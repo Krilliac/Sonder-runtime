@@ -46,3 +46,21 @@ called** and unload after a short idle (`keep_alive`), so the GPU stays free oth
 ## Swapping models
 `ollama pull <model>` then point a tier env var at it. Good 6 GB-friendly options:
 `llama3.2:3b`, `qwen2.5:7b`, `deepseek-coder-v2:16b` (won't fully fit — partial offload).
+
+## Trilobite — self-learning coding loop
+
+`trilobite` is a self-improving local coding model built on top of this bridge.
+The learning lives in this MCP server (retrieval + reflection + reward); Ollama
+only serves frozen weights.
+
+- **Interactive use:** call `mcp__local-llm__trilobite("...")` — or just say
+  "use trilobite". The reply ends with `[interaction_id: <id>]`.
+- **Close the loop:** once you know how the answer did, call
+  `record_outcome(<id>, "tests_passed" | "accepted" | "compiled" | "rejected" | "failed")`.
+  Good outcomes distill a retrievable lesson that improves future answers.
+- **Fleets:** the normal `offload(...)` tool learns automatically (`learn=True`);
+  pass `learn=False` to skip capture. Cloud tiers never learn (privacy).
+- **Setup (one-time):** `./venv/Scripts/python.exe setup_alias.py` (pulls
+  `nomic-embed-text`, creates the `trilobite` Ollama alias).
+- **State:** `memory.db` (gitignored) at the server root holds interactions,
+  outcomes, and lessons.
