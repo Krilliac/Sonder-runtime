@@ -8,6 +8,8 @@ import sys
 
 import server
 import memory_store
+import grounding
+import training_tasks
 
 BANNER = """trilobite - fully local self-improving coder
 type /help for commands, or just start typing to ask trilobite something.
@@ -21,8 +23,13 @@ HELP = """commands:
   /lessons           show the 10 most recent distilled lessons
   /pass, /good       record the last answer as tests_passed
   /fail, /bad        record the last answer as failed
+  /run               actually execute the code block from the last response
+  /train [N]         grounded self-learning: practice N tasks (default 3, max 10)
   /exit, /quit, /q   leave
 """
+
+TRAIN_DEFAULT_N = 3
+TRAIN_MAX_N = 10
 
 
 def _strip_footer(text):
@@ -55,10 +62,52 @@ def _on_off(arg, current):
     return current
 
 
+def _parse_train_n(arg):
+    arg = (arg or "").strip()
+    if not arg:
+        return TRAIN_DEFAULT_N
+    try:
+        n = int(arg)
+    except ValueError:
+        print("usage: /train [N]  (N must be an integer, default %d)" % TRAIN_DEFAULT_N)
+        return None
+    if n < 1:
+        n = 1
+    if n > TRAIN_MAX_N:
+        n = TRAIN_MAX_N
+    return n
+
+
+def _run_train(n):
+    tasks = training_tasks.sample(n)
+    passed = 0
+    lessons = 0
+    for t in tasks:
+        print("  training: %s ..." % t["name"])
+        resp = server.trilobite(t["prompt"])
+        iid = server.parse_interaction_id(resp)
+        code = grounding.extract_code_block(resp)
+        ok = False
+        if code:
+            ok, _ = grounding.run_code(code, t["check"])
+        signal = "tests_passed" if ok else "failed"
+        passed += 1 if ok else 0
+        if iid:
+            msg = server.record_outcome(iid, signal)
+            if "Distilled lesson" in msg:
+                lessons += 1
+            print("    -> %s  %s" % ("PASS" if ok else "FAIL", msg))
+        else:
+            print("    -> %s (no id)" % ("PASS" if ok else "FAIL"))
+    print("trained on %d tasks: %d passed, %d failed, %d new lessons" % (
+        len(tasks), passed, len(tasks) - passed, lessons))
+
+
 def main():
     trace = False
     strict = None  # None = env default
     last_iid = None
+    last_response = None
 
     print(BANNER)
 
@@ -100,6 +149,19 @@ def main():
                     print(server.record_outcome(last_iid, "failed"))
                 else:
                     print("(nothing to record yet)")
+            elif cmd == "/run":
+                code = grounding.extract_code_block(last_response)
+                if code is None:
+                    print("(no code block in the last response to run)")
+                else:
+                    ok, out = grounding.run_code(code)
+                    if out:
+                        print(out)
+                    print("[ran OK]" if ok else "[exited with error]")
+            elif cmd == "/train":
+                n = _parse_train_n(arg)
+                if n is not None:
+                    _run_train(n)
             elif cmd in ("/exit", "/quit", "/q"):
                 break
             else:
@@ -112,6 +174,7 @@ def main():
             continue
 
         last_iid = server.parse_interaction_id(out)
+        last_response = out
         cleaned = _strip_footer(out)
         print(cleaned)
         if last_iid:
