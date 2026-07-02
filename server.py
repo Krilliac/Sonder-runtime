@@ -20,8 +20,16 @@ Tiers (escalation ladder, cheapest first):
 
 import json
 import os
+import re
+import threading
 import urllib.request
 import urllib.error
+
+import memory_store
+import orchestrator
+import reward
+import reflection
+import embeddings  # noqa: F401  (ensures module import side-effects/config load)
 
 from mcp.server.fastmcp import FastMCP
 
@@ -40,6 +48,61 @@ TIERS = {
 }
 # Tiers whose ":...-cloud" model runs on Ollama's servers (data leaves the machine).
 CLOUD_TIERS = {"cloud-code", "cloud-general"}
+
+_DB_PATH = os.path.join(os.path.dirname(__file__), "memory.db")
+_DB = None
+_LOCK = threading.Lock()
+
+FOOTER_PREFIX = "\n\n[interaction_id: "
+_FOOTER_RE = re.compile(r"\[interaction_id: ([0-9a-f]+)\]\s*$")
+
+
+def _db():
+    global _DB
+    if _DB is None:
+        _DB = memory_store.connect(_DB_PATH, check_same_thread=False)
+    return _DB
+
+
+def with_footer(text, interaction_id):
+    return "%s%s%s]" % (text, FOOTER_PREFIX, interaction_id)
+
+
+def parse_interaction_id(text):
+    m = _FOOTER_RE.search(text or "")
+    return m.group(1) if m else None
+
+
+def resolve_trilobite_model():
+    try:
+        tags = [m.get("name", "") for m in _get("/api/tags").get("models", [])]
+    except Exception:
+        tags = []
+    if any(t.split(":")[0] == "trilobite" for t in tags):
+        return "trilobite"
+    return TIERS["code"]
+
+
+def _make_generate(model, system, temperature, num_predict, num_ctx):
+    def gen(prompt):
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        options = {"temperature": temperature, "num_predict": num_predict,
+                   "num_ctx": num_ctx}
+        payload = {"model": model, "messages": messages, "stream": False,
+                   "options": options, "keep_alive": KEEP_ALIVE}
+        out = _post("/api/chat", payload)
+        return out.get("message", {}).get("content", "")
+    return gen
+
+
+def _generate_text(prompt, tier="fast", system="", temperature=0.2,
+                   num_predict=256, num_ctx=2048):
+    model = TIERS.get(tier, TIERS["fast"])
+    return _make_generate(model, system, temperature, num_predict, num_ctx)(prompt)
+
 
 mcp = FastMCP("local-llm")
 
@@ -67,65 +130,118 @@ def offload(
     temperature: float = 0.2,
     num_predict: int = 1024,
     num_ctx: int = 4096,
+    learn: bool = True,
 ) -> str:
-    """Offload a self-contained subtask to a local-GPU or Ollama-cloud model instead of doing it yourself.
+    """Offload a self-contained subtask to a local-GPU or Ollama-cloud model.
 
-    Use this to save your own context/budget on bulk or mechanical work: summarizing,
-    classifying, extracting, drafting boilerplate, code generation, reformatting.
+    Local tiers (fast/code/general) run privately on the 6 GB 4050. When learn=True
+    (default) a local call is memory-augmented and captured: the response ends with
+    a '[interaction_id: <id>]' footer you can pass to record_outcome once you know
+    whether it compiled / passed tests. Cloud tiers never learn (data privacy).
+    Set learn=False for throwaway work you don't want captured (pure text, no footer).
 
-    Escalation ladder — pick the CHEAPEST tier that can do the job:
-      LOCAL (private, free, runs on the 6 GB 4050; loads into VRAM on call, unloads after):
-        tier="fast"          -> 3B. Default. Summaries, classification, simple text, quick answers.
-        tier="code"          -> 7B coder. Code gen, refactor snippets, code explanation.
-        tier="general"       -> 7B instruct. Harder text reasoning, longer drafts, rewriting.
-      CLOUD (frontier-size, hosted by Ollama, METERED, and the PROMPT LEAVES THIS MACHINE):
-        tier="cloud-code"    -> qwen3-coder:480b. Hard/large coding the 7B can't handle well.
-        tier="cloud-general" -> gpt-oss:120b. Hard reasoning / large-context text tasks.
-
-    PRIVACY: prefer a LOCAL tier for anything touching the user's private code or data
-    (e.g. their mangos-unified / Cambrian / MMORPG repos). Only use a cloud-* tier when the
-    task is genuinely beyond the 7B AND the content isn't sensitive, or the user asked for it.
-
-    Give the model a FULLY self-contained prompt (it has no memory of this conversation
-    and cannot see files). Paste in any context it needs.
-
-    Args:
-        prompt: The complete, self-contained instruction + context for the model.
-        tier: One of "fast", "code", "general", "cloud-code", "cloud-general".
-        system: Optional system instruction to steer behavior/format.
-        temperature: 0.0-1.0. Low = deterministic (default 0.2).
-        num_predict: Max tokens to generate (default 1024).
-        num_ctx: Context window for LOCAL tiers (default 4096). On this 6 GB card (~4.9 GB free)
-            the 7B always runs ~80% GPU / ~20% CPU; the 3B fits 100% GPU. Bigger num_ctx = more
-            CPU spill + system RAM. Raise only when a task needs more context. Ignored for cloud.
-
-    Returns:
-        The model's text response.
+    Tiers: fast=3B (default), code=7B coder, general=7B instruct,
+    cloud-code / cloud-general (METERED, prompt leaves this machine).
+    Give a FULLY self-contained prompt (the model can't see this chat or your files).
     """
     model = TIERS.get(tier)
     if model is None:
-        return f"ERROR: unknown tier '{tier}'. Valid tiers: {', '.join(TIERS)}."
+        return "ERROR: unknown tier '%s'. Valid tiers: %s." % (tier, ", ".join(TIERS))
 
-    messages = []
-    if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
+    # Cloud tiers and opt-out both take the plain, non-learning path.
+    if tier in CLOUD_TIERS or not learn:
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        options = {"temperature": temperature, "num_predict": num_predict}
+        payload = {"model": model, "messages": messages, "stream": False,
+                   "options": options}
+        if tier not in CLOUD_TIERS:
+            payload["keep_alive"] = KEEP_ALIVE
+            options["num_ctx"] = num_ctx
+        try:
+            out = _post("/api/chat", payload)
+        except urllib.error.URLError as e:
+            return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
+                    "running? (`ollama serve`)" % (BASE, e))
+        msg = out.get("message", {}).get("content", "")
+        return msg if msg else "(empty response) raw=%s" % json.dumps(out)[:500]
 
-    options = {"temperature": temperature, "num_predict": num_predict}
-    payload = {"model": model, "messages": messages, "stream": False, "options": options}
-    # keep_alive + a capped context only matter for local models held in VRAM; cloud runs remote.
-    if tier not in CLOUD_TIERS:
-        payload["keep_alive"] = KEEP_ALIVE
-        options["num_ctx"] = num_ctx
+    # Learning path (local tiers only).
+    gen = _make_generate(model, system, temperature, num_predict, num_ctx)
     try:
-        out = _post("/api/chat", payload)
+        with _LOCK:
+            response, iid = orchestrator.run_with_learning(_db(), prompt, tier, gen)
     except urllib.error.URLError as e:
-        return (
-            f"ERROR contacting Ollama at {BASE}: {e}. "
-            "Is the Ollama server running? (the tray app / `ollama serve`)"
-        )
-    msg = out.get("message", {}).get("content", "")
-    return msg if msg else f"(empty response) raw={json.dumps(out)[:500]}"
+        return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
+                "running? (`ollama serve`)" % (BASE, e))
+    return with_footer(response, iid)
+
+
+@mcp.tool()
+def trilobite(
+    prompt: str,
+    tier: str = "code",
+    system: str = "",
+    temperature: float = 0.2,
+    num_predict: int = 1024,
+    num_ctx: int = 4096,
+) -> str:
+    """Ask 'trilobite', the local self-improving coding model, for help.
+
+    This is the interactive front door to the same learning loop the fleet uses:
+    the prompt is augmented with lessons distilled from past work, answered locally
+    on the 4050, captured, and returned with a '[interaction_id: <id>]' footer.
+    After you learn how it went, call record_outcome(<id>, "tests_passed" | "accepted"
+    | "compiled" | "rejected" | "failed") so trilobite gets better over time.
+    Defaults to the 7B coder / the 'trilobite' Ollama alias if it exists.
+    """
+    if tier == "code":
+        model = resolve_trilobite_model()
+    else:
+        model = TIERS.get(tier, resolve_trilobite_model())
+    gen = _make_generate(model, system, temperature, num_predict, num_ctx)
+    try:
+        with _LOCK:
+            response, iid = orchestrator.run_with_learning(
+                _db(), prompt, "trilobite", gen
+            )
+    except urllib.error.URLError as e:
+        return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
+                "running? (`ollama serve`)" % (BASE, e))
+    return with_footer(response, iid)
+
+
+@mcp.tool()
+def record_outcome(interaction_id: str, signal: str) -> str:
+    """Feed a real-world outcome back into trilobite's learning loop.
+
+    Call this after a trilobite/offload response once you know how it went.
+    signal is one of: tests_passed, accepted, compiled, rejected, failed.
+    A good outcome triggers a distilled 'lesson' that future prompts will retrieve.
+    Pass the id from the '[interaction_id: <id>]' footer of the response.
+    """
+    if signal not in reward.VALID_SIGNALS:
+        return "ERROR: unknown signal '%s'. Valid: %s." % (
+            signal, ", ".join(sorted(reward.VALID_SIGNALS)))
+    with _LOCK:
+        conn = _db()
+        inter = memory_store.get_interaction(conn, interaction_id)
+        if inter is None:
+            return "ERROR: no interaction '%s' (already expired or wrong id)." % interaction_id
+        r = reward.score(signal)
+        memory_store.record_outcome_row(conn, interaction_id, signal, r)
+        lesson_id = None
+        if reward.is_good(signal):
+            lesson_id = reflection.maybe_add_lesson(
+                conn, interaction_id, inter["task"], inter["response"], signal,
+                offload_fn=_generate_text, embed_fn=embeddings.embed,
+            )
+    msg = "Recorded '%s' (reward %+.2f) for %s." % (signal, r, interaction_id)
+    if lesson_id:
+        msg += " Distilled lesson %s." % lesson_id
+    return msg
 
 
 @mcp.tool()
