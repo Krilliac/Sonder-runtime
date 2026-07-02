@@ -116,3 +116,20 @@ def fts_search(conn, query, limit=10):
         (q, limit),
     ).fetchall()
     return [r[0] for r in rows]
+
+
+def count_interactions(conn):
+    return conn.execute("SELECT COUNT(*) FROM interactions").fetchone()[0]
+
+
+def outcome_signal_counts(conn):
+    rows = conn.execute("SELECT signal, COUNT(*) FROM outcomes GROUP BY signal").fetchall()
+    return {r[0]: r[1] for r in rows}
+
+
+def recent_lessons(conn, limit=5):
+    rows = conn.execute(
+        "SELECT id, text, ts FROM lessons ORDER BY ts DESC, rowid DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]

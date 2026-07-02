@@ -100,3 +100,43 @@ def test_concurrent_writes_from_threads(tmp_path):
     conn = ms.connect(p)
     count = conn.execute("SELECT COUNT(*) FROM interactions").fetchone()[0]
     assert count == 40  # 8 threads * 5 each
+
+
+def test_count_interactions_empty():
+    assert ms.count_interactions(_conn()) == 0
+
+
+def test_count_interactions_counts_rows():
+    c = _conn()
+    ms.log_interaction(c, "a", "t", "", "r", "code")
+    ms.log_interaction(c, "b", "t", "", "r", "code")
+    assert ms.count_interactions(c) == 2
+
+
+def test_outcome_signal_counts_empty():
+    assert ms.outcome_signal_counts(_conn()) == {}
+
+
+def test_outcome_signal_counts_groups_by_signal():
+    c = _conn()
+    ms.log_interaction(c, "a", "t", "", "r", "code")
+    ms.record_outcome_row(c, "a", "tests_passed", 1.0)
+    ms.record_outcome_row(c, "a", "tests_passed", 1.0)
+    ms.record_outcome_row(c, "a", "failed", -1.0)
+    assert ms.outcome_signal_counts(c) == {"tests_passed": 2, "failed": 1}
+
+
+def test_recent_lessons_empty():
+    assert ms.recent_lessons(_conn()) == []
+
+
+def test_recent_lessons_returns_most_recent_first():
+    c = _conn()
+    ms.add_lesson(c, "L1", "first lesson", None, "a")
+    ms.add_lesson(c, "L2", "second lesson", None, "b")
+    ms.add_lesson(c, "L3", "third lesson", None, "c")
+    lessons = ms.recent_lessons(c, limit=2)
+    assert len(lessons) == 2
+    assert lessons[0]["id"] == "L3"
+    assert lessons[1]["id"] == "L2"
+    assert set(lessons[0].keys()) >= {"id", "text", "ts"}

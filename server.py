@@ -249,6 +249,43 @@ def record_outcome(interaction_id: str, signal: str) -> str:
 
 
 @mcp.tool()
+def trilobite_stats() -> str:
+    """Report what trilobite has learned so far.
+
+    Read-only observability into the learning loop's SQLite memory: how many
+    interactions have been logged, how outcomes break down by signal, and the
+    most recently distilled lessons. Makes no model call and needs no Ollama —
+    it only reads memory.db, so it works even if the Ollama server is down.
+    """
+    conn = _open_db()
+    try:
+        n_interactions = memory_store.count_interactions(conn)
+        signal_counts = memory_store.outcome_signal_counts(conn)
+        lessons = memory_store.recent_lessons(conn, limit=5)
+        n_lessons = conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0]
+    finally:
+        conn.close()
+    n_outcomes = sum(signal_counts.values())
+    signals_line = (
+        ", ".join("%s=%d" % (sig, n) for sig, n in sorted(signal_counts.items()))
+        if signal_counts else "(none yet)"
+    )
+    lines = [
+        "trilobite learning stats",
+        "  lessons: %d" % n_lessons,
+        "  interactions: %d | outcomes: %d" % (n_interactions, n_outcomes),
+        "  outcomes by signal: %s" % signals_line,
+    ]
+    if lessons:
+        lines.append("  recent lessons:")
+        for l in lessons:
+            lines.append("    - %s" % l["text"])
+    else:
+        lines.append("  recent lessons: (none yet)")
+    return "\n".join(lines)
+
+
+@mcp.tool()
 def status() -> str:
     """Report local-LLM state: which models are installed, and which are currently in VRAM.
 

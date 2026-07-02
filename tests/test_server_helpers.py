@@ -32,3 +32,10 @@ def test_resolve_trilobite_soft_fails_when_ollama_down(monkeypatch):
 def test_trilobite_rejects_cloud_tier():
     out = server.trilobite("hi", tier="cloud-code")
     assert "local-only" in out
+
+
+def test_trilobite_stats_runs_against_empty_db(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "empty.db"))
+    out = server.trilobite_stats()
+    assert isinstance(out, str)
+    assert "lessons:" in out
