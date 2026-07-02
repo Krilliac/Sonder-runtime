@@ -67,6 +67,12 @@ def parse_interaction_id(text):
     return m.group(1) if m else None
 
 
+def _should_learn(tier, learn):
+    # Only the local coding tier participates in the coding-lesson loop.
+    # Excludes cloud tiers (tier != "code"), mechanical fast/general, and learn=False.
+    return bool(learn) and tier == "code"
+
+
 def resolve_trilobite_model():
     try:
         tags = [m.get("name", "") for m in _get("/api/tags").get("models", [])]
@@ -128,11 +134,13 @@ def offload(
 ) -> str:
     """Offload a self-contained subtask to a local-GPU or Ollama-cloud model.
 
-    Local tiers (fast/code/general) run privately on the 6 GB 4050. When learn=True
-    (default) a local call is memory-augmented and captured: the response ends with
-    a '[interaction_id: <id>]' footer you can pass to record_outcome once you know
-    whether it compiled / passed tests. Cloud tiers never learn (data privacy).
-    Set learn=False for throwaway work you don't want captured (pure text, no footer).
+    Local tiers (fast/code/general) run privately on the 6 GB 4050. Only the local
+    'code' tier participates in the coding-lesson learning loop: when learn=True
+    (default) that call is memory-augmented and captured, and the response ends
+    with a '[interaction_id: <id>]' footer you can pass to record_outcome once you
+    know whether it compiled / passed tests. 'fast'/'general' (mechanical work like
+    summaries, reformatting, boilerplate), cloud tiers, and learn=False all run the
+    plain path instead: no lesson injection, no capture, no footer, just text.
 
     Tiers: fast=3B (default), code=7B coder, general=7B instruct,
     cloud-code / cloud-general (METERED, prompt leaves this machine).
@@ -142,8 +150,8 @@ def offload(
     if model is None:
         return "ERROR: unknown tier '%s'. Valid tiers: %s." % (tier, ", ".join(TIERS))
 
-    # Cloud tiers and opt-out both take the plain, non-learning path.
-    if tier in CLOUD_TIERS or not learn:
+    # Only the local 'code' tier (with learn not disabled) takes the learning path.
+    if not _should_learn(tier, learn):
         messages = []
         if system:
             messages.append({"role": "system", "content": system})

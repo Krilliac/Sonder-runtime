@@ -34,6 +34,14 @@ def test_trilobite_rejects_cloud_tier():
     assert "local-only" in out
 
 
+def test_should_learn_only_code_tier():
+    assert server._should_learn("code", True) is True
+    assert server._should_learn("fast", True) is False
+    assert server._should_learn("general", True) is False
+    assert server._should_learn("code", False) is False
+    assert server._should_learn("cloud-code", True) is False
+
+
 def test_trilobite_stats_runs_against_empty_db(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "empty.db"))
     out = server.trilobite_stats()
