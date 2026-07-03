@@ -82,6 +82,19 @@ Keep your grounded, personal data **private** (it stays gitignored). The distill
 
 ---
 
+## Contributing improvements (without hosting the model)
+
+The model and your raw interactions always stay local — only small, distilled **lesson text** ever travels, and only if you opt in:
+
+1. **`contribute.py`** exports lessons that pass a conservative privacy scrub (no paths, secrets, or emails; short generic sentences only) to `contrib/lessons_contrib.jsonl`. Nothing is sent anywhere yet — review the file yourself.
+2. **Send it home base** — open a PR adding your file under `contrib/`, or copy it to your own file server.
+3. **CI aggregates** — `.github/workflows/aggregate-lessons.yml` dedupes everyone's `contrib/*.jsonl` into `community_lessons.jsonl` at the repo root (weekly + manual).
+4. **`pull_community.py`** merges `community_lessons.jsonl` (fetched via `git pull` or your file server) back into your local `memory.db`, tagged `source_interaction='community'`.
+
+Privacy is opt-in and scrubbed at every step — nothing auto-uploads, and no PR or upload happens without you reviewing it first.
+
+---
+
 ## Roadmap (toward "for everyone")
 
 Honest gaps between "great for tinkerers" and "usable by anyone," and the plan to close them:

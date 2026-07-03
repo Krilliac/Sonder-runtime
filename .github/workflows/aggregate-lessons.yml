@@ -1,0 +1,73 @@
+# Home-base aggregation job for trilobite's federated lesson sharing.
+#
+# This does NOT run or host the model — it only merges small, opt-in,
+# already-scrubbed lesson text files that users contributed under contrib/
+# (via contribute.py + a PR) into a single deduped community_lessons.jsonl
+# at the repo root. Users then pull that file and merge it locally with
+# pull_community.py. No GPU, no network calls to any model, no secrets.
+name: aggregate-lessons
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"  # weekly, Monday 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  aggregate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Aggregate contrib/*.jsonl into community_lessons.jsonl
+        run: |
+          python - <<'PY'
+          import glob
+          import json
+
+          seen = {}
+          # Preserve existing community lessons too, so nothing already
+          # aggregated is ever dropped just because a contrib file was removed.
+          for path in ["community_lessons.jsonl"] + sorted(glob.glob("contrib/*.jsonl")):
+              try:
+                  with open(path, "r", encoding="utf-8") as f:
+                      for line in f:
+                          line = line.strip()
+                          if not line:
+                              continue
+                          try:
+                              item = json.loads(line)
+                          except ValueError:
+                              continue
+                          text = (item.get("text") or "").strip()
+                          if not text:
+                              continue
+                          key = text.lower()
+                          if key not in seen:
+                              seen[key] = {"id": item.get("id") or key[:16], "text": text}
+              except FileNotFoundError:
+                  continue
+
+          with open("community_lessons.jsonl", "w", encoding="utf-8", newline="\n") as f:
+              for item in sorted(seen.values(), key=lambda x: x["id"]):
+                  f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+          print("aggregated %d unique community lessons" % len(seen))
+          PY
+
+      - name: Commit updated community_lessons.jsonl if changed
+        run: |
+          if ! git diff --quiet -- community_lessons.jsonl; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add community_lessons.jsonl
+            git commit -m "chore: aggregate contributed lessons into community_lessons.jsonl"
+            git push
+          else
+            echo "no changes to community_lessons.jsonl"
+          fi
