@@ -11,6 +11,7 @@ import memory_store
 import grounding
 import training_tasks
 import intents
+import feedback
 
 BANNER = """trilobite - fully local self-improving coder
 type /help for commands, or just start typing to ask trilobite something.
@@ -161,11 +162,13 @@ def main():
             elif cmd in ("/pass", "/good"):
                 if last_iid:
                     print(server.record_outcome(last_iid, "tests_passed"))
+                    last_iid = None
                 else:
                     print("(nothing to record yet)")
             elif cmd in ("/fail", "/bad"):
                 if last_iid:
                     print(server.record_outcome(last_iid, "failed"))
+                    last_iid = None
                 else:
                     print("(nothing to record yet)")
             elif cmd == "/run":
@@ -179,6 +182,23 @@ def main():
             else:
                 print("unknown command %s — try /help" % cmd)
             continue
+
+        # Passive learning: if the previous turn is still pending an outcome,
+        # check whether this line is plain feedback on it ("thanks, that
+        # worked" / "no that's wrong") rather than a new task. Conservative
+        # classifier — only fires on short, non-question/imperative turns.
+        if last_iid:
+            fb = feedback.classify_feedback(line)
+            if fb == "positive":
+                server.record_outcome(last_iid, "accepted")
+                last_iid = None
+                print("(learned: \U0001F44D recorded)")
+                continue
+            if fb == "negative":
+                server.record_outcome(last_iid, "rejected")
+                last_iid = None
+                print("(learned: \U0001F44E recorded)")
+                continue
 
         # Natural-language control intents ("strict on, show your reasoning",
         # "run it", "train yourself") — conservative classifier, only fires on

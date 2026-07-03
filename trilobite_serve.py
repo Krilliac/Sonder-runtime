@@ -23,6 +23,7 @@ import server
 import grounding
 import training_tasks
 import intents
+import feedback
 
 DEFAULT_PORT = 11435
 
@@ -162,11 +163,15 @@ def _handle_slash(content):
         return server.trilobite_stats()
     if cmd in ("/pass", "/good"):
         if LAST_IID:
-            return server.record_outcome(LAST_IID, "tests_passed")
+            msg = server.record_outcome(LAST_IID, "tests_passed")
+            LAST_IID = None
+            return msg
         return "(nothing to record yet)"
     if cmd in ("/fail", "/bad"):
         if LAST_IID:
-            return server.record_outcome(LAST_IID, "failed")
+            msg = server.record_outcome(LAST_IID, "failed")
+            LAST_IID = None
+            return msg
         return "(nothing to record yet)"
     if cmd == "/trace":
         TRACE = _on_off(arg, TRACE)
@@ -183,6 +188,28 @@ def _handle_slash(content):
         return _do_train(n)
 
     return None  # not a recognized slash command — fall through to the model
+
+
+def _handle_feedback(content):
+    """Passive learning: if `content` reads as plain feedback on the last turn
+    ("thanks, that worked" / "no that's wrong") rather than a new task, record
+    the outcome on LAST_IID and return an acknowledgement. Else None (fall
+    through to intent/model handling)."""
+    global LAST_IID
+
+    if not LAST_IID:
+        return None
+
+    fb = feedback.classify_feedback(content)
+    if fb == "positive":
+        server.record_outcome(LAST_IID, "accepted")
+        LAST_IID = None
+        return "Got it — recorded that as helpful so I can learn."
+    if fb == "negative":
+        server.record_outcome(LAST_IID, "rejected")
+        LAST_IID = None
+        return "Got it — recorded that as not-helpful so I can learn."
+    return None
 
 
 def _handle_intent(content):
@@ -319,6 +346,8 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             reply = _handle_slash(prompt)
+            if reply is None:
+                reply = _handle_feedback(prompt)
             if reply is None:
                 reply = _handle_intent(prompt)
             content = reply if reply is not None else _run_prompt(prompt)
