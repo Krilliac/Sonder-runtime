@@ -97,10 +97,14 @@ Privacy is opt-in and scrubbed at every step — nothing auto-uploads, and no PR
 
 ## Roadmap (toward "for everyone")
 
-Honest gaps between "great for tinkerers" and "usable by anyone," and the plan to close them:
+**Shipped**
+- ✅ **Passive learning** — infers outcomes from natural follow-up ("that worked" / "no, still errors") so it learns without manual scoring.
+- ✅ **Personas** — `/persona coder|explainer|reviewer|teacher` so non-coders get value too.
+- ✅ **Federated contribution** — share scrubbed lessons back without hosting the model (see [above](#contributing-improvements-without-hosting-the-model)).
+
+**Planned** — honest gaps between "great for tinkerers" and "usable by anyone":
 - **One-click app + GUI** — bundle the engine, auto-detect hardware, auto-pick model size; no terminal, no config.
-- **Passive learning** — capture implicit feedback (edits, accepts, thumbs) so it improves without anyone deliberately scoring answers.
-- **Personas/templates** — coder, writer, student, researcher — so a non-expert gets value on day one.
+- **Richer passive learning** — capture edits/accepts, not just follow-up phrasing.
 - **Optional hosted mode** for people with no capable hardware — *opt-in only*, because it trades away the privacy promise.
 - **Beyond code** — generalize the grounding signal past "did it compile" to other domains.
 
