@@ -23,6 +23,7 @@ repo.
 - [How the loop works](#how-the-loop-works)
 - [Interfaces](#interfaces)
 - [Install / run](#install--run)
+- [Client install guide (CLIENT.md)](CLIENT.md)
 - [Self-training](#self-training)
 - [Weight training (QLoRA)](#weight-training-qlora)
 - [Architecture](#architecture)
@@ -152,6 +153,11 @@ chat messages.
 # point your chat UI's OpenAI API base at http://127.0.0.1:<port>/v1 (any api key)
 ```
 
+To run this as a public, always-on service on a VPS (systemd unit,
+auto-generated API key, firewall reminder), see [Hosted server + thin
+client](#hosted-server--thin-client) below and [CLIENT.md](CLIENT.md) for
+how someone installs the matching client on their own PC.
+
 ## Install / run
 
 ### Quick server setup (just the model, on a remote/fresh box)
@@ -169,6 +175,23 @@ system prompt describing what trilobite actually is). That gets you `ollama
 run trilobite` and the raw HTTP API. It does **not** install the Python
 learning loop (retrieval/capture/`/train`/trace/the proxy) — copy this repo
 over and follow local dev setup below for the full system.
+
+### Hosted server + thin client
+
+`bash deploy_trilobite.sh --serve` (run from inside a clone, after or
+instead of the plain model setup above) additionally installs Python3/venv,
+sets up the full learning-loop proxy, generates an API key if you didn't
+supply one via `TRILOBITE_API_KEY`, and installs it as a public systemd
+service (`trilobite.service`, `Restart=on-failure`, bound to `0.0.0.0`) so
+`trilobite_serve.py` survives reboots and crashes. It prints the public URL
+and the API key at the end — open the corresponding port in your
+firewall/security group, and keep that key secret (it's the only thing
+protecting the server).
+
+Anyone with the URL + key can then talk to it from any PC with nothing but
+Python — no repo, no Ollama — using the standalone
+[`trilobite_client.py`](trilobite_client.py). See **[CLIENT.md](CLIENT.md)**
+for the full install/config guide.
 
 ### Local dev (Windows, this repo)
 
