@@ -5,6 +5,7 @@ __pycache__/
 *.sqlite-*
 memory.db*
 training_data.jsonl
+personal_dataset.jsonl
 trilobite-lora/
 generated_tasks.jsonl
 games/
