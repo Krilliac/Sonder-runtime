@@ -93,13 +93,16 @@ LEVELS = [
 # Exception types that are EXPECTED when we forcibly cut off input/time on a
 # game we're just probing for real crashes — these do not count as failures.
 REAL_CRASH_EXCEPTIONS = {"EOFError", "KeyboardInterrupt", "SystemExit", "BrokenPipeError"}
+# Console games parse arbitrary piped input, so input-format errors (int(''), bad
+# index) are artifacts of our generic feed, not game bugs.
+_CONSOLE_EXPECTED = REAL_CRASH_EXCEPTIONS | {"ValueError", "IndexError", "OverflowError"}
 
 # ~200 lines of generic input so console games' input() calls have something
 # to consume before eventually hitting EOF.
 _STDIN_FEED = (b"1\n2\n3\n5\n1\n1\n\n" * 30)
 
 
-def detect_failure(stdout, stderr, returncode, timed_out=False):
+def detect_failure(stdout, stderr, returncode, timed_out=False, kind="pygame"):
     """Pure classifier: did this run count as a real crash, and why?
 
     A "crash" is a traceback whose final exception type is a genuine bug
@@ -120,7 +123,8 @@ def detect_failure(stdout, stderr, returncode, timed_out=False):
         lines = [l for l in stderr.strip().splitlines() if l.strip()]
         last_line = lines[-1] if lines else ""
         exc_type = last_line.split(":", 1)[0].strip()
-        if exc_type in REAL_CRASH_EXCEPTIONS:
+        expected = _CONSOLE_EXPECTED if kind == "console" else REAL_CRASH_EXCEPTIONS
+        if exc_type in expected:
             return False, "ran (ended on %s, expected)" % exc_type
         return True, last_line
 
@@ -172,12 +176,12 @@ def ground(code, kind, timeout=12):
                 err = err.encode("utf-8", errors="replace")
             err_text = err.decode("utf-8", errors="replace")
             out_text = (e.stdout or b"").decode("utf-8", errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-            failed, reason = detect_failure(out_text, err_text, None, timed_out=True)
+            failed, reason = detect_failure(out_text, err_text, None, timed_out=True, kind=kind)
             return (not failed), reason
 
         out_text = p.stdout.decode("utf-8", errors="replace") if isinstance(p.stdout, bytes) else p.stdout
         err_text = p.stderr.decode("utf-8", errors="replace") if isinstance(p.stderr, bytes) else p.stderr
-        failed, reason = detect_failure(out_text, err_text, p.returncode, timed_out=False)
+        failed, reason = detect_failure(out_text, err_text, p.returncode, timed_out=False, kind=kind)
         return (not failed), reason
     finally:
         try:
