@@ -5,3 +5,4 @@ __pycache__/
 *.sqlite-*
 memory.db*
 training_data.jsonl
+trilobite-lora/

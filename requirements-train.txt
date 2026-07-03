@@ -1,0 +1,28 @@
+# Training-only dependencies for qlora_train.py.
+# NOT installed by default — this repo's normal test/runtime deps (requirements-dev.txt)
+# stay light. Install these only when you're ready to actually run a training pass:
+#     ./venv/Scripts/python.exe -m pip install -r requirements-train.txt
+#
+# See TRAINING.md for full setup + feasibility notes before installing/running.
+
+# --- PyTorch -----------------------------------------------------------------
+# Install a CUDA build matching your driver, NOT the plain PyPI CPU wheel.
+# On Windows, the CUDA wheels are hosted on a separate index, e.g. for CUDA 12.1:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+# Check `nvidia-smi` for your driver's supported CUDA version first.
+torch>=2.2,<2.5
+
+# --- Hugging Face stack --------------------------------------------------------
+transformers>=4.42,<4.50
+accelerate>=0.30,<0.35
+peft>=0.11,<0.14
+datasets>=2.19,<2.21
+
+# --- 4-bit quantization ---------------------------------------------------------
+# bitsandbytes on native Windows is finicky (prebuilt wheels lag CUDA/Python
+# versions and CPU-offload paths are less battle-tested than on Linux). If you
+# hit import errors or silent CPU fallback, the smoother path is WSL2:
+#   wsl --install   (if not already set up)
+#   then re-create the venv and pip install inside the WSL2 Linux environment,
+#   where bitsandbytes' official Linux wheels apply cleanly.
+bitsandbytes>=0.43,<0.45
