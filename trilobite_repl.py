@@ -10,6 +10,7 @@ import server
 import memory_store
 import grounding
 import training_tasks
+import intents
 
 BANNER = """trilobite - fully local self-improving coder
 type /help for commands, or just start typing to ask trilobite something.
@@ -109,6 +110,26 @@ def main():
     last_iid = None
     last_response = None
 
+    def apply_trace(val):
+        nonlocal trace
+        trace = val
+        print("trace: %s" % ("on" if trace else "off"))
+
+    def apply_strict(val):
+        nonlocal strict
+        strict = val
+        print("strict: %s" % ("on" if strict else "off"))
+
+    def do_run():
+        code = grounding.extract_code_block(last_response)
+        if code is None:
+            print("(no code block in the last response to run)")
+            return
+        ok, out = grounding.run_code(code)
+        if out:
+            print(out)
+        print("[ran OK]" if ok else "[exited with error]")
+
     print(BANNER)
 
     while True:
@@ -130,11 +151,9 @@ def main():
             if cmd == "/help":
                 print(HELP)
             elif cmd == "/trace":
-                trace = _on_off(arg, trace)
-                print("trace: %s" % ("on" if trace else "off"))
+                apply_trace(_on_off(arg, trace))
             elif cmd == "/strict":
-                strict = _on_off(arg, strict)
-                print("strict: %s" % ("on" if strict else "off"))
+                apply_strict(_on_off(arg, strict))
             elif cmd == "/stats":
                 print(server.trilobite_stats())
             elif cmd == "/lessons":
@@ -150,14 +169,7 @@ def main():
                 else:
                     print("(nothing to record yet)")
             elif cmd == "/run":
-                code = grounding.extract_code_block(last_response)
-                if code is None:
-                    print("(no code block in the last response to run)")
-                else:
-                    ok, out = grounding.run_code(code)
-                    if out:
-                        print(out)
-                    print("[ran OK]" if ok else "[exited with error]")
+                do_run()
             elif cmd == "/train":
                 n = _parse_train_n(arg)
                 if n is not None:
@@ -166,6 +178,22 @@ def main():
                 break
             else:
                 print("unknown command %s — try /help" % cmd)
+            continue
+
+        # Natural-language control intents ("strict on, show your reasoning",
+        # "run it", "train yourself") — conservative classifier, only fires on
+        # short control-like turns. Applies the same toggles/actions as the
+        # slash commands above and skips the model call for this turn.
+        intent = intents.classify(line)
+        if intent:
+            if "trace" in intent:
+                apply_trace(intent["trace"])
+            if "strict" in intent:
+                apply_strict(intent["strict"])
+            if intent.get("run"):
+                do_run()
+            if "train" in intent:
+                _run_train(intent["train"])
             continue
 
         out = server.trilobite(line, trace=trace, strict=strict)

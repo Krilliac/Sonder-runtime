@@ -20,6 +20,9 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import server
+import grounding
+import training_tasks
+import intents
 
 DEFAULT_PORT = 11435
 
@@ -27,6 +30,10 @@ DEFAULT_PORT = 11435
 TRACE = False
 STRICT = None  # None = env default (server._STRICT_DEFAULT)
 LAST_IID = None
+LAST_RESPONSE = None  # full last assistant turn (with footer), for /run
+
+TRAIN_DEFAULT_N = 3
+TRAIN_MAX_N = 10
 
 HELP_TEXT = """commands:
   /help              show this help
@@ -35,6 +42,11 @@ HELP_TEXT = """commands:
   /stats             show trilobite's learning stats
   /pass, /good       record the last answer as tests_passed
   /fail, /bad        record the last answer as failed
+  /run               actually execute the code block from the last response
+  /train [N]         grounded self-learning: practice N tasks (default 3, max 10)
+
+Plain English also works for the toggles/actions above, e.g. "strict on,
+show your reasoning", "run it", "train yourself".
 """
 
 
@@ -59,6 +71,60 @@ def _last_user_message(messages):
         if msg.get("role") == "user":
             return msg.get("content") or ""
     return ""
+
+
+def _parse_train_n(arg):
+    """Parse /train's N argument. Returns (n, error_message); n is None on error."""
+    arg = (arg or "").strip()
+    if not arg:
+        return TRAIN_DEFAULT_N, None
+    try:
+        n = int(arg)
+    except ValueError:
+        return None, "usage: /train [N]  (N must be an integer, default %d)" % TRAIN_DEFAULT_N
+    if n < 1:
+        n = 1
+    if n > TRAIN_MAX_N:
+        n = TRAIN_MAX_N
+    return n, None
+
+
+def _do_run():
+    """Execute the code block from LAST_RESPONSE via grounding. Mirrors the REPL's /run."""
+    code = grounding.extract_code_block(LAST_RESPONSE)
+    if code is None:
+        return "(no code block in the last response to run)"
+    ok, out = grounding.run_code(code)
+    status = "[ran OK]" if ok else "[exited with error]"
+    return "%s\n%s" % (out, status) if out else status
+
+
+def _do_train(n):
+    """Run a grounded self-training pass over n practice tasks. Mirrors the REPL's /train N."""
+    tasks = training_tasks.sample(n)
+    passed = 0
+    lessons = 0
+    lines = []
+    for t in tasks:
+        lines.append("  training: %s ..." % t["name"])
+        resp = server.trilobite(t["prompt"])
+        iid = server.parse_interaction_id(resp)
+        code = grounding.extract_code_block(resp)
+        ok = False
+        if code:
+            ok, _ = grounding.run_code(code, t["check"])
+        signal = "tests_passed" if ok else "failed"
+        passed += 1 if ok else 0
+        if iid:
+            msg = server.record_outcome(iid, signal)
+            if "Distilled lesson" in msg:
+                lessons += 1
+            lines.append("    -> %s  %s" % ("PASS" if ok else "FAIL", msg))
+        else:
+            lines.append("    -> %s (no id)" % ("PASS" if ok else "FAIL"))
+    lines.append("trained on %d tasks: %d passed, %d failed, %d new lessons" % (
+        len(tasks), passed, len(tasks) - passed, lessons))
+    return "\n".join(lines)
 
 
 def _handle_slash(content):
@@ -91,18 +157,48 @@ def _handle_slash(content):
     if cmd == "/strict":
         STRICT = _on_off(arg, STRICT)
         return "strict %s" % ("on" if STRICT else "off")
+    if cmd == "/run":
+        return _do_run()
+    if cmd == "/train":
+        n, err = _parse_train_n(arg)
+        if err:
+            return err
+        return _do_train(n)
 
     return None  # not a recognized slash command — fall through to the model
 
 
+def _handle_intent(content):
+    """Return response text if `content` is a natural-language control intent, else None."""
+    global TRACE, STRICT
+
+    intent = intents.classify(content)
+    if not intent:
+        return None
+
+    replies = []
+    if "trace" in intent:
+        TRACE = intent["trace"]
+        replies.append("trace %s" % ("on" if TRACE else "off"))
+    if "strict" in intent:
+        STRICT = intent["strict"]
+        replies.append("strict %s" % ("on" if STRICT else "off"))
+    if intent.get("run"):
+        replies.append(_do_run())
+    if "train" in intent:
+        replies.append(_do_train(intent["train"]))
+    return "\n".join(replies)
+
+
 def _run_prompt(prompt):
     """Call the real trilobite loop; returns the text shown to the UI."""
-    global LAST_IID
+    global LAST_IID, LAST_RESPONSE
 
     out = server.trilobite(prompt, trace=TRACE, strict=STRICT)
     if out.startswith("ERROR"):
         return out
     LAST_IID = server.parse_interaction_id(out)
+    LAST_RESPONSE = out
     return _strip_footer(out)
 
 
@@ -187,8 +283,10 @@ class Handler(BaseHTTPRequestHandler):
         prompt = _last_user_message(messages)
 
         try:
-            slash_reply = _handle_slash(prompt)
-            content = slash_reply if slash_reply is not None else _run_prompt(prompt)
+            reply = _handle_slash(prompt)
+            if reply is None:
+                reply = _handle_intent(prompt)
+            content = reply if reply is not None else _run_prompt(prompt)
         except Exception:
             content = "ERROR: %s" % traceback.format_exc()
 
