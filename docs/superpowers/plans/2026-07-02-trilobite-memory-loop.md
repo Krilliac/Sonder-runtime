@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- **Repo root:** `C:\Users\user\.claude\mcp-servers\local-llm` — all paths below are relative to it. All commands run with cwd = repo root.
+- **Repo root:** `~/Trilobite-model` — all paths below are relative to it. All commands run with cwd = repo root.
 - **Python interpreter:** always `./venv/Scripts/python.exe` (the server's venv). Never bare `python`.
 - **Core modules are stdlib-only** (plus `mcp` in `server.py`). No third-party runtime deps beyond `mcp`. `pytest` is dev-only.
 - **Privacy:** the learning path is LOCAL tiers only. Cloud tiers (`cloud-code`, `cloud-general`) MUST NOT retrieve, capture, or reflect — they take the original non-learning path.

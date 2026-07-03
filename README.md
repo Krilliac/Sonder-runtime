@@ -173,7 +173,7 @@ over and follow local dev setup below for the full system.
 ### Local dev (Windows, this repo)
 
 ```bash
-cd "/c/Users/user/.claude/mcp-servers/local-llm"
+cd "~/Trilobite-model"
 
 # Python deps (venv already present in this repo)
 ./venv/Scripts/python.exe -m pip install -r requirements-dev.txt

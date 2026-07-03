@@ -70,7 +70,7 @@ machine without extra setup.
 ## Exact steps
 
 ```bash
-cd "/c/Users/user/.claude/mcp-servers/local-llm"
+cd "~/Trilobite-model"
 
 # 1. Install training deps (NOT installed by default — heavier than the
 #    normal test/runtime requirements).
