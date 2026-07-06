@@ -148,6 +148,14 @@ def test_run_ladder_repair_gives_up_after_max_attempts(monkeypatch):
     assert result["reached"] == 0
 
 
+def test_ground_capture_returns_full_traceback_for_repair():
+    passed, reason, full = game_ladder._ground_capture("raise ValueError('boom')", "pygame")
+    assert passed is False
+    # the full traceback (File/line frames) is what the repair loop needs
+    assert "Traceback" in full and "ValueError" in full
+    assert "ValueError" in reason  # short reason still classifies
+
+
 def test_build_level_with_repair_reports_attempts(monkeypatch):
     monkeypatch.setattr(game_ladder, "ground", lambda c, k, timeout=15: (True, "ran clean"))
     res = game_ladder.build_level_with_repair(

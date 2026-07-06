@@ -135,13 +135,12 @@ def detect_failure(stdout, stderr, returncode, timed_out=False, kind="pygame"):
     return False, "exited rc=%d, no crash" % returncode
 
 
-def ground(code, kind, timeout=12):
-    """Run generated game `code` headless and report pass/fail.
+def _ground_capture(code, kind, timeout=12):
+    """Run generated game `code` headless; return (passed, short_reason, full_output).
 
-    Grounds on whether the game actually crashes (an unexpected traceback),
-    not on any self-authored assertions inside the code.
-
-    Returns (passed: bool, detail: str).
+    `short_reason` is the one-line classification (for logging); `full_output` is
+    the complete traceback/stderr (for feeding a self-repair loop, which needs the
+    File/line frames to localize the bug — the last line alone is too weak a signal).
     """
     fd, path = tempfile.mkstemp(suffix=".py")
     os.close(fd)
@@ -154,7 +153,7 @@ def ground(code, kind, timeout=12):
         except (py_compile.PyCompileError, SyntaxError) as e:
             msg = str(e).strip()
             last_line = msg.splitlines()[-1] if msg else "syntax error"
-            return False, "SyntaxError: %s" % last_line
+            return False, "SyntaxError: %s" % last_line, msg
 
         env = dict(os.environ)
         env.update({
@@ -178,17 +177,27 @@ def ground(code, kind, timeout=12):
             err_text = err.decode("utf-8", errors="replace")
             out_text = (e.stdout or b"").decode("utf-8", errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
             failed, reason = detect_failure(out_text, err_text, None, timed_out=True, kind=kind)
-            return (not failed), reason
+            return (not failed), reason, err_text
 
         out_text = p.stdout.decode("utf-8", errors="replace") if isinstance(p.stdout, bytes) else p.stdout
         err_text = p.stderr.decode("utf-8", errors="replace") if isinstance(p.stderr, bytes) else p.stderr
         failed, reason = detect_failure(out_text, err_text, p.returncode, timed_out=False, kind=kind)
-        return (not failed), reason
+        return (not failed), reason, err_text
     finally:
         try:
             os.unlink(path)
         except OSError:
             pass
+
+
+def ground(code, kind, timeout=12):
+    """Run generated game `code` headless and report (passed, detail).
+
+    Grounds on whether the game actually crashes (an unexpected traceback), not on
+    any self-authored assertions. Thin wrapper over _ground_capture.
+    """
+    passed, reason, _ = _ground_capture(code, kind, timeout)
+    return passed, reason
 
 
 def run_ladder(gen_fn, start=1, max_levels=99, save_dir="games", record=None):
@@ -247,11 +256,13 @@ def build_level_with_repair(level, gen_fn, max_attempts=3):
                 "Your reply had no python code block. Return the COMPLETE program in ONE python code block.")
             continue
         last_code = code
-        passed, detail = ground(code, kind)
+        passed, detail, full = _ground_capture(code, kind)
         if passed:
             return {"code": code, "passed": True, "detail": detail, "attempts": attempt}
-        # real crash -> hand the model its own failing code + the traceback to fix
-        cur = solver._repair_prompt(prompt, code, detail)
+        # real crash -> hand the model its own failing code + the FULL traceback
+        # (File/line frames included) so it can localize the bug, not just the
+        # opaque last line like "TypeError: rect argument is invalid".
+        cur = solver._repair_prompt(prompt, code, full or detail)
     return {"code": last_code, "passed": False, "detail": detail, "attempts": max_attempts}
 
 
