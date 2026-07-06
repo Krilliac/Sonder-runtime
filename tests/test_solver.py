@@ -123,3 +123,21 @@ def test_rotate_solve_fails_when_all_models_wrong():
     res = solver.rotate_solve("write f", CHECK, gen_fns=gens, run_code_fn=_runner, max_attempts=4)
     assert res["passed"] is False
     assert res["attempts"] == 4
+
+
+def test_solve_verified_repairs_via_a_registry_verifier():
+    import verifiers
+    V = verifiers.Verdict
+
+    # stub verifier: fail (with a diagnostic) until the code contains "fixed"
+    def verify_fn(code):
+        return V(True, "ok", "") if "fixed" in code else V(False, "boom", "Traceback: boom at line 1")
+
+    def gen(p):
+        # the repair prompt echoes the detail ("Traceback: boom...") -> switch to fixed
+        return "```python\nfixed=1\n```" if "Traceback: boom" in p else "```python\nbroken=1\n```"
+
+    res = solver.solve_verified("do it", gen, verifier="ignored", verify_fn=verify_fn, max_attempts=3)
+    assert res["passed"] is True
+    assert res["attempts"] == 2
+    assert res["transcript"][0]["ok"] is False

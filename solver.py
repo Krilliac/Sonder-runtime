@@ -172,6 +172,41 @@ def rotate_solve(prompt, check, gen_fns, run_code_fn=grounding.run_code,
     return {"passed": False, "code": last_code, "attempts": max_attempts, "transcript": transcript}
 
 
+def solve_verified(prompt, gen_fn, verifier, spec=None,
+                   extract_fn=grounding.extract_code_block, max_attempts=3, verify_fn=None):
+    """Execution-grounded self-repair driven by a NAMED verifier from the registry.
+
+    Generalizes solve() beyond run_code_fn: `verifier` is a key like 'python_exec',
+    'program_run', 'cpp_compile', 'pytest_run', or 'llm_judge', and the repair loop
+    uses that backend's Verdict.detail (full traceback / compiler output) to steer
+    the next attempt. verify_fn is injectable for tests; by default it dispatches
+    through verifiers.verify(verifier, code, spec). Returns {passed, code, attempts,
+    transcript}. Never raises for an ordinary failure; a VerifierUnavailable from the
+    backend propagates (that means "couldn't judge", the caller should decide).
+    """
+    if verify_fn is None:
+        import verifiers
+        def verify_fn(code):
+            return verifiers.verify(verifier, code, spec)
+    transcript = []
+    cur_prompt = prompt
+    last_code = None
+    for attempt in range(1, max_attempts + 1):
+        code = extract_fn(gen_fn(cur_prompt))
+        if code is None:
+            transcript.append({"attempt": attempt, "code": None, "ok": False, "output": "no code block"})
+            cur_prompt = _repair_prompt(prompt, last_code, NO_CODE_HINT)
+            continue
+        last_code = code
+        v = verify_fn(code)
+        detail = v.detail or v.reason
+        transcript.append({"attempt": attempt, "code": code, "ok": v.passed, "output": detail})
+        if v.passed:
+            return {"passed": True, "code": code, "attempts": attempt, "transcript": transcript}
+        cur_prompt = _repair_prompt(prompt, code, detail)
+    return {"passed": False, "code": last_code, "attempts": max_attempts, "transcript": transcript}
+
+
 def best_of_n(prompt, generate_fn, check="", run_code_fn=grounding.run_code,
               extract_fn=grounding.extract_code_block, n=3):
     """Sample n independent candidates; return the first that runs green.
