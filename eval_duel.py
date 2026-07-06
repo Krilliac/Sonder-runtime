@@ -25,44 +25,49 @@ import training_tasks
 HARD = [
     "eval_expr", "base64_encode_manual", "topological_sort",
     "levenshtein_distance", "int_to_roman", "merge_intervals",
+    "matrix_multiply", "lcs_length", "is_balanced", "kth_smallest",
+    "max_subarray_sum", "two_sum",
 ]
 
 CODER = "qwen2.5-coder:7b"
-R1 = "deepseek-r1:7b"
+R1 = "deepseek-r1:7b"   # reasoning heavyweight; spills ~16% to CPU on 6GB (slow)
+Q3 = "qwen3:4b"          # reasoning model that fits fully on GPU (fast)
 
 
 def mk(model, temp=0.3):
-    # reasoning models emit long <think> traces -> give them room so the fenced
-    # code block is never truncated before extraction.
-    return server._make_generate(model, "", temp, 3072, 8192)
+    # Keep a 7B FULLY GPU-resident on 6GB. Even 4096 context spilled r1 ~18% to
+    # CPU; 2048 fits it entirely (short functions + <think> trace stay well under).
+    # 1024 predict caps runaway reasoning so a truncated attempt fails fast.
+    return server._make_generate(model, "", temp, 1024, 2048)
 
 
 def main(argv):
     n = int(argv[1]) if len(argv) > 1 else len(HARD)
     tasks = [t for t in training_tasks.TASKS if t["name"] in HARD][:n]
-    gc, gr = mk(CODER), mk(R1)
+    gc, gr, gq = mk(CODER), mk(R1), mk(Q3)
 
+    # qwen3:4b is the fast cross-model partner (fits GPU); r1 appears in one
+    # strategy so we get its solo data point without it dominating wall-clock.
     strategies = [
-        ("coder pass@1",         lambda t: solver.solve(t["prompt"], t["check"], gc, max_attempts=1)),
-        ("coder self-repair x3", lambda t: solver.solve(t["prompt"], t["check"], gc, max_attempts=3)),
-        ("r1 self-repair x3",    lambda t: solver.solve(t["prompt"], t["check"], gr, max_attempts=3)),
-        ("rotate coder<->r1 x4", lambda t: solver.rotate_solve(t["prompt"], t["check"], [gc, gr], max_attempts=4)),
-        ("gen coder/critic r1",  lambda t: solver.solve_with_critic(t["prompt"], t["check"], gc, gr, max_attempts=3)),
-        ("gen r1/critic coder",  lambda t: solver.solve_with_critic(t["prompt"], t["check"], gr, gc, max_attempts=3)),
+        ("coder pass@1",          lambda t: solver.solve(t["prompt"], t["check"], gc, max_attempts=1)),
+        ("coder self-repair x3",  lambda t: solver.solve(t["prompt"], t["check"], gc, max_attempts=3)),
+        ("q3 self-repair x3",     lambda t: solver.solve(t["prompt"], t["check"], gq, max_attempts=3)),
+        ("r1 self-repair x3",     lambda t: solver.solve(t["prompt"], t["check"], gr, max_attempts=3)),
+        ("rotate coder<->q3 x4",  lambda t: solver.rotate_solve(t["prompt"], t["check"], [gc, gq], max_attempts=4)),
+        ("gen coder/critic q3",   lambda t: solver.solve_with_critic(t["prompt"], t["check"], gc, gq, max_attempts=3)),
     ]
 
     tally = {name: 0 for name, _ in strategies}
     for t in tasks:
-        marks = []
+        print("\n# %s" % t["name"], flush=True)
         for name, fn in strategies:
             try:
                 ok = bool(fn(t)["passed"])
             except Exception as e:
                 ok = False
-                print("  ! %s on %s: %r" % (name, t["name"], e))
+                print("  ! %s: %r" % (name, e), flush=True)
             tally[name] += 1 if ok else 0
-            marks.append("Y" if ok else ".")
-        print("%-22s %s" % (t["name"], " ".join("%s=%s" % (s[0][:14], m) for s, m in zip(strategies, marks))))
+            print("   %-24s %s" % (name, "PASS" if ok else "fail"), flush=True)
 
     m = len(tasks)
     print("\n=== pass-rate on %d hard tasks ===" % m)
