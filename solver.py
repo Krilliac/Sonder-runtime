@@ -12,6 +12,7 @@ Pure and dependency-injected: generate_fn/run_code_fn/extract_fn are passed in,
 so the whole loop is unit-testable without a GPU. server wires the real ones.
 """
 import grounding
+import import_autofix
 
 # Lead with the failing code + error so the model attends to the correction
 # instead of regenerating its canonical (still-buggy) answer from the task text.
@@ -64,6 +65,17 @@ def solve(prompt, check, generate_fn, run_code_fn=grounding.run_code,
             ok, out = run_code_fn(code, check)
         except Exception as e:
             ok, out = False, "run_code error: %r" % (e,)
+        if not ok:
+            # cheap mechanical recovery before spending a model round-trip: if the
+            # failure is just a forgotten stdlib import, patch it and re-run once.
+            fixed = import_autofix.fix_missing_imports(code, out)
+            if fixed != code:
+                try:
+                    ok2, out2 = run_code_fn(fixed, check)
+                except Exception as e:
+                    ok2, out2 = False, "run_code error: %r" % (e,)
+                if ok2:
+                    code, ok, out = fixed, ok2, out2
         transcript.append({"attempt": attempt, "code": code, "ok": ok, "output": out})
         if ok:
             return {"passed": True, "code": code, "attempts": attempt, "transcript": transcript}

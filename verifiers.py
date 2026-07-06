@@ -204,3 +204,18 @@ def get(name):
 def verify(name, artifact, spec=None):
     """The single seam solver/ladder/reward call. Adding a domain never touches them."""
     return get(name)(artifact, spec)
+
+
+# External verifier backends promoted from the improvement fleet. Registered
+# defensively — a missing/broken ext module never breaks the core registry. Each
+# is Verdict-compatible (they import Verdict/VerifierUnavailable, defined above).
+for _key, _mod, _fn in (
+    ("node_run", "node_verifier", "node_run"),
+    ("sql_valid", "sql_verifier", "sql_valid"),
+    ("json_schema", "json_schema_verifier", "json_schema_verify"),
+    ("ruff_check", "ruff_verifier", "ruff_check"),
+):
+    try:
+        REGISTRY[_key] = getattr(__import__(_mod), _fn)
+    except Exception:
+        pass

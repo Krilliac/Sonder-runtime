@@ -125,6 +125,22 @@ def test_rotate_solve_fails_when_all_models_wrong():
     assert res["attempts"] == 4
 
 
+def test_solve_autofixes_missing_import_without_a_model_retry():
+    import grounding
+    bad = "```python\ndef f():\n    return math.floor(3.7)\n```"  # forgot `import math`
+    calls = {"n": 0}
+
+    def gen(p):
+        calls["n"] += 1
+        return bad  # model keeps returning the import-less code
+
+    res = solver.solve("use math", "assert f() == 3", generate_fn=gen,
+                       run_code_fn=grounding.run_code, max_attempts=3)
+    assert res["passed"] is True
+    assert res["attempts"] == 1  # patched mechanically on attempt 1
+    assert calls["n"] == 1       # no repair round-trip was needed
+
+
 def test_solve_verified_repairs_via_a_registry_verifier():
     import verifiers
     V = verifiers.Verdict
