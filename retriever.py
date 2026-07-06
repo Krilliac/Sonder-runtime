@@ -4,12 +4,15 @@ import os
 import embeddings
 import memory_store
 
-# Calibrated against memory.db (nomic-embed-text): held-out irrelevant probes
-# (swap_case, hamming_distance, is_pangram) topped out at cosine 0.56-0.65
-# against the current lesson set, while genuinely on-topic lesson/task pairs
-# (reverse_string, celsius_to_fahrenheit, nth_fibonacci) scored 0.65-0.86.
-# 0.65 clears all the observed noise while still admitting the on-topic hits.
-DEFAULT_MIN_SIM = 0.65
+# Recalibrated 2026-07-06 against the 557-lesson corpus via tune_min_sim.py
+# (nomic-embed-text). Over 22 natural-language coding intents vs 15 off-domain
+# noise probes, top-1 cosine separated cleanly: positives min 0.612 / median
+# 0.728; negatives max 0.611. 0.62 is the lowest zero-noise threshold — recall
+# 0.95, noise 0.00 (best Youden's J). The old 0.65, tuned on the tiny
+# game-ladder corpus, dropped genuine 0.60-0.65 hits (e.g. the sql-injection
+# lesson at 0.650) with no precision gain. Re-run tune_min_sim.py after large
+# corpus changes.
+DEFAULT_MIN_SIM = 0.62
 
 
 def rrf(rank_lists, k=60):
