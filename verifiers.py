@@ -36,6 +36,9 @@ PLANNED = {
 
 _VCVARS = (r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC"
            r"\Auxiliary\Build\vcvars64.bat")
+# cpp_compile interpolates these into an executed .bat, so they are validated:
+_ALLOWED_CPP_STD = {"c++11", "c++14", "c++17", "c++20", "c++23", "c++latest"}
+_BAT_META = set('&|<>^"%\r\n')
 
 
 class VerifierUnavailable(RuntimeError):
@@ -76,14 +79,28 @@ def pytest_run(artifact, spec=None):
     """spec={'cwd': dir, 'select': nodeid?, 'write_to': path?, 'python': exe?}.
     If write_to is given, the artifact is written there first (module under test)."""
     spec = spec or {}
-    if spec.get("write_to") and artifact:
-        with open(spec["write_to"], "w", encoding="utf-8") as f:
+    cwd = spec.get("cwd") or "."
+    write_to = spec.get("write_to")
+    if write_to and artifact:
+        # confine the write under cwd — reject traversal / absolute-path escapes
+        base = os.path.abspath(cwd)
+        dest = os.path.abspath(os.path.join(base, write_to))
+        try:
+            inside = os.path.commonpath([base, dest]) == base
+        except ValueError:  # different drive on Windows
+            inside = False
+        if not inside:
+            raise ValueError("write_to escapes cwd: %r" % (write_to,))
+        with open(dest, "w", encoding="utf-8") as f:
             f.write(artifact)
     interp = spec.get("python", sys.executable)
     args = [interp, "-m", "pytest", "-q"]
-    if spec.get("select"):
-        args.append(spec["select"])
-    rc, out = _run(args, cwd=spec.get("cwd") or ".", timeout=spec.get("timeout", 300))
+    select = spec.get("select")
+    if select:
+        if str(select).startswith("-"):
+            raise ValueError("select must be a test path/nodeid, not an option: %r" % (select,))
+        args.append(str(select))
+    rc, out = _run(args, cwd=cwd, timeout=spec.get("timeout", 300))
     return Verdict(rc == 0, "passed" if rc == 0 else (_last_line(out) or "pytest failed"),
                    out[-4000:])
 
@@ -116,13 +133,18 @@ def cpp_compile(artifact, spec=None):
     VerifierUnavailable if vcvars64.bat is missing."""
     spec = spec or {}
     vcvars = spec.get("vcvars", _VCVARS)
-    if not os.path.exists(vcvars):
-        raise VerifierUnavailable("vcvars64.bat not found at %s" % vcvars)
+    # vcvars is interpolated into a batch `call`; require a real file with no shell
+    # metacharacters to block command injection via a crafted spec['vcvars'].
+    if not os.path.isfile(vcvars) or (_BAT_META & set(vcvars)):
+        raise VerifierUnavailable("vcvars64.bat not found or unsafe path: %r" % (vcvars,))
+    std = spec.get("std", "c++17")
+    # std is also interpolated into the batch line — allowlist it (no injection).
+    if std not in _ALLOWED_CPP_STD:
+        raise ValueError("unsupported /std %r (allowed: %s)" % (std, sorted(_ALLOWED_CPP_STD)))
     d = tempfile.mkdtemp()
-    src = os.path.join(d, "tu.cpp")
+    src = os.path.join(d, "tu.cpp")  # our own mkdtemp path — not caller-controlled
     with open(src, "w", encoding="utf-8") as f:
         f.write(artifact)
-    std = spec.get("std", "c++17")
     # Run through a .bat: `cmd /c "call \"path with spaces\" && cl ..."` gets its
     # outer quotes stripped by cmd and mangles the vcvars path — a wrapper file dodges it.
     bat = os.path.join(d, "build.bat")

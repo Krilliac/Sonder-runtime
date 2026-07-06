@@ -87,6 +87,29 @@ def test_llm_judge_pass_and_fail():
     assert weak.passed is False
 
 
+def test_cpp_compile_rejects_std_injection():
+    # a crafted /std must not smuggle a shell command into the .bat
+    with pytest.raises(ValueError):
+        V.cpp_compile("int main(){}", {"vcvars": V.__file__, "std": "c++17 & calc.exe"})
+
+
+def test_cpp_compile_rejects_unsafe_vcvars():
+    with pytest.raises(V.VerifierUnavailable):
+        V.cpp_compile("int main(){}", {"vcvars": 'C:/x & del.bat'})
+
+
+def test_pytest_run_rejects_write_to_traversal():
+    d = tempfile.mkdtemp()
+    with pytest.raises(ValueError):
+        V.pytest_run("print('x')", {"cwd": d, "write_to": "../../evil.py"})
+
+
+def test_pytest_run_rejects_option_select():
+    d = tempfile.mkdtemp()
+    with pytest.raises(ValueError):
+        V.pytest_run("", {"cwd": d, "select": "-p evilplugin"})
+
+
 def test_registry_covers_all_documented_backends():
     for name in ("python_exec", "program_run", "pytest_run", "typecheck",
                  "cpp_compile", "llm_judge"):
