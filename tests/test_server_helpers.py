@@ -96,6 +96,28 @@ def test_serve_target_unknown_model_is_rejected():
     assert label is None
 
 
+def test_canonical_learn_tier_maps_student_to_code():
+    assert server._canonical_learn_tier("trilobite") == "code"
+    assert server._canonical_learn_tier("cloud-code") == "cloud-code"
+    assert server._canonical_learn_tier("general") == "general"
+
+
+def test_trilobite_tool_unknown_tier_errors_before_ollama(monkeypatch):
+    def boom_post(path, payload):
+        raise AssertionError("must not call Ollama for an unknown tier")
+    monkeypatch.setattr(server, "_post", boom_post)
+    out = server.trilobite("hi", tier="does-not-exist")
+    assert "unknown tier" in out
+
+
+def test_answer_with_history_unknown_model_errors_before_ollama(monkeypatch):
+    def boom_post(path, payload):
+        raise AssertionError("must not call Ollama for an unknown model")
+    monkeypatch.setattr(server, "_post", boom_post)
+    out = server.answer_with_history("hi", None, tier="gpt-9-turbo")
+    assert "unknown model" in out
+
+
 def test_serve_target_default_is_local_student(monkeypatch):
     monkeypatch.setattr(server, "_get",
                         lambda path: {"models": [{"name": "qwen2.5:3b"}]})
