@@ -1,0 +1,24 @@
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+pubspec.lock
+
+# Native project scaffolding — generated on demand by `flutter create`
+# (see app/README.md and .github/workflows/build-apps.yml). Not committed
+# so there is no generated native code to maintain in git.
+android/
+ios/
+linux/
+macos/
+windows/
+web/
+
+# IDE / OS
+.idea/
+*.iml
+.DS_Store

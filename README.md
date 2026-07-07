@@ -66,6 +66,7 @@ The learning loop above is *cross-task* memory. On top of it trilobite also has:
 1. **Local, in your terminal** — `trilobite` (like launching `claude`). Interactive REPL routed through the full loop, with `/trace`, `/strict`, `/run`, `/train`, `/pass`, `/fail`, `/stats` commands plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts` (and plain-English equivalents). Each REPL launch is its own remembered thread.
 2. **Hosted on your own server + a thin client anywhere** — run `deploy_trilobite.sh --serve` on your box (systemd service, API key), then any machine runs the single-file `trilobite_client.py` pointed at it. The serve layer threads the chat UI's own conversation history.
 3. **Integrated with Claude** — the MCP `local-llm` tools let Claude offload to it (`offload(learn=True)`, `trilobite`, `record_outcome`, `trilobite_stats`, `trilobite_sessions`, `trilobite_remember_fact`).
+4. **Mobile & desktop app (GUI)** — a cross-platform [Flutter client](app/) that talks to a hosted `trilobite_serve.py`. One codebase → an **Android APK** and **Windows/Linux/macOS** desktop apps, built in CI with downloadable installers. See [app/README.md](app/README.md).
 
 ---
 
@@ -119,9 +120,10 @@ Privacy is opt-in and scrubbed at every step — nothing auto-uploads, and no PR
 - ✅ **Passive learning** — infers outcomes from natural follow-up ("that worked" / "no, still errors") so it learns without manual scoring.
 - ✅ **Personas** — `/persona coder|explainer|reviewer|teacher` so non-coders get value too.
 - ✅ **Federated contribution** — share scrubbed lessons back without hosting the model (see [above](#contributing-improvements-without-hosting-the-model)).
+- ✅ **Mobile & desktop app (GUI)** — a [Flutter client](app/) with a real chat UI (Android APK + Windows/Linux/macOS), CI-built with download links. No terminal needed to *use* a hosted trilobite.
 
 **Planned** — honest gaps between "great for tinkerers" and "usable by anyone":
-- **One-click app + GUI** — bundle the engine, auto-detect hardware, auto-pick model size; no terminal, no config.
+- **One-click *engine* bundle** — the GUI now exists; the remaining piece is bundling the server/engine itself so there's no terminal setup on the host either (auto-detect hardware, auto-pick model size).
 - **Richer passive learning** — capture edits/accepts, not just follow-up phrasing.
 - **Optional hosted mode** for people with no capable hardware — *opt-in only*, because it trades away the privacy promise.
 - **Beyond code** — generalize the grounding signal past "did it compile" to other domains.
