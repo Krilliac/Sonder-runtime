@@ -249,6 +249,13 @@ def _serve_target(tier, strict):
     return None, False, True, None
 
 
+def _canonical_learn_tier(tier_label):
+    """Map a recorded tier label to the LEARN_TIERS key that governs it. The local
+    student is labeled 'trilobite' on interactions but is gated by the same 'code'
+    switch as offload's local coder, so both flip together."""
+    return "code" if tier_label == "trilobite" else tier_label
+
+
 def _session_history_messages(conn, session_id, max_turns):
     """Build the prior-turn chat messages for a session, summarizing overflow.
 
@@ -451,6 +458,7 @@ def trilobite(
     persona: str = "",
     session: str = "",
     project: str = "",
+    tier: str = "",
 ) -> str:
     """Ask 'trilobite', the local self-improving coding model, for help.
 
@@ -459,10 +467,16 @@ def trilobite(
     similar past solutions, answered locally on the 4050, captured, and returned with
     a '[interaction_id: <id>]' footer. After you learn how it went, call
     record_outcome(<id>, "tests_passed" | "accepted" | "compiled" | "rejected" |
-    "failed") so trilobite gets better over time. trilobite is local-only and always
-    uses the local coder model/alias — it never routes to another tier or the cloud;
-    use offload for that. Defaults to the 7B coder base model, or the 'trilobite'
-    Ollama alias if it exists.
+    "failed") so trilobite gets better over time. Defaults to the 7B coder base model,
+    or the 'trilobite' Ollama alias if it exists.
+
+    `tier` picks which model answers (default "" / "trilobite" = the local student).
+    Pass any tier name (e.g. "cloud-code") to route this call to that model instead —
+    cloud/non-student tiers answer CLEAN (teacher mode: no lesson/fact injection) but
+    are still captured, so a stronger model's grounded good outcomes distill into
+    lessons for the local student. Conversation memory (session) is threaded either
+    way. The turn is always captured (the tool is the deliberate learning front door);
+    LEARN_TIERS governs the automatic capture in offload / the serve layer instead.
 
     CONVERSATION MEMORY IS ON BY DEFAULT. Successive calls remember each other: with
     no `session`, the shared "default" thread is used, so follow-ups have context.
@@ -485,10 +499,13 @@ def trilobite(
     persona selects one of personas.names() (e.g. "explainer", "reviewer", "teacher")
     to steer tone; its system prompt is prepended ahead of `system`/trace instructions.
     """
-    model, effective_system = _resolve_model_and_system(system, trace, strict, persona)
-    if model is None:
+    tgt_model, cloud, augment, tier_label = _serve_target(tier, strict)
+    if tier_label is None:
+        return "ERROR: unknown tier '%s'. Valid: trilobite, %s." % (tier, ", ".join(TIERS))
+    if tgt_model is None:
         return ("ERROR: trilobite model/alias not found. Run setup_alias.py, or call "
                 "with strict=False to fall back to the base coder.")
+    effective_system = _build_system(system, trace, persona)
 
     session_id = _resolve_session(session)
     project_id = _resolve_project(project)
@@ -504,8 +521,9 @@ def trilobite(
             memory_store.touch_session(conn, session_id, project_id)
             history = _session_history_messages(conn, session_id, MAX_TURNS)
         response, iid, trace_ctx = _answer(
-            conn, prompt, model, effective_system, temperature, num_predict,
+            conn, prompt, tgt_model, effective_system, temperature, num_predict,
             num_ctx_eff, session_id, project_id, history, trace=trace,
+            tier=tier_label, cloud=cloud, augment=augment,
         )
         if session_id and is_first:
             _maybe_title(conn, session_id, prompt)
@@ -517,7 +535,7 @@ def trilobite(
 
     if trace:
         params = {"temperature": temperature, "num_predict": num_predict, "num_ctx": num_ctx_eff}
-        trace_block = _format_trace(model, "trilobite", params, trace_ctx)
+        trace_block = _format_trace(tgt_model, tier_label, params, trace_ctx)
         # Footer must stay LAST so parse_interaction_id's $-anchored regex still finds it.
         return with_footer(response + trace_block, iid)
     return with_footer(response, iid)
@@ -543,24 +561,37 @@ def answer_with_history(prompt, history, trace=False, strict=None, tier=None):
         return ("ERROR: trilobite model/alias not found. Run setup_alias.py, or call "
                 "with strict=False to fall back to the base coder.")
     effective_system = _build_system("", trace, "")
-    project = DEFAULT_PROJECT if augment else None
+    # Honor LEARN_TIERS here too. Serve conversation memory is client-side (the app
+    # resends history each request), so a non-learning model can skip capture entirely:
+    # no interaction row, no footer, nothing distilled. This lets a user exclude e.g.
+    # cloud from learning and have the app respect it. The student is gated via 'code'.
+    learn = _should_learn(_canonical_learn_tier(tier_label), True)
     conn = _open_db()
     try:
-        response, iid, trace_ctx = _answer(
-            conn, prompt, model, effective_system, 0.2, 1024, SESSION_NUM_CTX,
-            None, project, history or None, trace=trace,
-            tier=tier_label, cloud=cloud, augment=augment,
-        )
+        if learn:
+            project = DEFAULT_PROJECT if augment else None
+            response, iid, trace_ctx = _answer(
+                conn, prompt, model, effective_system, 0.2, 1024, SESSION_NUM_CTX,
+                None, project, history or None, trace=trace,
+                tier=tier_label, cloud=cloud, augment=augment,
+            )
+        else:
+            gen = _make_generate(model, effective_system, 0.2, 1024,
+                                 SESSION_NUM_CTX, cloud=cloud)
+            response = gen(prompt, history or None)
+            iid, trace_ctx = None, None
     except urllib.error.URLError as e:
         return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
                 "running? (the tray app / `ollama serve`)" % (BASE, e))
     finally:
         conn.close()
-    if trace:
+    if trace and trace_ctx is not None:
         params = {"temperature": 0.2, "num_predict": 1024, "num_ctx": SESSION_NUM_CTX}
-        trace_block = _format_trace(model, "trilobite", params, trace_ctx)
+        trace_block = _format_trace(model, tier_label, params, trace_ctx)
         return with_footer(response + trace_block, iid)
-    return with_footer(response, iid)
+    if iid is not None:
+        return with_footer(response, iid)
+    return response
 
 
 @mcp.tool()
