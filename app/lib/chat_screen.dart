@@ -27,6 +27,12 @@ class _ChatScreenState extends State<ChatScreen> {
   final _inputFocus = FocusNode();
   bool _sending = false;
 
+  // The model/tier to answer with. "trilobite" is the local self-improving student;
+  // other entries (e.g. cloud-code) route to that model on the server. Populated from
+  // GET /v1/models, with a sensible fallback if the server is unreachable.
+  late String _model;
+  List<String> _models = const ['trilobite', 'cloud-code', 'cloud-general'];
+
   // Quick-access slash commands the serve layer understands.
   static const _quickCommands = <String, String>{
     '/stats': 'Show learning stats',
@@ -40,6 +46,32 @@ class _ChatScreenState extends State<ChatScreen> {
         baseUrl: widget.settings.serverUrl,
         apiKey: widget.settings.apiKey,
       );
+
+  @override
+  void initState() {
+    super.initState();
+    _model = widget.settings.model;
+    _refreshModels();
+  }
+
+  Future<void> _refreshModels() async {
+    try {
+      final models = await _api.listModels();
+      if (!mounted || models.isEmpty) return;
+      setState(() {
+        _models = models;
+        if (!_models.contains(_model)) _model = _models.first;
+      });
+    } catch (_) {
+      // Offline / no auth — keep the static fallback list.
+    }
+  }
+
+  void _selectModel(String m) {
+    setState(() => _model = m);
+    widget.settings.model = m;
+    widget.settings.save();
+  }
 
   @override
   void dispose() {
@@ -77,7 +109,7 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       // Send everything except the trailing pending placeholder.
       final history = _messages.sublist(0, _messages.length - 1);
-      final reply = await _api.chat(history);
+      final reply = await _api.chat(history, model: _model);
       setState(() {
         _messages[_messages.length - 1] = ChatMessage(
           role: Role.assistant,
@@ -112,17 +144,56 @@ class _ChatScreenState extends State<ChatScreen> {
         onChanged: widget.onSettingsChanged,
       ),
     ));
-    setState(() {}); // pick up any changes on return
+    setState(() {
+      // Pick up server/key/model changes; re-fetch the model list if it moved.
+      _model = widget.settings.model;
+    });
+    _refreshModels();
   }
+
+  String _modelLabel(String m) => m == 'trilobite' ? 'trilobite (local)' : m;
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Row(
+        title: Row(
           children: [
-            Text('🦑 ', style: TextStyle(fontSize: 20)),
-            Text('trilobite'),
+            const Text('🦑 ', style: TextStyle(fontSize: 20)),
+            // Model picker: switch which LLM answers, per conversation.
+            PopupMenuButton<String>(
+              tooltip: 'Choose model',
+              onSelected: _selectModel,
+              itemBuilder: (_) => _models
+                  .map((m) => PopupMenuItem<String>(
+                        value: m,
+                        child: Row(
+                          children: [
+                            if (m == _model)
+                              const Icon(Icons.check, size: 18)
+                            else
+                              const SizedBox(width: 18),
+                            const SizedBox(width: 8),
+                            Text(_modelLabel(m)),
+                          ],
+                        ),
+                      ))
+                  .toList(),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Flexible(
+                    child: Text(
+                      _modelLabel(_model),
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          fontSize: 18, fontWeight: FontWeight.w500),
+                    ),
+                  ),
+                  const Icon(Icons.arrow_drop_down),
+                ],
+              ),
+            ),
           ],
         ),
         actions: [

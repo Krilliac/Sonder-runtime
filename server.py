@@ -26,6 +26,7 @@ import urllib.error
 
 import memory_store
 import orchestrator
+import retriever
 import reward
 import reflection
 import embeddings
@@ -50,6 +51,19 @@ TIERS = {
 }
 # Tiers whose ":...-cloud" model runs on Ollama's servers (data leaves the machine).
 CLOUD_TIERS = {"cloud-code", "cloud-general"}
+
+# Which offload tiers feed the learning loop (capture + distill lessons). A stronger
+# paid/cloud model makes an excellent *teacher*: its grounded good outcomes become
+# lessons and fine-tuning data the local student retrieves later. Local 'code' stays
+# in by default; cloud tiers now do too. Override machine-wide with e.g.
+# TRILOBITE_LEARN_TIERS="code" (local only) or "code,cloud-code,cloud-general,general".
+LEARN_TIERS = {
+    t.strip()
+    for t in os.environ.get(
+        "TRILOBITE_LEARN_TIERS", "code,cloud-code,cloud-general"
+    ).split(",")
+    if t.strip()
+}
 
 # strict=True pins trilobite to the fine-tuned alias only (errors if missing) instead
 # of silently falling back to the base coder model. Env default lets ops flip this
@@ -111,9 +125,10 @@ def _format_trace(model, tier, params, trace):
 
 
 def _should_learn(tier, learn):
-    # Only the local coding tier participates in the coding-lesson loop.
-    # Excludes cloud tiers (tier != "code"), mechanical fast/general, and learn=False.
-    return bool(learn) and tier == "code"
+    # A tier feeds the learning loop when it is in LEARN_TIERS (env-configurable) and
+    # the caller didn't opt out with learn=False. Defaults: local 'code' plus the
+    # cloud tiers (teacher distillation); 'fast'/'general' stay mechanical.
+    return bool(learn) and tier in LEARN_TIERS
 
 
 def resolve_trilobite_model(strict=False):
@@ -126,7 +141,13 @@ def resolve_trilobite_model(strict=False):
     return None if strict else TIERS["code"]
 
 
-def _make_generate(model, system, temperature, num_predict, num_ctx):
+def _make_generate(model, system, temperature, num_predict, num_ctx, cloud=False):
+    """Build a generate(prompt, history) closure for `model`.
+
+    cloud=True targets an Ollama-hosted model: keep_alive and num_ctx are omitted
+    (they're VRAM/local-context knobs the remote tier doesn't take), matching how the
+    non-learning cloud path posts.
+    """
     def gen(prompt, history=None):
         messages = []
         if system:
@@ -134,13 +155,22 @@ def _make_generate(model, system, temperature, num_predict, num_ctx):
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": prompt})
-        options = {"temperature": temperature, "num_predict": num_predict,
-                   "num_ctx": num_ctx}
+        options = {"temperature": temperature, "num_predict": num_predict}
         payload = {"model": model, "messages": messages, "stream": False,
-                   "options": options, "keep_alive": KEEP_ALIVE}
+                   "options": options}
+        if not cloud:
+            options["num_ctx"] = num_ctx
+            payload["keep_alive"] = KEEP_ALIVE
         out = _post("/api/chat", payload)
         return out.get("message", {}).get("content", "")
     return gen
+
+
+def _no_retrieve(conn, task):
+    """Retrieve hook that injects nothing — used for 'teacher' (clean) generation so a
+    strong model answers at full strength without local-lesson augmentation, while its
+    output is still captured for grounding + distillation."""
+    return []
 
 
 def _generate_text(prompt, tier="fast", system="", temperature=0.2,
@@ -169,6 +199,20 @@ def _resolve_project(project):
     return p
 
 
+def _build_system(system, trace, persona):
+    """Compose the effective system prompt from a base `system`, optional trace
+    instruction, and optional persona (persona goes first)."""
+    effective_system = system
+    if trace:
+        effective_system = "%s\n\n%s" % (system, TRACE_SYSTEM) if system else TRACE_SYSTEM
+    if persona and persona.strip():
+        persona_prompt = personas.get(persona)
+        effective_system = (
+            "%s\n\n%s" % (persona_prompt, effective_system) if effective_system else persona_prompt
+        )
+    return effective_system
+
+
 def _resolve_model_and_system(system, trace, strict, persona):
     """Shared prep for the trilobite tool and the serve layer.
 
@@ -178,15 +222,31 @@ def _resolve_model_and_system(system, trace, strict, persona):
     model = resolve_trilobite_model(strict_eff)
     if model is None:
         return None, None
-    effective_system = system
-    if trace:
-        effective_system = "%s\n\n%s" % (system, TRACE_SYSTEM) if system else TRACE_SYSTEM
-    if persona and persona.strip():
-        persona_prompt = personas.get(persona)
-        effective_system = (
-            "%s\n\n%s" % (persona_prompt, effective_system) if effective_system else persona_prompt
-        )
-    return model, effective_system
+    return model, _build_system(system, trace, persona)
+
+
+def _serve_target(tier, strict):
+    """Resolve a serve/app request's OpenAI `model` field to a concrete target.
+
+    Returns (model, cloud, augment, tier_label):
+      - model:      the Ollama model to generate with (None if a strict alias is
+                    missing, or tier_label is None for an unknown name)
+      - cloud:      True if it runs on Ollama's servers (payload omits VRAM knobs)
+      - augment:    inject facts/lessons/recall? Only the local student ('code'/
+                    trilobite) does; any other model answers clean (teacher mode)
+      - tier_label: what to record on the interaction (None => unknown model)
+
+    Default / "" / "trilobite" / "local" => the local self-improving student.
+    Any TIERS key (e.g. "cloud-code", "general") selects that model directly, so a
+    single server can drive many models — pick per request.
+    """
+    t = (tier or "").strip().lower()
+    if t in ("", "trilobite", "local"):
+        strict_eff = _STRICT_DEFAULT if strict is None else strict
+        return resolve_trilobite_model(strict_eff), False, True, "trilobite"
+    if t in TIERS:
+        return TIERS[t], t in CLOUD_TIERS, t == "code", t
+    return None, False, True, None
 
 
 def _session_history_messages(conn, session_id, max_turns):
@@ -246,25 +306,41 @@ def _maybe_title(conn, session_id, first_prompt):
 
 
 def _answer(conn, prompt, model, effective_system, temperature, num_predict,
-            num_ctx, session_id, project, history, trace=False):
-    """Core answer path shared by the tool and serve: augment (facts/lessons/recall),
-    generate with `history`, capture. Returns (response, interaction_id, trace_ctx)."""
-    gen = _make_generate(model, effective_system, temperature, num_predict, num_ctx)
+            num_ctx, session_id, project, history, trace=False,
+            tier="trilobite", cloud=False, augment=True):
+    """Core answer path shared by the tool and serve: (optionally) augment
+    (facts/lessons/recall), generate with `history`, capture. Returns
+    (response, interaction_id, trace_ctx).
+
+    tier      -> recorded on the interaction (so training data knows its source).
+    cloud     -> generate against an Ollama-hosted model (omit VRAM knobs).
+    augment   -> False runs 'teacher' mode: no lesson/fact/recall injection (the model
+                 answers clean), but the turn is still captured (with its task
+                 embedding) so record_outcome can ground and distill it.
+    """
+    gen = _make_generate(model, effective_system, temperature, num_predict, num_ctx,
+                         cloud=cloud)
     qv = embeddings.embed(prompt)
     blob = embeddings.to_blob(qv) if qv else None
-    recalls = recall.recall(conn, prompt, qv=qv, exclude_session=session_id)
-    facts = None
-    if project:
-        facts = [f["text"] for f in memory_store.facts_for_project(conn, project)]
+    if augment:
+        recalls = recall.recall(conn, prompt, qv=qv, exclude_session=session_id)
+        facts = None
+        if project:
+            facts = [f["text"] for f in memory_store.facts_for_project(conn, project)]
+        retrieve_fn = retriever.retrieve
+    else:
+        recalls = None
+        facts = None
+        retrieve_fn = _no_retrieve
     if trace:
         resp, iid, tctx = orchestrator.run_with_learning_traced(
-            conn, prompt, "trilobite", gen, history=history, recalls=recalls,
-            facts=facts, session_id=session_id, task_embedding=blob,
+            conn, prompt, tier, gen, retrieve_fn=retrieve_fn, history=history,
+            recalls=recalls, facts=facts, session_id=session_id, task_embedding=blob,
         )
         return resp, iid, tctx
     resp, iid = orchestrator.run_with_learning(
-        conn, prompt, "trilobite", gen, history=history, recalls=recalls,
-        facts=facts, session_id=session_id, task_embedding=blob,
+        conn, prompt, tier, gen, retrieve_fn=retrieve_fn, history=history,
+        recalls=recalls, facts=facts, session_id=session_id, task_embedding=blob,
     )
     return resp, iid, None
 
@@ -299,13 +375,15 @@ def offload(
 ) -> str:
     """Offload a self-contained subtask to a local-GPU or Ollama-cloud model.
 
-    Local tiers (fast/code/general) run privately on the 6 GB 4050. Only the local
-    'code' tier participates in the coding-lesson learning loop: when learn=True
-    (default) that call is memory-augmented and captured, and the response ends
-    with a '[interaction_id: <id>]' footer you can pass to record_outcome once you
-    know whether it compiled / passed tests. 'fast'/'general' (mechanical work like
-    summaries, reformatting, boilerplate), cloud tiers, and learn=False all run the
-    plain path instead: no lesson injection, no capture, no footer, just text.
+    Local tiers (fast/code/general) run privately on the 6 GB 4050. The learning tiers
+    (TRILOBITE_LEARN_TIERS, default local 'code' + both cloud tiers) participate in the
+    lesson loop: with learn=True (default) the call is captured and the response ends
+    with a '[interaction_id: <id>]' footer you can pass to record_outcome once you know
+    whether it compiled / passed tests, so a good outcome distills a lesson. The local
+    'code' tier is also memory-augmented (student); cloud tiers answer CLEAN (teacher)
+    but are still captured — so a paid frontier model's grounded wins become lessons and
+    fine-tuning data for the local model. 'fast'/'general' (mechanical work) and
+    learn=False run the plain path: no capture, no footer, just text.
 
     Tiers: fast=3B (default), code=7B coder, general=7B instruct,
     cloud-code / cloud-general (METERED, prompt leaves this machine).
@@ -335,16 +413,24 @@ def offload(
         msg = out.get("message", {}).get("content", "")
         return msg if msg else "(empty response) raw=%s" % json.dumps(out)[:500]
 
-    # Learning path (local tiers only) — serves from the same trilobite model as the
-    # trilobite tool, so the learning loop is consistent across entry points.
-    learning_model = resolve_trilobite_model(_STRICT_DEFAULT)
-    if learning_model is None:
-        return ("ERROR: trilobite model/alias not found. Run setup_alias.py, or call "
-                "with strict=False to fall back to the base coder.")
-    gen = _make_generate(learning_model, system, temperature, num_predict, num_ctx)
+    # Learning path. Local tiers are answered by the trilobite student model/alias and
+    # augmented with lessons (consistent with the trilobite tool). Cloud tiers act as a
+    # 'teacher': the actual cloud model answers CLEAN (no augmentation), and its grounded
+    # good outcomes are still captured + distilled into lessons for the local student.
+    retrieve_kwargs = {}
+    if tier in CLOUD_TIERS:
+        gen = _make_generate(model, system, temperature, num_predict, num_ctx, cloud=True)
+        retrieve_kwargs["retrieve_fn"] = _no_retrieve
+    else:
+        learning_model = resolve_trilobite_model(_STRICT_DEFAULT)
+        if learning_model is None:
+            return ("ERROR: trilobite model/alias not found. Run setup_alias.py, or call "
+                    "with strict=False to fall back to the base coder.")
+        gen = _make_generate(learning_model, system, temperature, num_predict, num_ctx)
     conn = _open_db()
     try:
-        response, iid = orchestrator.run_with_learning(conn, prompt, tier, gen)
+        response, iid = orchestrator.run_with_learning(
+            conn, prompt, tier, gen, **retrieve_kwargs)
     except urllib.error.URLError as e:
         return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
                 "running? (the tray app / `ollama serve`)" % (BASE, e))
@@ -437,21 +523,33 @@ def trilobite(
     return with_footer(response, iid)
 
 
-def answer_with_history(prompt, history, trace=False, strict=None):
+def answer_with_history(prompt, history, trace=False, strict=None, tier=None):
     """Answer a turn using caller-supplied prior `history` (list of {role, content}).
 
     For the OpenAI-compatible serve layer, where the chat UI owns the conversation:
-    history comes from the request, not the DB, so no DB session is threaded. Facts
-    still come from the DEFAULT_PROJECT. Returns the reply text (with footer)."""
-    model, effective_system = _resolve_model_and_system("", trace, strict, "")
+    history comes from the request, not the DB, so no DB session is threaded.
+
+    `tier` maps the request's OpenAI `model` field to a target (see _serve_target):
+    default/"trilobite" is the local self-improving student (augmented with facts +
+    lessons); any other tier (e.g. a paid cloud model) answers CLEAN as a teacher. The
+    turn is always captured so record_outcome can ground it and distill lessons — so
+    the app learns from whatever model you point it at. Returns the reply (with footer).
+    """
+    model, cloud, augment, tier_label = _serve_target(tier, strict)
+    if tier_label is None:
+        return "ERROR: unknown model '%s'. Valid: trilobite, %s." % (
+            tier, ", ".join(TIERS))
     if model is None:
         return ("ERROR: trilobite model/alias not found. Run setup_alias.py, or call "
                 "with strict=False to fall back to the base coder.")
+    effective_system = _build_system("", trace, "")
+    project = DEFAULT_PROJECT if augment else None
     conn = _open_db()
     try:
         response, iid, trace_ctx = _answer(
             conn, prompt, model, effective_system, 0.2, 1024, SESSION_NUM_CTX,
-            None, DEFAULT_PROJECT, history or None, trace=trace,
+            None, project, history or None, trace=trace,
+            tier=tier_label, cloud=cloud, augment=augment,
         )
     except urllib.error.URLError as e:
         return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "

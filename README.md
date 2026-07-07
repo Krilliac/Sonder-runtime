@@ -39,7 +39,13 @@ your task ─► retrieve relevant lessons ─► augment prompt ─► local mo
 - **Grounding** — you (or your fleet) call `record_outcome` with a real signal; execution outcomes are the reward.
 - **Reflection** — a good outcome distills a deduped one-line lesson future prompts can retrieve.
 
-All of it is local and private by construction (cloud tiers never participate in the learning path).
+The loop is model-agnostic: point it at whatever LLM you have. The local student
+(`code`) is memory-augmented; a stronger paid/cloud model can act as a **teacher** —
+it answers *clean* (no local-lesson injection) and its grounded good outcomes are
+distilled into lessons and fine-tuning data the local model retrieves later. Which
+tiers learn is configurable (`TRILOBITE_LEARN_TIERS`, default local `code` + both
+cloud tiers). The memory, capture, and distillation always stay local; only a
+cloud-tier *prompt* leaves the machine, and only when you choose a cloud model.
 
 ### Memory beyond lessons
 

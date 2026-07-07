@@ -18,6 +18,10 @@ party.
 ## Features
 
 - **Chat UI** with conversation memory (history is threaded to the server).
+- **Model picker** in the title bar — switch which LLM answers per conversation
+  (`trilobite` local student, or any cloud/paid tier the server exposes). The list is
+  fetched from the server's `/v1/models`. Cloud models answer *clean* (teacher mode)
+  and their good outcomes still feed the local model's learning.
 - **Settings**: server URL + optional API key, with a one-tap *Test connection*.
 - **Slash commands** built in — `/stats`, `/train`, `/pass`, `/fail`, `/help` —
   handled by the serve layer exactly like the REPL.

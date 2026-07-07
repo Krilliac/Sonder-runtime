@@ -10,8 +10,8 @@ void main() {
     await tester.pumpWidget(const TrilobiteApp());
     await tester.pumpAndSettle();
 
-    // AppBar title renders once settings resolve.
-    expect(find.text('trilobite'), findsOneWidget);
+    // Model picker in the title bar shows the local model once settings resolve.
+    expect(find.textContaining('trilobite'), findsWidgets);
     // Empty state shows the message composer.
     expect(find.byType(TextField), findsOneWidget);
   });

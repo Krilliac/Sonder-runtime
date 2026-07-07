@@ -5,15 +5,20 @@ class Settings {
   static const _kServer = 'server_url';
   static const _kKey = 'api_key';
   static const _kDark = 'dark_mode';
+  static const _kModel = 'model';
+
+  static const defaultModel = 'trilobite';
 
   String serverUrl;
   String apiKey;
   bool darkMode;
+  String model; // which server tier/model to use ("trilobite" = local student)
 
   Settings({
     this.serverUrl = 'http://127.0.0.1:11435',
     this.apiKey = '',
     this.darkMode = true,
+    this.model = defaultModel,
   });
 
   bool get isConfigured => serverUrl.trim().isNotEmpty;
@@ -24,6 +29,7 @@ class Settings {
       serverUrl: p.getString(_kServer) ?? 'http://127.0.0.1:11435',
       apiKey: p.getString(_kKey) ?? '',
       darkMode: p.getBool(_kDark) ?? true,
+      model: p.getString(_kModel) ?? defaultModel,
     );
   }
 
@@ -32,5 +38,6 @@ class Settings {
     await p.setString(_kServer, serverUrl.trim());
     await p.setString(_kKey, apiKey.trim());
     await p.setBool(_kDark, darkMode);
+    await p.setString(_kModel, model);
   }
 }

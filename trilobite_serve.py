@@ -255,11 +255,24 @@ def _handle_intent(content):
     return "\n".join(replies)
 
 
-def _run_prompt(prompt, history=None):
+def _model_to_tier(model):
+    """Map an OpenAI `model` field to a trilobite tier for answer_with_history.
+
+    "trilobite" (and the OpenAI-ish default "gpt-*"/blank) -> the local student.
+    Any known tier name (e.g. "cloud-code") selects that model directly."""
+    m = (model or "").strip()
+    if not m or m == "trilobite" or m.startswith("gpt-"):
+        return None  # default: local student
+    if m in server.TIERS:
+        return m
+    return None
+
+
+def _run_prompt(prompt, history=None, tier=None):
     """Call the real trilobite loop with the UI's prior turns; returns UI text."""
     global LAST_IID, LAST_RESPONSE
 
-    out = server.answer_with_history(prompt, history, trace=TRACE, strict=STRICT)
+    out = server.answer_with_history(prompt, history, trace=TRACE, strict=STRICT, tier=tier)
     if out.startswith("ERROR"):
         return out
     LAST_IID = server.parse_interaction_id(out)
@@ -326,10 +339,16 @@ class Handler(BaseHTTPRequestHandler):
             if not check_auth(self.headers.get("Authorization", ""), API_KEY):
                 self._send_auth_error()
                 return
-            body = json.dumps({
-                "object": "list",
-                "data": [{"id": "trilobite", "object": "model", "owned_by": "local"}],
-            }).encode("utf-8")
+            # Advertise the local student plus every configured tier, so a client can
+            # offer a model picker. owned_by flags where each runs.
+            data = [{"id": "trilobite", "object": "model", "owned_by": "local"}]
+            for tier_name in server.TIERS:
+                data.append({
+                    "id": tier_name,
+                    "object": "model",
+                    "owned_by": "cloud" if tier_name in server.CLOUD_TIERS else "local",
+                })
+            body = json.dumps({"object": "list", "data": data}).encode("utf-8")
             self.send_response(200)
             self._cors()
             self.send_header("Content-Type", "application/json")
@@ -372,7 +391,8 @@ class Handler(BaseHTTPRequestHandler):
                 reply = _handle_feedback(prompt)
             if reply is None:
                 reply = _handle_intent(prompt)
-            content = reply if reply is not None else _run_prompt(prompt, history)
+            content = reply if reply is not None else _run_prompt(
+                prompt, history, _model_to_tier(model))
         except Exception:
             content = "ERROR: %s" % traceback.format_exc()
 
