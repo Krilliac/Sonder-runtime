@@ -33,3 +33,17 @@ def test_history_from_messages_single_turn_is_empty():
 def test_history_from_messages_handles_empty():
     assert ts._history_from_messages([]) == []
     assert ts._history_from_messages(None) == []
+
+
+def test_model_to_tier_defaults_to_local_student():
+    for m in ("", None, "trilobite", "gpt-4o-mini"):
+        assert ts._model_to_tier(m) is None
+
+
+def test_model_to_tier_selects_known_tier():
+    assert ts._model_to_tier("cloud-code") == "cloud-code"
+    assert ts._model_to_tier("general") == "general"
+
+
+def test_model_to_tier_unknown_falls_back_to_default():
+    assert ts._model_to_tier("some-random-model") is None

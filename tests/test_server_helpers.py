@@ -55,12 +55,78 @@ def test_trilobite_strict_true_errors_when_alias_missing_before_any_ollama_call(
     assert "not found" in out
 
 
-def test_should_learn_only_code_tier():
+def test_should_learn_includes_code_and_cloud_tiers():
+    # Default LEARN_TIERS = code + both cloud tiers (teacher distillation).
     assert server._should_learn("code", True) is True
+    assert server._should_learn("cloud-code", True) is True
+    assert server._should_learn("cloud-general", True) is True
+    # Mechanical tiers and learn=False never learn.
     assert server._should_learn("fast", True) is False
     assert server._should_learn("general", True) is False
     assert server._should_learn("code", False) is False
+    assert server._should_learn("cloud-code", False) is False
+
+
+def test_should_learn_honors_learn_tiers(monkeypatch):
+    monkeypatch.setattr(server, "LEARN_TIERS", {"code"})
+    assert server._should_learn("code", True) is True
     assert server._should_learn("cloud-code", True) is False
+
+
+def test_serve_target_cloud_tier_is_clean_teacher():
+    # Cloud tier: real cloud model, cloud=True, augment=False (clean), labeled by tier.
+    model, cloud, augment, label = server._serve_target("cloud-code", None)
+    assert model == server.TIERS["cloud-code"]
+    assert cloud is True
+    assert augment is False
+    assert label == "cloud-code"
+
+
+def test_serve_target_local_general_tier_answers_clean():
+    # A non-code local tier runs that model but does not augment (only 'code' is student).
+    model, cloud, augment, label = server._serve_target("general", None)
+    assert model == server.TIERS["general"]
+    assert cloud is False
+    assert augment is False
+    assert label == "general"
+
+
+def test_serve_target_unknown_model_is_rejected():
+    model, cloud, augment, label = server._serve_target("gpt-4o", None)
+    assert label is None
+
+
+def test_canonical_learn_tier_maps_student_to_code():
+    assert server._canonical_learn_tier("trilobite") == "code"
+    assert server._canonical_learn_tier("cloud-code") == "cloud-code"
+    assert server._canonical_learn_tier("general") == "general"
+
+
+def test_trilobite_tool_unknown_tier_errors_before_ollama(monkeypatch):
+    def boom_post(path, payload):
+        raise AssertionError("must not call Ollama for an unknown tier")
+    monkeypatch.setattr(server, "_post", boom_post)
+    out = server.trilobite("hi", tier="does-not-exist")
+    assert "unknown tier" in out
+
+
+def test_answer_with_history_unknown_model_errors_before_ollama(monkeypatch):
+    def boom_post(path, payload):
+        raise AssertionError("must not call Ollama for an unknown model")
+    monkeypatch.setattr(server, "_post", boom_post)
+    out = server.answer_with_history("hi", None, tier="gpt-9-turbo")
+    assert "unknown model" in out
+
+
+def test_serve_target_default_is_local_student(monkeypatch):
+    monkeypatch.setattr(server, "_get",
+                        lambda path: {"models": [{"name": "qwen2.5:3b"}]})
+    for name in ("", "trilobite", "local", None):
+        model, cloud, augment, label = server._serve_target(name, None)
+        assert model == server.TIERS["code"]  # falls back to base coder alias target
+        assert cloud is False
+        assert augment is True
+        assert label == "trilobite"
 
 
 def test_trilobite_stats_runs_against_empty_db(monkeypatch, tmp_path):

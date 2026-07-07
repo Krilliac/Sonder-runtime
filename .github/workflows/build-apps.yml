@@ -1,0 +1,176 @@
+name: build-apps
+
+# Compiles the trilobite mobile/desktop client for Android, Linux, Windows and
+# macOS. Every run uploads installable artifacts (downloadable from the run's
+# "Summary" page). Pushing a tag like `app-v1.0.0` additionally publishes a
+# GitHub Release with permanent download links.
+#
+# The repo keeps only the Dart sources (app/lib, app/pubspec.yaml, app/test).
+# The native project scaffolding (android/, linux/, windows/, macos/) is
+# generated on the fly with `flutter create`, so there is no generated native
+# code to maintain in git.
+
+on:
+  push:
+    branches: [main, claude/mobile-desktop-app-gui-gzlhn5]
+    tags: ["app-v*"]
+  pull_request:
+    paths:
+      - "app/**"
+      - ".github/workflows/build-apps.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  FLUTTER_CHANNEL: stable
+  APP_ORG: com.trilobite
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          cache: true
+      - run: flutter create --org $APP_ORG --project-name trilobite --platforms=android .
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+
+  android:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          cache: true
+      - run: flutter create --org $APP_ORG --project-name trilobite --platforms=android .
+      - run: flutter pub get
+      - name: Build APK (release, debug-signed so it installs directly)
+        run: flutter build apk --release
+      - name: Rename APK
+        run: cp build/app/outputs/flutter-apk/app-release.apk trilobite-android.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trilobite-android-apk
+          path: app/trilobite-android.apk
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux desktop toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config \
+            libgtk-3-dev liblzma-dev libstdc++-12-dev
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          cache: true
+      - run: flutter config --enable-linux-desktop
+      - run: flutter create --org $APP_ORG --project-name trilobite --platforms=linux .
+      - run: flutter pub get
+      - run: flutter build linux --release
+      - name: Package Linux bundle
+        run: |
+          cd build/linux/x64/release/bundle
+          tar -czf "$GITHUB_WORKSPACE/app/trilobite-linux-x64.tar.gz" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trilobite-linux-x64
+          path: app/trilobite-linux-x64.tar.gz
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          cache: true
+      - run: flutter config --enable-windows-desktop
+      - run: flutter create --org com.trilobite --project-name trilobite --platforms=windows .
+      - run: flutter pub get
+      - run: flutter build windows --release
+      - name: Package Windows bundle
+        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath trilobite-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trilobite-windows-x64
+          path: app/trilobite-windows-x64.zip
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          cache: true
+      - run: flutter config --enable-macos-desktop
+      - run: flutter create --org $APP_ORG --project-name trilobite --platforms=macos .
+      - run: flutter pub get
+      - run: flutter build macos --release
+      - name: Package macOS app
+        run: |
+          cd build/macos/Build/Products/Release
+          zip -r -y "$GITHUB_WORKSPACE/app/trilobite-macos.zip" trilobite.app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trilobite-macos
+          path: app/trilobite-macos.zip
+          if-no-files-found: error
+
+  release:
+    # Only when a tag like app-v1.0.0 is pushed: gather every platform build
+    # and publish a GitHub Release with permanent download links.
+    needs: [android, linux, windows, macos]
+    if: startsWith(github.ref, 'refs/tags/app-v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*
+          generate_release_notes: true
+          body: |
+            Trilobite client builds — install on your phone or desktop, then
+            point the app at your `trilobite_serve.py` server (Settings → Server URL).
+
+            | Platform | Download |
+            |---|---|
+            | Android  | `trilobite-android.apk` |
+            | Linux    | `trilobite-linux-x64.tar.gz` |
+            | Windows  | `trilobite-windows-x64.zip` |
+            | macOS    | `trilobite-macos.zip` |
