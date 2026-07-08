@@ -66,6 +66,7 @@ HELP_TEXT = """commands:
   /trace [on|off]    toggle trace mode (bare = on); shows retrieval + prompt
   /strict [on|off]   toggle strict mode (bare = on); pins to the trilobite alias
   /stats             show trilobite's learning stats
+  /context           show context, session, and memory health meters
   /pass, /good       record the last answer as tests_passed
   /fail, /bad        record the last answer as failed
   /run [seconds]     execute the code block from the last response (default 8s)
@@ -243,6 +244,8 @@ def _handle_slash(content):
         return HELP_TEXT
     if cmd == "/stats":
         return server.trilobite_stats()
+    if cmd == "/context":
+        return server.context_health()
     if cmd in ("/pass", "/good"):
         if LAST_IID:
             msg = server.record_outcome(LAST_IID, "tests_passed")
@@ -436,6 +439,7 @@ class Handler(BaseHTTPRequestHandler):
                 "status": server.status(),
                 "stats": server.trilobite_stats(),
                 "learn_tiers": server.learn_tiers(),
+                "context": server.context_health_data(),
                 "db_path": getattr(server, "_DB_PATH", ""),
                 "state_home": str(server.trilobite_paths.default_home()),
                 "models": [

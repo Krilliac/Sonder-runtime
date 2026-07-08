@@ -1228,6 +1228,145 @@ def trilobite_stats() -> str:
     return "\n".join(lines)
 
 
+def _rough_token_count(text) -> int:
+    """Cheap, dependency-free estimate for dashboard health meters."""
+    if not text:
+        return 0
+    return max(1, (len(str(text)) + 3) // 4)
+
+
+def _rough_token_count_from_chars(count) -> int:
+    count = max(0, int(count or 0))
+    return max(1, (count + 3) // 4) if count else 0
+
+
+def _health_bar(percent, width=18) -> str:
+    pct = max(0.0, min(1.0, float(percent or 0.0)))
+    filled = int(round(pct * width))
+    return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
+
+
+def context_health_data(session: str = "", project: str = "") -> dict:
+    """Read-only context/memory snapshot for app and console visualizers.
+
+    This reports an approximate context load. Ollama does not expose the exact
+    live prompt token count here, so we estimate from the active session summary
+    plus the recent turns that Trilobite keeps in the prompt.
+    """
+    _maybe_live_reload()
+    session_id = _resolve_session(session)
+    project_id = _resolve_project(project)
+    conn = _open_db()
+    try:
+        turns = memory_store.session_history(conn, session_id, MAX_TURNS) if session_id else []
+        session_row = memory_store.get_session(conn, session_id) if session_id else None
+        summary = (session_row or {}).get("summary") or ""
+        turn_count = memory_store.session_turn_count(conn, session_id) if session_id else 0
+        session_count = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        lesson_count = conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0]
+        fact_count = (
+            memory_store.count_facts(conn, project_id) if project_id else
+            conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
+        )
+        interaction_count = memory_store.count_interactions(conn)
+        outcome_count = conn.execute("SELECT COUNT(*) FROM outcomes").fetchone()[0]
+        summarized_through = (session_row or {}).get("summarized_through") or ""
+        updated_ts = (session_row or {}).get("updated_ts") or ""
+        title = (session_row or {}).get("title") or ""
+        live_chars = sum(len(task or "") + len(response or "") for task, response in turns)
+        summary_tokens = _rough_token_count(summary)
+        live_tokens = _rough_token_count_from_chars(live_chars)
+        estimated_tokens = summary_tokens + live_tokens
+    finally:
+        conn.close()
+
+    context_limit = max(1, int(SESSION_NUM_CTX or 1))
+    context_ratio = min(1.0, estimated_tokens / context_limit)
+    live_turn_count = len(turns)
+    turn_ratio = min(1.0, live_turn_count / max(1, int(MAX_TURNS or 1)))
+    if context_ratio >= 0.90:
+        status_label = "hot"
+    elif context_ratio >= 0.70:
+        status_label = "warm"
+    else:
+        status_label = "healthy"
+    memory_items = lesson_count + fact_count + outcome_count
+    memory_ratio = min(1.0, memory_items / 1000.0)
+    return {
+        "session": session_id or "none",
+        "project": project_id or "none",
+        "title": title,
+        "status": status_label,
+        "context_limit": context_limit,
+        "estimated_tokens": estimated_tokens,
+        "context_percent": round(context_ratio * 100.0, 1),
+        "context_bar": _health_bar(context_ratio),
+        "live_turns": live_turn_count,
+        "max_live_turns": MAX_TURNS,
+        "total_turns": turn_count,
+        "turn_percent": round(turn_ratio * 100.0, 1),
+        "turn_bar": _health_bar(turn_ratio),
+        "summary_tokens": summary_tokens,
+        "live_tokens": live_tokens,
+        "summary_chars": len(summary),
+        "summarized_through": summarized_through,
+        "updated_ts": updated_ts,
+        "sessions": session_count,
+        "lessons": lesson_count,
+        "facts": fact_count,
+        "interactions": interaction_count,
+        "outcomes": outcome_count,
+        "memory_percent": round(memory_ratio * 100.0, 1),
+        "memory_bar": _health_bar(memory_ratio),
+        "db_path": _DB_PATH,
+        "state_home": str(trilobite_paths.default_home()),
+    }
+
+
+def format_context_health(data: dict) -> str:
+    lines = [
+        "trilobite context health",
+        "  status: %s" % data.get("status", "unknown"),
+        "  session: %s%s" % (
+            data.get("session", "none"),
+            " (%s)" % data.get("title") if data.get("title") else "",
+        ),
+        "  context %s %s%%  ~%s/%s tokens" % (
+            data.get("context_bar", ""),
+            data.get("context_percent", 0),
+            data.get("estimated_tokens", 0),
+            data.get("context_limit", 0),
+        ),
+        "  live    %s %s/%s turns in active prompt (%s total)" % (
+            data.get("turn_bar", ""),
+            data.get("live_turns", 0),
+            data.get("max_live_turns", 0),
+            data.get("total_turns", 0),
+        ),
+        "  memory  %s %s lessons, %s facts, %s interactions, %s outcomes" % (
+            data.get("memory_bar", ""),
+            data.get("lessons", 0),
+            data.get("facts", 0),
+            data.get("interactions", 0),
+            data.get("outcomes", 0),
+        ),
+        "  summary: %s chars, ~%s tokens%s" % (
+            data.get("summary_chars", 0),
+            data.get("summary_tokens", 0),
+            " through %s" % data.get("summarized_through")
+            if data.get("summarized_through") else "",
+        ),
+        "  db: %s" % data.get("db_path", ""),
+    ]
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def context_health(session: str = "", project: str = "") -> str:
+    """Show context budget, live turns, summaries, and memory as text meters."""
+    return format_context_health(context_health_data(session=session, project=project))
+
+
 @mcp.tool()
 def learn_tiers() -> str:
     """Show which tiers currently feed the learning loop."""
@@ -1431,6 +1570,11 @@ def _loop_dispatch(action):
         return _loop_text_result("status", status())
     if action_type == "diagnostics":
         return _loop_text_result("diagnostics", diagnostics())
+    if action_type == "context_health":
+        return _loop_text_result("context_health", context_health(
+            session=action.get("session", ""),
+            project=action.get("project", ""),
+        ))
     if action_type == "self_heal_check":
         return _loop_text_result("self_heal_check", self_heal_check())
     if action_type == "self_heal_repair":
@@ -1476,7 +1620,7 @@ def _loop_dispatch(action):
         "ok": False,
         "type": action_type or "(unknown)",
         "summary": "unknown action type",
-        "output": "Valid action types: code, project, offload, trilobite, status, diagnostics, self_heal_check, self_heal_repair, profile_status, emotion_status, memory_search, apply_learned, web_search, web_fetch, unload, sleep.",
+        "output": "Valid action types: code, project, offload, trilobite, status, diagnostics, context_health, self_heal_check, self_heal_repair, profile_status, emotion_status, memory_search, apply_learned, web_search, web_fetch, unload, sleep.",
     }
 
 
@@ -1936,7 +2080,7 @@ def tool_manifest() -> str:
         "memory_search/memory_export/session_export": "Inspect local memory.",
         "learn_from_example/apply_learned": "Teach from examples and preview lesson application.",
         "self_heal_check/self_heal_repair": "Detect and safely repair common local breakage.",
-        "diagnostics/live_reload_status/status/unload": "Observe and manage runtime health.",
+        "context_health/diagnostics/live_reload_status/status/unload": "Observe and manage runtime health.",
         "record_outcome": "Feed grounded outcomes back into learning.",
         "trilobite_stats/trilobite_sessions/trilobite_remember_fact": "Memory observability and durable facts.",
     }
@@ -1952,6 +2096,7 @@ AGENT_TOOL_HELP = """Available tools:
 - apply_learned: {"task": "...", "limit": 5}
 - workflow_run: {"name": "...", "max_iterations": 1}
 - diagnostics: {}
+- context_health: {}
 - self_heal_check: {}
 - self_heal_repair: {"apply": false}
 - status: {}
@@ -2020,6 +2165,11 @@ def _agent_dispatch(tool_name, args, allow_web=True):
         )
     if tool_name == "diagnostics":
         return diagnostics()
+    if tool_name == "context_health":
+        return context_health(
+            session=args.get("session", ""),
+            project=args.get("project", ""),
+        )
     if tool_name == "self_heal_check":
         return self_heal_check()
     if tool_name == "self_heal_repair":
@@ -2166,6 +2316,13 @@ def diagnostics() -> str:
             _DB_PATH, n_lessons, n_interactions))
     except Exception as e:
         lines.append("  memory db: ERROR %s" % e)
+    try:
+        ctx = context_health_data()
+        lines.append("  context: %s %s%% (~%s/%s tokens), live turns %s/%s" % (
+            ctx["status"], ctx["context_percent"], ctx["estimated_tokens"],
+            ctx["context_limit"], ctx["live_turns"], ctx["max_live_turns"]))
+    except Exception as e:
+        lines.append("  context: ERROR %s" % e)
     try:
         heal_issues = self_heal.check(_DB_PATH, module_names=LIVE_RELOAD_MODULES)
         repairable = sum(1 for issue in heal_issues if issue.repairable)

@@ -27,6 +27,7 @@ HELP = """commands:
   /strict [on|off]   toggle strict mode (bare = on); pins to the trilobite alias
   /persona [name]    show/set active persona (coder/explainer/reviewer/teacher)
   /stats             show trilobite's learning stats
+  /context           show context, session, and memory health meters
   /lessons           show the 10 most recent distilled lessons
   /pass, /good       record the last answer as tests_passed
   /fail, /bad        record the last answer as failed
@@ -275,6 +276,8 @@ def main():
                 do_persona(arg)
             elif cmd == "/stats":
                 print(server.trilobite_stats())
+            elif cmd == "/context":
+                print(server.context_health(session=session_id, project=project))
             elif cmd == "/lessons":
                 _print_lessons()
             elif cmd in ("/pass", "/good"):

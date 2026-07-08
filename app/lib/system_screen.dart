@@ -221,6 +221,11 @@ class _SystemScreenState extends State<SystemScreen> {
                   icon: const Icon(Icons.query_stats),
                   label: const Text('Stats'),
                 ),
+                OutlinedButton.icon(
+                  onPressed: _working ? null : () => _sendCommand('/context'),
+                  icon: const Icon(Icons.monitor_heart_outlined),
+                  label: const Text('Context'),
+                ),
                 SizedBox(
                   width: 120,
                   child: TextField(
@@ -291,6 +296,13 @@ class _SystemScreenState extends State<SystemScreen> {
           if (info != null) ...[
             _Section(title: 'Status', child: _OutputText(info.status)),
             const SizedBox(height: 12),
+            if (info.context != null) ...[
+              _Section(
+                title: 'Context Health',
+                child: _ContextHealthPanel(health: info.context!),
+              ),
+              const SizedBox(height: 12),
+            ],
             _Section(
               title: 'Server State',
               child: Column(
@@ -349,6 +361,137 @@ class _SystemScreenState extends State<SystemScreen> {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _ContextHealthPanel extends StatelessWidget {
+  final ContextHealth health;
+
+  const _ContextHealthPanel({required this.health});
+
+  @override
+  Widget build(BuildContext context) {
+    final status = health.status.isEmpty ? 'unknown' : health.status;
+    final sessionTitle = health.title.isEmpty ? health.session : health.title;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            Chip(
+              avatar: Icon(
+                _statusIcon(status),
+                size: 18,
+                color: _statusColor(context, status),
+              ),
+              label: Text('Context $status'),
+            ),
+            Chip(
+              avatar: const Icon(Icons.forum_outlined, size: 18),
+              label: Text('Session: $sessionTitle'),
+            ),
+            Chip(
+              avatar: const Icon(Icons.folder_copy_outlined, size: 18),
+              label: Text('Project: ${health.project}'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        _MeterBar(
+          label: 'Context',
+          percent: health.contextPercent,
+          detail:
+              '~${health.estimatedTokens}/${health.contextLimit} tokens in prompt',
+          color: _statusColor(context, status),
+        ),
+        const SizedBox(height: 10),
+        _MeterBar(
+          label: 'Live turns',
+          percent: health.turnPercent,
+          detail:
+              '${health.liveTurns}/${health.maxLiveTurns} kept live, ${health.totalTurns} total',
+        ),
+        const SizedBox(height: 10),
+        _MeterBar(
+          label: 'Memory',
+          percent: health.memoryPercent,
+          detail:
+              '${health.lessons} lessons, ${health.facts} facts, ${health.interactions} interactions',
+        ),
+        const SizedBox(height: 12),
+        _OutputCard(text: health.consoleText()),
+        if (health.updatedTs.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Text(
+            'Last updated ${health.updatedTs}',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ],
+      ],
+    );
+  }
+
+  IconData _statusIcon(String status) {
+    if (status == 'hot') return Icons.warning_amber_outlined;
+    if (status == 'warm') return Icons.thermostat_outlined;
+    if (status == 'healthy') return Icons.check_circle_outline;
+    return Icons.info_outline;
+  }
+
+  Color _statusColor(BuildContext context, String status) {
+    final cs = Theme.of(context).colorScheme;
+    if (status == 'hot') return cs.error;
+    if (status == 'warm') return Colors.amber.shade800;
+    if (status == 'healthy') return cs.primary;
+    return cs.outline;
+  }
+}
+
+class _MeterBar extends StatelessWidget {
+  final String label;
+  final double percent;
+  final String detail;
+  final Color? color;
+
+  const _MeterBar({
+    required this.label,
+    required this.percent,
+    required this.detail,
+    this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final value = (percent / 100).clamp(0.0, 1.0).toDouble();
+    final barColor = color ?? Theme.of(context).colorScheme.primary;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            SizedBox(
+              width: 96,
+              child:
+                  Text(label, style: Theme.of(context).textTheme.labelLarge),
+            ),
+            Expanded(child: Text(detail)),
+            const SizedBox(width: 8),
+            Text('${percent.toStringAsFixed(1)}%'),
+          ],
+        ),
+        const SizedBox(height: 6),
+        LinearProgressIndicator(
+          value: value,
+          minHeight: 8,
+          color: barColor,
+          backgroundColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(8),
+        ),
+      ],
     );
   }
 }

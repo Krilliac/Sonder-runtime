@@ -24,9 +24,9 @@ party.
   and their good outcomes still feed the local model's learning.
 - **Settings**: server URL + optional API key, default model/tier, with a
   one-tap *Test connection*.
-- **System panel**: view server status, learning stats and exposed models,
-  run `/stats`, `/train 10` and `/help`, start the bundled desktop server,
-  launch endless training, and pull updates from Git.
+- **System panel**: view server status, context health meters, learning stats
+  and exposed models, run `/stats`, `/context`, `/train 10` and `/help`, start
+  the bundled desktop server, launch endless training, and pull updates from Git.
 - **Slash commands** built in — `/stats`, `/train`, `/pass`, `/fail`, `/help` —
   handled by the serve layer exactly like the REPL.
 - **Dark / light** themes, copy-to-clipboard, selectable text.

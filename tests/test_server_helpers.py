@@ -1,3 +1,4 @@
+import memory_store
 import server
 
 
@@ -196,6 +197,51 @@ def test_trilobite_stats_runs_against_empty_db(monkeypatch, tmp_path):
     out = server.trilobite_stats()
     assert isinstance(out, str)
     assert "lessons:" in out
+
+
+def test_context_health_reports_session_and_memory(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
+    monkeypatch.setattr(server, "SESSION_NUM_CTX", 100)
+    monkeypatch.setattr(server, "MAX_TURNS", 2)
+    conn = server._open_db()
+    try:
+        memory_store.touch_session(conn, "demo", project="proj")
+        memory_store.update_session_summary(conn, "demo", "older summary text", "old-turn")
+        memory_store.log_interaction(
+            conn,
+            "i1",
+            "make a tiny game",
+            "",
+            "print('ok')",
+            "code",
+            session_id="demo",
+        )
+        memory_store.add_lesson(
+            conn, "lesson-one", "Prefer runnable snippets.", None, "i1"
+        )
+        memory_store.add_fact(conn, "fact-one", "proj", "Use the local app bundle.")
+        memory_store.record_outcome_row(conn, "i1", "tests_passed", 1.0)
+    finally:
+        conn.close()
+
+    data = server.context_health_data(session="demo", project="proj")
+
+    assert data["session"] == "demo"
+    assert data["project"] == "proj"
+    assert data["live_turns"] == 1
+    assert data["lessons"] == 1
+    assert data["facts"] == 1
+    assert data["outcomes"] == 1
+    assert data["context_percent"] > 0
+    assert data["context_bar"].startswith("[")
+
+
+def test_context_health_formats_console_meter(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
+    out = server.context_health()
+    assert "trilobite context health" in out
+    assert "context [" in out
+    assert "memory  [" in out
 
 
 def test_parallel_run_code_reports_mixed_results():

@@ -149,6 +149,7 @@ class SystemInfo {
   final String learnTiers;
   final String dbPath;
   final String stateHome;
+  final ContextHealth? context;
   final List<SystemModel> models;
 
   const SystemInfo({
@@ -157,6 +158,7 @@ class SystemInfo {
     required this.learnTiers,
     required this.dbPath,
     required this.stateHome,
+    required this.context,
     required this.models,
   });
 
@@ -171,9 +173,125 @@ class SystemInfo {
       learnTiers: json['learn_tiers']?.toString() ?? '',
       dbPath: json['db_path']?.toString() ?? '',
       stateHome: json['state_home']?.toString() ?? '',
+      context: json['context'] is Map<String, dynamic>
+          ? ContextHealth.fromJson(json['context'] as Map<String, dynamic>)
+          : null,
       models: models,
     );
   }
+}
+
+class ContextHealth {
+  final String session;
+  final String project;
+  final String title;
+  final String status;
+  final int contextLimit;
+  final int estimatedTokens;
+  final double contextPercent;
+  final String contextBar;
+  final int liveTurns;
+  final int maxLiveTurns;
+  final int totalTurns;
+  final double turnPercent;
+  final String turnBar;
+  final int summaryTokens;
+  final int liveTokens;
+  final int summaryChars;
+  final String summarizedThrough;
+  final String updatedTs;
+  final int sessions;
+  final int lessons;
+  final int facts;
+  final int interactions;
+  final int outcomes;
+  final double memoryPercent;
+  final String memoryBar;
+  final String dbPath;
+  final String stateHome;
+
+  const ContextHealth({
+    required this.session,
+    required this.project,
+    required this.title,
+    required this.status,
+    required this.contextLimit,
+    required this.estimatedTokens,
+    required this.contextPercent,
+    required this.contextBar,
+    required this.liveTurns,
+    required this.maxLiveTurns,
+    required this.totalTurns,
+    required this.turnPercent,
+    required this.turnBar,
+    required this.summaryTokens,
+    required this.liveTokens,
+    required this.summaryChars,
+    required this.summarizedThrough,
+    required this.updatedTs,
+    required this.sessions,
+    required this.lessons,
+    required this.facts,
+    required this.interactions,
+    required this.outcomes,
+    required this.memoryPercent,
+    required this.memoryBar,
+    required this.dbPath,
+    required this.stateHome,
+  });
+
+  factory ContextHealth.fromJson(Map<String, dynamic> json) {
+    return ContextHealth(
+      session: json['session']?.toString() ?? '',
+      project: json['project']?.toString() ?? '',
+      title: json['title']?.toString() ?? '',
+      status: json['status']?.toString() ?? '',
+      contextLimit: _asInt(json['context_limit']),
+      estimatedTokens: _asInt(json['estimated_tokens']),
+      contextPercent: _asDouble(json['context_percent']),
+      contextBar: json['context_bar']?.toString() ?? '',
+      liveTurns: _asInt(json['live_turns']),
+      maxLiveTurns: _asInt(json['max_live_turns']),
+      totalTurns: _asInt(json['total_turns']),
+      turnPercent: _asDouble(json['turn_percent']),
+      turnBar: json['turn_bar']?.toString() ?? '',
+      summaryTokens: _asInt(json['summary_tokens']),
+      liveTokens: _asInt(json['live_tokens']),
+      summaryChars: _asInt(json['summary_chars']),
+      summarizedThrough: json['summarized_through']?.toString() ?? '',
+      updatedTs: json['updated_ts']?.toString() ?? '',
+      sessions: _asInt(json['sessions']),
+      lessons: _asInt(json['lessons']),
+      facts: _asInt(json['facts']),
+      interactions: _asInt(json['interactions']),
+      outcomes: _asInt(json['outcomes']),
+      memoryPercent: _asDouble(json['memory_percent']),
+      memoryBar: json['memory_bar']?.toString() ?? '',
+      dbPath: json['db_path']?.toString() ?? '',
+      stateHome: json['state_home']?.toString() ?? '',
+    );
+  }
+
+  String consoleText() {
+    return [
+      'context $contextBar ${contextPercent.toStringAsFixed(1)}%  ~$estimatedTokens/$contextLimit tokens',
+      'live    $turnBar $liveTurns/$maxLiveTurns turns ($totalTurns total)',
+      'memory  $memoryBar $lessons lessons, $facts facts, $interactions interactions',
+      'summary $summaryChars chars, ~$summaryTokens tokens',
+    ].join('\n');
+  }
+}
+
+int _asInt(Object? value) {
+  if (value is int) return value;
+  if (value is num) return value.round();
+  return int.tryParse(value?.toString() ?? '') ?? 0;
+}
+
+double _asDouble(Object? value) {
+  if (value is double) return value;
+  if (value is num) return value.toDouble();
+  return double.tryParse(value?.toString() ?? '') ?? 0;
 }
 
 class SystemModel {
