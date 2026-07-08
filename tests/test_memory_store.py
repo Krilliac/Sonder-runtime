@@ -6,11 +6,13 @@ def test_delete_lesson_removes_from_table_and_fts():
     c = ms.connect(":memory:")
     ms.add_lesson(c, "L1", "Use collections.deque for O(1) pops.", _e.to_blob([1.0, 0.0]), "i1")
     ms.add_lesson(c, "L2", "Memoize with functools.lru_cache.", _e.to_blob([0.0, 1.0]), "i2")
+    ms.log_lesson_usage(c, ["L1"], "i1", "task")
     assert ms.delete_lesson(c, "L1") is True
     assert ms.get_lesson_text(c, "L1") is None
     assert [l["id"] for l in ms.all_lessons(c)] == ["L2"]
     # gone from the FTS mirror too (deque token no longer matches)
     assert "L1" not in ms.fts_search(c, "deque pops")
+    assert "L1" not in ms.lesson_usage_stats(c)
     # deleting a missing id is a harmless no-op
     assert ms.delete_lesson(c, "nope") is False
 
@@ -177,3 +179,16 @@ def test_interactions_with_good_outcome_empty_signals_returns_empty():
     ms.log_interaction(c, "a", "task A", "", "resp A", "code")
     ms.record_outcome_row(c, "a", "tests_passed", 1.0)
     assert ms.interactions_with_good_outcome(c, set()) == []
+
+
+def test_lesson_usage_stats_records_outcomes():
+    c = _conn()
+    ms.add_lesson(c, "L1", "lesson", None, "i0")
+    ms.log_lesson_usage(c, ["L1"], "i1", "task")
+    stats = ms.lesson_usage_stats(c)["L1"]
+    assert stats["uses"] == 1
+    assert stats["wins"] == 0
+    ms.record_lesson_usage_outcome(c, "i1", "tests_passed", 1.0)
+    stats = ms.lesson_usage_stats(c)["L1"]
+    assert stats["wins"] == 1
+    assert stats["avg_reward"] == 1.0

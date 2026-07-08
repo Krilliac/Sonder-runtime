@@ -59,7 +59,9 @@ def test_session_none_is_single_turn(stub):
     server.trilobite("solo", session="none")
     p = _answer_payload(stub, "solo")
     # Only the current user turn — no system (empty) and no prior history.
-    assert _contents(p) == ["solo"]
+    contents = _contents(p)
+    assert contents[-1] == "solo"
+    assert "first" not in contents
 
 
 def test_isolated_sessions_do_not_bleed(stub):

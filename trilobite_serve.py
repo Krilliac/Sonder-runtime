@@ -24,6 +24,7 @@ import grounding
 import training_tasks
 import intents
 import feedback
+import live_reload
 
 DEFAULT_PORT = 11435
 
@@ -38,7 +39,26 @@ LAST_IID = None
 LAST_RESPONSE = None  # full last assistant turn (with footer), for /run
 
 TRAIN_DEFAULT_N = 3
-TRAIN_MAX_N = 10
+
+
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+TRAIN_MAX_N = max(1, _env_int("TRILOBITE_TRAIN_MAX_N", 500))
+
+LIVE_RELOAD_MODULES = [
+    "server",
+    "grounding",
+    "training_tasks",
+    "intents",
+    "feedback",
+    "emotion_vectors",
+    "web_tools",
+]
 
 HELP_TEXT = """commands:
   /help              show this help
@@ -48,7 +68,7 @@ HELP_TEXT = """commands:
   /pass, /good       record the last answer as tests_passed
   /fail, /bad        record the last answer as failed
   /run               actually execute the code block from the last response
-  /train [N]         grounded self-learning: practice N tasks (default 3, max 10)
+  /train, /learn [N] grounded self-learning: practice N tasks (default 3, max 500)
 
 Plain English also works for the toggles/actions above, e.g. "strict on,
 show your reasoning", "run it", "train yourself".
@@ -73,6 +93,16 @@ def _strip_footer(text):
     if idx == -1:
         return text
     return text[:idx]
+
+
+def _maybe_live_reload():
+    global server, grounding, training_tasks, intents, feedback
+    modules = live_reload.reload_changed_modules(LIVE_RELOAD_MODULES)
+    server = modules.get("server", server)
+    grounding = modules.get("grounding", grounding)
+    training_tasks = modules.get("training_tasks", training_tasks)
+    intents = modules.get("intents", intents)
+    feedback = modules.get("feedback", feedback)
 
 
 def _on_off(arg, current):
@@ -202,7 +232,7 @@ def _handle_slash(content):
         return "strict %s" % ("on" if STRICT else "off")
     if cmd == "/run":
         return _do_run()
-    if cmd == "/train":
+    if cmd in ("/train", "/learn"):
         n, err = _parse_train_n(arg)
         if err:
             return err
@@ -335,6 +365,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        _maybe_live_reload()
         if self.path.rstrip("/") == "/v1/models":
             if not check_auth(self.headers.get("Authorization", ""), API_KEY):
                 self._send_auth_error()
@@ -361,6 +392,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
+        _maybe_live_reload()
         if self.path.rstrip("/") != "/v1/chat/completions":
             self.send_response(404)
             self._cors()
