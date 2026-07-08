@@ -96,6 +96,37 @@ def test_fix_returns_code_unchanged_for_unsupported_name():
     assert import_autofix.fix_missing_imports(code, tb) == code
 
 
+def test_fix_wrong_pygame_math_attrs_adds_math_import():
+    code = "import pygame\nx = pygame.cos(pygame.radians(90))"
+    tb = "AttributeError: module 'pygame' has no attribute 'cos'"
+
+    fixed = import_autofix.fix_wrong_module_attrs(code, tb)
+
+    assert fixed.startswith("import math\n")
+    assert "math.cos(math.radians(90))" in fixed
+
+
+def test_fix_common_generation_errors_handles_wrong_pygame_math_module():
+    code = "import pygame\nprint(round(pygame.cos(0)))"
+    tb = "AttributeError: module 'pygame' has no attribute 'cos'"
+
+    fixed = import_autofix.fix_common_generation_errors(code, tb)
+
+    assert "import math" in fixed
+    assert "math.cos" in fixed
+
+
+def test_fix_common_generation_errors_handles_pygame_math_namespace():
+    code = "import pygame\nprint(round(pygame.math.cos(0)))"
+    tb = "AttributeError: module 'pygame.math' has no attribute 'cos'"
+
+    fixed = import_autofix.fix_common_generation_errors(code, tb)
+
+    assert "import math" in fixed
+    assert "math.cos" in fixed
+    assert "pygame.math.cos" not in fixed
+
+
 # --- grounded end-to-end: the exact breakout-class failure --------------------
 
 def test_grounded_random_choice_breakout_case():
@@ -122,6 +153,19 @@ def test_grounded_typing_annotation_breakout_case():
 
     fixed = import_autofix.fix_missing_imports(buggy, out)
     assert fixed.startswith("from typing import List")
+
+    ok2, out2 = grounding.run_code(fixed)
+    assert ok2 is True, out2
+
+
+def test_grounded_pygame_math_attr_case():
+    buggy = "import pygame\nprint(round(pygame.cos(0)))"
+    ok, out = grounding.run_code(buggy)
+    assert ok is False
+    assert "AttributeError" in out
+
+    fixed = import_autofix.fix_common_generation_errors(buggy, out)
+    assert "math.cos" in fixed
 
     ok2, out2 = grounding.run_code(fixed)
     assert ok2 is True, out2

@@ -56,6 +56,10 @@ _SYMBOL_IMPORTS = {
 }
 
 _NAME_ERROR_RE = re.compile(r"NameError: name ['\"](\w+)['\"] is not defined")
+_PYGAME_MATH_ATTR_RE = re.compile(
+    r"AttributeError: module ['\"]pygame(?:\.math)?['\"] has no attribute ['\"](cos|sin|tan|radians|degrees|atan2|sqrt)['\"]"
+)
+_PYGAME_MATH_ATTRS = {"cos", "sin", "tan", "radians", "degrees", "atan2", "sqrt"}
 
 
 def _undefined_name(traceback_text):
@@ -108,3 +112,33 @@ def fix_missing_imports(code, traceback_text):
     if stmt is None or _already_imported(code, modname, name):
         return code
     return stmt + "\n" + (code or "")
+
+
+def _has_import(code, modname):
+    pattern = re.compile(r"^\s*import\s+%s\b" % re.escape(modname))
+    return any(pattern.match(line) for line in (code or "").splitlines())
+
+
+def fix_wrong_module_attrs(code, traceback_text):
+    """Patch common generated-code calls to APIs on the wrong module.
+
+    The game ladder often catches `pygame.cos(...)` / `pygame.radians(...)`.
+    Those are math APIs, not pygame APIs. Replace supported pygame math calls
+    with `math.*` and add `import math` if needed.
+    """
+    if not _PYGAME_MATH_ATTR_RE.search(traceback_text or ""):
+        return code
+    fixed = code or ""
+    for attr in _PYGAME_MATH_ATTRS:
+        fixed = re.sub(r"\bpygame\.%s\b" % re.escape(attr), "math.%s" % attr, fixed)
+        fixed = re.sub(r"\bpygame\.math\.%s\b" % re.escape(attr), "math.%s" % attr, fixed)
+    if fixed != (code or "") and not _has_import(fixed, "math"):
+        fixed = "import math\n" + fixed
+    return fixed
+
+
+def fix_common_generation_errors(code, traceback_text):
+    """Apply safe, local mechanical fixes before spending a model repair turn."""
+    fixed = fix_missing_imports(code, traceback_text)
+    fixed = fix_wrong_module_attrs(fixed, traceback_text)
+    return fixed

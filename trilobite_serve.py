@@ -67,7 +67,7 @@ HELP_TEXT = """commands:
   /stats             show trilobite's learning stats
   /pass, /good       record the last answer as tests_passed
   /fail, /bad        record the last answer as failed
-  /run               actually execute the code block from the last response
+  /run [seconds]     execute the code block from the last response (default 8s)
   /train, /learn [N] grounded self-learning: practice N tasks (default 3, max 500)
 
 Plain English also works for the toggles/actions above, e.g. "strict on,
@@ -158,14 +158,30 @@ def _parse_train_n(arg):
     return n, None
 
 
-def _do_run():
+def _parse_run_timeout(arg):
+    arg = (arg or "").strip()
+    if not arg:
+        return grounding.DEFAULT_TIMEOUT, None
+    try:
+        value = int(arg)
+    except ValueError:
+        return None, "usage: /run [seconds]  (runs the previous fenced code block, not a filename or shell command)"
+    return grounding.clamp_timeout(value), None
+
+
+def _do_run(timeout=grounding.DEFAULT_TIMEOUT):
     """Execute the code block from LAST_RESPONSE via grounding. Mirrors the REPL's /run."""
     code = grounding.extract_code_block(LAST_RESPONSE)
     if code is None:
         return "(no code block in the last response to run)"
-    ok, out = grounding.run_code(code)
-    status = "[ran OK]" if ok else "[exited with error]"
-    return "%s\n%s" % (out, status) if out else status
+    result = grounding.run_code_detail(code, timeout=timeout)
+    if result.get("ok"):
+        status = "[ran OK]"
+    elif result.get("timed_out"):
+        status = "[timed out]"
+    else:
+        status = "[exited with error]"
+    return "%s\n%s" % (grounding.format_run_result(result), status)
 
 
 def _do_train(n):
@@ -231,7 +247,10 @@ def _handle_slash(content):
         STRICT = _on_off(arg, STRICT)
         return "strict %s" % ("on" if STRICT else "off")
     if cmd == "/run":
-        return _do_run()
+        timeout, err = _parse_run_timeout(arg)
+        if err:
+            return err
+        return _do_run(timeout)
     if cmd in ("/train", "/learn"):
         n, err = _parse_train_n(arg)
         if err:

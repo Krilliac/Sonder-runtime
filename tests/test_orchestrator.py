@@ -13,6 +13,22 @@ def test_build_prompt_prepends_lessons():
     assert "How to apply the lessons" in p
 
 
+def test_build_prompt_injects_run_compat_for_game_failure_request():
+    p = o.build_prompt("create python games in increasing complexity tell failure", [])
+
+    assert "/run compatibility requirements" in p
+    assert "Do not use input()" in p
+    assert "scripted smoke-test" in p
+    assert "create python games in increasing complexity tell failure" in p
+
+
+def test_build_prompt_injects_run_compat_for_explicit_run_request():
+    p = o.build_prompt("make a pygame demo that will run with /run", [])
+
+    assert "/run compatibility requirements" in p
+    assert "Do not include `/run ...`" in p
+
+
 def test_run_with_learning_captures_and_returns_id():
     c = ms.connect(":memory:")
     seen = {}

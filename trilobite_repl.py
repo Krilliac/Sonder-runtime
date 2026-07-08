@@ -29,7 +29,7 @@ HELP = """commands:
   /lessons           show the 10 most recent distilled lessons
   /pass, /good       record the last answer as tests_passed
   /fail, /bad        record the last answer as failed
-  /run               actually execute the code block from the last response
+  /run [seconds]     execute the code block from the last response (default 8s)
   /train, /learn [N] grounded self-learning: practice N tasks (default 3, max 500)
   /new               start a fresh conversation thread (forget this chat's history)
   /sessions          list past conversation threads
@@ -123,6 +123,18 @@ def _parse_train_n(arg):
     return n
 
 
+def _parse_run_timeout(arg):
+    arg = (arg or "").strip()
+    if not arg:
+        return grounding.DEFAULT_TIMEOUT
+    try:
+        value = int(arg)
+    except ValueError:
+        print("usage: /run [seconds]  (runs the previous fenced code block, not a filename or shell command)")
+        return None
+    return grounding.clamp_timeout(value)
+
+
 def _run_train(n):
     tasks = training_tasks.sample(n)
     passed = 0
@@ -205,15 +217,19 @@ def main():
         persona = arg.lower()
         print("persona: %s" % persona)
 
-    def do_run():
+    def do_run(timeout=grounding.DEFAULT_TIMEOUT):
         code = grounding.extract_code_block(last_response)
         if code is None:
             print("(no code block in the last response to run)")
             return
-        ok, out = grounding.run_code(code)
-        if out:
-            print(out)
-        print("[ran OK]" if ok else "[exited with error]")
+        result = grounding.run_code_detail(code, timeout=timeout)
+        print(grounding.format_run_result(result))
+        if result.get("ok"):
+            print("[ran OK]")
+        elif result.get("timed_out"):
+            print("[timed out]")
+        else:
+            print("[exited with error]")
 
     print(BANNER)
 
@@ -259,7 +275,9 @@ def main():
                 else:
                     print("(nothing to record yet)")
             elif cmd == "/run":
-                do_run()
+                timeout = _parse_run_timeout(arg)
+                if timeout is not None:
+                    do_run(timeout)
             elif cmd in ("/train", "/learn"):
                 n = _parse_train_n(arg)
                 if n is not None:
