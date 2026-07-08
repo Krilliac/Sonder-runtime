@@ -1,5 +1,11 @@
 # trilobite
 
+[![Total downloads](https://img.shields.io/github/downloads/Krilliac/Trilobite-model/total?label=total%20downloads&style=for-the-badge)](https://github.com/Krilliac/Trilobite-model/releases)
+[![Android downloads](https://img.shields.io/github/downloads/Krilliac/Trilobite-model/app-latest/trilobite-android.apk?color=3DDC84&label=Android&style=for-the-badge)](https://github.com/Krilliac/Trilobite-model/releases/download/app-latest/trilobite-android.apk)
+[![Linux downloads](https://img.shields.io/github/downloads/Krilliac/Trilobite-model/app-latest/trilobite-linux-x64.tar.gz?color=FCC624&label=Linux&style=for-the-badge)](https://github.com/Krilliac/Trilobite-model/releases/download/app-latest/trilobite-linux-x64.tar.gz)
+[![Windows downloads](https://img.shields.io/github/downloads/Krilliac/Trilobite-model/app-latest/trilobite-windows-x64.zip?color=0078D4&label=Windows&style=for-the-badge)](https://github.com/Krilliac/Trilobite-model/releases/download/app-latest/trilobite-windows-x64.zip)
+[![macOS downloads](https://img.shields.io/github/downloads/Krilliac/Trilobite-model/app-latest/trilobite-macos.zip?color=000000&label=macOS&style=for-the-badge)](https://github.com/Krilliac/Trilobite-model/releases/download/app-latest/trilobite-macos.zip)
+
 **A private AI that's *yours*.** It runs entirely on your own machine, learns from your work over time, and no one can read it, rate-limit it, reset it, or take it away.
 
 trilobite is **not** trying to be smarter than ChatGPT or Claude — a local model won't win that race, and this README won't pretend otherwise. It's built for a different thing those can't give you: **privacy, ownership, and personalization.** Nothing leaves your computer. It works offline. It adapts to *you*. And it's yours to keep.
