@@ -19,3 +19,19 @@ def test_check_auth_wrong_key():
 
 def test_check_auth_missing_header_when_key_set():
     assert ts.check_auth("", "s3cret") is False
+
+
+def test_authorized_requires_account_when_flag_set(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", True)
+    monkeypatch.setattr(ts, "_auth_account", lambda header: None)
+
+    assert ts._authorized("") is False
+
+
+def test_authorized_accepts_account_when_flag_set(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", True)
+    monkeypatch.setattr(ts, "_auth_account", lambda header: {"username": "u"})
+
+    assert ts._authorized("Bearer token") is True

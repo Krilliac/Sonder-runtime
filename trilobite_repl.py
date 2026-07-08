@@ -17,6 +17,8 @@ import feedback
 import personas
 import live_reload
 
+CURRENT_TOKEN = ""
+
 BANNER = """trilobite - fully local self-improving coder
 type /help for commands, or just start typing to ask trilobite something.
 """
@@ -28,8 +30,27 @@ HELP = """commands:
   /persona [name]    show/set active persona (coder/explainer/reviewer/teacher)
   /stats             show trilobite's learning stats
   /context           show context, session, and memory health meters
+  /contextsize [N]   show/set requested context (8k..1m; native num_ctx is clamped)
   /quality           audit lesson quality and duplicate rows
   /qualityfix [apply] dry-run or apply exact duplicate lesson cleanup
+  /improve           show the next system improvement checklist
+  /master [mode] ... run master orchestration: ask, inline, or delegate
+  /agents            show live master/subagent activity
+  /register u p      create account (first account becomes admin)
+  /login u p         login for admin/debug commands
+  /whoami            show current account
+  /admin             show admin status
+  /accounts          list accounts (admin)
+  /setaccount ...    admin account edits: user role= tier= dev_flags= banned=
+  /debug             inspect safe debug state
+  /cot               denied: hidden private chain-of-thought is not exposed
+  /filepolicy        show file access roots and bypass controls
+  /files [query]     find files under guarded roots
+  /read <path>       read a guarded file
+  /write <p> <text>  create a guarded file
+  /append <p> <text> append to a guarded file
+  /edit <p>|<old>|<new> replace text in a guarded file
+  /delete <path>     dry-run delete; output shows required confirm string
   /lessons           show the 10 most recent distilled lessons
   /pass, /good       record the last answer as tests_passed
   /accept,/used      record the last answer as accepted/used
@@ -196,6 +217,7 @@ def _print_facts(project):
 
 
 def main():
+    global CURRENT_TOKEN
     trace = False
     strict = None  # None = env default
     persona = personas.DEFAULT
@@ -282,10 +304,106 @@ def main():
                 print(server.trilobite_stats())
             elif cmd == "/context":
                 print(server.context_health(session=session_id, project=project))
+            elif cmd in ("/contextsize", "/ctxsize"):
+                if arg.strip():
+                    print(server.set_context_size(arg.strip()))
+                else:
+                    print(server.context_policy_status())
             elif cmd == "/quality":
                 print(server.memory_quality_report())
             elif cmd == "/qualityfix":
                 print(server.memory_quality_repair(apply=(arg.strip().lower() == "apply")))
+            elif cmd in ("/improve", "/improvements"):
+                print(server.system_improvement_report(session=session_id, project=project))
+            elif cmd in ("/agents", "/masterstatus"):
+                print(server.master_status())
+            elif cmd == "/register":
+                parts = arg.split(None, 1)
+                if len(parts) != 2:
+                    print("usage: /register <username> <password>")
+                else:
+                    print(server.admin_register(parts[0], parts[1]))
+            elif cmd == "/login":
+                parts = arg.split(None, 1)
+                if len(parts) != 2:
+                    print("usage: /login <username> <password>")
+                else:
+                    out = server.admin_login(parts[0], parts[1])
+                    marker = "token: "
+                    if marker in out and not out.startswith("ERROR:"):
+                        CURRENT_TOKEN = out.split(marker, 1)[1].strip().splitlines()[0]
+                    print(out)
+            elif cmd == "/whoami":
+                print(server.admin_whoami(CURRENT_TOKEN))
+            elif cmd == "/admin":
+                print(server.admin_status(CURRENT_TOKEN))
+            elif cmd == "/accounts":
+                print(server.admin_accounts(CURRENT_TOKEN))
+            elif cmd == "/setaccount":
+                parts = arg.split()
+                if not parts:
+                    print("usage: /setaccount <username> role=developer tier=pro dev_flags=x banned=false")
+                else:
+                    kv = {}
+                    for item in parts[1:]:
+                        if "=" in item:
+                            k, v = item.split("=", 1)
+                            kv[k] = v
+                    print(server.admin_set_account(
+                        token=CURRENT_TOKEN,
+                        username=parts[0],
+                        role=kv.get("role", ""),
+                        tier=kv.get("tier", ""),
+                        dev_flags=kv.get("dev_flags", ""),
+                        banned=kv.get("banned", ""),
+                    ))
+            elif cmd in ("/debug", "/inspect"):
+                print(server.debug_inspect(CURRENT_TOKEN))
+            elif cmd in ("/cot", "/chainofthought", "/thoughts"):
+                print(server.admin_private_chain_of_thought(CURRENT_TOKEN))
+            elif cmd == "/filepolicy":
+                print(server.file_policy(token=CURRENT_TOKEN))
+            elif cmd in ("/files", "/find"):
+                print(server.file_find(query=arg.strip() or "*", token=CURRENT_TOKEN))
+            elif cmd == "/read":
+                print(server.file_read(path=arg.strip(), token=CURRENT_TOKEN))
+            elif cmd in ("/write", "/append"):
+                parts = arg.split(None, 1)
+                if len(parts) != 2:
+                    print("usage: %s <path> <text>" % cmd)
+                else:
+                    print(server.file_write(
+                        path=parts[0],
+                        content=parts[1],
+                        mode="append" if cmd == "/append" else "create",
+                        token=CURRENT_TOKEN,
+                    ))
+            elif cmd == "/edit":
+                pieces = arg.split("|", 2)
+                if len(pieces) != 3:
+                    print("usage: /edit <path>|<old>|<new>")
+                else:
+                    print(server.file_edit(
+                        path=pieces[0].strip(),
+                        old=pieces[1],
+                        new=pieces[2],
+                        token=CURRENT_TOKEN,
+                    ))
+            elif cmd == "/delete":
+                print(server.file_delete(path=arg.strip(), dry_run=True, token=CURRENT_TOKEN))
+            elif cmd == "/master":
+                text = arg.strip()
+                mode = "ask"
+                task = text
+                if text:
+                    parts = text.split(None, 1)
+                    if parts[0].lower() in (
+                        "ask", "inline", "master", "delegate",
+                        "delegated", "agents", "parallel",
+                    ):
+                        mode = parts[0].lower()
+                        task = parts[1] if len(parts) > 1 else ""
+                print(server.master_orchestrate(task=task, mode=mode))
             elif cmd == "/lessons":
                 _print_lessons()
             elif cmd in ("/pass", "/good"):

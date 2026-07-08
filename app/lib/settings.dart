@@ -7,6 +7,7 @@ class Settings {
   static const _kDark = 'dark_mode';
   static const _kModel = 'model';
   static const _kAllowHosted = 'allow_hosted';
+  static const _kContextSize = 'context_size';
 
   static const defaultModel = 'trilobite';
 
@@ -15,6 +16,7 @@ class Settings {
   bool darkMode;
   String model; // which server tier/model to use ("trilobite" = local student)
   bool allowHosted;
+  String contextSize;
 
   Settings({
     this.serverUrl = 'http://127.0.0.1:11435',
@@ -22,6 +24,7 @@ class Settings {
     this.darkMode = true,
     this.model = defaultModel,
     this.allowHosted = false,
+    this.contextSize = '8192',
   });
 
   bool get isConfigured => serverUrl.trim().isNotEmpty;
@@ -34,6 +37,7 @@ class Settings {
       darkMode: p.getBool(_kDark) ?? true,
       model: p.getString(_kModel) ?? defaultModel,
       allowHosted: p.getBool(_kAllowHosted) ?? false,
+      contextSize: p.getString(_kContextSize) ?? '8192',
     );
   }
 
@@ -44,5 +48,6 @@ class Settings {
     await p.setBool(_kDark, darkMode);
     await p.setString(_kModel, model);
     await p.setBool(_kAllowHosted, allowHosted);
+    await p.setString(_kContextSize, contextSize.trim().isEmpty ? '8192' : contextSize.trim());
   }
 }

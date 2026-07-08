@@ -47,6 +47,10 @@ import grounding
 import trilobite_paths
 import memory_quality
 import domain_grounding
+import master_orchestrator
+import admin_auth
+import file_ops
+import context_policy
 
 from mcp.server.fastmcp import FastMCP
 
@@ -92,7 +96,7 @@ def _local_model_options(temperature, num_predict, num_ctx):
     options = {
         "temperature": temperature,
         "num_predict": num_predict,
-        "num_ctx": num_ctx,
+        "num_ctx": context_policy.native(num_ctx),
     }
     runtime = {
         "num_thread": _env_int_option("LOCAL_LLM_NUM_THREAD", _cpu_thread_default()),
@@ -111,7 +115,17 @@ def _local_runtime_summary():
         "num_thread": options.get("num_thread", "ollama-default"),
         "num_gpu": options.get("num_gpu", "ollama-default"),
         "num_batch": options.get("num_batch", "ollama-default"),
+        "num_ctx_native": options.get("num_ctx", "ollama-default"),
+        "num_ctx_requested": context_policy.requested(SESSION_NUM_CTX),
     }
+
+
+def _context_requested(value=None):
+    return context_policy.requested(SESSION_NUM_CTX if value in (None, "") else value)
+
+
+def _context_native(value=None):
+    return context_policy.native(_context_requested(value))
 
 
 TIERS = {
@@ -191,7 +205,7 @@ DEFAULT_SESSION = os.environ.get("TRILOBITE_DEFAULT_SESSION", "default")
 DEFAULT_PROJECT = os.environ.get("TRILOBITE_DEFAULT_PROJECT", "default")
 # Sessioned calls get a roomier context (fits easily on the 6 GB 4050) and keep the
 # last MAX_TURNS turns live; older turns are rolled into a summary.
-SESSION_NUM_CTX = int(os.environ.get("LOCAL_LLM_SESSION_NUM_CTX", "8192"))
+SESSION_NUM_CTX = context_policy.default_requested()
 MAX_TURNS = int(os.environ.get("TRILOBITE_MAX_TURNS", "12"))
 
 _DB_PATH = trilobite_paths.memory_db_path()
@@ -218,6 +232,10 @@ LIVE_RELOAD_MODULES = [
     "self_heal",
     "memory_quality",
     "domain_grounding",
+    "master_orchestrator",
+    "admin_auth",
+    "file_ops",
+    "context_policy",
 ]
 
 
@@ -611,6 +629,7 @@ def trilobite(
     temperature: float = 0.2,
     num_predict: int = 1024,
     num_ctx: int = 4096,
+    context_size: str = "",
     trace: bool = False,
     strict: bool = None,
     persona: str = "",
@@ -670,8 +689,9 @@ def trilobite(
 
     session_id = _resolve_session(session)
     project_id = _resolve_project(project)
-    # Sessioned threads get the roomier context window; honor a larger explicit num_ctx.
-    num_ctx_eff = max(num_ctx, SESSION_NUM_CTX) if session_id else num_ctx
+    requested_ctx = _context_requested(context_size or (SESSION_NUM_CTX if session_id else num_ctx))
+    # Sessioned threads get the selected virtual context window; honor a larger explicit num_ctx.
+    num_ctx_eff = max(num_ctx, requested_ctx) if session_id else requested_ctx
 
     conn = _open_db()
     try:
@@ -695,14 +715,19 @@ def trilobite(
         conn.close()
 
     if trace:
-        params = {"temperature": temperature, "num_predict": num_predict, "num_ctx": num_ctx_eff}
+        params = {
+            "temperature": temperature,
+            "num_predict": num_predict,
+            "num_ctx": num_ctx_eff,
+            "num_ctx_native": _context_native(num_ctx_eff),
+        }
         trace_block = _format_trace(tgt_model, tier_label, params, trace_ctx)
         # Footer must stay LAST so parse_interaction_id's $-anchored regex still finds it.
         return with_footer(response + trace_block, iid)
     return with_footer(response, iid)
 
 
-def answer_with_history(prompt, history, trace=False, strict=None, tier=None):
+def answer_with_history(prompt, history, trace=False, strict=None, tier=None, context_size=""):
     """Answer a turn using caller-supplied prior `history` (list of {role, content}).
 
     For the OpenAI-compatible serve layer, where the chat UI owns the conversation:
@@ -730,18 +755,19 @@ def answer_with_history(prompt, history, trace=False, strict=None, tier=None):
     # no interaction row, no footer, nothing distilled. This lets a user exclude e.g.
     # cloud from learning and have the app respect it. The student is gated via 'code'.
     learn = _should_learn(_canonical_learn_tier(tier_label), True)
+    req_ctx = _context_requested(context_size or SESSION_NUM_CTX)
     conn = _open_db()
     try:
         if learn:
             project = DEFAULT_PROJECT if augment else None
             response, iid, trace_ctx = _answer(
-                conn, prompt, model, effective_system, 0.2, 1024, SESSION_NUM_CTX,
+                conn, prompt, model, effective_system, 0.2, 1024, req_ctx,
                 None, project, history or None, trace=trace,
                 tier=tier_label, cloud=cloud, augment=augment,
             )
         else:
             gen = _make_generate(model, effective_system, 0.2, 1024,
-                                 SESSION_NUM_CTX, cloud=cloud)
+                                 req_ctx, cloud=cloud)
             response = gen(prompt, history or None)
             iid, trace_ctx = None, None
     except urllib.error.URLError as e:
@@ -750,7 +776,12 @@ def answer_with_history(prompt, history, trace=False, strict=None, tier=None):
     finally:
         conn.close()
     if trace and trace_ctx is not None:
-        params = {"temperature": 0.2, "num_predict": 1024, "num_ctx": SESSION_NUM_CTX}
+        params = {
+            "temperature": 0.2,
+            "num_predict": 1024,
+            "num_ctx": req_ctx,
+            "num_ctx_native": _context_native(req_ctx),
+        }
         trace_block = _format_trace(model, tier_label, params, trace_ctx)
         return with_footer(response + trace_block, iid)
     if iid is not None:
@@ -1342,7 +1373,8 @@ def context_health_data(session: str = "", project: str = "") -> dict:
     finally:
         conn.close()
 
-    context_limit = max(1, int(SESSION_NUM_CTX or 1))
+    policy = context_policy.policy(SESSION_NUM_CTX)
+    context_limit = max(1, int(policy["requested"] or 1))
     context_ratio = min(1.0, estimated_tokens / context_limit)
     live_turn_count = len(turns)
     turn_ratio = min(1.0, live_turn_count / max(1, int(MAX_TURNS or 1)))
@@ -1360,6 +1392,11 @@ def context_health_data(session: str = "", project: str = "") -> dict:
         "title": title,
         "status": status_label,
         "context_limit": context_limit,
+        "native_context_limit": policy["native"],
+        "native_context_max": policy["native_max"],
+        "virtual_context_max": policy["virtual_max"],
+        "context_mode": policy["mode"],
+        "virtual_context": policy["virtual"],
         "estimated_tokens": estimated_tokens,
         "context_percent": round(context_ratio * 100.0, 1),
         "context_bar": _health_bar(context_ratio),
@@ -1399,6 +1436,10 @@ def format_context_health(data: dict) -> str:
             data.get("estimated_tokens", 0),
             data.get("context_limit", 0),
         ),
+        "  native  ~%s token Ollama num_ctx (%s mode)" % (
+            data.get("native_context_limit", 0),
+            data.get("context_mode", "native"),
+        ),
         "  live    %s %s/%s turns in active prompt (%s total)" % (
             data.get("turn_bar", ""),
             data.get("live_turns", 0),
@@ -1427,6 +1468,22 @@ def format_context_health(data: dict) -> str:
 def context_health(session: str = "", project: str = "") -> str:
     """Show context budget, live turns, summaries, and memory as text meters."""
     return format_context_health(context_health_data(session=session, project=project))
+
+
+@mcp.tool()
+def context_policy_status(context_size: str = "") -> str:
+    """Show requested virtual context and actual Ollama native num_ctx."""
+    _maybe_live_reload()
+    return context_policy.format_policy(context_size or SESSION_NUM_CTX)
+
+
+@mcp.tool()
+def set_context_size(context_size: str) -> str:
+    """Select Trilobite's requested virtual context size, up to 1m by default."""
+    global SESSION_NUM_CTX
+    _maybe_live_reload()
+    SESSION_NUM_CTX = context_policy.requested(context_size)
+    return "context size selected\n" + context_policy.format_policy(SESSION_NUM_CTX)
 
 
 @mcp.tool()
@@ -1478,6 +1535,572 @@ def learn_tiers() -> str:
         lines.append("  %s: %s (%s, %s)" % (tier, state, locality, model))
     lines.append("cloud tiers require TRILOBITE_ALLOW_CLOUD=1; override learning with TRILOBITE_LEARN_TIERS")
     return "\n".join(lines)
+
+
+def improvement_report_data(session: str = "", project: str = "") -> dict:
+    """Machine-readable next-step report for system self-improvement."""
+    _maybe_live_reload()
+    context = context_health_data(session=session, project=project)
+    conn = _open_db()
+    try:
+        quality = memory_quality.audit(conn)
+        interactions = memory_store.count_interactions(conn)
+        signal_counts = memory_store.outcome_signal_counts(conn)
+        lesson_count = conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0]
+        fact_count = conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
+    finally:
+        conn.close()
+
+    outcomes = sum(signal_counts.values())
+    acceptance = (
+        sum(
+            signal_counts.get(sig, 0)
+            for sig in ("tests_passed", "accepted", "used", "copied", "edited", "compiled")
+        )
+        / max(1, outcomes)
+    )
+    issues = []
+
+    def add(area, severity, title, action):
+        issues.append({
+            "area": area,
+            "severity": severity,
+            "title": title,
+            "action": action,
+        })
+
+    if interactions and outcomes / max(1, interactions) < 0.35:
+        add(
+            "learning",
+            "high",
+            "Too few interactions have grounded outcomes.",
+            "Use /accept, /edited, /copied, /pass, /fail, or record_outcome after real use.",
+        )
+    if interactions == 0:
+        add(
+            "learning",
+            "medium",
+            "No learning interactions have been captured yet.",
+            "Ask through trilobite or run /train so answers can become local lessons.",
+        )
+    if lesson_count < 10:
+        add(
+            "memory",
+            "medium",
+            "Lesson memory is still thin.",
+            "Run grounded training or teach examples from known-good work.",
+        )
+    if quality.get("exact_duplicate_prunable", 0):
+        add(
+            "memory",
+            "medium",
+            "Duplicate lessons can be pruned.",
+            "Run memory_quality_repair(apply=True) or /qualityfix apply after review.",
+        )
+    if quality.get("path_or_secret_like", 0):
+        add(
+            "privacy",
+            "high",
+            "Some lessons look like they may contain paths or secrets.",
+            "Review /quality output and remove or rewrite those lessons before contributing data.",
+        )
+    if quality.get("vague_without_anchor", 0):
+        add(
+            "memory",
+            "low",
+            "Some lessons are vague and lack concrete anchors.",
+            "Prefer lessons naming APIs, files, errors, commands, or explicit patterns.",
+        )
+    if quality.get("missing_fts", 0) or quality.get("orphan_fts", 0):
+        add(
+            "store",
+            "medium",
+            "Search index drift was detected.",
+            "Run self_heal_check and repair the store before large training sessions.",
+        )
+    if context.get("status") == "hot":
+        add(
+            "context",
+            "medium",
+            "The active conversation is near the context limit.",
+            "Start a new session or let summaries compress older turns before continuing.",
+        )
+    if not cloud_allowed():
+        add(
+            "deployment",
+            "info",
+            "Hosted tiers are disabled, preserving the local privacy promise.",
+            "Enable hosted/cloud tiers only when you intentionally want prompts to leave this machine.",
+        )
+    if "ground_artifact" not in tool_manifest():
+        add(
+            "grounding",
+            "medium",
+            "General artifact grounding is not advertised.",
+            "Expose ground_artifact in the tool manifest so non-code work can be validated.",
+        )
+    if not issues:
+        add(
+            "system",
+            "info",
+            "No urgent improvement items detected.",
+            "Keep collecting grounded outcomes and periodically run /quality.",
+        )
+
+    severity_rank = {"high": 0, "medium": 1, "low": 2, "info": 3}
+    issues.sort(key=lambda item: (severity_rank.get(item["severity"], 9), item["area"], item["title"]))
+    return {
+        "score": max(0, min(100, int(round(
+            100
+            - 18 * sum(1 for i in issues if i["severity"] == "high")
+            - 9 * sum(1 for i in issues if i["severity"] == "medium")
+            - 4 * sum(1 for i in issues if i["severity"] == "low")
+        )))),
+        "interactions": interactions,
+        "outcomes": outcomes,
+        "acceptance_percent": round(acceptance * 100.0, 1),
+        "lessons": lesson_count,
+        "facts": fact_count,
+        "cloud_allowed": cloud_allowed(),
+        "context_status": context.get("status", "unknown"),
+        "memory_quality": {
+            "duplicates": quality.get("exact_duplicate_prunable", 0),
+            "vague": quality.get("vague_without_anchor", 0),
+            "path_or_secret_like": quality.get("path_or_secret_like", 0),
+            "fts_issues": quality.get("missing_fts", 0) + quality.get("orphan_fts", 0),
+        },
+        "issues": issues,
+    }
+
+
+def format_improvement_report(report: dict) -> str:
+    lines = [
+        "trilobite improvement report",
+        "  readiness score: %s/100" % report.get("score", 0),
+        "  learning: %s interactions, %s outcomes, %s%% positive/grounded" % (
+            report.get("interactions", 0),
+            report.get("outcomes", 0),
+            report.get("acceptance_percent", 0),
+        ),
+        "  memory: %s lessons, %s facts, duplicate rows=%s, vague=%s" % (
+            report.get("lessons", 0),
+            report.get("facts", 0),
+            report.get("memory_quality", {}).get("duplicates", 0),
+            report.get("memory_quality", {}).get("vague", 0),
+        ),
+        "  context: %s | hosted/cloud: %s" % (
+            report.get("context_status", "unknown"),
+            "enabled" if report.get("cloud_allowed") else "disabled",
+        ),
+        "  next improvements:",
+    ]
+    for issue in report.get("issues", [])[:8]:
+        lines.append("    [%s] %s: %s" % (
+            issue.get("severity", "info"),
+            issue.get("area", "system"),
+            issue.get("title", ""),
+        ))
+        lines.append("        -> %s" % issue.get("action", ""))
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def system_improvement_report(session: str = "", project: str = "") -> str:
+    """Suggest the next concrete improvements for learning quality and runtime health."""
+    return format_improvement_report(improvement_report_data(session=session, project=project))
+
+
+def _orchestrator_worker(tier: str, learn: bool = False):
+    def worker(prompt: str) -> str:
+        return offload(
+            prompt=prompt,
+            tier=tier,
+            temperature=0.2,
+            num_predict=1400,
+            learn=learn,
+        )
+    return worker
+
+
+@mcp.tool()
+def master_orchestrate(
+    task: str,
+    mode: str = "ask",
+    agents: int = 3,
+    tier: str = "code",
+    learn: bool = False,
+) -> str:
+    """Run a master orchestration pass inline or by delegated parallel agents.
+
+    mode="ask" returns the choice prompt. mode="inline" keeps work in the master
+    lane. mode="delegate" spawns bounded parallel subagents, then audits and
+    merges their outputs. Status is visible through master_status().
+    """
+    _maybe_live_reload()
+    task = (task or "").strip()
+    mode = (mode or "ask").strip().lower()
+    if mode in ("ask", "choose", "prompt"):
+        return (
+            "Master orchestrator ready.\n"
+            "Choose execution mode:\n"
+            "  inline   - master handles the task directly.\n"
+            "  delegate - spawn %d parallel agent(s), audit their outputs, then merge.\n"
+            "Call master_orchestrate(task, mode='inline'|'delegate') or chat `/master inline ...`."
+        ) % max(1, min(8, int(agents or 3)))
+    if not task:
+        return "ERROR: empty task."
+    worker = _orchestrator_worker(tier, learn=learn)
+    if mode in ("inline", "master"):
+        result = master_orchestrator.run_inline(task, worker)
+        return result["output"]
+    if mode in ("delegate", "delegated", "agents", "parallel"):
+        result = master_orchestrator.run_delegated(
+            task,
+            worker_fn=worker,
+            audit_fn=_orchestrator_worker(tier, learn=False),
+            agents=agents,
+        )
+        lines = [
+            "master orchestration complete",
+            "mode: delegated | master=%s | agents=%d" % (
+                result["master_id"], len(result.get("agents") or [])),
+            "",
+            result["output"],
+        ]
+        return "\n".join(lines).strip()
+    return "ERROR: unknown mode '%s'. Use ask, inline, or delegate." % mode
+
+
+@mcp.tool()
+def master_status(include_finished: bool = True, limit: int = 20) -> str:
+    """Show live master/subagent activity, token estimates, and recent actions."""
+    _maybe_live_reload()
+    return master_orchestrator.format_snapshot(
+        master_orchestrator.snapshot(include_finished=include_finished, limit=limit)
+    )
+
+
+def _admin_account_from_token(token: str):
+    conn = _open_db()
+    try:
+        return admin_auth.authenticate(conn, token)
+    finally:
+        conn.close()
+
+
+def _admin_require(token: str, role: str = "admin"):
+    account = _admin_account_from_token(token)
+    ok, msg = admin_auth.require(account, role)
+    return ok, msg, account
+
+
+def _format_account(account: dict) -> str:
+    return (
+        "%(username)s role=%(role)s tier=%(tier)s banned=%(banned)s "
+        "dev_flags=%(dev_flags)s"
+    ) % account
+
+
+@mcp.tool()
+def admin_register(username: str, password: str) -> str:
+    """Register a local hosted account. The first account becomes admin."""
+    _maybe_live_reload()
+    conn = _open_db()
+    try:
+        account = admin_auth.register(conn, username, password)
+    except Exception as e:
+        return "ERROR: %s" % e
+    finally:
+        conn.close()
+    return "registered %s" % _format_account(account)
+
+
+@mcp.tool()
+def admin_login(username: str, password: str) -> str:
+    """Login and return a bearer token for admin/debug commands and hosted API use."""
+    _maybe_live_reload()
+    conn = _open_db()
+    try:
+        token, account = admin_auth.login(conn, username, password)
+    except Exception as e:
+        return "ERROR: %s" % e
+    finally:
+        conn.close()
+    return "login ok\n%s\ntoken: %s" % (_format_account(account), token)
+
+
+@mcp.tool()
+def admin_whoami(token: str = "") -> str:
+    """Show the account attached to a session token."""
+    _maybe_live_reload()
+    account = _admin_account_from_token(token)
+    if not account:
+        return "not logged in"
+    return _format_account(account)
+
+
+@mcp.tool()
+def admin_accounts(token: str = "", limit: int = 50) -> str:
+    """List hosted accounts. Admin token required."""
+    _maybe_live_reload()
+    ok, msg, _ = _admin_require(token, "admin")
+    if not ok:
+        return "ERROR: %s." % msg
+    conn = _open_db()
+    try:
+        accounts = admin_auth.list_accounts(conn, limit=limit)
+    finally:
+        conn.close()
+    if not accounts:
+        return "no accounts"
+    return "\n".join(_format_account(a) for a in accounts)
+
+
+@mcp.tool()
+def admin_set_account(
+    token: str,
+    username: str,
+    role: str = "",
+    tier: str = "",
+    dev_flags: str = "",
+    banned: str = "",
+) -> str:
+    """Update role/tier/dev flags/ban state. Admin token required."""
+    _maybe_live_reload()
+    ok, msg, _ = _admin_require(token, "admin")
+    if not ok:
+        return "ERROR: %s." % msg
+    changes = {}
+    if role:
+        changes["role"] = role
+    if tier:
+        changes["tier"] = tier
+    if dev_flags:
+        changes["dev_flags"] = dev_flags
+    if str(banned).strip().lower() in ("1", "true", "yes", "on", "ban", "banned"):
+        changes["banned"] = True
+    elif str(banned).strip().lower() in ("0", "false", "no", "off", "unban"):
+        changes["banned"] = False
+    conn = _open_db()
+    try:
+        account = admin_auth.set_account(conn, username, **changes)
+    except Exception as e:
+        return "ERROR: %s" % e
+    finally:
+        conn.close()
+    return "updated %s" % _format_account(account)
+
+
+@mcp.tool()
+def admin_status(token: str = "") -> str:
+    """Show hosted/admin safety state. Developer token recommended, local-safe without token."""
+    _maybe_live_reload()
+    account = _admin_account_from_token(token)
+    conn = _open_db()
+    try:
+        count = admin_auth.account_count(conn)
+    finally:
+        conn.close()
+    lines = [
+        "trilobite admin status",
+        "  accounts: %d" % count,
+        "  auth mode: %s" % ("api-key" if os.environ.get("TRILOBITE_API_KEY") else "local-open"),
+        "  require account: %s" % os.environ.get("TRILOBITE_REQUIRE_ACCOUNT", "0"),
+        "  hosted/cloud allowed: %s" % ("yes" if cloud_allowed() else "no"),
+        "  logged in: %s" % (_format_account(account) if account else "no"),
+        "  safeguards: role gates, bans, session tokens, per-tier rate limits, bounded execution",
+    ]
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def debug_inspect(token: str = "", include_status: bool = True) -> str:
+    """Developer/admin inspection bundle without hidden chain-of-thought."""
+    _maybe_live_reload()
+    account = _admin_account_from_token(token)
+    if token:
+        ok, msg = admin_auth.require(account, "developer")
+        if not ok:
+            return "ERROR: %s." % msg
+    sections = [
+        "trilobite debug inspect",
+        "  note: private hidden chain-of-thought is not exposed; use trace/tool/activity logs instead.",
+        "",
+        admin_status(token),
+        "",
+        master_status(limit=10),
+        "",
+        system_improvement_report(),
+        "",
+        memory_quality_report(sample_limit=3),
+    ]
+    if include_status:
+        sections.extend(["", status()])
+    return "\n".join(sections)
+
+
+@mcp.tool()
+def admin_private_chain_of_thought(token: str = "") -> str:
+    """Deny private chain-of-thought exposure and point to safe inspectable traces."""
+    _maybe_live_reload()
+    return (
+        "DENIED: hidden private chain-of-thought cannot be exposed. "
+        "Use /trace, /debug, /agents, master_status, debug_inspect, "
+        "tool call logs, prompts, retrieved lessons, and final rationale summaries instead."
+    )
+
+
+def _file_bypass_allowed(token: str = "", approval: str = "") -> bool:
+    if file_ops.bypass_enabled():
+        return True
+    expected = os.environ.get("TRILOBITE_FILE_APPROVAL_CODE", "").strip()
+    if expected and approval and approval == expected:
+        return True
+    account = _admin_account_from_token(token) if token else None
+    ok, _ = admin_auth.require(account, "developer")
+    return ok
+
+
+def _format_file_result(title: str, data: dict) -> str:
+    lines = [title]
+    for key, value in data.items():
+        if key == "text":
+            continue
+        lines.append("  %s: %s" % (key, value))
+    if "text" in data:
+        lines.extend(["", data["text"]])
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def file_policy(token: str = "", approval: str = "", extra_roots: str = "") -> str:
+    """Show guarded filesystem roots and bypass state."""
+    _maybe_live_reload()
+    return file_ops.policy_text(
+        bypass=_file_bypass_allowed(token, approval),
+        extra_roots=extra_roots,
+    )
+
+
+@mcp.tool()
+def file_find(
+    query: str = "*",
+    root: str = "",
+    max_results: int = 50,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Find files under allowed roots. Use extra_roots or admin/dev bypass for broader search."""
+    _maybe_live_reload()
+    try:
+        data = file_ops.find_files(
+            query=query,
+            root=root,
+            max_results=max_results,
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as e:
+        return "ERROR: %s" % e
+    lines = ["file find: %s under %s" % (data["query"], data["root"])]
+    for row in data["results"]:
+        lines.append("  %(type)s %(relative)s (%(bytes)s bytes)" % row)
+    if not data["results"]:
+        lines.append("  (no matches)")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def file_read(path: str, max_bytes: int = 256000, token: str = "", approval: str = "", extra_roots: str = "") -> str:
+    """Read a UTF-8-ish text file inside allowed roots."""
+    _maybe_live_reload()
+    try:
+        data = file_ops.read_file(
+            path,
+            max_bytes=max_bytes,
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as e:
+        return "ERROR: %s" % e
+    return _format_file_result("file read", data)
+
+
+@mcp.tool()
+def file_write(
+    path: str,
+    content: str,
+    mode: str = "create",
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Create, overwrite, or append a text file inside allowed roots."""
+    _maybe_live_reload()
+    try:
+        data = file_ops.write_file(
+            path,
+            content,
+            mode=mode,
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as e:
+        return "ERROR: %s" % e
+    return _format_file_result("file write", data)
+
+
+@mcp.tool()
+def file_edit(
+    path: str,
+    old: str,
+    new: str,
+    count: int = 1,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Replace text in a file inside allowed roots."""
+    _maybe_live_reload()
+    try:
+        data = file_ops.edit_file(
+            path,
+            old,
+            new,
+            count=count,
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as e:
+        return "ERROR: %s" % e
+    return _format_file_result("file edit", data)
+
+
+@mcp.tool()
+def file_delete(
+    path: str,
+    recursive: bool = False,
+    dry_run: bool = True,
+    confirm: str = "",
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Delete a file or directory. Dry-run by default; confirm must match returned string."""
+    _maybe_live_reload()
+    try:
+        data = file_ops.delete_path(
+            path,
+            recursive=recursive,
+            dry_run=dry_run,
+            confirm=confirm,
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as e:
+        return "ERROR: %s" % e
+    return _format_file_result("file delete", data)
 
 
 @mcp.tool()
@@ -1660,6 +2283,7 @@ def _loop_dispatch(action):
             temperature=action.get("temperature", 0.2),
             num_predict=action.get("num_predict", 1024),
             num_ctx=action.get("num_ctx", 4096),
+            context_size=action.get("context_size", ""),
             trace=action.get("trace", False),
             strict=action.get("strict"),
             persona=action.get("persona", ""),
@@ -1683,6 +2307,76 @@ def _loop_dispatch(action):
     if action_type == "memory_quality_repair":
         return _loop_text_result("memory_quality_repair", memory_quality_repair(
             apply=action.get("apply", False),
+        ))
+    if action_type in ("improvement_report", "system_improvement_report"):
+        return _loop_text_result("improvement_report", system_improvement_report(
+            session=action.get("session", ""),
+            project=action.get("project", ""),
+        ))
+    if action_type in ("master_status", "agent_status"):
+        return _loop_text_result("master_status", master_status(
+            include_finished=action.get("include_finished", True),
+            limit=action.get("limit", 20),
+        ))
+    if action_type in ("master", "master_orchestrate"):
+        return _loop_text_result("master_orchestrate", master_orchestrate(
+            task=action.get("task", action.get("prompt", "")),
+            mode=action.get("mode", "ask"),
+            agents=action.get("agents", 3),
+            tier=action.get("tier", "code"),
+            learn=action.get("learn", False),
+        ))
+    if action_type == "file_policy":
+        return _loop_text_result("file_policy", file_policy(
+            token=action.get("token", ""),
+            approval=action.get("approval", ""),
+            extra_roots=action.get("extra_roots", ""),
+        ))
+    if action_type == "file_find":
+        return _loop_text_result("file_find", file_find(
+            query=action.get("query", "*"),
+            root=action.get("root", ""),
+            max_results=action.get("max_results", 50),
+            token=action.get("token", ""),
+            approval=action.get("approval", ""),
+            extra_roots=action.get("extra_roots", ""),
+        ))
+    if action_type == "file_read":
+        return _loop_text_result("file_read", file_read(
+            path=action.get("path", ""),
+            max_bytes=action.get("max_bytes", 256000),
+            token=action.get("token", ""),
+            approval=action.get("approval", ""),
+            extra_roots=action.get("extra_roots", ""),
+        ))
+    if action_type == "file_write":
+        return _loop_text_result("file_write", file_write(
+            path=action.get("path", ""),
+            content=action.get("content", ""),
+            mode=action.get("mode", "create"),
+            token=action.get("token", ""),
+            approval=action.get("approval", ""),
+            extra_roots=action.get("extra_roots", ""),
+        ))
+    if action_type == "file_edit":
+        return _loop_text_result("file_edit", file_edit(
+            path=action.get("path", ""),
+            old=action.get("old", ""),
+            new=action.get("new", ""),
+            count=action.get("count", 1),
+            token=action.get("token", ""),
+            approval=action.get("approval", ""),
+            extra_roots=action.get("extra_roots", ""),
+        ))
+    if action_type == "file_delete":
+        return _loop_text_result("file_delete", file_delete(
+            path=action.get("path", ""),
+            recursive=action.get("recursive", False),
+            dry_run=action.get("dry_run", True),
+            confirm=action.get("confirm", ""),
+            token=action.get("token", ""),
+            approval=action.get("approval", ""),
+            extra_roots=action.get("extra_roots", ""),
         ))
     if action_type == "self_heal_check":
         return _loop_text_result("self_heal_check", self_heal_check())
@@ -1734,7 +2428,7 @@ def _loop_dispatch(action):
         "ok": False,
         "type": action_type or "(unknown)",
         "summary": "unknown action type",
-        "output": "Valid action types: code, project, offload, trilobite, status, diagnostics, context_health, memory_quality_report, memory_quality_repair, self_heal_check, self_heal_repair, profile_status, emotion_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, unload, sleep.",
+        "output": "Valid action types: code, project, offload, trilobite, master_orchestrate, master_status, file_policy, file_find, file_read, file_write, file_edit, file_delete, status, diagnostics, context_health, memory_quality_report, memory_quality_repair, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, unload, sleep.",
     }
 
 
@@ -1754,9 +2448,18 @@ def loop(
       - {"type":"project","files":[{"path":"src/main.cpp","content":"..."}],"commands":[{"cmd":["g++","src/main.cpp","-o","app"]}]}
       - {"type":"offload","prompt":"...","tier":"fast|code|general|cloud-code|cloud-general"}
       - {"type":"trilobite","prompt":"...","session":"none"}
+      - {"type":"trilobite","prompt":"...","context_size":"1m"}
+      - {"type":"master_orchestrate","task":"...","mode":"inline|delegate","agents":3}
+      - {"type":"master_status"}
+      - {"type":"file_find","query":"*.py","root":"."}
+      - {"type":"file_read","path":"README.md"}
+      - {"type":"file_write","path":"notes.txt","content":"...","mode":"create|overwrite|append"}
+      - {"type":"file_edit","path":"notes.txt","old":"before","new":"after"}
+      - {"type":"file_delete","path":"notes.txt","dry_run":true}
       - {"type":"web_search","query":"...","limit":5}
       - {"type":"web_fetch","url":"https://...","max_chars":8000}
       - {"type":"memory_search","query":"..."}
+      - {"type":"improvement_report"}
       - {"type":"status"}
       - {"type":"unload","tier":"all"}
       - {"type":"sleep","seconds":1}
@@ -2182,9 +2885,13 @@ def tool_manifest() -> str:
     """List the local-llm MCP tools and what they are for."""
     tools = {
         "agent": "Run a Claude-like tool-calling loop that can use local tools and web tools.",
+        "master_orchestrate/master_status": "Run inline/delegated master orchestration and inspect live subagent activity.",
+        "admin_register/admin_login/admin_accounts/admin_set_account": "Manage hosted accounts, roles, bans, tiers, and developer flags.",
+        "admin_status/debug_inspect/admin_private_chain_of_thought": "Inspect admin/debug state and safely deny private chain-of-thought exposure.",
         "trilobite": "Ask the local self-improving coding model.",
         "offload": "Route a self-contained task to a configured local/cloud tier.",
         "web_search/web_fetch": "Search or fetch public web pages.",
+        "file_policy/file_find/file_read/file_write/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete with approval bypass support.",
         "run_code": "Run a bounded Python/JS/PowerShell/C++/C# snippet.",
         "ground_artifact": "Validate non-code artifacts with exact/contains/regex/JSON checks.",
         "run_project": "Run a bounded temporary multi-file project with optional build commands.",
@@ -2194,6 +2901,8 @@ def tool_manifest() -> str:
         "emotion_vector_status/update_emotion_vectors": "Read or edit tone vectors.",
         "memory_search/memory_export/session_export": "Inspect local memory.",
         "memory_quality_report/memory_quality_repair": "Audit and dry-run/prune exact duplicate lessons.",
+        "system_improvement_report": "Suggest next improvements from learning, memory, context, and deployment signals.",
+        "context_policy_status/set_context_size": "Show or select requested virtual context up to 1m while clamping Ollama native num_ctx.",
         "learn_from_example/apply_learned": "Teach from examples and preview lesson application.",
         "self_heal_check/self_heal_repair": "Detect and safely repair common local breakage.",
         "context_health/diagnostics/live_reload_status/status/unload": "Observe and manage runtime health.",
@@ -2208,14 +2917,25 @@ AGENT_TOOL_HELP = """Available tools:
 - run_project: {"files_json": {"files": {"src/main.cpp": "..."}}, "commands_json": [{"cmd": ["g++", "src/main.cpp", "-o", "app"]}], "stdin": "", "timeout": 60}
 - web_search: {"query": "...", "limit": 5}
 - web_fetch: {"url": "https://...", "max_chars": 8000}
+- file_policy: {}
+- file_find: {"query": "*.py", "root": ".", "max_results": 50}
+- file_read: {"path": "README.md"}
+- file_write: {"path": "notes.txt", "content": "...", "mode": "create|overwrite|append"}
+- file_edit: {"path": "notes.txt", "old": "before", "new": "after", "count": 1}
+- file_delete: {"path": "notes.txt", "dry_run": true}
 - memory_search: {"query": "...", "limit": 10}
 - ground_artifact: {"artifact": "...", "checks_json": [{"type": "contains", "text": "..."}]}
 - apply_learned: {"task": "...", "limit": 5}
 - workflow_run: {"name": "...", "max_iterations": 1}
 - diagnostics: {}
 - context_health: {}
+- context_policy_status: {"context_size": "1m"}
+- set_context_size: {"context_size": "256k"}
 - memory_quality_report: {"sample_limit": 5}
 - memory_quality_repair: {"apply": false}
+- system_improvement_report: {}
+- master_orchestrate: {"task": "...", "mode": "ask|inline|delegate", "agents": 3, "tier": "code"}
+- master_status: {}
 - self_heal_check: {}
 - self_heal_repair: {"apply": false}
 - status: {}
@@ -2272,6 +2992,58 @@ def _agent_dispatch(tool_name, args, allow_web=True):
         return web_fetch(args.get("url", ""), args.get("max_chars", 8000))
     if tool_name == "memory_search":
         return memory_search(args.get("query", ""), args.get("limit", 10))
+    if tool_name == "file_policy":
+        return file_policy(
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "file_find":
+        return file_find(
+            query=args.get("query", "*"),
+            root=args.get("root", ""),
+            max_results=args.get("max_results", 50),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "file_read":
+        return file_read(
+            path=args.get("path", ""),
+            max_bytes=args.get("max_bytes", 256000),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "file_write":
+        return file_write(
+            path=args.get("path", ""),
+            content=args.get("content", ""),
+            mode=args.get("mode", "create"),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "file_edit":
+        return file_edit(
+            path=args.get("path", ""),
+            old=args.get("old", ""),
+            new=args.get("new", ""),
+            count=args.get("count", 1),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "file_delete":
+        return file_delete(
+            path=args.get("path", ""),
+            recursive=args.get("recursive", False),
+            dry_run=args.get("dry_run", True),
+            confirm=args.get("confirm", ""),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "ground_artifact":
         return ground_artifact(
             args.get("artifact", ""),
@@ -2294,10 +3066,32 @@ def _agent_dispatch(tool_name, args, allow_web=True):
             session=args.get("session", ""),
             project=args.get("project", ""),
         )
+    if tool_name == "context_policy_status":
+        return context_policy_status(args.get("context_size", ""))
+    if tool_name == "set_context_size":
+        return set_context_size(args.get("context_size", ""))
     if tool_name == "memory_quality_report":
         return memory_quality_report(sample_limit=args.get("sample_limit", 5))
     if tool_name == "memory_quality_repair":
         return memory_quality_repair(apply=args.get("apply", False))
+    if tool_name in ("system_improvement_report", "improvement_report"):
+        return system_improvement_report(
+            session=args.get("session", ""),
+            project=args.get("project", ""),
+        )
+    if tool_name in ("master_status", "agent_status"):
+        return master_status(
+            include_finished=args.get("include_finished", True),
+            limit=args.get("limit", 20),
+        )
+    if tool_name in ("master_orchestrate", "master"):
+        return master_orchestrate(
+            task=args.get("task", args.get("prompt", "")),
+            mode=args.get("mode", "ask"),
+            agents=args.get("agents", 3),
+            tier=args.get("tier", "code"),
+            learn=args.get("learn", False),
+        )
     if tool_name == "self_heal_check":
         return self_heal_check()
     if tool_name == "self_heal_repair":

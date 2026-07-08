@@ -84,3 +84,90 @@ def test_passive_slash_records_copied(monkeypatch):
     assert out == "ok"
     assert seen == [("abc123", "copied")]
     assert ts.LAST_IID is None
+
+
+def test_improve_slash_returns_report(monkeypatch):
+    monkeypatch.setattr(ts.server, "system_improvement_report", lambda: "improve me")
+
+    assert ts._handle_slash("/improve") == "improve me"
+    assert ts._handle_slash("/improvements") == "improve me"
+
+
+def test_master_slash_routes_modes(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        ts.server,
+        "master_orchestrate",
+        lambda **kwargs: calls.append(kwargs) or "mastered",
+    )
+
+    assert ts._handle_slash("/master delegate build it") == "mastered"
+    assert calls == [{"task": "build it", "mode": "delegate"}]
+
+
+def test_agents_slash_returns_master_status(monkeypatch):
+    monkeypatch.setattr(ts.server, "master_status", lambda: "agents live")
+
+    assert ts._handle_slash("/agents") == "agents live"
+
+
+def test_contextsize_slash_shows_or_sets(monkeypatch):
+    monkeypatch.setattr(ts.server, "context_policy_status", lambda: "policy")
+    monkeypatch.setattr(ts.server, "set_context_size", lambda size: "set " + size)
+
+    assert ts._handle_slash("/contextsize") == "policy"
+    assert ts._handle_slash("/ctxsize 1m") == "set 1m"
+
+
+def test_run_prompt_passes_context_size(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(ts.server, "parse_interaction_id", lambda out: None)
+    monkeypatch.setattr(ts, "_strip_footer", lambda out: out)
+
+    def fake_answer(prompt, history, trace=False, strict=None, tier=None, context_size=""):
+        seen["context_size"] = context_size
+        return "ok"
+
+    monkeypatch.setattr(ts.server, "answer_with_history", fake_answer)
+
+    assert ts._run_prompt("hi", context_size="1m") == "ok"
+    assert seen["context_size"] == "1m"
+
+
+def test_cot_slash_is_denied(monkeypatch):
+    monkeypatch.setattr(
+        ts.server,
+        "admin_private_chain_of_thought",
+        lambda token="": "DENIED: no",
+    )
+
+    assert ts._handle_slash("/cot") == "DENIED: no"
+
+
+def test_login_slash_stores_token(monkeypatch):
+    monkeypatch.setattr(
+        ts.server,
+        "admin_login",
+        lambda username, password: "login ok\ntoken: abc123",
+    )
+    monkeypatch.setattr(ts.server, "_admin_account_from_token", lambda token: {"username": "u"})
+    ts.CURRENT_TOKEN = ""
+
+    out = ts._handle_slash("/login user password123")
+
+    assert "login ok" in out
+    assert ts.CURRENT_TOKEN == "abc123"
+
+
+def test_file_slash_commands_route_to_server(monkeypatch):
+    monkeypatch.setattr(ts.server, "file_find", lambda **kwargs: "found")
+    monkeypatch.setattr(ts.server, "file_read", lambda **kwargs: "read")
+    monkeypatch.setattr(ts.server, "file_delete", lambda **kwargs: "dry delete")
+
+    assert ts._handle_slash("/files *.py") == "found"
+    assert ts._handle_slash("/read README.md") == "read"
+    assert ts._handle_slash("/delete README.md") == "dry delete"
+
+
+def test_write_slash_requires_path_and_text():
+    assert ts._handle_slash("/write onlypath").startswith("usage:")
