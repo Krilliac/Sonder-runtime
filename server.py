@@ -21,9 +21,11 @@ Tiers (escalation ladder, cheapest first):
 import json
 import os
 import re
+import threading
 import time
 import urllib.request
 import urllib.error
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import memory_store
 import orchestrator
@@ -41,6 +43,7 @@ import emotion_vectors
 import workflow_store
 import web_tools
 import self_heal
+import grounding
 
 from mcp.server.fastmcp import FastMCP
 
@@ -49,12 +52,15 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434").replace("http://"
 # for a phone app on the LAN). 0.0.0.0 is a bind-all address, not a connectable
 # one — dialing it fails on Windows (WinError 10049). Rewrite it to loopback for
 # this client without disturbing the server's bind env.
+# 0.0.0.0 is a bind-all server address, not a connectable client address on
+# Windows. Let users bind Ollama broadly while this client dials loopback.
 if OLLAMA_HOST.startswith("0.0.0.0"):
     OLLAMA_HOST = OLLAMA_HOST.replace("0.0.0.0", "127.0.0.1", 1)
 BASE = f"http://{OLLAMA_HOST}"
 # How long a model stays in VRAM after its last call. Short = frees GPU quickly.
 KEEP_ALIVE = os.environ.get("LOCAL_LLM_KEEP_ALIVE", "2m")
 TIMEOUT = int(os.environ.get("LOCAL_LLM_TIMEOUT", "300"))
+LOCAL_CODE_MODEL = os.environ.get("LOCAL_LLM_CODE_LOCAL", "qwen2.5-coder:7b")
 
 
 def _env_int_option(name, default=None):
@@ -115,15 +121,33 @@ TIERS = {
 # Tiers whose ":...-cloud" model runs on Ollama's servers (data leaves the machine).
 CLOUD_TIERS = {"cloud-code", "cloud-general"}
 
+
+def _is_cloud_model_name(model):
+    name = (model or "").lower()
+    return "-cloud" in name or name.endswith(":cloud")
+
+
+if _is_cloud_model_name(TIERS["code"]):
+    TIERS["code"] = LOCAL_CODE_MODEL
+
+
+def _is_cloud_tier(tier, model=None):
+    if tier in CLOUD_TIERS:
+        return True
+    if model is None:
+        model = TIERS.get(tier, "")
+    return _is_cloud_model_name(model)
+
 # Which offload tiers feed the learning loop (capture + distill lessons). A stronger
 # paid/cloud model makes an excellent *teacher*: its grounded good outcomes become
-# lessons and fine-tuning data the local student retrieves later. Local 'code' stays
-# in by default; cloud tiers now do too. Override machine-wide with e.g.
-# TRILOBITE_LEARN_TIERS="code" (local only) or "code,cloud-code,cloud-general,general".
+# lessons and fine-tuning data the local student retrieves later. All configured tiers
+# learn by default; override machine-wide with e.g. TRILOBITE_LEARN_TIERS="code"
+# (local coder only) or "fast,code,general" (local-only all sizes).
+DEFAULT_LEARN_TIERS = ",".join(TIERS.keys())
 LEARN_TIERS = {
     t.strip()
     for t in os.environ.get(
-        "TRILOBITE_LEARN_TIERS", "code,cloud-code,cloud-general"
+        "TRILOBITE_LEARN_TIERS", DEFAULT_LEARN_TIERS
     ).split(",")
     if t.strip()
 }
@@ -147,6 +171,7 @@ _DB_PATH = os.path.join(os.path.dirname(__file__), "memory.db")
 
 FOOTER_PREFIX = "\n\n[interaction_id: "
 _FOOTER_RE = re.compile(r"\[interaction_id: ([0-9a-f]+)\]\s*$")
+_CAMPAIGN_LEARN_LOCK = threading.Lock()
 
 LIVE_RELOAD_MODULES = [
     "memory_store",
@@ -341,7 +366,8 @@ def _serve_target(tier, strict):
         strict_eff = _STRICT_DEFAULT if strict is None else strict
         return resolve_trilobite_model(strict_eff), False, True, "trilobite"
     if t in TIERS:
-        return TIERS[t], t in CLOUD_TIERS, t == "code", t
+        model = TIERS[t]
+        return model, _is_cloud_tier(t, model), t == "code", t
     return None, False, True, None
 
 
@@ -509,7 +535,7 @@ def offload(
             options = _local_model_options(temperature, num_predict, num_ctx)
         payload = {"model": model, "messages": messages, "stream": False,
                    "options": options}
-        if tier not in CLOUD_TIERS:
+        if not _is_cloud_tier(tier, model):
             payload["keep_alive"] = KEEP_ALIVE
         try:
             out = _post("/api/chat", payload)
@@ -524,7 +550,7 @@ def offload(
     # 'teacher': the actual cloud model answers CLEAN (no augmentation), and its grounded
     # good outcomes are still captured + distilled into lessons for the local student.
     retrieve_kwargs = {}
-    if tier in CLOUD_TIERS:
+    if _is_cloud_tier(tier, model):
         gen = _make_generate(model, system, temperature, num_predict, num_ctx, cloud=True)
         retrieve_kwargs["retrieve_fn"] = _no_retrieve
     else:
@@ -734,6 +760,436 @@ def record_outcome(interaction_id: str, signal: str) -> str:
 
 
 @mcp.tool()
+def parallel_run_code(jobs_json: str, max_workers: int = 4, timeout: int = 8) -> str:
+    """Compile and execute many snippets concurrently.
+
+    jobs_json is a JSON list. Each item may be a code string or an object:
+      {"name":"candidate-a", "language":"python|javascript|powershell|cpp|csharp",
+       "code":"print(2+2)", "check":"assert ...", "timeout":8, "execute":true}
+
+    Every supported job is compiled/checked first, then executed with its optional
+    check appended where that language supports it.
+    Worker count and timeouts are bounded so this stays useful without stampeding the
+    machine.
+    """
+    try:
+        jobs = json.loads(jobs_json)
+        results = grounding.run_code_jobs(
+            jobs,
+            max_workers=max_workers,
+            default_timeout=timeout,
+        )
+    except Exception as e:
+        return "ERROR: %s" % e
+    return grounding.format_code_jobs(results)
+
+
+@mcp.tool()
+def parallel_generate_run(
+    prompt: str,
+    check: str = "",
+    variants: int = 4,
+    tier: str = "code",
+    max_workers: int = 4,
+    timeout: int = 8,
+    temperature: float = 0.4,
+    num_predict: int = 900,
+    num_ctx: int = 4096,
+) -> str:
+    """Generate several Python code candidates in parallel, then compile/run each.
+
+    The prompt should describe the desired Python solution. `check` is appended to
+    each extracted code block, usually as assertions. This is meant for search:
+    generate multiple attempts, compile them, execute them, and keep the winners.
+    """
+    variants = max(1, min(int(variants or 1), 12))
+    max_workers = max(1, min(int(max_workers or 1), 8, variants))
+    timeout = max(1, min(int(timeout or 8), 120))
+    model = TIERS.get(tier)
+    if model is None:
+        return "ERROR: unknown tier '%s'. Valid tiers: %s." % (tier, ", ".join(TIERS))
+    cloud = _is_cloud_tier(tier, model)
+    system = (
+        "Return one complete runnable Python solution in a single ```python code block. "
+        "No prose outside the code block. Avoid input() and unbounded loops."
+    )
+    gen = _make_generate(model, system, temperature, num_predict, num_ctx, cloud=cloud)
+    started = time.time()
+    generation_results = [None] * variants
+
+    def one(i):
+        candidate_prompt = (
+            "%s\n\nGenerate candidate %d of %d. Use a distinct implementation strategy "
+            "if there is a reasonable alternative." % (prompt, i + 1, variants)
+        )
+        try:
+            response = gen(candidate_prompt)
+            code = grounding.extract_code_block(response)
+            if not code:
+                return {
+                    "index": i,
+                    "name": "candidate-%d" % (i + 1),
+                    "ok": False,
+                    "output": "no Python code block returned",
+                    "seconds": 0,
+                    "response": response[:1200],
+                }
+            ok, out = grounding.run_code(code, check, timeout=timeout, compile_first=True)
+            return {
+                "index": i,
+                "name": "candidate-%d" % (i + 1),
+                "ok": bool(ok),
+                "output": out,
+                "seconds": 0,
+                "code": code,
+            }
+        except Exception as e:
+            return {
+                "index": i,
+                "name": "candidate-%d" % (i + 1),
+                "ok": False,
+                "output": "ERROR: %s" % e,
+                "seconds": 0,
+            }
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(one, i): i for i in range(variants)}
+        for future in as_completed(futures):
+            result = future.result()
+            generation_results[result["index"]] = result
+    elapsed = round(time.time() - started, 3)
+    passed = sum(1 for r in generation_results if r and r.get("ok"))
+    lines = [
+        "parallel generate/run: %d/%d passed in %.3fs (tier=%s, workers=%d)"
+        % (passed, variants, elapsed, tier, max_workers)
+    ]
+    for r in generation_results:
+        status = "PASS" if r.get("ok") else "FAIL"
+        lines.append("[%s] %s" % (status, r.get("name")))
+        out = (r.get("output") or "").strip()
+        if out:
+            lines.append(out[:1200])
+    winner = next((r for r in generation_results if r.get("ok") and r.get("code")), None)
+    if winner:
+        lines.append("winner code:")
+        lines.append("```python\n%s\n```" % winner["code"])
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def parallel_generate_run_languages(
+    prompt: str,
+    languages: str = "python,javascript,powershell,cpp,csharp",
+    check: str = "",
+    variants_per_language: int = 1,
+    tier: str = "code",
+    max_workers: int = 5,
+    timeout: int = 8,
+    temperature: float = 0.35,
+    num_predict: int = 900,
+    num_ctx: int = 4096,
+) -> str:
+    """Generate, compile, and execute many candidates across multiple languages.
+
+    `languages` is a comma-separated list from python, javascript, powershell, cpp,
+    csharp. The model is asked for one fenced block per candidate in the requested
+    language. All candidates are generated and tested in parallel.
+    """
+    language_list = [
+        grounding.normalize_language(x)
+        for x in (languages or "").split(",")
+        if x.strip()
+    ]
+    if not language_list:
+        return "ERROR: at least one language is required"
+    allowed = {"python", "javascript", "powershell", "cpp", "csharp"}
+    bad = [x for x in language_list if x not in allowed]
+    if bad:
+        return "ERROR: unsupported language(s): %s" % ", ".join(bad)
+    variants_per_language = max(1, min(int(variants_per_language or 1), 6))
+    jobs = []
+    for lang in language_list:
+        for i in range(variants_per_language):
+            jobs.append((lang, i + 1))
+    max_workers = max(1, min(int(max_workers or 1), 12, len(jobs)))
+    timeout = max(1, min(int(timeout or 8), 120))
+    model = TIERS.get(tier)
+    if model is None:
+        return "ERROR: unknown tier '%s'. Valid tiers: %s." % (tier, ", ".join(TIERS))
+    cloud = _is_cloud_tier(tier, model)
+    started = time.time()
+    results = [None] * len(jobs)
+
+    def one(index, lang, variant):
+        fence = lang
+        system = (
+            "Return one complete runnable %s program in a single ```%s code block. "
+            "No prose outside the code block. Avoid interactive input and unbounded loops."
+            % (lang, fence)
+        )
+        gen = _make_generate(model, system, temperature, num_predict, num_ctx, cloud=cloud)
+        candidate_prompt = (
+            "%s\n\nGenerate %s candidate %d. It must compile and terminate quickly."
+            % (prompt, lang, variant)
+        )
+        try:
+            response = gen(candidate_prompt)
+            code = grounding.extract_code_block(response, lang)
+            if not code:
+                return {
+                    "index": index,
+                    "name": "%s-%d" % (lang, variant),
+                    "language": lang,
+                    "ok": False,
+                    "output": "no %s code block returned" % lang,
+                    "seconds": 0,
+                }
+            ok, out = grounding.run_language_code(
+                code,
+                language=lang,
+                extra=check,
+                timeout=timeout,
+                execute=True,
+            )
+            return {
+                "index": index,
+                "name": "%s-%d" % (lang, variant),
+                "language": lang,
+                "ok": bool(ok),
+                "output": out,
+                "seconds": 0,
+                "code": code,
+            }
+        except Exception as e:
+            return {
+                "index": index,
+                "name": "%s-%d" % (lang, variant),
+                "language": lang,
+                "ok": False,
+                "output": "ERROR: %s" % e,
+                "seconds": 0,
+            }
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [
+            pool.submit(one, index, lang, variant)
+            for index, (lang, variant) in enumerate(jobs)
+        ]
+        for future in as_completed(futures):
+            result = future.result()
+            results[result["index"]] = result
+    elapsed = round(time.time() - started, 3)
+    passed = sum(1 for r in results if r and r.get("ok"))
+    lines = [
+        "parallel multi-language generate/run: %d/%d passed in %.3fs (tier=%s, workers=%d)"
+        % (passed, len(results), elapsed, tier, max_workers)
+    ]
+    for r in results:
+        status = "PASS" if r.get("ok") else "FAIL"
+        lines.append("[%s] %s [%s]" % (status, r.get("name"), r.get("language")))
+        out = (r.get("output") or "").strip()
+        if out:
+            lines.append(out[:1200])
+    winners = [r for r in results if r.get("ok") and r.get("code")]
+    if winners:
+        lines.append("winner code blocks:")
+        for r in winners[:3]:
+            fence = grounding._LANG_FENCE.get(r["language"], r["language"])
+            lines.append("```%s\n%s\n```" % (fence, r["code"]))
+    return "\n".join(lines)
+
+
+_CAMPAIGN_TASKS = [
+    ("hello", "print exactly: trilobite-ok"),
+    ("sum", "compute 12 + 30 and print exactly: 42"),
+    ("loop", "print the numbers 1, 2, and 3 each on its own line"),
+    ("string", "reverse the string 'trilobite' and print exactly: etibolirt"),
+    ("branch", "if 17 is prime print exactly: prime"),
+    ("list", "compute the sum of [2, 4, 6, 8] and print exactly: 20"),
+]
+
+
+def _campaign_expected(task_name):
+    return {
+        "hello": "trilobite-ok",
+        "sum": "42",
+        "loop": "1\n2\n3",
+        "string": "etibolirt",
+        "branch": "prime",
+        "list": "20",
+    }.get(task_name, "")
+
+
+def _campaign_prompt(language, task_name, task_text, repair_note=""):
+    fence = grounding._LANG_FENCE.get(language, language)
+    repair = ("\nPrevious attempt failed:\n%s\nFix it." % repair_note) if repair_note else ""
+    language_note = ""
+    if language == "powershell" and task_name == "string":
+        language_note = (
+            " PowerShell arrays print one item per line; when building a string from "
+            "characters, reverse by index/order and join explicitly with -join; do not "
+            "sort the characters."
+        )
+    if language == "powershell" and task_name == "list":
+        language_note = (
+            " In PowerShell, use Measure-Object -Sum or a simple loop to sum numeric "
+            "arrays; do not use Invoke-Expression for arithmetic."
+        )
+    if language == "cpp" and task_name == "string":
+        language_note = (
+            " In C++, include <algorithm> before using std::reverse, or reverse the "
+            "string manually."
+        )
+    return (
+        "Write a complete runnable %s program for this task: %s.\n"
+        "Return only one ```%s code block. Do not use interactive input. "
+        "The program must terminate quickly.%s%s" % (
+            language, task_text, fence, language_note, repair)
+    )
+
+
+@mcp.tool()
+def campaign_generate_compile_execute_record(
+    total: int = 24,
+    languages: str = "python,javascript,powershell,cpp,csharp",
+    tier: str = "code",
+    max_workers: int = 5,
+    timeout: int = 8,
+    repair_rounds: int = 1,
+    record_failures: bool = True,
+) -> str:
+    """Run a bounded self-improvement campaign across multiple languages.
+
+    The campaign generates many complete programs, compiles/executes them, repairs
+    failures once by default, and records every passing interaction as tests_passed.
+    When record_failures is true, terminal failed attempts with an interaction id are
+    recorded as failed too, so the reward store keeps negative signals.
+    """
+    total = max(1, min(int(total or 1), 120))
+    max_workers = max(1, min(int(max_workers or 1), 12, total))
+    timeout = max(1, min(int(timeout or 8), 120))
+    repair_rounds = max(0, min(int(repair_rounds or 0), 3))
+    language_list = [
+        grounding.normalize_language(x)
+        for x in (languages or "").split(",")
+        if x.strip()
+    ]
+    allowed = {"python", "javascript", "powershell", "cpp", "csharp"}
+    language_list = [x for x in language_list if x in allowed]
+    if not language_list:
+        return "ERROR: no supported languages selected"
+
+    jobs = []
+    for i in range(total):
+        lang = language_list[i % len(language_list)]
+        task_name, task_text = _CAMPAIGN_TASKS[i % len(_CAMPAIGN_TASKS)]
+        jobs.append((i, lang, task_name, task_text))
+
+    def run_one(index, lang, task_name, task_text):
+        attempts = []
+        last_note = ""
+        for attempt in range(repair_rounds + 1):
+            prompt = _campaign_prompt(lang, task_name, task_text, last_note)
+            with _CAMPAIGN_LEARN_LOCK:
+                response = trilobite(
+                    prompt,
+                    tier=tier,
+                    session="none",
+                    temperature=0.35 if attempt == 0 else 0.2,
+                    num_predict=900,
+                )
+            iid = parse_interaction_id(response)
+            code = grounding.extract_code_block(response, lang)
+            if not code:
+                ok = False
+                out = "no %s code block returned" % lang
+            else:
+                ok, out = grounding.run_language_code(
+                    code,
+                    language=lang,
+                    timeout=timeout,
+                    execute=True,
+                )
+                expected = _campaign_expected(task_name)
+                if ok and expected and expected not in (out or ""):
+                    ok = False
+                    out = "wrong output; expected to contain %r, got %r" % (expected, out)
+            record_msg = ""
+            if ok and iid:
+                with _CAMPAIGN_LEARN_LOCK:
+                    record_msg = record_outcome(iid, "tests_passed")
+            elif attempt == repair_rounds and record_failures and iid:
+                with _CAMPAIGN_LEARN_LOCK:
+                    record_msg = record_outcome(iid, "failed")
+            attempts.append({
+                "attempt": attempt + 1,
+                "ok": ok,
+                "iid": iid,
+                "output": out,
+                "record": record_msg,
+            })
+            if ok:
+                break
+            last_note = (out or "unknown failure")[:1200]
+        final = attempts[-1]
+        return {
+            "index": index,
+            "name": "%s-%s-%d" % (lang, task_name, index + 1),
+            "language": lang,
+            "task": task_name,
+            "ok": bool(final["ok"]),
+            "attempts": attempts,
+            "iid": final.get("iid"),
+        }
+
+    started = time.time()
+    results = [None] * len(jobs)
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(run_one, *job) for job in jobs]
+        for future in as_completed(futures):
+            result = future.result()
+            results[result["index"]] = result
+    elapsed = round(time.time() - started, 3)
+    passed = sum(1 for r in results if r and r.get("ok"))
+    recorded = sum(
+        1
+        for r in results
+        for a in r.get("attempts", [])
+        if a.get("ok") and a.get("record")
+    )
+    failed_recorded = sum(
+        1
+        for r in results
+        for a in r.get("attempts", [])
+        if not a.get("ok") and a.get("record")
+    )
+    by_lang = {}
+    for r in results:
+        lang = r["language"]
+        ok, total_lang = by_lang.get(lang, (0, 0))
+        by_lang[lang] = (ok + (1 if r["ok"] else 0), total_lang + 1)
+    lines = [
+        "campaign generate/compile/execute/record: %d/%d passed, %d recorded, %d failed-recorded in %.3fs"
+        % (passed, len(results), recorded, failed_recorded, elapsed),
+        "by language: %s" % ", ".join(
+            "%s=%d/%d" % (lang, ok, total_lang)
+            for lang, (ok, total_lang) in sorted(by_lang.items())
+        ),
+    ]
+    for r in results:
+        status = "PASS" if r["ok"] else "FAIL"
+        lines.append("[%s] %s attempts=%d iid=%s" % (
+            status, r["name"], len(r["attempts"]), r.get("iid") or "-"))
+        final_out = (r["attempts"][-1].get("output") or "").strip()
+        if final_out:
+            lines.append(final_out[:800])
+        record_msg = (r["attempts"][-1].get("record") or "").strip()
+        if record_msg:
+            lines.append(record_msg[:800])
+    return "\n".join(lines)
+
+
+@mcp.tool()
 def trilobite_stats() -> str:
     """Report what trilobite has learned so far.
 
@@ -768,6 +1224,18 @@ def trilobite_stats() -> str:
             lines.append("    - %s" % l["text"])
     else:
         lines.append("  recent lessons: (none yet)")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def learn_tiers() -> str:
+    """Show which tiers currently feed the learning loop."""
+    lines = ["learning tiers"]
+    for tier, model in TIERS.items():
+        state = "on" if tier in LEARN_TIERS else "off"
+        locality = "cloud" if _is_cloud_tier(tier, model) else "local"
+        lines.append("  %s: %s (%s, %s)" % (tier, state, locality, model))
+    lines.append("override with TRILOBITE_LEARN_TIERS=fast,code,general,cloud-code,cloud-general")
     return "\n".join(lines)
 
 
@@ -1735,13 +2203,14 @@ def status() -> str:
         f"{m.get('name')} (VRAM ~{round(m.get('size_vram', 0)/1e9, 1)} GB)" for m in ps
     ]
     tier_lines = [
-        f"  {k}={v}" + ("  [CLOUD — leaves machine]" if k in CLOUD_TIERS else "  [local GPU]")
+        f"  {k}={v}" + ("  [CLOUD — leaves machine]" if _is_cloud_tier(k, v) else "  [local GPU]")
         for k, v in TIERS.items()
     ]
     lines = [
         f"Ollama @ {BASE}",
         "Tiers:",
         *tier_lines,
+        f"Learning tiers: {', '.join(sorted(LEARN_TIERS)) if LEARN_TIERS else '(none)'}",
         f"Installed/registered models: {', '.join(installed) if installed else '(none)'}",
         f"In VRAM now: {', '.join(loaded) if loaded else '(none — GPU idle)'}",
         f"local keep_alive: {KEEP_ALIVE}",
@@ -1762,8 +2231,8 @@ def unload(tier: str = "all") -> str:
     _maybe_live_reload()
     if tier == "all":
         # Only local tiers occupy VRAM; cloud tiers run remote.
-        targets = [v for k, v in TIERS.items() if k not in CLOUD_TIERS]
-    elif tier in CLOUD_TIERS:
+        targets = [v for k, v in TIERS.items() if not _is_cloud_tier(k, v)]
+    elif _is_cloud_tier(tier):
         return f"'{tier}' is a cloud tier — it uses no local VRAM, nothing to unload."
     else:
         targets = [TIERS.get(tier)]

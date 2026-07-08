@@ -36,6 +36,13 @@ def test_extract_code_block_ignores_bare_shell_command_blocks():
 def test_extract_code_block_still_accepts_bare_python():
     text = "quick demo:\n```\nprint('hello')\n```\n"
     assert grounding.extract_code_block(text) == "print('hello')"
+def test_extract_code_block_can_select_language():
+    text = (
+        "```python\nprint('py')\n```\n"
+        "```javascript\nconsole.log('js')\n```\n"
+    )
+    assert grounding.extract_code_block(text, "javascript") == "console.log('js')"
+    assert grounding.extract_code_block(text, "js") == "console.log('js')"
 
 
 def test_run_code_simple_success():
@@ -84,3 +91,44 @@ def test_run_code_detail_clamps_timeout():
 
     assert result["ok"] is True
     assert result["timeout"] == grounding.MAX_TIMEOUT
+def test_run_code_reports_compile_failure_before_execution():
+    ok, out = grounding.run_code("def broken(:\n    pass")
+    assert ok is False
+    assert "compile failed" in out
+
+
+def test_run_code_jobs_parallel_keeps_input_order():
+    jobs = [
+        {"name": "slow", "code": "print('a')"},
+        {"name": "checked", "code": "def f(x): return x + 1", "check": "assert f(2) == 3"},
+        {"name": "bad", "code": "raise RuntimeError('boom')"},
+    ]
+    results = grounding.run_code_jobs(jobs, max_workers=3, default_timeout=8)
+    assert [r["name"] for r in results] == ["slow", "checked", "bad"]
+    assert [r["ok"] for r in results] == [True, True, False]
+    assert "boom" in results[2]["output"]
+
+
+def test_run_code_jobs_compile_only():
+    results = grounding.run_code_jobs([
+        {"name": "compile", "code": "raise RuntimeError('not executed')", "execute": False}
+    ])
+    assert results[0]["ok"] is True
+    assert results[0]["output"] == "compiled"
+
+
+def test_run_code_jobs_records_language(monkeypatch):
+    monkeypatch.setattr(
+        grounding,
+        "run_language_code",
+        lambda code, language, extra, timeout, interp=None, execute=True: (
+            language == "javascript",
+            "ok",
+        ),
+    )
+    results = grounding.run_code_jobs([
+        {"name": "js", "language": "js", "code": "console.log(1)"},
+        {"name": "bad", "language": "madeup", "code": "x"},
+    ])
+    assert [r["language"] for r in results] == ["javascript", "madeup"]
+    assert [r["ok"] for r in results] == [True, False]

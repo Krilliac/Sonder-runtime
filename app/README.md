@@ -22,7 +22,11 @@ party.
   (`trilobite` local student, or any cloud/paid tier the server exposes). The list is
   fetched from the server's `/v1/models`. Cloud models answer *clean* (teacher mode)
   and their good outcomes still feed the local model's learning.
-- **Settings**: server URL + optional API key, with a one-tap *Test connection*.
+- **Settings**: server URL + optional API key, default model/tier, with a
+  one-tap *Test connection*.
+- **System panel**: view server status, learning stats and exposed models,
+  run `/stats`, `/train 10` and `/help`, start the bundled desktop server,
+  launch endless training, and pull updates from Git.
 - **Slash commands** built in — `/stats`, `/train`, `/pass`, `/fail`, `/help` —
   handled by the serve layer exactly like the REPL.
 - **Dark / light** themes, copy-to-clipboard, selectable text.
@@ -48,6 +52,16 @@ with the four files attached:
 git tag app-v1.0.0
 git push origin app-v1.0.0
 ```
+
+## Bundled system
+
+Desktop downloads include a `local-system` folder beside the app. The System
+panel can use that folder to start the server, launch endless training, run
+common status/training commands and pull updates from Git.
+
+Android builds include the same payload as `local-system.zip` inside the APK,
+but Android still connects to a desktop or LAN server because it cannot launch
+the Python/Ollama runtime directly.
 
 ### Installing
 
@@ -78,6 +92,7 @@ project scaffolding locally with `flutter create`, then build:
 ```bash
 cd app
 flutter create --org com.trilobite --project-name trilobite .
+python ../scripts/package_local_system.py --out app/build/local-system --zip app/assets/local-system.zip
 flutter pub get
 
 flutter run                    # dev, on any connected device/desktop

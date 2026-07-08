@@ -5,6 +5,7 @@ import 'api.dart';
 import 'models.dart';
 import 'settings.dart';
 import 'settings_screen.dart';
+import 'system_screen.dart';
 
 class ChatScreen extends StatefulWidget {
   final Settings settings;
@@ -151,6 +152,12 @@ class _ChatScreenState extends State<ChatScreen> {
     _refreshModels();
   }
 
+  Future<void> _openSystem() async {
+    await Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => SystemScreen(settings: widget.settings),
+    ));
+  }
+
   String _modelLabel(String m) => m == 'trilobite' ? 'trilobite (local)' : m;
 
   @override
@@ -217,6 +224,11 @@ class _ChatScreenState extends State<ChatScreen> {
             tooltip: 'New chat',
             icon: const Icon(Icons.add_comment_outlined),
             onPressed: _messages.isEmpty ? null : _newChat,
+          ),
+          IconButton(
+            tooltip: 'System',
+            icon: const Icon(Icons.dashboard_customize_outlined),
+            onPressed: _openSystem,
           ),
           IconButton(
             tooltip: 'Settings',

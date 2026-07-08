@@ -22,6 +22,7 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   late final TextEditingController _server;
   late final TextEditingController _key;
+  late final TextEditingController _model;
   late bool _dark;
   bool _obscureKey = true;
   String? _status;
@@ -33,6 +34,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     super.initState();
     _server = TextEditingController(text: widget.settings.serverUrl);
     _key = TextEditingController(text: widget.settings.apiKey);
+    _model = TextEditingController(text: widget.settings.model);
     _dark = widget.settings.darkMode;
   }
 
@@ -40,6 +42,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void dispose() {
     _server.dispose();
     _key.dispose();
+    _model.dispose();
     super.dispose();
   }
 
@@ -47,6 +50,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         serverUrl: _server.text,
         apiKey: _key.text,
         darkMode: _dark,
+        model: _model.text.trim().isEmpty
+            ? Settings.defaultModel
+            : _model.text.trim(),
       );
 
   Future<void> _test() async {
@@ -123,6 +129,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     setState(() => _obscureKey = !_obscureKey),
               ),
               border: const OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _model,
+            autocorrect: false,
+            decoration: const InputDecoration(
+              labelText: 'Default model / tier',
+              hintText: 'trilobite, code, fast, cloud-code...',
+              helperText: 'Used by chat and system commands',
+              prefixIcon: Icon(Icons.memory_outlined),
+              border: OutlineInputBorder(),
             ),
           ),
           const SizedBox(height: 16),

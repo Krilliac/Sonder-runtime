@@ -59,6 +59,30 @@ class TrilobiteApi {
     }
   }
 
+  Future<SystemInfo> systemInfo() async {
+    late http.Response resp;
+    try {
+      resp = await http
+          .get(_uri('/v1/trilobite/status'), headers: _headers())
+          .timeout(const Duration(seconds: 20));
+    } catch (e) {
+      throw TrilobiteException('Cannot reach server: $e');
+    }
+    if (resp.statusCode == 401) {
+      throw TrilobiteException('Unauthorized - check the API key.');
+    }
+    if (resp.statusCode != 200) {
+      throw TrilobiteException('Server returned HTTP ${resp.statusCode}.');
+    }
+    try {
+      final obj = jsonDecode(utf8.decode(resp.bodyBytes))
+          as Map<String, dynamic>;
+      return SystemInfo.fromJson(obj);
+    } catch (_) {
+      throw TrilobiteException('Could not parse system status.');
+    }
+  }
+
   /// Send the full conversation and return the assistant's reply text.
   ///
   /// The serve layer threads history from the messages we send, and also
@@ -117,4 +141,45 @@ class TrilobiteException implements Exception {
   TrilobiteException(this.message);
   @override
   String toString() => message;
+}
+
+class SystemInfo {
+  final String status;
+  final String stats;
+  final String learnTiers;
+  final List<SystemModel> models;
+
+  const SystemInfo({
+    required this.status,
+    required this.stats,
+    required this.learnTiers,
+    required this.models,
+  });
+
+  factory SystemInfo.fromJson(Map<String, dynamic> json) {
+    final models = (json['models'] as List? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .map(SystemModel.fromJson)
+        .toList();
+    return SystemInfo(
+      status: json['status']?.toString() ?? '',
+      stats: json['stats']?.toString() ?? '',
+      learnTiers: json['learn_tiers']?.toString() ?? '',
+      models: models,
+    );
+  }
+}
+
+class SystemModel {
+  final String id;
+  final String ownedBy;
+
+  const SystemModel({required this.id, required this.ownedBy});
+
+  factory SystemModel.fromJson(Map<String, dynamic> json) {
+    return SystemModel(
+      id: json['id']?.toString() ?? '',
+      ownedBy: json['owned_by']?.toString() ?? '',
+    );
+  }
 }

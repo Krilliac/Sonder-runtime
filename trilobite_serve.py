@@ -412,13 +412,44 @@ class Handler(BaseHTTPRequestHandler):
             # Advertise the local student plus every configured tier, so a client can
             # offer a model picker. owned_by flags where each runs.
             data = [{"id": "trilobite", "object": "model", "owned_by": "local"}]
-            for tier_name in server.TIERS:
+            for tier_name, model in server.TIERS.items():
                 data.append({
                     "id": tier_name,
                     "object": "model",
-                    "owned_by": "cloud" if tier_name in server.CLOUD_TIERS else "local",
+                    "owned_by": "cloud"
+                    if server._is_cloud_tier(tier_name, model)
+                    else "local",
                 })
             body = json.dumps({"object": "list", "data": data}).encode("utf-8")
+            self.send_response(200)
+            self._cors()
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path.rstrip("/") == "/v1/trilobite/status":
+            if not check_auth(self.headers.get("Authorization", ""), API_KEY):
+                self._send_auth_error()
+                return
+            payload = {
+                "status": server.status(),
+                "stats": server.trilobite_stats(),
+                "learn_tiers": server.learn_tiers(),
+                "models": [
+                    {"id": "trilobite", "owned_by": "local"},
+                    *[
+                        {
+                            "id": tier_name,
+                            "owned_by": "cloud"
+                            if server._is_cloud_tier(tier_name, model)
+                            else "local",
+                        }
+                        for tier_name, model in server.TIERS.items()
+                    ],
+                ],
+            }
+            body = json.dumps(payload).encode("utf-8")
             self.send_response(200)
             self._cors()
             self.send_header("Content-Type", "application/json")

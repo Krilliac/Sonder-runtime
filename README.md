@@ -51,9 +51,13 @@ The loop is model-agnostic: point it at whatever LLM you have. The local student
 (`code`) is memory-augmented; a stronger paid/cloud model can act as a **teacher** —
 it answers *clean* (no local-lesson injection) and its grounded good outcomes are
 distilled into lessons and fine-tuning data the local model retrieves later. Which
-tiers learn is configurable (`TRILOBITE_LEARN_TIERS`, default local `code` + both
-cloud tiers). The memory, capture, and distillation always stay local; only a
+tiers learn is configurable (`TRILOBITE_LEARN_TIERS`, default all tiers:
+`fast,code,general,cloud-code,cloud-general`). The memory, capture, and distillation always stay local; only a
 cloud-tier *prompt* leaves the machine, and only when you choose a cloud model.
+The `code` tier is protected as the local coder lane: if `LOCAL_LLM_CODE` is
+accidentally pointed at a cloud model, trilobite falls back to the local
+`qwen2.5-coder:7b` model (override that local fallback with
+`LOCAL_LLM_CODE_LOCAL`).
 
 ### Memory beyond lessons
 
@@ -80,6 +84,7 @@ The learning loop above is *cross-task* memory. On top of it trilobite also has:
 1. **Local, in your terminal** — `trilobite` (like launching `claude`). Interactive REPL routed through the full loop, with `/trace`, `/strict`, `/run`, `/train`, `/pass`, `/fail`, `/stats` commands plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts` (and plain-English equivalents). Each REPL launch is its own remembered thread.
 2. **Hosted on your own server + a thin client anywhere** — run `deploy_trilobite.sh --serve` on your box (systemd service, API key), then any machine runs the single-file `trilobite_client.py` pointed at it. The serve layer threads the chat UI's own conversation history.
 3. **Integrated with Claude** — the MCP `local-llm` tools let Claude offload to it (`agent`, `offload(learn=True)`, `trilobite`, `run_code`, `web_search`, `web_fetch`, `loop`, `workflow_list/save/run/delete`, `self_heal_check`, `self_heal_repair`, `learn_from_example`, `apply_learned`, `system_profile_text`, `update_system_profile`, `emotion_vector_status`, `update_emotion_vectors`, `memory_search`, `memory_export`, `session_export`, `tool_manifest`, `diagnostics`, `live_reload_status`, `record_outcome`, `trilobite_stats`, `trilobite_sessions`, `trilobite_remember_fact`). `agent` runs a Claude-like tool-use loop where the model can call local tools and web tools step-by-step; `run_code` gives bounded local execution for Python, JavaScript/Node, and PowerShell snippets; `loop` repeats bounded code/model/system actions for retries, polling, and small workflows. Both `offload` and `trilobite` take a `tier` to route a call to any configured model (local or a paid cloud model); cloud tiers answer clean and still feed the learning loop.
+3. **Integrated with Claude** — the MCP `local-llm` tools let Claude offload to it (`offload(learn=True)`, `trilobite`, `parallel_run_code`, `parallel_generate_run`, `parallel_generate_run_languages`, `campaign_generate_compile_execute_record`, `learn_tiers`, `record_outcome`, `trilobite_stats`, `trilobite_sessions`, `trilobite_remember_fact`). `parallel_run_code` compiles/runs many snippets at once across Python, JavaScript, PowerShell, C++, and C#; `parallel_generate_run` asks the model for multiple Python candidates in parallel; `parallel_generate_run_languages` spreads candidates across several languages, compiles/runs them, and returns passing winners. `campaign_generate_compile_execute_record` runs a bounded self-improvement campaign, repairs failures, and records passing interactions as grounded lessons. Both `offload` and `trilobite` take a `tier` to route a call to any configured model (local or a paid cloud model); cloud tiers answer clean and still feed the learning loop.
 4. **Mobile & desktop app (GUI)** — a cross-platform [Flutter client](app/) that talks to a hosted `trilobite_serve.py`. One codebase → an **Android APK** and **Windows/Linux/macOS** desktop apps, built in CI with downloadable installers. See [app/README.md](app/README.md).
 
 ---
@@ -127,6 +132,12 @@ residency with `status()`.
 
 A fresh trilobite is just base Qwen — you make it valuable by feeding it *your* world:
 - **`/train`** — it practices real tasks, runs its own solutions to check them, and keeps the lessons from what works.
+- **Endless training** — run `endless-train.cmd` on Windows to continuously generate,
+  compile, execute, repair, and record passing multi-language campaign work until
+  Ctrl+C or a no-progress round. Tune it with `TRILOBITE_ENDLESS_TOTAL`,
+  `TRILOBITE_ENDLESS_LANGUAGES`, `TRILOBITE_ENDLESS_TIER`,
+  `TRILOBITE_ENDLESS_WORKERS`, `TRILOBITE_ENDLESS_TIMEOUT`, and
+  `TRILOBITE_ENDLESS_REPAIRS`.
 - **Use it on your actual work** — the more real, grounded outcomes it sees, the more its lessons reflect *your* code and conventions (not textbook generalities).
 - **Fine-tune** (optional) — once you've grown a real dataset, QLoRA bakes learning into the weights. Local 1.5B fits a 6 GB card; 7B wants a cloud GPU (`cloud_train.sh` + [TRAINING.md](TRAINING.md)). The result converts to a single GGUF file Ollama loads.
 
@@ -175,6 +186,7 @@ Flat, mostly-stdlib Python modules (plus `mcp`):
 | `reward.py` / `reflection.py` | outcome → score; distill deduped lessons |
 | `orchestrator.py` | the retrieve → augment → generate → capture flow |
 | `server.py` / `code_runner.py` / `web_tools.py` / `workflow_store.py` / `self_heal.py` / `live_reload.py` / `system_profile.py` / `emotion_vectors.py` | MCP server tools: `agent` / `offload` / `trilobite` / `run_code` / `web_search` / `web_fetch` / `loop` / workflows / memory export/search / self-healing / editable profile / emotion vectors / diagnostics; bounded execution, tool-calling loops, web access, reusable action routines, and request-boundary source reload |
+| `server.py` | MCP server: `offload` / `trilobite` / `parallel_run_code` / `parallel_generate_run` / `parallel_generate_run_languages` / `campaign_generate_compile_execute_record` / `learn_tiers` / `record_outcome` / `trilobite_stats` / `trilobite_sessions` / `trilobite_remember_fact` |
 | `recall.py` | semantic recall of past good-outcome solutions (vector search over interactions) |
 | `summarizer.py` | rolling conversation summaries + session auto-titles (fast tier) |
 | `trilobite_repl.py` / `trilobite_client.py` | local REPL / thin remote client |

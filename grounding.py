@@ -7,9 +7,12 @@ own say-so.
 """
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 _CODE_BLOCK_RE = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
 _FILE_INFO_RE = re.compile(r"(?:^|\s)(?:file|path)\s*[:=]\s*([^\s`]+)", re.IGNORECASE)
@@ -38,22 +41,45 @@ RUNNABLE_FENCE_LANGS = {
 }
 
 
-def extract_code_block(text):
-    """Return the best runnable Python block from a model response.
+def normalize_language(language):
+    lang = (language or "python").strip().lower()
+    return RUNNABLE_FENCE_LANGS.get(lang, lang)
 
-    Prefer explicit ```python fences. If only bare fences exist, skip blocks that
-    look like shell instructions such as `/run python file.py` or `pip install`.
+
+_LANG_FENCE = {
+    "python": "python",
+    "javascript": "javascript",
+    "powershell": "powershell",
+    "cpp": "cpp",
+    "csharp": "csharp",
+}
+
+
+def extract_code_block(text, language=None):
+    """Return the best runnable code block from a model response.
+
+    By default this returns Python, preferring explicit python fences and
+    ignoring bare shell-command blocks such as `/run python file.py`. Pass a
+    language to select a runnable non-Python fence.
     """
     blocks = [
         ((lang or "").strip().lower(), body.strip())
         for lang, body in _CODE_BLOCK_RE.findall(text or "")
     ]
-    for lang, body in reversed(blocks):
-        if lang in ("python", "py"):
-            return body
-    for lang, body in reversed(blocks):
-        if lang == "" and not _looks_like_shell_block(body):
-            return body
+    if language is None:
+        for lang, code in reversed(blocks):
+            first = (lang.split() or [""])[0]
+            if first and normalize_language(first) == "python":
+                return code
+        for lang, code in reversed(blocks):
+            if lang == "" and not _looks_like_shell_block(code):
+                return code
+        return None
+    want = normalize_language(language)
+    for lang, code in reversed(blocks):
+        first = (lang.split() or [""])[0]
+        if normalize_language(first) == want:
+            return code
     return None
 
 
@@ -158,7 +184,14 @@ def clamp_timeout(timeout, default=DEFAULT_TIMEOUT, maximum=MAX_TIMEOUT):
     return max(1, min(value, maximum))
 
 
-def run_code_detail(code, extra="", timeout=DEFAULT_TIMEOUT, interp=None, stdin=""):
+def run_code_detail(
+    code,
+    extra="",
+    timeout=DEFAULT_TIMEOUT,
+    interp=None,
+    stdin="",
+    compile_first=False,
+):
     """Run code in a fresh subprocess and return structured execution details."""
     timeout = clamp_timeout(timeout)
     interp = interp or sys.executable
@@ -168,6 +201,26 @@ def run_code_detail(code, extra="", timeout=DEFAULT_TIMEOUT, interp=None, stdin=
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(src)
         try:
+            if compile_first:
+                c = subprocess.run(
+                    [interp, "-m", "py_compile", path],
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
+                if c.returncode != 0:
+                    return {
+                        "ok": False,
+                        "returncode": c.returncode,
+                        "stdout": (c.stdout or "").strip(),
+                        "stderr": (
+                            "compile failed\n"
+                            + ((c.stderr or "").strip())
+                        ).strip(),
+                        "timeout": timeout,
+                        "timed_out": False,
+                        "error": "",
+                    }
             p = subprocess.run(
                 [interp, path],
                 input=stdin or "",
@@ -233,12 +286,18 @@ def format_run_result(result):
     return "\n".join(lines)
 
 
-def run_code(code, extra="", timeout=DEFAULT_TIMEOUT, interp=None):
+def run_code(code, extra="", timeout=DEFAULT_TIMEOUT, interp=None, compile_first=True):
     """Run `code` (plus optional `extra` appended, e.g. assertions) in a fresh
     subprocess. Returns (ok, output) where ok is True iff the process exited 0,
     and output is combined stdout+stderr.
     """
-    result = run_code_detail(code, extra=extra, timeout=timeout, interp=interp)
+    result = run_code_detail(
+        code,
+        extra=extra,
+        timeout=timeout,
+        interp=interp,
+        compile_first=compile_first,
+    )
     output = "\n".join(
         part for part in (
             result.get("stdout") or "",
@@ -248,3 +307,230 @@ def run_code(code, extra="", timeout=DEFAULT_TIMEOUT, interp=None):
         if part
     ).strip()
     return result.get("ok") is True, output
+
+
+def compile_code(code, timeout=8, interp=None):
+    """Syntax-compile Python code without executing it."""
+    interp = interp or sys.executable
+    fd, path = tempfile.mkstemp(suffix=".py")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(code)
+        try:
+            c = subprocess.run(
+                [interp, "-m", "py_compile", path],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            if c.returncode == 0:
+                return True, "compiled"
+            return False, ("compile failed\n" + ((c.stdout or "") + (c.stderr or "")).strip()).strip()
+        except subprocess.TimeoutExpired:
+            return False, "(timed out after %ss)" % timeout
+    finally:
+        os.unlink(path)
+
+
+def _combine(proc):
+    return ((proc.stdout or "") + (proc.stderr or "")).strip()
+
+
+def _missing(exe):
+    return False, "missing runtime/compiler: %s" % exe
+
+
+def _run_cmd(cmd, timeout, cwd=None):
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd)
+        return p.returncode == 0, _combine(p)
+    except FileNotFoundError:
+        return _missing(cmd[0])
+    except subprocess.TimeoutExpired:
+        return False, "(timed out after %ss)" % timeout
+
+
+def _run_javascript(code, extra, timeout, execute):
+    node = shutil.which("node")
+    if not node:
+        return _missing("node")
+    src = code + (("\n\n" + extra) if extra else "")
+    fd, path = tempfile.mkstemp(suffix=".js")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(src)
+        ok, out = _run_cmd([node, "--check", path], timeout)
+        if not ok or not execute:
+            return (ok, "compiled" if ok else ("compile failed\n" + out).strip())
+        return _run_cmd([node, path], timeout)
+    finally:
+        os.unlink(path)
+
+
+def _run_powershell(code, extra, timeout, execute):
+    exe = shutil.which("pwsh") or shutil.which("powershell")
+    if not exe:
+        return _missing("pwsh/powershell")
+    src = code + (("\n\n" + extra) if extra else "")
+    fd, path = tempfile.mkstemp(suffix=".ps1")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(src)
+        if not execute:
+            return True, "compiled"
+        return _run_cmd([exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path], timeout)
+    finally:
+        os.unlink(path)
+
+
+def _run_cpp(code, extra, timeout, execute):
+    compiler = shutil.which("g++") or shutil.which("clang++") or shutil.which("cl")
+    if not compiler:
+        return _missing("g++/clang++/cl")
+    src = code + (("\n\n" + extra) if extra else "")
+    with tempfile.TemporaryDirectory() as td:
+        source = os.path.join(td, "main.cpp")
+        exe = os.path.join(td, "main.exe" if os.name == "nt" else "main")
+        with open(source, "w", encoding="utf-8") as f:
+            f.write(src)
+        if os.path.basename(compiler).lower() == "cl.exe":
+            ok, out = _run_cmd([compiler, "/nologo", "/EHsc", source, "/Fe:" + exe], timeout, cwd=td)
+        else:
+            ok, out = _run_cmd([compiler, "-std=c++17", source, "-o", exe], timeout, cwd=td)
+        if not ok or not execute:
+            return (ok, "compiled" if ok else ("compile failed\n" + out).strip())
+        return _run_cmd([exe], timeout, cwd=td)
+
+
+def _run_csharp(code, extra, timeout, execute):
+    compiler = shutil.which("csc")
+    dotnet = shutil.which("dotnet")
+    src = code + (("\n\n" + extra) if extra else "")
+    with tempfile.TemporaryDirectory() as td:
+        source = os.path.join(td, "Program.cs")
+        exe = os.path.join(td, "Program.exe")
+        with open(source, "w", encoding="utf-8") as f:
+            f.write(src)
+        if compiler:
+            ok, out = _run_cmd([compiler, "/nologo", "/out:" + exe, source], timeout, cwd=td)
+            if not ok or not execute:
+                return (ok, "compiled" if ok else ("compile failed\n" + out).strip())
+            return _run_cmd([exe], timeout, cwd=td)
+        if dotnet:
+            project = os.path.join(td, "App.csproj")
+            with open(project, "w", encoding="utf-8") as f:
+                f.write('<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup></Project>')
+            ok, out = _run_cmd([dotnet, "build", project, "--nologo", "-v:q"], timeout, cwd=td)
+            if not ok or not execute:
+                return (ok, "compiled" if ok else ("compile failed\n" + out).strip())
+            return _run_cmd([dotnet, "run", "--project", project, "--no-build"], timeout, cwd=td)
+        return _missing("csc/dotnet")
+
+
+def run_language_code(code, language="python", extra="", timeout=8, interp=None, execute=True):
+    """Compile and optionally run code in a supported language."""
+    lang = normalize_language(language)
+    timeout = max(1, min(int(timeout or 8), 120))
+    if lang == "python":
+        if execute:
+            return run_code(code, extra, timeout=timeout, interp=interp, compile_first=True)
+        return compile_code(code, timeout=timeout, interp=interp)
+    if lang == "javascript":
+        return _run_javascript(code, extra, timeout, execute)
+    if lang == "powershell":
+        return _run_powershell(code, extra, timeout, execute)
+    if lang == "cpp":
+        return _run_cpp(code, extra, timeout, execute)
+    if lang == "csharp":
+        return _run_csharp(code, extra, timeout, execute)
+    return False, "unsupported language: %s" % language
+
+
+def _normalize_job(job, index, default_timeout):
+    if isinstance(job, str):
+        return {
+            "name": "job-%d" % (index + 1),
+            "language": "python",
+            "code": job,
+            "extra": "",
+            "timeout": default_timeout,
+            "execute": True,
+        }
+    if not isinstance(job, dict):
+        raise ValueError("job %d must be a string or object" % (index + 1))
+    code = job.get("code")
+    if not isinstance(code, str) or not code.strip():
+        raise ValueError("job %d is missing non-empty code" % (index + 1))
+    timeout = job.get("timeout", default_timeout)
+    try:
+        timeout = int(timeout)
+    except (TypeError, ValueError):
+        timeout = default_timeout
+    timeout = max(1, min(timeout, 120))
+    return {
+        "name": str(job.get("name") or "job-%d" % (index + 1)),
+        "language": normalize_language(job.get("language") or job.get("lang") or "python"),
+        "code": code,
+        "extra": str(job.get("extra") or job.get("check") or ""),
+        "timeout": timeout,
+        "execute": bool(job.get("execute", True)),
+    }
+
+
+def run_code_jobs(jobs, max_workers=4, default_timeout=8, interp=None):
+    """Compile and run many snippets in parallel.
+
+    jobs may be strings or dicts with code/name/language/extra/check/timeout/execute.
+    Returns a list of result dicts in input order.
+    """
+    if not isinstance(jobs, list):
+        raise ValueError("jobs must be a list")
+    if not jobs:
+        return []
+    max_workers = max(1, min(int(max_workers or 1), 16, len(jobs)))
+    default_timeout = max(1, min(int(default_timeout or 8), 120))
+    normalized = [_normalize_job(job, i, default_timeout) for i, job in enumerate(jobs)]
+    results = [None] * len(normalized)
+
+    def one(index, job):
+        started = time.time()
+        ok, out = run_language_code(
+            job["code"],
+            language=job["language"],
+            extra=job["extra"],
+            timeout=job["timeout"],
+            interp=interp,
+            execute=job["execute"],
+        )
+        return {
+            "index": index,
+            "name": job["name"],
+            "language": job["language"],
+            "ok": bool(ok),
+            "output": out,
+            "seconds": round(time.time() - started, 3),
+        }
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(one, i, job) for i, job in enumerate(normalized)]
+        for future in as_completed(futures):
+            result = future.result()
+            results[result["index"]] = result
+    return results
+
+
+def format_code_jobs(results):
+    passed = sum(1 for r in results if r.get("ok"))
+    lines = ["parallel code jobs: %d/%d passed" % (passed, len(results))]
+    for r in results:
+        status = "PASS" if r.get("ok") else "FAIL"
+        lines.append("[%s] %s [%s] (%.3fs)" % (
+            status,
+            r.get("name", "?"),
+            r.get("language", "python"),
+            r.get("seconds", 0),
+        ))
+        out = (r.get("output") or "").strip()
+        if out:
+            lines.append(out[:2000])
+    return "\n".join(lines)

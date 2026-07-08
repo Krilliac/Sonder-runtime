@@ -55,14 +55,14 @@ def test_trilobite_strict_true_errors_when_alias_missing_before_any_ollama_call(
     assert "not found" in out
 
 
-def test_should_learn_includes_code_and_cloud_tiers():
-    # Default LEARN_TIERS = code + both cloud tiers (teacher distillation).
+def test_should_learn_includes_all_tiers_by_default():
+    # Default LEARN_TIERS = all configured tiers.
+    assert server._should_learn("fast", True) is True
     assert server._should_learn("code", True) is True
+    assert server._should_learn("general", True) is True
     assert server._should_learn("cloud-code", True) is True
     assert server._should_learn("cloud-general", True) is True
-    # Mechanical tiers and learn=False never learn.
-    assert server._should_learn("fast", True) is False
-    assert server._should_learn("general", True) is False
+    # learn=False still opts out.
     assert server._should_learn("code", False) is False
     assert server._should_learn("cloud-code", False) is False
 
@@ -127,6 +127,23 @@ def test_serve_target_cloud_tier_is_clean_teacher():
     assert label == "cloud-code"
 
 
+def test_serve_target_treats_code_as_local():
+    model, cloud, augment, label = server._serve_target("code", None)
+    assert model == server.TIERS["code"]
+    assert cloud is False
+    assert augment is True
+    assert label == "code"
+
+
+def test_serve_target_cloud_detection_helper_detects_cloud_model_name(monkeypatch):
+    monkeypatch.setitem(server.TIERS, "code", "qwen3-coder:480b-cloud")
+    model, cloud, augment, label = server._serve_target("code", None)
+    assert model == "qwen3-coder:480b-cloud"
+    assert cloud is True
+    assert augment is True
+    assert label == "code"
+
+
 def test_serve_target_local_general_tier_answers_clean():
     # A non-code local tier runs that model but does not augment (only 'code' is student).
     model, cloud, augment, label = server._serve_target("general", None)
@@ -179,6 +196,143 @@ def test_trilobite_stats_runs_against_empty_db(monkeypatch, tmp_path):
     out = server.trilobite_stats()
     assert isinstance(out, str)
     assert "lessons:" in out
+
+
+def test_parallel_run_code_reports_mixed_results():
+    jobs = '[{"name":"ok","code":"print(2+2)"},{"name":"fail","code":"raise ValueError(\\"x\\")"}]'
+    out = server.parallel_run_code(jobs, max_workers=2, timeout=8)
+    assert "parallel code jobs: 1/2 passed" in out
+    assert "[PASS] ok" in out
+    assert "[FAIL] fail" in out
+
+
+def test_parallel_generate_run_uses_generated_code(monkeypatch):
+    def fake_make_generate(*args, **kwargs):
+        def gen(prompt, history=None):
+            return "```python\nprint('candidate')\n```"
+        return gen
+
+    monkeypatch.setattr(server, "_make_generate", fake_make_generate)
+    out = server.parallel_generate_run(
+        "write a hello program",
+        check="",
+        variants=2,
+        max_workers=2,
+        timeout=8,
+    )
+    assert "parallel generate/run: 2/2 passed" in out
+    assert "winner code:" in out
+    assert "print('candidate')" in out
+
+
+def test_parallel_generate_run_languages_spreads_languages(monkeypatch):
+    def fake_make_generate(*args, **kwargs):
+        def gen(prompt, history=None):
+            if "javascript" in prompt:
+                return "```javascript\nconsole.log('js')\n```"
+            return "```python\nprint('py')\n```"
+        return gen
+
+    calls = []
+
+    def fake_run_language_code(code, language, extra, timeout, execute=True):
+        calls.append((language, code))
+        return True, "%s ok" % language
+
+    monkeypatch.setattr(server, "_make_generate", fake_make_generate)
+    monkeypatch.setattr(server.grounding, "run_language_code", fake_run_language_code)
+    out = server.parallel_generate_run_languages(
+        "write tiny programs",
+        languages="python,javascript",
+        variants_per_language=1,
+        max_workers=2,
+    )
+    assert "parallel multi-language generate/run: 2/2 passed" in out
+    assert ("python", "print('py')") in calls
+    assert ("javascript", "console.log('js')") in calls
+
+
+def test_campaign_records_passing_interactions(monkeypatch):
+    def fake_trilobite(prompt, **kwargs):
+        return "```python\nprint('trilobite-ok')\n```\n\n[interaction_id: abc123]"
+
+    records = []
+    monkeypatch.setattr(server, "trilobite", fake_trilobite)
+    monkeypatch.setattr(
+        server.grounding,
+        "run_language_code",
+        lambda code, language, timeout=8, execute=True: (True, "trilobite-ok"),
+    )
+    monkeypatch.setattr(server, "record_outcome", lambda iid, signal: records.append((iid, signal)) or "recorded")
+
+    out = server.campaign_generate_compile_execute_record(
+        total=1,
+        languages="python",
+        max_workers=1,
+        repair_rounds=0,
+    )
+    assert "1/1 passed" in out
+    assert records == [("abc123", "tests_passed")]
+
+
+def test_campaign_repairs_then_records(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_trilobite(prompt, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return "```python\nprint('wrong')\n```\n\n[interaction_id: bad123]"
+        return "```python\nprint('trilobite-ok')\n```\n\n[interaction_id: feed123]"
+
+    outputs = iter([(True, "wrong"), (True, "trilobite-ok")])
+    records = []
+    monkeypatch.setattr(server, "trilobite", fake_trilobite)
+    monkeypatch.setattr(
+        server.grounding,
+        "run_language_code",
+        lambda code, language, timeout=8, execute=True: next(outputs),
+    )
+    monkeypatch.setattr(server, "record_outcome", lambda iid, signal: records.append((iid, signal)) or "recorded")
+
+    out = server.campaign_generate_compile_execute_record(
+        total=1,
+        languages="python",
+        max_workers=1,
+        repair_rounds=1,
+    )
+    assert "1/1 passed" in out
+    assert records == [("feed123", "tests_passed")]
+
+
+def test_campaign_records_terminal_failures(monkeypatch):
+    def fake_trilobite(prompt, **kwargs):
+        return "```python\nprint('wrong')\n```\n\n[interaction_id: bad123]"
+
+    records = []
+    monkeypatch.setattr(server, "trilobite", fake_trilobite)
+    monkeypatch.setattr(
+        server.grounding,
+        "run_language_code",
+        lambda code, language, timeout=8, execute=True: (True, "wrong"),
+    )
+    monkeypatch.setattr(server, "record_outcome", lambda iid, signal: records.append((iid, signal)) or "recorded")
+
+    out = server.campaign_generate_compile_execute_record(
+        total=1,
+        languages="python",
+        max_workers=1,
+        repair_rounds=0,
+        record_failures=True,
+    )
+    assert "0/1 passed" in out
+    assert "0 recorded, 1 failed-recorded" in out
+    assert records == [("bad123", "failed")]
+
+
+def test_learn_tiers_reports_all_defaults():
+    out = server.learn_tiers()
+    for tier in ("fast", "code", "general", "cloud-code", "cloud-general"):
+        assert "%s: on" % tier in out
 
 
 def test_format_trace_contains_model_lessons_and_prompt():
