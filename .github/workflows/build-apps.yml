@@ -2,8 +2,8 @@ name: build-apps
 
 # Compiles the trilobite mobile/desktop client for Android, Linux, Windows and
 # macOS. Every run uploads installable artifacts (downloadable from the run's
-# "Summary" page). Pushing a tag like `app-v1.0.0` additionally publishes a
-# GitHub Release with permanent download links.
+# "Summary" page). Main builds also refresh the `app-latest` GitHub Release,
+# and pushing a tag like `app-v1.0.0` publishes a versioned Release.
 #
 # The repo keeps only the Dart sources (app/lib, app/pubspec.yaml, app/test).
 # The native project scaffolding (android/, linux/, windows/, macos/) is
@@ -150,10 +150,10 @@ jobs:
           if-no-files-found: error
 
   release:
-    # Only when a tag like app-v1.0.0 is pushed: gather every platform build
-    # and publish a GitHub Release with permanent download links.
+    # Gather every platform build and publish permanent download links. Main
+    # runs update `app-latest`; app-v* tags create versioned releases.
     needs: [android, linux, windows, macos]
-    if: startsWith(github.ref, 'refs/tags/app-v')
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/app-v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -162,6 +162,11 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/app-v') && github.ref_name || 'app-latest' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/app-v') && github.ref_name || 'Latest app builds' }}
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/app-v') }}
+          make_latest: ${{ startsWith(github.ref, 'refs/tags/app-v') }}
+          overwrite_files: true
           files: dist/**/*
           generate_release_notes: true
           body: |
