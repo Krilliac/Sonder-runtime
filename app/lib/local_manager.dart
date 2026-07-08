@@ -51,7 +51,7 @@ class LocalManager {
     }
     final system = bundledSystemDirectory();
     if (!await system.exists()) {
-      return LocalActionResult(
+      return const LocalActionResult(
         false,
         'No bundled local-system folder found next to the app.',
       );
@@ -84,7 +84,7 @@ class LocalManager {
 
   static Future<LocalActionResult> startEndlessTraining() async {
     if (!canRunLocalTools) {
-      return LocalActionResult(false, 'Training launcher is desktop-only.');
+      return const LocalActionResult(false, 'Training launcher is desktop-only.');
     }
     final system = bundledSystemDirectory();
     if (!await system.exists()) {
