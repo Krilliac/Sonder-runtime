@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'api.dart';
 import 'local_manager.dart';
@@ -15,7 +16,10 @@ class SystemScreen extends StatefulWidget {
 }
 
 class _SystemScreenState extends State<SystemScreen> {
+  final _customCommand = TextEditingController(text: '/diagnostics');
+  final _trainCount = TextEditingController(text: '10');
   SystemInfo? _info;
+  LocalInstallInfo? _localInfo;
   String? _message;
   bool _loading = false;
   bool _working = false;
@@ -24,6 +28,13 @@ class _SystemScreenState extends State<SystemScreen> {
         baseUrl: widget.settings.serverUrl,
         apiKey: widget.settings.apiKey,
       );
+
+  @override
+  void dispose() {
+    _customCommand.dispose();
+    _trainCount.dispose();
+    super.dispose();
+  }
 
   @override
   void initState() {
@@ -38,9 +49,22 @@ class _SystemScreenState extends State<SystemScreen> {
     });
     try {
       final info = await _api.systemInfo();
-      setState(() => _info = info);
+      final localInfo = await LocalManager.inspect();
+      if (!mounted) return;
+      setState(() {
+        _info = info;
+        _localInfo = localInfo;
+      });
     } on TrilobiteException catch (e) {
-      setState(() => _message = e.message);
+      final localInfo = await LocalManager.inspect();
+      if (!mounted) return;
+      setState(() {
+        _localInfo = localInfo;
+        _message = e.message;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _message = e.toString());
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -64,13 +88,15 @@ class _SystemScreenState extends State<SystemScreen> {
   }
 
   Future<void> _sendCommand(String command) async {
+    final text = command.trim();
+    if (text.isEmpty) return;
     setState(() {
       _working = true;
       _message = null;
     });
     try {
       final reply = await _api.chat([
-        ChatMessage(role: Role.user, content: command),
+        ChatMessage(role: Role.user, content: text),
       ], model: widget.settings.model);
       setState(() => _message = reply);
     } on TrilobiteException catch (e) {
@@ -80,9 +106,22 @@ class _SystemScreenState extends State<SystemScreen> {
     }
   }
 
+  String _trainCommand() {
+    final parsed = int.tryParse(_trainCount.text.trim()) ?? 10;
+    final count = parsed.clamp(1, 500);
+    return '/train $count';
+  }
+
+  Future<void> _copy(String text) async {
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!mounted) return;
+    setState(() => _message = 'Copied to clipboard.');
+  }
+
   @override
   Widget build(BuildContext context) {
     final info = _info;
+    final localInfo = _localInfo;
     return Scaffold(
       appBar: AppBar(
         title: const Text('System'),
@@ -97,6 +136,49 @@ class _SystemScreenState extends State<SystemScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          if (localInfo != null) ...[
+            _Section(
+              title: 'Install',
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _StatusRow(
+                    label: 'Platform',
+                    value: localInfo.platform,
+                    ok: localInfo.canLaunch,
+                  ),
+                  _StatusRow(
+                    label: 'Local system',
+                    value: localInfo.systemExists
+                        ? localInfo.systemDir
+                        : 'Not bundled',
+                    ok: localInfo.systemExists,
+                  ),
+                  _StatusRow(
+                    label: 'Shared memory',
+                    value: localInfo.sharedHome,
+                    ok: true,
+                    onCopy: () => _copy(localInfo.sharedHome),
+                  ),
+                  _StatusRow(
+                    label: 'Local server',
+                    value: localInfo.defaultServerReachable
+                        ? 'Reachable on 127.0.0.1:11435'
+                        : 'Not detected on 127.0.0.1:11435',
+                    ok: localInfo.defaultServerReachable,
+                  ),
+                  _StatusRow(
+                    label: 'Updater',
+                    value: localInfo.gitCheckout
+                        ? 'Git pull enabled'
+                        : 'First update will replace bundled folder from Git',
+                    ok: true,
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+          ],
           _Section(
             title: 'Local Runtime',
             child: Wrap(
@@ -139,15 +221,60 @@ class _SystemScreenState extends State<SystemScreen> {
                   icon: const Icon(Icons.query_stats),
                   label: const Text('Stats'),
                 ),
+                SizedBox(
+                  width: 120,
+                  child: TextField(
+                    controller: _trainCount,
+                    enabled: !_working,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      labelText: 'Train',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
                 OutlinedButton.icon(
-                  onPressed: _working ? null : () => _sendCommand('/train 10'),
+                  onPressed:
+                      _working ? null : () => _sendCommand(_trainCommand()),
                   icon: const Icon(Icons.school_outlined),
-                  label: const Text('Train 10'),
+                  label: const Text('Run'),
                 ),
                 OutlinedButton.icon(
                   onPressed: _working ? null : () => _sendCommand('/help'),
                   icon: const Icon(Icons.help_outline),
                   label: const Text('Help'),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          _Section(
+            title: 'Command',
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _customCommand,
+                    enabled: !_working,
+                    autocorrect: false,
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      hintText: '/diagnostics',
+                      border: OutlineInputBorder(),
+                    ),
+                    onSubmitted: (_) {
+                      if (!_working) _sendCommand(_customCommand.text);
+                    },
+                  ),
+                ),
+                const SizedBox(width: 8),
+                FilledButton.icon(
+                  onPressed: _working
+                      ? null
+                      : () => _sendCommand(_customCommand.text.trim()),
+                  icon: const Icon(Icons.terminal),
+                  label: const Text('Send'),
                 ),
               ],
             ),
@@ -163,6 +290,31 @@ class _SystemScreenState extends State<SystemScreen> {
           const SizedBox(height: 12),
           if (info != null) ...[
             _Section(title: 'Status', child: _OutputText(info.status)),
+            const SizedBox(height: 12),
+            _Section(
+              title: 'Server State',
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (info.dbPath.isNotEmpty)
+                    _StatusRow(
+                      label: 'Database',
+                      value: info.dbPath,
+                      ok: true,
+                      onCopy: () => _copy(info.dbPath),
+                    ),
+                  if (info.stateHome.isNotEmpty)
+                    _StatusRow(
+                      label: 'Home',
+                      value: info.stateHome,
+                      ok: true,
+                      onCopy: () => _copy(info.stateHome),
+                    ),
+                  if (info.dbPath.isEmpty && info.stateHome.isEmpty)
+                    const _OutputText('Server did not report state paths.'),
+                ],
+              ),
+            ),
             const SizedBox(height: 12),
             _Section(title: 'Learning', child: _OutputText(info.learnTiers)),
             const SizedBox(height: 12),
@@ -190,10 +342,58 @@ class _SystemScreenState extends State<SystemScreen> {
           const SizedBox(height: 24),
           Text(
             'Desktop builds look for a bundled local-system folder next to the app. '
-            'Runtime memory is shared through ${LocalManager.sharedHomePath()}. '
+            'Runtime memory is shared through '
+            '${localInfo?.sharedHome ?? LocalManager.sharedHomePath()}. '
             'Android can connect to a LAN/hosted server, but cannot launch the Python server itself.',
             style: Theme.of(context).textTheme.bodySmall,
           ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StatusRow extends StatelessWidget {
+  final String label;
+  final String value;
+  final bool ok;
+  final VoidCallback? onCopy;
+
+  const _StatusRow({
+    required this.label,
+    required this.value,
+    required this.ok,
+    this.onCopy,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final color = ok
+        ? Theme.of(context).colorScheme.primary
+        : Theme.of(context).colorScheme.error;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            ok ? Icons.check_circle_outline : Icons.info_outline,
+            color: color,
+            size: 18,
+          ),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 112,
+            child: Text(label, style: Theme.of(context).textTheme.labelLarge),
+          ),
+          Expanded(child: SelectableText(value)),
+          if (onCopy != null)
+            IconButton(
+              tooltip: 'Copy',
+              visualDensity: VisualDensity.compact,
+              onPressed: onCopy,
+              icon: const Icon(Icons.copy, size: 18),
+            ),
         ],
       ),
     );

@@ -436,6 +436,8 @@ class Handler(BaseHTTPRequestHandler):
                 "status": server.status(),
                 "stats": server.trilobite_stats(),
                 "learn_tiers": server.learn_tiers(),
+                "db_path": getattr(server, "_DB_PATH", ""),
+                "state_home": str(server.trilobite_paths.default_home()),
                 "models": [
                     {"id": "trilobite", "owned_by": "local"},
                     *[
