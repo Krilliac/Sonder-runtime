@@ -100,6 +100,14 @@ def test_make_generate_adds_local_runtime_options(monkeypatch):
     }
 
 
+def test_local_model_options_clamps_native_context(monkeypatch):
+    monkeypatch.setenv("TRILOBITE_NATIVE_CONTEXT_MAX", "256k")
+
+    opts = server._local_model_options(0.2, 10, 1000000)
+
+    assert opts["num_ctx"] == 256000
+
+
 def test_make_generate_cloud_omits_local_runtime_options(monkeypatch):
     seen = {}
 
@@ -244,6 +252,8 @@ def test_context_health_reports_session_and_memory(monkeypatch, tmp_path):
     assert data["outcomes"] == 1
     assert data["context_percent"] > 0
     assert data["context_bar"].startswith("[")
+    assert data["native_context_limit"] <= data["context_limit"]
+    assert data["context_mode"] in ("native", "virtual")
 
 
 def test_context_health_formats_console_meter(monkeypatch, tmp_path):
@@ -251,7 +261,150 @@ def test_context_health_formats_console_meter(monkeypatch, tmp_path):
     out = server.context_health()
     assert "trilobite context health" in out
     assert "context [" in out
+    assert "native" in out
     assert "memory  [" in out
+
+
+def test_set_context_size_selects_virtual_context(monkeypatch):
+    monkeypatch.setenv("TRILOBITE_NATIVE_CONTEXT_MAX", "256k")
+    old = server.SESSION_NUM_CTX
+    try:
+        out = server.set_context_size("1m")
+        assert server.SESSION_NUM_CTX == 1000000
+        assert "mode: virtual" in out
+        assert server._context_native() == 256000
+    finally:
+        server.SESSION_NUM_CTX = old
+
+
+def test_improvement_report_flags_ungrounded_learning(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
+    conn = server._open_db()
+    try:
+        memory_store.log_interaction(
+            conn,
+            "i1",
+            "build a parser",
+            "",
+            "use appropriate handling",
+            "code",
+        )
+    finally:
+        conn.close()
+
+    report = server.improvement_report_data()
+    text = server.format_improvement_report(report)
+
+    assert report["interactions"] == 1
+    assert report["outcomes"] == 0
+    assert any(i["area"] == "learning" for i in report["issues"])
+    assert "trilobite improvement report" in text
+    assert "next improvements:" in text
+
+
+def test_improvement_report_honors_cloud_opt_in(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
+    monkeypatch.setenv("TRILOBITE_ALLOW_CLOUD", "1")
+
+    report = server.improvement_report_data()
+
+    assert report["cloud_allowed"] is True
+    assert not any(i["area"] == "deployment" for i in report["issues"])
+
+
+def test_master_orchestrate_asks_for_execution_mode():
+    out = server.master_orchestrate("build a parser", mode="ask", agents=2)
+
+    assert "Choose execution mode" in out
+    assert "inline" in out
+    assert "delegate" in out
+
+
+def test_master_orchestrate_delegates_and_audits(monkeypatch):
+    calls = []
+
+    def fake_offload(prompt, **kwargs):
+        calls.append(prompt)
+        if "Audit these delegated outputs" in prompt or "master orchestrator" in prompt.lower():
+            return "audited merge"
+        return "agent output"
+
+    monkeypatch.setattr(server, "offload", fake_offload)
+
+    out = server.master_orchestrate("find risks", mode="delegate", agents=2)
+
+    assert "master orchestration complete" in out
+    assert "audited merge" in out
+    assert len(calls) == 3
+    assert "active agents: 0" in server.master_status()
+
+
+def test_admin_register_login_and_cot_denial(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "admin.db"))
+
+    registered = server.admin_register("owner", "password123")
+    login = server.admin_login("owner", "password123")
+
+    assert "role=admin" in registered
+    assert "token:" in login
+    token = login.split("token: ", 1)[1].strip()
+    assert "owner role=admin" in server.admin_whoami(token)
+    assert "hidden private chain-of-thought cannot be exposed" in (
+        server.admin_private_chain_of_thought(token)
+    )
+
+
+def test_admin_accounts_requires_admin_token(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "admin.db"))
+
+    assert server.admin_accounts("").startswith("ERROR:")
+    server.admin_register("owner", "password123")
+    login = server.admin_login("owner", "password123")
+    token = login.split("token: ", 1)[1].strip()
+
+    assert "owner role=admin" in server.admin_accounts(token)
+
+
+def test_file_tools_available_without_admin_inside_guarded_root(monkeypatch, tmp_path):
+    monkeypatch.setattr(server.file_ops, "workspace_root", lambda: tmp_path)
+
+    out = server.file_write("demo.txt", "hello")
+    read = server.file_read("demo.txt")
+
+    assert "file write" in out
+    assert "hello" in read
+
+
+def test_file_tools_reject_outside_root_without_approval(monkeypatch, tmp_path):
+    root = tmp_path / "root"
+    outside = tmp_path / "outside.txt"
+    root.mkdir()
+    outside.write_text("secret", encoding="utf-8")
+    monkeypatch.setattr(server.file_ops, "workspace_root", lambda: root)
+
+    out = server.file_read(str(outside))
+
+    assert out.startswith("ERROR:")
+    assert "outside allowed roots" in out
+
+
+def test_file_tools_allow_extra_root_with_approval(monkeypatch, tmp_path):
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    target = outside / "ok.txt"
+    target.write_text("ok", encoding="utf-8")
+    monkeypatch.setattr(server.file_ops, "workspace_root", lambda: root)
+    monkeypatch.setenv("TRILOBITE_FILE_APPROVAL_CODE", "let-me")
+
+    out = server.file_read(
+        str(target),
+        approval="let-me",
+        extra_roots=str(outside),
+    )
+
+    assert "ok" in out
 
 
 def test_parallel_run_code_reports_mixed_results():

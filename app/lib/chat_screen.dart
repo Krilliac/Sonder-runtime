@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:ui';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -27,6 +30,8 @@ class _ChatScreenState extends State<ChatScreen> {
   final _scroll = ScrollController();
   final _inputFocus = FocusNode();
   bool _sending = false;
+  Timer? _statusTimer;
+  SystemInfo? _systemInfo;
 
   // The model/tier to answer with. "trilobite" is the local self-improving student;
   // other entries route to that model on the server. Populated from
@@ -39,6 +44,9 @@ class _ChatScreenState extends State<ChatScreen> {
     '/stats': 'Show learning stats',
     '/context': 'Show context health',
     '/quality': 'Audit memory quality',
+    '/improve': 'Show next improvements',
+    '/agents': 'Show live agent activity',
+    '/master': 'Choose inline or delegated execution',
     '/help': 'List commands',
     '/train': 'Practice & self-learn',
     '/pass': 'Mark last answer good',
@@ -57,6 +65,11 @@ class _ChatScreenState extends State<ChatScreen> {
     super.initState();
     _model = widget.settings.model;
     _refreshModels();
+    _refreshStatus();
+    _statusTimer = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) => _refreshStatus(),
+    );
   }
 
   Future<void> _refreshModels() async {
@@ -78,11 +91,22 @@ class _ChatScreenState extends State<ChatScreen> {
     widget.settings.save();
   }
 
+  Future<void> _refreshStatus() async {
+    try {
+      final info = await _api.systemInfo();
+      if (!mounted) return;
+      setState(() => _systemInfo = info);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _systemInfo = null);
+    }
+  }
+
   Future<void> _recordPassive(String command) async {
     try {
       await _api.chat([
         ChatMessage(role: Role.user, content: command),
-      ], model: _model);
+      ], model: _model, contextSize: widget.settings.contextSize);
     } catch (_) {
       // Passive learning should never interrupt the chat UI.
     }
@@ -90,6 +114,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    _statusTimer?.cancel();
     _input.dispose();
     _scroll.dispose();
     _inputFocus.dispose();
@@ -124,7 +149,11 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       // Send everything except the trailing pending placeholder.
       final history = _messages.sublist(0, _messages.length - 1);
-      final reply = await _api.chat(history, model: _model);
+      final reply = await _api.chat(
+        history,
+        model: _model,
+        contextSize: widget.settings.contextSize,
+      );
       setState(() {
         _messages[_messages.length - 1] = ChatMessage(
           role: Role.assistant,
@@ -142,6 +171,7 @@ class _ChatScreenState extends State<ChatScreen> {
     } finally {
       if (mounted) {
         setState(() => _sending = false);
+        _refreshStatus();
         _scrollToEnd();
         _inputFocus.requestFocus();
       }
@@ -276,6 +306,7 @@ class _ChatScreenState extends State<ChatScreen> {
             sending: _sending,
             onSend: () => _send(),
           ),
+          _LiveStatusBar(info: _systemInfo, model: _model),
         ],
       ),
     );
@@ -338,6 +369,58 @@ class _Suggestion extends StatelessWidget {
     return ActionChip(
       label: Text(text),
       onPressed: () => onTap(text),
+    );
+  }
+}
+
+class _LiveStatusBar extends StatelessWidget {
+  final SystemInfo? info;
+  final String model;
+
+  const _LiveStatusBar({required this.info, required this.model});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final contextInfo = info?.context;
+    final agentInfo = info?.agents;
+    final project = contextInfo?.project ?? 'unknown';
+    final projectText = project == 'none' ? 'project: none' : 'project: $project';
+    final path = info?.stateHome ?? '';
+    final latest = (agentInfo?.agents.isNotEmpty ?? false)
+        ? '${agentInfo!.agents.first.id}: ${agentInfo!.agents.first.activity}'
+        : ((agentInfo?.events.isNotEmpty ?? false)
+            ? agentInfo!.events.last
+            : 'idle');
+    final parts = [
+      'ctx ${(contextInfo?.contextPercent ?? 0).toStringAsFixed(1)}%',
+      'native ${contextInfo?.nativeContextLimit ?? 0}',
+      '${contextInfo?.contextMode ?? 'native'}',
+      'agents ${agentInfo?.activeAgents ?? 0}',
+      projectText,
+      'tokens ${agentInfo?.tokensIn ?? 0}/${agentInfo?.tokensOut ?? 0}',
+      'model $model',
+      if (path.isNotEmpty) path,
+      latest,
+    ];
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest.withValues(alpha: 0.65),
+        border: Border(top: BorderSide(color: cs.outlineVariant)),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Text(
+          parts.join('   |   '),
+          maxLines: 1,
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: cs.onSurfaceVariant,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+        ),
+      ),
     );
   }
 }

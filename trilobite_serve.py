@@ -20,6 +20,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import server
+import admin_auth
 import grounding
 import code_runner
 import training_tasks
@@ -32,12 +33,17 @@ DEFAULT_PORT = 11435
 # Auth + bind config. Empty API_KEY = auth disabled (local-only default).
 API_KEY = os.environ.get("TRILOBITE_API_KEY", "")
 HOST = os.environ.get("TRILOBITE_HOST", "127.0.0.1")
+REQUIRE_ACCOUNT = os.environ.get("TRILOBITE_REQUIRE_ACCOUNT", "").strip().lower() in (
+    "1", "true", "yes", "on"
+)
 
 # Server state (module globals, single-user local — mirrors trilobite_repl.py).
 TRACE = False
 STRICT = None  # None = env default (server._STRICT_DEFAULT)
 LAST_IID = None
 LAST_RESPONSE = None  # full last assistant turn (with footer), for /run
+CURRENT_ACCOUNT = None
+CURRENT_TOKEN = ""
 
 TRAIN_DEFAULT_N = 3
 
@@ -59,6 +65,7 @@ LIVE_RELOAD_MODULES = [
     "feedback",
     "emotion_vectors",
     "web_tools",
+    "admin_auth",
 ]
 
 HELP_TEXT = """commands:
@@ -67,8 +74,27 @@ HELP_TEXT = """commands:
   /strict [on|off]   toggle strict mode (bare = on); pins to the trilobite alias
   /stats             show trilobite's learning stats
   /context           show context, session, and memory health meters
+  /contextsize [N]   show/set requested context (8k..1m; native num_ctx is clamped)
   /quality           audit lesson quality and duplicate rows
   /qualityfix [apply] dry-run or apply exact duplicate lesson cleanup
+  /improve           show the next system improvement checklist
+  /master [mode] ... run master orchestration: ask, inline, or delegate
+  /agents            show live master/subagent activity
+  /register u p      create account (first account becomes admin)
+  /login u p         login for admin/debug commands
+  /whoami            show current account
+  /admin             show admin status
+  /accounts          list accounts (admin)
+  /setaccount ...    admin account edits: user role= tier= dev_flags= banned=
+  /debug             inspect safe debug state
+  /cot               denied: hidden private chain-of-thought is not exposed
+  /filepolicy        show file access roots and bypass controls
+  /files [query]     find files under guarded roots
+  /read <path>       read a guarded file
+  /write <p> <text>  create a guarded file
+  /append <p> <text> append to a guarded file
+  /edit <p>|<old>|<new> replace text in a guarded file
+  /delete <path>     dry-run delete; output shows required confirm string
   /pass, /good       record the last answer as tests_passed
   /accept,/used      record the last answer as accepted/used
   /copied,/edited    record copy/edit passive learning signals
@@ -95,6 +121,29 @@ def check_auth(auth_header, api_key):
     return False
 
 
+def _bearer_token(auth_header):
+    auth_header = auth_header or ""
+    if auth_header.startswith("Bearer "):
+        return auth_header.split(None, 1)[1].strip()
+    return auth_header.strip()
+
+
+def _auth_account(auth_header):
+    token = _bearer_token(auth_header)
+    if not token or token == API_KEY:
+        return None
+    return server._admin_account_from_token(token)
+
+
+def _authorized(auth_header):
+    account = _auth_account(auth_header)
+    if REQUIRE_ACCOUNT:
+        return account is not None or (bool(API_KEY) and check_auth(auth_header, API_KEY))
+    if check_auth(auth_header, API_KEY):
+        return True
+    return account is not None or not API_KEY
+
+
 def _strip_footer(text):
     idx = text.find(server.FOOTER_PREFIX)
     if idx == -1:
@@ -103,13 +152,14 @@ def _strip_footer(text):
 
 
 def _maybe_live_reload():
-    global server, grounding, training_tasks, intents, feedback
+    global server, grounding, training_tasks, intents, feedback, admin_auth
     modules = live_reload.reload_changed_modules(LIVE_RELOAD_MODULES)
     server = modules.get("server", server)
     grounding = modules.get("grounding", grounding)
     training_tasks = modules.get("training_tasks", training_tasks)
     intents = modules.get("intents", intents)
     feedback = modules.get("feedback", feedback)
+    admin_auth = modules.get("admin_auth", admin_auth)
 
 
 def _on_off(arg, current):
@@ -234,7 +284,7 @@ def _do_train(n):
 
 def _handle_slash(content):
     """Return response text if `content` is a recognized slash command, else None."""
-    global TRACE, STRICT, LAST_IID
+    global TRACE, STRICT, LAST_IID, CURRENT_ACCOUNT, CURRENT_TOKEN
 
     stripped = (content or "").strip()
     if not stripped.startswith("/"):
@@ -250,10 +300,99 @@ def _handle_slash(content):
         return server.trilobite_stats()
     if cmd == "/context":
         return server.context_health()
+    if cmd in ("/contextsize", "/ctxsize"):
+        if arg.strip():
+            return server.set_context_size(arg.strip())
+        return server.context_policy_status()
     if cmd == "/quality":
         return server.memory_quality_report()
     if cmd == "/qualityfix":
         return server.memory_quality_repair(apply=(arg.strip().lower() == "apply"))
+    if cmd in ("/improve", "/improvements"):
+        return server.system_improvement_report()
+    if cmd in ("/agents", "/masterstatus"):
+        return server.master_status()
+    if cmd == "/register":
+        parts2 = arg.split(None, 1)
+        if len(parts2) != 2:
+            return "usage: /register <username> <password>"
+        return server.admin_register(parts2[0], parts2[1])
+    if cmd == "/login":
+        parts2 = arg.split(None, 1)
+        if len(parts2) != 2:
+            return "usage: /login <username> <password>"
+        out = server.admin_login(parts2[0], parts2[1])
+        marker = "token: "
+        if marker in out and not out.startswith("ERROR:"):
+            CURRENT_TOKEN = out.split(marker, 1)[1].strip().splitlines()[0]
+            CURRENT_ACCOUNT = server._admin_account_from_token(CURRENT_TOKEN)
+        return out
+    if cmd == "/whoami":
+        return server.admin_whoami(CURRENT_TOKEN)
+    if cmd == "/admin":
+        return server.admin_status(CURRENT_TOKEN)
+    if cmd == "/accounts":
+        return server.admin_accounts(CURRENT_TOKEN)
+    if cmd == "/setaccount":
+        parts2 = arg.split()
+        if not parts2:
+            return "usage: /setaccount <username> role=developer tier=pro dev_flags=x banned=false"
+        username = parts2[0]
+        kv = {}
+        for item in parts2[1:]:
+            if "=" in item:
+                k, v = item.split("=", 1)
+                kv[k] = v
+        return server.admin_set_account(
+            token=CURRENT_TOKEN,
+            username=username,
+            role=kv.get("role", ""),
+            tier=kv.get("tier", ""),
+            dev_flags=kv.get("dev_flags", ""),
+            banned=kv.get("banned", ""),
+        )
+    if cmd in ("/debug", "/inspect"):
+        return server.debug_inspect(CURRENT_TOKEN)
+    if cmd in ("/cot", "/chainofthought", "/thoughts"):
+        return server.admin_private_chain_of_thought(CURRENT_TOKEN)
+    if cmd == "/filepolicy":
+        return server.file_policy(token=CURRENT_TOKEN)
+    if cmd in ("/files", "/find"):
+        return server.file_find(query=arg.strip() or "*", token=CURRENT_TOKEN)
+    if cmd == "/read":
+        return server.file_read(path=arg.strip(), token=CURRENT_TOKEN)
+    if cmd in ("/write", "/append"):
+        parts2 = arg.split(None, 1)
+        if len(parts2) != 2:
+            return "usage: %s <path> <text>" % cmd
+        return server.file_write(
+            path=parts2[0],
+            content=parts2[1],
+            mode="append" if cmd == "/append" else "create",
+            token=CURRENT_TOKEN,
+        )
+    if cmd == "/edit":
+        pieces = arg.split("|", 2)
+        if len(pieces) != 3:
+            return "usage: /edit <path>|<old>|<new>"
+        return server.file_edit(
+            path=pieces[0].strip(),
+            old=pieces[1],
+            new=pieces[2],
+            token=CURRENT_TOKEN,
+        )
+    if cmd == "/delete":
+        return server.file_delete(path=arg.strip(), dry_run=True, token=CURRENT_TOKEN)
+    if cmd == "/master":
+        text = arg.strip()
+        mode = "ask"
+        task = text
+        if text:
+            parts = text.split(None, 1)
+            if parts[0].lower() in ("ask", "inline", "master", "delegate", "delegated", "agents", "parallel"):
+                mode = parts[0].lower()
+                task = parts[1] if len(parts) > 1 else ""
+        return server.master_orchestrate(task=task, mode=mode)
     if cmd in ("/pass", "/good"):
         if LAST_IID:
             msg = server.record_outcome(LAST_IID, "tests_passed")
@@ -371,11 +510,14 @@ def _model_to_tier(model):
     return None
 
 
-def _run_prompt(prompt, history=None, tier=None):
+def _run_prompt(prompt, history=None, tier=None, context_size=""):
     """Call the real trilobite loop with the UI's prior turns; returns UI text."""
     global LAST_IID, LAST_RESPONSE
 
-    out = server.answer_with_history(prompt, history, trace=TRACE, strict=STRICT, tier=tier)
+    out = server.answer_with_history(
+        prompt, history, trace=TRACE, strict=STRICT, tier=tier,
+        context_size=context_size,
+    )
     if out.startswith("ERROR"):
         return out
     LAST_IID = server.parse_interaction_id(out)
@@ -437,10 +579,24 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_json_payload(self, payload, status=200):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self._cors()
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _read_json(self):
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        raw = self.rfile.read(length) if length else b"{}"
+        return json.loads(raw.decode("utf-8") or "{}")
+
     def do_GET(self):
         _maybe_live_reload()
         if self.path.rstrip("/") == "/v1/models":
-            if not check_auth(self.headers.get("Authorization", ""), API_KEY):
+            if not _authorized(self.headers.get("Authorization", "")):
                 self._send_auth_error()
                 return
             # Advertise the local student plus every configured tier, so a client can
@@ -463,16 +619,22 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if self.path.rstrip("/") == "/v1/trilobite/status":
-            if not check_auth(self.headers.get("Authorization", ""), API_KEY):
+            auth_header = self.headers.get("Authorization", "")
+            if not _authorized(auth_header):
                 self._send_auth_error()
                 return
+            account = _auth_account(auth_header)
             payload = {
                 "status": server.status(),
                 "stats": server.trilobite_stats(),
                 "learn_tiers": server.learn_tiers(),
+                "improvements": server.system_improvement_report(),
                 "context": server.context_health_data(),
+                "context_policy": server.context_policy.policy(server.SESSION_NUM_CTX),
+                "agents": server.master_orchestrator.snapshot(),
                 "db_path": getattr(server, "_DB_PATH", ""),
                 "state_home": str(server.trilobite_paths.default_home()),
+                "account": account or {},
                 "models": [
                     {"id": "trilobite", "owned_by": "local"},
                     *[
@@ -500,20 +662,68 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         _maybe_live_reload()
-        if self.path.rstrip("/") != "/v1/chat/completions":
+        path = self.path.rstrip("/")
+        if path == "/v1/trilobite/register":
+            try:
+                req = self._read_json()
+                out = server.admin_register(req.get("username", ""), req.get("password", ""))
+                self._send_json_payload({"ok": not out.startswith("ERROR:"), "message": out})
+            except Exception as e:
+                self._send_json_payload({"ok": False, "message": str(e)}, status=400)
+            return
+        if path == "/v1/trilobite/login":
+            try:
+                req = self._read_json()
+                out = server.admin_login(req.get("username", ""), req.get("password", ""))
+                if out.startswith("ERROR:"):
+                    self._send_json_payload({"ok": False, "message": out}, status=401)
+                    return
+                token = out.split("token: ", 1)[1].strip().splitlines()[0]
+                account = server._admin_account_from_token(token)
+                self._send_json_payload({"ok": True, "token": token, "account": account})
+            except Exception as e:
+                self._send_json_payload({"ok": False, "message": str(e)}, status=400)
+            return
+        if path == "/v1/trilobite/admin/account":
+            auth_header = self.headers.get("Authorization", "")
+            account = _auth_account(auth_header)
+            ok, msg = admin_auth.require(account, "admin")
+            if not ok:
+                self._send_json_payload({"ok": False, "message": msg}, status=403)
+                return
+            req = self._read_json()
+            out = server.admin_set_account(
+                token=_bearer_token(auth_header),
+                username=req.get("username", ""),
+                role=req.get("role", ""),
+                tier=req.get("tier", ""),
+                dev_flags=req.get("dev_flags", ""),
+                banned=str(req.get("banned", "")),
+            )
+            self._send_json_payload({"ok": not out.startswith("ERROR:"), "message": out})
+            return
+        if path != "/v1/chat/completions":
             self.send_response(404)
             self._cors()
             self.end_headers()
             return
 
-        if not check_auth(self.headers.get("Authorization", ""), API_KEY):
+        auth_header = self.headers.get("Authorization", "")
+        if not _authorized(auth_header):
             self._send_auth_error()
+            return
+        account = _auth_account(auth_header)
+        conn = server._open_db()
+        try:
+            ok, msg = admin_auth.rate_limit(conn, account)
+        finally:
+            conn.close()
+        if not ok:
+            self._send_json_payload({"error": {"message": msg, "type": "rate_limit"}}, status=429)
             return
 
         try:
-            length = int(self.headers.get("Content-Length", 0) or 0)
-            raw = self.rfile.read(length) if length else b"{}"
-            req = json.loads(raw.decode("utf-8") or "{}")
+            req = self._read_json()
         except Exception as e:
             self._send_error_completion("ERROR parsing request body: %s" % e, stream=False)
             return
@@ -521,6 +731,7 @@ class Handler(BaseHTTPRequestHandler):
         messages = req.get("messages", [])
         stream = bool(req.get("stream", False))
         model = req.get("model", "trilobite")
+        context_size = req.get("context_size", "")
         prompt = _last_user_message(messages)
         history = _history_from_messages(messages)
 
@@ -531,7 +742,7 @@ class Handler(BaseHTTPRequestHandler):
             if reply is None:
                 reply = _handle_intent(prompt)
             content = reply if reply is not None else _run_prompt(
-                prompt, history, _model_to_tier(model))
+                prompt, history, _model_to_tier(model), context_size=context_size)
         except Exception:
             content = "ERROR: %s" % traceback.format_exc()
 

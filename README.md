@@ -81,9 +81,9 @@ The learning loop above is *cross-task* memory. On top of it trilobite also has:
 
 ## Three ways to run it
 
-1. **Local, in your terminal** — `trilobite` (like launching `claude`). Interactive REPL routed through the full loop, with `/trace`, `/strict`, `/run`, `/train`, `/pass`, `/fail`, `/stats`, `/context`, `/quality` commands plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts` (and plain-English equivalents). Each REPL launch is its own remembered thread.
+1. **Local, in your terminal** — `trilobite` (like launching `claude`). Interactive REPL routed through the full loop, with `/trace`, `/strict`, `/run`, `/train`, `/master`, `/agents`, `/debug`, `/admin`, `/login`, `/register`, `/pass`, `/fail`, `/stats`, `/context`, `/quality`, `/improve` commands plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts` (and plain-English equivalents). Each REPL launch is its own remembered thread.
 2. **Hosted on your own server + a thin client anywhere** — run `deploy_trilobite.sh --serve` on your box (systemd service, API key), then any machine runs the single-file `trilobite_client.py` pointed at it. The serve layer threads the chat UI's own conversation history.
-3. **Integrated with Claude** — the MCP `local-llm` tools let Claude offload to it (`agent`, `offload(learn=True)`, `trilobite`, `run_code`, `web_search`, `web_fetch`, `loop`, `workflow_list/save/run/delete`, `self_heal_check`, `self_heal_repair`, `learn_from_example`, `apply_learned`, `system_profile_text`, `update_system_profile`, `emotion_vector_status`, `update_emotion_vectors`, `memory_search`, `memory_export`, `session_export`, `memory_quality_report`, `memory_quality_repair`, `tool_manifest`, `context_health`, `diagnostics`, `live_reload_status`, `record_outcome`, `trilobite_stats`, `trilobite_sessions`, `trilobite_remember_fact`). `agent` runs a Claude-like tool-use loop where the model can call local tools and web tools step-by-step; `run_code` gives bounded local execution for Python, JavaScript/Node, and PowerShell snippets; `loop` repeats bounded code/model/system actions for retries, polling, and small workflows. Both `offload` and `trilobite` take a `tier` to route a call to any configured model (local or a paid cloud model); cloud tiers answer clean and still feed the learning loop.
+3. **Integrated with Claude** — the MCP `local-llm` tools let Claude offload to it (`agent`, `master_orchestrate`, `master_status`, `admin_register`, `admin_login`, `admin_accounts`, `admin_set_account`, `debug_inspect`, `offload(learn=True)`, `trilobite`, `run_code`, `web_search`, `web_fetch`, `loop`, `workflow_list/save/run/delete`, `self_heal_check`, `self_heal_repair`, `learn_from_example`, `apply_learned`, `system_improvement_report`, `system_profile_text`, `update_system_profile`, `emotion_vector_status`, `update_emotion_vectors`, `memory_search`, `memory_export`, `session_export`, `memory_quality_report`, `memory_quality_repair`, `tool_manifest`, `context_health`, `diagnostics`, `live_reload_status`, `record_outcome`, `trilobite_stats`, `trilobite_sessions`, `trilobite_remember_fact`). `agent` runs a Claude-like tool-use loop where the model can call local tools and web tools step-by-step; `master_orchestrate` can ask whether to run inline or delegate to parallel subagents, then audit and merge their outputs; `run_code` gives bounded local execution for Python, JavaScript/Node, and PowerShell snippets; `loop` repeats bounded code/model/system actions for retries, polling, and small workflows. Both `offload` and `trilobite` take a `tier` to route a call to any configured model (local or a paid cloud model); cloud tiers answer clean and still feed the learning loop.
 3. **Integrated with Claude** — the MCP `local-llm` tools let Claude offload to it (`offload(learn=True)`, `trilobite`, `parallel_run_code`, `parallel_generate_run`, `parallel_generate_run_languages`, `campaign_generate_compile_execute_record`, `learn_tiers`, `record_outcome`, `trilobite_stats`, `trilobite_sessions`, `trilobite_remember_fact`). `parallel_run_code` compiles/runs many snippets at once across Python, JavaScript, PowerShell, C++, and C#; `parallel_generate_run` asks the model for multiple Python candidates in parallel; `parallel_generate_run_languages` spreads candidates across several languages, compiles/runs them, and returns passing winners. `campaign_generate_compile_execute_record` runs a bounded self-improvement campaign, repairs failures, and records passing interactions as grounded lessons. Both `offload` and `trilobite` take a `tier` to route a call to any configured model (local or a paid cloud model); cloud tiers answer clean and still feed the learning loop.
 4. **Mobile & desktop app (GUI)** — a cross-platform [Flutter client](app/) that talks to a hosted `trilobite_serve.py`. One codebase → an **Android APK** and **Windows/Linux/macOS** desktop apps, built in CI with downloadable installers. See [app/README.md](app/README.md).
 
@@ -109,7 +109,43 @@ python trilobite_repl.py                  # interactive session
 engine** in the app. It starts Ollama if needed, detects RAM, chooses a
 `qwen2.5-coder` size, pulls embeddings, and creates the `trilobite` alias.
 
+**Headless server/console mode:** the chat app is optional. On Windows run
+`trilobite-headless.cmd start` to launch Ollama and `trilobite_serve.py`
+without a visible app, `trilobite-headless.cmd status` to inspect it, and
+`trilobite-headless.cmd stop` to stop the Trilobite API process. Use
+`--stop-ollama` with stop if you also want to shut down the Ollama daemon.
+Cross-platform equivalent:
+`python trilobite_headless.py start --port 11435 --context-size 32k`.
+Then connect with `trilobite_client.py`, any OpenAI-compatible client pointed at
+`http://127.0.0.1:11435/v1`, the REPL, Claude MCP, or the Flutter app later.
+
 **Use the hosted model from any PC:** see [CLIENT.md](CLIENT.md).
+
+**Hosted/admin mode:** `/register` creates local accounts (the first account is
+admin), `/login` returns a bearer token, `/accounts` and `/setaccount` manage
+roles, tiers, dev flags and bans, and `/debug` shows safe inspectable runtime
+state. Set `TRILOBITE_REQUIRE_ACCOUNT=1` for public hosting, optionally keep
+`TRILOBITE_API_KEY` as an operator bypass, and use `TRILOBITE_AUTH_SECRET` to
+sign session tokens. `/cot` is intentionally denied: hidden private
+chain-of-thought is not exposed; use `/trace`, `/debug`, `/agents`, retrieved
+lessons, tool calls and status logs instead.
+
+**Filesystem tools:** all users can use guarded `/files`, `/read`, `/write`,
+`/append`, `/edit`, and dry-run `/delete` inside approved local roots. The
+server tools `file_find/read/write/edit/delete` expose the same policy to
+agents and workflows. Broader system paths require an explicit bypass:
+`TRILOBITE_FILE_ROOTS` for configured roots, `TRILOBITE_FILE_APPROVAL_CODE`
+with an `approval` argument, `TRILOBITE_FILE_BYPASS=1` for local owner mode, or
+a developer/admin token. Deletes require the exact `DELETE <resolved path>`
+confirmation string returned by the dry-run.
+
+**Selectable context:** use `/contextsize 32k`, `/contextsize 256k`, or
+`/contextsize 1m` to select the requested virtual context. Ollama receives a
+safe native `num_ctx` clamped by `TRILOBITE_NATIVE_CONTEXT_MAX` (default around
+256k), while Trilobite represents larger budgets with summaries, retrieval,
+facts, and recent-turn selection. App Settings has the same Context size field;
+env defaults are `TRILOBITE_CONTEXT_SIZE`, `TRILOBITE_NATIVE_CONTEXT_MAX`, and
+`TRILOBITE_VIRTUAL_CONTEXT_MAX`.
 
 ---
 

@@ -23,10 +23,15 @@ party.
   fetched from the server's `/v1/models`. Cloud models answer *clean* (teacher mode)
   and their good outcomes still feed the local model's learning.
 - **Settings**: server URL + optional API key, default model/tier, optional hosted
-  tiers opt-in, with a one-tap *Test connection*.
-- **System panel**: view server status, context health meters, learning stats
-  and exposed models, run `/stats`, `/context`, `/quality`, `/train 10` and `/help`, start
-  the bundled desktop server, launch endless training, and pull updates from Git.
+  tiers opt-in, account register/login for hosted deployments, with a one-tap
+  *Test connection*.
+- **System panel**: view server status, context health meters, master/subagent
+  activity, improvement recommendations, learning stats and exposed models, run
+  `/stats`, `/context`, `/quality`, `/improve`, `/agents`, `/train 10` and
+  `/help`, start/stop the bundled desktop server, launch endless training, and
+  pull updates from Git.
+- **Live footer**: chat shows context %, active agents, project scope, token
+  estimates, selected model and latest agent activity while work is running.
 - **Slash commands** built in — `/stats`, `/train`, `/pass`, `/fail`, `/help` —
   handled by the serve layer exactly like the REPL.
 - **Dark / light** themes, copy-to-clipboard, selectable text.
@@ -56,8 +61,10 @@ git push origin app-v1.0.0
 ## Bundled system
 
 Desktop downloads include a `local-system` folder beside the app. The System
-panel can use that folder to set up the local engine, start the server, launch
-endless training, run common status/training commands and pull updates from Git.
+panel can use that folder to set up the local engine, start/stop the server,
+launch endless training, run common status/training commands and pull updates
+from Git. Desktop app startup requests the bundled server automatically and app
+shutdown requests all `trilobite_serve.py` instances to stop.
 
 Runtime state is shared outside the install folder. By default the bundled
 server uses `%LOCALAPPDATA%\trilobite` on Windows, `$XDG_DATA_HOME/trilobite`

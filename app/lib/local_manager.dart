@@ -92,11 +92,15 @@ class LocalManager {
         '${Platform.pathSeparator}trilobite';
   }
 
-  static Map<String, String> processEnvironment({bool allowHosted = false}) {
+  static Map<String, String> processEnvironment({
+    bool allowHosted = false,
+    String contextSize = '8192',
+  }) {
     return {
       ...Platform.environment,
       'TRILOBITE_HOME': sharedHomePath(),
       'TRILOBITE_ALLOW_CLOUD': allowHosted ? '1' : '0',
+      'TRILOBITE_CONTEXT_SIZE': contextSize.trim().isEmpty ? '8192' : contextSize.trim(),
     };
   }
 
@@ -144,7 +148,10 @@ class LocalManager {
     );
   }
 
-  static Future<LocalActionResult> setupEngine({bool allowHosted = false}) async {
+  static Future<LocalActionResult> setupEngine({
+    bool allowHosted = false,
+    String contextSize = '8192',
+  }) async {
     if (!canRunLocalTools) {
       return const LocalActionResult(false, 'Engine setup is desktop-only.');
     }
@@ -160,7 +167,10 @@ class LocalManager {
             'cmd.exe',
             ['/c', 'start', '', script.path],
             workingDirectory: system.path,
-            environment: processEnvironment(allowHosted: allowHosted),
+            environment: processEnvironment(
+              allowHosted: allowHosted,
+              contextSize: contextSize,
+            ),
             runInShell: true,
           );
           return const LocalActionResult(true, 'Engine setup started.');
@@ -170,7 +180,10 @@ class LocalManager {
         Platform.isWindows ? 'python.exe' : 'python3',
         ['bootstrap_engine.py'],
         workingDirectory: system.path,
-        environment: processEnvironment(allowHosted: allowHosted),
+        environment: processEnvironment(
+          allowHosted: allowHosted,
+          contextSize: contextSize,
+        ),
         mode: ProcessStartMode.detached,
       );
       return const LocalActionResult(true, 'Engine setup started.');
@@ -179,7 +192,10 @@ class LocalManager {
     }
   }
 
-  static Future<LocalActionResult> startServer({bool allowHosted = false}) async {
+  static Future<LocalActionResult> startServer({
+    bool allowHosted = false,
+    String contextSize = '8192',
+  }) async {
     if (!canRunLocalTools) {
       return LocalActionResult(
         false,
@@ -207,7 +223,10 @@ class LocalManager {
             'cmd.exe',
             ['/c', 'start', '', '/min', script.path],
             workingDirectory: system.path,
-            environment: processEnvironment(allowHosted: allowHosted),
+            environment: processEnvironment(
+              allowHosted: allowHosted,
+              contextSize: contextSize,
+            ),
             runInShell: true,
           );
           return const LocalActionResult(true, 'Server startup requested.');
@@ -218,12 +237,64 @@ class LocalManager {
         python,
         ['trilobite_serve.py'],
         workingDirectory: system.path,
-        environment: processEnvironment(allowHosted: allowHosted),
+        environment: processEnvironment(
+          allowHosted: allowHosted,
+          contextSize: contextSize,
+        ),
         mode: ProcessStartMode.detached,
       );
       return const LocalActionResult(true, 'Server startup requested.');
     } catch (e) {
       return LocalActionResult(false, 'Could not start server: $e');
+    }
+  }
+
+  static Future<LocalActionResult> stopServers() async {
+    if (!canRunLocalTools) {
+      return const LocalActionResult(false, 'Server shutdown is desktop-only.');
+    }
+    try {
+      if (Platform.isWindows) {
+        final script = r'''
+$matches = Get-CimInstance Win32_Process |
+  Where-Object { $_.CommandLine -match 'trilobite_serve\.py' -or $_.CommandLine -match 'trilobite-serve\.cmd' }
+$count = 0
+foreach ($p in $matches) {
+  try {
+    Stop-Process -Id $p.ProcessId -Force
+    $count += 1
+  } catch {}
+}
+Write-Output "Stopped $count Trilobite server process(es)."
+''';
+        final result = await Process.run(
+          'powershell.exe',
+          ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
+          environment: processEnvironment(),
+        ).timeout(const Duration(seconds: 20));
+        final output = [
+          if ((result.stdout as String).trim().isNotEmpty)
+            (result.stdout as String).trim(),
+          if ((result.stderr as String).trim().isNotEmpty)
+            (result.stderr as String).trim(),
+        ].join('\n');
+        return LocalActionResult(result.exitCode == 0,
+            output.isEmpty ? 'Stop command exited.' : output);
+      }
+      final result = await Process.run(
+        'pkill',
+        ['-f', 'trilobite_serve.py'],
+        environment: processEnvironment(),
+      ).timeout(const Duration(seconds: 20));
+      if (result.exitCode == 0) {
+        return const LocalActionResult(true, 'Stopped Trilobite server process(es).');
+      }
+      return LocalActionResult(
+        true,
+        'No matching Trilobite server process was reported.',
+      );
+    } catch (e) {
+      return LocalActionResult(false, 'Could not stop server processes: $e');
     }
   }
 

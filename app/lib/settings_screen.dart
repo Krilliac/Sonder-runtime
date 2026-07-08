@@ -23,6 +23,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late final TextEditingController _server;
   late final TextEditingController _key;
   late final TextEditingController _model;
+  late final TextEditingController _contextSize;
+  late final TextEditingController _username;
+  late final TextEditingController _password;
   late bool _dark;
   late bool _allowHosted;
   bool _obscureKey = true;
@@ -36,6 +39,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _server = TextEditingController(text: widget.settings.serverUrl);
     _key = TextEditingController(text: widget.settings.apiKey);
     _model = TextEditingController(text: widget.settings.model);
+    _contextSize = TextEditingController(text: widget.settings.contextSize);
+    _username = TextEditingController();
+    _password = TextEditingController();
     _dark = widget.settings.darkMode;
     _allowHosted = widget.settings.allowHosted;
   }
@@ -45,6 +51,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _server.dispose();
     _key.dispose();
     _model.dispose();
+    _contextSize.dispose();
+    _username.dispose();
+    _password.dispose();
     super.dispose();
   }
 
@@ -53,6 +62,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         apiKey: _key.text,
         darkMode: _dark,
         allowHosted: _allowHosted,
+        contextSize: _contextSize.text.trim().isEmpty ? '8192' : _contextSize.text.trim(),
         model: _model.text.trim().isEmpty
             ? Settings.defaultModel
             : _model.text.trim(),
@@ -73,6 +83,45 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _statusOk = true;
         _status = 'Connected. Models: ${models.join(", ")}';
       });
+    } on TrilobiteException catch (e) {
+      setState(() {
+        _statusOk = false;
+        _status = e.message;
+      });
+    } finally {
+      if (mounted) setState(() => _testing = false);
+    }
+  }
+
+  Future<void> _register() async {
+    await _accountAction(register: true);
+  }
+
+  Future<void> _login() async {
+    await _accountAction(register: false);
+  }
+
+  Future<void> _accountAction({required bool register}) async {
+    setState(() {
+      _testing = true;
+      _status = null;
+    });
+    final api = TrilobiteApi(baseUrl: _server.text, apiKey: _key.text);
+    try {
+      if (register) {
+        final msg = await api.register(_username.text, _password.text);
+        setState(() {
+          _statusOk = true;
+          _status = msg;
+        });
+      } else {
+        final token = await api.login(_username.text, _password.text);
+        setState(() {
+          _key.text = token;
+          _statusOk = true;
+          _status = 'Logged in. Token saved in the API key/token field.';
+        });
+      }
     } on TrilobiteException catch (e) {
       setState(() {
         _statusOk = false;
@@ -146,6 +195,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
               border: OutlineInputBorder(),
             ),
           ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _contextSize,
+            autocorrect: false,
+            decoration: const InputDecoration(
+              labelText: 'Context size',
+              hintText: '8192, 32k, 256k, 1m',
+              helperText: 'Requested virtual context. Ollama native num_ctx is clamped safely.',
+              prefixIcon: Icon(Icons.view_week_outlined),
+              border: OutlineInputBorder(),
+            ),
+          ),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
             title: const Text('Allow hosted/cloud tiers'),
@@ -154,6 +215,49 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             value: _allowHosted,
             onChanged: (v) => setState(() => _allowHosted = v),
+          ),
+          const Divider(height: 40),
+          Text('Account',
+              style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _username,
+            autocorrect: false,
+            decoration: const InputDecoration(
+              labelText: 'Username',
+              prefixIcon: Icon(Icons.person_outline),
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _password,
+            obscureText: true,
+            autocorrect: false,
+            enableSuggestions: false,
+            decoration: const InputDecoration(
+              labelText: 'Password',
+              helperText: 'At least 8 characters. First account becomes admin.',
+              prefixIcon: Icon(Icons.lock_outline),
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              FilledButton.tonalIcon(
+                onPressed: _testing ? null : _register,
+                icon: const Icon(Icons.person_add_alt),
+                label: const Text('Register'),
+              ),
+              FilledButton.icon(
+                onPressed: _testing ? null : _login,
+                icon: const Icon(Icons.login),
+                label: const Text('Login'),
+              ),
+            ],
           ),
           const SizedBox(height: 16),
           FilledButton.tonalIcon(

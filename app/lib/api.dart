@@ -90,9 +90,10 @@ class TrilobiteApi {
   /// and natural-language control — so we simply forward whatever the user
   /// typed as the last user message.
   Future<String> chat(List<ChatMessage> messages,
-      {String model = 'trilobite'}) async {
+      {String model = 'trilobite', String contextSize = '8192'}) async {
     final body = jsonEncode({
       'model': model,
+      'context_size': contextSize,
       'messages': messages
           .where((m) => !m.pending)
           .map((m) => m.toWire())
@@ -147,18 +148,22 @@ class SystemInfo {
   final String status;
   final String stats;
   final String learnTiers;
+  final String improvements;
   final String dbPath;
   final String stateHome;
   final ContextHealth? context;
+  final AgentStatus? agents;
   final List<SystemModel> models;
 
   const SystemInfo({
     required this.status,
     required this.stats,
     required this.learnTiers,
+    required this.improvements,
     required this.dbPath,
     required this.stateHome,
     required this.context,
+    required this.agents,
     required this.models,
   });
 
@@ -171,12 +176,141 @@ class SystemInfo {
       status: json['status']?.toString() ?? '',
       stats: json['stats']?.toString() ?? '',
       learnTiers: json['learn_tiers']?.toString() ?? '',
+      improvements: json['improvements']?.toString() ?? '',
       dbPath: json['db_path']?.toString() ?? '',
       stateHome: json['state_home']?.toString() ?? '',
       context: json['context'] is Map<String, dynamic>
           ? ContextHealth.fromJson(json['context'] as Map<String, dynamic>)
           : null,
+      agents: json['agents'] is Map<String, dynamic>
+          ? AgentStatus.fromJson(json['agents'] as Map<String, dynamic>)
+          : null,
       models: models,
+    );
+  }
+
+  Future<String> register(String username, String password) async {
+    return _accountAction('/v1/trilobite/register', username, password);
+  }
+
+  Future<String> login(String username, String password) async {
+    late http.Response resp;
+    try {
+      resp = await http
+          .post(
+            _uri('/v1/trilobite/login'),
+            headers: _headers(),
+            body: jsonEncode({'username': username, 'password': password}),
+          )
+          .timeout(const Duration(seconds: 20));
+    } catch (e) {
+      throw TrilobiteException('Login failed: $e');
+    }
+    final obj = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+    if (resp.statusCode != 200 || obj['ok'] != true) {
+      throw TrilobiteException(obj['message']?.toString() ?? 'Login failed.');
+    }
+    return obj['token']?.toString() ?? '';
+  }
+
+  Future<String> _accountAction(
+      String path, String username, String password) async {
+    late http.Response resp;
+    try {
+      resp = await http
+          .post(
+            _uri(path),
+            headers: _headers(),
+            body: jsonEncode({'username': username, 'password': password}),
+          )
+          .timeout(const Duration(seconds: 20));
+    } catch (e) {
+      throw TrilobiteException('Account request failed: $e');
+    }
+    final obj = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+    if (resp.statusCode != 200 || obj['ok'] != true) {
+      throw TrilobiteException(obj['message']?.toString() ?? 'Account request failed.');
+    }
+    return obj['message']?.toString() ?? 'OK';
+  }
+}
+
+class AgentStatus {
+  final int activeAgents;
+  final int totalListed;
+  final int tokensIn;
+  final int tokensOut;
+  final List<AgentActivity> agents;
+  final List<String> events;
+
+  const AgentStatus({
+    required this.activeAgents,
+    required this.totalListed,
+    required this.tokensIn,
+    required this.tokensOut,
+    required this.agents,
+    required this.events,
+  });
+
+  factory AgentStatus.fromJson(Map<String, dynamic> json) {
+    final agents = (json['agents'] as List? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .map(AgentActivity.fromJson)
+        .toList();
+    final events = (json['events'] as List? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .map((e) {
+          final id = e['agent_id']?.toString() ?? '';
+          final msg = e['message']?.toString() ?? '';
+          return id.isEmpty ? msg : '$id: $msg';
+        })
+        .where((s) => s.trim().isNotEmpty)
+        .toList();
+    return AgentStatus(
+      activeAgents: _asInt(json['active_agents']),
+      totalListed: _asInt(json['total_listed']),
+      tokensIn: _asInt(json['tokens_in']),
+      tokensOut: _asInt(json['tokens_out']),
+      agents: agents,
+      events: events,
+    );
+  }
+}
+
+class AgentActivity {
+  final String id;
+  final String role;
+  final String status;
+  final String activity;
+  final String task;
+  final String summary;
+  final int toolCalls;
+  final int tokensIn;
+  final int tokensOut;
+
+  const AgentActivity({
+    required this.id,
+    required this.role,
+    required this.status,
+    required this.activity,
+    required this.task,
+    required this.summary,
+    required this.toolCalls,
+    required this.tokensIn,
+    required this.tokensOut,
+  });
+
+  factory AgentActivity.fromJson(Map<String, dynamic> json) {
+    return AgentActivity(
+      id: json['id']?.toString() ?? '',
+      role: json['role']?.toString() ?? '',
+      status: json['status']?.toString() ?? '',
+      activity: json['activity']?.toString() ?? '',
+      task: json['task']?.toString() ?? '',
+      summary: json['summary']?.toString() ?? '',
+      toolCalls: _asInt(json['tool_calls']),
+      tokensIn: _asInt(json['tokens_in']),
+      tokensOut: _asInt(json['tokens_out']),
     );
   }
 }
@@ -187,6 +321,8 @@ class ContextHealth {
   final String title;
   final String status;
   final int contextLimit;
+  final int nativeContextLimit;
+  final String contextMode;
   final int estimatedTokens;
   final double contextPercent;
   final String contextBar;
@@ -216,6 +352,8 @@ class ContextHealth {
     required this.title,
     required this.status,
     required this.contextLimit,
+    required this.nativeContextLimit,
+    required this.contextMode,
     required this.estimatedTokens,
     required this.contextPercent,
     required this.contextBar,
@@ -247,6 +385,8 @@ class ContextHealth {
       title: json['title']?.toString() ?? '',
       status: json['status']?.toString() ?? '',
       contextLimit: _asInt(json['context_limit']),
+      nativeContextLimit: _asInt(json['native_context_limit']),
+      contextMode: json['context_mode']?.toString() ?? 'native',
       estimatedTokens: _asInt(json['estimated_tokens']),
       contextPercent: _asDouble(json['context_percent']),
       contextBar: json['context_bar']?.toString() ?? '',
@@ -275,6 +415,7 @@ class ContextHealth {
   String consoleText() {
     return [
       'context $contextBar ${contextPercent.toStringAsFixed(1)}%  ~$estimatedTokens/$contextLimit tokens',
+      'native  ~$nativeContextLimit tokens ($contextMode mode)',
       'live    $turnBar $liveTurns/$maxLiveTurns turns ($totalTurns total)',
       'memory  $memoryBar $lessons lessons, $facts facts, $interactions interactions',
       'summary $summaryChars chars, ~$summaryTokens tokens',
