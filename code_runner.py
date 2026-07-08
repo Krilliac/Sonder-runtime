@@ -8,6 +8,7 @@ trimmed output.
 import os
 import glob
 import json
+import ntpath
 import shutil
 import subprocess
 import sys
@@ -213,7 +214,8 @@ def _find_visual_studio_vcvars():
             )
             install = (proc.stdout or "").strip().splitlines()
             if install:
-                vcvars = os.path.join(install[0], "VC", "Auxiliary", "Build", "vcvars64.bat")
+                joiner = ntpath.join if "\\" in install[0] or ":" in install[0] else os.path.join
+                vcvars = joiner(install[0], "VC", "Auxiliary", "Build", "vcvars64.bat")
                 if os.path.isfile(vcvars):
                     return vcvars
         except (OSError, subprocess.SubprocessError):
@@ -251,7 +253,8 @@ def _run_cpp(path, tmp, stdin, timeout, cwd):
     name, compiler = _cpp_compiler()
     if not compiler:
         return _error_result("cpp", cwd, timeout, SUPPORTED_LANGUAGES["cpp"]["missing"])
-    exe = os.path.join(tmp, "snippet.exe" if os.name == "nt" else "snippet")
+    exe_name = "snippet.exe" if os.name == "nt" or name in ("msvc-vcvars", "cl") else "snippet"
+    exe = os.path.join(tmp, exe_name)
     if name == "msvc-vcvars":
         compile_result = _msvc_compile_result(compiler, [path], exe, tmp, timeout, "cpp")
     elif name == "cl":
