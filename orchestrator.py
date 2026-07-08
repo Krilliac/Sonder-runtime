@@ -10,13 +10,49 @@ import retriever
 MEMORY_HEADER = "# Relevant lessons from past work (may help):"
 RECALL_HEADER = "# Similar things solved before (for reference):"
 FACTS_HEADER = "# Project facts (always true here):"
+RUN_COMPAT_HEADER = "# /run compatibility requirements:"
 
 
 APPLICATION_HEADER = "# How to apply the lessons:"
 
 
+def _needs_run_compatible_code(task):
+    text = (task or "").lower()
+    if "/run" in text:
+        return True
+    game_request = "game" in text and ("python" in text or "pygame" in text)
+    run_request = any(
+        phrase in text
+        for phrase in (
+            "tell failure",
+            "until failure",
+            "tell me when",
+            "run them",
+            "run it",
+            "will run",
+            "increasing complexity",
+            "increasing difficulty",
+        )
+    )
+    return game_request and run_request
+
+
+def _run_compat_block():
+    return (
+        "%s\n"
+        "- Return exactly one fenced ```python code block containing runnable source.\n"
+        "- The code must complete under `/run` without keyboard input. Do not use input().\n"
+        "- Do not include `/run ...`, `python file.py`, `pip ...`, or other shell commands in code fences.\n"
+        "- For games, include a scripted smoke-test/demo mode that simulates moves or frames, prints PASS/FAIL details, and exits.\n"
+        "- Avoid unbounded while/event loops unless they have an auto-exit path that runs by default."
+        % RUN_COMPAT_HEADER
+    )
+
+
 def build_prompt(task, lessons, recalls=None, facts=None):
     blocks = []
+    if _needs_run_compatible_code(task):
+        blocks.append(_run_compat_block())
     if facts:
         blocks.append("%s\n%s" % (FACTS_HEADER, "\n".join("- %s" % f for f in facts)))
     if lessons:

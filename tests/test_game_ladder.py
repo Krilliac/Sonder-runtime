@@ -64,6 +64,19 @@ def test_ground_clean_exit_nonzero_passes():
     assert passed is True
 
 
+def test_python_interpreter_falls_back_when_venv_launcher_is_broken(monkeypatch):
+    import sys
+
+    monkeypatch.setattr(game_ladder.os.path, "exists", lambda path: True)
+
+    class Broken:
+        returncode = 1
+
+    monkeypatch.setattr(game_ladder.subprocess, "run", lambda *a, **k: Broken())
+
+    assert game_ladder.python_interpreter() == sys.executable
+
+
 # ---- run_ladder --------------------------------------------------------
 
 def test_run_ladder_advances_through_all_levels(monkeypatch):

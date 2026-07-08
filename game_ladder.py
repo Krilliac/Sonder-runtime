@@ -104,6 +104,22 @@ _CONSOLE_EXPECTED = REAL_CRASH_EXCEPTIONS | {"ValueError", "IndexError", "Overfl
 _STDIN_FEED = (b"1\n2\n3\n5\n1\n1\n\n" * 30)
 
 
+def python_interpreter():
+    """Return a usable Python executable for grounding generated games."""
+    if os.path.exists(PY):
+        try:
+            p = subprocess.run(
+                [PY, "-c", "import sys"],
+                capture_output=True,
+                timeout=3,
+            )
+            if p.returncode == 0:
+                return PY
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return sys.executable
+
+
 def detect_failure(stdout, stderr, returncode, timed_out=False, kind="pygame"):
     """Pure classifier: did this run count as a real crash, and why?
 
@@ -162,7 +178,7 @@ def _ground_capture(code, kind, timeout=12):
             "SDL_AUDIODRIVER": "dummy",
             "PYGAME_HIDE_SUPPORT_PROMPT": "1",
         })
-        interp = PY if os.path.exists(PY) else sys.executable
+        interp = python_interpreter()
         try:
             p = subprocess.run(
                 [interp, path],
@@ -262,7 +278,7 @@ def build_level_with_repair(level, gen_fn, max_attempts=3):
             # cheap mechanical recovery: a forgotten stdlib import (the classic
             # breakout `NameError: name 'random'`) is patched + re-run for free,
             # before spending a model repair round-trip.
-            fixed = import_autofix.fix_missing_imports(code, full)
+            fixed = import_autofix.fix_common_generation_errors(code, full)
             if fixed != code:
                 p2, d2, f2 = _ground_capture(fixed, kind)
                 if p2:
