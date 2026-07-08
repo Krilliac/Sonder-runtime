@@ -14,3 +14,7 @@ combined_training.jsonl
 venv-train/
 trilobite-merged/
 Modelfile.trilobite
+trilobite-personal-merged/
+trilobite-personal-lora/
+combined_personal.jsonl
+Modelfile.personal

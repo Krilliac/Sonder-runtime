@@ -21,6 +21,7 @@ Tiers (escalation ladder, cheapest first):
 import json
 import os
 import re
+import time
 import urllib.request
 import urllib.error
 
@@ -33,10 +34,23 @@ import embeddings
 import personas
 import recall
 import summarizer
+import code_runner
+import live_reload
+import system_profile
+import emotion_vectors
+import workflow_store
+import web_tools
+import self_heal
 
 from mcp.server.fastmcp import FastMCP
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434").replace("http://", "")
+# OLLAMA_HOST may be set to 0.0.0.0 so `ollama serve` binds all interfaces (e.g.
+# for a phone app on the LAN). 0.0.0.0 is a bind-all address, not a connectable
+# one — dialing it fails on Windows (WinError 10049). Rewrite it to loopback for
+# this client without disturbing the server's bind env.
+if OLLAMA_HOST.startswith("0.0.0.0"):
+    OLLAMA_HOST = OLLAMA_HOST.replace("0.0.0.0", "127.0.0.1", 1)
 BASE = f"http://{OLLAMA_HOST}"
 # How long a model stays in VRAM after its last call. Short = frees GPU quickly.
 KEEP_ALIVE = os.environ.get("LOCAL_LLM_KEEP_ALIVE", "2m")
@@ -84,6 +98,31 @@ _DB_PATH = os.path.join(os.path.dirname(__file__), "memory.db")
 
 FOOTER_PREFIX = "\n\n[interaction_id: "
 _FOOTER_RE = re.compile(r"\[interaction_id: ([0-9a-f]+)\]\s*$")
+
+LIVE_RELOAD_MODULES = [
+    "memory_store",
+    "orchestrator",
+    "retriever",
+    "reward",
+    "reflection",
+    "embeddings",
+    "personas",
+    "recall",
+    "summarizer",
+    "code_runner",
+    "system_profile",
+    "emotion_vectors",
+    "workflow_store",
+    "web_tools",
+    "self_heal",
+]
+
+
+def _maybe_live_reload():
+    modules = live_reload.reload_changed_modules(LIVE_RELOAD_MODULES)
+    for name, module in modules.items():
+        if name in globals():
+            globals()[name] = module
 
 
 def _open_db():
@@ -199,9 +238,13 @@ def _resolve_project(project):
     return p
 
 
+def _join_system_parts(*parts):
+    return "\n\n".join(p for p in parts if p)
+
+
 def _build_system(system, trace, persona):
     """Compose the effective system prompt from a base `system`, optional trace
-    instruction, and optional persona (persona goes first)."""
+    instruction, optional persona, editable profile, and emotion vectors."""
     effective_system = system
     if trace:
         effective_system = "%s\n\n%s" % (system, TRACE_SYSTEM) if system else TRACE_SYSTEM
@@ -210,7 +253,9 @@ def _build_system(system, trace, persona):
         effective_system = (
             "%s\n\n%s" % (persona_prompt, effective_system) if effective_system else persona_prompt
         )
-    return effective_system
+    profile = system_profile.system_prompt()
+    emotions = emotion_vectors.system_prompt()
+    return _join_system_parts(profile, emotions, effective_system)
 
 
 def _resolve_model_and_system(system, trace, strict, persona):
@@ -396,6 +441,7 @@ def offload(
     cloud-code / cloud-general (METERED, prompt leaves this machine).
     Give a FULLY self-contained prompt (the model can't see this chat or your files).
     """
+    _maybe_live_reload()
     model = TIERS.get(tier)
     if model is None:
         return "ERROR: unknown tier '%s'. Valid tiers: %s." % (tier, ", ".join(TIERS))
@@ -499,6 +545,7 @@ def trilobite(
     persona selects one of personas.names() (e.g. "explainer", "reviewer", "teacher")
     to steer tone; its system prompt is prepended ahead of `system`/trace instructions.
     """
+    _maybe_live_reload()
     tgt_model, cloud, augment, tier_label = _serve_target(tier, strict)
     if tier_label is None:
         return "ERROR: unknown tier '%s'. Valid: trilobite, %s." % (tier, ", ".join(TIERS))
@@ -553,6 +600,7 @@ def answer_with_history(prompt, history, trace=False, strict=None, tier=None):
     turn is always captured so record_outcome can ground it and distill lessons — so
     the app learns from whatever model you point it at. Returns the reply (with footer).
     """
+    _maybe_live_reload()
     model, cloud, augment, tier_label = _serve_target(tier, strict)
     if tier_label is None:
         return "ERROR: unknown model '%s'. Valid: trilobite, %s." % (
@@ -603,6 +651,7 @@ def record_outcome(interaction_id: str, signal: str) -> str:
     A good outcome triggers a distilled 'lesson' that future prompts will retrieve.
     Pass the id from the '[interaction_id: <id>]' footer of the response.
     """
+    _maybe_live_reload()
     if signal not in reward.VALID_SIGNALS:
         return "ERROR: unknown signal '%s'. Valid: %s." % (
             signal, ", ".join(sorted(reward.VALID_SIGNALS)))
@@ -613,6 +662,7 @@ def record_outcome(interaction_id: str, signal: str) -> str:
             return "ERROR: no interaction '%s' (already expired or wrong id)." % interaction_id
         r = reward.score(signal)
         memory_store.record_outcome_row(conn, interaction_id, signal, r)
+        memory_store.record_lesson_usage_outcome(conn, interaction_id, signal, r)
         lesson_id = None
         if reward.is_good(signal):
             try:
@@ -639,6 +689,7 @@ def trilobite_stats() -> str:
     most recently distilled lessons. Makes no model call and needs no Ollama —
     it only reads memory.db, so it works even if the Ollama server is down.
     """
+    _maybe_live_reload()
     conn = _open_db()
     try:
         n_interactions = memory_store.count_interactions(conn)
@@ -674,6 +725,7 @@ def trilobite_sessions(limit: int = 20) -> str:
     Each line shows the session id (pass it as `session` to trilobite to resume),
     its auto-generated title, live turn count, and last-updated time. Read-only.
     """
+    _maybe_live_reload()
     conn = _open_db()
     try:
         sessions = memory_store.list_sessions(conn, limit=limit)
@@ -700,6 +752,7 @@ def trilobite_remember_fact(text: str, project: str = "") -> str:
     stores it under the "default" project. Use trilobite(..., project="<name>") to
     scope which facts apply to a call.
     """
+    _maybe_live_reload()
     text = (text or "").strip()
     if not text:
         return "ERROR: empty fact."
@@ -717,11 +770,844 @@ def trilobite_remember_fact(text: str, project: str = "") -> str:
 
 
 @mcp.tool()
+def run_code(
+    code: str,
+    language: str = "python",
+    stdin: str = "",
+    timeout: int = 10,
+    cwd: str = "",
+) -> str:
+    """Execute a short local code snippet and return stdout/stderr.
+
+    This gives Claude/Codex a Claude-like execution tool through the local-llm MCP
+    server. Supported languages: python, javascript/js/node, powershell/ps1. Code
+    runs on this machine with the same permissions as the MCP server, so treat it
+    like a local terminal: use it for small checks, experiments, and diagnostics,
+    not for untrusted code. Execution is bounded by a timeout (1-60s), output is
+    trimmed, and cwd is confined to this project workspace.
+    """
+    _maybe_live_reload()
+    try:
+        result = code_runner.run_code(
+            code=code,
+            language=language,
+            stdin=stdin,
+            timeout=timeout,
+            cwd=cwd or None,
+        )
+    except ValueError as e:
+        return "ERROR: %s" % e
+    return code_runner.format_result(result)
+
+
+def _loop_text_result(action_type, text):
+    text = text or ""
+    first_line = next((line for line in text.splitlines() if line.strip()), "")
+    return {
+        "ok": not text.startswith("ERROR:"),
+        "type": action_type,
+        "summary": first_line[:200],
+        "output": text,
+    }
+
+
+def _loop_dispatch(action):
+    action_type = (action.get("type") or action.get("action") or "code").strip().lower()
+    if action_type in ("code", "run_code"):
+        result = code_runner.run_code(
+            code=action.get("code", ""),
+            language=action.get("language", "python"),
+            stdin=action.get("stdin", ""),
+            timeout=action.get("timeout", 10),
+            cwd=action.get("cwd") or None,
+        )
+        rc = result.get("returncode")
+        summary = result.get("error") or "returncode %s" % (
+            "(none)" if rc is None else rc
+        )
+        return {
+            "ok": result.get("ok"),
+            "type": "code",
+            "summary": summary,
+            "output": code_runner.format_result(result),
+        }
+    if action_type == "offload":
+        return _loop_text_result("offload", offload(
+            prompt=action.get("prompt", ""),
+            tier=action.get("tier", "fast"),
+            system=action.get("system", ""),
+            temperature=action.get("temperature", 0.2),
+            num_predict=action.get("num_predict", 1024),
+            num_ctx=action.get("num_ctx", 4096),
+            learn=action.get("learn", True),
+        ))
+    if action_type == "trilobite":
+        return _loop_text_result("trilobite", trilobite(
+            prompt=action.get("prompt", ""),
+            system=action.get("system", ""),
+            temperature=action.get("temperature", 0.2),
+            num_predict=action.get("num_predict", 1024),
+            num_ctx=action.get("num_ctx", 4096),
+            trace=action.get("trace", False),
+            strict=action.get("strict"),
+            persona=action.get("persona", ""),
+            session=action.get("session", ""),
+            project=action.get("project", ""),
+            tier=action.get("tier", ""),
+        ))
+    if action_type == "status":
+        return _loop_text_result("status", status())
+    if action_type == "diagnostics":
+        return _loop_text_result("diagnostics", diagnostics())
+    if action_type == "self_heal_check":
+        return _loop_text_result("self_heal_check", self_heal_check())
+    if action_type == "self_heal_repair":
+        return _loop_text_result("self_heal_repair", self_heal_repair(
+            apply=action.get("apply", False),
+        ))
+    if action_type == "profile_status":
+        return _loop_text_result("profile_status", system_profile_text())
+    if action_type == "emotion_status":
+        return _loop_text_result("emotion_status", emotion_vector_status())
+    if action_type == "memory_search":
+        return _loop_text_result("memory_search", memory_search(
+            query=action.get("query", ""),
+            limit=action.get("limit", 10),
+        ))
+    if action_type == "apply_learned":
+        return _loop_text_result("apply_learned", apply_learned(
+            task=action.get("task", ""),
+            limit=action.get("limit", 5),
+        ))
+    if action_type == "web_search":
+        return _loop_text_result("web_search", web_search(
+            query=action.get("query", ""),
+            limit=action.get("limit", 5),
+        ))
+    if action_type == "web_fetch":
+        return _loop_text_result("web_fetch", web_fetch(
+            url=action.get("url", ""),
+            max_chars=action.get("max_chars", 8000),
+        ))
+    if action_type == "unload":
+        return _loop_text_result("unload", unload(action.get("tier", "all")))
+    if action_type == "sleep":
+        seconds = code_runner._clamp_delay(action.get("seconds", 1))
+        time.sleep(seconds)
+        return {
+            "ok": True,
+            "type": "sleep",
+            "summary": "slept for %.2fs" % seconds,
+            "output": "",
+        }
+    return {
+        "ok": False,
+        "type": action_type or "(unknown)",
+        "summary": "unknown action type",
+        "output": "Valid action types: code, offload, trilobite, status, diagnostics, self_heal_check, self_heal_repair, profile_status, emotion_status, memory_search, apply_learned, web_search, web_fetch, unload, sleep.",
+    }
+
+
+@mcp.tool()
+def loop(
+    actions_json: str,
+    max_iterations: int = 5,
+    stop_on_failure: bool = True,
+    stop_on_success: bool = False,
+    delay_seconds: float = 0,
+) -> str:
+    """Run a bounded loop of code/model/system actions.
+
+    `actions_json` is a JSON list of action objects, or {"actions": [...]}.
+    Supported action types:
+      - {"type":"code","language":"python|js|powershell","code":"..."}
+      - {"type":"offload","prompt":"...","tier":"fast|code|general|cloud-code|cloud-general"}
+      - {"type":"trilobite","prompt":"...","session":"none"}
+      - {"type":"web_search","query":"...","limit":5}
+      - {"type":"web_fetch","url":"https://...","max_chars":8000}
+      - {"type":"memory_search","query":"..."}
+      - {"type":"status"}
+      - {"type":"unload","tier":"all"}
+      - {"type":"sleep","seconds":1}
+
+    The loop is deliberately bounded: max_iterations is clamped to 1-50 and
+    delay_seconds to 0-10. Use stop_on_success=True for polling/retry loops, or
+    stop_on_failure=False to keep running after failures until the iteration cap.
+    """
+    _maybe_live_reload()
+    try:
+        parsed = json.loads(actions_json)
+    except json.JSONDecodeError as e:
+        return "ERROR: actions_json is not valid JSON: %s" % e
+    actions = parsed.get("actions") if isinstance(parsed, dict) else parsed
+    try:
+        result = code_runner.run_loop(
+            actions,
+            _loop_dispatch,
+            max_iterations=max_iterations,
+            stop_on_failure=stop_on_failure,
+            stop_on_success=stop_on_success,
+            delay_seconds=delay_seconds,
+        )
+    except ValueError as e:
+        return "ERROR: %s" % e
+    return code_runner.format_loop_result(result)
+
+
+@mcp.tool()
+def workflow_list() -> str:
+    """List reusable named workflows stored in workflows.json."""
+    _maybe_live_reload()
+    workflows, path = workflow_store.ensure_workflows()
+    return "workflows: %s\n\n%s" % (path, workflow_store.format_workflows(workflows))
+
+
+@mcp.tool()
+def workflow_save(name: str, actions_json: str, description: str = "") -> str:
+    """Save a named workflow made of loop action objects.
+
+    `actions_json` may be a JSON list or {"actions": [...]}.
+    """
+    _maybe_live_reload()
+    try:
+        parsed = json.loads(actions_json)
+    except json.JSONDecodeError as e:
+        return "ERROR: actions_json is not valid JSON: %s" % e
+    actions = parsed.get("actions") if isinstance(parsed, dict) else parsed
+    try:
+        workflow, path = workflow_store.save_workflow(name, actions, description)
+    except ValueError as e:
+        return "ERROR: %s" % e
+    return "Saved workflow '%s' to %s (%d actions)." % (
+        workflow_store.normalize_name(name), path, len(workflow["actions"]))
+
+
+@mcp.tool()
+def workflow_run(
+    name: str,
+    max_iterations: int = 1,
+    stop_on_failure: bool = True,
+    stop_on_success: bool = False,
+    delay_seconds: float = 0,
+) -> str:
+    """Run a saved workflow through the bounded loop engine."""
+    _maybe_live_reload()
+    try:
+        workflow = workflow_store.get_workflow(name)
+    except ValueError as e:
+        return "ERROR: %s" % e
+    if workflow is None:
+        return "ERROR: no workflow named '%s'." % name
+    result = code_runner.run_loop(
+        workflow["actions"],
+        _loop_dispatch,
+        max_iterations=max_iterations,
+        stop_on_failure=stop_on_failure,
+        stop_on_success=stop_on_success,
+        delay_seconds=delay_seconds,
+    )
+    header = "workflow: %s\n%s\n" % (
+        workflow_store.normalize_name(name),
+        workflow.get("description") or "(no description)",
+    )
+    return header + code_runner.format_loop_result(result)
+
+
+@mcp.tool()
+def workflow_delete(name: str) -> str:
+    """Delete a saved workflow from workflows.json."""
+    _maybe_live_reload()
+    try:
+        existed, path = workflow_store.delete_workflow(name)
+    except ValueError as e:
+        return "ERROR: %s" % e
+    if not existed:
+        return "No workflow named '%s' existed. File unchanged except normalization: %s" % (name, path)
+    return "Deleted workflow '%s' from %s." % (workflow_store.normalize_name(name), path)
+
+
+@mcp.tool()
+def web_search(query: str, limit: int = 5) -> str:
+    """Search the public web and return compact result links.
+
+    Uses a stdlib HTML parser against TRILOBITE_SEARCH_URL (default:
+    DuckDuckGo HTML). Disable with TRILOBITE_WEB_TOOLS=0.
+    """
+    _maybe_live_reload()
+    try:
+        results = web_tools.web_search(query, limit=limit)
+    except Exception as e:
+        return "ERROR: %s" % e
+    return web_tools.format_search_results(results)
+
+
+@mcp.tool()
+def web_fetch(url: str, max_chars: int = 8000) -> str:
+    """Fetch a public HTTP/HTTPS URL as readable text.
+
+    Blocks localhost/private-network literal IPs and trims output. Disable with
+    TRILOBITE_WEB_TOOLS=0.
+    """
+    _maybe_live_reload()
+    try:
+        return web_tools.web_fetch(url, max_chars=max_chars)
+    except Exception as e:
+        return "ERROR: %s" % e
+
+
+@mcp.tool()
+def live_reload_status() -> str:
+    """Show live-reload state for this running process.
+
+    Helper modules are checked at tool/request boundaries when
+    TRILOBITE_LIVE_RELOAD is on (default). The HTTP proxy and REPL also reload
+    server.py itself before each request/turn. An MCP process can refresh helper
+    module behavior, but brand-new MCP tool names still require reconnecting the
+    MCP server because FastMCP registers the tool list at startup.
+    """
+    _maybe_live_reload()
+    lines = [
+        "live reload: %s" % ("on" if live_reload.enabled() else "off"),
+        "watched modules:",
+    ]
+    for row in live_reload.snapshot(LIVE_RELOAD_MODULES):
+        line = "  - %s%s" % (
+            row["name"],
+            (" (%s)" % row["path"]) if row["path"] else " (not loaded)",
+        )
+        if row.get("error"):
+            line += "  ERROR: %s" % row["error"]
+        lines.append(line)
+    lines.append(
+        "note: HTTP proxy/REPL reload server.py on each request; MCP tool names are registered at startup."
+    )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def system_profile_text() -> str:
+    """Read the editable standing instructions injected into trilobite.
+
+    The profile lives in system_profile.md by default and is read on every
+    trilobite/serve request, so edits take effect without restarting the proxy or
+    REPL. Empty means no extra standing instructions are injected.
+    """
+    _maybe_live_reload()
+    text, path = system_profile.ensure_profile()
+    return "profile: %s\n\n%s" % (path, text or "(empty)")
+
+
+@mcp.tool()
+def update_system_profile(text: str, mode: str = "append") -> str:
+    """Append, replace, or clear trilobite's editable standing instructions.
+
+    mode: append (default), replace, or clear. The profile is plain Markdown in
+    system_profile.md, so direct file edits work too and are reflected on the
+    next request.
+    """
+    _maybe_live_reload()
+    mode = (mode or "append").strip().lower()
+    try:
+        if mode == "append":
+            path = system_profile.append_profile(text)
+        elif mode == "replace":
+            path = system_profile.write_profile(text)
+        elif mode == "clear":
+            path = system_profile.write_profile("")
+        else:
+            return "ERROR: unknown mode '%s'. Use append, replace, or clear." % mode
+    except ValueError as e:
+        return "ERROR: %s" % e
+    n = len(system_profile.read_profile())
+    return "Updated system profile (%s). %d characters active." % (path, n)
+
+
+@mcp.tool()
+def emotion_vector_status() -> str:
+    """Show the current live emotion/tone steering vectors.
+
+    Values are behavioral style controls from -1.0 to +1.0. They are injected
+    into the system prompt on every request, underneath correctness and explicit
+    user instructions.
+    """
+    _maybe_live_reload()
+    vectors, path = emotion_vectors.ensure_vectors()
+    return "emotion vectors: %s\n\n%s" % (path, emotion_vectors.format_vectors(vectors))
+
+
+@mcp.tool()
+def update_emotion_vectors(vectors_json: str, mode: str = "merge") -> str:
+    """Merge, replace, or clear the live emotion/tone steering vectors.
+
+    `vectors_json` must be a JSON object, for example:
+      {"warmth": 0.6, "brevity": 0.4, "urgency": -0.2}
+
+    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, or clear.
+    Direct edits to emotion_vectors.json also apply on the next request.
+    """
+    _maybe_live_reload()
+    try:
+        updates = json.loads(vectors_json or "{}")
+    except json.JSONDecodeError as e:
+        return "ERROR: vectors_json is not valid JSON: %s" % e
+    try:
+        vectors, path = emotion_vectors.update_vectors(updates, mode=mode)
+    except ValueError as e:
+        return "ERROR: %s" % e
+    return "Updated emotion vectors (%s).\n%s" % (
+        path,
+        emotion_vectors.format_vectors(vectors),
+    )
+
+
+def _safe_limit(limit, default=10, max_value=100):
+    try:
+        value = int(limit)
+    except (TypeError, ValueError):
+        value = default
+    return max(1, min(value, max_value))
+
+
+@mcp.tool()
+def memory_search(query: str, limit: int = 10) -> str:
+    """Search local lessons, facts, sessions, and recent interactions."""
+    _maybe_live_reload()
+    query = (query or "").strip()
+    if not query:
+        return "ERROR: empty query."
+    limit = _safe_limit(limit, 10, 50)
+    like = "%%%s%%" % query.replace("%", r"\%").replace("_", r"\_")
+    conn = _open_db()
+    try:
+        lesson_ids = memory_store.fts_search(conn, query, limit=limit)
+        lessons = []
+        for lesson_id in lesson_ids:
+            text = memory_store.get_lesson_text(conn, lesson_id)
+            if text:
+                lessons.append({"id": lesson_id, "text": text})
+        facts = [dict(r) for r in conn.execute(
+            "SELECT id, project, text FROM facts WHERE text LIKE ? ESCAPE '\\' "
+            "ORDER BY ts DESC, rowid DESC LIMIT ?",
+            (like, limit),
+        ).fetchall()]
+        sessions = [dict(r) for r in conn.execute(
+            "SELECT session_id, title, summary, project FROM sessions "
+            "WHERE title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' "
+            "ORDER BY updated_ts DESC, rowid DESC LIMIT ?",
+            (like, like, limit),
+        ).fetchall()]
+        interactions = [dict(r) for r in conn.execute(
+            "SELECT id, task, response, tier, session_id, ts FROM interactions "
+            "WHERE task LIKE ? ESCAPE '\\' OR response LIKE ? ESCAPE '\\' "
+            "ORDER BY ts DESC, rowid DESC LIMIT ?",
+            (like, like, limit),
+        ).fetchall()]
+    finally:
+        conn.close()
+
+    lines = ["memory search: %r" % query]
+    lines.append("lessons (%d):" % len(lessons))
+    lines.extend("  - %s: %s" % (l["id"], l["text"][:220]) for l in lessons)
+    lines.append("facts (%d):" % len(facts))
+    lines.extend("  - %s/%s: %s" % (f["project"], f["id"], f["text"][:220]) for f in facts)
+    lines.append("sessions (%d):" % len(sessions))
+    lines.extend("  - %s [%s]: %s" % (
+        s["session_id"], s.get("project") or "default",
+        (s.get("title") or s.get("summary") or "(untitled)")[:220],
+    ) for s in sessions)
+    lines.append("interactions (%d):" % len(interactions))
+    lines.extend("  - %s [%s]: %s" % (
+        i["id"], i.get("tier") or "?",
+        (i.get("task") or "")[:220],
+    ) for i in interactions)
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def learn_from_example(task: str, solution: str, signal: str = "accepted") -> str:
+    """Distill a reusable lesson from a known-good example.
+
+    This is a direct teaching path: provide a task and solution that worked, and
+    trilobite will try to extract one concrete lesson into memory. Use grounded
+    signals like accepted, tests_passed, or compiled for best results.
+    """
+    _maybe_live_reload()
+    if signal not in reward.VALID_SIGNALS:
+        return "ERROR: unknown signal '%s'. Valid: %s." % (
+            signal, ", ".join(sorted(reward.VALID_SIGNALS)))
+    if not (task or "").strip() or not (solution or "").strip():
+        return "ERROR: task and solution are required."
+    conn = _open_db()
+    try:
+        interaction_id = memory_store.new_id()
+        emb = embeddings.embed(task)
+        blob = embeddings.to_blob(emb) if emb else None
+        memory_store.log_interaction(
+            conn, interaction_id, task, "", solution, "example", task_embedding=blob)
+        r = reward.score(signal)
+        memory_store.record_outcome_row(conn, interaction_id, signal, r)
+        lesson_id = None
+        if reward.is_good(signal):
+            lesson_id = reflection.maybe_add_lesson(
+                conn, interaction_id, task, solution, signal,
+                offload_fn=_generate_text, embed_fn=embeddings.embed,
+            )
+    finally:
+        conn.close()
+    if lesson_id:
+        return "Learned lesson %s from example interaction %s." % (lesson_id, interaction_id)
+    return "Example recorded as %s, but no non-duplicate concrete lesson was distilled." % interaction_id
+
+
+@mcp.tool()
+def apply_learned(task: str, limit: int = 5) -> str:
+    """Show which learned lessons would be applied to a task."""
+    _maybe_live_reload()
+    task = (task or "").strip()
+    if not task:
+        return "ERROR: empty task."
+    limit = _safe_limit(limit, 5, 20)
+    conn = _open_db()
+    try:
+        rows = retriever.retrieve_with_ids(conn, task, k=limit)
+        stats = memory_store.lesson_usage_stats(conn)
+    finally:
+        conn.close()
+    if not rows:
+        return "No learned lessons were relevant enough for this task."
+    lines = ["learned lesson application plan", "task: %s" % task, ""]
+    for i, row in enumerate(rows, start=1):
+        st = stats.get(row["id"], {})
+        lines.append("%d. %s" % (i, row["text"]))
+        lines.append("   lesson_id=%s uses=%s wins=%s losses=%s" % (
+            row["id"], st.get("uses", 0), st.get("wins", 0), st.get("losses", 0)))
+        lines.append("   apply by treating it as a constraint or tactic for the task.")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def memory_export(limit: int = 50, include_interactions: bool = False) -> str:
+    """Export a compact JSON snapshot of local memory."""
+    _maybe_live_reload()
+    limit = _safe_limit(limit, 50, 200)
+    conn = _open_db()
+    try:
+        data = {
+            "lessons": memory_store.recent_lessons(conn, limit=limit),
+            "sessions": memory_store.list_sessions(conn, limit=limit),
+            "facts": [dict(r) for r in conn.execute(
+                "SELECT id, project, text, ts FROM facts ORDER BY ts DESC, rowid DESC LIMIT ?",
+                (limit,),
+            ).fetchall()],
+            "outcomes": memory_store.outcome_signal_counts(conn),
+        }
+        if include_interactions:
+            data["interactions"] = [dict(r) for r in conn.execute(
+                "SELECT id, task, response, tier, session_id, ts FROM interactions "
+                "ORDER BY ts DESC, rowid DESC LIMIT ?",
+                (limit,),
+            ).fetchall()]
+    finally:
+        conn.close()
+    return json.dumps(data, indent=2, sort_keys=True)
+
+
+@mcp.tool()
+def session_export(session: str = "", limit: int = 50) -> str:
+    """Export a remembered conversation session as readable transcript text."""
+    _maybe_live_reload()
+    session_id = _resolve_session(session)
+    if not session_id:
+        return "ERROR: session='none' has no stored transcript."
+    limit = _safe_limit(limit, 50, 200)
+    conn = _open_db()
+    try:
+        sess = memory_store.get_session(conn, session_id)
+        if sess is None:
+            found = memory_store.find_session(conn, session_id)
+            if found:
+                session_id = found
+                sess = memory_store.get_session(conn, session_id)
+        if sess is None:
+            return "ERROR: no session '%s'." % session
+        turns = memory_store.session_turns(conn, session_id)[-limit:]
+    finally:
+        conn.close()
+    lines = [
+        "session: %s" % session_id,
+        "title: %s" % (sess.get("title") or "(untitled)"),
+        "project: %s" % (sess.get("project") or "(none)"),
+        "",
+    ]
+    for turn in turns:
+        lines.append("USER: %s" % (turn.get("task") or ""))
+        lines.append("ASSISTANT: %s" % (turn.get("response") or ""))
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+@mcp.tool()
+def tool_manifest() -> str:
+    """List the local-llm MCP tools and what they are for."""
+    tools = {
+        "agent": "Run a Claude-like tool-calling loop that can use local tools and web tools.",
+        "trilobite": "Ask the local self-improving coding model.",
+        "offload": "Route a self-contained task to a configured local/cloud tier.",
+        "web_search/web_fetch": "Search or fetch public web pages.",
+        "run_code": "Run a bounded Python/JS/PowerShell snippet.",
+        "loop": "Repeat bounded code/model/system actions.",
+        "workflow_list/save/run/delete": "Manage reusable loop workflows.",
+        "system_profile_text/update_system_profile": "Read or edit standing instructions.",
+        "emotion_vector_status/update_emotion_vectors": "Read or edit tone vectors.",
+        "memory_search/memory_export/session_export": "Inspect local memory.",
+        "learn_from_example/apply_learned": "Teach from examples and preview lesson application.",
+        "self_heal_check/self_heal_repair": "Detect and safely repair common local breakage.",
+        "diagnostics/live_reload_status/status/unload": "Observe and manage runtime health.",
+        "record_outcome": "Feed grounded outcomes back into learning.",
+        "trilobite_stats/trilobite_sessions/trilobite_remember_fact": "Memory observability and durable facts.",
+    }
+    return "\n".join("  %s: %s" % item for item in sorted(tools.items()))
+
+
+AGENT_TOOL_HELP = """Available tools:
+- run_code: {"code": "...", "language": "python|js|powershell", "stdin": "", "timeout": 10}
+- web_search: {"query": "...", "limit": 5}
+- web_fetch: {"url": "https://...", "max_chars": 8000}
+- memory_search: {"query": "...", "limit": 10}
+- apply_learned: {"task": "...", "limit": 5}
+- workflow_run: {"name": "...", "max_iterations": 1}
+- diagnostics: {}
+- self_heal_check: {}
+- self_heal_repair: {"apply": false}
+- status: {}
+- system_profile_text: {}
+- emotion_vector_status: {}
+- tool_manifest: {}
+- offload: {"prompt": "...", "tier": "fast|code|general|cloud-code|cloud-general"}
+
+Reply with exactly one JSON object and no markdown:
+{"tool": "tool_name", "args": {...}, "reason": "short reason"}
+or
+{"final": "your final answer"}
+"""
+
+
+def _extract_agent_json(text):
+    text = (text or "").strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            raise ValueError("agent response was not JSON: %s" % text[:300])
+        return json.loads(text[start:end + 1])
+
+
+def _agent_dispatch(tool_name, args, allow_web=True):
+    tool_name = (tool_name or "").strip()
+    args = args or {}
+    if not isinstance(args, dict):
+        return "ERROR: tool args must be a JSON object"
+    if tool_name == "run_code":
+        return run_code(
+            code=args.get("code", ""),
+            language=args.get("language", "python"),
+            stdin=args.get("stdin", ""),
+            timeout=args.get("timeout", 10),
+        )
+    if tool_name == "web_search":
+        if not allow_web:
+            return "ERROR: web access disabled for this agent run"
+        return web_search(args.get("query", ""), args.get("limit", 5))
+    if tool_name == "web_fetch":
+        if not allow_web:
+            return "ERROR: web access disabled for this agent run"
+        return web_fetch(args.get("url", ""), args.get("max_chars", 8000))
+    if tool_name == "memory_search":
+        return memory_search(args.get("query", ""), args.get("limit", 10))
+    if tool_name == "apply_learned":
+        return apply_learned(args.get("task", ""), args.get("limit", 5))
+    if tool_name == "workflow_run":
+        return workflow_run(
+            args.get("name", ""),
+            max_iterations=args.get("max_iterations", 1),
+            stop_on_failure=args.get("stop_on_failure", True),
+            stop_on_success=args.get("stop_on_success", False),
+            delay_seconds=args.get("delay_seconds", 0),
+        )
+    if tool_name == "diagnostics":
+        return diagnostics()
+    if tool_name == "self_heal_check":
+        return self_heal_check()
+    if tool_name == "self_heal_repair":
+        return self_heal_repair(apply=args.get("apply", False))
+    if tool_name == "status":
+        return status()
+    if tool_name == "system_profile_text":
+        return system_profile_text()
+    if tool_name == "emotion_vector_status":
+        return emotion_vector_status()
+    if tool_name == "tool_manifest":
+        return tool_manifest()
+    if tool_name == "offload":
+        return offload(
+            prompt=args.get("prompt", ""),
+            tier=args.get("tier", "fast"),
+            system=args.get("system", ""),
+            temperature=args.get("temperature", 0.2),
+            num_predict=args.get("num_predict", 1024),
+            num_ctx=args.get("num_ctx", 4096),
+            learn=args.get("learn", False),
+        )
+    return "ERROR: unknown tool '%s'." % tool_name
+
+
+@mcp.tool()
+def agent(
+    prompt: str,
+    tier: str = "code",
+    max_steps: int = 6,
+    allow_web: bool = True,
+) -> str:
+    """Run a Claude-like local agent loop that can call tools.
+
+    The model chooses one JSON tool call at a time, receives the observation,
+    and continues until it returns {"final": "..."} or max_steps is reached.
+    Tools include code execution, memory search, workflows, diagnostics, and
+    public web search/fetch when allow_web=True and TRILOBITE_WEB_TOOLS is on.
+    """
+    _maybe_live_reload()
+    max_steps = _safe_limit(max_steps, 6, 12)
+    model, cloud, augment, tier_label = _serve_target(tier, None)
+    if tier_label is None:
+        return "ERROR: unknown tier '%s'. Valid: trilobite, %s." % (tier, ", ".join(TIERS))
+    if model is None:
+        return "ERROR: trilobite model/alias not found."
+    system = _build_system(
+        "You are a local tool-using agent. Decide when tools are useful. "
+        "Use web tools for current external information and cite fetched URLs in the final answer. "
+        "Do not invent tool results.",
+        False,
+        "",
+    )
+    gen = _make_generate(model, system, 0.1, 1200, SESSION_NUM_CTX, cloud=cloud)
+    observations = []
+    transcript = "Task:\n%s\n\n%s" % (prompt, AGENT_TOOL_HELP)
+    for step in range(1, max_steps + 1):
+        step_prompt = transcript
+        if observations:
+            step_prompt += "\n\nTool observations so far:\n" + "\n\n".join(observations)
+        step_prompt += "\n\nChoose the next tool call or final answer."
+        raw = gen(step_prompt)
+        try:
+            decision = _extract_agent_json(raw)
+        except Exception as e:
+            return "ERROR: could not parse agent decision at step %d: %s\nraw=%s" % (
+                step, e, raw[:1000])
+        if not isinstance(decision, dict):
+            return "ERROR: agent decision must be a JSON object."
+        if "final" in decision:
+            return str(decision.get("final") or "")
+        tool_name = decision.get("tool")
+        if not tool_name:
+            return "ERROR: agent decision missing 'tool' or 'final': %s" % decision
+        observation = _agent_dispatch(tool_name, decision.get("args", {}), allow_web=allow_web)
+        observations.append(
+            "step %d tool=%s reason=%s\n%s" % (
+                step,
+                tool_name,
+                decision.get("reason", ""),
+                observation[:6000],
+            )
+        )
+    return "ERROR: agent reached max_steps=%d without final answer.\n\n%s" % (
+        max_steps, "\n\n".join(observations))
+
+
+@mcp.tool()
+def self_heal_check() -> str:
+    """Check for common local breakage without changing anything."""
+    _maybe_live_reload()
+    issues = self_heal.check(_DB_PATH, module_names=LIVE_RELOAD_MODULES)
+    return self_heal.format_report(issues)
+
+
+@mcp.tool()
+def self_heal_repair(apply: bool = False) -> str:
+    """Repair safe local issues, or dry-run by default.
+
+    Safe repairs include rebuilding missing lesson FTS rows, removing orphan FTS
+    rows, clearing corrupt lesson embeddings, and restoring default JSON config
+    files after backing up invalid ones. Broken Python/venv and live-reload syntax
+    errors are reported but not auto-fixed.
+    """
+    _maybe_live_reload()
+    issues, actions = self_heal.repair(
+        _DB_PATH,
+        module_names=LIVE_RELOAD_MODULES,
+        apply=bool(apply),
+    )
+    return self_heal.format_report(issues, actions=actions)
+
+
+@mcp.tool()
+def diagnostics() -> str:
+    """Run lightweight health checks for the local trilobite system."""
+    _maybe_live_reload()
+    lines = ["trilobite diagnostics"]
+    lines.append("  live reload: %s" % ("on" if live_reload.enabled() else "off"))
+    try:
+        profile_text, profile_path = system_profile.ensure_profile()
+        lines.append("  system profile: ok (%s, %d chars)" % (
+            profile_path, len(profile_text)))
+    except Exception as e:
+        lines.append("  system profile: ERROR %s" % e)
+    try:
+        vectors, vector_path = emotion_vectors.ensure_vectors()
+        active = sum(1 for value in vectors.values() if abs(value) >= 0.001)
+        lines.append("  emotion vectors: ok (%s, %d active)" % (
+            vector_path, active))
+    except Exception as e:
+        lines.append("  emotion vectors: ERROR %s" % e)
+    try:
+        conn = _open_db()
+        try:
+            n_lessons = conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0]
+            n_interactions = memory_store.count_interactions(conn)
+        finally:
+            conn.close()
+        lines.append("  memory db: ok (%d lessons, %d interactions)" % (
+            n_lessons, n_interactions))
+    except Exception as e:
+        lines.append("  memory db: ERROR %s" % e)
+    try:
+        heal_issues = self_heal.check(_DB_PATH, module_names=LIVE_RELOAD_MODULES)
+        repairable = sum(1 for issue in heal_issues if issue.repairable)
+        lines.append("  self heal: %s (%d repairable)" % (
+            "ok" if not heal_issues else "%d issue(s)" % len(heal_issues),
+            repairable,
+        ))
+    except Exception as e:
+        lines.append("  self heal: ERROR %s" % e)
+    try:
+        tags = _get("/api/tags").get("models", [])
+        names = sorted(m.get("name", "?") for m in tags)
+        lines.append("  ollama: ok (%d models: %s)" % (
+            len(names), ", ".join(names[:8]) if names else "none"))
+    except Exception as e:
+        lines.append("  ollama: ERROR %s" % e)
+    lines.append("  web tools: %s" % ("on" if web_tools.enabled() else "off"))
+    return "\n".join(lines)
+
+
+@mcp.tool()
 def status() -> str:
     """Report local-LLM state: which models are installed, and which are currently in VRAM.
 
     Use this to check whether the GPU is busy before offloading, or to confirm models pulled.
     """
+    _maybe_live_reload()
     try:
         tags = _get("/api/tags").get("models", [])
         ps = _get("/api/ps").get("models", [])
@@ -754,6 +1640,7 @@ def unload(tier: str = "all") -> str:
     Args:
         tier: "all" (default), or one of "fast", "code", "general".
     """
+    _maybe_live_reload()
     if tier == "all":
         # Only local tiers occupy VRAM; cloud tiers run remote.
         targets = [v for k, v in TIERS.items() if k not in CLOUD_TIERS]
