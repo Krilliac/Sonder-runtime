@@ -1,6 +1,10 @@
 @echo off
 setlocal
 set "REPO=%~dp0"
+if not defined LOCAL_LLM_NUM_THREAD set "LOCAL_LLM_NUM_THREAD=%NUMBER_OF_PROCESSORS%"
+if not defined LOCAL_LLM_NUM_GPU set "LOCAL_LLM_NUM_GPU=999"
+if not defined LOCAL_LLM_NUM_BATCH set "LOCAL_LLM_NUM_BATCH=512"
+if not defined OLLAMA_FLASH_ATTENTION set "OLLAMA_FLASH_ATTENTION=1"
 ollama list >nul 2>&1
 if errorlevel 1 (
   echo [trilobite] starting Ollama...

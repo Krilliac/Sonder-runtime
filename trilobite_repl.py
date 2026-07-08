@@ -10,6 +10,7 @@ import sys
 import server
 import memory_store
 import grounding
+import code_runner
 import training_tasks
 import intents
 import feedback
@@ -30,6 +31,7 @@ HELP = """commands:
   /pass, /good       record the last answer as tests_passed
   /fail, /bad        record the last answer as failed
   /run [seconds]     execute the code block from the last response (default 8s)
+  /runproject [sec]  execute file/path fenced blocks as a temp project
   /train, /learn [N] grounded self-learning: practice N tasks (default 3, max 500)
   /new               start a fresh conversation thread (forget this chat's history)
   /sessions          list past conversation threads
@@ -218,18 +220,31 @@ def main():
         print("persona: %s" % persona)
 
     def do_run(timeout=grounding.DEFAULT_TIMEOUT):
-        code = grounding.extract_code_block(last_response)
-        if code is None:
+        block = grounding.extract_runnable_code_block(last_response)
+        if block is None:
             print("(no code block in the last response to run)")
             return
-        result = grounding.run_code_detail(code, timeout=timeout)
-        print(grounding.format_run_result(result))
+        result = code_runner.run_code(
+            block["code"],
+            language=block["language"],
+            timeout=timeout,
+        )
+        print(code_runner.format_result(result))
         if result.get("ok"):
             print("[ran OK]")
-        elif result.get("timed_out"):
+        elif result.get("returncode") is None and result.get("error", "").startswith("timed out"):
             print("[timed out]")
         else:
             print("[exited with error]")
+
+    def do_runproject(timeout=grounding.MAX_TIMEOUT):
+        files = grounding.extract_project_files(last_response)
+        if not files:
+            print("(no file/path fenced project blocks in the last response)")
+            return
+        result = code_runner.run_project({"files": files}, timeout=timeout)
+        print(code_runner.format_project_result(result))
+        print("[ran OK]" if result.get("ok") else "[project failed]")
 
     print(BANNER)
 
@@ -278,6 +293,10 @@ def main():
                 timeout = _parse_run_timeout(arg)
                 if timeout is not None:
                     do_run(timeout)
+            elif cmd == "/runproject":
+                timeout = _parse_run_timeout(arg)
+                if timeout is not None:
+                    do_runproject(timeout)
             elif cmd in ("/train", "/learn"):
                 n = _parse_train_n(arg)
                 if n is not None:
