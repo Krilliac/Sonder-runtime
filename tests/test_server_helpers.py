@@ -56,13 +56,12 @@ def test_trilobite_strict_true_errors_when_alias_missing_before_any_ollama_call(
     assert "not found" in out
 
 
-def test_should_learn_includes_all_tiers_by_default():
-    # Default LEARN_TIERS = all configured tiers.
+def test_should_learn_defaults_to_local_tiers():
     assert server._should_learn("fast", True) is True
     assert server._should_learn("code", True) is True
     assert server._should_learn("general", True) is True
-    assert server._should_learn("cloud-code", True) is True
-    assert server._should_learn("cloud-general", True) is True
+    assert server._should_learn("cloud-code", True) is False
+    assert server._should_learn("cloud-general", True) is False
     # learn=False still opts out.
     assert server._should_learn("code", False) is False
     assert server._should_learn("cloud-code", False) is False
@@ -119,7 +118,17 @@ def test_make_generate_cloud_omits_local_runtime_options(monkeypatch):
     assert seen["payload"]["options"] == {"temperature": 0.4, "num_predict": 88}
 
 
-def test_serve_target_cloud_tier_is_clean_teacher():
+def test_serve_target_cloud_tier_requires_opt_in(monkeypatch):
+    monkeypatch.delenv("TRILOBITE_ALLOW_CLOUD", raising=False)
+    model, cloud, augment, label = server._serve_target("cloud-code", None)
+    assert model is None
+    assert cloud is True
+    assert augment is False
+    assert label == "cloud-disabled"
+
+
+def test_serve_target_cloud_tier_is_clean_teacher_when_enabled(monkeypatch):
+    monkeypatch.setenv("TRILOBITE_ALLOW_CLOUD", "1")
     # Cloud tier: real cloud model, cloud=True, augment=False (clean), labeled by tier.
     model, cloud, augment, label = server._serve_target("cloud-code", None)
     assert model == server.TIERS["cloud-code"]
@@ -137,6 +146,7 @@ def test_serve_target_treats_code_as_local():
 
 
 def test_serve_target_cloud_detection_helper_detects_cloud_model_name(monkeypatch):
+    monkeypatch.setenv("TRILOBITE_ALLOW_CLOUD", "1")
     monkeypatch.setitem(server.TIERS, "code", "qwen3-coder:480b-cloud")
     model, cloud, augment, label = server._serve_target("code", None)
     assert model == "qwen3-coder:480b-cloud"
@@ -375,10 +385,13 @@ def test_campaign_records_terminal_failures(monkeypatch):
     assert records == [("bad123", "failed")]
 
 
-def test_learn_tiers_reports_all_defaults():
+def test_learn_tiers_reports_all_defaults(monkeypatch):
+    monkeypatch.delenv("TRILOBITE_ALLOW_CLOUD", raising=False)
     out = server.learn_tiers()
-    for tier in ("fast", "code", "general", "cloud-code", "cloud-general"):
+    for tier in ("fast", "code", "general"):
         assert "%s: on" % tier in out
+    for tier in ("cloud-code", "cloud-general"):
+        assert "%s: disabled" % tier in out
 
 
 def test_format_trace_contains_model_lessons_and_prompt():

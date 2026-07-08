@@ -26,6 +26,10 @@ _POSITIVE_PHRASES = [
     "good", "that's right", "solved it",
 ]
 
+_COPIED_PHRASES = ["copied", "copying this", "saved this"]
+_USED_PHRASES = ["used it", "using it", "i used it", "applied it"]
+_EDITED_PHRASES = ["edited it", "i edited it", "tweaked it", "modified it"]
+
 _NEGATIVE_PHRASES = [
     "no", "nope", "wrong", "that's wrong", "incorrect", "doesn't work",
     "does not work", "didn't work", "still fails", "still broken",
@@ -35,6 +39,15 @@ _NEGATIVE_PHRASES = [
 
 _POSITIVE_RE = re.compile(
     r"\b(%s)\b" % "|".join(re.escape(p) for p in _POSITIVE_PHRASES)
+)
+_COPIED_RE = re.compile(
+    r"\b(%s)\b" % "|".join(re.escape(p) for p in _COPIED_PHRASES)
+)
+_USED_RE = re.compile(
+    r"\b(%s)\b" % "|".join(re.escape(p) for p in _USED_PHRASES)
+)
+_EDITED_RE = re.compile(
+    r"\b(%s)\b" % "|".join(re.escape(p) for p in _EDITED_PHRASES)
 )
 _NEGATIVE_RE = re.compile(
     r"\b(%s)\b" % "|".join(re.escape(p) for p in _NEGATIVE_PHRASES)
@@ -63,4 +76,22 @@ def classify_feedback(text):
         return "positive"
     if is_negative:
         return "negative"
+    return None
+
+
+def classify_signal(text):
+    """Return a reward signal ("accepted", "rejected", "copied", etc.) or None."""
+    t = (text or "").strip().lower()
+    if not t or len(t.split()) > _MAX_WORDS or _GUARD_RE.match(t):
+        return None
+    if _NEGATIVE_RE.search(t):
+        return "rejected"
+    if _COPIED_RE.search(t):
+        return "copied"
+    if _USED_RE.search(t):
+        return "used"
+    if _EDITED_RE.search(t):
+        return "edited"
+    if _POSITIVE_RE.search(t):
+        return "accepted"
     return None

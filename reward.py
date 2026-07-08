@@ -2,6 +2,9 @@
 
 SIGNAL_REWARDS = {
     "tests_passed": 1.0,
+    "used": 0.9,
+    "copied": 0.85,
+    "edited": 0.75,
     "accepted": 0.8,
     "compiled": 0.7,
     "rejected": -0.5,

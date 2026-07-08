@@ -46,6 +46,7 @@ import self_heal
 import grounding
 import trilobite_paths
 import memory_quality
+import domain_grounding
 
 from mcp.server.fastmcp import FastMCP
 
@@ -122,6 +123,30 @@ TIERS = {
 }
 # Tiers whose ":...-cloud" model runs on Ollama's servers (data leaves the machine).
 CLOUD_TIERS = {"cloud-code", "cloud-general"}
+LOCAL_TIERS = tuple(k for k in TIERS if k not in CLOUD_TIERS)
+
+
+def cloud_allowed():
+    return os.environ.get("TRILOBITE_ALLOW_CLOUD", "").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+
+
+def available_tiers(include_disabled=False):
+    if include_disabled or cloud_allowed():
+        return dict(TIERS)
+    return {k: v for k, v in TIERS.items() if k not in CLOUD_TIERS}
+
+
+def _valid_tier_names():
+    return ", ".join(available_tiers())
+
+
+def _cloud_disabled_message():
+    return (
+        "ERROR: hosted/cloud tiers are disabled. Set TRILOBITE_ALLOW_CLOUD=1 "
+        "to opt in; prompts sent to cloud tiers leave this machine."
+    )
 
 
 def _is_cloud_model_name(model):
@@ -145,7 +170,7 @@ def _is_cloud_tier(tier, model=None):
 # lessons and fine-tuning data the local student retrieves later. All configured tiers
 # learn by default; override machine-wide with e.g. TRILOBITE_LEARN_TIERS="code"
 # (local coder only) or "fast,code,general" (local-only all sizes).
-DEFAULT_LEARN_TIERS = ",".join(TIERS.keys())
+DEFAULT_LEARN_TIERS = ",".join(LOCAL_TIERS)
 LEARN_TIERS = {
     t.strip()
     for t in os.environ.get(
@@ -192,6 +217,7 @@ LIVE_RELOAD_MODULES = [
     "web_tools",
     "self_heal",
     "memory_quality",
+    "domain_grounding",
 ]
 
 
@@ -370,6 +396,8 @@ def _serve_target(tier, strict):
         return resolve_trilobite_model(strict_eff), False, True, "trilobite"
     if t in TIERS:
         model = TIERS[t]
+        if _is_cloud_tier(t, model) and not cloud_allowed():
+            return None, True, False, "cloud-disabled"
         return model, _is_cloud_tier(t, model), t == "code", t
     return None, False, True, None
 
@@ -524,7 +552,9 @@ def offload(
     _maybe_live_reload()
     model = TIERS.get(tier)
     if model is None:
-        return "ERROR: unknown tier '%s'. Valid tiers: %s." % (tier, ", ".join(TIERS))
+        return "ERROR: unknown tier '%s'. Valid tiers: %s." % (tier, _valid_tier_names())
+    if _is_cloud_tier(tier, model) and not cloud_allowed():
+        return _cloud_disabled_message()
 
     # Only the local 'code' tier (with learn not disabled) takes the learning path.
     if not _should_learn(tier, learn):
@@ -594,8 +624,8 @@ def trilobite(
     the prompt is augmented with project facts, lessons distilled from past work, and
     similar past solutions, answered locally on the 4050, captured, and returned with
     a '[interaction_id: <id>]' footer. After you learn how it went, call
-    record_outcome(<id>, "tests_passed" | "accepted" | "compiled" | "rejected" |
-    "failed") so trilobite gets better over time. Defaults to the 7B coder base model,
+    record_outcome(<id>, "tests_passed" | "used" | "copied" | "edited" |
+    "accepted" | "compiled" | "rejected" | "failed") so trilobite gets better over time. Defaults to the 7B coder base model,
     or the 'trilobite' Ollama alias if it exists.
 
     `tier` picks which model answers (default "" / "trilobite" = the local student).
@@ -629,8 +659,10 @@ def trilobite(
     """
     _maybe_live_reload()
     tgt_model, cloud, augment, tier_label = _serve_target(tier, strict)
+    if tier_label == "cloud-disabled":
+        return _cloud_disabled_message()
     if tier_label is None:
-        return "ERROR: unknown tier '%s'. Valid: trilobite, %s." % (tier, ", ".join(TIERS))
+        return "ERROR: unknown tier '%s'. Valid: trilobite, %s." % (tier, _valid_tier_names())
     if tgt_model is None:
         return ("ERROR: trilobite model/alias not found. Run setup_alias.py, or call "
                 "with strict=False to fall back to the base coder.")
@@ -684,9 +716,11 @@ def answer_with_history(prompt, history, trace=False, strict=None, tier=None):
     """
     _maybe_live_reload()
     model, cloud, augment, tier_label = _serve_target(tier, strict)
+    if tier_label == "cloud-disabled":
+        return _cloud_disabled_message()
     if tier_label is None:
         return "ERROR: unknown model '%s'. Valid: trilobite, %s." % (
-            tier, ", ".join(TIERS))
+            tier, _valid_tier_names())
     if model is None:
         return ("ERROR: trilobite model/alias not found. Run setup_alias.py, or call "
                 "with strict=False to fall back to the base coder.")
@@ -729,7 +763,8 @@ def record_outcome(interaction_id: str, signal: str) -> str:
     """Feed a real-world outcome back into trilobite's learning loop.
 
     Call this after a trilobite/offload response once you know how it went.
-    signal is one of: tests_passed, accepted, compiled, rejected, failed.
+    signal is one of: tests_passed, used, copied, edited, accepted, compiled,
+    rejected, failed.
     A good outcome triggers a distilled 'lesson' that future prompts will retrieve.
     Pass the id from the '[interaction_id: <id>]' footer of the response.
     """
@@ -760,6 +795,27 @@ def record_outcome(interaction_id: str, signal: str) -> str:
     if lesson_id:
         msg += " Distilled lesson %s." % lesson_id
     return msg
+
+
+@mcp.tool()
+def ground_artifact(artifact: str, checks_json: str) -> str:
+    """Validate non-code artifacts with deterministic checks.
+
+    checks_json is a JSON list of checks such as:
+      {"type":"contains","text":"..."},
+      {"type":"regex","pattern":"..."},
+      {"type":"json"},
+      {"type":"json_field","path":"a.b","equals":3}.
+    Use the pass/fail result as a grounded signal for writing, configs, plans,
+    structured data, and other domains where compile/run is not the test.
+    """
+    _maybe_live_reload()
+    try:
+        checks = json.loads(checks_json)
+        result = domain_grounding.evaluate(artifact, checks)
+    except Exception as e:
+        return "ERROR: %s" % e
+    return domain_grounding.format_result(result)
 
 
 @mcp.tool()
@@ -810,7 +866,9 @@ def parallel_generate_run(
     timeout = max(1, min(int(timeout or 8), 120))
     model = TIERS.get(tier)
     if model is None:
-        return "ERROR: unknown tier '%s'. Valid tiers: %s." % (tier, ", ".join(TIERS))
+        return "ERROR: unknown tier '%s'. Valid tiers: %s." % (tier, _valid_tier_names())
+    if _is_cloud_tier(tier, model) and not cloud_allowed():
+        return _cloud_disabled_message()
     cloud = _is_cloud_tier(tier, model)
     system = (
         "Return one complete runnable Python solution in a single ```python code block. "
@@ -918,7 +976,9 @@ def parallel_generate_run_languages(
     timeout = max(1, min(int(timeout or 8), 120))
     model = TIERS.get(tier)
     if model is None:
-        return "ERROR: unknown tier '%s'. Valid tiers: %s." % (tier, ", ".join(TIERS))
+        return "ERROR: unknown tier '%s'. Valid tiers: %s." % (tier, _valid_tier_names())
+    if _is_cloud_tier(tier, model) and not cloud_allowed():
+        return _cloud_disabled_message()
     cloud = _is_cloud_tier(tier, model)
     started = time.time()
     results = [None] * len(jobs)
@@ -1410,11 +1470,13 @@ def memory_quality_repair(apply: bool = False) -> str:
 def learn_tiers() -> str:
     """Show which tiers currently feed the learning loop."""
     lines = ["learning tiers"]
-    for tier, model in TIERS.items():
+    for tier, model in available_tiers(include_disabled=True).items():
         state = "on" if tier in LEARN_TIERS else "off"
         locality = "cloud" if _is_cloud_tier(tier, model) else "local"
+        if locality == "cloud" and not cloud_allowed():
+            state = "disabled"
         lines.append("  %s: %s (%s, %s)" % (tier, state, locality, model))
-    lines.append("override with TRILOBITE_LEARN_TIERS=fast,code,general,cloud-code,cloud-general")
+    lines.append("cloud tiers require TRILOBITE_ALLOW_CLOUD=1; override learning with TRILOBITE_LEARN_TIERS")
     return "\n".join(lines)
 
 
@@ -1637,6 +1699,11 @@ def _loop_dispatch(action):
             query=action.get("query", ""),
             limit=action.get("limit", 10),
         ))
+    if action_type == "ground_artifact":
+        return _loop_text_result("ground_artifact", ground_artifact(
+            artifact=action.get("artifact", ""),
+            checks_json=json.dumps(action.get("checks", [])),
+        ))
     if action_type == "apply_learned":
         return _loop_text_result("apply_learned", apply_learned(
             task=action.get("task", ""),
@@ -1667,7 +1734,7 @@ def _loop_dispatch(action):
         "ok": False,
         "type": action_type or "(unknown)",
         "summary": "unknown action type",
-        "output": "Valid action types: code, project, offload, trilobite, status, diagnostics, context_health, memory_quality_report, memory_quality_repair, self_heal_check, self_heal_repair, profile_status, emotion_status, memory_search, apply_learned, web_search, web_fetch, unload, sleep.",
+        "output": "Valid action types: code, project, offload, trilobite, status, diagnostics, context_health, memory_quality_report, memory_quality_repair, self_heal_check, self_heal_repair, profile_status, emotion_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, unload, sleep.",
     }
 
 
@@ -2119,6 +2186,7 @@ def tool_manifest() -> str:
         "offload": "Route a self-contained task to a configured local/cloud tier.",
         "web_search/web_fetch": "Search or fetch public web pages.",
         "run_code": "Run a bounded Python/JS/PowerShell/C++/C# snippet.",
+        "ground_artifact": "Validate non-code artifacts with exact/contains/regex/JSON checks.",
         "run_project": "Run a bounded temporary multi-file project with optional build commands.",
         "loop": "Repeat bounded code/model/system actions.",
         "workflow_list/save/run/delete": "Manage reusable loop workflows.",
@@ -2141,6 +2209,7 @@ AGENT_TOOL_HELP = """Available tools:
 - web_search: {"query": "...", "limit": 5}
 - web_fetch: {"url": "https://...", "max_chars": 8000}
 - memory_search: {"query": "...", "limit": 10}
+- ground_artifact: {"artifact": "...", "checks_json": [{"type": "contains", "text": "..."}]}
 - apply_learned: {"task": "...", "limit": 5}
 - workflow_run: {"name": "...", "max_iterations": 1}
 - diagnostics: {}
@@ -2203,6 +2272,11 @@ def _agent_dispatch(tool_name, args, allow_web=True):
         return web_fetch(args.get("url", ""), args.get("max_chars", 8000))
     if tool_name == "memory_search":
         return memory_search(args.get("query", ""), args.get("limit", 10))
+    if tool_name == "ground_artifact":
+        return ground_artifact(
+            args.get("artifact", ""),
+            json.dumps(args.get("checks_json", args.get("checks", []))),
+        )
     if tool_name == "apply_learned":
         return apply_learned(args.get("task", ""), args.get("limit", 5))
     if tool_name == "workflow_run":
@@ -2266,8 +2340,10 @@ def agent(
     _maybe_live_reload()
     max_steps = _safe_limit(max_steps, 6, 12)
     model, cloud, augment, tier_label = _serve_target(tier, None)
+    if tier_label == "cloud-disabled":
+        return _cloud_disabled_message()
     if tier_label is None:
-        return "ERROR: unknown tier '%s'. Valid: trilobite, %s." % (tier, ", ".join(TIERS))
+        return "ERROR: unknown tier '%s'. Valid: trilobite, %s." % (tier, _valid_tier_names())
     if model is None:
         return "ERROR: trilobite model/alias not found."
     system = _build_system(
@@ -2427,7 +2503,7 @@ def status() -> str:
     ]
     tier_lines = [
         f"  {k}={v}" + ("  [CLOUD — leaves machine]" if _is_cloud_tier(k, v) else "  [local GPU]")
-        for k, v in TIERS.items()
+        for k, v in available_tiers(include_disabled=cloud_allowed()).items()
     ]
     lines = [
         f"Ollama @ {BASE}",
@@ -2460,7 +2536,7 @@ def unload(tier: str = "all") -> str:
     else:
         targets = [TIERS.get(tier)]
     if None in targets:
-        return f"ERROR: unknown tier '{tier}'. Valid: all, {', '.join(TIERS)}."
+        return f"ERROR: unknown tier '{tier}'. Valid: all, {_valid_tier_names()}."
     freed = []
     for model in targets:
         try:

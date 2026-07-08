@@ -17,6 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 EXCLUDE_DIRS = {
     ".git",
     ".pytest_cache",
+    ".pytest-tmp",
+    ".pytest-tmp2",
     "__pycache__",
     "venv",
     "trilobite-lora",
@@ -68,6 +70,7 @@ def copy_payload(dest: Path) -> None:
             shutil.copy2(path, target)
     (dest / "BUNDLED_SYSTEM_README.txt").write_text(
         "This folder is the bundled trilobite local system.\n"
+        "Run bootstrap-engine.cmd for one-click local model setup on Windows.\n"
         "Run trilobite-serve.cmd on Windows, or python trilobite_serve.py on Linux/macOS.\n"
         "Run endless-train.cmd for continuous grounded local training.\n"
         "Model weights are managed by Ollama and may be pulled on first setup.\n",

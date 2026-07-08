@@ -20,8 +20,16 @@ if errorlevel 1 (
 )
 ollama list 2>nul | findstr /i "trilobite" >nul
 if errorlevel 1 (
-  echo [trilobite] creating model alias ^(first run^)...
-  "%REPO%venv\Scripts\python.exe" "%REPO%setup_alias.py"
+  echo [trilobite] bootstrapping engine ^(first run^)...
+  if exist "%REPO%venv\Scripts\python.exe" (
+    "%REPO%venv\Scripts\python.exe" "%REPO%bootstrap_engine.py"
+  ) else (
+    python "%REPO%bootstrap_engine.py"
+  )
 )
-"%REPO%venv\Scripts\python.exe" "%REPO%trilobite_serve.py" %*
+if exist "%REPO%venv\Scripts\python.exe" (
+  "%REPO%venv\Scripts\python.exe" "%REPO%trilobite_serve.py" %*
+) else (
+  python "%REPO%trilobite_serve.py" %*
+)
 endlocal

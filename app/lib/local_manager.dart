@@ -17,6 +17,7 @@ class LocalInstallInfo {
   final bool gitCheckout;
   final bool serverScript;
   final bool trainingScript;
+  final bool bootstrapScript;
   final bool defaultServerReachable;
 
   const LocalInstallInfo({
@@ -29,6 +30,7 @@ class LocalInstallInfo {
     required this.gitCheckout,
     required this.serverScript,
     required this.trainingScript,
+    required this.bootstrapScript,
     required this.defaultServerReachable,
   });
 }
@@ -90,10 +92,11 @@ class LocalManager {
         '${Platform.pathSeparator}trilobite';
   }
 
-  static Map<String, String> processEnvironment() {
+  static Map<String, String> processEnvironment({bool allowHosted = false}) {
     return {
       ...Platform.environment,
       'TRILOBITE_HOME': sharedHomePath(),
+      'TRILOBITE_ALLOW_CLOUD': allowHosted ? '1' : '0',
     };
   }
 
@@ -121,6 +124,9 @@ class LocalManager {
     final gitCheckout = systemExists && await gitDir.exists();
     final serverScript = systemExists && await hasFile('trilobite-serve.cmd');
     final trainingScript = systemExists && await hasFile('endless-train.cmd');
+    final bootstrapScript = systemExists &&
+        (await hasFile('bootstrap-engine.cmd') ||
+            await hasFile('bootstrap_engine.py'));
     final reachable = await defaultServerReachable();
 
     return LocalInstallInfo(
@@ -133,11 +139,47 @@ class LocalManager {
       gitCheckout: gitCheckout,
       serverScript: serverScript,
       trainingScript: trainingScript,
+      bootstrapScript: bootstrapScript,
       defaultServerReachable: reachable,
     );
   }
 
-  static Future<LocalActionResult> startServer() async {
+  static Future<LocalActionResult> setupEngine({bool allowHosted = false}) async {
+    if (!canRunLocalTools) {
+      return const LocalActionResult(false, 'Engine setup is desktop-only.');
+    }
+    final system = bundledSystemDirectory();
+    if (!await system.exists()) {
+      return const LocalActionResult(false, 'No bundled local-system folder found.');
+    }
+    try {
+      if (Platform.isWindows) {
+        final script = File('${system.path}${Platform.pathSeparator}bootstrap-engine.cmd');
+        if (await script.exists()) {
+          await Process.start(
+            'cmd.exe',
+            ['/c', 'start', '', script.path],
+            workingDirectory: system.path,
+            environment: processEnvironment(allowHosted: allowHosted),
+            runInShell: true,
+          );
+          return const LocalActionResult(true, 'Engine setup started.');
+        }
+      }
+      await Process.start(
+        Platform.isWindows ? 'python.exe' : 'python3',
+        ['bootstrap_engine.py'],
+        workingDirectory: system.path,
+        environment: processEnvironment(allowHosted: allowHosted),
+        mode: ProcessStartMode.detached,
+      );
+      return const LocalActionResult(true, 'Engine setup started.');
+    } catch (e) {
+      return LocalActionResult(false, 'Could not start engine setup: $e');
+    }
+  }
+
+  static Future<LocalActionResult> startServer({bool allowHosted = false}) async {
     if (!canRunLocalTools) {
       return LocalActionResult(
         false,
@@ -165,7 +207,7 @@ class LocalManager {
             'cmd.exe',
             ['/c', 'start', '', '/min', script.path],
             workingDirectory: system.path,
-            environment: processEnvironment(),
+            environment: processEnvironment(allowHosted: allowHosted),
             runInShell: true,
           );
           return const LocalActionResult(true, 'Server startup requested.');
@@ -176,7 +218,7 @@ class LocalManager {
         python,
         ['trilobite_serve.py'],
         workingDirectory: system.path,
-        environment: processEnvironment(),
+        environment: processEnvironment(allowHosted: allowHosted),
         mode: ProcessStartMode.detached,
       );
       return const LocalActionResult(true, 'Server startup requested.');

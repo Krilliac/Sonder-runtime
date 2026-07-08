@@ -51,9 +51,9 @@ The loop is model-agnostic: point it at whatever LLM you have. The local student
 (`code`) is memory-augmented; a stronger paid/cloud model can act as a **teacher** —
 it answers *clean* (no local-lesson injection) and its grounded good outcomes are
 distilled into lessons and fine-tuning data the local model retrieves later. Which
-tiers learn is configurable (`TRILOBITE_LEARN_TIERS`, default all tiers:
-`fast,code,general,cloud-code,cloud-general`). The memory, capture, and distillation always stay local; only a
-cloud-tier *prompt* leaves the machine, and only when you choose a cloud model.
+tiers learn is configurable (`TRILOBITE_LEARN_TIERS`, default local-only:
+`fast,code,general`). The memory, capture, and distillation always stay local; only a
+cloud-tier *prompt* leaves the machine, and only after `TRILOBITE_ALLOW_CLOUD=1`.
 The `code` tier is protected as the local coder lane: if `LOCAL_LLM_CODE` is
 accidentally pointed at a cloud model, trilobite falls back to the local
 `qwen2.5-coder:7b` model (override that local fallback with
@@ -104,6 +104,10 @@ python -m venv venv && venv/Scripts/pip install mcp -r requirements-dev.txt
 venv/Scripts/python -m pytest -q          # run the test suite
 python trilobite_repl.py                  # interactive session
 ```
+
+**Bundled desktop engine setup:** run `bootstrap-engine.cmd` or press **Setup
+engine** in the app. It starts Ollama if needed, detects RAM, chooses a
+`qwen2.5-coder` size, pulls embeddings, and creates the `trilobite` alias.
 
 **Use the hosted model from any PC:** see [CLIENT.md](CLIENT.md).
 
@@ -161,16 +165,16 @@ Privacy is opt-in and scrubbed at every step — nothing auto-uploads, and no PR
 ## Roadmap (toward "for everyone")
 
 **Shipped**
+- ✅ **One-click engine setup** — bundled installs can bootstrap the local engine, detect available memory, pick a practical default model size, and start the local server without terminal setup.
+- ✅ **Richer passive learning** — accepts explicit accept/use/copy/edit signals from the CLI, server, and GUI in addition to natural follow-up phrasing.
+- ✅ **Local-first hosted opt-in** — cloud/hosted tiers are disabled unless `TRILOBITE_ALLOW_CLOUD=1` or the app setting is explicitly enabled.
+- ✅ **General artifact grounding** — `ground_artifact` validates non-code outputs with contains, regex, exact text, JSON, and JSON-field checks so learning is not limited to compile/run results.
 - ✅ **Passive learning** — infers outcomes from natural follow-up ("that worked" / "no, still errors") so it learns without manual scoring.
 - ✅ **Personas** — `/persona coder|explainer|reviewer|teacher` so non-coders get value too.
 - ✅ **Federated contribution** — share scrubbed lessons back without hosting the model (see [above](#contributing-improvements-without-hosting-the-model)).
 - ✅ **Mobile & desktop app (GUI)** — a [Flutter client](app/) with a real chat UI (Android APK + Windows/Linux/macOS), CI-built with download links. No terminal needed to *use* a hosted trilobite.
 
-**Planned** — honest gaps between "great for tinkerers" and "usable by anyone":
-- **One-click *engine* bundle** — the GUI now exists; the remaining piece is bundling the server/engine itself so there's no terminal setup on the host either (auto-detect hardware, auto-pick model size).
-- **Richer passive learning** — capture edits/accepts, not just follow-up phrasing.
-- **Optional hosted mode** for people with no capable hardware — *opt-in only*, because it trades away the privacy promise.
-- **Beyond code** — generalize the grounding signal past "did it compile" to other domains.
+**Next gaps** — make the bundled engine downloader fully self-contained per platform, add more GUI visualizers for learning quality, and broaden artifact grounding recipes for writing, data, docs, and UI work.
 
 ---
 

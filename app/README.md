@@ -22,8 +22,8 @@ party.
   (`trilobite` local student, or any cloud/paid tier the server exposes). The list is
   fetched from the server's `/v1/models`. Cloud models answer *clean* (teacher mode)
   and their good outcomes still feed the local model's learning.
-- **Settings**: server URL + optional API key, default model/tier, with a
-  one-tap *Test connection*.
+- **Settings**: server URL + optional API key, default model/tier, optional hosted
+  tiers opt-in, with a one-tap *Test connection*.
 - **System panel**: view server status, context health meters, learning stats
   and exposed models, run `/stats`, `/context`, `/quality`, `/train 10` and `/help`, start
   the bundled desktop server, launch endless training, and pull updates from Git.
@@ -56,8 +56,8 @@ git push origin app-v1.0.0
 ## Bundled system
 
 Desktop downloads include a `local-system` folder beside the app. The System
-panel can use that folder to start the server, launch endless training, run
-common status/training commands and pull updates from Git.
+panel can use that folder to set up the local engine, start the server, launch
+endless training, run common status/training commands and pull updates from Git.
 
 Runtime state is shared outside the install folder. By default the bundled
 server uses `%LOCALAPPDATA%\trilobite` on Windows, `$XDG_DATA_HOME/trilobite`
