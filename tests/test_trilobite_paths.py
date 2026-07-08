@@ -1,5 +1,3 @@
-import os
-
 import trilobite_paths
 
 
@@ -20,10 +18,10 @@ def test_memory_db_env_override_wins(monkeypatch, tmp_path):
     assert trilobite_paths.memory_db_path() == str(explicit)
 
 
-def test_default_home_prefers_localappdata_on_windows(monkeypatch, tmp_path):
+def test_default_home_prefers_xdg_data_home(monkeypatch, tmp_path):
     monkeypatch.delenv("TRILOBITE_HOME", raising=False)
-    monkeypatch.setattr(trilobite_paths.os, "name", "nt", raising=False)
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
     monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
 
-    assert trilobite_paths.default_home() == tmp_path / "local" / "trilobite"
+    assert trilobite_paths.default_home() == tmp_path / "xdg" / "trilobite"

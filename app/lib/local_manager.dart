@@ -7,6 +7,32 @@ class LocalActionResult {
   const LocalActionResult(this.ok, this.message);
 }
 
+class LocalInstallInfo {
+  final String platform;
+  final String appDir;
+  final String systemDir;
+  final String sharedHome;
+  final bool canLaunch;
+  final bool systemExists;
+  final bool gitCheckout;
+  final bool serverScript;
+  final bool trainingScript;
+  final bool defaultServerReachable;
+
+  const LocalInstallInfo({
+    required this.platform,
+    required this.appDir,
+    required this.systemDir,
+    required this.sharedHome,
+    required this.canLaunch,
+    required this.systemExists,
+    required this.gitCheckout,
+    required this.serverScript,
+    required this.trainingScript,
+    required this.defaultServerReachable,
+  });
+}
+
 class LocalManager {
   static const _repoUrl = 'https://github.com/Krilliac/Trilobite-model.git';
 
@@ -71,6 +97,46 @@ class LocalManager {
     };
   }
 
+  static Future<bool> defaultServerReachable() async {
+    try {
+      final socket = await Socket.connect(
+        InternetAddress.loopbackIPv4,
+        11435,
+        timeout: const Duration(milliseconds: 350),
+      );
+      socket.destroy();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Future<LocalInstallInfo> inspect() async {
+    final system = bundledSystemDirectory();
+    final systemExists = await system.exists();
+    Future<bool> hasFile(String name) async {
+      return File('${system.path}${Platform.pathSeparator}$name').exists();
+    }
+    final gitDir = Directory('${system.path}${Platform.pathSeparator}.git');
+    final gitCheckout = systemExists && await gitDir.exists();
+    final serverScript = systemExists && await hasFile('trilobite-serve.cmd');
+    final trainingScript = systemExists && await hasFile('endless-train.cmd');
+    final reachable = await defaultServerReachable();
+
+    return LocalInstallInfo(
+      platform: platformLabel,
+      appDir: appDirectory().path,
+      systemDir: system.path,
+      sharedHome: sharedHomePath(),
+      canLaunch: canRunLocalTools,
+      systemExists: systemExists,
+      gitCheckout: gitCheckout,
+      serverScript: serverScript,
+      trainingScript: trainingScript,
+      defaultServerReachable: reachable,
+    );
+  }
+
   static Future<LocalActionResult> startServer() async {
     if (!canRunLocalTools) {
       return LocalActionResult(
@@ -79,6 +145,12 @@ class LocalManager {
       );
     }
     final system = bundledSystemDirectory();
+    if (await defaultServerReachable()) {
+      return const LocalActionResult(
+        true,
+        'A server is already reachable on 127.0.0.1:11435.',
+      );
+    }
     if (!await system.exists()) {
       return const LocalActionResult(
         false,

@@ -147,12 +147,16 @@ class SystemInfo {
   final String status;
   final String stats;
   final String learnTiers;
+  final String dbPath;
+  final String stateHome;
   final List<SystemModel> models;
 
   const SystemInfo({
     required this.status,
     required this.stats,
     required this.learnTiers,
+    required this.dbPath,
+    required this.stateHome,
     required this.models,
   });
 
@@ -165,6 +169,8 @@ class SystemInfo {
       status: json['status']?.toString() ?? '',
       stats: json['stats']?.toString() ?? '',
       learnTiers: json['learn_tiers']?.toString() ?? '',
+      dbPath: json['db_path']?.toString() ?? '',
+      stateHome: json['state_home']?.toString() ?? '',
       models: models,
     );
   }
