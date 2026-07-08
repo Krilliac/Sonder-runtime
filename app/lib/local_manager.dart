@@ -42,6 +42,35 @@ class LocalManager {
     return desktopSibling;
   }
 
+  static String sharedHomePath() {
+    final existing = Platform.environment['TRILOBITE_HOME'];
+    if (existing != null && existing.trim().isNotEmpty) {
+      return existing;
+    }
+    if (Platform.isWindows) {
+      final root = Platform.environment['LOCALAPPDATA'] ??
+          Platform.environment['APPDATA'] ??
+          Platform.environment['USERPROFILE'] ??
+          appDirectory().path;
+      return '$root${Platform.pathSeparator}trilobite';
+    }
+    final xdg = Platform.environment['XDG_DATA_HOME'];
+    if (xdg != null && xdg.trim().isNotEmpty) {
+      return '$xdg${Platform.pathSeparator}trilobite';
+    }
+    final home = Platform.environment['HOME'] ?? appDirectory().path;
+    return '$home${Platform.pathSeparator}.local'
+        '${Platform.pathSeparator}share'
+        '${Platform.pathSeparator}trilobite';
+  }
+
+  static Map<String, String> processEnvironment() {
+    return {
+      ...Platform.environment,
+      'TRILOBITE_HOME': sharedHomePath(),
+    };
+  }
+
   static Future<LocalActionResult> startServer() async {
     if (!canRunLocalTools) {
       return LocalActionResult(
@@ -64,6 +93,7 @@ class LocalManager {
             'cmd.exe',
             ['/c', 'start', '', '/min', script.path],
             workingDirectory: system.path,
+            environment: processEnvironment(),
             runInShell: true,
           );
           return const LocalActionResult(true, 'Server startup requested.');
@@ -74,6 +104,7 @@ class LocalManager {
         python,
         ['trilobite_serve.py'],
         workingDirectory: system.path,
+        environment: processEnvironment(),
         mode: ProcessStartMode.detached,
       );
       return const LocalActionResult(true, 'Server startup requested.');
@@ -98,6 +129,7 @@ class LocalManager {
             'cmd.exe',
             ['/c', 'start', '', script.path],
             workingDirectory: system.path,
+            environment: processEnvironment(),
             runInShell: true,
           );
           return const LocalActionResult(true, 'Endless training started.');
@@ -107,6 +139,7 @@ class LocalManager {
         Platform.isWindows ? 'python.exe' : 'python3',
         ['endless_train.py'],
         workingDirectory: system.path,
+        environment: processEnvironment(),
         mode: ProcessStartMode.detached,
       );
       return const LocalActionResult(true, 'Endless training started.');
@@ -132,6 +165,7 @@ class LocalManager {
         'git',
         ['pull', '--ff-only'],
         workingDirectory: system.path,
+        environment: processEnvironment(),
       ).timeout(const Duration(minutes: 3));
       final output = [
         if ((result.stdout as String).trim().isNotEmpty)
@@ -165,6 +199,7 @@ class LocalManager {
       'git',
       ['clone', '--depth=1', _repoUrl, next.path],
       workingDirectory: parent.path,
+      environment: processEnvironment(),
     ).timeout(const Duration(minutes: 5));
     if (clone.exitCode != 0) {
       return LocalActionResult(

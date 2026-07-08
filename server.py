@@ -44,6 +44,7 @@ import workflow_store
 import web_tools
 import self_heal
 import grounding
+import trilobite_paths
 
 from mcp.server.fastmcp import FastMCP
 
@@ -167,7 +168,7 @@ DEFAULT_PROJECT = os.environ.get("TRILOBITE_DEFAULT_PROJECT", "default")
 SESSION_NUM_CTX = int(os.environ.get("LOCAL_LLM_SESSION_NUM_CTX", "8192"))
 MAX_TURNS = int(os.environ.get("TRILOBITE_MAX_TURNS", "12"))
 
-_DB_PATH = os.path.join(os.path.dirname(__file__), "memory.db")
+_DB_PATH = trilobite_paths.memory_db_path()
 
 FOOTER_PREFIX = "\n\n[interaction_id: "
 _FOOTER_RE = re.compile(r"\[interaction_id: ([0-9a-f]+)\]\s*$")
@@ -2161,8 +2162,8 @@ def diagnostics() -> str:
             n_interactions = memory_store.count_interactions(conn)
         finally:
             conn.close()
-        lines.append("  memory db: ok (%d lessons, %d interactions)" % (
-            n_lessons, n_interactions))
+        lines.append("  memory db: ok (%s, %d lessons, %d interactions)" % (
+            _DB_PATH, n_lessons, n_interactions))
     except Exception as e:
         lines.append("  memory db: ERROR %s" % e)
     try:

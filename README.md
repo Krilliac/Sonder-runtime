@@ -202,6 +202,17 @@ Long-running `trilobite_serve.py` and `trilobite_repl.py` processes check for so
 
 For the MCP server, existing tool handlers also refresh helper modules at tool boundaries. Brand-new MCP tool names still require reconnecting/restarting the MCP server, because FastMCP registers the tool list once at startup. Use `live_reload_status()` to see what a running process is watching.
 
+## Shared Runtime State
+
+Multiple installs can run the same system code, but they should not each own a
+separate memory database. Runtime state defaults to one per-user home directory:
+`%LOCALAPPDATA%\trilobite` on Windows, `$XDG_DATA_HOME/trilobite` or
+`~/.local/share/trilobite` on Linux, and the matching app data home on macOS.
+Set `TRILOBITE_HOME` to force a specific shared state folder, or `TRILOBITE_DB`
+to point directly at a database file. If an older install has `memory.db` beside
+the code and the shared DB does not exist yet, trilobite copies it into the
+shared home on first run.
+
 ## Standing instructions
 
 `system_profile.md` is an editable Markdown profile injected into every `trilobite` / OpenAI-proxy answer. Edit the file directly, or use `system_profile_text()` and `update_system_profile(mode="append"|"replace"|"clear")` through MCP. Because the profile is read at request time, changes apply on the next call.

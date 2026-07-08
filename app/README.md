@@ -59,6 +59,12 @@ Desktop downloads include a `local-system` folder beside the app. The System
 panel can use that folder to start the server, launch endless training, run
 common status/training commands and pull updates from Git.
 
+Runtime state is shared outside the install folder. By default the bundled
+server uses `%LOCALAPPDATA%\trilobite` on Windows, `$XDG_DATA_HOME/trilobite`
+or `~/.local/share/trilobite` on Linux, and the equivalent app data home on
+macOS. Set `TRILOBITE_HOME` to force every install/server to use a specific
+shared memory folder.
+
 Android builds include the same payload as `local-system.zip` inside the APK,
 but Android still connects to a desktop or LAN server because it cannot launch
 the Python/Ollama runtime directly.

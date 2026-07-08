@@ -190,6 +190,7 @@ class _SystemScreenState extends State<SystemScreen> {
           const SizedBox(height: 24),
           Text(
             'Desktop builds look for a bundled local-system folder next to the app. '
+            'Runtime memory is shared through ${LocalManager.sharedHomePath()}. '
             'Android can connect to a LAN/hosted server, but cannot launch the Python server itself.',
             style: Theme.of(context).textTheme.bodySmall,
           ),
