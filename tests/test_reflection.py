@@ -75,6 +75,18 @@ def test_maybe_add_lesson_dedupes_near_duplicate():
     assert len(ms.all_lessons(c)) == 1
 
 
+def test_maybe_add_lesson_dedupes_exact_text_without_embeddings():
+    c = ms.connect(":memory:")
+    ms.add_lesson(c, "existing", "Release the lock in a finally block.", None, "i0")
+    lid = reflection.maybe_add_lesson(
+        c, "i1", "task", "resp", "tests_passed",
+        offload_fn=lambda **kw: "  release   the LOCK in a finally block. ",
+        embed_fn=lambda t: None,
+    )
+    assert lid is None
+    assert len(ms.all_lessons(c)) == 1
+
+
 def test_maybe_add_lesson_skips_empty_distill():
     c = ms.connect(":memory:")
     lid = reflection.maybe_add_lesson(

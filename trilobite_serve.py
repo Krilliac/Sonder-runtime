@@ -67,6 +67,8 @@ HELP_TEXT = """commands:
   /strict [on|off]   toggle strict mode (bare = on); pins to the trilobite alias
   /stats             show trilobite's learning stats
   /context           show context, session, and memory health meters
+  /quality           audit lesson quality and duplicate rows
+  /qualityfix [apply] dry-run or apply exact duplicate lesson cleanup
   /pass, /good       record the last answer as tests_passed
   /fail, /bad        record the last answer as failed
   /run [seconds]     execute the code block from the last response (default 8s)
@@ -246,6 +248,10 @@ def _handle_slash(content):
         return server.trilobite_stats()
     if cmd == "/context":
         return server.context_health()
+    if cmd == "/quality":
+        return server.memory_quality_report()
+    if cmd == "/qualityfix":
+        return server.memory_quality_repair(apply=(arg.strip().lower() == "apply"))
     if cmd in ("/pass", "/good"):
         if LAST_IID:
             msg = server.record_outcome(LAST_IID, "tests_passed")

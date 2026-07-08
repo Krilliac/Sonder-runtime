@@ -226,6 +226,11 @@ class _SystemScreenState extends State<SystemScreen> {
                   icon: const Icon(Icons.monitor_heart_outlined),
                   label: const Text('Context'),
                 ),
+                OutlinedButton.icon(
+                  onPressed: _working ? null : () => _sendCommand('/quality'),
+                  icon: const Icon(Icons.fact_check_outlined),
+                  label: const Text('Quality'),
+                ),
                 SizedBox(
                   width: 120,
                   child: TextField(

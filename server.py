@@ -45,6 +45,7 @@ import web_tools
 import self_heal
 import grounding
 import trilobite_paths
+import memory_quality
 
 from mcp.server.fastmcp import FastMCP
 
@@ -190,6 +191,7 @@ LIVE_RELOAD_MODULES = [
     "workflow_store",
     "web_tools",
     "self_heal",
+    "memory_quality",
 ]
 
 
@@ -1368,6 +1370,43 @@ def context_health(session: str = "", project: str = "") -> str:
 
 
 @mcp.tool()
+def memory_quality_report(sample_limit: int = 5) -> str:
+    """Audit lesson quality: duplicates, long/vague rows, embeddings, and FTS health."""
+    _maybe_live_reload()
+    sample_limit = _safe_limit(sample_limit, 5, 20)
+    conn = _open_db()
+    try:
+        report = memory_quality.audit(conn)
+    finally:
+        conn.close()
+    return memory_quality.format_audit(report, sample_limit=sample_limit)
+
+
+@mcp.tool()
+def memory_quality_repair(apply: bool = False) -> str:
+    """Prune exact duplicate lessons; dry-run unless apply=True."""
+    _maybe_live_reload()
+    conn = _open_db()
+    try:
+        plan, deleted = memory_quality.repair_exact_duplicates(conn, apply=bool(apply))
+        report = memory_quality.format_audit(memory_quality.audit(conn), sample_limit=5)
+    finally:
+        conn.close()
+    prunable = sum(len(entry["prune_ids"]) for entry in plan)
+    lines = [
+        "memory quality repair",
+        "  mode: %s" % ("apply" if apply else "dry-run"),
+        "  exact duplicate groups: %d" % len(plan),
+        "  prunable exact duplicates: %d" % prunable,
+        "  deleted: %d" % deleted,
+    ]
+    if not apply and prunable:
+        lines.append("  rerun with apply=True to delete exact duplicate lesson rows.")
+    lines.extend(["", report])
+    return "\n".join(lines)
+
+
+@mcp.tool()
 def learn_tiers() -> str:
     """Show which tiers currently feed the learning loop."""
     lines = ["learning tiers"]
@@ -1575,6 +1614,14 @@ def _loop_dispatch(action):
             session=action.get("session", ""),
             project=action.get("project", ""),
         ))
+    if action_type == "memory_quality_report":
+        return _loop_text_result("memory_quality_report", memory_quality_report(
+            sample_limit=action.get("sample_limit", 5),
+        ))
+    if action_type == "memory_quality_repair":
+        return _loop_text_result("memory_quality_repair", memory_quality_repair(
+            apply=action.get("apply", False),
+        ))
     if action_type == "self_heal_check":
         return _loop_text_result("self_heal_check", self_heal_check())
     if action_type == "self_heal_repair":
@@ -1620,7 +1667,7 @@ def _loop_dispatch(action):
         "ok": False,
         "type": action_type or "(unknown)",
         "summary": "unknown action type",
-        "output": "Valid action types: code, project, offload, trilobite, status, diagnostics, context_health, self_heal_check, self_heal_repair, profile_status, emotion_status, memory_search, apply_learned, web_search, web_fetch, unload, sleep.",
+        "output": "Valid action types: code, project, offload, trilobite, status, diagnostics, context_health, memory_quality_report, memory_quality_repair, self_heal_check, self_heal_repair, profile_status, emotion_status, memory_search, apply_learned, web_search, web_fetch, unload, sleep.",
     }
 
 
@@ -2078,6 +2125,7 @@ def tool_manifest() -> str:
         "system_profile_text/update_system_profile": "Read or edit standing instructions.",
         "emotion_vector_status/update_emotion_vectors": "Read or edit tone vectors.",
         "memory_search/memory_export/session_export": "Inspect local memory.",
+        "memory_quality_report/memory_quality_repair": "Audit and dry-run/prune exact duplicate lessons.",
         "learn_from_example/apply_learned": "Teach from examples and preview lesson application.",
         "self_heal_check/self_heal_repair": "Detect and safely repair common local breakage.",
         "context_health/diagnostics/live_reload_status/status/unload": "Observe and manage runtime health.",
@@ -2097,6 +2145,8 @@ AGENT_TOOL_HELP = """Available tools:
 - workflow_run: {"name": "...", "max_iterations": 1}
 - diagnostics: {}
 - context_health: {}
+- memory_quality_report: {"sample_limit": 5}
+- memory_quality_repair: {"apply": false}
 - self_heal_check: {}
 - self_heal_repair: {"apply": false}
 - status: {}
@@ -2170,6 +2220,10 @@ def _agent_dispatch(tool_name, args, allow_web=True):
             session=args.get("session", ""),
             project=args.get("project", ""),
         )
+    if tool_name == "memory_quality_report":
+        return memory_quality_report(sample_limit=args.get("sample_limit", 5))
+    if tool_name == "memory_quality_repair":
+        return memory_quality_repair(apply=args.get("apply", False))
     if tool_name == "self_heal_check":
         return self_heal_check()
     if tool_name == "self_heal_repair":
@@ -2323,6 +2377,17 @@ def diagnostics() -> str:
             ctx["context_limit"], ctx["live_turns"], ctx["max_live_turns"]))
     except Exception as e:
         lines.append("  context: ERROR %s" % e)
+    try:
+        conn = _open_db()
+        try:
+            quality = memory_quality.audit(conn)
+        finally:
+            conn.close()
+        lines.append("  memory quality: %d duplicate group(s), %d prunable, %d no embedding" % (
+            quality["exact_duplicate_groups"], quality["exact_duplicate_prunable"],
+            quality["no_embedding"]))
+    except Exception as e:
+        lines.append("  memory quality: ERROR %s" % e)
     try:
         heal_issues = self_heal.check(_DB_PATH, module_names=LIVE_RELOAD_MODULES)
         repairable = sum(1 for issue in heal_issues if issue.repairable)

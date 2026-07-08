@@ -100,12 +100,28 @@ def is_duplicate(new_emb, conn, threshold=DUP_THRESHOLD):
     return False
 
 
+def _normalize_lesson_text(text):
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def exact_text_exists(text, conn):
+    needle = _normalize_lesson_text(text)
+    if not needle:
+        return False
+    for les in memory_store.all_lessons(conn):
+        if _normalize_lesson_text(les["text"]) == needle:
+            return True
+    return False
+
+
 def maybe_add_lesson(conn, interaction_id, task, response, signal, offload_fn,
                      embed_fn=embeddings.embed, id_fn=memory_store.new_id):
     if memory_store.lesson_exists_for_interaction(conn, interaction_id):
         return None
     text = distill(task, response, signal, offload_fn)
     if not text:
+        return None
+    if exact_text_exists(text, conn):
         return None
     emb = embed_fn(text)
     if is_duplicate(emb, conn):

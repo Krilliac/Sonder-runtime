@@ -28,6 +28,8 @@ HELP = """commands:
   /persona [name]    show/set active persona (coder/explainer/reviewer/teacher)
   /stats             show trilobite's learning stats
   /context           show context, session, and memory health meters
+  /quality           audit lesson quality and duplicate rows
+  /qualityfix [apply] dry-run or apply exact duplicate lesson cleanup
   /lessons           show the 10 most recent distilled lessons
   /pass, /good       record the last answer as tests_passed
   /fail, /bad        record the last answer as failed
@@ -278,6 +280,10 @@ def main():
                 print(server.trilobite_stats())
             elif cmd == "/context":
                 print(server.context_health(session=session_id, project=project))
+            elif cmd == "/quality":
+                print(server.memory_quality_report())
+            elif cmd == "/qualityfix":
+                print(server.memory_quality_repair(apply=(arg.strip().lower() == "apply")))
             elif cmd == "/lessons":
                 _print_lessons()
             elif cmd in ("/pass", "/good"):
