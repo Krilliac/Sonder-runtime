@@ -1,6 +1,8 @@
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -159,6 +161,7 @@ def test_grounded_typing_annotation_breakout_case():
 
 
 def test_grounded_pygame_math_attr_case():
+    pytest.importorskip("pygame")
     buggy = "import pygame\nprint(round(pygame.cos(0)))"
     ok, out = grounding.run_code(buggy)
     assert ok is False
