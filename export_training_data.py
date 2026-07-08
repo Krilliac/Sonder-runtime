@@ -4,11 +4,11 @@ Usage: ./venv/Scripts/python.exe export_training_data.py [out_path]
 Default out_path: training_data.jsonl (gitignored).
 """
 import json
-import os
 import sys
 
 import memory_store
 import reward
+import trilobite_paths
 
 
 def build_examples(conn):
@@ -30,7 +30,7 @@ def build_examples(conn):
 
 
 def main(out_path="training_data.jsonl", db_path=None):
-    db_path = db_path or os.path.join(os.path.dirname(__file__), "memory.db")
+    db_path = db_path or trilobite_paths.memory_db_path()
     conn = memory_store.connect(db_path)
     try:
         examples = build_examples(conn)
