@@ -42,6 +42,15 @@ CREATE TABLE IF NOT EXISTS facts (
     embedding BLOB,
     ts TEXT DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS lesson_usage (
+    lesson_id TEXT,
+    interaction_id TEXT,
+    task TEXT,
+    outcome_signal TEXT,
+    reward REAL,
+    ts TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(lesson_id, interaction_id)
+);
 """
 
 
@@ -81,6 +90,14 @@ def init_db(conn):
         "ON interactions(session_id, ts)"
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_project ON facts(project)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_lesson_usage_lesson "
+        "ON lesson_usage(lesson_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_lesson_usage_interaction "
+        "ON lesson_usage(interaction_id)"
+    )
     conn.commit()
 
 
@@ -151,8 +168,38 @@ def delete_lesson(conn, lesson_id):
     """
     cur = conn.execute("DELETE FROM lessons WHERE id=?", (lesson_id,))
     conn.execute("DELETE FROM lessons_fts WHERE lesson_id=?", (lesson_id,))
+    conn.execute("DELETE FROM lesson_usage WHERE lesson_id=?", (lesson_id,))
     conn.commit()
     return cur.rowcount > 0
+
+
+def log_lesson_usage(conn, lesson_ids, interaction_id, task):
+    for lesson_id in lesson_ids or []:
+        conn.execute(
+            "INSERT OR IGNORE INTO lesson_usage(lesson_id, interaction_id, task) "
+            "VALUES(?, ?, ?)",
+            (lesson_id, interaction_id, task),
+        )
+    conn.commit()
+
+
+def record_lesson_usage_outcome(conn, interaction_id, signal, reward):
+    conn.execute(
+        "UPDATE lesson_usage SET outcome_signal=?, reward=? WHERE interaction_id=?",
+        (signal, reward, interaction_id),
+    )
+    conn.commit()
+
+
+def lesson_usage_stats(conn):
+    rows = conn.execute(
+        "SELECT lesson_id, COUNT(*) AS uses, "
+        "SUM(CASE WHEN reward > 0 THEN 1 ELSE 0 END) AS wins, "
+        "SUM(CASE WHEN reward < 0 THEN 1 ELSE 0 END) AS losses, "
+        "AVG(CASE WHEN reward IS NOT NULL THEN reward END) AS avg_reward "
+        "FROM lesson_usage GROUP BY lesson_id"
+    ).fetchall()
+    return {r["lesson_id"]: dict(r) for r in rows}
 
 
 def _sanitize_fts(query):

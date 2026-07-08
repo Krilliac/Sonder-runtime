@@ -12,12 +12,20 @@ RECALL_HEADER = "# Similar things solved before (for reference):"
 FACTS_HEADER = "# Project facts (always true here):"
 
 
+APPLICATION_HEADER = "# How to apply the lessons:"
+
+
 def build_prompt(task, lessons, recalls=None, facts=None):
     blocks = []
     if facts:
         blocks.append("%s\n%s" % (FACTS_HEADER, "\n".join("- %s" % f for f in facts)))
     if lessons:
         blocks.append("%s\n%s" % (MEMORY_HEADER, "\n".join("- %s" % l for l in lessons)))
+        blocks.append(
+            "%s\nUse the relevant lessons above as constraints while solving. "
+            "Prefer lessons with concrete APIs, algorithms, or pitfalls that match this task." %
+            APPLICATION_HEADER
+        )
     if recalls:
         blocks.append("%s\n%s" % (RECALL_HEADER, "\n".join("- %s" % r for r in recalls)))
     if not blocks:
@@ -28,7 +36,12 @@ def build_prompt(task, lessons, recalls=None, facts=None):
 def _run(conn, task, tier, generate_fn, retrieve_fn=retriever.retrieve,
          id_fn=memory_store.new_id, history=None, recalls=None, facts=None,
          session_id=None, task_embedding=None):
-    lessons = retrieve_fn(conn, task)
+    lesson_rows = None
+    if retrieve_fn is retriever.retrieve:
+        lesson_rows = retriever.retrieve_with_ids(conn, task)
+        lessons = [r["text"] for r in lesson_rows]
+    else:
+        lessons = retrieve_fn(conn, task)
     augmented = build_prompt(task, lessons, recalls, facts)
     # Existing callers/tests pass a 1-arg gen; only pass history when present.
     response = generate_fn(augmented, history) if history else generate_fn(augmented)
@@ -37,6 +50,9 @@ def _run(conn, task, tier, generate_fn, retrieve_fn=retriever.retrieve,
         conn, interaction_id, task, "\n".join(lessons), response, tier,
         session_id=session_id, task_embedding=task_embedding,
     )
+    if lesson_rows:
+        memory_store.log_lesson_usage(
+            conn, [r["id"] for r in lesson_rows], interaction_id, task)
     return response, interaction_id, lessons, augmented
 
 

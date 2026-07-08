@@ -1,0 +1,32 @@
+{
+  "retry_python_check": {
+    "actions": [
+      {
+        "code": "print('replace me')",
+        "language": "python",
+        "type": "code"
+      }
+    ],
+    "description": "Template workflow: replace the code string, then run until success."
+  },
+  "status_sweep": {
+    "actions": [
+      {
+        "type": "diagnostics"
+      },
+      {
+        "type": "self_heal_check"
+      },
+      {
+        "type": "profile_status"
+      },
+      {
+        "type": "emotion_status"
+      },
+      {
+        "type": "status"
+      }
+    ],
+    "description": "Check live reload, system profile, emotion vectors, and Ollama status."
+  }
+}
