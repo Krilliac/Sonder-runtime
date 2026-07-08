@@ -67,3 +67,11 @@ def test_retrieve_embed_fn_none_still_uses_lexical_fallback_with_min_sim_set():
         c, "threading lock release", embed_fn=lambda t: None, min_sim=0.9
     )
     assert any("threading lock" in t for t in texts)
+
+
+def test_retrieve_with_ids_returns_ids_and_text():
+    c = ms.connect(":memory:")
+    ms.add_lesson(c, "L1", "always release the threading lock", None, "i")
+    rows = r.retrieve_with_ids(c, "threading lock release", embed_fn=lambda t: None)
+    assert rows[0]["id"] == "L1"
+    assert "threading lock" in rows[0]["text"]

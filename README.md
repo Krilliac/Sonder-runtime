@@ -71,7 +71,7 @@ The learning loop above is *cross-task* memory. On top of it trilobite also has:
 
 1. **Local, in your terminal** — `trilobite` (like launching `claude`). Interactive REPL routed through the full loop, with `/trace`, `/strict`, `/run`, `/train`, `/pass`, `/fail`, `/stats` commands plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts` (and plain-English equivalents). Each REPL launch is its own remembered thread.
 2. **Hosted on your own server + a thin client anywhere** — run `deploy_trilobite.sh --serve` on your box (systemd service, API key), then any machine runs the single-file `trilobite_client.py` pointed at it. The serve layer threads the chat UI's own conversation history.
-3. **Integrated with Claude** — the MCP `local-llm` tools let Claude offload to it (`offload(learn=True)`, `trilobite`, `record_outcome`, `trilobite_stats`, `trilobite_sessions`, `trilobite_remember_fact`). Both `offload` and `trilobite` take a `tier` to route a call to any configured model (local or a paid cloud model); cloud tiers answer clean and still feed the learning loop.
+3. **Integrated with Claude** — the MCP `local-llm` tools let Claude offload to it (`agent`, `offload(learn=True)`, `trilobite`, `run_code`, `web_search`, `web_fetch`, `loop`, `workflow_list/save/run/delete`, `self_heal_check`, `self_heal_repair`, `learn_from_example`, `apply_learned`, `system_profile_text`, `update_system_profile`, `emotion_vector_status`, `update_emotion_vectors`, `memory_search`, `memory_export`, `session_export`, `tool_manifest`, `diagnostics`, `live_reload_status`, `record_outcome`, `trilobite_stats`, `trilobite_sessions`, `trilobite_remember_fact`). `agent` runs a Claude-like tool-use loop where the model can call local tools and web tools step-by-step; `run_code` gives bounded local execution for Python, JavaScript/Node, and PowerShell snippets; `loop` repeats bounded code/model/system actions for retries, polling, and small workflows. Both `offload` and `trilobite` take a `tier` to route a call to any configured model (local or a paid cloud model); cloud tiers answer clean and still feed the learning loop.
 4. **Mobile & desktop app (GUI)** — a cross-platform [Flutter client](app/) that talks to a hosted `trilobite_serve.py`. One codebase → an **Android APK** and **Windows/Linux/macOS** desktop apps, built in CI with downloadable installers. See [app/README.md](app/README.md).
 
 ---
@@ -147,7 +147,7 @@ Flat, mostly-stdlib Python modules (plus `mcp`):
 | `retriever.py` | hybrid lexical+semantic retrieval with relevance threshold |
 | `reward.py` / `reflection.py` | outcome → score; distill deduped lessons |
 | `orchestrator.py` | the retrieve → augment → generate → capture flow |
-| `server.py` | MCP server: `offload` / `trilobite` / `record_outcome` / `trilobite_stats` / `trilobite_sessions` / `trilobite_remember_fact` |
+| `server.py` / `code_runner.py` / `web_tools.py` / `workflow_store.py` / `self_heal.py` / `live_reload.py` / `system_profile.py` / `emotion_vectors.py` | MCP server tools: `agent` / `offload` / `trilobite` / `run_code` / `web_search` / `web_fetch` / `loop` / workflows / memory export/search / self-healing / editable profile / emotion vectors / diagnostics; bounded execution, tool-calling loops, web access, reusable action routines, and request-boundary source reload |
 | `recall.py` | semantic recall of past good-outcome solutions (vector search over interactions) |
 | `summarizer.py` | rolling conversation summaries + session auto-titles (fast tier) |
 | `trilobite_repl.py` / `trilobite_client.py` | local REPL / thin remote client |
@@ -156,6 +156,38 @@ Flat, mostly-stdlib Python modules (plus `mcp`):
 | `qlora_train.py`, `export_training_data.py`, `cloud_train.sh` | fine-tuning pipeline |
 
 ---
+
+## Live reload
+
+Long-running `trilobite_serve.py` and `trilobite_repl.py` processes check for source edits before each request/turn. Edits to `server.py` and helper modules such as personas, retrieval, summarization, feedback, and code execution are picked up on the next call without hard restarting the proxy or REPL. Set `TRILOBITE_LIVE_RELOAD=0` to disable this.
+
+For the MCP server, existing tool handlers also refresh helper modules at tool boundaries. Brand-new MCP tool names still require reconnecting/restarting the MCP server, because FastMCP registers the tool list once at startup. Use `live_reload_status()` to see what a running process is watching.
+
+## Standing instructions
+
+`system_profile.md` is an editable Markdown profile injected into every `trilobite` / OpenAI-proxy answer. Edit the file directly, or use `system_profile_text()` and `update_system_profile(mode="append"|"replace"|"clear")` through MCP. Because the profile is read at request time, changes apply on the next call.
+
+## Emotion Vectors
+
+`emotion_vectors.json` holds live tone-steering dimensions from `-1.0` to `+1.0` such as warmth, calm, curiosity, confidence, playfulness, urgency, skepticism, and brevity. These are behavioral controls, not claims about internal feelings. Edit the JSON directly, or use `emotion_vector_status()` and `update_emotion_vectors(mode="merge"|"replace"|"clear")`; changes apply on the next call.
+
+## Workflows And Memory Tools
+
+`workflows.json` stores reusable `loop` action lists. Use `workflow_save()` to keep a routine, `workflow_run()` to execute it, and `workflow_list()` / `workflow_delete()` to manage it. The built-in `status_sweep` workflow checks diagnostics, profile, emotion vectors, and Ollama state.
+
+The MCP surface also includes `memory_search()`, `memory_export()`, and `session_export()` so the model can inspect local lessons, facts, sessions, and transcripts without raw SQLite access. `tool_manifest()` prints a compact map of the available tools.
+
+`learn_from_example()` lets you teach from a known-good task/solution pair, while `apply_learned()` shows which lessons would be applied to a new task. Lesson usage is tracked: when a retrieved lesson participates in an answer and you later call `record_outcome()`, the lesson gets credited or debited so future retrieval can prefer lessons that actually helped.
+
+## Agentic Tool Use And Web
+
+`agent(prompt, allow_web=True)` runs a bounded local tool-use loop. On each step the model returns a JSON tool call, the server executes it, then the observation is fed back until the model returns a final answer. Available tools include `run_code`, `web_search`, `web_fetch`, `memory_search`, `workflow_run`, `diagnostics`, `status`, profile/vector inspection, and `offload`.
+
+`web_search()` and `web_fetch()` use stdlib HTTP only. Search defaults to DuckDuckGo HTML, or set `TRILOBITE_SEARCH_URL` to an endpoint containing `{query}`. Set `TRILOBITE_WEB_TOOLS=0` to disable web access.
+
+## Self Healing
+
+`self_heal_check()` looks for common local breakage: invalid JSON config files, live-reload errors, broken venv pointers, and lesson-store integrity issues. `self_heal_repair(apply=True)` only applies conservative local fixes: rebuild missing lesson FTS rows, remove orphan FTS rows, clear corrupt lesson embeddings, and restore default JSON config files after making backups. Python/venv problems and syntax errors are reported for manual repair.
 
 ## Status & honest caveats
 

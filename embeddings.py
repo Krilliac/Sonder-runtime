@@ -6,6 +6,10 @@ import urllib.error
 import urllib.request
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434").replace("http://", "")
+# 0.0.0.0 is a bind-all address (used so `ollama serve` is reachable from a phone
+# on the LAN), not connectable on Windows — dial loopback instead.
+if OLLAMA_HOST.startswith("0.0.0.0"):
+    OLLAMA_HOST = OLLAMA_HOST.replace("0.0.0.0", "127.0.0.1", 1)
 BASE = "http://%s" % OLLAMA_HOST
 EMBED_MODEL = os.environ.get("TRILOBITE_EMBED_MODEL", "nomic-embed-text")
 

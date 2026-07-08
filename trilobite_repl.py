@@ -4,6 +4,7 @@ Boots straight into the real learning loop (server.trilobite), the way `claude`
 drops you into an interactive session. Slash-commands control trace/strict mode,
 teach outcomes back, and surface stats/lessons. Stdlib only + server/memory_store.
 """
+import os
 import sys
 
 import server
@@ -13,6 +14,7 @@ import training_tasks
 import intents
 import feedback
 import personas
+import live_reload
 
 BANNER = """trilobite - fully local self-improving coder
 type /help for commands, or just start typing to ask trilobite something.
@@ -28,7 +30,7 @@ HELP = """commands:
   /pass, /good       record the last answer as tests_passed
   /fail, /bad        record the last answer as failed
   /run               actually execute the code block from the last response
-  /train [N]         grounded self-learning: practice N tasks (default 3, max 10)
+  /train, /learn [N] grounded self-learning: practice N tasks (default 3, max 500)
   /new               start a fresh conversation thread (forget this chat's history)
   /sessions          list past conversation threads
   /resume <id|title> continue a past thread by id or title prefix
@@ -39,7 +41,40 @@ HELP = """commands:
 """
 
 TRAIN_DEFAULT_N = 3
-TRAIN_MAX_N = 10
+
+
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+TRAIN_MAX_N = max(1, _env_int("TRILOBITE_TRAIN_MAX_N", 500))
+
+LIVE_RELOAD_MODULES = [
+    "server",
+    "memory_store",
+    "grounding",
+    "training_tasks",
+    "intents",
+    "feedback",
+    "personas",
+    "emotion_vectors",
+    "web_tools",
+]
+
+
+def _maybe_live_reload():
+    global server, memory_store, grounding, training_tasks, intents, feedback, personas
+    modules = live_reload.reload_changed_modules(LIVE_RELOAD_MODULES)
+    server = modules.get("server", server)
+    memory_store = modules.get("memory_store", memory_store)
+    grounding = modules.get("grounding", grounding)
+    training_tasks = modules.get("training_tasks", training_tasks)
+    intents = modules.get("intents", intents)
+    feedback = modules.get("feedback", feedback)
+    personas = modules.get("personas", personas)
 
 
 def _strip_footer(text):
@@ -192,6 +227,7 @@ def main():
         line = line.strip()
         if not line:
             continue
+        _maybe_live_reload()
 
         if line.startswith("/"):
             parts = line.split(None, 1)
@@ -224,7 +260,7 @@ def main():
                     print("(nothing to record yet)")
             elif cmd == "/run":
                 do_run()
-            elif cmd == "/train":
+            elif cmd in ("/train", "/learn"):
                 n = _parse_train_n(arg)
                 if n is not None:
                     _run_train(n)

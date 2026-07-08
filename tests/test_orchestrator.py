@@ -10,6 +10,7 @@ def test_build_prompt_prepends_lessons():
     p = o.build_prompt("do X", ["lessonA", "lessonB"])
     assert "lessonA" in p and "lessonB" in p and "do X" in p
     assert p.index("lessonA") < p.index("do X")  # memories come first
+    assert "How to apply the lessons" in p
 
 
 def test_run_with_learning_captures_and_returns_id():
@@ -66,3 +67,20 @@ def test_run_with_learning_traced_returns_trace_context():
     assert "prefer RRF" in trace["augmented_prompt"]
     assert "fix the bug" in trace["augmented_prompt"]
     assert trace["augmented_prompt"] == seen["prompt"]
+
+
+def test_default_retriever_logs_lesson_usage(monkeypatch):
+    import retriever
+    c = ms.connect(":memory:")
+    ms.add_lesson(c, "L1", "use deque for queues", None, "seed")
+
+    monkeypatch.setattr(
+        retriever,
+        "retrieve_with_ids",
+        lambda conn, task: [{"id": "L1", "text": "use deque for queues", "score": 1.0}],
+    )
+    resp, iid = o.run_with_learning(
+        c, "queue task", "code", lambda prompt: "answer", id_fn=lambda: "I1")
+    assert resp == "answer"
+    stats = ms.lesson_usage_stats(c)["L1"]
+    assert stats["uses"] == 1

@@ -23,6 +23,14 @@ def rrf(rank_lists, k=60):
     return sorted(scores, key=lambda i: -scores[i])
 
 
+def rrf_scores(rank_lists, k=60):
+    scores = {}
+    for lst in rank_lists:
+        for rank, item in enumerate(lst):
+            scores[item] = scores.get(item, 0.0) + 1.0 / (k + rank + 1)
+    return scores
+
+
 def _semantic_rank(conn, qv, limit=10):
     scored = []
     for les in memory_store.all_lessons(conn):
@@ -62,6 +70,23 @@ def _relevant_ids(conn, qv, ids, min_sim):
 
 
 def retrieve(conn, task, k=5, embed_fn=embeddings.embed, min_sim=None):
+    rows = retrieve_with_ids(conn, task, k=k, embed_fn=embed_fn, min_sim=min_sim)
+    return [r["text"] for r in rows]
+
+
+def _usage_boost(conn, lesson_id):
+    stats = memory_store.lesson_usage_stats(conn).get(lesson_id)
+    if not stats:
+        return 0.0
+    uses = stats.get("uses") or 0
+    avg = stats.get("avg_reward")
+    if avg is None:
+        return 0.0
+    # Keep historical outcome as a gentle tiebreaker, not a relevance override.
+    return max(-0.01, min(0.01, float(avg) * min(uses, 10) / 1000.0))
+
+
+def retrieve_with_ids(conn, task, k=5, embed_fn=embeddings.embed, min_sim=None):
     if min_sim is None:
         min_sim = float(os.environ.get("TRILOBITE_MIN_SIM", str(DEFAULT_MIN_SIM)))
 
@@ -70,12 +95,22 @@ def retrieve(conn, task, k=5, embed_fn=embeddings.embed, min_sim=None):
 
     if qv is None:
         # Embeddings unavailable: soft-fail to lexical-only, no threshold possible.
-        fused = rrf([lexical, []])[:k]
-        texts = [memory_store.get_lesson_text(conn, lid) for lid in fused]
-        return [t for t in texts if t]
+        scores = rrf_scores([lexical, []])
+        fused = sorted(scores, key=lambda lid: -(scores[lid] + _usage_boost(conn, lid)))[:k]
+        rows = []
+        for lid in fused:
+            text = memory_store.get_lesson_text(conn, lid)
+            if text:
+                rows.append({"id": lid, "text": text, "score": scores[lid]})
+        return rows
 
     semantic = _semantic_rank(conn, qv, limit=10)
-    fused = rrf([lexical, semantic])
+    scores = rrf_scores([lexical, semantic])
+    fused = sorted(scores, key=lambda lid: -(scores[lid] + _usage_boost(conn, lid)))
     relevant = _relevant_ids(conn, qv, fused, min_sim)[:k]
-    texts = [memory_store.get_lesson_text(conn, lid) for lid in relevant]
-    return [t for t in texts if t]
+    rows = []
+    for lid in relevant:
+        text = memory_store.get_lesson_text(conn, lid)
+        if text:
+            rows.append({"id": lid, "text": text, "score": scores.get(lid, 0.0)})
+    return rows
