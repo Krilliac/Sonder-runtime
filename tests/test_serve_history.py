@@ -47,3 +47,28 @@ def test_model_to_tier_selects_known_tier():
 
 def test_model_to_tier_unknown_falls_back_to_default():
     assert ts._model_to_tier("some-random-model") is None
+
+
+def test_do_run_returns_structured_error_for_input_program():
+    ts.LAST_RESPONSE = "```python\ninput('move: ')\n```"
+    out = ts._do_run()
+
+    assert "status: failed" in out
+    assert "stderr:" in out
+    assert "EOFError" in out
+    assert "[exited with error]" in out
+
+
+def test_run_accepts_optional_timeout():
+    ts.LAST_RESPONSE = "```python\nprint('slow smoke')\n```"
+    out = ts._handle_slash("/run 12")
+
+    assert "timeout: 12s" in out
+    assert "slow smoke" in out
+
+
+def test_run_rejects_invalid_timeout():
+    out = ts._handle_slash("/run python pong.py")
+
+    assert out.startswith("usage: /run [seconds]")
+    assert "previous fenced code block" in out
