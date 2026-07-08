@@ -32,6 +32,8 @@ HELP = """commands:
   /qualityfix [apply] dry-run or apply exact duplicate lesson cleanup
   /lessons           show the 10 most recent distilled lessons
   /pass, /good       record the last answer as tests_passed
+  /accept,/used      record the last answer as accepted/used
+  /copied,/edited    record copy/edit passive learning signals
   /fail, /bad        record the last answer as failed
   /run [seconds]     execute the code block from the last response (default 8s)
   /runproject [sec]  execute file/path fenced blocks as a temp project
@@ -292,6 +294,19 @@ def main():
                     last_iid = None
                 else:
                     print("(nothing to record yet)")
+            elif cmd in ("/accept", "/accepted", "/used", "/copied", "/edited"):
+                if last_iid:
+                    signal = {
+                        "/accept": "accepted",
+                        "/accepted": "accepted",
+                        "/used": "used",
+                        "/copied": "copied",
+                        "/edited": "edited",
+                    }[cmd]
+                    print(server.record_outcome(last_iid, signal))
+                    last_iid = None
+                else:
+                    print("(nothing to record yet)")
             elif cmd in ("/fail", "/bad"):
                 if last_iid:
                     print(server.record_outcome(last_iid, "failed"))
@@ -360,6 +375,12 @@ def main():
         # worked" / "no that's wrong") rather than a new task. Conservative
         # classifier — only fires on short, non-question/imperative turns.
         if last_iid:
+            signal = feedback.classify_signal(line)
+            if signal:
+                server.record_outcome(last_iid, signal)
+                last_iid = None
+                print("(learned: %s recorded)" % signal)
+                continue
             fb = feedback.classify_feedback(line)
             if fb == "positive":
                 server.record_outcome(last_iid, "accepted")

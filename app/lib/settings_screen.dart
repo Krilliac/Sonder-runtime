@@ -24,6 +24,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late final TextEditingController _key;
   late final TextEditingController _model;
   late bool _dark;
+  late bool _allowHosted;
   bool _obscureKey = true;
   String? _status;
   bool _statusOk = false;
@@ -36,6 +37,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _key = TextEditingController(text: widget.settings.apiKey);
     _model = TextEditingController(text: widget.settings.model);
     _dark = widget.settings.darkMode;
+    _allowHosted = widget.settings.allowHosted;
   }
 
   @override
@@ -50,6 +52,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         serverUrl: _server.text,
         apiKey: _key.text,
         darkMode: _dark,
+        allowHosted: _allowHosted,
         model: _model.text.trim().isEmpty
             ? Settings.defaultModel
             : _model.text.trim(),
@@ -137,11 +140,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
             autocorrect: false,
             decoration: const InputDecoration(
               labelText: 'Default model / tier',
-              hintText: 'trilobite, code, fast, cloud-code...',
+              hintText: 'trilobite, code, fast...',
               helperText: 'Used by chat and system commands',
               prefixIcon: Icon(Icons.memory_outlined),
               border: OutlineInputBorder(),
             ),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Allow hosted/cloud tiers'),
+            subtitle: const Text(
+              'Opt-in only. Prompts sent to cloud tiers leave this machine.',
+            ),
+            value: _allowHosted,
+            onChanged: (v) => setState(() => _allowHosted = v),
           ),
           const SizedBox(height: 16),
           FilledButton.tonalIcon(

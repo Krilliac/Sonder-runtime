@@ -29,17 +29,21 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _sending = false;
 
   // The model/tier to answer with. "trilobite" is the local self-improving student;
-  // other entries (e.g. cloud-code) route to that model on the server. Populated from
+  // other entries route to that model on the server. Populated from
   // GET /v1/models, with a sensible fallback if the server is unreachable.
   late String _model;
-  List<String> _models = const ['trilobite', 'cloud-code', 'cloud-general'];
+  List<String> _models = const ['trilobite'];
 
   // Quick-access slash commands the serve layer understands.
   static const _quickCommands = <String, String>{
     '/stats': 'Show learning stats',
+    '/context': 'Show context health',
+    '/quality': 'Audit memory quality',
     '/help': 'List commands',
     '/train': 'Practice & self-learn',
     '/pass': 'Mark last answer good',
+    '/accept': 'Mark last answer useful',
+    '/edited': 'Mark answer used after edits',
     '/fail': 'Mark last answer bad',
   };
 
@@ -72,6 +76,16 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() => _model = m);
     widget.settings.model = m;
     widget.settings.save();
+  }
+
+  Future<void> _recordPassive(String command) async {
+    try {
+      await _api.chat([
+        ChatMessage(role: Role.user, content: command),
+      ], model: _model);
+    } catch (_) {
+      // Passive learning should never interrupt the chat UI.
+    }
   }
 
   @override
@@ -250,7 +264,10 @@ class _ChatScreenState extends State<ChatScreen> {
                     padding: const EdgeInsets.symmetric(
                         horizontal: 12, vertical: 16),
                     itemCount: _messages.length,
-                    itemBuilder: (_, i) => _Bubble(message: _messages[i]),
+                    itemBuilder: (_, i) => _Bubble(
+                      message: _messages[i],
+                      onPassive: _recordPassive,
+                    ),
                   ),
           ),
           _InputBar(
@@ -327,7 +344,8 @@ class _Suggestion extends StatelessWidget {
 
 class _Bubble extends StatelessWidget {
   final ChatMessage message;
-  const _Bubble({required this.message});
+  final ValueChanged<String>? onPassive;
+  const _Bubble({required this.message, this.onPassive});
 
   @override
   Widget build(BuildContext context) {
@@ -385,21 +403,58 @@ class _Bubble extends StatelessWidget {
             if (!isUser && !message.pending && message.content.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(top: 6),
-                child: InkWell(
-                  onTap: () => Clipboard.setData(
-                      ClipboardData(text: message.content)),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.copy_all_outlined,
-                          size: 14, color: fg.withValues(alpha: 0.6)),
-                      const SizedBox(width: 4),
-                      Text('copy',
-                          style: TextStyle(
-                              fontSize: 11,
-                              color: fg.withValues(alpha: 0.6))),
-                    ],
-                  ),
+                child: Wrap(
+                  spacing: 10,
+                  children: [
+                    InkWell(
+                      onTap: () {
+                        Clipboard.setData(ClipboardData(text: message.content));
+                        onPassive?.call('/copied');
+                      },
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.copy_all_outlined,
+                              size: 14, color: fg.withValues(alpha: 0.6)),
+                          const SizedBox(width: 4),
+                          Text('copy',
+                              style: TextStyle(
+                                  fontSize: 11,
+                                  color: fg.withValues(alpha: 0.6))),
+                        ],
+                      ),
+                    ),
+                    InkWell(
+                      onTap: () => onPassive?.call('/accept'),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.check_circle_outline,
+                              size: 14, color: fg.withValues(alpha: 0.6)),
+                          const SizedBox(width: 4),
+                          Text('useful',
+                              style: TextStyle(
+                                  fontSize: 11,
+                                  color: fg.withValues(alpha: 0.6))),
+                        ],
+                      ),
+                    ),
+                    InkWell(
+                      onTap: () => onPassive?.call('/edited'),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.edit_outlined,
+                              size: 14, color: fg.withValues(alpha: 0.6)),
+                          const SizedBox(width: 4),
+                          Text('edited',
+                              style: TextStyle(
+                                  fontSize: 11,
+                                  color: fg.withValues(alpha: 0.6))),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
               ),
           ],

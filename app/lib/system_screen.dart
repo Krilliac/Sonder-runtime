@@ -174,6 +174,13 @@ class _SystemScreenState extends State<SystemScreen> {
                         : 'First update will replace bundled folder from Git',
                     ok: true,
                   ),
+                  _StatusRow(
+                    label: 'Engine setup',
+                    value: localInfo.bootstrapScript
+                        ? 'One-click setup available'
+                        : 'Bootstrap script not bundled',
+                    ok: localInfo.bootstrapScript || !localInfo.canLaunch,
+                  ),
                 ],
               ),
             ),
@@ -188,7 +195,18 @@ class _SystemScreenState extends State<SystemScreen> {
                 FilledButton.icon(
                   onPressed: _working
                       ? null
-                      : () => _run(LocalManager.startServer),
+                      : () => _run(() => LocalManager.setupEngine(
+                            allowHosted: widget.settings.allowHosted,
+                          )),
+                  icon: const Icon(Icons.auto_fix_high_outlined),
+                  label: const Text('Setup engine'),
+                ),
+                FilledButton.icon(
+                  onPressed: _working
+                      ? null
+                      : () => _run(() => LocalManager.startServer(
+                            allowHosted: widget.settings.allowHosted,
+                          )),
                   icon: const Icon(Icons.play_arrow_outlined),
                   label: const Text('Start server'),
                 ),

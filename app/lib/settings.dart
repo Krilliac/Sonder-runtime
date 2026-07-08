@@ -6,6 +6,7 @@ class Settings {
   static const _kKey = 'api_key';
   static const _kDark = 'dark_mode';
   static const _kModel = 'model';
+  static const _kAllowHosted = 'allow_hosted';
 
   static const defaultModel = 'trilobite';
 
@@ -13,12 +14,14 @@ class Settings {
   String apiKey;
   bool darkMode;
   String model; // which server tier/model to use ("trilobite" = local student)
+  bool allowHosted;
 
   Settings({
     this.serverUrl = 'http://127.0.0.1:11435',
     this.apiKey = '',
     this.darkMode = true,
     this.model = defaultModel,
+    this.allowHosted = false,
   });
 
   bool get isConfigured => serverUrl.trim().isNotEmpty;
@@ -30,6 +33,7 @@ class Settings {
       apiKey: p.getString(_kKey) ?? '',
       darkMode: p.getBool(_kDark) ?? true,
       model: p.getString(_kModel) ?? defaultModel,
+      allowHosted: p.getBool(_kAllowHosted) ?? false,
     );
   }
 
@@ -39,5 +43,6 @@ class Settings {
     await p.setString(_kKey, apiKey.trim());
     await p.setBool(_kDark, darkMode);
     await p.setString(_kModel, model);
+    await p.setBool(_kAllowHosted, allowHosted);
   }
 }

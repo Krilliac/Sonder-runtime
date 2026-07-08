@@ -70,6 +70,8 @@ HELP_TEXT = """commands:
   /quality           audit lesson quality and duplicate rows
   /qualityfix [apply] dry-run or apply exact duplicate lesson cleanup
   /pass, /good       record the last answer as tests_passed
+  /accept,/used      record the last answer as accepted/used
+  /copied,/edited    record copy/edit passive learning signals
   /fail, /bad        record the last answer as failed
   /run [seconds]     execute the code block from the last response (default 8s)
   /runproject [sec]  execute file/path fenced blocks as a temp project
@@ -258,6 +260,19 @@ def _handle_slash(content):
             LAST_IID = None
             return msg
         return "(nothing to record yet)"
+    if cmd in ("/accept", "/accepted", "/used", "/copied", "/edited"):
+        if LAST_IID:
+            signal = {
+                "/accept": "accepted",
+                "/accepted": "accepted",
+                "/used": "used",
+                "/copied": "copied",
+                "/edited": "edited",
+            }[cmd]
+            msg = server.record_outcome(LAST_IID, signal)
+            LAST_IID = None
+            return msg
+        return "(nothing to record yet)"
     if cmd in ("/fail", "/bad"):
         if LAST_IID:
             msg = server.record_outcome(LAST_IID, "failed")
@@ -298,6 +313,16 @@ def _handle_feedback(content):
 
     if not LAST_IID:
         return None
+
+    signal = feedback.classify_signal(content)
+    if signal and server.reward.score(signal) > 0:
+        server.record_outcome(LAST_IID, signal)
+        LAST_IID = None
+        return "Got it - recorded %s so I can learn." % signal
+    if signal:
+        server.record_outcome(LAST_IID, signal)
+        LAST_IID = None
+        return "Got it - recorded that as not-helpful so I can learn."
 
     fb = feedback.classify_feedback(content)
     if fb == "positive":
@@ -421,7 +446,7 @@ class Handler(BaseHTTPRequestHandler):
             # Advertise the local student plus every configured tier, so a client can
             # offer a model picker. owned_by flags where each runs.
             data = [{"id": "trilobite", "object": "model", "owned_by": "local"}]
-            for tier_name, model in server.TIERS.items():
+            for tier_name, model in server.available_tiers().items():
                 data.append({
                     "id": tier_name,
                     "object": "model",
@@ -457,7 +482,7 @@ class Handler(BaseHTTPRequestHandler):
                             if server._is_cloud_tier(tier_name, model)
                             else "local",
                         }
-                        for tier_name, model in server.TIERS.items()
+                        for tier_name, model in server.available_tiers().items()
                     ],
                 ],
             }

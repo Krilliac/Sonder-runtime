@@ -72,3 +72,15 @@ def test_run_rejects_invalid_timeout():
 
     assert out.startswith("usage: /run [seconds]")
     assert "previous fenced code block" in out
+
+
+def test_passive_slash_records_copied(monkeypatch):
+    seen = []
+    monkeypatch.setattr(ts.server, "record_outcome", lambda iid, signal: seen.append((iid, signal)) or "ok")
+    ts.LAST_IID = "abc123"
+
+    out = ts._handle_slash("/copied")
+
+    assert out == "ok"
+    assert seen == [("abc123", "copied")]
+    assert ts.LAST_IID is None
