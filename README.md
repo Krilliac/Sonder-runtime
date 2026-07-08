@@ -1,11 +1,11 @@
 # trilobite
 
 <!-- ci-artifact-badges:start -->
-[![Latest CI artifacts 4 files](https://img.shields.io/badge/Latest%20CI%20artifacts-4%20files-2088FF?style=for-the-badge&logo=githubactions&logoColor=white)](https://github.com/Krilliac/Trilobite-model/actions/runs/28963779959)
-[![Android download](https://img.shields.io/badge/Android-download-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/Krilliac/Trilobite-model/actions/runs/28963779959/artifacts/8177258842)
-[![Linux download](https://img.shields.io/badge/Linux-download-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/Krilliac/Trilobite-model/actions/runs/28963779959/artifacts/8177182214)
-[![Windows download](https://img.shields.io/badge/Windows-download-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Krilliac/Trilobite-model/actions/runs/28963779959/artifacts/8177216621)
-[![macOS download](https://img.shields.io/badge/macOS-download-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/Krilliac/Trilobite-model/actions/runs/28963779959/artifacts/8177232831)
+[![Latest CI artifacts 4 files](https://img.shields.io/badge/Latest%20CI%20artifacts-4%20files-2088FF?style=for-the-badge&logo=githubactions&logoColor=white)](https://github.com/Krilliac/Trilobite-model/actions/runs/28965607688)
+[![Android download](https://img.shields.io/badge/Android-download-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/Krilliac/Trilobite-model/actions/runs/28965607688/artifacts/8178000122)
+[![Linux download](https://img.shields.io/badge/Linux-download-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/Krilliac/Trilobite-model/actions/runs/28965607688/artifacts/8177919570)
+[![Windows download](https://img.shields.io/badge/Windows-download-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Krilliac/Trilobite-model/actions/runs/28965607688/artifacts/8177965622)
+[![macOS download](https://img.shields.io/badge/macOS-download-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/Krilliac/Trilobite-model/actions/runs/28965607688/artifacts/8177924740)
 <!-- ci-artifact-badges:end -->
 
 **A private AI that's *yours*.** It runs entirely on your own machine, learns from your work over time, and no one can read it, rate-limit it, reset it, or take it away.
