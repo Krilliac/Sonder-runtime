@@ -15,7 +15,16 @@
 # Env vars for the hosting section:
 #   TRILOBITE_API_KEY   API key clients must send (auto-generated if unset)
 #   TRILOBITE_PORT      port to bind (default 11435)
+# Performance knobs used by local Ollama requests:
+#   LOCAL_LLM_NUM_THREAD CPU threads per local model request (default: nproc)
+#   LOCAL_LLM_NUM_GPU    GPU layers to offload (default: 999/all, use 0 for CPU)
+#   LOCAL_LLM_NUM_BATCH  inference batch size (default: 512)
 set -euo pipefail
+
+export LOCAL_LLM_NUM_THREAD="${LOCAL_LLM_NUM_THREAD:-$(nproc 2>/dev/null || echo 4)}"
+export LOCAL_LLM_NUM_GPU="${LOCAL_LLM_NUM_GPU:-999}"
+export LOCAL_LLM_NUM_BATCH="${LOCAL_LLM_NUM_BATCH:-512}"
+export OLLAMA_FLASH_ATTENTION="${OLLAMA_FLASH_ATTENTION:-1}"
 
 SERVE=0
 MODEL_STEP=1
@@ -135,6 +144,10 @@ Type=simple
 WorkingDirectory=$CLONE_DIR
 Environment=TRILOBITE_HOST=0.0.0.0
 Environment=TRILOBITE_API_KEY=$KEY
+Environment=LOCAL_LLM_NUM_THREAD=$LOCAL_LLM_NUM_THREAD
+Environment=LOCAL_LLM_NUM_GPU=$LOCAL_LLM_NUM_GPU
+Environment=LOCAL_LLM_NUM_BATCH=$LOCAL_LLM_NUM_BATCH
+Environment=OLLAMA_FLASH_ATTENTION=$OLLAMA_FLASH_ATTENTION
 ExecStart=$VENV_PY $CLONE_DIR/trilobite_serve.py $PORT
 Restart=on-failure
 RestartSec=3

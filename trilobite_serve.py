@@ -21,6 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import server
 import grounding
+import code_runner
 import training_tasks
 import intents
 import feedback
@@ -68,6 +69,7 @@ HELP_TEXT = """commands:
   /pass, /good       record the last answer as tests_passed
   /fail, /bad        record the last answer as failed
   /run [seconds]     execute the code block from the last response (default 8s)
+  /runproject [sec]  execute file/path fenced blocks as a temp project
   /train, /learn [N] grounded self-learning: practice N tasks (default 3, max 500)
 
 Plain English also works for the toggles/actions above, e.g. "strict on,
@@ -171,17 +173,30 @@ def _parse_run_timeout(arg):
 
 def _do_run(timeout=grounding.DEFAULT_TIMEOUT):
     """Execute the code block from LAST_RESPONSE via grounding. Mirrors the REPL's /run."""
-    code = grounding.extract_code_block(LAST_RESPONSE)
-    if code is None:
+    block = grounding.extract_runnable_code_block(LAST_RESPONSE)
+    if block is None:
         return "(no code block in the last response to run)"
-    result = grounding.run_code_detail(code, timeout=timeout)
+    result = code_runner.run_code(
+        block["code"],
+        language=block["language"],
+        timeout=timeout,
+    )
     if result.get("ok"):
         status = "[ran OK]"
-    elif result.get("timed_out"):
+    elif result.get("returncode") is None and result.get("error", "").startswith("timed out"):
         status = "[timed out]"
     else:
         status = "[exited with error]"
-    return "%s\n%s" % (grounding.format_run_result(result), status)
+    return "%s\n%s" % (code_runner.format_result(result), status)
+
+
+def _do_runproject(timeout=grounding.MAX_TIMEOUT):
+    files = grounding.extract_project_files(LAST_RESPONSE)
+    if not files:
+        return "(no file/path fenced project blocks in the last response)"
+    result = code_runner.run_project({"files": files}, timeout=timeout)
+    status = "[ran OK]" if result.get("ok") else "[project failed]"
+    return "%s\n%s" % (code_runner.format_project_result(result), status)
 
 
 def _do_train(n):
@@ -251,6 +266,11 @@ def _handle_slash(content):
         if err:
             return err
         return _do_run(timeout)
+    if cmd == "/runproject":
+        timeout, err = _parse_run_timeout(arg)
+        if err:
+            return err
+        return _do_runproject(timeout)
     if cmd in ("/train", "/learn"):
         n, err = _parse_train_n(arg)
         if err:

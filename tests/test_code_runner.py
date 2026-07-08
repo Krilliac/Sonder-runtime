@@ -75,6 +75,72 @@ def test_missing_runtime_is_reported(monkeypatch):
     assert "node executable not found" in out["error"]
 
 
+def test_cpp_compiler_finds_visual_studio_vcvars_from_env(monkeypatch):
+    monkeypatch.setattr(code_runner.shutil, "which", lambda exe: None)
+    monkeypatch.setenv("TRILOBITE_VCVARS64", r"C:\VS\VC\Auxiliary\Build\vcvars64.bat")
+    monkeypatch.setattr(code_runner.os.path, "isfile", lambda path: path.endswith("vcvars64.bat"))
+
+    assert code_runner._cpp_compiler() == (
+        "msvc-vcvars",
+        r"C:\VS\VC\Auxiliary\Build\vcvars64.bat",
+    )
+
+
+def test_cpp_compiler_finds_visual_studio_vcvars_from_vswhere(monkeypatch):
+    monkeypatch.delenv("TRILOBITE_VCVARS64", raising=False)
+    monkeypatch.setattr(code_runner.shutil, "which", lambda exe: r"C:\VS\Installer\vswhere.exe" if exe == "vswhere" else None)
+    monkeypatch.setattr(code_runner.os.path, "isfile", lambda path: path.endswith("vcvars64.bat") or path.endswith("vswhere.exe"))
+
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(args[0], 0, stdout=r"C:\Program Files\Microsoft Visual Studio\2022\Community" + "\n", stderr="")
+
+    monkeypatch.setattr(code_runner.subprocess, "run", fake_run)
+
+    name, path = code_runner._cpp_compiler()
+    assert name == "msvc-vcvars"
+    assert path.endswith(r"VC\Auxiliary\Build\vcvars64.bat")
+
+
+def test_run_cpp_uses_msvc_batch_when_vcvars_available(monkeypatch, tmp_path):
+    source = tmp_path / "snippet.cpp"
+    source.write_text("int main(){return 0;}", encoding="utf-8")
+    seen = []
+
+    monkeypatch.setattr(code_runner, "_cpp_compiler", lambda: ("msvc-vcvars", r"C:\VS\vcvars64.bat"))
+
+    def fake_run_process(cmd, cwd, stdin, timeout, language):
+        seen.append(cmd)
+        if cmd[:2] == ["cmd", "/c"]:
+            return {
+                "ok": True,
+                "returncode": 0,
+                "stdout": "",
+                "stderr": "",
+                "language": language,
+                "cwd": cwd,
+                "timeout": timeout,
+                "error": "",
+            }
+        return {
+            "ok": True,
+            "returncode": 0,
+            "stdout": "ran",
+            "stderr": "",
+            "language": language,
+            "cwd": cwd,
+            "timeout": timeout,
+            "error": "",
+        }
+
+    monkeypatch.setattr(code_runner, "_run_process", fake_run_process)
+
+    out = code_runner._run_cpp(str(source), str(tmp_path), "", 10, str(tmp_path))
+    assert out["ok"] is True
+    assert seen[0][:2] == ["cmd", "/c"]
+    assert seen[1][0].endswith("snippet.exe")
+    assert (tmp_path / "trilobite_build_msvc.bat").exists()
+
+
 def test_timeout_is_clamped(monkeypatch):
     seen = {}
 

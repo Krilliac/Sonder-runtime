@@ -12,8 +12,30 @@ import sys
 import tempfile
 
 _CODE_BLOCK_RE = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
+_FILE_INFO_RE = re.compile(r"(?:^|\s)(?:file|path)\s*[:=]\s*([^\s`]+)", re.IGNORECASE)
+_FILE_FIRST_LINE_RE = re.compile(
+    r"^\s*(?://|#|<!--)\s*(?:file|path)\s*[:=]\s*([^\s<]+)\s*(?:-->)?\s*$",
+    re.IGNORECASE,
+)
 DEFAULT_TIMEOUT = 8
 MAX_TIMEOUT = 60
+RUNNABLE_FENCE_LANGS = {
+    "python": "python",
+    "py": "python",
+    "javascript": "javascript",
+    "js": "javascript",
+    "node": "javascript",
+    "powershell": "powershell",
+    "pwsh": "powershell",
+    "ps1": "powershell",
+    "cpp": "cpp",
+    "c++": "cpp",
+    "cc": "cpp",
+    "cxx": "cpp",
+    "csharp": "csharp",
+    "cs": "csharp",
+    "c#": "csharp",
+}
 
 
 def extract_code_block(text):
@@ -33,6 +55,69 @@ def extract_code_block(text):
         if lang == "" and not _looks_like_shell_block(body):
             return body
     return None
+
+
+def _fence_language(info):
+    first = ((info or "").strip().split() or [""])[0].lower()
+    return RUNNABLE_FENCE_LANGS.get(first)
+
+
+def extract_runnable_code_block(text):
+    """Return {"language": ..., "code": ...} for the best single runnable block.
+
+    Unlike extract_code_block(), this accepts non-Python runnable fences for the
+    user-facing /run command. Bare fences are treated as Python unless they look
+    like shell commands.
+    """
+    blocks = [
+        ((lang or "").strip(), body.strip())
+        for lang, body in _CODE_BLOCK_RE.findall(text or "")
+    ]
+    for info, body in reversed(blocks):
+        language = _fence_language(info)
+        if language:
+            return {"language": language, "code": body}
+    for info, body in reversed(blocks):
+        if not (info or "").strip() and not _looks_like_shell_block(body):
+            return {"language": "python", "code": body}
+    return None
+
+
+def _path_from_fence(info, body):
+    m = _FILE_INFO_RE.search(info or "")
+    if m:
+        return m.group(1), body
+    lines = (body or "").splitlines()
+    if lines:
+        m = _FILE_FIRST_LINE_RE.match(lines[0])
+        if m:
+            return m.group(1), "\n".join(lines[1:]).lstrip("\n")
+    return None, body
+
+
+def extract_project_files(text):
+    """Extract multi-file project blocks from Markdown fences.
+
+    Supported forms:
+      ```file:src/main.cpp
+      ...
+      ```
+
+      ```cpp file=src/main.cpp
+      ...
+      ```
+
+      ```cpp
+      // file: src/main.cpp
+      ...
+      ```
+    """
+    files = []
+    for info, body in _CODE_BLOCK_RE.findall(text or ""):
+        path, content = _path_from_fence(info, body)
+        if path:
+            files.append({"path": path.strip(), "content": content.strip()})
+    return files
 
 
 def _looks_like_shell_block(body):

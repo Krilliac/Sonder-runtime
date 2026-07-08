@@ -73,6 +73,51 @@ def test_should_learn_honors_learn_tiers(monkeypatch):
     assert server._should_learn("cloud-code", True) is False
 
 
+def test_make_generate_adds_local_runtime_options(monkeypatch):
+    seen = {}
+
+    def fake_post(path, payload):
+        seen["path"] = path
+        seen["payload"] = payload
+        return {"message": {"content": "ok"}}
+
+    monkeypatch.setenv("LOCAL_LLM_NUM_THREAD", "12")
+    monkeypatch.setenv("LOCAL_LLM_NUM_GPU", "99")
+    monkeypatch.setenv("LOCAL_LLM_NUM_BATCH", "256")
+    monkeypatch.setattr(server, "_post", fake_post)
+
+    gen = server._make_generate("local-model", "system", 0.3, 77, 4096)
+    assert gen("hello") == "ok"
+    assert seen["path"] == "/api/chat"
+    assert seen["payload"]["keep_alive"] == server.KEEP_ALIVE
+    assert seen["payload"]["options"] == {
+        "temperature": 0.3,
+        "num_predict": 77,
+        "num_ctx": 4096,
+        "num_thread": 12,
+        "num_gpu": 99,
+        "num_batch": 256,
+    }
+
+
+def test_make_generate_cloud_omits_local_runtime_options(monkeypatch):
+    seen = {}
+
+    def fake_post(path, payload):
+        seen["payload"] = payload
+        return {"message": {"content": "ok"}}
+
+    monkeypatch.setenv("LOCAL_LLM_NUM_THREAD", "12")
+    monkeypatch.setenv("LOCAL_LLM_NUM_GPU", "99")
+    monkeypatch.setenv("LOCAL_LLM_NUM_BATCH", "256")
+    monkeypatch.setattr(server, "_post", fake_post)
+
+    gen = server._make_generate("cloud-model", "", 0.4, 88, 8192, cloud=True)
+    assert gen("hello") == "ok"
+    assert "keep_alive" not in seen["payload"]
+    assert seen["payload"]["options"] == {"temperature": 0.4, "num_predict": 88}
+
+
 def test_serve_target_cloud_tier_is_clean_teacher():
     # Cloud tier: real cloud model, cloud=True, augment=False (clean), labeled by tier.
     model, cloud, augment, label = server._serve_target("cloud-code", None)

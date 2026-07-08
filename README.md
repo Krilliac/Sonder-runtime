@@ -104,6 +104,25 @@ python trilobite_repl.py                  # interactive session
 
 ---
 
+## GPU and thread tuning
+
+trilobite sends Ollama local-runtime options on every local model call so it uses
+the machine instead of idling on conservative defaults:
+
+- `LOCAL_LLM_NUM_THREAD` - CPU threads per request. Defaults to all detected CPU
+  threads (`%NUMBER_OF_PROCESSORS%` on Windows, `nproc` on Linux).
+- `LOCAL_LLM_NUM_GPU` - model layers to offload to GPU. Defaults to `999`, which
+  asks Ollama to place all supported layers on the GPU. Set `0` for CPU-only, or
+  `auto`/`none` to let Ollama decide.
+- `LOCAL_LLM_NUM_BATCH` - inference batch size. Defaults to `512`.
+- `OLLAMA_FLASH_ATTENTION` - enabled as `1` by the launch scripts when they start
+  Ollama.
+
+Check the active values with `diagnostics()` or REPL `/diagnostics`; check VRAM
+residency with `status()`.
+
+---
+
 ## Making it *yours*
 
 A fresh trilobite is just base Qwen — you make it valuable by feeding it *your* world:

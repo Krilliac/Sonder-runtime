@@ -56,6 +56,55 @@ BASE = f"http://{OLLAMA_HOST}"
 KEEP_ALIVE = os.environ.get("LOCAL_LLM_KEEP_ALIVE", "2m")
 TIMEOUT = int(os.environ.get("LOCAL_LLM_TIMEOUT", "300"))
 
+
+def _env_int_option(name, default=None):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    raw = raw.strip()
+    if raw.lower() in ("", "auto", "default", "none", "off"):
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _cpu_thread_default():
+    return max(1, os.cpu_count() or 4)
+
+
+def _local_model_options(temperature, num_predict, num_ctx):
+    """Options sent with every local Ollama model request.
+
+    Read env at call time so a long-running process can pick up live env patches made
+    inside this Python process, and so tests can exercise the performance knobs.
+    """
+    options = {
+        "temperature": temperature,
+        "num_predict": num_predict,
+        "num_ctx": num_ctx,
+    }
+    runtime = {
+        "num_thread": _env_int_option("LOCAL_LLM_NUM_THREAD", _cpu_thread_default()),
+        "num_gpu": _env_int_option("LOCAL_LLM_NUM_GPU", 999),
+        "num_batch": _env_int_option("LOCAL_LLM_NUM_BATCH", 512),
+    }
+    for key, value in runtime.items():
+        if value is not None:
+            options[key] = value
+    return options
+
+
+def _local_runtime_summary():
+    options = _local_model_options(0.2, 1, SESSION_NUM_CTX)
+    return {
+        "num_thread": options.get("num_thread", "ollama-default"),
+        "num_gpu": options.get("num_gpu", "ollama-default"),
+        "num_batch": options.get("num_batch", "ollama-default"),
+    }
+
+
 TIERS = {
     "fast": os.environ.get("LOCAL_LLM_FAST", "qwen2.5:3b"),
     "code": os.environ.get("LOCAL_LLM_CODE", "qwen2.5-coder:7b"),
@@ -194,11 +243,13 @@ def _make_generate(model, system, temperature, num_predict, num_ctx, cloud=False
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": prompt})
-        options = {"temperature": temperature, "num_predict": num_predict}
+        if cloud:
+            options = {"temperature": temperature, "num_predict": num_predict}
+        else:
+            options = _local_model_options(temperature, num_predict, num_ctx)
         payload = {"model": model, "messages": messages, "stream": False,
                    "options": options}
         if not cloud:
-            options["num_ctx"] = num_ctx
             payload["keep_alive"] = KEEP_ALIVE
         out = _post("/api/chat", payload)
         return out.get("message", {}).get("content", "")
@@ -452,12 +503,14 @@ def offload(
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
-        options = {"temperature": temperature, "num_predict": num_predict}
+        if tier in CLOUD_TIERS:
+            options = {"temperature": temperature, "num_predict": num_predict}
+        else:
+            options = _local_model_options(temperature, num_predict, num_ctx)
         payload = {"model": model, "messages": messages, "stream": False,
                    "options": options}
         if tier not in CLOUD_TIERS:
             payload["keep_alive"] = KEEP_ALIVE
-            options["num_ctx"] = num_ctx
         try:
             out = _post("/api/chat", payload)
         except urllib.error.URLError as e:
@@ -780,8 +833,8 @@ def run_code(
     """Execute a short local code snippet and return stdout/stderr.
 
     This gives Claude/Codex a Claude-like execution tool through the local-llm MCP
-    server. Supported languages: python, javascript/js/node, powershell/ps1. Code
-    runs on this machine with the same permissions as the MCP server, so treat it
+    server. Supported languages: python, javascript/js/node, powershell/ps1,
+    cpp/c++, and csharp/cs. Code runs on this machine with the same permissions as the MCP server, so treat it
     like a local terminal: use it for small checks, experiments, and diagnostics,
     not for untrusted code. Execution is bounded by a timeout (1-60s), output is
     trimmed, and cwd is confined to this project workspace.
@@ -798,6 +851,35 @@ def run_code(
     except ValueError as e:
         return "ERROR: %s" % e
     return code_runner.format_result(result)
+
+
+@mcp.tool()
+def run_project(
+    files_json: str,
+    commands_json: str = "",
+    stdin: str = "",
+    timeout: int = 60,
+) -> str:
+    """Run a temporary multi-file project and return build/run output.
+
+    files_json may be {"files": {"path": "content"}} or a list of
+    {"path": "...", "content": "..."} objects. Paths must be relative and stay
+    inside the temp project. commands_json is optional; when omitted, the runner
+    auto-detects common layouts: main.py/app.py, C# .csproj or .cs files,
+    C++ .cpp/.cc/.cxx files, or package.json. Custom commands must be argv JSON,
+    e.g. [{"cmd": ["dotnet", "test"]}]; no shell is used.
+    """
+    _maybe_live_reload()
+    try:
+        result = code_runner.run_project(
+            files_json=files_json,
+            commands_json=commands_json,
+            stdin=stdin,
+            timeout=timeout,
+        )
+    except ValueError as e:
+        return "ERROR: %s" % e
+    return code_runner.format_project_result(result)
 
 
 def _loop_text_result(action_type, text):
@@ -830,6 +912,27 @@ def _loop_dispatch(action):
             "type": "code",
             "summary": summary,
             "output": code_runner.format_result(result),
+        }
+    if action_type in ("project", "run_project"):
+        try:
+            result = code_runner.run_project(
+                files_json=action.get("files") or action.get("files_json") or [],
+                commands_json=action.get("commands") or action.get("commands_json") or "",
+                stdin=action.get("stdin", ""),
+                timeout=action.get("timeout", 60),
+            )
+        except ValueError as e:
+            return {
+                "ok": False,
+                "type": "project",
+                "summary": str(e),
+                "output": "",
+            }
+        return {
+            "ok": result.get("ok"),
+            "type": "project",
+            "summary": "project %s" % ("ok" if result.get("ok") else "failed"),
+            "output": code_runner.format_project_result(result),
         }
     if action_type == "offload":
         return _loop_text_result("offload", offload(
@@ -904,7 +1007,7 @@ def _loop_dispatch(action):
         "ok": False,
         "type": action_type or "(unknown)",
         "summary": "unknown action type",
-        "output": "Valid action types: code, offload, trilobite, status, diagnostics, self_heal_check, self_heal_repair, profile_status, emotion_status, memory_search, apply_learned, web_search, web_fetch, unload, sleep.",
+        "output": "Valid action types: code, project, offload, trilobite, status, diagnostics, self_heal_check, self_heal_repair, profile_status, emotion_status, memory_search, apply_learned, web_search, web_fetch, unload, sleep.",
     }
 
 
@@ -920,7 +1023,8 @@ def loop(
 
     `actions_json` is a JSON list of action objects, or {"actions": [...]}.
     Supported action types:
-      - {"type":"code","language":"python|js|powershell","code":"..."}
+      - {"type":"code","language":"python|js|powershell|cpp|csharp","code":"..."}
+      - {"type":"project","files":[{"path":"src/main.cpp","content":"..."}],"commands":[{"cmd":["g++","src/main.cpp","-o","app"]}]}
       - {"type":"offload","prompt":"...","tier":"fast|code|general|cloud-code|cloud-general"}
       - {"type":"trilobite","prompt":"...","session":"none"}
       - {"type":"web_search","query":"...","limit":5}
@@ -1354,7 +1458,8 @@ def tool_manifest() -> str:
         "trilobite": "Ask the local self-improving coding model.",
         "offload": "Route a self-contained task to a configured local/cloud tier.",
         "web_search/web_fetch": "Search or fetch public web pages.",
-        "run_code": "Run a bounded Python/JS/PowerShell snippet.",
+        "run_code": "Run a bounded Python/JS/PowerShell/C++/C# snippet.",
+        "run_project": "Run a bounded temporary multi-file project with optional build commands.",
         "loop": "Repeat bounded code/model/system actions.",
         "workflow_list/save/run/delete": "Manage reusable loop workflows.",
         "system_profile_text/update_system_profile": "Read or edit standing instructions.",
@@ -1370,7 +1475,8 @@ def tool_manifest() -> str:
 
 
 AGENT_TOOL_HELP = """Available tools:
-- run_code: {"code": "...", "language": "python|js|powershell", "stdin": "", "timeout": 10}
+- run_code: {"code": "...", "language": "python|js|powershell|cpp|csharp", "stdin": "", "timeout": 10}
+- run_project: {"files_json": {"files": {"src/main.cpp": "..."}}, "commands_json": [{"cmd": ["g++", "src/main.cpp", "-o", "app"]}], "stdin": "", "timeout": 60}
 - web_search: {"query": "...", "limit": 5}
 - web_fetch: {"url": "https://...", "max_chars": 8000}
 - memory_search: {"query": "...", "limit": 10}
@@ -1415,6 +1521,13 @@ def _agent_dispatch(tool_name, args, allow_web=True):
             language=args.get("language", "python"),
             stdin=args.get("stdin", ""),
             timeout=args.get("timeout", 10),
+        )
+    if tool_name == "run_project":
+        return run_project(
+            files_json=args.get("files_json", args.get("files", [])),
+            commands_json=args.get("commands_json", args.get("commands", "")),
+            stdin=args.get("stdin", ""),
+            timeout=args.get("timeout", 60),
         )
     if tool_name == "web_search":
         if not allow_web:
@@ -1557,6 +1670,9 @@ def diagnostics() -> str:
     _maybe_live_reload()
     lines = ["trilobite diagnostics"]
     lines.append("  live reload: %s" % ("on" if live_reload.enabled() else "off"))
+    runtime = _local_runtime_summary()
+    lines.append("  local runtime: threads=%s, gpu_layers=%s, batch=%s" % (
+        runtime["num_thread"], runtime["num_gpu"], runtime["num_batch"]))
     try:
         profile_text, profile_path = system_profile.ensure_profile()
         lines.append("  system profile: ok (%s, %d chars)" % (
@@ -1629,6 +1745,9 @@ def status() -> str:
         f"Installed/registered models: {', '.join(installed) if installed else '(none)'}",
         f"In VRAM now: {', '.join(loaded) if loaded else '(none — GPU idle)'}",
         f"local keep_alive: {KEEP_ALIVE}",
+        "local runtime: threads={num_thread}, gpu_layers={num_gpu}, batch={num_batch}".format(
+            **_local_runtime_summary()
+        ),
     ]
     return "\n".join(lines)
 

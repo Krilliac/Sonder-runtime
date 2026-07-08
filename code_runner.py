@@ -6,6 +6,8 @@ interface predictable: known languages, workspace-confined cwd, timeout, and
 trimmed output.
 """
 import os
+import glob
+import json
 import shutil
 import subprocess
 import sys
@@ -32,6 +34,16 @@ SUPPORTED_LANGUAGES = {
         "cmd": lambda path: [_powershell_exe(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path],
         "missing": "PowerShell executable not found on PATH",
     },
+    "cpp": {
+        "aliases": {"cpp", "c++", "cc", "cxx"},
+        "suffix": ".cpp",
+        "missing": "C++ compiler not found (tried g++, clang++, cl, and Visual Studio vcvars64.bat)",
+    },
+    "csharp": {
+        "aliases": {"csharp", "cs", "c#"},
+        "suffix": ".cs",
+        "missing": ".NET SDK or C# compiler not found on PATH (tried dotnet, csc)",
+    },
 }
 
 DEFAULT_TIMEOUT = 10
@@ -40,6 +52,8 @@ MAX_OUTPUT_CHARS = 12000
 DEFAULT_LOOP_ITERATIONS = 5
 MAX_LOOP_ITERATIONS = 50
 MAX_LOOP_DELAY_SECONDS = 10.0
+MAX_PROJECT_FILES = 80
+MAX_PROJECT_BYTES = 750000
 
 
 def _powershell_exe():
@@ -95,6 +109,196 @@ def _trim_output(text, limit=MAX_OUTPUT_CHARS):
     return text[-limit:]
 
 
+def _completed_result(proc, language, cwd, timeout, error=""):
+    return {
+        "ok": proc.returncode == 0,
+        "returncode": proc.returncode,
+        "stdout": _trim_output(proc.stdout),
+        "stderr": _trim_output(proc.stderr),
+        "language": language,
+        "cwd": cwd,
+        "timeout": timeout,
+        "error": error,
+    }
+
+
+def _error_result(language, cwd, timeout, error):
+    return {
+        "ok": False,
+        "returncode": None,
+        "stdout": "",
+        "stderr": "",
+        "language": language,
+        "cwd": cwd,
+        "timeout": timeout,
+        "error": error,
+    }
+
+
+def _timeout_result(language, cwd, timeout, exc):
+    return {
+        "ok": False,
+        "returncode": None,
+        "stdout": _trim_output(exc.stdout if isinstance(exc.stdout, str) else ""),
+        "stderr": _trim_output(exc.stderr if isinstance(exc.stderr, str) else ""),
+        "language": language,
+        "cwd": cwd,
+        "timeout": timeout,
+        "error": "timed out after %ss" % timeout,
+    }
+
+
+def _run_process(cmd, cwd, stdin, timeout, language):
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=cwd,
+            input=stdin or "",
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        missing = SUPPORTED_LANGUAGES.get(language, {}).get(
+            "missing", "executable not found: %s" % (cmd[0] if cmd else "(empty)")
+        )
+        return _error_result(language, cwd, timeout, missing)
+    except subprocess.TimeoutExpired as exc:
+        return _timeout_result(language, cwd, timeout, exc)
+    return _completed_result(proc, language, cwd, timeout)
+
+
+def _cpp_compiler():
+    for exe in ("g++", "clang++", "cl"):
+        path = shutil.which(exe)
+        if path:
+            return exe, path
+    vcvars = _find_visual_studio_vcvars()
+    if vcvars:
+        return "msvc-vcvars", vcvars
+    return None, None
+
+
+def _find_visual_studio_vcvars():
+    override = os.environ.get("TRILOBITE_VCVARS64", "").strip()
+    if override and os.path.isfile(override):
+        return override
+
+    vswhere = shutil.which("vswhere")
+    if not vswhere:
+        candidate = os.path.join(
+            os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+            "Microsoft Visual Studio",
+            "Installer",
+            "vswhere.exe",
+        )
+        if os.path.isfile(candidate):
+            vswhere = candidate
+    if vswhere:
+        try:
+            proc = subprocess.run(
+                [
+                    vswhere,
+                    "-latest",
+                    "-products",
+                    "*",
+                    "-requires",
+                    "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                    "-property",
+                    "installationPath",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            install = (proc.stdout or "").strip().splitlines()
+            if install:
+                vcvars = os.path.join(install[0], "VC", "Auxiliary", "Build", "vcvars64.bat")
+                if os.path.isfile(vcvars):
+                    return vcvars
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    roots = [
+        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Microsoft Visual Studio", "*", "*"),
+        os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Microsoft Visual Studio", "*", "*"),
+    ]
+    for root in roots:
+        matches = sorted(
+            glob.glob(os.path.join(root, "VC", "Auxiliary", "Build", "vcvars64.bat")),
+            reverse=True,
+        )
+        for path in matches:
+            if os.path.isfile(path):
+                return path
+    return None
+
+
+def _msvc_compile_result(vcvars, sources, exe, cwd, timeout, language):
+    bat = os.path.join(cwd, "trilobite_build_msvc.bat")
+    quoted_sources = " ".join('"%s"' % src for src in sources)
+    with open(bat, "w", encoding="utf-8") as f:
+        f.write(
+            '@echo off\r\n'
+            'call "%s" >nul\r\n'
+            'cl /nologo /EHsc /std:c++17 /Fe:"%s" %s\r\n'
+            % (vcvars, exe, quoted_sources)
+        )
+    return _run_process(["cmd", "/c", bat], cwd, "", timeout, language)
+
+
+def _run_cpp(path, tmp, stdin, timeout, cwd):
+    name, compiler = _cpp_compiler()
+    if not compiler:
+        return _error_result("cpp", cwd, timeout, SUPPORTED_LANGUAGES["cpp"]["missing"])
+    exe = os.path.join(tmp, "snippet.exe" if os.name == "nt" else "snippet")
+    if name == "msvc-vcvars":
+        compile_result = _msvc_compile_result(compiler, [path], exe, tmp, timeout, "cpp")
+    elif name == "cl":
+        compile_cmd = [compiler, "/nologo", "/EHsc", "/std:c++17", "/Fe:" + exe, path]
+        compile_result = _run_process(compile_cmd, tmp, "", timeout, "cpp")
+    else:
+        compile_cmd = [compiler, "-std=c++17", path, "-o", exe]
+        compile_result = _run_process(compile_cmd, tmp, "", timeout, "cpp")
+    if not compile_result.get("ok"):
+        return compile_result
+    run_result = _run_process([exe], tmp, stdin, timeout, "cpp")
+    run_result["stdout"] = _trim_output(
+        (compile_result.get("stdout") or "") + (("\n" + run_result["stdout"]) if run_result.get("stdout") else "")
+    )
+    run_result["stderr"] = _trim_output(
+        (compile_result.get("stderr") or "") + (("\n" + run_result["stderr"]) if run_result.get("stderr") else "")
+    )
+    return run_result
+
+
+def _run_csharp(path, tmp, stdin, timeout, cwd):
+    csc = shutil.which("csc")
+    if csc:
+        exe = os.path.join(tmp, "snippet.exe")
+        compile_result = _run_process([csc, "/nologo", "/out:" + exe, path], tmp, "", timeout, "csharp")
+        if not compile_result.get("ok"):
+            return compile_result
+        return _run_process([exe], tmp, stdin, timeout, "csharp")
+    dotnet = shutil.which("dotnet")
+    if not dotnet:
+        return _error_result("csharp", cwd, timeout, SUPPORTED_LANGUAGES["csharp"]["missing"])
+    project = os.path.join(tmp, "Snippet.csproj")
+    with open(project, "w", encoding="utf-8") as f:
+        f.write(
+            '<Project Sdk="Microsoft.NET.Sdk">\n'
+            '  <PropertyGroup>\n'
+            '    <OutputType>Exe</OutputType>\n'
+            '    <TargetFramework>net8.0</TargetFramework>\n'
+            '    <ImplicitUsings>enable</ImplicitUsings>\n'
+            '    <Nullable>enable</Nullable>\n'
+            '  </PropertyGroup>\n'
+            '</Project>\n'
+        )
+    os.replace(path, os.path.join(tmp, "Program.cs"))
+    return _run_process([dotnet, "run", "--project", project], tmp, stdin, timeout, "csharp")
+
+
 def _clamp_iterations(max_iterations):
     try:
         value = int(max_iterations)
@@ -132,49 +336,12 @@ def run_code(code, language="python", stdin="", timeout=DEFAULT_TIMEOUT, cwd=Non
         path = os.path.join(tmp, "snippet" + cfg["suffix"])
         with open(path, "w", encoding="utf-8") as f:
             f.write(code)
+        if language == "cpp":
+            return _run_cpp(path, tmp, stdin, timeout, cwd)
+        if language == "csharp":
+            return _run_csharp(path, tmp, stdin, timeout, cwd)
         cmd = cfg["cmd"](path)
-        try:
-            proc = subprocess.run(
-                cmd,
-                cwd=cwd,
-                input=stdin or "",
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-        except FileNotFoundError:
-            return {
-                "ok": False,
-                "returncode": None,
-                "stdout": "",
-                "stderr": "",
-                "language": language,
-                "cwd": cwd,
-                "timeout": timeout,
-                "error": cfg["missing"],
-            }
-        except subprocess.TimeoutExpired as exc:
-            return {
-                "ok": False,
-                "returncode": None,
-                "stdout": _trim_output(exc.stdout if isinstance(exc.stdout, str) else ""),
-                "stderr": _trim_output(exc.stderr if isinstance(exc.stderr, str) else ""),
-                "language": language,
-                "cwd": cwd,
-                "timeout": timeout,
-                "error": "timed out after %ss" % timeout,
-            }
-
-    return {
-        "ok": proc.returncode == 0,
-        "returncode": proc.returncode,
-        "stdout": _trim_output(proc.stdout),
-        "stderr": _trim_output(proc.stderr),
-        "language": language,
-        "cwd": cwd,
-        "timeout": timeout,
-        "error": "",
-    }
+        return _run_process(cmd, cwd, stdin, timeout, language)
 
 
 def format_result(result):
@@ -191,6 +358,21 @@ def format_result(result):
         lines.append("error: %s" % result["error"])
     stdout = result.get("stdout") or ""
     stderr = result.get("stderr") or ""
+    if "EOFError" in stderr:
+        lines.append(
+            "note: this program tried to read keyboard input, but /run is non-interactive."
+        )
+    if (
+        result.get("error", "").startswith("timed out")
+        and result.get("language") in ("csharp", "cpp", "project")
+        and stdout
+        and ("enter" in stdout.lower() or "guess" in stdout.lower() or "input" in stdout.lower())
+    ):
+        lines.append(
+            "note: the program appears to be waiting for console input. For /run, add a scripted demo path or provide stdin."
+        )
+    if result.get("error", "").startswith("timed out"):
+        lines.append("note: use a bounded smoke test or auto-exit path for /run.")
     if stdout:
         lines.extend(["", "stdout:", stdout])
     if stderr:
@@ -198,6 +380,182 @@ def format_result(result):
     if not stdout and not stderr and not result.get("error"):
         lines.append("")
         lines.append("(no output)")
+    return "\n".join(lines)
+
+
+def _project_files_from_json(files_json):
+    try:
+        parsed = json.loads(files_json) if isinstance(files_json, str) else files_json
+    except json.JSONDecodeError as exc:
+        raise ValueError("files_json is not valid JSON: %s" % exc)
+    if isinstance(parsed, dict) and "files" in parsed:
+        parsed = parsed["files"]
+    if isinstance(parsed, dict):
+        files = [{"path": path, "content": content} for path, content in parsed.items()]
+    elif isinstance(parsed, list):
+        files = parsed
+    else:
+        raise ValueError("files_json must be a dict of path->content or a list of file objects")
+    if not files:
+        raise ValueError("project has no files")
+    if len(files) > MAX_PROJECT_FILES:
+        raise ValueError("too many project files (max %d)" % MAX_PROJECT_FILES)
+    total = 0
+    clean = []
+    for item in files:
+        if not isinstance(item, dict):
+            raise ValueError("each project file must be an object")
+        path = str(item.get("path") or "").replace("\\", "/").strip()
+        content = item.get("content")
+        if not path or content is None:
+            raise ValueError("each project file needs path and content")
+        if os.path.isabs(path) or path.startswith("../") or "/../" in path or path == "..":
+            raise ValueError("unsafe project path: %r" % path)
+        total += len(str(content).encode("utf-8"))
+        if total > MAX_PROJECT_BYTES:
+            raise ValueError("project content too large (max %d bytes)" % MAX_PROJECT_BYTES)
+        clean.append({"path": path, "content": str(content)})
+    return clean
+
+
+def _write_project_files(root, files):
+    for item in files:
+        dest = os.path.abspath(os.path.join(root, item["path"]))
+        try:
+            inside = os.path.commonpath([root, dest]) == root
+        except ValueError:
+            inside = False
+        if not inside:
+            raise ValueError("unsafe project path: %r" % item["path"])
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, "w", encoding="utf-8") as f:
+            f.write(item["content"])
+
+
+def _commands_from_json(commands_json):
+    if not commands_json:
+        return None
+    try:
+        parsed = json.loads(commands_json) if isinstance(commands_json, str) else commands_json
+    except json.JSONDecodeError as exc:
+        raise ValueError("commands_json is not valid JSON: %s" % exc)
+    if isinstance(parsed, dict) and "commands" in parsed:
+        parsed = parsed["commands"]
+    if not isinstance(parsed, list) or not parsed:
+        raise ValueError("commands_json must be a non-empty list")
+    commands = []
+    for item in parsed:
+        if isinstance(item, list):
+            cmd, cwd = item, ""
+        elif isinstance(item, dict):
+            cmd, cwd = item.get("cmd"), item.get("cwd", "")
+        else:
+            raise ValueError("each command must be an argv list or object")
+        if not isinstance(cmd, list) or not cmd or not all(isinstance(x, str) and x for x in cmd):
+            raise ValueError("command cmd must be a non-empty argv string list")
+        commands.append({"cmd": cmd, "cwd": str(cwd or "")})
+    return commands
+
+
+def _project_cwd(root, rel):
+    path = os.path.abspath(os.path.join(root, rel or ""))
+    try:
+        inside = os.path.commonpath([root, path]) == root
+    except ValueError:
+        inside = False
+    if not inside or not os.path.isdir(path):
+        raise ValueError("command cwd must stay inside project: %r" % rel)
+    return path
+
+
+def _auto_project_commands(root, files):
+    paths = [f["path"] for f in files]
+    lower = [p.lower() for p in paths]
+    py_main = next((p for p in paths if p.lower() in ("main.py", "app.py")), None)
+    if py_main:
+        return [{"cmd": [sys.executable, py_main], "cwd": ""}]
+    csproj = next((p for p in paths if p.lower().endswith(".csproj")), None)
+    if csproj:
+        return [{"cmd": ["dotnet", "run", "--project", csproj], "cwd": ""}]
+    cs_files = [p for p in paths if p.lower().endswith(".cs")]
+    if cs_files:
+        project = os.path.join(root, "TrilobiteGenerated.csproj")
+        with open(project, "w", encoding="utf-8") as f:
+            f.write(
+                '<Project Sdk="Microsoft.NET.Sdk">\n'
+                '  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework></PropertyGroup>\n'
+                '</Project>\n'
+            )
+        return [{"cmd": ["dotnet", "run", "--project", "TrilobiteGenerated.csproj"], "cwd": ""}]
+    cpp_files = [p for p in paths if p.lower().endswith((".cpp", ".cc", ".cxx"))]
+    if cpp_files:
+        name, compiler = _cpp_compiler()
+        if not compiler:
+            return [{"cmd": ["__missing_cpp_compiler__"], "cwd": ""}]
+        exe = os.path.abspath(os.path.join(root, "app.exe" if os.name == "nt" else "app"))
+        if name == "msvc-vcvars":
+            sources = [os.path.abspath(os.path.join(root, p)) for p in cpp_files]
+            bat = os.path.join(root, "trilobite_build_msvc.bat")
+            quoted_sources = " ".join('"%s"' % src for src in sources)
+            with open(bat, "w", encoding="utf-8") as f:
+                f.write(
+                    '@echo off\r\n'
+                    'call "%s" >nul\r\n'
+                    'cl /nologo /EHsc /std:c++17 /Fe:"%s" %s\r\n'
+                    % (compiler, exe, quoted_sources)
+                )
+            compile_cmd = ["cmd", "/c", bat]
+        elif name == "cl":
+            compile_cmd = [compiler, "/nologo", "/EHsc", "/std:c++17", "/Fe:" + exe] + cpp_files
+        else:
+            compile_cmd = [compiler, "-std=c++17"] + cpp_files + ["-o", exe]
+        return [{"cmd": compile_cmd, "cwd": ""}, {"cmd": [exe], "cwd": ""}]
+    if "package.json" in lower:
+        return [{"cmd": ["npm", "test"], "cwd": ""}]
+    raise ValueError("could not auto-detect how to run project; provide commands_json")
+
+
+def run_project(files_json, commands_json="", stdin="", timeout=MAX_TIMEOUT):
+    files = _project_files_from_json(files_json)
+    commands = _commands_from_json(commands_json)
+    timeout = _clamp_timeout(timeout)
+    with tempfile.TemporaryDirectory(prefix="trilobite-project-") as root:
+        root = os.path.abspath(root)
+        _write_project_files(root, files)
+        if commands is None:
+            commands = _auto_project_commands(root, files)
+        steps = []
+        ok = True
+        for index, command in enumerate(commands, start=1):
+            cwd = _project_cwd(root, command.get("cwd", ""))
+            cmd = command["cmd"]
+            language = "project"
+            if cmd and cmd[0] == "__missing_cpp_compiler__":
+                result = _error_result(language, cwd, timeout, SUPPORTED_LANGUAGES["cpp"]["missing"])
+            else:
+                try:
+                    result = _run_process(cmd, cwd, stdin if index == len(commands) else "", timeout, language)
+                except ValueError as exc:
+                    result = _error_result(language, cwd, timeout, str(exc))
+            steps.append({"index": index, "cmd": cmd, "cwd": cwd, "result": result})
+            if not result.get("ok"):
+                ok = False
+                break
+    return {"ok": ok, "files": [f["path"] for f in files], "steps": steps, "timeout": timeout}
+
+
+def format_project_result(result):
+    lines = [
+        "project status: %s" % ("ok" if result.get("ok") else "failed"),
+        "files: %s" % ", ".join(result.get("files") or []),
+        "timeout: %ss" % result.get("timeout"),
+    ]
+    for step in result.get("steps") or []:
+        lines.append("")
+        lines.append("step %d: %s" % (step["index"], " ".join(step.get("cmd") or [])))
+        formatted = format_result(step["result"])
+        for line in formatted.splitlines():
+            lines.append("  " + line)
     return "\n".join(lines)
 
 
