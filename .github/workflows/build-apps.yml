@@ -2,9 +2,11 @@ name: build-apps
 
 # Compiles the trilobite mobile/desktop client for Android, Linux, Windows and
 # macOS. Every run uploads installable artifacts (downloadable from the run's
-# "Summary" page). Main builds also refresh the README's direct artifact
-# download badges, and pushing a tag like `app-v1.0.0` additionally publishes a
-# GitHub Release with permanent download links.
+# "Summary" page). Manual workflow runs can refresh the README's direct
+# artifact download badges; normal push builds avoid bot commits so local GUI
+# pushes are not rejected by surprise README updates. Pushing a tag like
+# `app-v1.0.0` additionally publishes a GitHub Release with permanent download
+# links.
 #
 # The repo keeps only the Dart sources (app/lib, app/pubspec.yaml, app/test).
 # The native project scaffolding (android/, linux/, windows/, macos/) is
@@ -197,10 +199,11 @@ jobs:
           if-no-files-found: error
 
   update-readme-artifacts:
-    # GitHub Actions artifacts are per-run URLs. After a main build succeeds,
-    # write those exact URLs into the README badge block and skip the follow-up CI.
+    # GitHub Actions artifacts are per-run URLs. Refreshing the README badge
+    # block is intentionally manual-only; auto-committing on every main build
+    # races local GUI pushes and forces constant rebases.
     needs: [android, linux, windows, macos]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
