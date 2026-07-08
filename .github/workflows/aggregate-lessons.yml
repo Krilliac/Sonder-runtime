@@ -61,6 +61,7 @@ jobs:
           PY
 
       - name: Commit updated community_lessons.jsonl if changed
+        if: github.event_name == 'workflow_dispatch'
         run: |
           if ! git diff --quiet -- community_lessons.jsonl; then
             git config user.name "github-actions[bot]"
@@ -71,3 +72,7 @@ jobs:
           else
             echo "no changes to community_lessons.jsonl"
           fi
+
+      - name: Skip scheduled repository write
+        if: github.event_name != 'workflow_dispatch'
+        run: echo "Scheduled aggregation is preview-only; run this workflow manually to commit updates."

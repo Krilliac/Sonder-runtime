@@ -191,7 +191,7 @@ The model and your raw interactions always stay local — only small, distilled 
 
 1. **`contribute.py`** exports lessons that pass a conservative privacy scrub (no paths, secrets, or emails; short generic sentences only) to `contrib/lessons_contrib.jsonl`. Nothing is sent anywhere yet — review the file yourself.
 2. **Send it home base** — open a PR adding your file under `contrib/`, or copy it to your own file server.
-3. **CI aggregates** — `.github/workflows/aggregate-lessons.yml` dedupes everyone's `contrib/*.jsonl` into `community_lessons.jsonl` at the repo root (weekly + manual).
+3. **CI aggregates** — `.github/workflows/aggregate-lessons.yml` dedupes everyone's `contrib/*.jsonl` into `community_lessons.jsonl` at the repo root. Scheduled runs are preview-only so they do not surprise-push over local GUI work; run the workflow manually when you want it to commit the updated file.
 4. **`pull_community.py`** merges `community_lessons.jsonl` (fetched via `git pull` or your file server) back into your local `memory.db`, tagged `source_interaction='community'`.
 
 Privacy is opt-in and scrubbed at every step — nothing auto-uploads, and no PR or upload happens without you reviewing it first.
