@@ -66,6 +66,8 @@ LIVE_RELOAD_MODULES = [
     "emotion_vectors",
     "web_tools",
     "admin_auth",
+    "command_registry",
+    "permission_rules",
 ]
 
 HELP_TEXT = """commands:
@@ -75,6 +77,9 @@ HELP_TEXT = """commands:
   /stats             show trilobite's learning stats
   /context           show context, session, and memory health meters
   /contextsize [N]   show/set requested context (8k..1m; native num_ctx is clamped)
+  /compact           preview context compaction/rollover recommendations
+  /commands [filter] list available commands by category, name, or risk
+  /todo ...          list/add/update visible task state
   /quality           audit lesson quality and duplicate rows
   /qualityfix [apply] dry-run or apply exact duplicate lesson cleanup
   /improve           show the next system improvement checklist
@@ -88,6 +93,7 @@ HELP_TEXT = """commands:
   /setaccount ...    admin account edits: user role= tier= dev_flags= banned=
   /debug             inspect safe debug state
   /cot               denied: hidden private chain-of-thought is not exposed
+  /permissions [tool] show local permission rules or one matched rule
   /filepolicy        show file access roots and bypass controls
   /files [query]     find files under guarded roots
   /read <path>       read a guarded file
@@ -304,6 +310,40 @@ def _handle_slash(content):
         if arg.strip():
             return server.set_context_size(arg.strip())
         return server.context_policy_status()
+    if cmd in ("/compact", "/compaction"):
+        return server.context_compaction_plan()
+    if cmd in ("/commands", "/cmds"):
+        return server.command_registry_list(arg.strip())
+    if cmd in ("/permissions", "/perms"):
+        return server.permission_policy(arg.strip())
+    if cmd in ("/todo", "/task", "/tasks"):
+        text = arg.strip()
+        if not text or text.lower() in ("list", "ls"):
+            return server.task_list()
+        action, _, rest = text.partition(" ")
+        action = action.lower()
+        if action in ("add", "create", "new"):
+            return server.task_create(title=rest.strip())
+        if action in ("done", "complete", "finish"):
+            if not rest.strip():
+                return "usage: /todo done <task-id>"
+            return server.task_update(task_id=rest.strip(), status="done")
+        if action in ("start", "doing"):
+            if not rest.strip():
+                return "usage: /todo start <task-id>"
+            return server.task_update(task_id=rest.strip(), status="in_progress")
+        if action in ("block", "blocked"):
+            if not rest.strip():
+                return "usage: /todo block <task-id>"
+            return server.task_update(task_id=rest.strip(), status="blocked")
+        if action in ("show", "view"):
+            if not rest.strip():
+                return "usage: /todo show <task-id>"
+            return server.task_show(rest.strip())
+        return (
+            "usage: /todo [list] | /todo add <title> | /todo start <id> | "
+            "/todo done <id> | /todo block <id> | /todo show <id>"
+        )
     if cmd == "/quality":
         return server.memory_quality_report()
     if cmd == "/qualityfix":

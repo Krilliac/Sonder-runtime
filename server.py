@@ -51,6 +51,8 @@ import master_orchestrator
 import admin_auth
 import file_ops
 import context_policy
+import command_registry
+import permission_rules
 
 from mcp.server.fastmcp import FastMCP
 
@@ -236,6 +238,8 @@ LIVE_RELOAD_MODULES = [
     "admin_auth",
     "file_ops",
     "context_policy",
+    "command_registry",
+    "permission_rules",
 ]
 
 
@@ -1484,6 +1488,245 @@ def set_context_size(context_size: str) -> str:
     _maybe_live_reload()
     SESSION_NUM_CTX = context_policy.requested(context_size)
     return "context size selected\n" + context_policy.format_policy(SESSION_NUM_CTX)
+
+
+@mcp.tool()
+def command_registry_list(filter_text: str = "") -> str:
+    """List slash commands/tools by name, category, risk, or summary text."""
+    _maybe_live_reload()
+    return command_registry.format_commands(filter_text)
+
+
+def _format_task(row: dict) -> str:
+    if not row:
+        return "(no task)"
+    detail = (" - " + row.get("detail", "")) if row.get("detail") else ""
+    scope = []
+    if row.get("project"):
+        scope.append("project=%s" % row["project"])
+    if row.get("owner"):
+        scope.append("owner=%s" % row["owner"])
+    suffix = (" [" + ", ".join(scope) + "]") if scope else ""
+    return "%s  p%s  %-11s %s%s%s" % (
+        row.get("id", "")[:8],
+        row.get("priority", 2),
+        row.get("status", "pending"),
+        row.get("title", ""),
+        detail,
+        suffix,
+    )
+
+
+@mcp.tool()
+def task_create(
+    title: str,
+    detail: str = "",
+    priority: int = 2,
+    project: str = "",
+    owner: str = "",
+) -> str:
+    """Create a visible task/todo row the model, console, and app can inspect."""
+    _maybe_live_reload()
+    conn = _open_db()
+    try:
+        row = memory_store.create_task(
+            conn,
+            title=title,
+            detail=detail,
+            priority=priority,
+            project=project,
+            owner=owner,
+        )
+    except Exception as e:
+        return "ERROR: %s" % e
+    finally:
+        conn.close()
+    return "task created\n  " + _format_task(row)
+
+
+@mcp.tool()
+def task_list(
+    status: str = "",
+    project: str = "",
+    owner: str = "",
+    include_done: bool = False,
+    limit: int = 50,
+) -> str:
+    """List visible task/todo rows, pending and active by default."""
+    _maybe_live_reload()
+    conn = _open_db()
+    try:
+        rows = memory_store.list_tasks(
+            conn,
+            status=status,
+            project=project,
+            owner=owner,
+            include_done=bool(include_done),
+            limit=limit,
+        )
+    except Exception as e:
+        return "ERROR: %s" % e
+    finally:
+        conn.close()
+    lines = ["trilobite tasks"]
+    if not rows:
+        lines.append("  (no matching tasks)")
+    for row in rows:
+        lines.append("  " + _format_task(row))
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def task_update(
+    task_id: str,
+    status: str = "",
+    title: str = "",
+    detail: str = "",
+    priority: str = "",
+    project: str = "",
+    owner: str = "",
+    note: str = "",
+) -> str:
+    """Update task status/details. task_id may be an unambiguous id prefix."""
+    _maybe_live_reload()
+    conn = _open_db()
+    try:
+        row = memory_store.update_task(
+            conn,
+            task_id,
+            status=status or None,
+            title=title or None,
+            detail=detail if detail else None,
+            priority=priority if priority else None,
+            project=project if project else None,
+            owner=owner if owner else None,
+            note=note,
+        )
+    except Exception as e:
+        return "ERROR: %s" % e
+    finally:
+        conn.close()
+    return "task updated\n  " + _format_task(row)
+
+
+@mcp.tool()
+def task_show(task_id: str, events: bool = True) -> str:
+    """Show one task and its recent visible event history."""
+    _maybe_live_reload()
+    conn = _open_db()
+    try:
+        row = memory_store.get_task(conn, task_id)
+        history = memory_store.task_events(conn, task_id, limit=20) if events else []
+    finally:
+        conn.close()
+    if not row:
+        return "ERROR: no task '%s'." % task_id
+    lines = ["task", "  " + _format_task(row)]
+    if history:
+        lines.append("events:")
+        for event in history:
+            lines.append("  %(ts)s  %(event)s  %(note)s" % event)
+    return "\n".join(lines)
+
+
+def context_compaction_plan_data(session: str = "", project: str = "") -> dict:
+    data = context_health_data(session=session, project=project)
+    actions = []
+    if data.get("context_percent", 0) >= 90:
+        actions.append({
+            "priority": "high",
+            "action": "start a fresh session or summarize immediately",
+            "reason": "estimated prompt tokens are above 90% of the selected context",
+        })
+    elif data.get("context_percent", 0) >= 70:
+        actions.append({
+            "priority": "medium",
+            "action": "prefer summarizing older turns before adding large files",
+            "reason": "context is warming up",
+        })
+    if data.get("live_turns", 0) >= data.get("max_live_turns", 0):
+        actions.append({
+            "priority": "medium",
+            "action": "roll older turns into the session summary",
+            "reason": "the live turn window is full",
+        })
+    if data.get("summary_chars", 0) > 16000:
+        actions.append({
+            "priority": "low",
+            "action": "start a new session with the summary as a project fact",
+            "reason": "the summary itself is becoming large",
+        })
+    if not actions:
+        actions.append({
+            "priority": "info",
+            "action": "no compaction needed yet",
+            "reason": "context and live-turn usage are healthy",
+        })
+    return {"context": data, "actions": actions}
+
+
+def format_context_compaction_plan(plan: dict) -> str:
+    ctx = plan.get("context", {})
+    lines = [
+        "trilobite context compaction plan",
+        "  session: %s" % ctx.get("session", "none"),
+        "  context: %s%%  ~%s/%s tokens (%s mode)" % (
+            ctx.get("context_percent", 0),
+            ctx.get("estimated_tokens", 0),
+            ctx.get("context_limit", 0),
+            ctx.get("context_mode", "native"),
+        ),
+        "  live turns: %s/%s | summary: ~%s tokens" % (
+            ctx.get("live_turns", 0),
+            ctx.get("max_live_turns", 0),
+            ctx.get("summary_tokens", 0),
+        ),
+        "  recommended actions:",
+    ]
+    for item in plan.get("actions", []):
+        lines.append("    [%s] %s" % (item.get("priority", "info"), item.get("action", "")))
+        lines.append("        -> %s" % item.get("reason", ""))
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def context_compaction_plan(session: str = "", project: str = "") -> str:
+    """Preview when/how Trilobite should summarize or split context."""
+    _maybe_live_reload()
+    return format_context_compaction_plan(context_compaction_plan_data(session, project))
+
+
+@mcp.tool()
+def permission_policy(tool_name: str = "") -> str:
+    """Show local permission rules, or the matching rule for one tool."""
+    _maybe_live_reload()
+    return permission_rules.format_policy(trilobite_paths.default_home(), tool_name)
+
+
+@mcp.tool()
+def permission_rule_set(
+    pattern: str,
+    action: str,
+    note: str = "",
+    token: str = "",
+) -> str:
+    """Set a local permission rule. Developer token or explicit env opt-in required."""
+    _maybe_live_reload()
+    account = _admin_account_from_token(token) if token else None
+    ok, _ = admin_auth.require(account, "developer")
+    env_ok = os.environ.get("TRILOBITE_ALLOW_PERMISSION_EDITS", "").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+    if not ok and not env_ok:
+        return (
+            "ERROR: permission edits require a developer token or "
+            "TRILOBITE_ALLOW_PERMISSION_EDITS=1."
+        )
+    try:
+        permission_rules.add_rule(trilobite_paths.default_home(), pattern, action, note)
+    except Exception as e:
+        return "ERROR: %s" % e
+    return permission_rules.format_policy(trilobite_paths.default_home())
 
 
 @mcp.tool()
@@ -2892,6 +3135,10 @@ def tool_manifest() -> str:
         "offload": "Route a self-contained task to a configured local/cloud tier.",
         "web_search/web_fetch": "Search or fetch public web pages.",
         "file_policy/file_find/file_read/file_write/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete with approval bypass support.",
+        "task_create/task_list/task_update/task_show": "Visible Claude-style todo/task state shared by console, app, agents, and MCP.",
+        "command_registry_list": "Inspect available slash commands by category, name, or risk.",
+        "permission_policy/permission_rule_set": "Inspect or guarded-edit local permission rules for tool actions.",
+        "context_compaction_plan": "Preview when to summarize, split sessions, or reduce live context.",
         "run_code": "Run a bounded Python/JS/PowerShell/C++/C# snippet.",
         "ground_artifact": "Validate non-code artifacts with exact/contains/regex/JSON checks.",
         "run_project": "Run a bounded temporary multi-file project with optional build commands.",
@@ -2923,6 +3170,13 @@ AGENT_TOOL_HELP = """Available tools:
 - file_write: {"path": "notes.txt", "content": "...", "mode": "create|overwrite|append"}
 - file_edit: {"path": "notes.txt", "old": "before", "new": "after", "count": 1}
 - file_delete: {"path": "notes.txt", "dry_run": true}
+- task_create: {"title": "...", "detail": "...", "priority": 2, "project": "...", "owner": "..."}
+- task_list: {"status": "pending|in_progress|blocked|done|canceled", "project": "", "include_done": false, "limit": 50}
+- task_update: {"task_id": "...", "status": "in_progress|blocked|done", "note": "..."}
+- task_show: {"task_id": "..."}
+- command_registry_list: {"filter_text": "filesystem|dangerous|context"}
+- permission_policy: {"tool_name": "file_delete"}
+- context_compaction_plan: {"session": "", "project": ""}
 - memory_search: {"query": "...", "limit": 10}
 - ground_artifact: {"artifact": "...", "checks_json": [{"type": "contains", "text": "..."}]}
 - apply_learned: {"task": "...", "limit": 5}
@@ -3048,6 +3302,44 @@ def _agent_dispatch(tool_name, args, allow_web=True):
         return ground_artifact(
             args.get("artifact", ""),
             json.dumps(args.get("checks_json", args.get("checks", []))),
+        )
+    if tool_name == "task_create":
+        return task_create(
+            title=args.get("title", ""),
+            detail=args.get("detail", ""),
+            priority=args.get("priority", 2),
+            project=args.get("project", ""),
+            owner=args.get("owner", ""),
+        )
+    if tool_name == "task_list":
+        return task_list(
+            status=args.get("status", ""),
+            project=args.get("project", ""),
+            owner=args.get("owner", ""),
+            include_done=args.get("include_done", False),
+            limit=args.get("limit", 50),
+        )
+    if tool_name == "task_update":
+        return task_update(
+            task_id=args.get("task_id", args.get("id", "")),
+            status=args.get("status", ""),
+            title=args.get("title", ""),
+            detail=args.get("detail", ""),
+            priority=args.get("priority", ""),
+            project=args.get("project", ""),
+            owner=args.get("owner", ""),
+            note=args.get("note", ""),
+        )
+    if tool_name == "task_show":
+        return task_show(args.get("task_id", args.get("id", "")))
+    if tool_name == "command_registry_list":
+        return command_registry_list(args.get("filter_text", args.get("filter", "")))
+    if tool_name == "permission_policy":
+        return permission_policy(args.get("tool_name", args.get("tool", "")))
+    if tool_name == "context_compaction_plan":
+        return context_compaction_plan(
+            session=args.get("session", ""),
+            project=args.get("project", ""),
         )
     if tool_name == "apply_learned":
         return apply_learned(args.get("task", ""), args.get("limit", 5))

@@ -253,6 +253,16 @@ class _SystemScreenState extends State<SystemScreen> {
                   label: const Text('Context'),
                 ),
                 OutlinedButton.icon(
+                  onPressed: _working ? null : () => _sendCommand('/compact'),
+                  icon: const Icon(Icons.compress_outlined),
+                  label: const Text('Compact'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _working ? null : () => _sendCommand('/todo'),
+                  icon: const Icon(Icons.task_alt_outlined),
+                  label: const Text('Tasks'),
+                ),
+                OutlinedButton.icon(
                   onPressed: _working ? null : () => _sendCommand('/quality'),
                   icon: const Icon(Icons.fact_check_outlined),
                   label: const Text('Quality'),
@@ -266,6 +276,16 @@ class _SystemScreenState extends State<SystemScreen> {
                   onPressed: _working ? null : () => _sendCommand('/agents'),
                   icon: const Icon(Icons.hub_outlined),
                   label: const Text('Agents'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _working ? null : () => _sendCommand('/commands'),
+                  icon: const Icon(Icons.terminal_outlined),
+                  label: const Text('Commands'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _working ? null : () => _sendCommand('/permissions'),
+                  icon: const Icon(Icons.security_outlined),
+                  label: const Text('Permissions'),
                 ),
                 SizedBox(
                   width: 120,

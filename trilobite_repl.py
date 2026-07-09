@@ -31,6 +31,9 @@ HELP = """commands:
   /stats             show trilobite's learning stats
   /context           show context, session, and memory health meters
   /contextsize [N]   show/set requested context (8k..1m; native num_ctx is clamped)
+  /compact           preview context compaction/rollover recommendations
+  /commands [filter] list available commands by category, name, or risk
+  /todo ...          list/add/update visible task state
   /quality           audit lesson quality and duplicate rows
   /qualityfix [apply] dry-run or apply exact duplicate lesson cleanup
   /improve           show the next system improvement checklist
@@ -44,6 +47,7 @@ HELP = """commands:
   /setaccount ...    admin account edits: user role= tier= dev_flags= banned=
   /debug             inspect safe debug state
   /cot               denied: hidden private chain-of-thought is not exposed
+  /permissions [tool] show local permission rules or one matched rule
   /filepolicy        show file access roots and bypass controls
   /files [query]     find files under guarded roots
   /read <path>       read a guarded file
@@ -90,6 +94,8 @@ LIVE_RELOAD_MODULES = [
     "personas",
     "emotion_vectors",
     "web_tools",
+    "command_registry",
+    "permission_rules",
 ]
 
 
@@ -309,6 +315,46 @@ def main():
                     print(server.set_context_size(arg.strip()))
                 else:
                     print(server.context_policy_status())
+            elif cmd in ("/compact", "/compaction"):
+                print(server.context_compaction_plan(session=session_id, project=project))
+            elif cmd in ("/commands", "/cmds"):
+                print(server.command_registry_list(arg.strip()))
+            elif cmd in ("/permissions", "/perms"):
+                print(server.permission_policy(arg.strip()))
+            elif cmd in ("/todo", "/task", "/tasks"):
+                text = arg.strip()
+                if not text or text.lower() in ("list", "ls"):
+                    print(server.task_list(project=project))
+                else:
+                    action, _, rest = text.partition(" ")
+                    action = action.lower()
+                    if action in ("add", "create", "new"):
+                        print(server.task_create(title=rest.strip(), project=project))
+                    elif action in ("done", "complete", "finish"):
+                        if rest.strip():
+                            print(server.task_update(task_id=rest.strip(), status="done"))
+                        else:
+                            print("usage: /todo done <task-id>")
+                    elif action in ("start", "doing"):
+                        if rest.strip():
+                            print(server.task_update(task_id=rest.strip(), status="in_progress"))
+                        else:
+                            print("usage: /todo start <task-id>")
+                    elif action in ("block", "blocked"):
+                        if rest.strip():
+                            print(server.task_update(task_id=rest.strip(), status="blocked"))
+                        else:
+                            print("usage: /todo block <task-id>")
+                    elif action in ("show", "view"):
+                        if rest.strip():
+                            print(server.task_show(rest.strip()))
+                        else:
+                            print("usage: /todo show <task-id>")
+                    else:
+                        print(
+                            "usage: /todo [list] | /todo add <title> | /todo start <id> | "
+                            "/todo done <id> | /todo block <id> | /todo show <id>"
+                        )
             elif cmd == "/quality":
                 print(server.memory_quality_report())
             elif cmd == "/qualityfix":

@@ -43,9 +43,13 @@ class _ChatScreenState extends State<ChatScreen> {
   static const _quickCommands = <String, String>{
     '/stats': 'Show learning stats',
     '/context': 'Show context health',
+    '/compact': 'Preview context compaction',
+    '/commands': 'List command registry',
+    '/todo': 'Show visible task state',
     '/quality': 'Audit memory quality',
     '/improve': 'Show next improvements',
     '/agents': 'Show live agent activity',
+    '/permissions': 'Show permission rules',
     '/master': 'Choose inline or delegated execution',
     '/help': 'List commands',
     '/train': 'Practice & self-learn',

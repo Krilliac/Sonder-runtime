@@ -26,14 +26,16 @@ party.
   tiers opt-in, account register/login for hosted deployments, with a one-tap
   *Test connection*.
 - **System panel**: view server status, context health meters, master/subagent
-  activity, improvement recommendations, learning stats and exposed models, run
-  `/stats`, `/context`, `/quality`, `/improve`, `/agents`, `/train 10` and
-  `/help`, start/stop the bundled desktop server, launch endless training, and
-  pull updates from Git.
+  activity, visible task state, permission rules, command inventory, improvement
+  recommendations, learning stats and exposed models, run `/stats`, `/context`,
+  `/compact`, `/todo`, `/commands`, `/permissions`, `/quality`, `/improve`,
+  `/agents`, `/train 10` and `/help`, start/stop the bundled desktop server,
+  launch endless training, and pull updates from Git.
 - **Live footer**: chat shows context %, active agents, project scope, token
   estimates, selected model and latest agent activity while work is running.
-- **Slash commands** built in — `/stats`, `/train`, `/pass`, `/fail`, `/help` —
-  handled by the serve layer exactly like the REPL.
+- **Slash commands** built in — `/stats`, `/context`, `/compact`, `/todo`,
+  `/commands`, `/permissions`, `/train`, `/pass`, `/fail`, `/help` — handled
+  by the serve layer exactly like the REPL.
 - **Dark / light** themes, copy-to-clipboard, selectable text.
 - Works against a LAN server, a VPS, or `127.0.0.1` when the server runs on the
   same desktop machine.

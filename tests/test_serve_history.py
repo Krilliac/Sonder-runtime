@@ -119,6 +119,26 @@ def test_contextsize_slash_shows_or_sets(monkeypatch):
     assert ts._handle_slash("/ctxsize 1m") == "set 1m"
 
 
+def test_claude_like_slash_controls_route(monkeypatch):
+    monkeypatch.setattr(ts.server, "context_compaction_plan", lambda: "compact")
+    monkeypatch.setattr(ts.server, "command_registry_list", lambda f: "commands " + f)
+    monkeypatch.setattr(ts.server, "permission_policy", lambda tool: "perms " + tool)
+    monkeypatch.setattr(ts.server, "task_list", lambda: "tasks")
+    monkeypatch.setattr(ts.server, "task_create", lambda title: "create " + title)
+    monkeypatch.setattr(ts.server, "task_update", lambda task_id, status: "update %s %s" % (task_id, status))
+    monkeypatch.setattr(ts.server, "task_show", lambda task_id: "show " + task_id)
+
+    assert ts._handle_slash("/compact") == "compact"
+    assert ts._handle_slash("/commands risk") == "commands risk"
+    assert ts._handle_slash("/permissions file_delete") == "perms file_delete"
+    assert ts._handle_slash("/todo") == "tasks"
+    assert ts._handle_slash("/todo add ship it") == "create ship it"
+    assert ts._handle_slash("/todo start abc") == "update abc in_progress"
+    assert ts._handle_slash("/todo done abc") == "update abc done"
+    assert ts._handle_slash("/todo block abc") == "update abc blocked"
+    assert ts._handle_slash("/todo show abc") == "show abc"
+
+
 def test_run_prompt_passes_context_size(monkeypatch):
     seen = {}
     monkeypatch.setattr(ts.server, "parse_interaction_id", lambda out: None)

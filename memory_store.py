@@ -51,6 +51,25 @@ CREATE TABLE IF NOT EXISTS lesson_usage (
     ts TEXT DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(lesson_id, interaction_id)
 );
+CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    detail TEXT,
+    status TEXT DEFAULT 'pending',
+    priority INTEGER DEFAULT 2,
+    project TEXT,
+    owner TEXT,
+    parent_id TEXT,
+    created_ts TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_ts TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS task_events (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    event TEXT NOT NULL,
+    note TEXT,
+    ts TEXT DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -97,6 +116,14 @@ def init_db(conn):
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_lesson_usage_interaction "
         "ON lesson_usage(interaction_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_status_project "
+        "ON tasks(status, project, updated_ts)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_task_events_task "
+        "ON task_events(task_id, ts)"
     )
     conn.commit()
 
@@ -275,6 +302,167 @@ def session_turn_count(conn, session_id):
     return conn.execute(
         "SELECT COUNT(*) FROM interactions WHERE session_id=?", (session_id,)
     ).fetchone()[0]
+
+
+# --- visible task/todo state ----------------------------------------------
+
+TASK_STATUSES = {"pending", "in_progress", "blocked", "done", "canceled"}
+
+
+def _normalize_task_status(status):
+    s = (status or "pending").strip().lower().replace("-", "_")
+    if s in ("todo", "open"):
+        s = "pending"
+    if s in ("doing", "active"):
+        s = "in_progress"
+    if s in ("complete", "completed"):
+        s = "done"
+    if s not in TASK_STATUSES:
+        raise ValueError("unknown task status '%s'" % status)
+    return s
+
+
+def _normalize_priority(priority):
+    try:
+        value = int(priority)
+    except (TypeError, ValueError):
+        value = 2
+    return max(0, min(5, value))
+
+
+def log_task_event(conn, task_id, event, note=""):
+    conn.execute(
+        "INSERT INTO task_events(id, task_id, event, note) VALUES(?, ?, ?, ?)",
+        (new_id(), task_id, event, note or ""),
+    )
+    conn.commit()
+
+
+def create_task(conn, title, detail="", status="pending", priority=2,
+                project="", owner="", parent_id="", task_id=None):
+    title = (title or "").strip()
+    if not title:
+        raise ValueError("task title is required")
+    task_id = task_id or new_id()
+    normalized = _normalize_task_status(status)
+    conn.execute(
+        "INSERT INTO tasks(id, title, detail, status, priority, project, owner, parent_id) "
+        "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            task_id,
+            title,
+            detail or "",
+            normalized,
+            _normalize_priority(priority),
+            project or "",
+            owner or "",
+            parent_id or "",
+        ),
+    )
+    conn.commit()
+    log_task_event(conn, task_id, "created", title)
+    return get_task(conn, task_id)
+
+
+def resolve_task_id(conn, task_id):
+    value = (task_id or "").strip()
+    if not value:
+        return None
+    row = conn.execute("SELECT id FROM tasks WHERE id=?", (value,)).fetchone()
+    if row:
+        return row["id"]
+    rows = conn.execute(
+        "SELECT id FROM tasks WHERE id LIKE ? ORDER BY updated_ts DESC, rowid DESC LIMIT 2",
+        (value + "%",),
+    ).fetchall()
+    if len(rows) == 1:
+        return rows[0]["id"]
+    return None
+
+
+def get_task(conn, task_id):
+    resolved = resolve_task_id(conn, task_id) or task_id
+    row = conn.execute("SELECT * FROM tasks WHERE id=?", (resolved,)).fetchone()
+    return dict(row) if row else None
+
+
+def update_task(conn, task_id, status=None, title=None, detail=None,
+                priority=None, project=None, owner=None, note=""):
+    resolved = resolve_task_id(conn, task_id)
+    if not resolved:
+        raise ValueError("no unique task '%s'" % task_id)
+    fields = []
+    values = []
+    event_bits = []
+    if status is not None and str(status).strip():
+        normalized = _normalize_task_status(status)
+        fields.append("status=?")
+        values.append(normalized)
+        event_bits.append("status=%s" % normalized)
+    if title is not None and str(title).strip():
+        fields.append("title=?")
+        values.append(str(title).strip())
+        event_bits.append("title")
+    if detail is not None:
+        fields.append("detail=?")
+        values.append(detail or "")
+        event_bits.append("detail")
+    if priority is not None and str(priority).strip():
+        p = _normalize_priority(priority)
+        fields.append("priority=?")
+        values.append(p)
+        event_bits.append("priority=%s" % p)
+    if project is not None:
+        fields.append("project=?")
+        values.append(project or "")
+        event_bits.append("project")
+    if owner is not None:
+        fields.append("owner=?")
+        values.append(owner or "")
+        event_bits.append("owner")
+    if not fields:
+        return get_task(conn, resolved)
+    fields.append("updated_ts=CURRENT_TIMESTAMP")
+    values.append(resolved)
+    conn.execute("UPDATE tasks SET %s WHERE id=?" % ", ".join(fields), tuple(values))
+    conn.commit()
+    log_task_event(conn, resolved, "updated", note or ", ".join(event_bits))
+    return get_task(conn, resolved)
+
+
+def list_tasks(conn, status="", project="", owner="", limit=50, include_done=False):
+    limit = max(1, min(int(limit or 50), 200))
+    clauses = []
+    values = []
+    if status:
+        clauses.append("status=?")
+        values.append(_normalize_task_status(status))
+    elif not include_done:
+        clauses.append("status NOT IN ('done', 'canceled')")
+    if project:
+        clauses.append("project=?")
+        values.append(project)
+    if owner:
+        clauses.append("owner=?")
+        values.append(owner)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = conn.execute(
+        "SELECT * FROM tasks%s ORDER BY priority ASC, updated_ts DESC, rowid DESC LIMIT ?"
+        % where,
+        tuple(values + [limit]),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def task_events(conn, task_id, limit=20):
+    resolved = resolve_task_id(conn, task_id)
+    if not resolved:
+        return []
+    rows = conn.execute(
+        "SELECT * FROM task_events WHERE task_id=? ORDER BY ts DESC, rowid DESC LIMIT ?",
+        (resolved, max(1, min(int(limit or 20), 100))),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def touch_session(conn, session_id, project=None):
