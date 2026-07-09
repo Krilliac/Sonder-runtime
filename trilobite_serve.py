@@ -83,10 +83,13 @@ HELP_TEXT = """commands:
   /contextsize [N]   show/set requested context (8k..1m; native num_ctx is clamped)
   /compact           preview context compaction/rollover recommendations
   /commands [filter] list available commands by category, name, or risk
+  /activity          show active/latest tool calls and file changes
   /dump [label]      dump chat log and debug info to a text file
   /todo ...          list/add/update visible task state
   /quality           audit lesson quality and duplicate rows
   /qualityfix [apply] dry-run or apply exact duplicate lesson cleanup
+  /emotion [cmd]     show/tune live tone vectors; try: /emotion tune warmer shorter
+  /prefer [text]     show/teach preferences; /prefer forget <id-or-key>
   /improve           show the next system improvement checklist
   /master [mode] ... run master orchestration: ask, inline, or delegate
   /agents            show live master/subagent activity
@@ -449,10 +452,16 @@ def _handle_slash(content, messages=None):
         return server.memory_quality_report()
     if cmd == "/qualityfix":
         return server.memory_quality_repair(apply=(arg.strip().lower() == "apply"))
+    if cmd in ("/emotion", "/emotions", "/vectors", "/mood"):
+        return server.emotion_command(arg)
+    if cmd in ("/prefer", "/preference", "/preferences"):
+        return server.preference_command(arg)
     if cmd in ("/improve", "/improvements"):
         return server.system_improvement_report()
     if cmd in ("/agents", "/masterstatus"):
         return server.master_status()
+    if cmd in ("/activity", "/tools", "/work"):
+        return server.activity_status()
     if cmd == "/register":
         parts2 = arg.split(None, 1)
         if len(parts2) != 2:
@@ -687,6 +696,7 @@ def _chat_completion_object(content, model="trilobite"):
             "finish_reason": "stop",
         }],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "trilobite_activity": server.activity_tracker.snapshot().get("latest"),
     }
 
 
@@ -781,6 +791,7 @@ class Handler(BaseHTTPRequestHandler):
                 "context": server.context_health_data(),
                 "context_policy": server.context_policy.policy(server.SESSION_NUM_CTX),
                 "agents": server.master_orchestrator.snapshot(),
+                "activity": server.activity_tracker.snapshot(),
                 "db_path": getattr(server, "_DB_PATH", ""),
                 "state_home": str(server.trilobite_paths.default_home()),
                 "account": account or {},
@@ -889,14 +900,24 @@ class Handler(BaseHTTPRequestHandler):
 
         reply = None
         try:
-            reply = _handle_slash(prompt, messages=messages)
-            if reply is None:
-                reply = _handle_feedback(prompt)
-            if reply is None:
-                reply = _handle_intent(prompt)
-            content = reply if reply is not None else _run_prompt(
-                prompt, history, _model_to_tier(model),
-                context_size=context_size, session=session, project=project)
+            with server.activity_tracker.response_span(
+                "chat:%s" % (model or "trilobite"),
+                prompt,
+                surface="http",
+                model=model,
+                session=session,
+                project=project,
+            ):
+                reply = _handle_slash(prompt, messages=messages)
+                if reply is None:
+                    reply = _handle_feedback(prompt)
+                if reply is None:
+                    reply = _handle_intent(prompt)
+                content = reply if reply is not None else _run_prompt(
+                    prompt, history, _model_to_tier(model),
+                    context_size=context_size, session=session, project=project)
+                if "=== ACTIVITY (observable work) ===" not in content:
+                    content = server._append_activity(content)
         except Exception:
             content = "ERROR: %s" % traceback.format_exc()
         _record_chat("assistant", content, kind="slash" if reply is not None else "model")

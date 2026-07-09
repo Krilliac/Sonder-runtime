@@ -76,14 +76,22 @@ The learning loop above is *cross-task* memory. On top of it trilobite also has:
 - **Project facts.** `trilobite_remember_fact(text, project=…)` stores durable facts
   (toolchain, conventions, key paths) that are injected into every call for that
   project — a mini-brief the model carries itself. Scope a call with `project=…`.
+- **Dynamic user preferences.** Trilobite now captures clear preference statements
+  like "I prefer concise status updates" during normal chat, stores them with
+  evidence counts, and injects active preferences into future local-student
+  prompts. Use `/prefer`, `/prefer <text>`, or `/prefer forget <id-or-key>` to
+  inspect, teach, or disable them explicitly.
+- **Visible activity.** Each response tracks observable work: model calls, tool
+  calls, active response count, file creates/edits/deletes, and line deltas.
+  Use `/activity` or watch the chat app's bottom status line while work runs.
 
 ---
 
 ## Four ways to run it
 
-1. **Local, in your terminal** — `trilobite` (like launching `claude`). Interactive REPL routed through the full loop, with `/trace`, `/strict`, `/run`, `/runwindow`, `/train`, `/master`, `/agents`, `/todo`, `/commands`, `/dump`, `/permissions`, `/compact`, `/debug`, `/admin`, `/login`, `/register`, `/pass`, `/fail`, `/stats`, `/context`, `/quality`, `/improve` commands plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts` (and plain-English equivalents). Each REPL launch is its own remembered thread.
+1. **Local, in your terminal** — `trilobite` (like launching `claude`). Interactive REPL routed through the full loop, with `/trace`, `/strict`, `/run`, `/runwindow`, `/train`, `/master`, `/agents`, `/todo`, `/commands`, `/dump`, `/permissions`, `/compact`, `/debug`, `/admin`, `/login`, `/register`, `/pass`, `/fail`, `/stats`, `/context`, `/quality`, `/emotion`, `/improve` commands plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts` (and plain-English equivalents). Each REPL launch is its own remembered thread.
 2. **Hosted on your own server + a thin client anywhere** — run `deploy_trilobite.sh --serve` on your box (systemd service, API key), then any machine runs the single-file `trilobite_client.py` pointed at it. The serve layer threads the chat UI's own conversation history.
-3. **Integrated with Claude** — the MCP `local-llm` tools let Claude offload to it (`agent`, `master_orchestrate`, `master_status`, `task_create/list/update/show`, `command_registry_list`, `permission_policy`, `context_compaction_plan`, `admin_register`, `admin_login`, `admin_accounts`, `admin_set_account`, `debug_inspect`, `offload(learn=True)`, `trilobite`, `run_code`, `parallel_run_code`, `parallel_generate_run`, `parallel_generate_run_languages`, `campaign_generate_compile_execute_record`, `web_search`, `web_fetch`, `loop`, `workflow_list/save/run/delete`, `self_heal_check`, `self_heal_repair`, `learn_from_example`, `apply_learned`, `system_improvement_report`, `system_profile_text`, `update_system_profile`, `emotion_vector_status`, `update_emotion_vectors`, `memory_search`, `memory_export`, `session_export`, `memory_quality_report`, `memory_quality_repair`, `tool_manifest`, `context_health`, `diagnostics`, `live_reload_status`, `record_outcome`, `trilobite_stats`, `trilobite_sessions`, `trilobite_remember_fact`). `agent` runs a Claude-like tool-use loop where the model can call local tools and web tools step-by-step; `master_orchestrate` can ask whether to run inline or delegate to parallel subagents, then audit and merge their outputs; visible tasks replace hidden planning state; `run_code` and the parallel/campaign tools give bounded compile/run feedback across Python, JavaScript, PowerShell, C++, and C#; `loop` repeats bounded code/model/system actions for retries, polling, and small workflows. Both `offload` and `trilobite` take a `tier` to route a call to any configured model (local or a paid cloud model); cloud tiers answer clean and still feed the learning loop.
+3. **Integrated with Claude** — the MCP `local-llm` tools let Claude offload to it (`agent`, `master_orchestrate`, `master_status`, `task_create/list/update/show`, `command_registry_list`, `permission_policy`, `context_compaction_plan`, `admin_register`, `admin_login`, `admin_accounts`, `admin_set_account`, `debug_inspect`, `offload(learn=True)`, `trilobite`, `run_code`, `parallel_run_code`, `parallel_generate_run`, `parallel_generate_run_languages`, `campaign_generate_compile_execute_record`, `web_search`, `web_fetch`, `loop`, `workflow_list/save/run/delete`, `self_heal_check`, `self_heal_repair`, `learn_from_example`, `apply_learned`, `system_improvement_report`, `system_profile_text`, `update_system_profile`, `emotion_vector_status`, `update_emotion_vectors`, `tune_emotion_vectors`, `memory_search`, `memory_export`, `session_export`, `memory_quality_report`, `memory_quality_repair`, `tool_manifest`, `context_health`, `diagnostics`, `live_reload_status`, `record_outcome`, `trilobite_stats`, `trilobite_sessions`, `trilobite_remember_fact`). `agent` runs a Claude-like tool-use loop where the model can call local tools and web tools step-by-step; `master_orchestrate` can ask whether to run inline or delegate to parallel subagents, then audit and merge their outputs; visible tasks replace hidden planning state; `run_code` and the parallel/campaign tools give bounded compile/run feedback across Python, JavaScript, PowerShell, C++, and C#; emotion vectors can be read, set, reset, or live-tuned from feedback and apply on the next request; `loop` repeats bounded code/model/system actions for retries, polling, and small workflows. Both `offload` and `trilobite` take a `tier` to route a call to any configured model (local or a paid cloud model); cloud tiers answer clean and still feed the learning loop.
 4. **Mobile & desktop app (GUI)** — a cross-platform [Flutter client](app/) that talks to a hosted `trilobite_serve.py`. One codebase → an **Android APK** and **Windows/Linux/macOS** desktop apps, built in CI with downloadable installers. See [app/README.md](app/README.md).
 
 ---
@@ -117,6 +125,14 @@ Cross-platform equivalent:
 `python trilobite_headless.py start --port 11435 --context-size 32k`.
 Then connect with `trilobite_client.py`, any OpenAI-compatible client pointed at
 `http://127.0.0.1:11435/v1`, the REPL, Claude MCP, or the Flutter app later.
+Calling `trilobite` from a Windows terminal now follows the same local-first
+startup path as the app: it sets the shared state home, bootstraps the engine on
+first run, starts the background API server, then opens the REPL. Set
+`TRILOBITE_TERMINAL_BOOTSTRAP=0` to skip first-run setup or
+`TRILOBITE_TERMINAL_START_SERVER=0` to open only the REPL. If
+`TRILOBITE_SERVER` is set, the same command opens the hosted/API client after
+warming up the local fallback server; set `TRILOBITE_TERMINAL_REMOTE=0` to force
+the local REPL.
 
 **Use the hosted model from any PC:** see [CLIENT.md](CLIENT.md).
 

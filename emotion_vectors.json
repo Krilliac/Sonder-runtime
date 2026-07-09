@@ -1,10 +1,21 @@
 {
+  "adaptability": 0.15,
   "brevity": 0.2,
   "calm": 0.3,
   "confidence": 0.2,
+  "creativity": 0.15,
   "curiosity": 0.3,
+  "directness": 0.1,
+  "empathy": 0.25,
+  "encouragement": 0.2,
+  "humility": 0.15,
+  "initiative": 0.15,
+  "patience": 0.2,
   "playfulness": 0.1,
+  "precision": 0.25,
+  "rigor": 0.2,
   "skepticism": 0.15,
+  "transparency": 0.25,
   "urgency": 0.0,
   "warmth": 0.35
 }

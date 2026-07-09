@@ -49,9 +49,12 @@ class _ChatScreenState extends State<ChatScreen> {
     '/context': 'Show context health',
     '/compact': 'Preview context compaction',
     '/commands': 'List command registry',
+    '/activity': 'Show live tool/file activity',
     '/dump': 'Save chat/debug dump',
     '/todo': 'Show visible task state',
     '/quality': 'Audit memory quality',
+    '/emotion': 'Show or tune tone vectors',
+    '/prefer': 'Show or teach preferences',
     '/improve': 'Show next improvements',
     '/agents': 'Show live agent activity',
     '/permissions': 'Show permission rules',
@@ -78,7 +81,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _refreshModels();
     _refreshStatus();
     _statusTimer = Timer.periodic(
-      const Duration(seconds: 5),
+      const Duration(seconds: 1),
       (_) => _refreshStatus(),
     );
   }
@@ -717,6 +720,8 @@ class _LiveStatusBar extends StatelessWidget {
     final cs = Theme.of(context).colorScheme;
     final contextInfo = info?.context;
     final agentInfo = info?.agents;
+    final activityInfo = info?.activity;
+    final responseInfo = activityInfo?.displayResponse;
     final activeProject = project.trim().isEmpty
         ? (contextInfo?.project ?? 'unknown')
         : project.trim();
@@ -738,11 +743,18 @@ class _LiveStatusBar extends StatelessWidget {
       'native ${contextInfo?.nativeContextLimit ?? 0}',
       contextInfo?.contextMode ?? 'native',
       'agents ${agentInfo?.activeAgents ?? 0}',
+      'responses ${activityInfo?.activeCount ?? 0}',
+      'tools ${responseInfo?.toolCalls ?? 0}/${activityInfo?.totalToolCalls ?? 0}',
+      'models ${responseInfo?.modelCalls ?? 0}',
+      'files +${responseInfo?.fileCreates ?? 0} ~${responseInfo?.fileEdits ?? 0} -${responseInfo?.fileDeletes ?? 0}',
+      'lines +${responseInfo?.linesAdded ?? 0} ~${responseInfo?.linesEdited ?? 0} -${responseInfo?.linesDeleted ?? 0}',
       projectText,
       'tokens ${agentInfo?.tokensIn ?? 0}/${agentInfo?.tokensOut ?? 0}',
       'model $model',
       if (path.isNotEmpty) path,
       latest,
+      if (responseInfo != null) responseInfo.summary,
+      if (responseInfo?.events.isNotEmpty == true) responseInfo!.events.last,
     ];
     return Container(
       width: double.infinity,

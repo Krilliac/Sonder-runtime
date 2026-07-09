@@ -44,6 +44,12 @@ COMMANDS = [
         "summary": "Write the current chat and debug state to a text file.",
     },
     {
+        "name": "/activity",
+        "category": "inspect",
+        "risk": "safe",
+        "summary": "Show active/latest tool calls, file changes, and response activity.",
+    },
+    {
         "name": "/todo",
         "category": "planning",
         "risk": "safe",
@@ -96,6 +102,18 @@ COMMANDS = [
         "category": "memory",
         "risk": "ask",
         "summary": "Dry-run or apply exact duplicate lesson cleanup.",
+    },
+    {
+        "name": "/emotion",
+        "category": "persona",
+        "risk": "safe",
+        "summary": "Show, set, reset, or live-tune emotion/tone vectors.",
+    },
+    {
+        "name": "/prefer",
+        "category": "persona",
+        "risk": "safe",
+        "summary": "Show, teach, or forget learned user preferences.",
     },
     {
         "name": "/files",

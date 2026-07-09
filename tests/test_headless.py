@@ -24,6 +24,25 @@ def test_start_ollama_skips_when_already_reachable(monkeypatch):
     assert H.start_ollama() == "ollama: already reachable"
 
 
+def test_start_ollama_reports_missing_binary(monkeypatch):
+    monkeypatch.setattr(H, "ollama_ok", lambda: False)
+    monkeypatch.setattr(H.shutil, "which", lambda exe: None)
+
+    assert H.start_ollama() == "ollama: not installed or not on PATH"
+
+
+def test_python_exe_ignores_broken_venv(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    venv = root / "venv" / "Scripts"
+    venv.mkdir(parents=True)
+    (venv / "python.exe").write_text("broken", encoding="utf-8")
+    monkeypatch.setattr(H, "repo_root", lambda: root)
+    monkeypatch.setattr(H, "_python_works", lambda path: False)
+    monkeypatch.setattr(H.sys, "executable", "C:/Python/python.exe")
+
+    assert H.python_exe() == "C:/Python/python.exe"
+
+
 def test_stop_pid_reports_missing_pid(monkeypatch, tmp_path):
     monkeypatch.setattr(H, "run_dir", lambda: tmp_path)
 

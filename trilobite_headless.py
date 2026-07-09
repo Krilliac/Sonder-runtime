@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -32,9 +33,22 @@ def run_dir() -> Path:
 
 def python_exe() -> str:
     venv = repo_root() / "venv" / "Scripts" / "python.exe"
-    if venv.exists():
+    if venv.exists() and _python_works(str(venv)):
         return str(venv)
     return sys.executable or "python"
+
+
+def _python_works(path: str) -> bool:
+    try:
+        proc = subprocess.run(
+            [path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return proc.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def pid_file(name: str) -> Path:
@@ -118,6 +132,8 @@ def wait_until(fn, seconds: float) -> bool:
 def start_ollama() -> str:
     if ollama_ok():
         return "ollama: already reachable"
+    if not shutil.which("ollama"):
+        return "ollama: not installed or not on PATH"
     pid = _popen(["ollama", "serve"], "ollama")
     if wait_until(ollama_ok, 12):
         return "ollama: started pid=%s" % pid

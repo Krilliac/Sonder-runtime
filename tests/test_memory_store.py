@@ -192,3 +192,18 @@ def test_lesson_usage_stats_records_outcomes():
     stats = ms.lesson_usage_stats(c)["L1"]
     assert stats["wins"] == 1
     assert stats["avg_reward"] == 1.0
+
+
+def test_preferences_upsert_and_disable():
+    c = _conn()
+    ms.upsert_preference(c, "p1", "global", "concise", "User prefers concise answers.")
+    ms.upsert_preference(c, "p2", "global", "concise", "User prefers concise answers.")
+
+    prefs = ms.preferences_for_scope(c)
+    assert len(prefs) == 1
+    assert prefs[0]["evidence_count"] == 2
+    assert prefs[0]["enabled"] == 1
+
+    assert ms.set_preference_enabled(c, "concise", False) == 1
+    assert ms.preferences_for_scope(c) == []
+    assert ms.preferences_for_scope(c, include_disabled=True)[0]["enabled"] == 0

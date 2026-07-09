@@ -19,6 +19,21 @@ MAX_WRITE_BYTES = 1_000_000
 MAX_FIND_RESULTS = 200
 
 
+def _line_count(text: str) -> int:
+    if not text:
+        return 0
+    return len(text.splitlines()) or 1
+
+
+def _read_text_if_file(path: Path) -> str:
+    if not path.exists() or not path.is_file():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
 def workspace_root() -> Path:
     return Path(__file__).resolve().parent
 
@@ -155,6 +170,8 @@ def write_file(
     bypass: bool = False,
 ) -> dict:
     p = resolve_path(path, extra_roots=extra_roots, bypass=bypass)
+    before = _read_text_if_file(p)
+    before_lines = _line_count(before)
     data = (content or "").encode("utf-8")
     if len(data) > MAX_WRITE_BYTES:
         raise ValueError("content exceeds max write bytes")
@@ -169,7 +186,28 @@ def write_file(
             f.write(content or "")
     else:
         p.write_text(content or "", encoding="utf-8", newline="")
-    return {"path": str(p), "bytes": p.stat().st_size, "mode": mode}
+    after_lines = _line_count(before + (content or "")) if mode == "append" else _line_count(content or "")
+    if mode in {"create", "append"}:
+        lines_added = _line_count(content or "")
+        lines_deleted = 0
+        lines_edited = 0
+        action = "create" if mode == "create" else "append"
+    else:
+        lines_added = max(0, after_lines - before_lines)
+        lines_deleted = max(0, before_lines - after_lines)
+        lines_edited = min(before_lines, after_lines) if before != (content or "") else 0
+        action = "overwrite"
+    return {
+        "path": str(p),
+        "bytes": p.stat().st_size,
+        "mode": mode,
+        "action": action,
+        "lines_before": before_lines,
+        "lines_after": after_lines,
+        "lines_added": lines_added,
+        "lines_edited": lines_edited,
+        "lines_deleted": lines_deleted,
+    }
 
 
 def edit_file(
@@ -193,7 +231,12 @@ def edit_file(
         raise ValueError("old text not found")
     next_text = text.replace(old, new or "", max_count)
     result = write_file(path, next_text, mode="overwrite", extra_roots=extra_roots, bypass=bypass)
+    replacements = min(occurrences, max_count)
     result["replacements"] = min(occurrences, max_count)
+    result["action"] = "edit"
+    result["lines_added"] = _line_count(new or "") * replacements
+    result["lines_deleted"] = _line_count(old or "") * replacements
+    result["lines_edited"] = replacements
     return result
 
 
@@ -208,6 +251,7 @@ def delete_path(
 ) -> dict:
     p = resolve_path(path, extra_roots=extra_roots, bypass=bypass)
     exists = p.exists()
+    line_count = _line_count(_read_text_if_file(p))
     required = "DELETE %s" % p
     if dry_run or confirm != required:
         return {
@@ -215,10 +259,18 @@ def delete_path(
             "exists": exists,
             "dry_run": True,
             "deleted": False,
+            "lines_deleted": 0,
+            "would_delete_lines": line_count,
             "required_confirm": required,
         }
     if not exists:
-        return {"path": str(p), "exists": False, "dry_run": False, "deleted": False}
+        return {
+            "path": str(p),
+            "exists": False,
+            "dry_run": False,
+            "deleted": False,
+            "lines_deleted": 0,
+        }
     if p.is_dir():
         if not recursive:
             raise ValueError("directory delete requires recursive=True")
@@ -230,4 +282,11 @@ def delete_path(
         p.rmdir()
     else:
         p.unlink()
-    return {"path": str(p), "exists": True, "dry_run": False, "deleted": True}
+    return {
+        "path": str(p),
+        "exists": True,
+        "dry_run": False,
+        "deleted": True,
+        "action": "delete",
+        "lines_deleted": line_count,
+    }

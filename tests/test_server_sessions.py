@@ -93,6 +93,15 @@ def test_remember_fact_is_injected_for_project(stub):
     assert "this project uses MSVC" in joined
 
 
+def test_learned_preference_is_injected_next_turn(stub):
+    server.trilobite("I prefer concise status updates.", session="P")
+    server.trilobite("what changed?", session="P")
+
+    p = _answer_payload(stub, "what changed?")
+    joined = "\n".join(_contents(p))
+    assert "User preference: User prefers concise status updates." in joined
+
+
 def test_fact_not_injected_when_project_none(stub):
     server.trilobite_remember_fact("secret fact", project="proj")
     server.trilobite("do it", session="Y", project="none")

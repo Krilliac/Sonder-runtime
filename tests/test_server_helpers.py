@@ -333,6 +333,38 @@ def test_trilobite_slash_command_does_not_call_model(monkeypatch):
     assert server.trilobite("/context") == "context health"
 
 
+def test_preference_command_learns_and_lists(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "prefs.db"))
+
+    out = server.preference_command("I prefer short direct answers")
+    assert "Learned preference" in out
+    assert "User prefers short direct answers." in server.preferences_status()
+
+
+def test_activity_tracks_file_line_deltas(monkeypatch, tmp_path):
+    monkeypatch.setattr(server.file_ops, "workspace_root", lambda: tmp_path)
+    server.activity_tracker.reset_for_tests()
+
+    with server.activity_tracker.response_span("test", "create a file"):
+        out = server.file_write("notes.txt", "one\ntwo\n", mode="create")
+
+    latest = server.activity_tracker.snapshot()["latest"]
+    assert "file write" in out
+    assert latest["file_creates"] == 1
+    assert latest["lines_added"] == 2
+    assert latest["files"][0]["path"].endswith("notes.txt")
+
+
+def test_memory_search_includes_preferences(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "prefs.db"))
+    server.learn_preference("User prefers MSVC for C++ examples.")
+
+    out = server.memory_search("MSVC")
+
+    assert "preferences (1):" in out
+    assert "User prefers MSVC" in out
+
+
 def test_improvement_report_flags_ungrounded_learning(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
     conn = server._open_db()

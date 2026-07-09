@@ -13,20 +13,37 @@ import 'models.dart';
 class TrilobiteApi {
   final String baseUrl; // e.g. http://192.168.1.10:11435
   final String apiKey; // empty when the server has auth disabled
+  final String localFallbackUrl;
 
-  const TrilobiteApi({required this.baseUrl, this.apiKey = ''});
+  const TrilobiteApi({
+    required this.baseUrl,
+    this.apiKey = '',
+    this.localFallbackUrl = 'http://127.0.0.1:11435',
+  });
 
-  Uri _uri(String path) {
-    final root = baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
+  Uri _uri(String path, [String? rootUrl]) {
+    final root = (rootUrl ?? baseUrl).trim().replaceAll(RegExp(r'/+$'), '');
     return Uri.parse('$root$path');
   }
 
-  Map<String, String> _headers() {
+  Map<String, String> _headers([String? keyOverride]) {
     final h = <String, String>{'Content-Type': 'application/json'};
-    if (apiKey.trim().isNotEmpty) {
-      h['Authorization'] = 'Bearer ${apiKey.trim()}';
+    final key = keyOverride ?? apiKey;
+    if (key.trim().isNotEmpty) {
+      h['Authorization'] = 'Bearer ${key.trim()}';
     }
     return h;
+  }
+
+  bool get _canFallback {
+    final primary = baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    final local = localFallbackUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    return local.isNotEmpty && primary != local;
+  }
+
+  String _fallbackWarning(String operation, Object error) {
+    return 'Warning: hosted server ${baseUrl.trim()} was unreachable during $operation ($error). '
+        'Fell back to local server ${localFallbackUrl.trim()}.';
   }
 
   /// Verify connectivity + auth. Returns the list of model ids the server
@@ -39,7 +56,17 @@ class TrilobiteApi {
           .get(_uri('/v1/models'), headers: _headers())
           .timeout(const Duration(seconds: 15));
     } catch (e) {
-      throw TrilobiteException('Cannot reach server: $e');
+      if (_canFallback) {
+        try {
+          resp = await http
+              .get(_uri('/v1/models', localFallbackUrl), headers: _headers(''))
+              .timeout(const Duration(seconds: 15));
+        } catch (_) {
+          throw TrilobiteException('Cannot reach server: $e');
+        }
+      } else {
+        throw TrilobiteException('Cannot reach server: $e');
+      }
     }
     if (resp.statusCode == 401) {
       throw TrilobiteException('Unauthorized — check the API key.');
@@ -66,7 +93,18 @@ class TrilobiteApi {
           .get(_uri('/v1/trilobite/status'), headers: _headers())
           .timeout(const Duration(seconds: 20));
     } catch (e) {
-      throw TrilobiteException('Cannot reach server: $e');
+      if (_canFallback) {
+        try {
+          resp = await http
+              .get(_uri('/v1/trilobite/status', localFallbackUrl),
+                  headers: _headers(''))
+              .timeout(const Duration(seconds: 20));
+        } catch (_) {
+          throw TrilobiteException('Cannot reach server: $e');
+        }
+      } else {
+        throw TrilobiteException('Cannot reach server: $e');
+      }
     }
     if (resp.statusCode == 401) {
       throw TrilobiteException('Unauthorized - check the API key.');
@@ -109,13 +147,26 @@ class TrilobiteApi {
     });
 
     late http.Response resp;
+    String warning = '';
     try {
       resp = await http
           .post(_uri('/v1/chat/completions'),
               headers: _headers(), body: body)
           .timeout(const Duration(minutes: 5));
     } catch (e) {
-      throw TrilobiteException('Request failed: $e');
+      if (_canFallback) {
+        try {
+          resp = await http
+              .post(_uri('/v1/chat/completions', localFallbackUrl),
+                  headers: _headers(''), body: body)
+              .timeout(const Duration(minutes: 5));
+          warning = _fallbackWarning('chat', e);
+        } catch (_) {
+          throw TrilobiteException('Request failed: $e');
+        }
+      } else {
+        throw TrilobiteException('Request failed: $e');
+      }
     }
 
     if (resp.statusCode == 401) {
@@ -135,7 +186,8 @@ class TrilobiteApi {
       final msg = (choices.first as Map<String, dynamic>)['message']
           as Map<String, dynamic>?;
       final content = msg?['content']?.toString() ?? '';
-      return content.trimRight();
+      final reply = content.trimRight();
+      return warning.isEmpty ? reply : '$warning\n\n$reply';
     } on TrilobiteException {
       rethrow;
     } catch (_) {
@@ -205,6 +257,7 @@ class SystemInfo {
   final String stateHome;
   final ContextHealth? context;
   final AgentStatus? agents;
+  final ActivityStatus? activity;
   final List<SystemModel> models;
 
   const SystemInfo({
@@ -216,6 +269,7 @@ class SystemInfo {
     required this.stateHome,
     required this.context,
     required this.agents,
+    required this.activity,
     required this.models,
   });
 
@@ -237,8 +291,125 @@ class SystemInfo {
       agents: json['agents'] is Map<String, dynamic>
           ? AgentStatus.fromJson(json['agents'] as Map<String, dynamic>)
           : null,
+      activity: json['activity'] is Map<String, dynamic>
+          ? ActivityStatus.fromJson(json['activity'] as Map<String, dynamic>)
+          : null,
       models: models,
     );
+  }
+}
+
+class ActivityStatus {
+  final int activeCount;
+  final int totalToolCalls;
+  final ActivityResponse? latest;
+  final List<ActivityResponse> active;
+
+  const ActivityStatus({
+    required this.activeCount,
+    required this.totalToolCalls,
+    required this.latest,
+    required this.active,
+  });
+
+  factory ActivityStatus.fromJson(Map<String, dynamic> json) {
+    final active = (json['active'] as List? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .map(ActivityResponse.fromJson)
+        .toList();
+    return ActivityStatus(
+      activeCount: _asInt(json['active_count']),
+      totalToolCalls: _asInt(json['total_tool_calls']),
+      latest: json['latest'] is Map<String, dynamic>
+          ? ActivityResponse.fromJson(json['latest'] as Map<String, dynamic>)
+          : null,
+      active: active,
+    );
+  }
+
+  ActivityResponse? get displayResponse =>
+      active.isNotEmpty ? active.last : latest;
+}
+
+class ActivityResponse {
+  final String id;
+  final String label;
+  final String status;
+  final int elapsedMs;
+  final int toolCalls;
+  final int modelCalls;
+  final int fileCreates;
+  final int fileEdits;
+  final int fileDeletes;
+  final int linesAdded;
+  final int linesEdited;
+  final int linesDeleted;
+  final List<String> events;
+  final List<String> files;
+
+  const ActivityResponse({
+    required this.id,
+    required this.label,
+    required this.status,
+    required this.elapsedMs,
+    required this.toolCalls,
+    required this.modelCalls,
+    required this.fileCreates,
+    required this.fileEdits,
+    required this.fileDeletes,
+    required this.linesAdded,
+    required this.linesEdited,
+    required this.linesDeleted,
+    required this.events,
+    required this.files,
+  });
+
+  factory ActivityResponse.fromJson(Map<String, dynamic> json) {
+    final events = (json['events'] as List? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .map((e) {
+          final kind = e['kind']?.toString() ?? 'event';
+          final detail = e['summary']?.toString().trim().isNotEmpty == true
+              ? e['summary'].toString()
+              : (e['tool'] ?? e['path'] ?? e['model'] ?? '').toString();
+          final ms = _asInt(e['elapsed_ms']);
+          return '+${ms}ms $kind${detail.isEmpty ? '' : ' $detail'}';
+        })
+        .where((s) => s.trim().isNotEmpty)
+        .toList();
+    final files = (json['files'] as List? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .map((f) {
+          final action = f['action']?.toString() ?? 'file';
+          final path = f['path']?.toString() ?? '';
+          final added = _asInt(f['lines_added']);
+          final edited = _asInt(f['lines_edited']);
+          final deleted = _asInt(f['lines_deleted']);
+          return '$action $path  lines +$added ~$edited -$deleted';
+        })
+        .where((s) => s.trim().isNotEmpty)
+        .toList();
+    return ActivityResponse(
+      id: json['id']?.toString() ?? '',
+      label: json['label']?.toString() ?? '',
+      status: json['status']?.toString() ?? '',
+      elapsedMs: _asInt(json['elapsed_ms']),
+      toolCalls: _asInt(json['tool_calls']),
+      modelCalls: _asInt(json['model_calls']),
+      fileCreates: _asInt(json['file_creates']),
+      fileEdits: _asInt(json['file_edits']),
+      fileDeletes: _asInt(json['file_deletes']),
+      linesAdded: _asInt(json['lines_added']),
+      linesEdited: _asInt(json['lines_edited']),
+      linesDeleted: _asInt(json['lines_deleted']),
+      events: events,
+      files: files,
+    );
+  }
+
+  String get summary {
+    final labelText = label.isEmpty ? id : label;
+    return '$labelText $status | model $modelCalls | tools $toolCalls | files +$fileCreates ~$fileEdits -$fileDeletes | lines +$linesAdded ~$linesEdited -$linesDeleted';
   }
 }
 

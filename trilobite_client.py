@@ -7,6 +7,8 @@ running trilobite_serve.py with TRILOBITE_HOST=0.0.0.0).
 Config (env or argv):
     TRILOBITE_SERVER   e.g. http://your-vps:11435   (required)
     TRILOBITE_API_KEY  optional bearer key, if the server has auth enabled
+    TRILOBITE_LOCAL_FALLBACK  default http://127.0.0.1:11435
+    TRILOBITE_FALLBACK_LOCAL=0 disables local fallback
     --server URL       argv override for TRILOBITE_SERVER
     --key K            argv override for TRILOBITE_API_KEY
 
@@ -19,6 +21,8 @@ import os
 import sys
 import urllib.error
 import urllib.request
+
+LOCAL_FALLBACK_SERVER = os.environ.get("TRILOBITE_LOCAL_FALLBACK", "http://127.0.0.1:11435")
 
 USAGE = """usage: trilobite_client.py [--server URL] [--key API_KEY]
 
@@ -76,6 +80,44 @@ def send_prompt(server, api_key, prompt):
     return obj["choices"][0]["message"]["content"]
 
 
+def _same_server(a, b):
+    return (a or "").strip().rstrip("/") == (b or "").strip().rstrip("/")
+
+
+def local_fallback_enabled():
+    return os.environ.get("TRILOBITE_FALLBACK_LOCAL", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+
+
+def send_prompt_with_fallback(server, api_key, prompt, fallback_server=None):
+    """Try hosted/server URL first, then local Trilobite on connection failure.
+
+    HTTP errors intentionally do not fall back: auth, ban, rate-limit, and server
+    policy failures should stay visible instead of silently changing hosts.
+    Returns (reply, server_used, warning_text).
+    """
+    fallback_server = fallback_server or LOCAL_FALLBACK_SERVER
+    try:
+        return send_prompt(server, api_key, prompt), server, ""
+    except urllib.error.HTTPError:
+        raise
+    except urllib.error.URLError as first_error:
+        if (
+            not local_fallback_enabled()
+            or not fallback_server
+            or _same_server(server, fallback_server)
+        ):
+            raise
+        reply = send_prompt(fallback_server, "", prompt)
+        warning = (
+            "WARNING: hosted server %s was unreachable (%s). "
+            "Fell back to local server %s for this request."
+            % (server, first_error, fallback_server)
+        )
+        return reply, fallback_server, warning
+
+
 def resolve_config(argv):
     """Resolve (server, api_key) from argv overrides then env. Returns (server, key)."""
     argv_server, argv_key = _parse_argv(argv)
@@ -94,6 +136,9 @@ def main(argv=None):
 
     print("trilobite (remote) — connected to %s" % server)
 
+    if local_fallback_enabled() and not _same_server(server, LOCAL_FALLBACK_SERVER):
+        print("local fallback: %s (set TRILOBITE_FALLBACK_LOCAL=0 to disable)" % LOCAL_FALLBACK_SERVER)
+
     while True:
         try:
             line = input("trilobite> ")
@@ -108,7 +153,9 @@ def main(argv=None):
             continue
 
         try:
-            reply = send_prompt(server, api_key, line)
+            reply, _used_server, warning = send_prompt_with_fallback(server, api_key, line)
+            if warning:
+                print(warning)
             print(reply)
         except urllib.error.HTTPError as e:
             try:

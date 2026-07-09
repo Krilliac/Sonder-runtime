@@ -40,6 +40,7 @@ import code_runner
 import live_reload
 import system_profile
 import emotion_vectors
+import preference_learning
 import workflow_store
 import web_tools
 import self_heal
@@ -54,6 +55,7 @@ import context_policy
 import command_registry
 import permission_rules
 import debug_dump
+import activity_tracker
 
 from mcp.server.fastmcp import FastMCP
 
@@ -230,6 +232,7 @@ LIVE_RELOAD_MODULES = [
     "code_runner",
     "system_profile",
     "emotion_vectors",
+    "preference_learning",
     "workflow_store",
     "web_tools",
     "self_heal",
@@ -242,6 +245,7 @@ LIVE_RELOAD_MODULES = [
     "command_registry",
     "permission_rules",
     "debug_dump",
+    "activity_tracker",
 ]
 
 
@@ -257,7 +261,19 @@ def _open_db():
 
 
 def with_footer(text, interaction_id):
+    current = activity_tracker.current()
+    activity = activity_tracker.format_response(current) if current else ""
+    if activity and not activity.startswith("activity:") and "=== ACTIVITY (observable work) ===" not in (text or ""):
+        text = "%s\n\n%s" % (text, activity)
     return "%s%s%s]" % (text, FOOTER_PREFIX, interaction_id)
+
+
+def _append_activity(text):
+    current = activity_tracker.current()
+    activity = activity_tracker.format_response(current) if current else ""
+    if activity and not activity.startswith("activity:") and "=== ACTIVITY (observable work) ===" not in (text or ""):
+        return "%s\n\n%s" % (text, activity)
+    return text
 
 
 def parse_interaction_id(text):
@@ -315,6 +331,7 @@ def _make_generate(model, system, temperature, num_predict, num_ctx, cloud=False
     non-learning cloud path posts.
     """
     def gen(prompt, history=None):
+        started = time.time()
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -329,7 +346,18 @@ def _make_generate(model, system, temperature, num_predict, num_ctx, cloud=False
                    "options": options}
         if not cloud:
             payload["keep_alive"] = KEEP_ALIVE
-        out = _post("/api/chat", payload)
+        ok = False
+        try:
+            out = _post("/api/chat", payload)
+            ok = True
+        finally:
+            activity_tracker.record_model_call(
+                model=model,
+                prompt_chars=len(prompt or ""),
+                history_messages=len(history or []),
+                ok=ok,
+                elapsed_ms=int((time.time() - started) * 1000),
+            )
         return out.get("message", {}).get("content", "")
     return gen
 
@@ -587,12 +615,18 @@ def control_command(prompt: str, history=None, session="", project=""):
         return context_compaction_plan()
     if cmd in ("/commands", "/cmds"):
         return command_registry_list(arg.strip())
+    if cmd in ("/activity", "/tools", "/work"):
+        return activity_status()
     if cmd in ("/permissions", "/perms"):
         return permission_policy(arg.strip())
     if cmd == "/quality":
         return memory_quality_report()
     if cmd == "/qualityfix":
         return memory_quality_repair(apply=(arg.strip().lower() == "apply"))
+    if cmd in ("/emotion", "/emotions", "/vectors", "/mood"):
+        return emotion_command(arg)
+    if cmd in ("/prefer", "/preference", "/preferences"):
+        return preference_command(arg)
     if cmd in ("/improve", "/improvements"):
         return system_improvement_report()
     if cmd in ("/agents", "/masterstatus"):
@@ -671,6 +705,28 @@ def _maybe_title(conn, session_id, first_prompt):
     memory_store.set_session_title(conn, session_id, title)
 
 
+def _preference_facts(conn, limit=12):
+    prefs = memory_store.preferences_for_scope(conn, "global", limit=limit)
+    return ["User preference: %s" % p["text"] for p in prefs]
+
+
+def _capture_preferences(conn, text, source_interaction=None, scope="global"):
+    captured = []
+    for pref in preference_learning.extract_preferences(text):
+        key = preference_learning.preference_key(pref)
+        memory_store.upsert_preference(
+            conn,
+            memory_store.new_id(),
+            scope,
+            key,
+            pref,
+            source_interaction=source_interaction,
+            confidence=0.65,
+        )
+        captured.append(pref)
+    return captured
+
+
 def _answer(conn, prompt, model, effective_system, temperature, num_predict,
             num_ctx, session_id, project, history, trace=False,
             tier="trilobite", cloud=False, augment=True):
@@ -690,9 +746,9 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
     blob = embeddings.to_blob(qv) if qv else None
     if augment:
         recalls = recall.recall(conn, prompt, qv=qv, exclude_session=session_id)
-        facts = None
+        facts = _preference_facts(conn)
         if project:
-            facts = [f["text"] for f in memory_store.facts_for_project(conn, project)]
+            facts.extend(f["text"] for f in memory_store.facts_for_project(conn, project))
         retrieve_fn = retriever.retrieve
     else:
         recalls = None
@@ -703,11 +759,13 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
             conn, prompt, tier, gen, retrieve_fn=retrieve_fn, history=history,
             recalls=recalls, facts=facts, session_id=session_id, task_embedding=blob,
         )
+        _capture_preferences(conn, prompt, source_interaction=iid)
         return resp, iid, tctx
     resp, iid = orchestrator.run_with_learning(
         conn, prompt, tier, gen, retrieve_fn=retrieve_fn, history=history,
         recalls=recalls, facts=facts, session_id=session_id, task_embedding=blob,
     )
+    _capture_preferences(conn, prompt, source_interaction=iid)
     return resp, iid, None
 
 
@@ -810,8 +868,7 @@ def offload(
     return with_footer(response, iid)
 
 
-@mcp.tool()
-def trilobite(
+def _trilobite_impl(
     prompt: str,
     system: str = "",
     temperature: float = 0.2,
@@ -867,7 +924,7 @@ def trilobite(
     _maybe_live_reload()
     command = control_command(prompt, session=session, project=project)
     if command is not None:
-        return command
+        return _append_activity(command)
     tgt_model, cloud, augment, tier_label = _serve_target(tier, strict)
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()
@@ -918,7 +975,48 @@ def trilobite(
     return with_footer(response, iid)
 
 
-def answer_with_history(
+@mcp.tool()
+def trilobite(
+    prompt: str,
+    system: str = "",
+    temperature: float = 0.2,
+    num_predict: int = 1024,
+    num_ctx: int = 4096,
+    context_size: str = "",
+    trace: bool = False,
+    strict: bool = None,
+    persona: str = "",
+    session: str = "",
+    project: str = "",
+    tier: str = "",
+) -> str:
+    """Ask Trilobite and show observable activity for the response."""
+    label = "trilobite:%s" % ((tier or "trilobite").strip() or "trilobite")
+    with activity_tracker.response_span(
+        label,
+        prompt,
+        surface="terminal/mcp",
+        model=tier or "trilobite",
+        session=session,
+        project=project,
+    ):
+        return _trilobite_impl(
+            prompt,
+            system=system,
+            temperature=temperature,
+            num_predict=num_predict,
+            num_ctx=num_ctx,
+            context_size=context_size,
+            trace=trace,
+            strict=strict,
+            persona=persona,
+            session=session,
+            project=project,
+            tier=tier,
+        )
+
+
+def _answer_with_history_impl(
     prompt,
     history,
     trace=False,
@@ -943,7 +1041,7 @@ def answer_with_history(
     _maybe_live_reload()
     command = control_command(prompt, history=history, session=session, project=project)
     if command is not None:
-        return command
+        return _append_activity(command)
     model, cloud, augment, tier_label = _serve_target(tier, strict)
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()
@@ -994,7 +1092,38 @@ def answer_with_history(
         return with_footer(response + trace_block, iid)
     if iid is not None:
         return with_footer(response, iid)
-    return response
+    return _append_activity(response)
+
+
+def answer_with_history(
+    prompt,
+    history,
+    trace=False,
+    strict=None,
+    tier=None,
+    context_size="",
+    session="",
+    project="",
+):
+    label = "chat:%s" % ((tier or "trilobite").strip() or "trilobite")
+    with activity_tracker.response_span(
+        label,
+        prompt,
+        surface="chat-api",
+        model=tier or "trilobite",
+        session=session,
+        project=project,
+    ):
+        return _answer_with_history_impl(
+            prompt,
+            history,
+            trace=trace,
+            strict=strict,
+            tier=tier,
+            context_size=context_size,
+            session=session,
+            project=project,
+        )
 
 
 @mcp.tool()
@@ -1569,6 +1698,9 @@ def context_health_data(session: str = "", project: str = "") -> dict:
             memory_store.count_facts(conn, project_id) if project_id else
             conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
         )
+        preference_count = conn.execute(
+            "SELECT COUNT(*) FROM preferences WHERE enabled=1"
+        ).fetchone()[0]
         interaction_count = memory_store.count_interactions(conn)
         outcome_count = conn.execute("SELECT COUNT(*) FROM outcomes").fetchone()[0]
         summarized_through = (session_row or {}).get("summarized_through") or ""
@@ -1592,7 +1724,7 @@ def context_health_data(session: str = "", project: str = "") -> dict:
         status_label = "warm"
     else:
         status_label = "healthy"
-    memory_items = lesson_count + fact_count + outcome_count
+    memory_items = lesson_count + fact_count + preference_count + outcome_count
     memory_ratio = min(1.0, memory_items / 1000.0)
     return {
         "session": session_id or "none",
@@ -1621,6 +1753,7 @@ def context_health_data(session: str = "", project: str = "") -> dict:
         "sessions": session_count,
         "lessons": lesson_count,
         "facts": fact_count,
+        "preferences": preference_count,
         "interactions": interaction_count,
         "outcomes": outcome_count,
         "memory_percent": round(memory_ratio * 100.0, 1),
@@ -1654,10 +1787,11 @@ def format_context_health(data: dict) -> str:
             data.get("max_live_turns", 0),
             data.get("total_turns", 0),
         ),
-        "  memory  %s %s lessons, %s facts, %s interactions, %s outcomes" % (
+        "  memory  %s %s lessons, %s facts, %s prefs, %s interactions, %s outcomes" % (
             data.get("memory_bar", ""),
             data.get("lessons", 0),
             data.get("facts", 0),
+            data.get("preferences", 0),
             data.get("interactions", 0),
             data.get("outcomes", 0),
         ),
@@ -1676,6 +1810,38 @@ def format_context_health(data: dict) -> str:
 def context_health(session: str = "", project: str = "") -> str:
     """Show context budget, live turns, summaries, and memory as text meters."""
     return format_context_health(context_health_data(session=session, project=project))
+
+
+@mcp.tool()
+def activity_status(include_events: bool = True) -> str:
+    """Show active and most recent observable response activity."""
+    _maybe_live_reload()
+    snap = activity_tracker.snapshot()
+    lines = [
+        "trilobite activity",
+        "  active responses: %s" % snap.get("active_count", 0),
+        "  total tool calls since start: %s" % snap.get("total_tool_calls", 0),
+    ]
+    active = snap.get("active") or []
+    if active:
+        lines.append("  active:")
+        for row in active[-8:]:
+            last = row.get("last_event") or {}
+            lines.append(
+                "    %s %s tools=%s models=%s last=%s" % (
+                    row.get("id"),
+                    row.get("label"),
+                    row.get("tool_calls", 0),
+                    row.get("model_calls", 0),
+                    last.get("kind", "starting"),
+                )
+            )
+    latest = snap.get("latest")
+    if latest:
+        lines.extend(["", activity_tracker.format_response(latest)])
+    elif include_events:
+        lines.append("  latest: (none yet)")
+    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -2419,6 +2585,35 @@ def _format_file_result(title: str, data: dict) -> str:
     return "\n".join(lines)
 
 
+def _record_file_activity(default_action: str, data: dict) -> None:
+    if not isinstance(data, dict):
+        return
+    action = data.get("action") or default_action
+    activity_tracker.record_file_change(
+        action,
+        data.get("path", ""),
+        lines_added=data.get("lines_added", 0),
+        lines_edited=data.get("lines_edited", 0),
+        lines_deleted=data.get("lines_deleted", 0),
+        bytes_written=data.get("bytes", 0),
+        dry_run=data.get("dry_run", False),
+        summary="%s bytes" % data.get("bytes", 0) if data.get("bytes") else "",
+    )
+
+
+def _record_direct_tool(name: str, args=None, ok=True, started=None, summary="") -> None:
+    if activity_tracker.inside_tool_call():
+        return
+    elapsed_ms = int((time.time() - started) * 1000) if started else 0
+    activity_tracker.record_tool_call(
+        name,
+        args or {},
+        ok=ok,
+        elapsed_ms=elapsed_ms,
+        summary=summary,
+    )
+
+
 @mcp.tool()
 def file_policy(token: str = "", approval: str = "", extra_roots: str = "") -> str:
     """Show guarded filesystem roots and bypass state."""
@@ -2440,6 +2635,7 @@ def file_find(
 ) -> str:
     """Find files under allowed roots. Use extra_roots or admin/dev bypass for broader search."""
     _maybe_live_reload()
+    started = time.time()
     try:
         data = file_ops.find_files(
             query=query,
@@ -2449,7 +2645,20 @@ def file_find(
             bypass=_file_bypass_allowed(token, approval),
         )
     except Exception as e:
+        _record_direct_tool("file_find", {"query": query, "root": root}, ok=False, started=started, summary=str(e))
         return "ERROR: %s" % e
+    _record_direct_tool(
+        "file_find",
+        {"query": query, "root": root},
+        ok=True,
+        started=started,
+        summary="%d result(s)" % len(data["results"]),
+    )
+    activity_tracker.record_event(
+        "file_find",
+        summary="%s result(s) for %s" % (len(data["results"]), data["query"]),
+        path=data.get("root", ""),
+    )
     lines = ["file find: %s under %s" % (data["query"], data["root"])]
     for row in data["results"]:
         lines.append("  %(type)s %(relative)s (%(bytes)s bytes)" % row)
@@ -2462,6 +2671,7 @@ def file_find(
 def file_read(path: str, max_bytes: int = 256000, token: str = "", approval: str = "", extra_roots: str = "") -> str:
     """Read a UTF-8-ish text file inside allowed roots."""
     _maybe_live_reload()
+    started = time.time()
     try:
         data = file_ops.read_file(
             path,
@@ -2470,7 +2680,17 @@ def file_read(path: str, max_bytes: int = 256000, token: str = "", approval: str
             bypass=_file_bypass_allowed(token, approval),
         )
     except Exception as e:
+        _record_direct_tool("file_read", {"path": path}, ok=False, started=started, summary=str(e))
         return "ERROR: %s" % e
+    _record_direct_tool("file_read", {"path": path}, ok=True, started=started, summary="%s bytes" % data.get("bytes", 0))
+    activity_tracker.record_event(
+        "file_read",
+        summary="%s bytes%s" % (
+            data.get("bytes", 0),
+            " truncated" if data.get("truncated") else "",
+        ),
+        path=data.get("path", ""),
+    )
     return _format_file_result("file read", data)
 
 
@@ -2485,6 +2705,7 @@ def file_write(
 ) -> str:
     """Create, overwrite, or append a text file inside allowed roots."""
     _maybe_live_reload()
+    started = time.time()
     try:
         data = file_ops.write_file(
             path,
@@ -2494,7 +2715,10 @@ def file_write(
             bypass=_file_bypass_allowed(token, approval),
         )
     except Exception as e:
+        _record_direct_tool("file_write", {"path": path, "mode": mode}, ok=False, started=started, summary=str(e))
         return "ERROR: %s" % e
+    _record_direct_tool("file_write", {"path": path, "mode": mode}, ok=True, started=started, summary=data.get("action", "write"))
+    _record_file_activity("write", data)
     return _format_file_result("file write", data)
 
 
@@ -2510,6 +2734,7 @@ def file_edit(
 ) -> str:
     """Replace text in a file inside allowed roots."""
     _maybe_live_reload()
+    started = time.time()
     try:
         data = file_ops.edit_file(
             path,
@@ -2520,7 +2745,10 @@ def file_edit(
             bypass=_file_bypass_allowed(token, approval),
         )
     except Exception as e:
+        _record_direct_tool("file_edit", {"path": path, "count": count}, ok=False, started=started, summary=str(e))
         return "ERROR: %s" % e
+    _record_direct_tool("file_edit", {"path": path, "count": count}, ok=True, started=started, summary="%s replacement(s)" % data.get("replacements", 0))
+    _record_file_activity("edit", data)
     return _format_file_result("file edit", data)
 
 
@@ -2536,6 +2764,7 @@ def file_delete(
 ) -> str:
     """Delete a file or directory. Dry-run by default; confirm must match returned string."""
     _maybe_live_reload()
+    started = time.time()
     try:
         data = file_ops.delete_path(
             path,
@@ -2546,7 +2775,10 @@ def file_delete(
             bypass=_file_bypass_allowed(token, approval),
         )
     except Exception as e:
+        _record_direct_tool("file_delete", {"path": path, "dry_run": dry_run}, ok=False, started=started, summary=str(e))
         return "ERROR: %s" % e
+    _record_direct_tool("file_delete", {"path": path, "dry_run": dry_run}, ok=not data.get("dry_run", False), started=started, summary="deleted" if data.get("deleted") else "dry-run")
+    _record_file_activity("delete", data)
     return _format_file_result("file delete", data)
 
 
@@ -2619,6 +2851,8 @@ def run_code(
     trimmed, and cwd is confined to this project workspace.
     """
     _maybe_live_reload()
+    started = time.time()
+    ok = False
     try:
         result = code_runner.run_code(
             code=code,
@@ -2627,8 +2861,23 @@ def run_code(
             timeout=timeout,
             cwd=cwd or None,
         )
+        ok = bool(result.get("ok")) if isinstance(result, dict) else True
     except ValueError as e:
+        activity_tracker.record_tool_call(
+            "run_code",
+            {"language": language, "timeout": timeout},
+            ok=False,
+            elapsed_ms=int((time.time() - started) * 1000),
+            summary=str(e),
+        )
         return "ERROR: %s" % e
+    activity_tracker.record_tool_call(
+        "run_code",
+        {"language": language, "timeout": timeout},
+        ok=ok,
+        elapsed_ms=int((time.time() - started) * 1000),
+        summary=("ok" if ok else "failed"),
+    )
     return code_runner.format_result(result)
 
 
@@ -2649,6 +2898,8 @@ def run_project(
     e.g. [{"cmd": ["dotnet", "test"]}]; no shell is used.
     """
     _maybe_live_reload()
+    started = time.time()
+    ok = False
     try:
         result = code_runner.run_project(
             files_json=files_json,
@@ -2656,8 +2907,23 @@ def run_project(
             stdin=stdin,
             timeout=timeout,
         )
+        ok = bool(result.get("ok")) if isinstance(result, dict) else True
     except ValueError as e:
+        activity_tracker.record_tool_call(
+            "run_project",
+            {"timeout": timeout},
+            ok=False,
+            elapsed_ms=int((time.time() - started) * 1000),
+            summary=str(e),
+        )
         return "ERROR: %s" % e
+    activity_tracker.record_tool_call(
+        "run_project",
+        {"timeout": timeout},
+        ok=ok,
+        elapsed_ms=int((time.time() - started) * 1000),
+        summary=("ok" if ok else "failed"),
+    )
     return code_runner.format_project_result(result)
 
 
@@ -2674,6 +2940,11 @@ def _loop_text_result(action_type, text):
 
 def _loop_dispatch(action):
     action_type = (action.get("type") or action.get("action") or "code").strip().lower()
+    activity_tracker.record_tool_call(
+        "loop:%s" % action_type,
+        {k: v for k, v in (action or {}).items() if k not in {"code", "content", "files"}},
+        summary="loop action queued",
+    )
     if action_type in ("code", "run_code"):
         result = code_runner.run_code(
             code=action.get("code", ""),
@@ -2835,6 +3106,27 @@ def _loop_dispatch(action):
         return _loop_text_result("profile_status", system_profile_text())
     if action_type == "emotion_status":
         return _loop_text_result("emotion_status", emotion_vector_status())
+    if action_type == "emotion_update":
+        payload = action.get("vectors", action.get("vectors_json", {}))
+        return _loop_text_result("emotion_update", update_emotion_vectors(
+            vectors_json=payload if isinstance(payload, str) else json.dumps(payload),
+            mode=action.get("mode", "merge"),
+        ))
+    if action_type == "emotion_tune":
+        return _loop_text_result("emotion_tune", tune_emotion_vectors(
+            feedback_text=action.get("feedback_text", action.get("text", "")),
+            step=action.get("step", 0.1),
+        ))
+    if action_type == "learn_preference":
+        return _loop_text_result("learn_preference", learn_preference(
+            text=action.get("text", ""),
+            scope=action.get("scope", "global"),
+        ))
+    if action_type == "preferences_status":
+        return _loop_text_result("preferences_status", preferences_status(
+            include_disabled=action.get("include_disabled", False),
+            limit=action.get("limit", 50),
+        ))
     if action_type == "memory_search":
         return _loop_text_result("memory_search", memory_search(
             query=action.get("query", ""),
@@ -2875,7 +3167,7 @@ def _loop_dispatch(action):
         "ok": False,
         "type": action_type or "(unknown)",
         "summary": "unknown action type",
-        "output": "Valid action types: code, project, offload, trilobite, master_orchestrate, master_status, file_policy, file_find, file_read, file_write, file_edit, file_delete, status, diagnostics, context_health, memory_quality_report, memory_quality_repair, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, unload, sleep.",
+        "output": "Valid action types: code, project, offload, trilobite, master_orchestrate, master_status, file_policy, file_find, file_read, file_write, file_edit, file_delete, status, diagnostics, context_health, memory_quality_report, memory_quality_repair, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, unload, sleep.",
     }
 
 
@@ -2906,6 +3198,10 @@ def loop(
       - {"type":"web_search","query":"...","limit":5}
       - {"type":"web_fetch","url":"https://...","max_chars":8000}
       - {"type":"memory_search","query":"..."}
+      - {"type":"emotion_update","vectors":{"warmth":0.5,"brevity":0.2}}
+      - {"type":"emotion_tune","text":"be warmer but more concise"}
+      - {"type":"learn_preference","text":"User prefers concise status updates."}
+      - {"type":"preferences_status"}
       - {"type":"improvement_report"}
       - {"type":"status"}
       - {"type":"unload","tier":"all"}
@@ -3015,10 +3311,25 @@ def web_search(query: str, limit: int = 5) -> str:
     DuckDuckGo HTML). Disable with TRILOBITE_WEB_TOOLS=0.
     """
     _maybe_live_reload()
+    started = time.time()
     try:
         results = web_tools.web_search(query, limit=limit)
     except Exception as e:
+        activity_tracker.record_tool_call(
+            "web_search",
+            {"query": query, "limit": limit},
+            ok=False,
+            elapsed_ms=int((time.time() - started) * 1000),
+            summary=str(e),
+        )
         return "ERROR: %s" % e
+    activity_tracker.record_tool_call(
+        "web_search",
+        {"query": query, "limit": limit},
+        ok=True,
+        elapsed_ms=int((time.time() - started) * 1000),
+        summary="%d result(s)" % len(results),
+    )
     return web_tools.format_search_results(results)
 
 
@@ -3030,10 +3341,26 @@ def web_fetch(url: str, max_chars: int = 8000) -> str:
     TRILOBITE_WEB_TOOLS=0.
     """
     _maybe_live_reload()
+    started = time.time()
     try:
-        return web_tools.web_fetch(url, max_chars=max_chars)
+        out = web_tools.web_fetch(url, max_chars=max_chars)
     except Exception as e:
+        activity_tracker.record_tool_call(
+            "web_fetch",
+            {"url": url, "max_chars": max_chars},
+            ok=False,
+            elapsed_ms=int((time.time() - started) * 1000),
+            summary=str(e),
+        )
         return "ERROR: %s" % e
+    activity_tracker.record_tool_call(
+        "web_fetch",
+        {"url": url, "max_chars": max_chars},
+        ok=not out.startswith("ERROR:"),
+        elapsed_ms=int((time.time() - started) * 1000),
+        summary="%d chars" % len(out),
+    )
+    return out
 
 
 @mcp.tool()
@@ -3123,7 +3450,8 @@ def update_emotion_vectors(vectors_json: str, mode: str = "merge") -> str:
     `vectors_json` must be a JSON object, for example:
       {"warmth": 0.6, "brevity": 0.4, "urgency": -0.2}
 
-    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, or clear.
+    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,
+    or reset/defaults.
     Direct edits to emotion_vectors.json also apply on the next request.
     """
     _maybe_live_reload()
@@ -3139,6 +3467,141 @@ def update_emotion_vectors(vectors_json: str, mode: str = "merge") -> str:
         path,
         emotion_vectors.format_vectors(vectors),
     )
+
+
+@mcp.tool()
+def tune_emotion_vectors(feedback_text: str, step: float = 0.1) -> str:
+    """Live-tune emotion/tone vectors from plain-language feedback.
+
+    Examples:
+      "be warmer but more concise"
+      "more rigorous, less playful, warmth=0.4"
+
+    This applies small bounded deltas, writes emotion_vectors.json, and the next
+    model request picks up the change without restarting.
+    """
+    _maybe_live_reload()
+    feedback_text = (feedback_text or "").strip()
+    if not feedback_text:
+        return "ERROR: feedback_text is empty."
+    try:
+        vectors, path, deltas, explicit, matched = emotion_vectors.tune_from_text(
+            feedback_text,
+            step=step,
+        )
+    except ValueError as e:
+        return "ERROR: %s" % e
+    if not deltas and not explicit:
+        return (
+            "No emotion vector cues found. Try phrases like 'warmer', "
+            "'more concise', 'more rigorous', or explicit assignments like warmth=0.5."
+        )
+    changes = []
+    if deltas:
+        changes.append("inferred deltas: " + ", ".join(
+            "%s=%+0.2f" % (name, deltas[name]) for name in sorted(deltas)
+        ))
+    if explicit:
+        changes.append("explicit set: " + ", ".join(
+            "%s=%+0.2f" % (name, explicit[name]) for name in sorted(explicit)
+        ))
+    if matched:
+        changes.append("matched cues: " + "; ".join(matched[:8]))
+    return "Tuned emotion vectors (%s).\n%s\n\n%s" % (
+        path,
+        "\n".join(changes),
+        emotion_vectors.format_vectors(vectors),
+    )
+
+
+def emotion_command(arg: str = "") -> str:
+    """Handle REPL/serve `/emotion` commands with live file-backed updates."""
+    text = (arg or "").strip()
+    if not text or text.lower() in ("status", "list", "show"):
+        return emotion_vector_status()
+    lower = text.lower()
+    if lower in ("reset", "defaults", "default"):
+        return update_emotion_vectors("{}", mode="reset")
+    if lower in ("clear", "off"):
+        return update_emotion_vectors("{}", mode="clear")
+    if lower.startswith("set "):
+        text = text[4:].strip()
+    if lower.startswith("tune "):
+        return tune_emotion_vectors(text[5:].strip())
+    assignments = emotion_vectors.parse_assignments(text)
+    if assignments:
+        return update_emotion_vectors(json.dumps(assignments), mode="merge")
+    return tune_emotion_vectors(text)
+
+
+@mcp.tool()
+def learn_preference(text: str, scope: str = "global") -> str:
+    """Teach Trilobite a durable user preference immediately.
+
+    This is for behavior, style, workflow defaults, names, and recurring user
+    expectations. Learned preferences are injected into future local-student
+    prompts and apply without restarting.
+    """
+    _maybe_live_reload()
+    extracted = preference_learning.extract_preferences(text)
+    text = extracted[0] if extracted else preference_learning.normalize_preference(text)
+    if not text:
+        return "ERROR: preference text is empty."
+    key = preference_learning.preference_key(text)
+    conn = _open_db()
+    try:
+        memory_store.upsert_preference(
+            conn,
+            memory_store.new_id(),
+            scope or "global",
+            key,
+            text,
+            confidence=0.8,
+        )
+        rows = memory_store.preferences_for_scope(conn, scope or "global", limit=20)
+    finally:
+        conn.close()
+    return "Learned preference: %s\n\n%s" % (
+        text,
+        preference_learning.format_preferences(rows),
+    )
+
+
+@mcp.tool()
+def preferences_status(include_disabled: bool = False, limit: int = 50) -> str:
+    """List learned user preferences that shape future responses."""
+    _maybe_live_reload()
+    limit = _safe_limit(limit, 50, 200)
+    conn = _open_db()
+    try:
+        rows = memory_store.all_preferences(
+            conn,
+            limit=limit,
+            include_disabled=bool(include_disabled),
+        )
+    finally:
+        conn.close()
+    return "learned preferences\n%s" % preference_learning.format_preferences(rows)
+
+
+def preference_command(arg: str = "") -> str:
+    text = (arg or "").strip()
+    if not text or text.lower() in ("list", "status", "show"):
+        return preferences_status()
+    lower = text.lower()
+    if lower.startswith("forget "):
+        target = text[7:].strip()
+        if not target:
+            return "usage: /prefer forget <id-or-key>"
+        conn = _open_db()
+        try:
+            changed = memory_store.set_preference_enabled(conn, target, False)
+        finally:
+            conn.close()
+        return "forgot %d matching preference(s)" % changed
+    if lower.startswith("learn "):
+        text = text[6:].strip()
+    return learn_preference(text)
 
 
 def _safe_limit(limit, default=10, max_value=100):
@@ -3171,6 +3634,12 @@ def memory_search(query: str, limit: int = 10) -> str:
             "ORDER BY ts DESC, rowid DESC LIMIT ?",
             (like, limit),
         ).fetchall()]
+        preferences = [dict(r) for r in conn.execute(
+            "SELECT id, scope, key, text, confidence, evidence_count FROM preferences "
+            "WHERE text LIKE ? ESCAPE '\\' AND enabled=1 "
+            "ORDER BY confidence DESC, evidence_count DESC, updated_ts DESC LIMIT ?",
+            (like, limit),
+        ).fetchall()]
         sessions = [dict(r) for r in conn.execute(
             "SELECT session_id, title, summary, project FROM sessions "
             "WHERE title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' "
@@ -3191,6 +3660,10 @@ def memory_search(query: str, limit: int = 10) -> str:
     lines.extend("  - %s: %s" % (l["id"], l["text"][:220]) for l in lessons)
     lines.append("facts (%d):" % len(facts))
     lines.extend("  - %s/%s: %s" % (f["project"], f["id"], f["text"][:220]) for f in facts)
+    lines.append("preferences (%d):" % len(preferences))
+    lines.extend("  - %s/%s: %s" % (
+        p["scope"], p["id"], p["text"][:220],
+    ) for p in preferences)
     lines.append("sessions (%d):" % len(sessions))
     lines.extend("  - %s [%s]: %s" % (
         s["session_id"], s.get("project") or "default",
@@ -3280,6 +3753,7 @@ def memory_export(limit: int = 50, include_interactions: bool = False) -> str:
                 "SELECT id, project, text, ts FROM facts ORDER BY ts DESC, rowid DESC LIMIT ?",
                 (limit,),
             ).fetchall()],
+            "preferences": memory_store.all_preferences(conn, limit=limit),
             "outcomes": memory_store.outcome_signal_counts(conn),
         }
         if include_interactions:
@@ -3341,6 +3815,7 @@ def tool_manifest() -> str:
         "file_policy/file_find/file_read/file_write/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete with approval bypass support.",
         "task_create/task_list/task_update/task_show": "Visible Claude-style todo/task state shared by console, app, agents, and MCP.",
         "command_registry_list": "Inspect available slash commands by category, name, or risk.",
+        "activity_status": "Inspect active/latest response activity, tool calls, and file changes.",
         "permission_policy/permission_rule_set": "Inspect or guarded-edit local permission rules for tool actions.",
         "context_compaction_plan": "Preview when to summarize, split sessions, or reduce live context.",
         "run_code": "Run a bounded Python/JS/PowerShell/C++/C# snippet.",
@@ -3349,7 +3824,8 @@ def tool_manifest() -> str:
         "loop": "Repeat bounded code/model/system actions.",
         "workflow_list/save/run/delete": "Manage reusable loop workflows.",
         "system_profile_text/update_system_profile": "Read or edit standing instructions.",
-        "emotion_vector_status/update_emotion_vectors": "Read or edit tone vectors.",
+        "emotion_vector_status/update_emotion_vectors/tune_emotion_vectors": "Read, edit, or live-tune tone vectors.",
+        "learn_preference/preferences_status": "Read or teach durable user behavior/workflow preferences.",
         "memory_search/memory_export/session_export": "Inspect local memory.",
         "memory_quality_report/memory_quality_repair": "Audit and dry-run/prune exact duplicate lessons.",
         "system_improvement_report": "Suggest next improvements from learning, memory, context, and deployment signals.",
@@ -3379,6 +3855,7 @@ AGENT_TOOL_HELP = """Available tools:
 - task_update: {"task_id": "...", "status": "in_progress|blocked|done", "note": "..."}
 - task_show: {"task_id": "..."}
 - command_registry_list: {"filter_text": "filesystem|dangerous|context"}
+- activity_status: {}
 - permission_policy: {"tool_name": "file_delete"}
 - context_compaction_plan: {"session": "", "project": ""}
 - memory_search: {"query": "...", "limit": 10}
@@ -3399,6 +3876,10 @@ AGENT_TOOL_HELP = """Available tools:
 - status: {}
 - system_profile_text: {}
 - emotion_vector_status: {}
+- update_emotion_vectors: {"vectors_json": {"warmth": 0.5, "brevity": 0.2}, "mode": "merge|replace|clear|reset"}
+- tune_emotion_vectors: {"feedback_text": "be warmer but more concise", "step": 0.1}
+- learn_preference: {"text": "User prefers concise status updates.", "scope": "global"}
+- preferences_status: {"include_disabled": false, "limit": 20}
 - tool_manifest: {}
 - offload: {"prompt": "...", "tier": "fast|code|general|cloud-code|cloud-general"}
 
@@ -3538,6 +4019,8 @@ def _agent_dispatch(tool_name, args, allow_web=True):
         return task_show(args.get("task_id", args.get("id", "")))
     if tool_name == "command_registry_list":
         return command_registry_list(args.get("filter_text", args.get("filter", "")))
+    if tool_name == "activity_status":
+        return activity_status(include_events=args.get("include_events", True))
     if tool_name == "permission_policy":
         return permission_policy(args.get("tool_name", args.get("tool", "")))
     if tool_name == "context_compaction_plan":
@@ -3598,6 +4081,27 @@ def _agent_dispatch(tool_name, args, allow_web=True):
         return system_profile_text()
     if tool_name == "emotion_vector_status":
         return emotion_vector_status()
+    if tool_name == "update_emotion_vectors":
+        payload = args.get("vectors_json", args.get("vectors", {}))
+        return update_emotion_vectors(
+            json.dumps(payload) if not isinstance(payload, str) else payload,
+            mode=args.get("mode", "merge"),
+        )
+    if tool_name == "tune_emotion_vectors":
+        return tune_emotion_vectors(
+            feedback_text=args.get("feedback_text", args.get("text", "")),
+            step=args.get("step", 0.1),
+        )
+    if tool_name == "learn_preference":
+        return learn_preference(
+            text=args.get("text", ""),
+            scope=args.get("scope", "global"),
+        )
+    if tool_name == "preferences_status":
+        return preferences_status(
+            include_disabled=args.get("include_disabled", False),
+            limit=args.get("limit", 50),
+        )
     if tool_name == "tool_manifest":
         return tool_manifest()
     if tool_name == "offload":
@@ -3613,8 +4117,26 @@ def _agent_dispatch(tool_name, args, allow_web=True):
     return "ERROR: unknown tool '%s'." % tool_name
 
 
-@mcp.tool()
-def agent(
+def _agent_dispatch_observed(tool_name, args, allow_web=True):
+    started = time.time()
+    ok = False
+    observation = ""
+    try:
+        with activity_tracker.tool_dispatch_context():
+            observation = _agent_dispatch(tool_name, args, allow_web=allow_web)
+        ok = not str(observation).startswith("ERROR:")
+        return observation
+    finally:
+        activity_tracker.record_tool_call(
+            tool_name,
+            args,
+            ok=ok,
+            elapsed_ms=int((time.time() - started) * 1000),
+            summary=observation.splitlines()[0] if observation else "",
+        )
+
+
+def _agent_impl(
     prompt: str,
     tier: str = "code",
     max_steps: int = 6,
@@ -3664,7 +4186,7 @@ def agent(
         tool_name = decision.get("tool")
         if not tool_name:
             return "ERROR: agent decision missing 'tool' or 'final': %s" % decision
-        observation = _agent_dispatch(tool_name, decision.get("args", {}), allow_web=allow_web)
+        observation = _agent_dispatch_observed(tool_name, decision.get("args", {}), allow_web=allow_web)
         observations.append(
             "step %d tool=%s reason=%s\n%s" % (
                 step,
@@ -3675,6 +4197,28 @@ def agent(
         )
     return "ERROR: agent reached max_steps=%d without final answer.\n\n%s" % (
         max_steps, "\n\n".join(observations))
+
+
+@mcp.tool()
+def agent(
+    prompt: str,
+    tier: str = "code",
+    max_steps: int = 6,
+    allow_web: bool = True,
+) -> str:
+    """Run a visible local tool-using agent loop."""
+    with activity_tracker.response_span(
+        "agent:%s" % (tier or "code"),
+        prompt,
+        surface="agent",
+        model=tier,
+    ):
+        return _append_activity(_agent_impl(
+            prompt,
+            tier=tier,
+            max_steps=max_steps,
+            allow_web=allow_web,
+        ))
 
 
 @mcp.tool()
@@ -3729,11 +4273,14 @@ def diagnostics() -> str:
         conn = _open_db()
         try:
             n_lessons = conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0]
+            n_preferences = conn.execute(
+                "SELECT COUNT(*) FROM preferences WHERE enabled=1"
+            ).fetchone()[0]
             n_interactions = memory_store.count_interactions(conn)
         finally:
             conn.close()
-        lines.append("  memory db: ok (%s, %d lessons, %d interactions)" % (
-            _DB_PATH, n_lessons, n_interactions))
+        lines.append("  memory db: ok (%s, %d lessons, %d preferences, %d interactions)" % (
+            _DB_PATH, n_lessons, n_preferences, n_interactions))
     except Exception as e:
         lines.append("  memory db: ERROR %s" % e)
     try:

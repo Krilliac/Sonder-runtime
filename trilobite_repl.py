@@ -34,10 +34,13 @@ HELP = """commands:
   /contextsize [N]   show/set requested context (8k..1m; native num_ctx is clamped)
   /compact           preview context compaction/rollover recommendations
   /commands [filter] list available commands by category, name, or risk
+  /activity          show active/latest tool calls and file changes
   /dump [label]      dump this chat and debug info to a text file
   /todo ...          list/add/update visible task state
   /quality           audit lesson quality and duplicate rows
   /qualityfix [apply] dry-run or apply exact duplicate lesson cleanup
+  /emotion [cmd]     show/tune live tone vectors; try: /emotion tune warmer shorter
+  /prefer [text]     show/teach preferences; /prefer forget <id-or-key>
   /improve           show the next system improvement checklist
   /master [mode] ... run master orchestration: ask, inline, or delegate
   /agents            show live master/subagent activity
@@ -425,10 +428,16 @@ def main():
                 print(server.memory_quality_report())
             elif cmd == "/qualityfix":
                 print(server.memory_quality_repair(apply=(arg.strip().lower() == "apply")))
+            elif cmd in ("/emotion", "/emotions", "/vectors", "/mood"):
+                print(server.emotion_command(arg))
+            elif cmd in ("/prefer", "/preference", "/preferences"):
+                print(server.preference_command(arg))
             elif cmd in ("/improve", "/improvements"):
                 print(server.system_improvement_report(session=session_id, project=project))
             elif cmd in ("/agents", "/masterstatus"):
                 print(server.master_status())
+            elif cmd in ("/activity", "/tools", "/work"):
+                print(server.activity_status())
             elif cmd == "/register":
                 parts = arg.split(None, 1)
                 if len(parts) != 2:

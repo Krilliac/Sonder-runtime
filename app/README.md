@@ -40,6 +40,9 @@ party.
 - **Dark / light** themes, copy-to-clipboard, selectable text.
 - Works against a LAN server, a VPS, or `127.0.0.1` when the server runs on the
   same desktop machine.
+- If the configured hosted/LAN server cannot be reached, chat requests retry the
+  local server at `http://127.0.0.1:11435` and the assistant response starts
+  with a warning that local fallback was used.
 
 ## Download a pre-built app (no toolchain needed)
 

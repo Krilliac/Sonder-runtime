@@ -64,6 +64,12 @@ Or use the `trilobite-remote.cmd` wrapper if you have the repo checked out
 locally (`trilobite-remote.cmd` just calls `venv\Scripts\python.exe
 trilobite_client.py` with the same env vars).
 
+If the hosted server is unreachable, the client automatically retries the local
+server at `TRILOBITE_LOCAL_FALLBACK` (default `http://127.0.0.1:11435`) and
+prints a warning before the reply. Set `TRILOBITE_FALLBACK_LOCAL=0` to disable
+that fallback. HTTP errors from the hosted server, such as bad API keys or
+account bans, do not fall back.
+
 `--server`/`--key` argv flags also work and override the env vars:
 
 ```bash

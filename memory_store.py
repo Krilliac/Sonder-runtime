@@ -70,6 +70,19 @@ CREATE TABLE IF NOT EXISTS task_events (
     note TEXT,
     ts TEXT DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS preferences (
+    id TEXT PRIMARY KEY,
+    scope TEXT DEFAULT 'global',
+    key TEXT NOT NULL,
+    text TEXT NOT NULL,
+    source_interaction TEXT,
+    confidence REAL DEFAULT 0.5,
+    evidence_count INTEGER DEFAULT 1,
+    enabled INTEGER DEFAULT 1,
+    created_ts TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_ts TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(scope, key)
+);
 """
 
 
@@ -124,6 +137,10 @@ def init_db(conn):
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_task_events_task "
         "ON task_events(task_id, ts)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_preferences_scope_enabled "
+        "ON preferences(scope, enabled, updated_ts)"
     )
     conn.commit()
 
@@ -582,3 +599,65 @@ def count_facts(conn, project):
     return conn.execute(
         "SELECT COUNT(*) FROM facts WHERE project=?", (project,)
     ).fetchone()[0]
+
+
+# --- user preferences ------------------------------------------------------
+
+def upsert_preference(conn, pref_id, scope, key, text, source_interaction=None,
+                      confidence=0.6):
+    scope = (scope or "global").strip() or "global"
+    conn.execute(
+        "INSERT INTO preferences"
+        "(id, scope, key, text, source_interaction, confidence, evidence_count, enabled) "
+        "VALUES(?, ?, ?, ?, ?, ?, 1, 1) "
+        "ON CONFLICT(scope, key) DO UPDATE SET "
+        "text=excluded.text, "
+        "source_interaction=COALESCE(excluded.source_interaction, preferences.source_interaction), "
+        "confidence=MIN(1.0, MAX(preferences.confidence, excluded.confidence) + 0.05), "
+        "evidence_count=preferences.evidence_count + 1, "
+        "enabled=1, "
+        "updated_ts=CURRENT_TIMESTAMP",
+        (pref_id, scope, key, text, source_interaction, float(confidence)),
+    )
+    conn.commit()
+
+
+def preferences_for_scope(conn, scope="global", limit=20, include_disabled=False):
+    scope = (scope or "global").strip() or "global"
+    params = [scope]
+    where = "scope=?"
+    if not include_disabled:
+        where += " AND enabled=1"
+    rows = conn.execute(
+        "SELECT id, scope, key, text, source_interaction, confidence, "
+        "evidence_count, enabled, created_ts, updated_ts "
+        "FROM preferences WHERE %s "
+        "ORDER BY confidence DESC, evidence_count DESC, updated_ts DESC LIMIT ?"
+        % where,
+        tuple(params + [int(limit)]),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def all_preferences(conn, limit=50, include_disabled=False):
+    where = "" if include_disabled else "WHERE enabled=1"
+    rows = conn.execute(
+        "SELECT id, scope, key, text, source_interaction, confidence, "
+        "evidence_count, enabled, created_ts, updated_ts "
+        "FROM preferences %s "
+        "ORDER BY scope ASC, confidence DESC, evidence_count DESC, updated_ts DESC LIMIT ?"
+        % where,
+        (int(limit),),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_preference_enabled(conn, pref_id_or_key, enabled, scope="global"):
+    scope = (scope or "global").strip() or "global"
+    cur = conn.execute(
+        "UPDATE preferences SET enabled=?, updated_ts=CURRENT_TIMESTAMP "
+        "WHERE id=? OR (scope=? AND key=?)",
+        (1 if enabled else 0, pref_id_or_key, scope, pref_id_or_key),
+    )
+    conn.commit()
+    return cur.rowcount
