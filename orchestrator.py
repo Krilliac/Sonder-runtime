@@ -16,6 +16,33 @@ RUN_COMPAT_HEADER = "# /run compatibility requirements:"
 APPLICATION_HEADER = "# How to apply the lessons:"
 
 
+def _rough_token_count(text):
+    if not text:
+        return 0
+    return max(1, (len(str(text)) + 3) // 4)
+
+
+def _history_token_count(history):
+    total = 0
+    for msg in history or []:
+        if isinstance(msg, dict):
+            total += _rough_token_count(msg.get("content", ""))
+    return total
+
+
+def _token_usage(generate_fn, augmented_prompt, history, response):
+    usage = getattr(generate_fn, "last_usage", None) or {}
+    tokens_in = usage.get("tokens_in")
+    tokens_out = usage.get("tokens_out")
+    if tokens_in is not None or tokens_out is not None:
+        return tokens_in, tokens_out, usage.get("token_source") or "model"
+    return (
+        _rough_token_count(augmented_prompt) + _history_token_count(history),
+        _rough_token_count(response),
+        "estimated",
+    )
+
+
 def _needs_run_compatible_code(task):
     text = (task or "").lower()
     if "/run" in text:
@@ -104,10 +131,13 @@ def _run(conn, task, tier, generate_fn, retrieve_fn=retriever.retrieve,
     augmented = build_prompt(task, lessons, recalls, facts)
     # Existing callers/tests pass a 1-arg gen; only pass history when present.
     response = generate_fn(augmented, history) if history else generate_fn(augmented)
+    tokens_in, tokens_out, token_source = _token_usage(
+        generate_fn, augmented, history, response)
     interaction_id = id_fn()
     memory_store.log_interaction(
         conn, interaction_id, task, "\n".join(lessons), response, tier,
         session_id=session_id, task_embedding=task_embedding,
+        tokens_in=tokens_in, tokens_out=tokens_out, token_source=token_source,
     )
     if lesson_rows:
         memory_store.log_lesson_usage(

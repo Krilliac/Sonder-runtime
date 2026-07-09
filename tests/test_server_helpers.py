@@ -88,6 +88,9 @@ def test_make_generate_adds_local_runtime_options(monkeypatch):
 
     gen = server._make_generate("local-model", "system", 0.3, 77, 4096)
     assert gen("hello") == "ok"
+    assert gen.last_usage["tokens_in"] > 0
+    assert gen.last_usage["tokens_out"] == 1
+    assert gen.last_usage["token_source"] == "estimated"
     assert seen["path"] == "/api/chat"
     assert seen["payload"]["keep_alive"] == server.KEEP_ALIVE
     assert seen["payload"]["options"] == {
@@ -124,6 +127,25 @@ def test_make_generate_cloud_omits_local_runtime_options(monkeypatch):
     assert gen("hello") == "ok"
     assert "keep_alive" not in seen["payload"]
     assert seen["payload"]["options"] == {"temperature": 0.4, "num_predict": 88}
+
+
+def test_make_generate_captures_ollama_token_counts(monkeypatch):
+    def fake_post(path, payload):
+        return {
+            "message": {"content": "ok"},
+            "prompt_eval_count": 17,
+            "eval_count": 9,
+        }
+
+    monkeypatch.setattr(server, "_post", fake_post)
+
+    gen = server._make_generate("local-model", "", 0.1, 20, 2048)
+    assert gen("hello") == "ok"
+    assert gen.last_usage == {
+        "tokens_in": 17,
+        "tokens_out": 9,
+        "token_source": "ollama",
+    }
 
 
 def test_serve_target_cloud_tier_requires_opt_in(monkeypatch):
@@ -215,6 +237,8 @@ def test_trilobite_stats_runs_against_empty_db(monkeypatch, tmp_path):
     out = server.trilobite_stats()
     assert isinstance(out, str)
     assert "lessons:" in out
+    assert "tokens:" in out
+    assert "token rows:" in out
 
 
 def test_context_health_reports_session_and_memory(monkeypatch, tmp_path):
