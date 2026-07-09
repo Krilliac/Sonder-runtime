@@ -512,17 +512,34 @@ def _control_runproject(arg, history=None):
 def _control_dump(arg, prompt, history=None, session="", project=""):
     label = (arg or "server").strip() or "server"
     messages = _control_history_messages(history, prompt)
+    request_message_count = len(messages)
     session_id = _resolve_session(session)
     project_id = _resolve_project(project)
+    persisted_turns = 0
     if session_id:
         conn = _open_db()
         try:
             for turn in memory_store.session_turns(conn, session_id):
+                persisted_turns += 1
                 messages.append({"role": "user", "content": turn.get("task") or ""})
                 messages.append({"role": "assistant", "content": turn.get("response") or ""})
         finally:
             conn.close()
     sections = [
+        (
+            "dump sources",
+            (
+                "request/history messages: %d\n"
+                "persisted session: %s\n"
+                "persisted session turns appended: %d\n"
+                "note: large dumps usually mean saved memory.db history was included, "
+                "not necessarily that the server process stayed alive."
+            ) % (
+                request_message_count,
+                session_id or "(none)",
+                persisted_turns,
+            ),
+        ),
         ("session", session_id or "(none)"),
         ("project", project_id or "(none)"),
         ("context", context_health(session=session_id or "none", project=project_id or "none")),

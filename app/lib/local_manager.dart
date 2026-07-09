@@ -37,6 +37,8 @@ class LocalInstallInfo {
 
 class LocalManager {
   static const _repoUrl = 'https://github.com/Krilliac/Trilobite-model.git';
+  static Process? _managedServer;
+  static int? _managedServerPid;
 
   static bool get canRunLocalTools =>
       Platform.isWindows || Platform.isLinux || Platform.isMacOS;
@@ -195,6 +197,7 @@ class LocalManager {
   static Future<LocalActionResult> startServer({
     bool allowHosted = false,
     String contextSize = '8192',
+    bool persistOnAppClose = false,
   }) async {
     if (!canRunLocalTools) {
       return LocalActionResult(
@@ -217,23 +220,60 @@ class LocalManager {
     }
     try {
       if (Platform.isWindows) {
-        final script = File('${system.path}${Platform.pathSeparator}trilobite-serve.cmd');
+        final script = File(
+          '${system.path}${Platform.pathSeparator}trilobite-serve.cmd',
+        );
         if (await script.exists()) {
-          await Process.start(
+          if (persistOnAppClose) {
+            await Process.start(
+              'cmd.exe',
+              ['/c', 'start', '', '/min', script.path],
+              workingDirectory: system.path,
+              environment: processEnvironment(
+                allowHosted: allowHosted,
+                contextSize: contextSize,
+              ),
+              runInShell: true,
+            );
+            return const LocalActionResult(
+              true,
+              'Server startup requested in background mode.',
+            );
+          }
+          final process = await Process.start(
             'cmd.exe',
-            ['/c', 'start', '', '/min', script.path],
+            ['/c', script.path],
             workingDirectory: system.path,
             environment: processEnvironment(
               allowHosted: allowHosted,
               contextSize: contextSize,
             ),
-            runInShell: true,
           );
-          return const LocalActionResult(true, 'Server startup requested.');
+          _trackManagedServer(process);
+          return LocalActionResult(
+            true,
+            'Server startup requested. Managed PID ${process.pid}.',
+          );
         }
       }
       final python = Platform.isWindows ? 'python.exe' : 'python3';
-      await Process.start(
+      if (persistOnAppClose) {
+        await Process.start(
+          python,
+          ['trilobite_serve.py'],
+          workingDirectory: system.path,
+          environment: processEnvironment(
+            allowHosted: allowHosted,
+            contextSize: contextSize,
+          ),
+          mode: ProcessStartMode.detached,
+        );
+        return const LocalActionResult(
+          true,
+          'Server startup requested in background mode.',
+        );
+      }
+      final process = await Process.start(
         python,
         ['trilobite_serve.py'],
         workingDirectory: system.path,
@@ -241,31 +281,63 @@ class LocalManager {
           allowHosted: allowHosted,
           contextSize: contextSize,
         ),
-        mode: ProcessStartMode.detached,
       );
-      return const LocalActionResult(true, 'Server startup requested.');
+      _trackManagedServer(process);
+      return LocalActionResult(
+        true,
+        'Server startup requested. Managed PID ${process.pid}.',
+      );
     } catch (e) {
       return LocalActionResult(false, 'Could not start server: $e');
     }
+  }
+
+  static void _trackManagedServer(Process process) {
+    _managedServer = process;
+    _managedServerPid = process.pid;
+    process.stdout.listen((_) {}, onError: (_) {});
+    process.stderr.listen((_) {}, onError: (_) {});
+    process.exitCode.then((_) {
+      if (_managedServerPid == process.pid) {
+        _managedServer = null;
+        _managedServerPid = null;
+      }
+    });
+  }
+
+  static void stopManagedServerNow() {
+    final process = _managedServer;
+    if (process != null) {
+      process.kill(ProcessSignal.sigterm);
+      process.kill(ProcessSignal.sigkill);
+    }
+    _managedServer = null;
+    _managedServerPid = null;
   }
 
   static Future<LocalActionResult> stopServers() async {
     if (!canRunLocalTools) {
       return const LocalActionResult(false, 'Server shutdown is desktop-only.');
     }
+    final managedPid = _managedServerPid;
+    stopManagedServerNow();
     try {
       if (Platform.isWindows) {
-        const script = r'''
-$matches = Get-CimInstance Win32_Process |
-  Where-Object { $_.CommandLine -match 'trilobite_serve\.py' -or $_.CommandLine -match 'trilobite-serve\.cmd' }
-$count = 0
-foreach ($p in $matches) {
+        final parentMatch = managedPid == null
+            ? ''
+            : ' -or \$_.ParentProcessId -eq $managedPid'
+                ' -or \$_.ProcessId -eq $managedPid';
+        final script = '''
+\$matches = Get-CimInstance Win32_Process |
+  Where-Object { \$_.CommandLine -match 'trilobite_serve\\.py' -or \$_.CommandLine -match 'trilobite-serve\\.cmd'$parentMatch }
+\$count = 0
+foreach (\$p in \$matches) {
   try {
-    Stop-Process -Id $p.ProcessId -Force
-    $count += 1
+    Stop-Process -Id \$p.ProcessId -Force
+    \$count += 1
   } catch {}
 }
-Write-Output "Stopped $count Trilobite server process(es)."
+Write-Output "Stopped \$count Trilobite server process(es)."
 ''';
         final result = await Process.run(
           'powershell.exe',

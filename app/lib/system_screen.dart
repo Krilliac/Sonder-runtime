@@ -208,6 +208,8 @@ class _SystemScreenState extends State<SystemScreen> {
                         : () => _run(() => LocalManager.startServer(
                               allowHosted: widget.settings.allowHosted,
                               contextSize: widget.settings.contextSize,
+                              persistOnAppClose:
+                                  widget.settings.keepServerRunning,
                             )),
                   icon: const Icon(Icons.play_arrow_outlined),
                   label: const Text('Start server'),

@@ -66,7 +66,10 @@ Desktop downloads include a `local-system` folder beside the app. The System
 panel can use that folder to set up the local engine, start/stop the server,
 launch endless training, run common status/training commands and pull updates
 from Git. Desktop app startup requests the bundled server automatically and app
-shutdown requests all `trilobite_serve.py` instances to stop.
+shutdown requests all `trilobite_serve.py` instances to stop unless Settings
+has **Keep local server running after app closes** enabled. With that option on,
+the server is launched in background mode so it can keep serving headless after
+the GUI exits.
 
 Runtime state is shared outside the install folder. By default the bundled
 server uses `%LOCALAPPDATA%\trilobite` on Windows, `$XDG_DATA_HOME/trilobite`

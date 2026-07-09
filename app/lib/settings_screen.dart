@@ -28,6 +28,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late final TextEditingController _password;
   late bool _dark;
   late bool _allowHosted;
+  late bool _keepServerRunning;
   bool _obscureKey = true;
   String? _status;
   bool _statusOk = false;
@@ -44,6 +45,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _password = TextEditingController();
     _dark = widget.settings.darkMode;
     _allowHosted = widget.settings.allowHosted;
+    _keepServerRunning = widget.settings.keepServerRunning;
   }
 
   @override
@@ -62,7 +64,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
         apiKey: _key.text,
         darkMode: _dark,
         allowHosted: _allowHosted,
-        contextSize: _contextSize.text.trim().isEmpty ? '8192' : _contextSize.text.trim(),
+        contextSize: _contextSize.text.trim().isEmpty
+            ? '8192'
+            : _contextSize.text.trim(),
+        keepServerRunning: _keepServerRunning,
         model: _model.text.trim().isEmpty
             ? Settings.defaultModel
             : _model.text.trim(),
@@ -215,6 +220,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             value: _allowHosted,
             onChanged: (v) => setState(() => _allowHosted = v),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Keep local server running after app closes'),
+            subtitle: const Text(
+              'Use this for headless/background mode. Turn it off if the app '
+              'should stop its local server on exit.',
+            ),
+            value: _keepServerRunning,
+            onChanged: (v) => setState(() => _keepServerRunning = v),
           ),
           const Divider(height: 40),
           Text('Account',

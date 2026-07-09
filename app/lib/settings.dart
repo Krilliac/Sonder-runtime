@@ -8,6 +8,7 @@ class Settings {
   static const _kModel = 'model';
   static const _kAllowHosted = 'allow_hosted';
   static const _kContextSize = 'context_size';
+  static const _kKeepServerRunning = 'keep_server_running';
 
   static const defaultModel = 'trilobite';
 
@@ -17,6 +18,7 @@ class Settings {
   String model; // which server tier/model to use ("trilobite" = local student)
   bool allowHosted;
   String contextSize;
+  bool keepServerRunning;
 
   Settings({
     this.serverUrl = 'http://127.0.0.1:11435',
@@ -25,6 +27,7 @@ class Settings {
     this.model = defaultModel,
     this.allowHosted = false,
     this.contextSize = '8192',
+    this.keepServerRunning = false,
   });
 
   bool get isConfigured => serverUrl.trim().isNotEmpty;
@@ -38,6 +41,7 @@ class Settings {
       model: p.getString(_kModel) ?? defaultModel,
       allowHosted: p.getBool(_kAllowHosted) ?? false,
       contextSize: p.getString(_kContextSize) ?? '8192',
+      keepServerRunning: p.getBool(_kKeepServerRunning) ?? false,
     );
   }
 
@@ -48,6 +52,10 @@ class Settings {
     await p.setBool(_kDark, darkMode);
     await p.setString(_kModel, model);
     await p.setBool(_kAllowHosted, allowHosted);
-    await p.setString(_kContextSize, contextSize.trim().isEmpty ? '8192' : contextSize.trim());
+    await p.setString(
+      _kContextSize,
+      contextSize.trim().isEmpty ? '8192' : contextSize.trim(),
+    );
+    await p.setBool(_kKeepServerRunning, keepServerRunning);
   }
 }

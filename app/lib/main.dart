@@ -44,6 +44,7 @@ class _TrilobiteAppState extends State<TrilobiteApp> with WidgetsBindingObserver
     await LocalManager.startServer(
       allowHosted: settings.allowHosted,
       contextSize: settings.contextSize,
+      persistOnAppClose: settings.keepServerRunning,
     );
   }
 
@@ -54,7 +55,10 @@ class _TrilobiteAppState extends State<TrilobiteApp> with WidgetsBindingObserver
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (widget.manageLocalServer && state == AppLifecycleState.detached) {
+    if (widget.manageLocalServer &&
+        state == AppLifecycleState.detached &&
+        !(_settings?.keepServerRunning ?? false)) {
+      LocalManager.stopManagedServerNow();
       unawaited(LocalManager.stopServers());
     }
   }
@@ -62,7 +66,9 @@ class _TrilobiteAppState extends State<TrilobiteApp> with WidgetsBindingObserver
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    if (widget.manageLocalServer) {
+    if (widget.manageLocalServer &&
+        !(_settings?.keepServerRunning ?? false)) {
+      LocalManager.stopManagedServerNow();
       unawaited(LocalManager.stopServers());
     }
     super.dispose();
