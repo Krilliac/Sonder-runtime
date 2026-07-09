@@ -58,6 +58,32 @@ def test_run_with_learning_captures_and_returns_id():
     assert row["task"] == "fix the bug"
     assert row["response"] == "the answer"
     assert row["tier"] == "code"
+    assert row["tokens_in"] > 0
+    assert row["tokens_out"] > 0
+    assert row["token_source"] == "estimated"
+
+
+def test_run_with_learning_persists_generator_token_usage():
+    c = ms.connect(":memory:")
+
+    def gen(prompt):
+        gen.last_usage = {
+            "tokens_in": 123,
+            "tokens_out": 45,
+            "token_source": "ollama",
+        }
+        return "the answer"
+
+    resp, iid = o.run_with_learning(
+        c, "fix the bug", "code", gen,
+        retrieve_fn=lambda conn, task: [],
+        id_fn=lambda: "tok123",
+    )
+    assert resp == "the answer"
+    row = ms.get_interaction(c, iid)
+    assert row["tokens_in"] == 123
+    assert row["tokens_out"] == 45
+    assert row["token_source"] == "ollama"
 
 
 def test_run_with_learning_still_returns_2_tuple():

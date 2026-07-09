@@ -331,6 +331,7 @@ def _make_generate(model, system, temperature, num_predict, num_ctx, cloud=False
     non-learning cloud path posts.
     """
     def gen(prompt, history=None):
+        gen.last_usage = {}
         started = time.time()
         messages = []
         if system:
@@ -347,18 +348,37 @@ def _make_generate(model, system, temperature, num_predict, num_ctx, cloud=False
         if not cloud:
             payload["keep_alive"] = KEEP_ALIVE
         ok = False
+        content = ""
         try:
             out = _post("/api/chat", payload)
+            content = out.get("message", {}).get("content", "")
+            tokens_in = out.get("prompt_eval_count")
+            tokens_out = out.get("eval_count")
+            source = "ollama" if tokens_in is not None or tokens_out is not None else "estimated"
+            if tokens_in is None:
+                tokens_in = sum(_rough_token_count(m.get("content", "")) for m in messages)
+            if tokens_out is None:
+                tokens_out = _rough_token_count(content)
+            gen.last_usage = {
+                "tokens_in": int(tokens_in or 0),
+                "tokens_out": int(tokens_out or 0),
+                "token_source": source,
+            }
             ok = True
         finally:
+            usage = getattr(gen, "last_usage", {}) or {}
             activity_tracker.record_model_call(
                 model=model,
                 prompt_chars=len(prompt or ""),
                 history_messages=len(history or []),
+                tokens_in=usage.get("tokens_in", 0),
+                tokens_out=usage.get("tokens_out", 0),
+                token_source=usage.get("token_source", ""),
                 ok=ok,
                 elapsed_ms=int((time.time() - started) * 1000),
             )
-        return out.get("message", {}).get("content", "")
+        return content
+    gen.last_usage = {}
     return gen
 
 
@@ -1636,6 +1656,8 @@ def trilobite_stats() -> str:
     conn = _open_db()
     try:
         n_interactions = memory_store.count_interactions(conn)
+        token_totals = memory_store.interaction_token_totals(conn)
+        token_by_tier = memory_store.interaction_token_totals_by_tier(conn)
         signal_counts = memory_store.outcome_signal_counts(conn)
         lessons = memory_store.recent_lessons(conn, limit=5)
         n_lessons = conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0]
@@ -1650,8 +1672,27 @@ def trilobite_stats() -> str:
         "trilobite learning stats",
         "  lessons: %d" % n_lessons,
         "  interactions: %d | outcomes: %d" % (n_interactions, n_outcomes),
+        "  tokens: in=%d out=%d total=%d" % (
+            token_totals["tokens_in"],
+            token_totals["tokens_out"],
+            token_totals["tokens_total"],
+        ),
+        "  token rows: exact=%d estimated_legacy=%d" % (
+            token_totals["exact_rows"],
+            token_totals["estimated_rows"],
+        ),
         "  outcomes by signal: %s" % signals_line,
     ]
+    if token_by_tier:
+        lines.append("  tokens by tier:")
+        for row in token_by_tier[:8]:
+            lines.append(
+                "    - %s: in=%d out=%d total=%d interactions=%d exact=%d estimated=%d" % (
+                    row["tier"], row["tokens_in"], row["tokens_out"],
+                    row["tokens_total"], row["interactions"],
+                    row["exact_rows"], row["estimated_rows"],
+                )
+            )
     if lessons:
         lines.append("  recent lessons:")
         for l in lessons:
@@ -1831,11 +1872,13 @@ def activity_status(include_events: bool = True) -> str:
         for row in active[-8:]:
             last = row.get("last_event") or {}
             lines.append(
-                "    %s %s tools=%s models=%s last=%s" % (
+                "    %s %s tools=%s models=%s tokens=%s/%s last=%s" % (
                     row.get("id"),
                     row.get("label"),
                     row.get("tool_calls", 0),
                     row.get("model_calls", 0),
+                    row.get("tokens_in", 0),
+                    row.get("tokens_out", 0),
                     last.get("kind", "starting"),
                 )
             )

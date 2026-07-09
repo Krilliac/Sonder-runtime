@@ -29,11 +29,36 @@ def test_new_id_is_16_hex():
 
 def test_log_and_get_interaction_roundtrip():
     c = _conn()
-    ms.log_interaction(c, "abc", "do X", "ctx", "resp", "code")
+    ms.log_interaction(
+        c, "abc", "do X", "ctx", "resp", "code",
+        tokens_in=7, tokens_out=3, token_source="ollama",
+    )
     got = ms.get_interaction(c, "abc")
     assert got["task"] == "do X"
     assert got["response"] == "resp"
     assert got["tier"] == "code"
+    assert got["tokens_in"] == 7
+    assert got["tokens_out"] == 3
+    assert got["token_source"] == "ollama"
+
+
+def test_interaction_token_totals_mix_exact_and_estimated_rows():
+    c = _conn()
+    ms.log_interaction(c, "exact", "task", "ctx", "response", "code",
+                       tokens_in=10, tokens_out=5, token_source="ollama")
+    ms.log_interaction(c, "legacy", "12345", "123", "12345678", "fast")
+
+    totals = ms.interaction_token_totals(c)
+    assert totals["interactions"] == 2
+    assert totals["exact_rows"] == 1
+    assert totals["estimated_rows"] == 1
+    assert totals["tokens_in"] == 12  # 10 exact + ceil(8 chars / 4)
+    assert totals["tokens_out"] == 7  # 5 exact + ceil(8 chars / 4)
+    assert totals["tokens_total"] == 19
+
+    by_tier = {row["tier"]: row for row in ms.interaction_token_totals_by_tier(c)}
+    assert by_tier["code"]["tokens_total"] == 15
+    assert by_tier["fast"]["tokens_total"] == 4
 
 
 def test_get_missing_interaction_returns_none():

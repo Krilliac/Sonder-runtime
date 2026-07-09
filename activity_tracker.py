@@ -77,6 +77,8 @@ def response_span(label, prompt="", *, surface="", model="", session="", project
         "elapsed_ms": 0,
         "tool_calls": 0,
         "model_calls": 0,
+        "tokens_in": 0,
+        "tokens_out": 0,
         "file_creates": 0,
         "file_edits": 0,
         "file_deletes": 0,
@@ -122,18 +124,26 @@ def record_event(kind, **fields):
         return deepcopy(_event(response, kind, **fields))
 
 
-def record_model_call(model="", prompt_chars=0, history_messages=0, ok=True, elapsed_ms=0):
+def record_model_call(
+    model="", prompt_chars=0, history_messages=0, ok=True, elapsed_ms=0,
+    tokens_in=0, tokens_out=0, token_source="",
+):
     response = _current()
     if response is None:
         return
     with _LOCK:
         response["model_calls"] += 1
+        response["tokens_in"] += int(tokens_in or 0)
+        response["tokens_out"] += int(tokens_out or 0)
         _event(
             response,
             "model_call",
             model=_short(model, 80),
             prompt_chars=int(prompt_chars or 0),
             history_messages=int(history_messages or 0),
+            tokens_in=int(tokens_in or 0),
+            tokens_out=int(tokens_out or 0),
+            token_source=_short(token_source, 40),
             ok=bool(ok),
             elapsed_ms=int(elapsed_ms or 0),
         )
@@ -248,9 +258,11 @@ def format_response(response=None):
     lines = [
         "=== ACTIVITY (observable work) ===",
         "response: %(id)s %(status)s %(label)s in %(elapsed_ms)sms" % response,
-        "model calls: %s   tool calls: %s" % (
+        "model calls: %s   tool calls: %s   tokens in/out: %s/%s" % (
             response.get("model_calls", 0),
             response.get("tool_calls", 0),
+            response.get("tokens_in", 0),
+            response.get("tokens_out", 0),
         ),
         "files: +%s ~%s -%s   lines: +%s ~%s -%s" % (
             response.get("file_creates", 0),

@@ -10,7 +10,10 @@ CREATE TABLE IF NOT EXISTS interactions (
     retrieved_ctx TEXT,
     response TEXT,
     tier TEXT,
-    ts TEXT DEFAULT CURRENT_TIMESTAMP
+    ts TEXT DEFAULT CURRENT_TIMESTAMP,
+    tokens_in INTEGER,
+    tokens_out INTEGER,
+    token_source TEXT
 );
 CREATE TABLE IF NOT EXISTS outcomes (
     interaction_id TEXT,
@@ -111,6 +114,12 @@ def _migrate(conn):
         conn.execute("ALTER TABLE interactions ADD COLUMN session_id TEXT")
     if "task_embedding" not in cols:
         conn.execute("ALTER TABLE interactions ADD COLUMN task_embedding BLOB")
+    if "tokens_in" not in cols:
+        conn.execute("ALTER TABLE interactions ADD COLUMN tokens_in INTEGER")
+    if "tokens_out" not in cols:
+        conn.execute("ALTER TABLE interactions ADD COLUMN tokens_out INTEGER")
+    if "token_source" not in cols:
+        conn.execute("ALTER TABLE interactions ADD COLUMN token_source TEXT")
 
 
 def init_db(conn):
@@ -149,13 +158,45 @@ def new_id():
     return os.urandom(8).hex()
 
 
+def _clean_token_count(value):
+    if value is None:
+        return None
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
+def _estimate_tokens_from_chars(chars):
+    chars = max(0, int(chars or 0))
+    return (chars + 3) // 4 if chars else 0
+
+
+def estimate_interaction_tokens(task, retrieved_ctx, response):
+    tokens_in = _estimate_tokens_from_chars(
+        len(task or "") + len(retrieved_ctx or "")
+    )
+    tokens_out = _estimate_tokens_from_chars(len(response or ""))
+    return tokens_in, tokens_out
+
+
 def log_interaction(conn, interaction_id, task, retrieved_ctx, response, tier,
-                    session_id=None, task_embedding=None):
+                    session_id=None, task_embedding=None, tokens_in=None,
+                    tokens_out=None, token_source=None):
+    tokens_in = _clean_token_count(tokens_in)
+    tokens_out = _clean_token_count(tokens_out)
+    if token_source is None and (tokens_in is not None or tokens_out is not None):
+        token_source = "provided"
     conn.execute(
         "INSERT INTO interactions"
-        "(id, task, retrieved_ctx, response, tier, session_id, task_embedding) "
-        "VALUES(?, ?, ?, ?, ?, ?, ?)",
-        (interaction_id, task, retrieved_ctx, response, tier, session_id, task_embedding),
+        "(id, task, retrieved_ctx, response, tier, session_id, task_embedding, "
+        "tokens_in, tokens_out, token_source) "
+        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            interaction_id, task, retrieved_ctx, response, tier, session_id,
+            task_embedding, tokens_in, tokens_out, token_source,
+        ),
     )
     conn.commit()
 
@@ -266,6 +307,73 @@ def fts_search(conn, query, limit=10):
 
 def count_interactions(conn):
     return conn.execute("SELECT COUNT(*) FROM interactions").fetchone()[0]
+
+
+def interaction_token_totals(conn):
+    """Return exact persisted token totals plus estimated fallback for legacy rows."""
+    estimated_in_sql = (
+        "CASE WHEN (length(COALESCE(task, '')) + length(COALESCE(retrieved_ctx, ''))) = 0 "
+        "THEN 0 ELSE ((length(COALESCE(task, '')) + length(COALESCE(retrieved_ctx, '')) + 3) / 4) END"
+    )
+    estimated_out_sql = (
+        "CASE WHEN length(COALESCE(response, '')) = 0 "
+        "THEN 0 ELSE ((length(COALESCE(response, '')) + 3) / 4) END"
+    )
+    row = conn.execute(
+        "SELECT "
+        "COUNT(*) AS interactions, "
+        "SUM(CASE WHEN tokens_in IS NOT NULL OR tokens_out IS NOT NULL THEN 1 ELSE 0 END) AS exact_rows, "
+        "SUM(CASE WHEN tokens_in IS NULL AND tokens_out IS NULL THEN 1 ELSE 0 END) AS estimated_rows, "
+        "SUM(COALESCE(tokens_in, %s)) AS tokens_in, "
+        "SUM(COALESCE(tokens_out, %s)) AS tokens_out "
+        "FROM interactions"
+        % (estimated_in_sql, estimated_out_sql)
+    ).fetchone()
+    tokens_in = int(row["tokens_in"] or 0)
+    tokens_out = int(row["tokens_out"] or 0)
+    return {
+        "interactions": int(row["interactions"] or 0),
+        "exact_rows": int(row["exact_rows"] or 0),
+        "estimated_rows": int(row["estimated_rows"] or 0),
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "tokens_total": tokens_in + tokens_out,
+    }
+
+
+def interaction_token_totals_by_tier(conn):
+    estimated_in_sql = (
+        "CASE WHEN (length(COALESCE(task, '')) + length(COALESCE(retrieved_ctx, ''))) = 0 "
+        "THEN 0 ELSE ((length(COALESCE(task, '')) + length(COALESCE(retrieved_ctx, '')) + 3) / 4) END"
+    )
+    estimated_out_sql = (
+        "CASE WHEN length(COALESCE(response, '')) = 0 "
+        "THEN 0 ELSE ((length(COALESCE(response, '')) + 3) / 4) END"
+    )
+    rows = conn.execute(
+        "SELECT tier, "
+        "COUNT(*) AS interactions, "
+        "SUM(CASE WHEN tokens_in IS NOT NULL OR tokens_out IS NOT NULL THEN 1 ELSE 0 END) AS exact_rows, "
+        "SUM(CASE WHEN tokens_in IS NULL AND tokens_out IS NULL THEN 1 ELSE 0 END) AS estimated_rows, "
+        "SUM(COALESCE(tokens_in, %s)) AS tokens_in, "
+        "SUM(COALESCE(tokens_out, %s)) AS tokens_out "
+        "FROM interactions GROUP BY tier ORDER BY interactions DESC"
+        % (estimated_in_sql, estimated_out_sql)
+    ).fetchall()
+    out = []
+    for row in rows:
+        tokens_in = int(row["tokens_in"] or 0)
+        tokens_out = int(row["tokens_out"] or 0)
+        out.append({
+            "tier": row["tier"] or "(unknown)",
+            "interactions": int(row["interactions"] or 0),
+            "exact_rows": int(row["exact_rows"] or 0),
+            "estimated_rows": int(row["estimated_rows"] or 0),
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "tokens_total": tokens_in + tokens_out,
+        })
+    return out
 
 
 def outcome_signal_counts(conn):
