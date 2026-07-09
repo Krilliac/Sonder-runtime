@@ -96,6 +96,37 @@ The learning loop above is *cross-task* memory. On top of it trilobite also has:
 
 ---
 
+## Recommended offload procedure
+
+Use Trilobite as a local junior implementer, not as the final authority:
+
+1. Start substantial work with `status()` or `diagnostics()` so you know model,
+   VRAM, context, and memory-quality state before launching a batch.
+2. Prefer `offload(tier="code")` for one self-contained coding draft,
+   `run_code` / `parallel_generate_run` for bounded experiments, and
+   `master_orchestrate` only when independent perspectives are actually useful.
+3. Keep prompts narrow and complete. Include the relevant files, constraints,
+   acceptance checks, and what "done" means; the local model cannot see the
+   caller's hidden context.
+4. Treat every answer as a draft. The caller must audit APIs, edge cases, file
+   operations, security, and project style before applying changes.
+5. Use agent fan-out deliberately: 1-3 agents for normal work, 4-6 for useful
+   diversity, 8-16 for tiny prompts or stress tests, and higher counts only with
+   `TRILOBITE_MAX_AGENTS` plus healthy RAM/VRAM headroom.
+6. Record outcomes only after grounded evidence: compile, tests, direct use, or
+   explicit rejection. Good labels improve retrieval; vague labels pollute it.
+7. Run `memory_quality_report()` periodically and
+   `memory_quality_repair(apply=True)` after reviewing duplicate plans. Retrieval
+   quality is part of model quality.
+8. Keep cloud tiers opt-in. Local tiers are the default for private code and
+   user-specific memory; cloud tiers are metered and prompts leave the machine.
+
+Do not offload secrets, credential material, final security review, subtle
+correctness decisions, hot-path performance work, or changes whose failure mode
+cannot be checked locally.
+
+---
+
 ## Quickstart
 
 **On a server (get the model live):**
@@ -175,6 +206,9 @@ the machine instead of idling on conservative defaults:
   asks Ollama to place all supported layers on the GPU. Set `0` for CPU-only, or
   `auto`/`none` to let Ollama decide.
 - `LOCAL_LLM_NUM_BATCH` - inference batch size. Defaults to `512`.
+- `TRILOBITE_MAX_AGENTS` - delegated `master_orchestrate` cap. Defaults to `16`
+  and is hard-bounded at `64`; raising it is for deliberate stress or very small
+  prompts, not a default speed knob.
 - `OLLAMA_FLASH_ATTENTION` - enabled as `1` by the launch scripts when they start
   Ollama.
 
