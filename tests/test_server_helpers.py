@@ -442,9 +442,11 @@ def test_master_orchestrate_ask_reports_widened_agent_cap(monkeypatch):
 
 def test_master_orchestrate_delegates_and_audits(monkeypatch):
     calls = []
+    call_options = []
 
     def fake_offload(prompt, **kwargs):
         calls.append(prompt)
+        call_options.append(kwargs)
         if "Audit these delegated outputs" in prompt or "master orchestrator" in prompt.lower():
             return "audited merge"
         return "agent output"
@@ -456,7 +458,9 @@ def test_master_orchestrate_delegates_and_audits(monkeypatch):
     assert "master orchestration complete" in out
     assert "audited merge" in out
     assert len(calls) == 3
+    assert sorted(options["timeout"] for options in call_options) == [120, 150, 150]
     assert "active agents: 0" in server.master_status()
+    assert "latest completed master result:\naudited merge" in server.master_status()
 
 
 def test_admin_register_login_and_cot_denial(monkeypatch, tmp_path):

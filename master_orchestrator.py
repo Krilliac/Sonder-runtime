@@ -1,6 +1,7 @@
 """Master/subagent orchestration with live status snapshots."""
 from __future__ import annotations
 
+import itertools
 import os
 import threading
 import time
@@ -11,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 _LOCK = threading.RLock()
 _AGENTS = {}
 _EVENTS = []
+_UPDATE_SEQUENCE = itertools.count()
 _MAX_EVENTS = 80
 DEFAULT_MAX_AGENTS = 16
 ABSOLUTE_MAX_AGENTS = 64
@@ -70,12 +72,14 @@ def _new_agent(role: str, task: str, parent_id: str = "") -> str:
             "activity": "queued",
             "started_ts": now,
             "updated_ts": now,
+            "updated_seq": next(_UPDATE_SEQUENCE),
             "finished_ts": None,
             "tool_calls": 0,
             "tokens_in": estimate_tokens(task),
             "tokens_out": 0,
             "files": [],
             "summary": "",
+            "output": "",
             "error": "",
         }
     _event(agent_id, "queued: %s" % task[:140])
@@ -89,6 +93,7 @@ def update_agent(agent_id: str, **changes) -> None:
             return
         row.update(changes)
         row["updated_ts"] = _now()
+        row["updated_seq"] = next(_UPDATE_SEQUENCE)
         if changes.get("status") in ("done", "failed", "cancelled"):
             row["finished_ts"] = row["updated_ts"]
     if "activity" in changes:
@@ -103,6 +108,7 @@ def _finish(agent_id: str, output: str = "", error: str = "") -> str:
         activity=("failed: %s" % error[:160]) if error else "finished",
         tokens_out=estimate_tokens(output),
         summary=(output or error)[:500],
+        output=output,
         error=error,
     )
     return output
@@ -208,7 +214,7 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
         rows = list(_AGENTS.values())
         if not include_finished:
             rows = [r for r in rows if r.get("status") not in ("done", "failed", "cancelled")]
-        rows.sort(key=lambda r: r.get("updated_ts") or 0, reverse=True)
+        rows.sort(key=lambda r: r.get("updated_seq") or 0, reverse=True)
         rows = [dict(r) for r in rows[: max(1, int(limit or 20))]]
         events = list(_EVENTS[-_MAX_EVENTS:])
     active = [r for r in rows if r.get("status") in ("queued", "running")]
@@ -219,6 +225,14 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
         "events": events,
         "tokens_in": sum(int(r.get("tokens_in") or 0) for r in rows),
         "tokens_out": sum(int(r.get("tokens_out") or 0) for r in rows),
+        "latest_master_result": next(
+            (
+                r.get("output") or ""
+                for r in rows
+                if r.get("role") == "master" and r.get("status") == "done" and r.get("output")
+            ),
+            "",
+        ),
     }
 
 
@@ -234,5 +248,8 @@ def format_snapshot(data: dict) -> str:
     for row in agents[:12]:
         lines.append("  - %(id)s [%(status)s] %(activity)s" % row)
         lines.append("      task: %s" % (row.get("task") or "")[:180])
+    latest_result = data.get("latest_master_result") or ""
+    if latest_result:
+        lines.extend(["", "latest completed master result:", latest_result[:8000]])
     return "\n".join(lines)
 

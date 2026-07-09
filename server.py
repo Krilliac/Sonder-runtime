@@ -792,12 +792,13 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
 mcp = FastMCP("local-llm")
 
 
-def _post(path: str, payload: dict) -> dict:
+def _post(path: str, payload: dict, timeout: int | None = None) -> dict:
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         f"{BASE}{path}", data=data, headers={"Content-Type": "application/json"}
     )
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+    request_timeout = TIMEOUT if timeout is None else max(1, min(int(timeout), TIMEOUT))
+    with urllib.request.urlopen(req, timeout=request_timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -816,6 +817,7 @@ def offload(
     num_predict: int = 1024,
     num_ctx: int = 4096,
     learn: bool = True,
+    timeout: int = TIMEOUT,
 ) -> str:
     """Offload a self-contained subtask to a local-GPU or Ollama-cloud model.
 
@@ -855,7 +857,7 @@ def offload(
         if not _is_cloud_tier(tier, model):
             payload["keep_alive"] = KEEP_ALIVE
         try:
-            out = _post("/api/chat", payload)
+            out = _post("/api/chat", payload, timeout=timeout)
         except urllib.error.URLError as e:
             return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
                     "running? (the tray app / `ollama serve`)" % (BASE, e))
@@ -2369,7 +2371,15 @@ def system_improvement_report(session: str = "", project: str = "") -> str:
     return format_improvement_report(improvement_report_data(session=session, project=project))
 
 
-def _orchestrator_worker(tier: str, learn: bool = False):
+def _master_timeout(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(15, min(value, TIMEOUT))
+
+
+def _orchestrator_worker(tier: str, learn: bool = False, timeout: int = 150):
     def worker(prompt: str) -> str:
         return offload(
             prompt=prompt,
@@ -2377,6 +2387,7 @@ def _orchestrator_worker(tier: str, learn: bool = False):
             temperature=0.2,
             num_predict=1400,
             learn=learn,
+            timeout=timeout,
         )
     return worker
 
@@ -2408,7 +2419,11 @@ def master_orchestrate(
         ) % master_orchestrator.clamp_agent_count(agents, default=3)
     if not task:
         return "ERROR: empty task."
-    worker = _orchestrator_worker(tier, learn=learn)
+    worker = _orchestrator_worker(
+        tier,
+        learn=learn,
+        timeout=_master_timeout("TRILOBITE_MASTER_AGENT_TIMEOUT", 150),
+    )
     if mode in ("inline", "master"):
         result = master_orchestrator.run_inline(task, worker)
         return result["output"]
@@ -2416,7 +2431,11 @@ def master_orchestrate(
         result = master_orchestrator.run_delegated(
             task,
             worker_fn=worker,
-            audit_fn=_orchestrator_worker(tier, learn=False),
+            audit_fn=_orchestrator_worker(
+                tier,
+                learn=False,
+                timeout=_master_timeout("TRILOBITE_MASTER_AUDIT_TIMEOUT", 120),
+            ),
             agents=agents,
         )
         lines = [

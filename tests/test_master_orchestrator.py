@@ -31,6 +31,8 @@ def test_run_delegated_tracks_children_and_audit():
     assert len(result["agents"]) == 2
     assert snap["active_agents"] == 0
     assert snap["tokens_in"] > 0
+    assert snap["latest_master_result"] == "merged"
+    assert "latest completed master result:\nmerged" in master_orchestrator.format_snapshot(snap)
 
 
 def test_run_delegated_default_cap_allows_sixteen_agents(monkeypatch):
