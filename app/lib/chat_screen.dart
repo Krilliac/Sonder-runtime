@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -391,15 +390,19 @@ class _LiveStatusBar extends StatelessWidget {
     final project = contextInfo?.project ?? 'unknown';
     final projectText = project == 'none' ? 'project: none' : 'project: $project';
     final path = info?.stateHome ?? '';
-    final latest = (agentInfo?.agents.isNotEmpty ?? false)
-        ? '${agentInfo!.agents.first.id}: ${agentInfo!.agents.first.activity}'
-        : ((agentInfo?.events.isNotEmpty ?? false)
-            ? agentInfo!.events.last
-            : 'idle');
+    var latest = 'idle';
+    if (agentInfo != null) {
+      if (agentInfo.agents.isNotEmpty) {
+        final first = agentInfo.agents.first;
+        latest = '${first.id}: ${first.activity}';
+      } else if (agentInfo.events.isNotEmpty) {
+        latest = agentInfo.events.last;
+      }
+    }
     final parts = [
       'ctx ${(contextInfo?.contextPercent ?? 0).toStringAsFixed(1)}%',
       'native ${contextInfo?.nativeContextLimit ?? 0}',
-      '${contextInfo?.contextMode ?? 'native'}',
+      contextInfo?.contextMode ?? 'native',
       'agents ${agentInfo?.activeAgents ?? 0}',
       projectText,
       'tokens ${agentInfo?.tokensIn ?? 0}/${agentInfo?.tokensOut ?? 0}',
