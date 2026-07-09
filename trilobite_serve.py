@@ -262,7 +262,30 @@ def _parse_run_timeout(arg):
 
 def _do_run(timeout=grounding.DEFAULT_TIMEOUT):
     """Execute the code block from LAST_RESPONSE via grounding. Mirrors the REPL's /run."""
-    block = grounding.extract_runnable_code_block(LAST_RUN_SOURCE or LAST_RESPONSE)
+    return _do_run_from_messages(timeout=timeout)
+
+
+def _run_sources_from_messages(messages=None):
+    seen = set()
+    for source in (LAST_RUN_SOURCE, LAST_RESPONSE):
+        if source and source not in seen:
+            seen.add(source)
+            yield source
+    for msg in reversed(messages or []):
+        if msg.get("role") != "assistant":
+            continue
+        content = _answer_only(msg.get("content") or "")
+        if content and content not in seen:
+            seen.add(content)
+            yield content
+
+
+def _do_run_from_messages(timeout=grounding.DEFAULT_TIMEOUT, messages=None):
+    block = None
+    for source in _run_sources_from_messages(messages):
+        block = grounding.extract_runnable_code_block(source)
+        if block is not None:
+            break
     if block is None:
         return "(no code block in the last response to run)"
     result = code_runner.run_code(
@@ -280,7 +303,15 @@ def _do_run(timeout=grounding.DEFAULT_TIMEOUT):
 
 
 def _do_runproject(timeout=grounding.MAX_TIMEOUT):
-    files = grounding.extract_project_files(LAST_RUN_SOURCE or LAST_RESPONSE)
+    return _do_runproject_from_messages(timeout=timeout)
+
+
+def _do_runproject_from_messages(timeout=grounding.MAX_TIMEOUT, messages=None):
+    files = []
+    for source in _run_sources_from_messages(messages):
+        files = grounding.extract_project_files(source)
+        if files:
+            break
     if not files:
         return "(no file/path fenced project blocks in the last response)"
     result = code_runner.run_project({"files": files}, timeout=timeout)
@@ -520,12 +551,12 @@ def _handle_slash(content, messages=None):
         timeout, err = _parse_run_timeout(arg)
         if err:
             return err
-        return _do_run(timeout)
+        return _do_run_from_messages(timeout, messages=messages)
     if cmd == "/runproject":
         timeout, err = _parse_run_timeout(arg)
         if err:
             return err
-        return _do_runproject(timeout)
+        return _do_runproject_from_messages(timeout, messages=messages)
     if cmd in ("/train", "/learn"):
         n, err = _parse_train_n(arg)
         if err:

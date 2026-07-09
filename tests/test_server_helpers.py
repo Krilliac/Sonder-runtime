@@ -283,6 +283,49 @@ def test_control_command_routes_quality_before_model(monkeypatch):
     assert server.control_command("/quality") == "quality report"
 
 
+def test_control_command_dump_writes_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(server.trilobite_paths, "default_home", lambda: tmp_path)
+    monkeypatch.setattr(server, "context_health", lambda session="", project="": "context")
+    monkeypatch.setattr(server, "memory_quality_report", lambda sample_limit=5: "quality")
+    monkeypatch.setattr(server, "master_status", lambda limit=20: "agents")
+    monkeypatch.setattr(server, "diagnostics", lambda: "diagnostics")
+
+    out = server.control_command(
+        "/dump bug",
+        history=[{"role": "assistant", "content": "```python\nprint('kept')\n```"}],
+        session="none",
+        project="none",
+    )
+
+    assert out.startswith("dumped chat/debug log to ")
+    assert "last runnable block retained for /run" in out
+    path = out.splitlines()[0].split(" to ", 1)[1]
+    text = open(path, encoding="utf-8").read()
+    assert "== messages ==" in text
+    assert "print('kept')" in text
+
+
+def test_control_command_run_uses_history(monkeypatch):
+    seen = {}
+
+    def fake_run(code, language="python", timeout=8):
+        seen["code"] = code
+        seen["language"] = language
+        seen["timeout"] = timeout
+        return {"ok": True, "stdout": "ok", "stderr": "", "timeout": timeout, "returncode": 0}
+
+    monkeypatch.setattr(server.code_runner, "run_code", fake_run)
+    monkeypatch.setattr(server.code_runner, "format_result", lambda result: result["stdout"])
+
+    out = server.control_command(
+        "/run 9",
+        history=[{"role": "assistant", "content": "```cpp\nint main(){return 0;}\n```"}],
+    )
+
+    assert out.endswith("[ran OK]")
+    assert seen == {"code": "int main(){return 0;}", "language": "cpp", "timeout": 9}
+
+
 def test_trilobite_slash_command_does_not_call_model(monkeypatch):
     monkeypatch.setattr(server, "context_health", lambda: "context health")
     monkeypatch.setattr(server, "_serve_target", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("model should not resolve")))

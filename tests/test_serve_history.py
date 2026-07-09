@@ -90,6 +90,32 @@ def test_run_uses_answer_source_not_trace(monkeypatch):
     assert seen["code"] == "print('answer')"
 
 
+def test_run_falls_back_to_prior_assistant_message(monkeypatch):
+    seen = {}
+    ts.LAST_RESPONSE = "dumped chat/debug log to dump.txt"
+    ts.LAST_RUN_SOURCE = "dumped chat/debug log to dump.txt"
+    messages = [
+        {"role": "user", "content": "make cpp"},
+        {"role": "assistant", "content": "```cpp\nint main(){return 0;}\n```"},
+        {"role": "user", "content": "/dump"},
+        {"role": "assistant", "content": "dumped chat/debug log to dump.txt"},
+        {"role": "user", "content": "/run"},
+    ]
+
+    def fake_run(code, language="python", timeout=8):
+        seen["code"] = code
+        seen["language"] = language
+        return {"ok": True, "stdout": "compiled", "stderr": "", "timeout": timeout, "returncode": 0}
+
+    monkeypatch.setattr(ts.code_runner, "run_code", fake_run)
+    monkeypatch.setattr(ts.code_runner, "format_result", lambda result: result["stdout"])
+
+    out = ts._handle_slash("/run", messages=messages)
+
+    assert out.endswith("[ran OK]")
+    assert seen == {"code": "int main(){return 0;}", "language": "cpp"}
+
+
 def test_run_rejects_invalid_timeout():
     out = ts._handle_slash("/run python pong.py")
 

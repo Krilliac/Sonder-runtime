@@ -53,6 +53,7 @@ import file_ops
 import context_policy
 import command_registry
 import permission_rules
+import debug_dump
 
 from mcp.server.fastmcp import FastMCP
 
@@ -240,6 +241,7 @@ LIVE_RELOAD_MODULES = [
     "context_policy",
     "command_registry",
     "permission_rules",
+    "debug_dump",
 ]
 
 
@@ -424,7 +426,127 @@ def _serve_target(tier, strict):
     return None, False, True, None
 
 
-def control_command(prompt: str):
+def _control_history_messages(history, prompt):
+    messages = []
+    for msg in history or []:
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role")
+        content = msg.get("content") or ""
+        if role in ("user", "assistant") and content:
+            messages.append({"role": role, "content": content})
+    if prompt:
+        messages.append({"role": "user", "content": prompt})
+    return messages
+
+
+def _latest_runnable_block(history):
+    for msg in reversed(history or []):
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        block = grounding.extract_runnable_code_block(msg.get("content") or "")
+        if block:
+            return block
+    return None
+
+
+def _latest_project_files(history):
+    for msg in reversed(history or []):
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        files = grounding.extract_project_files(msg.get("content") or "")
+        if files:
+            return files
+    return []
+
+
+def _parse_control_timeout(arg, command="/run"):
+    arg = (arg or "").strip()
+    if not arg:
+        return grounding.DEFAULT_TIMEOUT, None
+    try:
+        return grounding.clamp_timeout(int(arg)), None
+    except ValueError:
+        return None, "usage: %s [seconds]  (runs the previous fenced code block)" % command
+
+
+def _control_run(arg, history=None):
+    timeout, err = _parse_control_timeout(arg, "/run")
+    if err:
+        return err
+    block = _latest_runnable_block(history)
+    if not block:
+        return (
+            "/run needs a previous assistant message with a fenced runnable code "
+            "block. Use it from the REPL/app after a code answer."
+        )
+    result = code_runner.run_code(
+        block["code"],
+        language=block["language"],
+        timeout=timeout,
+    )
+    if result.get("ok"):
+        status = "[ran OK]"
+    elif result.get("returncode") is None and result.get("error", "").startswith("timed out"):
+        status = "[timed out]"
+    else:
+        status = "[exited with error]"
+    return "%s\n%s" % (code_runner.format_result(result), status)
+
+
+def _control_runproject(arg, history=None):
+    timeout, err = _parse_control_timeout(arg, "/runproject")
+    if err:
+        return err
+    files = _latest_project_files(history)
+    if not files:
+        return (
+            "/runproject needs previous file/path fenced project blocks. Use it "
+            "from the REPL/app after a project-style answer."
+        )
+    result = code_runner.run_project({"files": files}, timeout=timeout)
+    status = "[ran OK]" if result.get("ok") else "[project failed]"
+    return "%s\n%s" % (code_runner.format_project_result(result), status)
+
+
+def _control_dump(arg, prompt, history=None, session="", project=""):
+    label = (arg or "server").strip() or "server"
+    messages = _control_history_messages(history, prompt)
+    session_id = _resolve_session(session)
+    project_id = _resolve_project(project)
+    if session_id:
+        conn = _open_db()
+        try:
+            for turn in memory_store.session_turns(conn, session_id):
+                messages.append({"role": "user", "content": turn.get("task") or ""})
+                messages.append({"role": "assistant", "content": turn.get("response") or ""})
+        finally:
+            conn.close()
+    sections = [
+        ("session", session_id or "(none)"),
+        ("project", project_id or "(none)"),
+        ("context", context_health(session=session_id or "none", project=project_id or "none")),
+        ("quality", memory_quality_report(sample_limit=5)),
+        ("agents", master_status(limit=20)),
+        ("diagnostics", diagnostics()),
+    ]
+    path = debug_dump.write_dump(
+        trilobite_paths.default_home(),
+        label=label,
+        messages=messages,
+        sections=sections,
+    )
+    out = "dumped chat/debug log to %s" % path
+    block = _latest_runnable_block(history)
+    if block:
+        out += (
+            "\n\nlast runnable block retained for /run:\n```%s\n%s\n```"
+            % (block["language"], block["code"])
+        )
+    return out
+
+
+def control_command(prompt: str, history=None, session="", project=""):
     """Handle safe slash commands before a prompt reaches the model.
 
     Client layers have richer commands like /run that depend on their local last
@@ -460,11 +582,12 @@ def control_command(prompt: str):
         return master_status()
     if cmd in ("/cot", "/chainofthought", "/thoughts"):
         return admin_private_chain_of_thought()
-    if cmd in ("/run", "/runproject", "/dump"):
-        return (
-            "%s is handled by the active client because it depends on the current "
-            "chat transcript or last displayed answer. Use it from the REPL or app."
-        ) % cmd
+    if cmd == "/run":
+        return _control_run(arg, history=history)
+    if cmd == "/runproject":
+        return _control_runproject(arg, history=history)
+    if cmd == "/dump":
+        return _control_dump(arg, text, history=history, session=session, project=project)
     return None
 
 
@@ -725,7 +848,7 @@ def trilobite(
     to steer tone; its system prompt is prepended ahead of `system`/trace instructions.
     """
     _maybe_live_reload()
-    command = control_command(prompt)
+    command = control_command(prompt, session=session, project=project)
     if command is not None:
         return command
     tgt_model, cloud, augment, tier_label = _serve_target(tier, strict)
@@ -791,7 +914,7 @@ def answer_with_history(prompt, history, trace=False, strict=None, tier=None, co
     the app learns from whatever model you point it at. Returns the reply (with footer).
     """
     _maybe_live_reload()
-    command = control_command(prompt)
+    command = control_command(prompt, history=history)
     if command is not None:
         return command
     model, cloud, augment, tier_label = _serve_target(tier, strict)
