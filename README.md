@@ -285,3 +285,5 @@ The MCP surface also includes `memory_search()`, `memory_export()`, and `session
 - A local 7B trails frontier hosted models on raw capability — by design; the trade is privacy + ownership.
 - Lesson-retrieval's measured benefit is real only when relevant lessons exist; on easy tasks it's do-no-harm, not a boost. Real gains come from *your* accumulated data and/or fine-tuning.
 - Tests run in CI on every push. Local-first throughout; your private data stays yours.
+- `python scripts/ci_watch.py` shows the latest GitHub Actions runs through the
+  GitHub CLI, which makes failed build/debug loops faster from a local checkout.
