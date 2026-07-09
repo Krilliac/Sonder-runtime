@@ -14,4 +14,23 @@ void main() {
     expect(done.content, 'hi');
     expect(done.pending, false);
   });
+
+  test('ChatThread derives a useful display title', () {
+    final thread = ChatThread.fresh().copyWith(messages: const [
+      ChatMessage(role: Role.user, content: 'build a dashboard for agents'),
+    ]);
+
+    expect(thread.displayTitle, 'build a dashboard for agents');
+  });
+
+  test('ChatThread serializes messages and project', () {
+    final thread = ChatThread.fresh(project: 'app').copyWith(
+      messages: const [ChatMessage(role: Role.assistant, content: 'ok')],
+    );
+    final restored = ChatThread.fromJson(thread.toJson());
+
+    expect(restored.project, 'app');
+    expect(restored.messages.single.content, 'ok');
+    expect(restored.messages.single.role, Role.assistant);
+  });
 }

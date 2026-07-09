@@ -513,7 +513,7 @@ def _control_dump(arg, prompt, history=None, session="", project=""):
     label = (arg or "server").strip() or "server"
     messages = _control_history_messages(history, prompt)
     request_message_count = len(messages)
-    session_id = _resolve_session(session)
+    session_id = _resolve_session(session) if (session or "").strip() else None
     project_id = _resolve_project(project)
     persisted_turns = 0
     if session_id:
@@ -918,11 +918,21 @@ def trilobite(
     return with_footer(response, iid)
 
 
-def answer_with_history(prompt, history, trace=False, strict=None, tier=None, context_size=""):
+def answer_with_history(
+    prompt,
+    history,
+    trace=False,
+    strict=None,
+    tier=None,
+    context_size="",
+    session="",
+    project="",
+):
     """Answer a turn using caller-supplied prior `history` (list of {role, content}).
 
     For the OpenAI-compatible serve layer, where the chat UI owns the conversation:
-    history comes from the request, not the DB, so no DB session is threaded.
+    history comes from the request, not the DB. Optional session/project tags
+    still scope captured interactions and project facts.
 
     `tier` maps the request's OpenAI `model` field to a target (see _serve_target):
     default/"trilobite" is the local self-improving student (augmented with facts +
@@ -931,7 +941,7 @@ def answer_with_history(prompt, history, trace=False, strict=None, tier=None, co
     the app learns from whatever model you point it at. Returns the reply (with footer).
     """
     _maybe_live_reload()
-    command = control_command(prompt, history=history)
+    command = control_command(prompt, history=history, session=session, project=project)
     if command is not None:
         return command
     model, cloud, augment, tier_label = _serve_target(tier, strict)
@@ -950,13 +960,17 @@ def answer_with_history(prompt, history, trace=False, strict=None, tier=None, co
     # cloud from learning and have the app respect it. The student is gated via 'code'.
     learn = _should_learn(_canonical_learn_tier(tier_label), True)
     req_ctx = _context_requested(context_size or SESSION_NUM_CTX)
+    session_id = _resolve_session(session) if (session or "").strip() else None
+    project_id = _resolve_project(project)
     conn = _open_db()
     try:
+        if session_id:
+            memory_store.touch_session(conn, session_id, project_id)
         if learn:
-            project = DEFAULT_PROJECT if augment else None
+            capture_project = project_id if augment else None
             response, iid, trace_ctx = _answer(
                 conn, prompt, model, effective_system, 0.2, 1024, req_ctx,
-                None, project, history or None, trace=trace,
+                session_id, capture_project, history or None, trace=trace,
                 tier=tier_label, cloud=cloud, augment=augment,
             )
         else:

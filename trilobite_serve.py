@@ -633,13 +633,15 @@ def _model_to_tier(model):
     return None
 
 
-def _run_prompt(prompt, history=None, tier=None, context_size=""):
+def _run_prompt(
+    prompt, history=None, tier=None, context_size="", session="", project="",
+):
     """Call the real trilobite loop with the UI's prior turns; returns UI text."""
     global LAST_IID, LAST_RESPONSE, LAST_RUN_SOURCE
 
     out = server.answer_with_history(
         prompt, history, trace=TRACE, strict=STRICT, tier=tier,
-        context_size=context_size,
+        context_size=context_size, session=session, project=project,
     )
     if out.startswith("ERROR"):
         return out
@@ -856,6 +858,8 @@ class Handler(BaseHTTPRequestHandler):
         stream = bool(req.get("stream", False))
         model = req.get("model", "trilobite")
         context_size = req.get("context_size", "")
+        session = req.get("session", "")
+        project = req.get("project", "")
         prompt = _last_user_message(messages)
         history = _history_from_messages(messages)
         _record_chat("user", prompt)
@@ -868,7 +872,8 @@ class Handler(BaseHTTPRequestHandler):
             if reply is None:
                 reply = _handle_intent(prompt)
             content = reply if reply is not None else _run_prompt(
-                prompt, history, _model_to_tier(model), context_size=context_size)
+                prompt, history, _model_to_tier(model),
+                context_size=context_size, session=session, project=project)
         except Exception:
             content = "ERROR: %s" % traceback.format_exc()
         _record_chat("assistant", content, kind="slash" if reply is not None else "model")

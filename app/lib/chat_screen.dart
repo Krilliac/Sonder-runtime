@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'api.dart';
+import 'chat_store.dart';
 import 'models.dart';
 import 'settings.dart';
 import 'settings_screen.dart';
@@ -28,7 +29,11 @@ class _ChatScreenState extends State<ChatScreen> {
   final _input = TextEditingController();
   final _scroll = ScrollController();
   final _inputFocus = FocusNode();
+  List<ChatThread> _threads = const [];
+  String _currentThreadId = '';
+  String _project = 'default';
   bool _sending = false;
+  bool _loadingThreads = true;
   Timer? _statusTimer;
   SystemInfo? _systemInfo;
 
@@ -68,12 +73,74 @@ class _ChatScreenState extends State<ChatScreen> {
   void initState() {
     super.initState();
     _model = widget.settings.model;
+    _loadThreads();
     _refreshModels();
     _refreshStatus();
     _statusTimer = Timer.periodic(
       const Duration(seconds: 5),
       (_) => _refreshStatus(),
     );
+  }
+
+  ChatThread get _currentThread {
+    return _threads.firstWhere(
+      (t) => t.id == _currentThreadId,
+      orElse: () => _threads.isNotEmpty ? _threads.first : ChatThread.fresh(),
+    );
+  }
+
+  Future<void> _loadThreads() async {
+    final threads = await ChatStore.load();
+    if (!mounted) return;
+    final current = threads.first;
+    setState(() {
+      _threads = threads;
+      _currentThreadId = current.id;
+      _project = current.project;
+      _messages
+        ..clear()
+        ..addAll(current.messages);
+      _loadingThreads = false;
+    });
+  }
+
+  Future<void> _saveCurrentThread({
+    String? title,
+    String? project,
+    List<ChatMessage>? messages,
+  }) async {
+    if (_currentThreadId.isEmpty) return;
+    final nextMessages =
+        (messages ?? _messages).where((m) => !m.pending).toList();
+    final nextTitle = title ?? _titleForMessages(nextMessages);
+    final nextProject = (project ?? _project).trim().isEmpty
+        ? 'default'
+        : (project ?? _project).trim();
+    final updated = _threads.map((thread) {
+      if (thread.id != _currentThreadId) return thread;
+      return thread.copyWith(
+        title: nextTitle,
+        project: nextProject,
+        messages: nextMessages,
+        updatedAt: DateTime.now(),
+      );
+    }).toList()
+      ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    setState(() {
+      _threads = updated;
+      _project = nextProject;
+    });
+    await ChatStore.save(updated);
+  }
+
+  String _titleForMessages(List<ChatMessage> messages) {
+    final userMessages = messages.where((m) => m.role == Role.user);
+    if (userMessages.isEmpty) return _currentThread.title;
+    final text =
+        userMessages.first.content.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (text.isEmpty) return 'New chat';
+    if (text.length <= 42) return text;
+    return '${text.substring(0, 42)}...';
   }
 
   Future<void> _refreshModels() async {
@@ -110,7 +177,11 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       await _api.chat([
         ChatMessage(role: Role.user, content: command),
-      ], model: _model, contextSize: widget.settings.contextSize);
+      ],
+          model: _model,
+          contextSize: widget.settings.contextSize,
+          sessionId: _currentThreadId,
+          project: _project);
     } catch (_) {
       // Passive learning should never interrupt the chat UI.
     }
@@ -157,6 +228,8 @@ class _ChatScreenState extends State<ChatScreen> {
         history,
         model: _model,
         contextSize: widget.settings.contextSize,
+        sessionId: _currentThreadId,
+        project: _project,
       );
       setState(() {
         _messages[_messages.length - 1] = ChatMessage(
@@ -174,6 +247,7 @@ class _ChatScreenState extends State<ChatScreen> {
       });
     } finally {
       if (mounted) {
+        await _saveCurrentThread();
         setState(() => _sending = false);
         _refreshStatus();
         _scrollToEnd();
@@ -183,7 +257,74 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _newChat() {
-    setState(() => _messages.clear());
+    final fresh = ChatThread.fresh(project: _project);
+    final updated = [fresh, ..._threads];
+    setState(() {
+      _threads = updated;
+      _currentThreadId = fresh.id;
+      _project = fresh.project;
+      _messages.clear();
+    });
+    unawaited(ChatStore.save(updated));
+  }
+
+  void _switchThread(ChatThread thread) {
+    setState(() {
+      _currentThreadId = thread.id;
+      _project = thread.project;
+      _messages
+        ..clear()
+        ..addAll(thread.messages);
+    });
+    unawaited(Navigator.of(context).maybePop());
+    _scrollToEnd();
+  }
+
+  Future<void> _deleteThread(ChatThread thread) async {
+    final remaining = _threads.where((t) => t.id != thread.id).toList();
+    final next =
+        remaining.isEmpty ? [ChatThread.fresh(project: _project)] : remaining;
+    final current = thread.id == _currentThreadId ? next.first : _currentThread;
+    setState(() {
+      _threads = next;
+      _currentThreadId = current.id;
+      _project = current.project;
+      _messages
+        ..clear()
+        ..addAll(current.messages);
+    });
+    await ChatStore.save(next);
+  }
+
+  Future<void> _editProject() async {
+    final controller = TextEditingController(text: _project);
+    final value = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Project'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'Project name',
+            hintText: 'default, app-ui, engine...',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(controller.text),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (value == null) return;
+    await _saveCurrentThread(project: value);
   }
 
   Future<void> _openSettings() async {
@@ -210,7 +351,16 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final currentTitle =
+        _loadingThreads ? 'Loading chats...' : _currentThread.displayTitle;
     return Scaffold(
+      drawer: _ChatDrawer(
+        threads: _threads,
+        currentThreadId: _currentThreadId,
+        onNew: _newChat,
+        onSelect: _switchThread,
+        onDelete: _deleteThread,
+      ),
       appBar: AppBar(
         title: Row(
           children: [
@@ -271,7 +421,7 @@ class _ChatScreenState extends State<ChatScreen> {
           IconButton(
             tooltip: 'New chat',
             icon: const Icon(Icons.add_comment_outlined),
-            onPressed: _messages.isEmpty ? null : _newChat,
+            onPressed: _newChat,
           ),
           IconButton(
             tooltip: 'System',
@@ -287,6 +437,12 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
       body: Column(
         children: [
+          _ChatHeader(
+            title: currentTitle,
+            project: _project,
+            messageCount: _messages.where((m) => !m.pending).length,
+            onEditProject: _editProject,
+          ),
           Expanded(
             child: _messages.isEmpty
                 ? _EmptyState(
@@ -310,7 +466,7 @@ class _ChatScreenState extends State<ChatScreen> {
             sending: _sending,
             onSend: () => _send(),
           ),
-          _LiveStatusBar(info: _systemInfo, model: _model),
+          _LiveStatusBar(info: _systemInfo, model: _model, project: _project),
         ],
       ),
     );
@@ -363,6 +519,173 @@ class _EmptyState extends StatelessWidget {
   }
 }
 
+class _ChatHeader extends StatelessWidget {
+  final String title;
+  final String project;
+  final int messageCount;
+  final VoidCallback onEditProject;
+
+  const _ChatHeader({
+    required this.title,
+    required this.project,
+    required this.messageCount,
+    required this.onEditProject,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: cs.surface,
+        border: Border(bottom: BorderSide(color: cs.outlineVariant)),
+      ),
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '$messageCount messages',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: cs.outline,
+                      ),
+                ),
+              ],
+            ),
+          ),
+          ActionChip(
+            avatar: const Icon(Icons.folder_outlined, size: 16),
+            label: Text(project.trim().isEmpty ? 'default' : project),
+            onPressed: onEditProject,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ChatDrawer extends StatelessWidget {
+  final List<ChatThread> threads;
+  final String currentThreadId;
+  final VoidCallback onNew;
+  final ValueChanged<ChatThread> onSelect;
+  final ValueChanged<ChatThread> onDelete;
+
+  const _ChatDrawer({
+    required this.threads,
+    required this.currentThreadId,
+    required this.onNew,
+    required this.onSelect,
+    required this.onDelete,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final projects = threads.map((t) => t.project).toSet().toList()..sort();
+    return Drawer(
+      child: SafeArea(
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 12, 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      'Chats',
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'New chat',
+                    onPressed: () {
+                      unawaited(Navigator.of(context).maybePop());
+                      onNew();
+                    },
+                    icon: const Icon(Icons.add_comment_outlined),
+                  ),
+                ],
+              ),
+            ),
+            if (projects.isNotEmpty)
+              SizedBox(
+                height: 42,
+                child: ListView.separated(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  scrollDirection: Axis.horizontal,
+                  itemCount: projects.length,
+                  separatorBuilder: (_, __) => const SizedBox(width: 6),
+                  itemBuilder: (_, index) => Chip(
+                    visualDensity: VisualDensity.compact,
+                    label: Text(projects[index]),
+                    avatar: const Icon(Icons.folder_outlined, size: 16),
+                  ),
+                ),
+              ),
+            const Divider(height: 1),
+            Expanded(
+              child: threads.isEmpty
+                  ? const Center(child: Text('No chats yet'))
+                  : ListView.builder(
+                      itemCount: threads.length,
+                      itemBuilder: (_, index) {
+                        final thread = threads[index];
+                        final selected = thread.id == currentThreadId;
+                        return ListTile(
+                          selected: selected,
+                          leading: CircleAvatar(
+                            backgroundColor: selected
+                                ? cs.primaryContainer
+                                : cs.surfaceContainerHighest,
+                            child: Icon(
+                              Icons.chat_bubble_outline,
+                              color: selected
+                                  ? cs.onPrimaryContainer
+                                  : cs.onSurfaceVariant,
+                              size: 18,
+                            ),
+                          ),
+                          title: Text(
+                            thread.displayTitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          subtitle: Text(
+                            '${thread.project}  |  ${thread.messages.length} messages',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          trailing: IconButton(
+                            tooltip: 'Delete chat',
+                            onPressed: threads.length <= 1
+                                ? null
+                                : () => onDelete(thread),
+                            icon: const Icon(Icons.delete_outline),
+                          ),
+                          onTap: () => onSelect(thread),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _Suggestion extends StatelessWidget {
   final String text;
   final ValueChanged<String> onTap;
@@ -380,16 +703,25 @@ class _Suggestion extends StatelessWidget {
 class _LiveStatusBar extends StatelessWidget {
   final SystemInfo? info;
   final String model;
+  final String project;
 
-  const _LiveStatusBar({required this.info, required this.model});
+  const _LiveStatusBar({
+    required this.info,
+    required this.model,
+    required this.project,
+  });
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final contextInfo = info?.context;
     final agentInfo = info?.agents;
-    final project = contextInfo?.project ?? 'unknown';
-    final projectText = project == 'none' ? 'project: none' : 'project: $project';
+    final activeProject = project.trim().isEmpty
+        ? (contextInfo?.project ?? 'unknown')
+        : project.trim();
+    final projectText = activeProject == 'none'
+        ? 'project: none'
+        : 'project: $activeProject';
     final path = info?.stateHome ?? '';
     var latest = 'idle';
     if (agentInfo != null) {
