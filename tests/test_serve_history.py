@@ -215,7 +215,16 @@ def test_run_prompt_passes_context_size(monkeypatch):
     monkeypatch.setattr(ts.server, "parse_interaction_id", lambda out: None)
     monkeypatch.setattr(ts, "_strip_footer", lambda out: out)
 
-    def fake_answer(prompt, history, trace=False, strict=None, tier=None, context_size=""):
+    def fake_answer(
+        prompt,
+        history,
+        trace=False,
+        strict=None,
+        tier=None,
+        context_size="",
+        session="",
+        project="",
+    ):
         seen["context_size"] = context_size
         return "ok"
 
