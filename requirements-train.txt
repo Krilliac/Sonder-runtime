@@ -10,10 +10,14 @@
 # On Windows, the CUDA wheels are hosted on a separate index, e.g. for CUDA 12.1:
 #   pip install torch --index-url https://download.pytorch.org/whl/cu121
 # Check `nvidia-smi` for your driver's supported CUDA version first.
-torch>=2.2,<2.5
+# Security floor: Dependabot advisories affect older PyTorch ranges through
+# 2.12.x, so keep this on a current training-only line.
+torch>=2.13,<2.14
 
 # --- Hugging Face stack --------------------------------------------------------
-transformers>=4.42,<4.50
+# Security floor: 5.3.0 includes fixes for the ReDoS/RCE advisories reported
+# against the earlier 4.x training range.
+transformers>=5.3,<6
 accelerate>=0.30,<0.35
 peft>=0.11,<0.14
 datasets>=2.19,<2.21
