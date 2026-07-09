@@ -89,11 +89,18 @@ class TrilobiteApi {
   /// handles slash-commands (/stats, /train, /pass, …), passive feedback,
   /// and natural-language control — so we simply forward whatever the user
   /// typed as the last user message.
-  Future<String> chat(List<ChatMessage> messages,
-      {String model = 'trilobite', String contextSize = '8192'}) async {
+  Future<String> chat(
+    List<ChatMessage> messages, {
+    String model = 'trilobite',
+    String contextSize = '8192',
+    String sessionId = '',
+    String project = '',
+  }) async {
     final body = jsonEncode({
       'model': model,
       'context_size': contextSize,
+      if (sessionId.trim().isNotEmpty) 'session': sessionId.trim(),
+      if (project.trim().isNotEmpty) 'project': project.trim(),
       'messages': messages
           .where((m) => !m.pending)
           .map((m) => m.toWire())

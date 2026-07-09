@@ -17,7 +17,8 @@ party.
 
 ## Features
 
-- **Chat UI** with conversation memory (history is threaded to the server).
+- **Chat UI** with saved local chats, a chat drawer, per-chat project names,
+  and conversation memory (history is threaded to the server).
 - **Model picker** in the title bar — switch which LLM answers per conversation
   (`trilobite` local student, or any cloud/paid tier the server exposes). The list is
   fetched from the server's `/v1/models`. Cloud models answer *clean* (teacher mode)

@@ -225,6 +225,31 @@ def test_run_prompt_passes_context_size(monkeypatch):
     assert seen["context_size"] == "1m"
 
 
+def test_run_prompt_passes_session_and_project(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(ts.server, "parse_interaction_id", lambda out: None)
+    monkeypatch.setattr(ts, "_strip_footer", lambda out: out)
+
+    def fake_answer(
+        prompt,
+        history,
+        trace=False,
+        strict=None,
+        tier=None,
+        context_size="",
+        session="",
+        project="",
+    ):
+        seen["session"] = session
+        seen["project"] = project
+        return "ok"
+
+    monkeypatch.setattr(ts.server, "answer_with_history", fake_answer)
+
+    assert ts._run_prompt("hi", session="chat-1", project="app") == "ok"
+    assert seen == {"session": "chat-1", "project": "app"}
+
+
 def test_cot_slash_is_denied(monkeypatch):
     monkeypatch.setattr(
         ts.server,
