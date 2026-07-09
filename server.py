@@ -991,6 +991,9 @@ def trilobite(
     tier: str = "",
 ) -> str:
     """Ask Trilobite and show observable activity for the response."""
+    command = control_command(prompt, session=session, project=project)
+    if command is not None:
+        return command
     label = "trilobite:%s" % ((tier or "trilobite").strip() or "trilobite")
     with activity_tracker.response_span(
         label,
@@ -2359,7 +2362,7 @@ def master_orchestrate(
             "  inline   - master handles the task directly.\n"
             "  delegate - spawn %d parallel agent(s), audit their outputs, then merge.\n"
             "Call master_orchestrate(task, mode='inline'|'delegate') or chat `/master inline ...`."
-        ) % max(1, min(8, int(agents or 3)))
+        ) % master_orchestrator.clamp_agent_count(agents, default=3)
     if not task:
         return "ERROR: empty task."
     worker = _orchestrator_worker(tier, learn=learn)

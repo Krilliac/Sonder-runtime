@@ -408,6 +408,14 @@ def test_master_orchestrate_asks_for_execution_mode():
     assert "delegate" in out
 
 
+def test_master_orchestrate_ask_reports_widened_agent_cap(monkeypatch):
+    monkeypatch.setenv("TRILOBITE_MAX_AGENTS", "16")
+
+    out = server.master_orchestrate("build a parser", mode="ask", agents=99)
+
+    assert "spawn 16 parallel agent(s)" in out
+
+
 def test_master_orchestrate_delegates_and_audits(monkeypatch):
     calls = []
 

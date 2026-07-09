@@ -1,6 +1,7 @@
 """Master/subagent orchestration with live status snapshots."""
 from __future__ import annotations
 
+import os
 import threading
 import time
 import uuid
@@ -11,6 +12,26 @@ _LOCK = threading.RLock()
 _AGENTS = {}
 _EVENTS = []
 _MAX_EVENTS = 80
+DEFAULT_MAX_AGENTS = 16
+ABSOLUTE_MAX_AGENTS = 64
+
+
+def max_agents() -> int:
+    """Configured upper bound for delegated subagents."""
+    raw = os.environ.get("TRILOBITE_MAX_AGENTS", str(DEFAULT_MAX_AGENTS))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = DEFAULT_MAX_AGENTS
+    return max(1, min(value, ABSOLUTE_MAX_AGENTS))
+
+
+def clamp_agent_count(count: int | str | None, default: int = 3) -> int:
+    try:
+        requested = int(count or default)
+    except (TypeError, ValueError):
+        requested = default
+    return max(1, min(requested, max_agents()))
 
 
 def _now() -> float:
@@ -115,7 +136,7 @@ def run_inline(task: str, worker_fn) -> dict:
 
 
 def _subtask_prompts(task: str, count: int) -> list[str]:
-    count = max(1, min(8, int(count or 1)))
+    count = clamp_agent_count(count, default=1)
     prompts = []
     for i in range(count):
         prompts.append(
@@ -127,7 +148,7 @@ def _subtask_prompts(task: str, count: int) -> list[str]:
 
 
 def run_delegated(task: str, worker_fn, audit_fn, agents: int = 3) -> dict:
-    agents = max(1, min(8, int(agents or 3)))
+    agents = clamp_agent_count(agents, default=3)
     master_id = _new_agent("master", task)
     update_agent(
         master_id,

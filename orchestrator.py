@@ -63,6 +63,7 @@ def _run_compat_block(task):
         "%s\n"
         "- Return exactly one fenced ```%s code block containing complete runnable %s source.\n"
         "- The code must complete under `/run` without keyboard input or external packages.\n"
+        "- Do not use input().\n"
         "- Do not include `/run ...`, `python file.py`, `pip ...`, or other shell commands in code fences.\n"
         "- For games and demos, include a scripted smoke-test/demo mode that simulates moves or frames, prints PASS/FAIL details, and exits.\n"
         "- Avoid unbounded while/event loops unless they have an auto-exit path that runs by default.\n"
