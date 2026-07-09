@@ -38,6 +38,12 @@ COMMANDS = [
         "summary": "List commands by category, name, or risk.",
     },
     {
+        "name": "/dump",
+        "category": "inspect",
+        "risk": "safe",
+        "summary": "Write the current chat and debug state to a text file.",
+    },
+    {
         "name": "/todo",
         "category": "planning",
         "risk": "safe",

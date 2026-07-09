@@ -27,6 +27,7 @@ import training_tasks
 import intents
 import feedback
 import live_reload
+import debug_dump
 
 DEFAULT_PORT = 11435
 
@@ -42,8 +43,10 @@ TRACE = False
 STRICT = None  # None = env default (server._STRICT_DEFAULT)
 LAST_IID = None
 LAST_RESPONSE = None  # full last assistant turn (with footer), for /run
+LAST_RUN_SOURCE = None  # answer-only text; trace/footer removed for /run
 CURRENT_ACCOUNT = None
 CURRENT_TOKEN = ""
+CHAT_EVENTS = []
 
 TRAIN_DEFAULT_N = 3
 
@@ -68,6 +71,7 @@ LIVE_RELOAD_MODULES = [
     "admin_auth",
     "command_registry",
     "permission_rules",
+    "debug_dump",
 ]
 
 HELP_TEXT = """commands:
@@ -79,6 +83,7 @@ HELP_TEXT = """commands:
   /contextsize [N]   show/set requested context (8k..1m; native num_ctx is clamped)
   /compact           preview context compaction/rollover recommendations
   /commands [filter] list available commands by category, name, or risk
+  /dump [label]      dump chat log and debug info to a text file
   /todo ...          list/add/update visible task state
   /quality           audit lesson quality and duplicate rows
   /qualityfix [apply] dry-run or apply exact duplicate lesson cleanup
@@ -157,8 +162,30 @@ def _strip_footer(text):
     return text[:idx]
 
 
+def _strip_trace(text):
+    marker = "\n=== TRACE (how trilobite decided) ==="
+    idx = (text or "").find(marker)
+    if idx == -1:
+        idx = (text or "").find("=== TRACE (how trilobite decided) ===")
+    if idx == -1:
+        return text or ""
+    return (text or "")[:idx].rstrip()
+
+
+def _answer_only(text):
+    return _strip_trace(_strip_footer(text or "")).rstrip()
+
+
+def _record_chat(role, content, kind="message"):
+    CHAT_EVENTS.append({
+        "role": "%s/%s" % (role, kind),
+        "content": content or "",
+    })
+    del CHAT_EVENTS[:-200]
+
+
 def _maybe_live_reload():
-    global server, grounding, training_tasks, intents, feedback, admin_auth
+    global server, grounding, training_tasks, intents, feedback, admin_auth, debug_dump
     modules = live_reload.reload_changed_modules(LIVE_RELOAD_MODULES)
     server = modules.get("server", server)
     grounding = modules.get("grounding", grounding)
@@ -166,6 +193,7 @@ def _maybe_live_reload():
     intents = modules.get("intents", intents)
     feedback = modules.get("feedback", feedback)
     admin_auth = modules.get("admin_auth", admin_auth)
+    debug_dump = modules.get("debug_dump", debug_dump)
 
 
 def _on_off(arg, current):
@@ -234,7 +262,7 @@ def _parse_run_timeout(arg):
 
 def _do_run(timeout=grounding.DEFAULT_TIMEOUT):
     """Execute the code block from LAST_RESPONSE via grounding. Mirrors the REPL's /run."""
-    block = grounding.extract_runnable_code_block(LAST_RESPONSE)
+    block = grounding.extract_runnable_code_block(LAST_RUN_SOURCE or LAST_RESPONSE)
     if block is None:
         return "(no code block in the last response to run)"
     result = code_runner.run_code(
@@ -252,7 +280,7 @@ def _do_run(timeout=grounding.DEFAULT_TIMEOUT):
 
 
 def _do_runproject(timeout=grounding.MAX_TIMEOUT):
-    files = grounding.extract_project_files(LAST_RESPONSE)
+    files = grounding.extract_project_files(LAST_RUN_SOURCE or LAST_RESPONSE)
     if not files:
         return "(no file/path fenced project blocks in the last response)"
     result = code_runner.run_project({"files": files}, timeout=timeout)
@@ -288,7 +316,29 @@ def _do_train(n):
     return "\n".join(lines)
 
 
-def _handle_slash(content):
+def _dump_chat(messages=None, label="chat"):
+    label = (label or "chat").strip() or "chat"
+    sections = [
+        ("trace", "on" if TRACE else "off"),
+        ("strict", str(STRICT)),
+        ("last interaction id", LAST_IID or "(none)"),
+        ("last answer source", LAST_RUN_SOURCE or "(none)"),
+        ("context", server.context_health()),
+        ("quality", server.memory_quality_report(sample_limit=5)),
+        ("agents", server.master_status(limit=20)),
+        ("diagnostics", server.diagnostics()),
+    ]
+    path = debug_dump.write_dump(
+        server.trilobite_paths.default_home(),
+        label=label,
+        messages=messages or [],
+        sections=sections,
+        events=CHAT_EVENTS,
+    )
+    return "dumped chat/debug log to %s" % path
+
+
+def _handle_slash(content, messages=None):
     """Return response text if `content` is a recognized slash command, else None."""
     global TRACE, STRICT, LAST_IID, CURRENT_ACCOUNT, CURRENT_TOKEN
 
@@ -302,6 +352,8 @@ def _handle_slash(content):
 
     if cmd == "/help":
         return HELP_TEXT
+    if cmd == "/dump":
+        return _dump_chat(messages=messages, label=arg.strip() or "chat")
     if cmd == "/stats":
         return server.trilobite_stats()
     if cmd == "/context":
@@ -552,7 +604,7 @@ def _model_to_tier(model):
 
 def _run_prompt(prompt, history=None, tier=None, context_size=""):
     """Call the real trilobite loop with the UI's prior turns; returns UI text."""
-    global LAST_IID, LAST_RESPONSE
+    global LAST_IID, LAST_RESPONSE, LAST_RUN_SOURCE
 
     out = server.answer_with_history(
         prompt, history, trace=TRACE, strict=STRICT, tier=tier,
@@ -562,6 +614,7 @@ def _run_prompt(prompt, history=None, tier=None, context_size=""):
         return out
     LAST_IID = server.parse_interaction_id(out)
     LAST_RESPONSE = out
+    LAST_RUN_SOURCE = _answer_only(out)
     return _strip_footer(out)
 
 
@@ -774,9 +827,11 @@ class Handler(BaseHTTPRequestHandler):
         context_size = req.get("context_size", "")
         prompt = _last_user_message(messages)
         history = _history_from_messages(messages)
+        _record_chat("user", prompt)
 
+        reply = None
         try:
-            reply = _handle_slash(prompt)
+            reply = _handle_slash(prompt, messages=messages)
             if reply is None:
                 reply = _handle_feedback(prompt)
             if reply is None:
@@ -785,6 +840,7 @@ class Handler(BaseHTTPRequestHandler):
                 prompt, history, _model_to_tier(model), context_size=context_size)
         except Exception:
             content = "ERROR: %s" % traceback.format_exc()
+        _record_chat("assistant", content, kind="slash" if reply is not None else "model")
 
         if stream:
             self._send_stream(content, model)

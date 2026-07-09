@@ -16,6 +16,7 @@ import intents
 import feedback
 import personas
 import live_reload
+import debug_dump
 
 CURRENT_TOKEN = ""
 
@@ -33,6 +34,7 @@ HELP = """commands:
   /contextsize [N]   show/set requested context (8k..1m; native num_ctx is clamped)
   /compact           preview context compaction/rollover recommendations
   /commands [filter] list available commands by category, name, or risk
+  /dump [label]      dump this chat and debug info to a text file
   /todo ...          list/add/update visible task state
   /quality           audit lesson quality and duplicate rows
   /qualityfix [apply] dry-run or apply exact duplicate lesson cleanup
@@ -96,11 +98,12 @@ LIVE_RELOAD_MODULES = [
     "web_tools",
     "command_registry",
     "permission_rules",
+    "debug_dump",
 ]
 
 
 def _maybe_live_reload():
-    global server, memory_store, grounding, training_tasks, intents, feedback, personas
+    global server, memory_store, grounding, training_tasks, intents, feedback, personas, debug_dump
     modules = live_reload.reload_changed_modules(LIVE_RELOAD_MODULES)
     server = modules.get("server", server)
     memory_store = modules.get("memory_store", memory_store)
@@ -109,6 +112,7 @@ def _maybe_live_reload():
     intents = modules.get("intents", intents)
     feedback = modules.get("feedback", feedback)
     personas = modules.get("personas", personas)
+    debug_dump = modules.get("debug_dump", debug_dump)
 
 
 def _strip_footer(text):
@@ -116,6 +120,20 @@ def _strip_footer(text):
     if idx == -1:
         return text
     return text[:idx]
+
+
+def _strip_trace(text):
+    marker = "\n=== TRACE (how trilobite decided) ==="
+    idx = (text or "").find(marker)
+    if idx == -1:
+        idx = (text or "").find("=== TRACE (how trilobite decided) ===")
+    if idx == -1:
+        return text or ""
+    return (text or "")[:idx].rstrip()
+
+
+def _answer_only(text):
+    return _strip_trace(_strip_footer(text or "")).rstrip()
 
 
 def _print_lessons():
@@ -229,6 +247,7 @@ def main():
     persona = personas.DEFAULT
     last_iid = None
     last_response = None
+    last_run_source = None
     # A fresh conversation thread per REPL launch; /new rerolls it, /resume switches it.
     session_id = memory_store.new_id()
     project = server.DEFAULT_PROJECT
@@ -253,7 +272,7 @@ def main():
         print("persona: %s" % persona)
 
     def do_run(timeout=grounding.DEFAULT_TIMEOUT):
-        block = grounding.extract_runnable_code_block(last_response)
+        block = grounding.extract_runnable_code_block(last_run_source or last_response)
         if block is None:
             print("(no code block in the last response to run)")
             return
@@ -271,13 +290,44 @@ def main():
             print("[exited with error]")
 
     def do_runproject(timeout=grounding.MAX_TIMEOUT):
-        files = grounding.extract_project_files(last_response)
+        files = grounding.extract_project_files(last_run_source or last_response)
         if not files:
             print("(no file/path fenced project blocks in the last response)")
             return
         result = code_runner.run_project({"files": files}, timeout=timeout)
         print(code_runner.format_project_result(result))
         print("[ran OK]" if result.get("ok") else "[project failed]")
+
+    def do_dump(label="repl"):
+        conn = server._open_db()
+        try:
+            turns = memory_store.session_turns(conn, session_id)
+        finally:
+            conn.close()
+        messages = []
+        for turn in turns:
+            messages.append({"role": "user", "content": turn.get("task") or ""})
+            messages.append({"role": "assistant", "content": turn.get("response") or ""})
+        sections = [
+            ("session", session_id),
+            ("project", project),
+            ("trace", "on" if trace else "off"),
+            ("strict", str(strict)),
+            ("persona", persona),
+            ("last interaction id", last_iid or "(none)"),
+            ("last answer source", last_run_source or "(none)"),
+            ("context", server.context_health(session=session_id, project=project)),
+            ("quality", server.memory_quality_report(sample_limit=5)),
+            ("agents", server.master_status(limit=20)),
+            ("diagnostics", server.diagnostics()),
+        ]
+        path = debug_dump.write_dump(
+            server.trilobite_paths.default_home(),
+            label=label or "repl",
+            messages=messages,
+            sections=sections,
+        )
+        print("dumped chat/debug log to %s" % path)
 
     print(BANNER)
 
@@ -319,6 +369,8 @@ def main():
                 print(server.context_compaction_plan(session=session_id, project=project))
             elif cmd in ("/commands", "/cmds"):
                 print(server.command_registry_list(arg.strip()))
+            elif cmd == "/dump":
+                do_dump(arg.strip() or "repl")
             elif cmd in ("/permissions", "/perms"):
                 print(server.permission_policy(arg.strip()))
             elif cmd in ("/todo", "/task", "/tasks"):
@@ -493,6 +545,7 @@ def main():
                 session_id = memory_store.new_id()
                 last_iid = None
                 last_response = None
+                last_run_source = None
                 print("started a new thread (%s)" % session_id)
             elif cmd == "/sessions":
                 _print_sessions()
@@ -510,6 +563,7 @@ def main():
                         session_id = found
                         last_iid = None
                         last_response = None
+                        last_run_source = None
                         print("resumed thread %s" % session_id)
                     else:
                         print("no session matching '%s'" % target)
@@ -581,6 +635,7 @@ def main():
 
         last_iid = server.parse_interaction_id(out)
         last_response = out
+        last_run_source = _answer_only(out)
         cleaned = _strip_footer(out)
         print(cleaned)
         if last_iid:

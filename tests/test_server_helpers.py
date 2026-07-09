@@ -277,6 +277,19 @@ def test_set_context_size_selects_virtual_context(monkeypatch):
         server.SESSION_NUM_CTX = old
 
 
+def test_control_command_routes_quality_before_model(monkeypatch):
+    monkeypatch.setattr(server, "memory_quality_report", lambda: "quality report")
+
+    assert server.control_command("/quality") == "quality report"
+
+
+def test_trilobite_slash_command_does_not_call_model(monkeypatch):
+    monkeypatch.setattr(server, "context_health", lambda: "context health")
+    monkeypatch.setattr(server, "_serve_target", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("model should not resolve")))
+
+    assert server.trilobite("/context") == "context health"
+
+
 def test_improvement_report_flags_ungrounded_learning(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
     conn = server._open_db()

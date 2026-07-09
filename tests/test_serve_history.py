@@ -61,10 +61,33 @@ def test_do_run_returns_structured_error_for_input_program():
 
 def test_run_accepts_optional_timeout():
     ts.LAST_RESPONSE = "```python\nprint('slow smoke')\n```"
+    ts.LAST_RUN_SOURCE = None
     out = ts._handle_slash("/run 12")
 
     assert "timeout: 12s" in out
     assert "slow smoke" in out
+
+
+def test_run_uses_answer_source_not_trace(monkeypatch):
+    seen = {}
+    ts.LAST_RESPONSE = (
+        "```python\nprint('answer')\n```\n"
+        "=== TRACE (how trilobite decided) ===\n"
+        "```python\nprint('trace')\n```"
+    )
+    ts.LAST_RUN_SOURCE = "```python\nprint('answer')\n```"
+
+    def fake_run(code, language="python", timeout=8):
+        seen["code"] = code
+        return {"ok": True, "stdout": "answer", "stderr": "", "timeout": timeout, "returncode": 0}
+
+    monkeypatch.setattr(ts.code_runner, "run_code", fake_run)
+    monkeypatch.setattr(ts.code_runner, "format_result", lambda result: result["stdout"])
+
+    out = ts._handle_slash("/run")
+
+    assert out.endswith("[ran OK]")
+    assert seen["code"] == "print('answer')"
 
 
 def test_run_rejects_invalid_timeout():
@@ -137,6 +160,28 @@ def test_claude_like_slash_controls_route(monkeypatch):
     assert ts._handle_slash("/todo done abc") == "update abc done"
     assert ts._handle_slash("/todo block abc") == "update abc blocked"
     assert ts._handle_slash("/todo show abc") == "show abc"
+
+
+def test_dump_slash_writes_debug_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(ts.server.trilobite_paths, "default_home", lambda: tmp_path)
+    monkeypatch.setattr(ts.server, "context_health", lambda: "context")
+    monkeypatch.setattr(ts.server, "memory_quality_report", lambda sample_limit=5: "quality")
+    monkeypatch.setattr(ts.server, "master_status", lambda limit=20: "agents")
+    monkeypatch.setattr(ts.server, "diagnostics", lambda: "diagnostics")
+    ts.CHAT_EVENTS[:] = [{"role": "user/message", "content": "hello"}]
+    ts.LAST_RUN_SOURCE = "last answer"
+
+    out = ts._handle_slash(
+        "/dump bug",
+        messages=[{"role": "user", "content": "/quality"}],
+    )
+
+    assert out.startswith("dumped chat/debug log to ")
+    path = out.split(" to ", 1)[1]
+    text = open(path, encoding="utf-8").read()
+    assert "== messages ==" in text
+    assert "/quality" in text
+    assert "last answer" in text
 
 
 def test_run_prompt_passes_context_size(monkeypatch):

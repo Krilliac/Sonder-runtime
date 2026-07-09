@@ -283,6 +283,11 @@ class _SystemScreenState extends State<SystemScreen> {
                   label: const Text('Commands'),
                 ),
                 OutlinedButton.icon(
+                  onPressed: _working ? null : () => _sendCommand('/dump app'),
+                  icon: const Icon(Icons.description_outlined),
+                  label: const Text('Dump'),
+                ),
+                OutlinedButton.icon(
                   onPressed: _working ? null : () => _sendCommand('/permissions'),
                   icon: const Icon(Icons.security_outlined),
                   label: const Text('Permissions'),

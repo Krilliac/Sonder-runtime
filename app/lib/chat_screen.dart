@@ -44,6 +44,7 @@ class _ChatScreenState extends State<ChatScreen> {
     '/context': 'Show context health',
     '/compact': 'Preview context compaction',
     '/commands': 'List command registry',
+    '/dump': 'Save chat/debug dump',
     '/todo': 'Show visible task state',
     '/quality': 'Audit memory quality',
     '/improve': 'Show next improvements',

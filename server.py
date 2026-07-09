@@ -424,6 +424,50 @@ def _serve_target(tier, strict):
     return None, False, True, None
 
 
+def control_command(prompt: str):
+    """Handle safe slash commands before a prompt reaches the model.
+
+    Client layers have richer commands like /run that depend on their local last
+    response. This guard catches read-only/status commands for direct MCP/API
+    calls too, so `/quality` and `/context` never get treated as ordinary model
+    prompts.
+    """
+    text = (prompt or "").strip()
+    if not text.startswith("/"):
+        return None
+    parts = text.split(None, 1)
+    cmd = parts[0].lower()
+    arg = parts[1] if len(parts) > 1 else ""
+    if cmd == "/stats":
+        return trilobite_stats()
+    if cmd == "/context":
+        return context_health()
+    if cmd in ("/contextsize", "/ctxsize"):
+        return set_context_size(arg.strip()) if arg.strip() else context_policy_status()
+    if cmd in ("/compact", "/compaction"):
+        return context_compaction_plan()
+    if cmd in ("/commands", "/cmds"):
+        return command_registry_list(arg.strip())
+    if cmd in ("/permissions", "/perms"):
+        return permission_policy(arg.strip())
+    if cmd == "/quality":
+        return memory_quality_report()
+    if cmd == "/qualityfix":
+        return memory_quality_repair(apply=(arg.strip().lower() == "apply"))
+    if cmd in ("/improve", "/improvements"):
+        return system_improvement_report()
+    if cmd in ("/agents", "/masterstatus"):
+        return master_status()
+    if cmd in ("/cot", "/chainofthought", "/thoughts"):
+        return admin_private_chain_of_thought()
+    if cmd in ("/run", "/runproject", "/dump"):
+        return (
+            "%s is handled by the active client because it depends on the current "
+            "chat transcript or last displayed answer. Use it from the REPL or app."
+        ) % cmd
+    return None
+
+
 def _canonical_learn_tier(tier_label):
     """Map a recorded tier label to the LEARN_TIERS key that governs it. The local
     student is labeled 'trilobite' on interactions but is gated by the same 'code'
@@ -681,6 +725,9 @@ def trilobite(
     to steer tone; its system prompt is prepended ahead of `system`/trace instructions.
     """
     _maybe_live_reload()
+    command = control_command(prompt)
+    if command is not None:
+        return command
     tgt_model, cloud, augment, tier_label = _serve_target(tier, strict)
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()
@@ -744,6 +791,9 @@ def answer_with_history(prompt, history, trace=False, strict=None, tier=None, co
     the app learns from whatever model you point it at. Returns the reply (with footer).
     """
     _maybe_live_reload()
+    command = control_command(prompt)
+    if command is not None:
+        return command
     model, cloud, augment, tier_label = _serve_target(tier, strict)
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()
