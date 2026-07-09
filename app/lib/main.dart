@@ -12,7 +12,9 @@ void main() {
 }
 
 class TrilobiteApp extends StatefulWidget {
-  const TrilobiteApp({super.key});
+  final bool manageLocalServer;
+
+  const TrilobiteApp({super.key, this.manageLocalServer = true});
 
   @override
   State<TrilobiteApp> createState() => _TrilobiteAppState();
@@ -33,7 +35,11 @@ class _TrilobiteAppState extends State<TrilobiteApp> with WidgetsBindingObserver
   }
 
   Future<void> _autoStartServer(Settings settings) async {
-    if (_startedLocalServer || !LocalManager.canRunLocalTools) return;
+    if (!widget.manageLocalServer ||
+        _startedLocalServer ||
+        !LocalManager.canRunLocalTools) {
+      return;
+    }
     _startedLocalServer = true;
     await LocalManager.startServer(
       allowHosted: settings.allowHosted,
@@ -48,7 +54,7 @@ class _TrilobiteAppState extends State<TrilobiteApp> with WidgetsBindingObserver
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.detached) {
+    if (widget.manageLocalServer && state == AppLifecycleState.detached) {
       unawaited(LocalManager.stopServers());
     }
   }
@@ -56,7 +62,9 @@ class _TrilobiteAppState extends State<TrilobiteApp> with WidgetsBindingObserver
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    unawaited(LocalManager.stopServers());
+    if (widget.manageLocalServer) {
+      unawaited(LocalManager.stopServers());
+    }
     super.dispose();
   }
 

@@ -7,7 +7,7 @@ void main() {
   testWidgets('App boots to the chat screen', (tester) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
 
-    await tester.pumpWidget(const TrilobiteApp());
+    await tester.pumpWidget(const TrilobiteApp(manageLocalServer: false));
     await tester.pumpAndSettle();
 
     // Model picker in the title bar shows the local model once settings resolve.
