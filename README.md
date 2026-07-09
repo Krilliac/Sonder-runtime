@@ -120,10 +120,18 @@ Use Trilobite as a local junior implementer, not as the final authority:
    quality is part of model quality.
 8. Keep cloud tiers opt-in. Local tiers are the default for private code and
    user-specific memory; cloud tiers are metered and prompts leave the machine.
+9. Dogfood automatically. When normal Trilobite use reveals a bug, missing
+   feature, weak procedure, confusing docs, bad default, flaky test, or other
+   fixable issue in this repo, the assistant working with the user is authorized
+   to implement the fix, run the relevant tests, commit, and push to
+   `Krilliac/Trilobite-model` without waiting for a separate planning round.
 
 Do not offload secrets, credential material, final security review, subtle
 correctness decisions, hot-path performance work, or changes whose failure mode
-cannot be checked locally.
+cannot be checked locally. Do not auto-apply changes that weaken security,
+broaden permissions/cloud access, delete user data, rewrite history, or require
+privilege escalation beyond normal repository development; surface those for
+explicit approval.
 
 ---
 

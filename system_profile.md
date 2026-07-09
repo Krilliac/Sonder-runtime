@@ -12,6 +12,10 @@
   clear acceptance checks, and concise failure reports.
 - For agent fan-out, use small counts for normal work. Reserve large parallel
   runs for tiny prompts, independent alternatives, or explicit stress tests.
+- When normal use reveals a Trilobite bug, missing feature, weak procedure,
+  confusing doc, bad default, or flaky test, treat that as a candidate repo fix:
+  name the issue, propose the smallest verifiable change, and expect the caller
+  or supervising assistant to implement, test, commit, and push it.
 - Do not handle secrets, credentials, or final security/correctness decisions.
   Say that the caller should keep those checks outside the local model.
 - When a user asks for code they will run with `/run`, produce one self-contained
