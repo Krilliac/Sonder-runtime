@@ -346,25 +346,76 @@ Write-Output "Stopped $count Trilobite server process(es)."
       if (!await gitDir.exists()) {
         return _replaceBundledSystemFromGit(system);
       }
-      final result = await Process.run(
-        'git',
-        ['pull', '--ff-only'],
-        workingDirectory: system.path,
-        environment: processEnvironment(),
-      ).timeout(const Duration(minutes: 3));
-      final output = [
-        if ((result.stdout as String).trim().isNotEmpty)
-          (result.stdout as String).trim(),
-        if ((result.stderr as String).trim().isNotEmpty)
-          (result.stderr as String).trim(),
-      ].join('\n');
+      final status = await _runGit(system, ['status', '--porcelain']);
+      final hadLocalChanges = (status.stdout as String).trim().isNotEmpty;
+      final result = await _runGit(
+        system,
+        ['pull', '--rebase', '--autostash'],
+        timeout: const Duration(minutes: 5),
+      );
+      var output = _processOutput(result);
+      if (result.exitCode != 0 && _looksLikeMissingUpstream(output)) {
+        final fallback = await _runGit(
+          system,
+          ['pull', '--rebase', '--autostash', 'origin', 'main'],
+          timeout: const Duration(minutes: 5),
+        );
+        output = _processOutput(fallback);
+        return LocalActionResult(
+          fallback.exitCode == 0,
+          _gitUpdateMessage(output, fallback.exitCode, hadLocalChanges),
+        );
+      }
       return LocalActionResult(
         result.exitCode == 0,
-        output.isEmpty ? 'Git exited with code ${result.exitCode}.' : output,
+        _gitUpdateMessage(output, result.exitCode, hadLocalChanges),
       );
     } catch (e) {
       return LocalActionResult(false, 'Could not update: $e');
     }
+  }
+
+  static Future<ProcessResult> _runGit(
+    Directory system,
+    List<String> args, {
+    Duration timeout = const Duration(minutes: 3),
+  }) {
+    return Process.run(
+      'git',
+      args,
+      workingDirectory: system.path,
+      environment: processEnvironment(),
+    ).timeout(timeout);
+  }
+
+  static String _processOutput(ProcessResult result) {
+    return [
+      if ((result.stdout as String).trim().isNotEmpty)
+        (result.stdout as String).trim(),
+      if ((result.stderr as String).trim().isNotEmpty)
+        (result.stderr as String).trim(),
+    ].join('\n');
+  }
+
+  static bool _looksLikeMissingUpstream(String output) {
+    final text = output.toLowerCase();
+    return text.contains('no tracking information') ||
+        text.contains('no upstream branch') ||
+        text.contains('there is no tracking information');
+  }
+
+  static String _gitUpdateMessage(
+    String output,
+    int exitCode,
+    bool hadLocalChanges,
+  ) {
+    final lines = <String>[
+      if (hadLocalChanges)
+        'Local edits were temporarily saved while updating. If Git reports conflicts, open the bundled local-system folder and resolve them there.',
+      if (output.trim().isNotEmpty) output.trim(),
+      if (output.trim().isEmpty) 'Git exited with code $exitCode.',
+    ];
+    return lines.join('\n');
   }
 
   static Future<LocalActionResult> _replaceBundledSystemFromGit(
