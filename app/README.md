@@ -71,6 +71,11 @@ has **Keep local server running after app closes** enabled. With that option on,
 the server is launched in background mode so it can keep serving headless after
 the GUI exits.
 
+If an older app build's **Update from Git** button aborts because local files
+would be overwritten, run `trilobite-safe-update.cmd` from the bundled
+`local-system` folder once. Newer app builds call that same safe updater from
+the button.
+
 Runtime state is shared outside the install folder. By default the bundled
 server uses `%LOCALAPPDATA%\trilobite` on Windows, `$XDG_DATA_HOME/trilobite`
 or `~/.local/share/trilobite` on Linux, and the equivalent app data home on

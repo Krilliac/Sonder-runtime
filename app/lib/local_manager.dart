@@ -418,6 +418,40 @@ Write-Output "Stopped \$count Trilobite server process(es)."
       if (!await gitDir.exists()) {
         return _replaceBundledSystemFromGit(system);
       }
+      final safeUpdater =
+          File('${system.path}${Platform.pathSeparator}safe_update.py');
+      final safeUpdaterCmd =
+          File('${system.path}${Platform.pathSeparator}trilobite-safe-update.cmd');
+      if (Platform.isWindows && await safeUpdaterCmd.exists()) {
+        final safe = await Process.run(
+          'cmd.exe',
+          ['/c', safeUpdaterCmd.path],
+          workingDirectory: system.path,
+          environment: processEnvironment(),
+        ).timeout(const Duration(minutes: 8));
+        final output = _processOutput(safe);
+        return LocalActionResult(
+          safe.exitCode == 0,
+          output.isEmpty
+              ? 'Safe updater exited with code ${safe.exitCode}.'
+              : output,
+        );
+      }
+      if (await safeUpdater.exists()) {
+        final safe = await Process.run(
+          Platform.isWindows ? 'python.exe' : 'python3',
+          [safeUpdater.path, '--repo', system.path],
+          workingDirectory: system.path,
+          environment: processEnvironment(),
+        ).timeout(const Duration(minutes: 8));
+        final output = _processOutput(safe);
+        return LocalActionResult(
+          safe.exitCode == 0,
+          output.isEmpty
+              ? 'Safe updater exited with code ${safe.exitCode}.'
+              : output,
+        );
+      }
       final status = await _runGit(system, ['status', '--porcelain']);
       final hadLocalChanges = (status.stdout as String).trim().isNotEmpty;
       final result = await _runGit(

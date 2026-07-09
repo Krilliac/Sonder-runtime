@@ -73,6 +73,7 @@ def copy_payload(dest: Path) -> None:
         "Run bootstrap-engine.cmd for one-click local model setup on Windows.\n"
         "Run trilobite-headless.cmd start/status/stop to manage Ollama + Trilobite without the app.\n"
         "Run trilobite-serve.cmd on Windows, or python trilobite_serve.py on Linux/macOS.\n"
+        "Run trilobite-safe-update.cmd if an older GUI update button gets stuck on local Git edits.\n"
         "Run endless-train.cmd for continuous grounded local training.\n"
         "Model weights are managed by Ollama and may be pulled on first setup.\n",
         encoding="utf-8",
