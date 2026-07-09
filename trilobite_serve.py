@@ -111,6 +111,7 @@ HELP_TEXT = """commands:
   /copied,/edited    record copy/edit passive learning signals
   /fail, /bad        record the last answer as failed
   /run [seconds]     execute the code block from the last response (default 8s)
+  /runwindow [sec]   launch the last code block in a separate Windows console
   /runproject [sec]  execute file/path fenced blocks as a temp project
   /train, /learn [N] grounded self-learning: practice N tasks (default 3, max 500)
 
@@ -300,6 +301,23 @@ def _do_run_from_messages(timeout=grounding.DEFAULT_TIMEOUT, messages=None):
     else:
         status = "[exited with error]"
     return "%s\n%s" % (code_runner.format_result(result), status)
+
+
+def _do_run_window_from_messages(timeout=grounding.DEFAULT_TIMEOUT, messages=None):
+    block = None
+    for source in _run_sources_from_messages(messages):
+        block = grounding.extract_runnable_code_block(source)
+        if block is not None:
+            break
+    if block is None:
+        return "(no code block in the last response to run)"
+    result = code_runner.run_code_window(
+        block["code"],
+        language=block["language"],
+        timeout=timeout,
+    )
+    status = "[launched]" if result.get("ok") else "[launch failed]"
+    return "%s\n%s" % (code_runner.format_window_result(result), status)
 
 
 def _do_runproject(timeout=grounding.MAX_TIMEOUT):
@@ -552,6 +570,11 @@ def _handle_slash(content, messages=None):
         if err:
             return err
         return _do_run_from_messages(timeout, messages=messages)
+    if cmd in ("/runwindow", "/runnew", "/runconsole"):
+        timeout, err = _parse_run_timeout(arg)
+        if err:
+            return err
+        return _do_run_window_from_messages(timeout, messages=messages)
     if cmd == "/runproject":
         timeout, err = _parse_run_timeout(arg)
         if err:

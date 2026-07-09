@@ -116,6 +116,37 @@ def test_run_falls_back_to_prior_assistant_message(monkeypatch):
     assert seen == {"code": "int main(){return 0;}", "language": "cpp"}
 
 
+def test_runwindow_uses_prior_runnable_block(monkeypatch):
+    seen = {}
+    ts.LAST_RESPONSE = "```cpp\nint main(){return 0;}\n```"
+    ts.LAST_RUN_SOURCE = None
+
+    def fake_run_window(code, language="python", timeout=8):
+        seen["code"] = code
+        seen["language"] = language
+        seen["timeout"] = timeout
+        return {
+            "ok": True,
+            "stdout": "launched",
+            "stderr": "",
+            "timeout": timeout,
+            "returncode": None,
+            "language": language,
+            "cwd": "C:/repo",
+            "error": "",
+            "detached": True,
+            "run_dir": "C:/tmp/trilobite-window",
+        }
+
+    monkeypatch.setattr(ts.code_runner, "run_code_window", fake_run_window)
+
+    out = ts._handle_slash("/runwindow 7")
+
+    assert out.endswith("[launched]")
+    assert "run dir: C:/tmp/trilobite-window" in out
+    assert seen == {"code": "int main(){return 0;}", "language": "cpp", "timeout": 7}
+
+
 def test_run_rejects_invalid_timeout():
     out = ts._handle_slash("/run python pong.py")
 

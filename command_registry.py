@@ -68,6 +68,12 @@ COMMANDS = [
         "summary": "Run the previous fenced code block with a timeout.",
     },
     {
+        "name": "/runwindow",
+        "category": "execution",
+        "risk": "ask",
+        "summary": "Launch the previous fenced code block in a separate Windows console.",
+    },
+    {
         "name": "/runproject",
         "category": "execution",
         "risk": "ask",

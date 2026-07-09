@@ -55,6 +55,7 @@ MAX_LOOP_ITERATIONS = 50
 MAX_LOOP_DELAY_SECONDS = 10.0
 MAX_PROJECT_FILES = 80
 MAX_PROJECT_BYTES = 750000
+RUN_WINDOW_DIR_ENV = "TRILOBITE_RUN_WINDOW_DIR"
 
 
 def _powershell_exe():
@@ -169,6 +170,62 @@ def _run_process(cmd, cwd, stdin, timeout, language):
     return _completed_result(proc, language, cwd, timeout)
 
 
+def _persistent_run_dir():
+    base = os.environ.get(RUN_WINDOW_DIR_ENV, "").strip()
+    if not base:
+        home = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+        base = os.path.join(home, "trilobite", "runs")
+    os.makedirs(base, exist_ok=True)
+    return tempfile.mkdtemp(prefix="trilobite-window-", dir=base)
+
+
+def _bat_quote(value):
+    return '"%s"' % str(value).replace('"', "")
+
+
+def _write_launcher(run_dir, lines):
+    path = os.path.join(run_dir, "launch.bat")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("@echo off\r\n")
+        f.write("cd /d %s\r\n" % _bat_quote(run_dir))
+        for line in lines:
+            f.write(line.rstrip() + "\r\n")
+    return path
+
+
+def _launch_console(launcher, cwd, language, timeout):
+    if os.name != "nt":
+        return _error_result(
+            language,
+            cwd,
+            timeout,
+            "/runwindow is only available on Windows consoles",
+        )
+    try:
+        proc = subprocess.Popen(
+            ["cmd", "/k", launcher],
+            cwd=cwd,
+            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+        )
+    except FileNotFoundError:
+        return _error_result(language, cwd, timeout, "cmd.exe not found")
+    except OSError as exc:
+        return _error_result(language, cwd, timeout, str(exc))
+    return {
+        "ok": True,
+        "returncode": None,
+        "stdout": "launched in a separate console window (pid %s)" % proc.pid,
+        "stderr": "",
+        "language": language,
+        "cwd": cwd,
+        "timeout": timeout,
+        "error": "",
+        "detached": True,
+        "pid": proc.pid,
+        "run_dir": os.path.dirname(launcher),
+    }
+
+
 def _cpp_compiler():
     for exe in ("g++", "clang++", "cl"):
         path = shutil.which(exe)
@@ -275,6 +332,32 @@ def _run_cpp(path, tmp, stdin, timeout, cwd):
     return run_result
 
 
+def _compile_cpp_for_window(path, run_dir, timeout):
+    name, compiler = _cpp_compiler()
+    if not compiler:
+        return _error_result("cpp", run_dir, timeout, SUPPORTED_LANGUAGES["cpp"]["missing"]), ""
+    exe = os.path.join(run_dir, "snippet.exe")
+    if name == "msvc-vcvars":
+        result = _msvc_compile_result(compiler, [path], exe, run_dir, timeout, "cpp")
+    elif name == "cl":
+        result = _run_process(
+            [compiler, "/nologo", "/EHsc", "/std:c++17", "/Fe:" + exe, path],
+            run_dir,
+            "",
+            timeout,
+            "cpp",
+        )
+    else:
+        result = _run_process(
+            [compiler, "-std=c++17", path, "-o", exe],
+            run_dir,
+            "",
+            timeout,
+            "cpp",
+        )
+    return result, exe
+
+
 def _run_csharp(path, tmp, stdin, timeout, cwd):
     csc = shutil.which("csc")
     if csc:
@@ -300,6 +383,33 @@ def _run_csharp(path, tmp, stdin, timeout, cwd):
         )
     os.replace(path, os.path.join(tmp, "Program.cs"))
     return _run_process([dotnet, "run", "--project", project], tmp, stdin, timeout, "csharp")
+
+
+def _compile_csharp_for_window(path, run_dir, timeout):
+    csc = shutil.which("csc")
+    if csc:
+        exe = os.path.join(run_dir, "snippet.exe")
+        result = _run_process([csc, "/nologo", "/out:" + exe, path], run_dir, "", timeout, "csharp")
+        return result, [_bat_quote(exe)]
+    dotnet = shutil.which("dotnet")
+    if not dotnet:
+        return _error_result("csharp", run_dir, timeout, SUPPORTED_LANGUAGES["csharp"]["missing"]), []
+    program = os.path.join(run_dir, "Program.cs")
+    os.replace(path, program)
+    project = os.path.join(run_dir, "Snippet.csproj")
+    with open(project, "w", encoding="utf-8") as f:
+        f.write(
+            '<Project Sdk="Microsoft.NET.Sdk">\n'
+            '  <PropertyGroup>\n'
+            '    <OutputType>Exe</OutputType>\n'
+            '    <TargetFramework>net8.0</TargetFramework>\n'
+            '    <ImplicitUsings>enable</ImplicitUsings>\n'
+            '    <Nullable>enable</Nullable>\n'
+            '  </PropertyGroup>\n'
+            '</Project>\n'
+        )
+    result = _run_process([dotnet, "build", project, "--nologo", "-v:q"], run_dir, "", timeout, "csharp")
+    return result, [_bat_quote(dotnet), "run", "--project", _bat_quote(project), "--no-build"]
 
 
 def _clamp_iterations(max_iterations):
@@ -347,6 +457,52 @@ def run_code(code, language="python", stdin="", timeout=DEFAULT_TIMEOUT, cwd=Non
         return _run_process(cmd, cwd, stdin, timeout, language)
 
 
+def run_code_window(code, language="python", timeout=DEFAULT_TIMEOUT, cwd=None):
+    """Compile/write a snippet and launch it in a separate Windows console.
+
+    Unlike run_code(), this deliberately keeps the generated run directory so an
+    interactive console app or compiled executable stays available after launch.
+    """
+    if not (code or "").strip():
+        raise ValueError("code is empty")
+    language = normalize_language(language)
+    timeout = _clamp_timeout(timeout)
+    cwd = resolve_cwd(cwd)
+    if os.name != "nt":
+        return _error_result(language, cwd, timeout, "/runwindow is only available on Windows consoles")
+
+    cfg = SUPPORTED_LANGUAGES[language]
+    run_dir = _persistent_run_dir()
+    path = os.path.join(run_dir, "snippet" + cfg["suffix"])
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(code)
+
+    if language == "cpp":
+        compile_result, exe = _compile_cpp_for_window(path, run_dir, timeout)
+        if not compile_result.get("ok"):
+            compile_result["run_dir"] = run_dir
+            return compile_result
+        launcher = _write_launcher(run_dir, [_bat_quote(exe)])
+        return _launch_console(launcher, run_dir, language, timeout)
+
+    if language == "csharp":
+        compile_result, command = _compile_csharp_for_window(path, run_dir, timeout)
+        if not compile_result.get("ok"):
+            compile_result["run_dir"] = run_dir
+            return compile_result
+        launcher = _write_launcher(run_dir, [" ".join(command)])
+        return _launch_console(launcher, run_dir, language, timeout)
+
+    if language == "javascript" and not shutil.which("node"):
+        return _error_result(language, cwd, timeout, SUPPORTED_LANGUAGES["javascript"]["missing"])
+    if language == "powershell" and not (shutil.which("pwsh") or shutil.which("powershell")):
+        return _error_result(language, cwd, timeout, SUPPORTED_LANGUAGES["powershell"]["missing"])
+
+    cmd = cfg["cmd"](path)
+    launcher = _write_launcher(run_dir, [" ".join(_bat_quote(part) for part in cmd)])
+    return _launch_console(launcher, run_dir, language, timeout)
+
+
 def format_result(result):
     status = "ok" if result.get("ok") else "failed"
     rc = result.get("returncode")
@@ -384,6 +540,16 @@ def format_result(result):
         lines.append("")
         lines.append("(no output)")
     return "\n".join(lines)
+
+
+def format_window_result(result):
+    lines = [format_result(result)]
+    if result.get("detached"):
+        lines.append("run dir: %s" % result.get("run_dir"))
+        lines.append("note: close the launched console window when you are done.")
+    elif result.get("run_dir"):
+        lines.append("run dir: %s" % result.get("run_dir"))
+    return "\n".join(line for line in lines if line)
 
 
 def _project_files_from_json(files_json):

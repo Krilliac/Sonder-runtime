@@ -56,6 +56,7 @@ class _ChatScreenState extends State<ChatScreen> {
     '/agents': 'Show live agent activity',
     '/permissions': 'Show permission rules',
     '/master': 'Choose inline or delegated execution',
+    '/runwindow': 'Launch last code in a Windows console',
     '/help': 'List commands',
     '/train': 'Practice & self-learn',
     '/pass': 'Mark last answer good',

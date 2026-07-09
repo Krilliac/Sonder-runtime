@@ -141,6 +141,41 @@ def test_run_cpp_uses_msvc_batch_when_vcvars_available(monkeypatch, tmp_path):
     assert (tmp_path / "trilobite_build_msvc.bat").exists()
 
 
+def test_run_code_window_launches_python_console(monkeypatch, tmp_path):
+    seen = {}
+
+    class FakeProc:
+        pid = 4321
+
+    def fake_popen(cmd, cwd, creationflags=0):
+        seen["cmd"] = cmd
+        seen["cwd"] = cwd
+        seen["creationflags"] = creationflags
+        return FakeProc()
+
+    monkeypatch.setattr(code_runner.os, "name", "nt", raising=False)
+    monkeypatch.setenv(code_runner.RUN_WINDOW_DIR_ENV, str(tmp_path))
+    monkeypatch.setattr(code_runner.subprocess, "Popen", fake_popen)
+
+    out = code_runner.run_code_window("print('hello window')", language="python")
+
+    assert out["ok"] is True
+    assert out["detached"] is True
+    assert out["pid"] == 4321
+    assert seen["cmd"][:2] == ["cmd", "/k"]
+    assert os.path.exists(os.path.join(out["run_dir"], "snippet.py"))
+    assert os.path.exists(os.path.join(out["run_dir"], "launch.bat"))
+
+
+def test_run_code_window_rejects_non_windows(monkeypatch):
+    monkeypatch.setattr(code_runner.os, "name", "posix", raising=False)
+
+    out = code_runner.run_code_window("print('x')", language="python")
+
+    assert out["ok"] is False
+    assert "/runwindow is only available on Windows" in out["error"]
+
+
 def test_timeout_is_clamped(monkeypatch):
     seen = {}
 

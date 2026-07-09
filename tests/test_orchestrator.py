@@ -29,6 +29,15 @@ def test_build_prompt_injects_run_compat_for_explicit_run_request():
     assert "Do not include `/run ...`" in p
 
 
+def test_build_prompt_injects_language_specific_run_compat_for_cpp():
+    p = o.build_prompt("make a simple console rpg game in C++ that will run with /run", [])
+
+    assert "```cpp code block" in p
+    assert "complete runnable C++ source" in p
+    assert "keyboard input" in p
+    assert "/runwindow" in p
+
+
 def test_run_with_learning_captures_and_returns_id():
     c = ms.connect(":memory:")
     seen = {}

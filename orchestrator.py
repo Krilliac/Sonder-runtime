@@ -20,7 +20,14 @@ def _needs_run_compatible_code(task):
     text = (task or "").lower()
     if "/run" in text:
         return True
-    game_request = "game" in text and ("python" in text or "pygame" in text)
+    language_request = any(
+        word in text
+        for word in (
+            "python", "pygame", "javascript", "node", "powershell",
+            "c++", "cpp", "c plus plus", "csharp", "c#", "c sharp",
+        )
+    )
+    game_request = "game" in text and language_request
     run_request = any(
         phrase in text
         for phrase in (
@@ -37,22 +44,37 @@ def _needs_run_compatible_code(task):
     return game_request and run_request
 
 
-def _run_compat_block():
+def _requested_run_language(task):
+    text = (task or "").lower()
+    if any(word in text for word in ("c++", "cpp", "c plus plus")):
+        return "cpp", "C++"
+    if any(word in text for word in ("csharp", "c#", "c sharp")):
+        return "csharp", "C#"
+    if any(word in text for word in ("javascript", "node", "js")):
+        return "javascript", "JavaScript"
+    if any(word in text for word in ("powershell", "pwsh", "ps1")):
+        return "powershell", "PowerShell"
+    return "python", "Python"
+
+
+def _run_compat_block(task):
+    fence, title = _requested_run_language(task)
     return (
         "%s\n"
-        "- Return exactly one fenced ```python code block containing runnable source.\n"
-        "- The code must complete under `/run` without keyboard input. Do not use input().\n"
+        "- Return exactly one fenced ```%s code block containing complete runnable %s source.\n"
+        "- The code must complete under `/run` without keyboard input or external packages.\n"
         "- Do not include `/run ...`, `python file.py`, `pip ...`, or other shell commands in code fences.\n"
-        "- For games, include a scripted smoke-test/demo mode that simulates moves or frames, prints PASS/FAIL details, and exits.\n"
-        "- Avoid unbounded while/event loops unless they have an auto-exit path that runs by default."
-        % RUN_COMPAT_HEADER
+        "- For games and demos, include a scripted smoke-test/demo mode that simulates moves or frames, prints PASS/FAIL details, and exits.\n"
+        "- Avoid unbounded while/event loops unless they have an auto-exit path that runs by default.\n"
+        "- If the user wants a separate console window, generate the normal runnable code and tell them to use `/runwindow` after it."
+        % (RUN_COMPAT_HEADER, fence, title)
     )
 
 
 def build_prompt(task, lessons, recalls=None, facts=None):
     blocks = []
     if _needs_run_compatible_code(task):
-        blocks.append(_run_compat_block())
+        blocks.append(_run_compat_block(task))
     if facts:
         blocks.append("%s\n%s" % (FACTS_HEADER, "\n".join("- %s" % f for f in facts)))
     if lessons:

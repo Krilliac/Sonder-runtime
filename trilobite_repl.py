@@ -63,6 +63,7 @@ HELP = """commands:
   /copied,/edited    record copy/edit passive learning signals
   /fail, /bad        record the last answer as failed
   /run [seconds]     execute the code block from the last response (default 8s)
+  /runwindow [sec]   launch the last code block in a separate Windows console
   /runproject [sec]  execute file/path fenced blocks as a temp project
   /train, /learn [N] grounded self-learning: practice N tasks (default 3, max 500)
   /new               start a fresh conversation thread (forget this chat's history)
@@ -288,6 +289,19 @@ def main():
             print("[timed out]")
         else:
             print("[exited with error]")
+
+    def do_run_window(timeout=grounding.DEFAULT_TIMEOUT):
+        block = grounding.extract_runnable_code_block(last_run_source or last_response)
+        if block is None:
+            print("(no code block in the last response to run)")
+            return
+        result = code_runner.run_code_window(
+            block["code"],
+            language=block["language"],
+            timeout=timeout,
+        )
+        print(code_runner.format_window_result(result))
+        print("[launched]" if result.get("ok") else "[launch failed]")
 
     def do_runproject(timeout=grounding.MAX_TIMEOUT):
         files = grounding.extract_project_files(last_run_source or last_response)
@@ -533,6 +547,10 @@ def main():
                 timeout = _parse_run_timeout(arg)
                 if timeout is not None:
                     do_run(timeout)
+            elif cmd in ("/runwindow", "/runnew", "/runconsole"):
+                timeout = _parse_run_timeout(arg)
+                if timeout is not None:
+                    do_run_window(timeout)
             elif cmd == "/runproject":
                 timeout = _parse_run_timeout(arg)
                 if timeout is not None:
