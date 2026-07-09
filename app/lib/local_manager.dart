@@ -255,7 +255,7 @@ class LocalManager {
     }
     try {
       if (Platform.isWindows) {
-        final script = r'''
+        const script = r'''
 $matches = Get-CimInstance Win32_Process |
   Where-Object { $_.CommandLine -match 'trilobite_serve\.py' -or $_.CommandLine -match 'trilobite-serve\.cmd' }
 $count = 0
@@ -289,7 +289,7 @@ Write-Output "Stopped $count Trilobite server process(es)."
       if (result.exitCode == 0) {
         return const LocalActionResult(true, 'Stopped Trilobite server process(es).');
       }
-      return LocalActionResult(
+      return const LocalActionResult(
         true,
         'No matching Trilobite server process was reported.',
       );

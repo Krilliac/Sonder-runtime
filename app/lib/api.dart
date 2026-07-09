@@ -135,6 +135,51 @@ class TrilobiteApi {
       throw TrilobiteException('Could not parse server response.');
     }
   }
+
+  Future<String> register(String username, String password) async {
+    return _accountAction('/v1/trilobite/register', username, password);
+  }
+
+  Future<String> login(String username, String password) async {
+    late http.Response resp;
+    try {
+      resp = await http
+          .post(
+            _uri('/v1/trilobite/login'),
+            headers: _headers(),
+            body: jsonEncode({'username': username, 'password': password}),
+          )
+          .timeout(const Duration(seconds: 20));
+    } catch (e) {
+      throw TrilobiteException('Login failed: $e');
+    }
+    final obj = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+    if (resp.statusCode != 200 || obj['ok'] != true) {
+      throw TrilobiteException(obj['message']?.toString() ?? 'Login failed.');
+    }
+    return obj['token']?.toString() ?? '';
+  }
+
+  Future<String> _accountAction(
+      String path, String username, String password) async {
+    late http.Response resp;
+    try {
+      resp = await http
+          .post(
+            _uri(path),
+            headers: _headers(),
+            body: jsonEncode({'username': username, 'password': password}),
+          )
+          .timeout(const Duration(seconds: 20));
+    } catch (e) {
+      throw TrilobiteException('Account request failed: $e');
+    }
+    final obj = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+    if (resp.statusCode != 200 || obj['ok'] != true) {
+      throw TrilobiteException(obj['message']?.toString() ?? 'Account request failed.');
+    }
+    return obj['message']?.toString() ?? 'OK';
+  }
 }
 
 class TrilobiteException implements Exception {
@@ -187,51 +232,6 @@ class SystemInfo {
           : null,
       models: models,
     );
-  }
-
-  Future<String> register(String username, String password) async {
-    return _accountAction('/v1/trilobite/register', username, password);
-  }
-
-  Future<String> login(String username, String password) async {
-    late http.Response resp;
-    try {
-      resp = await http
-          .post(
-            _uri('/v1/trilobite/login'),
-            headers: _headers(),
-            body: jsonEncode({'username': username, 'password': password}),
-          )
-          .timeout(const Duration(seconds: 20));
-    } catch (e) {
-      throw TrilobiteException('Login failed: $e');
-    }
-    final obj = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
-    if (resp.statusCode != 200 || obj['ok'] != true) {
-      throw TrilobiteException(obj['message']?.toString() ?? 'Login failed.');
-    }
-    return obj['token']?.toString() ?? '';
-  }
-
-  Future<String> _accountAction(
-      String path, String username, String password) async {
-    late http.Response resp;
-    try {
-      resp = await http
-          .post(
-            _uri(path),
-            headers: _headers(),
-            body: jsonEncode({'username': username, 'password': password}),
-          )
-          .timeout(const Duration(seconds: 20));
-    } catch (e) {
-      throw TrilobiteException('Account request failed: $e');
-    }
-    final obj = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
-    if (resp.statusCode != 200 || obj['ok'] != true) {
-      throw TrilobiteException(obj['message']?.toString() ?? 'Account request failed.');
-    }
-    return obj['message']?.toString() ?? 'OK';
   }
 }
 
