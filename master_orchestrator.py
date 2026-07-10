@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import itertools
 import os
+import re
 import threading
 import time
 import uuid
@@ -16,6 +17,51 @@ _UPDATE_SEQUENCE = itertools.count()
 _MAX_EVENTS = 80
 DEFAULT_MAX_AGENTS = 16
 ABSOLUTE_MAX_AGENTS = 64
+
+EVIDENCE_REQUIRED = (
+    "EVIDENCE_REQUIRED: guarded source evidence was unavailable. Authorize the "
+    "repository in file_roots.local, embed the relevant source excerpts, or use "
+    "the tool-using agent surface to inspect it first. No unsupported answer was produced."
+)
+
+_REPOSITORY_REQUEST = re.compile(
+    r"(?:\brepository\s*:|\brepo\s*:|\bcurrent\s+(?:file|code|diff|uncommitted)|"
+    r"\b(?:inspect|read|review|audit|edit|fix)\b.{0,40}\b(?:repo|repository|codebase|"
+    r"workspace|files?)\b|\buse\s+(?:local\s+)?file[- ]reading\s+tools?\b)",
+    re.IGNORECASE | re.DOTALL,
+)
+_EMBEDDED_EVIDENCE = re.compile(
+    r"(?:```|\bsource\s+excerpts?\s*:|\bbegin\s+file\b|\bpatch\s*:|\bdiff\s+--git\b)",
+    re.IGNORECASE,
+)
+
+
+def requires_repository_tools(task: str) -> bool:
+    """Return true when a task asks the model to inspect external repo state."""
+    task = task or ""
+    return bool(_REPOSITORY_REQUEST.search(task) and not _EMBEDDED_EVIDENCE.search(task))
+
+
+def evidence_gate(task: str, tools_available: bool = True) -> str:
+    """Refuse ungrounded repo inspection only when guarded tools are unavailable."""
+    if requires_repository_tools(task) and not tools_available:
+        return EVIDENCE_REQUIRED
+    return ""
+
+
+def _repository_worker(prompt: str) -> str:
+    """Lazily enter server's guarded agent loop without an import cycle."""
+    import server
+
+    return server._agent_impl(
+        prompt,
+        tier="code",
+        max_steps=8,
+        allow_web=False,
+        require_file_evidence=True,
+        read_only=True,
+        include_evidence=True,
+    )
 
 
 def max_agents() -> int:
@@ -130,6 +176,8 @@ def _run_worker(agent_id: str, prompt: str, worker_fn) -> str:
 
 
 def run_inline(task: str, worker_fn) -> dict:
+    if requires_repository_tools(task):
+        worker_fn = _repository_worker
     master_id = _new_agent("master", task)
     update_agent(master_id, status="running", activity="running inline as master", tool_calls=1)
     try:
@@ -141,19 +189,32 @@ def run_inline(task: str, worker_fn) -> dict:
     return {"mode": "inline", "master_id": master_id, "output": output}
 
 
-def _subtask_prompts(task: str, count: int) -> list[str]:
+def _subtask_prompts(task: str, count: int, tool_access: bool = False) -> list[str]:
     count = clamp_agent_count(count, default=1)
     prompts = []
     for i in range(count):
+        access_contract = (
+            "You have guarded read-only file tools. Inspect the relevant allowed files "
+            "before making codebase claims, and never request write/edit/delete tools. "
+            if tool_access else
+            "You have no filesystem, shell, web, or hidden tool access. Use only "
+            "evidence embedded in the task. "
+        )
         prompts.append(
-            "You are delegated subagent %d/%d. Work independently on this task, "
-            "state assumptions, produce concrete findings or changes, and keep the "
-            "answer concise.\n\nTask:\n%s" % (i + 1, count, task)
+            "You are delegated subagent %d/%d. %sNever "
+            "claim that you inspected, edited, compiled, ran, or verified anything "
+            "you were not explicitly shown. Quote the exact supporting excerpt for "
+            "each codebase finding; label unsupported possibilities as hypotheses. "
+            "If required evidence is absent, answer EVIDENCE_REQUIRED and list the "
+            "smallest missing inputs. Work independently and keep the answer concise."
+            "\n\nTask:\n%s" % (i + 1, count, access_contract, task)
         )
     return prompts
 
 
 def run_delegated(task: str, worker_fn, audit_fn, agents: int = 3) -> dict:
+    if requires_repository_tools(task):
+        worker_fn = _repository_worker
     agents = clamp_agent_count(agents, default=3)
     master_id = _new_agent("master", task)
     update_agent(
@@ -161,7 +222,8 @@ def run_delegated(task: str, worker_fn, audit_fn, agents: int = 3) -> dict:
         status="running",
         activity="delegating task to %d parallel agent(s)" % agents,
     )
-    prompts = _subtask_prompts(task, agents)
+    repository_task = requires_repository_tools(task)
+    prompts = _subtask_prompts(task, agents, tool_access=repository_task)
     child_ids = [_new_agent("agent", prompt, parent_id=master_id) for prompt in prompts]
     outputs = []
     with ThreadPoolExecutor(max_workers=agents) as pool:
@@ -176,10 +238,31 @@ def run_delegated(task: str, worker_fn, audit_fn, agents: int = 3) -> dict:
             except Exception as exc:
                 outputs.append((agent_id, "ERROR: %s" % exc))
                 _finish(agent_id, error=str(exc))
+    if repository_task:
+        outputs = [
+            (agent_id, output)
+            for agent_id, output in outputs
+            if "=== TOOL EVIDENCE ===" in output
+        ]
+        if not outputs:
+            merged = EVIDENCE_REQUIRED
+            _finish(master_id, output=merged)
+            return {
+                "mode": "delegated",
+                "master_id": master_id,
+                "agents": child_ids,
+                "outputs": [],
+                "output": merged,
+            }
     update_agent(master_id, activity="auditing delegated outputs", tool_calls=2)
     audit_prompt = [
-        "You are the master orchestrator. Audit these delegated outputs, resolve "
-        "conflicts, keep only reliable content, and produce the merged answer.",
+        "You are the master orchestrator. You also have no filesystem or tool access. "
+        "Audit the delegated outputs strictly against evidence quoted in the original "
+        "task. Discard invented files, symbols, APIs, edits, test runs, and success "
+        "claims. Never convert a proposal into a claim that work was completed. Resolve "
+        "conflicts, separate verified findings from hypotheses, and end with an "
+        "Evidence gaps section. If no concrete claim is supported, return "
+        "EVIDENCE_REQUIRED instead of a plausible-looking answer.",
         "",
         "Original task:",
         task,

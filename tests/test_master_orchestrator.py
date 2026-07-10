@@ -1,6 +1,38 @@
 import master_orchestrator
 
 
+def test_evidence_gate_rejects_repo_inspection_when_tools_unavailable():
+    task = "Repository: D:\\SparkEngine. Review current uncommitted files using local file-reading tools."
+
+    assert master_orchestrator.evidence_gate(task, tools_available=False) == master_orchestrator.EVIDENCE_REQUIRED
+    assert master_orchestrator.evidence_gate(task, tools_available=True) == ""
+
+
+def test_evidence_gate_allows_embedded_source_excerpt():
+    task = "Review the current file. Source excerpt:\n```cpp\nint answer() { return 42; }\n```"
+
+    assert master_orchestrator.evidence_gate(task) == ""
+
+
+def test_delegated_prompts_disclose_no_tool_access_and_demand_evidence():
+    prompt = master_orchestrator._subtask_prompts("compare these excerpts", 1)[0]
+
+    assert "no filesystem, shell, web" in prompt
+    assert "Quote the exact supporting excerpt" in prompt
+    assert "EVIDENCE_REQUIRED" in prompt
+
+
+def test_repository_prompts_require_guarded_read_tools():
+    prompt = master_orchestrator._subtask_prompts(
+        "Repository: D:\\SparkEngine. Inspect current files.",
+        1,
+        tool_access=True,
+    )[0]
+
+    assert "guarded read-only file tools" in prompt
+    assert "never request write/edit/delete tools" in prompt
+
+
 def test_run_inline_tracks_master_agent():
     result = master_orchestrator.run_inline("say hi", lambda prompt: "done: " + prompt)
     snap = master_orchestrator.snapshot()
@@ -16,6 +48,7 @@ def test_run_delegated_tracks_children_and_audit():
 
     def audit(prompt):
         assert "worker saw" in prompt
+        assert "Discard invented files, symbols, APIs" in prompt
         return "merged"
 
     result = master_orchestrator.run_delegated(
@@ -33,6 +66,26 @@ def test_run_delegated_tracks_children_and_audit():
     assert snap["tokens_in"] > 0
     assert snap["latest_master_result"] == "merged"
     assert "latest completed master result:\nmerged" in master_orchestrator.format_snapshot(snap)
+
+
+def test_repository_delegation_refuses_outputs_without_tool_ledger(monkeypatch):
+    monkeypatch.setattr(
+        master_orchestrator,
+        "_repository_worker",
+        lambda prompt: "I inspected it and everything passes.",
+    )
+    audited = []
+
+    result = master_orchestrator.run_delegated(
+        "Repository: D:\\SparkEngine. Inspect current files.",
+        worker_fn=lambda prompt: "unused",
+        audit_fn=lambda prompt: audited.append(prompt) or "should not run",
+        agents=2,
+    )
+
+    assert result["output"] == master_orchestrator.EVIDENCE_REQUIRED
+    assert result["outputs"] == []
+    assert audited == []
 
 
 def test_run_delegated_default_cap_allows_sixteen_agents(monkeypatch):

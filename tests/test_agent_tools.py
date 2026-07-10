@@ -69,3 +69,53 @@ def test_agent_reports_parse_error(monkeypatch):
     monkeypatch.setattr(server, "_make_generate", lambda *a, **k: lambda prompt, history=None: "not json")
     out = server.agent("x", tier="code", max_steps=1)
     assert out.startswith("ERROR: could not parse agent decision")
+
+
+def test_agent_requires_successful_file_evidence(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: '{"final": "I inspected it and it is correct."}',
+    )
+
+    out = server._agent_impl(
+        "Review Repository: D:\\SparkEngine",
+        tier="code",
+        max_steps=1,
+        require_file_evidence=True,
+        read_only=True,
+        include_evidence=True,
+    )
+
+    assert out.startswith("EVIDENCE_REQUIRED:")
+    assert "I inspected it" not in out
+
+
+def test_agent_attaches_successful_file_evidence(monkeypatch):
+    responses = [
+        '{"tool": "file_read", "args": {"path": "README.md"}, "reason": "inspect source"}',
+        '{"final": "README says hello."}',
+    ]
+    monkeypatch.setattr(
+        server,
+        "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: responses.pop(0),
+    )
+    monkeypatch.setattr(
+        server,
+        "_agent_dispatch_observed",
+        lambda tool, args, allow_web=True: "file read: README.md\nhello",
+    )
+
+    out = server._agent_impl(
+        "Review Repository: local",
+        tier="code",
+        max_steps=2,
+        require_file_evidence=True,
+        read_only=True,
+        include_evidence=True,
+    )
+
+    assert out.startswith("README says hello.")
+    assert "=== TOOL EVIDENCE ===" in out
+    assert "tool=file_read" in out

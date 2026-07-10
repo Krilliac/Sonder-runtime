@@ -2392,6 +2392,20 @@ def _orchestrator_worker(tier: str, learn: bool = False, timeout: int = 150):
     return worker
 
 
+def _orchestrator_agent_worker(tier: str, max_steps: int = 8):
+    def worker(prompt: str) -> str:
+        return _agent_impl(
+            prompt,
+            tier=tier,
+            max_steps=max_steps,
+            allow_web=False,
+            require_file_evidence=True,
+            read_only=True,
+            include_evidence=True,
+        )
+    return worker
+
+
 @mcp.tool()
 def master_orchestrate(
     task: str,
@@ -2419,10 +2433,15 @@ def master_orchestrate(
         ) % master_orchestrator.clamp_agent_count(agents, default=3)
     if not task:
         return "ERROR: empty task."
-    worker = _orchestrator_worker(
-        tier,
-        learn=learn,
-        timeout=_master_timeout("TRILOBITE_MASTER_AGENT_TIMEOUT", 150),
+    needs_repo_tools = master_orchestrator.requires_repository_tools(task)
+    worker = (
+        _orchestrator_agent_worker(tier)
+        if needs_repo_tools
+        else _orchestrator_worker(
+            tier,
+            learn=learn,
+            timeout=_master_timeout("TRILOBITE_MASTER_AGENT_TIMEOUT", 150),
+        )
     )
     if mode in ("inline", "master"):
         result = master_orchestrator.run_inline(task, worker)
@@ -4206,6 +4225,9 @@ def _agent_impl(
     tier: str = "code",
     max_steps: int = 6,
     allow_web: bool = True,
+    require_file_evidence: bool = False,
+    read_only: bool = False,
+    include_evidence: bool = False,
 ) -> str:
     """Run a Claude-like local agent loop that can call tools.
 
@@ -4232,6 +4254,7 @@ def _agent_impl(
     )
     gen = _make_generate(model, system, 0.1, 1200, SESSION_NUM_CTX, cloud=cloud)
     observations = []
+    file_evidence = False
     transcript = "Task:\n%s\n\n%s" % (prompt, AGENT_TOOL_HELP)
     for step in range(1, max_steps + 1):
         step_prompt = transcript
@@ -4247,11 +4270,26 @@ def _agent_impl(
         if not isinstance(decision, dict):
             return "ERROR: agent decision must be a JSON object."
         if "final" in decision:
-            return str(decision.get("final") or "")
+            final = str(decision.get("final") or "")
+            if require_file_evidence and not file_evidence:
+                detail = "\n\n" + "\n\n".join(observations) if observations else ""
+                return master_orchestrator.EVIDENCE_REQUIRED + detail
+            if include_evidence and observations:
+                final += "\n\n=== TOOL EVIDENCE ===\n" + "\n\n".join(observations)
+            return final
         tool_name = decision.get("tool")
         if not tool_name:
             return "ERROR: agent decision missing 'tool' or 'final': %s" % decision
+        if read_only and tool_name in {"file_write", "file_edit", "file_delete"}:
+            observations.append(
+                "step %d tool=%s reason=%s\nERROR: repository-aware master agents are read-only." % (
+                    step, tool_name, decision.get("reason", "")
+                )
+            )
+            continue
         observation = _agent_dispatch_observed(tool_name, decision.get("args", {}), allow_web=allow_web)
+        if tool_name in {"file_read", "file_find"} and not str(observation).startswith("ERROR:"):
+            file_evidence = True
         observations.append(
             "step %d tool=%s reason=%s\n%s" % (
                 step,

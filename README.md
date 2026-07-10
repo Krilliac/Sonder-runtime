@@ -105,6 +105,10 @@ Use Trilobite as a local junior implementer, not as the final authority:
 2. Prefer `offload(tier="code")` for one self-contained coding draft,
    `run_code` / `parallel_generate_run` for bounded experiments, and
    `master_orchestrate` only when independent perspectives are actually useful.
+   For repository tasks, `master_orchestrate` switches to guarded read-only
+   tool agents and requires successful file evidence before accepting an answer.
+   Allowed roots come from `TRILOBITE_FILE_ROOTS` plus the hot-read
+   `file_roots.local`; denied/unavailable access falls back to EVIDENCE_REQUIRED.
 3. Keep prompts narrow and complete. Include the relevant files, constraints,
    acceptance checks, and what "done" means; the local model cannot see the
    caller's hidden context.

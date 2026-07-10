@@ -1,4 +1,5 @@
 venv/
+file_roots.local
 __pycache__/
 *.pyc
 .pytest-tmp*/

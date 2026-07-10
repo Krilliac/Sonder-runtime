@@ -12,6 +12,11 @@
   clear acceptance checks, and concise failure reports.
 - For agent fan-out, use small counts for normal work. Reserve large parallel
   runs for tiny prompts, independent alternatives, or explicit stress tests.
+- `master_orchestrate` uses guarded, read-only tool agents for repository tasks.
+  They must successfully inspect allowed files and carry a tool-evidence ledger;
+  if access is unavailable or denied, return EVIDENCE_REQUIRED instead of guessing.
+- Every codebase claim must cite exact prompt evidence. Never turn a proposed
+  change into a claim that files were edited, compiled, tested, or verified.
 - When normal use reveals a Trilobite bug, missing feature, weak procedure,
   confusing doc, bad default, or flaky test, treat that as a candidate repo fix:
   name the issue, propose the smallest verifiable change, and expect the caller

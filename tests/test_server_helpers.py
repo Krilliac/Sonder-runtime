@@ -463,6 +463,31 @@ def test_master_orchestrate_delegates_and_audits(monkeypatch):
     assert "latest completed master result:\naudited merge" in server.master_status()
 
 
+def test_master_orchestrate_uses_tool_agent_for_repo_inspection(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        server,
+        "_agent_impl",
+        lambda prompt, **kwargs: (
+            calls.append((prompt, kwargs)) or
+            "grounded agent output\n\n=== TOOL EVIDENCE ===\nstep 1 tool=file_read\nsource"
+        ),
+    )
+    monkeypatch.setattr(server, "offload", lambda prompt, **kwargs: "audited merge")
+
+    out = server.master_orchestrate(
+        "Repository: D:\\SparkEngine. Review current uncommitted files using local file-reading tools.",
+        mode="delegate",
+        agents=4,
+    )
+
+    assert "audited merge" in out
+    assert len(calls) == 4
+    assert all(options["require_file_evidence"] for _, options in calls)
+    assert all(options["read_only"] for _, options in calls)
+    assert all(options["include_evidence"] for _, options in calls)
+
+
 def test_admin_register_login_and_cot_denial(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "admin.db"))
 

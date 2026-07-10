@@ -48,6 +48,34 @@ def test_extra_roots_only_apply_with_bypass(monkeypatch, tmp_path):
     assert file_ops.read_file(str(target), extra_roots=str(outside), bypass=True)["text"] == "ok"
 
 
+def test_hot_roots_file_allows_explicit_read_root(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    repo = tmp_path / "repo"
+    workspace.mkdir()
+    repo.mkdir()
+    target = repo / "README.md"
+    target.write_text("ground truth", encoding="utf-8")
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: workspace)
+    (workspace / file_ops.DEFAULT_ROOTS_FILE).write_text(str(repo), encoding="utf-8")
+
+    assert file_ops.read_file(str(target))["text"] == "ground truth"
+
+
+def test_hot_roots_file_ignores_comments_and_missing_paths(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: workspace)
+    (workspace / file_ops.DEFAULT_ROOTS_FILE).write_text(
+        "# approved roots\n\n" + str(tmp_path / "missing") + "\n",
+        encoding="utf-8",
+    )
+
+    roots = file_ops.allowed_roots()
+
+    assert workspace.resolve() in roots
+    assert (tmp_path / "missing").resolve() in roots
+
+
 def test_find_files_matches_names(monkeypatch, tmp_path):
     monkeypatch.setattr(file_ops, "workspace_root", lambda: tmp_path)
     (tmp_path / "a.py").write_text("print(1)", encoding="utf-8")

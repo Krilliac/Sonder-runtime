@@ -17,6 +17,7 @@ import trilobite_paths
 MAX_READ_BYTES = 256_000
 MAX_WRITE_BYTES = 1_000_000
 MAX_FIND_RESULTS = 200
+DEFAULT_ROOTS_FILE = "file_roots.local"
 
 
 def _line_count(text: str) -> int:
@@ -47,9 +48,28 @@ def _split_roots(raw: str) -> list[Path]:
     return roots
 
 
+def roots_file_path() -> Path:
+    configured = os.environ.get("TRILOBITE_FILE_ROOTS_FILE", "").strip()
+    return Path(configured).expanduser() if configured else workspace_root() / DEFAULT_ROOTS_FILE
+
+
+def _roots_from_file() -> list[Path]:
+    try:
+        lines = roots_file_path().read_text(encoding="utf-8").splitlines()
+    except (FileNotFoundError, OSError):
+        return []
+    roots = []
+    for line in lines:
+        value = line.strip()
+        if value and not value.startswith("#"):
+            roots.append(Path(value).expanduser())
+    return roots
+
+
 def allowed_roots(extra_roots: str = "") -> list[Path]:
     roots = [workspace_root(), Path(trilobite_paths.default_home())]
     roots.extend(_split_roots(os.environ.get("TRILOBITE_FILE_ROOTS", "")))
+    roots.extend(_roots_from_file())
     roots.extend(_split_roots(extra_roots))
     out = []
     for root in roots:
@@ -107,6 +127,7 @@ def policy_text(*, bypass: bool = False, extra_roots: str = "") -> str:
     for root in allowed_roots(extra_roots if bypass else ""):
         lines.append("    - %s" % root)
     lines.extend([
+        "  hot roots file: %s" % roots_file_path(),
         "  env bypass: TRILOBITE_FILE_BYPASS=1",
         "  approval code: TRILOBITE_FILE_APPROVAL_CODE plus approval=<code>",
         "  env extra roots: TRILOBITE_FILE_ROOTS=<path%spath>" % os.pathsep,
