@@ -32,7 +32,7 @@ party.
   recommendations, learning stats and exposed models, run `/stats`, `/context`,
   `/compact`, `/todo`, `/commands`, `/dump`, `/permissions`, `/quality`,
   `/inventory`, `/privacy`, `/embeddings`, `/improve`,
-  `/agents`, `/train 10` and `/help`, start/stop the bundled desktop server,
+  `/agents`, `/capacity`, `/agentcancel`, `/train 10` and `/help`, start/stop the bundled desktop server,
   launch endless training, and pull updates from Git.
 - **Live footer**: chat shows context %, active agents, project scope, token
   estimates, selected model and latest agent activity while work is running.

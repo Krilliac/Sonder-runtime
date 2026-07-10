@@ -28,7 +28,9 @@
   acceptance checks. Do not turn normal design decisions into an evidence-gap list.
 - For agent fan-out, use small counts for normal work. When the task explicitly
   asks for a fleet, swarm, spawn-as-many, parallel agents, or parallel workflow,
-  use the configured hardware fan-out ceiling and keep each worker bounded.
+  queue the configured hardware fan-out ceiling but obey the current RAM/CPU
+  worker-slot limit. Treat queued diversity and simultaneous execution as
+  different numbers; expose capacity and honor cooperative cancellation.
 - `master_orchestrate` uses guarded, read-only tool agents for repository tasks.
   They must successfully inspect allowed files and carry a tool-evidence ledger;
   if access is unavailable or denied, return EVIDENCE_REQUIRED instead of guessing.

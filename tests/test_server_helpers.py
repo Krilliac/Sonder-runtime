@@ -1,5 +1,11 @@
+import threading
+
 import memory_store
 import server
+
+
+def setup_function():
+    server.master_orchestrator.reset_for_tests()
 
 
 def test_with_footer_and_parse_roundtrip():
@@ -464,7 +470,108 @@ def test_master_orchestrate_ask_reports_widened_agent_cap(monkeypatch):
 
     out = server.master_orchestrate("build a parser", mode="ask", agents=99)
 
-    assert "spawn 16 parallel agent(s)" in out
+    assert "queue 16 agent(s)" in out
+    assert "safe worker slot(s)" in out
+
+
+def test_master_capacity_and_cancel_tools(monkeypatch):
+    server.master_orchestrator.reset_for_tests()
+    gib = 1024 ** 3
+    monkeypatch.setattr(
+        server.master_orchestrator,
+        "capacity",
+        lambda requested=None: {
+            "logical_cpus": 16,
+            "total_memory_bytes": 16 * gib,
+            "available_memory_bytes": 4 * gib,
+            "agent_ceiling": 32,
+            "requested_agents": requested or 32,
+            "worker_slots": 2,
+            "automatic_worker_slots": 2,
+            "source": "auto",
+            "ram_reserve_bytes": int(1.5 * gib),
+            "ram_per_worker_bytes": int(1.25 * gib),
+        },
+    )
+
+    capacity = server.master_capacity(32)
+    master_id = server.master_orchestrator._new_agent("master", "long task")
+    server.master_orchestrator.update_agent(
+        master_id, status="running", in_model_call=True,
+    )
+    canceled = server.master_cancel(master_id[:12])
+
+    assert "concurrent worker slots: 2" in capacity
+    assert "matched: 1" in canceled
+    assert "active model calls awaiting return: 1" in canceled
+    assert "running agents signalled: 1" in canceled
+    assert "cannot be force-killed" in canceled
+
+
+def test_orchestrator_worker_propagates_activity_into_worker_thread(monkeypatch):
+    calls = []
+
+    def fake_offload(**kwargs):
+        calls.append(kwargs)
+        server.activity_tracker.record_model_call(
+            model="fake-model", prompt_chars=len(kwargs["prompt"]),
+            tokens_in=4, tokens_out=2,
+        )
+        return "worker output"
+
+    monkeypatch.setattr(server, "offload", fake_offload)
+    server.activity_tracker.reset_for_tests()
+    with server.activity_tracker.response_span("master", "delegate") as response:
+        worker = server._orchestrator_worker("code")
+        thread = threading.Thread(target=lambda: worker("subtask"))
+        thread.start()
+        thread.join(2)
+
+        assert not thread.is_alive()
+        assert calls[0]["tier"] == "code"
+        assert response["model_calls"] == 1
+        assert response["tokens_in"] == 4
+        assert response["tokens_out"] == 2
+
+
+def test_non_learning_offload_records_model_usage(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "_post",
+        lambda *args, **kwargs: {
+            "message": {"content": "plain output"},
+            "prompt_eval_count": 9,
+            "eval_count": 3,
+        },
+    )
+    server.activity_tracker.reset_for_tests()
+
+    with server.activity_tracker.response_span("offload", "plain") as response:
+        output = server.offload("plain", tier="fast", learn=False)
+
+        assert output == "plain output"
+        assert response["model_calls"] == 1
+        assert response["tokens_in"] == 9
+        assert response["tokens_out"] == 3
+
+
+def test_master_orchestrate_accepts_common_delegate_typo(monkeypatch):
+    monkeypatch.setattr(
+        server.master_orchestrator,
+        "run_delegated",
+        lambda *args, **kwargs: {
+            "master_id": "master-test",
+            "agents": ["agent-one", "agent-two"],
+            "worker_slots": 1,
+            "output": "merged",
+        },
+    )
+
+    out = server.master_orchestrate("build it", mode="delagte", agents=2)
+
+    assert "master orchestration complete" in out
+    assert "agents=2" in out
+    assert "worker slots used: 1" in out
 
 
 def test_master_orchestrate_delegates_and_audits(monkeypatch):

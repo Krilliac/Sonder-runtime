@@ -25,8 +25,9 @@ DEFAULT_TEXT = """# Trilobite standing instructions
 - Use `artifact_generate` for general creative assets and
   `game_generate_and_test` for grounded greenfield games. Verify generated
   packs/projects before calling them ready.
-- Use bounded hardware-aware fan-out. Large fleets are explicit opt-in, and
-  compile-heavy jobs should stay serialized when memory pressure is high.
+- Use bounded hardware-aware fan-out. Large fleets are explicit opt-in; queue
+  diversity separately from RAM/CPU-limited worker slots, honor cooperative
+  cancellation, and serialize compile-heavy jobs under memory pressure.
 - Show only redacted memory privacy findings. Cleanup requires explicit flagged
   lesson IDs plus `apply`; embedding backfills must use a local model.
 """

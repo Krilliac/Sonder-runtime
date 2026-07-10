@@ -1,4 +1,10 @@
 import master_orchestrator
+import threading
+import time
+
+
+def setup_function():
+    master_orchestrator.reset_for_tests()
 
 
 def test_evidence_gate_rejects_repo_inspection_when_tools_unavailable():
@@ -126,3 +132,150 @@ def test_run_delegated_agent_cap_is_configurable(monkeypatch):
 
     assert master_orchestrator.max_agents() == 24
     assert len(result["agents"]) == 24
+
+
+def test_capacity_separates_agent_ceiling_from_memory_safe_worker_slots(monkeypatch):
+    gib = 1024 ** 3
+    monkeypatch.delenv("TRILOBITE_MAX_AGENTS", raising=False)
+    monkeypatch.delenv("TRILOBITE_PARALLEL_WORKERS", raising=False)
+    monkeypatch.setattr(master_orchestrator.os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(
+        master_orchestrator, "physical_memory_bytes", lambda: (16 * gib, 2 * gib)
+    )
+
+    low = master_orchestrator.capacity(32)
+
+    assert low["agent_ceiling"] == 32
+    assert low["requested_agents"] == 32
+    assert low["worker_slots"] == 1
+    assert low["source"] == "auto"
+
+    monkeypatch.setattr(
+        master_orchestrator, "physical_memory_bytes", lambda: (16 * gib, 10 * gib)
+    )
+    healthy = master_orchestrator.capacity(32)
+    assert healthy["worker_slots"] == 4
+
+
+def test_parallel_worker_override_is_explicit_and_bounded(monkeypatch):
+    gib = 1024 ** 3
+    monkeypatch.setenv("TRILOBITE_PARALLEL_WORKERS", "6")
+    monkeypatch.setattr(master_orchestrator.os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(
+        master_orchestrator, "physical_memory_bytes", lambda: (16 * gib, 2 * gib)
+    )
+
+    report = master_orchestrator.capacity(10)
+
+    assert report["worker_slots"] == 6
+    assert report["source"] == "TRILOBITE_PARALLEL_WORKERS"
+    assert "concurrent worker slots: 6" in master_orchestrator.format_capacity(report)
+
+
+def test_delegated_fleet_limits_actual_concurrency(monkeypatch):
+    monkeypatch.setattr(master_orchestrator, "parallel_worker_slots", lambda requested: 2)
+    lock = threading.Lock()
+    current = {"active": 0, "maximum": 0}
+
+    def worker(prompt):
+        with lock:
+            current["active"] += 1
+            current["maximum"] = max(current["maximum"], current["active"])
+        time.sleep(0.02)
+        with lock:
+            current["active"] -= 1
+        return "ok"
+
+    result = master_orchestrator.run_delegated(
+        "fan out", worker_fn=worker, audit_fn=lambda prompt: "merged", agents=6,
+    )
+
+    assert len(result["agents"]) == 6
+    assert result["worker_slots"] == 2
+    assert current["maximum"] == 2
+
+
+def test_cancel_master_skips_queued_workers_and_discards_running_result(monkeypatch):
+    monkeypatch.setattr(master_orchestrator, "parallel_worker_slots", lambda requested: 1)
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+    audited = []
+    result_box = {}
+
+    def worker(prompt):
+        calls.append(prompt)
+        started.set()
+        assert release.wait(2)
+        return "late result"
+
+    def run():
+        result_box["result"] = master_orchestrator.run_delegated(
+            "cancel fleet",
+            worker_fn=worker,
+            audit_fn=lambda prompt: audited.append(prompt) or "merged",
+            agents=4,
+        )
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert started.wait(2)
+    snap = master_orchestrator.snapshot(include_finished=False, limit=20)
+    master_id = next(row["id"] for row in snap["agents"] if row["role"] == "master")
+
+    canceled = master_orchestrator.request_cancel(master_id)
+    release.set()
+    thread.join(3)
+
+    assert not thread.is_alive()
+    assert canceled["matched"] == 5
+    assert canceled["queued"] == 3
+    assert canceled["running"] == 2
+    assert canceled["model_calls"] == 1
+    assert result_box["result"]["output"] == "CANCELLED"
+    assert len(calls) == 1
+    assert audited == []
+    final = master_orchestrator.snapshot(limit=20)
+    assert final["active_agents"] == 0
+    assert {row["status"] for row in final["agents"]} == {"cancelled"}
+
+
+def test_cancelled_queued_worker_cannot_transition_to_running():
+    calls = []
+    agent_id = master_orchestrator._new_agent("agent", "queued work")
+    master_orchestrator.request_cancel(agent_id)
+
+    output = master_orchestrator._run_worker(
+        agent_id, "prompt", lambda prompt: calls.append(prompt) or "unexpected",
+    )
+
+    assert output == "CANCELLED"
+    assert calls == []
+    row = master_orchestrator.snapshot(limit=5)["agents"][0]
+    assert row["status"] == "cancelled"
+
+
+def test_child_created_after_parent_cancellation_inherits_cancel_state():
+    master_id = master_orchestrator._new_agent("master", "parent")
+    master_orchestrator.request_cancel(master_id)
+
+    child_id = master_orchestrator._new_agent(
+        "agent", "late child", parent_id=master_id,
+    )
+
+    child = next(
+        row for row in master_orchestrator.snapshot(limit=5)["agents"]
+        if row["id"] == child_id
+    )
+    assert child["status"] == "cancelled"
+    assert child["cancel_requested"] is True
+
+
+def test_snapshot_active_count_is_not_clipped_by_display_limit():
+    for index in range(25):
+        master_orchestrator._new_agent("agent", "task %d" % index)
+
+    snap = master_orchestrator.snapshot(include_finished=False, limit=5)
+
+    assert snap["active_agents"] == 25
+    assert snap["total_listed"] == 5

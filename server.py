@@ -773,6 +773,14 @@ def control_command(prompt: str, history=None, session="", project=""):
         return system_improvement_report()
     if cmd in ("/agents", "/masterstatus"):
         return master_status()
+    if cmd in ("/capacity", "/agentcapacity"):
+        try:
+            requested = int(arg.strip() or 0)
+        except ValueError:
+            return "usage: /capacity [requested-agents]"
+        return master_capacity(requested)
+    if cmd in ("/agentcancel", "/cancelagents"):
+        return master_cancel(arg.strip()) if arg.strip() else "usage: /agentcancel <id|prefix|all>"
     if cmd in ("/asset", "/assets", "/assetgen", "/artifact"):
         asset_parts = arg.strip().split(None, 1)
         if len(asset_parts) != 2:
@@ -1009,13 +1017,43 @@ def offload(
                    "options": options}
         if not _is_cloud_tier(tier, model):
             payload["keep_alive"] = KEEP_ALIVE
+        started = time.time()
+        ok = False
+        usage = {}
         try:
             out = _post("/api/chat", payload, timeout=timeout)
+            msg = out.get("message", {}).get("content", "")
+            tokens_in = out.get("prompt_eval_count")
+            tokens_out = out.get("eval_count")
+            source = "ollama" if tokens_in is not None or tokens_out is not None else "estimated"
+            if tokens_in is None:
+                tokens_in = sum(
+                    _rough_token_count(message.get("content", ""))
+                    for message in messages
+                )
+            if tokens_out is None:
+                tokens_out = _rough_token_count(msg)
+            usage = {
+                "tokens_in": int(tokens_in or 0),
+                "tokens_out": int(tokens_out or 0),
+                "token_source": source,
+            }
+            ok = True
+            return msg if msg else "(empty response) raw=%s" % json.dumps(out)[:500]
         except urllib.error.URLError as e:
             return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
                     "running? (the tray app / `ollama serve`)" % (BASE, e))
-        msg = out.get("message", {}).get("content", "")
-        return msg if msg else "(empty response) raw=%s" % json.dumps(out)[:500]
+        finally:
+            activity_tracker.record_model_call(
+                model=model,
+                prompt_chars=len(prompt or ""),
+                history_messages=0,
+                tokens_in=usage.get("tokens_in", 0),
+                tokens_out=usage.get("tokens_out", 0),
+                token_source=usage.get("token_source", ""),
+                ok=ok,
+                elapsed_ms=int((time.time() - started) * 1000),
+            )
 
     # Learning path. Local tiers are answered by the trilobite student model/alias and
     # augmented with lessons (consistent with the trilobite tool). Cloud tiers act as a
@@ -2704,29 +2742,35 @@ def _master_timeout(name: str, default: int) -> int:
 
 
 def _orchestrator_worker(tier: str, learn: bool = False, timeout: int = 150):
+    response_id = activity_tracker.current_response_id()
+
     def worker(prompt: str) -> str:
-        return offload(
-            prompt=prompt,
-            tier=tier,
-            temperature=0.2,
-            num_predict=1400,
-            learn=learn,
-            timeout=timeout,
-        )
+        with activity_tracker.bind_response(response_id):
+            return offload(
+                prompt=prompt,
+                tier=tier,
+                temperature=0.2,
+                num_predict=1400,
+                learn=learn,
+                timeout=timeout,
+            )
     return worker
 
 
 def _orchestrator_agent_worker(tier: str, max_steps: int = 8):
+    response_id = activity_tracker.current_response_id()
+
     def worker(prompt: str) -> str:
-        return _agent_impl(
-            prompt,
-            tier=tier,
-            max_steps=max_steps,
-            allow_web=False,
-            require_file_evidence=True,
-            read_only=True,
-            include_evidence=True,
-        )
+        with activity_tracker.bind_response(response_id):
+            return _agent_impl(
+                prompt,
+                tier=tier,
+                max_steps=max_steps,
+                allow_web=False,
+                require_file_evidence=True,
+                read_only=True,
+                include_evidence=True,
+            )
     return worker
 
 
@@ -2738,32 +2782,45 @@ def master_orchestrate(
     tier: str = "code",
     learn: bool = False,
 ) -> str:
-    """Run a master orchestration pass inline or by delegated parallel agents.
+    """Run a master pass inline or with hardware-scheduled delegated agents.
 
     mode="ask" returns the choice prompt. mode="inline" keeps work in the master
-    lane. mode="delegate" spawns bounded parallel subagents, then audits and
-    merges their outputs. Status is visible through master_status().
+    lane. mode="delegate" queues bounded subagents across RAM/CPU-safe worker
+    slots, then audits and merges their outputs. mode="fleet" queues the full
+    hardware-derived breadth ceiling. Status is visible through master_status().
     """
     _maybe_live_reload()
     task = (task or "").strip()
     mode = (mode or "ask").strip().lower()
+    mode = {
+        "delagte": "delegate",
+        "delegte": "delegate",
+        "paralell": "parallel",
+        "inlne": "inline",
+        "workflow": "fleet",
+    }.get(mode, mode)
     if master_orchestrator.requests_fleet(task):
         if mode in ("ask", "choose", "prompt", "delegate", "delegated", "agents", "parallel"):
             mode = "fleet"
             agents = master_orchestrator.max_agents()
     if mode in ("ask", "choose", "prompt"):
+        delegate_count = master_orchestrator.clamp_agent_count(agents, default=3)
+        delegate_capacity = master_orchestrator.capacity(delegate_count)
+        fleet_capacity = master_orchestrator.capacity(master_orchestrator.max_agents())
         return (
             "Master orchestrator ready.\n"
             "Choose execution mode:\n"
             "  inline   - master handles the task directly.\n"
-            "  delegate - spawn %d parallel agent(s), audit their outputs, then merge.\n"
-            "  fleet    - use the hardware fan-out ceiling (%d agents).\n"
+            "  delegate - queue %d agent(s) across %d safe worker slot(s), audit, then merge.\n"
+            "  fleet    - queue the hardware ceiling (%d agents) across %d safe worker slot(s).\n"
             "Keywords fleet, swarm, spawn as many agents, parallel agents, and\n"
             "parallel workflow select fleet automatically.\n"
             "Call master_orchestrate(task, mode='inline'|'delegate'|'fleet') or chat `/master inline ...`."
         ) % (
-            master_orchestrator.clamp_agent_count(agents, default=3),
+            delegate_count,
+            delegate_capacity["worker_slots"],
             master_orchestrator.max_agents(),
+            fleet_capacity["worker_slots"],
         )
     if not task:
         return "ERROR: empty task."
@@ -2798,11 +2855,12 @@ def master_orchestrate(
             "mode: %s | master=%s | agents=%d" % (
                 "fleet" if mode in ("fleet", "swarm", "fanout") else "delegated",
                 result["master_id"], len(result.get("agents") or [])),
+            "worker slots used: %d (bounded concurrent model calls)" % result.get("worker_slots", 1),
             "",
             result["output"],
         ]
         return "\n".join(lines).strip()
-    return "ERROR: unknown mode '%s'. Use ask, inline, or delegate." % mode
+    return "ERROR: unknown mode '%s'. Use ask, inline, delegate, or fleet." % mode
 
 
 @mcp.tool()
@@ -2812,6 +2870,43 @@ def master_status(include_finished: bool = True, limit: int = 20) -> str:
     return master_orchestrator.format_snapshot(
         master_orchestrator.snapshot(include_finished=include_finished, limit=limit)
     )
+
+
+@mcp.tool()
+def master_capacity(requested_agents: int = 0) -> str:
+    """Show queued-agent ceiling and current RAM/CPU-bounded worker slots."""
+    _maybe_live_reload()
+    try:
+        value = int(requested_agents or 0)
+    except (TypeError, ValueError):
+        value = 0
+    requested = value if value > 0 else None
+    return master_orchestrator.format_capacity(
+        master_orchestrator.capacity(requested)
+    )
+
+
+@mcp.tool()
+def master_cancel(agent_id: str) -> str:
+    """Cooperatively cancel one active agent/master prefix or all active agents."""
+    _maybe_live_reload()
+    selector = str(agent_id or "").strip()
+    if not selector:
+        return "ERROR: agent_id is required; pass an exact ID, unique prefix, or 'all'."
+    result = master_orchestrator.request_cancel(selector)
+    if not result["matched"]:
+        return "ERROR: no active agent matched %r." % selector
+    lines = [
+        "master cancellation requested",
+        "  selector: %s | matched: %d" % (selector, result["matched"]),
+        "  queued cancelled: %d | active model calls awaiting return: %d" % (
+            result["queued"], result["model_calls"],
+        ),
+        "  running agents signalled: %d" % result["running"],
+        "  cooperative: active Ollama/HTTP calls cannot be force-killed; late results are discarded.",
+    ]
+    lines.append("  agents: %s" % ", ".join(result["agent_ids"]))
+    return "\n".join(lines)
 
 
 def _admin_account_from_token(token: str):
@@ -4457,6 +4552,14 @@ def _loop_dispatch(action):
             include_finished=action.get("include_finished", True),
             limit=action.get("limit", 20),
         ))
+    if action_type in ("master_capacity", "agent_capacity"):
+        return _loop_text_result("master_capacity", master_capacity(
+            requested_agents=action.get("requested_agents", action.get("agents", 0)),
+        ))
+    if action_type in ("master_cancel", "agent_cancel"):
+        return _loop_text_result("master_cancel", master_cancel(
+            agent_id=action.get("agent_id", action.get("selector", "")),
+        ))
     if action_type in ("master", "master_orchestrate"):
         return _loop_text_result("master_orchestrate", master_orchestrate(
             task=action.get("task", action.get("prompt", "")),
@@ -4720,7 +4823,7 @@ def _loop_dispatch(action):
         "ok": False,
         "type": action_type or "(unknown)",
         "summary": "unknown action type",
-        "output": "Valid action types: code, project, artifact_generate, game_reference_suite, game_generate_and_test, game_generation_campaign, offload, trilobite, master_orchestrate, master_status, file_policy, workspace_inventory, directory_tree, text_search, script_search, program_search, workspace_run, script_run, image_inspect, file_find, file_read, file_write, file_edit, file_delete, status, diagnostics, context_health, memory_quality_report, memory_quality_repair, memory_privacy_review, memory_privacy_repair, memory_embedding_backfill, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, unload, sleep.",
+        "output": "Valid action types: code, project, artifact_generate, game_reference_suite, game_generate_and_test, game_generation_campaign, offload, trilobite, master_orchestrate, master_status, master_capacity, master_cancel, file_policy, workspace_inventory, directory_tree, text_search, script_search, program_search, workspace_run, script_run, image_inspect, file_find, file_read, file_write, file_edit, file_delete, status, diagnostics, context_health, memory_quality_report, memory_quality_repair, memory_privacy_review, memory_privacy_repair, memory_embedding_backfill, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, unload, sleep.",
     }
 
 
@@ -4745,8 +4848,10 @@ def loop(
       - {"type":"offload","prompt":"...","tier":"fast|code|general|cloud-code|cloud-general"}
       - {"type":"trilobite","prompt":"...","session":"none"}
       - {"type":"trilobite","prompt":"...","context_size":"1m"}
-      - {"type":"master_orchestrate","task":"...","mode":"inline|delegate","agents":3}
+      - {"type":"master_orchestrate","task":"...","mode":"inline|delegate|fleet","agents":3}
       - {"type":"master_status"}
+      - {"type":"master_capacity","requested_agents":32}
+      - {"type":"master_cancel","agent_id":"master-id|prefix|all"}
       - {"type":"workspace_inventory","path":".","max_entries":20000,"timeout_seconds":10}
       - {"type":"file_find","query":"*.py","root":"."}
       - {"type":"file_read","path":"README.md"}
@@ -5365,7 +5470,7 @@ def tool_manifest() -> str:
     """List the local-llm MCP tools and what they are for."""
     tools = {
         "agent": "Run a Claude-like tool-calling loop that can use local tools and web tools.",
-        "master_orchestrate/master_status": "Run inline/delegated master orchestration and inspect live subagent activity.",
+        "master_orchestrate/master_status/master_capacity/master_cancel": "Run hardware-scheduled orchestration, inspect capacity/activity, and cooperatively cancel fleets.",
         "admin_register/admin_login/admin_accounts/admin_set_account": "Manage hosted accounts, roles, bans, tiers, and developer flags.",
         "admin_status/debug_inspect/admin_private_chain_of_thought": "Inspect admin/debug state and safely deny private chain-of-thought exposure.",
         "trilobite": "Ask the local self-improving coding model.",
@@ -5456,8 +5561,10 @@ AGENT_TOOL_HELP = """Available tools:
 - memory_privacy_repair: {"lesson_ids_json": ["lesson-id"], "apply": false}
 - memory_embedding_backfill: {"limit": 25, "apply": false}
 - system_improvement_report: {}
-- master_orchestrate: {"task": "...", "mode": "ask|inline|delegate", "agents": 3, "tier": "code"}
+- master_orchestrate: {"task": "...", "mode": "ask|inline|delegate|fleet", "agents": 3, "tier": "code"}
 - master_status: {}
+- master_capacity: {"requested_agents": 0}
+- master_cancel: {"agent_id": "master-id|prefix|all"}
 - self_heal_check: {}
 - self_heal_repair: {"apply": false}
 - status: {}
@@ -5482,7 +5589,7 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
     "diagnostics", "context_health", "context_policy_status",
-    "memory_quality_report", "memory_privacy_review", "system_improvement_report", "master_status",
+    "memory_quality_report", "memory_privacy_review", "system_improvement_report", "master_status", "master_capacity",
     "self_heal_check", "status", "system_profile_text",
     "emotion_vector_status", "preferences_status", "tool_manifest",
 })
@@ -5511,6 +5618,7 @@ REPOSITORY_AGENT_TOOL_HELP = """Available tools:
 - memory_privacy_review: {"sample_limit": 20}
 - system_improvement_report: {"session": "", "project": ""}
 - master_status: {}
+- master_capacity: {"requested_agents": 0}
 - self_heal_check: {}
 - status: {}
 - system_profile_text: {}
@@ -5913,6 +6021,14 @@ def _agent_dispatch(tool_name, args, allow_web=True, read_only=False):
         return master_status(
             include_finished=args.get("include_finished", True),
             limit=args.get("limit", 20),
+        )
+    if tool_name in ("master_capacity", "agent_capacity"):
+        return master_capacity(
+            requested_agents=args.get("requested_agents", args.get("agents", 0)),
+        )
+    if tool_name in ("master_cancel", "agent_cancel"):
+        return master_cancel(
+            agent_id=args.get("agent_id", args.get("selector", "")),
         )
     if tool_name in ("master_orchestrate", "master"):
         return master_orchestrate(

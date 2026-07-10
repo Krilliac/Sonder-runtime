@@ -16,6 +16,27 @@ def test_agent_dispatch_blocks_web_when_disabled():
     assert out.startswith("ERROR: web access disabled")
 
 
+def test_agent_dispatch_routes_fleet_capacity_and_cancellation(monkeypatch):
+    monkeypatch.setattr(
+        server, "master_capacity", lambda requested_agents=0: f"capacity:{requested_agents}",
+    )
+    monkeypatch.setattr(
+        server, "master_cancel", lambda agent_id: f"cancel:{agent_id}",
+    )
+
+    assert server._agent_dispatch(
+        "master_capacity", {"requested_agents": 12}, read_only=True,
+    ) == "capacity:12"
+    assert server._agent_dispatch(
+        "master_cancel", {"agent_id": "master-abc"}, read_only=False,
+    ) == "cancel:master-abc"
+    denied = server._agent_dispatch(
+        "master_cancel", {"agent_id": "all"}, read_only=True,
+    )
+    assert denied.startswith("ERROR:")
+    assert "not allowed" in denied
+
+
 def test_agent_dispatch_can_tune_emotion_vectors(monkeypatch, tmp_path):
     monkeypatch.setattr(server.emotion_vectors, "workspace_root", lambda: str(tmp_path))
     monkeypatch.delenv("TRILOBITE_EMOTION_VECTORS", raising=False)

@@ -139,6 +139,8 @@ ACTION_TITLES = {
     "checklist_create": "Created Checklist",
     "checklist_update": "Updated Checklist",
     "checklist_show": "Viewed Checklist",
+    "master_capacity": "Checked Fleet Capacity",
+    "master_cancel": "Cancelled Agent Fleet",
     "memory_privacy_review": "Reviewed Memory Privacy",
     "memory_privacy_repair": "Cleaned Memory Privacy",
     "memory_embedding_backfill": "Backfilled Memory Embeddings",
@@ -158,6 +160,27 @@ def _current():
         return None
     with _LOCK:
         return _ACTIVE.get(response_id)
+
+
+def current_response_id():
+    """Return the active response ID for propagation into a worker thread."""
+    return getattr(_LOCAL, "response_id", None)
+
+
+@contextlib.contextmanager
+def bind_response(response_id):
+    """Attach a worker thread to an existing response activity span."""
+    previous = getattr(_LOCAL, "response_id", None)
+    with _LOCK:
+        response = _ACTIVE.get(response_id) if response_id else None
+    if response is None:
+        yield None
+        return
+    _LOCAL.response_id = response_id
+    try:
+        yield response
+    finally:
+        _LOCAL.response_id = previous
 
 
 def _event(response, kind, **fields):
