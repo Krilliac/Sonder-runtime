@@ -83,6 +83,20 @@ def test_add_lesson_and_read_back():
     assert lessons[0]["embedding"] == b"\x00\x01"
 
 
+def test_missing_lesson_embeddings_can_be_backfilled_without_overwrite():
+    conn = ms.connect(":memory:")
+    ms.add_lesson(conn, "missing", "needs a vector", None, "seed")
+    ms.add_lesson(conn, "present", "already vectorized", b"existing", "seed")
+
+    rows = ms.lessons_without_embeddings(conn, limit=10)
+
+    assert [row["id"] for row in rows] == ["missing"]
+    assert ms.set_lesson_embedding(conn, "missing", b"new") is True
+    assert ms.set_lesson_embedding(conn, "present", b"replacement") is False
+    stored = {row["id"]: row["embedding"] for row in ms.all_lessons(conn)}
+    assert stored == {"missing": b"new", "present": b"existing"}
+
+
 def test_fts_search_matches_tokens():
     c = _conn()
     ms.add_lesson(c, "L1", "use RRF fusion for hybrid retrieval", None, "a")

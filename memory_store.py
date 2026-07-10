@@ -240,6 +240,28 @@ def all_lessons(conn):
     return [dict(r) for r in rows]
 
 
+def lessons_without_embeddings(conn, limit=100):
+    limit = max(1, min(int(limit or 100), 500))
+    rows = conn.execute(
+        "SELECT id, text, source_interaction, ts FROM lessons "
+        "WHERE embedding IS NULL ORDER BY ts ASC, rowid ASC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def set_lesson_embedding(conn, lesson_id, embedding):
+    """Set one missing embedding without overwriting an existing vector."""
+    if not embedding:
+        raise ValueError("embedding must be non-empty")
+    cur = conn.execute(
+        "UPDATE lessons SET embedding=? WHERE id=? AND embedding IS NULL",
+        (embedding, lesson_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
 def get_lesson_text(conn, lesson_id):
     row = conn.execute("SELECT text FROM lessons WHERE id=?", (lesson_id,)).fetchone()
     return row[0] if row else None

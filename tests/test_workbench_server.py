@@ -5,6 +5,56 @@ import memory_store
 import server
 
 
+def _inventory_result(root="workspace"):
+    return {
+        "root": root,
+        "files": 3,
+        "directories": 1,
+        "bytes": 123,
+        "entries_scanned": 4,
+        "elapsed_ms": 2,
+        "skipped_entries": 1,
+        "skipped_by_reason": {"ignored_directory": 1},
+        "skipped_examples": [],
+        "truncated": False,
+        "truncation_reason": "",
+        "manifests": ["pyproject.toml"],
+        "extensions": [{"extension": ".py", "files": 2, "bytes": 100}],
+        "largest_files": [{"relative": "server.py", "bytes": 80}],
+        "top_areas": [{"path": ".", "files": 3, "bytes": 123}],
+        "files_seen": 3,
+        "directories_seen": 1,
+    }
+
+
+def test_workspace_inventory_is_exposed_to_commands_agents_and_activity(monkeypatch):
+    activity_tracker.reset_for_tests()
+    calls = []
+
+    def fake_inventory(path, **kwargs):
+        calls.append((path, kwargs))
+        return _inventory_result(path)
+
+    monkeypatch.setattr(server.workbench, "workspace_inventory", fake_inventory)
+
+    with activity_tracker.response_span("inventory", "inspect workspace"):
+        output = server.control_command("/inventory src")
+    dispatched = server._agent_dispatch(
+        "workspace_inventory",
+        {"path": "src", "max_entries": 99, "timeout_seconds": 1},
+    )
+
+    assert "workspace inventory: src" in output
+    assert "pyproject.toml" in output
+    assert "workspace inventory: src" in dispatched
+    assert calls[-1][1]["max_entries"] == 99
+    actions = [
+        row for row in activity_tracker.latest()["events"]
+        if row.get("kind") == "tool_call"
+    ]
+    assert actions[0]["title"] == "Inventoried Workspace"
+
+
 def test_checklist_lifecycle_persists_order_and_parent_status(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "checklist.db"))
 
@@ -102,12 +152,16 @@ def test_nested_agent_report_uses_current_response_not_stale_latest(monkeypatch)
 
 def test_loop_dispatch_supports_workbench_actions(monkeypatch):
     monkeypatch.setattr(server, "directory_tree", lambda **kwargs: "tree ok")
+    monkeypatch.setattr(server, "workspace_inventory", lambda **kwargs: "inventory ok")
 
     result = server._loop_dispatch({"type": "directory_tree", "path": "."})
+    inventory = server._loop_dispatch({"type": "workspace_inventory", "path": "."})
 
     assert result["ok"] is True
     assert result["type"] == "directory_tree"
     assert result["output"] == "tree ok"
+    assert inventory["ok"] is True
+    assert inventory["output"] == "inventory ok"
 
 
 def test_validation_must_cover_persistent_mutation_path():

@@ -13,6 +13,9 @@
 - For concrete workspace tasks, use the guarded workbench instead of returning
   prose-only commands. Inspect folders/files/programs first, maintain the
   persistent checklist, make changes with file tools, and run a real validator.
+- Start unfamiliar or large repositories with `workspace_inventory`; honor its
+  scan budget and truncation reason, then narrow `text_search`, `script_search`,
+  and file reads instead of repeatedly sweeping generated/tooling directories.
 - Report observable actions with exact tool titles, argv-safe commands, bounded
   output, changed paths, and honest failures. End with checklist state and the
   checks that actually ran; never claim execution from a proposed command.
@@ -40,6 +43,9 @@
   or supervising assistant to implement, test, commit, and push it.
 - Do not handle secrets, credentials, or final security/correctness decisions.
   Say that the caller should keep those checks outside the local model.
+- Treat memory hygiene as explicit maintenance: show only redacted privacy
+  findings, never delete an unflagged lesson, require selected IDs plus `apply`
+  for cleanup, and use only the configured local model for embedding backfills.
 - When a user asks for code they will run with `/run`, produce one self-contained
   fenced code block that can complete in a non-interactive subprocess. Avoid
   `input()` and unbounded event loops unless the user explicitly asks for an

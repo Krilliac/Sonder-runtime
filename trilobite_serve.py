@@ -310,6 +310,7 @@ HELP_TEXT = """commands:
   /work <task>       execute a guarded workflow with checklist and end report
   /report            show the latest grounded report and action transcript
   /checklist [id]    show the current or selected persistent checklist
+  /inventory [path]  summarize a guarded workspace with explicit scan budgets
   /tree [path]       list a guarded folder tree
   /search q|root|g   search text under a guarded root (optional glob)
   /programs [query]  find installed programs
@@ -322,6 +323,9 @@ HELP_TEXT = """commands:
   /todo ...          list/add/update visible task state
   /quality           audit lesson quality and duplicate rows
   /qualityfix [apply] dry-run or apply exact duplicate lesson cleanup
+  /privacy [N]       review redacted path/credential-like lesson findings
+  /privacyfix ...    dry-run or delete explicit flagged lesson IDs
+  /embeddings ...    dry-run or locally backfill missing lesson vectors
   /emotion [cmd]     show/tune live tone vectors; try: /emotion tune warmer shorter
   /prefer [text]     show/teach preferences; /prefer forget <id-or-key>
   /improve           show the next system improvement checklist
@@ -476,9 +480,10 @@ DANGEROUS_HTTP_SLASH_COMMANDS = frozenset({
     "/asset", "/assets", "/assetgen", "/artifact", "/forge", "/gamesuite",
     "/game", "/gamegen", "/gamefleet", "/gamecampaign",
     "/activity", "/tools", "/work", "/agent", "/report", "/endreport",
-    "/checklist", "/plan", "/tree", "/folders", "/search", "/grep",
+    "/checklist", "/plan", "/inventory", "/workspace", "/tree", "/folders", "/search", "/grep",
     "/programs", "/programfind", "/scripts", "/scriptfind", "/image",
     "/inspectimage", "/mkdir", "/runprogram", "/runscript",
+    "/privacy", "/privacyreview", "/privacyfix", "/embeddings", "/embedfix",
 })
 
 
@@ -801,6 +806,8 @@ def _handle_slash(content, messages=None, state=None, project=""):
         return server.memory_quality_report()
     if cmd == "/qualityfix":
         return server.memory_quality_repair(apply=(arg.strip().lower() == "apply"))
+    if cmd in ("/privacy", "/privacyreview", "/privacyfix", "/embeddings", "/embedfix"):
+        return server.control_command(stripped, project=project)
     if cmd in ("/emotion", "/emotions", "/vectors", "/mood"):
         return server.emotion_command(arg)
     if cmd in ("/prefer", "/preference", "/preferences"):
@@ -819,6 +826,7 @@ def _handle_slash(content, messages=None, state=None, project=""):
         )
     if cmd in (
         "/report", "/endreport", "/checklist", "/plan",
+        "/inventory", "/workspace",
         "/tree", "/folders", "/search", "/grep",
         "/programs", "/programfind", "/scripts", "/scriptfind",
         "/image", "/inspectimage", "/mkdir", "/runprogram", "/runscript",
@@ -1409,6 +1417,7 @@ class Handler(BaseHTTPRequestHandler):
         reply = None
         turn = None
         response_iid = None
+        activity_response = None
         try:
             with state.lock:
                 _record_chat("user", prompt, state=state)
@@ -1419,7 +1428,7 @@ class Handler(BaseHTTPRequestHandler):
                     model=model,
                     session=storage_session,
                     project=storage_project,
-                ):
+                ) as activity_response:
                     reply = _handle_slash(
                         prompt, messages=messages, state=state,
                         project=storage_project,
@@ -1451,8 +1460,9 @@ class Handler(BaseHTTPRequestHandler):
                         )
                         content = turn.content
                         response_iid = turn.iid
-                    if "=== ACTIVITY (observable work) ===" not in content:
-                        content = server._append_activity(content)
+                content = server._append_activity(
+                    content, response=activity_response, replace=True,
+                )
                 _record_chat(
                     "assistant",
                     content,

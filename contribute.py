@@ -21,18 +21,81 @@ import memory_store  # noqa
 
 MAX_LEN = 300
 
-# Conservative patterns for text that may leak private info.
-PRIVATE_MARKERS = [
-    re.compile(r"[A-Za-z]:\\"),  # Windows drive path, e.g. C:\
-    re.compile(r"(?<![\w/])/home/"),  # unix home dir
-    re.compile(r"(?<![\w/])/Users/"),  # macOS home dir
-    re.compile(r"\\\\[A-Za-z0-9._-]+\\"),  # UNC path \\server\share
-    re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"),  # email address
-    re.compile(r"(?i)\b(api[_-]?key|secret|password|passwd|token|access[_-]?key)\b\s*[:=]"),
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-    re.compile(r"\b[A-Fa-f0-9]{32,}\b"),  # long hex blob (hash/key)
-    re.compile(r"\b[A-Za-z0-9+/]{40,}={0,2}\b"),  # long base64-ish blob
+# Conservative shared rules for text that may leak private info. Each rule has
+# a stable reason name and a replacement suitable for user-visible previews.
+PRIVATE_RULES = [
+    (
+        "windows_path",
+        re.compile(r"(?i)\b[A-Z]:\\[^\s\"']*"),
+        "<windows-path>",
+    ),
+    (
+        "unix_home_path",
+        re.compile(r"(?<![\w/])/(?:home|Users)/[^\s\"']*"),
+        "<home-path>",
+    ),
+    (
+        "unc_path",
+        re.compile(r"\\\\[A-Za-z0-9._-]+\\[^\s\"']*"),
+        "<unc-path>",
+    ),
+    (
+        "email",
+        re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"),
+        "<email>",
+    ),
+    (
+        "credential_assignment",
+        re.compile(
+            r"(?i)\b(?:api[_-]?key|secret|password|passwd|token|access[_-]?key)"
+            r"\b\s*[:=]\s*[^\s,;]+"
+        ),
+        "<credential>",
+    ),
+    (
+        "private_key",
+        re.compile(
+            r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?"
+            r"-----END [A-Z ]*PRIVATE KEY-----",
+            re.S,
+        ),
+        "<private-key>",
+    ),
+    (
+        "long_hex",
+        re.compile(r"\b[A-Fa-f0-9]{32,}\b"),
+        "<opaque-hex>",
+    ),
+    (
+        "long_base64",
+        re.compile(r"\b[A-Za-z0-9+/]{40,}={0,2}\b"),
+        "<opaque-token>",
+    ),
 ]
+PRIVATE_MARKERS = [pattern for _name, pattern, _replacement in PRIVATE_RULES]
+
+
+def private_reasons(text):
+    """Stable privacy finding names without returning the matching value."""
+    value = text or ""
+    return [name for name, pattern, _replacement in PRIVATE_RULES if pattern.search(value)]
+
+
+def privacy_preview(text, max_chars=120):
+    """Return only typed placeholders when any private marker is present."""
+    original = text or ""
+    placeholders = []
+    for _name, pattern, replacement in PRIVATE_RULES:
+        if pattern.search(original) and replacement not in placeholders:
+            placeholders.append(replacement)
+    if placeholders:
+        return " ".join(placeholders)
+    value = original
+    value = re.sub(r"\s+", " ", value).strip()
+    max_chars = max(20, min(int(max_chars or 120), 500))
+    if len(value) > max_chars:
+        value = value[: max_chars - 3] + "..."
+    return value
 
 
 def is_shareable(text):
@@ -41,10 +104,7 @@ def is_shareable(text):
         return False
     if len(text) > MAX_LEN:
         return False
-    for pat in PRIVATE_MARKERS:
-        if pat.search(text):
-            return False
-    return True
+    return not private_reasons(text)
 
 
 def scrubbed_lessons(conn):

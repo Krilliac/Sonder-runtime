@@ -53,6 +53,8 @@ class _ChatScreenState extends State<ChatScreen> {
     '/activity': 'Show live tool/file activity',
     '/report': 'Show latest end report and exact actions',
     '/checklist': 'Show the active work checklist',
+    '/inventory': 'Summarize the guarded workspace',
+    '/privacy': 'Review redacted memory privacy findings',
     '/tree': 'Inspect the guarded workspace tree',
     '/programs python': 'Find the local Python runtime',
     '/dump': 'Save chat/debug dump',

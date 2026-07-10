@@ -41,6 +41,18 @@ def _paint(text, *styles):
     return "".join(styles) + str(text) + _Ansi.reset
 
 
+def _normalize_input_line(line):
+    """Strip console framing, including a BOM from piped PowerShell input."""
+    value = str(line or "")
+    # Windows PowerShell 5.1 may send a UTF-8 BOM that Python's console codec
+    # exposes either correctly as U+FEFF or as the three Latin-1 code points.
+    for prefix in ("\ufeff", "\xef\xbb\xbf", "\xff\xfe", "\xfe\xff"):
+        if value.startswith(prefix):
+            value = value[len(prefix):]
+            break
+    return value.strip()
+
+
 def _rule(char="─", width=56):
     return _paint(char * width, _Ansi.muted)
 
@@ -66,6 +78,7 @@ HELP = """commands:
   /work <task>       execute a guarded tool-using workflow with checklist/report
   /report            show the latest grounded end report and action transcript
   /checklist [id]    show the current or selected persistent checklist
+  /inventory [path]  summarize a guarded workspace with explicit scan budgets
   /tree [path]       list a guarded folder tree
   /search q|root|g   search text under a guarded root (optional glob)
   /programs [query]  find installed programs available to the workbench
@@ -78,6 +91,9 @@ HELP = """commands:
   /todo ...          list/add/update visible task state
   /quality           audit lesson quality and duplicate rows
   /qualityfix [apply] dry-run or apply exact duplicate lesson cleanup
+  /privacy [N]       review redacted path/credential-like lesson findings
+  /privacyfix ...    dry-run or delete explicit flagged lesson IDs
+  /embeddings ...    dry-run or locally backfill missing lesson vectors
   /emotion [cmd]     show/tune live tone vectors; try: /emotion tune warmer shorter
   /prefer [text]     show/teach preferences; /prefer forget <id-or-key>
   /improve           show the next system improvement checklist
@@ -400,7 +416,9 @@ def main():
             print()
             break
 
-        line = line.strip()
+        # PowerShell 5.1 may prefix the first piped UTF-8 line with a BOM. Treat
+        # it as transport framing so slash commands remain commands.
+        line = _normalize_input_line(line)
         if not line:
             continue
         _maybe_live_reload()
@@ -473,6 +491,8 @@ def main():
                 print(server.memory_quality_report())
             elif cmd == "/qualityfix":
                 print(server.memory_quality_repair(apply=(arg.strip().lower() == "apply")))
+            elif cmd in ("/privacy", "/privacyreview", "/privacyfix", "/embeddings", "/embedfix"):
+                print(server.control_command(line, session=session_id, project=project))
             elif cmd in ("/emotion", "/emotions", "/vectors", "/mood"):
                 print(server.emotion_command(arg))
             elif cmd in ("/prefer", "/preference", "/preferences"):
@@ -496,6 +516,7 @@ def main():
                     print(out)
             elif cmd in (
                 "/report", "/endreport", "/checklist", "/plan",
+                "/inventory", "/workspace",
                 "/tree", "/folders", "/search", "/grep",
                 "/programs", "/programfind", "/scripts", "/scriptfind",
                 "/image", "/inspectimage", "/mkdir", "/runprogram", "/runscript",

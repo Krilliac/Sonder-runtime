@@ -113,6 +113,7 @@ def _safe_args(value, depth=0):
 
 
 ACTION_TITLES = {
+    "workspace_inventory": "Inventoried Workspace",
     "directory_tree": "Listed Folder",
     "directory_create": "Created Folder",
     "file_find": "Searched Files",
@@ -138,6 +139,9 @@ ACTION_TITLES = {
     "checklist_create": "Created Checklist",
     "checklist_update": "Updated Checklist",
     "checklist_show": "Viewed Checklist",
+    "memory_privacy_review": "Reviewed Memory Privacy",
+    "memory_privacy_repair": "Cleaned Memory Privacy",
+    "memory_embedding_backfill": "Backfilled Memory Embeddings",
     "web_search": "Searched Web",
     "web_fetch": "Fetched Web Page",
 }

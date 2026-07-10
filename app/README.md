@@ -30,7 +30,8 @@ party.
   activity, the live workbench checklist and exact action evidence, visible task
   state, permission rules, command inventory, improvement
   recommendations, learning stats and exposed models, run `/stats`, `/context`,
-  `/compact`, `/todo`, `/commands`, `/dump`, `/permissions`, `/quality`, `/improve`,
+  `/compact`, `/todo`, `/commands`, `/dump`, `/permissions`, `/quality`,
+  `/inventory`, `/privacy`, `/embeddings`, `/improve`,
   `/agents`, `/train 10` and `/help`, start/stop the bundled desktop server,
   launch endless training, and pull updates from Git.
 - **Live footer**: chat shows context %, active agents, project scope, token

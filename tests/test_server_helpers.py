@@ -379,6 +379,33 @@ def test_activity_tracks_file_line_deltas(monkeypatch, tmp_path):
     assert latest["files"][0]["path"].endswith("notes.txt")
 
 
+def test_completed_surface_replaces_inflight_activity_snapshot():
+    server.activity_tracker.reset_for_tests()
+
+    with server.activity_tracker.response_span("http", "/inventory") as response:
+        interim = server._append_activity("inventory result")
+        assert " running " in interim
+
+    final = server._append_activity(interim, response=response, replace=True)
+
+    assert final.count("=== ACTIVITY (observable work) ===") == 1
+    assert " complete " in final
+    assert " running " not in final
+
+
+def test_completed_activity_keeps_interaction_footer_last_and_parseable():
+    server.activity_tracker.reset_for_tests()
+
+    with server.activity_tracker.response_span("terminal", "hello") as response:
+        interim = server.with_footer("answer", "abc123def4567890")
+
+    final = server._append_activity(interim, response=response, replace=True)
+
+    assert " complete " in final
+    assert final.endswith("[interaction_id: abc123def4567890]")
+    assert server.parse_interaction_id(final) == "abc123def4567890"
+
+
 def test_memory_search_includes_preferences(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "prefs.db"))
     server.learn_preference("User prefers MSVC for C++ examples.")

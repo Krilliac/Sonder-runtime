@@ -68,6 +68,12 @@ COMMANDS = [
         "summary": "Show the current or selected persistent work checklist.",
     },
     {
+        "name": "/inventory",
+        "category": "filesystem",
+        "risk": "ask",
+        "summary": "Summarize a guarded workspace with bounded traversal, manifests, sizes, and exclusions.",
+    },
+    {
         "name": "/tree",
         "category": "filesystem",
         "risk": "ask",
@@ -186,6 +192,24 @@ COMMANDS = [
         "category": "memory",
         "risk": "safe",
         "summary": "Audit lesson quality and duplicate rows.",
+    },
+    {
+        "name": "/privacy",
+        "category": "learning",
+        "risk": "safe",
+        "summary": "Review redacted path and credential-like lesson findings.",
+    },
+    {
+        "name": "/privacyfix",
+        "category": "learning",
+        "risk": "dangerous",
+        "summary": "Dry-run or explicitly delete selected privacy-flagged lesson IDs.",
+    },
+    {
+        "name": "/embeddings",
+        "category": "learning",
+        "risk": "ask",
+        "summary": "Dry-run or locally backfill missing lesson embeddings in a bounded batch.",
     },
     {
         "name": "/qualityfix",
