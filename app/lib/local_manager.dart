@@ -225,19 +225,10 @@ class LocalManager {
         );
         if (await script.exists()) {
           if (persistOnAppClose) {
-            await Process.start(
-              'cmd.exe',
-              ['/c', 'start', '', '/min', script.path],
-              workingDirectory: system.path,
-              environment: processEnvironment(
-                allowHosted: allowHosted,
-                contextSize: contextSize,
-              ),
-              runInShell: true,
-            );
-            return const LocalActionResult(
-              true,
-              'Server startup requested in background mode.',
+            return _startHeadlessServer(
+              system,
+              allowHosted: allowHosted,
+              contextSize: contextSize,
             );
           }
           final process = await Process.start(
@@ -258,19 +249,10 @@ class LocalManager {
       }
       final python = Platform.isWindows ? 'python.exe' : 'python3';
       if (persistOnAppClose) {
-        await Process.start(
-          python,
-          ['trilobite_serve.py'],
-          workingDirectory: system.path,
-          environment: processEnvironment(
-            allowHosted: allowHosted,
-            contextSize: contextSize,
-          ),
-          mode: ProcessStartMode.detached,
-        );
-        return const LocalActionResult(
-          true,
-          'Server startup requested in background mode.',
+        return _startHeadlessServer(
+          system,
+          allowHosted: allowHosted,
+          contextSize: contextSize,
         );
       }
       final process = await Process.start(
@@ -290,6 +272,57 @@ class LocalManager {
     } catch (e) {
       return LocalActionResult(false, 'Could not start server: $e');
     }
+  }
+
+  static Future<LocalActionResult> _startHeadlessServer(
+    Directory system, {
+    required bool allowHosted,
+    required String contextSize,
+  }) async {
+    final args = <String>[
+      'start',
+      '--context-size',
+      contextSize.trim().isEmpty ? '8192' : contextSize.trim(),
+    ];
+    if (Platform.isWindows) {
+      final script = File(
+        '${system.path}${Platform.pathSeparator}trilobite-headless.cmd',
+      );
+      if (!await script.exists()) {
+        return const LocalActionResult(false, 'Headless supervisor is missing.');
+      }
+      await Process.start(
+        'cmd.exe',
+        ['/c', 'start', '', '/min', script.path, ...args],
+        workingDirectory: system.path,
+        environment: processEnvironment(
+          allowHosted: allowHosted,
+          contextSize: contextSize,
+        ),
+        runInShell: true,
+      );
+    } else {
+      final script = File(
+        '${system.path}${Platform.pathSeparator}trilobite_headless.py',
+      );
+      if (!await script.exists()) {
+        return const LocalActionResult(false, 'Headless supervisor is missing.');
+      }
+      await Process.start(
+        'python3',
+        [script.path, ...args],
+        workingDirectory: system.path,
+        environment: processEnvironment(
+          allowHosted: allowHosted,
+          contextSize: contextSize,
+        ),
+        mode: ProcessStartMode.detached,
+      );
+    }
+    return const LocalActionResult(
+      true,
+      'Server startup requested in managed background mode.',
+    );
   }
 
   static void _trackManagedServer(Process process) {
@@ -319,55 +352,70 @@ class LocalManager {
     if (!canRunLocalTools) {
       return const LocalActionResult(false, 'Server shutdown is desktop-only.');
     }
-    final managedPid = _managedServerPid;
-    stopManagedServerNow();
+    final managedResult = await _stopTrackedServer();
     try {
-      if (Platform.isWindows) {
-        final parentMatch = managedPid == null
-            ? ''
-            : ' -or \$_.ParentProcessId -eq $managedPid'
-                ' -or \$_.ProcessId -eq $managedPid';
-        final script = '''
-\$matches = Get-CimInstance Win32_Process |
-  Where-Object { \$_.CommandLine -match 'trilobite_serve\\.py' -or \$_.CommandLine -match 'trilobite-serve\\.cmd'$parentMatch }
-\$count = 0
-foreach (\$p in \$matches) {
-  try {
-    Stop-Process -Id \$p.ProcessId -Force
-    \$count += 1
-  } catch {}
-}
-Write-Output "Stopped \$count Trilobite server process(es)."
-''';
-        final result = await Process.run(
-          'powershell.exe',
-          ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
-          environment: processEnvironment(),
-        ).timeout(const Duration(seconds: 20));
-        final output = [
-          if ((result.stdout as String).trim().isNotEmpty)
-            (result.stdout as String).trim(),
-          if ((result.stderr as String).trim().isNotEmpty)
-            (result.stderr as String).trim(),
-        ].join('\n');
-        return LocalActionResult(result.exitCode == 0,
-            output.isEmpty ? 'Stop command exited.' : output);
+      final headlessResult = await _stopHeadlessServer(bundledSystemDirectory());
+      final results = <LocalActionResult>[
+        if (managedResult != null) managedResult,
+        if (headlessResult != null) headlessResult,
+      ];
+      if (results.isEmpty) {
+        return const LocalActionResult(true, 'No app-managed server was found.');
       }
-      final result = await Process.run(
-        'pkill',
-        ['-f', 'trilobite_serve.py'],
-        environment: processEnvironment(),
-      ).timeout(const Duration(seconds: 20));
-      if (result.exitCode == 0) {
-        return const LocalActionResult(true, 'Stopped Trilobite server process(es).');
-      }
-      return const LocalActionResult(
-        true,
-        'No matching Trilobite server process was reported.',
+      return LocalActionResult(
+        results.every((result) => result.ok),
+        results.map((result) => result.message).join('\n'),
       );
     } catch (e) {
-      return LocalActionResult(false, 'Could not stop server processes: $e');
+      return LocalActionResult(false, 'Could not stop managed servers: $e');
     }
+  }
+
+  static Future<LocalActionResult?> _stopTrackedServer() async {
+    final process = _managedServer;
+    final pid = _managedServerPid;
+    if (process == null || pid == null) return null;
+    try {
+      if (Platform.isWindows) {
+        final result = await Process.run(
+          'taskkill',
+          ['/PID', '$pid', '/T', '/F'],
+          environment: processEnvironment(),
+        ).timeout(const Duration(seconds: 20));
+        final output = _processOutput(result);
+        return LocalActionResult(
+          result.exitCode == 0,
+          output.isEmpty ? 'Stopped app-managed PID $pid.' : output,
+        );
+      }
+      final stopped = process.kill(ProcessSignal.sigterm);
+      return LocalActionResult(stopped, 'Stop requested for app-managed PID $pid.');
+    } finally {
+      if (_managedServerPid == pid) {
+        _managedServer = null;
+        _managedServerPid = null;
+      }
+    }
+  }
+
+  static Future<LocalActionResult?> _stopHeadlessServer(Directory system) async {
+    final windows = Platform.isWindows;
+    final script = File(
+      '${system.path}${Platform.pathSeparator}'
+      '${windows ? 'trilobite-headless.cmd' : 'trilobite_headless.py'}',
+    );
+    if (!await script.exists()) return null;
+    final result = await Process.run(
+      windows ? 'cmd.exe' : 'python3',
+      windows ? ['/c', script.path, 'stop'] : [script.path, 'stop'],
+      workingDirectory: system.path,
+      environment: processEnvironment(),
+    ).timeout(const Duration(seconds: 20));
+    final output = _processOutput(result);
+    return LocalActionResult(
+      result.exitCode == 0,
+      output.isEmpty ? 'Headless stop command exited.' : output,
+    );
   }
 
   static Future<LocalActionResult> startEndlessTraining() async {

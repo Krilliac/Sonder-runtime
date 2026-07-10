@@ -1,4 +1,6 @@
 import trilobite_serve as ts
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 
 def test_history_from_messages_excludes_last_user_turn():
@@ -327,3 +329,112 @@ def test_file_slash_commands_route_to_server(monkeypatch):
 
 def test_write_slash_requires_path_and_text():
     assert ts._handle_slash("/write onlypath").startswith("usage:")
+
+
+def test_http_session_state_is_scoped_and_blank_is_ephemeral():
+    ts._HTTP_SESSION_STATES.clear()
+    alice = {"account": {"username": "alice"}, "api_key": False}
+    bob = {"account": {"username": "bob"}, "api_key": False}
+
+    alice_first = ts._http_conversation_state(alice, "chat")
+    alice_again = ts._http_conversation_state(alice, "chat")
+    bob_state = ts._http_conversation_state(bob, "chat")
+    blank_first = ts._http_conversation_state(alice, "")
+    blank_again = ts._http_conversation_state(alice, "")
+
+    assert alice_first is alice_again
+    assert alice_first is not bob_state
+    assert blank_first is not blank_again
+
+
+def test_concurrent_turn_results_keep_iids_request_local(monkeypatch):
+    barrier = threading.Barrier(2)
+    ids = {"alpha": "aaa111", "beta": "bbb222"}
+
+    def fake_answer(prompt, history, **kwargs):
+        barrier.wait(timeout=3)
+        return "answer-%s\n\n[interaction_id: %s]" % (prompt, ids[prompt])
+
+    monkeypatch.setattr(ts.server, "answer_with_history", fake_answer)
+    alpha_state = ts.ConversationState()
+    beta_state = ts.ConversationState()
+
+    def run(prompt, state):
+        return ts._run_prompt(
+            prompt, history=[], state=state, return_result=True
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        alpha_future = pool.submit(run, "alpha", alpha_state)
+        beta_future = pool.submit(run, "beta", beta_state)
+        alpha = alpha_future.result(timeout=5)
+        beta = beta_future.result(timeout=5)
+
+    assert alpha.iid == "aaa111"
+    assert beta.iid == "bbb222"
+    assert alpha_state.last_iid == "aaa111"
+    assert beta_state.last_iid == "bbb222"
+    assert ts._chat_completion_object(
+        alpha.content, iid=alpha.iid
+    )["id"] == "chatcmpl-aaa111"
+    assert ts._chat_completion_object(
+        beta.content, iid=beta.iid
+    )["id"] == "chatcmpl-bbb222"
+
+
+def test_state_run_never_uses_legacy_global_response(monkeypatch):
+    monkeypatch.setattr(
+        ts, "LAST_RUN_SOURCE", "```python\nprint('wrong-global')\n```"
+    )
+    monkeypatch.setattr(
+        ts, "LAST_RESPONSE", "```python\nprint('wrong-global')\n```"
+    )
+    state = ts.ConversationState()
+    seen = {}
+
+    def fake_run(code, language="python", timeout=8):
+        seen["code"] = code
+        return {
+            "ok": True, "stdout": "ok", "stderr": "",
+            "timeout": timeout, "returncode": 0,
+        }
+
+    monkeypatch.setattr(ts.code_runner, "run_code", fake_run)
+    monkeypatch.setattr(ts.code_runner, "format_result", lambda result: "ok")
+    messages = [{
+        "role": "assistant",
+        "content": "```python\nprint('right-request')\n```",
+    }]
+
+    out = ts._handle_slash("/run", messages=messages, state=state)
+
+    assert out.endswith("[ran OK]")
+    assert "right-request" in seen["code"]
+    assert "wrong-global" not in seen["code"]
+
+
+def test_feedback_consumes_only_its_conversation_iid(monkeypatch):
+    alpha = ts.ConversationState(last_iid="aaa111")
+    beta = ts.ConversationState(last_iid="bbb222")
+    recorded = []
+    monkeypatch.setattr(
+        ts.server,
+        "record_outcome",
+        lambda iid, signal: recorded.append((iid, signal)) or "recorded",
+    )
+
+    assert ts._handle_slash("/pass", state=alpha) == "recorded"
+    assert recorded == [("aaa111", "tests_passed")]
+    assert alpha.last_iid is None
+    assert beta.last_iid == "bbb222"
+
+
+def test_chat_events_are_isolated_per_conversation():
+    alpha = ts.ConversationState()
+    beta = ts.ConversationState()
+
+    ts._record_chat("user", "alpha", state=alpha)
+    ts._record_chat("user", "beta", state=beta)
+
+    assert alpha.events == [{"role": "user/message", "content": "alpha"}]
+    assert beta.events == [{"role": "user/message", "content": "beta"}]

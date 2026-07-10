@@ -29,6 +29,7 @@ def test_build_request_strips_trailing_slash():
 
 def test_send_prompt_falls_back_to_local_on_connection_error(monkeypatch):
     calls = []
+    monkeypatch.setenv("TRILOBITE_FALLBACK_LOCAL", "1")
 
     def fake_send(server, key, prompt):
         calls.append((server, key, prompt))

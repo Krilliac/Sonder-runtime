@@ -56,7 +56,9 @@ def test_hot_roots_file_allows_explicit_read_root(monkeypatch, tmp_path):
     target = repo / "README.md"
     target.write_text("ground truth", encoding="utf-8")
     monkeypatch.setattr(file_ops, "workspace_root", lambda: workspace)
-    (workspace / file_ops.DEFAULT_ROOTS_FILE).write_text(str(repo), encoding="utf-8")
+    roots_file = workspace / "trusted-roots.local"
+    monkeypatch.setenv("TRILOBITE_FILE_ROOTS_FILE", str(roots_file))
+    roots_file.write_text(str(repo), encoding="utf-8")
 
     assert file_ops.read_file(str(target))["text"] == "ground truth"
 
@@ -65,7 +67,9 @@ def test_hot_roots_file_ignores_comments_and_missing_paths(monkeypatch, tmp_path
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.setattr(file_ops, "workspace_root", lambda: workspace)
-    (workspace / file_ops.DEFAULT_ROOTS_FILE).write_text(
+    roots_file = workspace / "trusted-roots.local"
+    monkeypatch.setenv("TRILOBITE_FILE_ROOTS_FILE", str(roots_file))
+    roots_file.write_text(
         "# approved roots\n\n" + str(tmp_path / "missing") + "\n",
         encoding="utf-8",
     )
@@ -84,4 +88,26 @@ def test_find_files_matches_names(monkeypatch, tmp_path):
     result = file_ops.find_files("*.py")
 
     assert [r["relative"] for r in result["results"]] == ["a.py"]
+
+
+def test_recursive_delete_allows_plain_subdirectory(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    state = tmp_path / "state"
+    target = workspace / "scratch"
+    target.mkdir(parents=True)
+    state.mkdir()
+    (target / "ordinary.txt").write_text("delete me", encoding="utf-8")
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: workspace)
+    monkeypatch.setattr(file_ops.trilobite_paths, "default_home", lambda: state)
+
+    preview = file_ops.delete_path(str(target), recursive=True)
+    result = file_ops.delete_path(
+        str(target),
+        recursive=True,
+        dry_run=False,
+        confirm=preview["required_confirm"],
+    )
+
+    assert result["deleted"] is True
+    assert not target.exists()
 

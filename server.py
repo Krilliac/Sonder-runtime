@@ -323,7 +323,9 @@ def resolve_trilobite_model(strict=False):
     return None if strict else TIERS["code"]
 
 
-def _make_generate(model, system, temperature, num_predict, num_ctx, cloud=False):
+def _make_generate(
+    model, system, temperature, num_predict, num_ctx, cloud=False, timeout=None
+):
     """Build a generate(prompt, history) closure for `model`.
 
     cloud=True targets an Ollama-hosted model: keep_alive and num_ctx are omitted
@@ -350,7 +352,10 @@ def _make_generate(model, system, temperature, num_predict, num_ctx, cloud=False
         ok = False
         content = ""
         try:
-            out = _post("/api/chat", payload)
+            if timeout is None:
+                out = _post("/api/chat", payload)
+            else:
+                out = _post("/api/chat", payload, timeout=timeout)
             content = out.get("message", {}).get("content", "")
             tokens_in = out.get("prompt_eval_count")
             tokens_out = out.get("eval_count")
@@ -792,12 +797,20 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
 mcp = FastMCP("local-llm")
 
 
+def _bounded_timeout(value) -> int:
+    try:
+        value = TIMEOUT if value is None else int(value)
+    except (TypeError, ValueError):
+        value = TIMEOUT
+    return max(1, min(value, TIMEOUT))
+
+
 def _post(path: str, payload: dict, timeout: int | None = None) -> dict:
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         f"{BASE}{path}", data=data, headers={"Content-Type": "application/json"}
     )
-    request_timeout = TIMEOUT if timeout is None else max(1, min(int(timeout), TIMEOUT))
+    request_timeout = _bounded_timeout(timeout)
     with urllib.request.urlopen(req, timeout=request_timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
@@ -836,6 +849,8 @@ def offload(
     Give a FULLY self-contained prompt (the model can't see this chat or your files).
     """
     _maybe_live_reload()
+    request_timeout = _bounded_timeout(timeout)
+    timeout = request_timeout
     model = TIERS.get(tier)
     if model is None:
         return "ERROR: unknown tier '%s'. Valid tiers: %s." % (tier, _valid_tier_names())
@@ -870,14 +885,20 @@ def offload(
     # good outcomes are still captured + distilled into lessons for the local student.
     retrieve_kwargs = {}
     if _is_cloud_tier(tier, model):
-        gen = _make_generate(model, system, temperature, num_predict, num_ctx, cloud=True)
+        gen = _make_generate(
+            model, system, temperature, num_predict, num_ctx,
+            cloud=True, timeout=request_timeout,
+        )
         retrieve_kwargs["retrieve_fn"] = _no_retrieve
     else:
         learning_model = resolve_trilobite_model(_STRICT_DEFAULT)
         if learning_model is None:
             return ("ERROR: trilobite model/alias not found. Run setup_alias.py, or call "
                     "with strict=False to fall back to the base coder.")
-        gen = _make_generate(learning_model, system, temperature, num_predict, num_ctx)
+        gen = _make_generate(
+            learning_model, system, temperature, num_predict, num_ctx,
+            timeout=request_timeout,
+        )
     conn = _open_db()
     try:
         response, iid = orchestrator.run_with_learning(
@@ -2647,15 +2668,21 @@ def admin_private_chain_of_thought(token: str = "") -> str:
     )
 
 
+def _file_developer_allowed(token: str = "") -> bool:
+    if not token:
+        return False
+    account = _admin_account_from_token(token)
+    ok, _ = admin_auth.require(account, "developer")
+    return ok
+
+
 def _file_bypass_allowed(token: str = "", approval: str = "") -> bool:
     if file_ops.bypass_enabled():
         return True
     expected = os.environ.get("TRILOBITE_FILE_APPROVAL_CODE", "").strip()
     if expected and approval and approval == expected:
         return True
-    account = _admin_account_from_token(token) if token else None
-    ok, _ = admin_auth.require(account, "developer")
-    return ok
+    return _file_developer_allowed(token)
 
 
 def _format_file_result(title: str, data: dict) -> str:
@@ -2797,6 +2824,7 @@ def file_write(
             mode=mode,
             extra_roots=extra_roots,
             bypass=_file_bypass_allowed(token, approval),
+            developer_authorized=_file_developer_allowed(token),
         )
     except Exception as e:
         _record_direct_tool("file_write", {"path": path, "mode": mode}, ok=False, started=started, summary=str(e))
@@ -2827,6 +2855,7 @@ def file_edit(
             count=count,
             extra_roots=extra_roots,
             bypass=_file_bypass_allowed(token, approval),
+            developer_authorized=_file_developer_allowed(token),
         )
     except Exception as e:
         _record_direct_tool("file_edit", {"path": path, "count": count}, ok=False, started=started, summary=str(e))
@@ -2857,6 +2886,7 @@ def file_delete(
             confirm=confirm,
             extra_roots=extra_roots,
             bypass=_file_bypass_allowed(token, approval),
+            developer_authorized=_file_developer_allowed(token),
         )
     except Exception as e:
         _record_direct_tool("file_delete", {"path": path, "dry_run": dry_run}, ok=False, started=started, summary=str(e))
@@ -3974,6 +4004,78 @@ or
 """
 
 
+REPOSITORY_READ_ONLY_TOOLS = frozenset({
+    "file_policy", "file_find", "file_read", "command_registry_list",
+    "activity_status", "permission_policy", "context_compaction_plan",
+    "diagnostics", "context_health", "context_policy_status",
+    "memory_quality_report", "system_improvement_report", "master_status",
+    "self_heal_check", "status", "system_profile_text",
+    "emotion_vector_status", "preferences_status", "tool_manifest",
+})
+REPOSITORY_READ_ONLY_FORBIDDEN_ARGS = frozenset({
+    "token", "approval", "extra_roots",
+})
+REPOSITORY_AGENT_TOOL_HELP = """Available tools:
+- file_policy: {}
+- file_find: {"query": "*.py", "root": ".", "max_results": 50}
+- file_read: {"path": "README.md", "max_bytes": 256000}
+- command_registry_list: {"filter_text": "filesystem|context|status"}
+- activity_status: {}
+- permission_policy: {"tool_name": "file_read"}
+- context_compaction_plan: {"session": "", "project": ""}
+- diagnostics: {}
+- context_health: {"session": "", "project": ""}
+- context_policy_status: {"context_size": "32k"}
+- memory_quality_report: {"sample_limit": 5}
+- system_improvement_report: {"session": "", "project": ""}
+- master_status: {}
+- self_heal_check: {}
+- status: {}
+- system_profile_text: {}
+- emotion_vector_status: {}
+- preferences_status: {"include_disabled": false, "limit": 20}
+- tool_manifest: {}
+
+Reply with exactly one JSON object and no markdown:
+{"tool": "tool_name", "args": {...}, "reason": "short reason"}
+or
+{"final": "your final answer"}
+"""
+
+
+def _agent_tool_help(read_only=False):
+    return REPOSITORY_AGENT_TOOL_HELP if read_only else AGENT_TOOL_HELP
+
+
+def _repository_read_only_error(tool_name, args):
+    if not isinstance(args, dict):
+        return "ERROR: repository read-only tool args must be a JSON object."
+    if tool_name not in REPOSITORY_READ_ONLY_TOOLS:
+        return "ERROR: tool '%s' is not allowed by the repository read-only policy." % tool_name
+    forbidden = sorted(REPOSITORY_READ_ONLY_FORBIDDEN_ARGS.intersection(args))
+    if forbidden:
+        return (
+            "ERROR: repository read-only tool '%s' forbids argument(s): %s."
+            % (tool_name, ", ".join(forbidden))
+        )
+    try:
+        if tool_name == "file_read":
+            file_ops.resolve_repository_read_path(
+                args.get("path", ""),
+                allow_workspace_root=False,
+                reject_sensitive=True,
+            )
+        elif tool_name == "file_find":
+            file_ops.resolve_repository_read_path(
+                args.get("root", "") or ".",
+                allow_workspace_root=True,
+                reject_sensitive=True,
+            )
+    except (PermissionError, ValueError) as exc:
+        return "ERROR: repository read-only path rejected: %s" % exc
+    return ""
+
+
 def _extract_agent_json(text):
     text = (text or "").strip()
     try:
@@ -3986,11 +4088,17 @@ def _extract_agent_json(text):
         return json.loads(text[start:end + 1])
 
 
-def _agent_dispatch(tool_name, args, allow_web=True):
+def _agent_dispatch(tool_name, args, allow_web=True, read_only=False):
     tool_name = (tool_name or "").strip()
     args = args or {}
     if not isinstance(args, dict):
         return "ERROR: tool args must be a JSON object"
+    if read_only:
+        policy_error = _repository_read_only_error(tool_name, args)
+        if policy_error:
+            return policy_error
+        if tool_name in {"command_registry_list", "tool_manifest"}:
+            return _agent_tool_help(read_only=True)
     if tool_name == "run_code":
         return run_code(
             code=args.get("code", ""),
@@ -4201,13 +4309,20 @@ def _agent_dispatch(tool_name, args, allow_web=True):
     return "ERROR: unknown tool '%s'." % tool_name
 
 
-def _agent_dispatch_observed(tool_name, args, allow_web=True):
+def _agent_dispatch_observed(tool_name, args, allow_web=True, read_only=False):
     started = time.time()
     ok = False
     observation = ""
     try:
         with activity_tracker.tool_dispatch_context():
-            observation = _agent_dispatch(tool_name, args, allow_web=allow_web)
+            if read_only:
+                observation = _agent_dispatch(
+                    tool_name, args, allow_web=allow_web, read_only=True
+                )
+            else:
+                observation = _agent_dispatch(
+                    tool_name, args, allow_web=allow_web
+                )
         ok = not str(observation).startswith("ERROR:")
         return observation
     finally:
@@ -4255,7 +4370,9 @@ def _agent_impl(
     gen = _make_generate(model, system, 0.1, 1200, SESSION_NUM_CTX, cloud=cloud)
     observations = []
     file_evidence = False
-    transcript = "Task:\n%s\n\n%s" % (prompt, AGENT_TOOL_HELP)
+    transcript = "Task:\n%s\n\n%s" % (
+        prompt, _agent_tool_help(read_only=read_only)
+    )
     for step in range(1, max_steps + 1):
         step_prompt = transcript
         if observations:
@@ -4280,14 +4397,16 @@ def _agent_impl(
         tool_name = decision.get("tool")
         if not tool_name:
             return "ERROR: agent decision missing 'tool' or 'final': %s" % decision
-        if read_only and tool_name in {"file_write", "file_edit", "file_delete"}:
-            observations.append(
-                "step %d tool=%s reason=%s\nERROR: repository-aware master agents are read-only." % (
-                    step, tool_name, decision.get("reason", "")
-                )
+        tool_args = decision.get("args", {})
+        policy_error = _repository_read_only_error(tool_name, tool_args) if read_only else ""
+        if policy_error:
+            observation = policy_error
+        elif read_only and tool_name in {"command_registry_list", "tool_manifest"}:
+            observation = _agent_tool_help(read_only=True)
+        else:
+            observation = _agent_dispatch_observed(
+                tool_name, tool_args, allow_web=allow_web
             )
-            continue
-        observation = _agent_dispatch_observed(tool_name, decision.get("args", {}), allow_web=allow_web)
         if tool_name in {"file_read", "file_find"} and not str(observation).startswith("ERROR:"):
             file_evidence = True
         observations.append(

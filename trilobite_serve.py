@@ -12,11 +12,17 @@ Run:
 Point your chat UI's OpenAI API base at http://127.0.0.1:<port>/v1 (any api key).
 """
 import json
+import hmac
+import hashlib
+import ipaddress
 import os
+import sqlite3
 import sys
+import threading
 import time
-import traceback
 import uuid
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import server
@@ -31,12 +37,52 @@ import debug_dump
 
 DEFAULT_PORT = 11435
 
-# Auth + bind config. Empty API_KEY = auth disabled (local-only default).
+
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_flag(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _resolve_auth_mode(api_key="", require_account=False, configured=None):
+    configured = os.environ.get("TRILOBITE_AUTH_MODE", "") if configured is None else configured
+    mode = (configured or "").strip().lower().replace("_", "-")
+    if mode:
+        if mode not in ("api-key", "account", "both", "either"):
+            raise RuntimeError("invalid TRILOBITE_AUTH_MODE")
+        return mode
+    if api_key:
+        return "api-key"
+    if require_account:
+        return "account"
+    return "local-open"
+
+
+def _parse_cors_origins(value):
+    return frozenset(
+        origin.strip()
+        for origin in (value or "").split(",")
+        if origin.strip() and origin.strip() != "*"
+    )
+
+# Auth + bind config. No credentials remains open only on loopback.
 API_KEY = os.environ.get("TRILOBITE_API_KEY", "")
 HOST = os.environ.get("TRILOBITE_HOST", "127.0.0.1")
-REQUIRE_ACCOUNT = os.environ.get("TRILOBITE_REQUIRE_ACCOUNT", "").strip().lower() in (
-    "1", "true", "yes", "on"
-)
+REQUIRE_ACCOUNT = _env_flag("TRILOBITE_REQUIRE_ACCOUNT")
+AUTH_MODE = _resolve_auth_mode(API_KEY, REQUIRE_ACCOUNT)
+CORS_ORIGINS = _parse_cors_origins(os.environ.get("TRILOBITE_CORS_ORIGINS", ""))
+ALLOW_REGISTRATION = _env_flag("TRILOBITE_ALLOW_REGISTRATION")
+MAX_REQUEST_BYTES = max(1, min(16 * 1024 * 1024, _env_int(
+    "TRILOBITE_MAX_REQUEST_BYTES", 1024 * 1024
+)))
 
 # Server state (module globals, single-user local — mirrors trilobite_repl.py).
 TRACE = False
@@ -48,14 +94,191 @@ CURRENT_ACCOUNT = None
 CURRENT_TOKEN = ""
 CHAT_EVENTS = []
 
+
+@dataclass
+class ConversationState:
+    """Mutable state for one hosted conversation, guarded by its lock."""
+
+    trace: bool = False
+    strict: object = None
+    last_iid: str | None = None
+    last_response: str | None = None
+    last_run_source: str | None = None
+    token: str = ""
+    account: dict | None = None
+    events: list = field(default_factory=list)
+    lock: threading.RLock = field(default_factory=threading.RLock)
+
+
+@dataclass(frozen=True)
+class TurnResult:
+    content: str
+    iid: str | None
+    run_source: str
+
+
+class _LegacyConversationState:
+    """Adapter preserving direct helper/REPL-style module-global behavior."""
+
+    lock = threading.RLock()
+
+    @property
+    def trace(self):
+        return TRACE
+
+    @trace.setter
+    def trace(self, value):
+        global TRACE
+        TRACE = value
+
+    @property
+    def strict(self):
+        return STRICT
+
+    @strict.setter
+    def strict(self, value):
+        global STRICT
+        STRICT = value
+
+    @property
+    def last_iid(self):
+        return LAST_IID
+
+    @last_iid.setter
+    def last_iid(self, value):
+        global LAST_IID
+        LAST_IID = value
+
+    @property
+    def last_response(self):
+        return LAST_RESPONSE
+
+    @last_response.setter
+    def last_response(self, value):
+        global LAST_RESPONSE
+        LAST_RESPONSE = value
+
+    @property
+    def last_run_source(self):
+        return LAST_RUN_SOURCE
+
+    @last_run_source.setter
+    def last_run_source(self, value):
+        global LAST_RUN_SOURCE
+        LAST_RUN_SOURCE = value
+
+    @property
+    def token(self):
+        return CURRENT_TOKEN
+
+    @token.setter
+    def token(self, value):
+        global CURRENT_TOKEN
+        CURRENT_TOKEN = value
+
+    @property
+    def account(self):
+        return CURRENT_ACCOUNT
+
+    @account.setter
+    def account(self, value):
+        global CURRENT_ACCOUNT
+        CURRENT_ACCOUNT = value
+
+    @property
+    def events(self):
+        return CHAT_EVENTS
+
+
+_LEGACY_STATE = _LegacyConversationState()
+HTTP_SESSION_STATE_LIMIT = max(1, min(
+    1024, _env_int("TRILOBITE_HTTP_SESSION_STATE_LIMIT", 128)
+))
+_HTTP_SESSION_STATES = OrderedDict()
+_HTTP_SESSION_STATES_LOCK = threading.RLock()
+
+
+def _state_or_legacy(state):
+    return state if state is not None else _LEGACY_STATE
+
+
+def _state_principal(context):
+    account = context.get("account") or {}
+    if account:
+        identity = account.get("username") or account.get("id") or "unknown"
+        return "account:%s" % identity
+    if context.get("api_key"):
+        return "api-key"
+    return "local-open"
+
+
+def _prune_http_session_states(max_size=HTTP_SESSION_STATE_LIMIT):
+    for key, candidate in list(_HTTP_SESSION_STATES.items()):
+        if len(_HTTP_SESSION_STATES) <= max_size:
+            break
+        if candidate.lock.acquire(blocking=False):
+            try:
+                _HTTP_SESSION_STATES.pop(key, None)
+            finally:
+                candidate.lock.release()
+
+
+def _http_conversation_state(context, session, token=""):
+    """Return bounded per-principal state; a blank HTTP session is ephemeral."""
+
+    session = (session or "").strip()
+    if not session:
+        return ConversationState(token=token or "", account=context.get("account"))
+    key = (_state_principal(context), session)
+    with _HTTP_SESSION_STATES_LOCK:
+        state = _HTTP_SESSION_STATES.get(key)
+        if state is None:
+            _prune_http_session_states(HTTP_SESSION_STATE_LIMIT - 1)
+            if len(_HTTP_SESSION_STATES) >= HTTP_SESSION_STATE_LIMIT:
+                # All retained conversations are active. Stay bounded and use
+                # request-local state rather than evicting an in-flight lock.
+                return ConversationState(
+                    token=token or "", account=context.get("account")
+                )
+            state = ConversationState()
+            _HTTP_SESSION_STATES[key] = state
+        _HTTP_SESSION_STATES.move_to_end(key)
+        if token:
+            state.token = token
+        if context.get("account"):
+            state.account = context["account"]
+        return state
+
+
+def _request_account_token(context, auth_header="", account_header=""):
+    if not context.get("account"):
+        return ""
+    source = account_header or ("" if context.get("api_key") else auth_header)
+    return _bearer_token(source)
+
+
+def _http_scope_value(value, label):
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise HTTPRequestError(400, "%s must be a string" % label)
+    value = value.strip()
+    if len(value) > 256:
+        raise HTTPRequestError(400, "%s is too long" % label)
+    return value
+
+
+def _hosted_storage_id(context, value, kind):
+    """Namespace durable HTTP state by principal without exposing client IDs."""
+    value = _http_scope_value(value, kind)
+    if not value or context.get("mode") == "local-open":
+        return value
+    material = "%s\0%s\0%s" % (kind, _state_principal(context), value)
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+    return "http-%s-%s" % (kind, digest)
+
+
 TRAIN_DEFAULT_N = 3
-
-
-def _env_int(name, default):
-    try:
-        return int(os.environ.get(name, default))
-    except (TypeError, ValueError):
-        return default
 
 
 TRAIN_MAX_N = max(1, _env_int("TRILOBITE_TRAIN_MAX_N", 500))
@@ -128,35 +351,129 @@ def check_auth(auth_header, api_key):
     auth_header is "Bearer <api_key>" (or a raw match to api_key, for convenience)."""
     if not api_key:
         return True
-    auth_header = auth_header or ""
-    if auth_header == "Bearer " + api_key:
-        return True
-    if auth_header == api_key:
-        return True
-    return False
+    token = _bearer_token(auth_header)
+    return hmac.compare_digest(token.encode("utf-8"), api_key.encode("utf-8"))
 
 
 def _bearer_token(auth_header):
     auth_header = auth_header or ""
-    if auth_header.startswith("Bearer "):
-        return auth_header.split(None, 1)[1].strip()
+    if auth_header[:7].lower() == "bearer ":
+        return auth_header[7:].strip()
     return auth_header.strip()
 
 
 def _auth_account(auth_header):
     token = _bearer_token(auth_header)
-    if not token or token == API_KEY:
+    if not token or (API_KEY and hmac.compare_digest(token, API_KEY)):
         return None
     return server._admin_account_from_token(token)
 
 
-def _authorized(auth_header):
-    account = _auth_account(auth_header)
-    if REQUIRE_ACCOUNT:
-        return account is not None or (bool(API_KEY) and check_auth(auth_header, API_KEY))
-    if check_auth(auth_header, API_KEY):
+def _effective_auth_mode():
+    if AUTH_MODE == "local-open":
+        if API_KEY:
+            return "api-key"
+        if REQUIRE_ACCOUNT:
+            return "account"
+    return AUTH_MODE
+
+
+def _auth_context(auth_header="", account_header=""):
+    mode = _effective_auth_mode()
+    api_key_ok = bool(API_KEY) and check_auth(auth_header, API_KEY)
+    account_source = account_header or ("" if api_key_ok else auth_header)
+    account = _auth_account(account_source) if account_source else None
+    authorized = {
+        "api-key": api_key_ok,
+        "account": account is not None,
+        "both": api_key_ok and account is not None,
+        "either": api_key_ok or account is not None,
+        "local-open": True,
+    }[mode]
+    return {
+        "mode": mode,
+        "authorized": authorized,
+        "api_key": api_key_ok,
+        "account": account,
+    }
+
+
+def _authorized(auth_header, account_header=""):
+    return _auth_context(auth_header, account_header)["authorized"]
+
+
+def _developer_authorized(context):
+    if context.get("mode") == "local-open":
         return True
-    return account is not None or not API_KEY
+    if not context["authorized"]:
+        return False
+    account = context.get("account")
+    role_ok = bool(account) and account.get("role") in ("developer", "admin")
+    if context["mode"] == "both":
+        return role_ok
+    return bool(context.get("api_key")) or role_ok
+
+
+def _is_loopback_host(host):
+    value = (host or "").strip().strip("[]").lower()
+    if value == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(value).is_loopback
+    except ValueError:
+        return False
+
+
+def _validate_bind_security(host, api_key=None, auth_mode=None, auth_secret=None):
+    api_key = API_KEY if api_key is None else api_key
+    mode = _effective_auth_mode() if auth_mode is None else auth_mode
+    auth_secret = os.environ.get("TRILOBITE_AUTH_SECRET", "") if auth_secret is None else auth_secret
+    if mode == "api-key" and not api_key:
+        raise RuntimeError("api-key auth mode requires TRILOBITE_API_KEY")
+    if mode == "both" and (not api_key or not auth_secret):
+        raise RuntimeError("both auth mode requires API key and account auth secret")
+    if _is_loopback_host(host):
+        return
+    strong_api = len(api_key) >= 24
+    strong_account = len(auth_secret) >= 32
+    secure = {
+        "api-key": strong_api,
+        "account": strong_account,
+        "both": strong_api and strong_account,
+        "either": strong_api and strong_account,
+        "local-open": False,
+    }.get(mode, False)
+    if not secure:
+        raise RuntimeError(
+            "non-loopback bind requires explicitly configured strong authentication"
+        )
+
+
+DANGEROUS_HTTP_SLASH_COMMANDS = frozenset({
+    "/dump", "/contextsize", "/ctxsize", "/permissions", "/perms",
+    "/todo", "/task", "/tasks", "/qualityfix", "/emotion", "/emotions",
+    "/vectors", "/mood", "/prefer", "/preference", "/preferences",
+    "/register", "/admin", "/accounts", "/setaccount", "/debug", "/inspect",
+    "/filepolicy", "/files", "/find", "/read", "/write", "/append", "/edit",
+    "/delete", "/master", "/pass", "/good", "/accept", "/accepted", "/used",
+    "/copied", "/edited", "/fail", "/bad", "/trace", "/strict", "/run",
+    "/runwindow", "/runnew", "/runconsole", "/runproject", "/train", "/learn",
+})
+
+
+def _dangerous_http_slash(content):
+    stripped = (content or "").strip()
+    if not stripped.startswith("/"):
+        return False
+    return stripped.split(None, 1)[0].lower() in DANGEROUS_HTTP_SLASH_COMMANDS
+
+
+class HTTPRequestError(Exception):
+    def __init__(self, status, message, error_type="invalid_request"):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+        self.error_type = error_type
 
 
 def _strip_footer(text):
@@ -180,12 +497,13 @@ def _answer_only(text):
     return _strip_trace(_strip_footer(text or "")).rstrip()
 
 
-def _record_chat(role, content, kind="message"):
-    CHAT_EVENTS.append({
+def _record_chat(role, content, kind="message", state=None):
+    state = _state_or_legacy(state)
+    state.events.append({
         "role": "%s/%s" % (role, kind),
         "content": content or "",
     })
-    del CHAT_EVENTS[:-200]
+    del state.events[:-200]
 
 
 def _maybe_live_reload():
@@ -266,15 +584,12 @@ def _parse_run_timeout(arg):
 
 def _do_run(timeout=grounding.DEFAULT_TIMEOUT):
     """Execute the code block from LAST_RESPONSE via grounding. Mirrors the REPL's /run."""
-    return _do_run_from_messages(timeout=timeout)
+    return _do_run_from_messages(timeout=timeout, state=_LEGACY_STATE)
 
 
-def _run_sources_from_messages(messages=None):
+def _run_sources_from_messages(messages=None, state=None):
+    state = _state_or_legacy(state)
     seen = set()
-    for source in (LAST_RUN_SOURCE, LAST_RESPONSE):
-        if source and source not in seen:
-            seen.add(source)
-            yield source
     for msg in reversed(messages or []):
         if msg.get("role") != "assistant":
             continue
@@ -282,11 +597,17 @@ def _run_sources_from_messages(messages=None):
         if content and content not in seen:
             seen.add(content)
             yield content
+    for source in (state.last_run_source, state.last_response):
+        if source and source not in seen:
+            seen.add(source)
+            yield source
 
 
-def _do_run_from_messages(timeout=grounding.DEFAULT_TIMEOUT, messages=None):
+def _do_run_from_messages(
+    timeout=grounding.DEFAULT_TIMEOUT, messages=None, state=None
+):
     block = None
-    for source in _run_sources_from_messages(messages):
+    for source in _run_sources_from_messages(messages, state=state):
         block = grounding.extract_runnable_code_block(source)
         if block is not None:
             break
@@ -306,9 +627,11 @@ def _do_run_from_messages(timeout=grounding.DEFAULT_TIMEOUT, messages=None):
     return "%s\n%s" % (code_runner.format_result(result), status)
 
 
-def _do_run_window_from_messages(timeout=grounding.DEFAULT_TIMEOUT, messages=None):
+def _do_run_window_from_messages(
+    timeout=grounding.DEFAULT_TIMEOUT, messages=None, state=None
+):
     block = None
-    for source in _run_sources_from_messages(messages):
+    for source in _run_sources_from_messages(messages, state=state):
         block = grounding.extract_runnable_code_block(source)
         if block is not None:
             break
@@ -324,12 +647,14 @@ def _do_run_window_from_messages(timeout=grounding.DEFAULT_TIMEOUT, messages=Non
 
 
 def _do_runproject(timeout=grounding.MAX_TIMEOUT):
-    return _do_runproject_from_messages(timeout=timeout)
+    return _do_runproject_from_messages(timeout=timeout, state=_LEGACY_STATE)
 
 
-def _do_runproject_from_messages(timeout=grounding.MAX_TIMEOUT, messages=None):
+def _do_runproject_from_messages(
+    timeout=grounding.MAX_TIMEOUT, messages=None, state=None
+):
     files = []
-    for source in _run_sources_from_messages(messages):
+    for source in _run_sources_from_messages(messages, state=state):
         files = grounding.extract_project_files(source)
         if files:
             break
@@ -368,13 +693,14 @@ def _do_train(n):
     return "\n".join(lines)
 
 
-def _dump_chat(messages=None, label="chat"):
+def _dump_chat(messages=None, label="chat", state=None):
+    state = _state_or_legacy(state)
     label = (label or "chat").strip() or "chat"
     sections = [
-        ("trace", "on" if TRACE else "off"),
-        ("strict", str(STRICT)),
-        ("last interaction id", LAST_IID or "(none)"),
-        ("last answer source", LAST_RUN_SOURCE or "(none)"),
+        ("trace", "on" if state.trace else "off"),
+        ("strict", str(state.strict)),
+        ("last interaction id", state.last_iid or "(none)"),
+        ("last answer source", state.last_run_source or "(none)"),
         ("context", server.context_health()),
         ("quality", server.memory_quality_report(sample_limit=5)),
         ("agents", server.master_status(limit=20)),
@@ -385,14 +711,14 @@ def _dump_chat(messages=None, label="chat"):
         label=label,
         messages=messages or [],
         sections=sections,
-        events=CHAT_EVENTS,
+        events=state.events,
     )
     return "dumped chat/debug log to %s" % path
 
 
-def _handle_slash(content, messages=None):
+def _handle_slash(content, messages=None, state=None):
     """Return response text if `content` is a recognized slash command, else None."""
-    global TRACE, STRICT, LAST_IID, CURRENT_ACCOUNT, CURRENT_TOKEN
+    state = _state_or_legacy(state)
 
     stripped = (content or "").strip()
     if not stripped.startswith("/"):
@@ -405,7 +731,9 @@ def _handle_slash(content, messages=None):
     if cmd == "/help":
         return HELP_TEXT
     if cmd == "/dump":
-        return _dump_chat(messages=messages, label=arg.strip() or "chat")
+        return _dump_chat(
+            messages=messages, label=arg.strip() or "chat", state=state
+        )
     if cmd == "/stats":
         return server.trilobite_stats()
     if cmd == "/context":
@@ -474,15 +802,15 @@ def _handle_slash(content, messages=None):
         out = server.admin_login(parts2[0], parts2[1])
         marker = "token: "
         if marker in out and not out.startswith("ERROR:"):
-            CURRENT_TOKEN = out.split(marker, 1)[1].strip().splitlines()[0]
-            CURRENT_ACCOUNT = server._admin_account_from_token(CURRENT_TOKEN)
+            state.token = out.split(marker, 1)[1].strip().splitlines()[0]
+            state.account = server._admin_account_from_token(state.token)
         return out
     if cmd == "/whoami":
-        return server.admin_whoami(CURRENT_TOKEN)
+        return server.admin_whoami(state.token)
     if cmd == "/admin":
-        return server.admin_status(CURRENT_TOKEN)
+        return server.admin_status(state.token)
     if cmd == "/accounts":
-        return server.admin_accounts(CURRENT_TOKEN)
+        return server.admin_accounts(state.token)
     if cmd == "/setaccount":
         parts2 = arg.split()
         if not parts2:
@@ -494,7 +822,7 @@ def _handle_slash(content, messages=None):
                 k, v = item.split("=", 1)
                 kv[k] = v
         return server.admin_set_account(
-            token=CURRENT_TOKEN,
+            token=state.token,
             username=username,
             role=kv.get("role", ""),
             tier=kv.get("tier", ""),
@@ -502,15 +830,15 @@ def _handle_slash(content, messages=None):
             banned=kv.get("banned", ""),
         )
     if cmd in ("/debug", "/inspect"):
-        return server.debug_inspect(CURRENT_TOKEN)
+        return server.debug_inspect(state.token)
     if cmd in ("/cot", "/chainofthought", "/thoughts"):
-        return server.admin_private_chain_of_thought(CURRENT_TOKEN)
+        return server.admin_private_chain_of_thought(state.token)
     if cmd == "/filepolicy":
-        return server.file_policy(token=CURRENT_TOKEN)
+        return server.file_policy(token=state.token)
     if cmd in ("/files", "/find"):
-        return server.file_find(query=arg.strip() or "*", token=CURRENT_TOKEN)
+        return server.file_find(query=arg.strip() or "*", token=state.token)
     if cmd == "/read":
-        return server.file_read(path=arg.strip(), token=CURRENT_TOKEN)
+        return server.file_read(path=arg.strip(), token=state.token)
     if cmd in ("/write", "/append"):
         parts2 = arg.split(None, 1)
         if len(parts2) != 2:
@@ -519,7 +847,7 @@ def _handle_slash(content, messages=None):
             path=parts2[0],
             content=parts2[1],
             mode="append" if cmd == "/append" else "create",
-            token=CURRENT_TOKEN,
+            token=state.token,
         )
     if cmd == "/edit":
         pieces = arg.split("|", 2)
@@ -529,10 +857,12 @@ def _handle_slash(content, messages=None):
             path=pieces[0].strip(),
             old=pieces[1],
             new=pieces[2],
-            token=CURRENT_TOKEN,
+            token=state.token,
         )
     if cmd == "/delete":
-        return server.file_delete(path=arg.strip(), dry_run=True, token=CURRENT_TOKEN)
+        return server.file_delete(
+            path=arg.strip(), dry_run=True, token=state.token
+        )
     if cmd == "/master":
         text = arg.strip()
         mode = "ask"
@@ -544,13 +874,13 @@ def _handle_slash(content, messages=None):
                 task = parts[1] if len(parts) > 1 else ""
         return server.master_orchestrate(task=task, mode=mode)
     if cmd in ("/pass", "/good"):
-        if LAST_IID:
-            msg = server.record_outcome(LAST_IID, "tests_passed")
-            LAST_IID = None
+        if state.last_iid:
+            msg = server.record_outcome(state.last_iid, "tests_passed")
+            state.last_iid = None
             return msg
         return "(nothing to record yet)"
     if cmd in ("/accept", "/accepted", "/used", "/copied", "/edited"):
-        if LAST_IID:
+        if state.last_iid:
             signal = {
                 "/accept": "accepted",
                 "/accepted": "accepted",
@@ -558,37 +888,41 @@ def _handle_slash(content, messages=None):
                 "/copied": "copied",
                 "/edited": "edited",
             }[cmd]
-            msg = server.record_outcome(LAST_IID, signal)
-            LAST_IID = None
+            msg = server.record_outcome(state.last_iid, signal)
+            state.last_iid = None
             return msg
         return "(nothing to record yet)"
     if cmd in ("/fail", "/bad"):
-        if LAST_IID:
-            msg = server.record_outcome(LAST_IID, "failed")
-            LAST_IID = None
+        if state.last_iid:
+            msg = server.record_outcome(state.last_iid, "failed")
+            state.last_iid = None
             return msg
         return "(nothing to record yet)"
     if cmd == "/trace":
-        TRACE = _on_off(arg, TRACE)
-        return "trace %s" % ("on" if TRACE else "off")
+        state.trace = _on_off(arg, state.trace)
+        return "trace %s" % ("on" if state.trace else "off")
     if cmd == "/strict":
-        STRICT = _on_off(arg, STRICT)
-        return "strict %s" % ("on" if STRICT else "off")
+        state.strict = _on_off(arg, state.strict)
+        return "strict %s" % ("on" if state.strict else "off")
     if cmd == "/run":
         timeout, err = _parse_run_timeout(arg)
         if err:
             return err
-        return _do_run_from_messages(timeout, messages=messages)
+        return _do_run_from_messages(timeout, messages=messages, state=state)
     if cmd in ("/runwindow", "/runnew", "/runconsole"):
         timeout, err = _parse_run_timeout(arg)
         if err:
             return err
-        return _do_run_window_from_messages(timeout, messages=messages)
+        return _do_run_window_from_messages(
+            timeout, messages=messages, state=state
+        )
     if cmd == "/runproject":
         timeout, err = _parse_run_timeout(arg)
         if err:
             return err
-        return _do_runproject_from_messages(timeout, messages=messages)
+        return _do_runproject_from_messages(
+            timeout, messages=messages, state=state
+        )
     if cmd in ("/train", "/learn"):
         n, err = _parse_train_n(arg)
         if err:
@@ -598,41 +932,41 @@ def _handle_slash(content, messages=None):
     return None  # not a recognized slash command — fall through to the model
 
 
-def _handle_feedback(content):
+def _handle_feedback(content, state=None):
     """Passive learning: if `content` reads as plain feedback on the last turn
     ("thanks, that worked" / "no that's wrong") rather than a new task, record
-    the outcome on LAST_IID and return an acknowledgement. Else None (fall
+    the outcome on this conversation and return an acknowledgement. Else None (fall
     through to intent/model handling)."""
-    global LAST_IID
+    state = _state_or_legacy(state)
 
-    if not LAST_IID:
+    if not state.last_iid:
         return None
 
     signal = feedback.classify_signal(content)
     if signal and server.reward.score(signal) > 0:
-        server.record_outcome(LAST_IID, signal)
-        LAST_IID = None
+        server.record_outcome(state.last_iid, signal)
+        state.last_iid = None
         return "Got it - recorded %s so I can learn." % signal
     if signal:
-        server.record_outcome(LAST_IID, signal)
-        LAST_IID = None
+        server.record_outcome(state.last_iid, signal)
+        state.last_iid = None
         return "Got it - recorded that as not-helpful so I can learn."
 
     fb = feedback.classify_feedback(content)
     if fb == "positive":
-        server.record_outcome(LAST_IID, "accepted")
-        LAST_IID = None
+        server.record_outcome(state.last_iid, "accepted")
+        state.last_iid = None
         return "Got it — recorded that as helpful so I can learn."
     if fb == "negative":
-        server.record_outcome(LAST_IID, "rejected")
-        LAST_IID = None
+        server.record_outcome(state.last_iid, "rejected")
+        state.last_iid = None
         return "Got it — recorded that as not-helpful so I can learn."
     return None
 
 
-def _handle_intent(content):
+def _handle_intent(content, messages=None, state=None):
     """Return response text if `content` is a natural-language control intent, else None."""
-    global TRACE, STRICT
+    state = _state_or_legacy(state)
 
     intent = intents.classify(content)
     if not intent:
@@ -640,13 +974,13 @@ def _handle_intent(content):
 
     replies = []
     if "trace" in intent:
-        TRACE = intent["trace"]
-        replies.append("trace %s" % ("on" if TRACE else "off"))
+        state.trace = intent["trace"]
+        replies.append("trace %s" % ("on" if state.trace else "off"))
     if "strict" in intent:
-        STRICT = intent["strict"]
-        replies.append("strict %s" % ("on" if STRICT else "off"))
+        state.strict = intent["strict"]
+        replies.append("strict %s" % ("on" if state.strict else "off"))
     if intent.get("run"):
-        replies.append(_do_run())
+        replies.append(_do_run_from_messages(messages=messages, state=state))
     if "train" in intent:
         replies.append(_do_train(intent["train"]))
     return "\n".join(replies)
@@ -667,24 +1001,29 @@ def _model_to_tier(model):
 
 def _run_prompt(
     prompt, history=None, tier=None, context_size="", session="", project="",
+    state=None, return_result=False,
 ):
     """Call the real trilobite loop with the UI's prior turns; returns UI text."""
-    global LAST_IID, LAST_RESPONSE, LAST_RUN_SOURCE
+    state = _state_or_legacy(state)
 
     out = server.answer_with_history(
-        prompt, history, trace=TRACE, strict=STRICT, tier=tier,
+        prompt, history, trace=state.trace, strict=state.strict, tier=tier,
         context_size=context_size, session=session, project=project,
     )
     if out.startswith("ERROR"):
-        return out
-    LAST_IID = server.parse_interaction_id(out)
-    LAST_RESPONSE = out
-    LAST_RUN_SOURCE = _answer_only(out)
-    return _strip_footer(out)
+        result = TurnResult(out, None, "")
+        return result if return_result else result.content
+    iid = server.parse_interaction_id(out)
+    run_source = _answer_only(out)
+    state.last_iid = iid
+    state.last_response = out
+    state.last_run_source = run_source
+    result = TurnResult(_strip_footer(out), iid, run_source)
+    return result if return_result else result.content
 
 
-def _chat_completion_object(content, model="trilobite"):
-    iid = LAST_IID or uuid.uuid4().hex[:12]
+def _chat_completion_object(content, model="trilobite", iid=None):
+    iid = iid or uuid.uuid4().hex[:12]
     return {
         "id": "chatcmpl-%s" % iid,
         "object": "chat.completion",
@@ -715,28 +1054,47 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "trilobite-serve/1.0"
 
     def _cors(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        origin = self.headers.get("Origin")
+        if origin is not None and origin in CORS_ORIGINS:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header(
+                "Access-Control-Allow-Headers",
+                "Content-Type, Authorization, X-Trilobite-Account-Token, "
+                "X-Trilobite-Bootstrap-Secret",
+            )
 
     def log_message(self, fmt, *args):
         sys.stderr.write("[trilobite_serve] %s\n" % (fmt % args))
 
     def do_OPTIONS(self):
-        self.send_response(200)
+        if self._reject_disallowed_origin():
+            return
+        self.send_response(204)
         self._cors()
         self.end_headers()
 
+    def _reject_disallowed_origin(self):
+        origin = self.headers.get("Origin")
+        if origin is None or origin in CORS_ORIGINS:
+            return False
+        self._send_json_payload(
+            {"error": {"message": "origin is not allowed", "type": "cors"}},
+            status=403,
+        )
+        return True
+
+    def _request_auth_context(self):
+        return _auth_context(
+            self.headers.get("Authorization", ""),
+            self.headers.get("X-Trilobite-Account-Token", ""),
+        )
+
     def _send_auth_error(self):
-        body = json.dumps({
-            "error": {"message": "invalid api key", "type": "auth"},
-        }).encode("utf-8")
-        self.send_response(401)
-        self._cors()
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        self._send_json_payload({
+            "error": {"message": "authentication required", "type": "auth"},
+        }, status=401)
 
     def _send_json_payload(self, payload, status=200):
         body = json.dumps(payload).encode("utf-8")
@@ -748,14 +1106,37 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _read_json(self):
-        length = int(self.headers.get("Content-Length", 0) or 0)
-        raw = self.rfile.read(length) if length else b"{}"
-        return json.loads(raw.decode("utf-8") or "{}")
+        if self.headers.get("Transfer-Encoding"):
+            raise HTTPRequestError(400, "transfer encoding is not supported")
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None:
+            raise HTTPRequestError(411, "Content-Length is required")
+        if not raw_length.strip().isdigit():
+            raise HTTPRequestError(400, "Content-Length must be a nonnegative integer")
+        length = int(raw_length)
+        if length > MAX_REQUEST_BYTES:
+            raise HTTPRequestError(413, "request body is too large")
+        media_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if media_type != "application/json":
+            raise HTTPRequestError(415, "Content-Type must be application/json")
+        raw = self.rfile.read(length)
+        if len(raw) != length:
+            raise HTTPRequestError(400, "request body is incomplete")
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise HTTPRequestError(400, "request body must contain valid JSON")
+        if not isinstance(payload, dict):
+            raise HTTPRequestError(400, "request JSON must be an object")
+        return payload
 
     def do_GET(self):
+        if self._reject_disallowed_origin():
+            return
         _maybe_live_reload()
         if self.path.rstrip("/") == "/v1/models":
-            if not _authorized(self.headers.get("Authorization", "")):
+            context = self._request_auth_context()
+            if not context["authorized"]:
                 self._send_auth_error()
                 return
             # Advertise the local student plus every configured tier, so a client can
@@ -778,11 +1159,11 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if self.path.rstrip("/") == "/v1/trilobite/status":
-            auth_header = self.headers.get("Authorization", "")
-            if not _authorized(auth_header):
+            context = self._request_auth_context()
+            if not context["authorized"]:
                 self._send_auth_error()
                 return
-            account = _auth_account(auth_header)
+            account = context["account"]
             payload = {
                 "status": server.status(),
                 "stats": server.trilobite_stats(),
@@ -816,44 +1197,83 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        self.send_response(404)
-        self._cors()
-        self.end_headers()
+        self._send_json_payload(
+            {"error": {"message": "not found", "type": "not_found"}}, status=404
+        )
 
     def do_POST(self):
+        if self._reject_disallowed_origin():
+            return
         _maybe_live_reload()
         path = self.path.rstrip("/")
+        try:
+            req = self._read_json()
+        except HTTPRequestError as error:
+            self._send_json_payload(
+                {"error": {"message": error.message, "type": error.error_type}},
+                status=error.status,
+            )
+            return
+        context = self._request_auth_context()
         if path == "/v1/trilobite/register":
+            conn = server._open_db()
             try:
-                req = self._read_json()
-                out = server.admin_register(req.get("username", ""), req.get("password", ""))
-                self._send_json_payload({"ok": not out.startswith("ERROR:"), "message": out})
-            except Exception as e:
-                self._send_json_payload({"ok": False, "message": str(e)}, status=400)
+                account = admin_auth.register(
+                    conn,
+                    req.get("username", ""),
+                    req.get("password", ""),
+                    trusted_local=False,
+                    bootstrap_secret=self.headers.get(
+                        "X-Trilobite-Bootstrap-Secret", ""
+                    ),
+                    allow_additional=ALLOW_REGISTRATION,
+                    actor=context["account"] if context["authorized"] else None,
+                )
+                self._send_json_payload({"ok": True, "account": account}, status=201)
+            except PermissionError as error:
+                self._send_json_payload({"ok": False, "message": str(error)}, status=403)
+            except sqlite3.IntegrityError:
+                self._send_json_payload({"ok": False, "message": "account already exists"}, status=409)
+            except ValueError as error:
+                self._send_json_payload({"ok": False, "message": str(error)}, status=400)
+            except Exception as error:
+                self.log_error("registration failed: %s", type(error).__name__)
+                self._send_json_payload({"ok": False, "message": "registration failed"}, status=500)
+            finally:
+                conn.close()
             return
         if path == "/v1/trilobite/login":
+            if context["mode"] in ("api-key", "both") and not context["api_key"]:
+                self._send_auth_error()
+                return
+            conn = server._open_db()
             try:
-                req = self._read_json()
-                out = server.admin_login(req.get("username", ""), req.get("password", ""))
-                if out.startswith("ERROR:"):
-                    self._send_json_payload({"ok": False, "message": out}, status=401)
-                    return
-                token = out.split("token: ", 1)[1].strip().splitlines()[0]
-                account = server._admin_account_from_token(token)
+                token, account = admin_auth.login(
+                    conn, req.get("username", ""), req.get("password", "")
+                )
                 self._send_json_payload({"ok": True, "token": token, "account": account})
-            except Exception as e:
-                self._send_json_payload({"ok": False, "message": str(e)}, status=400)
+            except (ValueError, PermissionError):
+                self._send_json_payload(
+                    {"ok": False, "message": "invalid username or password"}, status=401
+                )
+            except Exception as error:
+                self.log_error("login failed: %s", type(error).__name__)
+                self._send_json_payload({"ok": False, "message": "login failed"}, status=500)
+            finally:
+                conn.close()
             return
         if path == "/v1/trilobite/admin/account":
-            auth_header = self.headers.get("Authorization", "")
-            account = _auth_account(auth_header)
+            if not context["authorized"]:
+                self._send_auth_error()
+                return
+            account = context["account"]
             ok, msg = admin_auth.require(account, "admin")
             if not ok:
                 self._send_json_payload({"ok": False, "message": msg}, status=403)
                 return
-            req = self._read_json()
+            account_header = self.headers.get("X-Trilobite-Account-Token", "")
             out = server.admin_set_account(
-                token=_bearer_token(auth_header),
+                token=_bearer_token(account_header or self.headers.get("Authorization", "")),
                 username=req.get("username", ""),
                 role=req.get("role", ""),
                 tier=req.get("tier", ""),
@@ -863,16 +1283,28 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json_payload({"ok": not out.startswith("ERROR:"), "message": out})
             return
         if path != "/v1/chat/completions":
-            self.send_response(404)
-            self._cors()
-            self.end_headers()
+            self._send_json_payload(
+                {"error": {"message": "not found", "type": "not_found"}}, status=404
+            )
             return
 
-        auth_header = self.headers.get("Authorization", "")
-        if not _authorized(auth_header):
+        if not context["authorized"]:
             self._send_auth_error()
             return
-        account = _auth_account(auth_header)
+        account = context["account"]
+        messages = req.get("messages", [])
+        prompt = _last_user_message(messages)
+        if _dangerous_http_slash(prompt) and not _developer_authorized(context):
+            self._send_json_payload(
+                {
+                    "error": {
+                        "message": "developer or admin authentication is required",
+                        "type": "forbidden_command",
+                    }
+                },
+                status=403,
+            )
+            return
         conn = server._open_db()
         try:
             ok, msg = admin_auth.rate_limit(conn, account)
@@ -882,50 +1314,89 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json_payload({"error": {"message": msg, "type": "rate_limit"}}, status=429)
             return
 
-        try:
-            req = self._read_json()
-        except Exception as e:
-            self._send_error_completion("ERROR parsing request body: %s" % e, stream=False)
-            return
-
-        messages = req.get("messages", [])
         stream = bool(req.get("stream", False))
         model = req.get("model", "trilobite")
         context_size = req.get("context_size", "")
-        session = req.get("session", "")
-        project = req.get("project", "")
-        prompt = _last_user_message(messages)
+        try:
+            session = _http_scope_value(req.get("session", ""), "session")
+            project = _http_scope_value(req.get("project", ""), "project")
+            storage_session = _hosted_storage_id(context, session, "session")
+            storage_project = _hosted_storage_id(context, project, "project")
+        except HTTPRequestError as error:
+            self._send_json_payload(
+                {"error": {"message": error.message, "type": error.error_type}},
+                status=error.status,
+            )
+            return
         history = _history_from_messages(messages)
-        _record_chat("user", prompt)
+        account_header = self.headers.get("X-Trilobite-Account-Token", "")
+        auth_header = self.headers.get("Authorization", "")
+        state = _http_conversation_state(
+            context,
+            session,
+            token=_request_account_token(context, auth_header, account_header),
+        )
 
         reply = None
+        turn = None
+        response_iid = None
         try:
-            with server.activity_tracker.response_span(
-                "chat:%s" % (model or "trilobite"),
-                prompt,
-                surface="http",
-                model=model,
-                session=session,
-                project=project,
-            ):
-                reply = _handle_slash(prompt, messages=messages)
-                if reply is None:
-                    reply = _handle_feedback(prompt)
-                if reply is None:
-                    reply = _handle_intent(prompt)
-                content = reply if reply is not None else _run_prompt(
-                    prompt, history, _model_to_tier(model),
-                    context_size=context_size, session=session, project=project)
-                if "=== ACTIVITY (observable work) ===" not in content:
-                    content = server._append_activity(content)
-        except Exception:
-            content = "ERROR: %s" % traceback.format_exc()
-        _record_chat("assistant", content, kind="slash" if reply is not None else "model")
+            with state.lock:
+                _record_chat("user", prompt, state=state)
+                with server.activity_tracker.response_span(
+                    "chat:%s" % (model or "trilobite"),
+                    prompt,
+                    surface="http",
+                    model=model,
+                    session=storage_session,
+                    project=storage_project,
+                ):
+                    reply = _handle_slash(
+                        prompt, messages=messages, state=state
+                    )
+                    if reply is None:
+                        reply = _handle_feedback(prompt, state=state)
+                    if reply is None and _developer_authorized(context):
+                        reply = _handle_intent(
+                            prompt, messages=messages, state=state
+                        )
+                    if reply is not None:
+                        content = reply
+                    else:
+                        turn = _run_prompt(
+                            prompt,
+                            history,
+                            _model_to_tier(model),
+                            context_size=context_size,
+                            session=storage_session,
+                            project=storage_project,
+                            state=state,
+                            return_result=True,
+                        )
+                        content = turn.content
+                        response_iid = turn.iid
+                    if "=== ACTIVITY (observable work) ===" not in content:
+                        content = server._append_activity(content)
+                _record_chat(
+                    "assistant",
+                    content,
+                    kind="slash" if reply is not None else "model",
+                    state=state,
+                )
+        except Exception as error:
+            self.log_error("request failed: %s", type(error).__name__)
+            self._send_json_payload(
+                {"error": {"message": "internal server error", "type": "server_error"}},
+                status=500,
+            )
+            return
 
         if stream:
-            self._send_stream(content, model)
+            self._send_stream(content, model, iid=response_iid)
         else:
-            self._send_json(_chat_completion_object(content, model))
+            self._send_json(
+                _chat_completion_object(content, model, iid=response_iid)
+            )
 
     def _send_error_completion(self, text, stream):
         if stream:
@@ -942,8 +1413,8 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_stream(self, content, model):
-        iid = LAST_IID or uuid.uuid4().hex[:12]
+    def _send_stream(self, content, model, iid=None):
+        iid = iid or uuid.uuid4().hex[:12]
         self.send_response(200)
         self._cors()
         self.send_header("Content-Type", "text/event-stream")
@@ -971,11 +1442,12 @@ def main():
     else:
         port = int(os.environ.get("TRILOBITE_PORT", DEFAULT_PORT))
 
+    _validate_bind_security(HOST)
     httpd = ThreadingHTTPServer((HOST, port), Handler)
     url = "http://%s:%d" % (HOST, port)
     print("trilobite_serve listening on %s" % url)
-    print("auth: %s" % ("ON (api key required)" if API_KEY else "OFF (open, local use only)"))
-    print("point your chat UI's OpenAI API base at %s/v1 (any api key)" % url)
+    print("auth mode: %s" % _effective_auth_mode())
+    print("point your chat UI's OpenAI API base at %s/v1" % url)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

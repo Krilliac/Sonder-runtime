@@ -3,6 +3,18 @@ import pytest
 import web_tools
 
 
+@pytest.fixture(autouse=True)
+def public_dns(monkeypatch):
+    monkeypatch.setenv("TRILOBITE_WEB_TOOLS", "1")
+    monkeypatch.setattr(
+        web_tools.socket,
+        "getaddrinfo",
+        lambda host, port, *args, **kwargs: [
+            (web_tools.socket.AF_INET, web_tools.socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+        ],
+    )
+
+
 class FakeResponse:
     def __init__(self, body, content_type="text/html"):
         self._body = body.encode("utf-8")

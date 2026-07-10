@@ -13,16 +13,18 @@ import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 
 MODEL_SMALL = "qwen2.5-coder:1.5b"
 MODEL_MEDIUM = "qwen2.5-coder:3b"
 MODEL_LARGE = "qwen2.5-coder:7b"
+ROOT = Path(__file__).resolve().parent
 
 
-def _run(cmd, check=False, env=None):
+def _run(cmd, check=False, env=None, cwd=None):
     print("+ " + " ".join(cmd))
-    return subprocess.run(cmd, check=check, env=env)
+    return subprocess.run(cmd, check=check, env=env, cwd=cwd)
 
 
 def total_ram_gb():
@@ -135,7 +137,11 @@ def main(argv=None):
     env.setdefault("LOCAL_LLM_NUM_GPU", "999")
     env.setdefault("LOCAL_LLM_NUM_BATCH", "512")
     env.setdefault("OLLAMA_FLASH_ATTENTION", "1")
-    result = _run([sys.executable, "setup_alias.py"], env=env)
+    result = _run(
+        [sys.executable, str(ROOT / "setup_alias.py")],
+        env=env,
+        cwd=str(ROOT),
+    )
     return result.returncode
 
 

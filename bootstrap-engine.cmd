@@ -1,6 +1,7 @@
 @echo off
 setlocal
 set "REPO=%~dp0"
+pushd "%REPO%" || exit /b 1
 if not defined TRILOBITE_HOME (
   if defined LOCALAPPDATA (
     set "TRILOBITE_HOME=%LOCALAPPDATA%\trilobite"
@@ -17,4 +18,6 @@ if exist "%REPO%venv\Scripts\python.exe" (
 ) else (
   python "%REPO%bootstrap_engine.py" %*
 )
-endlocal
+set "EXIT_CODE=%ERRORLEVEL%"
+popd
+endlocal & exit /b %EXIT_CODE%

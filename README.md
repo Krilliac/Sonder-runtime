@@ -168,6 +168,10 @@ Cross-platform equivalent:
 `python trilobite_headless.py start --port 11435 --context-size 32k`.
 Then connect with `trilobite_client.py`, any OpenAI-compatible client pointed at
 `http://127.0.0.1:11435/v1`, the REPL, Claude MCP, or the Flutter app later.
+HTTP clients used by more than one conversation or device should send a stable,
+unique `session` value per conversation. Session state is isolated by the
+authenticated principal plus that explicit ID; a blank session is intentionally
+ephemeral and should not be used when multiple clients need continuity.
 Calling `trilobite` from a Windows terminal now follows the same local-first
 startup path as the app: it sets the shared state home, bootstraps the engine on
 first run, starts the background API server, then opens the REPL. Set
@@ -179,23 +183,44 @@ the local REPL.
 
 **Use the hosted model from any PC:** see [CLIENT.md](CLIENT.md).
 
-**Hosted/admin mode:** `/register` creates local accounts (the first account is
-admin), `/login` returns a bearer token, `/accounts` and `/setaccount` manage
-roles, tiers, dev flags and bans, and `/debug` shows safe inspectable runtime
-state. Set `TRILOBITE_REQUIRE_ACCOUNT=1` for public hosting, optionally keep
-`TRILOBITE_API_KEY` as an operator bypass, and use `TRILOBITE_AUTH_SECRET` to
-sign session tokens. `/cot` is intentionally denied: hidden private
-chain-of-thought is not exposed; use `/trace`, `/debug`, `/agents`, retrieved
-lessons, tool calls and status logs instead.
+**HTTP auth and hosted/admin mode:** `TRILOBITE_AUTH_MODE` accepts `api-key`,
+`account`, `both`, or `either`. If it is unset, configuring
+`TRILOBITE_API_KEY` selects API-key mode, `TRILOBITE_REQUIRE_ACCOUNT=1` selects
+account mode, and a credential-free server remains `local-open` only on
+loopback. `both` requires the API key in `Authorization: Bearer ...` and the
+account session token in `X-Trilobite-Account-Token`; `either` accepts either
+credential. A non-loopback bind is refused unless authentication is explicitly
+strong: API keys must be at least 24 characters, account signing secrets in
+`TRILOBITE_AUTH_SECRET` at least 32, and `both`/`either` require both strengths.
 
-**Filesystem tools:** all users can use guarded `/files`, `/read`, `/write`,
-`/append`, `/edit`, and dry-run `/delete` inside approved local roots. The
-server tools `file_find/read/write/edit/delete` expose the same policy to
-agents and workflows. Broader system paths require an explicit bypass:
-`TRILOBITE_FILE_ROOTS` for configured roots, `TRILOBITE_FILE_APPROVAL_CODE`
-with an `approval` argument, `TRILOBITE_FILE_BYPASS=1` for local owner mode, or
-a developer/admin token. Deletes require the exact `DELETE <resolved path>`
-confirmation string returned by the dry-run.
+The first HTTP admin registration is a one-time bootstrap: configure a
+`TRILOBITE_BOOTSTRAP_SECRET` of at least 16 characters and send it in
+`X-Trilobite-Bootstrap-Secret`. Successful creation consumes that bootstrap.
+Later HTTP registration is disabled unless `TRILOBITE_ALLOW_REGISTRATION=1`
+and the request is authenticated as an admin. `/login` returns an account
+session token; `/accounts` and `/setaccount` manage roles, tiers, dev flags and
+bans. `/debug` exposes only safe inspectable state. `/cot` remains denied; use
+`/trace`, `/debug`, `/agents`, retrieved lessons, tool calls and status logs.
+
+Browser origins are denied unless they exactly match a comma-separated entry in
+`TRILOBITE_CORS_ORIGINS`; `*` is intentionally ignored. HTTP POST bodies must
+have `Content-Type: application/json` and an explicit `Content-Length`.
+`TRILOBITE_MAX_REQUEST_BYTES` defaults to 1 MiB and is capped at 16 MiB.
+
+**Filesystem tools:** guarded `/files`, `/read`, `/write`, `/append`, `/edit`,
+and dry-run `/delete` operate inside approved local roots. The server tools
+`file_find/read/write/edit/delete` expose the same policy to agents and
+workflows. The default roots are the checkout and `TRILOBITE_HOME`;
+`file_roots.local` now defaults to `TRILOBITE_HOME/file_roots.local`, not the
+checkout. Override that file with `TRILOBITE_FILE_ROOTS_FILE`, or add roots with
+`TRILOBITE_FILE_ROOTS`. Control-plane files (root policy/config/state files,
+the memory database, credential-like files, and root-level Python modules) may
+be read under the guarded policy but mutation requires an authenticated
+developer/admin token; an approval code or broad root alone does not bypass
+that protection. `TRILOBITE_FILE_APPROVAL_CODE` and
+`TRILOBITE_FILE_BYPASS=1` remain local-owner controls for ordinary broader
+paths. Deletes require the exact `DELETE <resolved path>` confirmation string
+returned by the dry-run.
 
 **Selectable context:** use `/contextsize 32k`, `/contextsize 256k`, or
 `/contextsize 1m` to select the requested virtual context. Ollama receives a

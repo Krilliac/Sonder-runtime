@@ -11,10 +11,15 @@ import time
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 14
 DEFAULT_RATE_LIMIT = 120
 RATE_WINDOW_SECONDS = 60
+BOOTSTRAP_SECRET_MIN_LENGTH = 16
 
 
 def _secret() -> str:
     return os.environ.get("TRILOBITE_AUTH_SECRET") or "trilobite-local-dev-secret"
+
+
+def _bootstrap_secret() -> str:
+    return os.environ.get("TRILOBITE_BOOTSTRAP_SECRET", "")
 
 
 def _now() -> int:
@@ -71,6 +76,11 @@ def init(conn: sqlite3.Connection) -> None:
             count INTEGER,
             PRIMARY KEY(username, window_start)
         );
+        CREATE TABLE IF NOT EXISTS auth_bootstrap_state (
+            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+            consumed_ts INTEGER,
+            consumed_by TEXT
+        );
         """
     )
     conn.commit()
@@ -81,23 +91,74 @@ def account_count(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]
 
 
-def register(conn: sqlite3.Connection, username: str, password: str, role: str = "user") -> dict:
+def register(
+    conn: sqlite3.Connection,
+    username: str,
+    password: str,
+    role: str = "user",
+    *,
+    trusted_local: bool = True,
+    bootstrap_secret: str = "",
+    allow_additional: bool = False,
+    actor: dict | None = None,
+) -> dict:
+    """Create an account under an explicit registration policy.
+
+    Direct callers are a trusted local path for backward compatibility. Hosted
+    callers pass trusted_local=False; the first account then consumes the
+    configured bootstrap secret exactly once. Later hosted registration needs
+    both an admin actor and an explicit opt-in.
+    """
     init(conn)
     username = (username or "").strip().lower()
     if not username or len(username) < 3:
         raise ValueError("username must be at least 3 characters")
     if not password or len(password) < 8:
         raise ValueError("password must be at least 8 characters")
-    if account_count(conn) == 0:
-        role = "admin"
     role = role if role in ("user", "developer", "admin") else "user"
     salt, digest = _hash_password(password)
-    conn.execute(
-        "INSERT INTO accounts(username, password_salt, password_hash, role, created_ts) "
-        "VALUES(?, ?, ?, ?, ?)",
-        (username, salt, digest, role, _now()),
-    )
-    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        first_account = conn.execute("SELECT COUNT(*) FROM accounts").fetchone()[0] == 0
+        if first_account:
+            role = "admin"
+            if not trusted_local:
+                configured = _bootstrap_secret()
+                state = conn.execute(
+                    "SELECT consumed_ts FROM auth_bootstrap_state WHERE singleton=1"
+                ).fetchone()
+                valid = (
+                    len(configured) >= BOOTSTRAP_SECRET_MIN_LENGTH
+                    and hmac.compare_digest(
+                        configured.encode("utf-8"),
+                        (bootstrap_secret or "").encode("utf-8"),
+                    )
+                )
+                if (state and state["consumed_ts"]) or not valid:
+                    raise PermissionError("first-admin bootstrap is not authorized")
+        else:
+            if not trusted_local:
+                ok, message = require(actor, "admin")
+                if not allow_additional or not ok:
+                    raise PermissionError(
+                        message if allow_additional and message else "registration is disabled"
+                    )
+        conn.execute(
+            "INSERT INTO accounts(username, password_salt, password_hash, role, created_ts) "
+            "VALUES(?, ?, ?, ?, ?)",
+            (username, salt, digest, role, _now()),
+        )
+        if first_account and not trusted_local:
+            conn.execute(
+                "INSERT INTO auth_bootstrap_state(singleton, consumed_ts, consumed_by) "
+                "VALUES(1, ?, ?) ON CONFLICT(singleton) DO UPDATE SET "
+                "consumed_ts=excluded.consumed_ts, consumed_by=excluded.consumed_by",
+                (_now(), username),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return public_account(conn, username)
 
 

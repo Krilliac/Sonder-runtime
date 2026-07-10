@@ -4,6 +4,13 @@ import sys
 import time
 
 import live_reload
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _enable_live_reload(monkeypatch):
+    """Opt this unit-test module into the feature disabled by the global test sandbox."""
+    monkeypatch.setenv("TRILOBITE_LIVE_RELOAD", "1")
 
 
 def test_reload_changed_modules_reloads_source_edit(monkeypatch, tmp_path):
