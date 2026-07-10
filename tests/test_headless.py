@@ -66,3 +66,45 @@ def test_stop_pid_uses_taskkill_on_windows(monkeypatch, tmp_path):
 
     assert "stopped pid=123" in out
     assert seen["cmd"][:2] == ["taskkill", "/PID"]
+
+
+def test_listener_pid_parses_windows_netstat(monkeypatch):
+    output = """
+  Proto  Local Address          Foreign Address        State           PID
+  TCP    127.0.0.1:11435        0.0.0.0:0              LISTENING       4567
+"""
+    monkeypatch.setattr(H.os, "name", "nt", raising=False)
+    monkeypatch.setattr(
+        H.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, output, ""),
+    )
+
+    assert H._listener_pid("127.0.0.1", 11435) == 4567
+
+
+def test_managed_pid_repairs_stale_venv_launcher_pid(monkeypatch, tmp_path):
+    monkeypatch.setattr(H, "run_dir", lambda: tmp_path)
+    H.pid_file("trilobite_serve").write_text("111", encoding="ascii")
+    monkeypatch.setattr(H, "pid_alive", lambda pid: pid == 222)
+    monkeypatch.setattr(H, "port_open", lambda host, port: True)
+    monkeypatch.setattr(H, "_listener_pid", lambda host, port: 222)
+    monkeypatch.setattr(H, "_is_trilobite_server_pid", lambda pid: pid == 222)
+
+    assert H._managed_pid("trilobite_serve") == 222
+    assert H.pid_file("trilobite_serve").read_text(encoding="ascii") == "222"
+
+
+def test_start_trilobite_records_real_listener_pid(monkeypatch, tmp_path):
+    monkeypatch.setattr(H, "run_dir", lambda: tmp_path)
+    monkeypatch.setattr(H, "port_open", lambda host, port: False)
+    monkeypatch.setattr(H, "wait_until", lambda fn, seconds: True)
+    monkeypatch.setattr(H, "python_exe", lambda: "python")
+    monkeypatch.setattr(H, "_popen", lambda *args, **kwargs: 111)
+    monkeypatch.setattr(H, "_listener_pid", lambda host, port: 222)
+    monkeypatch.setattr(H, "_is_trilobite_server_pid", lambda pid: True)
+
+    out = H.start_trilobite("127.0.0.1", 11435)
+
+    assert "started pid=222" in out
+    assert H.pid_file("trilobite_serve").read_text(encoding="ascii") == "222"

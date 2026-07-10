@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
 import 'api.dart';
 import 'chat_store.dart';
@@ -57,6 +58,7 @@ class _ChatScreenState extends State<ChatScreen> {
     '/prefer': 'Show or teach preferences',
     '/improve': 'Show next improvements',
     '/agents': 'Show live agent activity',
+    '/forge': 'Build and test the in-house reference game suite',
     '/permissions': 'Show permission rules',
     '/master': 'Choose inline or delegated execution',
     '/runwindow': 'Launch last code in a Windows console',
@@ -218,8 +220,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
     setState(() {
       _messages.add(ChatMessage(role: Role.user, content: text));
-      _messages.add(const ChatMessage(
-          role: Role.assistant, content: '', pending: true));
+      _messages.add(
+          const ChatMessage(role: Role.assistant, content: '', pending: true));
       _sending = true;
       if (preset == null) _input.clear();
     });
@@ -368,7 +370,20 @@ class _ChatScreenState extends State<ChatScreen> {
       appBar: AppBar(
         title: Row(
           children: [
-            const Text('🦑 ', style: TextStyle(fontSize: 20)),
+            Container(
+              width: 32,
+              height: 32,
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.primaryContainer,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(
+                Icons.hub_outlined,
+                size: 19,
+                color: Theme.of(context).colorScheme.onPrimaryContainer,
+              ),
+            ),
+            const SizedBox(width: 10),
             // Model picker: switch which LLM answers, per conversation.
             PopupMenuButton<String>(
               tooltip: 'Choose model',
@@ -396,7 +411,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       _modelLabel(_model),
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
-                          fontSize: 18, fontWeight: FontWeight.w500),
+                          fontSize: 17, fontWeight: FontWeight.w700),
                     ),
                   ),
                   const Icon(Icons.arrow_drop_down),
@@ -455,12 +470,16 @@ class _ChatScreenState extends State<ChatScreen> {
                   )
                 : ListView.builder(
                     controller: _scroll,
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 16),
+                    padding: const EdgeInsets.fromLTRB(16, 18, 16, 20),
                     itemCount: _messages.length,
-                    itemBuilder: (_, i) => _Bubble(
-                      message: _messages[i],
-                      onPassive: _recordPassive,
+                    itemBuilder: (_, i) => Center(
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 1080),
+                        child: _Bubble(
+                          message: _messages[i],
+                          onPassive: _recordPassive,
+                        ),
+                      ),
                     ),
                   ),
           ),
@@ -491,10 +510,34 @@ class _EmptyState extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text('🦑', style: TextStyle(fontSize: 56)),
+            Container(
+              width: 88,
+              height: 88,
+              decoration: BoxDecoration(
+                color: cs.primaryContainer,
+                borderRadius: BorderRadius.circular(28),
+                boxShadow: [
+                  BoxShadow(
+                    color: cs.primary.withValues(alpha: 0.18),
+                    blurRadius: 28,
+                    spreadRadius: 2,
+                  ),
+                ],
+              ),
+              child: Icon(
+                Icons.hub_outlined,
+                size: 46,
+                color: cs.onPrimaryContainer,
+              ),
+            ),
             const SizedBox(height: 16),
-            Text('Your private AI',
-                style: Theme.of(context).textTheme.headlineSmall),
+            Text(
+              'Your private AI',
+              style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: -0.5,
+                  ),
+            ),
             const SizedBox(height: 8),
             Text(
               'Connected to $serverUrl',
@@ -510,8 +553,7 @@ class _EmptyState extends StatelessWidget {
               runSpacing: 8,
               alignment: WrapAlignment.center,
               children: [
-                _Suggestion(
-                    'Write a Python function to parse a CSV', onQuick),
+                _Suggestion('Write a Python function to parse a CSV', onQuick),
                 _Suggestion('Explain async/await simply', onQuick),
                 _Suggestion('/stats', onQuick),
               ],
@@ -542,10 +584,10 @@ class _ChatHeader extends StatelessWidget {
     return Container(
       width: double.infinity,
       decoration: BoxDecoration(
-        color: cs.surface,
+        color: cs.surface.withValues(alpha: 0.72),
         border: Border(bottom: BorderSide(color: cs.outlineVariant)),
       ),
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
       child: Row(
         children: [
           Expanded(
@@ -556,7 +598,9 @@ class _ChatHeader extends StatelessWidget {
                   title,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.titleSmall,
+                  style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
                 ),
                 const SizedBox(height: 2),
                 Text(
@@ -725,9 +769,8 @@ class _LiveStatusBar extends StatelessWidget {
     final activeProject = project.trim().isEmpty
         ? (contextInfo?.project ?? 'unknown')
         : project.trim();
-    final projectText = activeProject == 'none'
-        ? 'project: none'
-        : 'project: $activeProject';
+    final projectText =
+        activeProject == 'none' ? 'project: none' : 'project: $activeProject';
     final path = info?.stateHome ?? '';
     var latest = 'idle';
     if (agentInfo != null) {
@@ -769,9 +812,9 @@ class _LiveStatusBar extends StatelessWidget {
           parts.join('   |   '),
           maxLines: 1,
           style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: cs.onSurfaceVariant,
-                fontFeatures: const [FontFeature.tabularFigures()],
-              ),
+            color: cs.onSurfaceVariant,
+            fontFeatures: const [FontFeature.tabularFigures()],
+          ),
         ),
       ),
     );
@@ -787,6 +830,7 @@ class _Bubble extends StatelessWidget {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final isUser = message.role == Role.user;
+    final viewport = MediaQuery.sizeOf(context).width;
 
     final Color bg;
     final Color fg;
@@ -797,7 +841,7 @@ class _Bubble extends StatelessWidget {
       bg = cs.errorContainer;
       fg = cs.onErrorContainer;
     } else {
-      bg = cs.surfaceContainerHighest;
+      bg = cs.surfaceContainerLow;
       fg = cs.onSurface;
     }
 
@@ -809,32 +853,67 @@ class _Bubble extends StatelessWidget {
         child: _TypingDots(),
       );
     } else {
-      content = SelectableText(
-        message.content,
-        style: TextStyle(color: fg, height: 1.35),
-      );
+      content = isUser
+          ? SelectableText(
+              message.content,
+              style: TextStyle(color: fg, height: 1.4),
+            )
+          : _AssistantContent(content: message.content, color: fg);
     }
 
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
         constraints: BoxConstraints(
-          maxWidth: MediaQuery.of(context).size.width * 0.82,
+          maxWidth: viewport < 760 ? viewport - 32 : (isUser ? 720 : 960),
         ),
-        margin: const EdgeInsets.symmetric(vertical: 4),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        margin: const EdgeInsets.symmetric(vertical: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         decoration: BoxDecoration(
           color: bg,
+          border: isUser
+              ? null
+              : Border.all(color: cs.outlineVariant.withValues(alpha: 0.65)),
           borderRadius: BorderRadius.only(
-            topLeft: const Radius.circular(16),
-            topRight: const Radius.circular(16),
-            bottomLeft: Radius.circular(isUser ? 16 : 4),
-            bottomRight: Radius.circular(isUser ? 4 : 16),
+            topLeft: const Radius.circular(18),
+            topRight: const Radius.circular(18),
+            bottomLeft: Radius.circular(isUser ? 18 : 6),
+            bottomRight: Radius.circular(isUser ? 6 : 18),
           ),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            if (!isUser && !message.pending) ...[
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 24,
+                    height: 24,
+                    decoration: BoxDecoration(
+                      color: cs.primaryContainer,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Icon(
+                      Icons.hub_outlined,
+                      size: 15,
+                      color: cs.onPrimaryContainer,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    'trilobite',
+                    style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                          color: cs.onSurfaceVariant,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.1,
+                        ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+            ],
             content,
             if (!isUser && !message.pending && message.content.isNotEmpty)
               Padding(
@@ -900,6 +979,116 @@ class _Bubble extends StatelessWidget {
   }
 }
 
+class _AssistantContent extends StatelessWidget {
+  static const _activityMarker = '=== ACTIVITY (observable work) ===';
+
+  final String content;
+  final Color color;
+
+  const _AssistantContent({required this.content, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final markerIndex = content.indexOf(_activityMarker);
+    final answer =
+        (markerIndex < 0 ? content : content.substring(0, markerIndex))
+            .trimRight();
+    final activity =
+        markerIndex < 0 ? '' : content.substring(markerIndex).trim();
+    final body = Theme.of(context).textTheme.bodyMedium?.copyWith(
+          color: color,
+          height: 1.48,
+        );
+    final markdownStyle =
+        MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
+      p: body,
+      strong: body?.copyWith(fontWeight: FontWeight.w700),
+      a: body?.copyWith(
+        color: cs.primary,
+        decoration: TextDecoration.underline,
+        decorationColor: cs.primary.withValues(alpha: 0.6),
+      ),
+      code: body?.copyWith(
+        fontFamily: 'Consolas',
+        fontSize: 13,
+        color: cs.onSurface,
+        backgroundColor: cs.surfaceContainerHighest,
+      ),
+      codeblockPadding: const EdgeInsets.all(14),
+      codeblockDecoration: BoxDecoration(
+        color: cs.surfaceContainerHighest.withValues(alpha: 0.88),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: cs.outlineVariant),
+      ),
+      blockquoteDecoration: BoxDecoration(
+        color: cs.primaryContainer.withValues(alpha: 0.22),
+        borderRadius: BorderRadius.circular(10),
+        border: Border(left: BorderSide(color: cs.primary, width: 3)),
+      ),
+      blockquotePadding: const EdgeInsets.fromLTRB(14, 10, 12, 10),
+      blockSpacing: 10,
+      listIndent: 24,
+    );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        MarkdownBody(
+          data: answer,
+          selectable: true,
+          softLineBreak: true,
+          styleSheet: markdownStyle,
+        ),
+        if (activity.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Material(
+            color: Colors.transparent,
+            child: Theme(
+              data:
+                  Theme.of(context).copyWith(dividerColor: Colors.transparent),
+              child: ExpansionTile(
+                dense: true,
+                visualDensity: VisualDensity.compact,
+                tilePadding: EdgeInsets.zero,
+                childrenPadding: EdgeInsets.zero,
+                leading: Icon(Icons.monitor_heart_outlined,
+                    size: 17, color: cs.primary),
+                title: Text(
+                  'Activity evidence',
+                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                        color: cs.onSurfaceVariant,
+                        fontWeight: FontWeight.w700,
+                      ),
+                ),
+                children: [
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: cs.surfaceContainerHighest.withValues(alpha: 0.7),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: SelectableText(
+                      activity,
+                      style: TextStyle(
+                        color: cs.onSurfaceVariant,
+                        fontFamily: 'Consolas',
+                        fontSize: 11,
+                        height: 1.4,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
 class _TypingDots extends StatefulWidget {
   const _TypingDots();
   @override
@@ -908,9 +1097,9 @@ class _TypingDots extends StatefulWidget {
 
 class _TypingDotsState extends State<_TypingDots>
     with SingleTickerProviderStateMixin {
-  late final AnimationController _c =
-      AnimationController(vsync: this, duration: const Duration(milliseconds: 900))
-        ..repeat();
+  late final AnimationController _c = AnimationController(
+      vsync: this, duration: const Duration(milliseconds: 900))
+    ..repeat();
 
   @override
   void dispose() {
@@ -967,43 +1156,48 @@ class _InputBar extends StatelessWidget {
           color: cs.surface,
           border: Border(top: BorderSide(color: cs.outlineVariant)),
         ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.end,
-          children: [
-            Expanded(
-              child: TextField(
-                controller: controller,
-                focusNode: focusNode,
-                minLines: 1,
-                maxLines: 6,
-                textInputAction: TextInputAction.send,
-                onSubmitted: (_) => onSend(),
-                decoration: InputDecoration(
-                  hintText: 'Message trilobite…',
-                  filled: true,
-                  fillColor: cs.surfaceContainerHighest,
-                  contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 16, vertical: 12),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(24),
-                    borderSide: BorderSide.none,
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 1080),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: controller,
+                    focusNode: focusNode,
+                    minLines: 1,
+                    maxLines: 6,
+                    textInputAction: TextInputAction.send,
+                    onSubmitted: (_) => onSend(),
+                    decoration: InputDecoration(
+                      hintText: 'Message trilobite…',
+                      filled: true,
+                      fillColor: cs.surfaceContainerHighest,
+                      contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 12),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(24),
+                        borderSide: BorderSide.none,
+                      ),
+                    ),
                   ),
                 ),
-              ),
+                const SizedBox(width: 8),
+                FloatingActionButton.small(
+                  onPressed: sending ? null : onSend,
+                  elevation: 0,
+                  child: sending
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.arrow_upward),
+                ),
+              ],
             ),
-            const SizedBox(width: 8),
-            FloatingActionButton.small(
-              onPressed: sending ? null : onSend,
-              elevation: 0,
-              child: sending
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.arrow_upward),
-            ),
-          ],
+          ),
         ),
       ),
     );

@@ -91,6 +91,23 @@ def _read_pid(name: str) -> int | None:
 def pid_alive(pid: int | None) -> bool:
     if not pid:
         return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(0x1000, False, int(pid))
+            if not handle:
+                return False
+            try:
+                exit_code = ctypes.c_ulong()
+                return bool(
+                    kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+                    and exit_code.value == 259  # STILL_ACTIVE
+                )
+            finally:
+                kernel32.CloseHandle(handle)
+        except (AttributeError, OSError, ValueError):
+            return False
     try:
         os.kill(pid, 0)
         return True
@@ -105,6 +122,87 @@ def port_open(host=DEFAULT_HOST, port=DEFAULT_PORT, timeout=0.5) -> bool:
             return True
     except OSError:
         return False
+
+
+def _listener_pids(host=DEFAULT_HOST, port=DEFAULT_PORT) -> list[int]:
+    """Return Windows PIDs listening on ``port`` without extra packages."""
+    if os.name != "nt":
+        return []
+    try:
+        proc = subprocess.run(
+            ["netstat", "-ano", "-p", "TCP"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []
+    found = []
+    for line in proc.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 5 or parts[0].upper() != "TCP" or parts[3].upper() != "LISTENING":
+            continue
+        try:
+            local_port = int(parts[1].rsplit(":", 1)[1])
+            pid = int(parts[4])
+        except (IndexError, ValueError):
+            continue
+        if local_port == int(port) and pid not in found:
+            found.append(pid)
+    return found
+
+
+def _listener_pid(host=DEFAULT_HOST, port=DEFAULT_PORT) -> int | None:
+    listeners = _listener_pids(host, port)
+    return listeners[0] if listeners else None
+
+
+def _pid_command_line(pid: int) -> str:
+    if os.name == "nt":
+        command = (
+            "$p=Get-CimInstance Win32_Process -Filter 'ProcessId = %d'; "
+            "if($p){[Console]::Out.Write($p.CommandLine)}" % int(pid)
+        )
+        try:
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", command],
+                capture_output=True,
+                text=True,
+                timeout=8,
+            )
+            return proc.stdout.strip() if proc.returncode == 0 else ""
+        except (OSError, subprocess.SubprocessError):
+            return ""
+    try:
+        return Path("/proc/%d/cmdline" % int(pid)).read_bytes().replace(b"\0", b" ").decode(
+            "utf-8", errors="replace"
+        )
+    except OSError:
+        return ""
+
+
+def _is_trilobite_server_pid(pid: int) -> bool:
+    command = _pid_command_line(pid).lower().replace("/", os.sep).replace("\\", os.sep)
+    script = str((repo_root() / "trilobite_serve.py").resolve()).lower()
+    return bool(command and script in command)
+
+
+def _managed_pid(name: str, host=DEFAULT_HOST, port=DEFAULT_PORT) -> int | None:
+    """Resolve a service PID, repairing stale Windows venv-launcher pidfiles."""
+    recorded = _read_pid(name)
+    if recorded and pid_alive(recorded) and (
+        name != "trilobite_serve" or _is_trilobite_server_pid(recorded)
+    ):
+        return recorded
+    if name != "trilobite_serve" or not port_open(host, port):
+        return None
+    listener = _listener_pid(host, port)
+    if listener and pid_alive(listener) and _is_trilobite_server_pid(listener):
+        pid_file(name).write_text(str(listener), encoding="ascii")
+        return listener
+    return None
 
 
 def ollama_ok() -> bool:
@@ -142,7 +240,9 @@ def start_ollama() -> str:
 
 def start_trilobite(host=DEFAULT_HOST, port=DEFAULT_PORT, env=None) -> str:
     if port_open(host, port):
-        return "trilobite: already listening on http://%s:%s" % (host, port)
+        pid = _managed_pid("trilobite_serve", host, port)
+        suffix = " pid=%s" % pid if pid else " (unmanaged listener)"
+        return "trilobite: already listening on http://%s:%s%s" % (host, port, suffix)
     cmd = [python_exe(), str(repo_root() / "trilobite_serve.py"), str(port)]
     merged_env = os.environ.copy()
     if env:
@@ -151,36 +251,53 @@ def start_trilobite(host=DEFAULT_HOST, port=DEFAULT_PORT, env=None) -> str:
     merged_env.setdefault("TRILOBITE_PORT", str(port))
     pid = _popen(cmd, "trilobite_serve", env=merged_env)
     if wait_until(lambda: port_open(host, port), 12):
+        listener = _listener_pid(host, port)
+        if listener and _is_trilobite_server_pid(listener):
+            pid = listener
+            pid_file("trilobite_serve").write_text(str(pid), encoding="ascii")
         return "trilobite: started pid=%s at http://%s:%s" % (pid, host, port)
     return "trilobite: start requested pid=%s, not reachable yet (see %s)" % (
         pid, log_file("trilobite_serve"))
 
 
-def stop_pid(name: str) -> str:
-    pid = _read_pid(name)
-    if not pid:
+def stop_pid(name: str, host=DEFAULT_HOST, port=DEFAULT_PORT) -> str:
+    recorded = _read_pid(name)
+    if name == "trilobite_serve":
+        candidates = ([recorded] if recorded else []) + _listener_pids(host, port)
+        pids = [
+            pid for index, pid in enumerate(candidates)
+            if pid and pid not in candidates[:index] and pid_alive(pid)
+            and _is_trilobite_server_pid(pid)
+        ]
+    else:
+        pids = [recorded] if recorded and pid_alive(recorded) else []
+    if not pids:
+        try:
+            pid_file(name).unlink()
+        except OSError:
+            pass
+        if recorded:
+            return "%s: pid %s is not running" % (name, recorded)
         return "%s: no pid file" % name
-    if not pid_alive(pid):
-        try:
-            pid_file(name).unlink()
-        except OSError:
-            pass
-        return "%s: pid %s is not running" % (name, pid)
     try:
-        if os.name == "nt":
-            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True, timeout=10)
-        else:
-            os.kill(pid, 15)
+        for pid in pids:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True, timeout=10)
+            else:
+                os.kill(pid, 15)
         try:
             pid_file(name).unlink()
         except OSError:
             pass
-        return "%s: stopped pid=%s" % (name, pid)
+        return "%s: stopped pid=%s" % (name, ",".join(str(pid) for pid in pids))
     except OSError as exc:
-        return "%s: stop failed for pid=%s: %s" % (name, pid, exc)
+        return "%s: stop failed for pid=%s: %s" % (
+            name, ",".join(str(pid) for pid in pids), exc,
+        )
 
 
 def status(host=DEFAULT_HOST, port=DEFAULT_PORT) -> str:
+    trilobite_pid = _managed_pid("trilobite_serve", host, port)
     lines = [
         "trilobite headless status",
         "  ollama: %s%s" % (
@@ -189,7 +306,7 @@ def status(host=DEFAULT_HOST, port=DEFAULT_PORT) -> str:
         ),
         "  trilobite api: %s%s" % (
             "listening on http://%s:%s" % (host, port) if port_open(host, port) else "not listening",
-            " (pid %s)" % _read_pid("trilobite_serve") if _read_pid("trilobite_serve") else "",
+            " (pid %s)" % trilobite_pid if trilobite_pid else "",
         ),
         "  run dir: %s" % run_dir(),
         "  logs: %s, %s" % (log_file("ollama"), log_file("trilobite_serve")),
@@ -217,12 +334,12 @@ def main(argv=None) -> int:
         print(status(args.host, args.port))
         return 0
     if args.command == "stop":
-        print(stop_pid("trilobite_serve"))
+        print(stop_pid("trilobite_serve", args.host, args.port))
         if args.stop_ollama:
             print(stop_pid("ollama"))
         return 0
     if args.command == "restart":
-        print(stop_pid("trilobite_serve"))
+        print(stop_pid("trilobite_serve", args.host, args.port))
     print(start_ollama())
     print(start_trilobite(args.host, args.port, env=env))
     print(status(args.host, args.port))

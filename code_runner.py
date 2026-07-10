@@ -32,7 +32,7 @@ SUPPORTED_LANGUAGES = {
     "powershell": {
         "aliases": {"powershell", "pwsh", "ps1"},
         "suffix": ".ps1",
-        "cmd": lambda path: [_powershell_exe(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path],
+        "cmd": lambda path: [_powershell_exe(), "-NoProfile", "-File", path],
         "missing": "PowerShell executable not found on PATH",
     },
     "cpp": {
@@ -322,7 +322,7 @@ def _run_cpp(path, tmp, stdin, timeout, cwd):
         compile_result = _run_process(compile_cmd, tmp, "", timeout, "cpp")
     if not compile_result.get("ok"):
         return compile_result
-    run_result = _run_process([exe], tmp, stdin, timeout, "cpp")
+    run_result = _run_process([exe], cwd, stdin, timeout, "cpp")
     run_result["stdout"] = _trim_output(
         (compile_result.get("stdout") or "") + (("\n" + run_result["stdout"]) if run_result.get("stdout") else "")
     )
@@ -365,7 +365,7 @@ def _run_csharp(path, tmp, stdin, timeout, cwd):
         compile_result = _run_process([csc, "/nologo", "/out:" + exe, path], tmp, "", timeout, "csharp")
         if not compile_result.get("ok"):
             return compile_result
-        return _run_process([exe], tmp, stdin, timeout, "csharp")
+        return _run_process([exe], cwd, stdin, timeout, "csharp")
     dotnet = shutil.which("dotnet")
     if not dotnet:
         return _error_result("csharp", cwd, timeout, SUPPORTED_LANGUAGES["csharp"]["missing"])
@@ -382,7 +382,7 @@ def _run_csharp(path, tmp, stdin, timeout, cwd):
             '</Project>\n'
         )
     os.replace(path, os.path.join(tmp, "Program.cs"))
-    return _run_process([dotnet, "run", "--project", project], tmp, stdin, timeout, "csharp")
+    return _run_process([dotnet, "run", "--project", project], cwd, stdin, timeout, "csharp")
 
 
 def _compile_csharp_for_window(path, run_dir, timeout):

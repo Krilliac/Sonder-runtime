@@ -68,6 +68,30 @@ COMMANDS = [
         "summary": "Inspect live and recent agent activity.",
     },
     {
+        "name": "/asset",
+        "category": "creative",
+        "risk": "ask",
+        "summary": "Generate general-purpose icons, images, audio, models, scenes, and packs from a brief.",
+    },
+    {
+        "name": "/forge",
+        "category": "creative",
+        "risk": "ask",
+        "summary": "Build and run the dependency-free cross-language reference game suite.",
+    },
+    {
+        "name": "/game",
+        "category": "creative",
+        "risk": "ask",
+        "summary": "Generate, execute, repair, and ground a persistent 2D/2.5D/3D game.",
+    },
+    {
+        "name": "/gamefleet",
+        "category": "creative",
+        "risk": "ask",
+        "summary": "Run a bounded parallel multi-language 2D/2.5D/3D game campaign.",
+    },
+    {
         "name": "/run",
         "category": "execution",
         "risk": "ask",

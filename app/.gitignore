@@ -7,6 +7,8 @@
 .pub/
 build/
 pubspec.lock
+.metadata
+assets/local-system.zip
 
 # Native project scaffolding — generated on demand by `flutter create`
 # (see app/README.md and .github/workflows/build-apps.yml). Not committed

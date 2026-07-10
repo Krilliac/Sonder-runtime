@@ -11,6 +11,9 @@ personal_dataset.jsonl
 trilobite-lora/
 generated_tasks.jsonl
 games/
+artifacts/generated/
+.tooling/
+.vs/
 trilobite-lora/
 combined_training.jsonl
 venv-train/

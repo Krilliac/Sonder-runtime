@@ -14,6 +14,12 @@ def test_evidence_gate_allows_embedded_source_excerpt():
     assert master_orchestrator.evidence_gate(task) == ""
 
 
+def test_greenfield_design_is_not_treated_as_repository_inspection():
+    task = "Design and implement a C++ 2.5D isometric RPG from scratch."
+
+    assert not master_orchestrator.requires_repository_tools(task)
+
+
 def test_delegated_prompts_disclose_no_tool_access_and_demand_evidence():
     prompt = master_orchestrator._subtask_prompts("compare these excerpts", 1)[0]
 
@@ -98,8 +104,14 @@ def test_run_delegated_default_cap_allows_sixteen_agents(monkeypatch):
         agents=99,
     )
 
-    assert master_orchestrator.max_agents() == 16
-    assert len(result["agents"]) == 16
+    assert master_orchestrator.max_agents() == master_orchestrator.hardware_max_agents()
+    assert len(result["agents"]) == master_orchestrator.hardware_max_agents()
+
+
+def test_fleet_keywords_request_hardware_fanout():
+    assert master_orchestrator.requests_fleet("spawn as many parallel agents as possible")
+    assert master_orchestrator.requests_fleet("run a fleet workflow")
+    assert not master_orchestrator.requests_fleet("review this one file")
 
 
 def test_run_delegated_agent_cap_is_configurable(monkeypatch):

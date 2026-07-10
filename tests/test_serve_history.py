@@ -327,6 +327,49 @@ def test_file_slash_commands_route_to_server(monkeypatch):
     assert ts._handle_slash("/delete README.md") == "dry delete"
 
 
+def test_artifact_and_game_slash_commands_route_to_server(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        ts.server,
+        "artifact_generate",
+        lambda **kwargs: calls.append(("asset", kwargs)) or "asset ok",
+    )
+    monkeypatch.setattr(
+        ts.server,
+        "game_reference_suite",
+        lambda **kwargs: calls.append(("forge", kwargs)) or "forge ok",
+    )
+    monkeypatch.setattr(
+        ts.server,
+        "game_generate_and_test",
+        lambda **kwargs: calls.append(("game", kwargs)) or "game ok",
+    )
+    monkeypatch.setattr(
+        ts.server,
+        "game_generation_campaign",
+        lambda **kwargs: calls.append(("fleet", kwargs)) or "fleet ok",
+    )
+
+    assert ts._handle_slash("/asset brand-kit cobalt logo and notification sound") == "asset ok"
+    assert ts._handle_slash("/forge smoke-suite") == "forge ok"
+    assert ts._handle_slash("/game cpp 3d cavern | explore a crystal cavern") == "game ok"
+    assert ts._handle_slash("/gamefleet demos | create compact arcade games") == "fleet ok"
+    assert calls == [
+        ("asset", {"name": "brand-kit", "brief": "cobalt logo and notification sound"}),
+        ("forge", {"name": "smoke-suite"}),
+        (
+            "game",
+            {
+                "name": "cavern",
+                "concept": "explore a crystal cavern",
+                "language": "cpp",
+                "dimension": "3d",
+            },
+        ),
+        ("fleet", {"name": "demos", "concept": "create compact arcade games"}),
+    ]
+
+
 def test_write_slash_requires_path_and_text():
     assert ts._handle_slash("/write onlypath").startswith("usage:")
 

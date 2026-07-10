@@ -564,6 +564,72 @@ def test_parallel_run_code_reports_mixed_results():
     assert "[FAIL] fail" in out
 
 
+def test_artifact_generate_formats_general_pack(monkeypatch):
+    monkeypatch.setattr(
+        server.assetgen,
+        "generate_artifacts",
+        lambda **kwargs: {
+            "name": kwargs["name"], "dimension": "3d", "theme": "frost",
+            "files": [{"path": "icon.png"}], "total_bytes": 99,
+            "root": "C:/repo/artifacts/demo", "manifest": "C:/repo/artifacts/demo/manifest.json",
+        },
+    )
+
+    out = server.artifact_generate("demo", "frosty logo and 3D model")
+
+    assert "asset pack: demo" in out
+    assert "3d / frost" in out
+
+
+def test_game_generate_records_grounded_success(monkeypatch):
+    project = {
+        "language": "python", "dimension": "2d", "root": "C:/repo/game",
+        "source": "C:/repo/game/game.py", "frame": "C:/repo/game/frame.ppm",
+    }
+    monkeypatch.setattr(server.game_forge, "prepare_project", lambda *a, **k: project)
+    monkeypatch.setattr(server.game_forge, "generation_prompt", lambda *a, **k: "prompt")
+    monkeypatch.setattr(
+        server,
+        "trilobite",
+        lambda *a, **k: (
+            "```python\n# assets/tiles.png assets/hit.wav\n"
+            "open('frame.ppm','wb').write(b'P6')\nprint('GAME_OK')\n```\n\n"
+            "[interaction_id: abc123]"
+        ),
+    )
+    monkeypatch.setattr(server.game_forge, "run_project", lambda *a, **k: {
+        "ok": True, "output": "GAME_OK language=python dimension=2d",
+        "source": project["source"], "frame": project["frame"],
+    })
+    records = []
+    monkeypatch.setattr(server, "record_outcome", lambda iid, signal: records.append((iid, signal)) or "recorded")
+
+    out = server.game_generate_and_test("demo", "arena", repair_rounds=0)
+
+    assert "generated game: PASS" in out
+    assert records == [("abc123", "tests_passed")]
+
+
+def test_game_campaign_rotates_languages_and_dimensions(monkeypatch):
+    seen = []
+
+    def fake_result(name, concept, language, dimension, *args, **kwargs):
+        seen.append((language, dimension))
+        return {
+            "ok": True, "model_ok": True, "fallback_used": False,
+            "name": name, "language": language, "dimension": dimension,
+            "root": "C:/repo/" + name,
+            "attempts": [{"attempt": 1, "ok": True, "output": "GAME_OK", "iid": "abc"}],
+        }
+
+    monkeypatch.setattr(server, "_game_generate_result", fake_result)
+
+    out = server.game_generation_campaign("fleet", total=4, max_workers=2)
+
+    assert "4/4 runnable" in out
+    assert set(seen) == {("python", "2d"), ("javascript", "2.5d"), ("cpp", "3d"), ("csharp", "2d")}
+
+
 def test_parallel_generate_run_uses_generated_code(monkeypatch):
     def fake_make_generate(*args, **kwargs):
         def gen(prompt, history=None):
@@ -694,6 +760,15 @@ def test_learn_tiers_reports_all_defaults(monkeypatch):
         assert "%s: on" % tier in out
     for tier in ("cloud-code", "cloud-general"):
         assert "%s: disabled" % tier in out
+
+
+def test_learn_tiers_distinguishes_available_cloud_from_learning(monkeypatch):
+    monkeypatch.setenv("TRILOBITE_ALLOW_CLOUD", "1")
+    out = server.learn_tiers()
+
+    assert "cloud-code: off" in out
+    assert "cloud tiers are available" in out
+    assert "cloud tiers require" not in out
 
 
 def test_format_trace_contains_model_lessons_and_prompt():

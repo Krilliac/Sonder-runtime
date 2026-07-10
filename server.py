@@ -56,6 +56,8 @@ import command_registry
 import permission_rules
 import debug_dump
 import activity_tracker
+import assetgen
+import game_forge
 
 from mcp.server.fastmcp import FastMCP
 
@@ -246,6 +248,8 @@ LIVE_RELOAD_MODULES = [
     "permission_rules",
     "debug_dump",
     "activity_tracker",
+    "assetgen",
+    "game_forge",
 ]
 
 
@@ -656,6 +660,27 @@ def control_command(prompt: str, history=None, session="", project=""):
         return system_improvement_report()
     if cmd in ("/agents", "/masterstatus"):
         return master_status()
+    if cmd in ("/asset", "/assets", "/assetgen", "/artifact"):
+        asset_parts = arg.strip().split(None, 1)
+        if len(asset_parts) != 2:
+            return "usage: /asset <name> <free-form brief>"
+        return artifact_generate(name=asset_parts[0], brief=asset_parts[1])
+    if cmd in ("/forge", "/gamesuite"):
+        return game_reference_suite(name=arg.strip() or "trilobite-reference")
+    if cmd in ("/game", "/gamegen"):
+        game_parts = arg.strip().split(None, 2)
+        if len(game_parts) != 3 or "|" not in game_parts[2]:
+            return "usage: /game <language> <2d|2.5d|3d> <name> | <concept>"
+        game_name, _, concept = game_parts[2].partition("|")
+        return game_generate_and_test(
+            name=game_name.strip(), concept=concept.strip(),
+            language=game_parts[0], dimension=game_parts[1],
+        )
+    if cmd in ("/gamefleet", "/gamecampaign"):
+        fleet_name, separator, concept = arg.partition("|")
+        if not separator or not fleet_name.strip() or not concept.strip():
+            return "usage: /gamefleet <name> | <concept>"
+        return game_generation_campaign(name=fleet_name.strip(), concept=concept.strip())
     if cmd in ("/cot", "/chainofthought", "/thoughts"):
         return admin_private_chain_of_thought()
     if cmd == "/run":
@@ -2215,7 +2240,16 @@ def learn_tiers() -> str:
         if locality == "cloud" and not cloud_allowed():
             state = "disabled"
         lines.append("  %s: %s (%s, %s)" % (tier, state, locality, model))
-    lines.append("cloud tiers require TRILOBITE_ALLOW_CLOUD=1; override learning with TRILOBITE_LEARN_TIERS")
+    if cloud_allowed():
+        lines.append(
+            "cloud tiers are available; opt into cloud learning explicitly with "
+            "TRILOBITE_LEARN_TIERS"
+        )
+    else:
+        lines.append(
+            "cloud tiers require TRILOBITE_ALLOW_CLOUD=1; override learning with "
+            "TRILOBITE_LEARN_TIERS"
+        )
     return "\n".join(lines)
 
 
@@ -2444,14 +2478,24 @@ def master_orchestrate(
     _maybe_live_reload()
     task = (task or "").strip()
     mode = (mode or "ask").strip().lower()
+    if master_orchestrator.requests_fleet(task):
+        if mode in ("ask", "choose", "prompt", "delegate", "delegated", "agents", "parallel"):
+            mode = "fleet"
+            agents = master_orchestrator.max_agents()
     if mode in ("ask", "choose", "prompt"):
         return (
             "Master orchestrator ready.\n"
             "Choose execution mode:\n"
             "  inline   - master handles the task directly.\n"
             "  delegate - spawn %d parallel agent(s), audit their outputs, then merge.\n"
-            "Call master_orchestrate(task, mode='inline'|'delegate') or chat `/master inline ...`."
-        ) % master_orchestrator.clamp_agent_count(agents, default=3)
+            "  fleet    - use the hardware fan-out ceiling (%d agents).\n"
+            "Keywords fleet, swarm, spawn as many agents, parallel agents, and\n"
+            "parallel workflow select fleet automatically.\n"
+            "Call master_orchestrate(task, mode='inline'|'delegate'|'fleet') or chat `/master inline ...`."
+        ) % (
+            master_orchestrator.clamp_agent_count(agents, default=3),
+            master_orchestrator.max_agents(),
+        )
     if not task:
         return "ERROR: empty task."
     needs_repo_tools = master_orchestrator.requires_repository_tools(task)
@@ -2467,7 +2511,9 @@ def master_orchestrate(
     if mode in ("inline", "master"):
         result = master_orchestrator.run_inline(task, worker)
         return result["output"]
-    if mode in ("delegate", "delegated", "agents", "parallel"):
+    if mode in ("delegate", "delegated", "agents", "parallel", "fleet", "swarm", "fanout"):
+        if mode in ("fleet", "swarm", "fanout"):
+            agents = master_orchestrator.max_agents()
         result = master_orchestrator.run_delegated(
             task,
             worker_fn=worker,
@@ -2480,7 +2526,8 @@ def master_orchestrate(
         )
         lines = [
             "master orchestration complete",
-            "mode: delegated | master=%s | agents=%d" % (
+            "mode: %s | master=%s | agents=%d" % (
+                "fleet" if mode in ("fleet", "swarm", "fanout") else "delegated",
                 result["master_id"], len(result.get("agents") or [])),
             "",
             result["output"],
@@ -3041,6 +3088,343 @@ def run_project(
     return code_runner.format_project_result(result)
 
 
+@mcp.tool()
+def artifact_generate(
+    name: str,
+    brief: str,
+    kinds: str = "auto",
+    dimension: str = "auto",
+    theme: str = "auto",
+    seed: int | None = None,
+    output_dir: str = "",
+) -> str:
+    """Generate a deterministic in-house artifact set from a free-form brief.
+
+    Supported outputs include raster images, SVG vectors/diagrams, palettes,
+    Markdown briefs, JSON/CSV data, HTML mockups, sounds, music, OBJ/MTL models,
+    and JSON scenes. ``kinds`` may be auto, all, or a comma-separated subset. No
+    external model, service, package, or downloaded asset is required.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    try:
+        result = assetgen.generate_artifacts(
+            name=name,
+            brief=brief,
+            kinds=kinds,
+            dimension=dimension,
+            theme=theme,
+            seed=seed,
+            output_dir=output_dir,
+        )
+    except (OSError, ValueError) as exc:
+        activity_tracker.record_tool_call(
+            "artifact_generate", {"name": name, "kinds": kinds}, ok=False,
+            elapsed_ms=int((time.time() - started) * 1000), summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    activity_tracker.record_file_change(
+        "create", result["root"], bytes_written=result.get("total_bytes", 0),
+        summary="generated artifact pack",
+    )
+    activity_tracker.record_tool_call(
+        "artifact_generate", {"name": name, "kinds": kinds}, ok=True,
+        elapsed_ms=int((time.time() - started) * 1000),
+        summary="%d files" % len(result.get("files", [])),
+    )
+    return assetgen.format_pack(result)
+
+
+@mcp.tool()
+def artifact_verify(path: str) -> str:
+    """Verify every file in a generated artifact pack against its manifest."""
+    _maybe_live_reload()
+    try:
+        result = assetgen.verify_pack(path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return "ERROR: %s" % exc
+    lines = [
+        "artifact verification: %s" % ("PASS" if result["ok"] else "FAIL"),
+        "  checked: %d" % result["checked"],
+        "  root: %s" % result["root"],
+    ]
+    lines.extend("  - %s" % failure for failure in result["failures"])
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def game_reference_suite(
+    name: str = "trilobite-reference",
+    theme: str = "arcane",
+    seed: int = 1337,
+    max_workers: int = 2,
+    timeout: int = 30,
+) -> str:
+    """Build and run known-good 2D/2.5D/3D games across four languages.
+
+    The persistent projects use Python, JavaScript, C++, and C# standard
+    libraries only. Each consumes generated assets, simulates bounded gameplay,
+    writes a software-rendered PPM frame, prints GAME_OK, and exits.
+    """
+    _maybe_live_reload()
+    try:
+        result = game_forge.run_reference_suite(
+            name=name, theme=theme, seed=seed,
+            max_workers=max_workers, timeout=timeout,
+        )
+    except (OSError, ValueError) as exc:
+        return "ERROR: %s" % exc
+    return game_forge.format_suite(result)
+
+
+def _game_generate_result(
+    name: str,
+    concept: str,
+    language: str,
+    dimension: str,
+    theme: str,
+    seed: int,
+    tier: str,
+    timeout: int,
+    repair_rounds: int,
+    use_reference_fallback: bool = True,
+) -> dict:
+    project = game_forge.prepare_project(name, language, dimension, theme, seed)
+    base_prompt = game_forge.generation_prompt(project, concept)
+    try:
+        baseline = game_forge.reference_source(project["language"], project["dimension"])
+    except ValueError:
+        baseline = ""
+    if baseline:
+        base_prompt += (
+            "\n\nUse this complete, tested standard-library program as your starting scaffold. "
+            "Preserve its asset validation, bounded execution, frame writer, and GAME_OK "
+            "contract while adapting mechanics and visuals to the requested concept. Do not "
+            "add any third-party import, package, or engine.\n```%s\n%s\n```"
+            % (project["language"], baseline.rstrip())
+        )
+    attempts = []
+    repair_note = ""
+    final_iid = None
+    for attempt in range(max(0, min(int(repair_rounds), 2)) + 1):
+        prompt = base_prompt
+        if repair_note:
+            prompt += (
+                "\n\nThe previous candidate failed this exact grounded check:\n%s\n"
+                "Return a corrected complete program." % repair_note[:1800]
+            )
+        response = trilobite(
+            prompt,
+            tier=tier,
+            session="none",
+            temperature=0.32 if attempt == 0 else 0.15,
+            num_predict=1800,
+        )
+        iid = parse_interaction_id(response)
+        final_iid = iid or final_iid
+        code = grounding.extract_code_block(response, project["language"])
+        if not code:
+            run = {"ok": False, "output": "no %s code block returned" % project["language"]}
+        else:
+            code = game_forge.autofix_standard_library(code, project["language"])
+            forbidden = game_forge.validate_in_house(code, project["language"])
+            if forbidden:
+                run = {
+                    "ok": False,
+                    "output": "third-party dependency token(s): %s" % ", ".join(forbidden),
+                }
+            else:
+                contract = game_forge.contract_issues(code, project["language"])
+                if contract:
+                    run = {
+                        "ok": False,
+                        "output": "game contract violation(s): %s" % "; ".join(contract),
+                    }
+                else:
+                    run = game_forge.run_project(project, code, timeout)
+        attempts.append({
+            "attempt": attempt + 1,
+            "ok": bool(run.get("ok")),
+            "output": run.get("output", ""),
+            "iid": iid,
+            "source": run.get("source", project["source"]),
+            "frame": run.get("frame", project["frame"]),
+        })
+        if run.get("ok"):
+            if iid:
+                attempts[-1]["record"] = record_outcome(iid, "tests_passed")
+            break
+        repair_note = run.get("output") or "unknown game verification failure"
+    model_ok = bool(attempts and attempts[-1]["ok"])
+    if attempts and not model_ok and final_iid:
+        attempts[-1]["record"] = record_outcome(final_iid, "failed")
+    fallback_used = False
+    if not model_ok and use_reference_fallback:
+        try:
+            fallback_code = game_forge.reference_source(
+                project["language"], project["dimension"],
+            )
+            fallback_run = game_forge.run_project(project, fallback_code, timeout)
+            fallback_used = True
+            attempts.append({
+                "attempt": len(attempts) + 1,
+                "kind": "verified-reference-fallback",
+                "ok": bool(fallback_run.get("ok")),
+                "output": fallback_run.get("output", ""),
+                "iid": None,
+                "source": fallback_run.get("source", project["source"]),
+                "frame": fallback_run.get("frame", project["frame"]),
+            })
+        except (OSError, ValueError) as exc:
+            attempts.append({
+                "attempt": len(attempts) + 1,
+                "kind": "verified-reference-fallback",
+                "ok": False,
+                "output": "reference fallback unavailable: %s" % exc,
+                "iid": None,
+            })
+    return {
+        "ok": bool(attempts and attempts[-1]["ok"]),
+        "model_ok": model_ok,
+        "fallback_used": fallback_used,
+        "name": name,
+        "language": project["language"],
+        "dimension": project["dimension"],
+        "root": project["root"],
+        "attempts": attempts,
+    }
+
+
+@mcp.tool()
+def game_generate_and_test(
+    name: str,
+    concept: str,
+    language: str = "python",
+    dimension: str = "2d",
+    theme: str = "arcane",
+    seed: int = 1337,
+    tier: str = "code",
+    timeout: int = 30,
+    repair_rounds: int = 1,
+    use_reference_fallback: bool = True,
+) -> str:
+    """Have Trilobite create, execute, repair, and ground a persistent game.
+
+    Generated games must use only standard-library/OS-native APIs, consume an
+    in-house artifact pack, render frame.ppm, emit GAME_OK, and terminate within
+    the bounded timeout. Passing/failed outcomes are recorded into learning.
+    """
+    _maybe_live_reload()
+    try:
+        result = _game_generate_result(
+            name, concept, language, dimension, theme, seed, tier,
+            max(2, min(int(timeout), 60)), repair_rounds,
+            use_reference_fallback=use_reference_fallback,
+        )
+    except (OSError, ValueError) as exc:
+        return "ERROR: %s" % exc
+    lines = [
+        "generated game: %s" % ("PASS" if result["ok"] else "FAIL"),
+        "  target: %s / %s" % (result["language"], result["dimension"]),
+        "  attempts: %d" % len(result["attempts"]),
+        "  model result: %s | reference fallback: %s" % (
+            "PASS" if result.get("model_ok") else "FAIL",
+            "used" if result.get("fallback_used") else "not used",
+        ),
+        "  root: %s" % result["root"],
+    ]
+    for attempt in result["attempts"]:
+        lines.append("  [%s] attempt %d (%s) iid=%s" % (
+            "PASS" if attempt["ok"] else "FAIL",
+            attempt["attempt"], attempt.get("kind", "model"), attempt.get("iid") or "-",
+        ))
+        if attempt.get("output"):
+            lines.append(str(attempt["output"])[:1200])
+        if attempt.get("record"):
+            lines.append(str(attempt["record"])[:500])
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def game_generation_campaign(
+    name: str,
+    concept: str = "compact action game with one complete gameplay loop",
+    total: int = 6,
+    theme: str = "arcane",
+    tier: str = "code",
+    max_workers: int = 2,
+    timeout: int = 30,
+    repair_rounds: int = 1,
+    use_reference_fallback: bool = True,
+) -> str:
+    """Run a bounded parallel 2D/2.5D/3D multi-language game campaign.
+
+    Jobs rotate across Python, JavaScript, C++, and C#. Every candidate receives
+    its own general artifact pack, is compiled/executed, must emit GAME_OK and a
+    valid frame.ppm, and records a grounded pass/fail learning outcome.
+    """
+    _maybe_live_reload()
+    # Repeat the fully verified reference matrix. This keeps every default fleet
+    # job recoverable if a model draft fails while still covering all supported
+    # languages and 2D, isometric 2.5D, and 3D execution.
+    matrix = game_forge.DEFAULT_MATRIX
+    total = max(1, min(int(total or 1), 12))
+    workers = max(1, min(int(max_workers or 1), 4, total))
+    timeout = max(2, min(int(timeout or 30), 60))
+    results = [None] * total
+
+    def one(index):
+        language, dimension = matrix[index % len(matrix)]
+        suffix = "iso" if dimension == "2.5d" else dimension
+        project_name = "%s-%s-%s-%d" % (
+            assetgen._safe_slug(name), language, suffix, index + 1,
+        )
+        try:
+            return _game_generate_result(
+                project_name, concept, language, dimension, theme,
+                1337 + index, tier, timeout, repair_rounds,
+                use_reference_fallback=use_reference_fallback,
+            )
+        except Exception as exc:
+            return {
+                "ok": False, "name": project_name, "language": language,
+                "dimension": dimension, "root": "", "attempts": [
+                    {"attempt": 1, "ok": False, "output": "ERROR: %s" % exc, "iid": None}
+                ],
+            }
+
+    started = time.time()
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(one, index): index for index in range(total)}
+        for future in as_completed(futures):
+            results[futures[future]] = future.result()
+    elapsed = round(time.time() - started, 3)
+    passed = sum(1 for result in results if result and result.get("ok"))
+    model_passed = sum(1 for result in results if result and result.get("model_ok"))
+    fallback_passed = sum(
+        1 for result in results
+        if result and result.get("ok") and result.get("fallback_used")
+    )
+    lines = [
+        "greenfield game campaign: %d/%d runnable in %.3fs (model=%d, reference-fallback=%d, workers=%d)" %
+        (passed, total, elapsed, model_passed, fallback_passed, workers),
+    ]
+    for result in results:
+        final = result["attempts"][-1]
+        lines.append("[%s] %s/%s model=%s fallback=%s attempts=%d root=%s" % (
+            "PASS" if result.get("ok") else "FAIL",
+            result.get("language"), result.get("dimension"),
+            "PASS" if result.get("model_ok") else "FAIL",
+            "yes" if result.get("fallback_used") else "no",
+            len(result.get("attempts") or []), result.get("root") or "-",
+        ))
+        if final.get("output"):
+            lines.append(str(final["output"])[:900])
+        if final.get("record"):
+            lines.append(str(final["record"])[:400])
+    return "\n".join(lines)
+
+
 def _loop_text_result(action_type, text):
     text = text or ""
     first_line = next((line for line in text.splitlines() if line.strip()), "")
@@ -3098,6 +3482,47 @@ def _loop_dispatch(action):
             "summary": "project %s" % ("ok" if result.get("ok") else "failed"),
             "output": code_runner.format_project_result(result),
         }
+    if action_type in ("artifact", "artifact_generate", "assetgen"):
+        return _loop_text_result("artifact_generate", artifact_generate(
+            name=action.get("name", "generated-artifact"),
+            brief=action.get("brief", action.get("prompt", "")),
+            kinds=action.get("kinds", "auto"),
+            dimension=action.get("dimension", "auto"),
+            theme=action.get("theme", "auto"),
+            seed=action.get("seed"),
+            output_dir=action.get("output_dir", ""),
+        ))
+    if action_type in ("game_reference", "game_reference_suite"):
+        return _loop_text_result("game_reference_suite", game_reference_suite(
+            name=action.get("name", "trilobite-reference"),
+            theme=action.get("theme", "arcane"),
+            seed=action.get("seed", 1337),
+            max_workers=action.get("max_workers", 2),
+            timeout=action.get("timeout", 30),
+        ))
+    if action_type in ("game", "game_generate", "game_generate_and_test"):
+        return _loop_text_result("game_generate_and_test", game_generate_and_test(
+            name=action.get("name", "generated-game"),
+            concept=action.get("concept", action.get("prompt", "")),
+            language=action.get("language", "python"),
+            dimension=action.get("dimension", "2d"),
+            theme=action.get("theme", "arcane"),
+            seed=action.get("seed", 1337),
+            tier=action.get("tier", "code"),
+            timeout=action.get("timeout", 30),
+            repair_rounds=action.get("repair_rounds", 1),
+        ))
+    if action_type in ("game_campaign", "game_generation_campaign"):
+        return _loop_text_result("game_generation_campaign", game_generation_campaign(
+            name=action.get("name", "game-fleet"),
+            concept=action.get("concept", action.get("prompt", "compact action game")),
+            total=action.get("total", 6),
+            theme=action.get("theme", "arcane"),
+            tier=action.get("tier", "code"),
+            max_workers=action.get("max_workers", 2),
+            timeout=action.get("timeout", 30),
+            repair_rounds=action.get("repair_rounds", 1),
+        ))
     if action_type == "offload":
         return _loop_text_result("offload", offload(
             prompt=action.get("prompt", ""),
@@ -3281,7 +3706,7 @@ def _loop_dispatch(action):
         "ok": False,
         "type": action_type or "(unknown)",
         "summary": "unknown action type",
-        "output": "Valid action types: code, project, offload, trilobite, master_orchestrate, master_status, file_policy, file_find, file_read, file_write, file_edit, file_delete, status, diagnostics, context_health, memory_quality_report, memory_quality_repair, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, unload, sleep.",
+        "output": "Valid action types: code, project, artifact_generate, game_reference_suite, game_generate_and_test, game_generation_campaign, offload, trilobite, master_orchestrate, master_status, file_policy, file_find, file_read, file_write, file_edit, file_delete, status, diagnostics, context_health, memory_quality_report, memory_quality_repair, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, unload, sleep.",
     }
 
 
@@ -3299,6 +3724,10 @@ def loop(
     Supported action types:
       - {"type":"code","language":"python|js|powershell|cpp|csharp","code":"..."}
       - {"type":"project","files":[{"path":"src/main.cpp","content":"..."}],"commands":[{"cmd":["g++","src/main.cpp","-o","app"]}]}
+      - {"type":"artifact_generate","name":"brand-kit","brief":"fiery logo, music, and 3D mascot","kinds":"auto"}
+      - {"type":"game_reference_suite","name":"reference-suite"}
+      - {"type":"game_generate_and_test","name":"arena","concept":"isometric action RPG","language":"cpp","dimension":"2.5d"}
+      - {"type":"game_generation_campaign","name":"game-fleet","concept":"action roguelite","total":6,"max_workers":2}
       - {"type":"offload","prompt":"...","tier":"fast|code|general|cloud-code|cloud-general"}
       - {"type":"trilobite","prompt":"...","session":"none"}
       - {"type":"trilobite","prompt":"...","context_size":"1m"}
@@ -3935,6 +4364,8 @@ def tool_manifest() -> str:
         "run_code": "Run a bounded Python/JS/PowerShell/C++/C# snippet.",
         "ground_artifact": "Validate non-code artifacts with exact/contains/regex/JSON checks.",
         "run_project": "Run a bounded temporary multi-file project with optional build commands.",
+        "artifact_generate/artifact_verify": "Create and verify stdlib-only images, SVGs, documents, data, web mockups, audio, models, scenes, and themed packs from a free-form brief.",
+        "game_reference_suite/game_generate_and_test/game_generation_campaign": "Build, execute, repair, and ground persistent in-house 2D/2.5D/3D game projects and fleets.",
         "loop": "Repeat bounded code/model/system actions.",
         "workflow_list/save/run/delete": "Manage reusable loop workflows.",
         "system_profile_text/update_system_profile": "Read or edit standing instructions.",
@@ -3956,6 +4387,11 @@ def tool_manifest() -> str:
 AGENT_TOOL_HELP = """Available tools:
 - run_code: {"code": "...", "language": "python|js|powershell|cpp|csharp", "stdin": "", "timeout": 10}
 - run_project: {"files_json": {"files": {"src/main.cpp": "..."}}, "commands_json": [{"cmd": ["g++", "src/main.cpp", "-o", "app"]}], "stdin": "", "timeout": 60}
+- artifact_generate: {"name": "brand-kit", "brief": "fiery logo, diagram, web mockup, ambient music, 3D mascot", "kinds": "auto|all|icon,vector,diagram,document,data,web,music,model", "dimension": "auto|2d|2.5d|3d", "theme": "auto|ember|verdant|arcane|frost"}
+- artifact_verify: {"path": "artifacts/generated/brand-kit"}
+- game_reference_suite: {"name": "reference-suite", "theme": "arcane", "max_workers": 2, "timeout": 30}
+- game_generate_and_test: {"name": "arena", "concept": "isometric action RPG", "language": "python|javascript|cpp|csharp", "dimension": "2d|2.5d|3d", "theme": "arcane", "repair_rounds": 1}
+- game_generation_campaign: {"name": "game-fleet", "concept": "action roguelite", "total": 6, "theme": "arcane", "max_workers": 2, "repair_rounds": 1}
 - web_search: {"query": "...", "limit": 5}
 - web_fetch: {"url": "https://...", "max_chars": 8000}
 - file_policy: {}
@@ -4112,6 +4548,49 @@ def _agent_dispatch(tool_name, args, allow_web=True, read_only=False):
             commands_json=args.get("commands_json", args.get("commands", "")),
             stdin=args.get("stdin", ""),
             timeout=args.get("timeout", 60),
+        )
+    if tool_name in ("artifact_generate", "assetgen"):
+        return artifact_generate(
+            name=args.get("name", "generated-artifact"),
+            brief=args.get("brief", args.get("prompt", "")),
+            kinds=args.get("kinds", "auto"),
+            dimension=args.get("dimension", "auto"),
+            theme=args.get("theme", "auto"),
+            seed=args.get("seed"),
+            output_dir=args.get("output_dir", ""),
+        )
+    if tool_name == "artifact_verify":
+        return artifact_verify(args.get("path", ""))
+    if tool_name == "game_reference_suite":
+        return game_reference_suite(
+            name=args.get("name", "trilobite-reference"),
+            theme=args.get("theme", "arcane"),
+            seed=args.get("seed", 1337),
+            max_workers=args.get("max_workers", 2),
+            timeout=args.get("timeout", 30),
+        )
+    if tool_name in ("game_generate_and_test", "game_generate"):
+        return game_generate_and_test(
+            name=args.get("name", "generated-game"),
+            concept=args.get("concept", args.get("prompt", "")),
+            language=args.get("language", "python"),
+            dimension=args.get("dimension", "2d"),
+            theme=args.get("theme", "arcane"),
+            seed=args.get("seed", 1337),
+            tier=args.get("tier", "code"),
+            timeout=args.get("timeout", 30),
+            repair_rounds=args.get("repair_rounds", 1),
+        )
+    if tool_name in ("game_generation_campaign", "game_campaign"):
+        return game_generation_campaign(
+            name=args.get("name", "game-fleet"),
+            concept=args.get("concept", args.get("prompt", "compact action game")),
+            total=args.get("total", 6),
+            theme=args.get("theme", "arcane"),
+            tier=args.get("tier", "code"),
+            max_workers=args.get("max_workers", 2),
+            timeout=args.get("timeout", 30),
+            repair_rounds=args.get("repair_rounds", 1),
         )
     if tool_name == "web_search":
         if not allow_web:

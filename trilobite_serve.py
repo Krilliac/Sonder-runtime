@@ -316,6 +316,10 @@ HELP_TEXT = """commands:
   /improve           show the next system improvement checklist
   /master [mode] ... run master orchestration: ask, inline, or delegate
   /agents            show live master/subagent activity
+  /asset <n> <brief> generate general icons/audio/models/scenes from a brief
+  /forge [name]      build and run the dependency-free reference game suite
+  /game ...          generate/test: /game cpp 3d name | concept
+  /gamefleet ...     run a parallel multi-language game campaign
   /register u p      create account (first account becomes admin)
   /login u p         login for admin/debug commands
   /whoami            show current account
@@ -458,6 +462,8 @@ DANGEROUS_HTTP_SLASH_COMMANDS = frozenset({
     "/delete", "/master", "/pass", "/good", "/accept", "/accepted", "/used",
     "/copied", "/edited", "/fail", "/bad", "/trace", "/strict", "/run",
     "/runwindow", "/runnew", "/runconsole", "/runproject", "/train", "/learn",
+    "/asset", "/assets", "/assetgen", "/artifact", "/forge", "/gamesuite",
+    "/game", "/gamegen", "/gamefleet", "/gamecampaign",
 })
 
 
@@ -790,6 +796,29 @@ def _handle_slash(content, messages=None, state=None):
         return server.master_status()
     if cmd in ("/activity", "/tools", "/work"):
         return server.activity_status()
+    if cmd in ("/asset", "/assets", "/assetgen", "/artifact"):
+        parts2 = arg.strip().split(None, 1)
+        if len(parts2) != 2:
+            return "usage: /asset <name> <free-form brief>"
+        return server.artifact_generate(name=parts2[0], brief=parts2[1])
+    if cmd in ("/forge", "/gamesuite"):
+        return server.game_reference_suite(name=arg.strip() or "trilobite-reference")
+    if cmd in ("/game", "/gamegen"):
+        parts2 = arg.strip().split(None, 2)
+        if len(parts2) != 3 or "|" not in parts2[2]:
+            return "usage: /game <language> <2d|2.5d|3d> <name> | <concept>"
+        game_name, _, concept = parts2[2].partition("|")
+        return server.game_generate_and_test(
+            name=game_name.strip(), concept=concept.strip(),
+            language=parts2[0], dimension=parts2[1],
+        )
+    if cmd in ("/gamefleet", "/gamecampaign"):
+        fleet_name, separator, concept = arg.partition("|")
+        if not separator or not fleet_name.strip() or not concept.strip():
+            return "usage: /gamefleet <name> | <concept>"
+        return server.game_generation_campaign(
+            name=fleet_name.strip(), concept=concept.strip(),
+        )
     if cmd == "/register":
         parts2 = arg.split(None, 1)
         if len(parts2) != 2:

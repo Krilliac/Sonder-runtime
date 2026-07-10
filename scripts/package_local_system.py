@@ -50,8 +50,10 @@ PRIVATE_FILES = {
     "workflows.json",
 }
 REQUIRED_FILES = {
+    "assetgen.py",
     "bootstrap-engine.cmd",
     "bootstrap_engine.py",
+    "game_forge.py",
     "server.py",
     "setup_alias.py",
     "trilobite-headless.cmd",

@@ -20,9 +20,37 @@ import debug_dump
 
 CURRENT_TOKEN = ""
 
-BANNER = """trilobite - fully local self-improving coder
-type /help for commands, or just start typing to ask trilobite something.
-"""
+
+class _Ansi:
+    """Small dependency-free palette; automatically disappears when piped."""
+
+    enabled = bool(getattr(sys.stdout, "isatty", lambda: False)()) and not os.environ.get("NO_COLOR")
+    reset = "\x1b[0m"
+    teal = "\x1b[38;5;80m"
+    cyan = "\x1b[38;5;117m"
+    muted = "\x1b[38;5;245m"
+    green = "\x1b[38;5;114m"
+    amber = "\x1b[38;5;221m"
+    red = "\x1b[38;5;210m"
+    bold = "\x1b[1m"
+
+
+def _paint(text, *styles):
+    if not _Ansi.enabled:
+        return str(text)
+    return "".join(styles) + str(text) + _Ansi.reset
+
+
+def _rule(char="─", width=56):
+    return _paint(char * width, _Ansi.muted)
+
+
+def _result_tag(ok):
+    return _paint("PASS" if ok else "FAIL", _Ansi.green if ok else _Ansi.red, _Ansi.bold)
+
+BANNER = """{teal}trilobite{reset}  {muted}private self-improving coder{reset}
+{muted}type /help for commands, or start typing to ask trilobite something.{reset}
+""".format(teal=_Ansi.teal if _Ansi.enabled else "", reset=_Ansi.reset if _Ansi.enabled else "", muted=_Ansi.muted if _Ansi.enabled else "")
 
 HELP = """commands:
   /help              show this help
@@ -44,6 +72,10 @@ HELP = """commands:
   /improve           show the next system improvement checklist
   /master [mode] ... run master orchestration: ask, inline, or delegate
   /agents            show live master/subagent activity
+  /asset <n> <brief> generate a general icon/audio/model/scene artifact pack
+  /forge [name]      build and run the dependency-free reference game suite
+  /game ...          generate/test a game: /game cpp 3d name | concept
+  /gamefleet ...     parallel multi-language game campaign: name | concept
   /register u p      create account (first account becomes admin)
   /login u p         login for admin/debug commands
   /whoami            show current account
@@ -196,7 +228,7 @@ def _run_train(n):
     passed = 0
     lessons = 0
     for t in tasks:
-        print("  training: %s ..." % t["name"])
+        print("  %s %s" % (_paint("TRAIN", _Ansi.teal, _Ansi.bold), t["name"]))
         # Training runs are single-turn and must not pollute the user's chat thread.
         resp = server.trilobite(t["prompt"], session="none")
         iid = server.parse_interaction_id(resp)
@@ -210,10 +242,11 @@ def _run_train(n):
             msg = server.record_outcome(iid, signal)
             if "Distilled lesson" in msg:
                 lessons += 1
-            print("    -> %s  %s" % ("PASS" if ok else "FAIL", msg))
+            print("    %s  %s" % (_result_tag(ok), msg))
         else:
-            print("    -> %s (no id)" % ("PASS" if ok else "FAIL"))
-    print("trained on %d tasks: %d passed, %d failed, %d new lessons" % (
+            print("    %s  (no interaction id)" % _result_tag(ok))
+    print(_paint("training complete", _Ansi.cyan, _Ansi.bold) +
+          "  %d tasks · %d passed · %d failed · %d new lessons" % (
         len(tasks), passed, len(tasks) - passed, lessons))
 
 
@@ -350,7 +383,8 @@ def main():
 
     while True:
         try:
-            line = input("trilobite> ")
+            line = input(_paint("trilobite", _Ansi.teal, _Ansi.bold) +
+                         _paint(" > ", _Ansi.muted))
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -438,6 +472,32 @@ def main():
                 print(server.master_status())
             elif cmd in ("/activity", "/tools", "/work"):
                 print(server.activity_status())
+            elif cmd in ("/asset", "/assets", "/assetgen", "/artifact"):
+                parts = arg.strip().split(None, 1)
+                if len(parts) != 2:
+                    print("usage: /asset <name> <free-form brief>")
+                else:
+                    print(server.artifact_generate(name=parts[0], brief=parts[1]))
+            elif cmd in ("/forge", "/gamesuite"):
+                print(server.game_reference_suite(name=arg.strip() or "trilobite-reference"))
+            elif cmd in ("/game", "/gamegen"):
+                parts = arg.strip().split(None, 2)
+                if len(parts) != 3 or "|" not in parts[2]:
+                    print("usage: /game <language> <2d|2.5d|3d> <name> | <concept>")
+                else:
+                    name, _, concept = parts[2].partition("|")
+                    print(server.game_generate_and_test(
+                        name=name.strip(), concept=concept.strip(),
+                        language=parts[0], dimension=parts[1],
+                    ))
+            elif cmd in ("/gamefleet", "/gamecampaign"):
+                name, separator, concept = arg.partition("|")
+                if not separator or not name.strip() or not concept.strip():
+                    print("usage: /gamefleet <name> | <concept>")
+                else:
+                    print(server.game_generation_campaign(
+                        name=name.strip(), concept=concept.strip(),
+                    ))
             elif cmd == "/register":
                 parts = arg.split(None, 1)
                 if len(parts) != 2:
@@ -518,11 +578,18 @@ def main():
                 task = text
                 if text:
                     parts = text.split(None, 1)
-                    if parts[0].lower() in (
+                    mode_alias = {
+                        "delagte": "delegate",
+                        "delegte": "delegate",
+                        "inlne": "inline",
+                    }
+                    requested_mode = mode_alias.get(parts[0].lower(), parts[0].lower())
+                    if requested_mode in (
                         "ask", "inline", "master", "delegate",
-                        "delegated", "agents", "parallel",
+                        "delegated", "agents", "parallel", "fleet", "swarm",
+                        "fanout", "workflow",
                     ):
-                        mode = parts[0].lower()
+                        mode = requested_mode
                         task = parts[1] if len(parts) > 1 else ""
                 print(server.master_orchestrate(task=task, mode=mode))
             elif cmd == "/lessons":

@@ -170,6 +170,19 @@ def test_dangerous_slash_denied_before_handler(monkeypatch):
 
 @pytest.mark.parametrize(
     "prompt",
+    [
+        "/asset kit logo and sound",
+        "/forge suite",
+        "/game python 2d demo | platformer",
+        "/gamefleet demos | varied games",
+    ],
+)
+def test_artifact_and_game_commands_require_developer_access(prompt):
+    assert ts._dangerous_http_slash(prompt) is True
+
+
+@pytest.mark.parametrize(
+    "prompt",
     ["run it", "train yourself", "trace on", "strict on"],
 )
 def test_ordinary_account_cannot_trigger_natural_control_intents(

@@ -89,10 +89,30 @@ The learning loop above is *cross-task* memory. On top of it trilobite also has:
 
 ## Four ways to run it
 
-1. **Local, in your terminal** — `trilobite` (like launching `claude`). Interactive REPL routed through the full loop, with `/trace`, `/strict`, `/run`, `/runwindow`, `/train`, `/master`, `/agents`, `/todo`, `/commands`, `/dump`, `/permissions`, `/compact`, `/debug`, `/admin`, `/login`, `/register`, `/pass`, `/fail`, `/stats`, `/context`, `/quality`, `/emotion`, `/improve` commands plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts` (and plain-English equivalents). Each REPL launch is its own remembered thread.
+1. **Local, in your terminal** — `trilobite` (like launching `claude`). Interactive REPL routed through the full loop, with `/trace`, `/strict`, `/run`, `/runwindow`, `/train`, `/master`, `/agents`, `/asset`, `/forge`, `/game`, `/gamefleet`, `/todo`, `/commands`, `/dump`, `/permissions`, `/compact`, `/debug`, `/admin`, `/login`, `/register`, `/pass`, `/fail`, `/stats`, `/context`, `/quality`, `/emotion`, `/improve` commands plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts` (and plain-English equivalents). Each REPL launch is its own remembered thread.
 2. **Hosted on your own server + a thin client anywhere** — run `deploy_trilobite.sh --serve` on your box (systemd service, API key), then any machine runs the single-file `trilobite_client.py` pointed at it. The serve layer threads the chat UI's own conversation history.
-3. **Integrated with Claude** — the MCP `local-llm` tools let Claude offload to it (`agent`, `master_orchestrate`, `master_status`, `task_create/list/update/show`, `command_registry_list`, `permission_policy`, `context_compaction_plan`, `admin_register`, `admin_login`, `admin_accounts`, `admin_set_account`, `debug_inspect`, `offload(learn=True)`, `trilobite`, `run_code`, `parallel_run_code`, `parallel_generate_run`, `parallel_generate_run_languages`, `campaign_generate_compile_execute_record`, `web_search`, `web_fetch`, `loop`, `workflow_list/save/run/delete`, `self_heal_check`, `self_heal_repair`, `learn_from_example`, `apply_learned`, `system_improvement_report`, `system_profile_text`, `update_system_profile`, `emotion_vector_status`, `update_emotion_vectors`, `tune_emotion_vectors`, `memory_search`, `memory_export`, `session_export`, `memory_quality_report`, `memory_quality_repair`, `tool_manifest`, `context_health`, `diagnostics`, `live_reload_status`, `record_outcome`, `trilobite_stats`, `trilobite_sessions`, `trilobite_remember_fact`). `agent` runs a Claude-like tool-use loop where the model can call local tools and web tools step-by-step; `master_orchestrate` can ask whether to run inline or delegate to parallel subagents, then audit and merge their outputs; visible tasks replace hidden planning state; `run_code` and the parallel/campaign tools give bounded compile/run feedback across Python, JavaScript, PowerShell, C++, and C#; emotion vectors can be read, set, reset, or live-tuned from feedback and apply on the next request; `loop` repeats bounded code/model/system actions for retries, polling, and small workflows. Both `offload` and `trilobite` take a `tier` to route a call to any configured model (local or a paid cloud model); cloud tiers answer clean and still feed the learning loop.
+3. **Integrated with Claude** — the MCP `local-llm` tools let Claude offload to it (`agent`, `master_orchestrate`, `master_status`, `artifact_generate`, `artifact_verify`, `game_reference_suite`, `game_generate_and_test`, `game_generation_campaign`, `task_create/list/update/show`, `command_registry_list`, `permission_policy`, `context_compaction_plan`, `offload(learn=True)`, `trilobite`, `run_code`, `parallel_run_code`, `parallel_generate_run`, `campaign_generate_compile_execute_record`, `web_search`, `web_fetch`, `loop`, `workflow_list/save/run/delete`, `self_heal_check`, `learn_from_example`, `apply_learned`, `system_improvement_report`, `memory_search`, `memory_quality_report`, `tool_manifest`, `diagnostics`, `record_outcome`, `trilobite_stats`). `agent` runs a local tool-use loop; `master_orchestrate` can delegate to parallel subagents and audit their outputs; artifact and game tools create persistent assets/projects and accept only grounded compile/run results. Both `offload` and `trilobite` can route to configured local or explicitly enabled cloud tiers.
 4. **Mobile & desktop app (GUI)** — a cross-platform [Flutter client](app/) that talks to a hosted `trilobite_serve.py`. One codebase → an **Android APK** and **Windows/Linux/macOS** desktop apps, built in CI with downloadable installers. See [app/README.md](app/README.md).
+
+### General artifact forge and greenfield games
+
+`artifact_generate(name, brief)` turns a free-form request into a deterministic,
+stdlib-only creative pack. It is not game-specific: requests can produce icons,
+logos, backgrounds, textures, tilesets, sprite sheets, SVG vectors and diagrams,
+brand palettes, Markdown briefs, JSON/CSV sample data, standalone HTML mockups,
+PCM WAV sound effects and music loops, OBJ/MTL models, and JSON scenes. The
+generator uses manual PNG/PPM encoding, waveform synthesis, procedural geometry,
+bounded sizes, safe workspace paths, idempotent regeneration, and SHA-256
+manifests. `artifact_verify(path)` checks every file before downstream use.
+
+`game_reference_suite` is the known-good baseline: persistent Python 2D,
+JavaScript 2.5D, C++ 3D, and C# 2D projects consume generated assets, simulate
+bounded gameplay, software-render `frame.ppm`, print `GAME_OK`, and exit. The
+model-driven `game_generate_and_test` and `game_generation_campaign` surfaces use
+the same contract, reject third-party engine tokens and placeholders, compile/run
+the candidate, repair failures, and record grounded outcomes. If the local model
+cannot satisfy the contract, a clearly labeled verified reference fallback leaves
+a runnable project while the model attempt remains recorded as failed.
 
 ---
 
@@ -114,9 +134,12 @@ Use Trilobite as a local junior implementer, not as the final authority:
    caller's hidden context.
 4. Treat every answer as a draft. The caller must audit APIs, edge cases, file
    operations, security, and project style before applying changes.
-5. Use agent fan-out deliberately: 1-3 agents for normal work, 4-6 for useful
-   diversity, 8-16 for tiny prompts or stress tests, and higher counts only with
-   `TRILOBITE_MAX_AGENTS` plus healthy RAM/VRAM headroom.
+5. Use agent fan-out deliberately: 1-3 agents for normal work and 4-6 for useful
+   diversity. Explicit `fleet`, `swarm`, `workflow`, `parallel agents`, or
+   spawn-as-many requests use the hardware-derived ceiling (two submission slots
+   per logical CPU, capped at 64 and overridable with `TRILOBITE_MAX_AGENTS`).
+   Ollama still schedules actual GPU execution, so fan-out is bounded submission,
+   not a promise that every model fits in VRAM simultaneously.
 6. Record outcomes only after grounded evidence: compile, tests, direct use, or
    explicit rejection. Good labels improve retrieval; vague labels pollute it.
 7. Run `memory_quality_report()` periodically and
@@ -313,6 +336,7 @@ Flat, mostly-stdlib Python modules (plus `mcp`):
 | `orchestrator.py` | the retrieve → augment → generate → capture flow |
 | `server.py` / `code_runner.py` / `web_tools.py` / `workflow_store.py` / `self_heal.py` / `live_reload.py` / `system_profile.py` / `emotion_vectors.py` / `command_registry.py` / `permission_rules.py` | MCP server tools: `agent` / `offload` / `trilobite` / visible tasks / command registry / permission policy / context compaction plans / `run_code` / `web_search` / `web_fetch` / `loop` / workflows / memory export/search / self-healing / editable profile / emotion vectors / diagnostics; bounded execution, tool-calling loops, web access, reusable action routines, and request-boundary source reload |
 | `server.py` | MCP server: `offload` / `trilobite` / `parallel_run_code` / `parallel_generate_run` / `parallel_generate_run_languages` / `campaign_generate_compile_execute_record` / `learn_tiers` / `record_outcome` / `trilobite_stats` / `trilobite_sessions` / `trilobite_remember_fact` |
+| `assetgen.py` / `game_forge.py` | stdlib-only general artifact generation, manifest verification, persistent cross-language game projects, model campaigns, and verified reference fallbacks |
 | `recall.py` | semantic recall of past good-outcome solutions (vector search over interactions) |
 | `summarizer.py` | rolling conversation summaries + session auto-titles (fast tier) |
 | `trilobite_repl.py` / `trilobite_client.py` | local REPL / thin remote client |
