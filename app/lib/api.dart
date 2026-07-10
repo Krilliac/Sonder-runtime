@@ -510,19 +510,25 @@ class ActivityChecklistItem {
 
 class AgentStatus {
   final int activeAgents;
+  final int cancelPending;
+  final int totalAgents;
   final int totalListed;
   final int tokensIn;
   final int tokensOut;
   final List<AgentActivity> agents;
   final List<String> events;
+  final AgentCapacity? capacity;
 
   const AgentStatus({
     required this.activeAgents,
+    required this.cancelPending,
+    required this.totalAgents,
     required this.totalListed,
     required this.tokensIn,
     required this.tokensOut,
     required this.agents,
     required this.events,
+    required this.capacity,
   });
 
   factory AgentStatus.fromJson(Map<String, dynamic> json) {
@@ -539,13 +545,53 @@ class AgentStatus {
         })
         .where((s) => s.trim().isNotEmpty)
         .toList();
+    final totalListed = _asInt(json['total_listed']);
     return AgentStatus(
       activeAgents: _asInt(json['active_agents']),
-      totalListed: _asInt(json['total_listed']),
+      cancelPending: _asInt(json['cancel_pending']),
+      totalAgents: json.containsKey('total_agents')
+          ? _asInt(json['total_agents'])
+          : totalListed,
+      totalListed: totalListed,
       tokensIn: _asInt(json['tokens_in']),
       tokensOut: _asInt(json['tokens_out']),
       agents: agents,
       events: events,
+      capacity: json['capacity'] is Map<String, dynamic>
+          ? AgentCapacity.fromJson(json['capacity'] as Map<String, dynamic>)
+          : null,
+    );
+  }
+}
+
+class AgentCapacity {
+  final int logicalCpus;
+  final int agentCeiling;
+  final int workerSlots;
+  final int automaticWorkerSlots;
+  final int totalMemoryBytes;
+  final int availableMemoryBytes;
+  final String source;
+
+  const AgentCapacity({
+    required this.logicalCpus,
+    required this.agentCeiling,
+    required this.workerSlots,
+    required this.automaticWorkerSlots,
+    required this.totalMemoryBytes,
+    required this.availableMemoryBytes,
+    required this.source,
+  });
+
+  factory AgentCapacity.fromJson(Map<String, dynamic> json) {
+    return AgentCapacity(
+      logicalCpus: _asInt(json['logical_cpus']),
+      agentCeiling: _asInt(json['agent_ceiling']),
+      workerSlots: _asInt(json['worker_slots']),
+      automaticWorkerSlots: _asInt(json['automatic_worker_slots']),
+      totalMemoryBytes: _asInt(json['total_memory_bytes']),
+      availableMemoryBytes: _asInt(json['available_memory_bytes']),
+      source: json['source']?.toString() ?? 'auto',
     );
   }
 }

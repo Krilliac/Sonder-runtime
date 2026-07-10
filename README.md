@@ -92,7 +92,7 @@ The learning loop above is *cross-task* memory. On top of it trilobite also has:
 
 ## Four ways to run it
 
-1. **Local, in your terminal** — `trilobite` (like launching `claude`). Interactive REPL routed through the full loop, with `/work`, `/report`, `/checklist`, `/inventory`, `/tree`, `/search`, `/programs`, `/scripts`, `/image`, `/mkdir`, `/runprogram`, `/runscript`, `/trace`, `/strict`, `/run`, `/train`, `/master`, `/agents`, `/asset`, `/forge`, `/game`, `/gamefleet`, `/todo`, `/commands`, `/activity`, `/dump`, `/permissions`, `/compact`, `/debug`, `/pass`, `/fail`, `/stats`, `/context`, `/quality`, `/privacy`, `/embeddings`, `/emotion`, and `/improve`, plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts`. Concrete natural-language workspace requests route to the same guarded workbench. Each REPL launch is its own remembered thread.
+1. **Local, in your terminal** — `trilobite` (like launching `claude`). Interactive REPL routed through the full loop, with `/work`, `/report`, `/checklist`, `/inventory`, `/tree`, `/search`, `/programs`, `/scripts`, `/image`, `/mkdir`, `/runprogram`, `/runscript`, `/trace`, `/strict`, `/run`, `/train`, `/master`, `/agents`, `/capacity`, `/agentcancel`, `/asset`, `/forge`, `/game`, `/gamefleet`, `/todo`, `/commands`, `/activity`, `/dump`, `/permissions`, `/compact`, `/debug`, `/pass`, `/fail`, `/stats`, `/context`, `/quality`, `/privacy`, `/embeddings`, `/emotion`, and `/improve`, plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts`. Concrete natural-language workspace requests route to the same guarded workbench. Each REPL launch is its own remembered thread.
 2. **Hosted on your own server + a thin client anywhere** — run `deploy_trilobite.sh --serve` on your box (systemd service, API key), then any machine runs the single-file `trilobite_client.py` pointed at it. The serve layer threads the chat UI's own conversation history.
 3. **Integrated with Claude/Codex** — the MCP `local-llm` tools include `workbench_agent`, budgeted workspace inventory, guarded tree/range/text/script/program/image inspection, argv-only program/script execution, persistent checklists, exact activity reports, agent/master orchestration, universal artifact generation, grounded game generation, bounded code/project runners, workflows, web tools, self-healing, privacy-safe memory review, local embedding backfill, and the remaining learning/memory surfaces. `master_orchestrate` can delegate to parallel subagents and audit their outputs; artifact and game tools create persistent assets/projects and accept only grounded checks. Local tiers remain the default for private workspace code.
 4. **Mobile & desktop app (GUI)** — a cross-platform [Flutter client](app/) that talks to a hosted `trilobite_serve.py`. One codebase → an **Android APK** and **Windows/Linux/macOS** desktop apps, built in CI with downloadable installers. See [app/README.md](app/README.md).
@@ -139,10 +139,13 @@ Use Trilobite as a local junior implementer, not as the final authority:
    operations, security, and project style before applying changes.
 5. Use agent fan-out deliberately: 1-3 agents for normal work and 4-6 for useful
    diversity. Explicit `fleet`, `swarm`, `workflow`, `parallel agents`, or
-   spawn-as-many requests use the hardware-derived ceiling (two submission slots
-   per logical CPU, capped at 64 and overridable with `TRILOBITE_MAX_AGENTS`).
-   Ollama still schedules actual GPU execution, so fan-out is bounded submission,
-   not a promise that every model fits in VRAM simultaneously.
+   spawn-as-many requests queue the hardware-derived breadth ceiling (two
+   candidates per logical CPU, capped at 64 and overridable with
+   `TRILOBITE_MAX_AGENTS`). A separate scheduler bounds simultaneous model calls
+   from CPU and currently available RAM (8 automatic slots maximum). Inspect it
+   with `/capacity [requested-agents]`; use `/agentcancel <id|prefix|all>` for
+   cooperative cancellation. Queued work stops immediately. Already-running
+   Ollama/HTTP calls return naturally and their late results are discarded.
 6. Record outcomes only after grounded evidence: compile, tests, direct use, or
    explicit rejection. Good labels improve retrieval; vague labels pollute it.
 7. Run `memory_quality_report()` periodically and
@@ -279,9 +282,12 @@ the machine instead of idling on conservative defaults:
   asks Ollama to place all supported layers on the GPU. Set `0` for CPU-only, or
   `auto`/`none` to let Ollama decide.
 - `LOCAL_LLM_NUM_BATCH` - inference batch size. Defaults to `512`.
-- `TRILOBITE_MAX_AGENTS` - delegated `master_orchestrate` cap. Defaults to `16`
-  and is hard-bounded at `64`; raising it is for deliberate stress or very small
-  prompts, not a default speed knob.
+- `TRILOBITE_MAX_AGENTS` - queued breadth cap for delegated orchestration.
+  Defaults to two candidates per logical CPU (minimum 16), hard-bounded at 64.
+  Raising it adds perspectives; it does not increase simultaneous model calls.
+- `TRILOBITE_PARALLEL_WORKERS` - explicit concurrent model-call override,
+  bounded to 1..16 and never above the requested agent count. Without it,
+  Trilobite derives 1..8 slots from CPU count and available physical RAM.
 - `OLLAMA_FLASH_ATTENTION` - enabled as `1` by the launch scripts when they start
   Ollama.
 

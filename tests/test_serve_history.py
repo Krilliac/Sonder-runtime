@@ -184,7 +184,29 @@ def test_master_slash_routes_modes(monkeypatch):
     )
 
     assert ts._handle_slash("/master delegate build it") == "mastered"
-    assert calls == [{"task": "build it", "mode": "delegate"}]
+    assert ts._handle_slash("/master delagte build it") == "mastered"
+    assert ts._handle_slash("/master fleet build it") == "mastered"
+    assert calls == [
+        {"task": "build it", "mode": "delegate"},
+        {"task": "build it", "mode": "delegate"},
+        {"task": "build it", "mode": "fleet"},
+    ]
+
+
+def test_capacity_and_cancel_slashes_route_to_control_command(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        ts.server,
+        "control_command",
+        lambda command, **kwargs: calls.append((command, kwargs)) or "controlled",
+    )
+
+    assert ts._handle_slash("/capacity 12", project="demo") == "controlled"
+    assert ts._handle_slash("/agentcancel all", project="demo") == "controlled"
+    assert calls == [
+        ("/capacity 12", {"project": "demo"}),
+        ("/agentcancel all", {"project": "demo"}),
+    ]
 
 
 def test_agents_slash_returns_master_status(monkeypatch):

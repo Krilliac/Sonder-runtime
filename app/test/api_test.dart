@@ -45,4 +45,48 @@ void main() {
     expect(response.checklistTitle, 'Build smoke asset');
     expect(response.checklist.map((item) => item.status), everyElement('done'));
   });
+
+  test('agent status preserves scheduler capacity and cancellation state', () {
+    final status = AgentStatus.fromJson({
+      'active_agents': 12,
+      'cancel_pending': 2,
+      'total_agents': 33,
+      'total_listed': 20,
+      'tokens_in': 100,
+      'tokens_out': 50,
+      'agents': const [],
+      'events': const [],
+      'capacity': {
+        'logical_cpus': 16,
+        'agent_ceiling': 32,
+        'worker_slots': 2,
+        'automatic_worker_slots': 2,
+        'total_memory_bytes': 17179869184,
+        'available_memory_bytes': 4294967296,
+        'source': 'auto',
+      },
+    });
+
+    expect(status.activeAgents, 12);
+    expect(status.cancelPending, 2);
+    expect(status.totalAgents, 33);
+    expect(status.capacity?.agentCeiling, 32);
+    expect(status.capacity?.workerSlots, 2);
+    expect(status.capacity?.availableMemoryBytes, 4294967296);
+  });
+
+  test('agent status falls back to listed count for an older server', () {
+    final status = AgentStatus.fromJson({
+      'active_agents': 1,
+      'total_listed': 7,
+      'tokens_in': 0,
+      'tokens_out': 0,
+      'agents': const [],
+      'events': const [],
+    });
+
+    expect(status.totalAgents, 7);
+    expect(status.cancelPending, 0);
+    expect(status.capacity, isNull);
+  });
 }

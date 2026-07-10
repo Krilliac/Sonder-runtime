@@ -140,6 +140,18 @@ COMMANDS = [
         "summary": "Inspect live and recent agent activity.",
     },
     {
+        "name": "/capacity",
+        "category": "agents",
+        "risk": "safe",
+        "summary": "Show queued fleet ceiling and current RAM/CPU-bounded worker slots.",
+    },
+    {
+        "name": "/agentcancel",
+        "category": "agents",
+        "risk": "ask",
+        "summary": "Cooperatively cancel an active agent/master prefix or all active agents.",
+    },
+    {
         "name": "/asset",
         "category": "creative",
         "risk": "ask",

@@ -164,6 +164,27 @@ def test_loop_dispatch_supports_workbench_actions(monkeypatch):
     assert inventory["output"] == "inventory ok"
 
 
+def test_loop_dispatch_supports_fleet_capacity_and_cancellation(monkeypatch):
+    monkeypatch.setattr(
+        server, "master_capacity", lambda requested_agents=0: f"capacity:{requested_agents}",
+    )
+    monkeypatch.setattr(
+        server, "master_cancel", lambda agent_id: f"cancel:{agent_id}",
+    )
+
+    capacity = server._loop_dispatch({
+        "type": "master_capacity", "requested_agents": 20,
+    })
+    cancelled = server._loop_dispatch({
+        "type": "master_cancel", "agent_id": "all",
+    })
+
+    assert capacity["ok"] is True
+    assert capacity["output"] == "capacity:20"
+    assert cancelled["ok"] is True
+    assert cancelled["output"] == "cancel:all"
+
+
 def test_validation_must_cover_persistent_mutation_path():
     mutations = [{
         "tool": "file_write",

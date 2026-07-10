@@ -97,8 +97,10 @@ HELP = """commands:
   /emotion [cmd]     show/tune live tone vectors; try: /emotion tune warmer shorter
   /prefer [text]     show/teach preferences; /prefer forget <id-or-key>
   /improve           show the next system improvement checklist
-  /master [mode] ... run master orchestration: ask, inline, or delegate
+  /master [mode] ... run orchestration: ask, inline, delegate, or fleet
   /agents            show live master/subagent activity
+  /capacity [N]      show queued-agent ceiling and safe concurrent worker slots
+  /agentcancel <id>  cooperatively cancel an agent/master prefix or all
   /asset <n> <brief> generate a general icon/audio/model/scene artifact pack
   /forge [name]      build and run the dependency-free reference game suite
   /game ...          generate/test a game: /game cpp 3d name | concept
@@ -501,6 +503,10 @@ def main():
                 print(server.system_improvement_report(session=session_id, project=project))
             elif cmd in ("/agents", "/masterstatus"):
                 print(server.master_status())
+            elif cmd in ("/capacity", "/agentcapacity"):
+                print(server.control_command(line, session=session_id, project=project))
+            elif cmd in ("/agentcancel", "/cancelagents"):
+                print(server.control_command(line, session=session_id, project=project))
             elif cmd in ("/activity", "/tools"):
                 print(server.activity_status())
             elif cmd in ("/work", "/agent"):
@@ -633,13 +639,15 @@ def main():
                     mode_alias = {
                         "delagte": "delegate",
                         "delegte": "delegate",
+                        "paralell": "parallel",
                         "inlne": "inline",
+                        "workflow": "fleet",
                     }
                     requested_mode = mode_alias.get(parts[0].lower(), parts[0].lower())
                     if requested_mode in (
                         "ask", "inline", "master", "delegate",
                         "delegated", "agents", "parallel", "fleet", "swarm",
-                        "fanout", "workflow",
+                        "fanout",
                     ):
                         mode = requested_mode
                         task = parts[1] if len(parts) > 1 else ""

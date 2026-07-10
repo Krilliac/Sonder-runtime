@@ -329,8 +329,10 @@ HELP_TEXT = """commands:
   /emotion [cmd]     show/tune live tone vectors; try: /emotion tune warmer shorter
   /prefer [text]     show/teach preferences; /prefer forget <id-or-key>
   /improve           show the next system improvement checklist
-  /master [mode] ... run master orchestration: ask, inline, or delegate
+  /master [mode] ... run orchestration: ask, inline, delegate, or fleet
   /agents            show live master/subagent activity
+  /capacity [N]      show queued-agent ceiling and safe concurrent worker slots
+  /agentcancel <id>  cooperatively cancel an agent/master prefix or all
   /asset <n> <brief> generate general icons/audio/models/scenes from a brief
   /forge [name]      build and run the dependency-free reference game suite
   /game ...          generate/test: /game cpp 3d name | concept
@@ -484,6 +486,7 @@ DANGEROUS_HTTP_SLASH_COMMANDS = frozenset({
     "/programs", "/programfind", "/scripts", "/scriptfind", "/image",
     "/inspectimage", "/mkdir", "/runprogram", "/runscript",
     "/privacy", "/privacyreview", "/privacyfix", "/embeddings", "/embedfix",
+    "/capacity", "/agentcapacity", "/agentcancel", "/cancelagents",
 })
 
 
@@ -816,6 +819,8 @@ def _handle_slash(content, messages=None, state=None, project=""):
         return server.system_improvement_report()
     if cmd in ("/agents", "/masterstatus"):
         return server.master_status()
+    if cmd in ("/capacity", "/agentcapacity", "/agentcancel", "/cancelagents"):
+        return server.control_command(stripped, project=project)
     if cmd in ("/activity", "/tools"):
         return server.activity_status()
     if cmd in ("/work", "/agent"):
@@ -934,8 +939,17 @@ def _handle_slash(content, messages=None, state=None, project=""):
         task = text
         if text:
             parts = text.split(None, 1)
-            if parts[0].lower() in ("ask", "inline", "master", "delegate", "delegated", "agents", "parallel"):
-                mode = parts[0].lower()
+            mode_alias = {
+                "delagte": "delegate", "delegte": "delegate",
+                "paralell": "parallel", "inlne": "inline",
+                "workflow": "fleet",
+            }
+            requested_mode = mode_alias.get(parts[0].lower(), parts[0].lower())
+            if requested_mode in (
+                "ask", "inline", "master", "delegate", "delegated", "agents",
+                "parallel", "fleet", "swarm", "fanout",
+            ):
+                mode = requested_mode
                 task = parts[1] if len(parts) > 1 else ""
         return server.master_orchestrate(task=task, mode=mode)
     if cmd in ("/pass", "/good"):
