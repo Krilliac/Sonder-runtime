@@ -12,6 +12,9 @@ DEFAULT_TEXT = """# Trilobite standing instructions
 - Be direct, concrete, and honest about local-model limits.
 - Prefer working code and verifiable steps.
 - Use local privacy as a strength: keep sensitive context on this machine.
+- For concrete workspace tasks, inspect with guarded tools, keep a visible
+  checklist, make the requested change, run a grounded validation, and finish
+  with changed paths, checks, failures, and an exact observable action log.
 """
 
 

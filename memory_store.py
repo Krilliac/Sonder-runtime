@@ -747,6 +747,17 @@ def preferences_for_scope(conn, scope="global", limit=20, include_disabled=False
     return [dict(r) for r in rows]
 
 
+def task_children(conn, task_id):
+    resolved = resolve_task_id(conn, task_id)
+    if not resolved:
+        return []
+    rows = conn.execute(
+        "SELECT * FROM tasks WHERE parent_id=? ORDER BY rowid ASC",
+        (resolved,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def all_preferences(conn, limit=50, include_disabled=False):
     where = "" if include_disabled else "WHERE enabled=1"
     rows = conn.execute(

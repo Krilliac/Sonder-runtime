@@ -193,6 +193,44 @@ def test_agents_slash_returns_master_status(monkeypatch):
     assert ts._handle_slash("/agents") == "agents live"
 
 
+def test_workbench_slash_routes_project_and_task(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        ts.server,
+        "workbench_agent",
+        lambda **kwargs: calls.append(kwargs) or "work complete",
+    )
+
+    assert ts._handle_slash("/work inspect and test", project="demo") == "work complete"
+    assert calls == [{
+        "prompt": "inspect and test",
+        "tier": "code",
+        "max_steps": 12,
+        "project": "demo",
+    }]
+    assert ts._handle_slash("/work") == "usage: /work <task>"
+
+
+def test_natural_work_intent_requires_developer_authorization(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        ts.server,
+        "workbench_agent",
+        lambda **kwargs: calls.append(kwargs) or "grounded work",
+    )
+
+    assert ts._handle_work_intent("edit the app files", authorized=False) is None
+    assert ts._handle_work_intent(
+        "edit the app files", project="demo", authorized=True
+    ) == "grounded work"
+    assert calls == [{
+        "prompt": "edit the app files",
+        "tier": "code",
+        "max_steps": 12,
+        "project": "demo",
+    }]
+
+
 def test_contextsize_slash_shows_or_sets(monkeypatch):
     monkeypatch.setattr(ts.server, "context_policy_status", lambda: "policy")
     monkeypatch.setattr(ts.server, "set_context_size", lambda size: "set " + size)

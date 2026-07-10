@@ -53,3 +53,19 @@ def test_empty_and_none():
     assert intents.classify("") == {}
     assert intents.classify(None) == {}
     assert intents.classify("   ") == {}
+
+
+def test_work_intent_requires_action_and_workspace_target():
+    assert intents.classify_work("search the repo for TODO markers") is True
+    assert intents.classify_work("please edit C:\\work\\app.py and run the tests") is True
+    assert intents.classify_work("could you build the Flutter app?") is True
+    assert intents.classify_work("fix it and validate it") is True
+    assert intents.classify_work("make a logo and matching icon") is True
+    assert intents.classify_work("generate a dashboard report") is True
+
+
+def test_work_intent_does_not_hijack_questions_or_chat():
+    assert intents.classify_work("how do I search folders in Python?") is False
+    assert intents.classify_work("explain why this test failed") is False
+    assert intents.classify_work("write me a short poem") is False
+    assert intents.classify_work("hello trilobite") is False

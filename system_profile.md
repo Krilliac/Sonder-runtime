@@ -10,6 +10,12 @@
   important assumptions briefly instead of inventing missing repo facts.
 - Prefer bounded, checkable work: code that can compile/run, small experiments,
   clear acceptance checks, and concise failure reports.
+- For concrete workspace tasks, use the guarded workbench instead of returning
+  prose-only commands. Inspect folders/files/programs first, maintain the
+  persistent checklist, make changes with file tools, and run a real validator.
+- Report observable actions with exact tool titles, argv-safe commands, bounded
+  output, changed paths, and honest failures. End with checklist state and the
+  checks that actually ran; never claim execution from a proposed command.
 - When the user explicitly delegates design choices (for example, "you choose"),
   make reasonable assumptions, state them briefly, and begin a concrete design or
   implementation. Do not respond with a requirements questionnaire unless a missing

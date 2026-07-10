@@ -113,8 +113,8 @@ class TrilobiteApi {
       throw TrilobiteException('Server returned HTTP ${resp.statusCode}.');
     }
     try {
-      final obj = jsonDecode(utf8.decode(resp.bodyBytes))
-          as Map<String, dynamic>;
+      final obj =
+          jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
       return SystemInfo.fromJson(obj);
     } catch (_) {
       throw TrilobiteException('Could not parse system status.');
@@ -139,10 +139,8 @@ class TrilobiteApi {
       'context_size': contextSize,
       if (sessionId.trim().isNotEmpty) 'session': sessionId.trim(),
       if (project.trim().isNotEmpty) 'project': project.trim(),
-      'messages': messages
-          .where((m) => !m.pending)
-          .map((m) => m.toWire())
-          .toList(),
+      'messages':
+          messages.where((m) => !m.pending).map((m) => m.toWire()).toList(),
       'stream': false,
     });
 
@@ -150,8 +148,7 @@ class TrilobiteApi {
     String warning = '';
     try {
       resp = await http
-          .post(_uri('/v1/chat/completions'),
-              headers: _headers(), body: body)
+          .post(_uri('/v1/chat/completions'), headers: _headers(), body: body)
           .timeout(const Duration(minutes: 5));
     } catch (e) {
       if (_canFallback) {
@@ -177,8 +174,8 @@ class TrilobiteApi {
     }
 
     try {
-      final obj = jsonDecode(utf8.decode(resp.bodyBytes))
-          as Map<String, dynamic>;
+      final obj =
+          jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
       final choices = (obj['choices'] as List?) ?? const [];
       if (choices.isEmpty) {
         throw TrilobiteException('Empty response from server.');
@@ -235,7 +232,8 @@ class TrilobiteApi {
     }
     final obj = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
     if (resp.statusCode != 200 || obj['ok'] != true) {
-      throw TrilobiteException(obj['message']?.toString() ?? 'Account request failed.');
+      throw TrilobiteException(
+          obj['message']?.toString() ?? 'Account request failed.');
     }
     return obj['message']?.toString() ?? 'OK';
   }
@@ -346,6 +344,11 @@ class ActivityResponse {
   final int linesDeleted;
   final List<String> events;
   final List<String> files;
+  final List<ActivityEvent> actions;
+  final List<ActivityChecklistItem> checklist;
+  final String checklistTitle;
+  final String checklistStatus;
+  final String resultSummary;
 
   const ActivityResponse({
     required this.id,
@@ -362,6 +365,11 @@ class ActivityResponse {
     required this.linesDeleted,
     required this.events,
     required this.files,
+    required this.actions,
+    required this.checklist,
+    required this.checklistTitle,
+    required this.checklistStatus,
+    required this.resultSummary,
   });
 
   factory ActivityResponse.fromJson(Map<String, dynamic> json) {
@@ -389,6 +397,18 @@ class ActivityResponse {
         })
         .where((s) => s.trim().isNotEmpty)
         .toList();
+    final actions = (json['events'] as List? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .where((event) => event['kind']?.toString() == 'tool_call')
+        .map(ActivityEvent.fromJson)
+        .toList();
+    final checklistJson = json['checklist'] is Map<String, dynamic>
+        ? json['checklist'] as Map<String, dynamic>
+        : const <String, dynamic>{};
+    final checklist = (checklistJson['items'] as List? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .map(ActivityChecklistItem.fromJson)
+        .toList();
     return ActivityResponse(
       id: json['id']?.toString() ?? '',
       label: json['label']?.toString() ?? '',
@@ -404,12 +424,87 @@ class ActivityResponse {
       linesDeleted: _asInt(json['lines_deleted']),
       events: events,
       files: files,
+      actions: actions,
+      checklist: checklist,
+      checklistTitle: checklistJson['title']?.toString() ?? '',
+      checklistStatus: checklistJson['status']?.toString() ?? '',
+      resultSummary: json['result_summary']?.toString() ?? '',
     );
   }
 
   String get summary {
     final labelText = label.isEmpty ? id : label;
     return '$labelText $status | model $modelCalls | tools $toolCalls | files +$fileCreates ~$fileEdits -$fileDeletes | lines +$linesAdded ~$linesEdited -$linesDeleted';
+  }
+}
+
+class ActivityEvent {
+  final String kind;
+  final String tool;
+  final String title;
+  final String command;
+  final String output;
+  final String summary;
+  final int elapsedMs;
+  final bool ok;
+
+  const ActivityEvent({
+    required this.kind,
+    required this.tool,
+    required this.title,
+    required this.command,
+    required this.output,
+    required this.summary,
+    required this.elapsedMs,
+    required this.ok,
+  });
+
+  factory ActivityEvent.fromJson(Map<String, dynamic> json) {
+    final tool = json['tool']?.toString() ?? '';
+    final fallbackTitle = tool
+        .split('_')
+        .where((part) => part.isNotEmpty)
+        .map((part) => '${part[0].toUpperCase()}${part.substring(1)}')
+        .join(' ');
+    return ActivityEvent(
+      kind: json['kind']?.toString() ?? '',
+      tool: tool,
+      title: json['title']?.toString().trim().isNotEmpty == true
+          ? json['title'].toString()
+          : fallbackTitle,
+      command: json['command']?.toString() ?? '',
+      output: json['output']?.toString() ?? '',
+      summary: json['summary']?.toString() ?? '',
+      elapsedMs: _asInt(json['elapsed_ms']),
+      ok: json['ok'] is bool ? json['ok'] as bool : true,
+    );
+  }
+
+  String get evidence {
+    final lines = <String>[command, output.isNotEmpty ? output : summary]
+        .where((value) => value.trim().isNotEmpty)
+        .toList();
+    return lines.join('\n');
+  }
+}
+
+class ActivityChecklistItem {
+  final String id;
+  final String title;
+  final String status;
+
+  const ActivityChecklistItem({
+    required this.id,
+    required this.title,
+    required this.status,
+  });
+
+  factory ActivityChecklistItem.fromJson(Map<String, dynamic> json) {
+    return ActivityChecklistItem(
+      id: json['id']?.toString() ?? '',
+      title: json['title']?.toString() ?? '',
+      status: json['status']?.toString() ?? 'pending',
+    );
   }
 }
 

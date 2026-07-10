@@ -57,8 +57,12 @@ def test_agent_runs_tool_then_final(monkeypatch):
         return gen
 
     monkeypatch.setattr(server, "_make_generate", fake_make_generate)
-    monkeypatch.setattr(server, "_agent_dispatch", lambda tool, args, allow_web=True: "OBSERVATION")
-    out = server.agent("answer with tools", tier="code", max_steps=2)
+    monkeypatch.setattr(
+        server,
+        "_agent_dispatch",
+        lambda tool, args, allow_web=True, read_only=False: "OBSERVATION",
+    )
+    out = server.agent("answer with tools", tier="code", max_steps=2, checklist=False)
     assert out.startswith("done after observation")
     assert "=== ACTIVITY (observable work) ===" in out
     assert "tool calls:" in out
@@ -104,7 +108,7 @@ def test_agent_attaches_successful_file_evidence(monkeypatch):
     monkeypatch.setattr(
         server,
         "_agent_dispatch_observed",
-        lambda tool, args, allow_web=True: "file read: README.md\nhello",
+        lambda tool, args, allow_web=True, read_only=False: "file read: README.md\nhello",
     )
 
     out = server._agent_impl(

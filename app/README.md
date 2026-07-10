@@ -27,7 +27,8 @@ party.
   tiers opt-in, account register/login for hosted deployments, with a one-tap
   *Test connection*.
 - **System panel**: view server status, context health meters, master/subagent
-  activity, visible task state, permission rules, command inventory, improvement
+  activity, the live workbench checklist and exact action evidence, visible task
+  state, permission rules, command inventory, improvement
   recommendations, learning stats and exposed models, run `/stats`, `/context`,
   `/compact`, `/todo`, `/commands`, `/dump`, `/permissions`, `/quality`, `/improve`,
   `/agents`, `/train 10` and `/help`, start/stop the bundled desktop server,
@@ -112,6 +113,19 @@ the Python/Ollama runtime directly.
 4. Start chatting.
 
 ## Build it yourself
+
+From the repository root on Windows, the repo-local builder keeps Flutter under `.tooling/flutter`, so
+subsequent builds reuse the SDK and package directly into `app/build` without
+waiting for CI artifacts:
+
+```powershell
+powershell -NoProfile -File .\scripts\build_flutter_local.ps1 -Target windows
+```
+
+The command packages the current tracked local system, analyzes/tests the app,
+builds Release, and places the runnable bundle at
+`app\build\windows\x64\runner\Release\` with `local-system` beside it. The SDK
+is cloned from Flutter stable only when `.tooling/flutter` is missing.
 
 The repo commits only `lib/`, `pubspec.yaml` and `test/`. Generate the native
 project scaffolding locally with `flutter create`, then build:

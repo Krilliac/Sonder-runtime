@@ -58,6 +58,7 @@ import debug_dump
 import activity_tracker
 import assetgen
 import game_forge
+import workbench
 
 from mcp.server.fastmcp import FastMCP
 
@@ -250,6 +251,7 @@ LIVE_RELOAD_MODULES = [
     "activity_tracker",
     "assetgen",
     "game_forge",
+    "workbench",
 ]
 
 
@@ -644,8 +646,68 @@ def control_command(prompt: str, history=None, session="", project=""):
         return context_compaction_plan()
     if cmd in ("/commands", "/cmds"):
         return command_registry_list(arg.strip())
-    if cmd in ("/activity", "/tools", "/work"):
+    if cmd in ("/activity", "/tools"):
         return activity_status()
+    if cmd in ("/work", "/agent"):
+        if not arg.strip():
+            return "usage: /work <task>"
+        return workbench_agent(
+            prompt=arg.strip(), project=_resolve_project(project), max_steps=12,
+        )
+    if cmd in ("/report", "/endreport"):
+        latest = activity_tracker.latest()
+        return "%s\n\n%s" % (
+            activity_tracker.format_end_report(latest),
+            activity_tracker.format_transcript(latest),
+        )
+    if cmd in ("/tree", "/folders"):
+        return directory_tree(path=arg.strip() or ".")
+    if cmd in ("/search", "/grep"):
+        search_parts = [part.strip() for part in arg.split("|", 2)]
+        if not search_parts or not search_parts[0]:
+            return "usage: /search <text> | <root> | <glob>"
+        return text_search(
+            query=search_parts[0],
+            root=search_parts[1] if len(search_parts) > 1 and search_parts[1] else ".",
+            glob=search_parts[2] if len(search_parts) > 2 and search_parts[2] else "*",
+        )
+    if cmd in ("/programs", "/programfind"):
+        return program_search(query=arg.strip() or "*")
+    if cmd in ("/scripts", "/scriptfind"):
+        script_parts = [part.strip() for part in arg.split("|", 1)]
+        return script_search(
+            query=script_parts[0] or "*",
+            root=script_parts[1] if len(script_parts) > 1 and script_parts[1] else ".",
+        )
+    if cmd in ("/image", "/inspectimage"):
+        return image_inspect(path=arg.strip()) if arg.strip() else "usage: /image <path>"
+    if cmd == "/mkdir":
+        return directory_create(path=arg.strip()) if arg.strip() else "usage: /mkdir <path>"
+    if cmd == "/runprogram":
+        run_parts = [part.strip() for part in arg.split("|", 2)]
+        if not run_parts or not run_parts[0]:
+            return "usage: /runprogram <program> | <args-json> | <cwd>"
+        return workspace_run(
+            program=run_parts[0],
+            args_json=run_parts[1] if len(run_parts) > 1 and run_parts[1] else "[]",
+            cwd=run_parts[2] if len(run_parts) > 2 and run_parts[2] else ".",
+        )
+    if cmd == "/runscript":
+        run_parts = [part.strip() for part in arg.split("|", 2)]
+        if not run_parts or not run_parts[0]:
+            return "usage: /runscript <path> | <args-json> | <cwd>"
+        return script_run(
+            path=run_parts[0],
+            args_json=run_parts[1] if len(run_parts) > 1 and run_parts[1] else "[]",
+            cwd=run_parts[2] if len(run_parts) > 2 else "",
+        )
+    if cmd in ("/checklist", "/plan"):
+        checklist_id = arg.strip()
+        if checklist_id:
+            return checklist_show(checklist_id)
+        current = activity_tracker.current() or activity_tracker.latest() or {}
+        checklist = current.get("checklist") or {}
+        return checklist_show(checklist["id"]) if checklist.get("id") else "(no checklist yet; use /work <task>)"
     if cmd in ("/permissions", "/perms"):
         return permission_policy(arg.strip())
     if cmd == "/quality":
@@ -1988,6 +2050,7 @@ def task_create(
     priority: int = 2,
     project: str = "",
     owner: str = "",
+    parent_id: str = "",
 ) -> str:
     """Create a visible task/todo row the model, console, and app can inspect."""
     _maybe_live_reload()
@@ -2000,6 +2063,7 @@ def task_create(
             priority=priority,
             project=project,
             owner=owner,
+            parent_id=parent_id,
         )
     except Exception as e:
         return "ERROR: %s" % e
@@ -2743,6 +2807,178 @@ def _format_file_result(title: str, data: dict) -> str:
     return "\n".join(lines)
 
 
+def _checklist_data(conn, checklist_id: str) -> dict:
+    parent = memory_store.get_task(conn, checklist_id)
+    if not parent:
+        raise ValueError("no checklist '%s'" % checklist_id)
+    items = memory_store.task_children(conn, parent["id"])
+    done = sum(1 for item in items if item.get("status") == "done")
+    return {
+        "id": parent["id"],
+        "title": parent.get("title", ""),
+        "status": parent.get("status", "pending"),
+        "project": parent.get("project", ""),
+        "owner": parent.get("owner", ""),
+        "items": items,
+        "summary": "%d/%d complete" % (done, len(items)),
+    }
+
+
+def _format_checklist(data: dict) -> str:
+    symbols = {"done": "[x]", "in_progress": "[~]", "blocked": "[!]", "canceled": "[-]"}
+    lines = [
+        "trilobite checklist %s" % data.get("id", "")[:8],
+        "  %s [%s] %s" % (
+            data.get("title", ""), data.get("status", "pending"),
+            data.get("summary", "0/0 complete"),
+        ),
+    ]
+    for index, item in enumerate(data.get("items") or [], 1):
+        lines.append("  %s %d. %s  (%s)" % (
+            symbols.get(item.get("status"), "[ ]"), index,
+            item.get("title", ""), item.get("id", "")[:8],
+        ))
+    if not data.get("items"):
+        lines.append("  (no checklist items)")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def checklist_create(
+    title: str,
+    items_json: str,
+    project: str = "",
+    owner: str = "agent",
+    priority: int = 1,
+) -> str:
+    """Create a persistent parent task with ordered checklist items."""
+    _maybe_live_reload()
+    started = time.time()
+    try:
+        items = json.loads(items_json) if isinstance(items_json, str) else items_json
+        if not isinstance(items, list) or not items:
+            raise ValueError("items_json must be a non-empty JSON list")
+        if len(items) > 20:
+            raise ValueError("a checklist supports at most 20 items")
+        normalized_items = []
+        for item in items:
+            if isinstance(item, dict):
+                item_title = str(item.get("title", "")).strip()
+                detail = str(item.get("detail", ""))
+            else:
+                item_title = str(item).strip()
+                detail = ""
+            if not item_title:
+                raise ValueError("checklist item titles cannot be empty")
+            normalized_items.append((item_title, detail))
+        conn = _open_db()
+        try:
+            parent = memory_store.create_task(
+                conn, title=title, detail="work checklist", status="in_progress",
+                priority=priority, project=project, owner=owner,
+            )
+            for item_title, detail in normalized_items:
+                memory_store.create_task(
+                    conn, title=item_title, detail=detail, status="pending",
+                    priority=priority, project=project, owner=owner,
+                    parent_id=parent["id"],
+                )
+            data = _checklist_data(conn, parent["id"])
+        finally:
+            conn.close()
+    except Exception as exc:
+        _record_direct_tool("checklist_create", {"title": title}, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    _record_direct_tool(
+        "checklist_create", {"title": title, "items": len(items)},
+        ok=True, started=started, summary=data["summary"],
+    )
+    activity_tracker.set_checklist(data)
+    return _format_checklist(data)
+
+
+@mcp.tool()
+def checklist_show(checklist_id: str) -> str:
+    """Show a checklist with Codex-style pending/active/done markers."""
+    _maybe_live_reload()
+    started = time.time()
+    try:
+        conn = _open_db()
+        try:
+            data = _checklist_data(conn, checklist_id)
+        finally:
+            conn.close()
+    except Exception as exc:
+        _record_direct_tool(
+            "checklist_show", {"checklist_id": checklist_id},
+            ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    activity_tracker.set_checklist(data)
+    output = _format_checklist(data)
+    _record_direct_tool(
+        "checklist_show", {"checklist_id": checklist_id},
+        ok=True, started=started, summary=data["summary"], output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def checklist_update(
+    checklist_id: str,
+    item: str,
+    status: str,
+    note: str = "",
+) -> str:
+    """Update one checklist item by 1-based index or id prefix."""
+    _maybe_live_reload()
+    started = time.time()
+    try:
+        conn = _open_db()
+        try:
+            data = _checklist_data(conn, checklist_id)
+            children = data["items"]
+            selected = None
+            value = str(item or "").strip()
+            if value.isdigit() and 1 <= int(value) <= len(children):
+                selected = children[int(value) - 1]
+            else:
+                matches = [row for row in children if row["id"].startswith(value)]
+                if len(matches) == 1:
+                    selected = matches[0]
+            if not selected:
+                raise ValueError("no unique checklist item '%s'" % item)
+            memory_store.update_task(
+                conn, selected["id"], status=status, note=note or "checklist update",
+            )
+            data = _checklist_data(conn, checklist_id)
+            states = [row.get("status") for row in data["items"]]
+            parent_status = (
+                "done" if states and all(state in ("done", "canceled") for state in states)
+                else "blocked" if "blocked" in states
+                else "in_progress"
+            )
+            memory_store.update_task(
+                conn, data["id"], status=parent_status,
+                note="checklist %s" % data["summary"],
+            )
+            data = _checklist_data(conn, checklist_id)
+        finally:
+            conn.close()
+    except Exception as exc:
+        _record_direct_tool(
+            "checklist_update", {"checklist_id": checklist_id, "item": item, "status": status},
+            ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    _record_direct_tool(
+        "checklist_update", {"checklist_id": checklist_id, "item": item, "status": status},
+        ok=True, started=started, summary=data["summary"],
+    )
+    activity_tracker.set_checklist(data)
+    return _format_checklist(data)
+
+
 def _record_file_activity(default_action: str, data: dict) -> None:
     if not isinstance(data, dict):
         return
@@ -2759,16 +2995,20 @@ def _record_file_activity(default_action: str, data: dict) -> None:
     )
 
 
-def _record_direct_tool(name: str, args=None, ok=True, started=None, summary="") -> None:
+def _record_direct_tool(
+    name: str, args=None, ok=True, started=None, summary="", command="", output="",
+) -> None:
     if activity_tracker.inside_tool_call():
         return
     elapsed_ms = int((time.time() - started) * 1000) if started else 0
-    activity_tracker.record_tool_call(
+    activity_tracker.record_tool_result(
         name,
         args or {},
         ok=ok,
         elapsed_ms=elapsed_ms,
         summary=summary,
+        command=command,
+        output=output,
     )
 
 
@@ -2877,6 +3117,10 @@ def file_write(
         _record_direct_tool("file_write", {"path": path, "mode": mode}, ok=False, started=started, summary=str(e))
         return "ERROR: %s" % e
     _record_direct_tool("file_write", {"path": path, "mode": mode}, ok=True, started=started, summary=data.get("action", "write"))
+    for created_directory in data.get("created_directories", []):
+        activity_tracker.record_file_change(
+            "create_directory", created_directory, summary="parent created by file_write",
+        )
     _record_file_activity("write", data)
     return _format_file_result("file write", data)
 
@@ -2941,6 +3185,323 @@ def file_delete(
     _record_direct_tool("file_delete", {"path": path, "dry_run": dry_run}, ok=not data.get("dry_run", False), started=started, summary="deleted" if data.get("deleted") else "dry-run")
     _record_file_activity("delete", data)
     return _format_file_result("file delete", data)
+
+
+def _format_run_result(title: str, data: dict) -> str:
+    lines = [
+        title,
+        "  command: %s" % json.dumps(data.get("command") or [], ensure_ascii=False),
+        "  cwd: %s" % data.get("cwd", ""),
+        "  ok: %s" % data.get("ok", False),
+        "  returncode: %s" % data.get("returncode"),
+        "  timed_out: %s" % data.get("timed_out", False),
+        "  elapsed_ms: %s" % data.get("elapsed_ms", 0),
+    ]
+    if data.get("stdout"):
+        lines.extend(["stdout:", data["stdout"].rstrip()])
+    if data.get("stderr"):
+        lines.extend(["stderr:", data["stderr"].rstrip()])
+    if data.get("stdout_truncated") or data.get("stderr_truncated"):
+        lines.append("  output truncated: true")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def directory_tree(
+    path: str = ".",
+    depth: int = 2,
+    max_entries: int = 200,
+    include_hidden: bool = False,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """List a bounded guarded folder tree with file sizes."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"path": path, "depth": depth, "max_entries": max_entries}
+    try:
+        data = workbench.directory_tree(
+            path, depth=depth, max_entries=max_entries,
+            include_hidden=include_hidden, extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as exc:
+        _record_direct_tool("directory_tree", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    lines = ["directory tree: %s" % data["root"]]
+    for item in data["entries"]:
+        indent = "  " * max(1, int(item.get("depth", 1)))
+        marker = "[D]" if item["type"] == "dir" else "[F]"
+        size = "" if item["type"] == "dir" else " (%s bytes)" % item["bytes"]
+        lines.append("%s%s %s%s" % (indent, marker, item["relative"], size))
+    if data["truncated"]:
+        lines.append("  ... truncated at %d entries" % len(data["entries"]))
+    output = "\n".join(lines)
+    _record_direct_tool(
+        "directory_tree", args, ok=True, started=started,
+        summary="%d entries" % len(data["entries"]), output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def directory_create(
+    path: str,
+    parents: bool = True,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Create a guarded directory and optional parent directories."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"path": path, "parents": parents}
+    try:
+        data = file_ops.make_directory(
+            path, parents=parents, exist_ok=True, extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+            developer_authorized=_file_developer_allowed(token),
+        )
+    except Exception as exc:
+        _record_direct_tool("directory_create", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = _format_file_result("directory create", data)
+    _record_direct_tool(
+        "directory_create", args, ok=True, started=started,
+        summary=data["action"], output=output,
+    )
+    if data.get("created"):
+        _record_file_activity("create_directory", data)
+    return output
+
+
+@mcp.tool()
+def file_read_range(
+    path: str,
+    start_line: int = 1,
+    end_line: int = 200,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Read a bounded 1-based line range from a guarded text file."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"path": path, "start_line": start_line, "end_line": end_line}
+    try:
+        data = workbench.read_line_range(
+            path, start_line=start_line, end_line=end_line,
+            extra_roots=extra_roots, bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as exc:
+        _record_direct_tool("file_read_range", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    lines = ["file range: %s lines %s-%s" % (data["path"], data["start_line"], data["end_line"])]
+    lines.extend("%6d  %s" % (row["line"], row["text"]) for row in data["lines"])
+    output = "\n".join(lines)
+    _record_direct_tool(
+        "file_read_range", args, ok=True, started=started,
+        summary="%d lines" % len(data["lines"]), output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def text_search(
+    query: str,
+    root: str = ".",
+    glob: str = "*",
+    regex: bool = False,
+    case_sensitive: bool = False,
+    max_results: int = 100,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Search text inside guarded workspace files with line evidence."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"query": query, "root": root, "glob": glob, "regex": regex}
+    try:
+        data = workbench.text_search(
+            query, root=root, glob=glob, regex=regex,
+            case_sensitive=case_sensitive, max_results=max_results,
+            extra_roots=extra_roots, bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as exc:
+        _record_direct_tool("text_search", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    lines = [
+        "text search: %r under %s (%d files scanned)" %
+        (data["query"], data["root"], data["files_scanned"]),
+    ]
+    lines.extend(
+        "  %(relative)s:%(line)s:%(column)s: %(text)s" % row
+        for row in data["matches"]
+    )
+    if not data["matches"]:
+        lines.append("  (no matches)")
+    if data["truncated"]:
+        lines.append("  ... results truncated")
+    output = "\n".join(lines)
+    _record_direct_tool(
+        "text_search", args, ok=True, started=started,
+        summary="%d matches" % len(data["matches"]), output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def script_search(
+    query: str = "*",
+    root: str = ".",
+    max_results: int = 100,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Find runnable scripts under guarded roots and identify their runner."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"query": query, "root": root}
+    try:
+        data = workbench.script_search(
+            query, root=root, max_results=max_results, extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as exc:
+        _record_direct_tool("script_search", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    lines = ["script search: %s under %s" % (data["query"], data["root"])]
+    lines.extend("  %(runner)s  %(relative)s" % row for row in data["results"])
+    if not data["results"]:
+        lines.append("  (no scripts found)")
+    output = "\n".join(lines)
+    _record_direct_tool(
+        "script_search", args, ok=True, started=started,
+        summary="%d scripts" % len(data["results"]), output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def program_search(query: str = "*", max_results: int = 100) -> str:
+    """Search PATH and Windows App Paths for installed programs."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"query": query, "max_results": max_results}
+    try:
+        data = workbench.program_search(query, max_results=max_results)
+    except Exception as exc:
+        _record_direct_tool("program_search", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    lines = ["program search: %s" % data["query"]]
+    lines.extend("  %(name)s  [%(source)s]  %(path)s" % row for row in data["results"])
+    if not data["results"]:
+        lines.append("  (no programs found)")
+    output = "\n".join(lines)
+    _record_direct_tool(
+        "program_search", args, ok=True, started=started,
+        summary="%d programs" % len(data["results"]), output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def workspace_run(
+    program: str,
+    args_json: str = "[]",
+    cwd: str = ".",
+    stdin: str = "",
+    timeout: int = 30,
+    max_output: int = 128000,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Run a program as a bounded argv list; no shell command strings."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"program": program, "args_json": args_json, "cwd": cwd, "timeout": timeout}
+    try:
+        data = workbench.run_program(
+            program, args_json=args_json, cwd=cwd, stdin=stdin,
+            timeout=timeout, max_output=max_output, extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as exc:
+        _record_direct_tool("workspace_run", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = _format_run_result("workspace run", data)
+    _record_direct_tool(
+        "workspace_run", args, ok=data["ok"], started=started,
+        summary="exit %s" % data.get("returncode"),
+        command=data["command"], output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def script_run(
+    path: str,
+    args_json: str = "[]",
+    cwd: str = "",
+    stdin: str = "",
+    timeout: int = 30,
+    max_output: int = 128000,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Run a guarded script with its known interpreter and bounded output."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"path": path, "args_json": args_json, "cwd": cwd, "timeout": timeout}
+    try:
+        data = workbench.run_script(
+            path, args_json=args_json, cwd=cwd, stdin=stdin, timeout=timeout,
+            max_output=max_output, extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as exc:
+        _record_direct_tool("script_run", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = _format_run_result("script run", data)
+    _record_direct_tool(
+        "script_run", args, ok=data["ok"], started=started,
+        summary="exit %s" % data.get("returncode"),
+        command=data["command"], output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def image_inspect(
+    path: str,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Inspect guarded image headers, dimensions, size, and hash."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"path": path}
+    try:
+        data = workbench.image_inspect(
+            path, extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as exc:
+        _record_direct_tool("image_inspect", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = _format_file_result("image inspection", data)
+    _record_direct_tool(
+        "image_inspect", args, ok=True, started=started,
+        summary="%s %sx%s" % (data["format"], data.get("width"), data.get("height")),
+        output=output,
+    )
+    return output
 
 
 @mcp.tool()
@@ -3024,22 +3585,22 @@ def run_code(
         )
         ok = bool(result.get("ok")) if isinstance(result, dict) else True
     except ValueError as e:
-        activity_tracker.record_tool_call(
+        _record_direct_tool(
             "run_code",
             {"language": language, "timeout": timeout},
-            ok=False,
-            elapsed_ms=int((time.time() - started) * 1000),
+            ok=False, started=started,
             summary=str(e),
         )
         return "ERROR: %s" % e
-    activity_tracker.record_tool_call(
+    output = code_runner.format_result(result)
+    _record_direct_tool(
         "run_code",
         {"language": language, "timeout": timeout},
-        ok=ok,
-        elapsed_ms=int((time.time() - started) * 1000),
+        ok=ok, started=started,
         summary=("ok" if ok else "failed"),
+        output=output,
     )
-    return code_runner.format_result(result)
+    return output
 
 
 @mcp.tool()
@@ -3070,22 +3631,22 @@ def run_project(
         )
         ok = bool(result.get("ok")) if isinstance(result, dict) else True
     except ValueError as e:
-        activity_tracker.record_tool_call(
+        _record_direct_tool(
             "run_project",
             {"timeout": timeout},
-            ok=False,
-            elapsed_ms=int((time.time() - started) * 1000),
+            ok=False, started=started,
             summary=str(e),
         )
         return "ERROR: %s" % e
-    activity_tracker.record_tool_call(
+    output = code_runner.format_project_result(result)
+    _record_direct_tool(
         "run_project",
         {"timeout": timeout},
-        ok=ok,
-        elapsed_ms=int((time.time() - started) * 1000),
+        ok=ok, started=started,
         summary=("ok" if ok else "failed"),
+        output=output,
     )
-    return code_runner.format_project_result(result)
+    return output
 
 
 @mcp.tool()
@@ -3118,21 +3679,23 @@ def artifact_generate(
             output_dir=output_dir,
         )
     except (OSError, ValueError) as exc:
-        activity_tracker.record_tool_call(
+        _record_direct_tool(
             "artifact_generate", {"name": name, "kinds": kinds}, ok=False,
-            elapsed_ms=int((time.time() - started) * 1000), summary=str(exc),
+            started=started, summary=str(exc),
         )
         return "ERROR: %s" % exc
     activity_tracker.record_file_change(
         "create", result["root"], bytes_written=result.get("total_bytes", 0),
         summary="generated artifact pack",
     )
-    activity_tracker.record_tool_call(
+    output = assetgen.format_pack(result)
+    _record_direct_tool(
         "artifact_generate", {"name": name, "kinds": kinds}, ok=True,
-        elapsed_ms=int((time.time() - started) * 1000),
+        started=started,
         summary="%d files" % len(result.get("files", [])),
+        output=output,
     )
-    return assetgen.format_pack(result)
+    return output
 
 
 @mcp.tool()
@@ -3583,6 +4146,118 @@ def _loop_dispatch(action):
             tier=action.get("tier", "code"),
             learn=action.get("learn", False),
         ))
+    if action_type in ("work", "agent", "workbench_agent"):
+        return _loop_text_result("workbench_agent", workbench_agent(
+            prompt=action.get("task", action.get("prompt", "")),
+            tier=action.get("tier", "code"),
+            max_steps=action.get("max_steps", 12),
+            allow_web=action.get("allow_web", True),
+            project=action.get("project", ""),
+        ))
+    if action_type == "directory_tree":
+        return _loop_text_result("directory_tree", directory_tree(
+            path=action.get("path", "."),
+            depth=action.get("depth", 2),
+            max_entries=action.get("max_entries", 200),
+            include_hidden=action.get("include_hidden", False),
+            token=action.get("token", ""),
+            approval=action.get("approval", ""),
+            extra_roots=action.get("extra_roots", ""),
+        ))
+    if action_type == "directory_create":
+        return _loop_text_result("directory_create", directory_create(
+            path=action.get("path", ""),
+            parents=action.get("parents", True),
+            token=action.get("token", ""),
+            approval=action.get("approval", ""),
+            extra_roots=action.get("extra_roots", ""),
+        ))
+    if action_type == "file_read_range":
+        return _loop_text_result("file_read_range", file_read_range(
+            path=action.get("path", ""),
+            start_line=action.get("start_line", 1),
+            end_line=action.get("end_line", 200),
+            token=action.get("token", ""),
+            approval=action.get("approval", ""),
+            extra_roots=action.get("extra_roots", ""),
+        ))
+    if action_type == "text_search":
+        return _loop_text_result("text_search", text_search(
+            query=action.get("query", ""),
+            root=action.get("root", "."),
+            glob=action.get("glob", "*"),
+            regex=action.get("regex", False),
+            case_sensitive=action.get("case_sensitive", False),
+            max_results=action.get("max_results", 100),
+            token=action.get("token", ""),
+            approval=action.get("approval", ""),
+            extra_roots=action.get("extra_roots", ""),
+        ))
+    if action_type == "script_search":
+        return _loop_text_result("script_search", script_search(
+            query=action.get("query", "*"),
+            root=action.get("root", "."),
+            max_results=action.get("max_results", 100),
+            token=action.get("token", ""),
+            approval=action.get("approval", ""),
+            extra_roots=action.get("extra_roots", ""),
+        ))
+    if action_type == "program_search":
+        return _loop_text_result("program_search", program_search(
+            query=action.get("query", "*"),
+            max_results=action.get("max_results", 100),
+        ))
+    if action_type == "workspace_run":
+        return _loop_text_result("workspace_run", workspace_run(
+            program=action.get("program", ""),
+            args_json=action.get("args", action.get("args_json", [])),
+            cwd=action.get("cwd", "."),
+            stdin=action.get("stdin", ""),
+            timeout=action.get("timeout", 30),
+            max_output=action.get("max_output", 128000),
+            token=action.get("token", ""),
+            approval=action.get("approval", ""),
+            extra_roots=action.get("extra_roots", ""),
+        ))
+    if action_type == "script_run":
+        return _loop_text_result("script_run", script_run(
+            path=action.get("path", ""),
+            args_json=action.get("args", action.get("args_json", [])),
+            cwd=action.get("cwd", ""),
+            stdin=action.get("stdin", ""),
+            timeout=action.get("timeout", 30),
+            max_output=action.get("max_output", 128000),
+            token=action.get("token", ""),
+            approval=action.get("approval", ""),
+            extra_roots=action.get("extra_roots", ""),
+        ))
+    if action_type == "image_inspect":
+        return _loop_text_result("image_inspect", image_inspect(
+            path=action.get("path", ""),
+            token=action.get("token", ""),
+            approval=action.get("approval", ""),
+            extra_roots=action.get("extra_roots", ""),
+        ))
+    if action_type == "checklist_create":
+        items = action.get("items", action.get("items_json", []))
+        return _loop_text_result("checklist_create", checklist_create(
+            title=action.get("title", "Workflow checklist"),
+            items_json=items if isinstance(items, str) else json.dumps(items),
+            project=action.get("project", ""),
+            owner=action.get("owner", "workflow"),
+            priority=action.get("priority", 1),
+        ))
+    if action_type == "checklist_update":
+        return _loop_text_result("checklist_update", checklist_update(
+            checklist_id=action.get("checklist_id", action.get("id", "")),
+            item=str(action.get("item", "")),
+            status=action.get("status", "in_progress"),
+            note=action.get("note", ""),
+        ))
+    if action_type == "checklist_show":
+        return _loop_text_result("checklist_show", checklist_show(
+            checklist_id=action.get("checklist_id", action.get("id", "")),
+        ))
     if action_type == "file_policy":
         return _loop_text_result("file_policy", file_policy(
             token=action.get("token", ""),
@@ -3858,22 +4533,22 @@ def web_search(query: str, limit: int = 5) -> str:
     try:
         results = web_tools.web_search(query, limit=limit)
     except Exception as e:
-        activity_tracker.record_tool_call(
+        _record_direct_tool(
             "web_search",
             {"query": query, "limit": limit},
-            ok=False,
-            elapsed_ms=int((time.time() - started) * 1000),
+            ok=False, started=started,
             summary=str(e),
         )
         return "ERROR: %s" % e
-    activity_tracker.record_tool_call(
+    output = web_tools.format_search_results(results)
+    _record_direct_tool(
         "web_search",
         {"query": query, "limit": limit},
-        ok=True,
-        elapsed_ms=int((time.time() - started) * 1000),
+        ok=True, started=started,
         summary="%d result(s)" % len(results),
+        output=output,
     )
-    return web_tools.format_search_results(results)
+    return output
 
 
 @mcp.tool()
@@ -3888,20 +4563,19 @@ def web_fetch(url: str, max_chars: int = 8000) -> str:
     try:
         out = web_tools.web_fetch(url, max_chars=max_chars)
     except Exception as e:
-        activity_tracker.record_tool_call(
+        _record_direct_tool(
             "web_fetch",
             {"url": url, "max_chars": max_chars},
-            ok=False,
-            elapsed_ms=int((time.time() - started) * 1000),
+            ok=False, started=started,
             summary=str(e),
         )
         return "ERROR: %s" % e
-    activity_tracker.record_tool_call(
+    _record_direct_tool(
         "web_fetch",
         {"url": url, "max_chars": max_chars},
-        ok=not out.startswith("ERROR:"),
-        elapsed_ms=int((time.time() - started) * 1000),
+        ok=not out.startswith("ERROR:"), started=started,
         summary="%d chars" % len(out),
+        output=out,
     )
     return out
 
@@ -4355,8 +5029,11 @@ def tool_manifest() -> str:
         "trilobite": "Ask the local self-improving coding model.",
         "offload": "Route a self-contained task to a configured local/cloud tier.",
         "web_search/web_fetch": "Search or fetch public web pages.",
+        "directory_tree/directory_create/text_search/file_read_range": "Guarded folder discovery, creation, text search, and bounded line-range reads.",
         "file_policy/file_find/file_read/file_write/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete with approval bypass support.",
-        "task_create/task_list/task_update/task_show": "Visible Claude-style todo/task state shared by console, app, agents, and MCP.",
+        "program_search/script_search/workspace_run/script_run/image_inspect": "Discover installed programs and workspace scripts, run bounded argv-only processes, and inspect image metadata.",
+        "task_create/task_list/task_update/task_show/checklist_create/checklist_update/checklist_show": "Visible todo and ordered checklist state shared by console, app, agents, and MCP.",
+        "workbench_agent": "Run an autonomous local tool loop with a guaranteed checklist, exact action transcript, validation gate, and end report.",
         "command_registry_list": "Inspect available slash commands by category, name, or risk.",
         "activity_status": "Inspect active/latest response activity, tool calls, and file changes.",
         "permission_policy/permission_rule_set": "Inspect or guarded-edit local permission rules for tool actions.",
@@ -4395,15 +5072,27 @@ AGENT_TOOL_HELP = """Available tools:
 - web_search: {"query": "...", "limit": 5}
 - web_fetch: {"url": "https://...", "max_chars": 8000}
 - file_policy: {}
+- directory_tree: {"path": ".", "depth": 2, "max_entries": 200}
+- directory_create: {"path": "output/reports", "parents": true}
 - file_find: {"query": "*.py", "root": ".", "max_results": 50}
 - file_read: {"path": "README.md"}
+- file_read_range: {"path": "server.py", "start_line": 1, "end_line": 200}
+- text_search: {"query": "TODO", "root": ".", "glob": "*.py", "regex": false, "max_results": 100}
 - file_write: {"path": "notes.txt", "content": "...", "mode": "create|overwrite|append"}
 - file_edit: {"path": "notes.txt", "old": "before", "new": "after", "count": 1}
 - file_delete: {"path": "notes.txt", "dry_run": true}
+- script_search: {"query": "build", "root": ".", "max_results": 100}
+- program_search: {"query": "python", "max_results": 50}
+- workspace_run: {"program": "git", "args_json": ["status", "--short"], "cwd": ".", "timeout": 30}
+- script_run: {"path": "scripts/check.py", "args_json": [], "cwd": ".", "timeout": 30}
+- image_inspect: {"path": "artifacts/generated/demo/icon.png"}
 - task_create: {"title": "...", "detail": "...", "priority": 2, "project": "...", "owner": "..."}
 - task_list: {"status": "pending|in_progress|blocked|done|canceled", "project": "", "include_done": false, "limit": 50}
 - task_update: {"task_id": "...", "status": "in_progress|blocked|done", "note": "..."}
 - task_show: {"task_id": "..."}
+- checklist_create: {"title": "...", "items_json": ["Inspect", "Implement", "Validate", "Report"], "project": "..."}
+- checklist_update: {"checklist_id": "...", "item": "1|id-prefix", "status": "in_progress|done|blocked", "note": "..."}
+- checklist_show: {"checklist_id": "..."}
 - command_registry_list: {"filter_text": "filesystem|dangerous|context"}
 - activity_status: {}
 - permission_policy: {"tool_name": "file_delete"}
@@ -4441,7 +5130,8 @@ or
 
 
 REPOSITORY_READ_ONLY_TOOLS = frozenset({
-    "file_policy", "file_find", "file_read", "command_registry_list",
+    "file_policy", "directory_tree", "file_find", "file_read", "file_read_range",
+    "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
     "diagnostics", "context_health", "context_policy_status",
     "memory_quality_report", "system_improvement_report", "master_status",
@@ -4453,8 +5143,14 @@ REPOSITORY_READ_ONLY_FORBIDDEN_ARGS = frozenset({
 })
 REPOSITORY_AGENT_TOOL_HELP = """Available tools:
 - file_policy: {}
+- directory_tree: {"path": ".", "depth": 2, "max_entries": 200}
 - file_find: {"query": "*.py", "root": ".", "max_results": 50}
 - file_read: {"path": "README.md", "max_bytes": 256000}
+- file_read_range: {"path": "server.py", "start_line": 1, "end_line": 200}
+- text_search: {"query": "TODO", "root": ".", "glob": "*.py", "max_results": 100}
+- script_search: {"query": "build", "root": ".", "max_results": 100}
+- program_search: {"query": "python", "max_results": 50}
+- image_inspect: {"path": "docs/example.png"}
 - command_registry_list: {"filter_text": "filesystem|context|status"}
 - activity_status: {}
 - permission_policy: {"tool_name": "file_read"}
@@ -4495,15 +5191,15 @@ def _repository_read_only_error(tool_name, args):
             % (tool_name, ", ".join(forbidden))
         )
     try:
-        if tool_name == "file_read":
+        if tool_name in {"file_read", "file_read_range", "image_inspect"}:
             file_ops.resolve_repository_read_path(
                 args.get("path", ""),
                 allow_workspace_root=False,
                 reject_sensitive=True,
             )
-        elif tool_name == "file_find":
+        elif tool_name in {"directory_tree", "file_find", "text_search", "script_search"}:
             file_ops.resolve_repository_read_path(
-                args.get("root", "") or ".",
+                args.get("path", "") or args.get("root", "") or ".",
                 allow_workspace_root=True,
                 reject_sensitive=True,
             )
@@ -4608,11 +5304,50 @@ def _agent_dispatch(tool_name, args, allow_web=True, read_only=False):
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "directory_tree":
+        return directory_tree(
+            path=args.get("path", args.get("root", ".")),
+            depth=args.get("depth", 2),
+            max_entries=args.get("max_entries", 200),
+            include_hidden=args.get("include_hidden", False),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "directory_create":
+        return directory_create(
+            path=args.get("path", ""),
+            parents=args.get("parents", True),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "file_find":
         return file_find(
             query=args.get("query", "*"),
             root=args.get("root", ""),
             max_results=args.get("max_results", 50),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "file_read_range":
+        return file_read_range(
+            path=args.get("path", ""),
+            start_line=args.get("start_line", args.get("start", 1)),
+            end_line=args.get("end_line", args.get("end", 200)),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "text_search":
+        return text_search(
+            query=args.get("query", args.get("pattern", "")),
+            root=args.get("root", "."),
+            glob=args.get("glob", "*"),
+            regex=args.get("regex", False),
+            case_sensitive=args.get("case_sensitive", False),
+            max_results=args.get("max_results", 100),
             token=args.get("token", ""),
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
@@ -4654,6 +5389,51 @@ def _agent_dispatch(tool_name, args, allow_web=True, read_only=False):
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "script_search":
+        return script_search(
+            query=args.get("query", "*"),
+            root=args.get("root", "."),
+            max_results=args.get("max_results", 100),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "program_search":
+        return program_search(
+            query=args.get("query", "*"),
+            max_results=args.get("max_results", 100),
+        )
+    if tool_name == "workspace_run":
+        return workspace_run(
+            program=args.get("program", ""),
+            args_json=args.get("args_json", args.get("args", [])),
+            cwd=args.get("cwd", "."),
+            stdin=args.get("stdin", ""),
+            timeout=args.get("timeout", 30),
+            max_output=args.get("max_output", 128000),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "script_run":
+        return script_run(
+            path=args.get("path", ""),
+            args_json=args.get("args_json", args.get("args", [])),
+            cwd=args.get("cwd", ""),
+            stdin=args.get("stdin", ""),
+            timeout=args.get("timeout", 30),
+            max_output=args.get("max_output", 128000),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "image_inspect":
+        return image_inspect(
+            path=args.get("path", ""),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "ground_artifact":
         return ground_artifact(
             args.get("artifact", ""),
@@ -4666,6 +5446,7 @@ def _agent_dispatch(tool_name, args, allow_web=True, read_only=False):
             priority=args.get("priority", 2),
             project=args.get("project", ""),
             owner=args.get("owner", ""),
+            parent_id=args.get("parent_id", ""),
         )
     if tool_name == "task_list":
         return task_list(
@@ -4688,6 +5469,24 @@ def _agent_dispatch(tool_name, args, allow_web=True, read_only=False):
         )
     if tool_name == "task_show":
         return task_show(args.get("task_id", args.get("id", "")))
+    if tool_name == "checklist_create":
+        items = args.get("items_json", args.get("items", []))
+        return checklist_create(
+            title=args.get("title", "Work checklist"),
+            items_json=json.dumps(items) if not isinstance(items, str) else items,
+            project=args.get("project", ""),
+            owner=args.get("owner", "agent"),
+            priority=args.get("priority", 1),
+        )
+    if tool_name == "checklist_update":
+        return checklist_update(
+            checklist_id=args.get("checklist_id", args.get("id", "")),
+            item=str(args.get("item", args.get("item_id", ""))),
+            status=args.get("status", ""),
+            note=args.get("note", ""),
+        )
+    if tool_name == "checklist_show":
+        return checklist_show(args.get("checklist_id", args.get("id", "")))
     if tool_name == "command_registry_list":
         return command_registry_list(args.get("filter_text", args.get("filter", "")))
     if tool_name == "activity_status":
@@ -4788,6 +5587,26 @@ def _agent_dispatch(tool_name, args, allow_web=True, read_only=False):
     return "ERROR: unknown tool '%s'." % tool_name
 
 
+def _agent_activity_command(tool_name, args):
+    args = args if isinstance(args, dict) else {}
+    if tool_name == "workspace_run":
+        return "%s %s" % (
+            args.get("program", ""),
+            json.dumps(args.get("args_json", args.get("args", [])), ensure_ascii=False),
+        )
+    if tool_name == "script_run":
+        return "%s %s" % (
+            args.get("path", ""),
+            json.dumps(args.get("args_json", args.get("args", [])), ensure_ascii=False),
+        )
+    path = args.get("path") or args.get("root") or ""
+    if path:
+        return str(path)
+    if args.get("query"):
+        return "query=%s" % args["query"]
+    return ""
+
+
 def _agent_dispatch_observed(tool_name, args, allow_web=True, read_only=False):
     started = time.time()
     ok = False
@@ -4805,13 +5624,201 @@ def _agent_dispatch_observed(tool_name, args, allow_web=True, read_only=False):
         ok = not str(observation).startswith("ERROR:")
         return observation
     finally:
-        activity_tracker.record_tool_call(
+        activity_tracker.record_tool_result(
             tool_name,
             args,
             ok=ok,
             elapsed_ms=int((time.time() - started) * 1000),
             summary=observation.splitlines()[0] if observation else "",
+            command=_agent_activity_command(tool_name, args),
+            output=observation,
         )
+
+
+_WORK_MUTATION_TOOLS = frozenset({
+    "directory_create", "file_write", "file_edit", "file_delete",
+    "artifact_generate", "game_generate_and_test", "game_generation_campaign",
+})
+_WORK_VALIDATION_TOOLS = frozenset({
+    "workspace_run", "script_run", "run_code", "run_project", "ground_artifact",
+    "artifact_verify", "game_reference_suite", "game_generate_and_test",
+    "game_generation_campaign", "self_heal_check", "directory_tree", "file_find",
+    "file_read", "file_read_range", "text_search", "image_inspect",
+})
+
+
+def _agent_observation_ok(observation):
+    text = str(observation or "")
+    lowered = text.lower()
+    first = next((line.strip().lower() for line in text.splitlines() if line.strip()), "")
+    return not (
+        text.startswith("ERROR:")
+        or "  ok: false" in lowered
+        or first.endswith(": fail")
+        or first.startswith("validation_failed")
+        or "[fail]" in lowered
+    )
+
+
+def _agent_normalized_path(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        return os.path.normcase(str(file_ops.resolve_path(text)))
+    except (OSError, PermissionError, ValueError):
+        return os.path.normcase(os.path.abspath(text))
+
+
+def _agent_mutation_record(tool_name, args):
+    args = args if isinstance(args, dict) else {}
+    path = args.get("path", "")
+    if tool_name == "artifact_generate":
+        path = args.get("output_dir") or os.path.join(
+            "artifacts", "generated", str(args.get("name", "generated-artifact")),
+        )
+    elif tool_name in {"game_generate_and_test", "game_generation_campaign"}:
+        path = os.path.join("games", str(args.get("name", "generated-game")))
+    return {
+        "tool": tool_name,
+        "path": _agent_normalized_path(path),
+    }
+
+
+def _agent_validation_covers(tool_name, args, mutations, observation=""):
+    """Require validators to touch changed disk state, not equivalent draft code."""
+    args = args if isinstance(args, dict) else {}
+    records = [record for record in mutations if record.get("tool")]
+    if not records:
+        return True
+    paths = [record["path"] for record in records if record.get("path")]
+    target = _agent_normalized_path(args.get("path", args.get("artifact", "")))
+
+    if tool_name in {
+        "game_reference_suite", "game_generate_and_test", "game_generation_campaign",
+    }:
+        return True
+    if tool_name in {"artifact_verify", "ground_artifact"}:
+        return any(
+            record["tool"] == "artifact_generate"
+            and (not target or target.startswith(record.get("path", "")))
+            for record in records
+        )
+    if tool_name == "script_run":
+        if target and target in paths:
+            return True
+        name = os.path.basename(target).lower()
+        return any(word in name for word in ("test", "check", "verify", "smoke", "build"))
+    if tool_name == "workspace_run":
+        program = os.path.basename(str(args.get("program", ""))).lower()
+        argv = args.get("args_json", args.get("args", []))
+        if isinstance(argv, str):
+            try:
+                argv = json.loads(argv)
+            except (TypeError, ValueError):
+                argv = [argv]
+        argv_text = [str(item).lower() for item in (argv or [])]
+        for item in argv_text:
+            if _agent_normalized_path(item) in paths:
+                return True
+        command_text = " ".join([program, *argv_text])
+        known_validator = program in {
+            "pytest", "pytest.exe", "ctest", "ctest.exe", "cmake", "cmake.exe",
+            "ninja", "ninja.exe", "msbuild", "msbuild.exe", "flutter", "flutter.bat",
+            "dart", "dart.exe", "cargo", "cargo.exe", "dotnet", "dotnet.exe",
+            "npm", "npm.cmd", "gradle", "gradle.bat", "mvn", "mvn.cmd",
+            "python", "python.exe", "py", "py.exe", "node", "node.exe",
+            "cl", "cl.exe", "g++", "g++.exe", "clang++", "clang++.exe",
+        }
+        return known_validator and any(word in command_text for word in (
+            "pytest", "unittest", "test", "check", "verify", "smoke", "build",
+            "compile", "analyze", "lint", "ctest", "cmake", "ninja", "msbuild",
+            "flutter", "dart", "cargo", "dotnet", "npm", "gradle", "mvn",
+        ))
+    if tool_name == "image_inspect":
+        return bool(
+            target in paths
+            and os.path.splitext(target)[1].lower()
+            in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ppm", ".svg"}
+        )
+    if tool_name in {"file_read", "file_read_range"}:
+        return bool(
+            target in paths
+            and os.path.splitext(target)[1].lower()
+            in {".md", ".txt", ".json", ".csv", ".yaml", ".yml", ".toml", ".xml"}
+        )
+    if tool_name in {"directory_tree", "file_find", "text_search"}:
+        root = _agent_normalized_path(args.get("root", args.get("path", ".")))
+        observed = os.path.normcase(str(observation or ""))
+        eligible = [
+            record["path"] for record in records
+            if record.get("path")
+            and (
+                (
+                    tool_name in {"directory_tree", "file_find"}
+                    and record["tool"] == "directory_create"
+                )
+                or (
+                    tool_name == "text_search"
+                    and os.path.splitext(record["path"])[1].lower()
+                    in {".md", ".txt", ".json", ".csv", ".yaml", ".yml", ".toml", ".xml"}
+                )
+            )
+        ]
+        return bool(eligible) and all(
+            (path.startswith(root + os.sep) or path == root)
+            and os.path.basename(path) in observed
+            for path in eligible
+        )
+    # run_code/run_project validate generated snippets or temp projects, not the
+    # persistent files just edited. self_heal_check is likewise unrelated.
+    return False
+_WORK_INSPECTION_TOOLS = frozenset({
+    "file_policy", "directory_tree", "file_find", "file_read", "file_read_range",
+    "text_search", "script_search", "program_search", "image_inspect",
+    "memory_search", "web_search", "web_fetch", "status", "diagnostics",
+})
+
+
+def _start_agent_checklist(prompt: str, project: str, read_only: bool):
+    action = "Perform the requested analysis" if read_only else "Implement the requested changes"
+    items = [
+        "Inspect relevant folders, files, programs, and context",
+        action,
+        "Validate results with grounded checks",
+        "Produce a concise evidence-backed end report",
+    ]
+    title = re.sub(r"\s+", " ", prompt or "Agent work").strip()[:100] or "Agent work"
+    created = checklist_create(
+        title=title,
+        items_json=json.dumps(items),
+        project=project,
+        owner="trilobite-agent",
+        priority=1,
+    )
+    if created.startswith("ERROR:"):
+        return "", {}
+    match = re.search(r"trilobite checklist ([0-9a-f]+)", created)
+    checklist_id = match.group(1) if match else ""
+    states = {}
+    if checklist_id:
+        checklist_update(checklist_id, "1", "in_progress", "agent started inspection")
+        states[1] = "in_progress"
+    return checklist_id, states
+
+
+def _agent_checklist_mark(checklist_id, states, item, status, note):
+    if not checklist_id or states.get(item) == status:
+        return
+    result = checklist_update(checklist_id, str(item), status, note)
+    if not result.startswith("ERROR:"):
+        states[item] = status
+
+
+def _agent_checklist_fail(checklist_id, states, reason, item=1):
+    """Leave persistent, honest task state when an agent exits early."""
+    _agent_checklist_mark(checklist_id, states, item, "blocked", reason)
+    _agent_checklist_mark(checklist_id, states, 4, "done", "failure included in end report")
 
 
 def _agent_impl(
@@ -4822,6 +5829,8 @@ def _agent_impl(
     require_file_evidence: bool = False,
     read_only: bool = False,
     include_evidence: bool = False,
+    auto_checklist: bool = False,
+    project: str = "",
 ) -> str:
     """Run a Claude-like local agent loop that can call tools.
 
@@ -4831,7 +5840,7 @@ def _agent_impl(
     public web search/fetch when allow_web=True and TRILOBITE_WEB_TOOLS is on.
     """
     _maybe_live_reload()
-    max_steps = _safe_limit(max_steps, 6, 12)
+    max_steps = _safe_limit(max_steps, 6, 20)
     model, cloud, augment, tier_label = _serve_target(tier, None)
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()
@@ -4840,15 +5849,32 @@ def _agent_impl(
     if model is None:
         return "ERROR: trilobite model/alias not found."
     system = _build_system(
-        "You are a local tool-using agent. Decide when tools are useful. "
+        "You are a local tool-using coding agent. Inspect real workspace evidence before making claims. "
+        "For action tasks, use tools instead of merely describing commands. Prefer directory_tree, "
+        "text_search, file_read_range, and program_search for discovery; use guarded file tools for "
+        "mutations; validate every mutation with workspace_run, script_run, file_read_range, "
+        "image_inspect, artifact_verify, or another path-specific checker before returning final. "
+        "After editing a script, run that exact path "
+        "with script_run; an equivalent run_code snippet does not validate the on-disk file. "
+        "Never invent tool results. "
         "Use web tools for current external information and cite fetched URLs in the final answer. "
-        "Do not invent tool results.",
+        "Your final answer must lead with the outcome, mention changed paths and checks, and disclose failures.",
         False,
         "",
     )
     gen = _make_generate(model, system, 0.1, 1200, SESSION_NUM_CTX, cloud=cloud)
     observations = []
     file_evidence = False
+    used_tool = False
+    inspected = False
+    mutated = False
+    validation_attempted = False
+    validation_ok = False
+    mutations = []
+    checklist_id, checklist_states = (
+        _start_agent_checklist(prompt, project, read_only)
+        if auto_checklist else ("", {})
+    )
     transcript = "Task:\n%s\n\n%s" % (
         prompt, _agent_tool_help(read_only=read_only)
     )
@@ -4861,40 +5887,175 @@ def _agent_impl(
         try:
             decision = _extract_agent_json(raw)
         except Exception as e:
+            if auto_checklist:
+                _agent_checklist_fail(
+                    checklist_id, checklist_states,
+                    "model returned an invalid tool decision", 1,
+                )
             return "ERROR: could not parse agent decision at step %d: %s\nraw=%s" % (
                 step, e, raw[:1000])
         if not isinstance(decision, dict):
+            if auto_checklist:
+                _agent_checklist_fail(
+                    checklist_id, checklist_states,
+                    "model decision was not a JSON object", 1,
+                )
             return "ERROR: agent decision must be a JSON object."
         if "final" in decision:
             final = str(decision.get("final") or "")
+            if auto_checklist and not used_tool and step < max_steps:
+                observations.append(
+                    "HOST REQUIREMENT: use at least one relevant inspection or execution tool before final."
+                )
+                continue
+            if auto_checklist and mutated and not validation_ok and step < max_steps:
+                _agent_checklist_mark(
+                    checklist_id, checklist_states, 2, "done", "mutations completed",
+                )
+                _agent_checklist_mark(
+                    checklist_id, checklist_states, 3, "in_progress", "validation required before final",
+                )
+                observations.append(
+                    "HOST REQUIREMENT: files changed but no grounded validation has passed. "
+                    "Run or retry an exact validator now."
+                )
+                continue
             if require_file_evidence and not file_evidence:
+                if auto_checklist:
+                    _agent_checklist_fail(
+                        checklist_id, checklist_states,
+                        "required workspace evidence was not collected", 1,
+                    )
                 detail = "\n\n" + "\n\n".join(observations) if observations else ""
                 return master_orchestrator.EVIDENCE_REQUIRED + detail
+            if auto_checklist:
+                _agent_checklist_mark(
+                    checklist_id, checklist_states, 1, "done", "workspace evidence inspected",
+                )
+                _agent_checklist_mark(
+                    checklist_id, checklist_states, 2, "done",
+                    "requested work completed" if mutated else "analysis completed without file mutation",
+                )
+                validation_status = "done" if (validation_ok or not mutated) else "blocked"
+                _agent_checklist_mark(
+                    checklist_id, checklist_states, 3, validation_status,
+                    "grounded validation passed" if validation_ok else (
+                        "no mutation required" if not mutated else "validation did not pass"
+                    ),
+                )
+                _agent_checklist_mark(
+                    checklist_id, checklist_states, 4, "done", "end report prepared",
+                )
+            if auto_checklist and mutated and not validation_ok:
+                final = (
+                    "VALIDATION_FAILED: workspace changes were not successfully validated.\n\n"
+                    + final
+                )
             if include_evidence and observations:
                 final += "\n\n=== TOOL EVIDENCE ===\n" + "\n\n".join(observations)
+            activity_tracker.set_result_summary(final.splitlines()[0] if final else "agent completed")
             return final
         tool_name = decision.get("tool")
         if not tool_name:
+            if auto_checklist:
+                _agent_checklist_fail(
+                    checklist_id, checklist_states,
+                    "model decision omitted both tool and final", 1,
+                )
             return "ERROR: agent decision missing 'tool' or 'final': %s" % decision
         tool_args = decision.get("args", {})
         policy_error = _repository_read_only_error(tool_name, tool_args) if read_only else ""
+        if (
+            auto_checklist
+            and tool_name in _WORK_MUTATION_TOOLS
+            and not inspected
+            and not policy_error
+        ):
+            policy_error = (
+                "ERROR: HOST REQUIREMENT: inspect relevant workspace evidence "
+                "before making a mutation."
+            )
         if policy_error:
             observation = policy_error
         elif read_only and tool_name in {"command_registry_list", "tool_manifest"}:
             observation = _agent_tool_help(read_only=True)
         else:
             observation = _agent_dispatch_observed(
-                tool_name, tool_args, allow_web=allow_web
+                tool_name, tool_args, allow_web=allow_web, read_only=read_only
             )
-        if tool_name in {"file_read", "file_find"} and not str(observation).startswith("ERROR:"):
+        observation_text = str(observation)
+        tool_ok = _agent_observation_ok(observation_text)
+        used_tool = used_tool or tool_ok
+        if tool_name in {
+            "directory_tree", "file_read", "file_read_range", "file_find",
+            "text_search", "script_search", "image_inspect",
+        } and tool_ok:
             file_evidence = True
+        if auto_checklist and tool_name in _WORK_INSPECTION_TOOLS and tool_ok:
+            inspected = True
+            _agent_checklist_mark(
+                checklist_id, checklist_states, 1, "done", "%s completed" % tool_name,
+            )
+            _agent_checklist_mark(
+                checklist_id, checklist_states, 2, "in_progress", "working from inspected evidence",
+            )
+        mutation_happened = (
+            tool_name in _WORK_MUTATION_TOOLS
+            and tool_ok
+            and not (tool_name == "file_delete" and tool_args.get("dry_run", True))
+        )
+        if mutation_happened:
+            mutated = True
+            validation_attempted = False
+            validation_ok = False
+            record = _agent_mutation_record(tool_name, tool_args)
+            if record not in mutations:
+                mutations.append(record)
+            if auto_checklist and mutated:
+                _agent_checklist_mark(
+                    checklist_id, checklist_states, 1, "done", "inspection completed before mutation",
+                )
+                _agent_checklist_mark(
+                    checklist_id, checklist_states, 2, "in_progress", "%s changed workspace state" % tool_name,
+                )
+        if tool_name in _WORK_VALIDATION_TOOLS:
+            validation_attempted = True
+            validation_covered = tool_ok and _agent_validation_covers(
+                tool_name, tool_args, mutations, observation_text,
+            )
+            validation_ok = validation_ok or validation_covered
+            if mutated and tool_ok and not validation_covered:
+                observation_text += (
+                    "\nHOST VALIDATION: this check did not cover the changed on-disk path(s). "
+                    "Run the edited script, a workspace test/build, or a path-specific verifier."
+                )
+            if auto_checklist and mutated:
+                _agent_checklist_mark(
+                    checklist_id, checklist_states, 2, "done", "implementation phase complete",
+                )
+                _agent_checklist_mark(
+                    checklist_id, checklist_states, 3,
+                    "done" if validation_covered else "blocked",
+                    "%s %s" % (
+                        tool_name,
+                        "passed and covered changed paths"
+                        if validation_covered else "did not validate changed paths",
+                    ),
+                )
         observations.append(
             "step %d tool=%s reason=%s\n%s" % (
                 step,
                 tool_name,
                 decision.get("reason", ""),
-                observation[:6000],
+                observation_text[:6000],
             )
+        )
+    if auto_checklist:
+        active_item = 3 if validation_attempted else 2 if mutated else 1
+        _agent_checklist_fail(
+            checklist_id, checklist_states,
+            "agent reached max_steps without a final answer",
+            active_item,
         )
     return "ERROR: agent reached max_steps=%d without final answer.\n\n%s" % (
         max_steps, "\n\n".join(observations))
@@ -4906,20 +6067,54 @@ def agent(
     tier: str = "code",
     max_steps: int = 6,
     allow_web: bool = True,
+    project: str = "",
+    checklist: bool = True,
 ) -> str:
-    """Run a visible local tool-using agent loop."""
+    """Run a visible local tool-using agent loop with checklist/reporting."""
+    nested = activity_tracker.current() is not None
     with activity_tracker.response_span(
         "agent:%s" % (tier or "code"),
         prompt,
         surface="agent",
         model=tier,
+        project=project,
     ):
-        return _append_activity(_agent_impl(
+        result = _agent_impl(
             prompt,
             tier=tier,
             max_steps=max_steps,
             allow_web=allow_web,
-        ))
+            auto_checklist=bool(checklist),
+            project=project,
+        )
+    response = activity_tracker.current() if nested else activity_tracker.latest()
+    if nested and response:
+        response["status"] = "complete"
+        response["elapsed_ms"] = int((time.time() - response["started_at"]) * 1000)
+    return "%s\n\n%s\n\n%s" % (
+        result.rstrip(),
+        activity_tracker.format_end_report(response),
+        activity_tracker.format_response(response),
+    )
+
+
+@mcp.tool()
+def workbench_agent(
+    prompt: str,
+    tier: str = "code",
+    max_steps: int = 12,
+    allow_web: bool = True,
+    project: str = "",
+) -> str:
+    """Execute local work with guarded tools, checklist, validation, and report."""
+    return agent(
+        prompt=prompt,
+        tier=tier,
+        max_steps=max_steps,
+        allow_web=allow_web,
+        project=project,
+        checklist=True,
+    )
 
 
 @mcp.tool()

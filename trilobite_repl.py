@@ -63,6 +63,17 @@ HELP = """commands:
   /compact           preview context compaction/rollover recommendations
   /commands [filter] list available commands by category, name, or risk
   /activity          show active/latest tool calls and file changes
+  /work <task>       execute a guarded tool-using workflow with checklist/report
+  /report            show the latest grounded end report and action transcript
+  /checklist [id]    show the current or selected persistent checklist
+  /tree [path]       list a guarded folder tree
+  /search q|root|g   search text under a guarded root (optional glob)
+  /programs [query]  find installed programs available to the workbench
+  /scripts q|root    find runnable scripts under a guarded root
+  /image <path>      inspect image metadata and dimensions
+  /mkdir <path>      create a guarded directory
+  /runprogram p|a|c  run a program with JSON args and optional cwd
+  /runscript p|a|c   run a known script type with JSON args and optional cwd
   /dump [label]      dump this chat and debug info to a text file
   /todo ...          list/add/update visible task state
   /quality           audit lesson quality and duplicate rows
@@ -470,8 +481,28 @@ def main():
                 print(server.system_improvement_report(session=session_id, project=project))
             elif cmd in ("/agents", "/masterstatus"):
                 print(server.master_status())
-            elif cmd in ("/activity", "/tools", "/work"):
+            elif cmd in ("/activity", "/tools"):
                 print(server.activity_status())
+            elif cmd in ("/work", "/agent"):
+                if not arg.strip():
+                    print("usage: /work <task>")
+                else:
+                    out = server.workbench_agent(
+                        prompt=arg.strip(), project=project, max_steps=12,
+                    )
+                    last_response = out
+                    last_run_source = _answer_only(out)
+                    last_iid = None
+                    print(out)
+            elif cmd in (
+                "/report", "/endreport", "/checklist", "/plan",
+                "/tree", "/folders", "/search", "/grep",
+                "/programs", "/programfind", "/scripts", "/scriptfind",
+                "/image", "/inspectimage", "/mkdir", "/runprogram", "/runscript",
+            ):
+                print(server.control_command(
+                    line, session=session_id, project=project,
+                ))
             elif cmd in ("/asset", "/assets", "/assetgen", "/artifact"):
                 parts = arg.strip().split(None, 1)
                 if len(parts) != 2:
@@ -719,6 +750,19 @@ def main():
                 do_run()
             if "train" in intent:
                 _run_train(intent["train"])
+            continue
+
+        # Concrete workspace requests run through the guarded agent so the
+        # answer is backed by real inspection, file changes, validation, and a
+        # persistent checklist instead of being a prose-only suggestion.
+        if intents.classify_work(line):
+            out = server.workbench_agent(
+                prompt=line, tier="code", max_steps=12, project=project,
+            )
+            last_iid = None
+            last_response = out
+            last_run_source = _answer_only(out)
+            print(out)
             continue
 
         out = server.trilobite(line, trace=trace, strict=strict, persona=persona,

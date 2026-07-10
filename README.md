@@ -82,16 +82,19 @@ The learning loop above is *cross-task* memory. On top of it trilobite also has:
   prompts. Use `/prefer`, `/prefer <text>`, or `/prefer forget <id-or-key>` to
   inspect, teach, or disable them explicitly.
 - **Visible activity.** Each response tracks observable work: model calls, tool
-  calls, active response count, file creates/edits/deletes, and line deltas.
-  Use `/activity` or watch the chat app's bottom status line while work runs.
+  calls, active response count, file creates/edits/deletes, and line deltas. Tool
+  results retain a bounded, secret-redacted action transcript (`Viewed Image`,
+  `Ran Script`, `Edited File`, etc.), while `/work` maintains a persistent ordered
+  checklist and emits an evidence-backed end report. Use `/activity`, `/report`,
+  `/checklist`, or the app's Workbench Activity panel while work runs.
 
 ---
 
 ## Four ways to run it
 
-1. **Local, in your terminal** — `trilobite` (like launching `claude`). Interactive REPL routed through the full loop, with `/trace`, `/strict`, `/run`, `/runwindow`, `/train`, `/master`, `/agents`, `/asset`, `/forge`, `/game`, `/gamefleet`, `/todo`, `/commands`, `/dump`, `/permissions`, `/compact`, `/debug`, `/admin`, `/login`, `/register`, `/pass`, `/fail`, `/stats`, `/context`, `/quality`, `/emotion`, `/improve` commands plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts` (and plain-English equivalents). Each REPL launch is its own remembered thread.
+1. **Local, in your terminal** — `trilobite` (like launching `claude`). Interactive REPL routed through the full loop, with `/work`, `/report`, `/checklist`, `/tree`, `/search`, `/programs`, `/scripts`, `/image`, `/mkdir`, `/runprogram`, `/runscript`, `/trace`, `/strict`, `/run`, `/train`, `/master`, `/agents`, `/asset`, `/forge`, `/game`, `/gamefleet`, `/todo`, `/commands`, `/activity`, `/dump`, `/permissions`, `/compact`, `/debug`, `/pass`, `/fail`, `/stats`, `/context`, `/quality`, `/emotion`, and `/improve`, plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts`. Concrete natural-language workspace requests route to the same guarded workbench. Each REPL launch is its own remembered thread.
 2. **Hosted on your own server + a thin client anywhere** — run `deploy_trilobite.sh --serve` on your box (systemd service, API key), then any machine runs the single-file `trilobite_client.py` pointed at it. The serve layer threads the chat UI's own conversation history.
-3. **Integrated with Claude** — the MCP `local-llm` tools let Claude offload to it (`agent`, `master_orchestrate`, `master_status`, `artifact_generate`, `artifact_verify`, `game_reference_suite`, `game_generate_and_test`, `game_generation_campaign`, `task_create/list/update/show`, `command_registry_list`, `permission_policy`, `context_compaction_plan`, `offload(learn=True)`, `trilobite`, `run_code`, `parallel_run_code`, `parallel_generate_run`, `campaign_generate_compile_execute_record`, `web_search`, `web_fetch`, `loop`, `workflow_list/save/run/delete`, `self_heal_check`, `learn_from_example`, `apply_learned`, `system_improvement_report`, `memory_search`, `memory_quality_report`, `tool_manifest`, `diagnostics`, `record_outcome`, `trilobite_stats`). `agent` runs a local tool-use loop; `master_orchestrate` can delegate to parallel subagents and audit their outputs; artifact and game tools create persistent assets/projects and accept only grounded compile/run results. Both `offload` and `trilobite` can route to configured local or explicitly enabled cloud tiers.
+3. **Integrated with Claude/Codex** — the MCP `local-llm` tools include `workbench_agent`, guarded tree/range/text/script/program/image inspection, argv-only program/script execution, persistent checklists, exact activity reports, agent/master orchestration, universal artifact generation, grounded game generation, bounded code/project runners, workflows, web tools, self-healing, and the learning/memory surfaces. `master_orchestrate` can delegate to parallel subagents and audit their outputs; artifact and game tools create persistent assets/projects and accept only grounded checks. Local tiers remain the default for private workspace code.
 4. **Mobile & desktop app (GUI)** — a cross-platform [Flutter client](app/) that talks to a hosted `trilobite_serve.py`. One codebase → an **Android APK** and **Windows/Linux/macOS** desktop apps, built in CI with downloadable installers. See [app/README.md](app/README.md).
 
 ### General artifact forge and greenfield games
@@ -230,10 +233,14 @@ Browser origins are denied unless they exactly match a comma-separated entry in
 have `Content-Type: application/json` and an explicit `Content-Length`.
 `TRILOBITE_MAX_REQUEST_BYTES` defaults to 1 MiB and is capped at 16 MiB.
 
-**Filesystem tools:** guarded `/files`, `/read`, `/write`, `/append`, `/edit`,
-and dry-run `/delete` operate inside approved local roots. The server tools
-`file_find/read/write/edit/delete` expose the same policy to agents and
-workflows. The default roots are the checkout and `TRILOBITE_HOME`;
+**Workbench/filesystem tools:** guarded `/tree`, `/search`, `/programs`,
+`/scripts`, `/image`, `/mkdir`, `/runprogram`, `/runscript`, `/files`, `/read`,
+`/write`, `/append`, `/edit`, and dry-run `/delete` operate inside approved
+local roots. Program execution is argv-only (no shell command strings), bounded
+by time/output limits, and kills timed-out process trees. Scripts use known
+interpreters; direct inline PowerShell/cmd execution is rejected. The matching
+server tools are available to agents and reusable workflows. The default roots
+are the checkout and `TRILOBITE_HOME`;
 `file_roots.local` now defaults to `TRILOBITE_HOME/file_roots.local`, not the
 checkout. Override that file with `TRILOBITE_FILE_ROOTS_FILE`, or add roots with
 `TRILOBITE_FILE_ROOTS`. Control-plane files (root policy/config/state files,
@@ -334,7 +341,7 @@ Flat, mostly-stdlib Python modules (plus `mcp`):
 | `retriever.py` | hybrid lexical+semantic retrieval with relevance threshold |
 | `reward.py` / `reflection.py` | outcome → score; distill deduped lessons |
 | `orchestrator.py` | the retrieve → augment → generate → capture flow |
-| `server.py` / `code_runner.py` / `web_tools.py` / `workflow_store.py` / `self_heal.py` / `live_reload.py` / `system_profile.py` / `emotion_vectors.py` / `command_registry.py` / `permission_rules.py` | MCP server tools: `agent` / `offload` / `trilobite` / visible tasks / command registry / permission policy / context compaction plans / `run_code` / `web_search` / `web_fetch` / `loop` / workflows / memory export/search / self-healing / editable profile / emotion vectors / diagnostics; bounded execution, tool-calling loops, web access, reusable action routines, and request-boundary source reload |
+| `server.py` / `workbench.py` / `activity_tracker.py` / `code_runner.py` / `web_tools.py` / `workflow_store.py` / `self_heal.py` | MCP workbench/agent tools, guarded discovery and execution, persistent checklists, exact action/end reports, bounded code/project runners, web tools, workflows, and self-healing |
 | `server.py` | MCP server: `offload` / `trilobite` / `parallel_run_code` / `parallel_generate_run` / `parallel_generate_run_languages` / `campaign_generate_compile_execute_record` / `learn_tiers` / `record_outcome` / `trilobite_stats` / `trilobite_sessions` / `trilobite_remember_fact` |
 | `assetgen.py` / `game_forge.py` | stdlib-only general artifact generation, manifest verification, persistent cross-language game projects, model campaigns, and verified reference fallbacks |
 | `recall.py` | semantic recall of past good-outcome solutions (vector search over interactions) |
@@ -381,7 +388,14 @@ The MCP surface also includes `memory_search()`, `memory_export()`, and `session
 
 ## Agentic Tool Use And Web
 
-`agent(prompt, allow_web=True)` runs a bounded local tool-use loop. On each step the model returns a JSON tool call, the server executes it, then the observation is fed back until the model returns a final answer. Available tools include `run_code`, `web_search`, `web_fetch`, `memory_search`, `workflow_run`, `diagnostics`, `status`, profile/vector inspection, and `offload`.
+`workbench_agent(prompt)` runs a bounded local tool-use loop with four enforced
+phases: inspect, implement/analyze, validate, report. The host rejects mutation
+before inspection and does not accept an equivalent in-memory snippet as proof
+that an edited disk file works; scripts must be run from their persistent path
+or covered by a real workspace test/build. `agent()` exposes the same tools with
+optional checklist behavior. Both can inspect trees/files/programs/scripts/images,
+mutate guarded files, generate arbitrary asset packs or games, execute bounded
+checks, use memory/workflows/web, and return exact observable evidence.
 
 `web_search()` and `web_fetch()` use stdlib HTTP only. Search defaults to DuckDuckGo HTML, or set `TRILOBITE_SEARCH_URL` to an endpoint containing `{query}`. Set `TRILOBITE_WEB_TOOLS=0` to disable web access.
 

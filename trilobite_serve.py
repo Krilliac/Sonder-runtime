@@ -307,6 +307,17 @@ HELP_TEXT = """commands:
   /compact           preview context compaction/rollover recommendations
   /commands [filter] list available commands by category, name, or risk
   /activity          show active/latest tool calls and file changes
+  /work <task>       execute a guarded workflow with checklist and end report
+  /report            show the latest grounded report and action transcript
+  /checklist [id]    show the current or selected persistent checklist
+  /tree [path]       list a guarded folder tree
+  /search q|root|g   search text under a guarded root (optional glob)
+  /programs [query]  find installed programs
+  /scripts q|root    find runnable scripts under a guarded root
+  /image <path>      inspect image metadata and dimensions
+  /mkdir <path>      create a guarded directory
+  /runprogram p|a|c  run a program with JSON args and optional cwd
+  /runscript p|a|c   run a known script type with JSON args and optional cwd
   /dump [label]      dump chat log and debug info to a text file
   /todo ...          list/add/update visible task state
   /quality           audit lesson quality and duplicate rows
@@ -464,6 +475,10 @@ DANGEROUS_HTTP_SLASH_COMMANDS = frozenset({
     "/runwindow", "/runnew", "/runconsole", "/runproject", "/train", "/learn",
     "/asset", "/assets", "/assetgen", "/artifact", "/forge", "/gamesuite",
     "/game", "/gamegen", "/gamefleet", "/gamecampaign",
+    "/activity", "/tools", "/work", "/agent", "/report", "/endreport",
+    "/checklist", "/plan", "/tree", "/folders", "/search", "/grep",
+    "/programs", "/programfind", "/scripts", "/scriptfind", "/image",
+    "/inspectimage", "/mkdir", "/runprogram", "/runscript",
 })
 
 
@@ -722,7 +737,7 @@ def _dump_chat(messages=None, label="chat", state=None):
     return "dumped chat/debug log to %s" % path
 
 
-def _handle_slash(content, messages=None, state=None):
+def _handle_slash(content, messages=None, state=None, project=""):
     """Return response text if `content` is a recognized slash command, else None."""
     state = _state_or_legacy(state)
 
@@ -794,8 +809,21 @@ def _handle_slash(content, messages=None, state=None):
         return server.system_improvement_report()
     if cmd in ("/agents", "/masterstatus"):
         return server.master_status()
-    if cmd in ("/activity", "/tools", "/work"):
+    if cmd in ("/activity", "/tools"):
         return server.activity_status()
+    if cmd in ("/work", "/agent"):
+        if not arg.strip():
+            return "usage: /work <task>"
+        return server.workbench_agent(
+            prompt=arg.strip(), tier="code", max_steps=12, project=project,
+        )
+    if cmd in (
+        "/report", "/endreport", "/checklist", "/plan",
+        "/tree", "/folders", "/search", "/grep",
+        "/programs", "/programfind", "/scripts", "/scriptfind",
+        "/image", "/inspectimage", "/mkdir", "/runprogram", "/runscript",
+    ):
+        return server.control_command(stripped, project=project)
     if cmd in ("/asset", "/assets", "/assetgen", "/artifact"):
         parts2 = arg.strip().split(None, 1)
         if len(parts2) != 2:
@@ -1013,6 +1041,18 @@ def _handle_intent(content, messages=None, state=None):
     if "train" in intent:
         replies.append(_do_train(intent["train"]))
     return "\n".join(replies)
+
+
+def _handle_work_intent(content, project="", authorized=False):
+    """Route concrete developer workspace requests to the guarded workbench."""
+    if not authorized or not intents.classify_work(content):
+        return None
+    return server.workbench_agent(
+        prompt=content,
+        tier="code",
+        max_steps=12,
+        project=project,
+    )
 
 
 def _model_to_tier(model):
@@ -1381,13 +1421,20 @@ class Handler(BaseHTTPRequestHandler):
                     project=storage_project,
                 ):
                     reply = _handle_slash(
-                        prompt, messages=messages, state=state
+                        prompt, messages=messages, state=state,
+                        project=storage_project,
                     )
                     if reply is None:
                         reply = _handle_feedback(prompt, state=state)
                     if reply is None and _developer_authorized(context):
                         reply = _handle_intent(
                             prompt, messages=messages, state=state
+                        )
+                    if reply is None:
+                        reply = _handle_work_intent(
+                            prompt,
+                            project=storage_project,
+                            authorized=_developer_authorized(context),
                         )
                     if reply is not None:
                         content = reply

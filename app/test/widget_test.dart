@@ -6,6 +6,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:trilobite/main.dart';
 import 'package:trilobite/models.dart';
+import 'package:trilobite/api.dart';
+import 'package:trilobite/system_screen.dart';
 
 void main() {
   testWidgets('App boots to the chat screen', (tester) async {
@@ -50,5 +52,58 @@ void main() {
     expect(find.text('Bold answer'), findsOneWidget);
     expect(find.text('Activity evidence'), findsOneWidget);
     expect(find.textContaining('**Bold answer**'), findsNothing);
+  });
+
+  testWidgets('Workbench activity panel renders checklist and exact actions',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final response = ActivityResponse.fromJson({
+      'id': 'r1',
+      'label': 'agent:code',
+      'status': 'complete',
+      'elapsed_ms': 250,
+      'tool_calls': 1,
+      'model_calls': 2,
+      'result_summary': 'Created and validated demo.py',
+      'events': [
+        {
+          'kind': 'tool_call',
+          'tool': 'script_run',
+          'title': 'Ran Script',
+          'command': 'python demo.py',
+          'output': 'DEMO_OK',
+          'ok': true,
+          'elapsed_ms': 90,
+        },
+      ],
+      'checklist': {
+        'title': 'Build demo',
+        'status': 'done',
+        'items': [
+          {'id': 'a', 'title': 'Inspect files', 'status': 'done'},
+          {'id': 'b', 'title': 'Run validation', 'status': 'done'},
+        ],
+      },
+    });
+
+    await tester.pumpWidget(MaterialApp(
+      theme: ThemeData.dark(useMaterial3: true),
+      home: Scaffold(
+        body: SingleChildScrollView(
+          child: WorkbenchActivityPanel(
+            response: response,
+            totalToolCalls: 7,
+          ),
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Build demo'), findsOneWidget);
+    expect(find.text('Ran Script'), findsOneWidget);
+    expect(find.textContaining('DEMO_OK'), findsOneWidget);
+    expect(find.text('2/2'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 }

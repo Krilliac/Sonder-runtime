@@ -97,7 +97,9 @@ class _SystemScreenState extends State<SystemScreen> {
     try {
       final reply = await _api.chat([
         ChatMessage(role: Role.user, content: text),
-      ], model: widget.settings.model, contextSize: widget.settings.contextSize);
+      ],
+          model: widget.settings.model,
+          contextSize: widget.settings.contextSize);
       setState(() => _message = reply);
     } on TrilobiteException catch (e) {
       setState(() => _message = e.message);
@@ -195,22 +197,22 @@ class _SystemScreenState extends State<SystemScreen> {
                 FilledButton.icon(
                   onPressed: _working
                       ? null
-                        : () => _run(() => LocalManager.setupEngine(
-                              allowHosted: widget.settings.allowHosted,
-                              contextSize: widget.settings.contextSize,
-                            )),
+                      : () => _run(() => LocalManager.setupEngine(
+                            allowHosted: widget.settings.allowHosted,
+                            contextSize: widget.settings.contextSize,
+                          )),
                   icon: const Icon(Icons.auto_fix_high_outlined),
                   label: const Text('Setup engine'),
                 ),
                 FilledButton.icon(
                   onPressed: _working
                       ? null
-                        : () => _run(() => LocalManager.startServer(
-                              allowHosted: widget.settings.allowHosted,
-                              contextSize: widget.settings.contextSize,
-                              persistOnAppClose:
-                                  widget.settings.keepServerRunning,
-                            )),
+                      : () => _run(() => LocalManager.startServer(
+                            allowHosted: widget.settings.allowHosted,
+                            contextSize: widget.settings.contextSize,
+                            persistOnAppClose:
+                                widget.settings.keepServerRunning,
+                          )),
                   icon: const Icon(Icons.play_arrow_outlined),
                   label: const Text('Start server'),
                 ),
@@ -228,9 +230,8 @@ class _SystemScreenState extends State<SystemScreen> {
                   label: const Text('Endless train'),
                 ),
                 OutlinedButton.icon(
-                  onPressed: _working
-                      ? null
-                      : () => _run(LocalManager.updateFromGit),
+                  onPressed:
+                      _working ? null : () => _run(LocalManager.updateFromGit),
                   icon: const Icon(Icons.system_update_alt),
                   label: const Text('Update from Git'),
                 ),
@@ -290,7 +291,8 @@ class _SystemScreenState extends State<SystemScreen> {
                   label: const Text('Dump'),
                 ),
                 OutlinedButton.icon(
-                  onPressed: _working ? null : () => _sendCommand('/permissions'),
+                  onPressed:
+                      _working ? null : () => _sendCommand('/permissions'),
                   icon: const Icon(Icons.security_outlined),
                   label: const Text('Permissions'),
                 ),
@@ -368,6 +370,16 @@ class _SystemScreenState extends State<SystemScreen> {
               _Section(
                 title: 'Context Health',
                 child: _ContextHealthPanel(health: info.context!),
+              ),
+              const SizedBox(height: 12),
+            ],
+            if (info.activity?.displayResponse != null) ...[
+              _Section(
+                title: 'Workbench Activity',
+                child: WorkbenchActivityPanel(
+                  response: info.activity!.displayResponse!,
+                  totalToolCalls: info.activity!.totalToolCalls,
+                ),
               ),
               const SizedBox(height: 12),
             ],
@@ -482,7 +494,8 @@ class _ContextHealthPanel extends StatelessWidget {
             ),
             Chip(
               avatar: const Icon(Icons.view_week_outlined, size: 18),
-              label: Text('${health.contextMode}: native ${health.nativeContextLimit}'),
+              label: Text(
+                  '${health.contextMode}: native ${health.nativeContextLimit}'),
             ),
           ],
         ),
@@ -577,8 +590,7 @@ class _AgentStatusPanel extends StatelessWidget {
           ...recent.map((agent) => Padding(
                 padding: const EdgeInsets.only(bottom: 8),
                 child: _OutputCard(
-                  text:
-                      '${agent.id} [${agent.status}] ${agent.activity}\n'
+                  text: '${agent.id} [${agent.status}] ${agent.activity}\n'
                       'role=${agent.role} calls=${agent.toolCalls} '
                       'tokens=${agent.tokensIn}/${agent.tokensOut}\n'
                       'task: ${agent.task}',
@@ -590,6 +602,193 @@ class _AgentStatusPanel extends StatelessWidget {
         ],
       ],
     );
+  }
+}
+
+class WorkbenchActivityPanel extends StatelessWidget {
+  final ActivityResponse response;
+  final int totalToolCalls;
+
+  const WorkbenchActivityPanel({
+    super.key,
+    required this.response,
+    required this.totalToolCalls,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final recentActions = response.actions.length <= 8
+        ? response.actions
+        : response.actions.sublist(response.actions.length - 8);
+    final completed =
+        response.checklist.where((item) => item.status == 'done').length;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            Chip(
+              avatar: Icon(
+                response.status == 'error'
+                    ? Icons.error_outline
+                    : response.status == 'running'
+                        ? Icons.sync
+                        : Icons.check_circle_outline,
+                size: 18,
+              ),
+              label:
+                  Text(response.status.isEmpty ? 'Unknown' : response.status),
+            ),
+            Chip(
+              avatar: const Icon(Icons.build_outlined, size: 18),
+              label: Text('${response.toolCalls} actions'),
+            ),
+            Chip(
+              avatar: const Icon(Icons.history, size: 18),
+              label: Text('$totalToolCalls total'),
+            ),
+            Chip(
+              avatar: const Icon(Icons.timer_outlined, size: 18),
+              label: Text('${response.elapsedMs} ms'),
+            ),
+          ],
+        ),
+        if (response.resultSummary.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          Text(
+            response.resultSummary,
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+          ),
+        ],
+        if (response.checklist.isNotEmpty) ...[
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Icon(Icons.checklist_rounded, size: 19, color: cs.primary),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Text(
+                  response.checklistTitle.isEmpty
+                      ? 'Checklist'
+                      : response.checklistTitle,
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+              ),
+              Text('$completed/${response.checklist.length}'),
+            ],
+          ),
+          const SizedBox(height: 8),
+          ...response.checklist.map((item) => Padding(
+                padding: const EdgeInsets.only(bottom: 7),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      _checklistIcon(item.status),
+                      size: 18,
+                      color: _checklistColor(cs, item.status),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(child: Text(item.title)),
+                    const SizedBox(width: 8),
+                    Text(
+                      item.status.replaceAll('_', ' '),
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                            color: _checklistColor(cs, item.status),
+                          ),
+                    ),
+                  ],
+                ),
+              )),
+        ],
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            Icon(Icons.receipt_long_outlined, size: 19, color: cs.primary),
+            const SizedBox(width: 7),
+            Text('Exact actions',
+                style: Theme.of(context).textTheme.titleSmall),
+          ],
+        ),
+        const SizedBox(height: 8),
+        if (recentActions.isEmpty)
+          const _OutputText('No tool actions recorded yet.')
+        else
+          ...recentActions.map((action) => Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(11),
+                  decoration: BoxDecoration(
+                    color: cs.surfaceContainerHighest,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                      color: action.ok
+                          ? cs.outlineVariant
+                          : cs.error.withValues(alpha: 0.55),
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(
+                            action.ok
+                                ? Icons.check_circle_outline
+                                : Icons.error_outline,
+                            size: 17,
+                            color: action.ok ? cs.primary : cs.error,
+                          ),
+                          const SizedBox(width: 7),
+                          Expanded(
+                            child: Text(
+                              action.title,
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .labelLarge
+                                  ?.copyWith(fontWeight: FontWeight.w700),
+                            ),
+                          ),
+                          Text('+${action.elapsedMs}ms'),
+                        ],
+                      ),
+                      if (action.evidence.isNotEmpty) ...[
+                        const SizedBox(height: 7),
+                        SelectableText(
+                          action.evidence,
+                          style:
+                              Theme.of(context).textTheme.bodySmall?.copyWith(
+                                    fontFamily: 'monospace',
+                                    height: 1.3,
+                                  ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              )),
+      ],
+    );
+  }
+
+  IconData _checklistIcon(String status) {
+    if (status == 'done') return Icons.check_circle;
+    if (status == 'in_progress') return Icons.pending;
+    if (status == 'blocked') return Icons.error;
+    return Icons.radio_button_unchecked;
+  }
+
+  Color _checklistColor(ColorScheme colors, String status) {
+    if (status == 'done') return colors.primary;
+    if (status == 'blocked') return colors.error;
+    if (status == 'in_progress') return Colors.amber.shade800;
+    return colors.outline;
   }
 }
 
@@ -617,8 +816,7 @@ class _MeterBar extends StatelessWidget {
           children: [
             SizedBox(
               width: 96,
-              child:
-                  Text(label, style: Theme.of(context).textTheme.labelLarge),
+              child: Text(label, style: Theme.of(context).textTheme.labelLarge),
             ),
             Expanded(child: Text(detail)),
             const SizedBox(width: 8),
@@ -630,7 +828,8 @@ class _MeterBar extends StatelessWidget {
           value: value,
           minHeight: 8,
           color: barColor,
-          backgroundColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+          backgroundColor:
+              Theme.of(context).colorScheme.surfaceContainerHighest,
           borderRadius: BorderRadius.circular(8),
         ),
       ],

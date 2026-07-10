@@ -421,6 +421,33 @@ def read_file(path: str, *, max_bytes: int = MAX_READ_BYTES, extra_roots: str = 
     return {"path": str(p), "bytes": size, "truncated": size > limit, "text": text}
 
 
+def make_directory(
+    path: str,
+    *,
+    parents: bool = True,
+    exist_ok: bool = True,
+    extra_roots: str = "",
+    bypass: bool = False,
+    developer_authorized: bool = False,
+) -> dict:
+    p = resolve_path(path, extra_roots=extra_roots, bypass=bypass)
+    _require_mutation_access(p, developer_authorized)
+    existed = p.exists()
+    if existed and not p.is_dir():
+        raise FileExistsError("directory path is an existing file: %s" % p)
+    p.mkdir(parents=bool(parents), exist_ok=bool(exist_ok))
+    return {
+        "path": str(p),
+        "action": "directory_exists" if existed else "create_directory",
+        "created": not existed,
+        "parents": bool(parents),
+        "bytes": 0,
+        "lines_added": 0,
+        "lines_edited": 0,
+        "lines_deleted": 0,
+    }
+
+
 def write_file(
     path: str,
     content: str,
@@ -442,6 +469,13 @@ def write_file(
         raise ValueError("mode must be create, overwrite, or append")
     if mode == "create" and p.exists():
         raise FileExistsError(str(p))
+    missing_parents = []
+    cursor = p.parent
+    while not cursor.exists():
+        missing_parents.append(str(cursor))
+        if cursor.parent == cursor:
+            break
+        cursor = cursor.parent
     p.parent.mkdir(parents=True, exist_ok=True)
     if mode == "append":
         with p.open("a", encoding="utf-8", newline="") as f:
@@ -469,6 +503,7 @@ def write_file(
         "lines_added": lines_added,
         "lines_edited": lines_edited,
         "lines_deleted": lines_deleted,
+        "created_directories": list(reversed(missing_parents)),
     }
 
 

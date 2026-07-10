@@ -30,6 +30,34 @@ _TRAIN_DEFAULT_RE = re.compile(
 TRAIN_DEFAULT_N = 3
 
 
+_WORK_QUESTION_RE = re.compile(
+    r"^(how|what|why|who|when|where|which|explain|tell me about|show me how)\b"
+)
+_WORK_POLITE_RE = re.compile(
+    r"^(please\s+|can you\s+|could you\s+|would you\s+|will you\s+)+"
+)
+_WORK_ACTION_RE = re.compile(
+    r"\b(add|audit|build|compile|create|delete|diagnose|edit|execute|find|fix|"
+    r"generate|implement|inspect|install|list|make|modify|move|open|read|refactor|"
+    r"remove|rename|repair|run|scan|scaffold|search|test|update|validate|view|write)\b"
+)
+_WORK_TARGET_RE = re.compile(
+    r"\b(animation|api|app|application|asset|audio|background|brand|build|chart|"
+    r"cli|code|config|dashboard|data|diagram|directory|doc|docs|document|file|"
+    r"files|folder|folders|function|game|graphic|icon|image|library|logo|model|"
+    r"music|package|path|presentation|program|project|readme|report|repo|repository|"
+    r"scene|script|scripts|sound|spreadsheet|sprite|test|tests|texture|tool|tools|"
+    r"ui|vector|web|webpage|website|workspace)\b"
+)
+_WORK_DIRECT_RE = re.compile(
+    r"\b(use (the )?tools|work on|take care of|make the change|implement it|fix it|"
+    r"edit it|run it|test it|build it|create it)\b"
+)
+_PATH_LIKE_RE = re.compile(
+    r"(?:[a-zA-Z]:[\\/]|[./~][\\/]|[\\/][\w.-]+|\.[a-zA-Z0-9]{1,8}\b)"
+)
+
+
 def classify(text):
     """Return a dict of detected control intents, or {} for a normal task turn.
 
@@ -71,3 +99,24 @@ def classify(text):
         out["train"] = TRAIN_DEFAULT_N
 
     return out
+
+
+def classify_work(text):
+    """Return True for concrete workspace actions that should use real tools.
+
+    This intentionally does not classify explanatory questions or pure content
+    requests. A work request needs an action plus a workspace-like target, a
+    path, or an explicit reference such as "fix it"/"use the tools".
+    """
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not value or value.startswith("/") or len(value) > 12000:
+        return False
+    lowered = value.lower()
+    candidate = _WORK_POLITE_RE.sub("", lowered).strip()
+    if _WORK_QUESTION_RE.match(candidate):
+        return False
+    if _WORK_DIRECT_RE.search(candidate):
+        return True
+    if not _WORK_ACTION_RE.search(candidate):
+        return False
+    return bool(_WORK_TARGET_RE.search(candidate) or _PATH_LIKE_RE.search(value))
