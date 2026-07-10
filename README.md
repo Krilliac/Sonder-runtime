@@ -92,9 +92,9 @@ The learning loop above is *cross-task* memory. On top of it trilobite also has:
 
 ## Four ways to run it
 
-1. **Local, in your terminal** — `trilobite` (like launching `claude`). Interactive REPL routed through the full loop, with `/work`, `/report`, `/checklist`, `/tree`, `/search`, `/programs`, `/scripts`, `/image`, `/mkdir`, `/runprogram`, `/runscript`, `/trace`, `/strict`, `/run`, `/train`, `/master`, `/agents`, `/asset`, `/forge`, `/game`, `/gamefleet`, `/todo`, `/commands`, `/activity`, `/dump`, `/permissions`, `/compact`, `/debug`, `/pass`, `/fail`, `/stats`, `/context`, `/quality`, `/emotion`, and `/improve`, plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts`. Concrete natural-language workspace requests route to the same guarded workbench. Each REPL launch is its own remembered thread.
+1. **Local, in your terminal** — `trilobite` (like launching `claude`). Interactive REPL routed through the full loop, with `/work`, `/report`, `/checklist`, `/inventory`, `/tree`, `/search`, `/programs`, `/scripts`, `/image`, `/mkdir`, `/runprogram`, `/runscript`, `/trace`, `/strict`, `/run`, `/train`, `/master`, `/agents`, `/asset`, `/forge`, `/game`, `/gamefleet`, `/todo`, `/commands`, `/activity`, `/dump`, `/permissions`, `/compact`, `/debug`, `/pass`, `/fail`, `/stats`, `/context`, `/quality`, `/privacy`, `/embeddings`, `/emotion`, and `/improve`, plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts`. Concrete natural-language workspace requests route to the same guarded workbench. Each REPL launch is its own remembered thread.
 2. **Hosted on your own server + a thin client anywhere** — run `deploy_trilobite.sh --serve` on your box (systemd service, API key), then any machine runs the single-file `trilobite_client.py` pointed at it. The serve layer threads the chat UI's own conversation history.
-3. **Integrated with Claude/Codex** — the MCP `local-llm` tools include `workbench_agent`, guarded tree/range/text/script/program/image inspection, argv-only program/script execution, persistent checklists, exact activity reports, agent/master orchestration, universal artifact generation, grounded game generation, bounded code/project runners, workflows, web tools, self-healing, and the learning/memory surfaces. `master_orchestrate` can delegate to parallel subagents and audit their outputs; artifact and game tools create persistent assets/projects and accept only grounded checks. Local tiers remain the default for private workspace code.
+3. **Integrated with Claude/Codex** — the MCP `local-llm` tools include `workbench_agent`, budgeted workspace inventory, guarded tree/range/text/script/program/image inspection, argv-only program/script execution, persistent checklists, exact activity reports, agent/master orchestration, universal artifact generation, grounded game generation, bounded code/project runners, workflows, web tools, self-healing, privacy-safe memory review, local embedding backfill, and the remaining learning/memory surfaces. `master_orchestrate` can delegate to parallel subagents and audit their outputs; artifact and game tools create persistent assets/projects and accept only grounded checks. Local tiers remain the default for private workspace code.
 4. **Mobile & desktop app (GUI)** — a cross-platform [Flutter client](app/) that talks to a hosted `trilobite_serve.py`. One codebase → an **Android APK** and **Windows/Linux/macOS** desktop apps, built in CI with downloadable installers. See [app/README.md](app/README.md).
 
 ### General artifact forge and greenfield games
@@ -233,7 +233,7 @@ Browser origins are denied unless they exactly match a comma-separated entry in
 have `Content-Type: application/json` and an explicit `Content-Length`.
 `TRILOBITE_MAX_REQUEST_BYTES` defaults to 1 MiB and is capped at 16 MiB.
 
-**Workbench/filesystem tools:** guarded `/tree`, `/search`, `/programs`,
+**Workbench/filesystem tools:** guarded `/inventory`, `/tree`, `/search`, `/programs`,
 `/scripts`, `/image`, `/mkdir`, `/runprogram`, `/runscript`, `/files`, `/read`,
 `/write`, `/append`, `/edit`, and dry-run `/delete` operate inside approved
 local roots. Program execution is argv-only (no shell command strings), bounded
@@ -251,6 +251,12 @@ that protection. `TRILOBITE_FILE_APPROVAL_CODE` and
 `TRILOBITE_FILE_BYPASS=1` remain local-owner controls for ordinary broader
 paths. Deletes require the exact `DELETE <resolved path>` confirmation string
 returned by the dry-run.
+
+`workspace_inventory` reads metadata only and reports manifests, extension and
+area sizes, largest files, exclusions, elapsed time, and a concrete truncation
+reason. Inventory, text search, and script discovery enforce both an entry
+budget and a wall-clock deadline, never follow symlinks, and skip hidden and
+generated/tooling directories unless explicitly included.
 
 **Selectable context:** use `/contextsize 32k`, `/contextsize 256k`, or
 `/contextsize 1m` to select the requested virtual context. Ollama receives a
@@ -309,6 +315,14 @@ The model and your raw interactions always stay local — only small, distilled 
 2. **Send it home base** — open a PR adding your file under `contrib/`, or copy it to your own file server.
 3. **CI aggregates** — `.github/workflows/aggregate-lessons.yml` dedupes everyone's `contrib/*.jsonl` into `community_lessons.jsonl` at the repo root. Scheduled runs are preview-only so they do not surprise-push over local GUI work; run the workflow manually when you want it to commit the updated file.
 4. **`pull_community.py`** merges `community_lessons.jsonl` (fetched via `git pull` or your file server) back into your local `memory.db`, tagged `source_interaction='community'`.
+
+Local maintenance uses the same conservative privacy rules as contribution
+export. `/privacy` shows only redacted previews and stable lesson IDs;
+`/privacyfix <ids>` is a dry run, while `/privacyfix apply <ids>` can delete only
+the explicitly selected lessons that are still flagged. `/embeddings [N]`
+previews missing vectors and `/embeddings apply [N]` backfills a bounded batch
+through the configured local Ollama embedding model. Neither maintenance path
+uses a cloud model.
 
 Privacy is opt-in and scrubbed at every step — nothing auto-uploads, and no PR or upload happens without you reviewing it first.
 

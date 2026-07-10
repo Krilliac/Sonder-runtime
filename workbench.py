@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import heapq
 import json
 import os
 import re
@@ -32,10 +33,16 @@ MAX_EXEC_OUTPUT = 128_000
 MAX_EXEC_TIMEOUT = 120
 MAX_PROGRAM_CANDIDATES = 5_000
 MAX_IMAGE_BYTES = 64_000_000
+MAX_WALK_ENTRIES = 100_000
+MAX_WALK_SECONDS = 30.0
+DEFAULT_WALK_ENTRIES = 20_000
+DEFAULT_WALK_SECONDS = 10.0
 SKIP_DIRS = {
-    ".dart_tool", ".git", ".idea", ".pytest_cache", ".tooling", ".vs",
-    "__pycache__", "build", "dist", "node_modules", "venv",
+    ".dart_tool", ".git", ".idea", ".mypy_cache", ".pytest_cache",
+    ".ruff_cache", ".tooling", ".tox", ".venv", ".vs", "__pycache__",
+    "build", "coverage", "dist", "ephemeral", "node_modules", "venv",
 }
+SKIP_DIRS_CASEFOLD = {item.casefold() for item in SKIP_DIRS}
 TEXT_SUFFIXES = {
     "", ".bat", ".c", ".cc", ".cfg", ".cmd", ".cpp", ".cs", ".css",
     ".csv", ".dart", ".go", ".h", ".hpp", ".html", ".ini", ".java",
@@ -47,11 +54,26 @@ SCRIPT_EXTENSIONS = {
     ".bat": "cmd", ".cmd": "cmd", ".dart": "dart", ".js": "node",
     ".ps1": "powershell", ".py": "python", ".sh": "bash",
 }
+PROJECT_MANIFESTS = {
+    "build.gradle", "build.gradle.kts", "cargo.toml", "cmakelists.txt",
+    "composer.json", "deno.json", "deno.jsonc", "dockerfile", "gemfile",
+    "go.mod", "gradlew", "makefile", "mix.exs", "package.json",
+    "package.swift", "pom.xml", "pubspec.yaml", "pyproject.toml",
+    "requirements.txt", "setup.cfg", "setup.py", "workspace",
+}
 
 
 def _bounded_int(value, default, minimum, maximum):
     try:
         value = int(value)
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def _bounded_float(value, default, minimum, maximum):
+    try:
+        value = float(value)
     except (TypeError, ValueError):
         value = default
     return max(minimum, min(maximum, value))
@@ -65,6 +87,224 @@ def _resolve(path=".", *, extra_roots="", bypass=False) -> Path:
 
 def _hidden(name: str) -> bool:
     return name.startswith(".") and name not in (".", "..")
+
+
+def _skip_dir(name: str, include_ignored=False) -> bool:
+    return not include_ignored and name.casefold() in SKIP_DIRS_CASEFOLD
+
+
+def _new_walk_state(root: Path, max_entries: int, timeout_seconds: float):
+    return {
+        "root": str(root),
+        "entries_scanned": 0,
+        "files_seen": 0,
+        "directories_seen": 0,
+        "skipped_entries": 0,
+        "skipped_by_reason": {},
+        "skipped_examples": [],
+        "truncated": False,
+        "truncation_reason": "",
+        "max_entries": max_entries,
+        "timeout_seconds": timeout_seconds,
+        "elapsed_ms": 0,
+    }
+
+
+def _note_skip(state, path, reason):
+    state["skipped_entries"] += 1
+    counts = state["skipped_by_reason"]
+    counts[reason] = counts.get(reason, 0) + 1
+    if len(state["skipped_examples"]) < 20:
+        state["skipped_examples"].append({"path": str(path), "reason": reason})
+
+
+def _bounded_walk(
+    root: Path, *, include_hidden=False, include_ignored=False,
+    max_entries=DEFAULT_WALK_ENTRIES, timeout_seconds=DEFAULT_WALK_SECONDS,
+):
+    """Return a deterministic guarded-tree iterator and mutable scan state.
+
+    The caller already resolved ``root`` through ``file_ops``. Entries are
+    yielded depth-first in case-insensitive path order. Symlinks are never
+    followed. Both inspected directory entries and wall time are bounded, so a
+    small output limit cannot hide an unbounded filesystem walk.
+    """
+    max_entries = _bounded_int(
+        max_entries, DEFAULT_WALK_ENTRIES, 1, MAX_WALK_ENTRIES,
+    )
+    timeout_seconds = _bounded_float(
+        timeout_seconds, DEFAULT_WALK_SECONDS, 0.01, MAX_WALK_SECONDS,
+    )
+    state = _new_walk_state(root, max_entries, timeout_seconds)
+    started = time.monotonic()
+    deadline = started + timeout_seconds
+
+    def stop(reason):
+        state["truncated"] = True
+        state["truncation_reason"] = reason
+
+    def iterator():
+        stack = [root]
+        try:
+            while stack:
+                if time.monotonic() >= deadline:
+                    stop("timeout")
+                    break
+                if state["entries_scanned"] >= max_entries:
+                    stop("max_entries")
+                    break
+                base = stack.pop()
+                children = []
+                halt_reason = ""
+                try:
+                    with os.scandir(base) as scan:
+                        remaining = max_entries - state["entries_scanned"]
+                        while len(children) < remaining:
+                            if time.monotonic() >= deadline:
+                                halt_reason = "timeout"
+                                break
+                            try:
+                                children.append(next(scan))
+                            except StopIteration:
+                                break
+                except (OSError, PermissionError):
+                    _note_skip(state, base, "unreadable_directory")
+                    continue
+                if len(children) >= max_entries - state["entries_scanned"]:
+                    halt_reason = halt_reason or "max_entries"
+                children.sort(key=lambda item: item.name.casefold())
+                state["entries_scanned"] += len(children)
+                descend = []
+                for child in children:
+                    if time.monotonic() >= deadline:
+                        stop("timeout")
+                        return
+                    path = Path(child.path)
+                    try:
+                        if child.is_symlink():
+                            _note_skip(state, path, "symlink")
+                            continue
+                        if not include_hidden and _hidden(child.name):
+                            _note_skip(state, path, "hidden")
+                            continue
+                        is_dir = child.is_dir(follow_symlinks=False)
+                        if is_dir and _skip_dir(child.name, include_ignored):
+                            _note_skip(state, path, "ignored_directory")
+                            continue
+                        size = 0 if is_dir else child.stat(follow_symlinks=False).st_size
+                    except (OSError, PermissionError):
+                        _note_skip(state, path, "unreadable_entry")
+                        continue
+                    relative = str(path.relative_to(root))
+                    item = {
+                        "path": str(path),
+                        "relative": relative,
+                        "name": child.name,
+                        "type": "dir" if is_dir else "file",
+                        "bytes": int(size),
+                    }
+                    if is_dir:
+                        state["directories_seen"] += 1
+                        descend.append(path)
+                    else:
+                        state["files_seen"] += 1
+                    yield item
+                if halt_reason:
+                    stop(halt_reason)
+                    return
+                stack.extend(reversed(descend))
+        finally:
+            state["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+
+    return iterator(), state
+
+
+def _finish_walk(iterator, state):
+    """Close an early-stopped walk and return stable public scan metadata."""
+    close = getattr(iterator, "close", None)
+    if close:
+        close()
+    return {
+        "entries_scanned": state["entries_scanned"],
+        "files_seen": state["files_seen"],
+        "directories_seen": state["directories_seen"],
+        "skipped_entries": state["skipped_entries"],
+        "skipped_by_reason": dict(sorted(state["skipped_by_reason"].items())),
+        "skipped_examples": list(state["skipped_examples"]),
+        "elapsed_ms": state["elapsed_ms"],
+        "truncated": state["truncated"],
+        "truncation_reason": state["truncation_reason"],
+    }
+
+
+def workspace_inventory(
+    path=".", *, max_entries=DEFAULT_WALK_ENTRIES,
+    timeout_seconds=DEFAULT_WALK_SECONDS, top_n=15, include_hidden=False,
+    include_ignored=False, extra_roots="", bypass=False,
+):
+    """Summarize a guarded workspace without reading file contents."""
+    root = _resolve(path, extra_roots=extra_roots, bypass=bypass)
+    if not root.is_dir():
+        raise ValueError("inventory root is not a directory: %s" % root)
+    top_n = _bounded_int(top_n, 15, 1, 50)
+    iterator, state = _bounded_walk(
+        root,
+        include_hidden=include_hidden,
+        include_ignored=include_ignored,
+        max_entries=max_entries,
+        timeout_seconds=timeout_seconds,
+    )
+    total_bytes = 0
+    extension_stats = {}
+    area_stats = {}
+    manifests = []
+    largest = []
+    for item in iterator:
+        if item["type"] != "file":
+            continue
+        size = item["bytes"]
+        total_bytes += size
+        suffix = Path(item["name"]).suffix.lower() or "(none)"
+        ext = extension_stats.setdefault(suffix, {"extension": suffix, "files": 0, "bytes": 0})
+        ext["files"] += 1
+        ext["bytes"] += size
+        parts = Path(item["relative"]).parts
+        area_name = parts[0] if len(parts) > 1 else "."
+        area = area_stats.setdefault(area_name, {"path": area_name, "files": 0, "bytes": 0})
+        area["files"] += 1
+        area["bytes"] += size
+        rank = (size, item["relative"].casefold(), item["relative"])
+        if len(largest) < top_n:
+            heapq.heappush(largest, rank)
+        elif rank > largest[0]:
+            heapq.heapreplace(largest, rank)
+        lowered = item["name"].casefold()
+        if (
+            lowered in PROJECT_MANIFESTS
+            or lowered.endswith((".sln", ".xcodeproj"))
+        ) and len(manifests) < 100:
+            manifests.append(item["relative"])
+    scan = _finish_walk(iterator, state)
+    return {
+        "root": str(root),
+        "files": state["files_seen"],
+        "directories": state["directories_seen"],
+        "bytes": total_bytes,
+        "extensions": sorted(
+            extension_stats.values(),
+            key=lambda row: (-row["bytes"], -row["files"], row["extension"]),
+        )[:top_n],
+        "largest_files": [
+            {"relative": relative, "bytes": size}
+            for size, _folded, relative in sorted(largest, reverse=True)
+        ],
+        "top_areas": sorted(
+            area_stats.values(),
+            key=lambda row: (-row["bytes"], -row["files"], row["path"].casefold()),
+        )[:top_n],
+        "manifests": sorted(manifests, key=str.casefold),
+        **scan,
+    }
 
 
 def directory_tree(
@@ -159,6 +399,8 @@ def read_line_range(
 def text_search(
     query, *, root=".", glob="*", regex=False, case_sensitive=False,
     max_results=100, max_file_bytes=MAX_SEARCH_FILE_BYTES,
+    max_entries=DEFAULT_WALK_ENTRIES, timeout_seconds=DEFAULT_WALK_SECONDS,
+    include_hidden=False, include_ignored=False,
     extra_roots="", bypass=False,
 ):
     if not str(query or ""):
@@ -175,67 +417,84 @@ def text_search(
     matches = []
     files_scanned = 0
     files_skipped = 0
-    for base, dirs, files in os.walk(root_path):
-        dirs[:] = [
-            name for name in dirs
-            if name not in SKIP_DIRS and not _hidden(name)
-        ]
-        for name in files:
-            path = Path(base) / name
-            relative = str(path.relative_to(root_path))
-            if not (fnmatch.fnmatch(name, glob) or fnmatch.fnmatch(relative, glob)):
-                continue
-            if path.suffix.lower() not in TEXT_SUFFIXES:
-                files_skipped += 1
-                continue
-            try:
-                if path.is_symlink() or path.stat().st_size > size_limit:
+    iterator, state = _bounded_walk(
+        root_path,
+        include_hidden=include_hidden,
+        include_ignored=include_ignored,
+        max_entries=max_entries,
+        timeout_seconds=timeout_seconds,
+    )
+    result_limited = False
+    for item in iterator:
+        if item["type"] != "file":
+            continue
+        path = Path(item["path"])
+        name = item["name"]
+        relative = item["relative"]
+        if not (fnmatch.fnmatch(name, glob) or fnmatch.fnmatch(relative, glob)):
+            continue
+        if path.suffix.lower() not in TEXT_SUFFIXES or item["bytes"] > size_limit:
+            files_skipped += 1
+            continue
+        try:
+            with path.open("rb") as raw:
+                if b"\0" in raw.read(4096):
                     files_skipped += 1
                     continue
-                handle = path.open("r", encoding="utf-8", errors="replace")
-            except (OSError, PermissionError):
-                files_skipped += 1
-                continue
-            files_scanned += 1
-            with handle:
-                for number, line in enumerate(handle, 1):
-                    found = pattern.search(line)
-                    if not found:
-                        continue
-                    matches.append({
-                        "path": str(path),
-                        "relative": relative,
-                        "line": number,
-                        "column": found.start() + 1,
-                        "text": line.rstrip("\r\n")[:500],
-                    })
-                    if len(matches) >= limit:
-                        return {
-                            "root": str(root_path), "query": str(query),
-                            "glob": glob, "regex": bool(regex),
-                            "case_sensitive": bool(case_sensitive),
-                            "matches": matches, "files_scanned": files_scanned,
-                            "files_skipped": files_skipped, "truncated": True,
-                        }
+            handle = path.open("r", encoding="utf-8", errors="replace")
+        except (OSError, PermissionError):
+            files_skipped += 1
+            continue
+        files_scanned += 1
+        with handle:
+            for number, line in enumerate(handle, 1):
+                found = pattern.search(line)
+                if not found:
+                    continue
+                matches.append({
+                    "path": str(path),
+                    "relative": relative,
+                    "line": number,
+                    "column": found.start() + 1,
+                    "text": line.rstrip("\r\n")[:500],
+                })
+                if len(matches) >= limit:
+                    result_limited = True
+                    break
+        if result_limited:
+            break
+    scan = _finish_walk(iterator, state)
+    if result_limited:
+        scan["truncated"] = True
+        scan["truncation_reason"] = "max_results"
     return {
         "root": str(root_path), "query": str(query), "glob": glob,
         "regex": bool(regex), "case_sensitive": bool(case_sensitive),
         "matches": matches, "files_scanned": files_scanned,
-        "files_skipped": files_skipped, "truncated": False,
+        "files_skipped": files_skipped, **scan,
     }
 
 
 def script_search(
-    query="*", *, root=".", max_results=100, extra_roots="", bypass=False,
+    query="*", *, root=".", max_results=100,
+    max_entries=DEFAULT_WALK_ENTRIES, timeout_seconds=DEFAULT_WALK_SECONDS,
+    include_hidden=False, include_ignored=False, extra_roots="", bypass=False,
 ):
     limit = _bounded_int(max_results, 100, 1, MAX_SEARCH_RESULTS)
-    tree = directory_tree(
-        root, depth=8, max_entries=MAX_TREE_ENTRIES, include_hidden=False,
-        extra_roots=extra_roots, bypass=bypass,
+    root_path = _resolve(root, extra_roots=extra_roots, bypass=bypass)
+    if not root_path.is_dir():
+        raise ValueError("script search root is not a directory: %s" % root_path)
+    iterator, state = _bounded_walk(
+        root_path,
+        include_hidden=include_hidden,
+        include_ignored=include_ignored,
+        max_entries=max_entries,
+        timeout_seconds=timeout_seconds,
     )
     needle = str(query or "*").lower()
     results = []
-    for item in tree["entries"]:
+    result_limited = False
+    for item in iterator:
         suffix = Path(item["name"]).suffix.lower()
         if item["type"] != "file" or suffix not in SCRIPT_EXTENSIONS:
             continue
@@ -243,10 +502,14 @@ def script_search(
             continue
         results.append({**item, "runner": SCRIPT_EXTENSIONS[suffix]})
         if len(results) >= limit:
+            result_limited = True
             break
+    scan = _finish_walk(iterator, state)
+    if result_limited:
+        scan["truncated"] = True
+        scan["truncation_reason"] = "max_results"
     return {
-        "root": tree["root"], "query": query, "results": results,
-        "truncated": len(results) >= limit or tree["truncated"],
+        "root": str(root_path), "query": query, "results": results, **scan,
     }
 
 

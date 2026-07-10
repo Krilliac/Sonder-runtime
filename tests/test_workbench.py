@@ -41,6 +41,30 @@ def test_text_search_and_line_range_return_evidence(monkeypatch, tmp_path):
     assert [row["text"] for row in selected["lines"]] == ["TODO: fix this", "three"]
 
 
+def test_text_search_has_a_real_traversal_budget(monkeypatch, tmp_path):
+    _guard_root(monkeypatch, tmp_path)
+    for index in range(5):
+        (tmp_path / ("%02d.txt" % index)).write_text("no match\n", encoding="utf-8")
+
+    result = workbench.text_search("missing", root=".", max_entries=2)
+
+    assert result["truncated"] is True
+    assert result["truncation_reason"] == "max_entries"
+    assert result["entries_scanned"] == 2
+
+
+def test_text_search_skips_hidden_files_unless_explicit(monkeypatch, tmp_path):
+    _guard_root(monkeypatch, tmp_path)
+    (tmp_path / ".env").write_text("TOKEN=private-marker\n", encoding="utf-8")
+
+    safe = workbench.text_search("private-marker", root=".")
+    explicit = workbench.text_search("private-marker", root=".", include_hidden=True)
+
+    assert safe["matches"] == []
+    assert safe["skipped_by_reason"]["hidden"] == 1
+    assert explicit["matches"][0]["relative"] == ".env"
+
+
 def test_script_search_identifies_runners(monkeypatch, tmp_path):
     _guard_root(monkeypatch, tmp_path)
     (tmp_path / "tools").mkdir()
@@ -51,6 +75,91 @@ def test_script_search_identifies_runners(monkeypatch, tmp_path):
 
     runners = {row["name"]: row["runner"] for row in result["results"]}
     assert runners == {"build.ps1": "powershell", "check.py": "python"}
+
+
+def test_script_search_is_not_limited_by_tree_render_budget(monkeypatch, tmp_path):
+    _guard_root(monkeypatch, tmp_path)
+    for index in range(510):
+        (tmp_path / ("file-%03d.txt" % index)).write_text("x", encoding="utf-8")
+    (tmp_path / "z-last.py").write_text("print('found')\n", encoding="utf-8")
+
+    result = workbench.script_search("z-last", root=".", max_entries=1000)
+
+    assert [row["name"] for row in result["results"]] == ["z-last.py"]
+    assert result["entries_scanned"] == 511
+    assert result["truncated"] is False
+
+
+def test_workspace_inventory_is_bounded_and_actionable(monkeypatch, tmp_path):
+    _guard_root(monkeypatch, tmp_path)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "large.dat").write_bytes(b"x" * 10_000)
+    (tmp_path / "ephemeral").mkdir()
+    (tmp_path / "ephemeral" / "generated.pdb").write_bytes(b"x" * 20_000)
+
+    result = workbench.workspace_inventory(".", top_n=10)
+    explicit = workbench.workspace_inventory(".", top_n=10, include_ignored=True)
+
+    assert result["files"] == 2
+    assert result["manifests"] == ["pyproject.toml"]
+    assert result["skipped_by_reason"]["ignored_directory"] == 2
+    assert result["bytes"] < explicit["bytes"]
+    assert result["largest_files"][0]["relative"] == "pyproject.toml"
+    assert result["truncated"] is False
+
+
+def test_workspace_budget_bounds_directory_enumeration_itself(monkeypatch, tmp_path):
+    _guard_root(monkeypatch, tmp_path)
+    for index in range(50):
+        (tmp_path / ("file-%03d.txt" % index)).write_text("x", encoding="utf-8")
+    real_scandir = os.scandir
+    consumed = {"count": 0}
+
+    class CountingScandir:
+        def __init__(self, path):
+            self._inner = real_scandir(path)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._inner.close()
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            item = next(self._inner)
+            consumed["count"] += 1
+            return item
+
+    monkeypatch.setattr(workbench.os, "scandir", CountingScandir)
+
+    result = workbench.workspace_inventory(".", max_entries=3)
+
+    assert result["entries_scanned"] == 3
+    assert consumed["count"] == 3
+    assert result["truncation_reason"] == "max_entries"
+
+
+def test_workspace_inventory_never_follows_symlinks(monkeypatch, tmp_path):
+    _guard_root(monkeypatch, tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret\n", encoding="utf-8")
+    link = tmp_path / "linked"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except (NotImplementedError, OSError):
+        pytest.skip("symlink creation is unavailable")
+
+    result = workbench.workspace_inventory(".")
+
+    assert result["skipped_by_reason"]["symlink"] == 1
+    assert not any(row["relative"].startswith("linked") for row in result["largest_files"])
 
 
 def test_program_search_finds_path_executable(monkeypatch, tmp_path):

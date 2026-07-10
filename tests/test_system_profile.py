@@ -12,7 +12,28 @@ def test_ensure_profile_creates_default(monkeypatch, tmp_path):
     monkeypatch.delenv("TRILOBITE_SYSTEM_PROFILE", raising=False)
     text, path = system_profile.ensure_profile()
     assert "standing instructions" in text.lower()
+    assert "workspace_inventory" in text
+    assert "redacted memory privacy" in text
     assert path.endswith("system_profile.md")
+
+
+def test_system_prompt_initializes_missing_profile_on_first_use(monkeypatch, tmp_path):
+    monkeypatch.setattr(system_profile, "workspace_root", lambda: str(tmp_path))
+    monkeypatch.delenv("TRILOBITE_SYSTEM_PROFILE", raising=False)
+
+    prompt = system_profile.system_prompt()
+
+    assert prompt.startswith("Standing instructions")
+    assert (tmp_path / "system_profile.md").is_file()
+
+
+def test_system_prompt_preserves_intentionally_empty_profile(monkeypatch, tmp_path):
+    monkeypatch.setattr(system_profile, "workspace_root", lambda: str(tmp_path))
+    monkeypatch.delenv("TRILOBITE_SYSTEM_PROFILE", raising=False)
+    system_profile.write_profile("")
+
+    assert system_profile.system_prompt() == ""
+    assert system_profile.read_profile() == ""
 
 
 def test_append_profile_preserves_existing(monkeypatch, tmp_path):

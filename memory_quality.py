@@ -2,15 +2,11 @@
 import collections
 import re
 
+import contribute
 import memory_store
 
 LONG_LESSON_CHARS = 220
 
-_PATH_OR_SECRET = re.compile(
-    r"([A-Za-z]:\\|/home/|/Users/|\\Users\\|\.env\b|"
-    r"\b(api[_ -]?key|secret|password|bearer\s+token)\b)",
-    re.I,
-)
 _VAGUE_MARKERS = re.compile(
     r"\b(use appropriate|be careful|handle errors|write clean|ensure proper|"
     r"best practices|make sure|properly)\b",
@@ -115,7 +111,20 @@ def audit(conn):
     ).fetchall()]
     long_rows = [r for r in lessons if int(r.get("n") or 0) > LONG_LESSON_CHARS]
     no_embedding = [r for r in lessons if not r.get("has_embedding")]
-    path_or_secret = [r for r in lessons if _PATH_OR_SECRET.search(r.get("text") or "")]
+    path_or_secret = []
+    for row in lessons:
+        reasons = contribute.private_reasons(row.get("text") or "")
+        if not reasons:
+            continue
+        path_or_secret.append({
+            "id": row["id"],
+            "source_interaction": row.get("source_interaction"),
+            "ts": row.get("ts"),
+            "n": row.get("n", 0),
+            "has_embedding": row.get("has_embedding", False),
+            "privacy_reasons": reasons,
+            "privacy_preview": contribute.privacy_preview(row.get("text") or ""),
+        })
     vague = [
         r for r in lessons
         if _VAGUE_MARKERS.search(r.get("text") or "") and not _has_anchor(r.get("text") or "")
@@ -182,6 +191,15 @@ def format_audit(report, sample_limit=5):
                 entry["keeper_id"], len(entry["prune_ids"]),
                 _truncate(entry["keeper_text"]),
             ))
+    private_rows = report.get("samples", {}).get("path_or_secret", [])[:sample_limit]
+    if private_rows:
+        lines.append("  privacy review samples (redacted):")
+        for row in private_rows:
+            lines.append("    %s [%s]: %s" % (
+                row["id"], ",".join(row.get("privacy_reasons") or []),
+                row.get("privacy_preview") or "<empty>",
+            ))
+        lines.append("  use memory_privacy_repair with explicit lesson IDs; dry-run first.")
     return "\n".join(lines)
 
 
@@ -189,3 +207,78 @@ def repair_exact_duplicates(conn, apply=False):
     plan = exact_duplicate_plan(conn)
     deleted = 0 if not apply else apply_exact_duplicate_plan(conn, plan)
     return plan, deleted
+
+
+def privacy_findings(conn, limit=20):
+    """Return bounded, redacted findings; never return the raw lesson text."""
+    limit = max(1, min(int(limit or 20), 100))
+    rows = conn.execute(
+        "SELECT id, text, source_interaction, ts FROM lessons "
+        "ORDER BY ts ASC, rowid ASC"
+    ).fetchall()
+    findings = []
+    for raw in rows:
+        row = dict(raw)
+        reasons = contribute.private_reasons(row.get("text") or "")
+        if not reasons:
+            continue
+        findings.append({
+            "id": row["id"],
+            "source_interaction": row.get("source_interaction"),
+            "ts": row.get("ts"),
+            "reasons": reasons,
+            "preview": contribute.privacy_preview(row.get("text") or ""),
+        })
+        if len(findings) >= limit:
+            break
+    return findings
+
+
+def privacy_cleanup_plan(conn, lesson_ids):
+    """Classify explicit IDs; only currently flagged lessons are eligible."""
+    requested = []
+    seen = set()
+    for value in lesson_ids or []:
+        lesson_id = str(value or "").strip()
+        if lesson_id and lesson_id not in seen:
+            requested.append(lesson_id)
+            seen.add(lesson_id)
+    if not requested:
+        return {"eligible": [], "missing": [], "not_flagged": []}
+    rows = {}
+    for lesson_id in requested:
+        row = conn.execute(
+            "SELECT id, text FROM lessons WHERE id=?", (lesson_id,)
+        ).fetchone()
+        if row:
+            rows[lesson_id] = dict(row)
+    eligible = []
+    missing = []
+    not_flagged = []
+    for lesson_id in requested:
+        row = rows.get(lesson_id)
+        if row is None:
+            missing.append(lesson_id)
+            continue
+        reasons = contribute.private_reasons(row.get("text") or "")
+        if not reasons:
+            not_flagged.append(lesson_id)
+            continue
+        eligible.append({
+            "id": lesson_id,
+            "reasons": reasons,
+            "preview": contribute.privacy_preview(row.get("text") or ""),
+        })
+    return {
+        "eligible": eligible,
+        "missing": missing,
+        "not_flagged": not_flagged,
+    }
+
+
+def apply_privacy_cleanup(conn, plan, delete_fn=memory_store.delete_lesson):
+    deleted = 0
+    for row in plan.get("eligible", []):
+        if delete_fn(conn, row["id"]):
+            deleted += 1
+    return deleted

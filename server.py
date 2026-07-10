@@ -274,10 +274,35 @@ def with_footer(text, interaction_id):
     return "%s%s%s]" % (text, FOOTER_PREFIX, interaction_id)
 
 
-def _append_activity(text):
-    current = activity_tracker.current()
+def _strip_activity_block(text):
+    """Remove the final observable-activity block while preserving other text."""
+    value = str(text or "")
+    marker = "=== ACTIVITY (observable work) ==="
+    end_marker = "=== END ACTIVITY ==="
+    start = value.rfind(marker)
+    if start < 0:
+        return value
+    end = value.find(end_marker, start)
+    if end < 0:
+        return value
+    end += len(end_marker)
+    before = value[:start].rstrip()
+    after = value[end:].lstrip()
+    return "\n\n".join(part for part in (before, after) if part)
+
+
+def _append_activity(text, response=None, replace=False):
+    current = response if response is not None else activity_tracker.current()
+    if replace:
+        text = _strip_activity_block(text)
     activity = activity_tracker.format_response(current) if current else ""
     if activity and not activity.startswith("activity:") and "=== ACTIVITY (observable work) ===" not in (text or ""):
+        footer = _FOOTER_RE.search(text or "")
+        if footer:
+            before = (text or "")[:footer.start()].rstrip()
+            return "%s\n\n%s\n\n%s" % (
+                before, activity, (text or "")[footer.start():],
+            )
         return "%s\n\n%s" % (text, activity)
     return text
 
@@ -660,6 +685,8 @@ def control_command(prompt: str, history=None, session="", project=""):
             activity_tracker.format_end_report(latest),
             activity_tracker.format_transcript(latest),
         )
+    if cmd in ("/inventory", "/workspace"):
+        return workspace_inventory(path=arg.strip() or ".")
     if cmd in ("/tree", "/folders"):
         return directory_tree(path=arg.strip() or ".")
     if cmd in ("/search", "/grep"):
@@ -714,6 +741,30 @@ def control_command(prompt: str, history=None, session="", project=""):
         return memory_quality_report()
     if cmd == "/qualityfix":
         return memory_quality_repair(apply=(arg.strip().lower() == "apply"))
+    if cmd in ("/privacy", "/privacyreview"):
+        try:
+            return memory_privacy_review(sample_limit=int(arg.strip() or 20))
+        except ValueError:
+            return "usage: /privacy [sample-limit]"
+    if cmd == "/privacyfix":
+        repair_arg = arg.strip()
+        apply = False
+        if repair_arg.lower().startswith("apply "):
+            apply = True
+            repair_arg = repair_arg[6:].strip()
+        if not repair_arg:
+            return "usage: /privacyfix [apply] <lesson-id[,lesson-id...]>"
+        return memory_privacy_repair(lesson_ids_json=repair_arg, apply=apply)
+    if cmd in ("/embeddings", "/embedfix"):
+        embed_parts = arg.strip().split()
+        apply = bool(embed_parts and embed_parts[0].lower() == "apply")
+        if apply:
+            embed_parts = embed_parts[1:]
+        try:
+            limit = int(embed_parts[0]) if embed_parts else 25
+        except ValueError:
+            return "usage: /embeddings [apply] [limit]"
+        return memory_embedding_backfill(limit=limit, apply=apply)
     if cmd in ("/emotion", "/emotions", "/vectors", "/mood"):
         return emotion_command(arg)
     if cmd in ("/prefer", "/preference", "/preferences"):
@@ -1132,8 +1183,8 @@ def trilobite(
         model=tier or "trilobite",
         session=session,
         project=project,
-    ):
-        return _trilobite_impl(
+    ) as response:
+        result = _trilobite_impl(
             prompt,
             system=system,
             temperature=temperature,
@@ -1147,6 +1198,7 @@ def trilobite(
             project=project,
             tier=tier,
         )
+    return _append_activity(result, response=response, replace=True)
 
 
 def _answer_with_history_impl(
@@ -1246,8 +1298,8 @@ def answer_with_history(
         model=tier or "trilobite",
         session=session,
         project=project,
-    ):
-        return _answer_with_history_impl(
+    ) as response:
+        result = _answer_with_history_impl(
             prompt,
             history,
             trace=trace,
@@ -1257,6 +1309,7 @@ def answer_with_history(
             session=session,
             project=project,
         )
+    return _append_activity(result, response=response, replace=True)
 
 
 @mcp.tool()
@@ -2294,6 +2347,149 @@ def memory_quality_repair(apply: bool = False) -> str:
     return "\n".join(lines)
 
 
+def _parse_lesson_ids(value):
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            values = []
+        elif text.startswith("["):
+            values = json.loads(text)
+        else:
+            values = [part for part in re.split(r"[\s,]+", text) if part]
+    else:
+        values = value
+    if not isinstance(values, list):
+        raise ValueError("lesson IDs must be a JSON list or comma-separated text")
+    if len(values) > 50:
+        raise ValueError("at most 50 lesson IDs can be reviewed at once")
+    out = []
+    for raw in values:
+        lesson_id = str(raw or "").strip()
+        if not lesson_id or len(lesson_id) > 128 or any(ord(ch) < 32 for ch in lesson_id):
+            raise ValueError("invalid lesson ID")
+        if lesson_id not in out:
+            out.append(lesson_id)
+    return out
+
+
+@mcp.tool()
+def memory_privacy_review(sample_limit: int = 20) -> str:
+    """List redacted path/credential-like lessons without revealing raw values."""
+    _maybe_live_reload()
+    sample_limit = _safe_limit(sample_limit, 20, 100)
+    conn = _open_db()
+    try:
+        findings = memory_quality.privacy_findings(conn, limit=sample_limit)
+        total = memory_quality.audit(conn).get("path_or_secret_like", 0)
+    finally:
+        conn.close()
+    lines = [
+        "memory privacy review",
+        "  flagged: %d | showing: %d" % (total, len(findings)),
+        "  previews are redacted; no raw credential/path values are shown.",
+    ]
+    for row in findings:
+        lines.append("  %s [%s] %s" % (
+            row["id"], ",".join(row.get("reasons") or []),
+            row.get("preview") or "<empty>",
+        ))
+    if not findings:
+        lines.append("  (no privacy-like lessons found)")
+    else:
+        lines.append(
+            "  cleanup: memory_privacy_repair(lesson_ids_json=[...], apply=False), then apply=True."
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def memory_privacy_repair(lesson_ids_json: str = "[]", apply: bool = False) -> str:
+    """Delete only explicitly selected, currently privacy-flagged lessons; dry-run by default."""
+    _maybe_live_reload()
+    try:
+        lesson_ids = _parse_lesson_ids(lesson_ids_json)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        return "ERROR: %s" % exc
+    if not lesson_ids:
+        return "ERROR: provide one or more lesson IDs from memory_privacy_review."
+    conn = _open_db()
+    try:
+        plan = memory_quality.privacy_cleanup_plan(conn, lesson_ids)
+        deleted = memory_quality.apply_privacy_cleanup(conn, plan) if apply else 0
+    finally:
+        conn.close()
+    lines = [
+        "memory privacy repair",
+        "  mode: %s" % ("apply" if apply else "dry-run"),
+        "  eligible flagged lessons: %d" % len(plan["eligible"]),
+        "  not flagged: %d | missing: %d | deleted: %d" % (
+            len(plan["not_flagged"]), len(plan["missing"]), deleted,
+        ),
+    ]
+    for row in plan["eligible"]:
+        lines.append("  %s [%s] %s" % (
+            row["id"], ",".join(row.get("reasons") or []),
+            row.get("preview") or "<empty>",
+        ))
+    if plan["not_flagged"]:
+        lines.append("  refused unflagged IDs: %s" % ", ".join(plan["not_flagged"]))
+    if plan["missing"]:
+        lines.append("  missing IDs: %s" % ", ".join(plan["missing"]))
+    if not apply and plan["eligible"]:
+        lines.append("  reviewed only; rerun the same explicit IDs with apply=True to delete.")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def memory_embedding_backfill(limit: int = 25, apply: bool = False) -> str:
+    """Backfill missing lesson vectors with the configured local embedding model."""
+    _maybe_live_reload()
+    if _is_cloud_model_name(embeddings.EMBED_MODEL):
+        return (
+            "ERROR: embedding backfill requires a local model; configured model "
+            "%r looks cloud-hosted." % embeddings.EMBED_MODEL
+        )
+    limit = _safe_limit(limit, 25, 100)
+    conn = _open_db()
+    updated = 0
+    failed = []
+    try:
+        rows = memory_store.lessons_without_embeddings(conn, limit=limit)
+        if apply:
+            for row in rows:
+                try:
+                    vector = embeddings.embed(row.get("text") or "", timeout=30)
+                    if not isinstance(vector, (list, tuple)) or not vector:
+                        failed.append(row["id"])
+                        continue
+                    blob = embeddings.to_blob(vector)
+                    if memory_store.set_lesson_embedding(conn, row["id"], blob):
+                        updated += 1
+                except (OSError, TypeError, ValueError, OverflowError):
+                    failed.append(row["id"])
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM lessons WHERE embedding IS NULL"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    lines = [
+        "memory embedding backfill",
+        "  mode: %s | local model: %s" % (
+            "apply" if apply else "dry-run", embeddings.EMBED_MODEL,
+        ),
+        "  selected: %d | updated: %d | failed: %d | remaining: %d" % (
+            len(rows), updated, len(failed), remaining,
+        ),
+    ]
+    if rows:
+        lines.append("  lesson IDs: %s" % ", ".join(row["id"] for row in rows))
+    if failed:
+        lines.append("  failed IDs: %s" % ", ".join(failed))
+    if not apply and rows:
+        lines.append("  dry-run only; rerun with apply=True to call the local embedding model.")
+    return "\n".join(lines)
+
+
 @mcp.tool()
 def learn_tiers() -> str:
     """Show which tiers currently feed the learning loop."""
@@ -2382,7 +2578,14 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
             "privacy",
             "high",
             "Some lessons look like they may contain paths or secrets.",
-            "Review /quality output and remove or rewrite those lessons before contributing data.",
+            "Run /privacy for redacted IDs, then dry-run memory_privacy_repair before any explicit cleanup.",
+        )
+    if quality.get("no_embedding", 0):
+        add(
+            "memory",
+            "medium",
+            "%d lessons are missing semantic embeddings." % quality["no_embedding"],
+            "Run memory_embedding_backfill(apply=False), then backfill a bounded batch with apply=True.",
         )
     if quality.get("vague_without_anchor", 0):
         add(
@@ -2446,6 +2649,7 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
         "memory_quality": {
             "duplicates": quality.get("exact_duplicate_prunable", 0),
             "vague": quality.get("vague_without_anchor", 0),
+            "no_embedding": quality.get("no_embedding", 0),
             "path_or_secret_like": quality.get("path_or_secret_like", 0),
             "fts_issues": quality.get("missing_fts", 0) + quality.get("orphan_fts", 0),
         },
@@ -2462,11 +2666,12 @@ def format_improvement_report(report: dict) -> str:
             report.get("outcomes", 0),
             report.get("acceptance_percent", 0),
         ),
-        "  memory: %s lessons, %s facts, duplicate rows=%s, vague=%s" % (
+        "  memory: %s lessons, %s facts, duplicate rows=%s, vague=%s, missing embeddings=%s" % (
             report.get("lessons", 0),
             report.get("facts", 0),
             report.get("memory_quality", {}).get("duplicates", 0),
             report.get("memory_quality", {}).get("vague", 0),
+            report.get("memory_quality", {}).get("no_embedding", 0),
         ),
         "  context: %s | hosted/cloud: %s" % (
             report.get("context_status", "unknown"),
@@ -3207,6 +3412,87 @@ def _format_run_result(title: str, data: dict) -> str:
 
 
 @mcp.tool()
+def workspace_inventory(
+    path: str = ".",
+    max_entries: int = 20000,
+    timeout_seconds: float = 10.0,
+    top_n: int = 15,
+    include_hidden: bool = False,
+    include_ignored: bool = False,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Summarize a guarded workspace with explicit traversal budgets."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "path": path, "max_entries": max_entries,
+        "timeout_seconds": timeout_seconds, "top_n": top_n,
+        "include_hidden": include_hidden, "include_ignored": include_ignored,
+    }
+    try:
+        data = workbench.workspace_inventory(
+            path,
+            max_entries=max_entries,
+            timeout_seconds=timeout_seconds,
+            top_n=top_n,
+            include_hidden=include_hidden,
+            include_ignored=include_ignored,
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "workspace_inventory", args, ok=False, started=started,
+            summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    lines = [
+        "workspace inventory: %s" % data["root"],
+        "  files: %d | directories: %d | bytes: %d" % (
+            data["files"], data["directories"], data["bytes"],
+        ),
+        "  scanned: %d entries in %dms | skipped: %d" % (
+            data["entries_scanned"], data["elapsed_ms"], data["skipped_entries"],
+        ),
+    ]
+    if data["truncated"]:
+        lines.append("  truncated: %s" % data["truncation_reason"])
+    if data["skipped_by_reason"]:
+        lines.append("  skipped reasons: %s" % ", ".join(
+            "%s=%s" % item for item in data["skipped_by_reason"].items()
+        ))
+    if data["manifests"]:
+        lines.append("manifests:")
+        lines.extend("  %s" % value for value in data["manifests"])
+    if data["extensions"]:
+        lines.append("top extensions:")
+        lines.extend(
+            "  %(extension)s  %(files)d file(s)  %(bytes)d bytes" % row
+            for row in data["extensions"]
+        )
+    if data["largest_files"]:
+        lines.append("largest files:")
+        lines.extend(
+            "  %(bytes)d  %(relative)s" % row for row in data["largest_files"]
+        )
+    if data["top_areas"]:
+        lines.append("top areas:")
+        lines.extend(
+            "  %(bytes)d bytes  %(files)d file(s)  %(path)s" % row
+            for row in data["top_areas"]
+        )
+    output = "\n".join(lines)
+    _record_direct_tool(
+        "workspace_inventory", args, ok=True, started=started,
+        summary="%d files, %d bytes" % (data["files"], data["bytes"]),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
 def directory_tree(
     path: str = ".",
     depth: int = 2,
@@ -3315,6 +3601,10 @@ def text_search(
     regex: bool = False,
     case_sensitive: bool = False,
     max_results: int = 100,
+    max_entries: int = 20000,
+    timeout_seconds: float = 10.0,
+    include_hidden: bool = False,
+    include_ignored: bool = False,
     token: str = "",
     approval: str = "",
     extra_roots: str = "",
@@ -3322,11 +3612,16 @@ def text_search(
     """Search text inside guarded workspace files with line evidence."""
     _maybe_live_reload()
     started = time.time()
-    args = {"query": query, "root": root, "glob": glob, "regex": regex}
+    args = {
+        "query": query, "root": root, "glob": glob, "regex": regex,
+        "max_entries": max_entries, "timeout_seconds": timeout_seconds,
+    }
     try:
         data = workbench.text_search(
             query, root=root, glob=glob, regex=regex,
             case_sensitive=case_sensitive, max_results=max_results,
+            max_entries=max_entries, timeout_seconds=timeout_seconds,
+            include_hidden=include_hidden, include_ignored=include_ignored,
             extra_roots=extra_roots, bypass=_file_bypass_allowed(token, approval),
         )
     except Exception as exc:
@@ -3343,7 +3638,7 @@ def text_search(
     if not data["matches"]:
         lines.append("  (no matches)")
     if data["truncated"]:
-        lines.append("  ... results truncated")
+        lines.append("  ... truncated: %s" % (data.get("truncation_reason") or "limit"))
     output = "\n".join(lines)
     _record_direct_tool(
         "text_search", args, ok=True, started=started,
@@ -3357,6 +3652,10 @@ def script_search(
     query: str = "*",
     root: str = ".",
     max_results: int = 100,
+    max_entries: int = 20000,
+    timeout_seconds: float = 10.0,
+    include_hidden: bool = False,
+    include_ignored: bool = False,
     token: str = "",
     approval: str = "",
     extra_roots: str = "",
@@ -3364,10 +3663,15 @@ def script_search(
     """Find runnable scripts under guarded roots and identify their runner."""
     _maybe_live_reload()
     started = time.time()
-    args = {"query": query, "root": root}
+    args = {
+        "query": query, "root": root, "max_entries": max_entries,
+        "timeout_seconds": timeout_seconds,
+    }
     try:
         data = workbench.script_search(
             query, root=root, max_results=max_results, extra_roots=extra_roots,
+            max_entries=max_entries, timeout_seconds=timeout_seconds,
+            include_hidden=include_hidden, include_ignored=include_ignored,
             bypass=_file_bypass_allowed(token, approval),
         )
     except Exception as exc:
@@ -3377,6 +3681,8 @@ def script_search(
     lines.extend("  %(runner)s  %(relative)s" % row for row in data["results"])
     if not data["results"]:
         lines.append("  (no scripts found)")
+    if data["truncated"]:
+        lines.append("  ... truncated: %s" % (data.get("truncation_reason") or "limit"))
     output = "\n".join(lines)
     _record_direct_tool(
         "script_search", args, ok=True, started=started,
@@ -4128,6 +4434,19 @@ def _loop_dispatch(action):
         return _loop_text_result("memory_quality_repair", memory_quality_repair(
             apply=action.get("apply", False),
         ))
+    if action_type == "memory_privacy_review":
+        return _loop_text_result("memory_privacy_review", memory_privacy_review(
+            sample_limit=action.get("sample_limit", 20),
+        ))
+    if action_type == "memory_privacy_repair":
+        return _loop_text_result("memory_privacy_repair", memory_privacy_repair(
+            lesson_ids_json=action.get("lesson_ids", action.get("lesson_ids_json", [])),
+            apply=action.get("apply", False),
+        ))
+    if action_type == "memory_embedding_backfill":
+        return _loop_text_result("memory_embedding_backfill", memory_embedding_backfill(
+            limit=action.get("limit", 25), apply=action.get("apply", False),
+        ))
     if action_type in ("improvement_report", "system_improvement_report"):
         return _loop_text_result("improvement_report", system_improvement_report(
             session=action.get("session", ""),
@@ -4153,6 +4472,18 @@ def _loop_dispatch(action):
             max_steps=action.get("max_steps", 12),
             allow_web=action.get("allow_web", True),
             project=action.get("project", ""),
+        ))
+    if action_type == "workspace_inventory":
+        return _loop_text_result("workspace_inventory", workspace_inventory(
+            path=action.get("path", action.get("root", ".")),
+            max_entries=action.get("max_entries", 20000),
+            timeout_seconds=action.get("timeout_seconds", 10.0),
+            top_n=action.get("top_n", 15),
+            include_hidden=action.get("include_hidden", False),
+            include_ignored=action.get("include_ignored", False),
+            token=action.get("token", ""),
+            approval=action.get("approval", ""),
+            extra_roots=action.get("extra_roots", ""),
         ))
     if action_type == "directory_tree":
         return _loop_text_result("directory_tree", directory_tree(
@@ -4189,6 +4520,10 @@ def _loop_dispatch(action):
             regex=action.get("regex", False),
             case_sensitive=action.get("case_sensitive", False),
             max_results=action.get("max_results", 100),
+            max_entries=action.get("max_entries", 20000),
+            timeout_seconds=action.get("timeout_seconds", 10.0),
+            include_hidden=action.get("include_hidden", False),
+            include_ignored=action.get("include_ignored", False),
             token=action.get("token", ""),
             approval=action.get("approval", ""),
             extra_roots=action.get("extra_roots", ""),
@@ -4198,6 +4533,10 @@ def _loop_dispatch(action):
             query=action.get("query", "*"),
             root=action.get("root", "."),
             max_results=action.get("max_results", 100),
+            max_entries=action.get("max_entries", 20000),
+            timeout_seconds=action.get("timeout_seconds", 10.0),
+            include_hidden=action.get("include_hidden", False),
+            include_ignored=action.get("include_ignored", False),
             token=action.get("token", ""),
             approval=action.get("approval", ""),
             extra_roots=action.get("extra_roots", ""),
@@ -4381,7 +4720,7 @@ def _loop_dispatch(action):
         "ok": False,
         "type": action_type or "(unknown)",
         "summary": "unknown action type",
-        "output": "Valid action types: code, project, artifact_generate, game_reference_suite, game_generate_and_test, game_generation_campaign, offload, trilobite, master_orchestrate, master_status, file_policy, file_find, file_read, file_write, file_edit, file_delete, status, diagnostics, context_health, memory_quality_report, memory_quality_repair, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, unload, sleep.",
+        "output": "Valid action types: code, project, artifact_generate, game_reference_suite, game_generate_and_test, game_generation_campaign, offload, trilobite, master_orchestrate, master_status, file_policy, workspace_inventory, directory_tree, text_search, script_search, program_search, workspace_run, script_run, image_inspect, file_find, file_read, file_write, file_edit, file_delete, status, diagnostics, context_health, memory_quality_report, memory_quality_repair, memory_privacy_review, memory_privacy_repair, memory_embedding_backfill, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, unload, sleep.",
     }
 
 
@@ -4408,6 +4747,7 @@ def loop(
       - {"type":"trilobite","prompt":"...","context_size":"1m"}
       - {"type":"master_orchestrate","task":"...","mode":"inline|delegate","agents":3}
       - {"type":"master_status"}
+      - {"type":"workspace_inventory","path":".","max_entries":20000,"timeout_seconds":10}
       - {"type":"file_find","query":"*.py","root":"."}
       - {"type":"file_read","path":"README.md"}
       - {"type":"file_write","path":"notes.txt","content":"...","mode":"create|overwrite|append"}
@@ -4416,6 +4756,8 @@ def loop(
       - {"type":"web_search","query":"...","limit":5}
       - {"type":"web_fetch","url":"https://...","max_chars":8000}
       - {"type":"memory_search","query":"..."}
+      - {"type":"memory_privacy_review","sample_limit":20}
+      - {"type":"memory_embedding_backfill","limit":25,"apply":false}
       - {"type":"emotion_update","vectors":{"warmth":0.5,"brevity":0.2}}
       - {"type":"emotion_tune","text":"be warmer but more concise"}
       - {"type":"learn_preference","text":"User prefers concise status updates."}
@@ -5029,7 +5371,7 @@ def tool_manifest() -> str:
         "trilobite": "Ask the local self-improving coding model.",
         "offload": "Route a self-contained task to a configured local/cloud tier.",
         "web_search/web_fetch": "Search or fetch public web pages.",
-        "directory_tree/directory_create/text_search/file_read_range": "Guarded folder discovery, creation, text search, and bounded line-range reads.",
+        "workspace_inventory/directory_tree/directory_create/text_search/file_read_range": "Budgeted guarded workspace inventory, folder discovery, creation, text search, and bounded line-range reads.",
         "file_policy/file_find/file_read/file_write/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete with approval bypass support.",
         "program_search/script_search/workspace_run/script_run/image_inspect": "Discover installed programs and workspace scripts, run bounded argv-only processes, and inspect image metadata.",
         "task_create/task_list/task_update/task_show/checklist_create/checklist_update/checklist_show": "Visible todo and ordered checklist state shared by console, app, agents, and MCP.",
@@ -5050,6 +5392,8 @@ def tool_manifest() -> str:
         "learn_preference/preferences_status": "Read or teach durable user behavior/workflow preferences.",
         "memory_search/memory_export/session_export": "Inspect local memory.",
         "memory_quality_report/memory_quality_repair": "Audit and dry-run/prune exact duplicate lessons.",
+        "memory_privacy_review/memory_privacy_repair": "Review redacted privacy findings and explicitly dry-run/remove selected flagged lessons.",
+        "memory_embedding_backfill": "Dry-run or backfill missing semantic vectors with the local embedding model.",
         "system_improvement_report": "Suggest next improvements from learning, memory, context, and deployment signals.",
         "context_policy_status/set_context_size": "Show or select requested virtual context up to 1m while clamping Ollama native num_ctx.",
         "learn_from_example/apply_learned": "Teach from examples and preview lesson application.",
@@ -5072,6 +5416,7 @@ AGENT_TOOL_HELP = """Available tools:
 - web_search: {"query": "...", "limit": 5}
 - web_fetch: {"url": "https://...", "max_chars": 8000}
 - file_policy: {}
+- workspace_inventory: {"path": ".", "max_entries": 20000, "timeout_seconds": 10, "top_n": 15}
 - directory_tree: {"path": ".", "depth": 2, "max_entries": 200}
 - directory_create: {"path": "output/reports", "parents": true}
 - file_find: {"query": "*.py", "root": ".", "max_results": 50}
@@ -5107,6 +5452,9 @@ AGENT_TOOL_HELP = """Available tools:
 - set_context_size: {"context_size": "256k"}
 - memory_quality_report: {"sample_limit": 5}
 - memory_quality_repair: {"apply": false}
+- memory_privacy_review: {"sample_limit": 20}
+- memory_privacy_repair: {"lesson_ids_json": ["lesson-id"], "apply": false}
+- memory_embedding_backfill: {"limit": 25, "apply": false}
 - system_improvement_report: {}
 - master_orchestrate: {"task": "...", "mode": "ask|inline|delegate", "agents": 3, "tier": "code"}
 - master_status: {}
@@ -5130,11 +5478,11 @@ or
 
 
 REPOSITORY_READ_ONLY_TOOLS = frozenset({
-    "file_policy", "directory_tree", "file_find", "file_read", "file_read_range",
+    "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range",
     "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
     "diagnostics", "context_health", "context_policy_status",
-    "memory_quality_report", "system_improvement_report", "master_status",
+    "memory_quality_report", "memory_privacy_review", "system_improvement_report", "master_status",
     "self_heal_check", "status", "system_profile_text",
     "emotion_vector_status", "preferences_status", "tool_manifest",
 })
@@ -5143,6 +5491,7 @@ REPOSITORY_READ_ONLY_FORBIDDEN_ARGS = frozenset({
 })
 REPOSITORY_AGENT_TOOL_HELP = """Available tools:
 - file_policy: {}
+- workspace_inventory: {"path": ".", "max_entries": 20000, "timeout_seconds": 10, "top_n": 15}
 - directory_tree: {"path": ".", "depth": 2, "max_entries": 200}
 - file_find: {"query": "*.py", "root": ".", "max_results": 50}
 - file_read: {"path": "README.md", "max_bytes": 256000}
@@ -5159,6 +5508,7 @@ REPOSITORY_AGENT_TOOL_HELP = """Available tools:
 - context_health: {"session": "", "project": ""}
 - context_policy_status: {"context_size": "32k"}
 - memory_quality_report: {"sample_limit": 5}
+- memory_privacy_review: {"sample_limit": 20}
 - system_improvement_report: {"session": "", "project": ""}
 - master_status: {}
 - self_heal_check: {}
@@ -5197,7 +5547,7 @@ def _repository_read_only_error(tool_name, args):
                 allow_workspace_root=False,
                 reject_sensitive=True,
             )
-        elif tool_name in {"directory_tree", "file_find", "text_search", "script_search"}:
+        elif tool_name in {"workspace_inventory", "directory_tree", "file_find", "text_search", "script_search"}:
             file_ops.resolve_repository_read_path(
                 args.get("path", "") or args.get("root", "") or ".",
                 allow_workspace_root=True,
@@ -5304,6 +5654,18 @@ def _agent_dispatch(tool_name, args, allow_web=True, read_only=False):
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "workspace_inventory":
+        return workspace_inventory(
+            path=args.get("path", args.get("root", ".")),
+            max_entries=args.get("max_entries", 20000),
+            timeout_seconds=args.get("timeout_seconds", 10.0),
+            top_n=args.get("top_n", 15),
+            include_hidden=args.get("include_hidden", False),
+            include_ignored=args.get("include_ignored", False),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "directory_tree":
         return directory_tree(
             path=args.get("path", args.get("root", ".")),
@@ -5348,6 +5710,10 @@ def _agent_dispatch(tool_name, args, allow_web=True, read_only=False):
             regex=args.get("regex", False),
             case_sensitive=args.get("case_sensitive", False),
             max_results=args.get("max_results", 100),
+            max_entries=args.get("max_entries", 20000),
+            timeout_seconds=args.get("timeout_seconds", 10.0),
+            include_hidden=args.get("include_hidden", False),
+            include_ignored=args.get("include_ignored", False),
             token=args.get("token", ""),
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
@@ -5394,6 +5760,10 @@ def _agent_dispatch(tool_name, args, allow_web=True, read_only=False):
             query=args.get("query", "*"),
             root=args.get("root", "."),
             max_results=args.get("max_results", 100),
+            max_entries=args.get("max_entries", 20000),
+            timeout_seconds=args.get("timeout_seconds", 10.0),
+            include_hidden=args.get("include_hidden", False),
+            include_ignored=args.get("include_ignored", False),
             token=args.get("token", ""),
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
@@ -5523,6 +5893,17 @@ def _agent_dispatch(tool_name, args, allow_web=True, read_only=False):
         return memory_quality_report(sample_limit=args.get("sample_limit", 5))
     if tool_name == "memory_quality_repair":
         return memory_quality_repair(apply=args.get("apply", False))
+    if tool_name == "memory_privacy_review":
+        return memory_privacy_review(sample_limit=args.get("sample_limit", 20))
+    if tool_name == "memory_privacy_repair":
+        return memory_privacy_repair(
+            lesson_ids_json=args.get("lesson_ids_json", args.get("lesson_ids", [])),
+            apply=args.get("apply", False),
+        )
+    if tool_name == "memory_embedding_backfill":
+        return memory_embedding_backfill(
+            limit=args.get("limit", 25), apply=args.get("apply", False),
+        )
     if tool_name in ("system_improvement_report", "improvement_report"):
         return system_improvement_report(
             session=args.get("session", ""),
@@ -5638,12 +6019,14 @@ def _agent_dispatch_observed(tool_name, args, allow_web=True, read_only=False):
 _WORK_MUTATION_TOOLS = frozenset({
     "directory_create", "file_write", "file_edit", "file_delete",
     "artifact_generate", "game_generate_and_test", "game_generation_campaign",
+    "memory_quality_repair", "memory_privacy_repair", "memory_embedding_backfill",
 })
 _WORK_VALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "ground_artifact",
     "artifact_verify", "game_reference_suite", "game_generate_and_test",
-    "game_generation_campaign", "self_heal_check", "directory_tree", "file_find",
+    "game_generation_campaign", "self_heal_check", "workspace_inventory", "directory_tree", "file_find",
     "file_read", "file_read_range", "text_search", "image_inspect",
+    "memory_quality_report", "memory_privacy_review",
 })
 
 
@@ -5698,6 +6081,11 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
         "game_reference_suite", "game_generate_and_test", "game_generation_campaign",
     }:
         return True
+    if tool_name in {"memory_quality_report", "memory_privacy_review"}:
+        return all(record["tool"] in {
+            "memory_quality_repair", "memory_privacy_repair",
+            "memory_embedding_backfill",
+        } for record in records)
     if tool_name in {"artifact_verify", "ground_artifact"}:
         return any(
             record["tool"] == "artifact_generate"
@@ -5747,7 +6135,7 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
             and os.path.splitext(target)[1].lower()
             in {".md", ".txt", ".json", ".csv", ".yaml", ".yml", ".toml", ".xml"}
         )
-    if tool_name in {"directory_tree", "file_find", "text_search"}:
+    if tool_name in {"workspace_inventory", "directory_tree", "file_find", "text_search"}:
         root = _agent_normalized_path(args.get("root", args.get("path", ".")))
         observed = os.path.normcase(str(observation or ""))
         eligible = [
@@ -5755,7 +6143,7 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
             if record.get("path")
             and (
                 (
-                    tool_name in {"directory_tree", "file_find"}
+                    tool_name in {"workspace_inventory", "directory_tree", "file_find"}
                     and record["tool"] == "directory_create"
                 )
                 or (
@@ -5774,9 +6162,10 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
     # persistent files just edited. self_heal_check is likewise unrelated.
     return False
 _WORK_INSPECTION_TOOLS = frozenset({
-    "file_policy", "directory_tree", "file_find", "file_read", "file_read_range",
+    "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range",
     "text_search", "script_search", "program_search", "image_inspect",
-    "memory_search", "web_search", "web_fetch", "status", "diagnostics",
+    "memory_search", "memory_quality_report", "memory_privacy_review",
+    "web_search", "web_fetch", "status", "diagnostics",
 })
 
 
@@ -5850,7 +6239,7 @@ def _agent_impl(
         return "ERROR: trilobite model/alias not found."
     system = _build_system(
         "You are a local tool-using coding agent. Inspect real workspace evidence before making claims. "
-        "For action tasks, use tools instead of merely describing commands. Prefer directory_tree, "
+        "For action tasks, use tools instead of merely describing commands. Prefer workspace_inventory, directory_tree, "
         "text_search, file_read_range, and program_search for discovery; use guarded file tools for "
         "mutations; validate every mutation with workspace_run, script_run, file_read_range, "
         "image_inspect, artifact_verify, or another path-specific checker before returning final. "
@@ -5987,7 +6376,7 @@ def _agent_impl(
         tool_ok = _agent_observation_ok(observation_text)
         used_tool = used_tool or tool_ok
         if tool_name in {
-            "directory_tree", "file_read", "file_read_range", "file_find",
+            "workspace_inventory", "directory_tree", "file_read", "file_read_range", "file_find",
             "text_search", "script_search", "image_inspect",
         } and tool_ok:
             file_evidence = True
@@ -6003,6 +6392,13 @@ def _agent_impl(
             tool_name in _WORK_MUTATION_TOOLS
             and tool_ok
             and not (tool_name == "file_delete" and tool_args.get("dry_run", True))
+            and not (
+                tool_name in {
+                    "memory_quality_repair", "memory_privacy_repair",
+                    "memory_embedding_backfill",
+                }
+                and not tool_args.get("apply", False)
+            )
         )
         if mutation_happened:
             mutated = True
