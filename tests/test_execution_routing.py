@@ -27,6 +27,7 @@ def test_explicit_autonomy_starts_persistent_autopilot(monkeypatch):
     assert "source: explicit host cue" in output
     assert calls[0]["objective"].startswith("Inspect the repo")
     assert calls[0]["project"] == "demo"
+    assert calls[0]["tier"] == "code"
     assert calls[0]["adaptive"] is True
     assert calls[0]["plan_only"] is False
     assert calls[0]["wait"] is False
@@ -86,6 +87,7 @@ def test_simple_work_uses_foreground_without_model_triage(monkeypatch):
     output = server.route_work_request("Build the Flutter app.", project="demo")
 
     assert "mode: foreground workbench" in output
+    assert "tier: code ->" in output
     assert calls[0]["project"] == "demo"
     assert calls[0]["allow_location"] is False
 
@@ -97,6 +99,7 @@ def test_compound_work_uses_bounded_local_model_decision(monkeypatch):
         "_execution_route_model",
         lambda *_args, **_kwargs: {
             "mode": "workbench",
+            "tier": "general",
             "reason": "the stages fit one guarded loop",
             "confidence": 0.8,
         },
@@ -114,7 +117,7 @@ def test_compound_work_uses_bounded_local_model_decision(monkeypatch):
 
     assert "source: bounded local mode model" in output
     assert "confidence: 80%" in output
-    assert calls
+    assert calls[0]["tier"] == "general"
 
 
 def test_compound_route_falls_back_to_autopilot_safely(monkeypatch):
@@ -170,7 +173,8 @@ def test_natural_autopilot_does_not_start_concurrent_run(monkeypatch):
 def test_local_route_model_repairs_schema_once(monkeypatch):
     responses = [
         "I would use autopilot.",
-        '{"mode":"autopilot","reason":"several dependent phases","confidence":0.9}',
+        '{"mode":"autopilot","tier":"code",'
+        '"reason":"several dependent phases","confidence":0.9}',
     ]
     prompts = []
 
@@ -188,6 +192,7 @@ def test_local_route_model_repairs_schema_once(monkeypatch):
     result = server._execution_route_model("inspect, implement, and validate")
 
     assert result["mode"] == "autopilot"
+    assert result["tier"] == "code"
     assert result["confidence"] == 0.9
     assert "HOST SCHEMA ERROR" in prompts[1]
 

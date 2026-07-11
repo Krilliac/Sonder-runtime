@@ -50,6 +50,11 @@
   allowlist, workspace roots, task/failure/cycle budgets, evidence gate, and
   pause/cancel decisions as final. Persist progress across restarts and require an
   explicit resume; never infer location inside an autonomous run.
+- Accept the host's shared local runtime policy as authoritative. Use only the
+  selected `fast`, `code`, or `general` tier for the current execution lane.
+  Never rewrite model mappings unless the user explicitly requests a guarded
+  `/runtime set` change, and never use that policy to enable cloud, widen roots
+  or permissions, or store credentials.
 - After a successful inspect/research task, use the adaptive checkpoint to compare
   new evidence with the pending plan. Continue when it is still correct, replan
   only stale work, preserve superseded tasks for audit, and never exceed the host's

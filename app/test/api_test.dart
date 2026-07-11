@@ -249,6 +249,40 @@ void main() {
   test('system info accepts older servers without autopilot state', () {
     final info = SystemInfo.fromJson(const {});
     expect(info.autopilot, isNull);
+    expect(info.runtimePolicy, isNull);
     expect(info.models, isEmpty);
+  });
+
+  test('system info parses shared local runtime policy state', () {
+    final info = SystemInfo.fromJson({
+      'runtime_policy': {
+        'revision': 7,
+        'updated_ts': 1783731000,
+        'path': r'C:\Users\natew\AppData\Local\trilobite\runtime_policy.json',
+        'source': 'runtime_policy_update',
+        'error': '',
+        'local_models': {
+          'fast': 'qwen2.5:3b',
+          'code': 'trilobite:latest',
+          'general': 'qwen2.5:7b-instruct',
+        },
+        'routing': {
+          'router': 'fast',
+          'workbench': 'code',
+          'autopilot': 'code',
+          'fleet': 'code',
+          'review': 'general',
+        },
+        'missing_models': ['missing-local:latest'],
+      },
+    });
+
+    final policy = info.runtimePolicy!;
+    expect(policy.revision, 7);
+    expect(policy.localModels['code'], 'trilobite:latest');
+    expect(policy.routing['review'], 'general');
+    expect(policy.modelForLane('review'), 'qwen2.5:7b-instruct');
+    expect(policy.missingModels, ['missing-local:latest']);
+    expect(policy.hasWarning, isTrue);
   });
 }

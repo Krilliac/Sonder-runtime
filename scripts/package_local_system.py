@@ -58,6 +58,7 @@ REQUIRED_FILES = {
     "creative_router.py",
     "game_forge.py",
     "fleet_store.py",
+    "runtime_policy.py",
     "server.py",
     "setup_alias.py",
     "trilobite-headless.cmd",

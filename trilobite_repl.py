@@ -797,7 +797,7 @@ def main():
         # persistent checklist instead of being a prose-only suggestion.
         if intents.classify_work(line):
             out = server.workbench_agent(
-                prompt=line, tier="code", max_steps=12, project=project,
+                prompt=line, tier="auto", max_steps=12, project=project,
             )
             last_iid = None
             last_response = out

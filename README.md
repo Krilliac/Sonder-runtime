@@ -54,10 +54,10 @@ distilled into lessons and fine-tuning data the local model retrieves later. Whi
 tiers learn is configurable (`TRILOBITE_LEARN_TIERS`, default local-only:
 `fast,code,general`). The memory, capture, and distillation always stay local; only a
 cloud-tier *prompt* leaves the machine, and only after `TRILOBITE_ALLOW_CLOUD=1`.
-The `code` tier is protected as the local coder lane: if `LOCAL_LLM_CODE` is
-accidentally pointed at a cloud model, trilobite falls back to the local
-`qwen2.5-coder:7b` model (override that local fallback with
-`LOCAL_LLM_CODE_LOCAL`).
+The `fast`, `code`, and `general` aliases are local-only. Their shared mappings
+and each execution lane's preferred alias live in the hot-reloadable runtime
+policy described below. Environment values seed the first policy file; cloud
+aliases and cloud opt-in remain separate host-owned configuration.
 
 ### Memory beyond lessons
 
@@ -92,7 +92,7 @@ The learning loop above is *cross-task* memory. On top of it trilobite also has:
 
 ## Four ways to run it
 
-1. **Local, in your terminal** — `trilobite` (like launching `claude`). Interactive REPL routed through the full loop, with `/work`, `/report`, `/checklist`, `/inventory`, `/tree`, `/search`, `/programs`, `/scripts`, `/image`, `/mkdir`, `/runprogram`, `/runscript`, `/trace`, `/strict`, `/run`, `/train`, `/master`, `/agents`, `/capacity`, `/agentcancel`, `/agentretry`, `/asset`, `/forge`, `/game`, `/gamefleet`, `/todo`, `/commands`, `/activity`, `/dump`, `/permissions`, `/compact`, `/debug`, `/pass`, `/fail`, `/stats`, `/context`, `/quality`, `/privacy`, `/embeddings`, `/emotion`, and `/improve`, plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts`. Concrete natural-language workspace requests route to the same guarded workbench. Each REPL launch is its own remembered thread.
+1. **Local, in your terminal** — `trilobite` (like launching `claude`). Interactive REPL routed through the full loop, with `/work`, `/report`, `/checklist`, `/inventory`, `/tree`, `/search`, `/programs`, `/scripts`, `/image`, `/mkdir`, `/runprogram`, `/runscript`, `/trace`, `/strict`, `/run`, `/train`, `/master`, `/agents`, `/capacity`, `/agentcancel`, `/agentretry`, `/asset`, `/forge`, `/game`, `/gamefleet`, `/todo`, `/commands`, `/activity`, `/runtime`, `/dump`, `/permissions`, `/compact`, `/debug`, `/pass`, `/fail`, `/stats`, `/context`, `/quality`, `/privacy`, `/embeddings`, `/emotion`, and `/improve`, plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts`. Concrete natural-language workspace requests route to the same guarded workbench. Each REPL launch is its own remembered thread.
 2. **Hosted on your own server + a thin client anywhere** — run `deploy_trilobite.sh --serve` on your box (systemd service, API key), then any machine runs the single-file `trilobite_client.py` pointed at it. The serve layer threads the chat UI's own conversation history.
 3. **Integrated with Claude/Codex** — the MCP `local-llm` tools include `workbench_agent`, budgeted workspace inventory, guarded tree/range/text/script/program/image inspection, argv-only program/script execution, persistent checklists, exact activity reports, agent/master orchestration, universal artifact generation, grounded game generation, bounded code/project runners, workflows, web tools, self-healing, privacy-safe memory review, local embedding backfill, and the remaining learning/memory surfaces. `master_orchestrate` can delegate to parallel subagents and audit their outputs; artifact and game tools create persistent assets/projects and accept only grounded checks. Local tiers remain the default for private workspace code.
 4. **Mobile & desktop app (GUI)** — a cross-platform [Flutter client](app/) that talks to a hosted `trilobite_serve.py`. One codebase → an **Android APK** and **Windows/Linux/macOS** desktop apps, built in CI with downloadable installers. See [app/README.md](app/README.md).
@@ -105,7 +105,9 @@ workbench; explicit `fleet`, `swarm`, spawn-as-many, or parallel-agent language
 uses the hardware-bounded fleet; explicit `keep working`, `end-to-end`,
 `autonomously`, or background language starts persistent Autopilot. For an
 ambiguous compound request, a small local model may choose only between foreground
-and Autopilot, and the response reports its mode, source, reason, and confidence.
+and Autopilot and may select one bounded local alias (`fast`, `code`, or
+`general`). The response reports its mode, tier/model, source, reason, and
+confidence.
 `foreground only`, `plan only`, and `no tools` are deterministic overrides. The
 router runs only for local-open or developer/admin-authorized requests, never
 enables cloud or location, and defers instead of starting a second concurrent
@@ -358,6 +360,10 @@ the machine instead of idling on conservative defaults:
   ledger. Defaults to `TRILOBITE_HOME/fleet.db`.
 - `TRILOBITE_FLEET_HEARTBEAT` - set `0` to disable owner heartbeats (primarily
   for deterministic tests). Production defaults to a five-second heartbeat.
+- `TRILOBITE_RUNTIME_POLICY` - optional path to the shared JSON policy for local
+  aliases and execution lanes. By default it is
+  `TRILOBITE_HOME/runtime_policy.json`. `LOCAL_LLM_FAST`, `LOCAL_LLM_CODE`,
+  `LOCAL_LLM_CODE_LOCAL`, and `LOCAL_LLM_GENERAL` seed only its first creation.
 - `OLLAMA_FLASH_ATTENTION` - enabled as `1` by the launch scripts when they start
   Ollama.
 
@@ -433,6 +439,7 @@ Flat, mostly-stdlib Python modules (plus `mcp`):
 | `orchestrator.py` | the retrieve → augment → generate → capture flow |
 | `master_orchestrator.py` / `fleet_store.py` | RAM/CPU-bounded fleet execution plus a process-shared restart/recovery ledger |
 | `autopilot_controller.py` / `autopilot_store.py` | Persistent local goal planning, guarded execution/review, evidence gates, budgets, and explicit lifecycle control |
+| `runtime_policy.py` | Atomic per-user local-model aliases and execution-lane routing shared across live surfaces |
 | `creative_router.py` | conservative natural-language routing from concrete master build requests into grounded artifact, game, or game-campaign workflows |
 | `server.py` / `workbench.py` / `activity_tracker.py` / `code_runner.py` / `web_tools.py` / `workflow_store.py` / `self_heal.py` | MCP workbench/agent tools, guarded discovery and execution, persistent checklists, exact action/end reports, bounded code/project runners, web tools, workflows, and self-healing |
 | `server.py` | MCP server: `offload` / `trilobite` / `parallel_run_code` / `parallel_generate_run` / `parallel_generate_run_languages` / `campaign_generate_compile_execute_record` / `learn_tiers` / `record_outcome` / `trilobite_stats` / `trilobite_sessions` / `trilobite_remember_fact` |
@@ -462,6 +469,19 @@ Set `TRILOBITE_HOME` to force a specific shared state folder, or `TRILOBITE_DB`
 to point directly at a database file. If an older install has `memory.db` beside
 the code and the shared DB does not exist yet, trilobite copies it into the
 shared home on first run.
+
+The same home contains `runtime_policy.json`, the single source of truth for
+local model aliases and automatic execution lanes across MCP, the HTTP server,
+REPL, workbench, Autopilot, fleet workers, and review. Every request boundary
+reloads it, so an atomic update from one running surface is visible to the others
+without a hard restart. Inspect it with `/runtime` or
+`runtime_policy_status()`. Developer/admin-authorized edits use, for example,
+`/runtime set general=qwen2.5:7b-instruct review=general`; `/runtime reset`
+restores safe defaults. Updates reject cloud-looking or uninstalled model names.
+The policy cannot enable cloud tiers, broaden permissions/roots, or store
+credentials. The Flutter System page renders the same revision, aliases, lanes,
+path, and any missing-model warning. Brand-new MCP tool names still require an
+MCP reconnect even though edits to an existing policy are hot-reloaded.
 
 ## Standing instructions
 

@@ -374,6 +374,7 @@ class SystemInfo {
   final ContextHealth? context;
   final AgentStatus? agents;
   final AutopilotStatus? autopilot;
+  final RuntimePolicyInfo? runtimePolicy;
   final ActivityStatus? activity;
   final List<SystemModel> models;
 
@@ -387,6 +388,7 @@ class SystemInfo {
     required this.context,
     required this.agents,
     required this.autopilot,
+    this.runtimePolicy,
     required this.activity,
     required this.models,
   });
@@ -412,11 +414,65 @@ class SystemInfo {
       autopilot: json['autopilot'] is Map<String, dynamic>
           ? AutopilotStatus.fromJson(json['autopilot'] as Map<String, dynamic>)
           : null,
+      runtimePolicy: json['runtime_policy'] is Map<String, dynamic>
+          ? RuntimePolicyInfo.fromJson(
+              json['runtime_policy'] as Map<String, dynamic>,
+            )
+          : null,
       activity: json['activity'] is Map<String, dynamic>
           ? ActivityStatus.fromJson(json['activity'] as Map<String, dynamic>)
           : null,
       models: models,
     );
+  }
+}
+
+class RuntimePolicyInfo {
+  final int revision;
+  final int updatedTs;
+  final String path;
+  final String source;
+  final String error;
+  final String inventoryError;
+  final Map<String, String> localModels;
+  final Map<String, String> routing;
+  final List<String> missingModels;
+
+  const RuntimePolicyInfo({
+    required this.revision,
+    required this.updatedTs,
+    required this.path,
+    required this.source,
+    required this.error,
+    required this.inventoryError,
+    required this.localModels,
+    required this.routing,
+    required this.missingModels,
+  });
+
+  factory RuntimePolicyInfo.fromJson(Map<String, dynamic> json) {
+    return RuntimePolicyInfo(
+      revision: _asInt(json['revision']),
+      updatedTs: _asInt(json['updated_ts']),
+      path: json['path']?.toString() ?? '',
+      source: json['source']?.toString() ?? '',
+      error: json['error']?.toString() ?? '',
+      inventoryError: json['inventory_error']?.toString() ?? '',
+      localModels: _stringMap(json['local_models']),
+      routing: _stringMap(json['routing']),
+      missingModels: (json['missing_models'] as List? ?? const [])
+          .map((value) => value.toString())
+          .where((value) => value.isNotEmpty)
+          .toList(growable: false),
+    );
+  }
+
+  bool get hasWarning =>
+      error.isNotEmpty || inventoryError.isNotEmpty || missingModels.isNotEmpty;
+
+  String modelForLane(String lane) {
+    final tier = routing[lane] ?? '';
+    return localModels[tier] ?? '';
   }
 }
 
@@ -1078,6 +1134,14 @@ double _asDouble(Object? value) {
   if (value is double) return value;
   if (value is num) return value.toDouble();
   return double.tryParse(value?.toString() ?? '') ?? 0;
+}
+
+Map<String, String> _stringMap(Object? value) {
+  if (value is! Map) return const {};
+  return Map.unmodifiable({
+    for (final entry in value.entries)
+      entry.key.toString(): entry.value?.toString() ?? '',
+  });
 }
 
 class SystemModel {

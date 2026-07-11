@@ -62,6 +62,12 @@ COMMANDS = [
         "summary": "Run a persistent local goal with evidence-aware checkpoints, bounded replans, host gates, pause, resume, and cancel.",
     },
     {
+        "name": "/runtime",
+        "category": "system",
+        "risk": "ask",
+        "summary": "Inspect or guarded-edit shared local model mappings and execution-lane tiers; cloud remains separate.",
+    },
+    {
         "name": "/report",
         "category": "inspect",
         "risk": "safe",

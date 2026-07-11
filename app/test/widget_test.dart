@@ -74,6 +74,77 @@ void main() {
     expect(find.text('Observe only'), findsOneWidget);
   });
 
+  testWidgets('System shows the shared local runtime policy', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 1200));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final captureKey = GlobalKey();
+    final info = SystemInfo.fromJson({
+      'status': 'Ollama local runtime ready',
+      'runtime_policy': {
+        'revision': 4,
+        'path': r'C:\Users\natew\AppData\Local\trilobite\runtime_policy.json',
+        'source': 'runtime_policy_update',
+        'error': '',
+        'local_models': {
+          'fast': 'qwen2.5:3b',
+          'code': 'trilobite:latest',
+          'general': 'qwen2.5:7b-instruct',
+        },
+        'routing': {
+          'router': 'fast',
+          'workbench': 'code',
+          'autopilot': 'code',
+          'fleet': 'code',
+          'review': 'general',
+        },
+        'missing_models': const [],
+      },
+      'models': const [],
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: RepaintBoundary(
+          key: captureKey,
+          child: SystemScreen(
+            settings: Settings(),
+            initialInfo: info,
+            liveUpdates: false,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('runtime-policy-panel')),
+      360,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Local Runtime Policy'), findsOneWidget);
+    expect(find.text('Shared policy r4'), findsOneWidget);
+    expect(find.text('fast  qwen2.5:3b'), findsOneWidget);
+    expect(find.text('review  general'), findsOneWidget);
+    expect(
+        find.textContaining('/runtime set workbench=general'), findsOneWidget);
+
+    if (Platform.environment['TRILOBITE_CAPTURE_UI'] == '1') {
+      await tester.runAsync(() async {
+        final boundary = captureKey.currentContext!.findRenderObject()!
+            as RenderRepaintBoundary;
+        final image = await boundary.toImage(pixelRatio: 1);
+        final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+        final output = File('build/ui-smoke-runtime-policy.png');
+        await output.parent.create(recursive: true);
+        await output.writeAsBytes(bytes!.buffer.asUint8List(), flush: true);
+        image.dispose();
+      });
+    }
+  });
+
   testWidgets('Completed autopilot run renders its persisted ledger',
       (tester) async {
     await tester.binding.setSurfaceSize(const Size(1280, 1800));

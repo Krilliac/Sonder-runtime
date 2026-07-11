@@ -241,7 +241,7 @@ def test_workbench_slash_routes_project_and_task(monkeypatch):
     assert ts._handle_slash("/work inspect and test", project="demo") == "work complete"
     assert calls == [{
         "prompt": "inspect and test",
-        "tier": "code",
+        "tier": "auto",
         "max_steps": 12,
         "project": "demo",
     }]

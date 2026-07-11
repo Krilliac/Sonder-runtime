@@ -40,6 +40,9 @@ DEFAULT_TEXT = """# Trilobite standing instructions
   visible foreground, Autopilot, or explicit fleet decision. Ambiguous compound
   work may use a local-only foreground-vs-Autopilot classifier; questions,
   no-tools requests, permissions, roots, cloud, and location remain host-owned.
+- Treat the shared local runtime policy as host-owned. Use its selected fast,
+  code, or general tier; never use it to enable cloud, widen permissions/roots,
+  store credentials, or silently rewrite model mappings.
 - Negative repository claims require exact-anchor evidence. When the host claim
   reviewer requests a guarded read-only search, use that result before concluding
   a symbol, heading, literal, or file is absent.

@@ -63,6 +63,7 @@ import game_forge
 import workbench
 import creative_router
 import intents
+import runtime_policy
 import autopilot_store
 import autopilot_controller
 
@@ -186,6 +187,35 @@ if _is_cloud_model_name(TIERS["code"]):
     TIERS["code"] = LOCAL_CODE_MODEL
 
 
+_RUNTIME_POLICY = {}
+
+
+def _refresh_runtime_policy(create=True):
+    """Apply the shared local-only policy without touching cloud configuration."""
+    global LOCAL_CODE_MODEL, _RUNTIME_POLICY
+    policy = runtime_policy.load(create=create)
+    for tier in runtime_policy.LOCAL_TIERS:
+        TIERS[tier] = policy["local_models"][tier]
+    LOCAL_CODE_MODEL = policy["local_models"]["code"]
+    _RUNTIME_POLICY = policy
+    return policy
+
+
+_refresh_runtime_policy(create=True)
+
+
+def _runtime_lane_tier(lane: str, requested: str = "") -> str:
+    """Resolve an explicit local tier or the shared default for one lane."""
+    requested = str(requested or "").strip().lower()
+    if requested and requested not in {"auto", "default", "policy"}:
+        return requested
+    return runtime_policy.route_tier(
+        lane,
+        _RUNTIME_POLICY or _refresh_runtime_policy(create=True),
+        fallback="code",
+    )
+
+
 def _is_cloud_tier(tier, model=None):
     if tier in CLOUD_TIERS:
         return True
@@ -263,6 +293,7 @@ LIVE_RELOAD_MODULES = [
     "workbench",
     "creative_router",
     "intents",
+    "runtime_policy",
     # The controller is stateless and safe to refresh between callback calls.
     # autopilot_store intentionally stays loaded because it exclusively owns a
     # process-safe SQLite schema and may be serving background worker threads.
@@ -275,6 +306,7 @@ def _maybe_live_reload():
     for name, module in modules.items():
         if name in globals():
             globals()[name] = module
+    _refresh_runtime_policy(create=True)
 
 
 def _open_db():
@@ -728,6 +760,50 @@ def _autopilot_command(arg: str, project: str = "") -> str:
     return "ERROR: unknown autopilot action '%s'; try /autopilot help." % action
 
 
+def _runtime_command(arg: str) -> str:
+    text = str(arg or "").strip()
+    if not text or text.lower() in {"status", "show", "list"}:
+        return runtime_policy_status()
+    action, _, rest = text.partition(" ")
+    action = action.lower()
+    rest = rest.strip()
+    if action == "reset":
+        return runtime_policy_update(reset=True)
+    if action == "set":
+        local_models = {}
+        routing = {}
+        for item in rest.split():
+            if "=" not in item:
+                return "ERROR: runtime assignment must use key=value: %s" % item
+            key, value = item.split("=", 1)
+            key, value = key.strip().lower(), value.strip()
+            if key in runtime_policy.LOCAL_TIERS:
+                local_models[key] = value
+            elif key in runtime_policy.ROUTING_LANES:
+                routing[key] = value
+            else:
+                return "ERROR: unknown runtime policy key '%s'." % key
+        if not local_models and not routing:
+            return (
+                "usage: /runtime set code=<local-model> workbench=<fast|code|general>"
+            )
+        return runtime_policy_update(
+            local_models_json=json.dumps(local_models),
+            routing_json=json.dumps(routing),
+        )
+    if action in {"help", "?"}:
+        return (
+            "runtime policy commands:\n"
+            "  /runtime status\n"
+            "  /runtime set fast=<model> code=<model> general=<model>\n"
+            "  /runtime set router=<tier> workbench=<tier> autopilot=<tier> "
+            "fleet=<tier> review=<tier>\n"
+            "  /runtime reset\n"
+            "Only installed local models and fast/code/general route tiers are accepted."
+        )
+    return "ERROR: unknown runtime action '%s'; try /runtime help." % action
+
+
 def control_command(prompt: str, history=None, session="", project=""):
     """Handle safe slash commands before a prompt reaches the model.
 
@@ -756,6 +832,8 @@ def control_command(prompt: str, history=None, session="", project=""):
         return activity_status()
     if cmd in ("/autopilot", "/auto"):
         return _autopilot_command(arg, project=project)
+    if cmd in ("/runtime", "/models"):
+        return _runtime_command(arg)
     if cmd in ("/work", "/agent"):
         if not arg.strip():
             return "usage: /work <task>"
@@ -2969,7 +3047,7 @@ def master_orchestrate(
     task: str,
     mode: str = "ask",
     agents: int = 3,
-    tier: str = "code",
+    tier: str = "auto",
     learn: bool = False,
     retry_of: str = "",
 ) -> str:
@@ -3015,6 +3093,8 @@ def master_orchestrate(
         )
     if not task:
         return "ERROR: empty task."
+    tier = _runtime_lane_tier("fleet", tier)
+    audit_tier = _runtime_lane_tier("review")
     creative_intent = creative_router.classify(task, mode=mode)
     if creative_intent:
         return _master_grounded_build(
@@ -3044,12 +3124,17 @@ def master_orchestrate(
             task,
             worker_fn=worker,
             audit_fn=_orchestrator_worker(
-                tier,
+                audit_tier,
                 learn=False,
                 timeout=_master_timeout("TRILOBITE_MASTER_AUDIT_TIMEOUT", 120),
             ),
             agents=agents,
-            metadata={"tier": tier, "mode": mode, "retry_of": retry_of},
+            metadata={
+                "tier": tier,
+                "audit_tier": audit_tier,
+                "mode": mode,
+                "retry_of": retry_of,
+            },
         )
         lines = [
             "master orchestration complete",
@@ -4882,13 +4967,13 @@ def _loop_dispatch(action):
             task=action.get("task", action.get("prompt", "")),
             mode=action.get("mode", "ask"),
             agents=action.get("agents", 3),
-            tier=action.get("tier", "code"),
+            tier=action.get("tier", "auto"),
             learn=action.get("learn", False),
         ))
     if action_type in ("work", "agent", "workbench_agent"):
         return _loop_text_result("workbench_agent", workbench_agent(
             prompt=action.get("task", action.get("prompt", "")),
-            tier=action.get("tier", "code"),
+            tier=action.get("tier", "auto"),
             max_steps=action.get("max_steps", 12),
             allow_web=action.get("allow_web", True),
             project=action.get("project", ""),
@@ -5984,6 +6069,7 @@ def tool_manifest() -> str:
     tools = {
         "agent": "Run a Claude-like tool-calling loop that can use local tools and web tools.",
         "autopilot_start/autopilot_status/autopilot_resume/autopilot_pause/autopilot_cancel": "Run a restart-persistent local goal with evidence-aware checkpoints, bounded replans, host tool gates, and explicit lifecycle control.",
+        "runtime_policy_status/runtime_policy_update": "Inspect or guarded-edit shared hot-reloadable local model mappings and execution-lane tiers; cloud opt-in stays separate.",
         "master_orchestrate/master_status/master_capacity/master_cancel/master_retry": "Run restart-safe hardware-scheduled orchestration, inspect capacity/activity, cancel fleets, and explicitly retry interrupted work.",
         "admin_register/admin_login/admin_accounts/admin_set_account": "Manage hosted accounts, roles, bans, tiers, and developer flags.",
         "admin_status/debug_inspect/admin_private_chain_of_thought": "Inspect admin/debug state and safely deny private chain-of-thought exposure.",
@@ -6864,7 +6950,7 @@ def _agent_dispatch(
             task=args.get("task", args.get("prompt", "")),
             mode=args.get("mode", "ask"),
             agents=args.get("agents", 3),
-            tier=args.get("tier", "code"),
+            tier=args.get("tier", "auto"),
             learn=args.get("learn", False),
         )
     if tool_name == "self_heal_check":
@@ -7694,13 +7780,15 @@ def agent(
 @mcp.tool()
 def workbench_agent(
     prompt: str,
-    tier: str = "code",
+    tier: str = "auto",
     max_steps: int = 12,
     allow_web: bool = True,
     project: str = "",
     allow_location: bool = False,
 ) -> str:
     """Execute local work with guarded tools, checklist, validation, and report."""
+    _maybe_live_reload()
+    tier = _runtime_lane_tier("workbench", tier)
     return agent(
         prompt=prompt,
         tier=tier,
@@ -7806,7 +7894,13 @@ def _autopilot_tool_policy(run: dict):
 
 
 def _autopilot_json_model(run: dict, role: str, prompt: str, validator) -> dict:
-    tier = autopilot_controller.normalize_tier(run.get("tier", "code"))
+    run_tier = autopilot_controller.normalize_tier(run.get("tier", "code"))
+    if role == "reviewer":
+        tier = runtime_policy.route_tier(
+            "review", _refresh_runtime_policy(create=True), fallback=run_tier,
+        )
+    else:
+        tier = run_tier
     model, cloud, _augment, tier_label = _serve_target(tier, False)
     if model is None or cloud or tier_label not in autopilot_controller.LOCAL_TIERS:
         raise RuntimeError("autopilot requires an available local model tier")
@@ -8130,7 +8224,7 @@ def _launch_autopilot(run_id: str, max_cycles=12, plan_only=False) -> bool:
 def autopilot_start(
     objective: str,
     project: str = "",
-    tier: str = "code",
+    tier: str = "auto",
     policy: str = "workspace",
     allow_web: bool = True,
     max_cycles: int = 12,
@@ -8144,6 +8238,7 @@ def autopilot_start(
     """Create and start a persistent, locally planned autonomous goal run."""
     _maybe_live_reload()
     try:
+        tier = _runtime_lane_tier("autopilot", tier)
         tier = autopilot_controller.normalize_tier(tier)
         policy = autopilot_controller.normalize_policy(policy)
         run = autopilot_store.create_run(
@@ -8237,15 +8332,20 @@ def autopilot_status(run_id: str = "", include_finished: bool = True) -> str:
 
 def _execution_route_model(prompt: str, project: str = "") -> dict:
     """Let a local model choose only foreground workbench or Autopilot."""
-    model, cloud, _augment, tier_label = _serve_target("fast", False)
+    router_tier = runtime_policy.route_tier(
+        "router", _RUNTIME_POLICY or _refresh_runtime_policy(), fallback="fast",
+    )
+    model, cloud, _augment, tier_label = _serve_target(router_tier, False)
     if model is None or cloud or tier_label not in LOCAL_TIERS:
         raise RuntimeError("local execution router model is unavailable")
     system = _build_system(
         "You are Trilobite's execution-mode router. Return exactly one JSON "
         "object and no prose or chain-of-thought. You may choose only workbench "
-        "or autopilot. Workbench is a foreground task with at most 12 tool steps. "
+        "or autopilot and only fast, code, or general local tiers. Workbench is a "
+        "foreground task with at most 12 tool steps. "
         "Autopilot is a persistent multi-stage goal with planning, evidence review, "
-        "replanning, and validation. Never alter permissions, roots, tiers, or tools.",
+        "replanning, and validation. Never alter permissions, roots, tier mappings, "
+        "or tools.",
         False,
         "",
     )
@@ -8254,10 +8354,12 @@ def _execution_route_model(prompt: str, project: str = "") -> dict:
         "work request. Prefer workbench when the task is self-contained and likely "
         "to finish in one bounded tool loop. Prefer autopilot when it has several "
         "dependent phases, needs durable progress, or requires discovery followed "
-        "by implementation and independent validation.\n"
+        "by implementation and independent validation. Choose fast only for tiny "
+        "mechanical/read tasks, code for repository/code/tool work, and general for "
+        "prose-heavy explanation or review.\n"
         "Project: %s\nRequest: %s\n"
-        'JSON schema: {"mode":"workbench|autopilot","reason":"brief evidence-based '
-        'reason","confidence":0.0}'
+        'JSON schema: {"mode":"workbench|autopilot","tier":"fast|code|general",'
+        '"reason":"brief evidence-based reason","confidence":0.0}'
         % (project or "default", str(prompt or "")[:12000])
     )
     gen = _make_generate(model, system, 0.0, 240, 4096, cloud=False)
@@ -8272,6 +8374,9 @@ def _execution_route_model(prompt: str, project: str = "") -> dict:
             mode = str(payload.get("mode") or "").strip().lower()
             if mode not in {"workbench", "autopilot"}:
                 raise ValueError("route mode must be workbench or autopilot")
+            selected_tier = str(payload.get("tier") or "").strip().lower()
+            if selected_tier not in runtime_policy.LOCAL_TIERS:
+                raise ValueError("route tier must be fast, code, or general")
             confidence = float(payload.get("confidence", 0.5))
             if not 0.0 <= confidence <= 1.0:
                 raise ValueError("route confidence must be between 0 and 1")
@@ -8280,6 +8385,7 @@ def _execution_route_model(prompt: str, project: str = "") -> dict:
                 raise ValueError("route decision needs a brief reason")
             return {
                 "mode": mode,
+                "tier": selected_tier,
                 "reason": reason[:500],
                 "confidence": confidence,
             }
@@ -8292,7 +8398,13 @@ def _execution_route_model(prompt: str, project: str = "") -> dict:
     raise ValueError("execution router model failed schema validation: %s" % last_error)
 
 
-def _execution_route_header(mode: str, source: str, reason: str, confidence=None) -> str:
+def _execution_route_header(
+    mode: str,
+    source: str,
+    reason: str,
+    confidence=None,
+    tier: str = "",
+) -> str:
     labels = {
         "workbench": "foreground workbench",
         "autopilot": "persistent Autopilot",
@@ -8305,6 +8417,8 @@ def _execution_route_header(mode: str, source: str, reason: str, confidence=None
         "  source: %s" % source,
         "  reason: %s" % reason,
     ]
+    if tier in runtime_policy.LOCAL_TIERS:
+        lines.append("  tier: %s -> %s" % (tier, TIERS.get(tier, "(unmapped)")))
     if confidence is not None:
         lines.append("  confidence: %.0f%%" % (float(confidence) * 100.0))
     lines.append(
@@ -8323,15 +8437,26 @@ def route_work_request(prompt: str, project: str = "") -> str | None:
     reason = decision["reason"]
     source = "explicit host cue" if mode in {"fleet", "autopilot"} else "host classifier"
     confidence = None
+    selected_tier = runtime_policy.route_tier(
+        mode if mode in runtime_policy.ROUTING_LANES else "workbench",
+        _RUNTIME_POLICY,
+        fallback="code",
+    )
     if mode == "decide":
         try:
             routed = _execution_route_model(prompt, project=project)
             mode = routed["mode"]
+            selected_tier = routed.get("tier") or runtime_policy.route_tier(
+                mode, _RUNTIME_POLICY, fallback="code",
+            )
             reason = routed["reason"]
             confidence = routed["confidence"]
             source = "bounded local mode model"
         except (OSError, RuntimeError, ValueError) as exc:
             mode = "autopilot"
+            selected_tier = runtime_policy.route_tier(
+                "autopilot", _RUNTIME_POLICY, fallback="code",
+            )
             reason = (
                 "compound-work fallback after local mode selection was unavailable: %s"
                 % re.sub(r"\s+", " ", str(exc))[:240]
@@ -8341,12 +8466,12 @@ def route_work_request(prompt: str, project: str = "") -> str | None:
     resolved_project = _resolve_project(project) or ""
     if mode == "fleet":
         output = master_orchestrate(
-            task=prompt, mode="fleet", tier="code", learn=False,
+            task=prompt, mode="fleet", tier=selected_tier, learn=False,
         )
     elif mode == "workbench":
         output = workbench_agent(
             prompt=prompt,
-            tier="code",
+            tier=selected_tier,
             max_steps=12,
             allow_web=True,
             project=resolved_project,
@@ -8367,6 +8492,7 @@ def route_work_request(prompt: str, project: str = "") -> str | None:
                 source,
                 "another Autopilot run is active; automatic routing will not start a concurrent run",
                 confidence,
+                selected_tier,
             )
             return "%s\n\nactive run: %s [%s] %s\nuse /autopilot status %s" % (
                 header,
@@ -8378,7 +8504,7 @@ def route_work_request(prompt: str, project: str = "") -> str | None:
         output = autopilot_start(
             objective=prompt,
             project=resolved_project,
-            tier="code",
+            tier=selected_tier,
             policy="workspace",
             allow_web=True,
             adaptive=True,
@@ -8386,9 +8512,116 @@ def route_work_request(prompt: str, project: str = "") -> str | None:
             wait=False,
         )
     return "%s\n\n%s" % (
-        _execution_route_header(mode, source, reason, confidence),
+        _execution_route_header(mode, source, reason, confidence, selected_tier),
         output,
     )
+
+
+def _runtime_installed_models() -> set[str]:
+    payload = _get("/api/tags")
+    names = set()
+    for item in payload.get("models", []):
+        name = str(item.get("name") or item.get("model") or "").strip()
+        if name:
+            names.add(name)
+    return names
+
+
+def _runtime_model_is_installed(model: str, installed) -> bool:
+    requested = str(model or "").strip().casefold()
+    available = {str(name or "").strip().casefold() for name in installed}
+    if requested in available:
+        return True
+    # Ollama treats an omitted tag as :latest. Do not accept a different
+    # installed tag merely because its repository/base name happens to match.
+    if ":" not in requested:
+        return "%s:latest" % requested in available
+    if requested.endswith(":latest"):
+        return requested[:-len(":latest")] in available
+    return False
+
+
+def runtime_policy_data() -> dict:
+    policy = _refresh_runtime_policy(create=True)
+    data = {
+        **policy,
+        "local_models": dict(policy["local_models"]),
+        "routing": dict(policy["routing"]),
+        "missing_models": [],
+    }
+    try:
+        installed = _runtime_installed_models()
+        data["missing_models"] = list(dict.fromkeys(
+            model for model in data["local_models"].values()
+            if not _runtime_model_is_installed(model, installed)
+        ))
+    except Exception as exc:
+        data["inventory_error"] = "%s: %s" % (type(exc).__name__, exc)
+    return data
+
+
+@mcp.tool()
+def runtime_policy_status() -> str:
+    """Show shared local model mappings and execution-lane tier choices."""
+    _maybe_live_reload()
+    data = runtime_policy_data()
+    output = runtime_policy.format_policy(data)
+    if data.get("missing_models"):
+        output += "\n  WARNING missing local model(s): %s" % ", ".join(
+            sorted(set(data["missing_models"]))
+        )
+    if data.get("inventory_error"):
+        output += "\n  WARNING model inventory unavailable: %s" % data["inventory_error"]
+    return output
+
+
+def _runtime_update_object(value, label):
+    if value in (None, ""):
+        return {}
+    if isinstance(value, dict):
+        payload = value
+    else:
+        try:
+            payload = json.loads(str(value))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("%s must be a JSON object: %s" % (label, exc))
+    if not isinstance(payload, dict):
+        raise ValueError("%s must be a JSON object" % label)
+    return payload
+
+
+@mcp.tool()
+def runtime_policy_update(
+    local_models_json: str = "",
+    routing_json: str = "",
+    reset: bool = False,
+) -> str:
+    """Guarded-edit shared local mappings; cloud configuration is never accepted."""
+    _maybe_live_reload()
+    try:
+        local_models = _runtime_update_object(local_models_json, "local_models_json")
+        routing = _runtime_update_object(routing_json, "routing_json")
+        if local_models:
+            installed = _runtime_installed_models()
+            missing = [
+                str(model) for model in local_models.values()
+                if not _runtime_model_is_installed(model, installed)
+            ]
+            if missing:
+                raise ValueError(
+                    "local model(s) are not installed: %s"
+                    % ", ".join(sorted(set(missing)))
+                )
+        runtime_policy.update(
+            local_models=local_models,
+            routing=routing,
+            reset=bool(reset),
+            source="runtime_policy_update",
+        )
+        _refresh_runtime_policy(create=False)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        return "ERROR: %s" % exc
+    return runtime_policy_status()
 
 
 @mcp.tool()
@@ -8425,6 +8658,15 @@ def diagnostics() -> str:
     lines.append("  live reload: %s" % ("on" if live_reload.enabled() else "off"))
     lines.append(
         "  execution routing: host-gated foreground/autopilot/fleet with local ambiguity review"
+    )
+    policy = _refresh_runtime_policy(create=True)
+    lines.append(
+        "  runtime policy: revision=%s %s (%s)"
+        % (
+            policy.get("revision", 0),
+            "ERROR %s" % policy["error"] if policy.get("error") else "ok",
+            policy.get("path", runtime_policy.policy_path()),
+        )
     )
     runtime = _local_runtime_summary()
     lines.append("  local runtime: threads=%s, gpu_layers=%s, batch=%s" % (
