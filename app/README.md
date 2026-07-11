@@ -101,6 +101,14 @@ has **Keep local server running after app closes** enabled. With that option on,
 the server is launched in background mode so it can keep serving headless after
 the GUI exits.
 
+Windows, Linux, and macOS launchers prefer a sealed engine payload under
+`local-system/engine/<platform>-<architecture>/`. Such a payload contains a
+portable Python runtime with `mcp`, an Ollama runtime, and a complete model-store
+subset. **Setup engine** verifies all declared sizes, SHA-256 hashes, Ollama
+manifests, and referenced blobs, then runs without pip or model-registry access.
+If no engine payload is included, the app reports **Host runtimes; downloads may
+be needed** and retains the smaller installed-Python/Ollama fallback.
+
 If an older app build's **Update from Git** button aborts because local files
 would be overwritten, run `trilobite-safe-update.cmd` from the bundled
 `local-system` folder once. Newer app builds call that same safe updater from
@@ -153,6 +161,20 @@ The command packages the current tracked local system, analyzes/tests the app,
 builds Release, and places the runnable bundle at
 `app\build\windows\x64\runner\Release\` with `local-system` beside it. The SDK
 is cloned from Flutter stable only when `.tooling/flutter` is missing.
+
+To build the Windows app with a sealed offline engine from locally installed
+`qwen2.5-coder:1.5b` and `nomic-embed-text`, use:
+
+```powershell
+powershell -NoProfile -File .\scripts\build_flutter_local.ps1 `
+  -Target windows -AssembleOfflineEngine
+```
+
+This intentionally creates a multi-gigabyte local artifact. Build a reusable
+bundle separately with `scripts\assemble_engine_bundle.py`, then pass its path
+with `-EngineBundle` to avoid assembling it on every app build. The build keeps
+the Flutter/Android `local-system.zip` code-only and attaches the large sealed
+engine only to the desktop sibling folder, avoiding a duplicate embedded copy.
 
 The repo commits only `lib/`, `pubspec.yaml` and `test/`. Generate the native
 project scaffolding locally with `flutter create`, then build:

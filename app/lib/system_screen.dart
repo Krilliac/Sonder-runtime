@@ -350,6 +350,13 @@ class _SystemScreenState extends State<SystemScreen> {
                         : 'Bootstrap script not bundled',
                     ok: localInfo.bootstrapScript || !localInfo.canLaunch,
                   ),
+                  _StatusRow(
+                    label: 'Runtime payload',
+                    value: localInfo.engineBundle
+                        ? 'Sealed offline engine included'
+                        : 'Host runtimes; downloads may be needed',
+                    ok: localInfo.engineBundle,
+                  ),
                 ],
               ),
             ),
@@ -772,6 +779,8 @@ class _SystemScreenState extends State<SystemScreen> {
           const SizedBox(height: 24),
           Text(
             'Desktop builds look for a bundled local-system folder next to the app. '
+            'A sealed engine payload can include Python, Ollama, and models for offline setup; '
+            'otherwise setup uses installed runtimes and may download missing components. '
             'Runtime memory is shared through '
             '${localInfo?.sharedHome ?? LocalManager.sharedHomePath()}. '
             'Android can connect to a LAN/hosted server, but cannot launch the Python server itself.',
@@ -1947,9 +1956,10 @@ class _StatusRow extends StatelessWidget {
           ),
           const SizedBox(width: 8),
           SizedBox(
-            width: 112,
+            width: 120,
             child: Text(label, style: Theme.of(context).textTheme.labelLarge),
           ),
+          const SizedBox(width: 12),
           Expanded(child: SelectableText(value)),
           if (onCopy != null)
             IconButton(

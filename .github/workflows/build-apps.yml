@@ -23,6 +23,7 @@ on:
       - "scripts/package_local_system.py"
       - "*.py"
       - "*.cmd"
+      - "*.sh"
       - ".github/workflows/build-apps.yml"
   workflow_dispatch:
 

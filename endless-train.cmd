@@ -1,13 +1,7 @@
 @echo off
 setlocal
 set "REPO=%~dp0"
-if not defined TRILOBITE_HOME (
-  if defined LOCALAPPDATA (
-    set "TRILOBITE_HOME=%LOCALAPPDATA%\trilobite"
-  ) else (
-    set "TRILOBITE_HOME=%USERPROFILE%\.trilobite"
-  )
-)
+call "%REPO%trilobite-runtime.cmd"
 
 if not defined LOCAL_LLM_NUM_THREAD set "LOCAL_LLM_NUM_THREAD=%NUMBER_OF_PROCESSORS%"
 if not defined LOCAL_LLM_NUM_GPU set "LOCAL_LLM_NUM_GPU=999"
@@ -24,23 +18,8 @@ if not defined TRILOBITE_ENDLESS_REPAIRS set "TRILOBITE_ENDLESS_REPAIRS=2"
 if not defined TRILOBITE_ENDLESS_SLEEP set "TRILOBITE_ENDLESS_SLEEP=2"
 if not defined TRILOBITE_ENDLESS_STOP_AFTER_NO_PROGRESS set "TRILOBITE_ENDLESS_STOP_AFTER_NO_PROGRESS=1"
 
-set "PYEXE=%REPO%venv\Scripts\python.exe"
-"%PYEXE%" -c "import sys" >nul 2>&1
-if errorlevel 1 (
-  set "PYEXE="
-  if exist "%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" (
-    set "PYEXE=%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
-  )
-  for %%P in (py.exe python.exe) do (
-    if not defined PYEXE (
-      where %%P >nul 2>&1
-      if not errorlevel 1 set "PYEXE=%%P"
-    )
-  )
-)
-
-if not defined PYEXE (
-  echo [trilobite] ERROR: no usable Python found. Recreate venv or install Python.
+if not defined TRILOBITE_PYTHON (
+  echo [trilobite] ERROR: no bundled or system Python runtime was found.
   exit /b 1
 )
 
@@ -48,28 +27,28 @@ if exist "%REPO%venv\Lib\site-packages" (
   set "PYTHONPATH=%REPO%venv\Lib\site-packages;%REPO%venv\Lib\site-packages\win32;%REPO%venv\Lib\site-packages\win32\lib;%REPO%venv\Lib\site-packages\pywin32_system32;%PYTHONPATH%"
 )
 
-where ollama >nul 2>&1
+"%TRILOBITE_OLLAMA_EXE%" --version >nul 2>&1
 if errorlevel 1 (
   echo [trilobite] Ollama CLI not on PATH; using HTTP connection only.
 ) else (
-  ollama list >nul 2>&1
+  "%TRILOBITE_OLLAMA_EXE%" list >nul 2>&1
   if errorlevel 1 (
     echo [trilobite] starting Ollama...
-    start "" /b ollama serve
+    start "" /b "%TRILOBITE_OLLAMA_EXE%" serve
     timeout /t 2 >nul
   )
 
-  ollama list 2>nul | findstr /i "trilobite" >nul
+  "%TRILOBITE_OLLAMA_EXE%" list 2>nul | findstr /i "trilobite" >nul
   if errorlevel 1 (
     echo [trilobite] creating model alias ^(first run^)...
-    "%PYEXE%" "%REPO%setup_alias.py"
+    "%TRILOBITE_PYTHON%" "%REPO%bootstrap_engine.py"
   )
 )
 
 echo [trilobite] endless training loop starting.
 echo [trilobite] Stop with Ctrl+C.
 echo [trilobite] Per round: %TRILOBITE_ENDLESS_TOTAL% jobs, languages=%TRILOBITE_ENDLESS_LANGUAGES%, tier=%TRILOBITE_ENDLESS_TIER%
-"%PYEXE%" "%REPO%endless_train.py"
+"%TRILOBITE_PYTHON%" "%REPO%endless_train.py"
 set "RC=%ERRORLEVEL%"
 
 echo [trilobite] endless training exited with code %RC%.

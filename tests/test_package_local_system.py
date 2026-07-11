@@ -1,6 +1,8 @@
 import hashlib
 import json
 import os
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -92,6 +94,48 @@ def test_zip_is_deterministic_and_contains_manifest(monkeypatch, tmp_path):
     assert hashlib.sha256(archive.read_bytes()).hexdigest() == first
     with package.zipfile.ZipFile(archive) as zf:
         assert not any(name.endswith("unlisted-local-state.txt") for name in zf.namelist())
+        shell = zf.getinfo("local-system/bootstrap-engine.sh")
+        assert (shell.external_attr >> 16) & 0o777 == 0o755
+
+
+def test_optional_engine_bundle_is_binary_safe_sealed_and_executable(
+    monkeypatch,
+    tmp_path,
+):
+    root = _fake_repo(tmp_path, monkeypatch)
+    source = tmp_path / "prepared-engine"
+    runtime = source / "runtime" / "ollama" / "ollama.exe"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_bytes(b"binary runtime\xff")
+    engine_manifest = source / "ENGINE-BUNDLE.json"
+    engine_manifest.write_text("{}\n", encoding="utf-8")
+    record = package.engine_bundle.BundleFile(
+        Path("runtime/ollama/ollama.exe"),
+        runtime.stat().st_size,
+        package.engine_bundle.sha256_file(runtime),
+        True,
+    )
+    fake_bundle = SimpleNamespace(
+        root=source,
+        manifest_path=engine_manifest,
+        identity="windows-x86_64",
+        files=(record,),
+    )
+    monkeypatch.setattr(
+        package.engine_bundle,
+        "load_engine_bundle",
+        lambda *args, **kwargs: fake_bundle,
+    )
+
+    dest = root / "dist" / "local-system"
+    package.copy_payload(dest, source)
+    copied = dest / "engine" / "windows-x86_64" / record.relative
+    assert copied.read_bytes() == runtime.read_bytes()
+    manifest = json.loads((dest / "PACKAGE-MANIFEST.json").read_text(encoding="utf-8"))
+    entries = {item["path"]: item for item in manifest["files"]}
+    key = "engine/windows-x86_64/runtime/ollama/ollama.exe"
+    assert entries[key]["sha256"] == record.sha256
+    assert entries[key]["mode"] == 0o755
 
 
 def test_zip_rejects_tampered_manifest_content_and_preserves_archive(monkeypatch, tmp_path):

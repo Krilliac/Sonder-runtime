@@ -2,20 +2,23 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import uuid
 import zipfile
 from pathlib import Path, PurePosixPath
 
-
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import engine_bundle  # noqa: E402
 
 ALLOWED_DIRS = {
     "contrib",
@@ -55,8 +58,11 @@ REQUIRED_FILES = {
     "artifact_grounding.py",
     "assetgen.py",
     "bootstrap-engine.cmd",
+    "bootstrap-engine.sh",
     "bootstrap_engine.py",
     "creative_router.py",
+    "engine_bundle.py",
+    "endless-train.sh",
     "game_forge.py",
     "fleet_store.py",
     "learning_health.py",
@@ -68,9 +74,13 @@ REQUIRED_FILES = {
     "server.py",
     "setup_alias.py",
     "trilobite-headless.cmd",
+    "trilobite-headless.sh",
     "trilobite_headless.py",
+    "trilobite-runtime.cmd",
+    "trilobite-runtime.sh",
     "web_intents.py",
     "trilobite-serve.cmd",
+    "trilobite-serve.sh",
     "trilobite_serve.py",
 }
 EXACT_OUTPUTS = (
@@ -209,37 +219,84 @@ def _tracked_files() -> list[Path]:
     return sorted(paths, key=lambda item: item.relative_to(ROOT).as_posix())
 
 
-def _privacy_scan(path: Path) -> None:
-    data = path.read_bytes()
-    if b"\0" in data:
+def _privacy_scan_binary(path: Path) -> None:
+    home = str(Path.home())
+    needles = []
+    if len(home) > 3:
+        needles.extend(
+            (
+                home.encode("utf-8", errors="ignore").lower(),
+                home.encode("utf-16-le", errors="ignore").lower(),
+            )
+        )
+    overlap = b""
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            sample = overlap + chunk
+            lowered = sample.lower()
+            if any(needle and needle in lowered for needle in needles):
+                raise ValueError(f"payload binary contains an absolute user-home path: {path.name}")
+            overlap = sample[-512:]
+
+
+def _privacy_scan(path: Path, *, allow_binary: bool = False) -> None:
+    data = path.read_bytes() if path.stat().st_size <= 16 * 1024 * 1024 else b""
+    if not data or b"\0" in data:
+        if allow_binary:
+            _privacy_scan_binary(path)
+            return
+        if not data:
+            raise ValueError(f"payload text is too large to inspect safely: {path.name}")
         raise ValueError(f"payload text contains NUL bytes: {path.name}")
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
+        if allow_binary:
+            _privacy_scan_binary(path)
+            return
         raise ValueError(f"payload text is not valid UTF-8: {path.name}") from exc
     home = str(Path.home())
     if len(home) > 3 and home.casefold() in text.casefold():
         raise ValueError(f"payload contains an absolute user-home path: {path.name}")
-    for pattern in HOME_PATH_PATTERNS:
-        if pattern.search(text):
-            raise ValueError(f"payload contains an absolute user-home path: {path.name}")
+    if not allow_binary:
+        for pattern in HOME_PATH_PATTERNS:
+            if pattern.search(text):
+                raise ValueError(f"payload contains an absolute user-home path: {path.name}")
     for pattern in SECRET_PATTERNS:
         if pattern.search(text):
             raise ValueError(f"payload contains a secret-like value: {path.name}")
 
 
+def _engine_executables(stage: Path) -> set[str]:
+    executable_paths = set()
+    engine_root = stage / "engine"
+    if not engine_root.is_dir():
+        return executable_paths
+    for manifest_path in engine_root.glob(f"*/{engine_bundle.MANIFEST_NAME}"):
+        bundle = engine_bundle.load_engine_bundle(manifest_path.parent, verify_hashes=False)
+        prefix = manifest_path.parent.relative_to(stage)
+        for record in bundle.files:
+            if record.executable:
+                executable_paths.add((prefix / record.relative).as_posix())
+    return executable_paths
+
+
 def _write_manifest(stage: Path) -> None:
+    engine_executables = _engine_executables(stage)
     files = []
     for path in sorted(stage.rglob("*"), key=lambda item: item.as_posix()):
         if not path.is_file() or path.name == "PACKAGE-MANIFEST.json":
             continue
-        _privacy_scan(path)
-        data = path.read_bytes()
+        relative = path.relative_to(stage)
+        allow_binary = bool(relative.parts and relative.parts[0] == "engine")
+        _privacy_scan(path, allow_binary=allow_binary)
+        mode = 0o755 if relative.suffix == ".sh" or relative.as_posix() in engine_executables else 0o644
         files.append(
             {
-                "path": path.relative_to(stage).as_posix(),
-                "size": len(data),
-                "sha256": hashlib.sha256(data).hexdigest(),
+                "path": relative.as_posix(),
+                "size": path.stat().st_size,
+                "sha256": engine_bundle.sha256_file(path),
+                "mode": mode,
             }
         )
     manifest = {"schema": 1, "files": files}
@@ -249,7 +306,19 @@ def _write_manifest(stage: Path) -> None:
     )
 
 
-def copy_payload(dest: Path) -> None:
+def _copy_engine_bundle(source: Path, stage: Path) -> None:
+    bundle = engine_bundle.load_engine_bundle(source, verify_hashes=True)
+    target_root = stage / "engine" / bundle.identity
+    target_root.mkdir(parents=True, exist_ok=False)
+    shutil.copy2(bundle.manifest_path, target_root / engine_bundle.MANIFEST_NAME)
+    for record in bundle.files:
+        source_path = bundle.root / record.relative
+        target = target_root / record.relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, target)
+
+
+def copy_payload(dest: Path, engine_bundle_source: Path | None = None) -> None:
     dest = validate_output_path(dest)
     if dest.exists():
         if not dest.is_dir():
@@ -280,12 +349,16 @@ def copy_payload(dest: Path) -> None:
                 raise ValueError(f"payload destination escapes staging root: {rel}")
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
+        if engine_bundle_source is not None:
+            _copy_engine_bundle(engine_bundle_source, stage)
         (stage / "BUNDLED_SYSTEM_README.txt").write_text(
             "This folder is the bundled trilobite local system.\n"
             "Run bootstrap-engine.cmd for one-click local model setup on Windows.\n"
-            "Run trilobite-headless.cmd start/status/stop for the managed server.\n"
-            "Run trilobite-serve.cmd on Windows, or python trilobite_serve.py elsewhere.\n"
-            "Model weights are managed by Ollama and may be pulled on first setup.\n",
+            "Run ./bootstrap-engine.sh on Linux or macOS.\n"
+            "Run trilobite-headless.cmd or ./trilobite-headless.sh for the managed server.\n"
+            "If engine/<platform>-<architecture>/ exists, setup verifies and uses its sealed\n"
+            "Python, Ollama, and model payload without network access. Code-only packages use\n"
+            "host runtimes and may install mcp or pull missing models on first setup.\n",
             encoding="utf-8",
         )
         missing = sorted(name for name in REQUIRED_FILES if not (stage / name).is_file())
@@ -320,7 +393,7 @@ def _manifest_relative(raw: object) -> Path:
     return Path(*pure.parts)
 
 
-def _verified_manifest_files(src: Path) -> tuple[bytes, list[tuple[Path, bytes]]]:
+def _verified_manifest_files(src: Path) -> tuple[bytes, list[tuple[Path, Path, int]]]:
     manifest_path = src / "PACKAGE-MANIFEST.json"
     _assert_no_reparse(manifest_path, src)
     if not manifest_path.is_file() or _is_reparse(manifest_path):
@@ -353,19 +426,22 @@ def _verified_manifest_files(src: Path) -> tuple[bytes, list[tuple[Path, bytes]]
         _assert_no_reparse(target, src)
         if not target.is_file() or _is_reparse(target):
             raise ValueError(f"manifest-listed file is missing or unsafe: {key}")
-        _privacy_scan(target)
-        data = target.read_bytes()
+        allow_binary = bool(rel.parts and rel.parts[0] == "engine")
+        _privacy_scan(target, allow_binary=allow_binary)
         expected_size = record.get("size")
         expected_hash = record.get("sha256")
-        if type(expected_size) is not int or expected_size != len(data):
+        mode = record.get("mode", 0o644)
+        if mode not in (0o644, 0o755):
+            raise ValueError(f"manifest mode is invalid: {key}")
+        if type(expected_size) is not int or expected_size != target.stat().st_size:
             raise ValueError(f"manifest size mismatch: {key}")
         if (
             not isinstance(expected_hash, str)
             or not re.fullmatch(r"[0-9a-f]{64}", expected_hash)
-            or hashlib.sha256(data).hexdigest() != expected_hash
+            or engine_bundle.sha256_file(target) != expected_hash
         ):
             raise ValueError(f"manifest hash mismatch: {key}")
-        verified.append((rel, data))
+        verified.append((rel, target, mode))
     missing = sorted(REQUIRED_FILES - seen)
     if missing:
         raise ValueError("package manifest is missing required files: " + ", ".join(missing))
@@ -386,14 +462,20 @@ def zip_payload(src: Path, zip_path: Path) -> None:
     temp_path = Path(temp_name)
     try:
         with zipfile.ZipFile(temp_path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
-            entries = [(Path("PACKAGE-MANIFEST.json"), manifest_bytes)]
-            entries.extend(verified)
-            for rel, data in sorted(entries, key=lambda item: item[0].as_posix()):
+            manifest_info = zipfile.ZipInfo(
+                (Path(src.name) / "PACKAGE-MANIFEST.json").as_posix(),
+                date_time=(1980, 1, 1, 0, 0, 0),
+            )
+            manifest_info.compress_type = zipfile.ZIP_DEFLATED
+            manifest_info.external_attr = (stat.S_IFREG | 0o644) << 16
+            zf.writestr(manifest_info, manifest_bytes)
+            for rel, source, mode in sorted(verified, key=lambda item: item[0].as_posix()):
                 arcname = (Path(src.name) / rel).as_posix()
                 info = zipfile.ZipInfo(arcname, date_time=(1980, 1, 1, 0, 0, 0))
                 info.compress_type = zipfile.ZIP_DEFLATED
-                info.external_attr = 0o100644 << 16
-                zf.writestr(info, data)
+                info.external_attr = (stat.S_IFREG | mode) << 16
+                with source.open("rb") as incoming, zf.open(info, "w") as outgoing:
+                    shutil.copyfileobj(incoming, outgoing, length=1024 * 1024)
         os.replace(temp_path, zip_path)
     finally:
         if temp_path.exists():
@@ -404,13 +486,19 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", default="app/build/local-system")
     parser.add_argument("--zip", default="")
+    parser.add_argument(
+        "--engine-bundle",
+        default=os.environ.get("TRILOBITE_ENGINE_BUNDLE_SOURCE", ""),
+        help="optional sealed platform engine bundle to include",
+    )
     args = parser.parse_args()
 
     if Path(args.out).is_absolute():
         raise SystemExit("--out must be repository-relative")
     try:
         out = validate_output_path(ROOT / args.out)
-        copy_payload(out)
+        bundle_source = Path(args.engine_bundle).expanduser() if args.engine_bundle else None
+        copy_payload(out, bundle_source)
     except (RuntimeError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
     if args.zip:

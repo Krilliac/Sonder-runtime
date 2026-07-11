@@ -43,6 +43,31 @@ def test_python_exe_ignores_broken_venv(monkeypatch, tmp_path):
     assert H.python_exe() == "C:/Python/python.exe"
 
 
+def test_runtime_executables_honor_explicit_bundle_environment(monkeypatch):
+    monkeypatch.setenv("TRILOBITE_PYTHON", "C:/bundle/python.exe")
+    monkeypatch.setenv("TRILOBITE_OLLAMA_EXE", "C:/bundle/ollama.exe")
+    monkeypatch.setattr(H, "_python_works", lambda path: path == "C:/bundle/python.exe")
+    assert H.python_exe() == "C:/bundle/python.exe"
+    assert H.ollama_exe() == "C:/bundle/ollama.exe"
+
+
+def test_alias_probe_skips_bootstrap_when_ready(monkeypatch):
+    calls = []
+    monkeypatch.setattr(H, "ollama_exe", lambda: "ollama-test")
+    monkeypatch.setattr(H, "ollama_ok", lambda: True)
+    monkeypatch.setattr(H, "runtime_environment", lambda: {})
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "ready", "")
+
+    monkeypatch.setattr(H.subprocess, "run", fake_run)
+    ok, message = H.ensure_trilobite_alias()
+    assert ok is True
+    assert "ready" in message
+    assert calls == [["ollama-test", "show", "trilobite"]]
+
+
 def test_stop_pid_reports_missing_pid(monkeypatch, tmp_path):
     monkeypatch.setattr(H, "run_dir", lambda: tmp_path)
 

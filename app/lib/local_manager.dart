@@ -18,6 +18,7 @@ class LocalInstallInfo {
   final bool serverScript;
   final bool trainingScript;
   final bool bootstrapScript;
+  final bool engineBundle;
   final bool defaultServerReachable;
 
   const LocalInstallInfo({
@@ -31,6 +32,7 @@ class LocalInstallInfo {
     required this.serverScript,
     required this.trainingScript,
     required this.bootstrapScript,
+    required this.engineBundle,
     required this.defaultServerReachable,
   });
 }
@@ -58,8 +60,8 @@ class LocalManager {
   }
 
   static Directory bundledSystemDirectory() {
-    final desktopSibling =
-        Directory('${appDirectory().path}${Platform.pathSeparator}local-system');
+    final desktopSibling = Directory(
+        '${appDirectory().path}${Platform.pathSeparator}local-system');
     if (desktopSibling.existsSync()) return desktopSibling;
     if (Platform.isMacOS) {
       final contentsDir = appDirectory().parent;
@@ -102,7 +104,8 @@ class LocalManager {
       ...Platform.environment,
       'TRILOBITE_HOME': sharedHomePath(),
       'TRILOBITE_ALLOW_CLOUD': allowHosted ? '1' : '0',
-      'TRILOBITE_CONTEXT_SIZE': contextSize.trim().isEmpty ? '8192' : contextSize.trim(),
+      'TRILOBITE_CONTEXT_SIZE':
+          contextSize.trim().isEmpty ? '8192' : contextSize.trim(),
     };
   }
 
@@ -126,13 +129,35 @@ class LocalManager {
     Future<bool> hasFile(String name) async {
       return File('${system.path}${Platform.pathSeparator}$name').exists();
     }
+
     final gitDir = Directory('${system.path}${Platform.pathSeparator}.git');
     final gitCheckout = systemExists && await gitDir.exists();
-    final serverScript = systemExists && await hasFile('trilobite-serve.cmd');
-    final trainingScript = systemExists && await hasFile('endless-train.cmd');
+    final serverScript = systemExists &&
+        await hasFile(
+            Platform.isWindows ? 'trilobite-serve.cmd' : 'trilobite-serve.sh');
+    final trainingScript = systemExists &&
+        await hasFile(
+            Platform.isWindows ? 'endless-train.cmd' : 'endless-train.sh');
     final bootstrapScript = systemExists &&
-        (await hasFile('bootstrap-engine.cmd') ||
-            await hasFile('bootstrap_engine.py'));
+        await hasFile(Platform.isWindows
+            ? 'bootstrap-engine.cmd'
+            : 'bootstrap-engine.sh');
+    var engineBundle = false;
+    final engineDirectory = Directory(
+      '${system.path}${Platform.pathSeparator}engine',
+    );
+    if (systemExists && await engineDirectory.exists()) {
+      await for (final entry in engineDirectory.list(followLinks: false)) {
+        if (entry is! Directory) continue;
+        final manifest = File(
+          '${entry.path}${Platform.pathSeparator}ENGINE-BUNDLE.json',
+        );
+        if (await manifest.exists()) {
+          engineBundle = true;
+          break;
+        }
+      }
+    }
     final reachable = await defaultServerReachable();
 
     return LocalInstallInfo(
@@ -146,6 +171,7 @@ class LocalManager {
       serverScript: serverScript,
       trainingScript: trainingScript,
       bootstrapScript: bootstrapScript,
+      engineBundle: engineBundle,
       defaultServerReachable: reachable,
     );
   }
@@ -159,11 +185,13 @@ class LocalManager {
     }
     final system = bundledSystemDirectory();
     if (!await system.exists()) {
-      return const LocalActionResult(false, 'No bundled local-system folder found.');
+      return const LocalActionResult(
+          false, 'No bundled local-system folder found.');
     }
     try {
       if (Platform.isWindows) {
-        final script = File('${system.path}${Platform.pathSeparator}bootstrap-engine.cmd');
+        final script =
+            File('${system.path}${Platform.pathSeparator}bootstrap-engine.cmd');
         if (await script.exists()) {
           await Process.start(
             'cmd.exe',
@@ -178,9 +206,18 @@ class LocalManager {
           return const LocalActionResult(true, 'Engine setup started.');
         }
       }
+      final script = File(
+        '${system.path}${Platform.pathSeparator}bootstrap-engine.sh',
+      );
+      if (!await script.exists()) {
+        return const LocalActionResult(
+          false,
+          'The platform engine bootstrap launcher is missing.',
+        );
+      }
       await Process.start(
-        Platform.isWindows ? 'python.exe' : 'python3',
-        ['bootstrap_engine.py'],
+        '/bin/sh',
+        [script.path],
         workingDirectory: system.path,
         environment: processEnvironment(
           allowHosted: allowHosted,
@@ -247,7 +284,6 @@ class LocalManager {
           );
         }
       }
-      final python = Platform.isWindows ? 'python.exe' : 'python3';
       if (persistOnAppClose) {
         return _startHeadlessServer(
           system,
@@ -255,9 +291,15 @@ class LocalManager {
           contextSize: contextSize,
         );
       }
+      final script = File(
+        '${system.path}${Platform.pathSeparator}trilobite-serve.sh',
+      );
+      if (!await script.exists()) {
+        return const LocalActionResult(false, 'Server launcher is missing.');
+      }
       final process = await Process.start(
-        python,
-        ['trilobite_serve.py'],
+        '/bin/sh',
+        [script.path],
         workingDirectory: system.path,
         environment: processEnvironment(
           allowHosted: allowHosted,
@@ -289,7 +331,8 @@ class LocalManager {
         '${system.path}${Platform.pathSeparator}trilobite-headless.cmd',
       );
       if (!await script.exists()) {
-        return const LocalActionResult(false, 'Headless supervisor is missing.');
+        return const LocalActionResult(
+            false, 'Headless supervisor is missing.');
       }
       await Process.start(
         'cmd.exe',
@@ -303,13 +346,14 @@ class LocalManager {
       );
     } else {
       final script = File(
-        '${system.path}${Platform.pathSeparator}trilobite_headless.py',
+        '${system.path}${Platform.pathSeparator}trilobite-headless.sh',
       );
       if (!await script.exists()) {
-        return const LocalActionResult(false, 'Headless supervisor is missing.');
+        return const LocalActionResult(
+            false, 'Headless supervisor is missing.');
       }
       await Process.start(
-        'python3',
+        '/bin/sh',
         [script.path, ...args],
         workingDirectory: system.path,
         environment: processEnvironment(
@@ -354,13 +398,15 @@ class LocalManager {
     }
     final managedResult = await _stopTrackedServer();
     try {
-      final headlessResult = await _stopHeadlessServer(bundledSystemDirectory());
+      final headlessResult =
+          await _stopHeadlessServer(bundledSystemDirectory());
       final results = <LocalActionResult>[
         if (managedResult != null) managedResult,
         if (headlessResult != null) headlessResult,
       ];
       if (results.isEmpty) {
-        return const LocalActionResult(true, 'No app-managed server was found.');
+        return const LocalActionResult(
+            true, 'No app-managed server was found.');
       }
       return LocalActionResult(
         results.every((result) => result.ok),
@@ -389,7 +435,8 @@ class LocalManager {
         );
       }
       final stopped = process.kill(ProcessSignal.sigterm);
-      return LocalActionResult(stopped, 'Stop requested for app-managed PID $pid.');
+      return LocalActionResult(
+          stopped, 'Stop requested for app-managed PID $pid.');
     } finally {
       if (_managedServerPid == pid) {
         _managedServer = null;
@@ -398,15 +445,16 @@ class LocalManager {
     }
   }
 
-  static Future<LocalActionResult?> _stopHeadlessServer(Directory system) async {
+  static Future<LocalActionResult?> _stopHeadlessServer(
+      Directory system) async {
     final windows = Platform.isWindows;
     final script = File(
       '${system.path}${Platform.pathSeparator}'
-      '${windows ? 'trilobite-headless.cmd' : 'trilobite_headless.py'}',
+      '${windows ? 'trilobite-headless.cmd' : 'trilobite-headless.sh'}',
     );
     if (!await script.exists()) return null;
     final result = await Process.run(
-      windows ? 'cmd.exe' : 'python3',
+      windows ? 'cmd.exe' : '/bin/sh',
       windows ? ['/c', script.path, 'stop'] : [script.path, 'stop'],
       workingDirectory: system.path,
       environment: processEnvironment(),
@@ -420,15 +468,18 @@ class LocalManager {
 
   static Future<LocalActionResult> startEndlessTraining() async {
     if (!canRunLocalTools) {
-      return const LocalActionResult(false, 'Training launcher is desktop-only.');
+      return const LocalActionResult(
+          false, 'Training launcher is desktop-only.');
     }
     final system = bundledSystemDirectory();
     if (!await system.exists()) {
-      return const LocalActionResult(false, 'No bundled local-system folder found.');
+      return const LocalActionResult(
+          false, 'No bundled local-system folder found.');
     }
     try {
       if (Platform.isWindows) {
-        final script = File('${system.path}${Platform.pathSeparator}endless-train.cmd');
+        final script =
+            File('${system.path}${Platform.pathSeparator}endless-train.cmd');
         if (await script.exists()) {
           await Process.start(
             'cmd.exe',
@@ -440,9 +491,15 @@ class LocalManager {
           return const LocalActionResult(true, 'Endless training started.');
         }
       }
+      final script = File(
+        '${system.path}${Platform.pathSeparator}endless-train.sh',
+      );
+      if (!await script.exists()) {
+        return const LocalActionResult(false, 'Training launcher is missing.');
+      }
       await Process.start(
-        Platform.isWindows ? 'python.exe' : 'python3',
-        ['endless_train.py'],
+        '/bin/sh',
+        [script.path],
         workingDirectory: system.path,
         environment: processEnvironment(),
         mode: ProcessStartMode.detached,
@@ -459,7 +516,8 @@ class LocalManager {
     }
     final system = bundledSystemDirectory();
     if (!await system.exists()) {
-      return const LocalActionResult(false, 'No bundled local-system folder found.');
+      return const LocalActionResult(
+          false, 'No bundled local-system folder found.');
     }
     try {
       final gitDir = Directory('${system.path}${Platform.pathSeparator}.git');
@@ -468,8 +526,8 @@ class LocalManager {
       }
       final safeUpdater =
           File('${system.path}${Platform.pathSeparator}safe_update.py');
-      final safeUpdaterCmd =
-          File('${system.path}${Platform.pathSeparator}trilobite-safe-update.cmd');
+      final safeUpdaterCmd = File(
+          '${system.path}${Platform.pathSeparator}trilobite-safe-update.cmd');
       if (Platform.isWindows && await safeUpdaterCmd.exists()) {
         final safe = await Process.run(
           'cmd.exe',

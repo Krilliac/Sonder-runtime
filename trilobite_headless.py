@@ -14,6 +14,7 @@ import sys
 import time
 from pathlib import Path
 
+import engine_bundle
 import trilobite_paths
 
 
@@ -32,6 +33,15 @@ def run_dir() -> Path:
 
 
 def python_exe() -> str:
+    configured = os.environ.get("TRILOBITE_PYTHON", "").strip()
+    if configured and _python_works(configured):
+        return configured
+    try:
+        bundle = engine_bundle.discover_engine_bundle(repo_root())
+    except ValueError:
+        bundle = None
+    if bundle is not None and _python_works(str(bundle.python_executable)):
+        return str(bundle.python_executable)
     venv = repo_root() / "venv" / "Scripts" / "python.exe"
     if venv.exists() and _python_works(str(venv)):
         return str(venv)
@@ -205,13 +215,42 @@ def _managed_pid(name: str, host=DEFAULT_HOST, port=DEFAULT_PORT) -> int | None:
     return None
 
 
+def ollama_exe() -> str:
+    configured = os.environ.get("TRILOBITE_OLLAMA_EXE", "").strip()
+    if configured:
+        return configured
+    try:
+        bundle = engine_bundle.discover_engine_bundle(repo_root())
+    except ValueError:
+        bundle = None
+    if bundle is not None:
+        return str(bundle.ollama_executable)
+    return shutil.which("ollama") or ""
+
+
+def runtime_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    try:
+        bundle = engine_bundle.discover_engine_bundle(repo_root())
+    except ValueError:
+        bundle = None
+    if bundle is not None:
+        model_store = engine_bundle.default_trilobite_home() / "ollama-models"
+        env.update(engine_bundle.runtime_environment(bundle, model_store))
+    return env
+
+
 def ollama_ok() -> bool:
+    executable = ollama_exe()
+    if not executable:
+        return False
     try:
         proc = subprocess.run(
-            ["ollama", "list"],
+            [executable, "list"],
             capture_output=True,
             text=True,
             timeout=8,
+            env=runtime_environment(),
         )
         return proc.returncode == 0
     except (OSError, subprocess.SubprocessError):
@@ -230,12 +269,59 @@ def wait_until(fn, seconds: float) -> bool:
 def start_ollama() -> str:
     if ollama_ok():
         return "ollama: already reachable"
-    if not shutil.which("ollama"):
+    executable = ollama_exe()
+    if not executable:
         return "ollama: not installed or not on PATH"
-    pid = _popen(["ollama", "serve"], "ollama")
+    pid = _popen([executable, "serve"], "ollama", env=runtime_environment())
     if wait_until(ollama_ok, 12):
         return "ollama: started pid=%s" % pid
     return "ollama: start requested pid=%s, not reachable yet (see %s)" % (pid, log_file("ollama"))
+
+
+def ensure_trilobite_alias() -> tuple[bool, str]:
+    executable = ollama_exe()
+    if not executable or not ollama_ok():
+        return False, "engine: Ollama is not reachable; alias setup skipped"
+    env = runtime_environment()
+    try:
+        probe = subprocess.run(
+            [executable, "show", "trilobite"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, "engine: could not inspect trilobite alias: %s" % exc
+    if probe.returncode == 0:
+        return True, "engine: trilobite alias is ready"
+    command = [python_exe(), str(repo_root() / "bootstrap_engine.py")]
+    try:
+        bundle = engine_bundle.discover_engine_bundle(repo_root())
+    except ValueError as exc:
+        return False, "engine: bundled runtime is invalid: %s" % exc
+    if bundle is not None:
+        command.append("--offline")
+    try:
+        setup = subprocess.run(
+            command,
+            cwd=str(repo_root()),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30 * 60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, "engine: bootstrap could not run: %s" % exc
+    if setup.returncode == 0:
+        return True, "engine: bootstrap completed"
+    detail = (setup.stderr or setup.stdout).strip()
+    if len(detail) > 600:
+        detail = detail[-600:]
+    return False, "engine: bootstrap failed (%s)%s" % (
+        setup.returncode,
+        ": " + detail if detail else "",
+    )
 
 
 def start_trilobite(host=DEFAULT_HOST, port=DEFAULT_PORT, env=None) -> str:
@@ -244,7 +330,7 @@ def start_trilobite(host=DEFAULT_HOST, port=DEFAULT_PORT, env=None) -> str:
         suffix = " pid=%s" % pid if pid else " (unmanaged listener)"
         return "trilobite: already listening on http://%s:%s%s" % (host, port, suffix)
     cmd = [python_exe(), str(repo_root() / "trilobite_serve.py"), str(port)]
-    merged_env = os.environ.copy()
+    merged_env = runtime_environment()
     if env:
         merged_env.update(env)
     merged_env.setdefault("TRILOBITE_HOST", host)
@@ -341,6 +427,10 @@ def main(argv=None) -> int:
     if args.command == "restart":
         print(stop_pid("trilobite_serve", args.host, args.port))
     print(start_ollama())
+    alias_ok, alias_message = ensure_trilobite_alias()
+    print(alias_message)
+    if not alias_ok:
+        return 2
     print(start_trilobite(args.host, args.port, env=env))
     print(status(args.host, args.port))
     return 0

@@ -281,9 +281,36 @@ venv/Scripts/python -m pytest -q          # run the test suite
 python trilobite_repl.py                  # interactive session
 ```
 
-**Bundled desktop engine setup:** run `bootstrap-engine.cmd` or press **Setup
-engine** in the app. It starts Ollama if needed, detects RAM, chooses a
-`qwen2.5-coder` size, pulls embeddings, and creates the `trilobite` alias.
+**Bundled desktop engine setup:** run `bootstrap-engine.cmd` on Windows,
+`./bootstrap-engine.sh` on Linux/macOS, or press **Setup engine** in the app.
+It starts Ollama if needed, detects RAM, chooses an available `qwen2.5-coder`
+size, and creates the `trilobite` alias. Lightweight packages use installed
+Python/Ollama and may install `mcp` or download missing models on first setup.
+
+For a network-independent package, assemble and include a sealed platform
+engine bundle. The manifest pins the platform/architecture, portable Python and
+Ollama executables, every runtime/model file size and SHA-256, available base
+models, RAM thresholds, and the embedding model. Setup verifies the complete
+Ollama manifest/blob graph before copying models into writable shared state;
+offline mode never invokes pip or `ollama pull`.
+
+```powershell
+# Build a reusable Windows bundle from this machine's installed Ollama models.
+venv\Scripts\python.exe scripts\assemble_engine_bundle.py `
+  --out app\build\engine-bundles\windows-x86_64
+
+# Package that bundle and build the local Flutter release in one command.
+powershell -NoProfile -File .\scripts\build_flutter_local.ps1 `
+  -Target windows -AssembleOfflineEngine
+
+# Audit without changing state or allowing network access.
+bootstrap-engine.cmd --bundle app\build\engine-bundles\windows-x86_64 --dry-run
+```
+
+The assembler defaults to the compact installed `qwen2.5-coder:1.5b` plus
+`nomic-embed-text`; repeat `--base-model NAME=MIN_RAM_GB` to seal additional
+installed sizes. Linux/macOS use the same format and launchers but should pass a
+relocatable platform Python distribution with `--python-runtime`.
 
 **Headless server/console mode:** the chat app is optional. On Windows run
 `trilobite-headless.cmd start` to launch Ollama and `trilobite_serve.py`
@@ -443,6 +470,7 @@ Privacy is opt-in and scrubbed at every step — nothing auto-uploads, and no PR
 
 **Shipped**
 - ✅ **One-click engine setup** — bundled installs can bootstrap the local engine, detect available memory, pick a practical default model size, and start the local server without terminal setup.
+- ✅ **Sealed offline engine bundles** — optional per-platform payloads carry portable Python/Ollama runtimes and complete model-store subsets behind a fail-closed SHA-256 manifest; launchers and the Flutter System panel prefer them without removing lightweight host-runtime fallback.
 - ✅ **Richer passive learning** — accepts explicit accept/use/copy/edit signals from the CLI, server, and GUI in addition to natural follow-up phrasing.
 - ✅ **Local-first hosted opt-in** — cloud/hosted tiers are disabled unless `TRILOBITE_ALLOW_CLOUD=1` or the app setting is explicitly enabled.
 - ✅ **General artifact grounding** — `ground_artifact` validates in-memory content, while `artifact_ground` and `/artifactcheck` validate guarded files and bundles with format-specific writing, editable Office, data, UI, image, audio, model, and manifest recipes. Generated packs must pass these contracts before success is reported.
@@ -456,7 +484,10 @@ Privacy is opt-in and scrubbed at every step — nothing auto-uploads, and no PR
 
 - ✅ **Textured rigged morphing 3D models** — deterministic binary glTF 2.0 characters carry indexed geometry, unit normals, orthogonal tangent frames, UVs, three embedded PBR maps, a two-joint skin with inverse-bind matrices, normalized per-vertex weights, a named nonzero breathing blend shape, and three independent named clips for shell rotation, root translation, and morph weights in one dependency-free GLB.
 
-**Next gaps** — make the bundled engine downloader fully self-contained per platform and add larger humanoid rigs, morph normal/tangent deltas, clip sequencing, and broader native viewer/render compatibility beyond the current deterministic model contract.
+**Next gaps** — publish preassembled signed engine payloads for each desktop
+platform (the local assembler/package/runtime contract is shipped) and add larger
+humanoid rigs, morph normal/tangent deltas, clip sequencing, and broader native
+viewer/render compatibility beyond the current deterministic model contract.
 
 ---
 

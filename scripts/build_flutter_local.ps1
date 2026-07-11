@@ -2,7 +2,9 @@
 param(
     [ValidateSet("windows", "android", "test", "all")]
     [string]$Target = "windows",
-    [switch]$SkipTests
+    [switch]$SkipTests,
+    [string]$EngineBundle = "",
+    [switch]$AssembleOfflineEngine
 )
 
 $ErrorActionPreference = "Stop"
@@ -43,10 +45,23 @@ try {
 
     Push-Location $RepoRoot
     try {
+        if ($AssembleOfflineEngine) {
+            if ($Target -notin @("windows", "all")) {
+                throw "-AssembleOfflineEngine currently assembles the Windows runtime on this host"
+            }
+            $script:EngineBundle = Join-Path $RepoRoot "app\build\engine-bundles\windows-x86_64"
+            Invoke-NativeStep "Assemble sealed offline engine" {
+                & $Python scripts\assemble_engine_bundle.py `
+                    --out app\build\engine-bundles\windows-x86_64
+            }
+        }
         Invoke-NativeStep "Package bundled local system" {
-            & $Python scripts\package_local_system.py `
-                --out app\build\local-system `
-                --zip app\assets\local-system.zip
+            $PackageArgs = @(
+                "scripts\package_local_system.py",
+                "--out", "app\build\local-system",
+                "--zip", "app\assets\local-system.zip"
+            )
+            & $Python @PackageArgs
         }
         Push-Location $AppRoot
         try {
@@ -57,6 +72,13 @@ try {
             }
             if ($Target -in @("windows", "all")) {
                 Invoke-NativeStep "Build Windows release" { & $Flutter build windows --release }
+                if ($script:EngineBundle) {
+                    Invoke-NativeStep "Attach sealed desktop engine" {
+                        & $Python "$RepoRoot\scripts\package_local_system.py" `
+                            --out app\build\local-system `
+                            --engine-bundle $script:EngineBundle
+                    }
+                }
                 $ReleaseRoot = (Resolve-Path "build\windows\x64\runner\Release").Path
                 $PayloadTarget = Join-Path $ReleaseRoot "local-system"
                 if (-not $PayloadTarget.StartsWith($ReleaseRoot, [StringComparison]::OrdinalIgnoreCase)) {
