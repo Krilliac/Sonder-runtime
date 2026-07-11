@@ -26,6 +26,7 @@ def test_generate_pack_emits_valid_stdlib_assets(monkeypatch, tmp_path):
     assert open(os.path.join(root, "workbook.xlsx"), "rb").read(2) == b"PK"
     assert open(os.path.join(root, "presentation.pptx"), "rb").read(2) == b"PK"
     assert open(os.path.join(root, "animation.gif"), "rb").read(6) == b"GIF89a"
+    assert open(os.path.join(root, "preview.avi"), "rb").read(4) == b"RIFF"
     assert open(os.path.join(root, "score.mid"), "rb").read(4) == b"MThd"
     assert open(os.path.join(root, "captions.srt"), "rb").read(1) == b"1"
     assert open(os.path.join(root, "captions.vtt"), "rb").read(6) == b"WEBVTT"
@@ -158,13 +159,14 @@ def test_free_form_request_infers_editable_media_and_timeline(monkeypatch, tmp_p
 
     pack = assetgen.generate_artifacts(
         "media-suite",
-        "Create an animated GIF, MIDI score, SRT and WebVTT captions, and EDL video timeline",
+        "Create an animated GIF and AVI video, MIDI score, SRT and WebVTT captions, and EDL video timeline",
     )
 
-    assert {"animation", "midi", "captions", "timeline"} <= set(pack["kinds"])
+    assert {"animation", "video", "midi", "captions", "timeline"} <= set(pack["kinds"])
     paths = {row["path"] for row in pack["files"]}
     assert {
         "animation.gif",
+        "preview.avi",
         "score.mid",
         "captions.srt",
         "captions.vtt",
@@ -181,11 +183,16 @@ def test_timeline_kind_includes_and_references_local_animation(monkeypatch, tmp_
     )
 
     paths = {row["path"] for row in pack["files"]}
-    assert paths == {"animation.gif", "request.json", "timeline.edl"}
+    assert paths == {
+        "animation.gif",
+        "preview.avi",
+        "request.json",
+        "timeline.edl",
+    }
     timeline = open(
         os.path.join(pack["root"], "timeline.edl"), encoding="utf-8"
     ).read()
-    assert "* FROM CLIP NAME: animation.gif" in timeline
+    assert "* FROM CLIP NAME: preview.avi" in timeline
     assert assetgen.verify_pack(pack["root"])["ok"]
 
 

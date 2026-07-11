@@ -56,8 +56,8 @@ def test_generated_pack_is_grounded_before_success(monkeypatch, tmp_path):
 
     generated = server.artifact_generate(
         "launch-kit",
-        "Brand document, spreadsheet, presentation, animation, MIDI, captions, timeline, sample data, web UI, icon, sound, and model",
-        kinds="document,docx,spreadsheet,presentation,animation,midi,captions,timeline,data,web,icon,sound,model",
+        "Brand document, spreadsheet, presentation, animation, video, MIDI, captions, timeline, sample data, web UI, icon, sound, and model",
+        kinds="document,docx,spreadsheet,presentation,animation,video,midi,captions,timeline,data,web,icon,sound,model",
         dimension="3d",
         theme="frost",
         seed=42,
@@ -77,6 +77,7 @@ def test_generated_pack_is_grounded_before_success(monkeypatch, tmp_path):
                 "document.docx",
                 "workbook.xlsx",
                 "presentation.pptx",
+                "preview.avi",
                 "preview.html",
                 "score.mid",
                 "timeline.edl",
@@ -93,6 +94,7 @@ def test_generated_pack_is_grounded_before_success(monkeypatch, tmp_path):
     assert (root / "workbook.xlsx").is_file()
     assert (root / "presentation.pptx").is_file()
     assert (root / "animation.gif").is_file()
+    assert (root / "preview.avi").is_file()
     assert (root / "score.mid").is_file()
     assert (root / "captions.srt").is_file()
     assert (root / "captions.vtt").is_file()

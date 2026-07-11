@@ -46,6 +46,7 @@ OOXML_ACTIVE_SUFFIXES = {
 }
 
 EXTENSION_RECIPES = {
+    ".avi": "avi",
     ".csv": "csv",
     ".docx": "docx",
     ".edl": "edl",
@@ -84,12 +85,14 @@ RECIPE_ALIASES = {
     "subtitle": "auto",
     "timeline": "edl",
     "ui": "ui",
+    "video": "avi",
     "web": "ui",
     "writing": "auto",
 }
 
 SUPPORTED_RECIPES = {
     "auto",
+    "avi",
     "binary",
     "bundle",
     "csv",
@@ -681,6 +684,256 @@ def _validate_gif(path: Path, requirements: dict, checks: list):
         min_side <= width <= max_side and min_side <= height <= max_side,
         "%dx%d (each side %d..%d)" % (width, height, min_side, max_side),
     )
+
+
+def _riff_chunks(data: bytes, start: int, end: int):
+    offset = start
+    while offset < end:
+        if offset + 8 > end:
+            raise ValueError("RIFF chunk header is truncated")
+        kind = data[offset : offset + 4]
+        size = struct.unpack("<I", data[offset + 4 : offset + 8])[0]
+        payload_offset = offset + 8
+        payload_end = payload_offset + size
+        if payload_end > end:
+            raise ValueError("RIFF chunk %r exceeds its parent" % kind)
+        yield kind, payload_offset, size, offset
+        offset = payload_end + (size & 1)
+        if offset > end:
+            raise ValueError("RIFF chunk padding exceeds its parent")
+
+
+def _avi_stream_header(data: bytes):
+    if len(data) < 56:
+        raise ValueError("AVI stream header is truncated")
+    values = struct.unpack("<4s4sIHHIIIIIIIIhhhh", data[:56])
+    return {
+        "type": values[0],
+        "handler": values[1],
+        "scale": values[6],
+        "rate": values[7],
+        "length": values[9],
+        "suggested_size": values[10],
+        "sample_size": values[12],
+        "rect": values[13:17],
+    }
+
+
+def _validate_avi(path: Path, requirements: dict, checks: list):
+    try:
+        data = _read_bytes(path)
+        if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"AVI ":
+            raise ValueError("AVI must be a RIFF AVI container")
+        declared_size = struct.unpack("<I", data[4:8])[0]
+        if declared_size + 8 != len(data):
+            raise ValueError("AVI RIFF size does not match the file length")
+        header_range = None
+        movie_range = None
+        movie_origin = None
+        index_payload = None
+        for kind, payload_offset, size, _chunk_offset in _riff_chunks(
+            data, 12, len(data)
+        ):
+            if kind == b"LIST" and size >= 4:
+                list_kind = data[payload_offset : payload_offset + 4]
+                if list_kind == b"hdrl":
+                    header_range = (payload_offset + 4, payload_offset + size)
+                elif list_kind == b"movi":
+                    movie_origin = payload_offset
+                    movie_range = (payload_offset + 4, payload_offset + size)
+            elif kind == b"idx1":
+                index_payload = data[payload_offset : payload_offset + size]
+        if header_range is None or movie_range is None:
+            raise ValueError("AVI must contain hdrl and movi lists")
+
+        main_header = None
+        streams = []
+        for kind, payload_offset, size, _chunk_offset in _riff_chunks(
+            data, *header_range
+        ):
+            if kind == b"avih":
+                if size < 56:
+                    raise ValueError("AVI main header is truncated")
+                main_header = struct.unpack(
+                    "<14I", data[payload_offset : payload_offset + 56]
+                )
+            elif kind == b"LIST" and size >= 4:
+                if data[payload_offset : payload_offset + 4] != b"strl":
+                    continue
+                stream_header = None
+                stream_format = None
+                for child_kind, child_offset, child_size, _child_chunk in _riff_chunks(
+                    data, payload_offset + 4, payload_offset + size
+                ):
+                    if child_kind == b"strh":
+                        stream_header = _avi_stream_header(
+                            data[child_offset : child_offset + child_size]
+                        )
+                    elif child_kind == b"strf":
+                        stream_format = data[child_offset : child_offset + child_size]
+                if stream_header is None or stream_format is None:
+                    raise ValueError("AVI stream list requires strh and strf chunks")
+                streams.append((stream_header, stream_format))
+        if main_header is None:
+            raise ValueError("AVI main header is missing")
+
+        video_streams = [stream for stream in streams if stream[0]["type"] == b"vids"]
+        audio_streams = [stream for stream in streams if stream[0]["type"] == b"auds"]
+        if len(video_streams) != 1:
+            raise ValueError("AVI requires exactly one video stream")
+        video_header, video_format_data = video_streams[0]
+        if len(video_format_data) < 40:
+            raise ValueError("AVI BITMAPINFOHEADER is truncated")
+        bitmap = struct.unpack("<IiiHHIIiiII", video_format_data[:40])
+        bitmap_size, width, signed_height, planes, bit_count, compression = bitmap[:6]
+        image_size = bitmap[6]
+        height = abs(signed_height)
+        if (
+            bitmap_size < 40
+            or width <= 0
+            or height <= 0
+            or planes != 1
+            or bit_count != 24
+            or compression != 0
+        ):
+            raise ValueError("AVI video must be uncompressed 24-bit BI_RGB")
+        stride = (width * 3 + 3) & ~3
+        expected_frame_size = stride * height
+        if image_size not in {0, expected_frame_size}:
+            raise ValueError("AVI frame image size does not match its dimensions")
+        if not video_header["scale"] or not video_header["rate"]:
+            raise ValueError("AVI video stream rate/scale is invalid")
+        fps = video_header["rate"] / float(video_header["scale"])
+
+        audio_header = None
+        audio_format = None
+        if audio_streams:
+            if len(audio_streams) != 1:
+                raise ValueError("AVI supports at most one audio stream")
+            audio_header, audio_format_data = audio_streams[0]
+            if len(audio_format_data) < 16:
+                raise ValueError("AVI PCM format is truncated")
+            audio_format = struct.unpack("<HHIIHH", audio_format_data[:16])
+            format_tag, channels, sample_rate, average_bytes, block_align, bits = (
+                audio_format
+            )
+            if (
+                format_tag != 1
+                or channels not in {1, 2}
+                or not sample_rate
+                or not average_bytes
+                or not block_align
+                or bits not in {8, 16, 24, 32}
+                or average_bytes != sample_rate * block_align
+            ):
+                raise ValueError("AVI audio stream must contain consistent PCM")
+
+        movie_records = []
+        video_chunks = []
+        audio_chunks = []
+        for kind, payload_offset, size, chunk_offset in _riff_chunks(
+            data, *movie_range
+        ):
+            relative_offset = chunk_offset - movie_origin
+            movie_records.append((kind, relative_offset, size))
+            if re.fullmatch(rb"\d\ddb|\d\ddc", kind):
+                video_chunks.append((payload_offset, size))
+            elif re.fullmatch(rb"\d\dwb", kind):
+                audio_chunks.append((payload_offset, size))
+        if not video_chunks:
+            raise ValueError("AVI movi list contains no video frames")
+        if any(size != expected_frame_size for _offset, size in video_chunks):
+            raise ValueError("AVI video chunk size does not match the frame format")
+        total_audio_bytes = sum(size for _offset, size in audio_chunks)
+
+        index_valid = index_payload is not None and len(index_payload) % 16 == 0
+        index_records = []
+        if index_valid:
+            for offset in range(0, len(index_payload), 16):
+                kind, _flags, chunk_offset, chunk_size = struct.unpack(
+                    "<4sIII", index_payload[offset : offset + 16]
+                )
+                index_records.append((kind, chunk_offset, chunk_size))
+            index_valid = index_records == movie_records
+    except (OSError, ValueError, struct.error) as exc:
+        _check(checks, "valid-avi", False, str(exc))
+        return
+
+    main_frames = main_header[4]
+    main_streams = main_header[6]
+    main_width = main_header[8]
+    main_height = main_header[9]
+    audio_consistent = True
+    if audio_header is not None:
+        audio_consistent = (
+            bool(audio_header["scale"])
+            and bool(audio_header["rate"])
+            and audio_header["sample_size"] == audio_format[4]
+            and audio_header["length"] * audio_header["sample_size"]
+            == total_audio_bytes
+        )
+    stream_consistent = (
+        main_streams == len(streams)
+        and main_width == width
+        and main_height == height
+        and bool(main_header[3] & 0x10)
+        and abs(main_header[0] - (1_000_000.0 / fps)) <= 1.0
+        and video_header["length"] == len(video_chunks)
+        and main_frames == len(video_chunks)
+        and audio_consistent
+    )
+    _check(
+        checks,
+        "valid-avi",
+        stream_consistent,
+        "%dx%d, %.3f fps, %d frame(s), %d stream(s)"
+        % (width, height, fps, len(video_chunks), len(streams)),
+    )
+    _check(
+        checks,
+        "avi-index",
+        index_valid,
+        "%d movi chunks, %d index entries"
+        % (len(movie_records), len(index_records)),
+    )
+    minimum_frames = _bounded_int(requirements, "min_frames", 1, 1, 1_000_000)
+    _check(
+        checks,
+        "avi-minimum-frames",
+        len(video_chunks) >= minimum_frames,
+        "%d frames (minimum %d)" % (len(video_chunks), minimum_frames),
+    )
+    duration_ms = len(video_chunks) * video_header["scale"] * 1000.0 / video_header["rate"]
+    minimum_ms = _bounded_int(requirements, "min_duration_ms", 1, 0, 86_400_000)
+    _check(
+        checks,
+        "avi-duration",
+        duration_ms >= minimum_ms,
+        "%.1f ms (minimum %d)" % (duration_ms, minimum_ms),
+    )
+    max_side = _bounded_int(requirements, "max_side", 32768, 1, 32768)
+    min_side = _bounded_int(requirements, "min_side", 1, 1, max_side)
+    _check(
+        checks,
+        "avi-dimensions",
+        min_side <= width <= max_side and min_side <= height <= max_side,
+        "%dx%d (each side %d..%d)" % (width, height, min_side, max_side),
+    )
+    if requirements.get("require_audio"):
+        audio_duration_ms = (
+            total_audio_bytes * 1000.0 / audio_format[3] if audio_format else 0.0
+        )
+        synchronized = (
+            audio_header is not None
+            and bool(audio_chunks)
+            and abs(audio_duration_ms - duration_ms) <= max(2.0, 1000.0 / fps)
+        )
+        _check(
+            checks,
+            "avi-audio",
+            synchronized,
+            "%d PCM chunks, %.1f ms" % (len(audio_chunks), audio_duration_ms),
+        )
 
 
 def _midi_variable_length(data: bytes, offset: int):
@@ -1471,6 +1724,8 @@ def _validate_file(path: Path, recipe: str, requirements: dict) -> dict:
         _validate_ppm(path, requirements, checks)
     elif recipe == "wav":
         _validate_wav(path, requirements, checks)
+    elif recipe == "avi":
+        _validate_avi(path, requirements, checks)
     elif recipe == "gif":
         _validate_gif(path, requirements, checks)
     elif recipe == "midi":

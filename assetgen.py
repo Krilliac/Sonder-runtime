@@ -2,7 +2,7 @@
 
 The generator deliberately emits simple, documented formats that every language
 surface in this repository can consume without package installation: PNG, PPM,
-SVG, animated GIF, HTML, Markdown, CSV, DOCX, XLSX, PPTX, MIDI, captions,
+SVG, animated GIF, AVI video, HTML, Markdown, CSV, DOCX, XLSX, PPTX, MIDI, captions,
 EDL timelines, PCM WAV, Wavefront OBJ/MTL, and JSON. Packs are useful
 for branding, UI, documents, data prototypes, media, games, and other greenfield
 work. Output stays under the local-llm workspace.
@@ -35,7 +35,7 @@ THEMES = {
 ARTIFACT_KINDS = {
     "icon", "background", "tileset", "sprite_sheet", "texture", "preview",
     "vector", "diagram", "palette", "document", "data", "web",
-    "docx", "spreadsheet", "presentation", "animation", "sound", "music",
+    "docx", "spreadsheet", "presentation", "animation", "video", "sound", "music",
     "midi", "captions", "timeline", "model", "scene",
 }
 OWNED_FILENAMES = {
@@ -43,7 +43,7 @@ OWNED_FILENAMES = {
     "data.csv", "data.json", "diagram.svg",
     "document.docx",
     "hit.wav", "icon.png", "manifest.json", "materials.mtl", "models.obj",
-    "palette.json", "pickup.wav", "preview.html", "preview.ppm", "request.json",
+    "palette.json", "pickup.wav", "preview.avi", "preview.html", "preview.ppm", "request.json",
     "presentation.pptx",
     "scene.json", "score.mid", "sprites.png", "texture.png", "theme.wav",
     "tiles.png", "timeline.edl", "vector.svg", "workbook.xlsx",
@@ -551,6 +551,7 @@ def infer_request(brief: str, kinds: str = "auto", dimension: str = "auto",
             "tileset": ("tile", "map", "terrain", "floor"),
             "sprite_sheet": ("sprite", "character", "animation", "creature"),
             "animation": ("animated", "animation", "gif", "motion", "video"),
+            "video": ("video", "movie", "avi", "trailer", "cinematic"),
             "texture": ("texture", "material", "surface", "skin"),
             "preview": ("preview", "mockup", "concept", "wireframe"),
             "vector": ("vector", "svg", "logo", "illustration", "emblem"),
@@ -631,6 +632,10 @@ def generate_artifacts(name: str, brief: str, kinds: str = "auto",
     if "animation" in selected or "timeline" in selected:
         media_assets.write_gif(
             os.path.join(root, "animation.gif"), palette, seed + 10,
+        )
+    if "video" in selected or "timeline" in selected:
+        media_assets.write_avi(
+            os.path.join(root, "preview.avi"), palette, theme, seed + 12,
         )
     if "vector" in selected:
         _write_vector(os.path.join(root, "vector.svg"), palette, request["brief"])
@@ -791,6 +796,7 @@ def verify_pack(path: str) -> dict:
             "required_kinds": manifest.get("kinds", []),
             "no_external_dependencies": True,
             "recipes": {
+                "avi": {"min_frames": 2, "min_duration_ms": 1, "require_audio": True},
                 "gif": {"min_frames": 2, "min_duration_ms": 1},
                 "midi": {"min_notes": 1, "require_tempo": True},
                 "srt": {"min_cues": 1},

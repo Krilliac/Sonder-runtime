@@ -1,4 +1,5 @@
 import hashlib
+import struct
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,12 @@ PALETTE = ((17, 15, 35), (116, 91, 218), (87, 218, 207), (49, 38, 91))
 
 
 CASES = [
+    (
+        "preview.avi",
+        lambda path: media_assets.write_avi(path, PALETTE, "arcane", 42),
+        {"min_frames": 48, "min_duration_ms": 4000, "require_audio": True},
+        b"RIFF",
+    ),
     (
         "animation.gif",
         lambda path: media_assets.write_gif(path, PALETTE, 42),
@@ -79,6 +86,50 @@ def test_media_seed_and_theme_change_animation_and_score(tmp_path):
 
     assert first_gif.read_bytes() != second_gif.read_bytes()
     assert first_midi.read_bytes() != second_midi.read_bytes()
+
+
+def test_avi_contains_distinct_frames_and_non_silent_pcm(tmp_path):
+    video = tmp_path / "preview.avi"
+    media_assets.write_avi(video, PALETTE, "arcane", 42)
+    data = video.read_bytes()
+    frames = []
+    audio = bytearray()
+    for kind, payload_offset, size, _chunk_offset in artifact_grounding._riff_chunks(
+        data, 12, len(data)
+    ):
+        if kind != b"LIST" or data[payload_offset : payload_offset + 4] != b"movi":
+            continue
+        for child, child_offset, child_size, _child_chunk in artifact_grounding._riff_chunks(
+            data, payload_offset + 4, payload_offset + size
+        ):
+            if child == b"00db":
+                frames.append(hashlib.sha256(data[child_offset : child_offset + child_size]).digest())
+            elif child == b"01wb":
+                audio.extend(data[child_offset : child_offset + child_size])
+
+    assert len(frames) == 48
+    assert len(set(frames)) >= 24
+    assert len(audio) == 48 * 1000 * 2
+    assert any(audio)
+
+
+def test_avi_grounding_rejects_inconsistent_audio_stream_length(tmp_path):
+    video = tmp_path / "tampered.avi"
+    media_assets.write_avi(video, PALETTE, "arcane", 42)
+    data = bytearray(video.read_bytes())
+    audio_header = data.find(b"auds")
+    assert audio_header > 0
+    declared_samples = struct.unpack_from("<I", data, audio_header + 32)[0]
+    struct.pack_into("<I", data, audio_header + 32, declared_samples + 1)
+    video.write_bytes(data)
+
+    result = artifact_grounding.validate(video, "avi", {"require_audio": True})
+
+    assert not result["ok"]
+    assert any(
+        item["name"] == "valid-avi" and not item["ok"]
+        for item in result["checks"]
+    )
 
 
 def test_media_writers_replace_outputs_atomically_without_temp_files(tmp_path):

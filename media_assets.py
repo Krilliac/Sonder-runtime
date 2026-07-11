@@ -175,6 +175,201 @@ def write_gif(path, theme_palette, seed=1337, width=96, height=54, frames=8):
     _atomic_write_bytes(path, bytes(output))
 
 
+def _riff_chunk(kind, payload):
+    if len(kind) != 4:
+        raise ValueError("RIFF chunk identifiers must contain four bytes")
+    padding = b"\x00" if len(payload) % 2 else b""
+    return kind + struct.pack("<I", len(payload)) + payload + padding
+
+
+def _riff_list(kind, payload):
+    if len(kind) != 4:
+        raise ValueError("RIFF list identifiers must contain four bytes")
+    return _riff_chunk(b"LIST", kind + payload)
+
+
+def _avi_frame(indexed_pixels, palette, width, height):
+    row_bytes = width * 3
+    stride = (row_bytes + 3) & ~3
+    output = bytearray(stride * height)
+    write_offset = 0
+    for y in range(height - 1, -1, -1):
+        row_offset = y * width
+        for x in range(width):
+            red, green, blue = palette[indexed_pixels[row_offset + x]]
+            output[write_offset : write_offset + 3] = bytes((blue, green, red))
+            write_offset += 3
+        write_offset += stride - row_bytes
+    return bytes(output)
+
+
+def _avi_audio(frame_count, fps, theme):
+    samples_per_frame = 1000
+    sample_rate = fps * samples_per_frame
+    total_samples = frame_count * samples_per_frame
+    frequency = {"ember": 110.0, "verdant": 146.83, "frost": 220.0, "arcane": 174.61}.get(
+        str(theme).lower(), 174.61
+    )
+    samples = bytearray()
+    for index in range(total_samples):
+        time = index / float(sample_rate)
+        fade = min(1.0, index / float(max(1, sample_rate // 20)))
+        fade *= min(1.0, (total_samples - index) / float(max(1, sample_rate // 12)))
+        pulse = 0.72 + 0.28 * math.sin(2.0 * math.pi * 0.5 * time)
+        value = math.sin(2.0 * math.pi * frequency * time)
+        value += 0.22 * math.sin(2.0 * math.pi * frequency * 1.5 * time)
+        sample = int(max(-1.0, min(1.0, value * pulse * fade * 0.22)) * 32767)
+        samples.extend(struct.pack("<h", sample))
+    return bytes(samples), sample_rate, samples_per_frame
+
+
+def write_avi(
+    path,
+    theme_palette,
+    theme="arcane",
+    seed=1337,
+    width=128,
+    height=72,
+    frames=48,
+    fps=12,
+):
+    """Write an indexed-scene AVI with uncompressed 24-bit video and PCM audio."""
+    width = max(16, min(int(width), 256))
+    height = max(16, min(int(height), 144))
+    frames = max(2, min(int(frames), 120))
+    fps = max(1, min(int(fps), 60))
+    palette = _gif_palette(theme_palette)
+    rng = random.Random(int(seed))
+    stars = [
+        (rng.randrange(width), rng.randrange(2, max(3, int(height * 0.58))))
+        for _ in range(max(8, width // 3))
+    ]
+    frame_payloads = [
+        _avi_frame(
+            _animation_frame(width, height, frame, frames, stars),
+            palette,
+            width,
+            height,
+        )
+        for frame in range(frames)
+    ]
+    frame_size = len(frame_payloads[0])
+    audio, sample_rate, samples_per_frame = _avi_audio(frames, fps, theme)
+    block_align = 2
+    audio_chunk_size = samples_per_frame * block_align
+    average_audio_bytes = sample_rate * block_align
+
+    main_header = struct.pack(
+        "<14I",
+        int(round(1_000_000 / float(fps))),
+        frame_size * fps + average_audio_bytes,
+        0,
+        0x00000110,
+        frames,
+        0,
+        2,
+        max(frame_size, audio_chunk_size),
+        width,
+        height,
+        0,
+        0,
+        0,
+        0,
+    )
+    video_stream_header = struct.pack(
+        "<4s4sIHHIIIIIIIIhhhh",
+        b"vids",
+        b"DIB ",
+        0,
+        0,
+        0,
+        0,
+        1,
+        fps,
+        0,
+        frames,
+        frame_size,
+        0xFFFFFFFF,
+        0,
+        0,
+        0,
+        width,
+        height,
+    )
+    video_format = struct.pack(
+        "<IiiHHIIiiII",
+        40,
+        width,
+        height,
+        1,
+        24,
+        0,
+        frame_size,
+        0,
+        0,
+        0,
+        0,
+    )
+    audio_stream_header = struct.pack(
+        "<4s4sIHHIIIIIIIIhhhh",
+        b"auds",
+        b"\x00\x00\x00\x00",
+        0,
+        0,
+        0,
+        0,
+        block_align,
+        average_audio_bytes,
+        0,
+        len(audio) // block_align,
+        audio_chunk_size,
+        0xFFFFFFFF,
+        block_align,
+        0,
+        0,
+        0,
+        0,
+    )
+    audio_format = struct.pack(
+        "<HHIIHH", 1, 1, sample_rate, average_audio_bytes, block_align, 16
+    )
+    video_stream = _riff_list(
+        b"strl",
+        _riff_chunk(b"strh", video_stream_header)
+        + _riff_chunk(b"strf", video_format)
+        + _riff_chunk(b"strn", b"Trilobite Video\x00"),
+    )
+    audio_stream = _riff_list(
+        b"strl",
+        _riff_chunk(b"strh", audio_stream_header)
+        + _riff_chunk(b"strf", audio_format)
+        + _riff_chunk(b"strn", b"Trilobite Audio\x00"),
+    )
+    header_list = _riff_list(
+        b"hdrl", _riff_chunk(b"avih", main_header) + video_stream + audio_stream
+    )
+
+    movie_chunks = bytearray()
+    index_entries = bytearray()
+    for frame, frame_data in enumerate(frame_payloads):
+        video_offset = 4 + len(movie_chunks)
+        movie_chunks.extend(_riff_chunk(b"00db", frame_data))
+        index_entries.extend(
+            struct.pack("<4sIII", b"00db", 0x10, video_offset, len(frame_data))
+        )
+        audio_data = audio[
+            frame * audio_chunk_size : (frame + 1) * audio_chunk_size
+        ]
+        audio_offset = 4 + len(movie_chunks)
+        movie_chunks.extend(_riff_chunk(b"01wb", audio_data))
+        index_entries.extend(
+            struct.pack("<4sIII", b"01wb", 0, audio_offset, len(audio_data))
+        )
+    movie_list = _riff_list(b"movi", bytes(movie_chunks))
+    payload = b"AVI " + header_list + movie_list + _riff_chunk(b"idx1", bytes(index_entries))
+    _atomic_write_bytes(path, b"RIFF" + struct.pack("<I", len(payload)) + payload)
+
+
 def _variable_length(value):
     value = max(0, min(int(value), 0x0FFFFFFF))
     buffer = [value & 0x7F]
@@ -283,7 +478,7 @@ def _timecode(total_frames, fps=DEFAULT_FPS):
     return "%02d:%02d:%02d:%02d" % (hours, minutes, seconds, frames)
 
 
-def write_edl(path, title, brief, fps=DEFAULT_FPS, clip_name="animation.gif"):
+def write_edl(path, title, brief, fps=DEFAULT_FPS, clip_name="preview.avi"):
     """Write a CMX 3600-style non-drop-frame editable video timeline."""
     fps = max(24, min(int(fps), 60))
     lines = ["TITLE: %s" % (_clean(title, 72) or "TRILOBITE TIMELINE"), "FCM: NON-DROP FRAME", ""]

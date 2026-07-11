@@ -160,6 +160,7 @@ def test_generated_all_format_pack_passes_manifest_and_format_recipes(
                 "preview.html",
                 "icon.png",
                 "presentation.pptx",
+                "preview.avi",
                 "score.mid",
                 "theme.wav",
                 "timeline.edl",
@@ -175,7 +176,7 @@ def test_generated_all_format_pack_passes_manifest_and_format_recipes(
     assert result["failed_checks"] == 0
     recipes = {child["recipe"] for child in result["children"]}
     assert {
-        "markdown", "csv", "docx", "edl", "gif", "html", "json", "midi",
+        "markdown", "avi", "csv", "docx", "edl", "gif", "html", "json", "midi",
         "obj", "png", "ppm", "pptx", "srt", "svg", "vtt", "wav", "xlsx",
     } <= recipes
 
@@ -183,17 +184,24 @@ def test_generated_all_format_pack_passes_manifest_and_format_recipes(
 def test_editable_media_recipes_enforce_structure_and_content(tmp_path):
     palette = ((17, 15, 35), (116, 91, 218), (87, 218, 207), (49, 38, 91))
     animation = tmp_path / "animation.gif"
+    video = tmp_path / "preview.avi"
     score = tmp_path / "score.mid"
     captions_srt = tmp_path / "captions.srt"
     captions_vtt = tmp_path / "captions.vtt"
     timeline = tmp_path / "timeline.edl"
     assetgen.media_assets.write_gif(animation, palette, 42)
+    assetgen.media_assets.write_avi(video, palette, "arcane", 42)
     assetgen.media_assets.write_midi(score, "Arcane Suite", "arcane", 42)
     assetgen.media_assets.write_srt(captions_srt, "arcane launch")
     assetgen.media_assets.write_vtt(captions_vtt, "arcane launch")
     assetgen.media_assets.write_edl(timeline, "Arcane Suite", "arcane launch")
 
     results = [
+        artifact_grounding.validate(
+            video,
+            "video",
+            {"min_frames": 48, "min_duration_ms": 4000, "require_audio": True},
+        ),
         artifact_grounding.validate(
             animation, "animation", {"min_frames": 8, "min_duration_ms": 640}
         ),
@@ -213,20 +221,20 @@ def test_editable_media_recipes_enforce_structure_and_content(tmp_path):
 
     assert all(result["ok"] for result in results)
     assert [result["recipe"] for result in results] == [
-        "gif", "midi", "srt", "vtt", "edl"
+        "avi", "gif", "midi", "srt", "vtt", "edl"
     ]
 
 
 def test_edl_no_external_dependencies_requires_local_media(tmp_path):
     timeline = tmp_path / "timeline.edl"
-    animation = tmp_path / "animation.gif"
+    video = tmp_path / "preview.avi"
     palette = ((17, 15, 35), (116, 91, 218), (87, 218, 207), (49, 38, 91))
     assetgen.media_assets.write_edl(timeline, "Demo", "Local timeline")
 
     missing = artifact_grounding.validate(
         timeline, "edl", {"no_external_dependencies": True}
     )
-    assetgen.media_assets.write_gif(animation, palette, 42)
+    assetgen.media_assets.write_avi(video, palette, "arcane", 42)
     complete = artifact_grounding.validate(
         timeline, "edl", {"no_external_dependencies": True}
     )
@@ -407,7 +415,7 @@ def test_bundle_edl_grounding_rejects_rehashed_missing_media_reference(
     timeline = root / "timeline.edl"
     timeline.write_text(
         timeline.read_text(encoding="utf-8").replace(
-            "animation.gif", "missing-source.gif"
+            "preview.avi", "missing-source.avi"
         ),
         encoding="utf-8",
     )
@@ -427,6 +435,17 @@ def test_bundle_edl_grounding_rejects_rehashed_missing_media_reference(
 @pytest.mark.parametrize(
     "filename,writer,mutator,failed_check",
     [
+        (
+            "broken.avi",
+            lambda path: assetgen.media_assets.write_avi(
+                path,
+                ((17, 15, 35), (116, 91, 218), (87, 218, 207), (49, 38, 91)),
+                "arcane",
+                42,
+            ),
+            lambda data: data[:-17],
+            "valid-avi",
+        ),
         (
             "broken.mid",
             lambda path: assetgen.media_assets.write_midi(path, "Demo", "arcane", 42),
