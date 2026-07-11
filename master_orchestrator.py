@@ -1,20 +1,40 @@
 """Master/subagent orchestration with live status snapshots."""
 from __future__ import annotations
 
+import atexit
 import ctypes
 import itertools
 import os
 import re
+import sqlite3
 import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import fleet_store
 
-_LOCK = threading.RLock()
-_AGENTS = {}
-_EVENTS = []
-_UPDATE_SEQUENCE = itertools.count()
+
+# Preserve process-local execution state across importlib.reload(). The durable
+# ledger is intentionally owned by the non-hot-reloaded fleet_store service.
+if "_LOCK" not in globals():
+    _LOCK = threading.RLock()
+if "_OWNER_SERVICE_LOCK" not in globals():
+    _OWNER_SERVICE_LOCK = threading.RLock()
+if "_AGENTS" not in globals():
+    _AGENTS = {}
+if "_EVENTS" not in globals():
+    _EVENTS = []
+if "_UPDATE_SEQUENCE" not in globals():
+    _UPDATE_SEQUENCE = itertools.count()
+if "_OWNER_ID" not in globals():
+    _OWNER_ID = "owner-%s-%s" % (os.getpid(), uuid.uuid4().hex[:12])
+    _OWNER_STARTED_TS = time.time()
+    _OWNER_REGISTERED = False
+    _HEARTBEAT_THREAD = None
+    _HEARTBEAT_STOP = threading.Event()
+    _STORE_ERROR = ""
+    _ATEXIT_REGISTERED = False
 _MAX_EVENTS = 80
 DEFAULT_MAX_AGENTS = 16
 ABSOLUTE_MAX_AGENTS = 64
@@ -22,6 +42,8 @@ DEFAULT_MAX_WORKERS = 8
 ABSOLUTE_MAX_WORKERS = 16
 RAM_RESERVE_BYTES = int(1.5 * 1024 ** 3)
 RAM_PER_WORKER_BYTES = int(1.25 * 1024 ** 3)
+HEARTBEAT_SECONDS = 5
+ABORT_MARKERS = ("CANCELLED", "INTERRUPTED")
 
 EVIDENCE_REQUIRED = (
     "EVIDENCE_REQUIRED: guarded source evidence was unavailable. Authorize the "
@@ -46,6 +68,68 @@ _FLEET_REQUEST = re.compile(
     r"\bspawn\s+workflow\b|\bworkflow\b|\bmax(?:imum)?\s+agents?\b)",
     re.IGNORECASE,
 )
+
+
+def _remember_store_error(exc) -> None:
+    global _STORE_ERROR
+    _STORE_ERROR = "%s: %s" % (exc.__class__.__name__, exc)
+
+
+def _heartbeat_enabled() -> bool:
+    return os.environ.get("TRILOBITE_FLEET_HEARTBEAT", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+
+
+def _has_local_active_agents() -> bool:
+    with _LOCK:
+        return any(
+            row.get("status") in ("queued", "running")
+            for row in _AGENTS.values()
+        )
+
+
+def _heartbeat_loop() -> None:
+    while not _HEARTBEAT_STOP.wait(HEARTBEAT_SECONDS):
+        if not _has_local_active_agents():
+            continue
+        try:
+            if not fleet_store.heartbeat_owner(_OWNER_ID):
+                fleet_store.register_owner(
+                    _OWNER_ID, os.getpid(), _OWNER_STARTED_TS,
+                )
+        except Exception as exc:  # durability must not kill an active model call
+            _remember_store_error(exc)
+
+
+def _ensure_owner() -> None:
+    global _OWNER_REGISTERED, _HEARTBEAT_THREAD, _ATEXIT_REGISTERED
+    with _OWNER_SERVICE_LOCK:
+        if not _OWNER_REGISTERED:
+            fleet_store.register_owner(_OWNER_ID, os.getpid(), _OWNER_STARTED_TS)
+            _OWNER_REGISTERED = True
+        if _heartbeat_enabled() and (
+            _HEARTBEAT_THREAD is None or not _HEARTBEAT_THREAD.is_alive()
+        ):
+            _HEARTBEAT_THREAD = threading.Thread(
+                target=_heartbeat_loop,
+                name="trilobite-fleet-heartbeat",
+                daemon=True,
+            )
+            _HEARTBEAT_THREAD.start()
+        if not _ATEXIT_REGISTERED:
+            atexit.register(_close_owner)
+            _ATEXIT_REGISTERED = True
+
+
+def _close_owner() -> None:
+    if not _OWNER_REGISTERED:
+        return
+    _HEARTBEAT_STOP.set()
+    try:
+        fleet_store.close_owner(_OWNER_ID)
+    except Exception:
+        pass
 
 
 def hardware_max_agents() -> int:
@@ -203,44 +287,90 @@ def estimate_tokens(text: str) -> int:
 
 
 def _event(agent_id: str, message: str) -> None:
+    stamp = _stamp()
     with _LOCK:
         _EVENTS.append({
-            "ts": _stamp(),
+            "ts": stamp,
             "agent_id": agent_id,
             "message": message,
         })
         del _EVENTS[:-_MAX_EVENTS]
+        row = dict(_AGENTS.get(agent_id) or {})
+    try:
+        if not row:
+            row = fleet_store.get_agent(agent_id) or {}
+        if row:
+            fleet_store.add_event(
+                agent_id, row.get("owner_id") or _OWNER_ID, stamp, message,
+            )
+    except Exception as exc:
+        _remember_store_error(exc)
 
 
-def _new_agent(role: str, task: str, parent_id: str = "") -> str:
-    agent_id = "%s-%s" % (role, uuid.uuid4().hex[:8])
-    now = _now()
+def _sync_local(row: dict | None) -> None:
+    if not row:
+        return
     with _LOCK:
-        inherited_cancel = bool(
-            parent_id and (_AGENTS.get(parent_id) or {}).get("cancel_requested")
+        current = dict(row)
+        current["updated_seq"] = next(_UPDATE_SEQUENCE)
+        _AGENTS[current["id"]] = current
+
+
+def _prune_local(finished_retention: int = 500) -> None:
+    with _LOCK:
+        finished = sorted(
+            (
+                row for row in _AGENTS.values()
+                if row.get("status") not in ("queued", "running")
+            ),
+            key=lambda row: row.get("updated_ts") or 0,
+            reverse=True,
         )
-        _AGENTS[agent_id] = {
-            "id": agent_id,
-            "role": role,
-            "parent_id": parent_id,
-            "task": task,
-            "status": "cancelled" if inherited_cancel else "queued",
-            "activity": "cancelled with parent" if inherited_cancel else "queued",
-            "started_ts": now,
-            "updated_ts": now,
-            "updated_seq": next(_UPDATE_SEQUENCE),
-            "finished_ts": now if inherited_cancel else None,
-            "tool_calls": 0,
-            "tokens_in": estimate_tokens(task),
-            "tokens_out": 0,
-            "files": [],
-            "summary": "cancelled before model call" if inherited_cancel else "",
-            "output": "",
-            "error": "",
-            "cancel_requested": inherited_cancel,
-            "in_model_call": False,
-        }
-    if inherited_cancel:
+        for row in finished[max(10, int(finished_retention)):]:
+            _AGENTS.pop(row["id"], None)
+
+
+def _new_agent(
+    role: str, task: str, parent_id: str = "", metadata: dict | None = None,
+) -> str:
+    _ensure_owner()
+    metadata = dict(metadata or {})
+    agent_id = "%s-%s" % (role, uuid.uuid4().hex[:12])
+    now = _now()
+    row = {
+        "id": agent_id,
+        "role": role,
+        "parent_id": parent_id,
+        "task": task,
+        "status": "queued",
+        "activity": "queued",
+        "started_ts": now,
+        "updated_ts": now,
+        "finished_ts": None,
+        "tool_calls": 0,
+        "tokens_in": estimate_tokens(task),
+        "tokens_out": 0,
+        "files": [],
+        "summary": "",
+        "output": "",
+        "error": "",
+        "cancel_requested": False,
+        "in_model_call": False,
+        "requested_agents": int(metadata.get("requested_agents") or 0),
+        "worker_slots": int(metadata.get("worker_slots") or 0),
+        "mode": str(metadata.get("mode") or ""),
+        "tier": str(metadata.get("tier") or ""),
+        "retry_of": str(metadata.get("retry_of") or ""),
+        "retried_by": "",
+    }
+    try:
+        stored = fleet_store.create_agent(row, _OWNER_ID, os.getpid())
+    except sqlite3.IntegrityError:
+        # A 48-bit suffix collision is exceptionally unlikely; fail closed rather
+        # than risk attaching work to another process's row.
+        raise RuntimeError("fleet agent ID collision; retry orchestration")
+    _sync_local(stored)
+    if stored.get("cancel_requested"):
         _event(agent_id, "cancelled with parent before start")
     else:
         _event(agent_id, "queued: %s" % task[:140])
@@ -248,138 +378,70 @@ def _new_agent(role: str, task: str, parent_id: str = "") -> str:
 
 
 def update_agent(agent_id: str, **changes) -> None:
-    with _LOCK:
-        row = _AGENTS.get(agent_id)
-        if not row:
-            return
-        row.update(changes)
-        row["updated_ts"] = _now()
-        row["updated_seq"] = next(_UPDATE_SEQUENCE)
-        if changes.get("status") in ("done", "failed", "cancelled"):
-            row["finished_ts"] = row["updated_ts"]
-    if "activity" in changes:
-        _event(agent_id, changes["activity"])
+    stored = fleet_store.update_agent(agent_id, _OWNER_ID, **changes)
+    _sync_local(stored)
+    if stored and "activity" in changes:
+        _event(agent_id, stored.get("activity") or changes["activity"])
 
 
 def cancel_requested(agent_id: str) -> bool:
-    with _LOCK:
-        return bool((_AGENTS.get(agent_id) or {}).get("cancel_requested"))
+    return fleet_store.cancellation_requested(agent_id)
 
 
 def _start_agent(agent_id: str, activity: str, **changes) -> bool:
     """Atomically move a queued agent to running unless it was cancelled."""
-    with _LOCK:
-        row = _AGENTS.get(agent_id)
-        if not row or row.get("cancel_requested") or row.get("status") != "queued":
-            return False
-        row.update(changes)
-        row["status"] = "running"
-        row["activity"] = activity
-        row["updated_ts"] = _now()
-        row["updated_seq"] = next(_UPDATE_SEQUENCE)
+    stored = fleet_store.start_agent(
+        agent_id,
+        _OWNER_ID,
+        activity,
+        in_model_call=bool(changes.get("in_model_call")),
+        tool_calls=int(changes.get("tool_calls") or 0),
+        requested_agents=int(changes.get("requested_agents") or 0),
+        worker_slots=int(changes.get("worker_slots") or 0),
+        mode=str(changes.get("mode") or ""),
+        tier=str(changes.get("tier") or ""),
+    )
+    if not stored:
+        return False
+    _sync_local(stored)
     _event(agent_id, activity)
     return True
 
 
-def _resolve_cancel_targets(selector: str) -> list[str]:
-    value = str(selector or "").strip()
-    with _LOCK:
-        active = {
-            agent_id: row for agent_id, row in _AGENTS.items()
-            if row.get("status") in ("queued", "running")
-        }
-        if value.lower() in ("all", "*"):
-            selected = set(active)
-        elif not value:
-            selected = set()
-        elif value in active:
-            selected = {value}
-        else:
-            selected = {
-                agent_id for agent_id in active if agent_id.startswith(value)
-            }
-        # Canceling a master also selects all active descendants.
-        changed = True
-        while changed:
-            changed = False
-            for agent_id, row in active.items():
-                if row.get("parent_id") in selected and agent_id not in selected:
-                    selected.add(agent_id)
-                    changed = True
-        return sorted(selected)
+def _begin_model_call(agent_id: str, activity: str, tool_calls: int) -> bool:
+    stored = fleet_store.begin_model_call(
+        agent_id, _OWNER_ID, activity, tool_calls=tool_calls,
+    )
+    if not stored:
+        return False
+    _sync_local(stored)
+    _event(agent_id, activity)
+    return True
 
 
 def request_cancel(selector: str) -> dict:
     """Request cooperative cancellation by exact ID, prefix, or ``all``."""
-    running = 0
-    model_calls = 0
-    queued = 0
-    now = _now()
-    events = []
-    with _LOCK:
-        # Keep target resolution and mutation under one re-entrant lock. Any child
-        # created after this point sees its parent's cancellation and inherits it.
-        targets = _resolve_cancel_targets(selector)
-        for agent_id in targets:
-            row = _AGENTS.get(agent_id)
-            if not row or row.get("status") not in ("queued", "running"):
-                continue
-            row["cancel_requested"] = True
-            row["updated_ts"] = now
-            row["updated_seq"] = next(_UPDATE_SEQUENCE)
-            if row.get("status") == "queued":
-                queued += 1
-                row["status"] = "cancelled"
-                row["activity"] = "cancelled before start"
-                row["finished_ts"] = now
-                row["summary"] = "cancelled before model call"
-                events.append((agent_id, "cancelled before start"))
-            else:
-                running += 1
-                if row.get("in_model_call"):
-                    model_calls += 1
-                    row["activity"] = "cancellation requested; waiting for active model call"
-                else:
-                    row["activity"] = "cancellation requested; stopping after active children"
-                events.append((agent_id, row["activity"]))
-    for agent_id, message in events:
-        _event(agent_id, message)
-    return {
-        "selector": str(selector or ""),
-        "matched": len(targets),
-        "running": running,
-        "model_calls": model_calls,
-        "queued": queued,
-        "agent_ids": targets,
-        "cooperative": True,
-    }
+    result = fleet_store.cancel_agents(selector)
+    for row in result.get("agents") or []:
+        _sync_local(row)
+        _event(row["id"], row.get("activity") or "cancellation requested")
+    return result
 
 
 def _finish(agent_id: str, output: str = "", error: str = "") -> str:
-    if cancel_requested(agent_id):
-        update_agent(
-            agent_id,
-            status="cancelled",
-            activity="cancelled; late result discarded",
-            tokens_out=0,
-            summary="cancelled; active call returned and its result was discarded",
-            output="",
-            error="",
-            in_model_call=False,
-        )
-        return "CANCELLED"
-    status = "failed" if error else "done"
-    update_agent(
-        agent_id,
-        status=status,
-        activity=("failed: %s" % error[:160]) if error else "finished",
-        tokens_out=estimate_tokens(output),
-        summary=(output or error)[:500],
-        output=output,
-        error=error,
-        in_model_call=False,
+    stored, final = fleet_store.finish_agent(
+        agent_id, _OWNER_ID, output=output, error=error,
     )
-    return output
+    _sync_local(stored)
+    if stored:
+        _event(agent_id, stored.get("activity") or "finished")
+        if stored.get("role") == "master":
+            try:
+                fleet_store.prune()
+                _prune_local()
+            except Exception as exc:
+                _remember_store_error(exc)
+    return final
 
 
 def _run_worker(agent_id: str, prompt: str, worker_fn) -> str:
@@ -392,14 +454,16 @@ def _run_worker(agent_id: str, prompt: str, worker_fn) -> str:
         output = worker_fn(prompt)
     except Exception as exc:  # defensive boundary for worker threads
         final = _finish(agent_id, error=str(exc))
-        return final if final == "CANCELLED" else "ERROR: %s" % exc
+        return final if final in ABORT_MARKERS else "ERROR: %s" % exc
     return _finish(agent_id, output=output)
 
 
-def run_inline(task: str, worker_fn) -> dict:
+def run_inline(task: str, worker_fn, metadata: dict | None = None) -> dict:
     if requires_repository_tools(task):
         worker_fn = _repository_worker
-    master_id = _new_agent("master", task)
+    metadata = dict(metadata or {})
+    metadata.setdefault("mode", "inline")
+    master_id = _new_agent("master", task, metadata=metadata)
     if not _start_agent(
         master_id, "running inline as master", tool_calls=1, in_model_call=True,
     ):
@@ -407,8 +471,12 @@ def run_inline(task: str, worker_fn) -> dict:
     try:
         output = worker_fn(task)
     except Exception as exc:
-        _finish(master_id, error=str(exc))
-        return {"mode": "inline", "master_id": master_id, "output": "ERROR: %s" % exc}
+        final = _finish(master_id, error=str(exc))
+        return {
+            "mode": "inline",
+            "master_id": master_id,
+            "output": final if final in ABORT_MARKERS else "ERROR: %s" % exc,
+        }
     final = _finish(master_id, output=output)
     return {"mode": "inline", "master_id": master_id, "output": final}
 
@@ -440,12 +508,19 @@ def _subtask_prompts(task: str, count: int, tool_access: bool = False) -> list[s
     return prompts
 
 
-def run_delegated(task: str, worker_fn, audit_fn, agents: int = 3) -> dict:
+def run_delegated(
+    task: str, worker_fn, audit_fn, agents: int = 3,
+    metadata: dict | None = None,
+) -> dict:
     if requires_repository_tools(task):
         worker_fn = _repository_worker
     agents = clamp_agent_count(agents, default=3)
     worker_slots = parallel_worker_slots(agents)
-    master_id = _new_agent("master", task)
+    metadata = dict(metadata or {})
+    metadata.setdefault("mode", "delegated")
+    metadata["requested_agents"] = agents
+    metadata["worker_slots"] = worker_slots
+    master_id = _new_agent("master", task, metadata=metadata)
     started = _start_agent(
         master_id,
         "queued %d agent(s) across %d worker slot(s)" % (agents, worker_slots),
@@ -506,12 +581,18 @@ def run_delegated(task: str, worker_fn, audit_fn, agents: int = 3) -> dict:
                 "outputs": [],
                 "output": merged,
             }
-    update_agent(
-        master_id,
-        activity="auditing delegated outputs",
-        tool_calls=2,
-        in_model_call=True,
-    )
+    if not _begin_model_call(
+        master_id, "auditing delegated outputs", tool_calls=2,
+    ):
+        final = _finish(master_id)
+        return {
+            "mode": "delegated",
+            "master_id": master_id,
+            "agents": child_ids,
+            "worker_slots": worker_slots,
+            "outputs": outputs,
+            "output": final,
+        }
     audit_prompt = [
         "You are the master orchestrator. You also have no filesystem or tool access. "
         "Audit the delegated outputs strictly against evidence quoted in the original "
@@ -549,7 +630,7 @@ def run_delegated(task: str, worker_fn, audit_fn, agents: int = 3) -> dict:
             "agents": child_ids,
             "worker_slots": worker_slots,
             "outputs": outputs,
-            "output": final if final == "CANCELLED" else merged,
+            "output": final if final in ABORT_MARKERS else merged,
         }
     final = _finish(master_id, output=merged)
     return {
@@ -563,45 +644,49 @@ def run_delegated(task: str, worker_fn, audit_fn, agents: int = 3) -> dict:
 
 
 def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
-    with _LOCK:
-        all_rows = list(_AGENTS.values())
-        all_rows.sort(key=lambda r: r.get("updated_seq") or 0, reverse=True)
-        active_count = sum(
-            1 for row in all_rows if row.get("status") in ("queued", "running")
+    try:
+        data = fleet_store.snapshot(
+            include_finished=include_finished, limit=limit,
         )
-        cancel_pending = sum(
-            1 for row in all_rows
-            if row.get("cancel_requested") and row.get("status") == "running"
-        )
-        tokens_in = sum(int(row.get("tokens_in") or 0) for row in all_rows)
-        tokens_out = sum(int(row.get("tokens_out") or 0) for row in all_rows)
-        latest_result = next(
-            (
-                row.get("output") or ""
-                for row in all_rows
-                if row.get("role") == "master"
-                and row.get("status") == "done"
-                and row.get("output")
-            ),
-            "",
-        )
-        rows = all_rows
-        if not include_finished:
-            rows = [r for r in rows if r.get("status") not in ("done", "failed", "cancelled")]
-        rows = [dict(r) for r in rows[: max(1, int(limit or 20))]]
-        events = list(_EVENTS[-_MAX_EVENTS:])
-    return {
-        "active_agents": active_count,
-        "cancel_pending": cancel_pending,
-        "total_agents": len(all_rows),
-        "total_listed": len(rows),
-        "agents": rows,
-        "events": events,
-        "tokens_in": tokens_in,
-        "tokens_out": tokens_out,
-        "latest_master_result": latest_result,
-        "capacity": capacity(),
-    }
+    except Exception as exc:
+        _remember_store_error(exc)
+        with _LOCK:
+            rows = sorted(
+                (dict(row) for row in _AGENTS.values()),
+                key=lambda row: row.get("updated_seq") or 0,
+                reverse=True,
+            )
+            active = [
+                row for row in rows
+                if row.get("status") in ("queued", "running")
+            ]
+            listed = rows if include_finished else active
+            listed = listed[:max(1, int(limit or 20))]
+            data = {
+                "active_agents": len(active),
+                "cancel_pending": sum(
+                    1 for row in active if row.get("cancel_requested")
+                ),
+                "interrupted_agents": sum(
+                    1 for row in rows if row.get("status") == "interrupted"
+                ),
+                "total_agents": len(rows),
+                "total_listed": len(listed),
+                "agents": listed,
+                "events": list(_EVENTS[-_MAX_EVENTS:]),
+                "tokens_in": sum(int(row.get("tokens_in") or 0) for row in rows),
+                "tokens_out": sum(int(row.get("tokens_out") or 0) for row in rows),
+                "latest_master_result": "",
+                "database": "",
+            }
+    data["capacity"] = capacity()
+    data["store_error"] = _STORE_ERROR
+    return data
+
+
+def recovery_candidate(selector: str) -> dict | None:
+    """Resolve one persisted master by exact ID or unambiguous prefix."""
+    return fleet_store.get_agent(selector, role="master")
 
 
 def format_capacity(data: dict | None = None) -> str:
@@ -632,8 +717,13 @@ def format_snapshot(data: dict) -> str:
         "master orchestrator status",
         "  active agents: %s" % data.get("active_agents", 0),
         "  cancellation pending: %s" % data.get("cancel_pending", 0),
+        "  interrupted/recoverable: %s" % data.get("interrupted_agents", 0),
         "  tokens in/out: %s/%s" % (data.get("tokens_in", 0), data.get("tokens_out", 0)),
     ]
+    if data.get("database"):
+        lines.append("  persistence: shared restart-safe fleet ledger")
+    if data.get("store_error"):
+        lines.append("  persistence warning: %s" % data["store_error"][:240])
     capacity_data = data.get("capacity") or {}
     if capacity_data:
         lines.append("  capacity: %s queued ceiling / %s active worker slot(s) [%s]" % (
@@ -654,7 +744,11 @@ def format_snapshot(data: dict) -> str:
 
 
 def reset_for_tests() -> None:
+    global _OWNER_REGISTERED, _STORE_ERROR
     with _LOCK:
         _AGENTS.clear()
         _EVENTS.clear()
+    fleet_store.clear_all()
+    _OWNER_REGISTERED = False
+    _STORE_ERROR = ""
 

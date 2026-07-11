@@ -92,7 +92,7 @@ The learning loop above is *cross-task* memory. On top of it trilobite also has:
 
 ## Four ways to run it
 
-1. **Local, in your terminal** — `trilobite` (like launching `claude`). Interactive REPL routed through the full loop, with `/work`, `/report`, `/checklist`, `/inventory`, `/tree`, `/search`, `/programs`, `/scripts`, `/image`, `/mkdir`, `/runprogram`, `/runscript`, `/trace`, `/strict`, `/run`, `/train`, `/master`, `/agents`, `/capacity`, `/agentcancel`, `/asset`, `/forge`, `/game`, `/gamefleet`, `/todo`, `/commands`, `/activity`, `/dump`, `/permissions`, `/compact`, `/debug`, `/pass`, `/fail`, `/stats`, `/context`, `/quality`, `/privacy`, `/embeddings`, `/emotion`, and `/improve`, plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts`. Concrete natural-language workspace requests route to the same guarded workbench. Each REPL launch is its own remembered thread.
+1. **Local, in your terminal** — `trilobite` (like launching `claude`). Interactive REPL routed through the full loop, with `/work`, `/report`, `/checklist`, `/inventory`, `/tree`, `/search`, `/programs`, `/scripts`, `/image`, `/mkdir`, `/runprogram`, `/runscript`, `/trace`, `/strict`, `/run`, `/train`, `/master`, `/agents`, `/capacity`, `/agentcancel`, `/agentretry`, `/asset`, `/forge`, `/game`, `/gamefleet`, `/todo`, `/commands`, `/activity`, `/dump`, `/permissions`, `/compact`, `/debug`, `/pass`, `/fail`, `/stats`, `/context`, `/quality`, `/privacy`, `/embeddings`, `/emotion`, and `/improve`, plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts`. Concrete natural-language workspace requests route to the same guarded workbench. Each REPL launch is its own remembered thread.
 2. **Hosted on your own server + a thin client anywhere** — run `deploy_trilobite.sh --serve` on your box (systemd service, API key), then any machine runs the single-file `trilobite_client.py` pointed at it. The serve layer threads the chat UI's own conversation history.
 3. **Integrated with Claude/Codex** — the MCP `local-llm` tools include `workbench_agent`, budgeted workspace inventory, guarded tree/range/text/script/program/image inspection, argv-only program/script execution, persistent checklists, exact activity reports, agent/master orchestration, universal artifact generation, grounded game generation, bounded code/project runners, workflows, web tools, self-healing, privacy-safe memory review, local embedding backfill, and the remaining learning/memory surfaces. `master_orchestrate` can delegate to parallel subagents and audit their outputs; artifact and game tools create persistent assets/projects and accept only grounded checks. Local tiers remain the default for private workspace code.
 4. **Mobile & desktop app (GUI)** — a cross-platform [Flutter client](app/) that talks to a hosted `trilobite_serve.py`. One codebase → an **Android APK** and **Windows/Linux/macOS** desktop apps, built in CI with downloadable installers. See [app/README.md](app/README.md).
@@ -145,7 +145,11 @@ Use Trilobite as a local junior implementer, not as the final authority:
    from CPU and currently available RAM (8 automatic slots maximum). Inspect it
    with `/capacity [requested-agents]`; use `/agentcancel <id|prefix|all>` for
    cooperative cancellation. Queued work stops immediately. Already-running
-   Ollama/HTTP calls return naturally and their late results are discarded.
+   Ollama/HTTP calls return naturally and their late results are discarded. Fleet
+   state is shared through a private per-user SQLite ledger, so the app, REPL, API,
+   and MCP processes see the same work. Crashed/stale owners become `interrupted`
+   after a heartbeat grace period and are never replayed automatically; explicitly
+   rerun one with `/agentretry <master-id|prefix> [tier]` (local `code` by default).
 6. Record outcomes only after grounded evidence: compile, tests, direct use, or
    explicit rejection. Good labels improve retrieval; vague labels pollute it.
 7. Run `memory_quality_report()` periodically and
@@ -288,6 +292,10 @@ the machine instead of idling on conservative defaults:
 - `TRILOBITE_PARALLEL_WORKERS` - explicit concurrent model-call override,
   bounded to 1..16 and never above the requested agent count. Without it,
   Trilobite derives 1..8 slots from CPU count and available physical RAM.
+- `TRILOBITE_FLEET_DB` - optional path for the private process-shared fleet
+  ledger. Defaults to `TRILOBITE_HOME/fleet.db`.
+- `TRILOBITE_FLEET_HEARTBEAT` - set `0` to disable owner heartbeats (primarily
+  for deterministic tests). Production defaults to a five-second heartbeat.
 - `OLLAMA_FLASH_ATTENTION` - enabled as `1` by the launch scripts when they start
   Ollama.
 
@@ -361,6 +369,7 @@ Flat, mostly-stdlib Python modules (plus `mcp`):
 | `retriever.py` | hybrid lexical+semantic retrieval with relevance threshold |
 | `reward.py` / `reflection.py` | outcome → score; distill deduped lessons |
 | `orchestrator.py` | the retrieve → augment → generate → capture flow |
+| `master_orchestrator.py` / `fleet_store.py` | RAM/CPU-bounded fleet execution plus a process-shared restart/recovery ledger |
 | `server.py` / `workbench.py` / `activity_tracker.py` / `code_runner.py` / `web_tools.py` / `workflow_store.py` / `self_heal.py` | MCP workbench/agent tools, guarded discovery and execution, persistent checklists, exact action/end reports, bounded code/project runners, web tools, workflows, and self-healing |
 | `server.py` | MCP server: `offload` / `trilobite` / `parallel_run_code` / `parallel_generate_run` / `parallel_generate_run_languages` / `campaign_generate_compile_execute_record` / `learn_tiers` / `record_outcome` / `trilobite_stats` / `trilobite_sessions` / `trilobite_remember_fact` |
 | `assetgen.py` / `game_forge.py` | stdlib-only general artifact generation, manifest verification, persistent cross-language game projects, model campaigns, and verified reference fallbacks |

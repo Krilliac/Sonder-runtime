@@ -333,6 +333,7 @@ HELP_TEXT = """commands:
   /agents            show live master/subagent activity
   /capacity [N]      show queued-agent ceiling and safe concurrent worker slots
   /agentcancel <id>  cooperatively cancel an agent/master prefix or all
+  /agentretry <id>   explicitly retry persisted interrupted/failed master work
   /asset <n> <brief> generate general icons/audio/models/scenes from a brief
   /forge [name]      build and run the dependency-free reference game suite
   /game ...          generate/test: /game cpp 3d name | concept
@@ -487,6 +488,7 @@ DANGEROUS_HTTP_SLASH_COMMANDS = frozenset({
     "/inspectimage", "/mkdir", "/runprogram", "/runscript",
     "/privacy", "/privacyreview", "/privacyfix", "/embeddings", "/embedfix",
     "/capacity", "/agentcapacity", "/agentcancel", "/cancelagents",
+    "/agentretry", "/retryagent",
 })
 
 
@@ -819,7 +821,10 @@ def _handle_slash(content, messages=None, state=None, project=""):
         return server.system_improvement_report()
     if cmd in ("/agents", "/masterstatus"):
         return server.master_status()
-    if cmd in ("/capacity", "/agentcapacity", "/agentcancel", "/cancelagents"):
+    if cmd in (
+        "/capacity", "/agentcapacity", "/agentcancel", "/cancelagents",
+        "/agentretry", "/retryagent",
+    ):
         return server.control_command(stripped, project=project)
     if cmd in ("/activity", "/tools"):
         return server.activity_status()

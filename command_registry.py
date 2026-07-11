@@ -152,6 +152,12 @@ COMMANDS = [
         "summary": "Cooperatively cancel an active agent/master prefix or all active agents.",
     },
     {
+        "name": "/agentretry",
+        "category": "agents",
+        "risk": "ask",
+        "summary": "Explicitly rerun an interrupted, failed, or cancelled persisted master task.",
+    },
+    {
         "name": "/asset",
         "category": "creative",
         "risk": "ask",

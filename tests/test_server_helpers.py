@@ -1,3 +1,4 @@
+import importlib
 import threading
 
 import memory_store
@@ -313,6 +314,19 @@ def test_control_command_routes_quality_before_model(monkeypatch):
     assert server.control_command("/quality") == "quality report"
 
 
+def test_control_command_routes_persisted_agent_retry(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "master_retry",
+        lambda agent_id, tier="": f"retry:{agent_id}:{tier}",
+    )
+
+    assert server.control_command("/agentretry master-old") == "retry:master-old:"
+    assert server.control_command(
+        "/agentretry master-old general",
+    ) == "retry:master-old:general"
+
+
 def test_control_command_dump_writes_file(monkeypatch, tmp_path):
     monkeypatch.setattr(server.trilobite_paths, "default_home", lambda: tmp_path)
     monkeypatch.setattr(server, "context_health", lambda session="", project="": "context")
@@ -496,8 +510,8 @@ def test_master_capacity_and_cancel_tools(monkeypatch):
 
     capacity = server.master_capacity(32)
     master_id = server.master_orchestrator._new_agent("master", "long task")
-    server.master_orchestrator.update_agent(
-        master_id, status="running", in_model_call=True,
+    assert server.master_orchestrator._start_agent(
+        master_id, "calling model", in_model_call=True,
     )
     canceled = server.master_cancel(master_id[:12])
 
@@ -555,6 +569,19 @@ def test_non_learning_offload_records_model_usage(monkeypatch):
         assert response["tokens_out"] == 3
 
 
+def test_activity_tracker_hot_reload_preserves_open_response_span():
+    server.activity_tracker.reset_for_tests()
+
+    with server.activity_tracker.response_span("reload", "keep state") as response:
+        response_id = server.activity_tracker.current_response_id()
+        reloaded = importlib.reload(server.activity_tracker)
+        reloaded.record_model_call(model="after-reload", tokens_in=2, tokens_out=1)
+
+        assert reloaded.current_response_id() == response_id
+        assert response["model_calls"] == 1
+        assert response["tokens_in"] == 2
+
+
 def test_master_orchestrate_accepts_common_delegate_typo(monkeypatch):
     monkeypatch.setattr(
         server.master_orchestrator,
@@ -572,6 +599,52 @@ def test_master_orchestrate_accepts_common_delegate_typo(monkeypatch):
     assert "master orchestration complete" in out
     assert "agents=2" in out
     assert "worker slots used: 1" in out
+
+
+def test_master_retry_replays_persisted_task_with_local_safe_default(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        server.master_orchestrator,
+        "recovery_candidate",
+        lambda selector: {
+            "id": "master-old",
+            "status": "interrupted",
+            "task": "finish the review",
+            "mode": "fleet",
+            "requested_agents": 12,
+            "tier": "cloud-code",
+        },
+    )
+    monkeypatch.setattr(
+        server,
+        "master_orchestrate",
+        lambda **kwargs: calls.append(kwargs) or "retry complete",
+    )
+
+    out = server.master_retry("master-old")
+
+    assert "persisted master retry" in out
+    assert "retry complete" in out
+    assert calls == [{
+        "task": "finish the review",
+        "mode": "fleet",
+        "agents": 12,
+        "tier": "code",
+        "learn": False,
+        "retry_of": "master-old",
+    }]
+
+
+def test_master_retry_rejects_completed_master(monkeypatch):
+    monkeypatch.setattr(
+        server.master_orchestrator,
+        "recovery_candidate",
+        lambda selector: {
+            "id": "master-done", "status": "done", "task": "already done",
+        },
+    )
+
+    assert "only interrupted/failed/cancelled" in server.master_retry("master-done")
 
 
 def test_master_orchestrate_delegates_and_audits(monkeypatch):

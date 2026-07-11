@@ -50,6 +50,7 @@ void main() {
     final status = AgentStatus.fromJson({
       'active_agents': 12,
       'cancel_pending': 2,
+      'interrupted_agents': 4,
       'total_agents': 33,
       'total_listed': 20,
       'tokens_in': 100,
@@ -69,6 +70,7 @@ void main() {
 
     expect(status.activeAgents, 12);
     expect(status.cancelPending, 2);
+    expect(status.interruptedAgents, 4);
     expect(status.totalAgents, 33);
     expect(status.capacity?.agentCeiling, 32);
     expect(status.capacity?.workerSlots, 2);
@@ -87,6 +89,7 @@ void main() {
 
     expect(status.totalAgents, 7);
     expect(status.cancelPending, 0);
+    expect(status.interruptedAgents, 0);
     expect(status.capacity, isNull);
   });
 }

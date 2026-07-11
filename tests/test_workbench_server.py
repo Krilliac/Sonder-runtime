@@ -171,6 +171,9 @@ def test_loop_dispatch_supports_fleet_capacity_and_cancellation(monkeypatch):
     monkeypatch.setattr(
         server, "master_cancel", lambda agent_id: f"cancel:{agent_id}",
     )
+    monkeypatch.setattr(
+        server, "master_retry", lambda agent_id, tier="": f"retry:{agent_id}:{tier}",
+    )
 
     capacity = server._loop_dispatch({
         "type": "master_capacity", "requested_agents": 20,
@@ -178,11 +181,16 @@ def test_loop_dispatch_supports_fleet_capacity_and_cancellation(monkeypatch):
     cancelled = server._loop_dispatch({
         "type": "master_cancel", "agent_id": "all",
     })
+    retried = server._loop_dispatch({
+        "type": "master_retry", "agent_id": "master-old", "tier": "code",
+    })
 
     assert capacity["ok"] is True
     assert capacity["output"] == "capacity:20"
     assert cancelled["ok"] is True
     assert cancelled["output"] == "cancel:all"
+    assert retried["ok"] is True
+    assert retried["output"] == "retry:master-old:code"
 
 
 def test_validation_must_cover_persistent_mutation_path():

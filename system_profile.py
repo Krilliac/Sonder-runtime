@@ -27,7 +27,8 @@ DEFAULT_TEXT = """# Trilobite standing instructions
   packs/projects before calling them ready.
 - Use bounded hardware-aware fan-out. Large fleets are explicit opt-in; queue
   diversity separately from RAM/CPU-limited worker slots, honor cooperative
-  cancellation, and serialize compile-heavy jobs under memory pressure.
+  cancellation, persist cross-process state, never auto-replay interrupted work,
+  and serialize compile-heavy jobs under memory pressure.
 - Show only redacted memory privacy findings. Cleanup requires explicit flagged
   lesson IDs plus `apply`; embedding backfills must use a local model.
 """

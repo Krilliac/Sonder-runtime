@@ -10,3 +10,11 @@ def test_command_registry_filters_by_risk_and_category():
 def test_command_registry_handles_no_matches():
     out = command_registry.format_commands("definitely-not-a-command")
     assert "(no matching commands)" in out
+
+
+def test_command_registry_exposes_restart_safe_agent_controls():
+    agents = command_registry.format_commands("agents")
+
+    assert "/capacity" in agents
+    assert "/agentcancel" in agents
+    assert "/agentretry" in agents

@@ -1,3 +1,4 @@
+import importlib
 import master_orchestrator
 import threading
 import time
@@ -181,7 +182,9 @@ def test_delegated_fleet_limits_actual_concurrency(monkeypatch):
         with lock:
             current["active"] += 1
             current["maximum"] = max(current["maximum"], current["active"])
-        time.sleep(0.02)
+        # Leave enough overlap for the process-shared SQLite start transition;
+        # the assertion concerns model-call concurrency, not ledger connection time.
+        time.sleep(0.12)
         with lock:
             current["active"] -= 1
         return "ok"
@@ -279,3 +282,14 @@ def test_snapshot_active_count_is_not_clipped_by_display_limit():
 
     assert snap["active_agents"] == 25
     assert snap["total_listed"] == 5
+
+
+def test_hot_reload_preserves_owner_and_active_execution_state():
+    owner_id = master_orchestrator._OWNER_ID
+    agent_id = master_orchestrator._new_agent("agent", "survive reload")
+
+    reloaded = importlib.reload(master_orchestrator)
+    snap = reloaded.snapshot(include_finished=False, limit=5)
+
+    assert reloaded._OWNER_ID == owner_id
+    assert any(row["id"] == agent_id for row in snap["agents"])

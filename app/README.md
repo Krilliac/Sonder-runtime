@@ -32,10 +32,13 @@ party.
   recommendations, learning stats and exposed models, run `/stats`, `/context`,
   `/compact`, `/todo`, `/commands`, `/dump`, `/permissions`, `/quality`,
   `/inventory`, `/privacy`, `/embeddings`, `/improve`,
-  `/agents`, `/capacity`, `/agentcancel`, `/train 10` and `/help`, start/stop the bundled desktop server,
+  `/agents`, `/capacity`, `/agentcancel`, `/agentretry`, `/train 10` and `/help`, start/stop the bundled desktop server,
   launch endless training, and pull updates from Git.
 - **Live footer**: chat shows context %, active agents, project scope, token
   estimates, selected model and latest agent activity while work is running.
+- **Restart-safe fleets**: the System panel reads the shared private fleet ledger,
+  shows interrupted work from any local Trilobite process, and offers a confirmed
+  local retry without silently replaying work after a crash.
 - **Slash commands** built in — `/stats`, `/context`, `/compact`, `/todo`,
   `/commands`, `/dump`, `/permissions`, `/train`, `/pass`, `/fail`, `/help` — handled
   by the serve layer exactly like the REPL.
