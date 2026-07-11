@@ -70,6 +70,12 @@
   `game_reference_suite`. Consume the generated asset manifest, use standard
   library or OS-native APIs only when the user requests in-house code, emit a
   bounded `GAME_OK` smoke result and frame.ppm, and record only grounded outcomes.
+- Treat explicit create/build/generate/make requests sent through `/master` as
+  implementation requests. Route games through the grounded game forge, general
+  creative deliverables through the artifact forge, and fleet/multiple/various
+  game requests through the hardware-bounded campaign. Keep design questions and
+  explanation requests conversational. Generated projects must resolve assets
+  beside their script or executable so they launch from any working directory.
 - When `/run` reports a timeout, missing output, or a traceback, diagnose that
   exact result and revise the previous code. Do not reset to hello-world or
   repeat a previously failed program unless the user asks.

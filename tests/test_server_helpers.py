@@ -601,6 +601,59 @@ def test_master_orchestrate_accepts_common_delegate_typo(monkeypatch):
     assert "worker slots used: 1" in out
 
 
+def test_master_routes_explicit_game_build_to_grounded_forge(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        server,
+        "_master_grounded_build",
+        lambda task, mode, tier, intent, retry_of="": (
+            calls.append((task, mode, tier, intent, retry_of)) or "grounded game"
+        ),
+    )
+
+    out = server.master_orchestrate(
+        "Create a C++ 2.5D isometric RPG game with in-house assets.",
+        mode="delegate",
+    )
+
+    assert out == "grounded game"
+    assert calls[0][1:3] == ("delegate", "code")
+    assert calls[0][3]["kind"] == "game"
+    assert calls[0][3]["language"] == "cpp"
+    assert calls[0][3]["dimension"] == "2.5d"
+
+
+def test_master_grounded_game_build_creates_verified_output(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        server,
+        "game_generate_and_test",
+        lambda **kwargs: calls.append(kwargs) or "generated game: PASS\nroot: C:/games/demo",
+    )
+    intent = server.creative_router.classify(
+        "Create a Python 2D dungeon game with generated sprites.",
+        mode="delegate",
+    )
+
+    out = server._master_grounded_build(
+        intent["concept"], "delegate", "code", intent,
+    )
+
+    assert "master grounded build complete" in out
+    assert "persistent files + deterministic verification" in out
+    assert "generated game: PASS" in out
+    assert calls[0]["language"] == "python"
+    assert calls[0]["dimension"] == "2d"
+
+
+def test_master_does_not_hijack_game_questions(monkeypatch):
+    monkeypatch.setattr(server, "offload", lambda prompt, **kwargs: "ordinary answer")
+
+    out = server.master_orchestrate("How do I build a C++ game?", mode="inline")
+
+    assert out == "ordinary answer"
+
+
 def test_master_retry_replays_persisted_task_with_local_safe_default(monkeypatch):
     calls = []
     monkeypatch.setattr(
@@ -811,10 +864,14 @@ def test_game_generate_records_grounded_success(monkeypatch):
     records = []
     monkeypatch.setattr(server, "record_outcome", lambda iid, signal: records.append((iid, signal)) or "recorded")
 
-    out = server.game_generate_and_test("demo", "arena", repair_rounds=0)
+    server.activity_tracker.reset_for_tests()
+    with server.activity_tracker.response_span("game", "build") as activity:
+        out = server.game_generate_and_test("demo", "arena", repair_rounds=0)
 
     assert "generated game: PASS" in out
     assert records == [("abc123", "tests_passed")]
+    assert activity["tool_calls"] == 1
+    assert activity["file_creates"] == 1
 
 
 def test_game_campaign_rotates_languages_and_dimensions(monkeypatch):
@@ -822,6 +879,9 @@ def test_game_campaign_rotates_languages_and_dimensions(monkeypatch):
 
     def fake_result(name, concept, language, dimension, *args, **kwargs):
         seen.append((language, dimension))
+        server.activity_tracker.record_model_call(
+            model="fake-game-model", tokens_in=2, tokens_out=1,
+        )
         return {
             "ok": True, "model_ok": True, "fallback_used": False,
             "name": name, "language": language, "dimension": dimension,
@@ -831,10 +891,15 @@ def test_game_campaign_rotates_languages_and_dimensions(monkeypatch):
 
     monkeypatch.setattr(server, "_game_generate_result", fake_result)
 
-    out = server.game_generation_campaign("fleet", total=4, max_workers=2)
+    server.activity_tracker.reset_for_tests()
+    with server.activity_tracker.response_span("campaign", "four games") as activity:
+        out = server.game_generation_campaign("fleet", total=4, max_workers=2)
 
     assert "4/4 runnable" in out
     assert set(seen) == {("python", "2d"), ("javascript", "2.5d"), ("cpp", "3d"), ("csharp", "2d")}
+    assert activity["model_calls"] == 4
+    assert activity["file_creates"] == 4
+    assert activity["tool_calls"] == 1
 
 
 def test_parallel_generate_run_uses_generated_code(monkeypatch):

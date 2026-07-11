@@ -59,6 +59,7 @@ import activity_tracker
 import assetgen
 import game_forge
 import workbench
+import creative_router
 
 from mcp.server.fastmcp import FastMCP
 
@@ -252,6 +253,7 @@ LIVE_RELOAD_MODULES = [
     "assetgen",
     "game_forge",
     "workbench",
+    "creative_router",
 ]
 
 
@@ -329,8 +331,8 @@ def _format_trace(model, tier, params, trace):
         "generation params: %r" % (params,),
         "lessons retrieved: %d" % len(lessons),
     ]
-    for l in lessons:
-        lines.append("   - %s" % l)
+    for lesson_text in lessons:
+        lines.append("   - %s" % lesson_text)
     lines.append("--- exact prompt sent to the model ---")
     lines.append(trace.get("augmented_prompt", ""))
     lines.append("=== END TRACE ===")
@@ -1903,8 +1905,8 @@ def trilobite_stats() -> str:
             )
     if lessons:
         lines.append("  recent lessons:")
-        for l in lessons:
-            lines.append("    - %s" % l["text"])
+        for lesson in lessons:
+            lines.append("    - %s" % lesson["text"])
     else:
         lines.append("  recent lessons: (none yet)")
     return "\n".join(lines)
@@ -2781,6 +2783,66 @@ def _orchestrator_agent_worker(tier: str, max_steps: int = 8):
     return worker
 
 
+def _master_grounded_build(
+    task: str, mode: str, tier: str, intent: dict, retry_of: str = "",
+) -> str:
+    """Execute an explicit greenfield creative request through a verified forge."""
+    kind = intent["kind"]
+
+    def build(_prompt: str) -> str:
+        if kind == "artifact":
+            return artifact_generate(
+                name=intent["name"],
+                brief=intent["brief"],
+                kinds=intent["kinds"],
+                dimension=intent["dimension"],
+                theme=intent["theme"],
+            )
+        if kind == "game_campaign":
+            total = int(intent.get("total") or 4)
+            workers = master_orchestrator.parallel_worker_slots(total)
+            return game_generation_campaign(
+                name=intent["name"],
+                concept=intent["concept"],
+                total=total,
+                theme=intent["theme"],
+                tier=tier,
+                max_workers=workers,
+                timeout=30,
+                repair_rounds=1,
+                use_reference_fallback=True,
+            )
+        return game_generate_and_test(
+            name=intent["name"],
+            concept=intent["concept"],
+            language=intent["language"],
+            dimension=intent["dimension"],
+            theme=intent["theme"],
+            tier=tier,
+            timeout=30,
+            repair_rounds=1,
+            use_reference_fallback=True,
+        )
+
+    result = master_orchestrator.run_inline(
+        task,
+        build,
+        metadata={
+            "tier": tier, "mode": "forge-%s" % kind,
+            "retry_of": retry_of,
+        },
+    )
+    return "\n".join([
+        "master grounded build complete",
+        "  route: %s | master=%s | requested mode=%s" % (
+            kind.replace("_", "-"), result["master_id"], mode,
+        ),
+        "  contract: persistent files + deterministic verification",
+        "",
+        result["output"],
+    ]).strip()
+
+
 @mcp.tool()
 def master_orchestrate(
     task: str,
@@ -2832,6 +2894,11 @@ def master_orchestrate(
         )
     if not task:
         return "ERROR: empty task."
+    creative_intent = creative_router.classify(task, mode=mode)
+    if creative_intent:
+        return _master_grounded_build(
+            task, mode, tier, creative_intent, retry_of=retry_of,
+        )
     needs_repo_tools = master_orchestrator.requires_repository_tools(task)
     worker = (
         _orchestrator_agent_worker(tier)
@@ -4335,6 +4402,7 @@ def game_generate_and_test(
     the bounded timeout. Passing/failed outcomes are recorded into learning.
     """
     _maybe_live_reload()
+    started = time.time()
     try:
         result = _game_generate_result(
             name, concept, language, dimension, theme, seed, tier,
@@ -4342,6 +4410,11 @@ def game_generate_and_test(
             use_reference_fallback=use_reference_fallback,
         )
     except (OSError, ValueError) as exc:
+        _record_direct_tool(
+            "game_generate_and_test",
+            {"name": name, "language": language, "dimension": dimension},
+            ok=False, started=started, summary=str(exc),
+        )
         return "ERROR: %s" % exc
     lines = [
         "generated game: %s" % ("PASS" if result["ok"] else "FAIL"),
@@ -4362,7 +4435,19 @@ def game_generate_and_test(
             lines.append(str(attempt["output"])[:1200])
         if attempt.get("record"):
             lines.append(str(attempt["record"])[:500])
-    return "\n".join(lines)
+    output = "\n".join(lines)
+    if result.get("root"):
+        activity_tracker.record_file_change(
+            "create", result["root"], summary="generated persistent game project",
+        )
+    _record_direct_tool(
+        "game_generate_and_test",
+        {"name": name, "language": language, "dimension": dimension},
+        ok=bool(result.get("ok")), started=started,
+        summary="runnable" if result.get("ok") else "verification failed",
+        output=output,
+    )
+    return output
 
 
 @mcp.tool()
@@ -4392,26 +4477,28 @@ def game_generation_campaign(
     workers = max(1, min(int(max_workers or 1), 4, total))
     timeout = max(2, min(int(timeout or 30), 60))
     results = [None] * total
+    response_id = activity_tracker.current_response_id()
 
     def one(index):
-        language, dimension = matrix[index % len(matrix)]
-        suffix = "iso" if dimension == "2.5d" else dimension
-        project_name = "%s-%s-%s-%d" % (
-            assetgen._safe_slug(name), language, suffix, index + 1,
-        )
-        try:
-            return _game_generate_result(
-                project_name, concept, language, dimension, theme,
-                1337 + index, tier, timeout, repair_rounds,
-                use_reference_fallback=use_reference_fallback,
+        with activity_tracker.bind_response(response_id):
+            language, dimension = matrix[index % len(matrix)]
+            suffix = "iso" if dimension == "2.5d" else dimension
+            project_name = "%s-%s-%s-%d" % (
+                assetgen._safe_slug(name), language, suffix, index + 1,
             )
-        except Exception as exc:
-            return {
-                "ok": False, "name": project_name, "language": language,
-                "dimension": dimension, "root": "", "attempts": [
-                    {"attempt": 1, "ok": False, "output": "ERROR: %s" % exc, "iid": None}
-                ],
-            }
+            try:
+                return _game_generate_result(
+                    project_name, concept, language, dimension, theme,
+                    1337 + index, tier, timeout, repair_rounds,
+                    use_reference_fallback=use_reference_fallback,
+                )
+            except Exception as exc:
+                return {
+                    "ok": False, "name": project_name, "language": language,
+                    "dimension": dimension, "root": "", "attempts": [
+                        {"attempt": 1, "ok": False, "output": "ERROR: %s" % exc, "iid": None}
+                    ],
+                }
 
     started = time.time()
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -4442,7 +4529,20 @@ def game_generation_campaign(
             lines.append(str(final["output"])[:900])
         if final.get("record"):
             lines.append(str(final["record"])[:400])
-    return "\n".join(lines)
+    output = "\n".join(lines)
+    for result in results:
+        if result and result.get("root"):
+            activity_tracker.record_file_change(
+                "create", result["root"],
+                summary="generated campaign game project",
+            )
+    _record_direct_tool(
+        "game_generation_campaign",
+        {"name": name, "total": total, "workers": workers},
+        ok=passed == total, started=started,
+        summary="%d/%d runnable" % (passed, total), output=output,
+    )
+    return output
 
 
 def _loop_text_result(action_type, text):
@@ -5383,7 +5483,10 @@ def memory_search(query: str, limit: int = 10) -> str:
 
     lines = ["memory search: %r" % query]
     lines.append("lessons (%d):" % len(lessons))
-    lines.extend("  - %s: %s" % (l["id"], l["text"][:220]) for l in lessons)
+    lines.extend(
+        "  - %s: %s" % (lesson["id"], lesson["text"][:220])
+        for lesson in lessons
+    )
     lines.append("facts (%d):" % len(facts))
     lines.extend("  - %s/%s: %s" % (f["project"], f["id"], f["text"][:220]) for f in facts)
     lines.append("preferences (%d):" % len(preferences))

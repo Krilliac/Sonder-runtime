@@ -108,14 +108,24 @@ generator uses manual PNG/PPM encoding, waveform synthesis, procedural geometry,
 bounded sizes, safe workspace paths, idempotent regeneration, and SHA-256
 manifests. `artifact_verify(path)` checks every file before downstream use.
 
-`game_reference_suite` is the known-good baseline: persistent Python 2D,
+`game_reference_suite` is the known-good default baseline: persistent Python 2D,
 JavaScript 2.5D, C++ 3D, and C# 2D projects consume generated assets, simulate
-bounded gameplay, software-render `frame.ppm`, print `GAME_OK`, and exit. The
+bounded gameplay, software-render `frame.ppm`, print `GAME_OK`, and exit. Verified
+fallbacks cover every combination of Python, JavaScript, C++, and C# with 2D,
+2.5D, and 3D labels. Projects resolve assets beside their script or executable,
+so they remain runnable when launched from another working directory. The
 model-driven `game_generate_and_test` and `game_generation_campaign` surfaces use
 the same contract, reject third-party engine tokens and placeholders, compile/run
 the candidate, repair failures, and record grounded outcomes. If the local model
 cannot satisfy the contract, a clearly labeled verified reference fallback leaves
 a runnable project while the model attempt remains recorded as failed.
+
+Concrete `/master` requests containing an explicit build verb plus a game or
+artifact target now route directly through these grounded forges. Language,
+dimension, theme, and campaign intent are inferred conservatively; `fleet`,
+`multiple`, and `various` requests use the hardware-bounded campaign path. Design
+questions and explanation requests remain ordinary conversation instead of
+creating files unexpectedly.
 
 ---
 
@@ -370,9 +380,10 @@ Flat, mostly-stdlib Python modules (plus `mcp`):
 | `reward.py` / `reflection.py` | outcome → score; distill deduped lessons |
 | `orchestrator.py` | the retrieve → augment → generate → capture flow |
 | `master_orchestrator.py` / `fleet_store.py` | RAM/CPU-bounded fleet execution plus a process-shared restart/recovery ledger |
+| `creative_router.py` | conservative natural-language routing from concrete master build requests into grounded artifact, game, or game-campaign workflows |
 | `server.py` / `workbench.py` / `activity_tracker.py` / `code_runner.py` / `web_tools.py` / `workflow_store.py` / `self_heal.py` | MCP workbench/agent tools, guarded discovery and execution, persistent checklists, exact action/end reports, bounded code/project runners, web tools, workflows, and self-healing |
 | `server.py` | MCP server: `offload` / `trilobite` / `parallel_run_code` / `parallel_generate_run` / `parallel_generate_run_languages` / `campaign_generate_compile_execute_record` / `learn_tiers` / `record_outcome` / `trilobite_stats` / `trilobite_sessions` / `trilobite_remember_fact` |
-| `assetgen.py` / `game_forge.py` | stdlib-only general artifact generation, manifest verification, persistent cross-language game projects, model campaigns, and verified reference fallbacks |
+| `assetgen.py` / `game_forge.py` | stdlib-only general artifact generation, manifest verification, portable cross-language game projects, model campaigns, and verified 4-language x 3-dimension fallbacks |
 | `recall.py` | semantic recall of past good-outcome solutions (vector search over interactions) |
 | `summarizer.py` | rolling conversation summaries + session auto-titles (fast tier) |
 | `trilobite_repl.py` / `trilobite_client.py` | local REPL / thin remote client |

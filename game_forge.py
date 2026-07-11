@@ -29,10 +29,18 @@ DEFAULT_MATRIX = (
     ("cpp", "3d"),
     ("csharp", "2d"),
 )
+SUPPORTED_MATRIX = tuple(
+    (language, dimension)
+    for language in sorted(LANGUAGES)
+    for dimension in ("2d", "2.5d", "3d")
+)
 FORBIDDEN = {
     "python": ("pygame", "pillow", "pil.", "numpy", "pyglet", "arcade"),
     "javascript": ("three.js", "three'", 'three"', "pixi", "phaser", "babylon"),
-    "cpp": ("<sdl", "<sfml", "<gl/", "<glfw", "<vulkan", "raylib"),
+    "cpp": (
+        "<sdl", "<sfml", "<gl/", "<glfw", "<vulkan", "raylib",
+        "nlohmann", "<boost/", "<glm/", "<json/",
+    ),
     "csharp": (
         "unityengine", "monogame", "microsoft.xna", "raylib",
         "system.drawing", "image.fromfile", "bitmap(",
@@ -92,6 +100,7 @@ def validate_in_house(code: str, language: str) -> list[str]:
 
 def contract_issues(code: str, language: str) -> list[str]:
     """Return deterministic violations of the bounded artifact/game contract."""
+    language = normalize_language(language)
     text = code or ""
     lowered = text.lower()
     issues = []
@@ -107,6 +116,14 @@ def contract_issues(code: str, language: str) -> list[str]:
         issues.append("must consume an existing WAV name: pickup.wav, hit.wav, or theme.wav")
     if not any(name in lowered for name in ("background.png", "tiles.png", "sprites.png", "texture.png")):
         issues.append("must consume an existing PNG asset name")
+    cwd_only = {
+        "python": "path.cwd" in lowered and "__file__" not in lowered,
+        "javascript": "process.cwd" in lowered and "__dirname" not in lowered,
+        "cpp": "current_path" in lowered and "argv" not in lowered,
+        "csharp": "getcurrentdirectory" in lowered and "appcontext.basedirectory" not in lowered,
+    }
+    if cwd_only[language]:
+        issues.append("project root must resolve beside the script/executable with cwd fallback")
     return issues
 
 
@@ -162,7 +179,8 @@ def prepare_project(name: str, language: str, dimension: str, theme: str = "arca
 PYTHON_2D = r'''"""Trilobite stdlib-only 2D arena. Run with --play for Tk controls."""
 import json, math, pathlib, sys
 
-ROOT = pathlib.Path.cwd()
+SCRIPT_ROOT = pathlib.Path(__file__).resolve().parent
+ROOT = SCRIPT_ROOT if (SCRIPT_ROOT / "assets").is_dir() else pathlib.Path.cwd()
 ASSETS = ROOT / "assets"
 scene = json.loads((ASSETS / "scene.json").read_text(encoding="utf-8"))
 assert (ASSETS / "tiles.png").read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
@@ -208,7 +226,9 @@ print(f"GAME_OK language=python dimension=2d ticks=120 score={score} assets={len
 
 JAVASCRIPT_ISO = r'''"use strict";
 const fs = require("fs"), path = require("path");
-const root = process.cwd(), assets = path.join(root, "assets");
+const scriptRoot = __dirname;
+const root = fs.existsSync(path.join(scriptRoot, "assets")) ? scriptRoot : process.cwd();
+const assets = path.join(root, "assets");
 const scene = JSON.parse(fs.readFileSync(path.join(assets, "scene.json"), "utf8"));
 if (fs.readFileSync(path.join(assets, "tiles.png")).subarray(1,4).toString() !== "PNG") throw Error("bad PNG");
 if (fs.readFileSync(path.join(assets, "hit.wav")).subarray(0,4).toString() !== "RIFF") throw Error("bad WAV");
@@ -224,6 +244,51 @@ console.log(`GAME_OK language=javascript dimension=2.5d ticks=90 hp=${hero.hp} a
 '''
 
 
+CPP_ISO = r'''#include <algorithm>
+#include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <vector>
+struct Point { int x,y; };
+struct Actor { double x,y; int hp; };
+int main(int argc,char**argv){
+  namespace fs=std::filesystem; fs::path root=fs::current_path();
+  if(argc>0){const fs::path executable=fs::absolute(argv[0]).parent_path();if(fs::exists(executable/"assets"))root=executable;}
+  std::ifstream png(root/"assets"/"tiles.png",std::ios::binary); char sig[8]{}; png.read(sig,8);
+  if(png.gcount()!=8 || (unsigned char)sig[0]!=0x89 || sig[1]!='P') return 2;
+  std::ifstream wav(root/"assets"/"hit.wav",std::ios::binary); char riff[4]{}; wav.read(riff,4);
+  if(wav.gcount()!=4 || riff[0]!='R' || riff[1]!='I') return 3;
+  std::ifstream obj(root/"assets"/"models.obj"); int vertices=0; std::string text;
+  while(std::getline(obj,text))if(text.rfind("v ",0)==0)++vertices;if(vertices<8)return 4;
+  Actor hero{2.2,5.4,100}; std::vector<Actor> enemies={{3.6,4.5,20},{5.3,6.4,28},{7.5,2.6,24}};
+  int gold=0;
+  for(int tick=0;tick<120;++tick){
+    hero.x=2.2+tick*.032; hero.y=5.4-std::sin(tick*.055)*1.4;
+    for(auto& enemy:enemies){
+      if(enemy.hp<=0)continue; double dx=hero.x-enemy.x,dy=hero.y-enemy.y,dist=std::sqrt(dx*dx+dy*dy);
+      if(dist<1.35 && tick%4==0)enemy.hp-=5; if(dist<.75 && tick%12==0)hero.hp=std::max(1,hero.hp-2);
+      if(enemy.hp<=0)gold+=12;
+    }
+  }
+  const int W=192,H=112;std::vector<unsigned char> pix(W*H*3,9);
+  auto put=[&](int x,int y,int r,int g,int b){if(x<0||y<0||x>=W||y>=H)return;auto i=(y*W+x)*3;pix[i]=(unsigned char)r;pix[i+1]=(unsigned char)g;pix[i+2]=(unsigned char)b;};
+  auto diamond=[&](int cx,int cy,int rx,int ry,int r,int g,int b){for(int y=-ry;y<=ry;++y){int span=rx*(ry-std::abs(y))/std::max(1,ry);for(int x=-span;x<=span;++x)put(cx+x,cy+y,r,g,b);}};
+  auto disc=[&](int cx,int cy,int radius,int r,int g,int b){for(int y=-radius;y<=radius;++y)for(int x=-radius;x<=radius;++x)if(x*x+y*y<=radius*radius)put(cx+x,cy+y,r,g,b);};
+  auto iso=[](double x,double y,double z=0.0){return Point{int(96+(x-y)*8),int(10+(x+y)*5-z*8)};};
+  for(int y=0;y<8;++y)for(int x=0;x<12;++x){Point p=iso(x,y);int alt=(x+y)%3;diamond(p.x,p.y,8,4,26+alt*6,49+alt*7,48+alt*5);if(x==0||y==0||x==11||y==7){diamond(p.x,p.y-6,8,4,61,48,62);for(int d=0;d<6;++d){put(p.x-8,p.y-d,43,33,45);put(p.x+8,p.y-d,43,33,45);}}}
+  Point shrine=iso(7.0,2.0,0.4);disc(shrine.x,shrine.y,4,76,118,180);disc(shrine.x,shrine.y,2,132,224,230);
+  for(const auto& enemy:enemies)if(enemy.hp>0){Point p=iso(enemy.x,enemy.y,0.55);disc(p.x,p.y,5,177,45,63);disc(p.x-2,p.y-1,1,255,186,116);}
+  Point player=iso(hero.x,hero.y,0.7);disc(player.x,player.y,6,53,205,194);disc(player.x+2,player.y-2,2,183,255,232);
+  for(int x=8;x<74;++x)put(x,102,38,31,38);for(int x=8;x<8+hero.hp*66/100;++x)put(x,102,78,218,174);
+  std::ofstream ppm(root/"frame.ppm",std::ios::binary);ppm<<"P6\n"<<W<<" "<<H<<"\n255\n";ppm.write((char*)pix.data(),pix.size());
+  int alive=0;for(const auto& enemy:enemies)if(enemy.hp>0)++alive;
+  std::cout<<"GAME_OK language=cpp dimension=2.5d ticks=120 hp="<<hero.hp<<" enemies="<<alive<<" gold="<<gold<<" vertices="<<vertices<<"\n";return 0;
+}
+'''
+
+
 CPP_3D = r'''#include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -233,8 +298,9 @@ CPP_3D = r'''#include <algorithm>
 #include <vector>
 struct Vec3 { double x,y,z; };
 struct Point { int x,y; };
-int main(){
-  namespace fs=std::filesystem; const fs::path root=fs::current_path();
+int main(int argc,char**argv){
+  namespace fs=std::filesystem; fs::path root=fs::current_path();
+  if(argc>0){const fs::path executable=fs::absolute(argv[0]).parent_path();if(fs::exists(executable/"assets"))root=executable;}
   std::ifstream png(root/"assets"/"texture.png",std::ios::binary); char sig[8]{}; png.read(sig,8);
   if(png.gcount()!=8 || (unsigned char)sig[0]!=0x89 || sig[1]!='P') return 2;
   std::ifstream wav(root/"assets"/"hit.wav",std::ios::binary); char riff[4]{}; wav.read(riff,4);
@@ -259,8 +325,8 @@ using System.IO;
 class Game {
   static void Main(){
     string root=AppContext.BaseDirectory;
-    string sourceRoot=Path.GetDirectoryName(Environment.GetCommandLineArgs()[0]) ?? root;
-    string assets=Path.Combine(Directory.GetCurrentDirectory(),"assets");
+    if(!Directory.Exists(Path.Combine(root,"assets"))) root=Directory.GetCurrentDirectory();
+    string assets=Path.Combine(root,"assets");
     byte[] png=File.ReadAllBytes(Path.Combine(assets,"sprites.png"));
     byte[] wav=File.ReadAllBytes(Path.Combine(assets,"theme.wav"));
     if(png.Length<8 || png[1]!=(byte)'P' || wav.Length<4 || wav[0]!=(byte)'R') throw new Exception("asset validation failed");
@@ -269,7 +335,7 @@ class Game {
     Action<int,int,int,int,int,int,int> rect=(x,y,w,h,r,g,b)=>{for(int py=Math.Max(0,y);py<Math.Min(H,y+h);py++)for(int px=Math.Max(0,x);px<Math.Min(W,x+w);px++){int i=(py*W+px)*3;pixels[i]=(byte)r;pixels[i+1]=(byte)g;pixels[i+2]=(byte)b;}};
     int heroX=20,score=0;for(int tick=0;tick<100;tick++){heroX=20+(tick%80);if(heroX==70)score+=10;}
     for(int x=0;x<W;x+=16)rect(x,70,15,12,45,82,75);rect(heroX,60,8,10,90,218,205);rect(118,60,8,10,220,70,74);
-    using(var file=File.Create(Path.Combine(Directory.GetCurrentDirectory(),"frame.ppm"))){byte[] head=System.Text.Encoding.ASCII.GetBytes($"P6\n{W} {H}\n255\n");file.Write(head,0,head.Length);file.Write(pixels,0,pixels.Length);}
+    using(var file=File.Create(Path.Combine(root,"frame.ppm"))){byte[] head=System.Text.Encoding.ASCII.GetBytes($"P6\n{W} {H}\n255\n");file.Write(head,0,head.Length);file.Write(pixels,0,pixels.Length);}
     Console.WriteLine($"GAME_OK language=csharp dimension=2d ticks=100 score={score} assets={png.Length+wav.Length}");
   }
 }
@@ -279,6 +345,7 @@ class Game {
 REFERENCE_SOURCE = {
     ("python", "2d"): PYTHON_2D,
     ("javascript", "2.5d"): JAVASCRIPT_ISO,
+    ("cpp", "2.5d"): CPP_ISO,
     ("cpp", "3d"): CPP_3D,
     ("csharp", "2d"): CSHARP_2D,
 }
@@ -286,9 +353,17 @@ REFERENCE_SOURCE = {
 
 def reference_source(language: str, dimension: str) -> str:
     key = (normalize_language(language), normalize_dimension(dimension))
-    if key not in REFERENCE_SOURCE:
-        raise ValueError("no reference project for %s/%s" % key)
-    return REFERENCE_SOURCE[key]
+    if key in REFERENCE_SOURCE:
+        return REFERENCE_SOURCE[key]
+    base = next(
+        source for (source_language, _), source in REFERENCE_SOURCE.items()
+        if source_language == key[0]
+    )
+    return re.sub(
+        r"dimension=(?:2d|2[.]5d|3d)",
+        "dimension=%s" % key[1],
+        base,
+    )
 
 
 def save_source(project: dict, code: str) -> str:
@@ -365,11 +440,21 @@ def run_reference_suite(name: str, theme: str = "arcane", seed: int = 1337,
 
 def generation_prompt(project: dict, concept: str = "") -> str:
     language, dimension = project["language"], project["dimension"]
+    language_rule = ""
+    if language == "cpp":
+        language_rule = (
+            "C++ rule: nlohmann/json, Boost, GLM, SDL, SFML, GLFW, and all "
+            "non-standard headers are forbidden. Inspect JSON assets as plain text "
+            "or bytes with <fstream>; do not include a JSON helper. "
+        )
     return (
         "Create a compact greenfield %s game in %s. %s\n"
         "Use only the language standard library and OS-native APIs: no third-party "
-        "engines, packages, downloads, or external services. The working directory "
-        "contains these exact generated files: assets/manifest.json, assets/scene.json, "
+        "engines, packages, downloads, or external services. %sResolve the project root "
+        "beside the script/executable and fall back to the working directory only for "
+        "temporary compile runners, so the game launches correctly from any caller "
+        "directory. The project contains these exact generated files: "
+        "assets/manifest.json, assets/scene.json, "
         "assets/background.png, tiles.png, sprites.png, texture.png, pickup.wav, hit.wav, "
         "theme.wav, and models.obj. Use those names exactly. Validate PNG/WAV signatures "
         "and inspect metadata; do not write a full image/audio decoder. For 3D also parse "
@@ -380,7 +465,7 @@ def generation_prompt(project: dict, concept: str = "") -> str:
         "interactive input in smoke mode. No placeholders, TODOs, omitted logic, or fake "
         "loaders are allowed. Return exactly one complete fenced %s "
         "code block and no prose. Do not claim execution or test success."
-        % (dimension, language, concept.strip(), language)
+        % (dimension, language, concept.strip(), language_rule, language)
     )
 
 

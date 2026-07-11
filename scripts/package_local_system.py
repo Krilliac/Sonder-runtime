@@ -53,6 +53,7 @@ REQUIRED_FILES = {
     "assetgen.py",
     "bootstrap-engine.cmd",
     "bootstrap_engine.py",
+    "creative_router.py",
     "game_forge.py",
     "fleet_store.py",
     "server.py",
