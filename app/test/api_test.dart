@@ -250,6 +250,7 @@ void main() {
     final info = SystemInfo.fromJson(const {});
     expect(info.autopilot, isNull);
     expect(info.runtimePolicy, isNull);
+    expect(info.mcpRuntime, isNull);
     expect(info.models, isEmpty);
   });
 
@@ -284,5 +285,35 @@ void main() {
     expect(policy.modelForLane('review'), 'qwen2.5:7b-instruct');
     expect(policy.missingModels, ['missing-local:latest']);
     expect(policy.hasWarning, isTrue);
+  });
+
+  test('system info parses live MCP convergence state', () {
+    final info = SystemInfo.fromJson({
+      'mcp_runtime': {
+        'status': 'current',
+        'enabled': true,
+        'module': '__main__',
+        'path': r'C:\trilobite\server.py',
+        'loaded_digest': '1234567890abcdef',
+        'current_digest': '1234567890abcdef',
+        'source_changed': false,
+        'registered_tools': 108,
+        'refresh_count': 3,
+        'last_refresh_ts': 1783731000,
+        'last_surface_changed': true,
+        'last_error': '',
+        'last_notification_error': '',
+        'protocol_list_changed': true,
+      },
+    });
+
+    final runtime = info.mcpRuntime!;
+    expect(runtime.status, 'current');
+    expect(runtime.registeredTools, 108);
+    expect(runtime.refreshCount, 3);
+    expect(runtime.protocolListChanged, isTrue);
+    expect(runtime.loadedShort, '1234567890ab');
+    expect(runtime.currentShort, '1234567890ab');
+    expect(runtime.hasWarning, isFalse);
   });
 }

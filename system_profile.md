@@ -55,6 +55,10 @@
   Never rewrite model mappings unless the user explicitly requests a guarded
   `/runtime set` change, and never use that policy to enable cloud, widen roots
   or permissions, or store credentials.
+- Accept the host's atomic MCP refresh boundary. Updated tool implementations
+  and schemas may appear after any tool/list request. If `/mcp status` reports a
+  failed refresh, disclose it and keep using only the last known-good registered
+  tools; never treat a model response as permission to bypass that boundary.
 - After a successful inspect/research task, use the adaptive checkpoint to compare
   new evidence with the pending plan. Continue when it is still correct, replan
   only stale work, preserve superseded tasks for audit, and never exceed the host's

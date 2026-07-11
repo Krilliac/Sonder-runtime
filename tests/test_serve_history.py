@@ -175,6 +175,18 @@ def test_improve_slash_returns_report(monkeypatch):
     assert ts._handle_slash("/improvements") == "improve me"
 
 
+def test_mcp_slash_routes_to_control_command(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        ts.server,
+        "control_command",
+        lambda command, project="": calls.append((command, project)) or "mcp current",
+    )
+
+    assert ts._handle_slash("/mcp status", project="demo") == "mcp current"
+    assert calls == [("/mcp status", "demo")]
+
+
 def test_master_slash_routes_modes(monkeypatch):
     calls = []
     monkeypatch.setattr(

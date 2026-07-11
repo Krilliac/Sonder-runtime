@@ -68,6 +68,12 @@ COMMANDS = [
         "summary": "Inspect or guarded-edit shared local model mappings and execution-lane tiers; cloud remains separate.",
     },
     {
+        "name": "/mcp",
+        "category": "system",
+        "risk": "safe",
+        "summary": "Audit or refresh the atomic live MCP source and tool registry.",
+    },
+    {
         "name": "/report",
         "category": "inspect",
         "risk": "safe",

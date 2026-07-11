@@ -77,6 +77,8 @@ HELP = """commands:
   /activity          show active/latest tool calls and file changes
   /work <task>       execute a guarded tool-using workflow with checklist/report
   /autopilot ...     persistent plan/run/status/resume/pause/cancel autonomy
+  /runtime ...       shared local model mappings and execution-lane tiers
+  /mcp ...           audit/refresh atomic MCP source and tool convergence
   /report            show the latest grounded end report and action transcript
   /checklist [id]    show the current or selected persistent checklist
   /inventory [path]  summarize a guarded workspace with explicit scan budgets
@@ -515,6 +517,10 @@ def main():
             elif cmd in ("/activity", "/tools"):
                 print(server.activity_status())
             elif cmd in ("/autopilot", "/auto"):
+                print(server.control_command(
+                    line, session=session_id, project=project,
+                ))
+            elif cmd in ("/runtime", "/models", "/mcp", "/convergence"):
                 print(server.control_command(
                     line, session=session_id, project=project,
                 ))

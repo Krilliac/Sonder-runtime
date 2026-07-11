@@ -503,6 +503,25 @@ def test_improvement_report_honors_cloud_opt_in(monkeypatch, tmp_path):
     assert not any(i["area"] == "deployment" for i in report["issues"])
 
 
+def test_improvement_report_flags_failed_closed_mcp_refresh(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
+    state = server.mcp_runtime_data()
+    state.update({
+        "status": "error",
+        "source_changed": True,
+        "last_error": "SyntaxError: invalid syntax",
+    })
+    monkeypatch.setattr(server, "mcp_runtime_data", lambda: dict(state))
+
+    report = server.improvement_report_data()
+
+    issue = next(item for item in report["issues"] if item["area"] == "runtime")
+    assert issue["severity"] == "high"
+    assert "failed closed" in issue["title"]
+    assert report["mcp_runtime"]["last_error"].startswith("SyntaxError")
+    assert "mcp: error" in server.format_improvement_report(report)
+
+
 def test_master_orchestrate_asks_for_execution_mode():
     out = server.master_orchestrate("build a parser", mode="ask", agents=2)
 

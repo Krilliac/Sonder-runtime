@@ -310,6 +310,7 @@ HELP_TEXT = """commands:
   /work <task>       execute a guarded workflow with checklist and end report
   /autopilot ...     persistent plan/run/status/resume/pause/cancel autonomy
   /runtime ...       shared local model mappings and execution-lane tiers
+  /mcp ...           audit/refresh atomic MCP source and tool convergence
   natural work       auto-select foreground, Autopilot, or explicit fleet mode
   /report            show the latest grounded report and action transcript
   /checklist [id]    show the current or selected persistent checklist
@@ -845,6 +846,8 @@ def _handle_slash(content, messages=None, state=None, project=""):
         return server.control_command(stripped, project=project)
     if cmd in ("/runtime", "/models"):
         return server.control_command(stripped, project=project)
+    if cmd in ("/mcp", "/convergence"):
+        return server.control_command(stripped, project=project)
     if cmd in ("/weather", "/forecast"):
         if not arg.strip():
             return "usage: /weather <city/state or ZIP>"
@@ -1284,6 +1287,7 @@ class Handler(BaseHTTPRequestHandler):
                 "agents": server.master_orchestrator.snapshot(),
                 "autopilot": server.autopilot_controller.snapshot(),
                 "runtime_policy": server.runtime_policy_data(),
+                "mcp_runtime": server.mcp_runtime_data(),
                 "activity": server.activity_tracker.snapshot(),
                 "db_path": getattr(server, "_DB_PATH", ""),
                 "state_home": str(server.trilobite_paths.default_home()),

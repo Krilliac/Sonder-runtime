@@ -51,6 +51,8 @@ class _ChatScreenState extends State<ChatScreen> {
     '/compact': 'Preview context compaction',
     '/commands': 'List command registry',
     '/activity': 'Show live tool/file activity',
+    '/runtime': 'Show shared local model routing',
+    '/mcp': 'Audit live MCP source/tool convergence',
     '/autopilot': 'Plan or run a persistent guarded goal',
     '/report': 'Show latest end report and exact actions',
     '/checklist': 'Show the active work checklist',

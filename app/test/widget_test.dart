@@ -99,6 +99,22 @@ void main() {
         },
         'missing_models': const [],
       },
+      'mcp_runtime': {
+        'status': 'current',
+        'enabled': true,
+        'module': '__main__',
+        'path': r'C:\trilobite\server.py',
+        'loaded_digest': '1234567890abcdef',
+        'current_digest': '1234567890abcdef',
+        'source_changed': false,
+        'registered_tools': 108,
+        'refresh_count': 3,
+        'last_refresh_ts': 1783731000,
+        'last_surface_changed': true,
+        'last_error': '',
+        'last_notification_error': '',
+        'protocol_list_changed': true,
+      },
       'models': const [],
     });
 
@@ -130,6 +146,19 @@ void main() {
     expect(find.text('review  general'), findsOneWidget);
     expect(
         find.textContaining('/runtime set workbench=general'), findsOneWidget);
+
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('mcp-runtime-panel')),
+      280,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Runtime Convergence'), findsOneWidget);
+    expect(find.text('MCP current'), findsOneWidget);
+    expect(find.text('108 tools'), findsOneWidget);
+    expect(find.text('3 atomic refreshes'), findsOneWidget);
+    expect(find.text('Live tool-list updates'), findsOneWidget);
 
     if (Platform.environment['TRILOBITE_CAPTURE_UI'] == '1') {
       await tester.runAsync(() async {

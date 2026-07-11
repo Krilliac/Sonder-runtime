@@ -375,6 +375,7 @@ class SystemInfo {
   final AgentStatus? agents;
   final AutopilotStatus? autopilot;
   final RuntimePolicyInfo? runtimePolicy;
+  final McpRuntimeInfo? mcpRuntime;
   final ActivityStatus? activity;
   final List<SystemModel> models;
 
@@ -389,6 +390,7 @@ class SystemInfo {
     required this.agents,
     required this.autopilot,
     this.runtimePolicy,
+    this.mcpRuntime,
     required this.activity,
     required this.models,
   });
@@ -417,6 +419,11 @@ class SystemInfo {
       runtimePolicy: json['runtime_policy'] is Map<String, dynamic>
           ? RuntimePolicyInfo.fromJson(
               json['runtime_policy'] as Map<String, dynamic>,
+            )
+          : null,
+      mcpRuntime: json['mcp_runtime'] is Map<String, dynamic>
+          ? McpRuntimeInfo.fromJson(
+              json['mcp_runtime'] as Map<String, dynamic>,
             )
           : null,
       activity: json['activity'] is Map<String, dynamic>
@@ -474,6 +481,69 @@ class RuntimePolicyInfo {
     final tier = routing[lane] ?? '';
     return localModels[tier] ?? '';
   }
+}
+
+class McpRuntimeInfo {
+  final String status;
+  final bool enabled;
+  final String module;
+  final String path;
+  final String loadedDigest;
+  final String currentDigest;
+  final bool sourceChanged;
+  final int registeredTools;
+  final int refreshCount;
+  final int lastRefreshTs;
+  final bool lastSurfaceChanged;
+  final String lastError;
+  final String lastNotificationError;
+  final bool protocolListChanged;
+
+  const McpRuntimeInfo({
+    required this.status,
+    required this.enabled,
+    required this.module,
+    required this.path,
+    required this.loadedDigest,
+    required this.currentDigest,
+    required this.sourceChanged,
+    required this.registeredTools,
+    required this.refreshCount,
+    required this.lastRefreshTs,
+    required this.lastSurfaceChanged,
+    required this.lastError,
+    required this.lastNotificationError,
+    required this.protocolListChanged,
+  });
+
+  factory McpRuntimeInfo.fromJson(Map<String, dynamic> json) {
+    return McpRuntimeInfo(
+      status: json['status']?.toString() ?? 'unknown',
+      enabled: _asBool(json['enabled']),
+      module: json['module']?.toString() ?? '',
+      path: json['path']?.toString() ?? '',
+      loadedDigest: json['loaded_digest']?.toString() ?? '',
+      currentDigest: json['current_digest']?.toString() ?? '',
+      sourceChanged: _asBool(json['source_changed']),
+      registeredTools: _asInt(json['registered_tools']),
+      refreshCount: _asInt(json['refresh_count']),
+      lastRefreshTs: _asInt(json['last_refresh_ts']),
+      lastSurfaceChanged: _asBool(json['last_surface_changed']),
+      lastError: json['last_error']?.toString() ?? '',
+      lastNotificationError: json['last_notification_error']?.toString() ?? '',
+      protocolListChanged: _asBool(json['protocol_list_changed']),
+    );
+  }
+
+  bool get hasWarning =>
+      sourceChanged || lastError.isNotEmpty || lastNotificationError.isNotEmpty;
+
+  String get loadedShort =>
+      loadedDigest.length <= 12 ? loadedDigest : loadedDigest.substring(0, 12);
+
+  String get currentShort => currentDigest.length <= 12
+      ? currentDigest
+      : currentDigest.substring(0, 12);
 }
 
 class AutopilotStatus {
@@ -1134,6 +1204,13 @@ double _asDouble(Object? value) {
   if (value is double) return value;
   if (value is num) return value.toDouble();
   return double.tryParse(value?.toString() ?? '') ?? 0;
+}
+
+bool _asBool(Object? value) {
+  if (value is bool) return value;
+  if (value is num) return value != 0;
+  return const {'1', 'true', 'yes', 'on'}
+      .contains(value?.toString().trim().toLowerCase());
 }
 
 Map<String, String> _stringMap(Object? value) {
