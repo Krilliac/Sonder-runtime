@@ -39,7 +39,7 @@ void main() {
     expect(find.textContaining('/asset media-suite'), findsOneWidget);
     expect(find.textContaining('/asset rigged-character'), findsOneWidget);
     expect(find.text('Generate a grounded editable media kit'), findsOneWidget);
-    expect(find.text('Generate a self-contained textured 3D character'), findsOneWidget);
+    expect(find.text('Generate a textured morphing multi-clip character'), findsOneWidget);
   });
 
   testWidgets('System always has an explicit return to main chat',

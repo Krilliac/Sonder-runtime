@@ -2283,6 +2283,179 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
         ),
     )
 
+    morph_errors = []
+    mesh_target_counts = {}
+    maximum_morph_targets = 0
+    named_morph_targets = 0
+    all_morph_targets_named = True
+    for mesh_index, mesh in enumerate(meshes):
+        if not isinstance(mesh, dict):
+            continue
+        primitives = mesh.get("primitives", [])
+        if not isinstance(primitives, list) or not primitives:
+            continue
+        primitive_target_counts = []
+        expected_target_semantics = None
+        for primitive_index, primitive in enumerate(primitives):
+            if not isinstance(primitive, dict):
+                continue
+            targets = primitive.get("targets", [])
+            if not isinstance(targets, list):
+                morph_errors.append(
+                    "mesh %d primitive %d targets must be an array"
+                    % (mesh_index, primitive_index)
+                )
+                continue
+            primitive_target_counts.append(len(targets))
+            semantics = []
+            attributes = primitive.get("attributes", {})
+            position_index = attributes.get("POSITION") if isinstance(attributes, dict) else None
+            vertex_count = (
+                accessors[position_index].get("count", 0)
+                if _glb_integer(position_index)
+                and 0 <= position_index < len(accessors)
+                and isinstance(accessors[position_index], dict)
+                else 0
+            )
+            for target_index, target in enumerate(targets):
+                if not isinstance(target, dict) or not target:
+                    morph_errors.append(
+                        "mesh %d primitive %d target %d is empty or invalid"
+                        % (mesh_index, primitive_index, target_index)
+                    )
+                    semantics.append(frozenset())
+                    continue
+                keys = frozenset(target)
+                semantics.append(keys)
+                if not keys <= {"POSITION", "NORMAL", "TANGENT"}:
+                    morph_errors.append(
+                        "mesh %d primitive %d target %d has invalid semantics"
+                        % (mesh_index, primitive_index, target_index)
+                    )
+                for semantic, accessor_index in target.items():
+                    try:
+                        if not _glb_integer(accessor_index):
+                            raise ValueError("%s delta has an invalid accessor" % semantic)
+                        target_accessor = accessors[accessor_index]
+                        target_rows = accessor_cache.get(accessor_index) or _glb_accessor_values(
+                            document, binary, accessor_index
+                        )
+                        if (
+                            not isinstance(target_accessor, dict)
+                            or target_accessor.get("componentType") != 5126
+                            or target_accessor.get("type") != "VEC3"
+                        ):
+                            raise ValueError("%s delta must be floating-point VEC3" % semantic)
+                        if len(target_rows) != vertex_count:
+                            raise ValueError("%s delta count must match POSITION" % semantic)
+                        if any(
+                            not math.isfinite(float(value))
+                            for row in target_rows
+                            for value in row
+                        ):
+                            raise ValueError("%s deltas contain non-finite values" % semantic)
+                        if semantic == "POSITION":
+                            if "min" not in target_accessor or "max" not in target_accessor:
+                                raise ValueError("POSITION deltas require min/max bounds")
+                            if not any(
+                                not math.isclose(float(value), 0.0, abs_tol=1e-8)
+                                for row in target_rows
+                                for value in row
+                            ):
+                                raise ValueError("POSITION morph target is entirely zero")
+                    except (IndexError, KeyError, TypeError, ValueError, struct.error) as exc:
+                        morph_errors.append(
+                            "mesh %d primitive %d target %d: %s"
+                            % (mesh_index, primitive_index, target_index, exc)
+                        )
+            if expected_target_semantics is None:
+                expected_target_semantics = semantics
+            elif semantics != expected_target_semantics:
+                morph_errors.append(
+                    "mesh %d primitives have inconsistent morph semantics" % mesh_index
+                )
+        if primitive_target_counts:
+            if len(set(primitive_target_counts)) != 1:
+                morph_errors.append(
+                    "mesh %d primitives have inconsistent morph target counts" % mesh_index
+                )
+            target_count = min(primitive_target_counts)
+            mesh_target_counts[mesh_index] = target_count
+            maximum_morph_targets = max(maximum_morph_targets, target_count)
+            weights = mesh.get("weights")
+            if weights is not None and (
+                target_count < 1
+                or not isinstance(weights, list)
+                or len(weights) != target_count
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                    for value in weights
+                )
+            ):
+                morph_errors.append("mesh %d has invalid default morph weights" % mesh_index)
+            extras = mesh.get("extras", {})
+            target_names = extras.get("targetNames") if isinstance(extras, dict) else None
+            if target_names is not None:
+                if (
+                    not isinstance(target_names, list)
+                    or len(target_names) != target_count
+                    or any(not isinstance(name, str) or not name.strip() for name in target_names)
+                    or len(set(target_names)) != len(target_names)
+                ):
+                    morph_errors.append("mesh %d has invalid morph target names" % mesh_index)
+                else:
+                    named_morph_targets = max(named_morph_targets, len(target_names))
+            elif target_count:
+                all_morph_targets_named = False
+    for node_index, node in enumerate(nodes):
+        if not isinstance(node, dict) or "weights" not in node:
+            continue
+        mesh_index = node.get("mesh")
+        target_count = mesh_target_counts.get(mesh_index, 0)
+        weights = node.get("weights")
+        if (
+            target_count < 1
+            or not isinstance(weights, list)
+            or len(weights) != target_count
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                for value in weights
+            )
+        ):
+            morph_errors.append("node %d has invalid morph weights" % node_index)
+    minimum_morph_targets = _bounded_int(
+        requirements, "min_morph_targets", 0, 0, 100_000
+    )
+    require_named_morph_targets = bool(
+        requirements.get("require_named_morph_targets")
+    )
+    morphs_ok = (
+        not morph_errors
+        and maximum_morph_targets >= minimum_morph_targets
+        and (
+            not require_named_morph_targets
+            or (
+                named_morph_targets >= maximum_morph_targets
+                and maximum_morph_targets > 0
+                and all_morph_targets_named
+            )
+        )
+    )
+    _check(
+        checks,
+        "glb-morph-targets",
+        morphs_ok,
+        (
+            "; ".join(morph_errors[:8])
+            or "%d maximum target(s), %d named"
+            % (maximum_morph_targets, named_morph_targets)
+        ),
+    )
+
     minimum_joints = _bounded_int(requirements, "min_joints", 0, 0, 100_000)
     skin_ok = (
         not skin_errors
@@ -2306,13 +2479,29 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
         animation_errors.append("animations must be an array")
         animations = []
     joint_targets = set().union(*joint_sets) if joint_sets else set()
-    animated_joint = False
+    animation_names = set()
+    named_animations = 0
+    skeletal_animations = set()
+    morph_animations = set()
     for animation_index, animation in enumerate(animations):
-        samplers = animation.get("samplers", []) if isinstance(animation, dict) else None
-        channels = animation.get("channels", []) if isinstance(animation, dict) else None
+        if not isinstance(animation, dict):
+            animation_errors.append("animation %d is not an object" % animation_index)
+            continue
+        name = animation.get("name")
+        if name is not None:
+            if not isinstance(name, str) or not name.strip():
+                animation_errors.append("animation %d has an invalid name" % animation_index)
+            elif name in animation_names:
+                animation_errors.append("animation name %r is duplicated" % name)
+            else:
+                animation_names.add(name)
+                named_animations += 1
+        samplers = animation.get("samplers", [])
+        channels = animation.get("channels", [])
         if not isinstance(samplers, list) or not samplers or not isinstance(channels, list) or not channels:
             animation_errors.append("animation %d has no samplers/channels" % animation_index)
             continue
+        channel_targets = set()
         for channel_index, channel in enumerate(channels):
             try:
                 sampler_index = channel["sampler"]
@@ -2327,11 +2516,17 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
                     raise ValueError("invalid target node")
                 if target_path not in {"translation", "rotation", "scale", "weights"}:
                     raise ValueError("invalid target path")
+                target_key = (target_node, target_path)
+                if target_key in channel_targets:
+                    raise ValueError("duplicate node/path target")
+                channel_targets.add(target_key)
                 sampler = samplers[sampler_index]
                 if not isinstance(sampler, dict):
                     raise ValueError("invalid sampler")
                 input_index = sampler.get("input")
                 output_index = sampler.get("output")
+                if not _glb_integer(input_index) or not _glb_integer(output_index):
+                    raise ValueError("animation sampler has invalid accessors")
                 interpolation = sampler.get("interpolation", "LINEAR")
                 if interpolation not in {"LINEAR", "STEP", "CUBICSPLINE"}:
                     raise ValueError("invalid interpolation")
@@ -2351,17 +2546,34 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
                 ) or any(right <= left for left, right in zip(times, times[1:])):
                     raise ValueError("animation input times must be finite and increasing")
                 multiplier = 3 if interpolation == "CUBICSPLINE" else 1
-                if len(output_rows) != len(input_rows) * multiplier:
-                    raise ValueError("animation input/output counts do not match")
                 expected_type = {
                     "translation": "VEC3",
                     "rotation": "VEC4",
                     "scale": "VEC3",
-                }.get(target_path)
-                if expected_type and output_accessor.get("type") != expected_type:
+                    "weights": "SCALAR",
+                }[target_path]
+                output_multiplier = multiplier
+                if target_path == "weights":
+                    target_node_value = nodes[target_node]
+                    if not isinstance(target_node_value, dict):
+                        raise ValueError("weight animation target node is invalid")
+                    target_mesh = target_node_value.get("mesh")
+                    target_count = mesh_target_counts.get(target_mesh, 0)
+                    if target_count < 1:
+                        raise ValueError("weight animation target has no morph targets")
+                    output_multiplier *= target_count
+                if len(output_rows) != len(input_rows) * output_multiplier:
+                    raise ValueError("animation input/output counts do not match")
+                if output_accessor.get("type") != expected_type:
                     raise ValueError("animation output has the wrong type")
                 if output_accessor.get("componentType") != 5126:
                     raise ValueError("animation output must use floating-point values")
+                if any(
+                    not math.isfinite(float(value))
+                    for row in output_rows
+                    for value in row
+                ):
+                    raise ValueError("animation output contains non-finite values")
                 if target_path == "rotation":
                     value_rows = output_rows[1::3] if interpolation == "CUBICSPLINE" else output_rows
                     if any(
@@ -2374,16 +2586,31 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
                         for row in value_rows
                     ):
                         raise ValueError("animation rotations must be unit quaternions")
-                animated_joint = animated_joint or target_node in joint_targets
+                if target_path == "weights":
+                    morph_animations.add(animation_index)
+                elif target_node in joint_targets:
+                    skeletal_animations.add(animation_index)
             except (IndexError, KeyError, TypeError, ValueError, struct.error) as exc:
                 animation_errors.append(
                     "animation %d channel %d: %s" % (animation_index, channel_index, exc)
                 )
     minimum_animations = _bounded_int(requirements, "min_animations", 0, 0, 100_000)
+    minimum_skeletal_animations = _bounded_int(
+        requirements, "min_skeletal_animations", 0, 0, 100_000
+    )
+    minimum_morph_animations = _bounded_int(
+        requirements, "min_morph_animations", 0, 0, 100_000
+    )
+    require_named_animations = bool(requirements.get("require_named_animations"))
     animation_ok = (
         not animation_errors
         and len(animations) >= minimum_animations
-        and (minimum_animations == 0 or animated_joint)
+        and len(skeletal_animations) >= minimum_skeletal_animations
+        and len(morph_animations) >= minimum_morph_animations
+        and (
+            not require_named_animations
+            or (named_animations == len(animations) and named_animations > 0)
+        )
     )
     _check(
         checks,
@@ -2391,7 +2618,13 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
         animation_ok,
         (
             "; ".join(animation_errors[:8])
-            or "%d animation(s), joint target=%s" % (len(animations), animated_joint)
+            or "%d animation(s), %d skeletal, %d morph, %d named"
+            % (
+                len(animations),
+                len(skeletal_animations),
+                len(morph_animations),
+                named_animations,
+            )
         ),
     )
 

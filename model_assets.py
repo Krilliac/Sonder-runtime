@@ -1,4 +1,4 @@
-"""Deterministic, dependency-free textured and rigged glTF 2.0 generation."""
+"""Deterministic textured, rigged, morphing, multi-clip glTF 2.0 generation."""
 
 from __future__ import annotations
 
@@ -198,7 +198,7 @@ def _inverse_translation_y(value):
 
 
 def write_rigged_glb(path, palette, theme="arcane", seed=1337, title="Trilobite", brief=""):
-    """Write a textured GLB containing geometry, a two-joint skin, and animation."""
+    """Write a textured GLB with skinning, a morph target, and named clips."""
     seed = int(seed)
     variation = ((seed & 255) / 255.0 - 0.5) * 0.16
     joint_height = round(0.9 + variation * 0.25, 6)
@@ -259,6 +259,19 @@ def write_rigged_glb(path, palette, theme="arcane", seed=1337, title="Trilobite"
     texcoord_values = _flatten(texcoords)
     joint_values = _flatten(joints)
     weight_values = _flatten(weights)
+    morph_deltas = []
+    for x, y, z in positions:
+        influence = max(
+            0.0,
+            min(1.0, (y - joint_height + 0.12) / (2.18 - joint_height + 0.12)),
+        )
+        morph_deltas.append(
+            (
+                round(x * 0.09 * influence, 6),
+                round(0.055 * influence, 6),
+                round(z * 0.09 * influence, 6),
+            )
+        )
     mins = [min(row[axis] for row in positions) for axis in range(3)]
     maxs = [max(row[axis] for row in positions) for axis in range(3)]
     position_accessor = accessor(
@@ -285,6 +298,18 @@ def write_rigged_glb(path, palette, theme="arcane", seed=1337, title="Trilobite"
         5123, len(indices), "SCALAR", "INDICES", 34963,
         [min(indices)], [max(indices)],
     )
+    morph_mins = [min(row[axis] for row in morph_deltas) for axis in range(3)]
+    morph_maxs = [max(row[axis] for row in morph_deltas) for axis in range(3)]
+    morph_accessor = accessor(
+        _float_payload(_flatten(morph_deltas)),
+        5126,
+        len(morph_deltas),
+        "VEC3",
+        "MORPH_BREATHE_POSITION",
+        34962,
+        morph_mins,
+        morph_maxs,
+    )
     matrices = _identity_matrix() + _inverse_translation_y(joint_height)
     bind_accessor = accessor(
         _float_payload(matrices), 5126, 2, "MAT4", "INVERSE_BIND_MATRICES",
@@ -303,6 +328,25 @@ def write_rigged_glb(path, palette, theme="arcane", seed=1337, title="Trilobite"
     rotation_accessor = accessor(
         _float_payload(_flatten(rotations)), 5126, len(rotations), "VEC4", "SHELL_ROTATION",
     )
+    translations = (
+        (0.0, 0.0, 0.0),
+        (0.0, round(0.07 + abs(variation) * 0.1, 6), 0.0),
+        (0.0, 0.0, 0.0),
+    )
+    translation_accessor = accessor(
+        _float_payload(_flatten(translations)),
+        5126,
+        len(translations),
+        "VEC3",
+        "ROOT_BOB_TRANSLATION",
+    )
+    morph_weight_accessor = accessor(
+        _float_payload((0.0, 1.0, 0.0)),
+        5126,
+        3,
+        "SCALAR",
+        "MORPH_BREATHE_WEIGHT",
+    )
 
     base_color_png, surface_png, normal_png = _material_textures(palette, seed)
     base_color_view = builder.add(base_color_png)
@@ -312,15 +356,41 @@ def write_rigged_glb(path, palette, theme="arcane", seed=1337, title="Trilobite"
     binary = bytes(builder.payload)
     document = {
         "accessors": accessors,
-        "animations": [{
-            "channels": [{"sampler": 0, "target": {"node": 1, "path": "rotation"}}],
-            "name": "ShellPulse",
-            "samplers": [{
-                "input": time_accessor,
-                "interpolation": "LINEAR",
-                "output": rotation_accessor,
-            }],
-        }],
+        "animations": [
+            {
+                "channels": [
+                    {"sampler": 0, "target": {"node": 1, "path": "rotation"}},
+                ],
+                "name": "ShellPulse",
+                "samplers": [{
+                    "input": time_accessor,
+                    "interpolation": "LINEAR",
+                    "output": rotation_accessor,
+                }],
+            },
+            {
+                "channels": [
+                    {"sampler": 0, "target": {"node": 0, "path": "translation"}},
+                ],
+                "name": "RootBob",
+                "samplers": [{
+                    "input": time_accessor,
+                    "interpolation": "LINEAR",
+                    "output": translation_accessor,
+                }],
+            },
+            {
+                "channels": [
+                    {"sampler": 0, "target": {"node": 2, "path": "weights"}},
+                ],
+                "name": "Breathe",
+                "samplers": [{
+                    "input": time_accessor,
+                    "interpolation": "LINEAR",
+                    "output": morph_weight_accessor,
+                }],
+            },
+        ],
         "asset": {
             "generator": "Trilobite stdlib rigged-model forge",
             "version": "2.0",
@@ -379,12 +449,19 @@ def write_rigged_glb(path, palette, theme="arcane", seed=1337, title="Trilobite"
                 "indices": index_accessor,
                 "material": 0,
                 "mode": 4,
+                "targets": [{"POSITION": morph_accessor}],
             }],
+            "extras": {"targetNames": ["Breathe"]},
         }],
         "nodes": [
             {"children": [1], "name": "RootJoint"},
             {"name": "ShellJoint", "translation": [0.0, joint_height, 0.0]},
-            {"mesh": 0, "name": "%sModel" % _clean(title, 64), "skin": 0},
+            {
+                "mesh": 0,
+                "name": "%sModel" % _clean(title, 64),
+                "skin": 0,
+                "weights": [0.0],
+            },
         ],
         "scene": 0,
         "scenes": [{"name": "%s Scene" % _clean(title, 64), "nodes": [0, 2]}],
@@ -421,11 +498,12 @@ def write_rigged_glb(path, palette, theme="arcane", seed=1337, title="Trilobite"
     )
     _atomic_write_bytes(path, glb)
     return {
-        "animations": 1,
+        "animations": 3,
         "bytes": len(glb),
         "images": 3,
         "joints": 2,
         "materials": 1,
+        "morph_targets": 1,
         "textures": 3,
         "triangles": len(indices) // 3,
         "vertices": len(positions),
