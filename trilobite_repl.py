@@ -108,6 +108,7 @@ HELP = """commands:
   /agentretry <id>   explicitly retry persisted interrupted/failed master work
   /weather <place>   get sourced live conditions and a short forecast
   /asset <n> <brief> generate a general icon/audio/model/scene artifact pack
+  /artifactcheck ... ground a file/pack: /artifactcheck <path> [| recipe]
   /forge [name]      build and run the dependency-free reference game suite
   /game ...          generate/test a game: /game cpp 3d name | concept
   /gamefleet ...     parallel game campaign: name | concept [| language | dimension]
@@ -549,6 +550,7 @@ def main():
                 "/tree", "/folders", "/search", "/grep",
                 "/programs", "/programfind", "/scripts", "/scriptfind",
                 "/image", "/inspectimage", "/mkdir", "/runprogram", "/runscript",
+                "/artifactcheck", "/verifyartifact", "/groundartifact",
             ):
                 print(server.control_command(
                     line, session=session_id, project=project,

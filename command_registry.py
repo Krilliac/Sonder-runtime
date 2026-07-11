@@ -194,6 +194,12 @@ COMMANDS = [
         "summary": "Generate general-purpose icons, images, audio, models, scenes, and packs from a brief.",
     },
     {
+        "name": "/artifactcheck",
+        "category": "creative",
+        "risk": "safe",
+        "summary": "Ground an artifact path with inferred or explicit format-specific validation recipes.",
+    },
+    {
         "name": "/forge",
         "category": "creative",
         "risk": "ask",

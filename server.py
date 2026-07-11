@@ -60,6 +60,7 @@ import permission_rules
 import debug_dump
 import activity_tracker
 import assetgen
+import artifact_grounding
 import game_forge
 import workbench
 import creative_router
@@ -290,6 +291,7 @@ LIVE_RELOAD_MODULES = [
     "debug_dump",
     "activity_tracker",
     "assetgen",
+    "artifact_grounding",
     "game_forge",
     "workbench",
     "creative_router",
@@ -984,6 +986,14 @@ def control_command(prompt: str, history=None, session="", project=""):
         if len(asset_parts) != 2:
             return "usage: /asset <name> <free-form brief>"
         return artifact_generate(name=asset_parts[0], brief=asset_parts[1])
+    if cmd in ("/artifactcheck", "/verifyartifact", "/groundartifact"):
+        if not arg.strip():
+            return "usage: /artifactcheck <path> [| recipe]"
+        artifact_path, separator, recipe = arg.partition("|")
+        return artifact_ground(
+            path=artifact_path.strip(),
+            recipe=recipe.strip() if separator else "auto",
+        )
     if cmd in ("/weather", "/forecast"):
         if not arg.strip():
             return "usage: /weather <city/state or ZIP>"
@@ -2914,12 +2924,13 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
             "Hosted tiers are disabled, preserving the local privacy promise.",
             "Enable hosted/cloud tiers only when you intentionally want prompts to leave this machine.",
         )
-    if "ground_artifact" not in tool_manifest():
+    manifest_text = tool_manifest()
+    if "ground_artifact" not in manifest_text or "artifact_ground" not in manifest_text:
         add(
             "grounding",
             "medium",
-            "General artifact grounding is not advertised.",
-            "Expose ground_artifact in the tool manifest so non-code work can be validated.",
+            "General or format-specific artifact grounding is not advertised.",
+            "Expose ground_artifact and artifact_ground so both in-memory content and real files can be validated.",
         )
     if not issues:
         add(
@@ -4506,7 +4517,7 @@ def artifact_generate(
 
 @mcp.tool()
 def artifact_verify(path: str) -> str:
-    """Verify every file in a generated artifact pack against its manifest."""
+    """Verify every generated file against its manifest and format contract."""
     _maybe_live_reload()
     try:
         result = assetgen.verify_pack(path)
@@ -4515,6 +4526,11 @@ def artifact_verify(path: str) -> str:
     lines = [
         "artifact verification: %s" % ("PASS" if result["ok"] else "FAIL"),
         "  checked: %d" % result["checked"],
+        "  deterministic checks: %d passed, %d failed"
+        % (
+            result["grounding"].get("passed_checks", 0),
+            result["grounding"].get("failed_checks", 0),
+        ),
         "  root: %s" % result["root"],
     ]
     lines.extend("  - %s" % failure for failure in result["failures"])
@@ -4871,6 +4887,12 @@ def _loop_text_result(action_type, text):
     }
 
 
+def _loop_verdict_result(action_type, text, success_prefix):
+    result = _loop_text_result(action_type, text)
+    result["ok"] = bool(text) and text.startswith(success_prefix)
+    return result
+
+
 def _loop_dispatch(action):
     action_type = (action.get("type") or action.get("action") or "code").strip().lower()
     activity_tracker.record_tool_call(
@@ -4927,6 +4949,12 @@ def _loop_dispatch(action):
             seed=action.get("seed"),
             output_dir=action.get("output_dir", ""),
         ))
+    if action_type in ("artifact_ground", "artifact_check"):
+        return _loop_verdict_result("artifact_ground", artifact_ground(
+            path=action.get("path", ""),
+            recipe=action.get("recipe", "auto"),
+            requirements_json=action.get("requirements", action.get("requirements_json", "")),
+        ), "artifact grounding: PASS")
     if action_type in ("game_reference", "game_reference_suite"):
         return _loop_text_result("game_reference_suite", game_reference_suite(
             name=action.get("name", "trilobite-reference"),
@@ -5270,10 +5298,10 @@ def _loop_dispatch(action):
             limit=action.get("limit", 10),
         ))
     if action_type == "ground_artifact":
-        return _loop_text_result("ground_artifact", ground_artifact(
+        return _loop_verdict_result("ground_artifact", ground_artifact(
             artifact=action.get("artifact", ""),
             checks_json=json.dumps(action.get("checks", [])),
-        ))
+        ), "grounding: passed")
     if action_type == "apply_learned":
         return _loop_text_result("apply_learned", apply_learned(
             task=action.get("task", ""),
@@ -5315,7 +5343,7 @@ def _loop_dispatch(action):
         "ok": False,
         "type": action_type or "(unknown)",
         "summary": "unknown action type",
-        "output": "Valid action types: code, project, artifact_generate, game_reference_suite, game_generate_and_test, game_generation_campaign, offload, trilobite, master_orchestrate, master_status, master_capacity, master_cancel, master_retry, file_policy, workspace_inventory, directory_tree, text_search, script_search, program_search, workspace_run, script_run, image_inspect, file_find, file_read, file_write, file_edit, file_delete, status, diagnostics, context_health, learning_health, memory_quality_report, memory_quality_repair, memory_privacy_review, memory_privacy_repair, memory_embedding_backfill, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, weather_lookup, approximate_location_lookup, unload, sleep.",
+        "output": "Valid action types: code, project, artifact_generate, artifact_ground, game_reference_suite, game_generate_and_test, game_generation_campaign, offload, trilobite, master_orchestrate, master_status, master_capacity, master_cancel, master_retry, file_policy, workspace_inventory, directory_tree, text_search, script_search, program_search, workspace_run, script_run, image_inspect, file_find, file_read, file_write, file_edit, file_delete, status, diagnostics, context_health, learning_health, memory_quality_report, memory_quality_repair, memory_privacy_review, memory_privacy_repair, memory_embedding_backfill, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, weather_lookup, approximate_location_lookup, unload, sleep.",
     }
 
 
@@ -5736,6 +5764,59 @@ def format_mcp_runtime(data: dict | None = None) -> str:
     if data.get("last_notification_error"):
         lines.append("  notification warning: %s" % data["last_notification_error"])
     return "\n".join(lines)
+
+
+@mcp.tool()
+def artifact_ground(
+    path: str,
+    recipe: str = "auto",
+    requirements_json: str = "",
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Ground an artifact path with deterministic format-specific recipes.
+
+    Recipes include auto, bundle, writing/markdown/text, data/JSON/CSV,
+    UI/HTML/SVG, PNG/PPM images, WAV audio, and OBJ models. Requirements are an
+    optional JSON object with fields such as required_files, required_kinds,
+    required_text, required_headings, required_fields, required_columns,
+    min_rows, min_words, and no_external_dependencies.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    try:
+        resolved = file_ops.resolve_path(
+            path,
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+        )
+        requirements = artifact_grounding.parse_requirements(requirements_json)
+        result = artifact_grounding.validate(resolved, recipe, requirements)
+    except (OSError, PermissionError, ValueError, json.JSONDecodeError) as exc:
+        _record_direct_tool(
+            "artifact_ground",
+            {"path": path, "recipe": recipe},
+            ok=False,
+            started=started,
+            summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = artifact_grounding.format_result(result)
+    _record_direct_tool(
+        "artifact_ground",
+        {"path": str(resolved), "recipe": result.get("recipe", recipe)},
+        ok=bool(result.get("ok")),
+        started=started,
+        summary="%s; %s files; %s failed checks"
+        % (
+            "passed" if result.get("ok") else "failed",
+            result.get("checked_files", 0),
+            result.get("failed_checks", 0),
+        ),
+        output=output,
+    )
+    return output
 
 
 @mcp.tool()
@@ -6203,7 +6284,8 @@ def tool_manifest() -> str:
         "permission_policy/permission_rule_set": "Inspect or guarded-edit local permission rules for tool actions.",
         "context_compaction_plan": "Preview when to summarize, split sessions, or reduce live context.",
         "run_code": "Run a bounded Python/JS/PowerShell/C++/C# snippet.",
-        "ground_artifact": "Validate non-code artifacts with exact/contains/regex/JSON checks.",
+        "ground_artifact": "Validate in-memory non-code content with exact/contains/regex/JSON checks.",
+        "artifact_ground": "Validate files or bundles with inferred writing, data, UI, image, audio, model, and manifest recipes.",
         "run_project": "Run a bounded temporary multi-file project with optional build commands.",
         "artifact_generate/artifact_verify": "Create and verify stdlib-only images, SVGs, documents, data, web mockups, audio, models, scenes, and themed packs from a free-form brief.",
         "game_reference_suite/game_generate_and_test/game_generation_campaign": "Build, execute, repair, and ground persistent in-house 2D/2.5D/3D game projects and fleets.",
@@ -6233,6 +6315,7 @@ AGENT_TOOL_HELP = """Available tools:
 - run_project: {"files_json": {"files": {"src/main.cpp": "..."}}, "commands_json": [{"cmd": ["g++", "src/main.cpp", "-o", "app"]}], "stdin": "", "timeout": 60}
 - artifact_generate: {"name": "brand-kit", "brief": "fiery logo, diagram, web mockup, ambient music, 3D mascot", "kinds": "auto|all|icon,vector,diagram,document,data,web,music,model", "dimension": "auto|2d|2.5d|3d", "theme": "auto|ember|verdant|arcane|frost"}
 - artifact_verify: {"path": "artifacts/generated/brand-kit"}
+- artifact_ground: {"path": "artifacts/generated/brand-kit", "recipe": "auto|bundle|writing|data|ui|markdown|json|csv|html|svg|png|ppm|wav|obj", "requirements_json": {"required_files": ["brief.md"], "required_headings": ["Provenance"], "no_external_dependencies": true}}
 - game_reference_suite: {"name": "reference-suite", "theme": "arcane", "max_workers": 2, "timeout": 30}
 - game_generate_and_test: {"name": "arena", "concept": "isometric action RPG", "language": "python|javascript|cpp|csharp", "dimension": "2d|2.5d|3d", "theme": "arcane", "repair_rounds": 1}
 - game_generation_campaign: {"name": "game-fleet", "concept": "action roguelite", "total": 6, "language": "", "dimension": "", "theme": "arcane", "max_workers": 2, "repair_rounds": 1}
@@ -6310,7 +6393,7 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range",
     "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
-    "diagnostics", "context_health", "learning_health_status", "context_policy_status",
+    "diagnostics", "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
     "memory_quality_report", "memory_privacy_review", "system_improvement_report", "master_status", "master_capacity",
     "self_heal_check", "status", "system_profile_text",
     "emotion_vector_status", "preferences_status", "tool_manifest",
@@ -6341,6 +6424,7 @@ REPOSITORY_AGENT_TOOL_HELP = """Available tools:
 - diagnostics: {}
 - context_health: {"session": "", "project": ""}
 - learning_health_status: {}
+- artifact_ground: {"path": "artifacts/generated/report", "recipe": "auto", "requirements_json": {}}
 - context_policy_status: {"context_size": "32k"}
 - memory_quality_report: {"sample_limit": 5}
 - memory_privacy_review: {"sample_limit": 20}
@@ -6726,6 +6810,15 @@ def _agent_dispatch(
         )
     if tool_name == "artifact_verify":
         return artifact_verify(args.get("path", ""))
+    if tool_name == "artifact_ground":
+        return artifact_ground(
+            path=args.get("path", ""),
+            recipe=args.get("recipe", "auto"),
+            requirements_json=args.get("requirements_json", args.get("requirements", "")),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "game_reference_suite":
         return game_reference_suite(
             name=args.get("name", "trilobite-reference"),
@@ -7178,7 +7271,7 @@ _WORK_MUTATION_TOOLS = frozenset({
     "memory_quality_repair", "memory_privacy_repair", "memory_embedding_backfill",
 })
 _WORK_VALIDATION_TOOLS = frozenset({
-    "workspace_run", "script_run", "run_code", "run_project", "ground_artifact",
+    "workspace_run", "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_verify", "game_reference_suite", "game_generate_and_test",
     "game_generation_campaign", "self_heal_check", "workspace_inventory", "directory_tree", "file_find",
     "file_read", "file_read_range", "text_search", "image_inspect",
@@ -7242,7 +7335,7 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
             "memory_quality_repair", "memory_privacy_repair",
             "memory_embedding_backfill",
         } for record in records)
-    if tool_name in {"artifact_verify", "ground_artifact"}:
+    if tool_name in {"artifact_verify", "artifact_ground", "ground_artifact"}:
         return any(
             record["tool"] == "artifact_generate"
             and (not target or target.startswith(record.get("path", "")))
@@ -7320,7 +7413,7 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
 _WORK_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range",
     "text_search", "script_search", "program_search", "image_inspect",
-    "memory_search", "learning_health_status", "memory_quality_report", "memory_privacy_review",
+    "memory_search", "learning_health_status", "memory_quality_report", "memory_privacy_review", "artifact_ground",
     "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",
     "status", "diagnostics",
 })
@@ -7927,11 +8020,11 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "file_read", "file_read_range", "text_search", "script_search",
     "program_search", "image_inspect", "memory_search", "web_search",
     "web_fetch", "weather_lookup", "status", "diagnostics",
-    "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report",
+    "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
 })
 _AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
     "directory_create", "file_write", "file_edit", "workspace_run",
-    "script_run", "run_code", "run_project", "ground_artifact",
+    "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_generate", "artifact_verify", "game_reference_suite",
     "game_generate_and_test",
 })
