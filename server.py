@@ -4479,9 +4479,10 @@ def artifact_generate(
     """Generate a deterministic in-house artifact set from a free-form brief.
 
     Supported outputs include raster images, SVG vectors/diagrams, palettes,
-    Markdown briefs, JSON/CSV data, HTML mockups, sounds, music, OBJ/MTL models,
-    and JSON scenes. ``kinds`` may be auto, all, or a comma-separated subset. No
-    external model, service, package, or downloaded asset is required.
+    Markdown and editable DOCX briefs, JSON/CSV data, editable XLSX workbooks,
+    HTML mockups, editable PPTX decks, sounds, music, OBJ/MTL models, and JSON
+    scenes. ``kinds`` may be auto, all, or a comma-separated subset. No external
+    model, service, package, or downloaded asset is required.
     """
     _maybe_live_reload()
     started = time.time()
@@ -5778,10 +5779,11 @@ def artifact_ground(
     """Ground an artifact path with deterministic format-specific recipes.
 
     Recipes include auto, bundle, writing/markdown/text, data/JSON/CSV,
-    UI/HTML/SVG, PNG/PPM images, WAV audio, and OBJ models. Requirements are an
-    optional JSON object with fields such as required_files, required_kinds,
-    required_text, required_headings, required_fields, required_columns,
-    min_rows, min_words, and no_external_dependencies.
+    editable Office DOCX/XLSX/PPTX packages, UI/HTML/SVG, PNG/PPM images, WAV
+    audio, and OBJ models. Requirements are an optional JSON object with fields
+    such as required_files, required_kinds, required_text, required_headings,
+    required_fields, required_columns, min_paragraphs, min_rows, min_slides,
+    min_words, required_sheet_names, and no_external_dependencies.
     """
     _maybe_live_reload()
     started = time.time()
@@ -6285,9 +6287,9 @@ def tool_manifest() -> str:
         "context_compaction_plan": "Preview when to summarize, split sessions, or reduce live context.",
         "run_code": "Run a bounded Python/JS/PowerShell/C++/C# snippet.",
         "ground_artifact": "Validate in-memory non-code content with exact/contains/regex/JSON checks.",
-        "artifact_ground": "Validate files or bundles with inferred writing, data, UI, image, audio, model, and manifest recipes.",
+        "artifact_ground": "Validate files or bundles with inferred writing, data, editable Office, UI, image, audio, model, and manifest recipes.",
         "run_project": "Run a bounded temporary multi-file project with optional build commands.",
-        "artifact_generate/artifact_verify": "Create and verify stdlib-only images, SVGs, documents, data, web mockups, audio, models, scenes, and themed packs from a free-form brief.",
+        "artifact_generate/artifact_verify": "Create and verify stdlib-only images, SVGs, DOCX documents, XLSX workbooks, PPTX decks, data, web mockups, audio, models, scenes, and themed packs from a free-form brief.",
         "game_reference_suite/game_generate_and_test/game_generation_campaign": "Build, execute, repair, and ground persistent in-house 2D/2.5D/3D game projects and fleets.",
         "loop": "Repeat bounded code/model/system actions.",
         "workflow_list/save/run/delete": "Manage reusable loop workflows.",
@@ -6313,9 +6315,9 @@ def tool_manifest() -> str:
 AGENT_TOOL_HELP = """Available tools:
 - run_code: {"code": "...", "language": "python|js|powershell|cpp|csharp", "stdin": "", "timeout": 10}
 - run_project: {"files_json": {"files": {"src/main.cpp": "..."}}, "commands_json": [{"cmd": ["g++", "src/main.cpp", "-o", "app"]}], "stdin": "", "timeout": 60}
-- artifact_generate: {"name": "brand-kit", "brief": "fiery logo, diagram, web mockup, ambient music, 3D mascot", "kinds": "auto|all|icon,vector,diagram,document,data,web,music,model", "dimension": "auto|2d|2.5d|3d", "theme": "auto|ember|verdant|arcane|frost"}
+- artifact_generate: {"name": "brand-kit", "brief": "fiery logo, DOCX report, XLSX workbook, PPTX deck, ambient music, 3D mascot", "kinds": "auto|all|icon,vector,diagram,document,docx,data,spreadsheet,presentation,web,music,model", "dimension": "auto|2d|2.5d|3d", "theme": "auto|ember|verdant|arcane|frost"}
 - artifact_verify: {"path": "artifacts/generated/brand-kit"}
-- artifact_ground: {"path": "artifacts/generated/brand-kit", "recipe": "auto|bundle|writing|data|ui|markdown|json|csv|html|svg|png|ppm|wav|obj", "requirements_json": {"required_files": ["brief.md"], "required_headings": ["Provenance"], "no_external_dependencies": true}}
+- artifact_ground: {"path": "artifacts/generated/brand-kit", "recipe": "auto|bundle|writing|data|office|docx|xlsx|pptx|ui|markdown|json|csv|html|svg|png|ppm|wav|obj", "requirements_json": {"required_files": ["document.docx"], "required_text": ["Provenance"], "no_external_dependencies": true}}
 - game_reference_suite: {"name": "reference-suite", "theme": "arcane", "max_workers": 2, "timeout": 30}
 - game_generate_and_test: {"name": "arena", "concept": "isometric action RPG", "language": "python|javascript|cpp|csharp", "dimension": "2d|2.5d|3d", "theme": "arcane", "repair_rounds": 1}
 - game_generation_campaign: {"name": "game-fleet", "concept": "action roguelite", "total": 6, "language": "", "dimension": "", "theme": "arcane", "max_workers": 2, "repair_rounds": 1}

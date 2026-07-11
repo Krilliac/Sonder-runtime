@@ -22,6 +22,9 @@ def test_generate_pack_emits_valid_stdlib_assets(monkeypatch, tmp_path):
     assert open(os.path.join(root, "hit.wav"), "rb").read(4) == b"RIFF"
     assert open(os.path.join(root, "preview.ppm"), "rb").read(2) == b"P6"
     assert "v " in open(os.path.join(root, "models.obj"), encoding="utf-8").read()
+    assert open(os.path.join(root, "document.docx"), "rb").read(2) == b"PK"
+    assert open(os.path.join(root, "workbook.xlsx"), "rb").read(2) == b"PK"
+    assert open(os.path.join(root, "presentation.pptx"), "rb").read(2) == b"PK"
     assert assetgen.verify_pack(root)["ok"]
 
 
@@ -113,12 +116,13 @@ def test_non_game_request_emits_general_open_formats(monkeypatch, tmp_path):
     _local_root(monkeypatch, tmp_path)
     pack = assetgen.generate_artifacts(
         "launch-materials",
-        "Brand palette, architecture diagram, SVG vector, landing page, document, and sample data",
+        "Brand palette, architecture diagram, SVG vector, landing page, editable document, spreadsheet, presentation, and sample data",
     )
 
     expected = {
-        "brief.md", "data.csv", "data.json", "diagram.svg", "palette.json",
-        "preview.html", "vector.svg",
+        "brief.md", "data.csv", "data.json", "diagram.svg", "document.docx",
+        "palette.json", "presentation.pptx", "preview.html", "vector.svg",
+        "workbook.xlsx",
     }
     assert expected <= {row["path"] for row in pack["files"]}
     assert "<svg" in open(os.path.join(pack["root"], "diagram.svg"), encoding="utf-8").read()
@@ -128,6 +132,20 @@ def test_non_game_request_emits_general_open_formats(monkeypatch, tmp_path):
     assert "<!doctype html>" in html
     assert "<body>" in html and "</body>" in html
     assert assetgen.verify_pack(pack["root"])["ok"]
+
+
+def test_free_form_request_infers_editable_office_deliverables(monkeypatch, tmp_path):
+    _local_root(monkeypatch, tmp_path)
+
+    pack = assetgen.generate_artifacts(
+        "editable-suite",
+        "Create a Word DOCX report, Excel workbook, and PowerPoint slide deck",
+    )
+
+    assert {"docx", "spreadsheet", "presentation"} <= set(pack["kinds"])
+    paths = {row["path"] for row in pack["files"]}
+    assert {"document.docx", "workbook.xlsx", "presentation.pptx"} <= paths
+    assert pack["validation"]["failed_checks"] == 0
 
 
 def test_regeneration_removes_stale_generator_outputs(monkeypatch, tmp_path):

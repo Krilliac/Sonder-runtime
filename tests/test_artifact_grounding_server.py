@@ -56,8 +56,8 @@ def test_generated_pack_is_grounded_before_success(monkeypatch, tmp_path):
 
     generated = server.artifact_generate(
         "launch-kit",
-        "Brand document, sample data, web UI, icon, sound, and model",
-        kinds="document,data,web,icon,sound,model",
+        "Brand document, spreadsheet, presentation, sample data, web UI, icon, sound, and model",
+        kinds="document,docx,spreadsheet,presentation,data,web,icon,sound,model",
         dimension="3d",
         theme="frost",
         seed=42,
@@ -67,13 +67,26 @@ def test_generated_pack_is_grounded_before_success(monkeypatch, tmp_path):
     grounded = server.artifact_ground(
         str(root),
         "bundle",
-        {"require_manifest": True, "required_files": ["brief.md", "preview.html"]},
+        {
+            "require_manifest": True,
+            "required_files": [
+                "brief.md",
+                "document.docx",
+                "workbook.xlsx",
+                "presentation.pptx",
+                "preview.html",
+            ],
+            "no_external_dependencies": True,
+        },
     )
 
     assert "grounding: PASS" in generated
     assert verified.startswith("artifact verification: PASS")
     assert "deterministic checks:" in verified
     assert grounded.startswith("artifact grounding: PASS")
+    assert (root / "document.docx").is_file()
+    assert (root / "workbook.xlsx").is_file()
+    assert (root / "presentation.pptx").is_file()
 
 
 def test_artifactcheck_slash_preserves_spaces_and_recipe(monkeypatch):

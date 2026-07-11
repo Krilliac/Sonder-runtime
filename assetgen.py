@@ -2,7 +2,7 @@
 
 The generator deliberately emits simple, documented formats that every language
 surface in this repository can consume without package installation: PNG, PPM,
-SVG, HTML, Markdown, CSV, PCM WAV, Wavefront OBJ/MTL, and JSON. Packs are useful
+SVG, HTML, Markdown, CSV, DOCX, XLSX, PPTX, PCM WAV, Wavefront OBJ/MTL, and JSON. Packs are useful
 for branding, UI, documents, data prototypes, media, games, and other greenfield
 work. Output stays under the local-llm workspace.
 """
@@ -20,6 +20,7 @@ import wave
 import zlib
 
 import artifact_grounding
+import ooxml_assets
 
 
 DIMENSIONS = {"2d", "2.5d", "3d"}
@@ -32,14 +33,16 @@ THEMES = {
 ARTIFACT_KINDS = {
     "icon", "background", "tileset", "sprite_sheet", "texture", "preview",
     "vector", "diagram", "palette", "document", "data", "web",
-    "sound", "music", "model", "scene",
+    "docx", "spreadsheet", "presentation", "sound", "music", "model", "scene",
 }
 OWNED_FILENAMES = {
     "background.png", "brief.md", "data.csv", "data.json", "diagram.svg",
+    "document.docx",
     "hit.wav", "icon.png", "manifest.json", "materials.mtl", "models.obj",
     "palette.json", "pickup.wav", "preview.html", "preview.ppm", "request.json",
+    "presentation.pptx",
     "scene.json", "sprites.png", "texture.png", "theme.wav", "tiles.png",
-    "vector.svg",
+    "vector.svg", "workbook.xlsx",
 }
 MAX_NAME = 48
 MAX_IMAGE_SIDE = 512
@@ -549,7 +552,10 @@ def infer_request(brief: str, kinds: str = "auto", dimension: str = "auto",
             "diagram": ("diagram", "flowchart", "architecture", "infographic", "process"),
             "palette": ("palette", "colors", "colour", "brand", "theme", "style guide"),
             "document": ("document", "brief", "copy", "readme", "brochure", "content"),
+            "docx": ("docx", "word document", "editable document", "report", "proposal", "brochure", "document"),
             "data": ("data", "dataset", "csv", "table", "chart", "sample records"),
+            "spreadsheet": ("xlsx", "excel", "spreadsheet", "workbook"),
+            "presentation": ("pptx", "powerpoint", "presentation", "slide deck", "slides"),
             "web": ("website", "web page", "landing page", "dashboard", "html", "web mockup"),
             "sound": ("sound", "sfx", "audio", "explosion", "laser", "voice"),
             "music": ("music", "song", "theme", "loop", "ambient"),
@@ -601,6 +607,7 @@ def generate_artifacts(name: str, brief: str, kinds: str = "auto",
             os.remove(stale)
     palette = THEMES[theme]
     selected = set(request["kinds"])
+    title = _safe_slug(name).replace("-", " ").title()
     if "icon" in selected:
         _icon(os.path.join(root, "icon.png"), palette, seed)
     if "background" in selected:
@@ -623,8 +630,24 @@ def generate_artifacts(name: str, brief: str, kinds: str = "auto",
         _write_document(
             os.path.join(root, "brief.md"), request["brief"], dimension, theme, selected,
         )
+    if "docx" in selected:
+        ooxml_assets.write_docx(
+            os.path.join(root, "document.docx"), title, request["brief"], theme,
+        )
     if "data" in selected:
         _write_data(root, seed + 8, request["brief"])
+    if "spreadsheet" in selected:
+        ooxml_assets.write_xlsx(
+            os.path.join(root, "workbook.xlsx"),
+            title,
+            request["brief"],
+            seed + 9,
+            theme,
+        )
+    if "presentation" in selected:
+        ooxml_assets.write_pptx(
+            os.path.join(root, "presentation.pptx"), title, request["brief"], theme,
+        )
     if "web" in selected:
         _write_web_preview(os.path.join(root, "preview.html"), palette, request["brief"])
     if "sound" in selected:
