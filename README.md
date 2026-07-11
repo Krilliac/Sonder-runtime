@@ -92,7 +92,7 @@ The learning loop above is *cross-task* memory. On top of it trilobite also has:
 
 ## Four ways to run it
 
-1. **Local, in your terminal** — `trilobite` (like launching `claude`). Interactive REPL routed through the full loop, with `/work`, `/report`, `/checklist`, `/inventory`, `/tree`, `/search`, `/programs`, `/scripts`, `/image`, `/mkdir`, `/runprogram`, `/runscript`, `/trace`, `/strict`, `/run`, `/train`, `/master`, `/agents`, `/capacity`, `/agentcancel`, `/agentretry`, `/asset`, `/forge`, `/game`, `/gamefleet`, `/todo`, `/commands`, `/activity`, `/runtime`, `/dump`, `/permissions`, `/compact`, `/debug`, `/pass`, `/fail`, `/stats`, `/context`, `/quality`, `/privacy`, `/embeddings`, `/emotion`, and `/improve`, plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts`. Concrete natural-language workspace requests route to the same guarded workbench. Each REPL launch is its own remembered thread.
+1. **Local, in your terminal** — `trilobite` (like launching `claude`). Interactive REPL routed through the full loop, with `/work`, `/report`, `/checklist`, `/inventory`, `/tree`, `/search`, `/programs`, `/scripts`, `/image`, `/mkdir`, `/runprogram`, `/runscript`, `/trace`, `/strict`, `/run`, `/train`, `/master`, `/agents`, `/capacity`, `/agentcancel`, `/agentretry`, `/asset`, `/forge`, `/game`, `/gamefleet`, `/todo`, `/commands`, `/activity`, `/runtime`, `/mcp`, `/dump`, `/permissions`, `/compact`, `/debug`, `/pass`, `/fail`, `/stats`, `/context`, `/quality`, `/privacy`, `/embeddings`, `/emotion`, and `/improve`, plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts`. Concrete natural-language workspace requests route to the same guarded workbench. Each REPL launch is its own remembered thread.
 2. **Hosted on your own server + a thin client anywhere** — run `deploy_trilobite.sh --serve` on your box (systemd service, API key), then any machine runs the single-file `trilobite_client.py` pointed at it. The serve layer threads the chat UI's own conversation history.
 3. **Integrated with Claude/Codex** — the MCP `local-llm` tools include `workbench_agent`, budgeted workspace inventory, guarded tree/range/text/script/program/image inspection, argv-only program/script execution, persistent checklists, exact activity reports, agent/master orchestration, universal artifact generation, grounded game generation, bounded code/project runners, workflows, web tools, self-healing, privacy-safe memory review, local embedding backfill, and the remaining learning/memory surfaces. `master_orchestrate` can delegate to parallel subagents and audit their outputs; artifact and game tools create persistent assets/projects and accept only grounded checks. Local tiers remain the default for private workspace code.
 4. **Mobile & desktop app (GUI)** — a cross-platform [Flutter client](app/) that talks to a hosted `trilobite_serve.py`. One codebase → an **Android APK** and **Windows/Linux/macOS** desktop apps, built in CI with downloadable installers. See [app/README.md](app/README.md).
@@ -440,6 +440,7 @@ Flat, mostly-stdlib Python modules (plus `mcp`):
 | `master_orchestrator.py` / `fleet_store.py` | RAM/CPU-bounded fleet execution plus a process-shared restart/recovery ledger |
 | `autopilot_controller.py` / `autopilot_store.py` | Persistent local goal planning, guarded execution/review, evidence gates, budgets, and explicit lifecycle control |
 | `runtime_policy.py` | Atomic per-user local-model aliases and execution-lane routing shared across live surfaces |
+| `reloadable_mcp.py` | Fail-closed live server-source execution, atomic tool-manager swaps, schema-cache invalidation, and MCP tool-list notifications |
 | `creative_router.py` | conservative natural-language routing from concrete master build requests into grounded artifact, game, or game-campaign workflows |
 | `server.py` / `workbench.py` / `activity_tracker.py` / `code_runner.py` / `web_tools.py` / `workflow_store.py` / `self_heal.py` | MCP workbench/agent tools, guarded discovery and execution, persistent checklists, exact action/end reports, bounded code/project runners, web tools, workflows, and self-healing |
 | `server.py` | MCP server: `offload` / `trilobite` / `parallel_run_code` / `parallel_generate_run` / `parallel_generate_run_languages` / `campaign_generate_compile_execute_record` / `learn_tiers` / `record_outcome` / `trilobite_stats` / `trilobite_sessions` / `trilobite_remember_fact` |
@@ -457,7 +458,15 @@ Flat, mostly-stdlib Python modules (plus `mcp`):
 
 Long-running `trilobite_serve.py` and `trilobite_repl.py` processes check for source edits before each request/turn. Edits to `server.py` and helper modules such as personas, retrieval, summarization, feedback, and code execution are picked up on the next call without hard restarting the proxy or REPL. Set `TRILOBITE_LIVE_RELOAD=0` to disable this.
 
-For the MCP server, existing tool handlers also refresh helper modules at tool boundaries. Brand-new MCP tool names still require reconnecting/restarting the MCP server, because FastMCP registers the tool list once at startup. Use `live_reload_status()` to see what a running process is watching.
+The MCP server now stages the complete updated `server.py` tool registry in an
+isolated namespace at the next list/tool request. A clean load atomically swaps
+implementations and schemas, clears the protocol schema cache, and emits
+`notifications/tools/list_changed`; a syntax/import/runtime failure discards the
+stage and keeps every last known-good tool active. This covers changed, added,
+and removed MCP tools without disconnecting the process. The first upgrade from
+an older startup-bound build still needs one reconnect so this reloadable kernel
+itself is loaded. Inspect convergence with `/mcp`, `mcp_runtime_status()`, or
+`live_reload_status()`.
 
 ## Shared Runtime State
 
@@ -480,8 +489,7 @@ without a hard restart. Inspect it with `/runtime` or
 restores safe defaults. Updates reject cloud-looking or uninstalled model names.
 The policy cannot enable cloud tiers, broaden permissions/roots, or store
 credentials. The Flutter System page renders the same revision, aliases, lanes,
-path, and any missing-model warning. Brand-new MCP tool names still require an
-MCP reconnect even though edits to an existing policy are hot-reloaded.
+path, and any missing-model warning alongside MCP source/tool convergence.
 
 ## Standing instructions
 

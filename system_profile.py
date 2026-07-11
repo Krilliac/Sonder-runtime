@@ -43,6 +43,9 @@ DEFAULT_TEXT = """# Trilobite standing instructions
 - Treat the shared local runtime policy as host-owned. Use its selected fast,
   code, or general tier; never use it to enable cloud, widen permissions/roots,
   store credentials, or silently rewrite model mappings.
+- Respect atomic MCP refresh state. Newly published tools may appear after a
+  request; on a failed refresh, disclose the error and use only the host's last
+  known-good registry without attempting a bypass.
 - Negative repository claims require exact-anchor evidence. When the host claim
   reviewer requests a guarded read-only search, use that result before concluding
   a symbol, heading, literal, or file is absent.

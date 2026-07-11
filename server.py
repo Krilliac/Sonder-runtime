@@ -64,10 +64,9 @@ import workbench
 import creative_router
 import intents
 import runtime_policy
+import reloadable_mcp
 import autopilot_store
 import autopilot_controller
-
-from mcp.server.fastmcp import FastMCP
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434").replace("http://", "")
 # OLLAMA_HOST may be set to 0.0.0.0 so `ollama serve` binds all interfaces (e.g.
@@ -804,6 +803,31 @@ def _runtime_command(arg: str) -> str:
     return "ERROR: unknown runtime action '%s'; try /runtime help." % action
 
 
+def _mcp_command(arg: str) -> str:
+    action = str(arg or "status").strip().lower() or "status"
+    if action in {"status", "show", "audit", "list"}:
+        return format_mcp_runtime()
+    if action == "refresh":
+        refreshed = mcp.refresh_if_changed()
+        prefix = (
+            "MCP source refreshed."
+            if refreshed.get("reloaded")
+            else "MCP source already current."
+        )
+        if refreshed.get("error"):
+            prefix = "MCP refresh failed closed: %s" % refreshed["error"]
+        return "%s\n\n%s" % (prefix, format_mcp_runtime())
+    if action in {"help", "?"}:
+        return (
+            "MCP runtime commands:\n"
+            "  /mcp status\n"
+            "  /mcp refresh\n"
+            "Updated implementations and tool schemas publish atomically; a bad edit "
+            "keeps the last known-good registry."
+        )
+    return "ERROR: unknown MCP action '%s'; try /mcp help." % action
+
+
 def control_command(prompt: str, history=None, session="", project=""):
     """Handle safe slash commands before a prompt reaches the model.
 
@@ -834,6 +858,8 @@ def control_command(prompt: str, history=None, session="", project=""):
         return _autopilot_command(arg, project=project)
     if cmd in ("/runtime", "/models"):
         return _runtime_command(arg)
+    if cmd in ("/mcp", "/convergence"):
+        return _mcp_command(arg)
     if cmd in ("/work", "/agent"):
         if not arg.strip():
             return "usage: /work <task>"
@@ -1112,7 +1138,13 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
     return resp, iid, None
 
 
-mcp = FastMCP("local-llm")
+_existing_mcp = globals().get("_PERSISTENT_MCP")
+if isinstance(_existing_mcp, reloadable_mcp.ReloadableFastMCP):
+    mcp = _existing_mcp
+    mcp.begin_module_refresh()
+else:
+    mcp = reloadable_mcp.ReloadableFastMCP("local-llm")
+_PERSISTENT_MCP = mcp
 
 
 def _bounded_timeout(value) -> int:
@@ -2755,6 +2787,7 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
             "runs": [],
             "database": autopilot_store.database_path(),
         }
+    mcp_state = mcp_runtime_data()
 
     def add(area, severity, title, action):
         issues.append({
@@ -2839,6 +2872,27 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
             % autonomous_attention,
             "Inspect /autopilot status, then deliberately resume, cancel, or revise the goal.",
         )
+    if mcp_state.get("last_error"):
+        add(
+            "runtime",
+            "high",
+            "The latest MCP source refresh failed closed.",
+            "Run /mcp status, fix the reported source error, then use /mcp refresh; the last known-good tools remain active.",
+        )
+    elif mcp_state.get("source_changed"):
+        add(
+            "runtime",
+            "medium",
+            "The MCP process has newer source waiting to be loaded.",
+            "Run /mcp refresh or any MCP tool/list request to publish the update atomically.",
+        )
+    if mcp_state.get("last_notification_error"):
+        add(
+            "runtime",
+            "low",
+            "The MCP client did not accept the latest tool-list notification.",
+            "Use /mcp status and reconnect only if the client does not relist tools automatically.",
+        )
     if not cloud_allowed():
         add(
             "deployment",
@@ -2889,6 +2943,7 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
             "resumable": autopilot.get("resumable_runs", 0),
             "database": autopilot.get("database", ""),
         },
+        "mcp_runtime": mcp_state,
         "issues": issues,
     }
 
@@ -2916,6 +2971,11 @@ def format_improvement_report(report: dict) -> str:
         "  autonomy: %s active | %s resumable" % (
             report.get("autopilot", {}).get("active", 0),
             report.get("autopilot", {}).get("resumable", 0),
+        ),
+        "  mcp: %s | %s tools | %s atomic refreshes" % (
+            report.get("mcp_runtime", {}).get("status", "unknown"),
+            report.get("mcp_runtime", {}).get("registered_tools", 0),
+            report.get("mcp_runtime", {}).get("refresh_count", 0),
         ),
         "  next improvements:",
     ]
@@ -5622,16 +5682,53 @@ def chat_web_response(
     )
 
 
+def mcp_runtime_data() -> dict:
+    """Return the loaded/current MCP source and tool-registry convergence state."""
+    return mcp.runtime_snapshot()
+
+
+def format_mcp_runtime(data: dict | None = None) -> str:
+    data = mcp_runtime_data() if data is None else data
+    loaded = str(data.get("loaded_digest") or "")[:12] or "unknown"
+    current = str(data.get("current_digest") or "")[:12] or "unknown"
+    lines = [
+        "trilobite MCP runtime",
+        "  status: %s | live source refresh: %s"
+        % (
+            data.get("status", "unknown"),
+            "on" if data.get("enabled") else "off",
+        ),
+        "  tools: %s | atomic refreshes: %s | last surface changed: %s"
+        % (
+            data.get("registered_tools", 0),
+            data.get("refresh_count", 0),
+            "yes" if data.get("last_surface_changed") else "no",
+        ),
+        "  MCP tool-list updates: %s"
+        % ("advertised" if data.get("protocol_list_changed") else "not advertised"),
+        "  source: %s" % (data.get("path") or "(unknown)"),
+        "  loaded/current: %s / %s" % (loaded, current),
+    ]
+    if data.get("last_refresh_ts"):
+        lines.append("  last refresh unix time: %s" % data["last_refresh_ts"])
+    if data.get("last_error"):
+        lines.append(
+            "  ERROR: %s (last known-good registry remains active)" % data["last_error"]
+        )
+    if data.get("last_notification_error"):
+        lines.append("  notification warning: %s" % data["last_notification_error"])
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def mcp_runtime_status() -> str:
+    """Show live MCP source/tool convergence and fail-closed refresh state."""
+    return format_mcp_runtime()
+
+
 @mcp.tool()
 def live_reload_status() -> str:
-    """Show live-reload state for this running process.
-
-    Helper modules are checked at tool/request boundaries when
-    TRILOBITE_LIVE_RELOAD is on (default). The HTTP proxy and REPL also reload
-    server.py itself before each request/turn. An MCP process can refresh helper
-    module behavior, but brand-new MCP tool names still require reconnecting the
-    MCP server because FastMCP registers the tool list at startup.
-    """
+    """Show helper-module and atomic MCP tool-registry live reload state."""
     _maybe_live_reload()
     lines = [
         "live reload: %s" % ("on" if live_reload.enabled() else "off"),
@@ -5645,8 +5742,9 @@ def live_reload_status() -> str:
         if row.get("error"):
             line += "  ERROR: %s" % row["error"]
         lines.append(line)
+    lines.extend(["", format_mcp_runtime()])
     lines.append(
-        "note: HTTP proxy/REPL reload server.py on each request; MCP tool names are registered at startup."
+        "note: updated MCP implementations and tool schemas swap atomically; invalid source keeps the last known-good registry."
     )
     return "\n".join(lines)
 
@@ -6070,6 +6168,7 @@ def tool_manifest() -> str:
         "agent": "Run a Claude-like tool-calling loop that can use local tools and web tools.",
         "autopilot_start/autopilot_status/autopilot_resume/autopilot_pause/autopilot_cancel": "Run a restart-persistent local goal with evidence-aware checkpoints, bounded replans, host tool gates, and explicit lifecycle control.",
         "runtime_policy_status/runtime_policy_update": "Inspect or guarded-edit shared hot-reloadable local model mappings and execution-lane tiers; cloud opt-in stays separate.",
+        "mcp_runtime_status/live_reload_status": "Audit atomic MCP source/tool convergence, refresh history, list-change signaling, and fail-closed reload errors.",
         "master_orchestrate/master_status/master_capacity/master_cancel/master_retry": "Run restart-safe hardware-scheduled orchestration, inspect capacity/activity, cancel fleets, and explicitly retry interrupted work.",
         "admin_register/admin_login/admin_accounts/admin_set_account": "Manage hosted accounts, roles, bans, tiers, and developer flags.",
         "admin_status/debug_inspect/admin_private_chain_of_thought": "Inspect admin/debug state and safely deny private chain-of-thought exposure.",
@@ -8656,6 +8755,18 @@ def diagnostics() -> str:
     _maybe_live_reload()
     lines = ["trilobite diagnostics"]
     lines.append("  live reload: %s" % ("on" if live_reload.enabled() else "off"))
+    mcp_state = mcp_runtime_data()
+    lines.append(
+        "  mcp runtime: %s (%s tools, %s atomic refreshes, list-changed=%s)"
+        % (
+            mcp_state.get("status", "unknown"),
+            mcp_state.get("registered_tools", 0),
+            mcp_state.get("refresh_count", 0),
+            "on" if mcp_state.get("protocol_list_changed") else "off",
+        )
+    )
+    if mcp_state.get("last_error"):
+        lines.append("  mcp refresh ERROR: %s" % mcp_state["last_error"])
     lines.append(
         "  execution routing: host-gated foreground/autopilot/fleet with local ambiguity review"
     )
@@ -8819,5 +8930,8 @@ def unload(tier: str = "all") -> str:
     return f"Unload requested for: {', '.join(freed) if freed else '(none)'}."
 
 
-if __name__ == "__main__":
+mcp.finish_module_refresh(__name__, __file__, globals())
+
+
+if __name__ == "__main__" and not globals().get("_MCP_HOT_RELOAD_EXEC"):
     mcp.run()

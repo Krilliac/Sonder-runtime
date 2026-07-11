@@ -1,8 +1,9 @@
 """Tiny source-file live reload helper for long-running trilobite processes.
 
-This is deliberately conservative: it reloads already-imported Python modules at
+This is deliberately conservative: it reloads already-imported helper modules at
 request/tool boundaries when their source file's mtime changes. It does not try
-to mutate active stack frames, reload native extensions, or re-register MCP tools.
+to mutate active stack frames or native extensions. ``reloadable_mcp.py`` owns
+the separate atomic whole-server/tool-registry refresh boundary.
 """
 import importlib
 import os
