@@ -32,8 +32,9 @@ cloud tiers and invoked web tools contact their named external services.
   IP, and labels the result as approximate.
 - **Universal artifact shortcuts**: the command menu can generate verified Office
   suites plus synchronized AVI video, animated GIF, MIDI, SRT/WebVTT caption,
-  and EDL timeline media kits locally without waiting for CI or downloading
-  third-party creative assets.
+  EDL timeline media kits, and self-contained animated humanoid GLBs with a
+  17-bone hierarchy, full morph frames, and sequenced clips locally without
+  waiting for CI or downloading third-party creative assets.
 - **System panel**: view server status, context health meters, master/subagent
   activity, the live workbench checklist and exact action evidence, visible task
   state, the shared local runtime-policy revision/model aliases/execution lanes,
@@ -160,7 +161,11 @@ powershell -NoProfile -File .\scripts\build_flutter_local.ps1 -Target windows
 The command packages the current tracked local system, analyzes/tests the app,
 builds Release, and places the runnable bundle at
 `app\build\windows\x64\runner\Release\` with `local-system` beside it. The SDK
-is cloned from Flutter stable only when `.tooling/flutter` is missing.
+is cloned from Flutter stable only when `.tooling/flutter` is missing. When a
+verified bundle already exists at
+`app\build\engine-bundles\windows-x86_64`, the builder automatically reuses it
+instead of reassembling or downloading the offline engine. Pass `-CodeOnly` to
+intentionally omit that existing engine from a Windows rebuild.
 
 To build the Windows app with a sealed offline engine from locally installed
 `qwen2.5-coder:1.5b` and `nomic-embed-text`, use:

@@ -4,7 +4,8 @@ param(
     [string]$Target = "windows",
     [switch]$SkipTests,
     [string]$EngineBundle = "",
-    [switch]$AssembleOfflineEngine
+    [switch]$AssembleOfflineEngine,
+    [switch]$CodeOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -34,6 +35,9 @@ if (-not (Test-Path -LiteralPath $Flutter -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
     $Python = (Get-Command python -ErrorAction Stop).Source
 }
+if ($CodeOnly -and ($AssembleOfflineEngine -or $EngineBundle)) {
+    throw "-CodeOnly cannot be combined with -AssembleOfflineEngine or -EngineBundle"
+}
 
 $OriginalCC = $env:CC
 $OriginalCXX = $env:CXX
@@ -45,6 +49,19 @@ try {
 
     Push-Location $RepoRoot
     try {
+        if (
+            -not $CodeOnly -and
+            -not $AssembleOfflineEngine -and
+            -not $script:EngineBundle -and
+            $Target -in @("windows", "all")
+        ) {
+            $ExistingBundle = Join-Path $RepoRoot "app\build\engine-bundles\windows-x86_64"
+            $ExistingManifest = Join-Path $ExistingBundle "ENGINE-BUNDLE.json"
+            if (Test-Path -LiteralPath $ExistingManifest -PathType Leaf) {
+                $script:EngineBundle = $ExistingBundle
+                Write-Host "Reusing sealed offline engine: $ExistingBundle" -ForegroundColor DarkCyan
+            }
+        }
         if ($AssembleOfflineEngine) {
             if ($Target -notin @("windows", "all")) {
                 throw "-AssembleOfflineEngine currently assembles the Windows runtime on this host"

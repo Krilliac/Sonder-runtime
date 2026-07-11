@@ -164,8 +164,8 @@ editable XLSX workbooks, standalone HTML mockups, editable PPTX slide decks, PCM
 WAV sound effects and music loops, editable MIDI scores, animated GIF previews,
 uncompressed AVI video with synchronized PCM audio, SRT/WebVTT captions,
 CMX-style EDL timelines, OBJ/MTL models, self-contained textured,
-rigged/morphing, multi-clip GLB 2.0 characters, and JSON scenes. The generator uses deterministic in-house
-OOXML/ZIP, RIFF/AVI, GIF/LZW, MIDI-event,
+humanoid-rigged/morphing GLB 2.0 characters with named clip sequences, and JSON
+scenes. The generator uses deterministic in-house OOXML/ZIP, RIFF/AVI, GIF/LZW, MIDI-event,
 caption/timecode, PNG/PPM, waveform, and procedural-geometry writers, bounded
 sizes, safe workspace paths, idempotent regeneration, and SHA-256 manifests.
 `artifact_verify(path)` checks every file before downstream use.
@@ -181,9 +181,10 @@ references, SVG geometry, PNG chunks/CRCs, PPM dimensions, WAV frames/duration,
 OBJ vertices/faces/index bounds, GLB containers/buffers/accessors/scenes,
 embedded PNG CRCs/pixel streams, texture/sampler/material references, UV sets,
 triangle indices, unit normals, joint indices, normalized skin weights,
-inverse-bind matrices, morph deltas/default weights/names, animation clip names,
-skeletal and blend-shape timelines, quaternion normalization, and complete bundle
-manifests. Custom
+affine inverse-bind matrices, canonical humanoid hierarchy, nonzero morph
+position/normal/tangent frames, default weights/names, exact animation clip
+metadata and durations, valid named clip sequences, skeletal and blend-shape
+timelines, quaternion normalization, and complete bundle manifests. Custom
 requirements can pin headings, text, fields, columns, files, kinds, sizes,
 paragraph/row/slide/frame/note/cue/event/vertex/triangle/joint/animation counts,
 sheets, and dependency policy.
@@ -299,7 +300,10 @@ offline mode never invokes pip or `ollama pull`.
 venv\Scripts\python.exe scripts\assemble_engine_bundle.py `
   --out app\build\engine-bundles\windows-x86_64
 
-# Package that bundle and build the local Flutter release in one command.
+# Reuse that verified bundle and build the local Flutter release.
+powershell -NoProfile -File .\scripts\build_flutter_local.ps1 -Target windows
+
+# Or assemble/refresh the bundle and build in one command.
 powershell -NoProfile -File .\scripts\build_flutter_local.ps1 `
   -Target windows -AssembleOfflineEngine
 
@@ -482,12 +486,13 @@ Privacy is opt-in and scrubbed at every step — nothing auto-uploads, and no PR
 - ✅ **Federated contribution** — share scrubbed lessons back without hosting the model (see [above](#contributing-improvements-without-hosting-the-model)).
 - ✅ **Mobile & desktop app (GUI)** — a [Flutter client](app/) with a real chat UI (Android APK + Windows/Linux/macOS), CI-built with download links. No terminal needed to *use* a hosted trilobite.
 
-- ✅ **Textured rigged morphing 3D models** — deterministic binary glTF 2.0 characters carry indexed geometry, unit normals, orthogonal tangent frames, UVs, three embedded PBR maps, a two-joint skin with inverse-bind matrices, normalized per-vertex weights, a named nonzero breathing blend shape, and three independent named clips for shell rotation, root translation, and morph weights in one dependency-free GLB.
+- ✅ **Grounded animated humanoid 3D models** — deterministic binary glTF 2.0 characters carry 384 vertices and 192 triangles, unit normals, orthogonal tangent frames, UVs, three embedded PBR maps, a canonical 17-joint humanoid hierarchy with affine inverse-bind matrices and normalized per-vertex weights, two nonzero position/normal/tangent morph frames, six named skeletal/blend-shape clips, and two validated clip sequences in one dependency-free GLB. The output passes Khronos glTF Validator with zero findings and independently imports through glTF Transform with every mesh, skin, morph frame, texture, clip, and sequence intact.
 
 **Next gaps** — publish preassembled signed engine payloads for each desktop
-platform (the local assembler/package/runtime contract is shipped) and add larger
-humanoid rigs, morph normal/tangent deltas, clip sequencing, and broader native
-viewer/render compatibility beyond the current deterministic model contract.
+platform (the local assembler/package/runtime contract is shipped), add
+importer-specific runtime smoke profiles beyond format-level Khronos validation,
+and expand the deterministic humanoid baseline with configurable topology and
+retargetable motion libraries.
 
 ---
 
@@ -508,7 +513,7 @@ Flat, mostly-stdlib Python modules (plus `mcp`):
 | `reloadable_mcp.py` | Fail-closed live server-source execution, atomic tool-manager swaps, schema-cache invalidation, and MCP tool-list notifications |
 | `learning_health.py` | Outcome coverage, reward distribution, lesson provenance, distillation yield, and memory-hygiene reporting |
 | `artifact_grounding.py` | Guarded format contracts for writing, data, UI, images, audio, models, and complete artifact bundles |
-| `model_assets.py` | Deterministic stdlib-only binary glTF geometry, embedded PBR textures, skinning, morph targets, inverse-bind matrices, and named animation clips |
+| `model_assets.py` | Deterministic stdlib-only binary glTF humanoids, embedded PBR textures, canonical skinning, full morph frames, affine inverse-bind matrices, and named animation clips/sequences |
 | `creative_router.py` | conservative natural-language routing from concrete master build requests into grounded artifact, game, or game-campaign workflows |
 | `server.py` / `workbench.py` / `activity_tracker.py` / `code_runner.py` / `web_tools.py` / `workflow_store.py` / `self_heal.py` | MCP workbench/agent tools, guarded discovery and execution, persistent checklists, exact action/end reports, bounded code/project runners, web tools, workflows, and self-healing |
 | `server.py` | MCP server: `offload` / `trilobite` / `parallel_run_code` / `parallel_generate_run` / `parallel_generate_run_languages` / `campaign_generate_compile_execute_record` / `learn_tiers` / `record_outcome` / `trilobite_stats` / `trilobite_sessions` / `trilobite_remember_fact` |

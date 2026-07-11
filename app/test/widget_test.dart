@@ -26,7 +26,8 @@ void main() {
     expect(find.byType(TextField), findsOneWidget);
   });
 
-  testWidgets('Commands expose grounded Office, media, and model artifact suites',
+  testWidgets(
+      'Commands expose grounded Office, media, and model artifact suites',
       (tester) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
 
@@ -39,7 +40,8 @@ void main() {
     expect(find.textContaining('/asset media-suite'), findsOneWidget);
     expect(find.textContaining('/asset rigged-character'), findsOneWidget);
     expect(find.text('Generate a grounded editable media kit'), findsOneWidget);
-    expect(find.text('Generate a textured morphing multi-clip character'), findsOneWidget);
+    expect(find.text('Generate a grounded animated humanoid character'),
+        findsOneWidget);
   });
 
   testWidgets('System always has an explicit return to main chat',

@@ -42,6 +42,25 @@ GLB_TYPES = {
     "MAT3": 9,
     "MAT4": 16,
 }
+HUMANOID_JOINT_PARENTS = {
+    "Hips": None,
+    "Spine": "Hips",
+    "Chest": "Spine",
+    "Neck": "Chest",
+    "Head": "Neck",
+    "LeftShoulder": "Chest",
+    "LeftElbow": "LeftShoulder",
+    "LeftWrist": "LeftElbow",
+    "RightShoulder": "Chest",
+    "RightElbow": "RightShoulder",
+    "RightWrist": "RightElbow",
+    "LeftHip": "Hips",
+    "LeftKnee": "LeftHip",
+    "LeftAnkle": "LeftKnee",
+    "RightHip": "Hips",
+    "RightKnee": "RightHip",
+    "RightAnkle": "RightKnee",
+}
 
 OOXML_REQUIRED_PARTS = {
     "docx": {"[Content_Types].xml", "_rels/.rels", "word/document.xml"},
@@ -1683,10 +1702,12 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
         if _glb_integer(mesh_index) and _glb_integer(skin_index):
             mesh_skins.setdefault(mesh_index, set()).add(skin_index)
     indegree = {index: 0 for index in graph}
-    for children in graph.values():
+    parent_of = {}
+    for parent_index, children in graph.items():
         for child in children:
             if child in indegree:
                 indegree[child] += 1
+                parent_of[child] = parent_index
     if any(value > 1 for value in indegree.values()):
         node_errors.append("a node has multiple parents")
     pending = [index for index, value in indegree.items() if value == 0]
@@ -2010,11 +2031,86 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
                     or bind.get("count") != len(joint_list)
                 ):
                     skin_errors.append("skin %d inverse bind matrices do not match joints" % skin_index)
+                else:
+                    try:
+                        bind_rows = accessor_cache.get(bind_index) or _glb_accessor_values(
+                            document, binary, bind_index
+                        )
+                        if len(bind_rows) != len(joint_list) or any(
+                            len(row) != 16
+                            or any(not math.isfinite(float(value)) for value in row)
+                            or not math.isclose(float(row[3]), 0.0, abs_tol=1e-5)
+                            or not math.isclose(float(row[7]), 0.0, abs_tol=1e-5)
+                            or not math.isclose(float(row[11]), 0.0, abs_tol=1e-5)
+                            or not math.isclose(float(row[15]), 1.0, abs_tol=1e-5)
+                            for row in bind_rows
+                        ):
+                            raise ValueError("must contain finite affine MAT4 values")
+                    except (IndexError, KeyError, TypeError, ValueError, struct.error) as exc:
+                        skin_errors.append(
+                            "skin %d inverse bind matrices %s" % (skin_index, exc)
+                        )
         skeleton = skin.get("skeleton")
         if skeleton is not None and (
             not _glb_integer(skeleton) or skeleton < 0 or skeleton >= len(nodes)
         ):
             skin_errors.append("skin %d has an invalid skeleton" % skin_index)
+
+    require_humanoid_rig = bool(requirements.get("require_humanoid_rig"))
+    required_joint_names = set(_string_list(requirements, "required_joint_names"))
+    if require_humanoid_rig:
+        required_joint_names.update(HUMANOID_JOINT_PARENTS)
+    humanoid_errors = []
+    matched_humanoid_names = set()
+    matched_humanoid_skin = None
+    for skin_index, joint_set in enumerate(joint_sets):
+        names = {}
+        duplicates = set()
+        for joint in joint_set:
+            node = nodes[joint] if 0 <= joint < len(nodes) else None
+            name = node.get("name") if isinstance(node, dict) else None
+            if isinstance(name, str) and name.strip():
+                if name in names:
+                    duplicates.add(name)
+                names[name] = joint
+        if duplicates:
+            humanoid_errors.append(
+                "skin %d duplicates joint names: %s"
+                % (skin_index, ", ".join(sorted(duplicates)))
+            )
+        if len(required_joint_names & set(names)) > len(matched_humanoid_names):
+            matched_humanoid_names = required_joint_names & set(names)
+            matched_humanoid_skin = (skin_index, names)
+    missing_joint_names = sorted(required_joint_names - matched_humanoid_names)
+    if missing_joint_names:
+        humanoid_errors.append(
+            "missing required joint names: %s" % ", ".join(missing_joint_names)
+        )
+    if require_humanoid_rig and matched_humanoid_skin is not None and not missing_joint_names:
+        skin_index, names = matched_humanoid_skin
+        for child_name, parent_name in HUMANOID_JOINT_PARENTS.items():
+            child = names[child_name]
+            if parent_name is None:
+                skeleton = skins[skin_index].get("skeleton")
+                if skeleton != child:
+                    humanoid_errors.append("skin skeleton must be the Hips joint")
+            elif parent_of.get(child) != names[parent_name]:
+                humanoid_errors.append(
+                    "%s must be a direct child of %s" % (child_name, parent_name)
+                )
+    humanoid_ok = not humanoid_errors and (
+        not required_joint_names or matched_humanoid_skin is not None
+    )
+    _check(
+        checks,
+        "glb-humanoid-rig",
+        humanoid_ok,
+        (
+            "; ".join(humanoid_errors[:8])
+            or "%d required humanoid joint name(s) matched"
+            % len(matched_humanoid_names)
+        ),
+    )
 
     geometry_errors = []
     tangent_errors = []
@@ -2288,6 +2384,9 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
     maximum_morph_targets = 0
     named_morph_targets = 0
     all_morph_targets_named = True
+    total_morph_targets = 0
+    morph_normal_targets = 0
+    morph_tangent_targets = 0
     for mesh_index, mesh in enumerate(meshes):
         if not isinstance(mesh, dict):
             continue
@@ -2327,14 +2426,22 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
                     continue
                 keys = frozenset(target)
                 semantics.append(keys)
+                total_morph_targets += 1
+                morph_normal_targets += int("NORMAL" in keys)
+                morph_tangent_targets += int("TANGENT" in keys)
                 if not keys <= {"POSITION", "NORMAL", "TANGENT"}:
                     morph_errors.append(
                         "mesh %d primitive %d target %d has invalid semantics"
                         % (mesh_index, primitive_index, target_index)
                     )
+                target_delta_rows = {}
                 for semantic, accessor_index in target.items():
                     try:
-                        if not _glb_integer(accessor_index):
+                        if (
+                            not _glb_integer(accessor_index)
+                            or accessor_index < 0
+                            or accessor_index >= len(accessors)
+                        ):
                             raise ValueError("%s delta has an invalid accessor" % semantic)
                         target_accessor = accessors[accessor_index]
                         target_rows = accessor_cache.get(accessor_index) or _glb_accessor_values(
@@ -2363,6 +2470,61 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
                                 for value in row
                             ):
                                 raise ValueError("POSITION morph target is entirely zero")
+                        elif not any(
+                            not math.isclose(float(value), 0.0, abs_tol=1e-8)
+                            for row in target_rows
+                            for value in row
+                        ):
+                            raise ValueError("%s morph target is entirely zero" % semantic)
+                        target_delta_rows[semantic] = target_rows
+                    except (IndexError, KeyError, TypeError, ValueError, struct.error) as exc:
+                        morph_errors.append(
+                            "mesh %d primitive %d target %d: %s"
+                            % (mesh_index, primitive_index, target_index, exc)
+                        )
+                if {"NORMAL", "TANGENT"} <= set(target_delta_rows):
+                    try:
+                        normal_index = attributes.get("NORMAL")
+                        tangent_index = attributes.get("TANGENT")
+                        base_normals = accessor_cache.get(normal_index) or _glb_accessor_values(
+                            document, binary, normal_index
+                        )
+                        base_tangents = accessor_cache.get(tangent_index) or _glb_accessor_values(
+                            document, binary, tangent_index
+                        )
+                        normal_deltas = target_delta_rows["NORMAL"]
+                        tangent_deltas = target_delta_rows["TANGENT"]
+                        if not (
+                            len(base_normals)
+                            == len(base_tangents)
+                            == len(normal_deltas)
+                            == len(tangent_deltas)
+                            == vertex_count
+                        ):
+                            raise ValueError("morph frame counts do not match base attributes")
+                        for base_normal, base_tangent, normal_delta, tangent_delta in zip(
+                            base_normals, base_tangents, normal_deltas, tangent_deltas
+                        ):
+                            changed_normal = [
+                                float(value) + float(delta)
+                                for value, delta in zip(base_normal, normal_delta)
+                            ]
+                            changed_tangent = [
+                                float(value) + float(delta)
+                                for value, delta in zip(base_tangent[:3], tangent_delta)
+                            ]
+                            normal_length = math.sqrt(sum(value * value for value in changed_normal))
+                            tangent_length = math.sqrt(sum(value * value for value in changed_tangent))
+                            if normal_length < 1e-6 or tangent_length < 1e-6:
+                                raise ValueError("morph frame produces a degenerate normal or tangent")
+                            dot = sum(
+                                normal_value * tangent_value
+                                for normal_value, tangent_value in zip(
+                                    changed_normal, changed_tangent
+                                )
+                            ) / (normal_length * tangent_length)
+                            if not math.isclose(dot, 0.0, abs_tol=1e-3):
+                                raise ValueError("morphed tangents must remain orthogonal to normals")
                     except (IndexError, KeyError, TypeError, ValueError, struct.error) as exc:
                         morph_errors.append(
                             "mesh %d primitive %d target %d: %s"
@@ -2433,6 +2595,8 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
     require_named_morph_targets = bool(
         requirements.get("require_named_morph_targets")
     )
+    require_morph_normals = bool(requirements.get("require_morph_normals"))
+    require_morph_tangents = bool(requirements.get("require_morph_tangents"))
     morphs_ok = (
         not morph_errors
         and maximum_morph_targets >= minimum_morph_targets
@@ -2444,6 +2608,14 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
                 and all_morph_targets_named
             )
         )
+        and (
+            not require_morph_normals
+            or (total_morph_targets > 0 and morph_normal_targets == total_morph_targets)
+        )
+        and (
+            not require_morph_tangents
+            or (total_morph_targets > 0 and morph_tangent_targets == total_morph_targets)
+        )
     )
     _check(
         checks,
@@ -2451,8 +2623,13 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
         morphs_ok,
         (
             "; ".join(morph_errors[:8])
-            or "%d maximum target(s), %d named"
-            % (maximum_morph_targets, named_morph_targets)
+            or "%d maximum target(s), %d named, %d normal, %d tangent"
+            % (
+                maximum_morph_targets,
+                named_morph_targets,
+                morph_normal_targets,
+                morph_tangent_targets,
+            )
         ),
     )
 
@@ -2483,6 +2660,7 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
     named_animations = 0
     skeletal_animations = set()
     morph_animations = set()
+    animation_durations = {}
     for animation_index, animation in enumerate(animations):
         if not isinstance(animation, dict):
             animation_errors.append("animation %d is not an object" % animation_index)
@@ -2502,6 +2680,7 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
             animation_errors.append("animation %d has no samplers/channels" % animation_index)
             continue
         channel_targets = set()
+        animation_duration = 0.0
         for channel_index, channel in enumerate(channels):
             try:
                 sampler_index = channel["sampler"]
@@ -2525,7 +2704,14 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
                     raise ValueError("invalid sampler")
                 input_index = sampler.get("input")
                 output_index = sampler.get("output")
-                if not _glb_integer(input_index) or not _glb_integer(output_index):
+                if (
+                    not _glb_integer(input_index)
+                    or input_index < 0
+                    or input_index >= len(accessors)
+                    or not _glb_integer(output_index)
+                    or output_index < 0
+                    or output_index >= len(accessors)
+                ):
                     raise ValueError("animation sampler has invalid accessors")
                 interpolation = sampler.get("interpolation", "LINEAR")
                 if interpolation not in {"LINEAR", "STEP", "CUBICSPLINE"}:
@@ -2545,6 +2731,7 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
                     not math.isfinite(value) for value in times
                 ) or any(right <= left for left, right in zip(times, times[1:])):
                     raise ValueError("animation input times must be finite and increasing")
+                animation_duration = max(animation_duration, times[-1])
                 multiplier = 3 if interpolation == "CUBICSPLINE" else 1
                 expected_type = {
                     "translation": "VEC3",
@@ -2594,6 +2781,8 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
                 animation_errors.append(
                     "animation %d channel %d: %s" % (animation_index, channel_index, exc)
                 )
+        if isinstance(name, str) and name.strip() and name in animation_names:
+            animation_durations[name] = animation_duration
     minimum_animations = _bounded_int(requirements, "min_animations", 0, 0, 100_000)
     minimum_skeletal_animations = _bounded_int(
         requirements, "min_skeletal_animations", 0, 0, 100_000
@@ -2625,6 +2814,142 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
                 len(morph_animations),
                 named_animations,
             )
+        ),
+    )
+
+    sequence_errors = []
+    extras = document.get("extras", {})
+    if extras is None:
+        extras = {}
+    if not isinstance(extras, dict):
+        sequence_errors.append("document extras must be an object for animation metadata")
+        extras = {}
+    clip_metadata = extras.get("animationClips", [])
+    if clip_metadata is None:
+        clip_metadata = []
+    if not isinstance(clip_metadata, list):
+        sequence_errors.append("animationClips must be an array")
+        clip_metadata = []
+    clip_indices = set()
+    clip_names = set()
+    for clip_index, clip in enumerate(clip_metadata):
+        if not isinstance(clip, dict):
+            sequence_errors.append("animation clip %d is not an object" % clip_index)
+            continue
+        index = clip.get("index")
+        clip_name = clip.get("name")
+        duration = clip.get("duration")
+        if (
+            not _glb_integer(index)
+            or index < 0
+            or index >= len(animations)
+            or index in clip_indices
+        ):
+            sequence_errors.append("animation clip %d has an invalid index" % clip_index)
+            continue
+        expected_name = animations[index].get("name") if isinstance(animations[index], dict) else None
+        valid_clip_name = not (
+            not isinstance(clip_name, str)
+            or not clip_name.strip()
+            or clip_name != expected_name
+            or clip_name in clip_names
+        )
+        if not valid_clip_name:
+            sequence_errors.append("animation clip %d has an invalid name" % clip_index)
+        expected_duration = (
+            animation_durations.get(clip_name, -1.0) if valid_clip_name else -1.0
+        )
+        if (
+            isinstance(duration, bool)
+            or not isinstance(duration, (int, float))
+            or not math.isfinite(float(duration))
+            or float(duration) <= 0.0
+            or not math.isclose(
+                float(duration), expected_duration, abs_tol=1e-4
+            )
+        ):
+            sequence_errors.append("animation clip %d has an invalid duration" % clip_index)
+        clip_indices.add(index)
+        if valid_clip_name:
+            clip_names.add(clip_name)
+    sequences = extras.get("animationSequences", [])
+    if sequences is None:
+        sequences = []
+    if not isinstance(sequences, list):
+        sequence_errors.append("animationSequences must be an array")
+        sequences = []
+    sequence_names = set()
+    sequenced_clips = set()
+    for sequence_index, sequence in enumerate(sequences):
+        if not isinstance(sequence, dict):
+            sequence_errors.append("animation sequence %d is not an object" % sequence_index)
+            continue
+        sequence_name = sequence.get("name")
+        clips = sequence.get("clips")
+        transitions = sequence.get("transitions")
+        loop = sequence.get("loop")
+        if (
+            not isinstance(sequence_name, str)
+            or not sequence_name.strip()
+            or sequence_name in sequence_names
+        ):
+            sequence_errors.append("animation sequence %d has an invalid name" % sequence_index)
+        else:
+            sequence_names.add(sequence_name)
+        if (
+            not isinstance(clips, list)
+            or len(clips) < 2
+            or any(not isinstance(clip, str) or clip not in animation_names for clip in clips)
+        ):
+            sequence_errors.append("animation sequence %d references invalid clips" % sequence_index)
+            clips = []
+        else:
+            sequenced_clips.update(clips)
+        if (
+            not isinstance(transitions, list)
+            or len(transitions) != max(0, len(clips) - 1)
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or not 0.0 <= float(value) <= 10.0
+                for value in transitions
+            )
+        ):
+            sequence_errors.append("animation sequence %d has invalid transitions" % sequence_index)
+        if type(loop) is not bool:
+            sequence_errors.append("animation sequence %d has an invalid loop flag" % sequence_index)
+    minimum_sequences = _bounded_int(
+        requirements, "min_animation_sequences", 0, 0, 100_000
+    )
+    require_clip_metadata = bool(requirements.get("require_animation_clip_metadata"))
+    required_animation_clips = set(
+        _string_list(requirements, "required_animation_clips")
+    )
+    missing_sequence_clips = sorted(required_animation_clips - sequenced_clips)
+    if missing_sequence_clips:
+        sequence_errors.append(
+            "required clips are not sequenced: %s" % ", ".join(missing_sequence_clips)
+        )
+    sequences_ok = (
+        not sequence_errors
+        and len(sequences) >= minimum_sequences
+        and (
+            not require_clip_metadata
+            or (
+                len(clip_metadata) == len(animations)
+                and clip_indices == set(range(len(animations)))
+            )
+        )
+    )
+    _check(
+        checks,
+        "glb-animation-sequences",
+        sequences_ok,
+        (
+            "; ".join(sequence_errors[:8])
+            or "%d sequence(s), %d clip metadata record(s), %d sequenced clip(s)"
+            % (len(sequences), len(clip_metadata), len(sequenced_clips))
         ),
     )
 

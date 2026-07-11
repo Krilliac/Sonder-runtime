@@ -59,8 +59,8 @@ class _ChatScreenState extends State<ChatScreen> {
         'Generate a grounded editable Office suite',
     '/asset media-suite AVI video, animated GIF, MIDI score, SRT WebVTT captions, EDL timeline':
         'Generate a grounded editable media kit',
-    '/asset rigged-character textured PBR rigged GLB character with morph target and animation clips':
-        'Generate a textured morphing multi-clip character',
+    '/asset rigged-character textured PBR humanoid GLB with a 17-bone rig, full morph frames, and sequenced Idle Walk Run clips':
+        'Generate a grounded animated humanoid character',
     '/autopilot': 'Plan or run a persistent guarded goal',
     '/report': 'Show latest end report and exact actions',
     '/checklist': 'Show the active work checklist',

@@ -557,7 +557,7 @@ def infer_request(brief: str, kinds: str = "auto", dimension: str = "auto",
     if dimension == "auto":
         if any(word in lowered for word in (
             "3d", "mesh", "model", "sculpt", "glb", "gltf", "rigged", "armature",
-            "morph", "blend shape", "blendshape",
+            "morph", "blend shape", "blendshape", "humanoid", "biped",
         )):
             dimension = "3d"
         elif any(word in lowered for word in ("2.5d", "isometric", "iso ")):
@@ -593,7 +593,8 @@ def infer_request(brief: str, kinds: str = "auto", dimension: str = "auto",
             "rigged_model": (
                 "rigged", "skeletal", "skinned", "armature", "bone", "bones",
                 "animated model", "glb", "gltf", "morph", "blend shape", "blendshape",
-                "skeletal animation", "animation clips",
+                "skeletal animation", "animation clips", "humanoid", "biped",
+                "3d character", "character model", "avatar model",
             ),
             "scene": ("scene", "level", "world", "layout", "map"),
         }
@@ -836,13 +837,14 @@ def verify_pack(path: str) -> dict:
                 "glb": {
                     "min_images": 3,
                     "min_materials": 1,
-                    "min_vertices": 3,
-                    "min_triangles": 1,
-                    "min_joints": 2,
-                    "min_animations": 3,
-                    "min_morph_animations": 1,
-                    "min_morph_targets": 1,
-                    "min_skeletal_animations": 2,
+                    "min_vertices": 384,
+                    "min_triangles": 192,
+                    "min_joints": 17,
+                    "min_animations": 6,
+                    "min_animation_sequences": 2,
+                    "min_morph_animations": 2,
+                    "min_morph_targets": 2,
+                    "min_skeletal_animations": 4,
                     "min_texcoord_sets": 1,
                     "min_textures": 3,
                     "no_external_dependencies": True,
@@ -850,6 +852,13 @@ def verify_pack(path: str) -> dict:
                     "require_material_textures": True,
                     "require_named_animations": True,
                     "require_named_morph_targets": True,
+                    "require_morph_normals": True,
+                    "require_morph_tangents": True,
+                    "require_humanoid_rig": True,
+                    "require_animation_clip_metadata": True,
+                    "required_animation_clips": [
+                        "Idle", "Walk", "Run", "Breathe", "Focus",
+                    ],
                     "require_power_of_two_images": True,
                     "require_tangents": True,
                 },

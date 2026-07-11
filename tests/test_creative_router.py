@@ -58,6 +58,15 @@ def test_routes_general_non_game_assets():
     assert intent["theme"] == "frost"
 
 
+def test_routes_explicit_humanoid_character_to_artifact_forge():
+    intent = creative_router.classify(
+        "Create a humanoid character with a 17-bone rig and animation clips."
+    )
+
+    assert intent["kind"] == "artifact"
+    assert intent["dimension"] == "3d"
+
+
 def test_does_not_hijack_questions_or_design_only_requests():
     assert creative_router.classify("How do I build a C++ game?") is None
     assert creative_router.classify("Design an isometric RPG combat system.") is None

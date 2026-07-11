@@ -83,6 +83,15 @@ def test_morph_language_routes_to_rigged_3d_model():
     assert "rigged_model" in request["kinds"]
 
 
+def test_humanoid_language_routes_to_rigged_3d_model():
+    request = assetgen.infer_request(
+        "Create a humanoid biped with idle walk run and facial blend shapes"
+    )
+
+    assert request["dimension"] == "3d"
+    assert "rigged_model" in request["kinds"]
+
+
 def test_pack_is_deterministic_for_same_request(monkeypatch, tmp_path):
     _local_root(monkeypatch, tmp_path)
 

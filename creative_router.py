@@ -17,7 +17,7 @@ _GAME_TARGET = re.compile(
 _ARTIFACT_TARGET = re.compile(
     r"\b(?:assets?|logos?|icons?|images?|illustrations?|sounds?|audio|music|"
     r"models?|meshes?|textures?|sprites?|diagrams?|documents?|datasets?|"
-    r"mockups?|scenes?|palettes?|brand kit)\b",
+    r"mockups?|scenes?|palettes?|characters?|avatars?|humanoids?|brand kit)\b",
     re.IGNORECASE,
 )
 _CAMPAIGN = re.compile(
@@ -35,7 +35,8 @@ _STOP_WORDS = {
     "everything", "for", "forge", "game", "games", "generate", "implement",
     "in", "language", "languages", "make", "of", "produce", "project",
     "scaffold", "the", "to", "using", "with", "without", "2d", "3d",
-    "cpp", "csharp", "javascript", "python", "assets", "asset",
+    "cpp", "csharp", "javascript", "python", "assets", "asset", "character",
+    "characters", "avatar", "avatars", "humanoid", "humanoids",
 }
 
 
@@ -44,6 +45,12 @@ def _dimension(text: str) -> str:
     if re.search(r"\b2\s*[.]\s*5\s*d\b|\bisometric\b", lowered):
         return "2.5d"
     if re.search(r"\b3\s*d\b|\bthree[- ]dimensional\b", lowered):
+        return "3d"
+    if re.search(
+        r"\b(?:humanoid|biped|rigged|skeletal|armature|glb|gltf|mesh)\b|"
+        r"\bbone\s+rig\b|\banimation\s+clips?\b",
+        lowered,
+    ):
         return "3d"
     return "2d"
 

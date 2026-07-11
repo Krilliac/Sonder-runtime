@@ -19,6 +19,17 @@ def test_parse_none_when_absent():
     assert server.parse_interaction_id("just some text") is None
 
 
+def test_agent_tool_help_advertises_strict_humanoid_artifact_contract():
+    help_text = server._agent_tool_help()
+
+    assert '"min_joints": 17' in help_text
+    assert '"min_animation_sequences": 2' in help_text
+    assert '"require_humanoid_rig": true' in help_text
+    assert '"require_morph_normals": true' in help_text
+    assert '"require_morph_tangents": true' in help_text
+    assert '"required_animation_clips": ["Idle", "Walk", "Run"' in help_text
+
+
 def test_resolve_trilobite_falls_back(monkeypatch):
     # no alias present -> code tier model
     monkeypatch.setattr(server, "_get", lambda path: {"models": [{"name": "qwen2.5:3b"}]})

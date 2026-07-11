@@ -72,15 +72,16 @@ def test_rigged_glb_is_self_contained_animated_gltf_2(tmp_path):
     assert declared_binary <= parsed["binary_length"] <= declared_binary + 3
     assert "uri" not in document["buffers"][0]
     assert stats == {
-        "animations": 3,
+        "animation_sequences": 2,
+        "animations": 6,
         "bytes": len(parsed["payload"]),
         "images": 3,
-        "joints": 2,
+        "joints": 17,
         "materials": 1,
-        "morph_targets": 1,
+        "morph_targets": 2,
         "textures": 3,
-        "triangles": 36,
-        "vertices": 72,
+        "triangles": 192,
+        "vertices": 384,
     }
     primitive = document["meshes"][0]["primitives"][0]
     assert {
@@ -100,35 +101,55 @@ def test_rigged_glb_is_self_contained_animated_gltf_2(tmp_path):
     assert pbr["metallicRoughnessTexture"] == {"index": 1}
     assert document["materials"][0]["occlusionTexture"]["index"] == 1
     assert document["materials"][0]["normalTexture"]["index"] == 2
-    assert primitive["targets"] == [{"POSITION": next(
-        index
-        for index, accessor in enumerate(document["accessors"])
-        if accessor.get("name") == "MORPH_BREATHE_POSITION"
-    )}]
-    assert document["meshes"][0]["extras"]["targetNames"] == ["Breathe"]
-    assert document["nodes"][2]["weights"] == [0.0]
-    assert document["skins"][0]["joints"] == [0, 1]
+    assert len(primitive["targets"]) == 2
+    assert all(set(target) == {"POSITION", "NORMAL", "TANGENT"} for target in primitive["targets"])
+    assert document["meshes"][0]["extras"]["targetNames"] == ["Breathe", "Focus"]
+    assert document["nodes"][17]["weights"] == [0.0, 0.0]
+    assert document["skins"][0]["joints"] == list(range(17))
     assert document["animations"][0]["channels"][0]["target"] == {
-        "node": 1,
+        "node": 2,
         "path": "rotation",
     }
+    idle_translation_index = next(
+        index
+        for index, accessor in enumerate(document["accessors"])
+        if accessor.get("name") == "IDLE_HIPS_TRANSLATION"
+    )
+    binary = parsed["payload"][
+        parsed["binary_start"]:parsed["binary_start"] + parsed["binary_length"]
+    ]
+    idle_translations = artifact_grounding._glb_accessor_values(
+        document, binary, idle_translation_index
+    )
+    assert idle_translations[0] == (0.0, 1.0, 0.0)
+    assert idle_translations[1][1] > 1.0
+    assert idle_translations[2] == (0.0, 1.0, 0.0)
     assert {animation["name"] for animation in document["animations"]} == {
-        "ShellPulse",
-        "RootBob",
+        "Idle",
+        "Walk",
+        "Run",
+        "Wave",
         "Breathe",
+        "Focus",
+    }
+    assert document["extras"]["humanoidBones"]["Head"] == 4
+    assert {sequence["name"] for sequence in document["extras"]["animationSequences"]} == {
+        "AmbientCharacter",
+        "LocomotionRamp",
     }
 
     grounded = artifact_grounding.validate(
         path,
         "glb",
         {
-            "min_vertices": 72,
-            "min_triangles": 36,
-            "min_joints": 2,
-            "min_animations": 3,
-            "min_skeletal_animations": 2,
-            "min_morph_animations": 1,
-            "min_morph_targets": 1,
+            "min_vertices": 384,
+            "min_triangles": 192,
+            "min_joints": 17,
+            "min_animations": 6,
+            "min_skeletal_animations": 4,
+            "min_morph_animations": 2,
+            "min_morph_targets": 2,
+            "min_animation_sequences": 2,
             "min_images": 3,
             "min_materials": 1,
             "min_textures": 3,
@@ -138,9 +159,14 @@ def test_rigged_glb_is_self_contained_animated_gltf_2(tmp_path):
             "require_material_textures": True,
             "require_named_animations": True,
             "require_named_morph_targets": True,
+            "require_morph_normals": True,
+            "require_morph_tangents": True,
+            "require_humanoid_rig": True,
+            "require_animation_clip_metadata": True,
             "require_power_of_two_images": True,
             "require_tangents": True,
-            "required_text": ["Crawler", "ShellPulse"],
+            "required_animation_clips": ["Idle", "Walk", "Run", "Breathe", "Focus"],
+            "required_text": ["Crawler", "LocomotionRamp"],
         },
     )
     assert grounded["ok"], artifact_grounding.format_result(grounded)
@@ -256,7 +282,7 @@ def test_glb_grounding_rejects_non_unit_animation_quaternion(tmp_path):
     rotation_accessor = next(
         accessor
         for accessor in document["accessors"]
-        if accessor.get("name") == "SHELL_ROTATION"
+        if accessor.get("name") == "IDLE_CHEST_ROTATION"
     )
     view = document["bufferViews"][rotation_accessor["bufferView"]]
     payload = bytearray(parsed["payload"])
@@ -489,6 +515,178 @@ def test_glb_grounding_rejects_duplicate_animation_names(tmp_path):
     assert "duplicated" in animations["detail"]
 
 
+def test_glb_grounding_requires_complete_morph_frame_semantics(tmp_path):
+    path = tmp_path / "missing-morph-tangent.glb"
+    model_assets.write_rigged_glb(path, PALETTE)
+    parsed = _read_glb(path)
+    document = parsed["document"]
+    del document["meshes"][0]["primitives"][0]["targets"][0]["TANGENT"]
+    _rewrite_document(path, parsed, document)
+
+    result = artifact_grounding.validate(
+        path,
+        "glb",
+        {
+            "min_morph_targets": 2,
+            "require_morph_normals": True,
+            "require_morph_tangents": True,
+        },
+    )
+
+    assert not result["ok"]
+    morphs = next(
+        check for check in result["checks"] if check["name"] == "glb-morph-targets"
+    )
+    assert not morphs["ok"]
+
+
+def test_glb_grounding_rejects_nonorthogonal_morphed_tangent_frame(tmp_path):
+    path = tmp_path / "broken-morph-frame.glb"
+    model_assets.write_rigged_glb(path, PALETTE)
+    parsed = _read_glb(path)
+    accessor = next(
+        item
+        for item in parsed["document"]["accessors"]
+        if item.get("name") == "MORPH_BREATHE_NORMAL"
+    )
+    view = parsed["document"]["bufferViews"][accessor["bufferView"]]
+    payload = bytearray(parsed["payload"])
+    struct.pack_into(
+        "<3f",
+        payload,
+        parsed["binary_start"] + view["byteOffset"],
+        0.0,
+        0.0,
+        1.0,
+    )
+    path.write_bytes(payload)
+
+    result = artifact_grounding.validate(
+        path,
+        "glb",
+        {"require_morph_normals": True, "require_morph_tangents": True},
+    )
+
+    assert not result["ok"]
+    morphs = next(
+        check for check in result["checks"] if check["name"] == "glb-morph-targets"
+    )
+    assert "orthogonal" in morphs["detail"]
+
+
+def test_glb_grounding_rejects_broken_humanoid_hierarchy(tmp_path):
+    path = tmp_path / "broken-humanoid.glb"
+    model_assets.write_rigged_glb(path, PALETTE)
+    parsed = _read_glb(path)
+    document = parsed["document"]
+    document["nodes"][5]["children"].remove(6)
+    document["nodes"][2]["children"].append(6)
+    _rewrite_document(path, parsed, document)
+
+    result = artifact_grounding.validate(
+        path, "glb", {"min_joints": 17, "require_humanoid_rig": True}
+    )
+
+    assert not result["ok"]
+    humanoid = next(
+        check for check in result["checks"] if check["name"] == "glb-humanoid-rig"
+    )
+    assert "LeftElbow must be a direct child" in humanoid["detail"]
+
+
+def test_glb_grounding_rejects_non_affine_inverse_bind_matrix(tmp_path):
+    path = tmp_path / "broken-bind.glb"
+    model_assets.write_rigged_glb(path, PALETTE)
+    parsed = _read_glb(path)
+    accessor = next(
+        item
+        for item in parsed["document"]["accessors"]
+        if item.get("name") == "INVERSE_BIND_MATRICES"
+    )
+    view = parsed["document"]["bufferViews"][accessor["bufferView"]]
+    payload = bytearray(parsed["payload"])
+    struct.pack_into(
+        "<f", payload, parsed["binary_start"] + view["byteOffset"] + 12, 1.0
+    )
+    path.write_bytes(payload)
+
+    result = artifact_grounding.validate(path, "glb", {"min_joints": 17})
+
+    assert not result["ok"]
+    skinning = next(
+        check for check in result["checks"] if check["name"] == "glb-skinning"
+    )
+    assert "finite affine MAT4" in skinning["detail"]
+
+
+def test_glb_grounding_rejects_unknown_clip_in_sequence(tmp_path):
+    path = tmp_path / "broken-sequence.glb"
+    model_assets.write_rigged_glb(path, PALETTE)
+    parsed = _read_glb(path)
+    document = parsed["document"]
+    document["extras"]["animationSequences"][0]["clips"][2] = "Teleport"
+    _rewrite_document(path, parsed, document)
+
+    result = artifact_grounding.validate(
+        path,
+        "glb",
+        {
+            "min_animation_sequences": 2,
+            "require_animation_clip_metadata": True,
+        },
+    )
+
+    assert not result["ok"]
+    sequences = next(
+        check
+        for check in result["checks"]
+        if check["name"] == "glb-animation-sequences"
+    )
+    assert "invalid clips" in sequences["detail"]
+
+
+def test_glb_grounding_rejects_clip_duration_drift(tmp_path):
+    path = tmp_path / "broken-clip-duration.glb"
+    model_assets.write_rigged_glb(path, PALETTE)
+    parsed = _read_glb(path)
+    document = parsed["document"]
+    document["extras"]["animationClips"][0]["duration"] = 9.0
+    _rewrite_document(path, parsed, document)
+
+    result = artifact_grounding.validate(
+        path, "glb", {"require_animation_clip_metadata": True}
+    )
+
+    assert not result["ok"]
+    sequences = next(
+        check
+        for check in result["checks"]
+        if check["name"] == "glb-animation-sequences"
+    )
+    assert "invalid duration" in sequences["detail"]
+
+
+def test_glb_grounding_fails_closed_on_non_string_clip_name(tmp_path):
+    path = tmp_path / "broken-clip-name.glb"
+    model_assets.write_rigged_glb(path, PALETTE)
+    parsed = _read_glb(path)
+    document = parsed["document"]
+    document["extras"]["animationClips"][0]["name"] = ["Idle"]
+    _rewrite_document(path, parsed, document)
+
+    result = artifact_grounding.validate(
+        path, "glb", {"require_animation_clip_metadata": True}
+    )
+
+    assert not result["ok"]
+    sequences = next(
+        check
+        for check in result["checks"]
+        if check["name"] == "glb-animation-sequences"
+    )
+    assert "invalid name" in sequences["detail"]
+
+
 def test_glb_grounding_fails_closed_on_malformed_schema_fields(tmp_path):
     path = tmp_path / "malformed.glb"
 
@@ -513,8 +711,14 @@ def test_glb_grounding_fails_closed_on_malformed_schema_fields(tmp_path):
     def bad_morph_accessor(document):
         document["meshes"][0]["primitives"][0]["targets"][0]["POSITION"] = True
 
+    def negative_morph_accessor(document):
+        document["meshes"][0]["primitives"][0]["targets"][0]["POSITION"] = -1
+
     def bad_animation_accessors(document):
         document["animations"][0]["samplers"][0]["input"] = True
+
+    def negative_animation_accessor(document):
+        document["animations"][0]["samplers"][0]["input"] = -1
 
     for mutate in (
         bad_buffer,
@@ -524,7 +728,9 @@ def test_glb_grounding_fails_closed_on_malformed_schema_fields(tmp_path):
         bad_textures,
         bad_texture_sampler,
         bad_morph_accessor,
+        negative_morph_accessor,
         bad_animation_accessors,
+        negative_animation_accessor,
     ):
         model_assets.write_rigged_glb(path, PALETTE)
         parsed = _read_glb(path)
