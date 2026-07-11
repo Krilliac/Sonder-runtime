@@ -376,6 +376,7 @@ class SystemInfo {
   final AutopilotStatus? autopilot;
   final RuntimePolicyInfo? runtimePolicy;
   final McpRuntimeInfo? mcpRuntime;
+  final LearningHealthInfo? learningHealth;
   final ActivityStatus? activity;
   final List<SystemModel> models;
 
@@ -391,6 +392,7 @@ class SystemInfo {
     required this.autopilot,
     this.runtimePolicy,
     this.mcpRuntime,
+    this.learningHealth,
     required this.activity,
     required this.models,
   });
@@ -424,6 +426,11 @@ class SystemInfo {
       mcpRuntime: json['mcp_runtime'] is Map<String, dynamic>
           ? McpRuntimeInfo.fromJson(
               json['mcp_runtime'] as Map<String, dynamic>,
+            )
+          : null,
+      learningHealth: json['learning_health'] is Map<String, dynamic>
+          ? LearningHealthInfo.fromJson(
+              json['learning_health'] as Map<String, dynamic>,
             )
           : null,
       activity: json['activity'] is Map<String, dynamic>
@@ -544,6 +551,160 @@ class McpRuntimeInfo {
   String get currentShort => currentDigest.length <= 12
       ? currentDigest
       : currentDigest.substring(0, 12);
+}
+
+class LearningHealthInfo {
+  final String status;
+  final int interactions;
+  final int outcomes;
+  final int outcomeInteractions;
+  final int goodOutcomes;
+  final int badOutcomes;
+  final double outcomeCoveragePercent;
+  final double positivePercent;
+  final int lessons;
+  final int facts;
+  final int groundedLessons;
+  final int syntheticLessons;
+  final double lessonsPerInteraction;
+  final double? distillationYield;
+  final Map<String, int> lessonSources;
+  final List<LearningSignalInfo> signals;
+  final LearningQualityInfo quality;
+
+  const LearningHealthInfo({
+    required this.status,
+    required this.interactions,
+    required this.outcomes,
+    required this.outcomeInteractions,
+    required this.goodOutcomes,
+    required this.badOutcomes,
+    required this.outcomeCoveragePercent,
+    required this.positivePercent,
+    required this.lessons,
+    required this.facts,
+    required this.groundedLessons,
+    required this.syntheticLessons,
+    required this.lessonsPerInteraction,
+    required this.distillationYield,
+    required this.lessonSources,
+    required this.signals,
+    required this.quality,
+  });
+
+  factory LearningHealthInfo.fromJson(Map<String, dynamic> json) {
+    return LearningHealthInfo(
+      status: json['status']?.toString() ?? 'unknown',
+      interactions: _asInt(json['interactions']),
+      outcomes: _asInt(json['outcomes']),
+      outcomeInteractions: _asInt(json['outcome_interactions']),
+      goodOutcomes: _asInt(json['good_outcomes']),
+      badOutcomes: _asInt(json['bad_outcomes']),
+      outcomeCoveragePercent: _asDouble(json['outcome_coverage_percent']),
+      positivePercent: _asDouble(json['positive_percent']),
+      lessons: _asInt(json['lessons']),
+      facts: _asInt(json['facts']),
+      groundedLessons: _asInt(json['grounded_lessons']),
+      syntheticLessons: _asInt(json['synthetic_lessons']),
+      lessonsPerInteraction: _asDouble(json['lessons_per_interaction']),
+      distillationYield: json['distillation_yield'] == null
+          ? null
+          : _asDouble(json['distillation_yield']),
+      lessonSources: _intMap(json['lesson_sources']),
+      signals: (json['signals'] as List? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(LearningSignalInfo.fromJson)
+          .toList(growable: false),
+      quality: json['quality'] is Map<String, dynamic>
+          ? LearningQualityInfo.fromJson(
+              json['quality'] as Map<String, dynamic>,
+            )
+          : const LearningQualityInfo.empty(),
+    );
+  }
+
+  bool get hasWarning => status == 'attention' || status == 'watch';
+}
+
+class LearningSignalInfo {
+  final String signal;
+  final int count;
+  final double averageReward;
+  final bool good;
+
+  const LearningSignalInfo({
+    required this.signal,
+    required this.count,
+    required this.averageReward,
+    required this.good,
+  });
+
+  factory LearningSignalInfo.fromJson(Map<String, dynamic> json) {
+    return LearningSignalInfo(
+      signal: json['signal']?.toString() ?? '',
+      count: _asInt(json['count']),
+      averageReward: _asDouble(json['average_reward']),
+      good: _asBool(json['good']),
+    );
+  }
+}
+
+class LearningQualityInfo {
+  final int duplicateGroups;
+  final int duplicateRows;
+  final int missingEmbeddings;
+  final int vagueLessons;
+  final int privacyFlags;
+  final int missingSources;
+  final int missingFts;
+  final int orphanFts;
+  final double embeddingPercent;
+
+  const LearningQualityInfo({
+    required this.duplicateGroups,
+    required this.duplicateRows,
+    required this.missingEmbeddings,
+    required this.vagueLessons,
+    required this.privacyFlags,
+    required this.missingSources,
+    required this.missingFts,
+    required this.orphanFts,
+    required this.embeddingPercent,
+  });
+
+  const LearningQualityInfo.empty()
+      : duplicateGroups = 0,
+        duplicateRows = 0,
+        missingEmbeddings = 0,
+        vagueLessons = 0,
+        privacyFlags = 0,
+        missingSources = 0,
+        missingFts = 0,
+        orphanFts = 0,
+        embeddingPercent = 0;
+
+  factory LearningQualityInfo.fromJson(Map<String, dynamic> json) {
+    return LearningQualityInfo(
+      duplicateGroups: _asInt(json['exact_duplicate_groups']),
+      duplicateRows: _asInt(json['exact_duplicate_prunable']),
+      missingEmbeddings: _asInt(json['no_embedding']),
+      vagueLessons: _asInt(json['vague_without_anchor']),
+      privacyFlags: _asInt(json['path_or_secret_like']),
+      missingSources: _asInt(json['missing_source_interaction']),
+      missingFts: _asInt(json['missing_fts']),
+      orphanFts: _asInt(json['orphan_fts']),
+      embeddingPercent: _asDouble(json['embedding_percent']),
+    );
+  }
+
+  int get issueCount =>
+      duplicateRows +
+      missingEmbeddings +
+      vagueLessons +
+      privacyFlags +
+      missingSources +
+      missingFts +
+      orphanFts;
 }
 
 class AutopilotStatus {
@@ -1218,6 +1379,14 @@ Map<String, String> _stringMap(Object? value) {
   return Map.unmodifiable({
     for (final entry in value.entries)
       entry.key.toString(): entry.value?.toString() ?? '',
+  });
+}
+
+Map<String, int> _intMap(Object? value) {
+  if (value is! Map) return const {};
+  return Map.unmodifiable({
+    for (final entry in value.entries)
+      entry.key.toString(): _asInt(entry.value),
   });
 }
 

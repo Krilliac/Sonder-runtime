@@ -57,6 +57,7 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     entries = {item["path"]: item for item in manifest["files"]}
     assert package.REQUIRED_FILES <= set(entries)
     assert "runtime_policy.py" in entries
+    assert "learning_health.py" in entries
     assert "BUNDLED_SYSTEM_README.txt" in entries
     for private in (
         "file_roots.local",

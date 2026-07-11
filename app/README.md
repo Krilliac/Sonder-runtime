@@ -34,9 +34,10 @@ cloud tiers and invoked web tools contact their named external services.
   activity, the live workbench checklist and exact action evidence, visible task
   state, the shared local runtime-policy revision/model aliases/execution lanes,
   atomic MCP source/tool convergence and fail-closed refresh errors, permission
-  rules, command inventory, improvement
+  rules, grounded outcome coverage, lesson provenance, distillation yield,
+  memory-hygiene meters, command inventory, improvement
   recommendations, learning stats and exposed models, run `/stats`, `/context`,
-  `/compact`, `/todo`, `/commands`, `/runtime`, `/mcp`, `/dump`, `/permissions`, `/quality`,
+  `/compact`, `/todo`, `/commands`, `/runtime`, `/mcp`, `/learning`, `/dump`, `/permissions`, `/quality`,
   `/inventory`, `/privacy`, `/embeddings`, `/improve`,
   `/agents`, `/capacity`, `/agentcancel`, `/agentretry`, `/train 10` and `/help`, start/stop the bundled desktop server,
   launch endless training, and pull updates from Git.
@@ -56,7 +57,7 @@ cloud tiers and invoked web tools contact their named external services.
   shows interrupted work from any local Trilobite process, and offers a confirmed
   local retry without silently replaying work after a crash.
 - **Slash commands** built in — `/stats`, `/context`, `/compact`, `/todo`,
-  `/commands`, `/runtime`, `/mcp`, `/dump`, `/permissions`, `/train`, `/pass`, `/fail`, `/help` — handled
+  `/commands`, `/runtime`, `/mcp`, `/learning`, `/dump`, `/permissions`, `/train`, `/pass`, `/fail`, `/help` — handled
   by the serve layer exactly like the REPL.
 - **Dark / light** themes, copy-to-clipboard, selectable text.
 - Works against a LAN server, a VPS, or `127.0.0.1` when the server runs on the

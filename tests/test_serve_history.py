@@ -187,6 +187,18 @@ def test_mcp_slash_routes_to_control_command(monkeypatch):
     assert calls == [("/mcp status", "demo")]
 
 
+def test_learning_slash_routes_to_control_command(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        ts.server,
+        "control_command",
+        lambda command, project="": calls.append((command, project)) or "healthy",
+    )
+
+    assert ts._handle_slash("/learning", project="demo") == "healthy"
+    assert calls == [("/learning", "demo")]
+
+
 def test_master_slash_routes_modes(monkeypatch):
     calls = []
     monkeypatch.setattr(

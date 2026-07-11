@@ -79,6 +79,7 @@ HELP = """commands:
   /autopilot ...     persistent plan/run/status/resume/pause/cancel autonomy
   /runtime ...       shared local model mappings and execution-lane tiers
   /mcp ...           audit/refresh atomic MCP source and tool convergence
+  /learning          show grounded outcomes, lesson sources, and memory hygiene
   /report            show the latest grounded end report and action transcript
   /checklist [id]    show the current or selected persistent checklist
   /inventory [path]  summarize a guarded workspace with explicit scan budgets
@@ -520,7 +521,10 @@ def main():
                 print(server.control_command(
                     line, session=session_id, project=project,
                 ))
-            elif cmd in ("/runtime", "/models", "/mcp", "/convergence"):
+            elif cmd in (
+                "/runtime", "/models", "/mcp", "/convergence",
+                "/learning", "/learnhealth", "/metrics",
+            ):
                 print(server.control_command(
                     line, session=session_id, project=project,
                 ))

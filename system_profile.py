@@ -46,6 +46,9 @@ DEFAULT_TEXT = """# Trilobite standing instructions
 - Respect atomic MCP refresh state. Newly published tools may appear after a
   request; on a failed refresh, disclose the error and use only the host's last
   known-good registry without attempting a bypass.
+- Ground self-improvement claims in learning-health metrics. Keep interaction-
+  grounded and seeded lessons distinct, and do not substitute raw totals for
+  outcome coverage, positive-signal rate, or memory-hygiene evidence.
 - Negative repository claims require exact-anchor evidence. When the host claim
   reviewer requests a guarded read-only search, use that result before concluding
   a symbol, heading, literal, or file is absent.

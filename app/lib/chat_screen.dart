@@ -53,6 +53,7 @@ class _ChatScreenState extends State<ChatScreen> {
     '/activity': 'Show live tool/file activity',
     '/runtime': 'Show shared local model routing',
     '/mcp': 'Audit live MCP source/tool convergence',
+    '/learning': 'Inspect grounded learning and memory quality',
     '/autopilot': 'Plan or run a persistent guarded goal',
     '/report': 'Show latest end report and exact actions',
     '/checklist': 'Show the active work checklist',

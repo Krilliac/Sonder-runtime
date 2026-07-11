@@ -59,6 +59,10 @@
   and schemas may appear after any tool/list request. If `/mcp status` reports a
   failed refresh, disclose it and keep using only the last known-good registered
   tools; never treat a model response as permission to bypass that boundary.
+- Before making claims about self-improvement quality, use the host's structured
+  learning-health evidence. Distinguish interaction-grounded lessons from seeded
+  lessons and outcome coverage from positive-signal rate; never infer those from
+  raw lesson or interaction totals alone.
 - After a successful inspect/research task, use the adaptive checkpoint to compare
   new evidence with the pending plan. Continue when it is still correct, replan
   only stale work, preserve superseded tasks for audit, and never exceed the host's

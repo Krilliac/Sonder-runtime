@@ -115,6 +115,48 @@ void main() {
         'last_notification_error': '',
         'protocol_list_changed': true,
       },
+      'learning_health': {
+        'status': 'healthy',
+        'interactions': 4416,
+        'outcomes': 3710,
+        'outcome_interactions': 3710,
+        'good_outcomes': 3596,
+        'bad_outcomes': 114,
+        'outcome_coverage_percent': 84.0,
+        'positive_percent': 96.9,
+        'lessons': 974,
+        'facts': 8,
+        'grounded_lessons': 461,
+        'synthetic_lessons': 513,
+        'lessons_per_interaction': 0.221,
+        'distillation_yield': 0.128,
+        'lesson_sources': {'interaction': 461, 'seed': 513},
+        'signals': [
+          {
+            'signal': 'tests_passed',
+            'count': 3559,
+            'average_reward': 1.0,
+            'good': true,
+          },
+          {
+            'signal': 'failed',
+            'count': 99,
+            'average_reward': -1.0,
+            'good': false,
+          },
+        ],
+        'quality': {
+          'exact_duplicate_groups': 0,
+          'exact_duplicate_prunable': 0,
+          'no_embedding': 0,
+          'vague_without_anchor': 0,
+          'path_or_secret_like': 0,
+          'missing_source_interaction': 0,
+          'missing_fts': 0,
+          'orphan_fts': 0,
+          'embedding_percent': 100.0,
+        },
+      },
       'models': const [],
     });
 
@@ -160,6 +202,22 @@ void main() {
     expect(find.text('3 atomic refreshes'), findsOneWidget);
     expect(find.text('Live tool-list updates'), findsOneWidget);
 
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('learning-health-panel')),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Learning Quality'), findsOneWidget);
+    expect(find.text('Learning healthy'), findsOneWidget);
+    expect(find.text('974 lessons'), findsOneWidget);
+    expect(find.text('3710 outcomes'), findsOneWidget);
+    expect(find.text('interaction  461'), findsOneWidget);
+    expect(find.text('seed  513'), findsOneWidget);
+    expect(find.text('tests passed  3559'), findsOneWidget);
+    expect(find.textContaining('Memory hygiene is clean'), findsOneWidget);
+
     if (Platform.environment['TRILOBITE_CAPTURE_UI'] == '1') {
       await tester.runAsync(() async {
         final boundary = captureKey.currentContext!.findRenderObject()!
@@ -172,6 +230,66 @@ void main() {
         image.dispose();
       });
     }
+  });
+
+  testWidgets('System learning quality surfaces hygiene warnings',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(900, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final info = SystemInfo.fromJson({
+      'status': 'ready',
+      'learning_health': {
+        'status': 'attention',
+        'interactions': 20,
+        'outcomes': 10,
+        'outcome_interactions': 10,
+        'good_outcomes': 5,
+        'bad_outcomes': 5,
+        'outcome_coverage_percent': 50.0,
+        'positive_percent': 50.0,
+        'lessons': 4,
+        'grounded_lessons': 2,
+        'synthetic_lessons': 2,
+        'lesson_sources': {'interaction': 2, 'seed': 2},
+        'signals': const [],
+        'quality': {
+          'exact_duplicate_groups': 1,
+          'exact_duplicate_prunable': 2,
+          'no_embedding': 1,
+          'vague_without_anchor': 0,
+          'path_or_secret_like': 1,
+          'missing_source_interaction': 0,
+          'missing_fts': 0,
+          'orphan_fts': 0,
+          'embedding_percent': 75.0,
+        },
+      },
+      'models': const [],
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: SystemScreen(
+          settings: Settings(),
+          initialInfo: info,
+          liveUpdates: false,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('learning-health-panel')),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Learning attention'), findsOneWidget);
+    expect(find.textContaining('Memory hygiene needs review'), findsOneWidget);
+    expect(find.textContaining('2 duplicate rows'), findsOneWidget);
+    expect(find.textContaining('1 missing embeddings'), findsOneWidget);
+    expect(find.textContaining('1 privacy flags'), findsOneWidget);
   });
 
   testWidgets('Completed autopilot run renders its persisted ledger',

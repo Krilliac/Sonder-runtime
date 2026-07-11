@@ -49,6 +49,7 @@ import self_heal
 import grounding
 import trilobite_paths
 import memory_quality
+import learning_health
 import domain_grounding
 import master_orchestrator
 import admin_auth
@@ -278,6 +279,7 @@ LIVE_RELOAD_MODULES = [
     "web_intents",
     "self_heal",
     "memory_quality",
+    "learning_health",
     "domain_grounding",
     "master_orchestrator",
     "admin_auth",
@@ -860,6 +862,8 @@ def control_command(prompt: str, history=None, session="", project=""):
         return _runtime_command(arg)
     if cmd in ("/mcp", "/convergence"):
         return _mcp_command(arg)
+    if cmd in ("/learning", "/learnhealth", "/metrics"):
+        return learning_health_status()
     if cmd in ("/work", "/agent"):
         if not arg.strip():
             return "usage: /work <task>"
@@ -2107,6 +2111,22 @@ def trilobite_stats() -> str:
     return "\n".join(lines)
 
 
+def learning_health_data() -> dict:
+    """Return structured outcome grounding, lesson provenance, and hygiene metrics."""
+    _maybe_live_reload()
+    conn = _open_db()
+    try:
+        return learning_health.build_report(conn)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def learning_health_status() -> str:
+    """Show outcome coverage, positive signals, lesson provenance, and memory hygiene."""
+    return learning_health.format_report(learning_health_data())
+
+
 def _rough_token_count(text) -> int:
     """Cheap, dependency-free estimate for dashboard health meters."""
     if not text:
@@ -2761,22 +2781,16 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
     context = context_health_data(session=session, project=project)
     conn = _open_db()
     try:
-        quality = memory_quality.audit(conn)
-        interactions = memory_store.count_interactions(conn)
-        signal_counts = memory_store.outcome_signal_counts(conn)
-        lesson_count = conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0]
-        fact_count = conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
+        learning_state = learning_health.build_report(conn)
     finally:
         conn.close()
 
-    outcomes = sum(signal_counts.values())
-    acceptance = (
-        sum(
-            signal_counts.get(sig, 0)
-            for sig in ("tests_passed", "accepted", "used", "copied", "edited", "compiled")
-        )
-        / max(1, outcomes)
-    )
+    quality = learning_state["quality"]
+    interactions = learning_state["interactions"]
+    outcomes = learning_state["outcomes"]
+    lesson_count = learning_state["lessons"]
+    fact_count = learning_state["facts"]
+    acceptance = learning_state["positive_percent"] / 100.0
     issues = []
     try:
         autopilot = autopilot_store.snapshot(include_finished=False, limit=100)
@@ -2797,7 +2811,7 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
             "action": action,
         })
 
-    if interactions and outcomes / max(1, interactions) < 0.35:
+    if interactions and learning_state["outcome_coverage_percent"] < 35.0:
         add(
             "learning",
             "high",
@@ -2938,6 +2952,7 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
             "path_or_secret_like": quality.get("path_or_secret_like", 0),
             "fts_issues": quality.get("missing_fts", 0) + quality.get("orphan_fts", 0),
         },
+        "learning_health": learning_state,
         "autopilot": {
             "active": autopilot.get("active_runs", 0),
             "resumable": autopilot.get("resumable_runs", 0),
@@ -2952,9 +2967,10 @@ def format_improvement_report(report: dict) -> str:
     lines = [
         "trilobite improvement report",
         "  readiness score: %s/100" % report.get("score", 0),
-        "  learning: %s interactions, %s outcomes, %s%% positive/grounded" % (
+        "  learning: %s interactions, %s outcomes, %s%% covered, %s%% positive" % (
             report.get("interactions", 0),
             report.get("outcomes", 0),
+            report.get("learning_health", {}).get("outcome_coverage_percent", 0),
             report.get("acceptance_percent", 0),
         ),
         "  memory: %s lessons, %s facts, duplicate rows=%s, vague=%s, missing embeddings=%s" % (
@@ -4978,6 +4994,8 @@ def _loop_dispatch(action):
             session=action.get("session", ""),
             project=action.get("project", ""),
         ))
+    if action_type == "learning_health":
+        return _loop_text_result("learning_health", learning_health_status())
     if action_type == "memory_quality_report":
         return _loop_text_result("memory_quality_report", memory_quality_report(
             sample_limit=action.get("sample_limit", 5),
@@ -5297,7 +5315,7 @@ def _loop_dispatch(action):
         "ok": False,
         "type": action_type or "(unknown)",
         "summary": "unknown action type",
-        "output": "Valid action types: code, project, artifact_generate, game_reference_suite, game_generate_and_test, game_generation_campaign, offload, trilobite, master_orchestrate, master_status, master_capacity, master_cancel, master_retry, file_policy, workspace_inventory, directory_tree, text_search, script_search, program_search, workspace_run, script_run, image_inspect, file_find, file_read, file_write, file_edit, file_delete, status, diagnostics, context_health, memory_quality_report, memory_quality_repair, memory_privacy_review, memory_privacy_repair, memory_embedding_backfill, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, weather_lookup, approximate_location_lookup, unload, sleep.",
+        "output": "Valid action types: code, project, artifact_generate, game_reference_suite, game_generate_and_test, game_generation_campaign, offload, trilobite, master_orchestrate, master_status, master_capacity, master_cancel, master_retry, file_policy, workspace_inventory, directory_tree, text_search, script_search, program_search, workspace_run, script_run, image_inspect, file_find, file_read, file_write, file_edit, file_delete, status, diagnostics, context_health, learning_health, memory_quality_report, memory_quality_repair, memory_privacy_review, memory_privacy_repair, memory_embedding_backfill, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, weather_lookup, approximate_location_lookup, unload, sleep.",
     }
 
 
@@ -6195,6 +6213,7 @@ def tool_manifest() -> str:
         "emotion_vector_status/update_emotion_vectors/tune_emotion_vectors": "Read, edit, or live-tune tone vectors.",
         "learn_preference/preferences_status": "Read or teach durable user behavior/workflow preferences.",
         "memory_search/memory_export/session_export": "Inspect local memory.",
+        "learning_health_status": "Inspect grounded outcome coverage, signal quality, lesson provenance, distillation yield, and memory hygiene.",
         "memory_quality_report/memory_quality_repair": "Audit and dry-run/prune exact duplicate lessons.",
         "memory_privacy_review/memory_privacy_repair": "Review redacted privacy findings and explicitly dry-run/remove selected flagged lessons.",
         "memory_embedding_backfill": "Dry-run or backfill missing semantic vectors with the local embedding model.",
@@ -6254,6 +6273,7 @@ AGENT_TOOL_HELP = """Available tools:
 - workflow_run: {"name": "...", "max_iterations": 1}
 - diagnostics: {}
 - context_health: {}
+- learning_health_status: {}
 - context_policy_status: {"context_size": "1m"}
 - set_context_size: {"context_size": "256k"}
 - memory_quality_report: {"sample_limit": 5}
@@ -6290,7 +6310,7 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range",
     "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
-    "diagnostics", "context_health", "context_policy_status",
+    "diagnostics", "context_health", "learning_health_status", "context_policy_status",
     "memory_quality_report", "memory_privacy_review", "system_improvement_report", "master_status", "master_capacity",
     "self_heal_check", "status", "system_profile_text",
     "emotion_vector_status", "preferences_status", "tool_manifest",
@@ -6320,6 +6340,7 @@ REPOSITORY_AGENT_TOOL_HELP = """Available tools:
 - context_compaction_plan: {"session": "", "project": ""}
 - diagnostics: {}
 - context_health: {"session": "", "project": ""}
+- learning_health_status: {}
 - context_policy_status: {"context_size": "32k"}
 - memory_quality_report: {"sample_limit": 5}
 - memory_privacy_review: {"sample_limit": 20}
@@ -7002,6 +7023,8 @@ def _agent_dispatch(
             session=args.get("session", ""),
             project=args.get("project", ""),
         )
+    if tool_name == "learning_health_status":
+        return learning_health_status()
     if tool_name == "context_policy_status":
         return context_policy_status(args.get("context_size", ""))
     if tool_name == "set_context_size":
@@ -7297,7 +7320,7 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
 _WORK_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range",
     "text_search", "script_search", "program_search", "image_inspect",
-    "memory_search", "memory_quality_report", "memory_privacy_review",
+    "memory_search", "learning_health_status", "memory_quality_report", "memory_privacy_review",
     "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",
     "status", "diagnostics",
 })
@@ -7904,7 +7927,7 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "file_read", "file_read_range", "text_search", "script_search",
     "program_search", "image_inspect", "memory_search", "web_search",
     "web_fetch", "weather_lookup", "status", "diagnostics",
-    "context_health", "memory_quality_report", "system_improvement_report",
+    "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report",
 })
 _AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
     "directory_create", "file_write", "file_edit", "workspace_run",
@@ -8817,11 +8840,19 @@ def diagnostics() -> str:
     except Exception as e:
         lines.append("  context: ERROR %s" % e)
     try:
-        conn = _open_db()
-        try:
-            quality = memory_quality.audit(conn)
-        finally:
-            conn.close()
+        health = learning_health_data()
+        quality = health["quality"]
+        lines.append(
+            "  learning health: %s (%s%% outcome coverage, %s%% positive, yield=%s)"
+            % (
+                health["status"],
+                health["outcome_coverage_percent"],
+                health["positive_percent"],
+                health["distillation_yield"]
+                if health["distillation_yield"] is not None
+                else "n/a",
+            )
+        )
         lines.append("  memory quality: %d duplicate group(s), %d prunable, %d no embedding" % (
             quality["exact_duplicate_groups"], quality["exact_duplicate_prunable"],
             quality["no_embedding"]))

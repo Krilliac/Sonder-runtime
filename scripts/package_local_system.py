@@ -58,6 +58,7 @@ REQUIRED_FILES = {
     "creative_router.py",
     "game_forge.py",
     "fleet_store.py",
+    "learning_health.py",
     "reloadable_mcp.py",
     "runtime_policy.py",
     "server.py",

@@ -74,6 +74,12 @@ COMMANDS = [
         "summary": "Audit or refresh the atomic live MCP source and tool registry.",
     },
     {
+        "name": "/learning",
+        "category": "memory",
+        "risk": "safe",
+        "summary": "Show grounded outcome coverage, lesson provenance, distillation yield, and memory hygiene.",
+    },
+    {
         "name": "/report",
         "category": "inspect",
         "risk": "safe",

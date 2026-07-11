@@ -248,6 +248,35 @@ def test_trilobite_stats_runs_against_empty_db(monkeypatch, tmp_path):
     assert "token rows:" in out
 
 
+def test_learning_health_is_structured_and_routed(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "learning.db"))
+    conn = server._open_db()
+    try:
+        memory_store.log_interaction(
+            conn, "i1", "task", "", "answer", "code"
+        )
+        memory_store.record_outcome_row(conn, "i1", "tests_passed", 1.0)
+        memory_store.add_lesson(
+            conn,
+            "lesson-one",
+            "Verify the exact packaged payload before release.",
+            b"\x00\x00\x00\x00",
+            "i1",
+        )
+    finally:
+        conn.close()
+
+    data = server.learning_health_data()
+    text = server.learning_health_status()
+
+    assert data["status"] == "healthy"
+    assert data["outcome_coverage_percent"] == 100.0
+    assert data["grounded_lessons"] == 1
+    assert "trilobite learning health" in text
+    assert server.control_command("/learning") == text
+    assert server.control_command("/metrics") == text
+
+
 def test_context_health_reports_session_and_memory(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
     monkeypatch.setattr(server, "SESSION_NUM_CTX", 100)

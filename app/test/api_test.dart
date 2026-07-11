@@ -251,6 +251,7 @@ void main() {
     expect(info.autopilot, isNull);
     expect(info.runtimePolicy, isNull);
     expect(info.mcpRuntime, isNull);
+    expect(info.learningHealth, isNull);
     expect(info.models, isEmpty);
   });
 
@@ -315,5 +316,65 @@ void main() {
     expect(runtime.loadedShort, '1234567890ab');
     expect(runtime.currentShort, '1234567890ab');
     expect(runtime.hasWarning, isFalse);
+  });
+
+  test('system info parses structured learning health', () {
+    final info = SystemInfo.fromJson({
+      'learning_health': {
+        'status': 'healthy',
+        'interactions': 4416,
+        'outcomes': 3710,
+        'outcome_interactions': 3710,
+        'good_outcomes': 3596,
+        'bad_outcomes': 114,
+        'outcome_coverage_percent': 84.0,
+        'positive_percent': 96.9,
+        'lessons': 974,
+        'facts': 8,
+        'grounded_lessons': 461,
+        'synthetic_lessons': 513,
+        'lessons_per_interaction': 0.221,
+        'distillation_yield': 0.128,
+        'lesson_sources': {'interaction': 461, 'seed': 513},
+        'signals': [
+          {
+            'signal': 'tests_passed',
+            'count': 3559,
+            'average_reward': 1.0,
+            'good': true,
+          },
+          {
+            'signal': 'failed',
+            'count': 99,
+            'average_reward': -1.0,
+            'good': false,
+          },
+        ],
+        'quality': {
+          'exact_duplicate_groups': 0,
+          'exact_duplicate_prunable': 0,
+          'no_embedding': 0,
+          'vague_without_anchor': 0,
+          'path_or_secret_like': 0,
+          'missing_source_interaction': 0,
+          'missing_fts': 0,
+          'orphan_fts': 0,
+          'embedding_percent': 100.0,
+        },
+      },
+    });
+
+    final health = info.learningHealth!;
+    expect(health.status, 'healthy');
+    expect(health.outcomeCoveragePercent, 84.0);
+    expect(health.positivePercent, 96.9);
+    expect(health.groundedLessons, 461);
+    expect(health.distillationYield, 0.128);
+    expect(health.lessonSources['seed'], 513);
+    expect(health.signals.first.signal, 'tests_passed');
+    expect(health.signals.last.good, isFalse);
+    expect(health.quality.embeddingPercent, 100.0);
+    expect(health.quality.issueCount, 0);
+    expect(health.hasWarning, isFalse);
   });
 }

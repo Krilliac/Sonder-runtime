@@ -89,6 +89,18 @@ def test_agent_dispatch_routes_fleet_capacity_and_cancellation(monkeypatch):
     assert "not allowed" in retry_denied
 
 
+def test_agent_dispatch_exposes_learning_health_as_read_only(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "learning_health_status",
+        lambda: "learning health: grounded",
+    )
+
+    assert server._agent_dispatch(
+        "learning_health_status", {}, read_only=True
+    ) == "learning health: grounded"
+
+
 def test_agent_dispatch_can_tune_emotion_vectors(monkeypatch, tmp_path):
     monkeypatch.setattr(server.emotion_vectors, "workspace_root", lambda: str(tmp_path))
     monkeypatch.delenv("TRILOBITE_EMOTION_VECTORS", raising=False)
