@@ -11,6 +11,23 @@ def test_extract_agent_json_accepts_wrapped_json():
     assert out["tool"] == "status"
 
 
+def test_agent_observation_prompt_bounds_context_and_keeps_recent_evidence():
+    observations = [
+        "step %d tool=file_read reason=inspect\nMARKER_%d\n%s"
+        % (index, index, "x" * 2500)
+        for index in range(1, 6)
+    ]
+
+    prompt = server._agent_observation_prompt(observations, max_chars=1800)
+
+    assert len(prompt) <= 1800
+    assert "Earlier observation summaries" in prompt
+    assert "step 1 tool=file_read" in prompt
+    assert "step 5 tool=file_read" in prompt
+    assert "MARKER_5" in prompt
+    assert "full host ledger retained" in prompt
+
+
 def test_agent_dispatch_blocks_web_when_disabled():
     for tool, args in (
         ("web_search", {"query": "x"}),
@@ -129,6 +146,86 @@ def test_agent_reports_parse_error(monkeypatch):
     monkeypatch.setattr(server, "_make_generate", lambda *a, **k: lambda prompt, history=None: "not json")
     out = server.agent("x", tier="code", max_steps=1)
     assert out.startswith("ERROR: could not parse agent decision")
+
+
+def test_agent_repairs_invalid_json_decision_then_continues(monkeypatch):
+    responses = [
+        "I should inspect memory first.",
+        '{"tool": "memory_search", "args": {"query": "adaptive"}}',
+        '{"final": "done after repaired decision"}',
+    ]
+    prompts = []
+
+    def generate(prompt, history=None):
+        prompts.append(prompt)
+        return responses.pop(0)
+
+    monkeypatch.setattr(server, "_make_generate", lambda *a, **k: generate)
+    monkeypatch.setattr(
+        server, "_agent_dispatch_observed", lambda *a, **k: "grounded observation",
+    )
+
+    output = server._agent_impl("inspect adaptive behavior", max_steps=2)
+
+    assert output == "done after repaired decision"
+    assert "HOST FORMAT REPAIR 1/2" in prompts[1]
+    assert "exactly one JSON object" in prompts[1]
+    assert "grounded observation" in prompts[2]
+
+
+def test_agent_stops_repeating_identical_failed_tool_call(monkeypatch):
+    responses = [
+        '{"tool": "script_run", "args": {"path": "missing.py"}}',
+        '{"tool": "script_run", "args": {"path": "missing.py"}}',
+        '{"tool": "script_run", "args": {"path": "missing.py"}}',
+        '{"tool": "script_run", "args": {"path": "missing.py"}}',
+    ]
+    prompts = []
+    dispatches = []
+
+    def generate(prompt, history=None):
+        prompts.append(prompt)
+        return responses.pop(0)
+
+    monkeypatch.setattr(server, "_make_generate", lambda *a, **k: generate)
+    monkeypatch.setattr(
+        server,
+        "_agent_dispatch_observed",
+        lambda *a, **k: dispatches.append(a) or "ERROR: missing.py",
+    )
+
+    output = server._agent_impl("run the script", max_steps=4)
+
+    assert output.startswith("ERROR: agent repeated the same unsuccessful tool call 3 times")
+    assert len(dispatches) == 2
+    assert "HOST RECOVERY" in prompts[1]
+    assert "HOST NO-PROGRESS" in prompts[3]
+
+
+def test_agent_gets_final_only_pass_after_tool_step_budget(monkeypatch):
+    responses = [
+        '{"tool": "memory_search", "args": {"query": "one"}}',
+        '{"tool": "memory_search", "args": {"query": "two"}}',
+        '{"final": "synthesized after tool budget"}',
+    ]
+    prompts = []
+
+    def generate(prompt, history=None):
+        prompts.append(prompt)
+        return responses.pop(0)
+
+    monkeypatch.setattr(server, "_make_generate", lambda *a, **k: generate)
+    monkeypatch.setattr(
+        server, "_agent_dispatch_observed", lambda *a, **k: "grounded evidence",
+    )
+
+    output = server._agent_impl(
+        "inspect twice", max_steps=2, include_evidence=True,
+    )
+
+    assert output.startswith("synthesized after tool budget")
+    assert "=== TOOL EVIDENCE ===" in output
+    assert "HOST FINALIZATION ONLY" in prompts[2]
 
 
 def test_agent_host_requires_successful_web_tool_before_final(monkeypatch):

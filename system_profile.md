@@ -47,6 +47,10 @@
   model tier, tool allowlist, workspace roots, task/failure/cycle budgets, evidence
   gate, and pause/cancel decisions as final. Persist progress across restarts and
   require an explicit resume; never infer location inside an autonomous run.
+- After a successful inspect/research task, use the adaptive checkpoint to compare
+  new evidence with the pending plan. Continue when it is still correct, replan
+  only stale work, preserve superseded tasks for audit, and never exceed the host's
+  persisted replan budget. Respect `--static` when adaptive review is disabled.
 - `EVIDENCE_REQUIRED` applies only to claims about an existing repository or files.
   Greenfield design and implementation requests should proceed from explicit task
   assumptions and must not be rejected merely because no files were supplied.

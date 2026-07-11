@@ -59,7 +59,7 @@ COMMANDS = [
         "name": "/autopilot",
         "category": "agents",
         "risk": "ask",
-        "summary": "Plan and run a persistent local autonomous goal with host budgets, evidence gates, pause, resume, and cancel.",
+        "summary": "Run a persistent local goal with evidence-aware checkpoints, bounded replans, host gates, pause, resume, and cancel.",
     },
     {
         "name": "/report",

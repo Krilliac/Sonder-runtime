@@ -30,6 +30,7 @@ class _SystemScreenState extends State<SystemScreen> {
   final _autopilotGoal = TextEditingController();
   bool _autopilotObserve = false;
   bool _autopilotWeb = true;
+  bool _autopilotAdaptive = true;
   SystemInfo? _info;
   LocalInstallInfo? _localInfo;
   String? _message;
@@ -216,6 +217,7 @@ class _SystemScreenState extends State<SystemScreen> {
     final options = <String>[
       if (_autopilotObserve) '--observe',
       if (!_autopilotWeb) '--no-web',
+      if (!_autopilotAdaptive) '--static',
     ];
     final command = [
       '/autopilot',
@@ -460,6 +462,15 @@ class _SystemScreenState extends State<SystemScreen> {
                       onSelected: _working
                           ? null
                           : (value) => setState(() => _autopilotWeb = value),
+                    ),
+                    FilterChip(
+                      label: const Text('Adaptive review'),
+                      avatar: const Icon(Icons.route_outlined, size: 18),
+                      selected: _autopilotAdaptive,
+                      onSelected: _working
+                          ? null
+                          : (value) =>
+                              setState(() => _autopilotAdaptive = value),
                     ),
                     Tooltip(
                       message:
@@ -911,6 +922,13 @@ class _AutopilotPanel extends StatelessWidget {
               ),
               label: Text(run.allowWeb ? 'web on' : 'web off'),
             ),
+            Chip(
+              avatar: Icon(
+                run.adaptive ? Icons.route_outlined : Icons.linear_scale,
+                size: 18,
+              ),
+              label: Text(run.adaptive ? 'adaptive' : 'static plan'),
+            ),
           ],
         ),
         const SizedBox(height: 12),
@@ -938,7 +956,9 @@ class _AutopilotPanel extends StatelessWidget {
         const SizedBox(height: 6),
         Text(
           '$complete/${run.tasks.length} tasks settled • '
-          '${run.cycles} cycles • ${run.failures}/${run.maxFailures} failures',
+          '${run.cycles} cycles • ${run.failures}/${run.maxFailures} failures • '
+          '${run.checkpoints} checkpoint${run.checkpoints == 1 ? '' : 's'} • '
+          '${run.replans}/${run.maxReplans} replans',
           style: Theme.of(context).textTheme.bodySmall,
         ),
         if (run.summary.isNotEmpty) ...[

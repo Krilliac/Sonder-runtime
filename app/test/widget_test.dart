@@ -100,8 +100,12 @@ void main() {
           'phase': 'completed',
           'cycles': 3,
           'failures': 0,
+          'checkpoints': 1,
+          'replans': 1,
           'max_failures': 2,
           'max_tasks': 3,
+          'max_replans': 2,
+          'adaptive': true,
           'summary': 'Objective completed with host-verified task evidence.',
           'final_report': 'autopilot end report\n3 tasks passed\n0 failures',
           'last_error': '',
@@ -185,7 +189,10 @@ void main() {
 
     expect(find.text('Persistent checklist'), findsOneWidget);
     expect(
-      find.text('3/3 tasks settled • 3 cycles • 0/2 failures'),
+      find.text(
+        '3/3 tasks settled • 3 cycles • 0/2 failures • '
+        '1 checkpoint • 1/2 replans',
+      ),
       findsOneWidget,
     );
     expect(find.textContaining('Validate completion gates'), findsWidgets);

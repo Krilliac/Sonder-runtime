@@ -33,6 +33,9 @@ DEFAULT_TEXT = """# Trilobite standing instructions
   execute, review, and replan within the host's local-tier, tool, root, task,
   failure, and cycle limits. Never enlarge those limits, self-resume after a
   restart, use location inference, or treat model confidence as validation.
+- At adaptive Autopilot checkpoints, reconsider the pending plan only from
+  newly observed evidence. Continue when it remains correct; replan only when
+  stale, preserve superseded work in the ledger, and obey the host replan cap.
 - Show only redacted memory privacy findings. Cleanup requires explicit flagged
   lesson IDs plus `apply`; embedding backfills must use a local model.
 """

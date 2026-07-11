@@ -56,8 +56,12 @@ CREATE TABLE IF NOT EXISTS autopilot_runs (
     current_task INTEGER,
     cycles INTEGER NOT NULL DEFAULT 0,
     failures INTEGER NOT NULL DEFAULT 0,
+    checkpoints INTEGER NOT NULL DEFAULT 0,
+    replans INTEGER NOT NULL DEFAULT 0,
     max_failures INTEGER NOT NULL DEFAULT 3,
     max_tasks INTEGER NOT NULL DEFAULT 12,
+    max_replans INTEGER NOT NULL DEFAULT 2,
+    adaptive INTEGER NOT NULL DEFAULT 1,
     owner_id TEXT DEFAULT '',
     owner_pid INTEGER DEFAULT 0,
     owner_host TEXT DEFAULT '',
@@ -84,6 +88,13 @@ CREATE TABLE IF NOT EXISTS autopilot_events (
 CREATE INDEX IF NOT EXISTS idx_autopilot_events_run
     ON autopilot_events(run_id, event_id DESC);
 """
+
+_RUN_COLUMN_MIGRATIONS = {
+    "checkpoints": "INTEGER NOT NULL DEFAULT 0",
+    "replans": "INTEGER NOT NULL DEFAULT 0",
+    "max_replans": "INTEGER NOT NULL DEFAULT 2",
+    "adaptive": "INTEGER NOT NULL DEFAULT 1",
+}
 
 
 def database_path() -> str:
@@ -113,6 +124,15 @@ def _ensure_schema(path: str) -> None:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA foreign_keys=ON")
             conn.executescript(_SCHEMA)
+            existing = {
+                row[1] for row in conn.execute("PRAGMA table_info(autopilot_runs)")
+            }
+            for name, declaration in _RUN_COLUMN_MIGRATIONS.items():
+                if name not in existing:
+                    conn.execute(
+                        "ALTER TABLE autopilot_runs ADD COLUMN %s %s"
+                        % (name, declaration)
+                    )
             conn.commit()
         finally:
             conn.close()
@@ -157,6 +177,7 @@ def _row_dict(row) -> dict | None:
             parsed = []
         data[target] = parsed if isinstance(parsed, list) else []
     data["allow_web"] = bool(data.get("allow_web"))
+    data["adaptive"] = bool(data.get("adaptive"))
     data["pause_requested"] = bool(data.get("pause_requested"))
     data["cancel_requested"] = bool(data.get("cancel_requested"))
     return data
@@ -223,6 +244,8 @@ def create_run(
     allow_web: bool = True,
     max_failures: int = 3,
     max_tasks: int = 12,
+    max_replans: int = 2,
+    adaptive: bool = True,
 ) -> dict:
     objective = _clamp_text(objective.strip(), MAX_OBJECTIVE_CHARS)
     if not objective:
@@ -234,8 +257,8 @@ def create_run(
             """
             INSERT INTO autopilot_runs(
                 id, objective, project, tier, policy, allow_web, status, phase,
-                max_failures, max_tasks, created_ts, updated_ts
-            ) VALUES (?, ?, ?, ?, ?, ?, 'ready', 'plan', ?, ?, ?, ?)
+                max_failures, max_tasks, max_replans, adaptive, created_ts, updated_ts
+            ) VALUES (?, ?, ?, ?, ?, ?, 'ready', 'plan', ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
@@ -246,6 +269,8 @@ def create_run(
                 int(bool(allow_web)),
                 max(1, min(int(max_failures), 10)),
                 max(3, min(int(max_tasks), 24)),
+                max(0, min(int(max_replans), 6)),
+                int(bool(adaptive)),
                 now,
                 now,
             ),
@@ -366,6 +391,8 @@ def save_progress(
     current_task: int | None = None,
     cycles_delta: int = 0,
     failures_delta: int = 0,
+    checkpoints_delta: int = 0,
+    replans_delta: int = 0,
     summary: str | None = None,
     last_error: str | None = None,
     event_kind: str = "progress",
@@ -374,10 +401,12 @@ def save_progress(
 ) -> dict | None:
     now = time.time()
     assignments = [
-        "cycles=cycles+?", "failures=failures+?", "lease_until=?", "updated_ts=?",
+        "cycles=cycles+?", "failures=failures+?", "checkpoints=checkpoints+?",
+        "replans=replans+?", "lease_until=?", "updated_ts=?",
     ]
     values: list[object] = [
         int(cycles_delta), int(failures_delta),
+        int(checkpoints_delta), int(replans_delta),
         now + max(60, min(int(lease_seconds), 3600)), now,
     ]
     if plan is not None:

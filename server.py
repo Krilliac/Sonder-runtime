@@ -684,18 +684,21 @@ def _autopilot_command(arg: str, project: str = "") -> str:
     if action in ("run", "start", "plan"):
         policy = "workspace"
         allow_web = True
+        adaptive = True
         while rest.startswith("--"):
             option, _, remaining = rest.partition(" ")
             if option == "--observe":
                 policy = "observe"
             elif option == "--no-web":
                 allow_web = False
+            elif option == "--static":
+                adaptive = False
             else:
                 return "ERROR: unknown autopilot option '%s'." % option
             rest = remaining.strip()
         if not rest:
             return (
-                "usage: /autopilot %s [--observe] [--no-web] <objective>"
+                "usage: /autopilot %s [--observe] [--no-web] [--static] <objective>"
                 % action
             )
         return autopilot_start(
@@ -703,6 +706,7 @@ def _autopilot_command(arg: str, project: str = "") -> str:
             project=_resolve_project(project) or "",
             policy=policy,
             allow_web=allow_web,
+            adaptive=adaptive,
             plan_only=action == "plan",
         )
     if action == "resume":
@@ -715,8 +719,8 @@ def _autopilot_command(arg: str, project: str = "") -> str:
         return (
             "autopilot commands:\n"
             "  /autopilot status [id]\n"
-            "  /autopilot plan [--observe] [--no-web] <objective>\n"
-            "  /autopilot run [--observe] [--no-web] <objective>\n"
+            "  /autopilot plan [--observe] [--no-web] [--static] <objective>\n"
+            "  /autopilot run [--observe] [--no-web] [--static] <objective>\n"
             "  /autopilot resume|pause|cancel <id>"
         )
     return "ERROR: unknown autopilot action '%s'; try /autopilot help." % action
@@ -5977,7 +5981,7 @@ def tool_manifest() -> str:
     """List the local-llm MCP tools and what they are for."""
     tools = {
         "agent": "Run a Claude-like tool-calling loop that can use local tools and web tools.",
-        "autopilot_start/autopilot_status/autopilot_resume/autopilot_pause/autopilot_cancel": "Run a restart-persistent local autonomous goal with host tool allowlists, budgets, evidence gates, and explicit lifecycle control.",
+        "autopilot_start/autopilot_status/autopilot_resume/autopilot_pause/autopilot_cancel": "Run a restart-persistent local goal with evidence-aware checkpoints, bounded replans, host tool gates, and explicit lifecycle control.",
         "master_orchestrate/master_status/master_capacity/master_cancel/master_retry": "Run restart-safe hardware-scheduled orchestration, inspect capacity/activity, cancel fleets, and explicitly retry interrupted work.",
         "admin_register/admin_login/admin_accounts/admin_set_account": "Manage hosted accounts, roles, bans, tiers, and developer flags.",
         "admin_status/debug_inspect/admin_private_chain_of_thought": "Inspect admin/debug state and safely deny private chain-of-thought exposure.",
@@ -6192,6 +6196,124 @@ def _extract_agent_json(text):
         if start == -1 or end == -1 or end <= start:
             raise ValueError("agent response was not JSON: %s" % text[:300])
         return json.loads(text[start:end + 1])
+
+
+_AGENT_OBSERVATION_PROMPT_CHARS = 9000
+_AGENT_DECISION_REPAIR_LIMIT = 2
+
+
+def _clip_agent_prompt_text(text, limit):
+    """Keep useful context from both ends of a long tool observation."""
+    text = str(text or "")
+    limit = max(0, int(limit))
+    if len(text) <= limit:
+        return text
+    if limit <= 48:
+        return text[:limit]
+    marker = "\n...[observation compacted by host]...\n"
+    remaining = limit - len(marker)
+    head = max(1, (remaining * 2) // 3)
+    tail = max(1, remaining - head)
+    return text[:head] + marker + text[-tail:]
+
+
+def _agent_observation_prompt(
+    observations, max_chars=_AGENT_OBSERVATION_PROMPT_CHARS,
+):
+    """Build a bounded model-facing window while the host retains full evidence."""
+    values = [str(item or "") for item in observations if str(item or "").strip()]
+    if not values:
+        return ""
+    max_chars = max(512, int(max_chars))
+    full = "Tool observations so far:\n" + "\n\n".join(values)
+    if len(full) <= max_chars:
+        return full
+
+    summary_budget = min(1400, max_chars // 5)
+    recent_header = "Recent tool observations (full host ledger retained):\n"
+    recent_budget = max(256, max_chars - summary_budget - len(recent_header) - 4)
+    selected = []
+    selected_chars = 0
+    first_selected = len(values)
+    for index in range(len(values) - 1, -1, -1):
+        value = values[index]
+        separator = 2 if selected else 0
+        if selected_chars + separator + len(value) <= recent_budget:
+            selected.insert(0, value)
+            selected_chars += separator + len(value)
+            first_selected = index
+            continue
+        if not selected:
+            selected.append(_clip_agent_prompt_text(value, recent_budget))
+            first_selected = index
+        break
+
+    recent = recent_header + "\n\n".join(selected)
+    older = values[:first_selected]
+    if not older:
+        return _clip_agent_prompt_text(recent, max_chars)
+
+    summary_lines = []
+    for item in older[-8:]:
+        first_line = next((line.strip() for line in item.splitlines() if line.strip()), "")
+        summary_lines.append("- " + _clip_agent_prompt_text(first_line, 180))
+    omitted = max(0, len(older) - len(summary_lines))
+    summary_header = "Earlier observation summaries (%d compacted" % len(older)
+    if omitted:
+        summary_header += ", %d older omitted" % omitted
+    summary = summary_header + "):\n" + "\n".join(summary_lines)
+    summary = _clip_agent_prompt_text(summary, summary_budget)
+    result = summary + "\n\n" + recent
+    if len(result) <= max_chars:
+        return result
+    # Preserve the recent window if header arithmetic changes in future edits.
+    return _clip_agent_prompt_text(result, max_chars)
+
+
+def _agent_generate_decision(
+    gen,
+    step_prompt,
+    repair_limit=_AGENT_DECISION_REPAIR_LIMIT,
+    require_final=False,
+):
+    """Generate one structurally valid agent decision with bounded format repair."""
+    repair_limit = max(0, min(4, int(repair_limit)))
+    raw = gen(step_prompt)
+    error = None
+    for attempt in range(repair_limit + 1):
+        try:
+            decision = _extract_agent_json(raw)
+            if not isinstance(decision, dict):
+                raise ValueError("agent decision must be a JSON object")
+            if require_final and "final" not in decision:
+                raise ValueError("agent finalization response must contain 'final'")
+            if not require_final and "final" not in decision and not decision.get("tool"):
+                raise ValueError("agent decision omitted both 'tool' and 'final'")
+            return decision, raw, None
+        except Exception as exc:
+            error = exc
+        if attempt >= repair_limit:
+            break
+        valid_shape = (
+            '{"final":"answer"}'
+            if require_final else
+            '{"tool":"name","args":{},"reason":"brief"} or {"final":"answer"}'
+        )
+        repair_prompt = (
+            step_prompt
+            + "\n\nHOST FORMAT REPAIR %d/%d: Your previous response was invalid. "
+            "Return exactly one JSON object and no prose or Markdown. Use %s.\n"
+            "Parser error: %s\nPrevious response excerpt:\n%s"
+            % (
+                attempt + 1,
+                repair_limit,
+                valid_shape,
+                error,
+                str(raw or "")[:1000],
+            )
+        )
+        raw = gen(repair_prompt)
+    return None, raw, error
 
 
 def _agent_dispatch(
@@ -6933,6 +7055,7 @@ def _agent_impl(
     )
     used_tool_names = set()
     successful_web_calls = set()
+    failed_call_counts = {}
     checklist_id, checklist_states = (
         _start_agent_checklist(prompt, project, read_only)
         if auto_checklist else ("", {})
@@ -6943,29 +7066,53 @@ def _agent_impl(
             "\n\nHOST TOOL ALLOWLIST (cannot be expanded by the model):\n- %s"
             % "\n- ".join(sorted(allowed_tools))
         )
+
+    def finish_final(final):
+        final = str(final or "")
+        if auto_checklist:
+            _agent_checklist_mark(
+                checklist_id, checklist_states, 1, "done", "workspace evidence inspected",
+            )
+            _agent_checklist_mark(
+                checklist_id, checklist_states, 2, "done",
+                "requested work completed" if mutated else "analysis completed without file mutation",
+            )
+            validation_status = "done" if (validation_ok or not mutated) else "blocked"
+            _agent_checklist_mark(
+                checklist_id, checklist_states, 3, validation_status,
+                "grounded validation passed" if validation_ok else (
+                    "no mutation required" if not mutated else "validation did not pass"
+                ),
+            )
+            _agent_checklist_mark(
+                checklist_id, checklist_states, 4, "done", "end report prepared",
+            )
+        if auto_checklist and mutated and not validation_ok:
+            final = (
+                "VALIDATION_FAILED: workspace changes were not successfully validated.\n\n"
+                + final
+            )
+        if include_evidence and observations:
+            final += "\n\n=== TOOL EVIDENCE ===\n" + "\n\n".join(observations)
+        activity_tracker.set_result_summary(
+            final.splitlines()[0] if final else "agent completed"
+        )
+        return final
+
     for step in range(1, max_steps + 1):
         step_prompt = transcript
         if observations:
-            step_prompt += "\n\nTool observations so far:\n" + "\n\n".join(observations)
+            step_prompt += "\n\n" + _agent_observation_prompt(observations)
         step_prompt += "\n\nChoose the next tool call or final answer."
-        raw = gen(step_prompt)
-        try:
-            decision = _extract_agent_json(raw)
-        except Exception as e:
+        decision, raw, decision_error = _agent_generate_decision(gen, step_prompt)
+        if decision is None:
             if auto_checklist:
                 _agent_checklist_fail(
                     checklist_id, checklist_states,
                     "model returned an invalid tool decision", 1,
                 )
             return "ERROR: could not parse agent decision at step %d: %s\nraw=%s" % (
-                step, e, raw[:1000])
-        if not isinstance(decision, dict):
-            if auto_checklist:
-                _agent_checklist_fail(
-                    checklist_id, checklist_states,
-                    "model decision was not a JSON object", 1,
-                )
-            return "ERROR: agent decision must be a JSON object."
+                step, decision_error, raw[:1000])
         if "final" in decision:
             final = str(decision.get("final") or "")
             if required_tools and not (required_tools & used_tool_names):
@@ -7006,33 +7153,7 @@ def _agent_impl(
                     )
                 detail = "\n\n" + "\n\n".join(observations) if observations else ""
                 return master_orchestrator.EVIDENCE_REQUIRED + detail
-            if auto_checklist:
-                _agent_checklist_mark(
-                    checklist_id, checklist_states, 1, "done", "workspace evidence inspected",
-                )
-                _agent_checklist_mark(
-                    checklist_id, checklist_states, 2, "done",
-                    "requested work completed" if mutated else "analysis completed without file mutation",
-                )
-                validation_status = "done" if (validation_ok or not mutated) else "blocked"
-                _agent_checklist_mark(
-                    checklist_id, checklist_states, 3, validation_status,
-                    "grounded validation passed" if validation_ok else (
-                        "no mutation required" if not mutated else "validation did not pass"
-                    ),
-                )
-                _agent_checklist_mark(
-                    checklist_id, checklist_states, 4, "done", "end report prepared",
-                )
-            if auto_checklist and mutated and not validation_ok:
-                final = (
-                    "VALIDATION_FAILED: workspace changes were not successfully validated.\n\n"
-                    + final
-                )
-            if include_evidence and observations:
-                final += "\n\n=== TOOL EVIDENCE ===\n" + "\n\n".join(observations)
-            activity_tracker.set_result_summary(final.splitlines()[0] if final else "agent completed")
-            return final
+            return finish_final(final)
         tool_name = decision.get("tool")
         if not tool_name:
             if auto_checklist:
@@ -7046,6 +7167,22 @@ def _agent_impl(
             str(tool_name),
             json.dumps(tool_args, sort_keys=True, ensure_ascii=False, default=str),
         )
+        prior_identical_failures = failed_call_counts.get(call_signature, 0)
+        if prior_identical_failures >= 3:
+            if auto_checklist:
+                _agent_checklist_fail(
+                    checklist_id, checklist_states,
+                    "model repeated an unchanged failing tool call", 2,
+                )
+            return (
+                "ERROR: agent repeated the same unsuccessful tool call %d times: %s. "
+                "Change the arguments, inspect the error, or choose a recovery tool.\n\n%s"
+                % (
+                    prior_identical_failures,
+                    tool_name,
+                    "\n\n".join(observations),
+                )
+            )
         policy_error = ""
         if allowed_tools is not None and tool_name not in allowed_tools:
             policy_error = (
@@ -7066,7 +7203,13 @@ def _agent_impl(
                 "ERROR: HOST REQUIREMENT: inspect relevant workspace evidence "
                 "before making a mutation."
             )
-        if tool_name in {
+        if prior_identical_failures >= 2:
+            observation = (
+                "ERROR: HOST NO-PROGRESS: this exact tool call already failed twice. "
+                "It was not run again. Change its arguments, inspect/discover the "
+                "correct target, or choose a different recovery tool."
+            )
+        elif tool_name in {
             "web_search", "web_fetch", "weather_lookup",
             "approximate_location_lookup",
         } and call_signature in successful_web_calls:
@@ -7090,6 +7233,23 @@ def _agent_impl(
             )
         observation_text = str(observation)
         tool_ok = _agent_observation_ok(observation_text)
+        if tool_ok:
+            failed_call_counts.pop(call_signature, None)
+            if tool_name in _WORK_MUTATION_TOOLS:
+                # A real state change makes prior validation failures retryable.
+                failed_call_counts.clear()
+        else:
+            failed_call_counts[call_signature] = prior_identical_failures + 1
+            recovery = (
+                "HOST RECOVERY: do not repeat this exact failed call unchanged. "
+                "Inspect the error and change the target, arguments, or tool."
+            )
+            if tool_name == "script_run":
+                recovery += (
+                    " Use script_search/file_find to locate a real script, or use "
+                    "workspace_run with an approved interpreter and explicit argv."
+                )
+            observation_text += "\n" + recovery
         used_tool = used_tool or tool_ok
         if tool_ok:
             used_tool_names.add(str(tool_name))
@@ -7169,15 +7329,51 @@ def _agent_impl(
                 observation_text[:6000],
             )
         )
-    if auto_checklist:
-        active_item = 3 if validation_attempted else 2 if mutated else 1
+    final_prompt = transcript
+    if observations:
+        final_prompt += "\n\n" + _agent_observation_prompt(observations)
+    final_prompt += (
+        "\n\nHOST FINALIZATION ONLY: the tool-step budget is exhausted. Do not call "
+        "another tool. Synthesize a concise grounded result from the observations, "
+        "disclose unresolved errors or checks, and return exactly "
+        '{"final":"answer"}.'
+    )
+    final_decision, raw, final_error = _agent_generate_decision(
+        gen, final_prompt, require_final=True,
+    )
+    if final_decision is None:
+        if auto_checklist:
+            active_item = 3 if validation_attempted else 2 if mutated else 1
+            _agent_checklist_fail(
+                checklist_id, checklist_states,
+                "agent could not synthesize a final answer after max_steps",
+                active_item,
+            )
+        return (
+            "ERROR: agent reached max_steps=%d and finalization failed: %s\n"
+            "raw=%s\n\n%s"
+            % (max_steps, final_error, raw[:1000], "\n\n".join(observations))
+        )
+    if required_tools and not (required_tools & used_tool_names):
+        return (
+            "ERROR: agent reached max_steps=%d without using a required web tool (%s)."
+            % (max_steps, ", ".join(sorted(required_tools)))
+        )
+    if auto_checklist and not used_tool:
         _agent_checklist_fail(
             checklist_id, checklist_states,
-            "agent reached max_steps without a final answer",
-            active_item,
+            "agent exhausted tool steps without successful evidence", 1,
         )
-    return "ERROR: agent reached max_steps=%d without final answer.\n\n%s" % (
-        max_steps, "\n\n".join(observations))
+        return "ERROR: agent reached max_steps=%d without successful tool evidence." % max_steps
+    if require_file_evidence and not file_evidence:
+        if auto_checklist:
+            _agent_checklist_fail(
+                checklist_id, checklist_states,
+                "required workspace evidence was not collected", 1,
+            )
+        detail = "\n\n" + "\n\n".join(observations) if observations else ""
+        return master_orchestrator.EVIDENCE_REQUIRED + detail
+    return finish_final(final_decision.get("final"))
 
 
 @mcp.tool()
@@ -7366,13 +7562,22 @@ def _autopilot_json_model(run: dict, role: str, prompt: str, validator) -> dict:
 
 def _autopilot_plan_model(run: dict) -> dict:
     allowed = sorted(_autopilot_allowed_tools(run))
+    max_tasks = int(run.get("max_tasks") or 12)
+    reserve = (
+        min(int(run.get("max_replans") or 0), max(0, max_tasks - 3))
+        if run.get("adaptive", True) else 0
+    )
+    initial_limit = max(3, min(6, max_tasks - reserve))
     prompt = (
         "Create a short executable plan for this autonomous goal.\n"
         "Objective: {objective}\nProject: {project}\nPolicy: {policy}\n"
-        "Web: {web}\nMaximum tasks: {max_tasks}\nAllowed tools: {tools}\n\n"
+        "Web: {web}\nAdaptive checkpoints: {adaptive}\n"
+        "Initial task limit: {initial_limit}\nOverall task ledger limit: {max_tasks}\n"
+        "Replan budget: {max_replans}\nAllowed tools: {tools}\n\n"
         "Use measurable success criteria. Order inspection before mutation and "
         "always finish with grounded validation. Under observe policy, do not "
-        "create implementation tasks. JSON schema:\n"
+        "create implementation tasks. Keep the initial plan within its smaller "
+        "limit so adaptive review has room to replace stale pending work. JSON schema:\n"
         '{{"summary":"...","success_criteria":["..."],"tasks":['
         '{{"title":"...","kind":"inspect|research|implement|validate|report",'
         '"instruction":"specific bounded action"}}]}}'
@@ -7381,14 +7586,22 @@ def _autopilot_plan_model(run: dict) -> dict:
         project=run.get("project") or "default",
         policy=run.get("policy", "workspace"),
         web="on" if run.get("allow_web") else "off",
-        max_tasks=run.get("max_tasks", 12),
+        adaptive="on" if run.get("adaptive", True) else "off",
+        initial_limit=initial_limit,
+        max_tasks=max_tasks,
+        max_replans=run.get("max_replans", 0),
         tools=", ".join(allowed),
     )
 
     def validate(payload):
         normalized = autopilot_controller.normalize_plan(
-            payload, run.get("objective", ""), run.get("max_tasks", 12),
+            payload, run.get("objective", ""), max_tasks,
         )
+        if len(normalized["tasks"]) > initial_limit:
+            raise ValueError(
+                "initial plan exceeds the %d-task adaptive planning limit"
+                % initial_limit
+            )
         if run.get("policy") == "observe" and any(
             task.get("kind") == "implement" for task in normalized["tasks"]
         ):
@@ -7404,33 +7617,102 @@ def _autopilot_review_model(run: dict, issue: str) -> dict:
             "id": task.get("id"),
             "kind": task.get("kind"),
             "title": task.get("title"),
+            "instruction": task.get("instruction"),
             "status": task.get("status"),
             "attempts": task.get("attempts"),
             "result": autopilot_controller._first_line(
                 task.get("output"), task.get("error", ""),
             ),
+            "evidence_actions": autopilot_controller._evidence_actions(
+                task.get("output", ""), limit=6,
+            ),
         })
     prompt = (
         "Review the bounded run and select the next decision.\n"
         "Objective: %s\nHost gate/issue: %s\nFailures: %s/%s\n"
-        "Task budget: %s/%s\nLedger: %s\n\n"
+        "Task budget: %s/%s\nAdaptive checkpoints: %s\nReplans: %s/%s\n"
+        "Ledger: %s\n\n"
         "Use complete only when the host gate says all requirements passed. "
-        "Use retry for one corrected attempt, replan with only necessary new "
-        "tasks, or pause when operator judgment is genuinely required. JSON schema:\n"
-        '{"decision":"complete|retry|replan|pause","reason":"...",'
+        "At an adaptive checkpoint, use continue when the pending plan remains "
+        "correct, replan only when new evidence makes it stale, or pause when "
+        "operator judgment is genuinely required. Use retry only after a failure. "
+        "At every adaptive checkpoint, assess every pending task by ID. A task is "
+        "stale when completed evidence contradicts its premise or says its work is "
+        "already unnecessary. A stale task forbids continue: choose replan, omit "
+        "the contradicted work, and retain necessary validation/reporting. "
+        "The host preserves tasks marked keep and supersedes only tasks marked "
+        "stale. Every replan must include only necessary new replacement tasks; "
+        "tasks may be empty when removing stale work is sufficient and a kept "
+        "validation task remains. JSON schema:\n"
+        '{"decision":"complete|continue|retry|replan|pause","reason":"...",'
         '"instruction":"corrected retry instruction or empty",'
+        '"pending_assessment":[{"id":"task-00","verdict":"keep|stale",'
+        '"reason":"evidence comparison"}],'
         '"tasks":[{"title":"...","kind":"inspect|research|implement|validate|report",'
         '"instruction":"..."}]}'
     ) % (
         run.get("objective", ""), issue, run.get("failures", 0),
         run.get("max_failures", 3), len(run.get("plan") or []),
-        run.get("max_tasks", 12), json.dumps(ledger, ensure_ascii=False),
+        run.get("max_tasks", 12), run.get("checkpoints", 0),
+        run.get("replans", 0), run.get("max_replans", 0),
+        json.dumps(ledger, ensure_ascii=False),
     )
+
+    is_checkpoint = str(issue or "").startswith("adaptive checkpoint")
+    pending_ids = {
+        str(task.get("id"))
+        for task in (run.get("plan") or [])
+        if task.get("status") == "pending" and task.get("id")
+    }
+
+    def validate(payload):
+        normalized = autopilot_controller.normalize_review(payload)
+        if not is_checkpoint:
+            return
+        if normalized["decision"] not in {"continue", "replan", "pause"}:
+            raise ValueError(
+                "adaptive checkpoint decision must be continue, replan, or pause"
+            )
+        assessments = payload.get("pending_assessment") or []
+        if not isinstance(assessments, list):
+            raise ValueError("adaptive pending assessment must be a JSON list")
+        assessed = {}
+        for item in assessments:
+            if not isinstance(item, dict):
+                raise ValueError("each pending assessment must be a JSON object")
+            task_id = str(item.get("id") or "").strip()
+            verdict = str(item.get("verdict") or "").strip().lower()
+            if task_id in assessed:
+                raise ValueError("adaptive review assessed a pending task twice")
+            if verdict not in {"keep", "stale"}:
+                raise ValueError("pending task verdict must be keep or stale")
+            assessed[task_id] = verdict
+        unknown = set(assessed) - pending_ids
+        if unknown:
+            raise ValueError(
+                "adaptive review assessed unknown pending tasks: %s"
+                % ", ".join(sorted(unknown))
+            )
+        for task_id in sorted(pending_ids - set(assessed)):
+            assessments.append({
+                "id": task_id,
+                "verdict": "keep",
+                "reason": "host default: reviewer did not mark this pending task stale",
+            })
+            assessed[task_id] = "keep"
+        payload["pending_assessment"] = assessments
+        stale = {task_id for task_id, verdict in assessed.items() if verdict == "stale"}
+        if stale and normalized["decision"] == "continue":
+            raise ValueError("continue is invalid while a pending task is stale")
+        if normalized["decision"] == "replan":
+            if not stale:
+                raise ValueError("replan requires at least one stale pending task")
+
     return _autopilot_json_model(
         run,
         "reviewer",
         prompt,
-        autopilot_controller.normalize_review,
+        validate,
     )
 
 
@@ -7578,6 +7860,8 @@ def autopilot_start(
     max_cycles: int = 12,
     max_failures: int = 3,
     max_tasks: int = 12,
+    max_replans: int = 2,
+    adaptive: bool = True,
     plan_only: bool = False,
     wait: bool = False,
 ) -> str:
@@ -7594,6 +7878,8 @@ def autopilot_start(
             allow_web=bool(allow_web),
             max_failures=max_failures,
             max_tasks=max_tasks,
+            max_replans=max_replans,
+            adaptive=bool(adaptive),
         )
         if wait:
             run = _execute_autopilot(

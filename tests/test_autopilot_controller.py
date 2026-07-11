@@ -47,6 +47,9 @@ def test_normalize_plan_injects_validation_and_deduplicates():
     )
     assert [task["kind"] for task in normalized["tasks"]] == ["inspect", "validate"]
     assert normalized["tasks"][1]["id"] == "task-02"
+    assert autopilot_controller.normalize_review({
+        "decision": "continue", "reason": "plan remains correct",
+    })["decision"] == "continue"
 
 
 def test_successful_run_completes_only_after_validation_and_review():
@@ -64,6 +67,156 @@ def test_successful_run_completes_only_after_validation_and_review():
     assert all(task["status"] == "passed" for task in result["plan"])
     assert "host-verified task evidence" in result["summary"]
     assert "action: workspace_run" in result["final_report"]
+    assert result["checkpoints"] == 1
+
+
+def test_adaptive_checkpoint_replaces_stale_pending_plan():
+    run = autopilot_store.create_run(
+        "Inspect, adapt, implement, and validate", max_tasks=6, max_replans=1,
+    )
+    executed = []
+
+    def work(_run, task, _prior):
+        executed.append(task["title"])
+        tool = {
+            "inspect": "file_read",
+            "implement": "file_write",
+            "validate": "workspace_run",
+        }.get(task["kind"], "file_read")
+        return _evidence(tool)
+
+    def review(current, issue):
+        if issue.startswith("adaptive checkpoint"):
+            return {
+                "decision": "replan",
+                "reason": "inspection found a more precise implementation path",
+                "tasks": [
+                    {"title": "Implement revised", "kind": "implement", "instruction": "Use discovered API"},
+                    {"title": "Validate revised", "kind": "validate", "instruction": "Run focused checks"},
+                ],
+            }
+        return _complete(current, issue)
+
+    result = autopilot_controller.execute_run(
+        run["id"], "owner", owner_pid=os.getpid(),
+        plan_fn=lambda _run: _plan([
+            {"title": "Inspect", "kind": "inspect", "instruction": "Discover API"},
+            {"title": "Implement stale", "kind": "implement", "instruction": "Old assumption"},
+            {"title": "Validate stale", "kind": "validate", "instruction": "Old checks"},
+        ]),
+        work_fn=work,
+        review_fn=review,
+        max_cycles=6,
+    )
+
+    assert result["status"] == "completed"
+    assert result["checkpoints"] == 1
+    assert result["replans"] == 1
+    assert "Implement stale" not in executed
+    assert "Validate stale" not in executed
+    assert executed == ["Inspect", "Implement revised", "Validate revised"]
+    assert [task["status"] for task in result["plan"][:3]] == [
+        "passed", "superseded", "superseded",
+    ]
+    assert any(
+        event["kind"] == "adaptive_replan"
+        for event in autopilot_store.events(result["id"])
+    )
+
+
+def test_static_run_skips_adaptive_checkpoint():
+    run = autopilot_store.create_run("Use a fixed plan", adaptive=False)
+    reviews = []
+
+    def review(current, issue):
+        reviews.append(issue)
+        return _complete(current, issue)
+
+    result = autopilot_controller.execute_run(
+        run["id"], "owner", owner_pid=os.getpid(),
+        plan_fn=lambda _run: _plan(),
+        work_fn=lambda _run, task, _prior: _evidence(
+            "workspace_run" if task["kind"] == "validate" else "file_read"
+        ),
+        review_fn=review,
+    )
+
+    assert result["status"] == "completed"
+    assert result["checkpoints"] == 0
+    assert reviews == ["host completion gates passed"]
+
+
+def test_adaptive_replan_supersedes_only_assessed_stale_tasks():
+    run = autopilot_store.create_run(
+        "Remove obsolete discovery and keep validation", max_replans=1,
+    )
+    executed = []
+
+    def review(current, issue):
+        if issue.startswith("adaptive checkpoint"):
+            return {
+                "decision": "replan",
+                "reason": "the missing-feature premise was disproved",
+                "pending_assessment": [
+                    {"id": "task-02", "verdict": "stale", "reason": "already exists"},
+                    {"id": "task-03", "verdict": "keep", "reason": "tests still required"},
+                ],
+                "tasks": [],
+            }
+        return _complete(current, issue)
+
+    result = autopilot_controller.execute_run(
+        run["id"], "owner", owner_pid=os.getpid(),
+        plan_fn=lambda _run: {
+            "summary": "selective replan",
+            "success_criteria": ["validation passes"],
+            "tasks": [
+                {"title": "Inspect", "kind": "inspect", "instruction": "inspect"},
+                {"title": "Design missing feature", "kind": "research", "instruction": "design"},
+                {"title": "Validate exact command", "kind": "validate", "instruction": "exact"},
+            ],
+        },
+        work_fn=lambda _run, task, _prior: executed.append(task["title"]) or _evidence(
+            "workspace_run" if task["kind"] == "validate" else "file_read"
+        ),
+        review_fn=review,
+        max_cycles=4,
+    )
+
+    assert result["status"] == "completed"
+    assert result["replans"] == 1
+    assert executed == ["Inspect", "Validate exact command"]
+    assert [task["status"] for task in result["plan"]] == [
+        "passed", "superseded", "passed",
+    ]
+
+
+def test_adaptive_replan_budget_is_host_enforced():
+    run = autopilot_store.create_run(
+        "Do not exceed revision budget", max_replans=0,
+    )
+
+    def review(_run, issue):
+        if issue.startswith("adaptive checkpoint"):
+            return {
+                "decision": "replan", "reason": "want another plan",
+                "tasks": [
+                    {"title": "Replacement", "kind": "validate", "instruction": "check"},
+                ],
+            }
+        return _complete(_run, issue)
+
+    result = autopilot_controller.execute_run(
+        run["id"], "owner", owner_pid=os.getpid(),
+        plan_fn=lambda _run: _plan(),
+        work_fn=lambda *_args: _evidence(),
+        review_fn=review,
+    )
+
+    assert result["status"] == "blocked"
+    assert result["checkpoints"] == 1
+    assert result["replans"] == 0
+    assert "budget exhausted" in result["summary"]
 
 
 def test_missing_tool_evidence_fails_and_pauses_for_review():
@@ -126,6 +279,22 @@ def test_replan_respects_one_remaining_slot_and_preserves_validation():
     assert plan[0]["status"] == "superseded"
     assert plan[-1]["title"] == "Replacement"
     assert any(task["kind"] == "validate" for task in plan)
+
+
+def test_observe_policy_rejects_implementation_during_replan():
+    run = {
+        "objective": "inspect only", "policy": "observe", "max_tasks": 4,
+        "criteria": ["grounded"],
+        "plan": [{
+            "id": "task-01", "title": "Inspect", "instruction": "read",
+            "kind": "inspect", "status": "passed", "history": [],
+        }],
+    }
+    with pytest.raises(ValueError, match="observe policy"):
+        autopilot_controller._append_replan(
+            run, None,
+            [{"title": "Edit", "kind": "implement", "instruction": "change it"}],
+        )
 
 
 def test_plan_only_persists_ready_plan_without_execution():
