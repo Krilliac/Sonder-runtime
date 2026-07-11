@@ -54,6 +54,7 @@ REQUIRED_FILES = {
     "bootstrap-engine.cmd",
     "bootstrap_engine.py",
     "game_forge.py",
+    "fleet_store.py",
     "server.py",
     "setup_alias.py",
     "trilobite-headless.cmd",

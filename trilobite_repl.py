@@ -101,6 +101,7 @@ HELP = """commands:
   /agents            show live master/subagent activity
   /capacity [N]      show queued-agent ceiling and safe concurrent worker slots
   /agentcancel <id>  cooperatively cancel an agent/master prefix or all
+  /agentretry <id>   explicitly retry persisted interrupted/failed master work
   /asset <n> <brief> generate a general icon/audio/model/scene artifact pack
   /forge [name]      build and run the dependency-free reference game suite
   /game ...          generate/test a game: /game cpp 3d name | concept
@@ -506,6 +507,8 @@ def main():
             elif cmd in ("/capacity", "/agentcapacity"):
                 print(server.control_command(line, session=session_id, project=project))
             elif cmd in ("/agentcancel", "/cancelagents"):
+                print(server.control_command(line, session=session_id, project=project))
+            elif cmd in ("/agentretry", "/retryagent"):
                 print(server.control_command(line, session=session_id, project=project))
             elif cmd in ("/activity", "/tools"):
                 print(server.activity_status())

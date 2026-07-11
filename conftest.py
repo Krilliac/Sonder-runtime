@@ -18,6 +18,8 @@ os.environ.update(
     {
         "TRILOBITE_HOME": str(_TEST_STATE_ROOT),
         "TRILOBITE_DB": str(_TEST_STATE_ROOT / "memory.db"),
+        "TRILOBITE_FLEET_DB": str(_TEST_STATE_ROOT / "fleet.db"),
+        "TRILOBITE_FLEET_HEARTBEAT": "0",
         "TRILOBITE_ALLOW_CLOUD": "0",
         "TRILOBITE_WEB_TOOLS": "0",
         "TRILOBITE_LIVE_RELOAD": "0",

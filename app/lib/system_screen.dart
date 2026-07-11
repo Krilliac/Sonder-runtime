@@ -100,9 +100,9 @@ class _SystemScreenState extends State<SystemScreen> {
       ],
           model: widget.settings.model,
           contextSize: widget.settings.contextSize);
-      setState(() => _message = reply);
+      if (mounted) setState(() => _message = reply);
     } on TrilobiteException catch (e) {
-      setState(() => _message = e.message);
+      if (mounted) setState(() => _message = e.message);
     } finally {
       if (mounted) setState(() => _working = false);
     }
@@ -139,6 +139,34 @@ class _SystemScreenState extends State<SystemScreen> {
     await _sendCommand('/agentcancel all');
     if (!mounted) return;
     await Future<void>.delayed(const Duration(milliseconds: 250));
+    if (mounted) await _refresh();
+  }
+
+  Future<void> _retryPersistedAgent(String agentId) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Retry interrupted work?'),
+        content: Text(
+          'Trilobite will rerun $agentId from its private restart-safe ledger. '
+          'Retries use the local code tier unless you run /agentretry manually '
+          'with a different tier.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Not now'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.pop(context, true),
+            icon: const Icon(Icons.replay_outlined),
+            label: const Text('Retry'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await _sendCommand('/agentretry $agentId');
     if (mounted) await _refresh();
   }
 
@@ -458,7 +486,10 @@ class _SystemScreenState extends State<SystemScreen> {
             if (info.agents != null) ...[
               _Section(
                 title: 'Agents',
-                child: _AgentStatusPanel(status: info.agents!),
+                child: _AgentStatusPanel(
+                  status: info.agents!,
+                  onRetry: _retryPersistedAgent,
+                ),
               ),
               const SizedBox(height: 12),
             ],
@@ -597,8 +628,9 @@ class _ContextHealthPanel extends StatelessWidget {
 
 class _AgentStatusPanel extends StatelessWidget {
   final AgentStatus status;
+  final ValueChanged<String>? onRetry;
 
-  const _AgentStatusPanel({required this.status});
+  const _AgentStatusPanel({required this.status, this.onRetry});
 
   @override
   Widget build(BuildContext context) {
@@ -643,6 +675,11 @@ class _AgentStatusPanel extends StatelessWidget {
                     const Icon(Icons.cancel_schedule_send_outlined, size: 18),
                 label: Text('${status.cancelPending} cancelling'),
               ),
+            if (status.interruptedAgents > 0)
+              Chip(
+                avatar: const Icon(Icons.restore_outlined, size: 18),
+                label: Text('${status.interruptedAgents} recoverable'),
+              ),
             Chip(
               avatar: const Icon(Icons.keyboard_double_arrow_down, size: 18),
               label: Text('${status.tokensIn} in'),
@@ -664,6 +701,15 @@ class _AgentStatusPanel extends StatelessWidget {
                       'role=${agent.role} calls=${agent.toolCalls} '
                       'tokens=${agent.tokensIn}/${agent.tokensOut}\n'
                       'task: ${agent.task}',
+                  action: agent.role == 'master' &&
+                          agent.status == 'interrupted' &&
+                          onRetry != null
+                      ? TextButton.icon(
+                          onPressed: () => onRetry!(agent.id),
+                          icon: const Icon(Icons.replay_outlined, size: 18),
+                          label: const Text('Retry locally'),
+                        )
+                      : null,
                 ),
               )),
         if (status.events.isNotEmpty) ...[
@@ -981,8 +1027,9 @@ class _Section extends StatelessWidget {
 
 class _OutputCard extends StatelessWidget {
   final String text;
+  final Widget? action;
 
-  const _OutputCard({required this.text});
+  const _OutputCard({required this.text, this.action});
 
   @override
   Widget build(BuildContext context) {
@@ -993,7 +1040,16 @@ class _OutputCard extends StatelessWidget {
         color: cs.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(8),
       ),
-      child: _OutputText(text),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _OutputText(text),
+          if (action != null) ...[
+            const SizedBox(height: 8),
+            Align(alignment: Alignment.centerRight, child: action!),
+          ],
+        ],
+      ),
     );
   }
 }

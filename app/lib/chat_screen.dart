@@ -65,6 +65,7 @@ class _ChatScreenState extends State<ChatScreen> {
     '/improve': 'Show next improvements',
     '/agents': 'Show live agent activity',
     '/capacity': 'Show hardware-safe fleet capacity',
+    '/agentretry': 'Retry interrupted persisted master work',
     '/forge': 'Build and test the in-house reference game suite',
     '/permissions': 'Show permission rules',
     '/master': 'Choose inline or delegated execution',

@@ -511,6 +511,7 @@ class ActivityChecklistItem {
 class AgentStatus {
   final int activeAgents;
   final int cancelPending;
+  final int interruptedAgents;
   final int totalAgents;
   final int totalListed;
   final int tokensIn;
@@ -522,6 +523,7 @@ class AgentStatus {
   const AgentStatus({
     required this.activeAgents,
     required this.cancelPending,
+    required this.interruptedAgents,
     required this.totalAgents,
     required this.totalListed,
     required this.tokensIn,
@@ -549,6 +551,7 @@ class AgentStatus {
     return AgentStatus(
       activeAgents: _asInt(json['active_agents']),
       cancelPending: _asInt(json['cancel_pending']),
+      interruptedAgents: _asInt(json['interrupted_agents']),
       totalAgents: json.containsKey('total_agents')
           ? _asInt(json['total_agents'])
           : totalListed,

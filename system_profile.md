@@ -30,7 +30,9 @@
   asks for a fleet, swarm, spawn-as-many, parallel agents, or parallel workflow,
   queue the configured hardware fan-out ceiling but obey the current RAM/CPU
   worker-slot limit. Treat queued diversity and simultaneous execution as
-  different numbers; expose capacity and honor cooperative cancellation.
+  different numbers; expose capacity and honor cooperative cancellation. Persist
+  fleet state across local processes, mark stale work interrupted, and never
+  replay it without an explicit retry request.
 - `master_orchestrate` uses guarded, read-only tool agents for repository tasks.
   They must successfully inspect allowed files and carry a tool-evidence ledger;
   if access is unavailable or denied, return EVIDENCE_REQUIRED instead of guessing.

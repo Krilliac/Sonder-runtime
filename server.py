@@ -781,6 +781,13 @@ def control_command(prompt: str, history=None, session="", project=""):
         return master_capacity(requested)
     if cmd in ("/agentcancel", "/cancelagents"):
         return master_cancel(arg.strip()) if arg.strip() else "usage: /agentcancel <id|prefix|all>"
+    if cmd in ("/agentretry", "/retryagent"):
+        retry_parts = arg.strip().split(None, 1)
+        if not retry_parts:
+            return "usage: /agentretry <master-id|prefix> [tier]"
+        return master_retry(
+            retry_parts[0], retry_parts[1] if len(retry_parts) > 1 else "",
+        )
     if cmd in ("/asset", "/assets", "/assetgen", "/artifact"):
         asset_parts = arg.strip().split(None, 1)
         if len(asset_parts) != 2:
@@ -2781,6 +2788,7 @@ def master_orchestrate(
     agents: int = 3,
     tier: str = "code",
     learn: bool = False,
+    retry_of: str = "",
 ) -> str:
     """Run a master pass inline or with hardware-scheduled delegated agents.
 
@@ -2835,7 +2843,11 @@ def master_orchestrate(
         )
     )
     if mode in ("inline", "master"):
-        result = master_orchestrator.run_inline(task, worker)
+        result = master_orchestrator.run_inline(
+            task,
+            worker,
+            metadata={"tier": tier, "mode": "inline", "retry_of": retry_of},
+        )
         return result["output"]
     if mode in ("delegate", "delegated", "agents", "parallel", "fleet", "swarm", "fanout"):
         if mode in ("fleet", "swarm", "fanout"):
@@ -2849,6 +2861,7 @@ def master_orchestrate(
                 timeout=_master_timeout("TRILOBITE_MASTER_AUDIT_TIMEOUT", 120),
             ),
             agents=agents,
+            metadata={"tier": tier, "mode": mode, "retry_of": retry_of},
         )
         lines = [
             "master orchestration complete",
@@ -2907,6 +2920,49 @@ def master_cancel(agent_id: str) -> str:
     ]
     lines.append("  agents: %s" % ", ".join(result["agent_ids"]))
     return "\n".join(lines)
+
+
+@mcp.tool()
+def master_retry(agent_id: str, tier: str = "") -> str:
+    """Explicitly rerun one interrupted/failed/cancelled persisted master task."""
+    _maybe_live_reload()
+    selector = str(agent_id or "").strip()
+    if not selector:
+        return "ERROR: agent_id is required; pass an exact master ID or unique prefix."
+    candidate = master_orchestrator.recovery_candidate(selector)
+    if not candidate:
+        return "ERROR: no unambiguous persisted master matched %r." % selector
+    status = candidate.get("status") or ""
+    if status not in ("interrupted", "failed", "cancelled"):
+        return "ERROR: master %s is %s; only interrupted/failed/cancelled work can be retried." % (
+            candidate["id"], status or "unknown",
+        )
+    task = (candidate.get("task") or "").strip()
+    if not task:
+        return "ERROR: persisted master %s has no recoverable task text." % candidate["id"]
+    mode = (candidate.get("mode") or "delegated").lower()
+    if mode not in (
+        "inline", "master", "delegate", "delegated", "agents", "parallel",
+        "fleet", "swarm", "fanout",
+    ):
+        mode = "delegated"
+    agents = int(candidate.get("requested_agents") or 3)
+    retry_tier = str(tier or "code").strip() or "code"
+    result = master_orchestrate(
+        task=task, mode=mode, agents=agents, tier=retry_tier, learn=False,
+        retry_of=candidate["id"],
+    )
+    return "\n".join([
+        "persisted master retry",
+        "  source: %s [%s] | mode: %s | agents: %d" % (
+            candidate["id"], status, mode, agents,
+        ),
+        "  tier: %s (explicit/local-safe default; original=%s)" % (
+            retry_tier, candidate.get("tier") or "unknown",
+        ),
+        "",
+        result,
+    ]).strip()
 
 
 def _admin_account_from_token(token: str):
@@ -4560,6 +4616,11 @@ def _loop_dispatch(action):
         return _loop_text_result("master_cancel", master_cancel(
             agent_id=action.get("agent_id", action.get("selector", "")),
         ))
+    if action_type in ("master_retry", "agent_retry"):
+        return _loop_text_result("master_retry", master_retry(
+            agent_id=action.get("agent_id", action.get("selector", "")),
+            tier=action.get("tier", ""),
+        ))
     if action_type in ("master", "master_orchestrate"):
         return _loop_text_result("master_orchestrate", master_orchestrate(
             task=action.get("task", action.get("prompt", "")),
@@ -4823,7 +4884,7 @@ def _loop_dispatch(action):
         "ok": False,
         "type": action_type or "(unknown)",
         "summary": "unknown action type",
-        "output": "Valid action types: code, project, artifact_generate, game_reference_suite, game_generate_and_test, game_generation_campaign, offload, trilobite, master_orchestrate, master_status, master_capacity, master_cancel, file_policy, workspace_inventory, directory_tree, text_search, script_search, program_search, workspace_run, script_run, image_inspect, file_find, file_read, file_write, file_edit, file_delete, status, diagnostics, context_health, memory_quality_report, memory_quality_repair, memory_privacy_review, memory_privacy_repair, memory_embedding_backfill, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, unload, sleep.",
+        "output": "Valid action types: code, project, artifact_generate, game_reference_suite, game_generate_and_test, game_generation_campaign, offload, trilobite, master_orchestrate, master_status, master_capacity, master_cancel, master_retry, file_policy, workspace_inventory, directory_tree, text_search, script_search, program_search, workspace_run, script_run, image_inspect, file_find, file_read, file_write, file_edit, file_delete, status, diagnostics, context_health, memory_quality_report, memory_quality_repair, memory_privacy_review, memory_privacy_repair, memory_embedding_backfill, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, unload, sleep.",
     }
 
 
@@ -4852,6 +4913,7 @@ def loop(
       - {"type":"master_status"}
       - {"type":"master_capacity","requested_agents":32}
       - {"type":"master_cancel","agent_id":"master-id|prefix|all"}
+      - {"type":"master_retry","agent_id":"master-id|prefix","tier":"code"}
       - {"type":"workspace_inventory","path":".","max_entries":20000,"timeout_seconds":10}
       - {"type":"file_find","query":"*.py","root":"."}
       - {"type":"file_read","path":"README.md"}
@@ -5470,7 +5532,7 @@ def tool_manifest() -> str:
     """List the local-llm MCP tools and what they are for."""
     tools = {
         "agent": "Run a Claude-like tool-calling loop that can use local tools and web tools.",
-        "master_orchestrate/master_status/master_capacity/master_cancel": "Run hardware-scheduled orchestration, inspect capacity/activity, and cooperatively cancel fleets.",
+        "master_orchestrate/master_status/master_capacity/master_cancel/master_retry": "Run restart-safe hardware-scheduled orchestration, inspect capacity/activity, cancel fleets, and explicitly retry interrupted work.",
         "admin_register/admin_login/admin_accounts/admin_set_account": "Manage hosted accounts, roles, bans, tiers, and developer flags.",
         "admin_status/debug_inspect/admin_private_chain_of_thought": "Inspect admin/debug state and safely deny private chain-of-thought exposure.",
         "trilobite": "Ask the local self-improving coding model.",
@@ -5565,6 +5627,7 @@ AGENT_TOOL_HELP = """Available tools:
 - master_status: {}
 - master_capacity: {"requested_agents": 0}
 - master_cancel: {"agent_id": "master-id|prefix|all"}
+- master_retry: {"agent_id": "master-id|prefix", "tier": "code"}
 - self_heal_check: {}
 - self_heal_repair: {"apply": false}
 - status: {}
@@ -6029,6 +6092,11 @@ def _agent_dispatch(tool_name, args, allow_web=True, read_only=False):
     if tool_name in ("master_cancel", "agent_cancel"):
         return master_cancel(
             agent_id=args.get("agent_id", args.get("selector", "")),
+        )
+    if tool_name in ("master_retry", "agent_retry"):
+        return master_retry(
+            agent_id=args.get("agent_id", args.get("selector", "")),
+            tier=args.get("tier", ""),
         )
     if tool_name in ("master_orchestrate", "master"):
         return master_orchestrate(

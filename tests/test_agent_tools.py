@@ -23,6 +23,9 @@ def test_agent_dispatch_routes_fleet_capacity_and_cancellation(monkeypatch):
     monkeypatch.setattr(
         server, "master_cancel", lambda agent_id: f"cancel:{agent_id}",
     )
+    monkeypatch.setattr(
+        server, "master_retry", lambda agent_id, tier="": f"retry:{agent_id}:{tier}",
+    )
 
     assert server._agent_dispatch(
         "master_capacity", {"requested_agents": 12}, read_only=True,
@@ -30,11 +33,19 @@ def test_agent_dispatch_routes_fleet_capacity_and_cancellation(monkeypatch):
     assert server._agent_dispatch(
         "master_cancel", {"agent_id": "master-abc"}, read_only=False,
     ) == "cancel:master-abc"
+    assert server._agent_dispatch(
+        "master_retry", {"agent_id": "master-old", "tier": "code"},
+        read_only=False,
+    ) == "retry:master-old:code"
     denied = server._agent_dispatch(
         "master_cancel", {"agent_id": "all"}, read_only=True,
     )
     assert denied.startswith("ERROR:")
     assert "not allowed" in denied
+    retry_denied = server._agent_dispatch(
+        "master_retry", {"agent_id": "master-old"}, read_only=True,
+    )
+    assert "not allowed" in retry_denied
 
 
 def test_agent_dispatch_can_tune_emotion_vectors(monkeypatch, tmp_path):

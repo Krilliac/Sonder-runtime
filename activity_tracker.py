@@ -19,12 +19,20 @@ from copy import deepcopy
 MAX_EVENTS = 80
 MAX_ACTIVE = 20
 MAX_EVENT_BLOCK = 4000
-_LOCK = threading.RLock()
-_LOCAL = threading.local()
-_IDS = itertools.count(1)
-_ACTIVE = {}
-_LATEST = None
-_TOTAL_TOOL_CALLS = 0
+# Keep active response spans intact when this helper is refreshed at a request
+# boundary. Function definitions may reload; live response ownership may not.
+if "_LOCK" not in globals():
+    _LOCK = threading.RLock()
+if "_LOCAL" not in globals():
+    _LOCAL = threading.local()
+if "_IDS" not in globals():
+    _IDS = itertools.count(1)
+if "_ACTIVE" not in globals():
+    _ACTIVE = {}
+if "_LATEST" not in globals():
+    _LATEST = None
+if "_TOTAL_TOOL_CALLS" not in globals():
+    _TOTAL_TOOL_CALLS = 0
 
 
 def _now():
@@ -141,6 +149,7 @@ ACTION_TITLES = {
     "checklist_show": "Viewed Checklist",
     "master_capacity": "Checked Fleet Capacity",
     "master_cancel": "Cancelled Agent Fleet",
+    "master_retry": "Retried Persisted Fleet",
     "memory_privacy_review": "Reviewed Memory Privacy",
     "memory_privacy_repair": "Cleaned Memory Privacy",
     "memory_embedding_backfill": "Backfilled Memory Embeddings",

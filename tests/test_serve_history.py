@@ -203,9 +203,11 @@ def test_capacity_and_cancel_slashes_route_to_control_command(monkeypatch):
 
     assert ts._handle_slash("/capacity 12", project="demo") == "controlled"
     assert ts._handle_slash("/agentcancel all", project="demo") == "controlled"
+    assert ts._handle_slash("/agentretry master-old", project="demo") == "controlled"
     assert calls == [
         ("/capacity 12", {"project": "demo"}),
         ("/agentcancel all", {"project": "demo"}),
+        ("/agentretry master-old", {"project": "demo"}),
     ]
 
 
