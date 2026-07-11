@@ -440,7 +440,23 @@ optional checklist behavior. Both can inspect trees/files/programs/scripts/image
 mutate guarded files, generate arbitrary asset packs or games, execute bounded
 checks, use memory/workflows/web, and return exact observable evidence.
 
-`web_search()` and `web_fetch()` use stdlib HTTP only. Search defaults to DuckDuckGo HTML, or set `TRILOBITE_SEARCH_URL` to an endpoint containing `{query}`. Set `TRILOBITE_WEB_TOOLS=0` to disable web access.
+`web_search()` and `web_fetch()` use stdlib HTTP only. Search defaults to
+DuckDuckGo HTML, or set `TRILOBITE_SEARCH_URL` to an endpoint containing
+`{query}`. `weather_lookup()` resolves a supplied city/postal code and gets
+sourced current conditions plus a short forecast from Open-Meteo. Ordinary chat
+now routes explicit weather/current-web requests through these tools instead of
+letting the base model falsely claim that internet access is unavailable.
+
+Approximate location remains opt-in. The Flutter Settings switch contacts
+`ipwho.is` only for a location-dependent prompt, minimizes the response to
+city/region/country/timezone, discards coordinates, and never sends the raw IP
+to Trilobite.
+The chat response identifies the resolved place as an approximate public-IP
+estimate because VPN and ISP routing can make it wrong. Loopback clients can use
+the same consented server-side fallback through `approximate_location_lookup()`;
+remote hosted clients must provide the client-side hint so the server's data
+center location is not mistaken for the user's. Set `TRILOBITE_WEB_TOOLS=0` to
+disable all web and location access.
 
 ## Self Healing
 

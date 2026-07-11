@@ -43,6 +43,7 @@ import emotion_vectors
 import preference_learning
 import workflow_store
 import web_tools
+import web_intents
 import self_heal
 import grounding
 import trilobite_paths
@@ -239,6 +240,7 @@ LIVE_RELOAD_MODULES = [
     "preference_learning",
     "workflow_store",
     "web_tools",
+    "web_intents",
     "self_heal",
     "memory_quality",
     "domain_grounding",
@@ -807,6 +809,10 @@ def control_command(prompt: str, history=None, session="", project=""):
         if len(asset_parts) != 2:
             return "usage: /asset <name> <free-form brief>"
         return artifact_generate(name=asset_parts[0], brief=asset_parts[1])
+    if cmd in ("/weather", "/forecast"):
+        if not arg.strip():
+            return "usage: /weather <city/state or ZIP>"
+        return weather_lookup(arg.strip())
     if cmd in ("/forge", "/gamesuite"):
         return game_reference_suite(name=arg.strip() or "trilobite-reference")
     if cmd in ("/game", "/gamegen"):
@@ -4789,6 +4795,7 @@ def _loop_dispatch(action):
             max_steps=action.get("max_steps", 12),
             allow_web=action.get("allow_web", True),
             project=action.get("project", ""),
+            allow_location=action.get("allow_location", False),
         ))
     if action_type == "workspace_inventory":
         return _loop_text_result("workspace_inventory", workspace_inventory(
@@ -5022,6 +5029,17 @@ def _loop_dispatch(action):
             url=action.get("url", ""),
             max_chars=action.get("max_chars", 8000),
         ))
+    if action_type == "weather_lookup":
+        return _loop_text_result("weather_lookup", weather_lookup(
+            location=action.get("location", ""),
+            forecast_days=action.get("forecast_days", 3),
+            units=action.get("units", "auto"),
+        ))
+    if action_type == "approximate_location_lookup":
+        return _loop_text_result(
+            "approximate_location_lookup",
+            approximate_location_lookup(consent=action.get("consent") is True),
+        )
     if action_type == "unload":
         return _loop_text_result("unload", unload(action.get("tier", "all")))
     if action_type == "sleep":
@@ -5037,7 +5055,7 @@ def _loop_dispatch(action):
         "ok": False,
         "type": action_type or "(unknown)",
         "summary": "unknown action type",
-        "output": "Valid action types: code, project, artifact_generate, game_reference_suite, game_generate_and_test, game_generation_campaign, offload, trilobite, master_orchestrate, master_status, master_capacity, master_cancel, master_retry, file_policy, workspace_inventory, directory_tree, text_search, script_search, program_search, workspace_run, script_run, image_inspect, file_find, file_read, file_write, file_edit, file_delete, status, diagnostics, context_health, memory_quality_report, memory_quality_repair, memory_privacy_review, memory_privacy_repair, memory_embedding_backfill, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, unload, sleep.",
+        "output": "Valid action types: code, project, artifact_generate, game_reference_suite, game_generate_and_test, game_generation_campaign, offload, trilobite, master_orchestrate, master_status, master_capacity, master_cancel, master_retry, file_policy, workspace_inventory, directory_tree, text_search, script_search, program_search, workspace_run, script_run, image_inspect, file_find, file_read, file_write, file_edit, file_delete, status, diagnostics, context_health, memory_quality_report, memory_quality_repair, memory_privacy_review, memory_privacy_repair, memory_embedding_backfill, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, weather_lookup, approximate_location_lookup, unload, sleep.",
     }
 
 
@@ -5075,6 +5093,8 @@ def loop(
       - {"type":"file_delete","path":"notes.txt","dry_run":true}
       - {"type":"web_search","query":"...","limit":5}
       - {"type":"web_fetch","url":"https://...","max_chars":8000}
+      - {"type":"weather_lookup","location":"Chicago, IL","forecast_days":3}
+      - {"type":"approximate_location_lookup","consent":true}
       - {"type":"memory_search","query":"..."}
       - {"type":"memory_privacy_review","sample_limit":20}
       - {"type":"memory_embedding_backfill","limit":25,"apply":false}
@@ -5240,6 +5260,184 @@ def web_fetch(url: str, max_chars: int = 8000) -> str:
         output=out,
     )
     return out
+
+
+@mcp.tool()
+def weather_lookup(
+    location: str,
+    forecast_days: int = 3,
+    units: str = "auto",
+) -> str:
+    """Get current conditions and a short forecast for a city or postal code."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "location": location, "forecast_days": forecast_days, "units": units,
+    }
+    try:
+        result = web_tools.weather_lookup(
+            location, forecast_days=forecast_days, units=units,
+        )
+        output = web_tools.format_weather(result)
+    except Exception as exc:
+        _record_direct_tool(
+            "weather_lookup", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    _record_direct_tool(
+        "weather_lookup", args, ok=True, started=started,
+        summary="forecast for %s" % result.get("query", location), output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def approximate_location_lookup(consent: bool = False) -> str:
+    """Resolve this machine's public IP to a place after explicit consent."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"consent": bool(consent)}
+    if not consent:
+        message = "explicit location consent is required"
+        _record_direct_tool(
+            "approximate_location_lookup", args, ok=False, started=started,
+            summary=message,
+        )
+        return "ERROR: %s" % message
+    try:
+        location = web_tools.approximate_location_lookup()
+        output = web_tools.format_approximate_location(location)
+    except Exception as exc:
+        _record_direct_tool(
+            "approximate_location_lookup", args, ok=False, started=started,
+            summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    _record_direct_tool(
+        "approximate_location_lookup", args, ok=True, started=started,
+        summary=web_tools.location_label(location), output=output,
+    )
+    return output
+
+
+def _chat_location(
+    location_consent=False,
+    location_hint=None,
+    allow_server_location_lookup=False,
+):
+    if not location_consent:
+        raise ValueError("approximate location is not enabled")
+    started = time.time()
+    source = "client_hint" if location_hint else "server_lookup"
+    args = {"consent": True, "source": source}
+    try:
+        if location_hint:
+            location = web_tools.normalize_location_hint(location_hint)
+        elif allow_server_location_lookup:
+            location = web_tools.approximate_location_lookup()
+        else:
+            raise ValueError("the client did not provide an approximate location")
+        output = web_tools.format_approximate_location(location)
+    except Exception as exc:
+        _record_direct_tool(
+            "approximate_location_lookup", args, ok=False, started=started,
+            summary=str(exc),
+        )
+        raise
+    _record_direct_tool(
+        "approximate_location_lookup", args, ok=True, started=started,
+        summary=(
+            "%s (%s)" % (web_tools.location_label(location), source)
+        ),
+        output=output,
+    )
+    return location
+
+
+def chat_web_response(
+    prompt: str,
+    history=None,
+    tier: str = "code",
+    location_consent: bool = False,
+    location_hint=None,
+    allow_server_location_lookup: bool = False,
+) -> str | None:
+    """Handle explicit web chat intent before the plain model fallback."""
+    _maybe_live_reload()
+    intent = web_intents.classify(prompt, history=history)
+    if intent is None:
+        return None
+    if intent["kind"] == "capability":
+        if web_tools.enabled():
+            return (
+                "Yes. Live public web search, page fetch, and weather tools are enabled. "
+                "Ask me to search the web or give me a city/state or ZIP for weather."
+            )
+        return (
+            "This Trilobite build has web tools, but they are disabled in the current "
+            "runtime by TRILOBITE_WEB_TOOLS."
+        )
+    if not web_tools.enabled():
+        return "Web tools are disabled in the current runtime by TRILOBITE_WEB_TOOLS."
+    location = None
+    if intent["kind"] == "location" or intent.get("needs_location"):
+        if not location_consent:
+            return (
+                "Approximate location is off. Enable `Allow approximate IP location` "
+                "in Settings, or tell me your city/state or ZIP directly."
+            )
+        try:
+            location = _chat_location(
+                location_consent=location_consent,
+                location_hint=location_hint,
+                allow_server_location_lookup=allow_server_location_lookup,
+            )
+        except Exception as exc:
+            return (
+                "Approximate location is enabled, but lookup did not return a usable "
+                "place (%s). You can still send a city/state or ZIP." % exc
+            )
+        if intent["kind"] == "location":
+            return web_tools.format_approximate_location(location)
+    if intent["kind"] == "weather":
+        requested_location = intent.get("location", "")
+        prefix = ""
+        if not requested_location and location_consent:
+            try:
+                location = _chat_location(
+                    location_consent=location_consent,
+                    location_hint=location_hint,
+                    allow_server_location_lookup=allow_server_location_lookup,
+                )
+                requested_location = web_tools.location_label(location)
+                prefix = web_tools.format_approximate_location(location) + "\n\n"
+            except Exception as exc:
+                return (
+                    "Approximate location is enabled, but lookup did not return a "
+                    "usable place (%s). Send a city/state or ZIP instead." % exc
+                )
+        if not requested_location:
+            return (
+                "I can use the live weather tool, but I need a location. Enable "
+                "`Allow approximate IP location` in Settings, or send a city/state or "
+                "ZIP, for example: `Chicago, IL` or `60601`."
+            )
+        return prefix + weather_lookup(requested_location)
+    query = intent.get("query", prompt)
+    if intent.get("needs_location"):
+        query = (
+            "%s\n\nThe user explicitly enabled approximate IP location. Their "
+            "approximate city/region is %s. Use only that place label, disclose that "
+            "it may be inaccurate, and do not claim precise location."
+            % (query, web_tools.location_label(location))
+        )
+    return _agent_impl(
+        query,
+        tier=tier or "code",
+        max_steps=6,
+        allow_web=True,
+        required_tool_names=("web_search", "web_fetch"),
+    )
 
 
 @mcp.tool()
@@ -5693,7 +5891,7 @@ def tool_manifest() -> str:
         "admin_status/debug_inspect/admin_private_chain_of_thought": "Inspect admin/debug state and safely deny private chain-of-thought exposure.",
         "trilobite": "Ask the local self-improving coding model.",
         "offload": "Route a self-contained task to a configured local/cloud tier.",
-        "web_search/web_fetch": "Search or fetch public web pages.",
+        "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
         "workspace_inventory/directory_tree/directory_create/text_search/file_read_range": "Budgeted guarded workspace inventory, folder discovery, creation, text search, and bounded line-range reads.",
         "file_policy/file_find/file_read/file_write/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete with approval bypass support.",
         "program_search/script_search/workspace_run/script_run/image_inspect": "Discover installed programs and workspace scripts, run bounded argv-only processes, and inspect image metadata.",
@@ -5738,6 +5936,8 @@ AGENT_TOOL_HELP = """Available tools:
 - game_generation_campaign: {"name": "game-fleet", "concept": "action roguelite", "total": 6, "language": "", "dimension": "", "theme": "arcane", "max_workers": 2, "repair_rounds": 1}
 - web_search: {"query": "...", "limit": 5}
 - web_fetch: {"url": "https://...", "max_chars": 8000}
+- weather_lookup: {"location": "Chicago, IL|60601", "forecast_days": 3, "units": "auto|metric|imperial"}
+- approximate_location_lookup: {"consent": true} (only after the user explicitly enables or requests IP location)
 - file_policy: {}
 - workspace_inventory: {"path": ".", "max_entries": 20000, "timeout_seconds": 10, "top_n": 15}
 - directory_tree: {"path": ".", "depth": 2, "max_entries": 200}
@@ -5897,7 +6097,9 @@ def _extract_agent_json(text):
         return json.loads(text[start:end + 1])
 
 
-def _agent_dispatch(tool_name, args, allow_web=True, read_only=False):
+def _agent_dispatch(
+    tool_name, args, allow_web=True, read_only=False, allow_location=False,
+):
     tool_name = (tool_name or "").strip()
     args = args or {}
     if not isinstance(args, dict):
@@ -5975,6 +6177,23 @@ def _agent_dispatch(tool_name, args, allow_web=True, read_only=False):
         if not allow_web:
             return "ERROR: web access disabled for this agent run"
         return web_fetch(args.get("url", ""), args.get("max_chars", 8000))
+    if tool_name == "weather_lookup":
+        if not allow_web:
+            return "ERROR: web access disabled for this agent run"
+        return weather_lookup(
+            args.get("location", ""),
+            args.get("forecast_days", 3),
+            args.get("units", "auto"),
+        )
+    if tool_name == "approximate_location_lookup":
+        if not allow_web:
+            return "ERROR: web access disabled for this agent run"
+        if not allow_location:
+            return (
+                "ERROR: approximate location requires host-verified user consent "
+                "for this agent run"
+            )
+        return approximate_location_lookup(bool(args.get("consent", False)))
     if tool_name == "memory_search":
         return memory_search(args.get("query", ""), args.get("limit", 10))
     if tool_name == "file_policy":
@@ -6330,20 +6549,23 @@ def _agent_activity_command(tool_name, args):
     return ""
 
 
-def _agent_dispatch_observed(tool_name, args, allow_web=True, read_only=False):
+def _agent_dispatch_observed(
+    tool_name, args, allow_web=True, read_only=False, allow_location=False,
+):
     started = time.time()
     ok = False
     observation = ""
     try:
         with activity_tracker.tool_dispatch_context():
+            dispatch_options = {"allow_web": allow_web}
+            if allow_location:
+                dispatch_options["allow_location"] = True
             if read_only:
                 observation = _agent_dispatch(
-                    tool_name, args, allow_web=allow_web, read_only=True
+                    tool_name, args, read_only=True, **dispatch_options,
                 )
             else:
-                observation = _agent_dispatch(
-                    tool_name, args, allow_web=allow_web
-                )
+                observation = _agent_dispatch(tool_name, args, **dispatch_options)
         ok = not str(observation).startswith("ERROR:")
         return observation
     finally:
@@ -6507,7 +6729,8 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range",
     "text_search", "script_search", "program_search", "image_inspect",
     "memory_search", "memory_quality_report", "memory_privacy_review",
-    "web_search", "web_fetch", "status", "diagnostics",
+    "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",
+    "status", "diagnostics",
 })
 
 
@@ -6562,13 +6785,15 @@ def _agent_impl(
     include_evidence: bool = False,
     auto_checklist: bool = False,
     project: str = "",
+    required_tool_names=(),
+    allow_location: bool = False,
 ) -> str:
     """Run a Claude-like local agent loop that can call tools.
 
     The model chooses one JSON tool call at a time, receives the observation,
     and continues until it returns {"final": "..."} or max_steps is reached.
     Tools include code execution, memory search, workflows, diagnostics, and
-    public web search/fetch when allow_web=True and TRILOBITE_WEB_TOOLS is on.
+    public web search/fetch/weather when allow_web=True and web tools are on.
     """
     _maybe_live_reload()
     max_steps = _safe_limit(max_steps, 6, 20)
@@ -6602,6 +6827,9 @@ def _agent_impl(
     validation_attempted = False
     validation_ok = False
     mutations = []
+    required_tools = frozenset(str(name) for name in required_tool_names if name)
+    used_tool_names = set()
+    successful_web_calls = set()
     checklist_id, checklist_states = (
         _start_agent_checklist(prompt, project, read_only)
         if auto_checklist else ("", {})
@@ -6634,6 +6862,19 @@ def _agent_impl(
             return "ERROR: agent decision must be a JSON object."
         if "final" in decision:
             final = str(decision.get("final") or "")
+            if required_tools and not (required_tools & used_tool_names):
+                if step < max_steps:
+                    observations.append(
+                        "HOST REQUIREMENT: use at least one successful tool from: %s."
+                        % ", ".join(sorted(required_tools))
+                    )
+                    continue
+                return (
+                    "ERROR: agent reached max_steps=%d without using a required "
+                    "web tool (%s)." % (
+                        max_steps, ", ".join(sorted(required_tools)),
+                    )
+                )
             if auto_checklist and not used_tool and step < max_steps:
                 observations.append(
                     "HOST REQUIREMENT: use at least one relevant inspection or execution tool before final."
@@ -6695,6 +6936,10 @@ def _agent_impl(
                 )
             return "ERROR: agent decision missing 'tool' or 'final': %s" % decision
         tool_args = decision.get("args", {})
+        call_signature = (
+            str(tool_name),
+            json.dumps(tool_args, sort_keys=True, ensure_ascii=False, default=str),
+        )
         policy_error = _repository_read_only_error(tool_name, tool_args) if read_only else ""
         if (
             auto_checklist
@@ -6706,17 +6951,38 @@ def _agent_impl(
                 "ERROR: HOST REQUIREMENT: inspect relevant workspace evidence "
                 "before making a mutation."
             )
-        if policy_error:
+        if tool_name in {
+            "web_search", "web_fetch", "weather_lookup",
+            "approximate_location_lookup",
+        } and call_signature in successful_web_calls:
+            observation = (
+                "ERROR: HOST REQUIREMENT: this identical web tool call already "
+                "succeeded; use its existing observation or choose a different call."
+            )
+        elif policy_error:
             observation = policy_error
         elif read_only and tool_name in {"command_registry_list", "tool_manifest"}:
             observation = _agent_tool_help(read_only=True)
         else:
+            dispatch_options = {
+                "allow_web": allow_web,
+                "read_only": read_only,
+            }
+            if allow_location:
+                dispatch_options["allow_location"] = True
             observation = _agent_dispatch_observed(
-                tool_name, tool_args, allow_web=allow_web, read_only=read_only
+                tool_name, tool_args, **dispatch_options,
             )
         observation_text = str(observation)
         tool_ok = _agent_observation_ok(observation_text)
         used_tool = used_tool or tool_ok
+        if tool_ok:
+            used_tool_names.add(str(tool_name))
+            if tool_name in {
+                "web_search", "web_fetch", "weather_lookup",
+                "approximate_location_lookup",
+            }:
+                successful_web_calls.add(call_signature)
         if tool_name in {
             "workspace_inventory", "directory_tree", "file_read", "file_read_range", "file_find",
             "text_search", "script_search", "image_inspect",
@@ -6807,6 +7073,7 @@ def agent(
     allow_web: bool = True,
     project: str = "",
     checklist: bool = True,
+    allow_location: bool = False,
 ) -> str:
     """Run a visible local tool-using agent loop with checklist/reporting."""
     nested = activity_tracker.current() is not None
@@ -6824,6 +7091,7 @@ def agent(
             allow_web=allow_web,
             auto_checklist=bool(checklist),
             project=project,
+            allow_location=bool(allow_location),
         )
     response = activity_tracker.current() if nested else activity_tracker.latest()
     if nested and response:
@@ -6843,6 +7111,7 @@ def workbench_agent(
     max_steps: int = 12,
     allow_web: bool = True,
     project: str = "",
+    allow_location: bool = False,
 ) -> str:
     """Execute local work with guarded tools, checklist, validation, and report."""
     return agent(
@@ -6852,6 +7121,7 @@ def workbench_agent(
         allow_web=allow_web,
         project=project,
         checklist=True,
+        allow_location=allow_location,
     )
 
 

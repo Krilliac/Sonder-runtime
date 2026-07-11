@@ -346,6 +346,19 @@ def test_control_command_routes_targeted_game_campaign(monkeypatch):
     }]
 
 
+def test_control_command_routes_weather_without_model(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        server,
+        "weather_lookup",
+        lambda location: calls.append(location) or "weather result",
+    )
+
+    assert server.control_command("/weather Chicago, IL") == "weather result"
+    assert server.control_command("/weather") == "usage: /weather <city/state or ZIP>"
+    assert calls == ["Chicago, IL"]
+
+
 def test_control_command_dump_writes_file(monkeypatch, tmp_path):
     monkeypatch.setattr(server.trilobite_paths, "default_home", lambda: tmp_path)
     monkeypatch.setattr(server, "context_health", lambda session="", project="": "context")

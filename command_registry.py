@@ -158,6 +158,12 @@ COMMANDS = [
         "summary": "Explicitly rerun an interrupted, failed, or cancelled persisted master task.",
     },
     {
+        "name": "/weather",
+        "category": "web",
+        "risk": "ask",
+        "summary": "Get sourced live conditions and a short forecast for a city or ZIP.",
+    },
+    {
         "name": "/asset",
         "category": "creative",
         "risk": "ask",

@@ -1,7 +1,99 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:trilobite/api.dart';
+import 'package:trilobite/models.dart';
 
 void main() {
+  test('location opt-in sends a minimized client-side place hint', () async {
+    Map<String, dynamic>? chatBody;
+    final client = MockClient((request) async {
+      if (request.url.host == 'ipwho.is') {
+        return http.Response(
+            jsonEncode({
+              'success': true,
+              'ip': '203.0.113.77',
+              'city': 'Chicago',
+              'region': 'Illinois',
+              'country': 'United States',
+              'country_code': 'US',
+              'latitude': 41.8,
+              'longitude': -87.6,
+              'timezone': {
+                'id': 'America/Chicago',
+                'abbr': 'CDT',
+                'offset': -18000,
+              },
+            }),
+            200);
+      }
+      chatBody = jsonDecode(request.body) as Map<String, dynamic>;
+      return http.Response(
+          jsonEncode({
+            'choices': [
+              {
+                'message': {'role': 'assistant', 'content': 'weather live'}
+              }
+            ]
+          }),
+          200);
+    });
+
+    final output = await http.runWithClient(
+      () => const TrilobiteApi(baseUrl: 'http://trilobite.test').chat(
+        const [ChatMessage(role: Role.user, content: 'weather in my area')],
+        allowApproximateLocation: true,
+      ),
+      () => client,
+    );
+
+    expect(output, 'weather live');
+    expect(chatBody?['location_consent'], isTrue);
+    final hint = chatBody?['location_hint'] as Map<String, dynamic>;
+    expect(hint['city'], 'Chicago');
+    expect(hint.containsKey('ip'), isFalse);
+    expect(hint.containsKey('latitude'), isFalse);
+    expect(hint.containsKey('longitude'), isFalse);
+    expect(hint['timezone'], 'America/Chicago');
+  });
+
+  test('explicit weather city does not perform an IP location lookup',
+      () async {
+    var locationRequests = 0;
+    Map<String, dynamic>? chatBody;
+    final client = MockClient((request) async {
+      if (request.url.host == 'ipwho.is') {
+        locationRequests += 1;
+        return http.Response('{}', 200);
+      }
+      chatBody = jsonDecode(request.body) as Map<String, dynamic>;
+      return http.Response(
+          jsonEncode({
+            'choices': [
+              {
+                'message': {'role': 'assistant', 'content': 'Tokyo weather'}
+              }
+            ]
+          }),
+          200);
+    });
+
+    final output = await http.runWithClient(
+      () => const TrilobiteApi(baseUrl: 'http://trilobite.test').chat(
+        const [ChatMessage(role: Role.user, content: 'weather in Tokyo')],
+        allowApproximateLocation: true,
+      ),
+      () => client,
+    );
+
+    expect(output, 'Tokyo weather');
+    expect(locationRequests, 0);
+    expect(chatBody?['location_consent'], isTrue);
+    expect(chatBody?.containsKey('location_hint'), isFalse);
+  });
+
   test('activity response preserves exact actions and checklist state', () {
     final status = ActivityStatus.fromJson({
       'active_count': 0,

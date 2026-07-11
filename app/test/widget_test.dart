@@ -64,6 +64,41 @@ void main() {
     expect(find.text('New chat'), findsOneWidget);
   });
 
+  testWidgets('Approximate location is explicit opt-in and persists',
+      (tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+
+    await tester.pumpWidget(const TrilobiteApp(manageLocalServer: false));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Settings'));
+    await tester.pumpAndSettle();
+
+    final label = find.text('Allow approximate IP location');
+    expect(find.byType(ListView), findsOneWidget);
+    await tester.drag(find.byType(ListView), const Offset(0, -600));
+    await tester.pumpAndSettle();
+    expect(label, findsOneWidget);
+    final tile = find.widgetWithText(
+      SwitchListTile,
+      'Allow approximate IP location',
+    );
+    expect(tester.widget<SwitchListTile>(tile).value, isFalse);
+
+    await tester.tap(tile);
+    await tester.pump();
+    expect(tester.widget<SwitchListTile>(tile).value, isTrue);
+
+    final save = find.text('Save');
+    await tester.drag(find.byType(ListView), const Offset(0, -700));
+    await tester.pumpAndSettle();
+    expect(save, findsOneWidget);
+    await tester.tap(save);
+    await tester.pumpAndSettle();
+
+    final preferences = await SharedPreferences.getInstance();
+    expect(preferences.getBool('allow_approximate_location'), isTrue);
+  });
+
   testWidgets(
       'Assistant messages render markdown and collapse activity evidence',
       (tester) async {

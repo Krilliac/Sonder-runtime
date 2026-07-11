@@ -4,8 +4,8 @@ A cross-platform GUI client for [trilobite](../README.md). One Flutter
 codebase builds an **Android APK** and **desktop apps** for Windows, Linux and
 macOS. The app is a thin chat front-end: it talks to your own
 `trilobite_serve.py` server over its OpenAI-compatible HTTP API, so your model,
-memory and lessons stay on the machine *you* run — nothing goes to a third
-party.
+memory and lessons stay on the machine *you* run by default. Explicitly selected
+cloud tiers and invoked web tools contact their named external services.
 
 ```
   ┌────────────┐        HTTP /v1/chat/completions        ┌────────────────────┐
@@ -24,8 +24,12 @@ party.
   fetched from the server's `/v1/models`. Cloud models answer *clean* (teacher mode)
   and their good outcomes still feed the local model's learning.
 - **Settings**: server URL + optional API key, default model/tier, optional hosted
-  tiers opt-in, account register/login for hosted deployments, with a one-tap
-  *Test connection*.
+  tiers opt-in, approximate IP-location opt-in, account register/login for hosted
+  deployments, with a one-tap *Test connection*.
+- **Grounded web/weather**: explicit current-web requests use visible tools;
+  weather uses Open-Meteo. When approximate location is enabled, the app asks
+  `ipwho.is` for a city/region only on location-dependent prompts, strips the raw
+  IP, and labels the result as approximate.
 - **System panel**: view server status, context health meters, master/subagent
   activity, the live workbench checklist and exact action evidence, visible task
   state, permission rules, command inventory, improvement
@@ -114,7 +118,9 @@ the Python/Ollama runtime directly.
 2. Open the app → **Settings** (gear icon).
 3. Enter the **Server URL** (e.g. `http://192.168.1.20:11435`) and the **API
    key** if the server has auth enabled. Tap **Test connection**, then **Save**.
-4. Start chatting.
+4. Optionally enable **Allow approximate IP location** for weather/nearby prompts.
+   This contacts `ipwho.is`; VPN or ISP routing can report the wrong city.
+5. Start chatting.
 
 ## Build it yourself
 

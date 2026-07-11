@@ -195,7 +195,8 @@ class _ChatScreenState extends State<ChatScreen> {
           model: _model,
           contextSize: widget.settings.contextSize,
           sessionId: _currentThreadId,
-          project: _project);
+          project: _project,
+          allowApproximateLocation: widget.settings.allowApproximateLocation);
     } catch (_) {
       // Passive learning should never interrupt the chat UI.
     }
@@ -244,6 +245,7 @@ class _ChatScreenState extends State<ChatScreen> {
         contextSize: widget.settings.contextSize,
         sessionId: _currentThreadId,
         project: _project,
+        allowApproximateLocation: widget.settings.allowApproximateLocation,
       );
       setState(() {
         _messages[_messages.length - 1] = ChatMessage(

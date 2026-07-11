@@ -164,6 +164,32 @@ def test_loop_dispatch_supports_workbench_actions(monkeypatch):
     assert inventory["output"] == "inventory ok"
 
 
+def test_loop_dispatch_supports_weather_and_consent_gated_location(monkeypatch):
+    monkeypatch.setattr(
+        server, "weather_lookup",
+        lambda location, forecast_days=3, units="auto": (
+            f"weather:{location}:{forecast_days}:{units}"
+        ),
+    )
+    monkeypatch.setattr(
+        server, "approximate_location_lookup",
+        lambda consent=False: "location:allowed" if consent else "ERROR: consent",
+    )
+
+    weather = server._loop_dispatch({
+        "type": "weather_lookup", "location": "Chicago", "forecast_days": 2,
+    })
+    denied = server._loop_dispatch({"type": "approximate_location_lookup"})
+    allowed = server._loop_dispatch({
+        "type": "approximate_location_lookup", "consent": True,
+    })
+
+    assert weather["ok"] is True
+    assert weather["output"] == "weather:Chicago:2:auto"
+    assert denied["ok"] is False
+    assert allowed["output"] == "location:allowed"
+
+
 def test_loop_dispatch_supports_fleet_capacity_and_cancellation(monkeypatch):
     monkeypatch.setattr(
         server, "master_capacity", lambda requested_agents=0: f"capacity:{requested_agents}",

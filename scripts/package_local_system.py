@@ -60,6 +60,7 @@ REQUIRED_FILES = {
     "setup_alias.py",
     "trilobite-headless.cmd",
     "trilobite_headless.py",
+    "web_intents.py",
     "trilobite-serve.cmd",
     "trilobite_serve.py",
 }

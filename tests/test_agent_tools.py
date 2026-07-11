@@ -12,8 +12,32 @@ def test_extract_agent_json_accepts_wrapped_json():
 
 
 def test_agent_dispatch_blocks_web_when_disabled():
-    out = server._agent_dispatch("web_search", {"query": "x"}, allow_web=False)
-    assert out.startswith("ERROR: web access disabled")
+    for tool, args in (
+        ("web_search", {"query": "x"}),
+        ("web_fetch", {"url": "https://example.com"}),
+        ("weather_lookup", {"location": "Chicago"}),
+        ("approximate_location_lookup", {"consent": True}),
+    ):
+        out = server._agent_dispatch(tool, args, allow_web=False)
+        assert out.startswith("ERROR: web access disabled")
+
+
+def test_agent_dispatch_requires_host_verified_location_consent(monkeypatch):
+    monkeypatch.setattr(
+        server, "approximate_location_lookup",
+        lambda consent=False: "Approximate location: Chicago" if consent else "ERROR",
+    )
+
+    denied = server._agent_dispatch(
+        "approximate_location_lookup", {"consent": True}, allow_web=True,
+    )
+    allowed = server._agent_dispatch(
+        "approximate_location_lookup", {"consent": True}, allow_web=True,
+        allow_location=True,
+    )
+
+    assert "host-verified user consent" in denied
+    assert allowed == "Approximate location: Chicago"
 
 
 def test_agent_dispatch_routes_fleet_capacity_and_cancellation(monkeypatch):
@@ -105,6 +129,78 @@ def test_agent_reports_parse_error(monkeypatch):
     monkeypatch.setattr(server, "_make_generate", lambda *a, **k: lambda prompt, history=None: "not json")
     out = server.agent("x", tier="code", max_steps=1)
     assert out.startswith("ERROR: could not parse agent decision")
+
+
+def test_agent_host_requires_successful_web_tool_before_final(monkeypatch):
+    responses = [
+        '{"final": "I cannot access the web."}',
+        '{"tool": "web_search", "args": {"query": "current news"}}',
+        '{"final": "Here are the current results."}',
+    ]
+    prompts = []
+
+    def generate(prompt, history=None):
+        prompts.append(prompt)
+        return responses.pop(0)
+
+    monkeypatch.setattr(server, "_make_generate", lambda *a, **k: generate)
+    monkeypatch.setattr(
+        server,
+        "_agent_dispatch_observed",
+        lambda *a, **k: "1. Current result\n   https://example.com",
+    )
+
+    output = server._agent_impl(
+        "Find current news",
+        max_steps=3,
+        required_tool_names=("web_search", "web_fetch"),
+    )
+
+    assert output == "Here are the current results."
+    assert "HOST REQUIREMENT" in prompts[1]
+
+
+def test_agent_rejects_final_when_required_web_tool_never_runs(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: '{"final": "No tools."}',
+    )
+
+    output = server._agent_impl(
+        "Find current news", max_steps=1,
+        required_tool_names=("web_search",),
+    )
+
+    assert output.startswith("ERROR: agent reached max_steps=1")
+    assert "required web tool" in output
+
+
+def test_agent_does_not_repeat_identical_successful_web_call(monkeypatch):
+    responses = [
+        '{"tool": "web_fetch", "args": {"url": "https://example.com"}}',
+        '{"tool": "web_fetch", "args": {"url": "https://example.com"}}',
+        '{"final": "Used the fetched page."}',
+    ]
+    dispatches = []
+
+    monkeypatch.setattr(
+        server, "_make_generate",
+        lambda *args, **kwargs: lambda prompt, history=None: responses.pop(0),
+    )
+
+    def fake_dispatch(tool, args, **kwargs):
+        dispatches.append((tool, args))
+        return "fetched page"
+
+    monkeypatch.setattr(server, "_agent_dispatch_observed", fake_dispatch)
+
+    output = server._agent_impl(
+        "Fetch the page", max_steps=3, required_tool_names=("web_fetch",),
+    )
+
+    assert output == "Used the fetched page."
+    assert len(dispatches) == 1
 
 
 def test_agent_requires_successful_file_evidence(monkeypatch):

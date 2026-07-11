@@ -217,6 +217,19 @@ def test_agents_slash_returns_master_status(monkeypatch):
     assert ts._handle_slash("/agents") == "agents live"
 
 
+def test_weather_slash_routes_to_live_tool(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        ts.server,
+        "weather_lookup",
+        lambda location: calls.append(location) or "weather live",
+    )
+
+    assert ts._handle_slash("/weather Chicago, IL") == "weather live"
+    assert ts._handle_slash("/weather") == "usage: /weather <city/state or ZIP>"
+    assert calls == ["Chicago, IL"]
+
+
 def test_workbench_slash_routes_project_and_task(monkeypatch):
     calls = []
     monkeypatch.setattr(

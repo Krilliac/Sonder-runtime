@@ -141,6 +141,89 @@ def test_post_body_limit_and_content_type_return_real_4xx(monkeypatch):
         assert "Traceback" not in body.decode("utf-8")
 
 
+def test_chat_rejects_non_object_location_hint(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+
+    class FakeConnection:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ts.server, "_open_db", lambda: FakeConnection())
+    monkeypatch.setattr(ts.admin_auth, "rate_limit", lambda conn, account: (True, ""))
+    request = json.dumps({
+        "messages": [{"role": "user", "content": "weather in my area"}],
+        "location_consent": True,
+        "location_hint": "not-an-object",
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 400
+    assert json.loads(body)["error"]["message"] == "location_hint must be an object"
+
+
+def test_chat_forwards_consent_and_client_location_to_web_router(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+
+    class FakeConnection:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ts.server, "_open_db", lambda: FakeConnection())
+    monkeypatch.setattr(ts.admin_auth, "rate_limit", lambda conn, account: (True, ""))
+    calls = []
+
+    def fake_web(prompt, **kwargs):
+        calls.append((prompt, kwargs))
+        return "GROUNDED WEATHER"
+
+    monkeypatch.setattr(ts.server, "chat_web_response", fake_web)
+    monkeypatch.setattr(
+        ts.server, "answer_with_history",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("model called")),
+    )
+    hint = {
+        "city": "Chicago",
+        "region": "Illinois",
+        "country": "United States",
+        "timezone": "America/Chicago",
+    }
+    request = json.dumps({
+        "model": "trilobite",
+        "messages": [{"role": "user", "content": "weather in my area"}],
+        "location_consent": True,
+        "location_hint": hint,
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 200
+    content = json.loads(body)["choices"][0]["message"]["content"]
+    assert "GROUNDED WEATHER" in content
+    assert calls[0][0] == "weather in my area"
+    assert calls[0][1]["location_consent"] is True
+    assert calls[0][1]["location_hint"] == hint
+    assert calls[0][1]["allow_server_location_lookup"] is True
+
+
 def test_dangerous_slash_denied_before_handler(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "account")

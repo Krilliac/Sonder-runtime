@@ -202,21 +202,14 @@ def run_code_detail(
             f.write(src)
         try:
             if compile_first:
-                c = subprocess.run(
-                    [interp, "-m", "py_compile", path],
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                )
-                if c.returncode != 0:
+                try:
+                    compile(src, path, "exec")
+                except (SyntaxError, ValueError, OverflowError) as exc:
                     return {
                         "ok": False,
-                        "returncode": c.returncode,
-                        "stdout": (c.stdout or "").strip(),
-                        "stderr": (
-                            "compile failed\n"
-                            + ((c.stderr or "").strip())
-                        ).strip(),
+                        "returncode": 1,
+                        "stdout": "",
+                        "stderr": "compile failed\n%s" % exc,
                         "timeout": timeout,
                         "timed_out": False,
                         "error": "",

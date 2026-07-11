@@ -21,6 +21,117 @@ class TrilobiteApi {
     this.localFallbackUrl = 'http://127.0.0.1:11435',
   });
 
+  static final RegExp _relativeLocationIntent = RegExp(
+    r'\b(near me|nearby|my area|around me|where am i|my location|locate me)\b',
+    caseSensitive: false,
+  );
+  static final RegExp _weatherIntent = RegExp(
+    r'\b(weather|forecast|temperature|rain(?:ing)?|snow(?:ing)?|humidity|wind chill)\b',
+    caseSensitive: false,
+  );
+  static final RegExp _postalCode = RegExp(r'(?<!\d)\d{5}(?:-\d{4})?(?!\d)');
+  static final RegExp _weatherLocationSuffix = RegExp(
+    r'\b(?:in|for|near|around)\s+(.+)$',
+    caseSensitive: false,
+  );
+  static final RegExp _weatherLocationPrefix = RegExp(
+    r'^\s*(.{2,80}?)\s+(?:weather|forecast|temperature)\b',
+    caseSensitive: false,
+  );
+  static final RegExp _webCapability = RegExp(
+    r'\b(internet|web|online|browser|tools?)\b',
+    caseSensitive: false,
+  );
+
+  bool _promptNeedsApproximateLocation(String prompt) {
+    if (_relativeLocationIntent.hasMatch(prompt)) return true;
+    if (!_weatherIntent.hasMatch(prompt)) return false;
+    if (_postalCode.hasMatch(prompt)) return false;
+
+    final suffix = _weatherLocationSuffix.firstMatch(prompt)?.group(1)?.trim();
+    if (suffix != null && suffix.isNotEmpty) {
+      final normalized = suffix.toLowerCase();
+      const relativePlaces = <String>{
+        'here',
+        'home',
+        'me',
+        'my area',
+        'my city',
+        'my location',
+        'near me',
+        'around me',
+        'current location',
+      };
+      if (!relativePlaces.contains(normalized)) return false;
+    }
+
+    final prefix = _weatherLocationPrefix.firstMatch(prompt)?.group(1)?.trim();
+    if (prefix != null && prefix.isNotEmpty) {
+      final normalized = prefix.toLowerCase();
+      if (!RegExp(r'\b(what|how|tell|show|check|current)\b')
+          .hasMatch(normalized)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool _needsApproximateLocation(List<ChatMessage> messages) {
+    final userMessages = messages
+        .where((message) => message.role == Role.user && !message.pending)
+        .map((message) => message.content)
+        .toList();
+    if (userMessages.isEmpty) return false;
+    final current = userMessages.last;
+    if (_promptNeedsApproximateLocation(current)) return true;
+    return _webCapability.hasMatch(current) &&
+        userMessages
+            .take(userMessages.length - 1)
+            .toList()
+            .reversed
+            .take(4)
+            .any(_promptNeedsApproximateLocation);
+  }
+
+  Future<Map<String, dynamic>?> _discoverApproximateLocation() async {
+    const fields =
+        'success,message,country,country_code,region,region_code,city,'
+        'timezone';
+    try {
+      final response = await http
+          .get(Uri.parse('https://ipwho.is/?fields=$fields'))
+          .timeout(const Duration(seconds: 10));
+      if (response.statusCode != 200) return null;
+      final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+      if (decoded is! Map<String, dynamic> || decoded['success'] == false) {
+        return null;
+      }
+      const allowed = <String>{
+        'success',
+        'country',
+        'country_code',
+        'region',
+        'region_code',
+        'city',
+        'timezone',
+      };
+      final minimized = <String, dynamic>{};
+      for (final entry in decoded.entries) {
+        if (!allowed.contains(entry.key)) continue;
+        var value = entry.value;
+        if (entry.key == 'timezone' && value is Map) {
+          value = value['id'] ?? value['name'];
+        }
+        if (value is String || value is bool) {
+          minimized[entry.key] = value;
+        }
+      }
+      return minimized;
+    } catch (_) {
+      return null;
+    }
+  }
+
   Uri _uri(String path, [String? rootUrl]) {
     final root = (rootUrl ?? baseUrl).trim().replaceAll(RegExp(r'/+$'), '');
     return Uri.parse('$root$path');
@@ -133,12 +244,19 @@ class TrilobiteApi {
     String contextSize = '8192',
     String sessionId = '',
     String project = '',
+    bool allowApproximateLocation = false,
   }) async {
+    final locationHint =
+        allowApproximateLocation && _needsApproximateLocation(messages)
+            ? await _discoverApproximateLocation()
+            : null;
     final body = jsonEncode({
       'model': model,
       'context_size': contextSize,
       if (sessionId.trim().isNotEmpty) 'session': sessionId.trim(),
       if (project.trim().isNotEmpty) 'project': project.trim(),
+      'location_consent': allowApproximateLocation,
+      if (locationHint != null) 'location_hint': locationHint,
       'messages':
           messages.where((m) => !m.pending).map((m) => m.toWire()).toList(),
       'stream': false,

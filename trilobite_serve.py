@@ -334,6 +334,7 @@ HELP_TEXT = """commands:
   /capacity [N]      show queued-agent ceiling and safe concurrent worker slots
   /agentcancel <id>  cooperatively cancel an agent/master prefix or all
   /agentretry <id>   explicitly retry persisted interrupted/failed master work
+  /weather <place>   get sourced live conditions and a short forecast
   /asset <n> <brief> generate general icons/audio/models/scenes from a brief
   /forge [name]      build and run the dependency-free reference game suite
   /game ...          generate/test: /game cpp 3d name | concept
@@ -828,6 +829,10 @@ def _handle_slash(content, messages=None, state=None, project=""):
         return server.control_command(stripped, project=project)
     if cmd in ("/activity", "/tools"):
         return server.activity_status()
+    if cmd in ("/weather", "/forecast"):
+        if not arg.strip():
+            return "usage: /weather <city/state or ZIP>"
+        return server.weather_lookup(arg.strip())
     if cmd in ("/work", "/agent"):
         if not arg.strip():
             return "usage: /work <task>"
@@ -1411,6 +1416,19 @@ class Handler(BaseHTTPRequestHandler):
         stream = bool(req.get("stream", False))
         model = req.get("model", "trilobite")
         context_size = req.get("context_size", "")
+        location_consent = req.get("location_consent") is True
+        location_hint = req.get("location_hint")
+        if location_hint is not None and not isinstance(location_hint, dict):
+            self._send_json_payload(
+                {
+                    "error": {
+                        "message": "location_hint must be an object",
+                        "type": "invalid_request",
+                    }
+                },
+                status=400,
+            )
+            return
         try:
             session = _http_scope_value(req.get("session", ""), "session")
             project = _http_scope_value(req.get("project", ""), "project")
@@ -1432,6 +1450,7 @@ class Handler(BaseHTTPRequestHandler):
         )
 
         reply = None
+        web_routed = False
         turn = None
         response_iid = None
         activity_response = None
@@ -1456,6 +1475,20 @@ class Handler(BaseHTTPRequestHandler):
                         reply = _handle_intent(
                             prompt, messages=messages, state=state
                         )
+                    if reply is None:
+                        reply = server.chat_web_response(
+                            prompt,
+                            history=history,
+                            tier=_model_to_tier(model) or "code",
+                            location_consent=location_consent,
+                            location_hint=location_hint,
+                            allow_server_location_lookup=(
+                                location_consent
+                                and bool(self.client_address)
+                                and _is_loopback_host(self.client_address[0])
+                            ),
+                        )
+                        web_routed = reply is not None
                     if reply is None:
                         reply = _handle_work_intent(
                             prompt,
@@ -1483,7 +1516,9 @@ class Handler(BaseHTTPRequestHandler):
                 _record_chat(
                     "assistant",
                     content,
-                    kind="slash" if reply is not None else "model",
+                    kind=(
+                        "web" if web_routed else "slash" if reply is not None else "model"
+                    ),
                     state=state,
                 )
         except Exception as error:

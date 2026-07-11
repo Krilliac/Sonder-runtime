@@ -9,6 +9,7 @@ class Settings {
   static const _kAllowHosted = 'allow_hosted';
   static const _kContextSize = 'context_size';
   static const _kKeepServerRunning = 'keep_server_running';
+  static const _kAllowApproximateLocation = 'allow_approximate_location';
 
   static const defaultModel = 'trilobite';
 
@@ -19,6 +20,7 @@ class Settings {
   bool allowHosted;
   String contextSize;
   bool keepServerRunning;
+  bool allowApproximateLocation;
 
   Settings({
     this.serverUrl = 'http://127.0.0.1:11435',
@@ -28,6 +30,7 @@ class Settings {
     this.allowHosted = false,
     this.contextSize = '8192',
     this.keepServerRunning = false,
+    this.allowApproximateLocation = false,
   });
 
   bool get isConfigured => serverUrl.trim().isNotEmpty;
@@ -42,6 +45,7 @@ class Settings {
       allowHosted: p.getBool(_kAllowHosted) ?? false,
       contextSize: p.getString(_kContextSize) ?? '8192',
       keepServerRunning: p.getBool(_kKeepServerRunning) ?? false,
+      allowApproximateLocation: p.getBool(_kAllowApproximateLocation) ?? false,
     );
   }
 
@@ -57,5 +61,6 @@ class Settings {
       contextSize.trim().isEmpty ? '8192' : contextSize.trim(),
     );
     await p.setBool(_kKeepServerRunning, keepServerRunning);
+    await p.setBool(_kAllowApproximateLocation, allowApproximateLocation);
   }
 }

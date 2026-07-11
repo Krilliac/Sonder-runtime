@@ -29,6 +29,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late bool _dark;
   late bool _allowHosted;
   late bool _keepServerRunning;
+  late bool _allowApproximateLocation;
   bool _obscureKey = true;
   String? _status;
   bool _statusOk = false;
@@ -46,6 +47,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _dark = widget.settings.darkMode;
     _allowHosted = widget.settings.allowHosted;
     _keepServerRunning = widget.settings.keepServerRunning;
+    _allowApproximateLocation = widget.settings.allowApproximateLocation;
   }
 
   @override
@@ -68,6 +70,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ? '8192'
             : _contextSize.text.trim(),
         keepServerRunning: _keepServerRunning,
+        allowApproximateLocation: _allowApproximateLocation,
         model: _model.text.trim().isEmpty
             ? Settings.defaultModel
             : _model.text.trim(),
@@ -248,6 +251,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
             value: _keepServerRunning,
             onChanged: (v) => setState(() => _keepServerRunning = v),
           ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            secondary: const Icon(Icons.location_searching_outlined),
+            title: const Text('Allow approximate IP location'),
+            subtitle: const Text(
+              'Off by default. For weather or nearby requests, the app asks '
+              'ipwho.is for an approximate city/region. Raw IP is never sent '
+              'to Trilobite, displayed, or retained.',
+            ),
+            value: _allowApproximateLocation,
+            onChanged: (v) => setState(() => _allowApproximateLocation = v),
+          ),
           const Divider(height: 40),
           Text('Account', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 12),
@@ -349,8 +364,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           const SizedBox(height: 24),
           Text(
-            'Trilobite is a private, local AI. Nothing you type leaves the '
-            'server you point this app at. Run that server yourself with '
+            'Trilobite is local-first. Hosted tiers, explicit web tools, and '
+            'approximate location can contact external services only when you '
+            'enable or invoke them. Run the server yourself with '
             'deploy_trilobite.sh --serve.',
             style: Theme.of(context).textTheme.bodySmall,
           ),
