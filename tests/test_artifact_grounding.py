@@ -1,6 +1,9 @@
 import hashlib
 import json
+import zipfile
 from pathlib import Path
+
+import pytest
 
 import artifact_grounding
 import assetgen
@@ -24,6 +27,17 @@ def _update_manifest_hash(root: Path, filename: str):
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def _rewrite_zip_entry(path: Path, entry_name: str, transform):
+    with zipfile.ZipFile(path) as source:
+        entries = [
+            (info, transform(source.read(info.filename)) if info.filename == entry_name else source.read(info.filename))
+            for info in source.infolist()
+        ]
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as destination:
+        for info, data in entries:
+            destination.writestr(info, data)
 
 
 def test_text_markdown_json_and_csv_recipes(tmp_path):
@@ -139,10 +153,13 @@ def test_generated_all_format_pack_passes_manifest_and_format_recipes(
             "required_files": [
                 "brief.md",
                 "data.csv",
+                "document.docx",
                 "preview.html",
                 "icon.png",
+                "presentation.pptx",
                 "theme.wav",
                 "models.obj",
+                "workbook.xlsx",
             ],
             "recipes": {"html": {"no_external_dependencies": True}},
         },
@@ -152,7 +169,125 @@ def test_generated_all_format_pack_passes_manifest_and_format_recipes(
     assert result["checked_files"] == len(pack["files"])
     assert result["failed_checks"] == 0
     recipes = {child["recipe"] for child in result["children"]}
-    assert {"markdown", "csv", "html", "json", "obj", "png", "ppm", "svg", "wav"} <= recipes
+    assert {
+        "markdown", "csv", "docx", "html", "json", "obj", "png", "ppm",
+        "pptx", "svg", "wav", "xlsx",
+    } <= recipes
+
+
+def test_editable_office_recipes_check_content_and_structure(tmp_path):
+    document = tmp_path / "report.docx"
+    workbook = tmp_path / "metrics.xlsx"
+    presentation = tmp_path / "roadmap.pptx"
+    assetgen.ooxml_assets.write_docx(document, "Release", "Verified locally")
+    assetgen.ooxml_assets.write_xlsx(workbook, "Metrics", "Verified locally", 42)
+    assetgen.ooxml_assets.write_pptx(presentation, "Roadmap", "Verified locally")
+
+    results = [
+        artifact_grounding.validate(
+            document,
+            "office",
+            {
+                "min_paragraphs": 10,
+                "required_text": ["Release", "Verified locally"],
+                "no_external_dependencies": True,
+            },
+        ),
+        artifact_grounding.validate(
+            workbook,
+            "spreadsheet",
+            {
+                "min_rows": 13,
+                "required_sheet_names": ["Data"],
+                "required_text": ["Metrics"],
+                "no_external_dependencies": True,
+            },
+        ),
+        artifact_grounding.validate(
+            presentation,
+            "presentation",
+            {
+                "min_slides": 3,
+                "required_text": ["Roadmap", "provenance"],
+                "no_external_dependencies": True,
+            },
+        ),
+    ]
+
+    assert all(result["ok"] for result in results)
+    assert [result["recipe"] for result in results] == ["ooxml", "xlsx", "pptx"]
+
+
+def test_ooxml_validation_catches_missing_part_after_manifest_rehash(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(assetgen, "workspace_root", lambda: str(tmp_path))
+    pack = assetgen.generate_artifacts("editable", "editable document", kinds="docx")
+    root = Path(pack["root"])
+    document = root / "document.docx"
+    with zipfile.ZipFile(document) as source:
+        entries = {
+            info.filename: source.read(info.filename)
+            for info in source.infolist()
+            if info.filename != "word/document.xml"
+        }
+    with zipfile.ZipFile(document, "w", zipfile.ZIP_DEFLATED) as destination:
+        for name, data in sorted(entries.items()):
+            destination.writestr(name, data)
+    _update_manifest_hash(root, "document.docx")
+
+    result = artifact_grounding.validate(root, "bundle", {"require_manifest": True})
+
+    assert not result["ok"]
+    assert any(item["name"] == "ooxml-required-part" for item in _failures(result))
+    assert not any(item["name"] == "bundle-sha256" for item in _failures(result))
+
+
+def test_bundle_ooxml_grounding_propagates_no_external_dependencies(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(assetgen, "workspace_root", lambda: str(tmp_path))
+    pack = assetgen.generate_artifacts("editable", "editable document", kinds="docx")
+    root = Path(pack["root"])
+    document = root / "document.docx"
+    _rewrite_zip_entry(
+        document,
+        "word/_rels/document.xml.rels",
+        lambda data: data.replace(
+            b'Target="styles.xml"',
+            b'Target="https://example.invalid/styles.xml" TargetMode="External"',
+        ),
+    )
+    _update_manifest_hash(root, "document.docx")
+
+    result = artifact_grounding.validate(
+        root,
+        "bundle",
+        {"require_manifest": True, "no_external_dependencies": True},
+    )
+
+    assert not result["ok"]
+    assert any(
+        item["name"] == "ooxml-no-external-dependencies"
+        for item in _failures(result)
+    )
+    assert not any(item["name"] == "bundle-sha256" for item in _failures(result))
+
+
+@pytest.mark.parametrize(
+    "entry_name,check_name",
+    [("../escape.bin", "ooxml-safe-paths"), ("word/vbaProject.bin", "ooxml-no-active-content")],
+)
+def test_ooxml_rejects_unsafe_or_active_zip_entries(tmp_path, entry_name, check_name):
+    document = tmp_path / "unsafe.docx"
+    assetgen.ooxml_assets.write_docx(document, "Safe", "Before tampering")
+    with zipfile.ZipFile(document, "a", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(entry_name, b"not allowed")
+
+    result = artifact_grounding.validate(document, "docx")
+
+    assert not result["ok"]
+    assert any(item["name"] == check_name for item in _failures(result))
 
 
 def test_format_validation_catches_tampering_even_with_updated_manifest(

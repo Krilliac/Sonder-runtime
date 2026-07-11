@@ -5,9 +5,11 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import posixpath
 import re
 import struct
 import wave
+import zipfile
 import zlib
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
@@ -18,9 +20,34 @@ MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_TEXT_BYTES = 8 * 1024 * 1024
 MAX_BUNDLE_FILES = 500
 MAX_BUNDLE_BYTES = 256 * 1024 * 1024
+MAX_OOXML_ENTRIES = 1000
+MAX_OOXML_BYTES = 128 * 1024 * 1024
+
+OOXML_REQUIRED_PARTS = {
+    "docx": {"[Content_Types].xml", "_rels/.rels", "word/document.xml"},
+    "xlsx": {
+        "[Content_Types].xml",
+        "_rels/.rels",
+        "xl/workbook.xml",
+        "xl/worksheets/sheet1.xml",
+    },
+    "pptx": {
+        "[Content_Types].xml",
+        "_rels/.rels",
+        "ppt/presentation.xml",
+        "ppt/slideMasters/slideMaster1.xml",
+        "ppt/slideLayouts/slideLayout1.xml",
+        "ppt/theme/theme1.xml",
+    },
+}
+OOXML_ACTIVE_SUFFIXES = {
+    ".bat", ".cmd", ".com", ".dll", ".exe", ".js", ".msi", ".ps1",
+    ".scr", ".vbe", ".vbs",
+}
 
 EXTENSION_RECIPES = {
     ".csv": "csv",
+    ".docx": "docx",
     ".htm": "html",
     ".html": "html",
     ".json": "json",
@@ -29,17 +56,23 @@ EXTENSION_RECIPES = {
     ".obj": "obj",
     ".png": "png",
     ".ppm": "ppm",
+    ".pptx": "pptx",
     ".svg": "svg",
     ".txt": "text",
     ".wav": "wav",
+    ".xlsx": "xlsx",
 }
 
 RECIPE_ALIASES = {
     "audio": "wav",
     "data": "auto",
     "document": "auto",
+    "editable": "ooxml",
     "image": "auto",
     "model": "obj",
+    "office": "ooxml",
+    "presentation": "auto",
+    "spreadsheet": "auto",
     "ui": "ui",
     "web": "ui",
     "writing": "auto",
@@ -50,16 +83,20 @@ SUPPORTED_RECIPES = {
     "binary",
     "bundle",
     "csv",
+    "docx",
     "html",
     "json",
     "markdown",
     "obj",
+    "ooxml",
     "png",
     "ppm",
+    "pptx",
     "svg",
     "text",
     "ui",
     "wav",
+    "xlsx",
     *RECIPE_ALIASES,
 }
 
@@ -496,6 +533,344 @@ def _validate_obj(path: Path, requirements: dict, checks: list):
     _check(checks, "obj-indices", bad_indices == 0, "%d malformed/out-of-range indices" % bad_indices)
 
 
+def _safe_ooxml_part_name(name: str) -> str | None:
+    """Return a canonical package part name, or None for an unsafe ZIP path."""
+    if not name or "\\" in name or name.startswith("/") or "//" in name:
+        return None
+    pure = PurePosixPath(name)
+    if any(part in {"", ".", ".."} for part in pure.parts):
+        return None
+    normalized = pure.as_posix()
+    if normalized.startswith("../") or normalized == ".." or ":" in pure.parts[0]:
+        return None
+    return normalized
+
+
+def _ooxml_relationship_source(relationship_part: str) -> str | None:
+    if relationship_part == "_rels/.rels":
+        return ""
+    pure = PurePosixPath(relationship_part)
+    if (
+        len(pure.parts) < 3
+        or pure.parts[-2] != "_rels"
+        or not pure.name.endswith(".rels")
+    ):
+        return None
+    source_name = pure.name[:-5]
+    return PurePosixPath(*pure.parts[:-2], source_name).as_posix()
+
+
+def _ooxml_relationship_target(relationship_part: str, target: str) -> str | None:
+    """Resolve an internal OPC relationship without allowing package-root escape."""
+    target = str(target or "").replace("\\", "/")
+    target = target.split("#", 1)[0].split("?", 1)[0]
+    if not target:
+        return None
+    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", target) or target.startswith("//"):
+        return None
+    source = _ooxml_relationship_source(relationship_part)
+    if source is None:
+        return None
+    if target.startswith("/"):
+        joined = target.lstrip("/")
+    else:
+        joined = posixpath.join(posixpath.dirname(source), target)
+    normalized = posixpath.normpath(joined)
+    if normalized in {"", ".", ".."} or normalized.startswith("../"):
+        return None
+    return _safe_ooxml_part_name(normalized)
+
+
+def _ooxml_kind(path: Path, recipe: str, names: set[str]) -> str:
+    if recipe in OOXML_REQUIRED_PARTS:
+        return recipe
+    suffix = path.suffix.lower().lstrip(".")
+    if suffix in OOXML_REQUIRED_PARTS:
+        return suffix
+    for kind, marker in (
+        ("docx", "word/document.xml"),
+        ("xlsx", "xl/workbook.xml"),
+        ("pptx", "ppt/presentation.xml"),
+    ):
+        if marker in names:
+            return kind
+    return "unknown"
+
+
+def _validate_ooxml(path: Path, recipe: str, requirements: dict, checks: list):
+    """Validate an editable Office Open XML ZIP package without third parties."""
+    try:
+        archive = zipfile.ZipFile(path)
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        _check(checks, "valid-ooxml-zip", False, str(exc))
+        return
+
+    with archive:
+        infos = archive.infolist()
+        _check(checks, "valid-ooxml-zip", True, "%d package entries" % len(infos))
+        within_entry_limit = _check(
+            checks,
+            "ooxml-entry-limit",
+            len(infos) <= MAX_OOXML_ENTRIES,
+            "%d entries (maximum %d)" % (len(infos), MAX_OOXML_ENTRIES),
+        )
+        total_bytes = sum(max(0, item.file_size) for item in infos)
+        within_size_limit = _check(
+            checks,
+            "ooxml-uncompressed-limit",
+            total_bytes <= MAX_OOXML_BYTES,
+            "%d uncompressed bytes (maximum %d)" % (total_bytes, MAX_OOXML_BYTES),
+        )
+        canonical = [_safe_ooxml_part_name(item.filename.rstrip("/")) for item in infos]
+        unsafe = [item.filename for item, safe in zip(infos, canonical) if safe is None]
+        _check(
+            checks,
+            "ooxml-safe-paths",
+            not unsafe,
+            "unsafe entries: %s" % (", ".join(unsafe[:10]) or "none"),
+        )
+        safe_names = [name for name in canonical if name is not None]
+        folded = [name.casefold() for name in safe_names]
+        _check(
+            checks,
+            "ooxml-unique-paths",
+            len(folded) == len(set(folded)),
+            "%d unique entries" % len(set(folded)),
+        )
+        encrypted = [item.filename for item in infos if item.flag_bits & 0x1]
+        _check(
+            checks,
+            "ooxml-not-encrypted",
+            not encrypted,
+            "encrypted entries: %s" % (", ".join(encrypted[:10]) or "none"),
+        )
+        linked = [
+            item.filename
+            for item in infos
+            if ((item.external_attr >> 16) & 0o170000) == 0o120000
+        ]
+        _check(
+            checks,
+            "ooxml-no-symlinks",
+            not linked,
+            "symlink entries: %s" % (", ".join(linked[:10]) or "none"),
+        )
+        active = [
+            name
+            for name in safe_names
+            if PurePosixPath(name).suffix.lower() in OOXML_ACTIVE_SUFFIXES
+            or "vbaproject" in name.casefold()
+            or "/activex/" in ("/" + name.casefold())
+            or "/embeddings/" in ("/" + name.casefold())
+        ]
+        _check(
+            checks,
+            "ooxml-no-active-content",
+            not active,
+            "active/embedded entries: %s" % (", ".join(active[:10]) or "none"),
+        )
+        if (
+            not within_entry_limit
+            or not within_size_limit
+            or unsafe
+            or encrypted
+            or linked
+        ):
+            return
+        try:
+            corrupt = archive.testzip()
+        except (OSError, RuntimeError, zipfile.BadZipFile, zlib.error) as exc:
+            _check(checks, "ooxml-zip-integrity", False, str(exc))
+            return
+        _check(
+            checks,
+            "ooxml-zip-integrity",
+            corrupt is None,
+            "first corrupt entry: %s" % (corrupt or "none"),
+        )
+        if corrupt is not None:
+            return
+
+        names = set(safe_names)
+        kind = _ooxml_kind(path, recipe, names)
+        _check(
+            checks,
+            "ooxml-package-kind",
+            kind in OOXML_REQUIRED_PARTS,
+            "detected %s" % kind,
+        )
+        if kind not in OOXML_REQUIRED_PARTS:
+            return
+        if recipe in OOXML_REQUIRED_PARTS:
+            _check(
+                checks,
+                "ooxml-matching-extension",
+                path.suffix.lower() == "." + recipe,
+                "expected .%s" % recipe,
+            )
+        for required in sorted(OOXML_REQUIRED_PARTS[kind]):
+            _check(
+                checks,
+                "ooxml-required-part",
+                required in names,
+                required,
+            )
+
+        roots = {}
+        malformed = []
+        unsafe_markup = []
+        xml_names = [
+            item.filename
+            for item in infos
+            if item.filename.lower().endswith((".xml", ".rels"))
+        ]
+        for name in xml_names:
+            info = archive.getinfo(name)
+            if info.file_size > MAX_TEXT_BYTES:
+                malformed.append("%s exceeds XML size limit" % name)
+                continue
+            try:
+                data = archive.read(name)
+                lowered = data.lower()
+                if b"<!doctype" in lowered or b"<!entity" in lowered:
+                    unsafe_markup.append(name)
+                    continue
+                roots[name] = ElementTree.fromstring(data)
+            except (ElementTree.ParseError, OSError, RuntimeError, ValueError) as exc:
+                malformed.append("%s: %s" % (name, exc))
+        _check(
+            checks,
+            "ooxml-valid-xml",
+            not malformed and len(roots) == len(xml_names),
+            "%d XML parts; malformed: %s"
+            % (len(roots), "; ".join(malformed[:5]) or "none"),
+        )
+        _check(
+            checks,
+            "ooxml-safe-xml",
+            not unsafe_markup,
+            "DTD/entity parts: %s" % (", ".join(unsafe_markup[:10]) or "none"),
+        )
+
+        relationship_ns = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+        missing_targets = []
+        invalid_targets = []
+        external_targets = []
+        for relationship_name, root in roots.items():
+            if not relationship_name.endswith(".rels"):
+                continue
+            for relationship in root.findall("%sRelationship" % relationship_ns):
+                target = relationship.attrib.get("Target", "")
+                mode = relationship.attrib.get("TargetMode", "").casefold()
+                external = mode == "external" or bool(
+                    re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", target)
+                    or target.startswith("//")
+                )
+                if external:
+                    external_targets.append(target)
+                    continue
+                resolved = _ooxml_relationship_target(relationship_name, target)
+                if resolved is None:
+                    invalid_targets.append("%s -> %s" % (relationship_name, target))
+                elif resolved not in names:
+                    missing_targets.append("%s -> %s" % (relationship_name, resolved))
+        _check(
+            checks,
+            "ooxml-valid-relationship-targets",
+            not invalid_targets,
+            "invalid targets: %s" % ("; ".join(invalid_targets[:10]) or "none"),
+        )
+        _check(
+            checks,
+            "ooxml-complete-relationships",
+            not missing_targets,
+            "missing targets: %s" % ("; ".join(missing_targets[:10]) or "none"),
+        )
+        if requirements.get("no_external_dependencies"):
+            _check(
+                checks,
+                "ooxml-no-external-dependencies",
+                not external_targets,
+                "external targets: %s"
+                % (", ".join(external_targets[:10]) or "none"),
+            )
+
+        text_fragments = []
+        if kind == "docx" and "word/document.xml" in roots:
+            root = roots["word/document.xml"]
+            namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+            paragraphs = root.findall(".//%sp" % namespace)
+            text_fragments = [node.text or "" for node in root.findall(".//%st" % namespace)]
+            minimum = _bounded_int(requirements, "min_paragraphs", 1, 0, 1_000_000)
+            _check(
+                checks,
+                "docx-minimum-paragraphs",
+                len(paragraphs) >= minimum,
+                "%d paragraphs (minimum %d)" % (len(paragraphs), minimum),
+            )
+        elif kind == "xlsx":
+            sheet_names = sorted(
+                name
+                for name in roots
+                if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", name)
+            )
+            sheet_ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+            rows = []
+            for name in sheet_names:
+                rows.extend(roots[name].findall(".//%srow" % sheet_ns))
+                text_fragments.extend(
+                    node.text or "" for node in roots[name].findall(".//%st" % sheet_ns)
+                )
+                text_fragments.extend(
+                    node.text or "" for node in roots[name].findall(".//%sv" % sheet_ns)
+                )
+            minimum = _bounded_int(requirements, "min_rows", 1, 0, 1_000_000)
+            _check(
+                checks,
+                "xlsx-minimum-rows",
+                len(rows) >= minimum,
+                "%d rows (minimum %d)" % (len(rows), minimum),
+            )
+            workbook = roots.get("xl/workbook.xml")
+            actual_sheets = []
+            if workbook is not None:
+                actual_sheets = [
+                    node.attrib.get("name", "")
+                    for node in workbook.findall(".//%ssheet" % sheet_ns)
+                ]
+            for sheet in _string_list(requirements, "required_sheet_names"):
+                _check(
+                    checks,
+                    "xlsx-required-sheet",
+                    sheet in actual_sheets,
+                    "sheet %r" % sheet,
+                )
+        elif kind == "pptx":
+            slide_names = sorted(
+                name for name in roots if re.fullmatch(r"ppt/slides/slide\d+\.xml", name)
+            )
+            drawing_ns = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+            for name in slide_names:
+                text_fragments.extend(
+                    node.text or "" for node in roots[name].findall(".//%st" % drawing_ns)
+                )
+            minimum = _bounded_int(requirements, "min_slides", 1, 0, 10_000)
+            _check(
+                checks,
+                "pptx-minimum-slides",
+                len(slide_names) >= minimum,
+                "%d slides (minimum %d)" % (len(slide_names), minimum),
+            )
+        rendered_text = " ".join(text_fragments)
+        for needle in _string_list(requirements, "required_text"):
+            _check(
+                checks,
+                "ooxml-required-text",
+                needle.casefold() in rendered_text.casefold(),
+                "contains %r" % needle,
+            )
+
+
 def _resolve_recipe(path: Path, recipe: str) -> str:
     recipe = str(recipe or "auto").strip().lower().replace("-", "_")
     if recipe not in SUPPORTED_RECIPES:
@@ -551,6 +926,8 @@ def _validate_file(path: Path, recipe: str, requirements: dict) -> dict:
         _validate_wav(path, requirements, checks)
     elif recipe == "obj":
         _validate_obj(path, requirements, checks)
+    elif recipe in {"docx", "xlsx", "pptx", "ooxml"}:
+        _validate_ooxml(path, recipe, requirements, checks)
     else:
         raise ValueError("recipe %s requires a directory" % recipe)
     return {
@@ -665,7 +1042,9 @@ def _validate_directory(path: Path, recipe: str, requirements: dict) -> dict:
             continue
         child_recipe = _resolve_recipe(candidate, "auto")
         child_requirements = _child_requirements(requirements, child_recipe)
-        if child_recipe in {"html", "svg"} and "no_external_dependencies" in requirements:
+        if child_recipe in {
+            "html", "svg", "docx", "xlsx", "pptx", "ooxml",
+        } and "no_external_dependencies" in requirements:
             child_requirements.setdefault(
                 "no_external_dependencies",
                 bool(requirements.get("no_external_dependencies")),

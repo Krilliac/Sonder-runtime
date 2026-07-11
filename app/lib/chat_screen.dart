@@ -55,6 +55,8 @@ class _ChatScreenState extends State<ChatScreen> {
     '/mcp': 'Audit live MCP source/tool convergence',
     '/learning': 'Inspect grounded learning and memory quality',
     '/artifactcheck': 'Validate a generated file or artifact pack',
+    '/asset office-suite DOCX report, XLSX workbook, PPTX deck':
+        'Generate a grounded editable Office suite',
     '/autopilot': 'Plan or run a persistent guarded goal',
     '/report': 'Show latest end report and exact actions',
     '/checklist': 'Show the active work checklist',
