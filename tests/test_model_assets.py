@@ -1,6 +1,7 @@
 import hashlib
 import json
 import struct
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 
 import artifact_grounding
@@ -67,19 +68,37 @@ def test_rigged_glb_is_self_contained_animated_gltf_2(tmp_path):
     assert parsed["total"] == len(parsed["payload"])
     assert parsed["json_kind"] == model_assets.JSON_CHUNK
     assert parsed["binary_kind"] == model_assets.BIN_CHUNK
-    assert parsed["binary_length"] == document["buffers"][0]["byteLength"]
+    declared_binary = document["buffers"][0]["byteLength"]
+    assert declared_binary <= parsed["binary_length"] <= declared_binary + 3
     assert "uri" not in document["buffers"][0]
     assert stats == {
         "animations": 1,
         "bytes": len(parsed["payload"]),
+        "images": 3,
         "joints": 2,
+        "materials": 1,
+        "textures": 3,
         "triangles": 36,
         "vertices": 72,
     }
     primitive = document["meshes"][0]["primitives"][0]
-    assert {"POSITION", "NORMAL", "JOINTS_0", "WEIGHTS_0"} <= set(
+    assert {
+        "POSITION", "NORMAL", "TANGENT", "TEXCOORD_0", "JOINTS_0", "WEIGHTS_0",
+    } <= set(
         primitive["attributes"]
     )
+    assert len(document["images"]) == 3
+    assert len(document["textures"]) == 3
+    assert all("uri" not in image for image in document["images"])
+    for image in document["images"]:
+        view = document["bufferViews"][image["bufferView"]]
+        start = parsed["binary_start"] + view["byteOffset"]
+        assert parsed["payload"][start:start + 8] == b"\x89PNG\r\n\x1a\n"
+    pbr = document["materials"][0]["pbrMetallicRoughness"]
+    assert pbr["baseColorTexture"] == {"index": 0}
+    assert pbr["metallicRoughnessTexture"] == {"index": 1}
+    assert document["materials"][0]["occlusionTexture"]["index"] == 1
+    assert document["materials"][0]["normalTexture"]["index"] == 2
     assert document["skins"][0]["joints"] == [0, 1]
     assert document["animations"][0]["channels"][0]["target"] == {
         "node": 1,
@@ -94,7 +113,15 @@ def test_rigged_glb_is_self_contained_animated_gltf_2(tmp_path):
             "min_triangles": 36,
             "min_joints": 2,
             "min_animations": 1,
+            "min_images": 3,
+            "min_materials": 1,
+            "min_textures": 3,
+            "min_texcoord_sets": 1,
             "no_external_dependencies": True,
+            "require_embedded_images": True,
+            "require_material_textures": True,
+            "require_power_of_two_images": True,
+            "require_tangents": True,
             "required_text": ["Crawler", "ShellPulse"],
         },
     )
@@ -238,6 +265,115 @@ def test_glb_grounding_rejects_non_unit_animation_quaternion(tmp_path):
     assert "unit quaternions" in animation["detail"]
 
 
+def test_glb_grounding_rejects_corrupt_embedded_texture(tmp_path):
+    path = tmp_path / "broken-texture.glb"
+    model_assets.write_rigged_glb(path, PALETTE)
+    parsed = _read_glb(path)
+    image = parsed["document"]["images"][0]
+    view = parsed["document"]["bufferViews"][image["bufferView"]]
+    payload = bytearray(parsed["payload"])
+    png_start = parsed["binary_start"] + view["byteOffset"]
+    chunk = png_start + 8
+    while payload[chunk + 4:chunk + 8] != b"IDAT":
+        chunk += 12 + struct.unpack_from(">I", payload, chunk)[0]
+    chunk_length = struct.unpack_from(">I", payload, chunk)[0]
+    data_start = chunk + 8
+    data_end = data_start + chunk_length
+    payload[data_start] ^= 0xFF
+    crc = zlib.crc32(payload[chunk + 4:data_end]) & 0xFFFFFFFF
+    struct.pack_into(">I", payload, data_end, crc)
+    path.write_bytes(payload)
+
+    result = artifact_grounding.validate(
+        path,
+        "glb",
+        {
+            "min_images": 2,
+            "require_embedded_images": True,
+            "require_material_textures": True,
+        },
+    )
+
+    assert not result["ok"]
+    images = next(check for check in result["checks"] if check["name"] == "glb-images")
+    assert not images["ok"]
+    assert "embedded PNG" in images["detail"]
+
+
+def test_glb_grounding_rejects_invalid_texture_reference(tmp_path):
+    path = tmp_path / "broken-reference.glb"
+    model_assets.write_rigged_glb(path, PALETTE)
+    parsed = _read_glb(path)
+    document = parsed["document"]
+    document["textures"][0]["source"] = 999
+    _rewrite_document(path, parsed, document)
+
+    result = artifact_grounding.validate(
+        path,
+        "glb",
+        {"min_textures": 2, "require_material_textures": True},
+    )
+
+    assert not result["ok"]
+    materials = next(
+        check for check in result["checks"] if check["name"] == "glb-materials"
+    )
+    assert not materials["ok"]
+    assert "invalid source" in materials["detail"]
+
+
+def test_glb_grounding_requires_material_texture_coordinates(tmp_path):
+    path = tmp_path / "missing-uv.glb"
+    model_assets.write_rigged_glb(path, PALETTE)
+    parsed = _read_glb(path)
+    document = parsed["document"]
+    del document["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_0"]
+    _rewrite_document(path, parsed, document)
+
+    result = artifact_grounding.validate(
+        path,
+        "glb",
+        {
+            "min_texcoord_sets": 1,
+            "require_material_textures": True,
+        },
+    )
+
+    assert not result["ok"]
+    texcoords = next(
+        check
+        for check in result["checks"]
+        if check["name"] == "glb-texture-coordinates"
+    )
+    assert not texcoords["ok"]
+    assert "TEXCOORD_0 is missing" in texcoords["detail"]
+
+
+def test_glb_grounding_requires_normal_map_tangents(tmp_path):
+    path = tmp_path / "missing-tangent.glb"
+    model_assets.write_rigged_glb(path, PALETTE)
+    parsed = _read_glb(path)
+    document = parsed["document"]
+    del document["meshes"][0]["primitives"][0]["attributes"]["TANGENT"]
+    _rewrite_document(path, parsed, document)
+
+    result = artifact_grounding.validate(
+        path,
+        "glb",
+        {
+            "require_material_textures": True,
+            "require_tangents": True,
+        },
+    )
+
+    assert not result["ok"]
+    tangents = next(
+        check for check in result["checks"] if check["name"] == "glb-tangents"
+    )
+    assert not tangents["ok"]
+    assert "TANGENT is missing" in tangents["detail"]
+
+
 def test_glb_grounding_fails_closed_on_malformed_schema_fields(tmp_path):
     path = tmp_path / "malformed.glb"
 
@@ -253,7 +389,20 @@ def test_glb_grounding_fails_closed_on_malformed_schema_fields(tmp_path):
     def bad_images(document):
         document["images"] = None
 
-    for mutate in (bad_buffer, bad_joints, bad_sampler, bad_images):
+    def bad_textures(document):
+        document["textures"] = None
+
+    def bad_texture_sampler(document):
+        document["samplers"] = [{"wrapS": "repeat"}]
+
+    for mutate in (
+        bad_buffer,
+        bad_joints,
+        bad_sampler,
+        bad_images,
+        bad_textures,
+        bad_texture_sampler,
+    ):
         model_assets.write_rigged_glb(path, PALETTE)
         parsed = _read_glb(path)
         document = parsed["document"]

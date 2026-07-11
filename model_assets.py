@@ -1,4 +1,4 @@
-"""Deterministic, dependency-free rigged glTF 2.0 model generation."""
+"""Deterministic, dependency-free textured and rigged glTF 2.0 generation."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import os
 import struct
 import tempfile
 import time
+import zlib
 
 
 GLB_MAGIC = b"glTF"
@@ -82,21 +83,96 @@ def _flatten(rows):
     return [value for row in rows for value in row]
 
 
-def _append_box(positions, normals, joints, weights, indices, bounds, skin):
+def _png_chunk(kind, payload):
+    return (
+        struct.pack(">I", len(payload))
+        + kind
+        + payload
+        + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+    )
+
+
+def _png_rgba(width, height, pixels):
+    if len(pixels) != width * height * 4:
+        raise ValueError("RGBA texture payload has the wrong size")
+    stride = width * 4
+    rows = b"".join(
+        b"\x00" + pixels[y * stride:(y + 1) * stride]
+        for y in range(height)
+    )
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(
+            b"IHDR",
+            struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0),
+        )
+        + _png_chunk(b"IDAT", zlib.compress(rows, 9))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+def _mix(left, right, amount):
+    return tuple(
+        max(0, min(255, round(a + (b - a) * amount)))
+        for a, b in zip(left, right)
+    )
+
+
+def _material_textures(palette, seed, size=32):
+    color = bytearray()
+    surface = bytearray()
+    normal = bytearray()
+    phase = int(seed) & 15
+    for y in range(size):
+        for x in range(size):
+            checker = ((x // 4) + (y // 4) + phase) & 1
+            ridge = ((x + y + phase) % 11) < 2
+            base = _mix(palette[1], palette[2], 0.38 if checker else 0.08)
+            if ridge:
+                base = _mix(base, palette[2], 0.55)
+            color.extend((*base, 255))
+            occlusion = 210 + (22 if checker else 0)
+            roughness = 150 + ((x * 5 + y * 3 + phase) % 70)
+            metallic = 96 + (72 if ridge else 0)
+            surface.extend((occlusion, roughness, metallic, 255))
+            nx = 0.16 * math.sin((x + phase) * 0.55)
+            ny = 0.16 * math.cos((y - phase) * 0.47)
+            nz = math.sqrt(max(0.0, 1.0 - nx * nx - ny * ny))
+            normal.extend(
+                (
+                    round((nx * 0.5 + 0.5) * 255),
+                    round((ny * 0.5 + 0.5) * 255),
+                    round((nz * 0.5 + 0.5) * 255),
+                    255,
+                )
+            )
+    return (
+        _png_rgba(size, size, bytes(color)),
+        _png_rgba(size, size, bytes(surface)),
+        _png_rgba(size, size, bytes(normal)),
+    )
+
+
+def _append_box(
+    positions, normals, tangents, texcoords, joints, weights, indices, bounds, skin,
+):
     x0, y0, z0, x1, y1, z1 = bounds
     faces = (
-        ((1.0, 0.0, 0.0), ((x1, y0, z0), (x1, y1, z0), (x1, y1, z1), (x1, y0, z1))),
-        ((-1.0, 0.0, 0.0), ((x0, y0, z1), (x0, y1, z1), (x0, y1, z0), (x0, y0, z0))),
-        ((0.0, 1.0, 0.0), ((x0, y1, z0), (x0, y1, z1), (x1, y1, z1), (x1, y1, z0))),
-        ((0.0, -1.0, 0.0), ((x0, y0, z1), (x0, y0, z0), (x1, y0, z0), (x1, y0, z1))),
-        ((0.0, 0.0, 1.0), ((x1, y0, z1), (x1, y1, z1), (x0, y1, z1), (x0, y0, z1))),
-        ((0.0, 0.0, -1.0), ((x0, y0, z0), (x0, y1, z0), (x1, y1, z0), (x1, y0, z0))),
+        ((1.0, 0.0, 0.0), (0.0, 0.0, 1.0), ((x1, y0, z0), (x1, y1, z0), (x1, y1, z1), (x1, y0, z1))),
+        ((-1.0, 0.0, 0.0), (0.0, 0.0, -1.0), ((x0, y0, z1), (x0, y1, z1), (x0, y1, z0), (x0, y0, z0))),
+        ((0.0, 1.0, 0.0), (1.0, 0.0, 0.0), ((x0, y1, z0), (x0, y1, z1), (x1, y1, z1), (x1, y1, z0))),
+        ((0.0, -1.0, 0.0), (1.0, 0.0, 0.0), ((x0, y0, z1), (x0, y0, z0), (x1, y0, z0), (x1, y0, z1))),
+        ((0.0, 0.0, 1.0), (-1.0, 0.0, 0.0), ((x1, y0, z1), (x1, y1, z1), (x0, y1, z1), (x0, y0, z1))),
+        ((0.0, 0.0, -1.0), (1.0, 0.0, 0.0), ((x0, y0, z0), (x0, y1, z0), (x1, y1, z0), (x1, y0, z0))),
     )
-    for normal, corners in faces:
+    face_uvs = ((0.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, 0.0))
+    for normal, tangent, corners in faces:
         base = len(positions)
-        for position in corners:
+        for position, uv in zip(corners, face_uvs):
             positions.append(position)
             normals.append(normal)
+            tangents.append((*tangent, -1.0))
+            texcoords.append(uv)
             joint_row, weight_row = skin(position[1])
             joints.append(joint_row)
             weights.append(weight_row)
@@ -121,12 +197,8 @@ def _inverse_translation_y(value):
     )
 
 
-def _factor(rgb):
-    return [round(channel / 255.0, 6) for channel in rgb] + [1.0]
-
-
 def write_rigged_glb(path, palette, theme="arcane", seed=1337, title="Trilobite", brief=""):
-    """Write a compact GLB containing geometry, a two-joint skin, and animation."""
+    """Write a textured GLB containing geometry, a two-joint skin, and animation."""
     seed = int(seed)
     variation = ((seed & 255) / 255.0 - 0.5) * 0.16
     joint_height = round(0.9 + variation * 0.25, 6)
@@ -134,6 +206,8 @@ def write_rigged_glb(path, palette, theme="arcane", seed=1337, title="Trilobite"
 
     positions = []
     normals = []
+    tangents = []
+    texcoords = []
     joints = []
     weights = []
     indices = []
@@ -147,15 +221,15 @@ def write_rigged_glb(path, palette, theme="arcane", seed=1337, title="Trilobite"
         return (0, 1, 0, 0), (round(1.0 - blend, 6), blend, 0.0, 0.0)
 
     _append_box(
-        positions, normals, joints, weights, indices,
+        positions, normals, tangents, texcoords, joints, weights, indices,
         (-0.55, 0.0, -0.38, 0.55, joint_height, 0.38), root_skin,
     )
     _append_box(
-        positions, normals, joints, weights, indices,
+        positions, normals, tangents, texcoords, joints, weights, indices,
         (-shell_width, joint_height - 0.18, -0.5, shell_width, 1.7, 0.5), upper_skin,
     )
     _append_box(
-        positions, normals, joints, weights, indices,
+        positions, normals, tangents, texcoords, joints, weights, indices,
         (-0.42, 1.62, -0.34, 0.42, 2.18 + variation, 0.34), upper_skin,
     )
 
@@ -181,6 +255,8 @@ def write_rigged_glb(path, palette, theme="arcane", seed=1337, title="Trilobite"
 
     position_values = _flatten(positions)
     normal_values = _flatten(normals)
+    tangent_values = _flatten(tangents)
+    texcoord_values = _flatten(texcoords)
     joint_values = _flatten(joints)
     weight_values = _flatten(weights)
     mins = [min(row[axis] for row in positions) for axis in range(3)]
@@ -191,6 +267,12 @@ def write_rigged_glb(path, palette, theme="arcane", seed=1337, title="Trilobite"
     )
     normal_accessor = accessor(
         _float_payload(normal_values), 5126, len(normals), "VEC3", "NORMAL", 34962,
+    )
+    tangent_accessor = accessor(
+        _float_payload(tangent_values), 5126, len(tangents), "VEC4", "TANGENT", 34962,
+    )
+    texcoord_accessor = accessor(
+        _float_payload(texcoord_values), 5126, len(texcoords), "VEC2", "TEXCOORD_0", 34962,
     )
     joint_accessor = accessor(
         bytes(joint_values), 5121, len(joints), "VEC4", "JOINTS_0", 34962,
@@ -222,6 +304,11 @@ def write_rigged_glb(path, palette, theme="arcane", seed=1337, title="Trilobite"
         _float_payload(_flatten(rotations)), 5126, len(rotations), "VEC4", "SHELL_ROTATION",
     )
 
+    base_color_png, surface_png, normal_png = _material_textures(palette, seed)
+    base_color_view = builder.add(base_color_png)
+    surface_view = builder.add(surface_png)
+    normal_view = builder.add(normal_png)
+
     binary = bytes(builder.payload)
     document = {
         "accessors": accessors,
@@ -245,13 +332,37 @@ def write_rigged_glb(path, palette, theme="arcane", seed=1337, title="Trilobite"
             "seed": seed,
             "theme": _clean(theme, 32),
         },
+        "images": [
+            {
+                "bufferView": base_color_view,
+                "mimeType": "image/png",
+                "name": "%s Base Color" % _clean(title, 64),
+            },
+            {
+                "bufferView": surface_view,
+                "mimeType": "image/png",
+                "name": "%s Surface" % _clean(title, 64),
+            },
+            {
+                "bufferView": normal_view,
+                "mimeType": "image/png",
+                "name": "%s Normal" % _clean(title, 64),
+            },
+        ],
         "materials": [{
             "doubleSided": False,
+            "emissiveFactor": [
+                round(channel / 255.0 * 0.08, 6) for channel in palette[2]
+            ],
             "name": "%s %s shell" % (_clean(title, 64), _clean(theme, 32)),
+            "normalTexture": {"index": 2, "scale": 0.7},
+            "occlusionTexture": {"index": 1, "strength": 0.85},
             "pbrMetallicRoughness": {
-                "baseColorFactor": _factor(palette[1]),
-                "metallicFactor": 0.22,
-                "roughnessFactor": 0.58,
+                "baseColorFactor": [1.0, 1.0, 1.0, 1.0],
+                "baseColorTexture": {"index": 0},
+                "metallicFactor": 0.72,
+                "metallicRoughnessTexture": {"index": 1},
+                "roughnessFactor": 0.92,
             },
         }],
         "meshes": [{
@@ -261,6 +372,8 @@ def write_rigged_glb(path, palette, theme="arcane", seed=1337, title="Trilobite"
                     "JOINTS_0": joint_accessor,
                     "NORMAL": normal_accessor,
                     "POSITION": position_accessor,
+                    "TANGENT": tangent_accessor,
+                    "TEXCOORD_0": texcoord_accessor,
                     "WEIGHTS_0": weight_accessor,
                 },
                 "indices": index_accessor,
@@ -275,12 +388,23 @@ def write_rigged_glb(path, palette, theme="arcane", seed=1337, title="Trilobite"
         ],
         "scene": 0,
         "scenes": [{"name": "%s Scene" % _clean(title, 64), "nodes": [0, 2]}],
+        "samplers": [{
+            "magFilter": 9729,
+            "minFilter": 9987,
+            "wrapS": 10497,
+            "wrapT": 10497,
+        }],
         "skins": [{
             "inverseBindMatrices": bind_accessor,
             "joints": [0, 1],
             "name": "%s Rig" % _clean(title, 64),
             "skeleton": 0,
         }],
+        "textures": [
+            {"name": "%s Base Color" % _clean(title, 64), "sampler": 0, "source": 0},
+            {"name": "%s Surface" % _clean(title, 64), "sampler": 0, "source": 1},
+            {"name": "%s Normal" % _clean(title, 64), "sampler": 0, "source": 2},
+        ],
     }
     json_payload = json.dumps(
         document, ensure_ascii=True, separators=(",", ":"), sort_keys=True,
@@ -299,7 +423,10 @@ def write_rigged_glb(path, palette, theme="arcane", seed=1337, title="Trilobite"
     return {
         "animations": 1,
         "bytes": len(glb),
+        "images": 3,
         "joints": 2,
+        "materials": 1,
+        "textures": 3,
         "triangles": len(indices) // 3,
         "vertices": len(positions),
     }

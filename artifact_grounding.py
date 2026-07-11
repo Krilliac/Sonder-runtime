@@ -415,6 +415,114 @@ def _validate_svg(path: Path, requirements: dict, checks: list):
         )
 
 
+def _inspect_png_bytes(data: bytes) -> dict:
+    result = {
+        "chunk_count": 0,
+        "crc_ok": True,
+        "data_ok": False,
+        "errors": [],
+        "height": 0,
+        "structure_ok": False,
+        "width": 0,
+    }
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        result["errors"].append("invalid PNG signature")
+        return result
+    offset = 8
+    bit_depth = color_type = compression = filtering = interlace = None
+    ended = False
+    idat = []
+    palette = False
+    while offset + 12 <= len(data):
+        length = struct.unpack(">I", data[offset : offset + 4])[0]
+        if length > MAX_FILE_BYTES or offset + 12 + length > len(data):
+            result["errors"].append("truncated or oversized PNG chunk")
+            break
+        kind = data[offset + 4 : offset + 8]
+        payload = data[offset + 8 : offset + 8 + length]
+        expected = struct.unpack(">I", data[offset + 8 + length : offset + 12 + length])[0]
+        result["crc_ok"] = (
+            result["crc_ok"]
+            and zlib.crc32(kind + payload) & 0xFFFFFFFF == expected
+        )
+        result["chunk_count"] += 1
+        if kind == b"IHDR" and len(payload) == 13:
+            if result["chunk_count"] != 1 or result["width"]:
+                result["errors"].append("IHDR must be the first and only header")
+            (
+                result["width"],
+                result["height"],
+                bit_depth,
+                color_type,
+                compression,
+                filtering,
+                interlace,
+            ) = struct.unpack(">IIBBBBB", payload)
+        elif kind == b"IHDR":
+            result["errors"].append("IHDR has an invalid length")
+        elif kind == b"PLTE":
+            palette = True
+        elif kind == b"IDAT":
+            idat.append(payload)
+        offset += 12 + length
+        if kind == b"IEND":
+            if length:
+                result["errors"].append("IEND must be empty")
+            ended = True
+            break
+    if not result["width"] or not result["height"]:
+        result["errors"].append("missing or invalid IHDR")
+    if not idat:
+        result["errors"].append("PNG has no IDAT data")
+    if not ended:
+        result["errors"].append("PNG has no IEND chunk")
+    elif offset != len(data):
+        result["errors"].append("PNG has trailing data after IEND")
+    allowed_depths = {
+        0: {1, 2, 4, 8, 16},
+        2: {8, 16},
+        3: {1, 2, 4, 8},
+        4: {8, 16},
+        6: {8, 16},
+    }
+    if color_type not in allowed_depths or bit_depth not in allowed_depths.get(color_type, set()):
+        result["errors"].append("PNG has an invalid color type/bit depth")
+    if compression != 0 or filtering != 0 or interlace not in {0, 1}:
+        result["errors"].append("PNG uses unsupported header methods")
+    if color_type == 3 and not palette:
+        result["errors"].append("indexed PNG is missing PLTE")
+    if color_type in {0, 4} and palette:
+        result["errors"].append("grayscale PNG must not contain PLTE")
+    result["structure_ok"] = not result["errors"]
+
+    data_errors = []
+    if result["structure_ok"] and interlace == 0:
+        channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[color_type]
+        row_bytes = (result["width"] * channels * bit_depth + 7) // 8
+        expected_bytes = result["height"] * (row_bytes + 1)
+        try:
+            inflater = zlib.decompressobj()
+            decoded = inflater.decompress(b"".join(idat), expected_bytes + 1)
+            if len(decoded) <= expected_bytes:
+                decoded += inflater.flush(expected_bytes + 1 - len(decoded))
+            if (
+                len(decoded) != expected_bytes
+                or not inflater.eof
+                or inflater.unused_data
+                or inflater.unconsumed_tail
+            ):
+                data_errors.append("PNG pixel stream has the wrong decoded size")
+            elif any(decoded[row * (row_bytes + 1)] > 4 for row in range(result["height"])):
+                data_errors.append("PNG pixel stream has an invalid row filter")
+        except zlib.error as exc:
+            data_errors.append("invalid PNG pixel stream: %s" % exc)
+        result["data_ok"] = not data_errors
+    elif result["structure_ok"]:
+        result["data_ok"] = True
+    result["errors"].extend(data_errors)
+    return result
+
+
 def _validate_png(path: Path, requirements: dict, checks: list):
     try:
         data = _read_bytes(path)
@@ -424,35 +532,29 @@ def _validate_png(path: Path, requirements: dict, checks: list):
     if not data.startswith(b"\x89PNG\r\n\x1a\n"):
         _check(checks, "valid-png", False, "invalid PNG signature")
         return
-    offset = 8
-    width = height = 0
-    chunk_count = 0
-    crc_ok = True
-    ended = False
-    while offset + 12 <= len(data):
-        length = struct.unpack(">I", data[offset : offset + 4])[0]
-        if length > MAX_FILE_BYTES or offset + 12 + length > len(data):
-            break
-        kind = data[offset + 4 : offset + 8]
-        payload = data[offset + 8 : offset + 8 + length]
-        expected = struct.unpack(">I", data[offset + 8 + length : offset + 12 + length])[0]
-        crc_ok = crc_ok and zlib.crc32(kind + payload) & 0xFFFFFFFF == expected
-        chunk_count += 1
-        if kind == b"IHDR" and len(payload) == 13:
-            width, height = struct.unpack(">II", payload[:8])
-        offset += 12 + length
-        if kind == b"IEND":
-            ended = True
-            break
-    _check(checks, "png-structure", bool(width and height and ended), "%dx%d, %d chunks" % (width, height, chunk_count))
-    _check(checks, "png-crc", crc_ok, "all parsed chunk CRCs match")
+    info = _inspect_png_bytes(data)
+    _check(
+        checks,
+        "png-structure",
+        info["structure_ok"],
+        "%dx%d, %d chunks%s"
+        % (
+            info["width"],
+            info["height"],
+            info["chunk_count"],
+            ("; " + "; ".join(info["errors"][:4])) if info["errors"] else "",
+        ),
+    )
+    _check(checks, "png-crc", info["crc_ok"], "all parsed chunk CRCs match")
+    _check(checks, "png-pixels", info["data_ok"], "zlib stream and row filters are valid")
     max_side = _bounded_int(requirements, "max_side", 32768, 1, 32768)
     min_side = _bounded_int(requirements, "min_side", 1, 1, max_side)
     _check(
         checks,
         "png-dimensions",
-        min_side <= width <= max_side and min_side <= height <= max_side,
-        "%dx%d (each side %d..%d)" % (width, height, min_side, max_side),
+        min_side <= info["width"] <= max_side and min_side <= info["height"] <= max_side,
+        "%dx%d (each side %d..%d)"
+        % (info["width"], info["height"], min_side, max_side),
     )
 
 
@@ -1620,6 +1722,261 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
         "; ".join(node_errors[:8]) or "%d node(s), %d scene(s)" % (len(nodes), len(scenes)),
     )
 
+    image_errors = []
+    images = document.get("images", [])
+    textures = document.get("textures", [])
+    texture_samplers = document.get("samplers", [])
+    if not isinstance(images, list):
+        image_errors.append("images must be an array")
+        images = []
+    if not isinstance(textures, list):
+        image_errors.append("textures must be an array")
+        textures = []
+    if not isinstance(texture_samplers, list):
+        image_errors.append("samplers must be an array")
+        texture_samplers = []
+    embedded_images = 0
+    power_of_two_images = 0
+    for image_index, image in enumerate(images):
+        if not isinstance(image, dict):
+            image_errors.append("image %d is not an object" % image_index)
+            continue
+        has_uri = "uri" in image
+        has_view = "bufferView" in image
+        if has_uri == has_view:
+            image_errors.append("image %d must use exactly one URI or bufferView" % image_index)
+            continue
+        if has_uri:
+            if not isinstance(image.get("uri"), str) or not image["uri"].strip():
+                image_errors.append("image %d has an invalid URI" % image_index)
+            continue
+        view_index = image.get("bufferView")
+        mime_type = image.get("mimeType")
+        if not _glb_integer(view_index) or view_index < 0 or view_index >= len(views):
+            image_errors.append("image %d has an invalid bufferView" % image_index)
+            continue
+        if mime_type not in {"image/png", "image/jpeg"}:
+            image_errors.append("image %d has an invalid embedded MIME type" % image_index)
+            continue
+        view = views[view_index]
+        try:
+            if not isinstance(view, dict) or "target" in view:
+                raise ValueError("image bufferView must not declare a target")
+            start = view.get("byteOffset", 0)
+            length = view.get("byteLength")
+            if (
+                not _glb_integer(start)
+                or start < 0
+                or not _glb_integer(length)
+                or length < 1
+                or start + length > len(binary)
+            ):
+                raise ValueError("image bufferView is out of bounds")
+            payload = binary[start:start + length]
+            if mime_type == "image/png":
+                info = _inspect_png_bytes(payload)
+                if not info["structure_ok"] or not info["crc_ok"] or not info["data_ok"]:
+                    raise ValueError(
+                        "invalid embedded PNG: %s"
+                        % ("; ".join(info["errors"][:4]) or "CRC mismatch")
+                    )
+                if (
+                    info["width"] > 0
+                    and info["height"] > 0
+                    and info["width"] & (info["width"] - 1) == 0
+                    and info["height"] & (info["height"] - 1) == 0
+                ):
+                    power_of_two_images += 1
+            elif not (
+                len(payload) >= 4
+                and payload.startswith(b"\xff\xd8")
+                and payload.endswith(b"\xff\xd9")
+            ):
+                raise ValueError("invalid embedded JPEG markers")
+            embedded_images += 1
+        except (TypeError, ValueError) as exc:
+            image_errors.append("image %d: %s" % (image_index, exc))
+    minimum_images = _bounded_int(requirements, "min_images", 0, 0, 100_000)
+    require_embedded_images = bool(requirements.get("require_embedded_images"))
+    require_power_of_two_images = bool(
+        requirements.get("require_power_of_two_images")
+    )
+    images_ok = (
+        not image_errors
+        and len(images) >= minimum_images
+        and (
+            not require_embedded_images
+            or (embedded_images == len(images) and embedded_images > 0)
+        )
+        and (
+            not require_power_of_two_images
+            or (power_of_two_images == len(images) and power_of_two_images > 0)
+        )
+    )
+    _check(
+        checks,
+        "glb-images",
+        images_ok,
+        (
+            "; ".join(image_errors[:8])
+            or "%d image(s), %d embedded, %d power-of-two"
+            % (len(images), embedded_images, power_of_two_images)
+        ),
+    )
+
+    material_errors = []
+    for sampler_index, sampler in enumerate(texture_samplers):
+        if not isinstance(sampler, dict):
+            material_errors.append("sampler %d is not an object" % sampler_index)
+            continue
+        if "magFilter" in sampler and sampler["magFilter"] not in {9728, 9729}:
+            material_errors.append("sampler %d has an invalid magFilter" % sampler_index)
+        if "minFilter" in sampler and sampler["minFilter"] not in {
+            9728, 9729, 9984, 9985, 9986, 9987,
+        }:
+            material_errors.append("sampler %d has an invalid minFilter" % sampler_index)
+        for field in ("wrapS", "wrapT"):
+            if field in sampler and sampler[field] not in {33071, 33648, 10497}:
+                material_errors.append(
+                    "sampler %d has an invalid %s" % (sampler_index, field)
+                )
+    for texture_index, texture in enumerate(textures):
+        if not isinstance(texture, dict):
+            material_errors.append("texture %d is not an object" % texture_index)
+            continue
+        source = texture.get("source")
+        sampler = texture.get("sampler")
+        if not _glb_integer(source) or source < 0 or source >= len(images):
+            material_errors.append("texture %d has an invalid source" % texture_index)
+        if sampler is not None and (
+            not _glb_integer(sampler)
+            or sampler < 0
+            or sampler >= len(texture_samplers)
+        ):
+            material_errors.append("texture %d has an invalid sampler" % texture_index)
+
+    material_texcoords = {}
+    normal_mapped_materials = set()
+    used_texture_slots = 0
+
+    def texture_slot(material_index, owner, field):
+        nonlocal used_texture_slots
+        if field not in owner:
+            return
+        info = owner[field]
+        if not isinstance(info, dict):
+            material_errors.append("material %d %s is not an object" % (material_index, field))
+            return
+        texture_index = info.get("index")
+        texcoord = info.get("texCoord", 0)
+        if (
+            not _glb_integer(texture_index)
+            or texture_index < 0
+            or texture_index >= len(textures)
+        ):
+            material_errors.append("material %d %s has an invalid texture" % (material_index, field))
+        if not _glb_integer(texcoord) or texcoord < 0:
+            material_errors.append("material %d %s has an invalid texCoord" % (material_index, field))
+            return
+        material_texcoords.setdefault(material_index, set()).add(texcoord)
+        used_texture_slots += 1
+
+    for material_index, material in enumerate(materials):
+        if not isinstance(material, dict):
+            material_errors.append("material %d is not an object" % material_index)
+            continue
+        pbr = material.get("pbrMetallicRoughness", {})
+        if not isinstance(pbr, dict):
+            material_errors.append("material %d PBR data is not an object" % material_index)
+            pbr = {}
+        factor = pbr.get("baseColorFactor", [1.0, 1.0, 1.0, 1.0])
+        if (
+            not isinstance(factor, list)
+            or len(factor) != 4
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or not 0.0 <= float(value) <= 1.0
+                for value in factor
+            )
+        ):
+            material_errors.append("material %d has an invalid baseColorFactor" % material_index)
+        for field in ("metallicFactor", "roughnessFactor"):
+            value = pbr.get(field, 1.0)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or not 0.0 <= float(value) <= 1.0
+            ):
+                material_errors.append("material %d has an invalid %s" % (material_index, field))
+        emissive = material.get("emissiveFactor", [0.0, 0.0, 0.0])
+        if (
+            not isinstance(emissive, list)
+            or len(emissive) != 3
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or not 0.0 <= float(value) <= 1.0
+                for value in emissive
+            )
+        ):
+            material_errors.append("material %d has an invalid emissiveFactor" % material_index)
+        texture_slot(material_index, pbr, "baseColorTexture")
+        texture_slot(material_index, pbr, "metallicRoughnessTexture")
+        texture_slot(material_index, material, "normalTexture")
+        texture_slot(material_index, material, "occlusionTexture")
+        texture_slot(material_index, material, "emissiveTexture")
+        if "normalTexture" in material:
+            normal_mapped_materials.add(material_index)
+            normal_info = material.get("normalTexture")
+            scale = normal_info.get("scale", 1.0) if isinstance(normal_info, dict) else None
+            if (
+                isinstance(scale, bool)
+                or not isinstance(scale, (int, float))
+                or not math.isfinite(float(scale))
+            ):
+                material_errors.append(
+                    "material %d has an invalid normal scale" % material_index
+                )
+        if "occlusionTexture" in material:
+            occlusion_info = material.get("occlusionTexture")
+            strength = (
+                occlusion_info.get("strength", 1.0)
+                if isinstance(occlusion_info, dict)
+                else None
+            )
+            if (
+                isinstance(strength, bool)
+                or not isinstance(strength, (int, float))
+                or not math.isfinite(float(strength))
+                or not 0.0 <= float(strength) <= 1.0
+            ):
+                material_errors.append(
+                    "material %d has an invalid occlusion strength" % material_index
+                )
+    minimum_materials = _bounded_int(requirements, "min_materials", 0, 0, 100_000)
+    minimum_textures = _bounded_int(requirements, "min_textures", 0, 0, 100_000)
+    require_material_textures = bool(requirements.get("require_material_textures"))
+    materials_ok = (
+        not material_errors
+        and len(materials) >= minimum_materials
+        and len(textures) >= minimum_textures
+        and (not require_material_textures or used_texture_slots > 0)
+    )
+    _check(
+        checks,
+        "glb-materials",
+        materials_ok,
+        (
+            "; ".join(material_errors[:8])
+            or "%d material(s), %d texture(s), %d used slot(s)"
+            % (len(materials), len(textures), used_texture_slots)
+        ),
+    )
+
     skin_errors = []
     joint_sets = []
     maximum_joints = 0
@@ -1660,9 +2017,14 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
             skin_errors.append("skin %d has an invalid skeleton" % skin_index)
 
     geometry_errors = []
+    tangent_errors = []
+    texcoord_errors = []
     total_vertices = 0
     total_triangles = 0
+    maximum_texcoord_sets = 0
     rigged_primitives = 0
+    normal_mapped_primitives = 0
+    textured_primitives = 0
     for mesh_index, mesh in enumerate(meshes):
         primitives = mesh.get("primitives", []) if isinstance(mesh, dict) else None
         if not isinstance(primitives, list) or not primitives:
@@ -1691,6 +2053,7 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
             vertex_count = len(position_rows)
             total_vertices += vertex_count
             normal_index = attributes.get("NORMAL")
+            normal_rows = None
             if normal_index is not None:
                 try:
                     normal_accessor = accessors[normal_index]
@@ -1742,6 +2105,89 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
                 not _glb_integer(material) or material < 0 or material >= len(materials)
             ):
                 geometry_errors.append("mesh %d primitive %d has an invalid material" % (mesh_index, primitive_index))
+            required_sets = material_texcoords.get(material, set())
+            if required_sets:
+                textured_primitives += 1
+            for texcoord_set in required_sets:
+                attribute_name = "TEXCOORD_%d" % texcoord_set
+                texcoord_index = attributes.get(attribute_name)
+                try:
+                    if texcoord_index is None:
+                        raise ValueError("%s is missing" % attribute_name)
+                    texcoord_accessor = accessors[texcoord_index]
+                    texcoord_rows = accessor_cache.get(texcoord_index) or _glb_accessor_values(
+                        document, binary, texcoord_index
+                    )
+                    valid_component = (
+                        texcoord_accessor.get("componentType") == 5126
+                        or (
+                            texcoord_accessor.get("componentType") in {5121, 5123}
+                            and texcoord_accessor.get("normalized") is True
+                        )
+                    )
+                    if texcoord_accessor.get("type") != "VEC2" or not valid_component:
+                        raise ValueError("%s must be float or normalized unsigned VEC2" % attribute_name)
+                    if len(texcoord_rows) != vertex_count:
+                        raise ValueError("%s count must match POSITION" % attribute_name)
+                    if any(
+                        not math.isfinite(float(value))
+                        for row in texcoord_rows
+                        for value in row
+                    ):
+                        raise ValueError("%s contains non-finite values" % attribute_name)
+                    maximum_texcoord_sets = max(maximum_texcoord_sets, texcoord_set + 1)
+                except (IndexError, KeyError, TypeError, ValueError, struct.error) as exc:
+                    texcoord_errors.append(
+                        "mesh %d primitive %d: %s"
+                        % (mesh_index, primitive_index, exc)
+                    )
+            if material in normal_mapped_materials:
+                normal_mapped_primitives += 1
+                tangent_index = attributes.get("TANGENT")
+                try:
+                    if normal_rows is None:
+                        raise ValueError("NORMAL is required for a normal map")
+                    if tangent_index is None:
+                        raise ValueError("TANGENT is missing")
+                    tangent_accessor = accessors[tangent_index]
+                    tangent_rows = accessor_cache.get(tangent_index) or _glb_accessor_values(
+                        document, binary, tangent_index
+                    )
+                    if (
+                        tangent_accessor.get("type") != "VEC4"
+                        or tangent_accessor.get("componentType") != 5126
+                    ):
+                        raise ValueError("TANGENT must be floating-point VEC4")
+                    if len(tangent_rows) != vertex_count:
+                        raise ValueError("TANGENT count must match POSITION")
+                    if any(
+                        not math.isclose(
+                            math.sqrt(sum(float(value) ** 2 for value in row[:3])),
+                            1.0,
+                            rel_tol=1e-4,
+                            abs_tol=1e-4,
+                        )
+                        or not math.isclose(abs(float(row[3])), 1.0, abs_tol=1e-4)
+                        for row in tangent_rows
+                    ):
+                        raise ValueError("TANGENT vectors and handedness must be normalized")
+                    if normal_rows is not None and any(
+                        not math.isclose(
+                            sum(
+                                float(normal_value) * float(tangent_value)
+                                for normal_value, tangent_value in zip(normal, tangent[:3])
+                            ),
+                            0.0,
+                            abs_tol=1e-4,
+                        )
+                        for normal, tangent in zip(normal_rows, tangent_rows)
+                    ):
+                        raise ValueError("TANGENT vectors must be orthogonal to NORMAL")
+                except (IndexError, KeyError, TypeError, ValueError, struct.error) as exc:
+                    tangent_errors.append(
+                        "mesh %d primitive %d: %s"
+                        % (mesh_index, primitive_index, exc)
+                    )
             joint_index = attributes.get("JOINTS_0")
             weight_index = attributes.get("WEIGHTS_0")
             if (joint_index is None) != (weight_index is None):
@@ -1794,6 +2240,46 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
         (
             "; ".join(geometry_errors[:8])
             or "%d vertices, %d triangles" % (total_vertices, total_triangles)
+        ),
+    )
+
+    minimum_texcoord_sets = _bounded_int(
+        requirements, "min_texcoord_sets", 0, 0, 100_000
+    )
+    texcoords_ok = (
+        not texcoord_errors
+        and maximum_texcoord_sets >= minimum_texcoord_sets
+        and (not require_material_textures or textured_primitives > 0)
+    )
+    _check(
+        checks,
+        "glb-texture-coordinates",
+        texcoords_ok,
+        (
+            "; ".join(texcoord_errors[:8])
+            or "%d coordinate set(s), %d textured primitive(s)"
+            % (maximum_texcoord_sets, textured_primitives)
+        ),
+    )
+
+    require_tangents = bool(requirements.get("require_tangents"))
+    tangents_ok = (
+        not tangent_errors
+        and (
+            not require_tangents
+            or (
+                normal_mapped_primitives > 0
+                and normal_mapped_primitives == textured_primitives
+            )
+        )
+    )
+    _check(
+        checks,
+        "glb-tangents",
+        tangents_ok,
+        (
+            "; ".join(tangent_errors[:8])
+            or "%d normal-mapped primitive(s)" % normal_mapped_primitives
         ),
     )
 

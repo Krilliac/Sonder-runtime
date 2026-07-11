@@ -340,7 +340,7 @@ HELP_TEXT = """commands:
   /agentcancel <id>  cooperatively cancel an agent/master prefix or all
   /agentretry <id>   explicitly retry persisted interrupted/failed master work
   /weather <place>   get sourced live conditions and a short forecast
-  /asset <n> <brief> generate icons/media/rigged models/scenes from a brief
+  /asset <n> <brief> generate icons/media/textured rigged models/scenes
   /artifactcheck ... ground a file/pack: /artifactcheck <path> [| recipe]
   /forge [name]      build and run the dependency-free reference game suite
   /game ...          generate/test: /game cpp 3d name | concept

@@ -67,6 +67,13 @@ def test_free_form_request_infers_rigged_animated_model(monkeypatch, tmp_path):
     assert result["validation"]["failed_checks"] == 0
 
 
+def test_theme_inference_uses_terms_not_substrings():
+    assert assetgen.infer_request("textured PBR model")["theme"] == "arcane"
+    assert assetgen.infer_request("voice interface")["theme"] == "arcane"
+    assert assetgen.infer_request("red textured model")["theme"] == "ember"
+    assert assetgen.infer_request("ice voice interface")["theme"] == "frost"
+
+
 def test_pack_is_deterministic_for_same_request(monkeypatch, tmp_path):
     _local_root(monkeypatch, tmp_path)
 
@@ -144,6 +151,39 @@ def test_verify_detects_invalid_glb_even_when_manifest_hash_matches(
     assert not verified["ok"]
     assert any(
         "format rigged.glb glb-skinning" in item for item in verified["failures"]
+    )
+    assert not any("hash mismatch" in item for item in verified["failures"])
+
+
+def test_verify_detects_corrupt_embedded_glb_texture_with_updated_manifest(
+    monkeypatch, tmp_path
+):
+    _local_root(monkeypatch, tmp_path)
+    pack = assetgen.generate_artifacts(
+        "textured-rig", "textured PBR rigged GLB character", kinds="rigged_model"
+    )
+    glb_path = os.path.join(pack["root"], "rigged.glb")
+    payload = bytearray(open(glb_path, "rb").read())
+    json_length = struct.unpack_from("<I", payload, 12)[0]
+    document = json.loads(payload[20:20 + json_length].decode("utf-8").rstrip())
+    image = document["images"][0]
+    view = document["bufferViews"][image["bufferView"]]
+    binary_start = 20 + json_length + 8
+    payload[binary_start + view["byteOffset"] + 40] ^= 0x20
+    with open(glb_path, "wb") as handle:
+        handle.write(payload)
+    manifest = json.loads(open(pack["manifest"], encoding="utf-8").read())
+    row = next(item for item in manifest["files"] if item["path"] == "rigged.glb")
+    row["bytes"] = len(payload)
+    row["sha256"] = hashlib.sha256(payload).hexdigest()
+    with open(pack["manifest"], "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2, sort_keys=True)
+
+    verified = assetgen.verify_pack(pack["root"])
+
+    assert not verified["ok"]
+    assert any(
+        "format rigged.glb glb-images" in item for item in verified["failures"]
     )
     assert not any("hash mismatch" in item for item in verified["failures"])
 

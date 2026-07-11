@@ -3,7 +3,7 @@
 The generator deliberately emits simple, documented formats that every language
 surface in this repository can consume without package installation: PNG, PPM,
 SVG, animated GIF, AVI video, HTML, Markdown, CSV, DOCX, XLSX, PPTX, MIDI, captions,
-EDL timelines, PCM WAV, Wavefront OBJ/MTL, rigged binary glTF, and JSON. Packs are useful
+EDL timelines, PCM WAV, Wavefront OBJ/MTL, textured rigged binary glTF, and JSON. Packs are useful
 for branding, UI, documents, data prototypes, media, games, and other greenfield
 work. Output stays under the local-llm workspace.
 """
@@ -521,6 +521,16 @@ def _hash_file(path: str) -> str:
     return digest.hexdigest()
 
 
+def _mentions_term(text: str, terms) -> bool:
+    return any(
+        re.search(
+            r"(?<![a-z0-9])%s(?![a-z0-9])" % re.escape(term),
+            text,
+        )
+        for term in terms
+    )
+
+
 def infer_request(brief: str, kinds: str = "auto", dimension: str = "auto",
                   theme: str = "auto", seed: int | None = None) -> dict:
     """Turn a free-form artifact request into deterministic generator settings."""
@@ -529,11 +539,17 @@ def infer_request(brief: str, kinds: str = "auto", dimension: str = "auto",
     if not text:
         raise ValueError("brief is required")
     if theme == "auto":
-        if any(word in lowered for word in ("fire", "fiery", "ember", "hell", "lava", "warm", "red")):
+        if _mentions_term(
+            lowered, ("fire", "fiery", "ember", "hell", "lava", "warm", "red")
+        ):
             theme = "ember"
-        elif any(word in lowered for word in ("forest", "nature", "leaf", "earth", "green")):
+        elif _mentions_term(
+            lowered, ("forest", "nature", "leaf", "earth", "green")
+        ):
             theme = "verdant"
-        elif any(word in lowered for word in ("ice", "frost", "snow", "water", "ocean", "blue")):
+        elif _mentions_term(
+            lowered, ("ice", "frost", "snow", "water", "ocean", "blue")
+        ):
             theme = "frost"
         else:
             theme = "arcane"
@@ -815,11 +831,19 @@ def verify_pack(path: str) -> dict:
                 "avi": {"min_frames": 2, "min_duration_ms": 1, "require_audio": True},
                 "gif": {"min_frames": 2, "min_duration_ms": 1},
                 "glb": {
+                    "min_images": 3,
+                    "min_materials": 1,
                     "min_vertices": 3,
                     "min_triangles": 1,
                     "min_joints": 2,
                     "min_animations": 1,
+                    "min_texcoord_sets": 1,
+                    "min_textures": 3,
                     "no_external_dependencies": True,
+                    "require_embedded_images": True,
+                    "require_material_textures": True,
+                    "require_power_of_two_images": True,
+                    "require_tangents": True,
                 },
                 "midi": {"min_notes": 1, "require_tempo": True},
                 "srt": {"min_cues": 1},

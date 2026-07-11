@@ -6293,9 +6293,9 @@ def tool_manifest() -> str:
         "context_compaction_plan": "Preview when to summarize, split sessions, or reduce live context.",
         "run_code": "Run a bounded Python/JS/PowerShell/C++/C# snippet.",
         "ground_artifact": "Validate in-memory non-code content with exact/contains/regex/JSON checks.",
-        "artifact_ground": "Validate files or bundles with inferred writing, data, editable Office/media/timelines, UI, image, audio, static/rigged model, and manifest recipes.",
+        "artifact_ground": "Validate files or bundles with inferred writing, data, editable Office/media/timelines, UI, image, audio, and static/textured-rigged model recipes.",
         "run_project": "Run a bounded temporary multi-file project with optional build commands.",
-        "artifact_generate/artifact_verify": "Create and verify stdlib-only images, animated GIF/AVI video, SVGs, Office files, MIDI/WAV audio, captions, EDL timelines, data, web mockups, OBJ and rigged GLB models, scenes, and themed packs from a free-form brief.",
+        "artifact_generate/artifact_verify": "Create and verify stdlib-only images, animated GIF/AVI video, SVGs, Office files, MIDI/WAV audio, captions, EDL timelines, data, web mockups, OBJ and textured rigged GLB models, scenes, and themed packs from a free-form brief.",
         "game_reference_suite/game_generate_and_test/game_generation_campaign": "Build, execute, repair, and ground persistent in-house 2D/2.5D/3D game projects and fleets.",
         "loop": "Repeat bounded code/model/system actions.",
         "workflow_list/save/run/delete": "Manage reusable loop workflows.",
@@ -6321,9 +6321,9 @@ def tool_manifest() -> str:
 AGENT_TOOL_HELP = """Available tools:
 - run_code: {"code": "...", "language": "python|js|powershell|cpp|csharp", "stdin": "", "timeout": 10}
 - run_project: {"files_json": {"files": {"src/main.cpp": "..."}}, "commands_json": [{"cmd": ["g++", "src/main.cpp", "-o", "app"]}], "stdin": "", "timeout": 60}
-- artifact_generate: {"name": "brand-kit", "brief": "fiery logo, DOCX report, AVI video, animated GIF, MIDI score, captions, EDL timeline, rigged 3D mascot", "kinds": "auto|all|icon,vector,diagram,document,docx,data,spreadsheet,presentation,animation,video,music,midi,captions,timeline,web,model,rigged_model", "dimension": "auto|2d|2.5d|3d", "theme": "auto|ember|verdant|arcane|frost"}
+- artifact_generate: {"name": "brand-kit", "brief": "fiery logo, DOCX report, AVI video, animated GIF, MIDI score, captions, EDL timeline, textured rigged 3D mascot", "kinds": "auto|all|icon,vector,diagram,document,docx,data,spreadsheet,presentation,animation,video,music,midi,captions,timeline,web,model,rigged_model", "dimension": "auto|2d|2.5d|3d", "theme": "auto|ember|verdant|arcane|frost"}
 - artifact_verify: {"path": "artifacts/generated/brand-kit"}
-- artifact_ground: {"path": "artifacts/generated/brand-kit", "recipe": "auto|bundle|writing|data|office|docx|xlsx|pptx|avi|gif|glb|midi|srt|vtt|edl|ui|markdown|json|csv|html|svg|png|ppm|wav|obj", "requirements_json": {"required_files": ["rigged.glb"], "min_vertices": 3, "min_joints": 2, "min_animations": 1, "no_external_dependencies": true}}
+- artifact_ground: {"path": "artifacts/generated/brand-kit", "recipe": "auto|bundle|writing|data|office|docx|xlsx|pptx|avi|gif|glb|midi|srt|vtt|edl|ui|markdown|json|csv|html|svg|png|ppm|wav|obj", "requirements_json": {"required_files": ["rigged.glb"], "min_vertices": 3, "min_joints": 2, "min_animations": 1, "min_images": 3, "min_textures": 3, "min_texcoord_sets": 1, "require_embedded_images": true, "require_material_textures": true, "require_power_of_two_images": true, "require_tangents": true, "no_external_dependencies": true}}
 - game_reference_suite: {"name": "reference-suite", "theme": "arcane", "max_workers": 2, "timeout": 30}
 - game_generate_and_test: {"name": "arena", "concept": "isometric action RPG", "language": "python|javascript|cpp|csharp", "dimension": "2d|2.5d|3d", "theme": "arcane", "repair_rounds": 1}
 - game_generation_campaign: {"name": "game-fleet", "concept": "action roguelite", "total": 6, "language": "", "dimension": "", "theme": "arcane", "max_workers": 2, "repair_rounds": 1}

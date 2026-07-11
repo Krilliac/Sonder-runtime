@@ -163,8 +163,8 @@ brand palettes, Markdown briefs, editable DOCX reports, JSON/CSV sample data,
 editable XLSX workbooks, standalone HTML mockups, editable PPTX slide decks, PCM
 WAV sound effects and music loops, editable MIDI scores, animated GIF previews,
 uncompressed AVI video with synchronized PCM audio, SRT/WebVTT captions,
-CMX-style EDL timelines, OBJ/MTL models, self-contained rigged/animated GLB 2.0
-characters, and JSON scenes. The generator uses deterministic in-house
+CMX-style EDL timelines, OBJ/MTL models, self-contained textured and
+rigged/animated GLB 2.0 characters, and JSON scenes. The generator uses deterministic in-house
 OOXML/ZIP, RIFF/AVI, GIF/LZW, MIDI-event,
 caption/timecode, PNG/PPM, waveform, and procedural-geometry writers, bounded
 sizes, safe workspace paths, idempotent regeneration, and SHA-256 manifests.
@@ -179,6 +179,7 @@ frames/LZW/duration, MIDI tracks/notes/tempo, caption timing and cue text, EDL
 event/timecode continuity and local-media references, self-contained HTML/UI
 references, SVG geometry, PNG chunks/CRCs, PPM dimensions, WAV frames/duration,
 OBJ vertices/faces/index bounds, GLB containers/buffers/accessors/scenes,
+embedded PNG CRCs/pixel streams, texture/sampler/material references, UV sets,
 triangle indices, unit normals, joint indices, normalized skin weights,
 inverse-bind matrices, animation timelines/quaternions, and complete bundle
 manifests. Custom
@@ -452,9 +453,9 @@ Privacy is opt-in and scrubbed at every step — nothing auto-uploads, and no PR
 - ✅ **Federated contribution** — share scrubbed lessons back without hosting the model (see [above](#contributing-improvements-without-hosting-the-model)).
 - ✅ **Mobile & desktop app (GUI)** — a [Flutter client](app/) with a real chat UI (Android APK + Windows/Linux/macOS), CI-built with download links. No terminal needed to *use* a hosted trilobite.
 
-- ✅ **Rigged animated 3D models** — deterministic binary glTF 2.0 characters carry real indexed geometry, unit normals, PBR material data, a two-joint skin with inverse-bind matrices, normalized per-vertex weights, and a looping quaternion animation in one dependency-free GLB.
+- ✅ **Textured rigged animated 3D models** — deterministic binary glTF 2.0 characters carry indexed geometry, unit normals, orthogonal tangent frames, UVs, embedded power-of-two base-color, packed occlusion/roughness/metallic, and tangent-space normal PNGs, complete PBR texture bindings, a two-joint skin with inverse-bind matrices, normalized per-vertex weights, and a looping quaternion animation in one dependency-free GLB.
 
-**Next gaps** — make the bundled engine downloader fully self-contained per platform and add textured/material-rich GLB variants plus broader native viewer/render compatibility checks beyond the current deterministic rigged model contract.
+**Next gaps** — make the bundled engine downloader fully self-contained per platform and add morph targets, richer skeletal clips, and broader native viewer/render compatibility beyond the current deterministic textured model contract.
 
 ---
 
@@ -475,7 +476,7 @@ Flat, mostly-stdlib Python modules (plus `mcp`):
 | `reloadable_mcp.py` | Fail-closed live server-source execution, atomic tool-manager swaps, schema-cache invalidation, and MCP tool-list notifications |
 | `learning_health.py` | Outcome coverage, reward distribution, lesson provenance, distillation yield, and memory-hygiene reporting |
 | `artifact_grounding.py` | Guarded format contracts for writing, data, UI, images, audio, models, and complete artifact bundles |
-| `model_assets.py` | Deterministic stdlib-only binary glTF geometry, skin, inverse-bind matrices, materials, and animation |
+| `model_assets.py` | Deterministic stdlib-only binary glTF geometry, embedded textures, PBR materials, skinning, inverse-bind matrices, and animation |
 | `creative_router.py` | conservative natural-language routing from concrete master build requests into grounded artifact, game, or game-campaign workflows |
 | `server.py` / `workbench.py` / `activity_tracker.py` / `code_runner.py` / `web_tools.py` / `workflow_store.py` / `self_heal.py` | MCP workbench/agent tools, guarded discovery and execution, persistent checklists, exact action/end reports, bounded code/project runners, web tools, workflows, and self-healing |
 | `server.py` | MCP server: `offload` / `trilobite` / `parallel_run_code` / `parallel_generate_run` / `parallel_generate_run_languages` / `campaign_generate_compile_execute_record` / `learn_tiers` / `record_outcome` / `trilobite_stats` / `trilobite_sessions` / `trilobite_remember_fact` |
