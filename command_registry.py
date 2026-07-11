@@ -179,7 +179,7 @@ COMMANDS = [
         "name": "/gamefleet",
         "category": "creative",
         "risk": "ask",
-        "summary": "Run a bounded parallel multi-language 2D/2.5D/3D game campaign.",
+        "summary": "Run a bounded parallel game campaign with optional language/dimension targets.",
     },
     {
         "name": "/run",

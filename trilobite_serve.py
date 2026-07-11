@@ -859,12 +859,10 @@ def _handle_slash(content, messages=None, state=None, project=""):
             language=parts2[0], dimension=parts2[1],
         )
     if cmd in ("/gamefleet", "/gamecampaign"):
-        fleet_name, separator, concept = arg.partition("|")
-        if not separator or not fleet_name.strip() or not concept.strip():
-            return "usage: /gamefleet <name> | <concept>"
-        return server.game_generation_campaign(
-            name=fleet_name.strip(), concept=concept.strip(),
-        )
+        campaign_args = server._parse_game_campaign_command(arg)
+        if campaign_args is None:
+            return "usage: /gamefleet <name> | <concept> [| language | dimension]"
+        return server.game_generation_campaign(**campaign_args)
     if cmd == "/register":
         parts2 = arg.split(None, 1)
         if len(parts2) != 2:

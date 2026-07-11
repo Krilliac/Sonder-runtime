@@ -125,7 +125,10 @@ artifact target now route directly through these grounded forges. Language,
 dimension, theme, and campaign intent are inferred conservatively; `fleet`,
 `multiple`, and `various` requests use the hardware-bounded campaign path. Design
 questions and explanation requests remain ordinary conversation instead of
-creating files unexpectedly.
+creating files unexpectedly. Explicit campaign constraints are sticky: a C++
+2.5D fleet stays C++/2.5D, while an unconstrained multi-language request rotates
+through the verified default matrix. The direct command form is
+`/gamefleet <name> | <concept> [| language | dimension]`.
 
 ---
 

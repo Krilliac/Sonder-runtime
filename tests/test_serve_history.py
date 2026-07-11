@@ -416,6 +416,9 @@ def test_artifact_and_game_slash_commands_route_to_server(monkeypatch):
     assert ts._handle_slash("/forge smoke-suite") == "forge ok"
     assert ts._handle_slash("/game cpp 3d cavern | explore a crystal cavern") == "game ok"
     assert ts._handle_slash("/gamefleet demos | create compact arcade games") == "fleet ok"
+    assert ts._handle_slash(
+        "/gamefleet iso | create dungeon games | cpp | 2.5d"
+    ) == "fleet ok"
     assert calls == [
         ("asset", {"name": "brand-kit", "brief": "cobalt logo and notification sound"}),
         ("forge", {"name": "smoke-suite"}),
@@ -429,6 +432,13 @@ def test_artifact_and_game_slash_commands_route_to_server(monkeypatch):
             },
         ),
         ("fleet", {"name": "demos", "concept": "create compact arcade games"}),
+        (
+            "fleet",
+            {
+                "name": "iso", "concept": "create dungeon games",
+                "language": "cpp", "dimension": "2.5d",
+            },
+        ),
     ]
 
 

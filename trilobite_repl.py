@@ -105,7 +105,7 @@ HELP = """commands:
   /asset <n> <brief> generate a general icon/audio/model/scene artifact pack
   /forge [name]      build and run the dependency-free reference game suite
   /game ...          generate/test a game: /game cpp 3d name | concept
-  /gamefleet ...     parallel multi-language game campaign: name | concept
+  /gamefleet ...     parallel game campaign: name | concept [| language | dimension]
   /register u p      create account (first account becomes admin)
   /login u p         login for admin/debug commands
   /whoami            show current account
@@ -211,8 +211,8 @@ def _print_lessons():
     if not lessons:
         print("(no lessons yet)")
         return
-    for l in lessons:
-        print("- %s" % l["text"])
+    for lesson in lessons:
+        print("- %s" % lesson["text"])
 
 
 def _on_off(arg, current):
@@ -552,13 +552,11 @@ def main():
                         language=parts[0], dimension=parts[1],
                     ))
             elif cmd in ("/gamefleet", "/gamecampaign"):
-                name, separator, concept = arg.partition("|")
-                if not separator or not name.strip() or not concept.strip():
-                    print("usage: /gamefleet <name> | <concept>")
+                campaign_args = server._parse_game_campaign_command(arg)
+                if campaign_args is None:
+                    print("usage: /gamefleet <name> | <concept> [| language | dimension]")
                 else:
-                    print(server.game_generation_campaign(
-                        name=name.strip(), concept=concept.strip(),
-                    ))
+                    print(server.game_generation_campaign(**campaign_args))
             elif cmd == "/register":
                 parts = arg.split(None, 1)
                 if len(parts) != 2:
