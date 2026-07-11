@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import struct
 
 import pytest
 
@@ -22,6 +23,7 @@ def test_generate_pack_emits_valid_stdlib_assets(monkeypatch, tmp_path):
     assert open(os.path.join(root, "hit.wav"), "rb").read(4) == b"RIFF"
     assert open(os.path.join(root, "preview.ppm"), "rb").read(2) == b"P6"
     assert "v " in open(os.path.join(root, "models.obj"), encoding="utf-8").read()
+    assert open(os.path.join(root, "rigged.glb"), "rb").read(4) == b"glTF"
     assert open(os.path.join(root, "document.docx"), "rb").read(2) == b"PK"
     assert open(os.path.join(root, "workbook.xlsx"), "rb").read(2) == b"PK"
     assert open(os.path.join(root, "presentation.pptx"), "rb").read(2) == b"PK"
@@ -48,6 +50,21 @@ def test_free_form_request_infers_general_artifact_kinds(monkeypatch, tmp_path):
     assert os.path.isfile(os.path.join(result["root"], "icon.png"))
     assert os.path.isfile(os.path.join(result["root"], "theme.wav"))
     assert os.path.isfile(os.path.join(result["root"], "models.obj"))
+    assert os.path.isfile(os.path.join(result["root"], "rigged.glb"))
+
+
+def test_free_form_request_infers_rigged_animated_model(monkeypatch, tmp_path):
+    _local_root(monkeypatch, tmp_path)
+
+    result = assetgen.generate_artifacts(
+        "rigged-crawler",
+        "Create a rigged animated GLB character with a skeleton and skinning",
+    )
+
+    assert result["dimension"] == "3d"
+    assert "rigged_model" in result["kinds"]
+    assert os.path.isfile(os.path.join(result["root"], "rigged.glb"))
+    assert result["validation"]["failed_checks"] == 0
 
 
 def test_pack_is_deterministic_for_same_request(monkeypatch, tmp_path):
@@ -93,6 +110,41 @@ def test_verify_detects_invalid_format_even_when_manifest_hash_matches(
 
     assert not verified["ok"]
     assert any("format icon.png valid-png" in item for item in verified["failures"])
+    assert not any("hash mismatch" in item for item in verified["failures"])
+
+
+def test_verify_detects_invalid_glb_even_when_manifest_hash_matches(
+    monkeypatch, tmp_path
+):
+    _local_root(monkeypatch, tmp_path)
+    pack = assetgen.generate_artifacts(
+        "rigged-pack", "rigged animated GLB character", kinds="rigged_model"
+    )
+    glb_path = os.path.join(pack["root"], "rigged.glb")
+    payload = bytearray(open(glb_path, "rb").read())
+    json_length = struct.unpack_from("<I", payload, 12)[0]
+    document = json.loads(payload[20:20 + json_length].decode("utf-8").rstrip())
+    joint_accessor = next(
+        row for row in document["accessors"] if row.get("name") == "JOINTS_0"
+    )
+    view = document["bufferViews"][joint_accessor["bufferView"]]
+    binary_start = 20 + json_length + 8
+    payload[binary_start + view["byteOffset"]] = 255
+    with open(glb_path, "wb") as handle:
+        handle.write(payload)
+    manifest = json.loads(open(pack["manifest"], encoding="utf-8").read())
+    row = next(item for item in manifest["files"] if item["path"] == "rigged.glb")
+    row["bytes"] = len(payload)
+    row["sha256"] = hashlib.sha256(payload).hexdigest()
+    with open(pack["manifest"], "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2, sort_keys=True)
+
+    verified = assetgen.verify_pack(pack["root"])
+
+    assert not verified["ok"]
+    assert any(
+        "format rigged.glb glb-skinning" in item for item in verified["failures"]
+    )
     assert not any("hash mismatch" in item for item in verified["failures"])
 
 

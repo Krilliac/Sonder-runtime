@@ -3,7 +3,7 @@
 The generator deliberately emits simple, documented formats that every language
 surface in this repository can consume without package installation: PNG, PPM,
 SVG, animated GIF, AVI video, HTML, Markdown, CSV, DOCX, XLSX, PPTX, MIDI, captions,
-EDL timelines, PCM WAV, Wavefront OBJ/MTL, and JSON. Packs are useful
+EDL timelines, PCM WAV, Wavefront OBJ/MTL, rigged binary glTF, and JSON. Packs are useful
 for branding, UI, documents, data prototypes, media, games, and other greenfield
 work. Output stays under the local-llm workspace.
 """
@@ -22,6 +22,7 @@ import zlib
 
 import artifact_grounding
 import media_assets
+import model_assets
 import ooxml_assets
 
 
@@ -36,7 +37,7 @@ ARTIFACT_KINDS = {
     "icon", "background", "tileset", "sprite_sheet", "texture", "preview",
     "vector", "diagram", "palette", "document", "data", "web",
     "docx", "spreadsheet", "presentation", "animation", "video", "sound", "music",
-    "midi", "captions", "timeline", "model", "scene",
+    "midi", "captions", "timeline", "model", "rigged_model", "scene",
 }
 OWNED_FILENAMES = {
     "animation.gif", "background.png", "brief.md", "captions.srt", "captions.vtt",
@@ -45,7 +46,7 @@ OWNED_FILENAMES = {
     "hit.wav", "icon.png", "manifest.json", "materials.mtl", "models.obj",
     "palette.json", "pickup.wav", "preview.avi", "preview.html", "preview.ppm", "request.json",
     "presentation.pptx",
-    "scene.json", "score.mid", "sprites.png", "texture.png", "theme.wav",
+    "rigged.glb", "scene.json", "score.mid", "sprites.png", "texture.png", "theme.wav",
     "tiles.png", "timeline.edl", "vector.svg", "workbook.xlsx",
 }
 MAX_NAME = 48
@@ -537,7 +538,9 @@ def infer_request(brief: str, kinds: str = "auto", dimension: str = "auto",
         else:
             theme = "arcane"
     if dimension == "auto":
-        if any(word in lowered for word in ("3d", "mesh", "model", "sculpt")):
+        if any(word in lowered for word in (
+            "3d", "mesh", "model", "sculpt", "glb", "gltf", "rigged", "armature",
+        )):
             dimension = "3d"
         elif any(word in lowered for word in ("2.5d", "isometric", "iso ")):
             dimension = "2.5d"
@@ -569,6 +572,10 @@ def infer_request(brief: str, kinds: str = "auto", dimension: str = "auto",
             "captions": ("caption", "subtitle", "subrip", "srt", "webvtt", "vtt", "video"),
             "timeline": ("timeline", "edl", "edit decision", "video edit", "storyboard", "video"),
             "model": ("3d", "mesh", "model", "object", "prop"),
+            "rigged_model": (
+                "rigged", "skeletal", "skinned", "armature", "bone", "bones",
+                "animated model", "glb", "gltf",
+            ),
             "scene": ("scene", "level", "world", "layout", "map"),
         }
         for kind, words in rules.items():
@@ -625,7 +632,7 @@ def generate_artifacts(name: str, brief: str, kinds: str = "auto",
         _tiles(os.path.join(root, "tiles.png"), palette, seed + 2, dimension)
     if "sprite_sheet" in selected:
         _sprites(os.path.join(root, "sprites.png"), palette, seed + 3)
-    if "texture" in selected or "model" in selected:
+    if "texture" in selected or "model" in selected or "rigged_model" in selected:
         _texture(os.path.join(root, "texture.png"), palette, seed + 4)
     if "preview" in selected:
         _preview(os.path.join(root, "preview.ppm"), palette, dimension)
@@ -689,6 +696,15 @@ def generate_artifacts(name: str, brief: str, kinds: str = "auto",
         )
     if "model" in selected:
         _write_models(root, palette)
+    if "model" in selected or "rigged_model" in selected:
+        model_assets.write_rigged_glb(
+            os.path.join(root, "rigged.glb"),
+            palette,
+            theme,
+            seed + 13,
+            title,
+            request["brief"],
+        )
     if "scene" in selected:
         with open(os.path.join(root, "scene.json"), "w", encoding="utf-8") as handle:
             json.dump(_scene(dimension, theme, seed), handle, indent=2, sort_keys=True)
@@ -798,6 +814,13 @@ def verify_pack(path: str) -> dict:
             "recipes": {
                 "avi": {"min_frames": 2, "min_duration_ms": 1, "require_audio": True},
                 "gif": {"min_frames": 2, "min_duration_ms": 1},
+                "glb": {
+                    "min_vertices": 3,
+                    "min_triangles": 1,
+                    "min_joints": 2,
+                    "min_animations": 1,
+                    "no_external_dependencies": True,
+                },
                 "midi": {"min_notes": 1, "require_tempo": True},
                 "srt": {"min_cues": 1},
                 "vtt": {"min_cues": 1},

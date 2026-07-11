@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import posixpath
 import re
 import struct
@@ -22,6 +23,25 @@ MAX_BUNDLE_FILES = 500
 MAX_BUNDLE_BYTES = 256 * 1024 * 1024
 MAX_OOXML_ENTRIES = 1000
 MAX_OOXML_BYTES = 128 * 1024 * 1024
+MAX_GLB_ACCESSOR_ITEMS = 2_000_000
+
+GLB_COMPONENTS = {
+    5120: ("b", 1),
+    5121: ("B", 1),
+    5122: ("h", 2),
+    5123: ("H", 2),
+    5125: ("I", 4),
+    5126: ("f", 4),
+}
+GLB_TYPES = {
+    "SCALAR": 1,
+    "VEC2": 2,
+    "VEC3": 3,
+    "VEC4": 4,
+    "MAT2": 4,
+    "MAT3": 9,
+    "MAT4": 16,
+}
 
 OOXML_REQUIRED_PARTS = {
     "docx": {"[Content_Types].xml", "_rels/.rels", "word/document.xml"},
@@ -51,6 +71,7 @@ EXTENSION_RECIPES = {
     ".docx": "docx",
     ".edl": "edl",
     ".gif": "gif",
+    ".glb": "glb",
     ".htm": "html",
     ".html": "html",
     ".json": "json",
@@ -79,6 +100,7 @@ RECIPE_ALIASES = {
     "editable": "ooxml",
     "image": "auto",
     "model": "obj",
+    "rigged_model": "glb",
     "office": "ooxml",
     "presentation": "auto",
     "spreadsheet": "auto",
@@ -99,6 +121,7 @@ SUPPORTED_RECIPES = {
     "docx",
     "edl",
     "gif",
+    "glb",
     "html",
     "json",
     "markdown",
@@ -1284,6 +1307,635 @@ def _validate_edl(path: Path, requirements: dict, checks: list):
         )
 
 
+def _parse_glb(data: bytes):
+    if len(data) < 20:
+        raise ValueError("GLB is shorter than its header and JSON chunk")
+    magic, version, declared_length = struct.unpack_from("<4sII", data, 0)
+    if magic != b"glTF":
+        raise ValueError("missing glTF magic")
+    if version != 2:
+        raise ValueError("GLB version must be 2")
+    if declared_length != len(data):
+        raise ValueError(
+            "declared GLB length %d does not match %d bytes"
+            % (declared_length, len(data))
+        )
+    if declared_length % 4:
+        raise ValueError("GLB length must be 4-byte aligned")
+    chunks = []
+    offset = 12
+    while offset < len(data):
+        if offset + 8 > len(data):
+            raise ValueError("truncated GLB chunk header")
+        length, kind = struct.unpack_from("<II", data, offset)
+        offset += 8
+        if length % 4:
+            raise ValueError("GLB chunk length must be 4-byte aligned")
+        end = offset + length
+        if end > len(data):
+            raise ValueError("GLB chunk exceeds the declared container length")
+        chunks.append((kind, data[offset:end]))
+        offset = end
+    if not chunks or chunks[0][0] != 0x4E4F534A:
+        raise ValueError("the first GLB chunk must be JSON")
+    if sum(kind == 0x4E4F534A for kind, _payload in chunks) != 1:
+        raise ValueError("GLB must contain exactly one JSON chunk")
+    if sum(kind == 0x004E4942 for kind, _payload in chunks) > 1:
+        raise ValueError("GLB may contain at most one BIN chunk")
+    if any(kind == 0x004E4942 for kind, _payload in chunks) and chunks[1][0] != 0x004E4942:
+        raise ValueError("the BIN chunk must immediately follow the JSON chunk")
+    try:
+        json_text = chunks[0][1].decode("utf-8")
+        document, json_end = json.JSONDecoder().raw_decode(json_text)
+        if any(character != " " for character in json_text[json_end:]):
+            raise ValueError("GLB JSON padding must contain only spaces")
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid GLB JSON chunk: %s" % exc) from exc
+    if not isinstance(document, dict):
+        raise ValueError("GLB JSON root must be an object")
+    binary = next(
+        (payload for kind, payload in chunks[1:] if kind == 0x004E4942), b""
+    )
+    return document, binary, chunks
+
+
+def _glb_integer(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _glb_accessor_values(document, binary, index):
+    accessors = document.get("accessors", [])
+    views = document.get("bufferViews", [])
+    if not _glb_integer(index) or index < 0 or index >= len(accessors):
+        raise ValueError("invalid accessor index %r" % index)
+    accessor = accessors[index]
+    if not isinstance(accessor, dict):
+        raise ValueError("accessor %d must be an object" % index)
+    view_index = accessor.get("bufferView")
+    if not _glb_integer(view_index) or view_index < 0 or view_index >= len(views):
+        raise ValueError("accessor %d has an invalid bufferView" % index)
+    view = views[view_index]
+    if (
+        not isinstance(view, dict)
+        or not _glb_integer(view.get("buffer"))
+        or view.get("buffer") != 0
+    ):
+        raise ValueError("accessor %d must use embedded buffer 0" % index)
+    component_type = accessor.get("componentType")
+    value_type = accessor.get("type")
+    count = accessor.get("count")
+    if component_type not in GLB_COMPONENTS or value_type not in GLB_TYPES:
+        raise ValueError("accessor %d has an unsupported component/type" % index)
+    if not _glb_integer(count) or count < 1 or count > MAX_GLB_ACCESSOR_ITEMS:
+        raise ValueError("accessor %d has an invalid count" % index)
+    code, component_size = GLB_COMPONENTS[component_type]
+    components = GLB_TYPES[value_type]
+    element_size = component_size * components
+    stride = view.get("byteStride", element_size)
+    if (
+        not _glb_integer(stride)
+        or stride < element_size
+        or stride > 252
+        or ("byteStride" in view and stride % 4)
+    ):
+        raise ValueError("accessor %d has an invalid byteStride" % index)
+    view_offset = view.get("byteOffset", 0)
+    view_length = view.get("byteLength")
+    accessor_offset = accessor.get("byteOffset", 0)
+    if (
+        not _glb_integer(view_offset)
+        or view_offset < 0
+        or not _glb_integer(view_length)
+        or view_length < 1
+        or not _glb_integer(accessor_offset)
+        or accessor_offset < 0
+    ):
+        raise ValueError("accessor %d has a non-integer byte offset" % index)
+    if (view_offset + accessor_offset) % component_size:
+        raise ValueError("accessor %d has a misaligned component offset" % index)
+    start = view_offset + accessor_offset
+    end = start + (count - 1) * stride + element_size
+    view_end = view_offset + view_length
+    if start < view_offset or end > view_end or end > len(binary):
+        raise ValueError("accessor %d exceeds its bufferView" % index)
+    unpacker = struct.Struct("<" + code * components)
+    return [unpacker.unpack_from(binary, start + row * stride) for row in range(count)]
+
+
+def _validate_glb(path: Path, requirements: dict, checks: list):
+    try:
+        data = _read_bytes(path)
+        document, binary, chunks = _parse_glb(data)
+    except (OSError, ValueError, struct.error) as exc:
+        _check(checks, "valid-glb", False, str(exc))
+        return
+    _check(
+        checks,
+        "valid-glb",
+        True,
+        "%d bytes, %d chunk(s)" % (len(data), len(chunks)),
+    )
+
+    asset = document.get("asset")
+    asset_ok = isinstance(asset, dict) and asset.get("version") == "2.0"
+    _check(checks, "glb-asset-version", asset_ok, "glTF asset version 2.0")
+
+    buffer_errors = []
+    buffers = document.get("buffers", [])
+    if not isinstance(buffers, list) or len(buffers) != 1 or not isinstance(buffers[0], dict):
+        buffer_errors.append("expected one embedded buffer")
+        declared_buffer = -1
+    else:
+        declared_buffer = buffers[0].get("byteLength")
+        if not _glb_integer(declared_buffer) or declared_buffer < 1:
+            buffer_errors.append("buffer byteLength must be a positive integer")
+            declared_buffer = -1
+        elif declared_buffer > len(binary) or len(binary) - declared_buffer > 3:
+            buffer_errors.append("BIN chunk length does not match buffer byteLength")
+        elif any(binary[declared_buffer:]):
+            buffer_errors.append("BIN chunk padding must contain only zero bytes")
+    views = document.get("bufferViews", [])
+    if not isinstance(views, list) or not views:
+        buffer_errors.append("bufferViews must be a non-empty array")
+        views = []
+    for index, view in enumerate(views):
+        if not isinstance(view, dict):
+            buffer_errors.append("bufferView %d is not an object" % index)
+            continue
+        offset = view.get("byteOffset", 0)
+        length = view.get("byteLength")
+        if not _glb_integer(view.get("buffer")) or view.get("buffer") != 0:
+            buffer_errors.append("bufferView %d does not use buffer 0" % index)
+        if not _glb_integer(offset) or offset < 0 or offset % 4:
+            buffer_errors.append("bufferView %d has an unaligned offset" % index)
+        if not _glb_integer(length) or length < 1:
+            buffer_errors.append("bufferView %d has an invalid length" % index)
+        elif _glb_integer(offset) and offset + length > max(0, declared_buffer):
+            buffer_errors.append("bufferView %d exceeds the buffer" % index)
+        stride = view.get("byteStride")
+        if stride is not None and (
+            not _glb_integer(stride) or stride < 4 or stride > 252 or stride % 4
+        ):
+            buffer_errors.append("bufferView %d has an invalid byteStride" % index)
+        if "target" in view and view["target"] not in {34962, 34963}:
+            buffer_errors.append("bufferView %d has an invalid target" % index)
+    _check(
+        checks,
+        "glb-buffers",
+        not buffer_errors,
+        "; ".join(buffer_errors[:8]) or "%d bufferView(s)" % len(views),
+    )
+
+    accessor_errors = []
+    accessors = document.get("accessors", [])
+    if not isinstance(accessors, list) or not accessors:
+        accessor_errors.append("accessors must be a non-empty array")
+        accessors = []
+    accessor_cache = {}
+    for index, accessor in enumerate(accessors):
+        if not isinstance(accessor, dict):
+            accessor_errors.append("accessor %d is not an object" % index)
+            continue
+        if "sparse" in accessor:
+            accessor_errors.append("accessor %d uses unsupported sparse storage" % index)
+        component_type = accessor.get("componentType")
+        value_type = accessor.get("type")
+        if component_type not in GLB_COMPONENTS or value_type not in GLB_TYPES:
+            accessor_errors.append("accessor %d has an invalid component/type" % index)
+            continue
+        if accessor.get("normalized") and component_type == 5126:
+            accessor_errors.append("accessor %d normalizes floating-point data" % index)
+        try:
+            values = _glb_accessor_values(document, binary, index)
+            accessor_cache[index] = values
+        except (ValueError, struct.error) as exc:
+            accessor_errors.append(str(exc))
+            continue
+        if component_type == 5126 and any(
+            not math.isfinite(float(value)) for row in values for value in row
+        ):
+            accessor_errors.append("accessor %d contains non-finite values" % index)
+        for key, chooser in (("min", min), ("max", max)):
+            declared = accessor.get(key)
+            if declared is None:
+                continue
+            components = GLB_TYPES[value_type]
+            if not isinstance(declared, list) or len(declared) != components:
+                accessor_errors.append("accessor %d has an invalid %s" % (index, key))
+                continue
+            actual = [chooser(row[column] for row in values) for column in range(components)]
+            if any(
+                not isinstance(declared[column], (int, float))
+                or not math.isclose(float(declared[column]), float(actual[column]), rel_tol=1e-5, abs_tol=1e-5)
+                for column in range(components)
+            ):
+                accessor_errors.append("accessor %d %s does not match its data" % (index, key))
+    _check(
+        checks,
+        "glb-accessors",
+        not accessor_errors,
+        "; ".join(accessor_errors[:8]) or "%d accessor(s)" % len(accessors),
+    )
+
+    nodes = document.get("nodes", [])
+    meshes = document.get("meshes", [])
+    skins = document.get("skins", [])
+    materials = document.get("materials", [])
+    node_errors = []
+    if not isinstance(nodes, list) or not nodes:
+        node_errors.append("nodes must be a non-empty array")
+        nodes = []
+    if not isinstance(meshes, list) or not meshes:
+        node_errors.append("meshes must be a non-empty array")
+        meshes = []
+    if not isinstance(skins, list):
+        node_errors.append("skins must be an array")
+        skins = []
+    if not isinstance(materials, list):
+        node_errors.append("materials must be an array")
+        materials = []
+    mesh_skins = {}
+    graph = {}
+    for index, node in enumerate(nodes):
+        if not isinstance(node, dict):
+            node_errors.append("node %d is not an object" % index)
+            continue
+        children = node.get("children", [])
+        if not isinstance(children, list) or any(
+            not _glb_integer(child) or child < 0 or child >= len(nodes) or child == index
+            for child in children
+        ):
+            node_errors.append("node %d has invalid children" % index)
+            children = []
+        graph[index] = children
+        mesh_index = node.get("mesh")
+        skin_index = node.get("skin")
+        if mesh_index is not None and (
+            not _glb_integer(mesh_index) or mesh_index < 0 or mesh_index >= len(meshes)
+        ):
+            node_errors.append("node %d has an invalid mesh" % index)
+        if skin_index is not None and (
+            not _glb_integer(skin_index) or skin_index < 0 or skin_index >= len(skins)
+        ):
+            node_errors.append("node %d has an invalid skin" % index)
+        if _glb_integer(mesh_index) and _glb_integer(skin_index):
+            mesh_skins.setdefault(mesh_index, set()).add(skin_index)
+    indegree = {index: 0 for index in graph}
+    for children in graph.values():
+        for child in children:
+            if child in indegree:
+                indegree[child] += 1
+    if any(value > 1 for value in indegree.values()):
+        node_errors.append("a node has multiple parents")
+    pending = [index for index, value in indegree.items() if value == 0]
+    processed = 0
+    while pending:
+        parent = pending.pop()
+        processed += 1
+        for child in graph.get(parent, []):
+            if child not in indegree:
+                continue
+            indegree[child] -= 1
+            if indegree[child] == 0:
+                pending.append(child)
+    if processed != len(graph):
+        node_errors.append("node hierarchy contains a cycle")
+    scenes = document.get("scenes", [])
+    default_scene = document.get("scene")
+    if not isinstance(scenes, list) or not scenes:
+        node_errors.append("scenes must be a non-empty array")
+    else:
+        if not _glb_integer(default_scene) or default_scene < 0 or default_scene >= len(scenes):
+            node_errors.append("default scene is invalid")
+        for scene_index, scene in enumerate(scenes):
+            roots = scene.get("nodes", []) if isinstance(scene, dict) else None
+            if not isinstance(roots, list) or any(
+                not _glb_integer(root) or root < 0 or root >= len(nodes) for root in roots
+            ):
+                node_errors.append("scene %d has invalid root nodes" % scene_index)
+    _check(
+        checks,
+        "glb-scene",
+        not node_errors,
+        "; ".join(node_errors[:8]) or "%d node(s), %d scene(s)" % (len(nodes), len(scenes)),
+    )
+
+    skin_errors = []
+    joint_sets = []
+    maximum_joints = 0
+    for skin_index, skin in enumerate(skins):
+        if not isinstance(skin, dict):
+            skin_errors.append("skin %d is not an object" % skin_index)
+            joint_sets.append(set())
+            continue
+        joint_list = skin.get("joints")
+        if not isinstance(joint_list, list) or not joint_list:
+            skin_errors.append("skin %d has no joints" % skin_index)
+            joint_list = []
+        elif any(
+            not _glb_integer(joint) or joint < 0 or joint >= len(nodes)
+            for joint in joint_list
+        ) or len(set(joint_list)) != len(joint_list):
+            skin_errors.append("skin %d has invalid or duplicate joints" % skin_index)
+        joint_set = {joint for joint in joint_list if _glb_integer(joint)}
+        joint_sets.append(joint_set)
+        maximum_joints = max(maximum_joints, len(joint_list))
+        bind_index = skin.get("inverseBindMatrices")
+        if bind_index is not None:
+            if not _glb_integer(bind_index) or bind_index < 0 or bind_index >= len(accessors):
+                skin_errors.append("skin %d has invalid inverse bind matrices" % skin_index)
+            else:
+                bind = accessors[bind_index]
+                if (
+                    not isinstance(bind, dict)
+                    or bind.get("componentType") != 5126
+                    or bind.get("type") != "MAT4"
+                    or bind.get("count") != len(joint_list)
+                ):
+                    skin_errors.append("skin %d inverse bind matrices do not match joints" % skin_index)
+        skeleton = skin.get("skeleton")
+        if skeleton is not None and (
+            not _glb_integer(skeleton) or skeleton < 0 or skeleton >= len(nodes)
+        ):
+            skin_errors.append("skin %d has an invalid skeleton" % skin_index)
+
+    geometry_errors = []
+    total_vertices = 0
+    total_triangles = 0
+    rigged_primitives = 0
+    for mesh_index, mesh in enumerate(meshes):
+        primitives = mesh.get("primitives", []) if isinstance(mesh, dict) else None
+        if not isinstance(primitives, list) or not primitives:
+            geometry_errors.append("mesh %d has no primitives" % mesh_index)
+            continue
+        for primitive_index, primitive in enumerate(primitives):
+            if not isinstance(primitive, dict):
+                geometry_errors.append("mesh %d primitive %d is invalid" % (mesh_index, primitive_index))
+                continue
+            attributes = primitive.get("attributes")
+            position_index = attributes.get("POSITION") if isinstance(attributes, dict) else None
+            try:
+                position_accessor = accessors[position_index]
+                position_rows = accessor_cache.get(position_index) or _glb_accessor_values(
+                    document, binary, position_index
+                )
+                if position_accessor.get("type") != "VEC3" or position_accessor.get("componentType") != 5126:
+                    raise ValueError("POSITION must be floating-point VEC3")
+                if any(not math.isfinite(float(value)) for row in position_rows for value in row):
+                    raise ValueError("POSITION contains non-finite values")
+            except (IndexError, KeyError, TypeError, ValueError, struct.error) as exc:
+                geometry_errors.append(
+                    "mesh %d primitive %d: %s" % (mesh_index, primitive_index, exc)
+                )
+                continue
+            vertex_count = len(position_rows)
+            total_vertices += vertex_count
+            normal_index = attributes.get("NORMAL")
+            if normal_index is not None:
+                try:
+                    normal_accessor = accessors[normal_index]
+                    normal_rows = accessor_cache.get(normal_index) or _glb_accessor_values(
+                        document, binary, normal_index
+                    )
+                    if normal_accessor.get("type") != "VEC3" or len(normal_rows) != vertex_count:
+                        raise ValueError("NORMAL must be VEC3 and match POSITION count")
+                    if any(
+                        not math.isclose(
+                            math.sqrt(sum(float(value) ** 2 for value in row)),
+                            1.0,
+                            rel_tol=1e-4,
+                            abs_tol=1e-4,
+                        )
+                        for row in normal_rows
+                    ):
+                        raise ValueError("NORMAL vectors must be unit length")
+                except (IndexError, TypeError, ValueError, struct.error) as exc:
+                    geometry_errors.append(
+                        "mesh %d primitive %d: %s" % (mesh_index, primitive_index, exc)
+                    )
+            index_index = primitive.get("indices")
+            if index_index is None:
+                index_values = list(range(vertex_count))
+            else:
+                try:
+                    index_accessor = accessors[index_index]
+                    index_rows = accessor_cache.get(index_index) or _glb_accessor_values(
+                        document, binary, index_index
+                    )
+                    if index_accessor.get("type") != "SCALAR" or index_accessor.get("componentType") not in {5121, 5123, 5125}:
+                        raise ValueError("indices must be an unsigned SCALAR accessor")
+                    index_values = [int(row[0]) for row in index_rows]
+                except (IndexError, TypeError, ValueError, struct.error) as exc:
+                    geometry_errors.append(
+                        "mesh %d primitive %d: %s" % (mesh_index, primitive_index, exc)
+                    )
+                    continue
+            if any(index < 0 or index >= vertex_count for index in index_values):
+                geometry_errors.append("mesh %d primitive %d has out-of-range indices" % (mesh_index, primitive_index))
+            mode = primitive.get("mode", 4)
+            if mode == 4:
+                if len(index_values) % 3:
+                    geometry_errors.append("mesh %d primitive %d has an incomplete triangle" % (mesh_index, primitive_index))
+                total_triangles += len(index_values) // 3
+            material = primitive.get("material")
+            if material is not None and (
+                not _glb_integer(material) or material < 0 or material >= len(materials)
+            ):
+                geometry_errors.append("mesh %d primitive %d has an invalid material" % (mesh_index, primitive_index))
+            joint_index = attributes.get("JOINTS_0")
+            weight_index = attributes.get("WEIGHTS_0")
+            if (joint_index is None) != (weight_index is None):
+                skin_errors.append("mesh %d primitive %d has incomplete skin attributes" % (mesh_index, primitive_index))
+            elif joint_index is not None:
+                rigged_primitives += 1
+                try:
+                    joint_accessor = accessors[joint_index]
+                    weight_accessor = accessors[weight_index]
+                    joint_rows = accessor_cache.get(joint_index) or _glb_accessor_values(
+                        document, binary, joint_index
+                    )
+                    weight_rows = accessor_cache.get(weight_index) or _glb_accessor_values(
+                        document, binary, weight_index
+                    )
+                    if joint_accessor.get("type") != "VEC4" or joint_accessor.get("componentType") not in {5121, 5123}:
+                        raise ValueError("JOINTS_0 must be unsigned VEC4")
+                    if weight_accessor.get("type") != "VEC4" or weight_accessor.get("componentType") != 5126:
+                        raise ValueError("WEIGHTS_0 must be floating-point VEC4")
+                    if len(joint_rows) != vertex_count or len(weight_rows) != vertex_count:
+                        raise ValueError("skin attribute counts must match POSITION")
+                    skin_indices = mesh_skins.get(mesh_index, set())
+                    if not skin_indices:
+                        raise ValueError("skinned mesh is not attached to a skin")
+                    joint_limit = min(len(skins[skin]["joints"]) for skin in skin_indices)
+                    if any(int(value) < 0 or int(value) >= joint_limit for row in joint_rows for value in row):
+                        raise ValueError("JOINTS_0 contains an out-of-range joint")
+                    if any(
+                        any(not math.isfinite(float(value)) or float(value) < 0.0 for value in row)
+                        or not math.isclose(sum(float(value) for value in row), 1.0, rel_tol=1e-4, abs_tol=1e-4)
+                        for row in weight_rows
+                    ):
+                        raise ValueError("WEIGHTS_0 rows must be finite, nonnegative, and sum to one")
+                except (IndexError, KeyError, TypeError, ValueError, struct.error) as exc:
+                    skin_errors.append(
+                        "mesh %d primitive %d: %s" % (mesh_index, primitive_index, exc)
+                    )
+
+    minimum_vertices = _bounded_int(requirements, "min_vertices", 3, 0, 10_000_000)
+    minimum_triangles = _bounded_int(requirements, "min_triangles", 1, 0, 10_000_000)
+    geometry_ok = (
+        not geometry_errors
+        and total_vertices >= minimum_vertices
+        and total_triangles >= minimum_triangles
+    )
+    _check(
+        checks,
+        "glb-geometry",
+        geometry_ok,
+        (
+            "; ".join(geometry_errors[:8])
+            or "%d vertices, %d triangles" % (total_vertices, total_triangles)
+        ),
+    )
+
+    minimum_joints = _bounded_int(requirements, "min_joints", 0, 0, 100_000)
+    skin_ok = (
+        not skin_errors
+        and maximum_joints >= minimum_joints
+        and (minimum_joints == 0 or rigged_primitives > 0)
+    )
+    _check(
+        checks,
+        "glb-skinning",
+        skin_ok,
+        (
+            "; ".join(skin_errors[:8])
+            or "%d skin(s), %d maximum joints, %d rigged primitive(s)"
+            % (len(skins), maximum_joints, rigged_primitives)
+        ),
+    )
+
+    animation_errors = []
+    animations = document.get("animations", [])
+    if not isinstance(animations, list):
+        animation_errors.append("animations must be an array")
+        animations = []
+    joint_targets = set().union(*joint_sets) if joint_sets else set()
+    animated_joint = False
+    for animation_index, animation in enumerate(animations):
+        samplers = animation.get("samplers", []) if isinstance(animation, dict) else None
+        channels = animation.get("channels", []) if isinstance(animation, dict) else None
+        if not isinstance(samplers, list) or not samplers or not isinstance(channels, list) or not channels:
+            animation_errors.append("animation %d has no samplers/channels" % animation_index)
+            continue
+        for channel_index, channel in enumerate(channels):
+            try:
+                sampler_index = channel["sampler"]
+                target = channel["target"]
+                if not _glb_integer(sampler_index) or sampler_index < 0 or sampler_index >= len(samplers):
+                    raise ValueError("invalid sampler")
+                if not isinstance(target, dict):
+                    raise ValueError("invalid target")
+                target_node = target.get("node")
+                target_path = target.get("path")
+                if not _glb_integer(target_node) or target_node < 0 or target_node >= len(nodes):
+                    raise ValueError("invalid target node")
+                if target_path not in {"translation", "rotation", "scale", "weights"}:
+                    raise ValueError("invalid target path")
+                sampler = samplers[sampler_index]
+                if not isinstance(sampler, dict):
+                    raise ValueError("invalid sampler")
+                input_index = sampler.get("input")
+                output_index = sampler.get("output")
+                interpolation = sampler.get("interpolation", "LINEAR")
+                if interpolation not in {"LINEAR", "STEP", "CUBICSPLINE"}:
+                    raise ValueError("invalid interpolation")
+                input_accessor = accessors[input_index]
+                output_accessor = accessors[output_index]
+                input_rows = accessor_cache.get(input_index) or _glb_accessor_values(
+                    document, binary, input_index
+                )
+                output_rows = accessor_cache.get(output_index) or _glb_accessor_values(
+                    document, binary, output_index
+                )
+                if input_accessor.get("type") != "SCALAR" or input_accessor.get("componentType") != 5126:
+                    raise ValueError("animation input must be floating-point SCALAR")
+                times = [float(row[0]) for row in input_rows]
+                if not times or times[0] < 0.0 or any(
+                    not math.isfinite(value) for value in times
+                ) or any(right <= left for left, right in zip(times, times[1:])):
+                    raise ValueError("animation input times must be finite and increasing")
+                multiplier = 3 if interpolation == "CUBICSPLINE" else 1
+                if len(output_rows) != len(input_rows) * multiplier:
+                    raise ValueError("animation input/output counts do not match")
+                expected_type = {
+                    "translation": "VEC3",
+                    "rotation": "VEC4",
+                    "scale": "VEC3",
+                }.get(target_path)
+                if expected_type and output_accessor.get("type") != expected_type:
+                    raise ValueError("animation output has the wrong type")
+                if output_accessor.get("componentType") != 5126:
+                    raise ValueError("animation output must use floating-point values")
+                if target_path == "rotation":
+                    value_rows = output_rows[1::3] if interpolation == "CUBICSPLINE" else output_rows
+                    if any(
+                        not math.isclose(
+                            math.sqrt(sum(float(value) ** 2 for value in row)),
+                            1.0,
+                            rel_tol=1e-4,
+                            abs_tol=1e-4,
+                        )
+                        for row in value_rows
+                    ):
+                        raise ValueError("animation rotations must be unit quaternions")
+                animated_joint = animated_joint or target_node in joint_targets
+            except (IndexError, KeyError, TypeError, ValueError, struct.error) as exc:
+                animation_errors.append(
+                    "animation %d channel %d: %s" % (animation_index, channel_index, exc)
+                )
+    minimum_animations = _bounded_int(requirements, "min_animations", 0, 0, 100_000)
+    animation_ok = (
+        not animation_errors
+        and len(animations) >= minimum_animations
+        and (minimum_animations == 0 or animated_joint)
+    )
+    _check(
+        checks,
+        "glb-animations",
+        animation_ok,
+        (
+            "; ".join(animation_errors[:8])
+            or "%d animation(s), joint target=%s" % (len(animations), animated_joint)
+        ),
+    )
+
+    if requirements.get("no_external_dependencies"):
+        external = []
+        for index, buffer in enumerate(buffers if isinstance(buffers, list) else []):
+            if isinstance(buffer, dict) and "uri" in buffer:
+                external.append("buffer %d" % index)
+        images = document.get("images", [])
+        if not isinstance(images, list):
+            images = [{"uri": "invalid images collection"}]
+        for index, image in enumerate(images):
+            if isinstance(image, dict) and "uri" in image:
+                external.append("image %d" % index)
+        _check(
+            checks,
+            "glb-no-external-dependencies",
+            not external,
+            "external references: %s" % (", ".join(external) or "none"),
+        )
+    searchable = json.dumps(document, ensure_ascii=True, sort_keys=True)
+    for needle in _string_list(requirements, "required_text"):
+        _check(
+            checks,
+            "glb-required-text",
+            needle.casefold() in searchable.casefold(),
+            "contains %r" % needle,
+        )
+
+
 def _validate_obj(path: Path, requirements: dict, checks: list):
     try:
         lines = _read_text(path).splitlines()
@@ -1728,6 +2380,8 @@ def _validate_file(path: Path, recipe: str, requirements: dict) -> dict:
         _validate_avi(path, requirements, checks)
     elif recipe == "gif":
         _validate_gif(path, requirements, checks)
+    elif recipe == "glb":
+        _validate_glb(path, requirements, checks)
     elif recipe == "midi":
         _validate_midi(path, requirements, checks)
     elif recipe == "srt":

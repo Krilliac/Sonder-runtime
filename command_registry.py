@@ -191,7 +191,7 @@ COMMANDS = [
         "name": "/asset",
         "category": "creative",
         "risk": "ask",
-        "summary": "Generate general-purpose icons, images, audio, models, scenes, and packs from a brief.",
+        "summary": "Generate general-purpose icons, media, rigged GLB models, scenes, and packs from a brief.",
     },
     {
         "name": "/artifactcheck",

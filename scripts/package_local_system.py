@@ -61,6 +61,7 @@ REQUIRED_FILES = {
     "fleet_store.py",
     "learning_health.py",
     "media_assets.py",
+    "model_assets.py",
     "ooxml_assets.py",
     "reloadable_mcp.py",
     "runtime_policy.py",
