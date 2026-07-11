@@ -3,7 +3,8 @@
 The generator deliberately emits simple, documented formats that every language
 surface in this repository can consume without package installation: PNG, PPM,
 SVG, animated GIF, AVI video, HTML, Markdown, CSV, DOCX, XLSX, PPTX, MIDI, captions,
-EDL timelines, PCM WAV, Wavefront OBJ/MTL, textured rigged binary glTF, and JSON. Packs are useful
+EDL timelines, PCM WAV, Wavefront OBJ/MTL, textured morphing multi-clip binary glTF,
+and JSON. Packs are useful
 for branding, UI, documents, data prototypes, media, games, and other greenfield
 work. Output stays under the local-llm workspace.
 """
@@ -556,6 +557,7 @@ def infer_request(brief: str, kinds: str = "auto", dimension: str = "auto",
     if dimension == "auto":
         if any(word in lowered for word in (
             "3d", "mesh", "model", "sculpt", "glb", "gltf", "rigged", "armature",
+            "morph", "blend shape", "blendshape",
         )):
             dimension = "3d"
         elif any(word in lowered for word in ("2.5d", "isometric", "iso ")):
@@ -590,7 +592,8 @@ def infer_request(brief: str, kinds: str = "auto", dimension: str = "auto",
             "model": ("3d", "mesh", "model", "object", "prop"),
             "rigged_model": (
                 "rigged", "skeletal", "skinned", "armature", "bone", "bones",
-                "animated model", "glb", "gltf",
+                "animated model", "glb", "gltf", "morph", "blend shape", "blendshape",
+                "skeletal animation", "animation clips",
             ),
             "scene": ("scene", "level", "world", "layout", "map"),
         }
@@ -836,12 +839,17 @@ def verify_pack(path: str) -> dict:
                     "min_vertices": 3,
                     "min_triangles": 1,
                     "min_joints": 2,
-                    "min_animations": 1,
+                    "min_animations": 3,
+                    "min_morph_animations": 1,
+                    "min_morph_targets": 1,
+                    "min_skeletal_animations": 2,
                     "min_texcoord_sets": 1,
                     "min_textures": 3,
                     "no_external_dependencies": True,
                     "require_embedded_images": True,
                     "require_material_textures": True,
+                    "require_named_animations": True,
+                    "require_named_morph_targets": True,
                     "require_power_of_two_images": True,
                     "require_tangents": True,
                 },

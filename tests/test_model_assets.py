@@ -72,11 +72,12 @@ def test_rigged_glb_is_self_contained_animated_gltf_2(tmp_path):
     assert declared_binary <= parsed["binary_length"] <= declared_binary + 3
     assert "uri" not in document["buffers"][0]
     assert stats == {
-        "animations": 1,
+        "animations": 3,
         "bytes": len(parsed["payload"]),
         "images": 3,
         "joints": 2,
         "materials": 1,
+        "morph_targets": 1,
         "textures": 3,
         "triangles": 36,
         "vertices": 72,
@@ -99,10 +100,22 @@ def test_rigged_glb_is_self_contained_animated_gltf_2(tmp_path):
     assert pbr["metallicRoughnessTexture"] == {"index": 1}
     assert document["materials"][0]["occlusionTexture"]["index"] == 1
     assert document["materials"][0]["normalTexture"]["index"] == 2
+    assert primitive["targets"] == [{"POSITION": next(
+        index
+        for index, accessor in enumerate(document["accessors"])
+        if accessor.get("name") == "MORPH_BREATHE_POSITION"
+    )}]
+    assert document["meshes"][0]["extras"]["targetNames"] == ["Breathe"]
+    assert document["nodes"][2]["weights"] == [0.0]
     assert document["skins"][0]["joints"] == [0, 1]
     assert document["animations"][0]["channels"][0]["target"] == {
         "node": 1,
         "path": "rotation",
+    }
+    assert {animation["name"] for animation in document["animations"]} == {
+        "ShellPulse",
+        "RootBob",
+        "Breathe",
     }
 
     grounded = artifact_grounding.validate(
@@ -112,7 +125,10 @@ def test_rigged_glb_is_self_contained_animated_gltf_2(tmp_path):
             "min_vertices": 72,
             "min_triangles": 36,
             "min_joints": 2,
-            "min_animations": 1,
+            "min_animations": 3,
+            "min_skeletal_animations": 2,
+            "min_morph_animations": 1,
+            "min_morph_targets": 1,
             "min_images": 3,
             "min_materials": 1,
             "min_textures": 3,
@@ -120,6 +136,8 @@ def test_rigged_glb_is_self_contained_animated_gltf_2(tmp_path):
             "no_external_dependencies": True,
             "require_embedded_images": True,
             "require_material_textures": True,
+            "require_named_animations": True,
+            "require_named_morph_targets": True,
             "require_power_of_two_images": True,
             "require_tangents": True,
             "required_text": ["Crawler", "ShellPulse"],
@@ -374,6 +392,103 @@ def test_glb_grounding_requires_normal_map_tangents(tmp_path):
     assert "TANGENT is missing" in tangents["detail"]
 
 
+def test_glb_grounding_rejects_morph_delta_count_mismatch(tmp_path):
+    path = tmp_path / "broken-morph-count.glb"
+    model_assets.write_rigged_glb(path, PALETTE)
+    parsed = _read_glb(path)
+    document = parsed["document"]
+    morph_accessor = next(
+        accessor
+        for accessor in document["accessors"]
+        if accessor.get("name") == "MORPH_BREATHE_POSITION"
+    )
+    morph_accessor["count"] -= 1
+    _rewrite_document(path, parsed, document)
+
+    result = artifact_grounding.validate(
+        path,
+        "glb",
+        {"min_morph_targets": 1, "require_named_morph_targets": True},
+    )
+
+    assert not result["ok"]
+    morphs = next(
+        check for check in result["checks"] if check["name"] == "glb-morph-targets"
+    )
+    assert not morphs["ok"]
+    assert "delta count must match POSITION" in morphs["detail"]
+
+
+def test_glb_grounding_requires_named_morph_targets(tmp_path):
+    path = tmp_path / "unnamed-morph.glb"
+    model_assets.write_rigged_glb(path, PALETTE)
+    parsed = _read_glb(path)
+    document = parsed["document"]
+    del document["meshes"][0]["extras"]
+    _rewrite_document(path, parsed, document)
+
+    result = artifact_grounding.validate(
+        path,
+        "glb",
+        {"min_morph_targets": 1, "require_named_morph_targets": True},
+    )
+
+    assert not result["ok"]
+    morphs = next(
+        check for check in result["checks"] if check["name"] == "glb-morph-targets"
+    )
+    assert not morphs["ok"]
+
+
+def test_glb_grounding_rejects_morph_animation_output_count_mismatch(tmp_path):
+    path = tmp_path / "broken-morph-animation.glb"
+    model_assets.write_rigged_glb(path, PALETTE)
+    parsed = _read_glb(path)
+    document = parsed["document"]
+    output = next(
+        accessor
+        for accessor in document["accessors"]
+        if accessor.get("name") == "MORPH_BREATHE_WEIGHT"
+    )
+    output["count"] -= 1
+    _rewrite_document(path, parsed, document)
+
+    result = artifact_grounding.validate(
+        path,
+        "glb",
+        {"min_animations": 3, "min_morph_animations": 1},
+    )
+
+    assert not result["ok"]
+    animations = next(
+        check for check in result["checks"] if check["name"] == "glb-animations"
+    )
+    assert not animations["ok"]
+    assert "input/output counts do not match" in animations["detail"]
+
+
+def test_glb_grounding_rejects_duplicate_animation_names(tmp_path):
+    path = tmp_path / "duplicate-animation.glb"
+    model_assets.write_rigged_glb(path, PALETTE)
+    parsed = _read_glb(path)
+    document = parsed["document"]
+    document["animations"][1]["name"] = document["animations"][0]["name"]
+    _rewrite_document(path, parsed, document)
+
+    result = artifact_grounding.validate(
+        path,
+        "glb",
+        {"min_animations": 3, "require_named_animations": True},
+    )
+
+    assert not result["ok"]
+    animations = next(
+        check for check in result["checks"] if check["name"] == "glb-animations"
+    )
+    assert not animations["ok"]
+    assert "duplicated" in animations["detail"]
+
+
 def test_glb_grounding_fails_closed_on_malformed_schema_fields(tmp_path):
     path = tmp_path / "malformed.glb"
 
@@ -395,6 +510,12 @@ def test_glb_grounding_fails_closed_on_malformed_schema_fields(tmp_path):
     def bad_texture_sampler(document):
         document["samplers"] = [{"wrapS": "repeat"}]
 
+    def bad_morph_accessor(document):
+        document["meshes"][0]["primitives"][0]["targets"][0]["POSITION"] = True
+
+    def bad_animation_accessors(document):
+        document["animations"][0]["samplers"][0]["input"] = True
+
     for mutate in (
         bad_buffer,
         bad_joints,
@@ -402,6 +523,8 @@ def test_glb_grounding_fails_closed_on_malformed_schema_fields(tmp_path):
         bad_images,
         bad_textures,
         bad_texture_sampler,
+        bad_morph_accessor,
+        bad_animation_accessors,
     ):
         model_assets.write_rigged_glb(path, PALETTE)
         parsed = _read_glb(path)

@@ -74,6 +74,15 @@ def test_theme_inference_uses_terms_not_substrings():
     assert assetgen.infer_request("ice voice interface")["theme"] == "frost"
 
 
+def test_morph_language_routes_to_rigged_3d_model():
+    request = assetgen.infer_request(
+        "Create a character with a morph target, blend shape, and animation clips"
+    )
+
+    assert request["dimension"] == "3d"
+    assert "rigged_model" in request["kinds"]
+
+
 def test_pack_is_deterministic_for_same_request(monkeypatch, tmp_path):
     _local_root(monkeypatch, tmp_path)
 
@@ -184,6 +193,43 @@ def test_verify_detects_corrupt_embedded_glb_texture_with_updated_manifest(
     assert not verified["ok"]
     assert any(
         "format rigged.glb glb-images" in item for item in verified["failures"]
+    )
+    assert not any("hash mismatch" in item for item in verified["failures"])
+
+
+def test_verify_detects_nonfinite_glb_morph_with_updated_manifest(
+    monkeypatch, tmp_path
+):
+    _local_root(monkeypatch, tmp_path)
+    pack = assetgen.generate_artifacts(
+        "morph-rig", "morph target rigged GLB character", kinds="rigged_model"
+    )
+    glb_path = os.path.join(pack["root"], "rigged.glb")
+    payload = bytearray(open(glb_path, "rb").read())
+    json_length = struct.unpack_from("<I", payload, 12)[0]
+    document = json.loads(payload[20:20 + json_length].decode("utf-8").rstrip())
+    accessor = next(
+        item
+        for item in document["accessors"]
+        if item.get("name") == "MORPH_BREATHE_POSITION"
+    )
+    view = document["bufferViews"][accessor["bufferView"]]
+    binary_start = 20 + json_length + 8
+    struct.pack_into("<f", payload, binary_start + view["byteOffset"], float("nan"))
+    with open(glb_path, "wb") as handle:
+        handle.write(payload)
+    manifest = json.loads(open(pack["manifest"], encoding="utf-8").read())
+    row = next(item for item in manifest["files"] if item["path"] == "rigged.glb")
+    row["bytes"] = len(payload)
+    row["sha256"] = hashlib.sha256(payload).hexdigest()
+    with open(pack["manifest"], "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2, sort_keys=True)
+
+    verified = assetgen.verify_pack(pack["root"])
+
+    assert not verified["ok"]
+    assert any(
+        "format rigged.glb glb-accessors" in item for item in verified["failures"]
     )
     assert not any("hash mismatch" in item for item in verified["failures"])
 
