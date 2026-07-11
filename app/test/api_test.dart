@@ -203,8 +203,12 @@ void main() {
         'phase': 'execute',
         'cycles': 2,
         'failures': 1,
+        'checkpoints': 2,
+        'replans': 1,
         'max_failures': 3,
         'max_tasks': 12,
+        'max_replans': 2,
+        'adaptive': true,
         'summary': 'working',
         'final_report': 'autopilot end report',
         'last_error': '',
@@ -233,6 +237,10 @@ void main() {
     expect(status.totalRuns, 4);
     expect(status.latest?.id, 'auto-abc123');
     expect(status.latest?.isActive, isTrue);
+    expect(status.latest?.adaptive, isTrue);
+    expect(status.latest?.checkpoints, 2);
+    expect(status.latest?.replans, 1);
+    expect(status.latest?.maxReplans, 2);
     expect(status.latest?.tasks.single.status, 'passed');
     expect(status.latest?.criteria, ['tests pass']);
     expect(status.events.single.message, 'task-01 passed');

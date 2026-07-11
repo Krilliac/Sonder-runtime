@@ -42,6 +42,8 @@ def test_waiting_start_runs_end_to_end_without_ollama(monkeypatch):
     assert "autopilot end report" in output
     stored = autopilot_store.get_run()
     assert stored["status"] == "completed"
+    assert stored["adaptive"] is True
+    assert stored["checkpoints"] == 1
 
 
 def test_control_command_creates_background_goal(monkeypatch):
@@ -53,15 +55,149 @@ def test_control_command_creates_background_goal(monkeypatch):
         ) or True,
     )
     output = server.control_command(
-        "/autopilot plan --observe --no-web inspect this project",
+        "/autopilot plan --observe --no-web --static inspect this project",
         project="demo",
     )
     stored = autopilot_store.get_run()
     assert output.startswith("autopilot plan started")
     assert stored["policy"] == "observe"
     assert stored["allow_web"] is False
+    assert stored["adaptive"] is False
     assert stored["project"] == "demo"
     assert launched == [(stored["id"], 12, True)]
+
+
+def test_planner_reserves_room_for_adaptive_replans(monkeypatch):
+    captured = {}
+
+    def fake_json(run, role, prompt, validator):
+        captured.update({"role": role, "prompt": prompt})
+        payload = _plan(run)
+        validator(payload)
+        return payload
+
+    monkeypatch.setattr(server, "_autopilot_json_model", fake_json)
+    payload = server._autopilot_plan_model({
+        "objective": "adapt safely", "project": "demo", "policy": "workspace",
+        "allow_web": False, "adaptive": True, "max_tasks": 12,
+        "max_replans": 2, "tier": "code",
+    })
+
+    assert payload["summary"] == "test plan"
+    assert captured["role"] == "planner"
+    assert "Initial task limit: 6" in captured["prompt"]
+    assert "Replan budget: 2" in captured["prompt"]
+
+
+def test_reviewer_receives_checkpoint_evidence_and_continue_decision(monkeypatch):
+    captured = {}
+
+    def fake_json(_run, role, prompt, validator):
+        captured.update({"role": role, "prompt": prompt})
+        payload = {
+            "decision": "continue",
+            "reason": "plan remains correct",
+            "pending_assessment": [
+                {"id": "task-02", "verdict": "keep", "reason": "still required"},
+            ],
+        }
+        validator(payload)
+        return payload
+
+    monkeypatch.setattr(server, "_autopilot_json_model", fake_json)
+    result = server._autopilot_review_model({
+        "objective": "adapt", "failures": 0, "max_failures": 3,
+        "max_tasks": 12, "checkpoints": 1, "replans": 0, "max_replans": 2,
+        "plan": [{
+            "id": "task-01", "kind": "inspect", "title": "Inspect",
+            "instruction": "Inspect the real API",
+            "status": "passed", "attempts": 1,
+            "output": "found API\n=== TOOL EVIDENCE ===\nstep 1 tool=file_read reason=inspect",
+        }, {
+            "id": "task-02", "kind": "validate", "title": "Validate",
+            "instruction": "Run focused tests",
+            "status": "pending", "attempts": 0, "output": "",
+        }],
+    }, "adaptive checkpoint after task-01")
+
+    assert result["decision"] == "continue"
+    assert captured["role"] == "reviewer"
+    assert '"evidence_actions": ["file_read: inspect"]' in captured["prompt"]
+    assert '"instruction": "Run focused tests"' in captured["prompt"]
+    assert '"pending_assessment"' in captured["prompt"]
+    assert "complete|continue|retry|replan|pause" in captured["prompt"]
+
+
+def test_reviewer_rejects_continue_when_pending_assessment_is_stale(monkeypatch):
+    def fake_json(_run, _role, _prompt, validator):
+        payload = {
+            "decision": "continue",
+            "reason": "nothing else needed",
+            "pending_assessment": [
+                {"id": "task-02", "verdict": "stale", "reason": "already exists"},
+            ],
+        }
+        validator(payload)
+        return payload
+
+    monkeypatch.setattr(server, "_autopilot_json_model", fake_json)
+    with pytest.raises(ValueError, match="continue is invalid"):
+        server._autopilot_review_model({
+            "objective": "adapt", "max_tasks": 6, "max_replans": 1,
+            "plan": [
+                {
+                    "id": "task-01", "kind": "inspect", "title": "Inspect",
+                    "instruction": "Inspect", "status": "passed", "output": "exists",
+                },
+                {
+                    "id": "task-02", "kind": "research", "title": "Design missing feature",
+                    "instruction": "Assume it is absent", "status": "pending", "output": "",
+                },
+            ],
+        }, "adaptive checkpoint after task-01")
+
+
+def test_reviewer_fills_omitted_pending_assessments_as_keep(monkeypatch):
+    captured = {}
+
+    def fake_json(_run, _role, _prompt, validator):
+        payload = {
+            "decision": "replan",
+            "reason": "one premise is stale",
+            "pending_assessment": [
+                {"id": "task-02", "verdict": "stale", "reason": "already exists"},
+            ],
+            "tasks": [],
+        }
+        validator(payload)
+        captured.update(payload)
+        return payload
+
+    monkeypatch.setattr(server, "_autopilot_json_model", fake_json)
+    result = server._autopilot_review_model({
+        "objective": "adapt", "max_tasks": 6, "max_replans": 1,
+        "plan": [
+            {
+                "id": "task-01", "kind": "inspect", "title": "Inspect",
+                "instruction": "Inspect", "status": "passed", "output": "exists",
+            },
+            {
+                "id": "task-02", "kind": "research", "title": "Design",
+                "instruction": "Assume absent", "status": "pending", "output": "",
+            },
+            {
+                "id": "task-03", "kind": "validate", "title": "Validate",
+                "instruction": "Run tests", "status": "pending", "output": "",
+            },
+        ],
+    }, "adaptive checkpoint after task-01")
+
+    assert result["decision"] == "replan"
+    assert captured["pending_assessment"][-1] == {
+        "id": "task-03",
+        "verdict": "keep",
+        "reason": "host default: reviewer did not mark this pending task stale",
+    }
 
 
 def test_autopilot_policy_blocks_control_plane_shell_and_bypass():

@@ -101,26 +101,35 @@ The learning loop above is *cross-task* memory. On top of it trilobite also has:
 
 `/autopilot run <objective>` turns one outcome into a durable, model-planned task
 ledger. A local planner selects measurable success criteria and ordered tasks;
-the guarded workbench executes one task at a time; a local reviewer may retry or
-replan; deterministic host code alone enforces tool/root allowlists, local-only
-tiers, cycle/task/failure budgets, mutation validation, pause/cancel, and the
-completion gate. Runs live in a process-safe private `autopilot.db` and survive
+the guarded workbench executes one task at a time; successful inspection and
+research tasks trigger evidence-aware checkpoints where a local reviewer may
+keep or replace the remaining pending plan. Deterministic host code alone
+enforces tool/root allowlists, local-only tiers, cycle/task/failure/replan budgets,
+mutation validation, pause/cancel, and the completion gate. Superseded tasks stay
+in the audit ledger. Runs live in a process-safe private `autopilot.db` and survive
 server replacement. Stale owners become `interrupted` and are never silently
 replayed.
 
+The tool agent retains the complete evidence ledger while compacting only its
+model-facing observation window. It repairs malformed JSON decisions twice,
+blocks unchanged failing tool-call loops, and reserves a final-only synthesis
+pass after the tool-step budget is exhausted.
+
 ```text
 /autopilot status [id]
-/autopilot plan [--observe] [--no-web] <objective>
-/autopilot run [--observe] [--no-web] <objective>
+/autopilot plan [--observe] [--no-web] [--static] <objective>
+/autopilot run [--observe] [--no-web] [--static] <objective>
 /autopilot resume|pause|cancel <id>
 ```
 
 Workspace mode can inspect, create, and edit through bounded tools, but cannot
 delete files, change accounts/permissions/memory, launch fleets, use cloud tiers,
 or infer location. Observe mode is read-only. The Flutter System page exposes the
-same goal composer, persisted checklist, budgets, events, end report, and lifecycle
-controls. Starting, resuming, pausing, or cancelling through hosted HTTP requires a
-developer/admin account; status remains read-only.
+same goal composer, adaptive/static selector, checkpoint and replan counters,
+persisted checklist, budgets, events, end report, and lifecycle controls. Use
+`--static` to opt out of adaptive checkpoints. Starting, resuming, pausing, or
+cancelling through hosted HTTP requires a developer/admin account; status remains
+read-only.
 
 ### General artifact forge and greenfield games
 

@@ -477,8 +477,12 @@ class AutopilotRun {
   final String phase;
   final int cycles;
   final int failures;
+  final int checkpoints;
+  final int replans;
   final int maxFailures;
   final int maxTasks;
+  final int maxReplans;
+  final bool adaptive;
   final String summary;
   final String finalReport;
   final String lastError;
@@ -496,8 +500,12 @@ class AutopilotRun {
     required this.phase,
     required this.cycles,
     required this.failures,
+    required this.checkpoints,
+    required this.replans,
     required this.maxFailures,
     required this.maxTasks,
+    required this.maxReplans,
+    required this.adaptive,
     required this.summary,
     required this.finalReport,
     required this.lastError,
@@ -519,8 +527,17 @@ class AutopilotRun {
       phase: json['phase']?.toString() ?? '',
       cycles: _asInt(json['cycles']),
       failures: _asInt(json['failures']),
+      checkpoints: _asInt(json['checkpoints']),
+      replans: _asInt(json['replans']),
       maxFailures: _asInt(json['max_failures']),
       maxTasks: _asInt(json['max_tasks']),
+      maxReplans:
+          json.containsKey('max_replans') ? _asInt(json['max_replans']) : 2,
+      adaptive: json.containsKey('adaptive')
+          ? (json['adaptive'] is bool
+              ? json['adaptive'] as bool
+              : _asInt(json['adaptive']) != 0)
+          : true,
       summary: json['summary']?.toString() ?? '',
       finalReport: json['final_report']?.toString() ?? '',
       lastError: json['last_error']?.toString() ?? '',

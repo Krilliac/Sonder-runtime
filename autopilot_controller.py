@@ -18,6 +18,7 @@ TASK_KINDS = ("inspect", "research", "implement", "validate", "report")
 POLICIES = ("observe", "workspace")
 LOCAL_TIERS = ("fast", "code", "general")
 MAX_TOTAL_CYCLES = 50
+MAX_ADAPTIVE_CHECKPOINTS = 6
 MAX_TASK_OUTPUT = 32_000
 FAILURE_PREFIXES = (
     "ERROR:", "VALIDATION_FAILED:", "EVIDENCE_REQUIRED", "CANCELLED",
@@ -126,16 +127,32 @@ def normalize_review(payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("autopilot review must be a JSON object")
     decision = str(payload.get("decision") or "").strip().lower()
-    if decision not in ("complete", "retry", "replan", "pause"):
+    if decision not in ("complete", "continue", "retry", "replan", "pause"):
         raise ValueError("autopilot review decision is invalid")
     tasks = payload.get("tasks") or []
     if not isinstance(tasks, list):
         raise ValueError("autopilot review tasks must be a JSON list")
+    assessments = payload.get("pending_assessment") or []
+    if not isinstance(assessments, list):
+        raise ValueError("autopilot pending assessment must be a JSON list")
+    normalized_assessments = []
+    for item in assessments:
+        if not isinstance(item, dict):
+            raise ValueError("each autopilot pending assessment must be a JSON object")
+        task_id = _clean_text(item.get("id"), 80)
+        verdict = str(item.get("verdict") or "").strip().lower()
+        if task_id and verdict in {"keep", "stale"}:
+            normalized_assessments.append({
+                "id": task_id,
+                "verdict": verdict,
+                "reason": _clean_text(item.get("reason"), 500),
+            })
     return {
         "decision": decision,
         "reason": _clean_text(payload.get("reason"), 2_000),
         "instruction": _clean_text(payload.get("instruction"), 4_000),
         "tasks": tasks,
+        "pending_assessment": normalized_assessments,
     }
 
 
@@ -211,7 +228,14 @@ def _repair_interrupted_tasks(plan: list[dict]) -> bool:
     return changed
 
 
-def _append_replan(run: dict, failed_index: int | None, raw_tasks: list) -> list[dict]:
+def _append_replan(
+    run: dict,
+    failed_index: int | None,
+    raw_tasks: list,
+    *,
+    supersede_pending: bool = False,
+    supersede_ids=(),
+) -> list[dict]:
     plan = [dict(task) for task in (run.get("plan") or [])]
     max_tasks = int(run.get("max_tasks") or 12)
     if failed_index is not None and 0 <= failed_index < len(plan):
@@ -224,11 +248,21 @@ def _append_replan(run: dict, failed_index: int | None, raw_tasks: list) -> list
         })
         plan[failed_index]["status"] = "superseded"
         plan[failed_index]["history"] = history[-5:]
+    stale_ids = {str(task_id) for task_id in supersede_ids if str(task_id)}
+    superseded_count = 0
+    if supersede_pending or stale_ids:
+        for task in plan:
+            if task.get("status") == "pending" and (
+                supersede_pending or str(task.get("id")) in stale_ids
+            ):
+                task["status"] = "superseded"
+                task["error"] = "superseded by an evidence-aware checkpoint replan"
+                superseded_count += 1
     remaining = max_tasks - len(plan)
-    if remaining <= 0:
+    if remaining <= 0 and raw_tasks:
         raise ValueError("autopilot plan budget has no room for replanning")
-    if not isinstance(raw_tasks, list) or not raw_tasks:
-        raise ValueError("autopilot replan needs at least one replacement task")
+    if not isinstance(raw_tasks, list):
+        raise ValueError("autopilot replan tasks must be a JSON list")
     normalized = []
     signatures = {
         (str(item.get("title", "")).lower(), str(item.get("instruction", "")).lower())
@@ -238,6 +272,8 @@ def _append_replan(run: dict, failed_index: int | None, raw_tasks: list) -> list
         if len(normalized) >= remaining:
             break
         task = _task(raw, len(plan) + len(normalized))
+        if run.get("policy") == "observe" and task["kind"] == "implement":
+            raise ValueError("observe policy cannot accept implementation replan tasks")
         signature = (task["title"].lower(), task["instruction"].lower())
         if signature in signatures:
             continue
@@ -257,11 +293,13 @@ def _append_replan(run: dict, failed_index: int | None, raw_tasks: list) -> list
                 % _clean_text(run.get("objective", ""), 1_000)
             ),
         }, len(plan) + len(normalized))
+        if remaining <= 0:
+            raise ValueError("autopilot plan budget has no room for required validation")
         if len(normalized) >= remaining:
             normalized[-1] = validation
         else:
             normalized.append(validation)
-    if not normalized:
+    if not normalized and not superseded_count:
         raise ValueError("autopilot replan produced no unique tasks")
     for task in normalized:
         task["id"] = "task-%02d" % (len(plan) + 1)
@@ -276,6 +314,12 @@ def format_report(run: dict, review_reason: str = "") -> str:
         "  objective: %s" % run.get("objective", ""),
         "  policy/tier: %s / %s" % (run.get("policy", ""), run.get("tier", "")),
         "  cycles/failures: %s/%s" % (run.get("cycles", 0), run.get("failures", 0)),
+        "  adaptive/checkpoints/replans: %s / %s / %s/%s" % (
+            "on" if run.get("adaptive", True) else "off",
+            run.get("checkpoints", 0),
+            run.get("replans", 0),
+            run.get("max_replans", 0),
+        ),
         "  success criteria:",
     ]
     lines.extend("    - %s" % item for item in (run.get("criteria") or []))
@@ -310,6 +354,12 @@ def format_run(run: dict | None, include_report: bool = True) -> str:
         ),
         "  tasks: %d passed, %d pending, %d total" % (passed, pending, len(plan)),
         "  cycles/failures: %s/%s" % (run.get("cycles", 0), run.get("failures", 0)),
+        "  adaptive: %s | checkpoints: %s | replans: %s/%s" % (
+            "on" if run.get("adaptive", True) else "off",
+            run.get("checkpoints", 0),
+            run.get("replans", 0),
+            run.get("max_replans", 0),
+        ),
     ]
     if run.get("summary"):
         lines.append("  summary: %s" % run["summary"])
@@ -343,8 +393,10 @@ def format_snapshot(data: dict) -> str:
         lines.append("  runs: none yet")
     for run in rows[:10]:
         lines.append("  - %(id)s [%(status)s/%(phase)s] %(objective)s" % run)
-        lines.append("      cycles=%s failures=%s policy=%s" % (
-            run.get("cycles", 0), run.get("failures", 0), run.get("policy", ""),
+        lines.append("      cycles=%s failures=%s replans=%s/%s policy=%s" % (
+            run.get("cycles", 0), run.get("failures", 0),
+            run.get("replans", 0), run.get("max_replans", 0),
+            run.get("policy", ""),
         ))
     return "\n".join(lines)
 
@@ -458,6 +510,12 @@ def execute_run(
                         final_report=report,
                     ) or run
                 if review["decision"] == "replan" and review["tasks"]:
+                    if int(run.get("replans") or 0) >= int(run.get("max_replans") or 0):
+                        return autopilot_store.finish_run(
+                            run["id"], owner_id, "blocked",
+                            summary="review requested replanning but the replan budget is exhausted",
+                            last_error="maximum replans=%s" % run.get("max_replans", 0),
+                        ) or run
                     try:
                         plan = _append_replan(run, None, review["tasks"])
                     except ValueError as exc:
@@ -468,6 +526,7 @@ def execute_run(
                         ) or run
                     run = autopilot_store.save_progress(
                         run["id"], owner_id, plan=plan, phase="execute",
+                        replans_delta=1,
                         event_kind="replan", event_message=review["reason"] or "review added tasks",
                     ) or run
                     continue
@@ -524,6 +583,128 @@ def execute_run(
             ) or run
             invoked_cycles += 1
             if passed:
+                pending_index, _pending_task = _next_pending(run.get("plan") or [])
+                should_checkpoint = (
+                    bool(run.get("adaptive", True))
+                    and task.get("kind") in ("inspect", "research")
+                    and pending_index is not None
+                    and int(run.get("checkpoints") or 0) < MAX_ADAPTIVE_CHECKPOINTS
+                )
+                if should_checkpoint:
+                    flags = autopilot_store.control_flags(run["id"], owner_id)
+                    if flags.get("lost"):
+                        raise AutopilotError(
+                            "autopilot ownership was lost before adaptive review"
+                        )
+                    if flags.get("cancel"):
+                        return autopilot_store.finish_run(
+                            run["id"], owner_id, "cancelled",
+                            summary="cancelled before adaptive review",
+                        ) or run
+                    if flags.get("pause"):
+                        return autopilot_store.finish_run(
+                            run["id"], owner_id, "paused",
+                            summary="paused before adaptive review",
+                        ) or run
+                    checkpoint_reason = (
+                        "adaptive checkpoint after %s passed; inspect the new evidence "
+                        "and decide whether the remaining pending plan is still correct"
+                        % task.get("id", "discovery task")
+                    )
+                    review = normalize_review(review_fn(run, checkpoint_reason))
+                    flags = autopilot_store.control_flags(run["id"], owner_id)
+                    if flags.get("lost"):
+                        raise AutopilotError(
+                            "autopilot ownership was lost during adaptive review"
+                        )
+                    if flags.get("cancel"):
+                        return autopilot_store.finish_run(
+                            run["id"], owner_id, "cancelled",
+                            summary="cancelled during adaptive review",
+                        ) or run
+                    if flags.get("pause"):
+                        run = autopilot_store.save_progress(
+                            run["id"], owner_id, checkpoints_delta=1,
+                            event_kind="checkpoint_pause",
+                            event_message="operator pause arrived during adaptive review",
+                        ) or run
+                        return autopilot_store.finish_run(
+                            run["id"], owner_id, "paused",
+                            summary="paused during adaptive review",
+                            final_report=format_report(run, review["reason"]),
+                        ) or run
+                    stale_ids = {
+                        item["id"]
+                        for item in review.get("pending_assessment") or []
+                        if item.get("verdict") == "stale"
+                    }
+                    if review["decision"] == "replan" and (
+                        review["tasks"] or stale_ids
+                    ):
+                        if int(run.get("replans") or 0) >= int(
+                            run.get("max_replans") or 0
+                        ):
+                            run = autopilot_store.save_progress(
+                                run["id"], owner_id, checkpoints_delta=1,
+                                event_kind="checkpoint_blocked",
+                                event_message="adaptive reviewer requested a replan after the budget was exhausted",
+                            ) or run
+                            return autopilot_store.finish_run(
+                                run["id"], owner_id, "blocked",
+                                summary="adaptive replan budget exhausted",
+                                last_error="maximum replans=%s"
+                                % run.get("max_replans", 0),
+                                final_report=format_report(run, review["reason"]),
+                            ) or run
+                        try:
+                            plan = _append_replan(
+                                run,
+                                None,
+                                review["tasks"],
+                                supersede_pending=not bool(stale_ids),
+                                supersede_ids=stale_ids,
+                            )
+                        except ValueError as exc:
+                            run = autopilot_store.save_progress(
+                                run["id"], owner_id, checkpoints_delta=1,
+                                event_kind="checkpoint_blocked",
+                                event_message=str(exc),
+                            ) or run
+                            return autopilot_store.finish_run(
+                                run["id"], owner_id, "blocked",
+                                summary="adaptive replanning failed host validation",
+                                last_error=str(exc),
+                                final_report=format_report(run, review["reason"]),
+                            ) or run
+                        run = autopilot_store.save_progress(
+                            run["id"], owner_id,
+                            plan=plan,
+                            checkpoints_delta=1,
+                            replans_delta=1,
+                            event_kind="adaptive_replan",
+                            event_message=review["reason"] or (
+                                "new evidence replaced the remaining pending plan"
+                            ),
+                        ) or run
+                        continue
+                    run = autopilot_store.save_progress(
+                        run["id"], owner_id,
+                        checkpoints_delta=1,
+                        event_kind=(
+                            "checkpoint_pause"
+                            if review["decision"] == "pause"
+                            else "checkpoint_continue"
+                        ),
+                        event_message=review["reason"] or (
+                            "remaining plan retained after evidence review"
+                        ),
+                    ) or run
+                    if review["decision"] == "pause":
+                        return autopilot_store.finish_run(
+                            run["id"], owner_id, "paused",
+                            summary=review["reason"] or "paused by adaptive reviewer",
+                            final_report=format_report(run, review["reason"]),
+                        ) or run
                 continue
             if int(run.get("failures") or 0) >= int(run.get("max_failures") or 3):
                 return autopilot_store.finish_run(
@@ -558,6 +739,13 @@ def execute_run(
                 ) or run
                 continue
             if review["decision"] == "replan" and review["tasks"]:
+                if int(run.get("replans") or 0) >= int(run.get("max_replans") or 0):
+                    return autopilot_store.finish_run(
+                        run["id"], owner_id, "blocked",
+                        summary="failure review requested replanning but the budget is exhausted",
+                        last_error="maximum replans=%s" % run.get("max_replans", 0),
+                        final_report=format_report(run, review["reason"]),
+                    ) or run
                 try:
                     plan = _append_replan(run, task_index, review["tasks"])
                 except ValueError as exc:
@@ -568,6 +756,7 @@ def execute_run(
                     ) or run
                 run = autopilot_store.save_progress(
                     run["id"], owner_id, plan=plan,
+                    replans_delta=1,
                     event_kind="replan", event_message=review["reason"] or "failed task replanned",
                 ) or run
                 continue
