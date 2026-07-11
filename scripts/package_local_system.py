@@ -52,6 +52,7 @@ PRIVATE_FILES = {
 REQUIRED_FILES = {
     "autopilot_controller.py",
     "autopilot_store.py",
+    "artifact_grounding.py",
     "assetgen.py",
     "bootstrap-engine.cmd",
     "bootstrap_engine.py",

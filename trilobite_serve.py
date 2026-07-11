@@ -341,6 +341,7 @@ HELP_TEXT = """commands:
   /agentretry <id>   explicitly retry persisted interrupted/failed master work
   /weather <place>   get sourced live conditions and a short forecast
   /asset <n> <brief> generate general icons/audio/models/scenes from a brief
+  /artifactcheck ... ground a file/pack: /artifactcheck <path> [| recipe]
   /forge [name]      build and run the dependency-free reference game suite
   /game ...          generate/test: /game cpp 3d name | concept
   /gamefleet ...     run a parallel multi-language game campaign
@@ -867,6 +868,7 @@ def _handle_slash(content, messages=None, state=None, project=""):
         "/tree", "/folders", "/search", "/grep",
         "/programs", "/programfind", "/scripts", "/scriptfind",
         "/image", "/inspectimage", "/mkdir", "/runprogram", "/runscript",
+        "/artifactcheck", "/verifyartifact", "/groundartifact",
     ):
         return server.control_command(stripped, project=project)
     if cmd in ("/asset", "/assets", "/assetgen", "/artifact"):

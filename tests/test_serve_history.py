@@ -199,6 +199,19 @@ def test_learning_slash_routes_to_control_command(monkeypatch):
     assert calls == [("/learning", "demo")]
 
 
+def test_artifactcheck_slash_routes_to_control_command(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        ts.server,
+        "control_command",
+        lambda command, project="": calls.append((command, project)) or "grounded",
+    )
+
+    command = "/artifactcheck artifacts/my pack | bundle"
+    assert ts._handle_slash(command, project="demo") == "grounded"
+    assert calls == [(command, "demo")]
+
+
 def test_master_slash_routes_modes(monkeypatch):
     calls = []
     monkeypatch.setattr(

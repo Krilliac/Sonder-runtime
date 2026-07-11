@@ -99,7 +99,11 @@
   create general icons, logos, backgrounds, textures, sprite sheets, SVG vectors
   and diagrams, palettes, documents, sample data, standalone web mockups, sound
   effects, music loops, OBJ models/materials, scenes, and complete packs from a
-  free-form brief. Verify packs before claiming they are ready.
+  free-form brief. Generated packs must pass their manifest and format contracts.
+  For any other created writing, data, document, UI, image, audio, model, or
+  bundle path, run `artifact_ground` with the closest recipe and explicit user
+  requirements before claiming it is ready. A matching hash alone does not prove
+  that bytes form a valid or usable artifact; repair failed format checks.
 - For greenfield game work, prefer `game_generate_and_test` or the known-good
   `game_reference_suite`. Consume the generated asset manifest, use standard
   library or OS-native APIs only when the user requests in-house code, emit a

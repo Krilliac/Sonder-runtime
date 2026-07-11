@@ -19,6 +19,8 @@ import struct
 import wave
 import zlib
 
+import artifact_grounding
+
 
 DIMENSIONS = {"2d", "2.5d", "3d"}
 THEMES = {
@@ -394,7 +396,7 @@ def _write_web_preview(path: str, palette, brief: str) -> None:
 body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 20%% 0%%,var(--surface),var(--canvas) 58%%);color:#fff;font:16px/1.5 system-ui,sans-serif}
 main{width:min(900px,92vw);padding:56px;border:1px solid color-mix(in srgb,var(--highlight),transparent 65%%);border-radius:28px;background:color-mix(in srgb,var(--canvas),transparent 12%%);box-shadow:0 30px 90px #0008}
 .eyebrow{color:var(--highlight);letter-spacing:.16em;text-transform:uppercase}h1{font-size:clamp(2.4rem,8vw,5.4rem);line-height:.92;margin:.3em 0}.button{display:inline-block;margin-top:22px;padding:13px 20px;border-radius:999px;background:var(--accent);font-weight:700}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:42px}.grid div{height:86px;border-radius:16px;background:linear-gradient(135deg,var(--surface),var(--accent))}@media(max-width:600px){main{padding:30px}.grid{grid-template-columns:1fr}}
-</style><main><div class="eyebrow">Trilobite concept</div><h1>%s</h1><p>A self-contained, dependency-free web mockup generated directly from the request.</p><span class="button">Explore concept</span><div class="grid"><div></div><div></div><div></div></div></main></html>
+</style><body><main><div class="eyebrow">Trilobite concept</div><h1>%s</h1><p>A self-contained, dependency-free web mockup generated directly from the request.</p><span class="button">Explore concept</span><div class="grid"><div></div><div></div><div></div></div></main></body></html>
 """ % (title, _hex(base), _hex(accent), _hex(bright), _hex(earth), title)
     with open(path, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(document)
@@ -661,6 +663,20 @@ def generate_artifacts(name: str, brief: str, kinds: str = "auto",
     with open(manifest_path, "w", encoding="utf-8") as handle:
         json.dump(manifest, handle, indent=2, sort_keys=True)
         handle.write("\n")
+    verification = verify_pack(root)
+    if not verification["ok"]:
+        raise ValueError(
+            "generated artifact pack failed grounding: %s"
+            % "; ".join(verification["failures"][:8])
+        )
+    manifest["validation"] = {
+        "recipe": "bundle",
+        "passed_checks": verification["grounding"].get("passed_checks", 0),
+        "failed_checks": verification["grounding"].get("failed_checks", 0),
+    }
+    with open(manifest_path, "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2, sort_keys=True)
+        handle.write("\n")
     manifest.update({
         "root": root,
         "manifest": manifest_path,
@@ -692,8 +708,17 @@ def verify_pack(path: str) -> dict:
     with open(manifest_path, "r", encoding="utf-8") as handle:
         manifest = json.load(handle)
     failures = []
+    if not isinstance(manifest, dict):
+        raise ValueError("artifact manifest must be a JSON object")
+    manifest_files = manifest.get("files", [])
+    if not isinstance(manifest_files, list):
+        failures.append("manifest files must be a list")
+        manifest_files = []
     seen = set()
-    for row in manifest.get("files", []):
+    for row in manifest_files:
+        if not isinstance(row, dict):
+            failures.append("manifest file row must be an object")
+            continue
         filename = row.get("path", "")
         candidate = os.path.abspath(os.path.join(root, filename))
         if filename in seen:
@@ -708,12 +733,39 @@ def verify_pack(path: str) -> dict:
             if _hash_file(candidate) != row.get("sha256"):
                 failures.append("hash mismatch: %s" % filename)
         seen.add(filename)
+    grounding = artifact_grounding.validate(
+        root,
+        "bundle",
+        {
+            "require_manifest": True,
+            "required_kinds": manifest.get("kinds", []),
+            "no_external_dependencies": True,
+        },
+    )
+    if not grounding["ok"]:
+        for check in grounding.get("checks", []):
+            if not check.get("ok"):
+                failures.append(
+                    "grounding %s: %s" % (check.get("name"), check.get("detail"))
+                )
+        for child in grounding.get("children", []):
+            for check in child.get("checks", []):
+                if not check.get("ok"):
+                    failures.append(
+                        "format %s %s: %s"
+                        % (
+                            os.path.basename(child.get("path", "")),
+                            check.get("name"),
+                            check.get("detail"),
+                        )
+                    )
     return {
         "ok": not failures,
         "root": root,
-        "checked": len(manifest.get("files", [])),
+        "checked": len(manifest_files),
         "failures": failures,
         "manifest": manifest,
+        "grounding": grounding,
     }
 
 
@@ -724,6 +776,12 @@ def format_pack(result: dict) -> str:
         "  files: %d | bytes: %d" % (len(result.get("files", [])), result.get("total_bytes", 0)),
         "  root: %s" % result.get("root", ""),
     ]
+    validation = result.get("validation") or {}
+    if validation:
+        lines.append(
+            "  grounding: PASS (%s deterministic checks)"
+            % validation.get("passed_checks", 0)
+        )
     return "\n".join(lines)
 
 

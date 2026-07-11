@@ -98,7 +98,7 @@ The learning loop above is *cross-task* memory. On top of it trilobite also has:
 
 ## Four ways to run it
 
-1. **Local, in your terminal** — `trilobite` (like launching `claude`). Interactive REPL routed through the full loop, with `/work`, `/report`, `/checklist`, `/inventory`, `/tree`, `/search`, `/programs`, `/scripts`, `/image`, `/mkdir`, `/runprogram`, `/runscript`, `/trace`, `/strict`, `/run`, `/train`, `/master`, `/agents`, `/capacity`, `/agentcancel`, `/agentretry`, `/asset`, `/forge`, `/game`, `/gamefleet`, `/todo`, `/commands`, `/activity`, `/runtime`, `/mcp`, `/learning`, `/dump`, `/permissions`, `/compact`, `/debug`, `/pass`, `/fail`, `/stats`, `/context`, `/quality`, `/privacy`, `/embeddings`, `/emotion`, and `/improve`, plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts`. Concrete natural-language workspace requests route to the same guarded workbench. Each REPL launch is its own remembered thread.
+1. **Local, in your terminal** — `trilobite` (like launching `claude`). Interactive REPL routed through the full loop, with `/work`, `/report`, `/checklist`, `/inventory`, `/tree`, `/search`, `/programs`, `/scripts`, `/image`, `/mkdir`, `/runprogram`, `/runscript`, `/trace`, `/strict`, `/run`, `/train`, `/master`, `/agents`, `/capacity`, `/agentcancel`, `/agentretry`, `/asset`, `/artifactcheck`, `/forge`, `/game`, `/gamefleet`, `/todo`, `/commands`, `/activity`, `/runtime`, `/mcp`, `/learning`, `/dump`, `/permissions`, `/compact`, `/debug`, `/pass`, `/fail`, `/stats`, `/context`, `/quality`, `/privacy`, `/embeddings`, `/emotion`, and `/improve`, plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts`. Concrete natural-language workspace requests route to the same guarded workbench. Each REPL launch is its own remembered thread.
 2. **Hosted on your own server + a thin client anywhere** — run `deploy_trilobite.sh --serve` on your box (systemd service, API key), then any machine runs the single-file `trilobite_client.py` pointed at it. The serve layer threads the chat UI's own conversation history.
 3. **Integrated with Claude/Codex** — the MCP `local-llm` tools include `workbench_agent`, budgeted workspace inventory, guarded tree/range/text/script/program/image inspection, argv-only program/script execution, persistent checklists, exact activity reports, agent/master orchestration, universal artifact generation, grounded game generation, bounded code/project runners, workflows, web tools, self-healing, privacy-safe memory review, local embedding backfill, and the remaining learning/memory surfaces. `master_orchestrate` can delegate to parallel subagents and audit their outputs; artifact and game tools create persistent assets/projects and accept only grounded checks. Local tiers remain the default for private workspace code.
 4. **Mobile & desktop app (GUI)** — a cross-platform [Flutter client](app/) that talks to a hosted `trilobite_serve.py`. One codebase → an **Android APK** and **Windows/Linux/macOS** desktop apps, built in CI with downloadable installers. See [app/README.md](app/README.md).
@@ -164,6 +164,14 @@ PCM WAV sound effects and music loops, OBJ/MTL models, and JSON scenes. The
 generator uses manual PNG/PPM encoding, waveform synthesis, procedural geometry,
 bounded sizes, safe workspace paths, idempotent regeneration, and SHA-256
 manifests. `artifact_verify(path)` checks every file before downstream use.
+Generation now fails closed unless every manifest size/hash and every recognized
+format contract passes. `artifact_ground(path, recipe, requirements_json)` and
+`/artifactcheck <path> [| recipe]` apply the same guarded recipes to arbitrary
+workspace outputs: writing/Markdown structure, JSON fields, CSV columns and row
+shape, self-contained HTML/UI references, SVG geometry, PNG chunks/CRCs, PPM
+dimensions, WAV frames/duration, OBJ vertices/faces/index bounds, and complete
+bundle manifests. Custom requirements can pin headings, text, fields, columns,
+files, kinds, sizes, row counts, and external-dependency policy.
 
 `game_reference_suite` is the known-good default baseline: persistent Python 2D,
 JavaScript 2.5D, C++ 3D, and C# 2D projects consume generated assets, simulate
@@ -422,13 +430,13 @@ Privacy is opt-in and scrubbed at every step — nothing auto-uploads, and no PR
 - ✅ **One-click engine setup** — bundled installs can bootstrap the local engine, detect available memory, pick a practical default model size, and start the local server without terminal setup.
 - ✅ **Richer passive learning** — accepts explicit accept/use/copy/edit signals from the CLI, server, and GUI in addition to natural follow-up phrasing.
 - ✅ **Local-first hosted opt-in** — cloud/hosted tiers are disabled unless `TRILOBITE_ALLOW_CLOUD=1` or the app setting is explicitly enabled.
-- ✅ **General artifact grounding** — `ground_artifact` validates non-code outputs with contains, regex, exact text, JSON, and JSON-field checks so learning is not limited to compile/run results.
+- ✅ **General artifact grounding** — `ground_artifact` validates in-memory content, while `artifact_ground` and `/artifactcheck` validate guarded files and bundles with format-specific writing, data, UI, image, audio, model, and manifest recipes. Generated packs must pass these contracts before success is reported.
 - ✅ **Passive learning** — infers outcomes from natural follow-up ("that worked" / "no, still errors") so it learns without manual scoring.
 - ✅ **Personas** — `/persona coder|explainer|reviewer|teacher` so non-coders get value too.
 - ✅ **Federated contribution** — share scrubbed lessons back without hosting the model (see [above](#contributing-improvements-without-hosting-the-model)).
 - ✅ **Mobile & desktop app (GUI)** — a [Flutter client](app/) with a real chat UI (Android APK + Windows/Linux/macOS), CI-built with download links. No terminal needed to *use* a hosted trilobite.
 
-**Next gaps** — make the bundled engine downloader fully self-contained per platform and broaden artifact grounding recipes for writing, data, docs, and UI work.
+**Next gaps** — make the bundled engine downloader fully self-contained per platform and add richer editable document/media exporters beyond the current portable open formats.
 
 ---
 
@@ -448,6 +456,7 @@ Flat, mostly-stdlib Python modules (plus `mcp`):
 | `runtime_policy.py` | Atomic per-user local-model aliases and execution-lane routing shared across live surfaces |
 | `reloadable_mcp.py` | Fail-closed live server-source execution, atomic tool-manager swaps, schema-cache invalidation, and MCP tool-list notifications |
 | `learning_health.py` | Outcome coverage, reward distribution, lesson provenance, distillation yield, and memory-hygiene reporting |
+| `artifact_grounding.py` | Guarded format contracts for writing, data, UI, images, audio, models, and complete artifact bundles |
 | `creative_router.py` | conservative natural-language routing from concrete master build requests into grounded artifact, game, or game-campaign workflows |
 | `server.py` / `workbench.py` / `activity_tracker.py` / `code_runner.py` / `web_tools.py` / `workflow_store.py` / `self_heal.py` | MCP workbench/agent tools, guarded discovery and execution, persistent checklists, exact action/end reports, bounded code/project runners, web tools, workflows, and self-healing |
 | `server.py` | MCP server: `offload` / `trilobite` / `parallel_run_code` / `parallel_generate_run` / `parallel_generate_run_languages` / `campaign_generate_compile_execute_record` / `learn_tiers` / `record_outcome` / `trilobite_stats` / `trilobite_sessions` / `trilobite_remember_fact` |

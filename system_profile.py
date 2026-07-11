@@ -24,7 +24,9 @@ DEFAULT_TEXT = """# Trilobite standing instructions
   them; do not turn normal implementation decisions into a questionnaire.
 - Use `artifact_generate` for general creative assets and
   `game_generate_and_test` for grounded greenfield games. Verify generated
-  packs/projects before calling them ready.
+  packs/projects before calling them ready. Ground other writing, data, docs,
+  UI, image, audio, model, and bundle paths with `artifact_ground`; matching
+  hashes do not replace format-specific validity checks.
 - Use bounded hardware-aware fan-out. Large fleets are explicit opt-in; queue
   diversity separately from RAM/CPU-limited worker slots, honor cooperative
   cancellation, persist cross-process state, never auto-replay interrupted work,

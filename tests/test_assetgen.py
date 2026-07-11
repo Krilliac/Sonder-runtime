@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 
@@ -63,6 +64,29 @@ def test_verify_detects_tampering(monkeypatch, tmp_path):
     assert any("hash mismatch" in item for item in verified["failures"])
 
 
+def test_verify_detects_invalid_format_even_when_manifest_hash_matches(
+    monkeypatch, tmp_path
+):
+    _local_root(monkeypatch, tmp_path)
+    pack = assetgen.generate_artifacts("icon-pack", "frost icon", kinds="icon")
+    icon_path = os.path.join(pack["root"], "icon.png")
+    with open(icon_path, "wb") as handle:
+        handle.write(b"not actually a PNG")
+    manifest = json.loads(open(pack["manifest"], encoding="utf-8").read())
+    row = next(item for item in manifest["files"] if item["path"] == "icon.png")
+    data = open(icon_path, "rb").read()
+    row["bytes"] = len(data)
+    row["sha256"] = hashlib.sha256(data).hexdigest()
+    with open(pack["manifest"], "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2, sort_keys=True)
+
+    verified = assetgen.verify_pack(pack["root"])
+
+    assert not verified["ok"]
+    assert any("format icon.png valid-png" in item for item in verified["failures"])
+    assert not any("hash mismatch" in item for item in verified["failures"])
+
+
 def test_output_rejects_path_escape(monkeypatch, tmp_path):
     _local_root(monkeypatch, tmp_path)
 
@@ -81,6 +105,8 @@ def test_manifest_is_machine_readable(monkeypatch, tmp_path):
     assert manifest["schema"] == 2
     assert manifest["brief"] == "architecture diagram preview"
     assert "preview" in manifest["kinds"]
+    assert manifest["validation"]["recipe"] == "bundle"
+    assert manifest["validation"]["failed_checks"] == 0
 
 
 def test_non_game_request_emits_general_open_formats(monkeypatch, tmp_path):
@@ -96,9 +122,11 @@ def test_non_game_request_emits_general_open_formats(monkeypatch, tmp_path):
     }
     assert expected <= {row["path"] for row in pack["files"]}
     assert "<svg" in open(os.path.join(pack["root"], "diagram.svg"), encoding="utf-8").read()
-    assert "<!doctype html>" in open(
+    html = open(
         os.path.join(pack["root"], "preview.html"), encoding="utf-8"
     ).read().lower()
+    assert "<!doctype html>" in html
+    assert "<body>" in html and "</body>" in html
     assert assetgen.verify_pack(pack["root"])["ok"]
 
 

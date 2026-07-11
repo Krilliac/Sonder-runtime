@@ -14,3 +14,4 @@ def test_help_exposes_runtime_policy_and_live_mcp_convergence():
     assert "/runtime" in trilobite_repl.HELP
     assert "/mcp" in trilobite_repl.HELP
     assert "/learning" in trilobite_repl.HELP
+    assert "/artifactcheck" in trilobite_repl.HELP
