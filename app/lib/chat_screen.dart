@@ -57,6 +57,8 @@ class _ChatScreenState extends State<ChatScreen> {
     '/artifactcheck': 'Validate a generated file or artifact pack',
     '/asset office-suite DOCX report, XLSX workbook, PPTX deck':
         'Generate a grounded editable Office suite',
+    '/asset media-suite animated GIF, MIDI score, SRT WebVTT captions, EDL timeline':
+        'Generate a grounded editable media kit',
     '/autopilot': 'Plan or run a persistent guarded goal',
     '/report': 'Show latest end report and exact actions',
     '/checklist': 'Show the active work checklist',

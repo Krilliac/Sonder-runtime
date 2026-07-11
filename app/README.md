@@ -30,6 +30,9 @@ cloud tiers and invoked web tools contact their named external services.
   weather uses Open-Meteo. When approximate location is enabled, the app asks
   `ipwho.is` for a city/region only on location-dependent prompts, strips the raw
   IP, and labels the result as approximate.
+- **Universal artifact shortcuts**: the command menu can generate verified Office
+  suites plus animated GIF, MIDI, SRT/WebVTT caption, and EDL timeline media kits
+  locally without waiting for CI or downloading third-party creative assets.
 - **System panel**: view server status, context health meters, master/subagent
   activity, the live workbench checklist and exact action evidence, visible task
   state, the shared local runtime-policy revision/model aliases/execution lanes,

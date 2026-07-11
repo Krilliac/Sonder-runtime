@@ -48,23 +48,31 @@ OOXML_ACTIVE_SUFFIXES = {
 EXTENSION_RECIPES = {
     ".csv": "csv",
     ".docx": "docx",
+    ".edl": "edl",
+    ".gif": "gif",
     ".htm": "html",
     ".html": "html",
     ".json": "json",
     ".md": "markdown",
     ".markdown": "markdown",
+    ".mid": "midi",
+    ".midi": "midi",
     ".obj": "obj",
     ".png": "png",
     ".ppm": "ppm",
     ".pptx": "pptx",
     ".svg": "svg",
+    ".srt": "srt",
     ".txt": "text",
     ".wav": "wav",
+    ".vtt": "vtt",
     ".xlsx": "xlsx",
 }
 
 RECIPE_ALIASES = {
     "audio": "wav",
+    "animation": "gif",
+    "captions": "auto",
     "data": "auto",
     "document": "auto",
     "editable": "ooxml",
@@ -73,6 +81,8 @@ RECIPE_ALIASES = {
     "office": "ooxml",
     "presentation": "auto",
     "spreadsheet": "auto",
+    "subtitle": "auto",
+    "timeline": "edl",
     "ui": "ui",
     "web": "ui",
     "writing": "auto",
@@ -84,18 +94,23 @@ SUPPORTED_RECIPES = {
     "bundle",
     "csv",
     "docx",
+    "edl",
+    "gif",
     "html",
     "json",
     "markdown",
+    "midi",
     "obj",
     "ooxml",
     "png",
     "ppm",
     "pptx",
     "svg",
+    "srt",
     "text",
     "ui",
     "wav",
+    "vtt",
     "xlsx",
     *RECIPE_ALIASES,
 }
@@ -482,6 +497,538 @@ def _validate_wav(path: Path, requirements: dict, checks: list):
         duration * 1000 >= minimum_ms,
         "%.1f ms (minimum %d)" % (duration * 1000, minimum_ms),
     )
+
+
+def _gif_subblocks(data: bytes, offset: int):
+    payload = bytearray()
+    while offset < len(data):
+        size = data[offset]
+        offset += 1
+        if size == 0:
+            return bytes(payload), offset
+        if offset + size > len(data):
+            raise ValueError("GIF sub-block exceeds file boundary")
+        payload.extend(data[offset : offset + size])
+        offset += size
+    raise ValueError("GIF sub-block chain has no terminator")
+
+
+def _gif_lzw_decode(payload: bytes, minimum_code_size: int, maximum_output: int):
+    if not 2 <= minimum_code_size <= 8:
+        raise ValueError("GIF LZW minimum code size must be 2..8")
+    clear = 1 << minimum_code_size
+    end = clear + 1
+    code_size = minimum_code_size + 1
+    dictionary = {index: bytes((index,)) for index in range(clear)}
+    next_code = end + 1
+    previous = None
+    output = bytearray()
+    bit_offset = 0
+    ended = False
+
+    def read_code(width):
+        nonlocal bit_offset
+        if bit_offset + width > len(payload) * 8:
+            raise ValueError("GIF LZW stream ended inside a code")
+        value = 0
+        for bit in range(width):
+            byte_index = (bit_offset + bit) // 8
+            bit_index = (bit_offset + bit) % 8
+            value |= ((payload[byte_index] >> bit_index) & 1) << bit
+        bit_offset += width
+        return value
+
+    while bit_offset < len(payload) * 8:
+        code = read_code(code_size)
+        if code == clear:
+            dictionary = {index: bytes((index,)) for index in range(clear)}
+            next_code = end + 1
+            code_size = minimum_code_size + 1
+            previous = None
+            continue
+        if code == end:
+            ended = True
+            break
+        if code in dictionary:
+            entry = dictionary[code]
+        elif code == next_code and previous is not None:
+            entry = previous + previous[:1]
+        else:
+            raise ValueError("GIF LZW references an undefined code")
+        output.extend(entry)
+        if len(output) > maximum_output:
+            raise ValueError("GIF LZW expands beyond the frame dimensions")
+        if previous is not None and next_code < 4096:
+            dictionary[next_code] = previous + entry[:1]
+            next_code += 1
+            if next_code == (1 << code_size) and code_size < 12:
+                code_size += 1
+        previous = entry
+    if not ended:
+        raise ValueError("GIF LZW stream has no end code")
+    return bytes(output)
+
+
+def _validate_gif(path: Path, requirements: dict, checks: list):
+    try:
+        data = _read_bytes(path)
+        if len(data) < 14 or data[:6] not in {b"GIF87a", b"GIF89a"}:
+            raise ValueError("invalid GIF signature or logical screen descriptor")
+        width, height, packed, _background, _aspect = struct.unpack(
+            "<HHBBB", data[6:13]
+        )
+        if not width or not height:
+            raise ValueError("GIF dimensions must be positive")
+        offset = 13
+        global_colors = 0
+        if packed & 0x80:
+            global_colors = 1 << ((packed & 0x07) + 1)
+            offset += global_colors * 3
+        if offset > len(data):
+            raise ValueError("GIF global color table is truncated")
+        frames = 0
+        total_delay_cs = 0
+        pending_delay_cs = 0
+        lzw_ok = True
+        structure_ok = True
+        trailer = False
+        while offset < len(data):
+            marker = data[offset]
+            offset += 1
+            if marker == 0x3B:
+                trailer = True
+                structure_ok = offset == len(data)
+                break
+            if marker == 0x21:
+                if offset >= len(data):
+                    raise ValueError("GIF extension label is missing")
+                label = data[offset]
+                offset += 1
+                extension, offset = _gif_subblocks(data, offset)
+                if label == 0xF9:
+                    if len(extension) != 4:
+                        raise ValueError("GIF graphic control extension must be 4 bytes")
+                    pending_delay_cs = struct.unpack("<H", extension[1:3])[0]
+                continue
+            if marker != 0x2C:
+                raise ValueError("unknown GIF block marker 0x%02x" % marker)
+            if offset + 9 > len(data):
+                raise ValueError("GIF image descriptor is truncated")
+            left, top, frame_width, frame_height, image_packed = struct.unpack(
+                "<HHHHB", data[offset : offset + 9]
+            )
+            offset += 9
+            if not frame_width or not frame_height:
+                raise ValueError("GIF frame dimensions must be positive")
+            if left + frame_width > width or top + frame_height > height:
+                raise ValueError("GIF frame exceeds the logical screen")
+            color_count = global_colors
+            if image_packed & 0x80:
+                color_count = 1 << ((image_packed & 0x07) + 1)
+                offset += color_count * 3
+                if offset > len(data):
+                    raise ValueError("GIF local color table is truncated")
+            if color_count == 0:
+                raise ValueError("GIF frame has no active color table")
+            if offset >= len(data):
+                raise ValueError("GIF image data is missing")
+            minimum_code_size = data[offset]
+            offset += 1
+            compressed, offset = _gif_subblocks(data, offset)
+            try:
+                decoded = _gif_lzw_decode(
+                    compressed, minimum_code_size, frame_width * frame_height
+                )
+                frame_valid = (
+                    len(decoded) == frame_width * frame_height
+                    and (not decoded or max(decoded) < color_count)
+                )
+            except ValueError:
+                frame_valid = False
+            lzw_ok = lzw_ok and frame_valid
+            frames += 1
+            total_delay_cs += pending_delay_cs
+            pending_delay_cs = 0
+    except (OSError, ValueError, struct.error) as exc:
+        _check(checks, "valid-gif", False, str(exc))
+        return
+    _check(
+        checks,
+        "valid-gif",
+        structure_ok and trailer,
+        "%dx%d, %d frame(s)" % (width, height, frames),
+    )
+    _check(checks, "gif-lzw", lzw_ok, "all frame streams decode to their dimensions")
+    minimum_frames = _bounded_int(requirements, "min_frames", 1, 1, 10_000)
+    _check(
+        checks,
+        "gif-minimum-frames",
+        frames >= minimum_frames,
+        "%d frames (minimum %d)" % (frames, minimum_frames),
+    )
+    minimum_ms = _bounded_int(requirements, "min_duration_ms", 0, 0, 86_400_000)
+    _check(
+        checks,
+        "gif-duration",
+        total_delay_cs * 10 >= minimum_ms,
+        "%d ms (minimum %d)" % (total_delay_cs * 10, minimum_ms),
+    )
+    max_side = _bounded_int(requirements, "max_side", 32768, 1, 32768)
+    min_side = _bounded_int(requirements, "min_side", 1, 1, max_side)
+    _check(
+        checks,
+        "gif-dimensions",
+        min_side <= width <= max_side and min_side <= height <= max_side,
+        "%dx%d (each side %d..%d)" % (width, height, min_side, max_side),
+    )
+
+
+def _midi_variable_length(data: bytes, offset: int):
+    value = 0
+    for _ in range(4):
+        if offset >= len(data):
+            raise ValueError("MIDI variable-length value is truncated")
+        byte = data[offset]
+        offset += 1
+        value = (value << 7) | (byte & 0x7F)
+        if not byte & 0x80:
+            return value, offset
+    raise ValueError("MIDI variable-length value exceeds four bytes")
+
+
+def _parse_midi_track(data: bytes):
+    offset = 0
+    running_status = None
+    ticks = 0
+    note_count = 0
+    tempo_count = 0
+    ended = False
+    while offset < len(data):
+        delta, offset = _midi_variable_length(data, offset)
+        ticks += delta
+        if offset >= len(data):
+            raise ValueError("MIDI event status is missing")
+        lead = data[offset]
+        if lead < 0x80:
+            if running_status is None:
+                raise ValueError("MIDI data byte has no running status")
+            status = running_status
+        else:
+            status = lead
+            offset += 1
+            running_status = status if status < 0xF0 else None
+        if status == 0xFF:
+            if offset >= len(data):
+                raise ValueError("MIDI meta event type is missing")
+            kind = data[offset]
+            offset += 1
+            length, offset = _midi_variable_length(data, offset)
+            if offset + length > len(data):
+                raise ValueError("MIDI meta event is truncated")
+            payload = data[offset : offset + length]
+            offset += length
+            if kind == 0x51 and len(payload) == 3:
+                tempo_count += 1
+            if kind == 0x2F:
+                if length != 0:
+                    raise ValueError("MIDI end-of-track event must be empty")
+                ended = offset == len(data)
+                break
+            continue
+        if status in {0xF0, 0xF7}:
+            length, offset = _midi_variable_length(data, offset)
+            if offset + length > len(data):
+                raise ValueError("MIDI SysEx event is truncated")
+            offset += length
+            continue
+        if status >= 0xF0:
+            raise ValueError("unsupported MIDI system event 0x%02x" % status)
+        event = status & 0xF0
+        data_length = 1 if event in {0xC0, 0xD0} else 2
+        if offset + data_length > len(data):
+            raise ValueError("MIDI channel event is truncated")
+        event_data = data[offset : offset + data_length]
+        if any(value >= 0x80 for value in event_data):
+            raise ValueError("MIDI channel data byte has its high bit set")
+        offset += data_length
+        if event == 0x90 and event_data[1] > 0:
+            note_count += 1
+    return {
+        "ticks": ticks,
+        "notes": note_count,
+        "tempos": tempo_count,
+        "ended": ended,
+    }
+
+
+def _validate_midi(path: Path, requirements: dict, checks: list):
+    try:
+        data = _read_bytes(path)
+        if len(data) < 14 or data[:4] != b"MThd":
+            raise ValueError("MIDI header chunk is missing")
+        header_length = struct.unpack(">I", data[4:8])[0]
+        if header_length < 6 or 8 + header_length > len(data):
+            raise ValueError("MIDI header chunk has an invalid length")
+        midi_format, declared_tracks, division = struct.unpack(">HHH", data[8:14])
+        if midi_format not in {0, 1}:
+            raise ValueError("only MIDI format 0 or 1 is supported")
+        if midi_format == 0 and declared_tracks != 1:
+            raise ValueError("MIDI format 0 must declare exactly one track")
+        if not declared_tracks or declared_tracks > 64:
+            raise ValueError("MIDI track count must be 1..64")
+        if division & 0x8000 or division == 0:
+            raise ValueError("MIDI must use positive ticks-per-quarter timing")
+        offset = 8 + header_length
+        tracks = []
+        for _ in range(declared_tracks):
+            if offset + 8 > len(data) or data[offset : offset + 4] != b"MTrk":
+                raise ValueError("MIDI track chunk is missing")
+            track_length = struct.unpack(">I", data[offset + 4 : offset + 8])[0]
+            offset += 8
+            if offset + track_length > len(data):
+                raise ValueError("MIDI track chunk is truncated")
+            tracks.append(_parse_midi_track(data[offset : offset + track_length]))
+            offset += track_length
+        if offset != len(data):
+            raise ValueError("MIDI contains trailing bytes after declared tracks")
+    except (OSError, ValueError, struct.error) as exc:
+        _check(checks, "valid-midi", False, str(exc))
+        return
+    total_notes = sum(track["notes"] for track in tracks)
+    total_tempos = sum(track["tempos"] for track in tracks)
+    duration_ticks = max((track["ticks"] for track in tracks), default=0)
+    _check(
+        checks,
+        "valid-midi",
+        all(track["ended"] for track in tracks),
+        "format %d, %d track(s), PPQ %d" % (midi_format, len(tracks), division),
+    )
+    minimum_tracks = _bounded_int(requirements, "min_tracks", 1, 1, 64)
+    _check(
+        checks,
+        "midi-minimum-tracks",
+        len(tracks) >= minimum_tracks,
+        "%d tracks (minimum %d)" % (len(tracks), minimum_tracks),
+    )
+    minimum_notes = _bounded_int(requirements, "min_notes", 1, 0, 10_000_000)
+    _check(
+        checks,
+        "midi-minimum-notes",
+        total_notes >= minimum_notes,
+        "%d note-on events (minimum %d)" % (total_notes, minimum_notes),
+    )
+    minimum_ticks = _bounded_int(
+        requirements, "min_duration_ticks", 1, 0, 0x0FFFFFFF
+    )
+    _check(
+        checks,
+        "midi-duration",
+        duration_ticks >= minimum_ticks,
+        "%d ticks (minimum %d)" % (duration_ticks, minimum_ticks),
+    )
+    if requirements.get("require_tempo"):
+        _check(checks, "midi-tempo", total_tempos > 0, "%d tempo events" % total_tempos)
+
+
+def _caption_timestamp(value: str, separator: str):
+    pattern = r"^(\d{2}):(\d{2}):(\d{2})%s(\d{3})$" % re.escape(separator)
+    match = re.fullmatch(pattern, value.strip())
+    if not match:
+        raise ValueError("invalid caption timestamp %r" % value)
+    hours, minutes, seconds, milliseconds = map(int, match.groups())
+    if minutes >= 60 or seconds >= 60:
+        raise ValueError("caption timestamp component is out of range")
+    return ((hours * 60 + minutes) * 60 + seconds) * 1000 + milliseconds
+
+
+def _caption_checks(cues, text, recipe: str, requirements: dict, checks: list):
+    ordered = all(
+        start < end and (index == 0 or start >= cues[index - 1][0])
+        for index, (start, end, _caption) in enumerate(cues)
+    )
+    _check(checks, "%s-timing" % recipe, ordered, "%d ordered cue ranges" % len(cues))
+    minimum = _bounded_int(requirements, "min_cues", 1, 0, 1_000_000)
+    _check(
+        checks,
+        "%s-minimum-cues" % recipe,
+        len(cues) >= minimum,
+        "%d cues (minimum %d)" % (len(cues), minimum),
+    )
+    for needle in _string_list(requirements, "required_text"):
+        _check(
+            checks,
+            "%s-required-text" % recipe,
+            needle.casefold() in text.casefold(),
+            "contains %r" % needle,
+        )
+
+
+def _validate_srt(path: Path, requirements: dict, checks: list):
+    try:
+        text = _read_text(path).lstrip("\ufeff")
+        blocks = [block for block in re.split(r"\r?\n\s*\r?\n", text.strip()) if block]
+        cues = []
+        expected_index = 1
+        for block in blocks:
+            lines = block.splitlines()
+            if len(lines) < 3 or int(lines[0].strip()) != expected_index:
+                raise ValueError("SRT cue numbering must be contiguous from 1")
+            timing = lines[1].split(" --> ")
+            if len(timing) != 2:
+                raise ValueError("SRT cue timing arrow is malformed")
+            start = _caption_timestamp(timing[0], ",")
+            end = _caption_timestamp(timing[1].split()[0], ",")
+            caption = "\n".join(lines[2:]).strip()
+            if not caption:
+                raise ValueError("SRT cue text is empty")
+            cues.append((start, end, caption))
+            expected_index += 1
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        _check(checks, "valid-srt", False, str(exc))
+        return
+    _check(checks, "valid-srt", bool(cues), "%d parsed cues" % len(cues))
+    _caption_checks(cues, text, "srt", requirements, checks)
+
+
+def _validate_vtt(path: Path, requirements: dict, checks: list):
+    try:
+        text = _read_text(path).lstrip("\ufeff")
+        lines = text.splitlines()
+        if not lines or not lines[0].startswith("WEBVTT"):
+            raise ValueError("WebVTT file must begin with WEBVTT")
+        cues = []
+        index = 1
+        while index < len(lines):
+            line = lines[index].strip()
+            if not line:
+                index += 1
+                continue
+            if line.startswith(("NOTE", "STYLE", "REGION")):
+                index += 1
+                while index < len(lines) and lines[index].strip():
+                    index += 1
+                continue
+            if " --> " not in line:
+                index += 1
+                if index >= len(lines):
+                    raise ValueError("WebVTT cue identifier has no timing line")
+                line = lines[index].strip()
+            timing = line.split(" --> ")
+            if len(timing) != 2:
+                raise ValueError("WebVTT cue timing arrow is malformed")
+            start = _caption_timestamp(timing[0], ".")
+            end = _caption_timestamp(timing[1].split()[0], ".")
+            index += 1
+            caption_lines = []
+            while index < len(lines) and lines[index].strip():
+                caption_lines.append(lines[index].strip())
+                index += 1
+            if not caption_lines:
+                raise ValueError("WebVTT cue text is empty")
+            cues.append((start, end, "\n".join(caption_lines)))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        _check(checks, "valid-vtt", False, str(exc))
+        return
+    _check(checks, "valid-vtt", bool(cues), "%d parsed cues" % len(cues))
+    _caption_checks(cues, text, "vtt", requirements, checks)
+
+
+def _edl_timecode(value: str, fps: int):
+    match = re.fullmatch(r"(\d{2}):(\d{2}):(\d{2}):(\d{2})", value)
+    if not match:
+        raise ValueError("invalid EDL timecode %r" % value)
+    hours, minutes, seconds, frames = map(int, match.groups())
+    if minutes >= 60 or seconds >= 60 or frames >= fps:
+        raise ValueError("EDL timecode component is out of range")
+    return ((hours * 60 + minutes) * 60 + seconds) * fps + frames
+
+
+def _validate_edl(path: Path, requirements: dict, checks: list):
+    try:
+        text = _read_text(path)
+        lines = text.splitlines()
+        if not any(line.startswith("TITLE:") for line in lines[:3]):
+            raise ValueError("EDL title header is missing")
+        if not any(line.strip() == "FCM: NON-DROP FRAME" for line in lines[:4]):
+            raise ValueError("EDL must declare non-drop-frame timing")
+        fps = _bounded_int(requirements, "frame_rate", 30, 1, 120)
+        events = []
+        for line in lines:
+            parts = line.split()
+            if not parts or not re.fullmatch(r"\d{3}", parts[0]):
+                continue
+            if len(parts) != 8:
+                raise ValueError("EDL event row must contain eight fields")
+            event_number = int(parts[0])
+            source_in, source_out, record_in, record_out = (
+                _edl_timecode(value, fps) for value in parts[4:8]
+            )
+            if source_out <= source_in or record_out <= record_in:
+                raise ValueError("EDL event ranges must have positive duration")
+            if source_out - source_in != record_out - record_in:
+                raise ValueError("EDL source and record durations must match")
+            events.append((event_number, record_in, record_out))
+        if not events:
+            raise ValueError("EDL contains no event rows")
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        _check(checks, "valid-edl", False, str(exc))
+        return
+    numbered = [event[0] for event in events] == list(range(1, len(events) + 1))
+    ordered = all(
+        index == 0 or event[1] >= events[index - 1][2]
+        for index, event in enumerate(events)
+    )
+    _check(checks, "valid-edl", numbered, "%d contiguous numbered events" % len(events))
+    _check(checks, "edl-record-order", ordered, "record ranges are non-overlapping")
+    minimum = _bounded_int(requirements, "min_events", 1, 1, 1_000_000)
+    _check(
+        checks,
+        "edl-minimum-events",
+        len(events) >= minimum,
+        "%d events (minimum %d)" % (len(events), minimum),
+    )
+    for needle in _string_list(requirements, "required_text"):
+        _check(
+            checks,
+            "edl-required-text",
+            needle.casefold() in text.casefold(),
+            "contains %r" % needle,
+        )
+    if requirements.get("no_external_dependencies"):
+        clip_names = sorted(set(re.findall(
+            r"(?m)^\*\s+FROM CLIP NAME:\s*(.+?)\s*$", text
+        )))
+        unsafe = []
+        missing = []
+        root = path.parent.resolve()
+        for clip_name in clip_names:
+            pure = PurePosixPath(clip_name.replace("\\", "/"))
+            if (
+                not pure.parts
+                or pure.is_absolute()
+                or ".." in pure.parts
+                or _is_external_ref(clip_name)
+                or ":" in pure.parts[0]
+            ):
+                unsafe.append(clip_name)
+                continue
+            candidate = (root / Path(*pure.parts)).resolve()
+            if root not in (candidate, *candidate.parents):
+                unsafe.append(clip_name)
+            elif not candidate.is_file() or candidate.is_symlink():
+                missing.append(clip_name)
+        _check(
+            checks,
+            "edl-safe-media-references",
+            not unsafe,
+            "unsafe media: %s" % (", ".join(unsafe[:10]) or "none"),
+        )
+        _check(
+            checks,
+            "edl-local-media",
+            not missing,
+            "missing media: %s" % (", ".join(missing[:10]) or "none"),
+        )
 
 
 def _validate_obj(path: Path, requirements: dict, checks: list):
@@ -924,6 +1471,16 @@ def _validate_file(path: Path, recipe: str, requirements: dict) -> dict:
         _validate_ppm(path, requirements, checks)
     elif recipe == "wav":
         _validate_wav(path, requirements, checks)
+    elif recipe == "gif":
+        _validate_gif(path, requirements, checks)
+    elif recipe == "midi":
+        _validate_midi(path, requirements, checks)
+    elif recipe == "srt":
+        _validate_srt(path, requirements, checks)
+    elif recipe == "vtt":
+        _validate_vtt(path, requirements, checks)
+    elif recipe == "edl":
+        _validate_edl(path, requirements, checks)
     elif recipe == "obj":
         _validate_obj(path, requirements, checks)
     elif recipe in {"docx", "xlsx", "pptx", "ooxml"}:
@@ -1043,7 +1600,7 @@ def _validate_directory(path: Path, recipe: str, requirements: dict) -> dict:
         child_recipe = _resolve_recipe(candidate, "auto")
         child_requirements = _child_requirements(requirements, child_recipe)
         if child_recipe in {
-            "html", "svg", "docx", "xlsx", "pptx", "ooxml",
+            "html", "svg", "docx", "xlsx", "pptx", "ooxml", "edl",
         } and "no_external_dependencies" in requirements:
             child_requirements.setdefault(
                 "no_external_dependencies",

@@ -152,12 +152,17 @@ def test_generated_all_format_pack_passes_manifest_and_format_recipes(
             "required_kinds": pack["kinds"],
             "required_files": [
                 "brief.md",
+                "animation.gif",
+                "captions.srt",
+                "captions.vtt",
                 "data.csv",
                 "document.docx",
                 "preview.html",
                 "icon.png",
                 "presentation.pptx",
+                "score.mid",
                 "theme.wav",
+                "timeline.edl",
                 "models.obj",
                 "workbook.xlsx",
             ],
@@ -170,9 +175,65 @@ def test_generated_all_format_pack_passes_manifest_and_format_recipes(
     assert result["failed_checks"] == 0
     recipes = {child["recipe"] for child in result["children"]}
     assert {
-        "markdown", "csv", "docx", "html", "json", "obj", "png", "ppm",
-        "pptx", "svg", "wav", "xlsx",
+        "markdown", "csv", "docx", "edl", "gif", "html", "json", "midi",
+        "obj", "png", "ppm", "pptx", "srt", "svg", "vtt", "wav", "xlsx",
     } <= recipes
+
+
+def test_editable_media_recipes_enforce_structure_and_content(tmp_path):
+    palette = ((17, 15, 35), (116, 91, 218), (87, 218, 207), (49, 38, 91))
+    animation = tmp_path / "animation.gif"
+    score = tmp_path / "score.mid"
+    captions_srt = tmp_path / "captions.srt"
+    captions_vtt = tmp_path / "captions.vtt"
+    timeline = tmp_path / "timeline.edl"
+    assetgen.media_assets.write_gif(animation, palette, 42)
+    assetgen.media_assets.write_midi(score, "Arcane Suite", "arcane", 42)
+    assetgen.media_assets.write_srt(captions_srt, "arcane launch")
+    assetgen.media_assets.write_vtt(captions_vtt, "arcane launch")
+    assetgen.media_assets.write_edl(timeline, "Arcane Suite", "arcane launch")
+
+    results = [
+        artifact_grounding.validate(
+            animation, "animation", {"min_frames": 8, "min_duration_ms": 640}
+        ),
+        artifact_grounding.validate(
+            score, "midi", {"min_notes": 16, "require_tempo": True}
+        ),
+        artifact_grounding.validate(
+            captions_srt, "captions", {"min_cues": 6, "required_text": ["arcane"]}
+        ),
+        artifact_grounding.validate(
+            captions_vtt, "subtitle", {"min_cues": 6, "required_text": ["arcane"]}
+        ),
+        artifact_grounding.validate(
+            timeline, "timeline", {"min_events": 6, "required_text": ["Arcane Suite"]}
+        ),
+    ]
+
+    assert all(result["ok"] for result in results)
+    assert [result["recipe"] for result in results] == [
+        "gif", "midi", "srt", "vtt", "edl"
+    ]
+
+
+def test_edl_no_external_dependencies_requires_local_media(tmp_path):
+    timeline = tmp_path / "timeline.edl"
+    animation = tmp_path / "animation.gif"
+    palette = ((17, 15, 35), (116, 91, 218), (87, 218, 207), (49, 38, 91))
+    assetgen.media_assets.write_edl(timeline, "Demo", "Local timeline")
+
+    missing = artifact_grounding.validate(
+        timeline, "edl", {"no_external_dependencies": True}
+    )
+    assetgen.media_assets.write_gif(animation, palette, 42)
+    complete = artifact_grounding.validate(
+        timeline, "edl", {"no_external_dependencies": True}
+    )
+
+    assert not missing["ok"]
+    assert any(item["name"] == "edl-local-media" for item in _failures(missing))
+    assert complete["ok"]
 
 
 def test_editable_office_recipes_check_content_and_structure(tmp_path):
@@ -308,6 +369,101 @@ def test_format_validation_catches_tampering_even_with_updated_manifest(
     assert not result["ok"]
     assert any(item["name"] == "valid-png" for item in _failures(result))
     assert not any(item["name"] == "bundle-sha256" for item in _failures(result))
+
+
+def test_media_validation_catches_tampering_even_with_updated_manifest(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(assetgen, "workspace_root", lambda: str(tmp_path))
+    pack = assetgen.generate_artifacts(
+        "media-pack", "animated GIF and MIDI score", kinds="animation,midi"
+    )
+    root = Path(pack["root"])
+    animation = root / "animation.gif"
+    data = bytearray(animation.read_bytes())
+    data[-1] = 0
+    animation.write_bytes(data)
+    _update_manifest_hash(root, "animation.gif")
+
+    result = artifact_grounding.validate(
+        root,
+        "bundle",
+        {"require_manifest": True, "recipes": {"gif": {"min_frames": 2}}},
+    )
+
+    assert not result["ok"]
+    assert any(item["name"] == "valid-gif" for item in _failures(result))
+    assert not any(item["name"] == "bundle-sha256" for item in _failures(result))
+
+
+def test_bundle_edl_grounding_rejects_rehashed_missing_media_reference(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(assetgen, "workspace_root", lambda: str(tmp_path))
+    pack = assetgen.generate_artifacts(
+        "timeline-pack", "editable timeline", kinds="timeline"
+    )
+    root = Path(pack["root"])
+    timeline = root / "timeline.edl"
+    timeline.write_text(
+        timeline.read_text(encoding="utf-8").replace(
+            "animation.gif", "missing-source.gif"
+        ),
+        encoding="utf-8",
+    )
+    _update_manifest_hash(root, "timeline.edl")
+
+    result = artifact_grounding.validate(
+        root,
+        "bundle",
+        {"require_manifest": True, "no_external_dependencies": True},
+    )
+
+    assert not result["ok"]
+    assert any(item["name"] == "edl-local-media" for item in _failures(result))
+    assert not any(item["name"] == "bundle-sha256" for item in _failures(result))
+
+
+@pytest.mark.parametrize(
+    "filename,writer,mutator,failed_check",
+    [
+        (
+            "broken.mid",
+            lambda path: assetgen.media_assets.write_midi(path, "Demo", "arcane", 42),
+            lambda data: data[:-1],
+            "valid-midi",
+        ),
+        (
+            "broken.srt",
+            lambda path: assetgen.media_assets.write_srt(path, "Demo captions"),
+            lambda data: data.replace(b"00:00:01,800", b"00:00:00,000", 1),
+            "srt-timing",
+        ),
+        (
+            "broken.vtt",
+            lambda path: assetgen.media_assets.write_vtt(path, "Demo captions"),
+            lambda data: data.replace(b"WEBVTT", b"BROKEN", 1),
+            "valid-vtt",
+        ),
+        (
+            "broken.edl",
+            lambda path: assetgen.media_assets.write_edl(path, "Demo", "Demo timeline"),
+            lambda data: data.replace(b"FCM: NON-DROP FRAME", b"FCM: UNKNOWN", 1),
+            "valid-edl",
+        ),
+    ],
+)
+def test_media_recipes_reject_malformed_content(
+    tmp_path, filename, writer, mutator, failed_check
+):
+    path = tmp_path / filename
+    writer(path)
+    path.write_bytes(mutator(path.read_bytes()))
+
+    result = artifact_grounding.validate(path, "auto")
+
+    assert not result["ok"]
+    assert any(item["name"] == failed_check for item in _failures(result))
 
 
 def test_bundle_rejects_manifest_path_escape(tmp_path):

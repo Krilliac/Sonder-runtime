@@ -161,21 +161,24 @@ stdlib-only creative pack. It is not game-specific: requests can produce icons,
 logos, backgrounds, textures, tilesets, sprite sheets, SVG vectors and diagrams,
 brand palettes, Markdown briefs, editable DOCX reports, JSON/CSV sample data,
 editable XLSX workbooks, standalone HTML mockups, editable PPTX slide decks, PCM
-WAV sound effects and music loops, OBJ/MTL models, and JSON scenes. The generator
-uses deterministic in-house OOXML/ZIP writing, manual PNG/PPM encoding, waveform
-synthesis, procedural geometry, bounded sizes, safe workspace paths, idempotent
-regeneration, and SHA-256 manifests. `artifact_verify(path)` checks every file
-before downstream use.
+WAV sound effects and music loops, editable MIDI scores, animated GIF previews,
+SRT/WebVTT captions, CMX-style EDL timelines, OBJ/MTL models, and JSON scenes.
+The generator uses deterministic in-house OOXML/ZIP, GIF/LZW, MIDI-event,
+caption/timecode, PNG/PPM, waveform, and procedural-geometry writers, bounded
+sizes, safe workspace paths, idempotent regeneration, and SHA-256 manifests.
+`artifact_verify(path)` checks every file before downstream use.
 Generation now fails closed unless every manifest size/hash and every recognized
 format contract passes. `artifact_ground(path, recipe, requirements_json)` and
 `/artifactcheck <path> [| recipe]` apply the same guarded recipes to arbitrary
 workspace outputs: writing/Markdown structure, JSON fields, CSV columns and row
 shape, DOCX paragraphs, XLSX rows/sheets, PPTX slides, OOXML relationships and
-package safety, self-contained HTML/UI references, SVG geometry, PNG chunks/CRCs,
+package safety, animated GIF frames/LZW/duration, MIDI tracks/notes/tempo,
+caption timing and cue text, EDL event/timecode continuity and local-media
+references, self-contained HTML/UI references, SVG geometry, PNG chunks/CRCs,
 PPM dimensions, WAV frames/duration, OBJ vertices/faces/index bounds, and complete
-bundle manifests. Custom requirements can pin headings, text, fields, columns,
-files, kinds, sizes, paragraph/row/slide counts, sheets, and external-dependency
-policy.
+bundle manifests. Custom
+requirements can pin headings, text, fields, columns, files, kinds, sizes,
+paragraph/row/slide/frame/note/cue/event counts, sheets, and dependency policy.
 
 `game_reference_suite` is the known-good default baseline: persistent Python 2D,
 JavaScript 2.5D, C++ 3D, and C# 2D projects consume generated assets, simulate
@@ -436,12 +439,13 @@ Privacy is opt-in and scrubbed at every step — nothing auto-uploads, and no PR
 - ✅ **Local-first hosted opt-in** — cloud/hosted tiers are disabled unless `TRILOBITE_ALLOW_CLOUD=1` or the app setting is explicitly enabled.
 - ✅ **General artifact grounding** — `ground_artifact` validates in-memory content, while `artifact_ground` and `/artifactcheck` validate guarded files and bundles with format-specific writing, editable Office, data, UI, image, audio, model, and manifest recipes. Generated packs must pass these contracts before success is reported.
 - ✅ **Editable Office deliverables** — deterministic stdlib-only DOCX reports, XLSX workbooks, and PPTX decks are inferred from natural-language requests, open in installed Microsoft Office, and fail closed on unsafe ZIP paths, malformed XML, missing relationships, active content, external dependencies, or unmet content requirements.
+- ✅ **Editable media and timelines** — deterministic animated GIFs, MIDI scores, SRT/WebVTT captions, and EDL edit timelines are inferred from media requests, independently parseable, and grounded for real frames, notes, timing, cue text, and non-overlapping edits.
 - ✅ **Passive learning** — infers outcomes from natural follow-up ("that worked" / "no, still errors") so it learns without manual scoring.
 - ✅ **Personas** — `/persona coder|explainer|reviewer|teacher` so non-coders get value too.
 - ✅ **Federated contribution** — share scrubbed lessons back without hosting the model (see [above](#contributing-improvements-without-hosting-the-model)).
 - ✅ **Mobile & desktop app (GUI)** — a [Flutter client](app/) with a real chat UI (Android APK + Windows/Linux/macOS), CI-built with download links. No terminal needed to *use* a hosted trilobite.
 
-**Next gaps** — make the bundled engine downloader fully self-contained per platform and add richer editable media/timeline exporters beyond the current image, audio, model, web, and Office formats.
+**Next gaps** — make the bundled engine downloader fully self-contained per platform and add richer editable video/container and rigged-model exporters beyond the current animation, audio, caption, timeline, model, web, and Office formats.
 
 ---
 

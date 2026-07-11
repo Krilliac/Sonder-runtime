@@ -26,6 +26,20 @@ void main() {
     expect(find.byType(TextField), findsOneWidget);
   });
 
+  testWidgets('Commands expose grounded Office and media artifact suites',
+      (tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+
+    await tester.pumpWidget(const TrilobiteApp(manageLocalServer: false));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Commands'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('/asset office-suite'), findsOneWidget);
+    expect(find.textContaining('/asset media-suite'), findsOneWidget);
+    expect(find.text('Generate a grounded editable media kit'), findsOneWidget);
+  });
+
   testWidgets('System always has an explicit return to main chat',
       (tester) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});

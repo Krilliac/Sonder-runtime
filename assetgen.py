@@ -2,7 +2,8 @@
 
 The generator deliberately emits simple, documented formats that every language
 surface in this repository can consume without package installation: PNG, PPM,
-SVG, HTML, Markdown, CSV, DOCX, XLSX, PPTX, PCM WAV, Wavefront OBJ/MTL, and JSON. Packs are useful
+SVG, animated GIF, HTML, Markdown, CSV, DOCX, XLSX, PPTX, MIDI, captions,
+EDL timelines, PCM WAV, Wavefront OBJ/MTL, and JSON. Packs are useful
 for branding, UI, documents, data prototypes, media, games, and other greenfield
 work. Output stays under the local-llm workspace.
 """
@@ -20,6 +21,7 @@ import wave
 import zlib
 
 import artifact_grounding
+import media_assets
 import ooxml_assets
 
 
@@ -33,16 +35,18 @@ THEMES = {
 ARTIFACT_KINDS = {
     "icon", "background", "tileset", "sprite_sheet", "texture", "preview",
     "vector", "diagram", "palette", "document", "data", "web",
-    "docx", "spreadsheet", "presentation", "sound", "music", "model", "scene",
+    "docx", "spreadsheet", "presentation", "animation", "sound", "music",
+    "midi", "captions", "timeline", "model", "scene",
 }
 OWNED_FILENAMES = {
-    "background.png", "brief.md", "data.csv", "data.json", "diagram.svg",
+    "animation.gif", "background.png", "brief.md", "captions.srt", "captions.vtt",
+    "data.csv", "data.json", "diagram.svg",
     "document.docx",
     "hit.wav", "icon.png", "manifest.json", "materials.mtl", "models.obj",
     "palette.json", "pickup.wav", "preview.html", "preview.ppm", "request.json",
     "presentation.pptx",
-    "scene.json", "sprites.png", "texture.png", "theme.wav", "tiles.png",
-    "vector.svg", "workbook.xlsx",
+    "scene.json", "score.mid", "sprites.png", "texture.png", "theme.wav",
+    "tiles.png", "timeline.edl", "vector.svg", "workbook.xlsx",
 }
 MAX_NAME = 48
 MAX_IMAGE_SIDE = 512
@@ -546,6 +550,7 @@ def infer_request(brief: str, kinds: str = "auto", dimension: str = "auto",
             "background": ("background", "wallpaper", "backdrop", "skybox"),
             "tileset": ("tile", "map", "terrain", "floor"),
             "sprite_sheet": ("sprite", "character", "animation", "creature"),
+            "animation": ("animated", "animation", "gif", "motion", "video"),
             "texture": ("texture", "material", "surface", "skin"),
             "preview": ("preview", "mockup", "concept", "wireframe"),
             "vector": ("vector", "svg", "logo", "illustration", "emblem"),
@@ -559,6 +564,9 @@ def infer_request(brief: str, kinds: str = "auto", dimension: str = "auto",
             "web": ("website", "web page", "landing page", "dashboard", "html", "web mockup"),
             "sound": ("sound", "sfx", "audio", "explosion", "laser", "voice"),
             "music": ("music", "song", "theme", "loop", "ambient"),
+            "midi": ("midi", "score", "melody", "composition", "music", "song"),
+            "captions": ("caption", "subtitle", "subrip", "srt", "webvtt", "vtt", "video"),
+            "timeline": ("timeline", "edl", "edit decision", "video edit", "storyboard", "video"),
             "model": ("3d", "mesh", "model", "object", "prop"),
             "scene": ("scene", "level", "world", "layout", "map"),
         }
@@ -620,6 +628,10 @@ def generate_artifacts(name: str, brief: str, kinds: str = "auto",
         _texture(os.path.join(root, "texture.png"), palette, seed + 4)
     if "preview" in selected:
         _preview(os.path.join(root, "preview.ppm"), palette, dimension)
+    if "animation" in selected or "timeline" in selected:
+        media_assets.write_gif(
+            os.path.join(root, "animation.gif"), palette, seed + 10,
+        )
     if "vector" in selected:
         _write_vector(os.path.join(root, "vector.svg"), palette, request["brief"])
     if "diagram" in selected:
@@ -655,6 +667,21 @@ def generate_artifacts(name: str, brief: str, kinds: str = "auto",
         write_wav(os.path.join(root, "hit.wav"), 120.0, 0.22, seed + 6, "noise")
     if "music" in selected:
         write_wav(os.path.join(root, "theme.wav"), 110.0, 1.4, seed + 7, "square")
+    if "midi" in selected or "music" in selected:
+        media_assets.write_midi(
+            os.path.join(root, "score.mid"), title, theme, seed + 11,
+        )
+    if "captions" in selected:
+        media_assets.write_srt(
+            os.path.join(root, "captions.srt"), request["brief"],
+        )
+        media_assets.write_vtt(
+            os.path.join(root, "captions.vtt"), request["brief"],
+        )
+    if "timeline" in selected:
+        media_assets.write_edl(
+            os.path.join(root, "timeline.edl"), title, request["brief"],
+        )
     if "model" in selected:
         _write_models(root, palette)
     if "scene" in selected:
@@ -763,6 +790,13 @@ def verify_pack(path: str) -> dict:
             "require_manifest": True,
             "required_kinds": manifest.get("kinds", []),
             "no_external_dependencies": True,
+            "recipes": {
+                "gif": {"min_frames": 2, "min_duration_ms": 1},
+                "midi": {"min_notes": 1, "require_tempo": True},
+                "srt": {"min_cues": 1},
+                "vtt": {"min_cues": 1},
+                "edl": {"min_events": 1},
+            },
         },
     )
     if not grounding["ok"]:
