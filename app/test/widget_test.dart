@@ -22,6 +22,48 @@ void main() {
     expect(find.byType(TextField), findsOneWidget);
   });
 
+  testWidgets('System always has an explicit return to main chat',
+      (tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+
+    await tester.pumpWidget(const TrilobiteApp(manageLocalServer: false));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('System'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.text('System'), findsOneWidget);
+    expect(find.byTooltip('Back to chat'), findsOneWidget);
+    expect(find.text('Chat'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Back to chat'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.text('New chat'), findsOneWidget);
+  });
+
+  testWidgets('Settings always has an explicit return to main chat',
+      (tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+
+    await tester.pumpWidget(const TrilobiteApp(manageLocalServer: false));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Settings'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.text('Settings'), findsOneWidget);
+    expect(find.byTooltip('Back to chat'), findsOneWidget);
+    expect(find.text('Chat'), findsOneWidget);
+
+    await tester.tap(find.text('Chat'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.text('New chat'), findsOneWidget);
+  });
+
   testWidgets(
       'Assistant messages render markdown and collapse activity evidence',
       (tester) async {

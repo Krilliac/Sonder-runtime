@@ -188,8 +188,22 @@ class _SystemScreenState extends State<SystemScreen> {
     final localInfo = _localInfo;
     return Scaffold(
       appBar: AppBar(
+        automaticallyImplyLeading: false,
+        leading: IconButton(
+          tooltip: 'Back to chat',
+          onPressed: () => Navigator.of(context).maybePop(),
+          icon: const Icon(Icons.arrow_back),
+        ),
         title: const Text('System'),
         actions: [
+          Tooltip(
+            message: 'Return to main chat',
+            child: TextButton.icon(
+              onPressed: () => Navigator.of(context).maybePop(),
+              icon: const Icon(Icons.chat_bubble_outline, size: 18),
+              label: const Text('Chat'),
+            ),
+          ),
           IconButton(
             tooltip: 'Refresh',
             onPressed: _loading ? null : _refresh,

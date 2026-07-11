@@ -150,12 +150,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     return Scaffold(
-      appBar: AppBar(title: const Text('Settings')),
+      appBar: AppBar(
+        automaticallyImplyLeading: false,
+        leading: IconButton(
+          tooltip: 'Back to chat',
+          onPressed: () => Navigator.of(context).maybePop(),
+          icon: const Icon(Icons.arrow_back),
+        ),
+        title: const Text('Settings'),
+        actions: [
+          Tooltip(
+            message: 'Return to main chat',
+            child: TextButton.icon(
+              onPressed: () => Navigator.of(context).maybePop(),
+              icon: const Icon(Icons.chat_bubble_outline, size: 18),
+              label: const Text('Chat'),
+            ),
+          ),
+        ],
+      ),
       body: ListView(
         padding: const EdgeInsets.all(20),
         children: [
-          Text('Connection',
-              style: Theme.of(context).textTheme.titleMedium),
+          Text('Connection', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 12),
           TextField(
             controller: _server,
@@ -180,10 +197,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
               helperText: 'Leave blank if the server has auth disabled',
               prefixIcon: const Icon(Icons.key_outlined),
               suffixIcon: IconButton(
-                icon: Icon(
-                    _obscureKey ? Icons.visibility : Icons.visibility_off),
-                onPressed: () =>
-                    setState(() => _obscureKey = !_obscureKey),
+                icon:
+                    Icon(_obscureKey ? Icons.visibility : Icons.visibility_off),
+                onPressed: () => setState(() => _obscureKey = !_obscureKey),
               ),
               border: const OutlineInputBorder(),
             ),
@@ -207,7 +223,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             decoration: const InputDecoration(
               labelText: 'Context size',
               hintText: '8192, 32k, 256k, 1m',
-              helperText: 'Requested virtual context. Ollama native num_ctx is clamped safely.',
+              helperText:
+                  'Requested virtual context. Ollama native num_ctx is clamped safely.',
               prefixIcon: Icon(Icons.view_week_outlined),
               border: OutlineInputBorder(),
             ),
@@ -232,8 +249,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             onChanged: (v) => setState(() => _keepServerRunning = v),
           ),
           const Divider(height: 40),
-          Text('Account',
-              style: Theme.of(context).textTheme.titleMedium),
+          Text('Account', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 12),
           TextField(
             controller: _username,
@@ -298,9 +314,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 children: [
                   Icon(
                     _statusOk ? Icons.check_circle : Icons.error_outline,
-                    color: _statusOk
-                        ? cs.onPrimaryContainer
-                        : cs.onErrorContainer,
+                    color:
+                        _statusOk ? cs.onPrimaryContainer : cs.onErrorContainer,
                     size: 20,
                   ),
                   const SizedBox(width: 8),
@@ -319,8 +334,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ],
           const Divider(height: 40),
-          Text('Appearance',
-              style: Theme.of(context).textTheme.titleMedium),
+          Text('Appearance', style: Theme.of(context).textTheme.titleMedium),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
             title: const Text('Dark mode'),
