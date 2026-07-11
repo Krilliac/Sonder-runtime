@@ -18,6 +18,7 @@ Tiers (escalation ladder, cheapest first):
     cloud-general -> gpt-oss:120b-cloud   (heavy reasoning over text)
 """
 
+import contextlib
 import json
 import os
 import re
@@ -61,6 +62,8 @@ import assetgen
 import game_forge
 import workbench
 import creative_router
+import autopilot_store
+import autopilot_controller
 
 from mcp.server.fastmcp import FastMCP
 
@@ -223,6 +226,8 @@ _DB_PATH = trilobite_paths.memory_db_path()
 FOOTER_PREFIX = "\n\n[interaction_id: "
 _FOOTER_RE = re.compile(r"\[interaction_id: ([0-9a-f]+)\]\s*$")
 _CAMPAIGN_LEARN_LOCK = threading.Lock()
+_AUTOPILOT_THREADS_LOCK = threading.RLock()
+_AUTOPILOT_THREADS = {}
 
 LIVE_RELOAD_MODULES = [
     "memory_store",
@@ -256,6 +261,10 @@ LIVE_RELOAD_MODULES = [
     "game_forge",
     "workbench",
     "creative_router",
+    # The controller is stateless and safe to refresh between callback calls.
+    # autopilot_store intentionally stays loaded because it exclusively owns a
+    # process-safe SQLite schema and may be serving background worker threads.
+    "autopilot_controller",
 ]
 
 
@@ -663,6 +672,56 @@ def _parse_game_campaign_command(arg: str) -> dict | None:
     return kwargs
 
 
+def _autopilot_command(arg: str, project: str = "") -> str:
+    text = str(arg or "").strip()
+    if not text:
+        return autopilot_status()
+    action, _, rest = text.partition(" ")
+    action = action.lower()
+    rest = rest.strip()
+    if action in ("status", "show", "list"):
+        return autopilot_status(rest)
+    if action in ("run", "start", "plan"):
+        policy = "workspace"
+        allow_web = True
+        while rest.startswith("--"):
+            option, _, remaining = rest.partition(" ")
+            if option == "--observe":
+                policy = "observe"
+            elif option == "--no-web":
+                allow_web = False
+            else:
+                return "ERROR: unknown autopilot option '%s'." % option
+            rest = remaining.strip()
+        if not rest:
+            return (
+                "usage: /autopilot %s [--observe] [--no-web] <objective>"
+                % action
+            )
+        return autopilot_start(
+            objective=rest,
+            project=_resolve_project(project) or "",
+            policy=policy,
+            allow_web=allow_web,
+            plan_only=action == "plan",
+        )
+    if action == "resume":
+        return autopilot_resume(rest) if rest else "usage: /autopilot resume <run-id>"
+    if action == "pause":
+        return autopilot_pause(rest) if rest else "usage: /autopilot pause <run-id>"
+    if action == "cancel":
+        return autopilot_cancel(rest) if rest else "usage: /autopilot cancel <run-id>"
+    if action in ("help", "?"):
+        return (
+            "autopilot commands:\n"
+            "  /autopilot status [id]\n"
+            "  /autopilot plan [--observe] [--no-web] <objective>\n"
+            "  /autopilot run [--observe] [--no-web] <objective>\n"
+            "  /autopilot resume|pause|cancel <id>"
+        )
+    return "ERROR: unknown autopilot action '%s'; try /autopilot help." % action
+
+
 def control_command(prompt: str, history=None, session="", project=""):
     """Handle safe slash commands before a prompt reaches the model.
 
@@ -689,6 +748,8 @@ def control_command(prompt: str, history=None, session="", project=""):
         return command_registry_list(arg.strip())
     if cmd in ("/activity", "/tools"):
         return activity_status()
+    if cmd in ("/autopilot", "/auto"):
+        return _autopilot_command(arg, project=project)
     if cmd in ("/work", "/agent"):
         if not arg.strip():
             return "usage: /work <task>"
@@ -2601,6 +2662,15 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
         / max(1, outcomes)
     )
     issues = []
+    try:
+        autopilot = autopilot_store.snapshot(include_finished=False, limit=100)
+    except Exception:
+        autopilot = {
+            "active_runs": 0,
+            "resumable_runs": 0,
+            "runs": [],
+            "database": autopilot_store.database_path(),
+        }
 
     def add(area, severity, title, action):
         issues.append({
@@ -2673,6 +2743,18 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
             "The active conversation is near the context limit.",
             "Start a new session or let summaries compress older turns before continuing.",
         )
+    autonomous_attention = sum(
+        1 for row in autopilot.get("runs", [])
+        if row.get("status") in ("blocked", "interrupted")
+    )
+    if autonomous_attention:
+        add(
+            "autonomy",
+            "medium",
+            "%d autonomous run(s) need explicit review or resume."
+            % autonomous_attention,
+            "Inspect /autopilot status, then deliberately resume, cancel, or revise the goal.",
+        )
     if not cloud_allowed():
         add(
             "deployment",
@@ -2718,6 +2800,11 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
             "path_or_secret_like": quality.get("path_or_secret_like", 0),
             "fts_issues": quality.get("missing_fts", 0) + quality.get("orphan_fts", 0),
         },
+        "autopilot": {
+            "active": autopilot.get("active_runs", 0),
+            "resumable": autopilot.get("resumable_runs", 0),
+            "database": autopilot.get("database", ""),
+        },
         "issues": issues,
     }
 
@@ -2741,6 +2828,10 @@ def format_improvement_report(report: dict) -> str:
         "  context: %s | hosted/cloud: %s" % (
             report.get("context_status", "unknown"),
             "enabled" if report.get("cloud_allowed") else "disabled",
+        ),
+        "  autonomy: %s active | %s resumable" % (
+            report.get("autopilot", {}).get("active", 0),
+            report.get("autopilot", {}).get("resumable", 0),
         ),
         "  next improvements:",
     ]
@@ -5886,6 +5977,7 @@ def tool_manifest() -> str:
     """List the local-llm MCP tools and what they are for."""
     tools = {
         "agent": "Run a Claude-like tool-calling loop that can use local tools and web tools.",
+        "autopilot_start/autopilot_status/autopilot_resume/autopilot_pause/autopilot_cancel": "Run a restart-persistent local autonomous goal with host tool allowlists, budgets, evidence gates, and explicit lifecycle control.",
         "master_orchestrate/master_status/master_capacity/master_cancel/master_retry": "Run restart-safe hardware-scheduled orchestration, inspect capacity/activity, cancel fleets, and explicitly retry interrupted work.",
         "admin_register/admin_login/admin_accounts/admin_set_account": "Manage hosted accounts, roles, bans, tiers, and developer flags.",
         "admin_status/debug_inspect/admin_private_chain_of_thought": "Inspect admin/debug state and safely deny private chain-of-thought exposure.",
@@ -6011,6 +6103,7 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "memory_quality_report", "memory_privacy_review", "system_improvement_report", "master_status", "master_capacity",
     "self_heal_check", "status", "system_profile_text",
     "emotion_vector_status", "preferences_status", "tool_manifest",
+    "memory_search", "web_search", "web_fetch", "weather_lookup",
 })
 REPOSITORY_READ_ONLY_FORBIDDEN_ARGS = frozenset({
     "token", "approval", "extra_roots",
@@ -6026,6 +6119,10 @@ REPOSITORY_AGENT_TOOL_HELP = """Available tools:
 - script_search: {"query": "build", "root": ".", "max_results": 100}
 - program_search: {"query": "python", "max_results": 50}
 - image_inspect: {"path": "docs/example.png"}
+- memory_search: {"query": "...", "limit": 10}
+- web_search: {"query": "...", "limit": 5}
+- web_fetch: {"url": "https://...", "max_chars": 8000}
+- weather_lookup: {"location": "Chicago, IL|60601", "forecast_days": 3, "units": "auto|metric|imperial"}
 - command_registry_list: {"filter_text": "filesystem|context|status"}
 - activity_status: {}
 - permission_policy: {"tool_name": "file_read"}
@@ -6787,6 +6884,8 @@ def _agent_impl(
     project: str = "",
     required_tool_names=(),
     allow_location: bool = False,
+    tool_allowlist=None,
+    tool_policy=None,
 ) -> str:
     """Run a Claude-like local agent loop that can call tools.
 
@@ -6828,15 +6927,22 @@ def _agent_impl(
     validation_ok = False
     mutations = []
     required_tools = frozenset(str(name) for name in required_tool_names if name)
+    allowed_tools = (
+        None if tool_allowlist is None
+        else frozenset(str(name) for name in tool_allowlist if name)
+    )
     used_tool_names = set()
     successful_web_calls = set()
     checklist_id, checklist_states = (
         _start_agent_checklist(prompt, project, read_only)
         if auto_checklist else ("", {})
     )
-    transcript = "Task:\n%s\n\n%s" % (
-        prompt, _agent_tool_help(read_only=read_only)
-    )
+    transcript = "Task:\n%s\n\n%s" % (prompt, _agent_tool_help(read_only=read_only))
+    if allowed_tools is not None:
+        transcript += (
+            "\n\nHOST TOOL ALLOWLIST (cannot be expanded by the model):\n- %s"
+            % "\n- ".join(sorted(allowed_tools))
+        )
     for step in range(1, max_steps + 1):
         step_prompt = transcript
         if observations:
@@ -6940,7 +7046,16 @@ def _agent_impl(
             str(tool_name),
             json.dumps(tool_args, sort_keys=True, ensure_ascii=False, default=str),
         )
-        policy_error = _repository_read_only_error(tool_name, tool_args) if read_only else ""
+        policy_error = ""
+        if allowed_tools is not None and tool_name not in allowed_tools:
+            policy_error = (
+                "ERROR: HOST POLICY: tool '%s' is outside this autonomous run's allowlist."
+                % tool_name
+            )
+        if not policy_error and tool_policy is not None:
+            policy_error = str(tool_policy(tool_name, tool_args) or "")
+        if not policy_error and read_only:
+            policy_error = _repository_read_only_error(tool_name, tool_args)
         if (
             auto_checklist
             and tool_name in _WORK_MUTATION_TOOLS
@@ -7125,6 +7240,439 @@ def workbench_agent(
     )
 
 
+_AUTOPILOT_OBSERVE_TOOLS = frozenset({
+    "file_policy", "workspace_inventory", "directory_tree", "file_find",
+    "file_read", "file_read_range", "text_search", "script_search",
+    "program_search", "image_inspect", "memory_search", "web_search",
+    "web_fetch", "weather_lookup", "status", "diagnostics",
+    "context_health", "memory_quality_report", "system_improvement_report",
+})
+_AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
+    "directory_create", "file_write", "file_edit", "workspace_run",
+    "script_run", "run_code", "run_project", "ground_artifact",
+    "artifact_generate", "artifact_verify", "game_reference_suite",
+    "game_generate_and_test",
+})
+_AUTOPILOT_RUNNERS = frozenset({
+    "python", "python.exe", "py", "py.exe", "pytest", "pytest.exe",
+    "node", "node.exe", "dart", "dart.exe", "flutter", "flutter.bat",
+    "cmake", "cmake.exe", "ctest", "ctest.exe", "ninja", "ninja.exe",
+    "msbuild", "msbuild.exe", "dotnet", "dotnet.exe", "cl", "cl.exe",
+    "g++", "g++.exe", "clang++", "clang++.exe", "cargo", "cargo.exe",
+})
+_AUTOPILOT_SCRIPT_SUFFIXES = frozenset({".py", ".js", ".dart", ".exe", ".com"})
+_AUTOPILOT_MUTATION_EVIDENCE = frozenset({
+    "directory_create", "file_write", "file_edit", "artifact_generate",
+    "game_generate_and_test",
+})
+
+
+def _autopilot_allowed_tools(run: dict) -> frozenset:
+    return (
+        _AUTOPILOT_OBSERVE_TOOLS
+        if run.get("policy") == "observe"
+        else _AUTOPILOT_WORKSPACE_TOOLS
+    )
+
+
+def _autopilot_command_programs(value) -> list[str]:
+    if value in (None, ""):
+        return []
+    try:
+        payload = json.loads(value) if isinstance(value, str) else value
+    except (TypeError, ValueError):
+        return ["(invalid)"]
+    if isinstance(payload, dict):
+        payload = payload.get("commands") or []
+    if not isinstance(payload, list):
+        return ["(invalid)"]
+    programs = []
+    for item in payload:
+        command = item.get("cmd") if isinstance(item, dict) else item
+        if not isinstance(command, list) or not command:
+            return ["(invalid)"]
+        programs.append(os.path.basename(str(command[0])).lower())
+    return programs
+
+
+def _autopilot_tool_policy(run: dict):
+    """Return an argument-aware policy that models cannot override."""
+    def check(tool_name, args):
+        args = args if isinstance(args, dict) else {}
+        if any(args.get(name) for name in ("token", "approval", "extra_roots")):
+            return "ERROR: HOST POLICY: autonomous runs cannot use bypass credentials or extra roots."
+        if tool_name == "workspace_run":
+            program = os.path.basename(str(args.get("program", ""))).lower()
+            if program not in _AUTOPILOT_RUNNERS:
+                return (
+                    "ERROR: HOST POLICY: executable '%s' is not approved for autonomous runs."
+                    % (program or "(missing)")
+                )
+        if tool_name == "script_run":
+            suffix = os.path.splitext(str(args.get("path", "")))[1].lower()
+            if suffix not in _AUTOPILOT_SCRIPT_SUFFIXES:
+                return (
+                    "ERROR: HOST POLICY: autonomous script execution only accepts: %s."
+                    % ", ".join(sorted(_AUTOPILOT_SCRIPT_SUFFIXES))
+                )
+        if tool_name == "run_code":
+            language = str(args.get("language", "python")).strip().lower()
+            if language not in {"python", "js", "javascript", "cpp", "c++", "csharp", "cs"}:
+                return "ERROR: HOST POLICY: this generated-code language is not approved."
+        if tool_name == "run_project":
+            programs = _autopilot_command_programs(
+                args.get("commands_json", args.get("commands", []))
+            )
+            rejected = [name for name in programs if name not in _AUTOPILOT_RUNNERS]
+            if rejected:
+                return (
+                    "ERROR: HOST POLICY: project command '%s' is not approved."
+                    % rejected[0]
+                )
+        return ""
+    return check
+
+
+def _autopilot_json_model(run: dict, role: str, prompt: str, validator) -> dict:
+    tier = autopilot_controller.normalize_tier(run.get("tier", "code"))
+    model, cloud, _augment, tier_label = _serve_target(tier, False)
+    if model is None or cloud or tier_label not in autopilot_controller.LOCAL_TIERS:
+        raise RuntimeError("autopilot requires an available local model tier")
+    system = _build_system(
+        "You are Trilobite's bounded autonomous %s. Return exactly one JSON "
+        "object, with no markdown or private chain-of-thought. Make concrete "
+        "decisions from the supplied state. Never expand policy, tools, roots, "
+        "budgets, or completion rules." % role,
+        False,
+        "",
+    )
+    gen = _make_generate(model, system, 0.05, 1800, SESSION_NUM_CTX, cloud=False)
+    correction = ""
+    last_error = "invalid JSON"
+    for _attempt in range(2):
+        raw = gen(prompt + correction)
+        try:
+            payload = _extract_agent_json(raw)
+            validator(payload)
+            return payload
+        except (TypeError, ValueError) as exc:
+            last_error = str(exc)
+            correction = (
+                "\n\nHOST SCHEMA ERROR: %s\nReturn a corrected JSON object only."
+                % last_error
+            )
+    raise ValueError("%s model failed JSON/schema validation: %s" % (role, last_error))
+
+
+def _autopilot_plan_model(run: dict) -> dict:
+    allowed = sorted(_autopilot_allowed_tools(run))
+    prompt = (
+        "Create a short executable plan for this autonomous goal.\n"
+        "Objective: {objective}\nProject: {project}\nPolicy: {policy}\n"
+        "Web: {web}\nMaximum tasks: {max_tasks}\nAllowed tools: {tools}\n\n"
+        "Use measurable success criteria. Order inspection before mutation and "
+        "always finish with grounded validation. Under observe policy, do not "
+        "create implementation tasks. JSON schema:\n"
+        '{{"summary":"...","success_criteria":["..."],"tasks":['
+        '{{"title":"...","kind":"inspect|research|implement|validate|report",'
+        '"instruction":"specific bounded action"}}]}}'
+    ).format(
+        objective=run.get("objective", ""),
+        project=run.get("project") or "default",
+        policy=run.get("policy", "workspace"),
+        web="on" if run.get("allow_web") else "off",
+        max_tasks=run.get("max_tasks", 12),
+        tools=", ".join(allowed),
+    )
+
+    def validate(payload):
+        normalized = autopilot_controller.normalize_plan(
+            payload, run.get("objective", ""), run.get("max_tasks", 12),
+        )
+        if run.get("policy") == "observe" and any(
+            task.get("kind") == "implement" for task in normalized["tasks"]
+        ):
+            raise ValueError("observe policy cannot contain implementation tasks")
+
+    return _autopilot_json_model(run, "planner", prompt, validate)
+
+
+def _autopilot_review_model(run: dict, issue: str) -> dict:
+    ledger = []
+    for task in run.get("plan") or []:
+        ledger.append({
+            "id": task.get("id"),
+            "kind": task.get("kind"),
+            "title": task.get("title"),
+            "status": task.get("status"),
+            "attempts": task.get("attempts"),
+            "result": autopilot_controller._first_line(
+                task.get("output"), task.get("error", ""),
+            ),
+        })
+    prompt = (
+        "Review the bounded run and select the next decision.\n"
+        "Objective: %s\nHost gate/issue: %s\nFailures: %s/%s\n"
+        "Task budget: %s/%s\nLedger: %s\n\n"
+        "Use complete only when the host gate says all requirements passed. "
+        "Use retry for one corrected attempt, replan with only necessary new "
+        "tasks, or pause when operator judgment is genuinely required. JSON schema:\n"
+        '{"decision":"complete|retry|replan|pause","reason":"...",'
+        '"instruction":"corrected retry instruction or empty",'
+        '"tasks":[{"title":"...","kind":"inspect|research|implement|validate|report",'
+        '"instruction":"..."}]}'
+    ) % (
+        run.get("objective", ""), issue, run.get("failures", 0),
+        run.get("max_failures", 3), len(run.get("plan") or []),
+        run.get("max_tasks", 12), json.dumps(ledger, ensure_ascii=False),
+    )
+    return _autopilot_json_model(
+        run,
+        "reviewer",
+        prompt,
+        autopilot_controller.normalize_review,
+    )
+
+
+def _autopilot_evidence_has(output: str, tools) -> bool:
+    names = {str(name) for name in tools}
+    return any(
+        match.group(1) in names
+        for match in re.finditer(r"\btool=([A-Za-z0-9_]+)", str(output or ""))
+    )
+
+
+def _autopilot_work_model(run: dict, task: dict, prior: str) -> str:
+    allowed = _autopilot_allowed_tools(run)
+    prompt = (
+        "Autopilot objective: {objective}\n"
+        "Current bounded task: {task_id} [{kind}] {title}\n"
+        "Instruction: {instruction}\n"
+        "Success criteria:\n{criteria}\n"
+        "Prior task evidence:\n{prior}\n\n"
+        "Complete only this task using host tools. Inspect before mutation, do "
+        "not broaden scope, and validate every persistent change. If blocked, "
+        "report the exact blocker; do not claim success."
+    ).format(
+        objective=run.get("objective", ""),
+        task_id=task.get("id", ""),
+        kind=task.get("kind", ""),
+        title=task.get("title", ""),
+        instruction=task.get("instruction", ""),
+        criteria="\n".join("- " + item for item in (run.get("criteria") or [])),
+        prior=prior or "(none yet)",
+    )
+    output = _agent_impl(
+        prompt,
+        tier=run.get("tier", "code"),
+        max_steps=12,
+        allow_web=bool(run.get("allow_web")),
+        require_file_evidence=False,
+        read_only=run.get("policy") == "observe",
+        include_evidence=True,
+        auto_checklist=True,
+        project=run.get("project", ""),
+        allow_location=False,
+        tool_allowlist=allowed,
+        tool_policy=_autopilot_tool_policy(run),
+    )
+    if (
+        task.get("kind") == "implement"
+        and not _autopilot_evidence_has(output, _AUTOPILOT_MUTATION_EVIDENCE)
+    ):
+        return (
+            "EVIDENCE_REQUIRED: implementation task produced no allowed persistent "
+            "workspace mutation.\n\n" + output
+        )
+    if (
+        task.get("kind") == "validate"
+        and not _autopilot_evidence_has(output, _WORK_VALIDATION_TOOLS)
+    ):
+        return "EVIDENCE_REQUIRED: validation task ran no grounded validator.\n\n" + output
+    return output
+
+
+def _autopilot_heartbeat(run_id: str, owner_id: str, stop: threading.Event) -> None:
+    while not stop.wait(30):
+        if not autopilot_store.heartbeat(run_id, owner_id):
+            return
+
+
+def _execute_autopilot(run_id: str, *, max_cycles=12, plan_only=False) -> dict:
+    owner_id = "auto-%s-%s" % (os.getpid(), time.time_ns())
+    stop = threading.Event()
+    heartbeat = threading.Thread(
+        target=_autopilot_heartbeat,
+        args=(run_id, owner_id, stop),
+        name="trilobite-autopilot-heartbeat",
+        daemon=True,
+    )
+    heartbeat.start()
+    try:
+        return autopilot_controller.execute_run(
+            run_id,
+            owner_id,
+            owner_pid=os.getpid(),
+            plan_fn=_autopilot_plan_model,
+            work_fn=_autopilot_work_model,
+            review_fn=_autopilot_review_model,
+            max_cycles=max_cycles,
+            plan_only=plan_only,
+        )
+    finally:
+        stop.set()
+        heartbeat.join(timeout=2)
+
+
+def _autopilot_thread_main(run_id: str, max_cycles: int, plan_only: bool) -> None:
+    run = autopilot_store.get_run(run_id) or {}
+    try:
+        with activity_tracker.response_span(
+            "autopilot:%s" % run_id,
+            run.get("objective", ""),
+            surface="autopilot",
+            model=run.get("tier", "code"),
+            project=run.get("project", ""),
+        ):
+            result = _execute_autopilot(
+                run_id, max_cycles=max_cycles, plan_only=plan_only,
+            )
+            activity_tracker.set_result_summary(
+                "%s: %s" % (result.get("status", "unknown"), result.get("summary", ""))
+            )
+    except Exception as exc:
+        # execute_run persists model/tool failures whenever it owns the run. A
+        # claim conflict is observable but must never steal or overwrite state.
+        with contextlib.suppress(Exception):
+            activity_tracker.set_result_summary("autopilot worker: %s" % exc)
+    finally:
+        with _AUTOPILOT_THREADS_LOCK:
+            current = _AUTOPILOT_THREADS.get(run_id)
+            if current is threading.current_thread():
+                _AUTOPILOT_THREADS.pop(run_id, None)
+
+
+def _launch_autopilot(run_id: str, max_cycles=12, plan_only=False) -> bool:
+    with _AUTOPILOT_THREADS_LOCK:
+        current = _AUTOPILOT_THREADS.get(run_id)
+        if current is not None and current.is_alive():
+            return False
+        thread = threading.Thread(
+            target=_autopilot_thread_main,
+            args=(run_id, int(max_cycles), bool(plan_only)),
+            name="trilobite-autopilot-%s" % run_id,
+            daemon=True,
+        )
+        _AUTOPILOT_THREADS[run_id] = thread
+        thread.start()
+        return True
+
+
+@mcp.tool()
+def autopilot_start(
+    objective: str,
+    project: str = "",
+    tier: str = "code",
+    policy: str = "workspace",
+    allow_web: bool = True,
+    max_cycles: int = 12,
+    max_failures: int = 3,
+    max_tasks: int = 12,
+    plan_only: bool = False,
+    wait: bool = False,
+) -> str:
+    """Create and start a persistent, locally planned autonomous goal run."""
+    _maybe_live_reload()
+    try:
+        tier = autopilot_controller.normalize_tier(tier)
+        policy = autopilot_controller.normalize_policy(policy)
+        run = autopilot_store.create_run(
+            objective,
+            project=project,
+            tier=tier,
+            policy=policy,
+            allow_web=bool(allow_web),
+            max_failures=max_failures,
+            max_tasks=max_tasks,
+        )
+        if wait:
+            run = _execute_autopilot(
+                run["id"], max_cycles=max_cycles, plan_only=plan_only,
+            )
+            return autopilot_controller.format_run(run)
+        launched = _launch_autopilot(
+            run["id"], max_cycles=max_cycles, plan_only=plan_only,
+        )
+    except (OSError, RuntimeError, ValueError, autopilot_controller.AutopilotError) as exc:
+        return "ERROR: %s" % exc
+    prefix = "autopilot plan started" if plan_only else "autopilot started"
+    if not launched:
+        prefix = "autopilot already active"
+    return "%s\n%s\n  use /autopilot status %s" % (
+        prefix, autopilot_controller.format_run(run, include_report=False), run["id"],
+    )
+
+
+@mcp.tool()
+def autopilot_resume(
+    run_id: str,
+    max_cycles: int = 12,
+    wait: bool = False,
+) -> str:
+    """Explicitly resume a paused, blocked, ready, or interrupted run."""
+    _maybe_live_reload()
+    run = autopilot_store.get_run(run_id)
+    if not run:
+        return "ERROR: no unambiguous autopilot run matches '%s'." % run_id
+    if run.get("status") not in autopilot_store.RESUMABLE_STATUSES:
+        return "ERROR: run %s is %s and cannot be resumed." % (run["id"], run.get("status"))
+    try:
+        if wait:
+            return autopilot_controller.format_run(
+                _execute_autopilot(run["id"], max_cycles=max_cycles),
+            )
+        launched = _launch_autopilot(run["id"], max_cycles=max_cycles)
+    except (OSError, RuntimeError, ValueError, autopilot_controller.AutopilotError) as exc:
+        return "ERROR: %s" % exc
+    return "%s\n%s" % (
+        "autopilot resumed" if launched else "autopilot already active",
+        autopilot_controller.format_run(run, include_report=False),
+    )
+
+
+@mcp.tool()
+def autopilot_pause(run_id: str) -> str:
+    """Request a cooperative pause at the next host checkpoint."""
+    _maybe_live_reload()
+    run = autopilot_store.request_pause(run_id)
+    return (
+        autopilot_controller.format_run(run, include_report=False)
+        if run else "ERROR: no unambiguous autopilot run matches '%s'." % run_id
+    )
+
+
+@mcp.tool()
+def autopilot_cancel(run_id: str) -> str:
+    """Request cancellation; an active task result is discarded."""
+    _maybe_live_reload()
+    run = autopilot_store.request_cancel(run_id)
+    return (
+        autopilot_controller.format_run(run, include_report=False)
+        if run else "ERROR: no unambiguous autopilot run matches '%s'." % run_id
+    )
+
+
+@mcp.tool()
+def autopilot_status(run_id: str = "", include_finished: bool = True) -> str:
+    """Inspect one persistent autonomous run or the controller ledger."""
+    _maybe_live_reload()
+    if run_id.strip():
+        return autopilot_controller.format_run(autopilot_store.get_run(run_id))
+    return autopilot_controller.format_snapshot(
+        autopilot_controller.snapshot(include_finished=include_finished),
+    )
+
+
 @mcp.tool()
 def self_heal_check() -> str:
     """Check for common local breakage without changing anything."""
@@ -7215,6 +7763,18 @@ def diagnostics() -> str:
     except Exception as e:
         lines.append("  self heal: ERROR %s" % e)
     try:
+        auto = autopilot_store.snapshot(include_finished=False, limit=20)
+        lines.append(
+            "  autopilot: ok (%s active, %s resumable; %s)"
+            % (
+                auto.get("active_runs", 0),
+                auto.get("resumable_runs", 0),
+                auto.get("database", ""),
+            )
+        )
+    except Exception as e:
+        lines.append("  autopilot: ERROR %s" % e)
+    try:
         tags = _get("/api/tags").get("models", [])
         names = sorted(m.get("name", "?") for m in tags)
         lines.append("  ollama: ok (%d models: %s)" % (
@@ -7258,6 +7818,14 @@ def status() -> str:
             **_local_runtime_summary()
         ),
     ]
+    try:
+        auto = autopilot_store.snapshot(include_finished=False, limit=20)
+        lines.append(
+            "autopilot: %s active, %s resumable"
+            % (auto.get("active_runs", 0), auto.get("resumable_runs", 0))
+        )
+    except Exception as exc:
+        lines.append("autopilot: ERROR %s" % exc)
     return "\n".join(lines)
 
 

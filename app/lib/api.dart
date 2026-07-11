@@ -373,6 +373,7 @@ class SystemInfo {
   final String stateHome;
   final ContextHealth? context;
   final AgentStatus? agents;
+  final AutopilotStatus? autopilot;
   final ActivityStatus? activity;
   final List<SystemModel> models;
 
@@ -385,6 +386,7 @@ class SystemInfo {
     required this.stateHome,
     required this.context,
     required this.agents,
+    required this.autopilot,
     required this.activity,
     required this.models,
   });
@@ -407,10 +409,196 @@ class SystemInfo {
       agents: json['agents'] is Map<String, dynamic>
           ? AgentStatus.fromJson(json['agents'] as Map<String, dynamic>)
           : null,
+      autopilot: json['autopilot'] is Map<String, dynamic>
+          ? AutopilotStatus.fromJson(json['autopilot'] as Map<String, dynamic>)
+          : null,
       activity: json['activity'] is Map<String, dynamic>
           ? ActivityStatus.fromJson(json['activity'] as Map<String, dynamic>)
           : null,
       models: models,
+    );
+  }
+}
+
+class AutopilotStatus {
+  final int activeRuns;
+  final int resumableRuns;
+  final int totalRuns;
+  final int totalListed;
+  final String database;
+  final List<AutopilotRun> runs;
+  final AutopilotRun? latest;
+  final List<AutopilotEvent> events;
+
+  const AutopilotStatus({
+    required this.activeRuns,
+    required this.resumableRuns,
+    required this.totalRuns,
+    required this.totalListed,
+    required this.database,
+    required this.runs,
+    required this.latest,
+    required this.events,
+  });
+
+  factory AutopilotStatus.fromJson(Map<String, dynamic> json) {
+    final runs = (json['runs'] as List? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .map(AutopilotRun.fromJson)
+        .toList();
+    return AutopilotStatus(
+      activeRuns: _asInt(json['active_runs']),
+      resumableRuns: _asInt(json['resumable_runs']),
+      totalRuns: json.containsKey('total_runs')
+          ? _asInt(json['total_runs'])
+          : _asInt(json['total_listed']),
+      totalListed: _asInt(json['total_listed']),
+      database: json['database']?.toString() ?? '',
+      runs: runs,
+      latest: json['latest'] is Map<String, dynamic>
+          ? AutopilotRun.fromJson(json['latest'] as Map<String, dynamic>)
+          : (runs.isEmpty ? null : runs.first),
+      events: (json['events'] as List? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(AutopilotEvent.fromJson)
+          .toList(),
+    );
+  }
+}
+
+class AutopilotRun {
+  final String id;
+  final String objective;
+  final String project;
+  final String tier;
+  final String policy;
+  final bool allowWeb;
+  final String status;
+  final String phase;
+  final int cycles;
+  final int failures;
+  final int maxFailures;
+  final int maxTasks;
+  final String summary;
+  final String finalReport;
+  final String lastError;
+  final List<String> criteria;
+  final List<AutopilotTask> tasks;
+
+  const AutopilotRun({
+    required this.id,
+    required this.objective,
+    required this.project,
+    required this.tier,
+    required this.policy,
+    required this.allowWeb,
+    required this.status,
+    required this.phase,
+    required this.cycles,
+    required this.failures,
+    required this.maxFailures,
+    required this.maxTasks,
+    required this.summary,
+    required this.finalReport,
+    required this.lastError,
+    required this.criteria,
+    required this.tasks,
+  });
+
+  factory AutopilotRun.fromJson(Map<String, dynamic> json) {
+    return AutopilotRun(
+      id: json['id']?.toString() ?? '',
+      objective: json['objective']?.toString() ?? '',
+      project: json['project']?.toString() ?? '',
+      tier: json['tier']?.toString() ?? '',
+      policy: json['policy']?.toString() ?? '',
+      allowWeb: json['allow_web'] is bool
+          ? json['allow_web'] as bool
+          : _asInt(json['allow_web']) != 0,
+      status: json['status']?.toString() ?? '',
+      phase: json['phase']?.toString() ?? '',
+      cycles: _asInt(json['cycles']),
+      failures: _asInt(json['failures']),
+      maxFailures: _asInt(json['max_failures']),
+      maxTasks: _asInt(json['max_tasks']),
+      summary: json['summary']?.toString() ?? '',
+      finalReport: json['final_report']?.toString() ?? '',
+      lastError: json['last_error']?.toString() ?? '',
+      criteria: (json['criteria'] as List? ?? const [])
+          .map((value) => value.toString())
+          .toList(),
+      tasks: (json['plan'] as List? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(AutopilotTask.fromJson)
+          .toList(),
+    );
+  }
+
+  bool get isActive => status == 'planning' || status == 'running';
+  bool get isResumable => const {
+        'ready',
+        'paused',
+        'blocked',
+        'interrupted',
+      }.contains(status);
+  bool get isTerminal => const {
+        'completed',
+        'failed',
+        'cancelled',
+      }.contains(status);
+}
+
+class AutopilotTask {
+  final String id;
+  final String title;
+  final String instruction;
+  final String kind;
+  final String status;
+  final int attempts;
+  final String output;
+  final String error;
+
+  const AutopilotTask({
+    required this.id,
+    required this.title,
+    required this.instruction,
+    required this.kind,
+    required this.status,
+    required this.attempts,
+    required this.output,
+    required this.error,
+  });
+
+  factory AutopilotTask.fromJson(Map<String, dynamic> json) {
+    return AutopilotTask(
+      id: json['id']?.toString() ?? '',
+      title: json['title']?.toString() ?? '',
+      instruction: json['instruction']?.toString() ?? '',
+      kind: json['kind']?.toString() ?? '',
+      status: json['status']?.toString() ?? 'pending',
+      attempts: _asInt(json['attempts']),
+      output: json['output']?.toString() ?? '',
+      error: json['error']?.toString() ?? '',
+    );
+  }
+}
+
+class AutopilotEvent {
+  final int id;
+  final String kind;
+  final String message;
+
+  const AutopilotEvent({
+    required this.id,
+    required this.kind,
+    required this.message,
+  });
+
+  factory AutopilotEvent.fromJson(Map<String, dynamic> json) {
+    return AutopilotEvent(
+      id: _asInt(json['event_id']),
+      kind: json['kind']?.toString() ?? '',
+      message: json['message']?.toString() ?? '',
     );
   }
 }

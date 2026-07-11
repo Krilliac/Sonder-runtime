@@ -308,6 +308,7 @@ HELP_TEXT = """commands:
   /commands [filter] list available commands by category, name, or risk
   /activity          show active/latest tool calls and file changes
   /work <task>       execute a guarded workflow with checklist and end report
+  /autopilot ...     persistent plan/run/status/resume/pause/cancel autonomy
   /report            show the latest grounded report and action transcript
   /checklist [id]    show the current or selected persistent checklist
   /inventory [path]  summarize a guarded workspace with explicit scan budgets
@@ -497,7 +498,12 @@ def _dangerous_http_slash(content):
     stripped = (content or "").strip()
     if not stripped.startswith("/"):
         return False
-    return stripped.split(None, 1)[0].lower() in DANGEROUS_HTTP_SLASH_COMMANDS
+    pieces = stripped.split(None, 2)
+    command = pieces[0].lower()
+    if command in ("/autopilot", "/auto"):
+        action = pieces[1].lower() if len(pieces) > 1 else "status"
+        return action not in ("status", "show", "list", "help", "?")
+    return command in DANGEROUS_HTTP_SLASH_COMMANDS
 
 
 class HTTPRequestError(Exception):
@@ -829,6 +835,8 @@ def _handle_slash(content, messages=None, state=None, project=""):
         return server.control_command(stripped, project=project)
     if cmd in ("/activity", "/tools"):
         return server.activity_status()
+    if cmd in ("/autopilot", "/auto"):
+        return server.control_command(stripped, project=project)
     if cmd in ("/weather", "/forecast"):
         if not arg.strip():
             return "usage: /weather <city/state or ZIP>"
@@ -1271,6 +1279,7 @@ class Handler(BaseHTTPRequestHandler):
                 "context": server.context_health_data(),
                 "context_policy": server.context_policy.policy(server.SESSION_NUM_CTX),
                 "agents": server.master_orchestrator.snapshot(),
+                "autopilot": server.autopilot_controller.snapshot(),
                 "activity": server.activity_tracker.snapshot(),
                 "db_path": getattr(server, "_DB_PATH", ""),
                 "state_home": str(server.trilobite_paths.default_home()),
