@@ -10,6 +10,8 @@ def test_routes_explicit_cpp_isometric_rpg_to_grounded_game():
     assert intent["kind"] == "game"
     assert intent["language"] == "cpp"
     assert intent["dimension"] == "2.5d"
+    assert intent["language_explicit"] is True
+    assert intent["dimension_explicit"] is True
     assert intent["theme"] == "ember"
     assert "diablo" in intent["name"]
     assert len(intent["name"].split("-")[-1]) == 7
@@ -22,6 +24,28 @@ def test_fleet_or_multilanguage_game_request_routes_campaign():
 
     assert fleet["kind"] == "game_campaign"
     assert fleet["total"] == 8
+    assert fleet["language_explicit"] is False
+    assert fleet["dimension_explicit"] is False
+
+
+def test_targeted_fleet_preserves_explicit_language_and_dimension():
+    fleet = creative_router.classify(
+        "Build 6 C++ 2.5D games as a parallel fleet.", mode="fleet",
+    )
+
+    assert fleet["kind"] == "game_campaign"
+    assert fleet["language"] == "cpp"
+    assert fleet["dimension"] == "2.5d"
+    assert fleet["language_explicit"] is True
+    assert fleet["dimension_explicit"] is True
+
+
+def test_dimension_digits_are_not_mistaken_for_campaign_count():
+    fleet = creative_router.classify(
+        "Build a fleet of C++ 2.5D games.", mode="fleet",
+    )
+
+    assert fleet["total"] == 4
 
 
 def test_routes_general_non_game_assets():

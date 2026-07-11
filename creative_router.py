@@ -48,17 +48,37 @@ def _dimension(text: str) -> str:
     return "2d"
 
 
-def _language(text: str) -> str:
+def _dimension_explicit(text: str) -> bool:
+    return bool(re.search(
+        r"\b(?:2\s*[.]\s*5\s*d|isometric|2\s*d|3\s*d|"
+        r"two[- ]dimensional|three[- ]dimensional)\b",
+        text,
+        re.IGNORECASE,
+    ))
+
+
+def _detected_language(text: str) -> str:
     lowered = text.lower()
     if re.search(r"\bc\s*\+\s*\+|\bcpp\b", lowered):
         return "cpp"
-    if re.search(r"\bc\s*#|\bcsharp\b|[.]net\b", lowered):
+    if (
+        re.search(r"\bc\s*#|\bcsharp\b", lowered)
+        or re.search(r"(?<!\w)[.]net\b", lowered)
+    ):
         return "csharp"
     if re.search(r"\bjavascript\b|\bnode(?:[.]js)?\b|\bjs\b", lowered):
         return "javascript"
     if re.search(r"\bpython\b|\bpy\b", lowered):
         return "python"
-    return "python"
+    return ""
+
+
+def _language(text: str) -> str:
+    return _detected_language(text) or "python"
+
+
+def _language_explicit(text: str) -> bool:
+    return bool(_detected_language(text))
 
 
 def _theme(text: str) -> str:
@@ -89,7 +109,11 @@ def _name(text: str, prefix: str) -> str:
 
 
 def _campaign_total(text: str, default: int = 4) -> int:
-    match = re.search(r"\b(\d{1,2})\s+(?:different\s+)?games?\b", text, re.IGNORECASE)
+    match = re.search(
+        r"(?<![.\w])(\d{1,2})(?![.\w])(?=[^!?\n]{0,64}\bgames?\b)",
+        text,
+        re.IGNORECASE,
+    )
     if not match:
         return default
     return max(1, min(int(match.group(1)), 12))
@@ -115,6 +139,8 @@ def classify(task: str, mode: str = "") -> dict | None:
             "concept": text,
             "language": _language(text),
             "dimension": dimension,
+            "language_explicit": _language_explicit(text),
+            "dimension_explicit": _dimension_explicit(text),
             "theme": theme,
             "total": _campaign_total(text, default=4),
         }

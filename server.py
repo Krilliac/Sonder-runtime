@@ -649,6 +649,18 @@ def _control_dump(arg, prompt, history=None, session="", project=""):
     return out
 
 
+def _parse_game_campaign_command(arg: str) -> dict | None:
+    parts = [part.strip() for part in str(arg or "").split("|", 3)]
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        return None
+    kwargs = {"name": parts[0], "concept": parts[1]}
+    if len(parts) > 2 and parts[2]:
+        kwargs["language"] = parts[2]
+    if len(parts) > 3 and parts[3]:
+        kwargs["dimension"] = parts[3]
+    return kwargs
+
+
 def control_command(prompt: str, history=None, session="", project=""):
     """Handle safe slash commands before a prompt reaches the model.
 
@@ -807,10 +819,10 @@ def control_command(prompt: str, history=None, session="", project=""):
             language=game_parts[0], dimension=game_parts[1],
         )
     if cmd in ("/gamefleet", "/gamecampaign"):
-        fleet_name, separator, concept = arg.partition("|")
-        if not separator or not fleet_name.strip() or not concept.strip():
-            return "usage: /gamefleet <name> | <concept>"
-        return game_generation_campaign(name=fleet_name.strip(), concept=concept.strip())
+        campaign_args = _parse_game_campaign_command(arg)
+        if campaign_args is None:
+            return "usage: /gamefleet <name> | <concept> [| language | dimension]"
+        return game_generation_campaign(**campaign_args)
     if cmd in ("/cot", "/chainofthought", "/thoughts"):
         return admin_private_chain_of_thought()
     if cmd == "/run":
@@ -2805,6 +2817,12 @@ def _master_grounded_build(
                 name=intent["name"],
                 concept=intent["concept"],
                 total=total,
+                language=(
+                    intent["language"] if intent.get("language_explicit") else ""
+                ),
+                dimension=(
+                    intent["dimension"] if intent.get("dimension_explicit") else ""
+                ),
                 theme=intent["theme"],
                 tier=tier,
                 max_workers=workers,
@@ -4461,18 +4479,45 @@ def game_generation_campaign(
     timeout: int = 30,
     repair_rounds: int = 1,
     use_reference_fallback: bool = True,
+    language: str = "",
+    dimension: str = "",
 ) -> str:
-    """Run a bounded parallel 2D/2.5D/3D multi-language game campaign.
+    """Run a bounded parallel game campaign with optional target constraints.
 
-    Jobs rotate across Python, JavaScript, C++, and C#. Every candidate receives
-    its own general artifact pack, is compiled/executed, must emit GAME_OK and a
-    valid frame.ppm, and records a grounded pass/fail learning outcome.
+    By default jobs rotate across Python, JavaScript, C++, and C# plus 2D,
+    2.5D, and 3D. An explicit language and/or dimension constrains the matrix.
+    Every candidate receives its own artifact pack, is compiled/executed, must
+    emit GAME_OK and a valid frame.ppm, and records a grounded outcome.
     """
     _maybe_live_reload()
     # Repeat the fully verified reference matrix. This keeps every default fleet
     # job recoverable if a model draft fails while still covering all supported
     # languages and 2D, isometric 2.5D, and 3D execution.
-    matrix = game_forge.DEFAULT_MATRIX
+    try:
+        target_language = (
+            game_forge.normalize_language(language) if str(language).strip() else ""
+        )
+        target_dimension = (
+            game_forge.normalize_dimension(dimension) if str(dimension).strip() else ""
+        )
+    except ValueError as exc:
+        return "ERROR: %s" % exc
+    language_order = tuple(dict.fromkeys(
+        item_language for item_language, _ in game_forge.DEFAULT_MATRIX
+    ))
+    if target_language and target_dimension:
+        matrix = ((target_language, target_dimension),)
+    elif target_language:
+        matrix = tuple(
+            (target_language, item_dimension)
+            for item_dimension in ("2d", "2.5d", "3d")
+        )
+    elif target_dimension:
+        matrix = tuple(
+            (item_language, target_dimension) for item_language in language_order
+        )
+    else:
+        matrix = game_forge.DEFAULT_MATRIX
     total = max(1, min(int(total or 1), 12))
     workers = max(1, min(int(max_workers or 1), 4, total))
     timeout = max(2, min(int(timeout or 30), 60))
@@ -4481,21 +4526,21 @@ def game_generation_campaign(
 
     def one(index):
         with activity_tracker.bind_response(response_id):
-            language, dimension = matrix[index % len(matrix)]
-            suffix = "iso" if dimension == "2.5d" else dimension
+            job_language, job_dimension = matrix[index % len(matrix)]
+            suffix = "iso" if job_dimension == "2.5d" else job_dimension
             project_name = "%s-%s-%s-%d" % (
-                assetgen._safe_slug(name), language, suffix, index + 1,
+                assetgen._safe_slug(name), job_language, suffix, index + 1,
             )
             try:
                 return _game_generate_result(
-                    project_name, concept, language, dimension, theme,
+                    project_name, concept, job_language, job_dimension, theme,
                     1337 + index, tier, timeout, repair_rounds,
                     use_reference_fallback=use_reference_fallback,
                 )
             except Exception as exc:
                 return {
-                    "ok": False, "name": project_name, "language": language,
-                    "dimension": dimension, "root": "", "attempts": [
+                    "ok": False, "name": project_name, "language": job_language,
+                    "dimension": job_dimension, "root": "", "attempts": [
                         {"attempt": 1, "ok": False, "output": "ERROR: %s" % exc, "iid": None}
                     ],
                 }
@@ -4513,8 +4558,11 @@ def game_generation_campaign(
         if result and result.get("ok") and result.get("fallback_used")
     )
     lines = [
-        "greenfield game campaign: %d/%d runnable in %.3fs (model=%d, reference-fallback=%d, workers=%d)" %
-        (passed, total, elapsed, model_passed, fallback_passed, workers),
+        "greenfield game campaign: %d/%d runnable in %.3fs "
+        "(model=%d, reference-fallback=%d, workers=%d, target=%s/%s)" % (
+            passed, total, elapsed, model_passed, fallback_passed, workers,
+            target_language or "mixed", target_dimension or "mixed",
+        ),
     ]
     for result in results:
         final = result["attempts"][-1]
@@ -4538,7 +4586,10 @@ def game_generation_campaign(
             )
     _record_direct_tool(
         "game_generation_campaign",
-        {"name": name, "total": total, "workers": workers},
+        {
+            "name": name, "total": total, "workers": workers,
+            "language": target_language, "dimension": target_dimension,
+        },
         ok=passed == total, started=started,
         summary="%d/%d runnable" % (passed, total), output=output,
     )
@@ -4637,6 +4688,8 @@ def _loop_dispatch(action):
             name=action.get("name", "game-fleet"),
             concept=action.get("concept", action.get("prompt", "compact action game")),
             total=action.get("total", 6),
+            language=action.get("language", ""),
+            dimension=action.get("dimension", ""),
             theme=action.get("theme", "arcane"),
             tier=action.get("tier", "code"),
             max_workers=action.get("max_workers", 2),
@@ -5005,7 +5058,7 @@ def loop(
       - {"type":"artifact_generate","name":"brand-kit","brief":"fiery logo, music, and 3D mascot","kinds":"auto"}
       - {"type":"game_reference_suite","name":"reference-suite"}
       - {"type":"game_generate_and_test","name":"arena","concept":"isometric action RPG","language":"cpp","dimension":"2.5d"}
-      - {"type":"game_generation_campaign","name":"game-fleet","concept":"action roguelite","total":6,"max_workers":2}
+      - {"type":"game_generation_campaign","name":"game-fleet","concept":"action roguelite","total":6,"language":"cpp","dimension":"2.5d","max_workers":2}
       - {"type":"offload","prompt":"...","tier":"fast|code|general|cloud-code|cloud-general"}
       - {"type":"trilobite","prompt":"...","session":"none"}
       - {"type":"trilobite","prompt":"...","context_size":"1m"}
@@ -5682,7 +5735,7 @@ AGENT_TOOL_HELP = """Available tools:
 - artifact_verify: {"path": "artifacts/generated/brand-kit"}
 - game_reference_suite: {"name": "reference-suite", "theme": "arcane", "max_workers": 2, "timeout": 30}
 - game_generate_and_test: {"name": "arena", "concept": "isometric action RPG", "language": "python|javascript|cpp|csharp", "dimension": "2d|2.5d|3d", "theme": "arcane", "repair_rounds": 1}
-- game_generation_campaign: {"name": "game-fleet", "concept": "action roguelite", "total": 6, "theme": "arcane", "max_workers": 2, "repair_rounds": 1}
+- game_generation_campaign: {"name": "game-fleet", "concept": "action roguelite", "total": 6, "language": "", "dimension": "", "theme": "arcane", "max_workers": 2, "repair_rounds": 1}
 - web_search: {"query": "...", "limit": 5}
 - web_fetch: {"url": "https://...", "max_chars": 8000}
 - file_policy: {}
@@ -5906,6 +5959,8 @@ def _agent_dispatch(tool_name, args, allow_web=True, read_only=False):
             name=args.get("name", "game-fleet"),
             concept=args.get("concept", args.get("prompt", "compact action game")),
             total=args.get("total", 6),
+            language=args.get("language", ""),
+            dimension=args.get("dimension", ""),
             theme=args.get("theme", "arcane"),
             tier=args.get("tier", "code"),
             max_workers=args.get("max_workers", 2),

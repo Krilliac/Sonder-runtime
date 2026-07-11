@@ -327,6 +327,25 @@ def test_control_command_routes_persisted_agent_retry(monkeypatch):
     ) == "retry:master-old:general"
 
 
+def test_control_command_routes_targeted_game_campaign(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        server,
+        "game_generation_campaign",
+        lambda **kwargs: calls.append(kwargs) or "campaign",
+    )
+
+    out = server.control_command(
+        "/gamefleet abyss | dungeon combat | c++ | 2.5d",
+    )
+
+    assert out == "campaign"
+    assert calls == [{
+        "name": "abyss", "concept": "dungeon combat",
+        "language": "c++", "dimension": "2.5d",
+    }]
+
+
 def test_control_command_dump_writes_file(monkeypatch, tmp_path):
     monkeypatch.setattr(server.trilobite_paths, "default_home", lambda: tmp_path)
     monkeypatch.setattr(server, "context_health", lambda session="", project="": "context")
@@ -646,6 +665,27 @@ def test_master_grounded_game_build_creates_verified_output(monkeypatch):
     assert calls[0]["dimension"] == "2d"
 
 
+def test_master_grounded_campaign_preserves_explicit_targets(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        server,
+        "game_generation_campaign",
+        lambda **kwargs: calls.append(kwargs) or "campaign: PASS",
+    )
+    intent = server.creative_router.classify(
+        "Build 3 C++ 2.5D dungeon games as a fleet.", mode="fleet",
+    )
+
+    out = server._master_grounded_build(
+        intent["concept"], "fleet", "code", intent,
+    )
+
+    assert "campaign: PASS" in out
+    assert calls[0]["language"] == "cpp"
+    assert calls[0]["dimension"] == "2.5d"
+    assert calls[0]["total"] == 3
+
+
 def test_master_does_not_hijack_game_questions(monkeypatch):
     monkeypatch.setattr(server, "offload", lambda prompt, **kwargs: "ordinary answer")
 
@@ -900,6 +940,60 @@ def test_game_campaign_rotates_languages_and_dimensions(monkeypatch):
     assert activity["model_calls"] == 4
     assert activity["file_creates"] == 4
     assert activity["tool_calls"] == 1
+
+
+def test_game_campaign_honors_explicit_language_and_dimension(monkeypatch):
+    seen = []
+
+    def fake_result(name, concept, language, dimension, *args, **kwargs):
+        seen.append((language, dimension))
+        return {
+            "ok": True, "model_ok": True, "fallback_used": False,
+            "name": name, "language": language, "dimension": dimension,
+            "root": "C:/repo/" + name,
+            "attempts": [
+                {"attempt": 1, "ok": True, "output": "GAME_OK", "iid": "abc"}
+            ],
+        }
+
+    monkeypatch.setattr(server, "_game_generate_result", fake_result)
+
+    out = server.game_generation_campaign(
+        "cpp-fleet", total=3, language="c++", dimension="isometric",
+        max_workers=1,
+    )
+
+    assert "target=cpp/2.5d" in out
+    assert seen == [("cpp", "2.5d")] * 3
+
+
+def test_game_campaign_preserves_single_axis_constraints(monkeypatch):
+    seen = []
+
+    def fake_result(name, concept, language, dimension, *args, **kwargs):
+        seen.append((language, dimension))
+        return {
+            "ok": True, "model_ok": True, "fallback_used": False,
+            "name": name, "language": language, "dimension": dimension,
+            "root": "C:/repo/" + name,
+            "attempts": [{"attempt": 1, "ok": True, "output": "GAME_OK"}],
+        }
+
+    monkeypatch.setattr(server, "_game_generate_result", fake_result)
+
+    server.game_generation_campaign(
+        "cpp-dimensions", total=3, language="cpp", max_workers=1,
+    )
+    assert seen == [("cpp", "2d"), ("cpp", "2.5d"), ("cpp", "3d")]
+
+    seen.clear()
+    server.game_generation_campaign(
+        "three-d-languages", total=4, dimension="3d", max_workers=1,
+    )
+    assert seen == [
+        ("python", "3d"), ("javascript", "3d"),
+        ("cpp", "3d"), ("csharp", "3d"),
+    ]
 
 
 def test_parallel_generate_run_uses_generated_code(monkeypatch):
