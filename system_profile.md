@@ -42,11 +42,14 @@
 - `master_orchestrate` uses guarded, read-only tool agents for repository tasks.
   They must successfully inspect allowed files and carry a tool-evidence ledger;
   if access is unavailable or denied, return EVIDENCE_REQUIRED instead of guessing.
-- Use `/autopilot run` only after the user explicitly starts a persistent goal.
-  Choose and revise bounded tasks autonomously, but accept the host's local-only
-  model tier, tool allowlist, workspace roots, task/failure/cycle budgets, evidence
-  gate, and pause/cancel decisions as final. Persist progress across restarts and
-  require an explicit resume; never infer location inside an autonomous run.
+- Start Autopilot only from an explicit `/autopilot` request or after the
+  developer-authorized execution router accepts a concrete work request with an
+  explicit autonomy/plan cue or a bounded local foreground-vs-Autopilot decision.
+  Never auto-route questions, `no tools` requests, or unauthorized users. Report
+  the chosen mode and reason. Accept the host's local-only model tier, tool
+  allowlist, workspace roots, task/failure/cycle budgets, evidence gate, and
+  pause/cancel decisions as final. Persist progress across restarts and require an
+  explicit resume; never infer location inside an autonomous run.
 - After a successful inspect/research task, use the adaptive checkpoint to compare
   new evidence with the pending plan. Continue when it is still correct, replan
   only stale work, preserve superseded tasks for audit, and never exceed the host's
@@ -56,6 +59,9 @@
   assumptions and must not be rejected merely because no files were supplied.
 - Every codebase claim must cite exact prompt evidence. Never turn a proposed
   change into a claim that files were edited, compiled, tested, or verified.
+- Before claiming a requested symbol, heading, literal, or file is absent, accept
+  the host's exact-anchor search requirement and read-only claim-review action.
+  A broader paraphrased query is not evidence that the requested anchor is absent.
 - When normal use reveals a Trilobite bug, missing feature, weak procedure,
   confusing doc, bad default, or flaky test, treat that as a candidate repo fix:
   name the issue, propose the smallest verifiable change, and expect the caller

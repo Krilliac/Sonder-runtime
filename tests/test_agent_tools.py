@@ -228,6 +228,139 @@ def test_agent_gets_final_only_pass_after_tool_step_budget(monkeypatch):
     assert "HOST FINALIZATION ONLY" in prompts[2]
 
 
+def test_negative_claim_review_repairs_schema(monkeypatch):
+    responses = [
+        "needs more evidence",
+        '{"decision":"continue","reason":"query was paraphrased",'
+        '"tool":"text_search","args":{"query":"Persistent autopilot"}}',
+    ]
+    prompts = []
+
+    def generate(prompt, history=None):
+        prompts.append(prompt)
+        return responses.pop(0)
+
+    monkeypatch.setattr(server, "_make_generate", lambda *a, **k: generate)
+
+    review = server._agent_negative_claim_review(
+        "Find the exact heading",
+        "The heading was not found.",
+        ["step 1 tool=text_search reason=find\n(no matches)"],
+        "qwen-local",
+    )
+
+    assert review["decision"] == "continue"
+    assert review["tool"] == "text_search"
+    assert review["args"] == {"query": "Persistent autopilot"}
+    assert "HOST SCHEMA ERROR" in prompts[1]
+
+
+def test_negative_claim_review_requires_exact_named_heading(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "_make_generate",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("deterministic exact-anchor gate should run first")
+        ),
+    )
+
+    review = server._agent_negative_claim_review(
+        "Inspect README.md and report its Persistent autopilot heading.",
+        "The README does not contain a Persistent autopilot heading.",
+        [
+            "step 1 tool=text_search reason=find\n"
+            "text search: 'Persistent autopilot heading' under repo\n(no matches)"
+        ],
+        "qwen-local",
+    )
+
+    assert review == {
+        "decision": "continue",
+        "reason": "the exact task anchor 'Persistent autopilot' has not been searched",
+        "tool": "text_search",
+        "args": {
+            "query": "Persistent autopilot",
+            "root": ".",
+            "regex": False,
+            "max_results": 20,
+            "glob": "README.md",
+        },
+    }
+
+
+def test_agent_collects_more_evidence_after_negative_claim_review(monkeypatch):
+    responses = [
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"final":"The Persistent autopilot heading was not found."}',
+        '{"tool":"text_search","args":{"query":"Persistent autopilot"}}',
+        '{"final":"The Persistent autopilot heading is present."}',
+    ]
+    prompts = []
+    reviews = []
+
+    def generate(prompt, history=None):
+        prompts.append(prompt)
+        return responses.pop(0)
+
+    def claim_review(*_args, **_kwargs):
+        reviews.append(True)
+        return {
+            "decision": "continue",
+            "reason": "the descriptive query did not prove the negative claim",
+            "tool": "text_search",
+            "args": {"query": "Persistent autopilot", "root": "."},
+        }
+
+    monkeypatch.setattr(server, "_make_generate", lambda *a, **k: generate)
+    monkeypatch.setattr(server, "_agent_negative_claim_review", claim_review)
+    monkeypatch.setattr(
+        server,
+        "_agent_dispatch_observed",
+        lambda tool, *_args, **_kwargs: (
+            "### Persistent autopilot" if tool == "text_search" else "README excerpt"
+        ),
+    )
+
+    output = server._agent_impl("Find the Persistent autopilot heading", max_steps=4)
+
+    assert output == "The Persistent autopilot heading is present."
+    assert len(reviews) == 1
+    assert "HOST CLAIM REVIEW" in prompts[2]
+    assert "### Persistent autopilot" in prompts[2]
+
+
+def test_agent_bounds_repeated_negative_claim_recovery(monkeypatch):
+    responses = [
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"final":"The heading was not found."}',
+        '{"final":"The heading was not found."}',
+        '{"final":"The heading was not found."}',
+    ]
+    monkeypatch.setattr(
+        server,
+        "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: responses.pop(0),
+    )
+    monkeypatch.setattr(
+        server, "_agent_dispatch_observed", lambda *_args, **_kwargs: "README excerpt",
+    )
+    monkeypatch.setattr(
+        server,
+        "_agent_negative_claim_review",
+        lambda *_args, **_kwargs: {
+            "decision": "continue",
+            "reason": "the exact anchor was never searched",
+            "tool": "text_search",
+            "args": {"query": "exact heading", "root": "."},
+        },
+    )
+
+    output = server._agent_impl("Find a heading", max_steps=2)
+
+    assert output.startswith("EVIDENCE_REQUIRED")
+    assert "exact anchor was never searched" in output
+
+
 def test_agent_host_requires_successful_web_tool_before_final(monkeypatch):
     responses = [
         '{"final": "I cannot access the web."}',

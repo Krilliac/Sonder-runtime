@@ -99,6 +99,18 @@ The learning loop above is *cross-task* memory. On top of it trilobite also has:
 
 ### Persistent autopilot
 
+Concrete natural-language work requests now pass through a visible execution
+decision before any model answer. A small task runs in the guarded foreground
+workbench; explicit `fleet`, `swarm`, spawn-as-many, or parallel-agent language
+uses the hardware-bounded fleet; explicit `keep working`, `end-to-end`,
+`autonomously`, or background language starts persistent Autopilot. For an
+ambiguous compound request, a small local model may choose only between foreground
+and Autopilot, and the response reports its mode, source, reason, and confidence.
+`foreground only`, `plan only`, and `no tools` are deterministic overrides. The
+router runs only for local-open or developer/admin-authorized requests, never
+enables cloud or location, and defers instead of starting a second concurrent
+Autopilot run. Slash commands remain explicit overrides.
+
 `/autopilot run <objective>` turns one outcome into a durable, model-planned task
 ledger. A local planner selects measurable success criteria and ordered tasks;
 the guarded workbench executes one task at a time; successful inspection and
@@ -113,7 +125,10 @@ replayed.
 The tool agent retains the complete evidence ledger while compacting only its
 model-facing observation window. It repairs malformed JSON decisions twice,
 blocks unchanged failing tool-call loops, and reserves a final-only synthesis
-pass after the tool-step budget is exhausted.
+pass after the tool-step budget is exhausted. Negative existence claims receive
+an extra local evidence review; explicit literals and named headings must be
+searched exactly, and the host may run only a guarded read-only recovery action
+before asking the model to synthesize again.
 
 ```text
 /autopilot status [id]

@@ -44,6 +44,10 @@ cloud tiers and invoked web tools contact their named external services.
   gates, task ledger, cycle/failure/replan budgets, evidence checkpoints, events,
   and evidence-backed end report. Active runs can be paused or cancelled;
   interrupted/paused work resumes only after an explicit tap.
+- **Automatic execution decisions**: concrete developer work entered in chat is
+  visibly routed to the foreground workbench, persistent Autopilot, or an
+  explicitly requested hardware-bounded fleet. Ambiguous multi-stage work gets a
+  local-only mode decision; questions and `no tools` requests stay ordinary chat.
 - **Live footer**: chat shows context %, active agents, project scope, token
   estimates, selected model and latest agent activity while work is running.
 - **Restart-safe fleets**: the System panel reads the shared private fleet ledger,

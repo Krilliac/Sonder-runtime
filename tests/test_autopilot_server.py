@@ -246,6 +246,7 @@ def test_diagnostics_manifest_and_improvement_expose_autopilot(monkeypatch, tmp_
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "memory.db"))
     monkeypatch.setattr(server, "_get", lambda path: {"models": []})
     assert "autopilot:" in server.diagnostics()
+    assert "execution routing: host-gated" in server.diagnostics()
     assert "autopilot_start" in server.tool_manifest()
     assert "/autopilot" in server.command_registry_list("agents")
     report = server.improvement_report_data()

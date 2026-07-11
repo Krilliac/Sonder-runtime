@@ -248,24 +248,19 @@ def test_workbench_slash_routes_project_and_task(monkeypatch):
     assert ts._handle_slash("/work") == "usage: /work <task>"
 
 
-def test_natural_work_intent_requires_developer_authorization(monkeypatch):
+def test_natural_execution_intent_requires_developer_authorization(monkeypatch):
     calls = []
     monkeypatch.setattr(
         ts.server,
-        "workbench_agent",
-        lambda **kwargs: calls.append(kwargs) or "grounded work",
+        "route_work_request",
+        lambda prompt, project="": calls.append((prompt, project)) or "grounded work",
     )
 
     assert ts._handle_work_intent("edit the app files", authorized=False) is None
     assert ts._handle_work_intent(
         "edit the app files", project="demo", authorized=True
     ) == "grounded work"
-    assert calls == [{
-        "prompt": "edit the app files",
-        "tier": "code",
-        "max_steps": 12,
-        "project": "demo",
-    }]
+    assert calls == [("edit the app files", "demo")]
 
 
 def test_contextsize_slash_shows_or_sets(monkeypatch):

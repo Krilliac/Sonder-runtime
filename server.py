@@ -62,6 +62,7 @@ import assetgen
 import game_forge
 import workbench
 import creative_router
+import intents
 import autopilot_store
 import autopilot_controller
 
@@ -261,6 +262,7 @@ LIVE_RELOAD_MODULES = [
     "game_forge",
     "workbench",
     "creative_router",
+    "intents",
     # The controller is stateless and safe to refresh between callback calls.
     # autopilot_store intentionally stays loaded because it exclusively owns a
     # process-safe SQLite schema and may be serving background worker threads.
@@ -6200,6 +6202,28 @@ def _extract_agent_json(text):
 
 _AGENT_OBSERVATION_PROMPT_CHARS = 9000
 _AGENT_DECISION_REPAIR_LIMIT = 2
+_AGENT_NEGATIVE_CLAIM_RE = re.compile(
+    r"\b(?:does not|doesn't|did not|could not|cannot|can't)\s+"
+    r"(?:contain|include|find|locate|exist)\b|"
+    r"\b(?:not found|no matches?|none found|missing from)\b",
+    re.IGNORECASE,
+)
+_AGENT_CLAIM_REVIEW_TOOLS = frozenset({
+    "text_search", "file_read_range", "file_find",
+})
+_AGENT_QUOTED_ANCHOR_RE = re.compile(
+    r"`([^`\r\n]{2,120})`|\"([^\"\r\n]{2,120})\"|\'([^\'\r\n]{2,120})\'"
+)
+_AGENT_HEADING_ANCHOR_RE = re.compile(
+    r"\b(?:its|the|a|an)\s+"
+    r"([A-Z][A-Za-z0-9_.:-]*(?:\s+[A-Za-z0-9_.:-]+){0,5})\s+heading\b"
+)
+_AGENT_TASK_PATH_RE = re.compile(
+    r"(?<![\w.-])([A-Za-z0-9_.-]+\.(?:md|txt|py|dart|js|ts|json|yaml|yml|toml|"
+    r"cpp|cc|cxx|h|hpp|cs|html|css|svg))(?![\w.-])",
+    re.IGNORECASE,
+)
+_AGENT_SEARCH_QUERY_RE = re.compile(r"text search:\s*'([^'\r\n]+)'", re.IGNORECASE)
 
 
 def _clip_agent_prompt_text(text, limit):
@@ -6314,6 +6338,147 @@ def _agent_generate_decision(
         )
         raw = gen(repair_prompt)
     return None, raw, error
+
+
+def _agent_task_exact_anchors(task: str) -> list[str]:
+    """Extract explicit literals and named headings worth exact negative search."""
+    text = str(task or "")
+    anchors = []
+    for match in _AGENT_QUOTED_ANCHOR_RE.finditer(text):
+        anchor = next((value for value in match.groups() if value), "").strip()
+        if anchor and len(anchor.split()) <= 12:
+            anchors.append(anchor)
+    for match in _AGENT_HEADING_ANCHOR_RE.finditer(text):
+        anchor = match.group(1).strip().rstrip(".:")
+        if anchor:
+            anchors.append(anchor)
+    deduped = []
+    seen = set()
+    for anchor in anchors:
+        key = re.sub(r"\s+", " ", anchor).strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            deduped.append(anchor)
+    return deduped[:6]
+
+
+def _agent_exact_negative_action(task: str, observations) -> dict | None:
+    """Require exact anchor queries before accepting a negative existence claim."""
+    anchors = _agent_task_exact_anchors(task)
+    if not anchors:
+        return None
+    exact_queries = set()
+    for observation in observations:
+        text = str(observation or "")
+        if "ERROR:" in text:
+            continue
+        for match in _AGENT_SEARCH_QUERY_RE.finditer(text):
+            exact_queries.add(re.sub(r"\s+", " ", match.group(1)).strip().lower())
+    missing = next(
+        (
+            anchor for anchor in anchors
+            if re.sub(r"\s+", " ", anchor).strip().lower() not in exact_queries
+        ),
+        None,
+    )
+    if not missing:
+        return None
+    args = {
+        "query": missing,
+        "root": ".",
+        "regex": False,
+        "max_results": 20,
+    }
+    paths = _AGENT_TASK_PATH_RE.findall(str(task or ""))
+    if paths:
+        args["glob"] = paths[0]
+    return {
+        "decision": "continue",
+        "reason": "the exact task anchor %r has not been searched" % missing,
+        "tool": "text_search",
+        "args": args,
+    }
+
+
+def _agent_negative_claim_review(
+    task: str,
+    final: str,
+    observations,
+    model: str,
+    cloud: bool = False,
+) -> dict:
+    """Audit negative existence claims without letting the reviewer invent facts."""
+    if not _AGENT_NEGATIVE_CLAIM_RE.search(str(final or "")):
+        return {"decision": "accept", "reason": "no negative existence claim"}
+    exact_action = _agent_exact_negative_action(task, observations)
+    if exact_action:
+        return exact_action
+    system = _build_system(
+        "You are a local evidence reviewer. Return exactly one JSON object and no "
+        "prose or chain-of-thought. Decide only accept or continue. Accept a negative "
+        "existence claim only when tool evidence searched the exact shortest useful "
+        "anchor across the relevant scope. Reject a paraphrased/descriptive search "
+        "query, a clipped read that did not reach the target, or a scope mismatch. "
+        "Never rewrite the answer or invent evidence; continue must return exactly "
+        "one structured read-only evidence action using text_search, file_read_range, "
+        "or file_find.",
+        False,
+        "",
+    )
+    review_prompt = (
+        "Task:\n%s\n\nProposed final:\n%s\n\n%s\n\n"
+        "JSON schema: {\"decision\":\"accept|continue\",\"reason\":\"brief\","
+        "\"tool\":\"text_search|file_read_range|file_find or empty\","
+        "\"args\":{}}"
+        % (
+            str(task or "")[:8000],
+            str(final or "")[:4000],
+            _agent_observation_prompt(observations, max_chars=7000),
+        )
+    )
+    gen = _make_generate(model, system, 0.0, 260, 4096, cloud=cloud)
+    correction = ""
+    last_error = "invalid claim review"
+    for _attempt in range(2):
+        raw = gen(review_prompt + correction)
+        try:
+            payload = _extract_agent_json(raw)
+            if not isinstance(payload, dict):
+                raise ValueError("claim review must be a JSON object")
+            decision = str(payload.get("decision") or "").strip().lower()
+            if decision not in {"accept", "continue"}:
+                raise ValueError("claim review decision must be accept or continue")
+            reason = re.sub(r"\s+", " ", str(payload.get("reason") or "")).strip()
+            tool = str(payload.get("tool") or "").strip()
+            args = payload.get("args") or {}
+            if not reason:
+                raise ValueError("claim review needs a reason")
+            if not isinstance(args, dict):
+                raise ValueError("claim review args must be a JSON object")
+            if decision == "continue" and tool not in _AGENT_CLAIM_REVIEW_TOOLS:
+                raise ValueError(
+                    "continued claim review needs an approved read-only tool"
+                )
+            if decision == "accept":
+                tool, args = "", {}
+            return {
+                "decision": decision,
+                "reason": reason[:500],
+                "tool": tool,
+                "args": args,
+            }
+        except (TypeError, ValueError) as exc:
+            last_error = str(exc)
+            correction = (
+                "\n\nHOST SCHEMA ERROR: %s. Return corrected JSON only."
+                % last_error
+            )
+    return {
+        "decision": "continue",
+        "reason": "negative claim review failed safely: %s" % last_error,
+        "tool": "",
+        "args": {},
+    }
 
 
 def _agent_dispatch(
@@ -7056,6 +7221,7 @@ def _agent_impl(
     used_tool_names = set()
     successful_web_calls = set()
     failed_call_counts = {}
+    claim_review_requests = 0
     checklist_id, checklist_states = (
         _start_agent_checklist(prompt, project, read_only)
         if auto_checklist else ("", {})
@@ -7098,6 +7264,55 @@ def _agent_impl(
             final.splitlines()[0] if final else "agent completed"
         )
         return final
+
+    def run_claim_review_action(review, review_number):
+        nonlocal file_evidence, inspected, used_tool
+        tool_name = str(review.get("tool") or "")
+        tool_args = review.get("args") or {}
+        policy_error = ""
+        if tool_name not in _AGENT_CLAIM_REVIEW_TOOLS:
+            policy_error = "ERROR: HOST CLAIM REVIEW: no approved evidence tool was supplied."
+        elif allowed_tools is not None and tool_name not in allowed_tools:
+            policy_error = (
+                "ERROR: HOST CLAIM REVIEW: tool '%s' is outside this run's allowlist."
+                % tool_name
+            )
+        if not policy_error and tool_policy is not None:
+            policy_error = str(tool_policy(tool_name, tool_args) or "")
+        if not policy_error:
+            policy_error = _repository_read_only_error(tool_name, tool_args)
+        if policy_error:
+            observation_text = policy_error
+        else:
+            observation_text = str(_agent_dispatch_observed(
+                tool_name,
+                tool_args,
+                allow_web=False,
+                read_only=True,
+            ))
+        tool_ok = _agent_observation_ok(observation_text)
+        if tool_ok:
+            used_tool = True
+            used_tool_names.add(tool_name)
+            file_evidence = True
+            inspected = True
+            if auto_checklist:
+                _agent_checklist_mark(
+                    checklist_id,
+                    checklist_states,
+                    1,
+                    "done",
+                    "%s completed for negative-claim review" % tool_name,
+                )
+        return (
+            "host claim review %d tool=%s reason=%s\n%s"
+            % (
+                review_number,
+                tool_name or "(missing)",
+                review.get("reason", ""),
+                observation_text[:6000],
+            )
+        )
 
     for step in range(1, max_steps + 1):
         step_prompt = transcript
@@ -7145,6 +7360,35 @@ def _agent_impl(
                     "Run or retry an exact validator now."
                 )
                 continue
+            if _AGENT_NEGATIVE_CLAIM_RE.search(final):
+                claim_review = _agent_negative_claim_review(
+                    prompt, final, observations, model, cloud=cloud,
+                )
+                if claim_review["decision"] == "continue":
+                    claim_review_requests += 1
+                    if claim_review_requests <= 2:
+                        observations.append(
+                            "HOST CLAIM REVIEW: %s\n%s"
+                            % (
+                                claim_review["reason"],
+                                run_claim_review_action(
+                                    claim_review, claim_review_requests,
+                                ),
+                            )
+                        )
+                        continue
+                    if auto_checklist:
+                        _agent_checklist_fail(
+                            checklist_id,
+                            checklist_states,
+                            "negative existence claim lacked exact evidence",
+                            1,
+                        )
+                    return "%s: %s\n\n%s" % (
+                        master_orchestrator.EVIDENCE_REQUIRED,
+                        claim_review["reason"],
+                        "\n\n".join(observations),
+                    )
             if require_file_evidence and not file_evidence:
                 if auto_checklist:
                     _agent_checklist_fail(
@@ -7329,30 +7573,62 @@ def _agent_impl(
                 observation_text[:6000],
             )
         )
-    final_prompt = transcript
-    if observations:
-        final_prompt += "\n\n" + _agent_observation_prompt(observations)
-    final_prompt += (
-        "\n\nHOST FINALIZATION ONLY: the tool-step budget is exhausted. Do not call "
-        "another tool. Synthesize a concise grounded result from the observations, "
-        "disclose unresolved errors or checks, and return exactly "
-        '{"final":"answer"}.'
-    )
-    final_decision, raw, final_error = _agent_generate_decision(
-        gen, final_prompt, require_final=True,
-    )
-    if final_decision is None:
-        if auto_checklist:
-            active_item = 3 if validation_attempted else 2 if mutated else 1
-            _agent_checklist_fail(
-                checklist_id, checklist_states,
-                "agent could not synthesize a final answer after max_steps",
-                active_item,
+    final = ""
+    while True:
+        final_prompt = transcript
+        if observations:
+            final_prompt += "\n\n" + _agent_observation_prompt(observations)
+        final_prompt += (
+            "\n\nHOST FINALIZATION ONLY: the tool-step budget is exhausted. Do not call "
+            "another tool. Synthesize a concise grounded result from the observations, "
+            "disclose unresolved errors or checks, and return exactly "
+            '{"final":"answer"}.'
+        )
+        final_decision, raw, final_error = _agent_generate_decision(
+            gen, final_prompt, require_final=True,
+        )
+        if final_decision is None:
+            if auto_checklist:
+                active_item = 3 if validation_attempted else 2 if mutated else 1
+                _agent_checklist_fail(
+                    checklist_id, checklist_states,
+                    "agent could not synthesize a final answer after max_steps",
+                    active_item,
+                )
+            return (
+                "ERROR: agent reached max_steps=%d and finalization failed: %s\n"
+                "raw=%s\n\n%s"
+                % (max_steps, final_error, raw[:1000], "\n\n".join(observations))
             )
-        return (
-            "ERROR: agent reached max_steps=%d and finalization failed: %s\n"
-            "raw=%s\n\n%s"
-            % (max_steps, final_error, raw[:1000], "\n\n".join(observations))
+        final = str(final_decision.get("final") or "")
+        if not _AGENT_NEGATIVE_CLAIM_RE.search(final):
+            break
+        claim_review = _agent_negative_claim_review(
+            prompt, final, observations, model, cloud=cloud,
+        )
+        if claim_review["decision"] == "accept":
+            break
+        claim_review_requests += 1
+        if claim_review_requests <= 2:
+            observations.append(
+                "HOST CLAIM REVIEW: %s\n%s"
+                % (
+                    claim_review["reason"],
+                    run_claim_review_action(claim_review, claim_review_requests),
+                )
+            )
+            continue
+        if auto_checklist:
+            _agent_checklist_fail(
+                checklist_id,
+                checklist_states,
+                "negative existence claim lacked exact evidence at finalization",
+                1,
+            )
+        return "%s: %s\n\n%s" % (
+            master_orchestrator.EVIDENCE_REQUIRED,
+            claim_review["reason"],
+            "\n\n".join(observations),
         )
     if required_tools and not (required_tools & used_tool_names):
         return (
@@ -7373,7 +7649,7 @@ def _agent_impl(
             )
         detail = "\n\n" + "\n\n".join(observations) if observations else ""
         return master_orchestrator.EVIDENCE_REQUIRED + detail
-    return finish_final(final_decision.get("final"))
+    return finish_final(final)
 
 
 @mcp.tool()
@@ -7959,6 +8235,162 @@ def autopilot_status(run_id: str = "", include_finished: bool = True) -> str:
     )
 
 
+def _execution_route_model(prompt: str, project: str = "") -> dict:
+    """Let a local model choose only foreground workbench or Autopilot."""
+    model, cloud, _augment, tier_label = _serve_target("fast", False)
+    if model is None or cloud or tier_label not in LOCAL_TIERS:
+        raise RuntimeError("local execution router model is unavailable")
+    system = _build_system(
+        "You are Trilobite's execution-mode router. Return exactly one JSON "
+        "object and no prose or chain-of-thought. You may choose only workbench "
+        "or autopilot. Workbench is a foreground task with at most 12 tool steps. "
+        "Autopilot is a persistent multi-stage goal with planning, evidence review, "
+        "replanning, and validation. Never alter permissions, roots, tiers, or tools.",
+        False,
+        "",
+    )
+    route_prompt = (
+        "Choose the smallest reliable execution mode for this developer-authorized "
+        "work request. Prefer workbench when the task is self-contained and likely "
+        "to finish in one bounded tool loop. Prefer autopilot when it has several "
+        "dependent phases, needs durable progress, or requires discovery followed "
+        "by implementation and independent validation.\n"
+        "Project: %s\nRequest: %s\n"
+        'JSON schema: {"mode":"workbench|autopilot","reason":"brief evidence-based '
+        'reason","confidence":0.0}'
+        % (project or "default", str(prompt or "")[:12000])
+    )
+    gen = _make_generate(model, system, 0.0, 240, 4096, cloud=False)
+    correction = ""
+    last_error = "invalid route decision"
+    for _attempt in range(2):
+        raw = gen(route_prompt + correction)
+        try:
+            payload = _extract_agent_json(raw)
+            if not isinstance(payload, dict):
+                raise ValueError("route decision must be a JSON object")
+            mode = str(payload.get("mode") or "").strip().lower()
+            if mode not in {"workbench", "autopilot"}:
+                raise ValueError("route mode must be workbench or autopilot")
+            confidence = float(payload.get("confidence", 0.5))
+            if not 0.0 <= confidence <= 1.0:
+                raise ValueError("route confidence must be between 0 and 1")
+            reason = re.sub(r"\s+", " ", str(payload.get("reason") or "")).strip()
+            if not reason:
+                raise ValueError("route decision needs a brief reason")
+            return {
+                "mode": mode,
+                "reason": reason[:500],
+                "confidence": confidence,
+            }
+        except (TypeError, ValueError) as exc:
+            last_error = str(exc)
+            correction = (
+                "\n\nHOST SCHEMA ERROR: %s. Return corrected JSON only."
+                % last_error
+            )
+    raise ValueError("execution router model failed schema validation: %s" % last_error)
+
+
+def _execution_route_header(mode: str, source: str, reason: str, confidence=None) -> str:
+    labels = {
+        "workbench": "foreground workbench",
+        "autopilot": "persistent Autopilot",
+        "fleet": "hardware-bounded fleet",
+        "deferred": "Autopilot deferred",
+    }
+    lines = [
+        "trilobite execution decision",
+        "  mode: %s" % labels.get(mode, mode),
+        "  source: %s" % source,
+        "  reason: %s" % reason,
+    ]
+    if confidence is not None:
+        lines.append("  confidence: %.0f%%" % (float(confidence) * 100.0))
+    lines.append(
+        "  boundary: local tiers and existing host permissions, roots, and budgets"
+    )
+    return "\n".join(lines)
+
+
+def route_work_request(prompt: str, project: str = "") -> str | None:
+    """Transparently route eligible natural work to a bounded execution lane."""
+    _maybe_live_reload()
+    decision = intents.classify_execution(prompt)
+    if not decision:
+        return None
+    mode = decision["mode"]
+    reason = decision["reason"]
+    source = "explicit host cue" if mode in {"fleet", "autopilot"} else "host classifier"
+    confidence = None
+    if mode == "decide":
+        try:
+            routed = _execution_route_model(prompt, project=project)
+            mode = routed["mode"]
+            reason = routed["reason"]
+            confidence = routed["confidence"]
+            source = "bounded local mode model"
+        except (OSError, RuntimeError, ValueError) as exc:
+            mode = "autopilot"
+            reason = (
+                "compound-work fallback after local mode selection was unavailable: %s"
+                % re.sub(r"\s+", " ", str(exc))[:240]
+            )
+            source = "host fallback"
+
+    resolved_project = _resolve_project(project) or ""
+    if mode == "fleet":
+        output = master_orchestrate(
+            task=prompt, mode="fleet", tier="code", learn=False,
+        )
+    elif mode == "workbench":
+        output = workbench_agent(
+            prompt=prompt,
+            tier="code",
+            max_steps=12,
+            allow_web=True,
+            project=resolved_project,
+            allow_location=False,
+        )
+    else:
+        active = []
+        with contextlib.suppress(Exception):
+            snapshot = autopilot_store.snapshot(include_finished=False, limit=20)
+            active = [
+                row for row in snapshot.get("runs", [])
+                if row.get("status") in autopilot_store.ACTIVE_STATUSES
+            ]
+        if active:
+            current = active[0]
+            header = _execution_route_header(
+                "deferred",
+                source,
+                "another Autopilot run is active; automatic routing will not start a concurrent run",
+                confidence,
+            )
+            return "%s\n\nactive run: %s [%s] %s\nuse /autopilot status %s" % (
+                header,
+                current.get("id", "unknown"),
+                current.get("status", "unknown"),
+                current.get("objective", ""),
+                current.get("id", ""),
+            )
+        output = autopilot_start(
+            objective=prompt,
+            project=resolved_project,
+            tier="code",
+            policy="workspace",
+            allow_web=True,
+            adaptive=True,
+            plan_only=bool(decision.get("plan_only")),
+            wait=False,
+        )
+    return "%s\n\n%s" % (
+        _execution_route_header(mode, source, reason, confidence),
+        output,
+    )
+
+
 @mcp.tool()
 def self_heal_check() -> str:
     """Check for common local breakage without changing anything."""
@@ -7991,6 +8423,9 @@ def diagnostics() -> str:
     _maybe_live_reload()
     lines = ["trilobite diagnostics"]
     lines.append("  live reload: %s" % ("on" if live_reload.enabled() else "off"))
+    lines.append(
+        "  execution routing: host-gated foreground/autopilot/fleet with local ambiguity review"
+    )
     runtime = _local_runtime_summary()
     lines.append("  local runtime: threads=%s, gpu_layers=%s, batch=%s" % (
         runtime["num_thread"], runtime["num_gpu"], runtime["num_batch"]))

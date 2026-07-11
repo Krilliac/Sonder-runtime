@@ -309,6 +309,7 @@ HELP_TEXT = """commands:
   /activity          show active/latest tool calls and file changes
   /work <task>       execute a guarded workflow with checklist and end report
   /autopilot ...     persistent plan/run/status/resume/pause/cancel autonomy
+  natural work       auto-select foreground, Autopilot, or explicit fleet mode
   /report            show the latest grounded report and action transcript
   /checklist [id]    show the current or selected persistent checklist
   /inventory [path]  summarize a guarded workspace with explicit scan budgets
@@ -1082,15 +1083,10 @@ def _handle_intent(content, messages=None, state=None):
 
 
 def _handle_work_intent(content, project="", authorized=False):
-    """Route concrete developer workspace requests to the guarded workbench."""
-    if not authorized or not intents.classify_work(content):
+    """Route developer work through the bounded execution-mode chooser."""
+    if not authorized:
         return None
-    return server.workbench_agent(
-        prompt=content,
-        tier="code",
-        max_steps=12,
-        project=project,
-    )
+    return server.route_work_request(content, project=project)
 
 
 def _model_to_tier(model):
@@ -1460,6 +1456,7 @@ class Handler(BaseHTTPRequestHandler):
 
         reply = None
         web_routed = False
+        execution_routed = False
         turn = None
         response_iid = None
         activity_response = None
@@ -1504,6 +1501,7 @@ class Handler(BaseHTTPRequestHandler):
                             project=storage_project,
                             authorized=_developer_authorized(context),
                         )
+                        execution_routed = reply is not None
                     if reply is not None:
                         content = reply
                     else:
@@ -1526,7 +1524,9 @@ class Handler(BaseHTTPRequestHandler):
                     "assistant",
                     content,
                     kind=(
-                        "web" if web_routed else "slash" if reply is not None else "model"
+                        "web" if web_routed else
+                        "execution" if execution_routed else
+                        "slash" if reply is not None else "model"
                     ),
                     state=state,
                 )

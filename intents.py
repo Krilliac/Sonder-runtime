@@ -37,24 +37,56 @@ _WORK_POLITE_RE = re.compile(
     r"^(please\s+|can you\s+|could you\s+|would you\s+|will you\s+)+"
 )
 _WORK_ACTION_RE = re.compile(
-    r"\b(add|audit|build|compile|create|delete|diagnose|edit|execute|find|fix|"
+    r"\b(add|audit|benchmark|build|compile|continue|create|delete|deploy|diagnose|"
+    r"document|edit|execute|find|fix|"
     r"generate|implement|inspect|install|list|make|modify|move|open|read|refactor|"
-    r"remove|rename|repair|run|scan|scaffold|search|test|update|validate|view|write)\b"
+    r"remove|rename|repair|review|run|scan|scaffold|search|ship|test|update|validate|"
+    r"verify|view|write)\b"
 )
 _WORK_TARGET_RE = re.compile(
     r"\b(animation|api|app|application|asset|audio|background|brand|build|chart|"
     r"cli|code|config|dashboard|data|diagram|directory|doc|docs|document|file|"
     r"files|folder|folders|function|game|graphic|icon|image|library|logo|model|"
     r"music|package|path|presentation|program|project|readme|report|repo|repository|"
-    r"scene|script|scripts|sound|spreadsheet|sprite|test|tests|texture|tool|tools|"
-    r"ui|vector|web|webpage|website|workspace)\b"
+    r"scene|script|scripts|sound|spreadsheet|sprite|system|test|tests|texture|"
+    r"tool|tools|trilobite|ui|vector|web|webpage|website|workspace)\b"
 )
 _WORK_DIRECT_RE = re.compile(
-    r"\b(use (the )?tools|work on|take care of|make the change|implement it|fix it|"
+    r"\b(use (the )?tools|work on|continue working|take care of|make the change|implement it|fix it|"
     r"edit it|run it|test it|build it|create it)\b"
 )
 _PATH_LIKE_RE = re.compile(
     r"(?:[a-zA-Z]:[\\/]|[./~][\\/]|[\\/][\w.-]+|\.[a-zA-Z0-9]{1,8}\b)"
+)
+
+_EXECUTION_NO_TOOLS_RE = re.compile(
+    r"\b(?:no tools?|do not use (?:any )?tools?|don't use (?:any )?tools?|"
+    r"just answer|answer only|explain only)\b"
+)
+_EXECUTION_PLAN_ONLY_RE = re.compile(
+    r"\b(?:plan only|planning only|make (?:me )?a plan(?: only)?|"
+    r"plan (?:it|this) but (?:do not|don't) execute|do not execute(?: it)? yet)\b"
+)
+_EXECUTION_NO_BACKGROUND_RE = re.compile(
+    r"\b(?:foreground|one[- ]shot|single pass|quick pass|"
+    r"do not|don't)\s+(?:start|run|use)?\s*(?:it\s+)?(?:in\s+)?background\b|"
+    r"\b(?:do it now|handle it inline|foreground only)\b"
+)
+_EXECUTION_FLEET_RE = re.compile(
+    r"\b(?:fleet|swarm|fan[- ]?out|paral+el (?:sub)?agents?|paral+el workflow|"
+    r"multiple subagents?|spawn (?:as many|as much|all|the maximum|maximum|max)?\s*"
+    r"(?:sub)?agents?|"
+    r"as many (?:sub)?agents? as (?:possible|the hardware allows))\b"
+)
+_EXECUTION_AUTOPILOT_RE = re.compile(
+    r"\b(?:autonomously|autonomous(?:ly)?|autopilot|in the background|"
+    r"keep working|continue working|do not stop|don't stop|continue until|work until|"
+    r"end[- ]to[- ]end|from start to finish|take ownership|handle everything|"
+    r"implement everything|finish (?:the )?(?:whole|entire)|plan and execute|"
+    r"without (?:asking|waiting for) me)\b"
+)
+_EXECUTION_SEQUENCE_RE = re.compile(
+    r"\b(?:then|after that|afterward|next|finally|and then|all the way through)\b"
 )
 
 
@@ -120,3 +152,66 @@ def classify_work(text):
     if not _WORK_ACTION_RE.search(candidate):
         return False
     return bool(_WORK_TARGET_RE.search(candidate) or _PATH_LIKE_RE.search(value))
+
+
+def classify_execution(text):
+    """Choose a bounded execution lane for an eligible natural work request.
+
+    ``decide`` is intentionally not an execution mode. It asks the local router
+    model to choose only between foreground workbench and persistent Autopilot;
+    host code still owns authorization, policies, and the final dispatch.
+    """
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not value or value.startswith("/") or _EXECUTION_NO_TOOLS_RE.search(value.lower()):
+        return None
+    if not classify_work(value):
+        return None
+    lowered = value.lower()
+    plan_only = bool(_EXECUTION_PLAN_ONLY_RE.search(lowered))
+    actions = sorted(set(_WORK_ACTION_RE.findall(lowered)))
+    if _EXECUTION_FLEET_RE.search(lowered):
+        return {
+            "mode": "fleet",
+            "reason": "explicit fleet or parallel-agent request",
+            "plan_only": False,
+            "actions": actions,
+        }
+    if plan_only:
+        return {
+            "mode": "autopilot",
+            "reason": "explicit persistent plan-only request",
+            "plan_only": True,
+            "actions": actions,
+        }
+    if _EXECUTION_NO_BACKGROUND_RE.search(lowered):
+        return {
+            "mode": "workbench",
+            "reason": "explicit foreground or one-shot request",
+            "plan_only": False,
+            "actions": actions,
+        }
+    if _EXECUTION_AUTOPILOT_RE.search(lowered):
+        return {
+            "mode": "autopilot",
+            "reason": "explicit autonomous or end-to-end request",
+            "plan_only": False,
+            "actions": actions,
+        }
+    compound = len(actions) >= 3 and (
+        bool(_EXECUTION_SEQUENCE_RE.search(lowered))
+        or len(value) >= 180
+        or value.count(",") >= 2
+    )
+    if compound:
+        return {
+            "mode": "decide",
+            "reason": "compound multi-stage work needs a bounded local mode decision",
+            "plan_only": False,
+            "actions": actions,
+        }
+    return {
+        "mode": "workbench",
+        "reason": "bounded foreground task",
+        "plan_only": False,
+        "actions": actions,
+    }

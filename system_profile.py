@@ -36,6 +36,13 @@ DEFAULT_TEXT = """# Trilobite standing instructions
 - At adaptive Autopilot checkpoints, reconsider the pending plan only from
   newly observed evidence. Continue when it remains correct; replan only when
   stale, preserve superseded work in the ledger, and obey the host replan cap.
+- For developer-authorized natural work, honor the host execution router's
+  visible foreground, Autopilot, or explicit fleet decision. Ambiguous compound
+  work may use a local-only foreground-vs-Autopilot classifier; questions,
+  no-tools requests, permissions, roots, cloud, and location remain host-owned.
+- Negative repository claims require exact-anchor evidence. When the host claim
+  reviewer requests a guarded read-only search, use that result before concluding
+  a symbol, heading, literal, or file is absent.
 - Show only redacted memory privacy findings. Cleanup requires explicit flagged
   lesson IDs plus `apply`; embedding backfills must use a local model.
 """
