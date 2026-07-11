@@ -184,4 +184,63 @@ void main() {
     expect(status.interruptedAgents, 0);
     expect(status.capacity, isNull);
   });
+
+  test('autopilot status preserves lifecycle budgets tasks and reports', () {
+    final status = AutopilotStatus.fromJson({
+      'active_runs': 1,
+      'resumable_runs': 2,
+      'total_runs': 4,
+      'total_listed': 4,
+      'database': r'C:\state\autopilot.db',
+      'latest': {
+        'id': 'auto-abc123',
+        'objective': 'Implement and validate the feature',
+        'project': 'demo',
+        'tier': 'code',
+        'policy': 'workspace',
+        'allow_web': true,
+        'status': 'running',
+        'phase': 'execute',
+        'cycles': 2,
+        'failures': 1,
+        'max_failures': 3,
+        'max_tasks': 12,
+        'summary': 'working',
+        'final_report': 'autopilot end report',
+        'last_error': '',
+        'criteria': ['tests pass'],
+        'plan': [
+          {
+            'id': 'task-01',
+            'title': 'Inspect',
+            'instruction': 'Read the source',
+            'kind': 'inspect',
+            'status': 'passed',
+            'attempts': 1,
+            'output': 'done',
+            'error': '',
+          },
+        ],
+      },
+      'runs': const [],
+      'events': [
+        {'event_id': 9, 'kind': 'task_pass', 'message': 'task-01 passed'},
+      ],
+    });
+
+    expect(status.activeRuns, 1);
+    expect(status.resumableRuns, 2);
+    expect(status.totalRuns, 4);
+    expect(status.latest?.id, 'auto-abc123');
+    expect(status.latest?.isActive, isTrue);
+    expect(status.latest?.tasks.single.status, 'passed');
+    expect(status.latest?.criteria, ['tests pass']);
+    expect(status.events.single.message, 'task-01 passed');
+  });
+
+  test('system info accepts older servers without autopilot state', () {
+    final info = SystemInfo.fromJson(const {});
+    expect(info.autopilot, isNull);
+    expect(info.models, isEmpty);
+  });
 }

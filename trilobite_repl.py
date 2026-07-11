@@ -76,6 +76,7 @@ HELP = """commands:
   /commands [filter] list available commands by category, name, or risk
   /activity          show active/latest tool calls and file changes
   /work <task>       execute a guarded tool-using workflow with checklist/report
+  /autopilot ...     persistent plan/run/status/resume/pause/cancel autonomy
   /report            show the latest grounded end report and action transcript
   /checklist [id]    show the current or selected persistent checklist
   /inventory [path]  summarize a guarded workspace with explicit scan budgets
@@ -513,6 +514,10 @@ def main():
                 print(server.control_command(line, session=session_id, project=project))
             elif cmd in ("/activity", "/tools"):
                 print(server.activity_status())
+            elif cmd in ("/autopilot", "/auto"):
+                print(server.control_command(
+                    line, session=session_id, project=project,
+                ))
             elif cmd in ("/weather", "/forecast"):
                 print(server.control_command(
                     line, session=session_id, project=project,

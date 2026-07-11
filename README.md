@@ -97,6 +97,31 @@ The learning loop above is *cross-task* memory. On top of it trilobite also has:
 3. **Integrated with Claude/Codex** — the MCP `local-llm` tools include `workbench_agent`, budgeted workspace inventory, guarded tree/range/text/script/program/image inspection, argv-only program/script execution, persistent checklists, exact activity reports, agent/master orchestration, universal artifact generation, grounded game generation, bounded code/project runners, workflows, web tools, self-healing, privacy-safe memory review, local embedding backfill, and the remaining learning/memory surfaces. `master_orchestrate` can delegate to parallel subagents and audit their outputs; artifact and game tools create persistent assets/projects and accept only grounded checks. Local tiers remain the default for private workspace code.
 4. **Mobile & desktop app (GUI)** — a cross-platform [Flutter client](app/) that talks to a hosted `trilobite_serve.py`. One codebase → an **Android APK** and **Windows/Linux/macOS** desktop apps, built in CI with downloadable installers. See [app/README.md](app/README.md).
 
+### Persistent autopilot
+
+`/autopilot run <objective>` turns one outcome into a durable, model-planned task
+ledger. A local planner selects measurable success criteria and ordered tasks;
+the guarded workbench executes one task at a time; a local reviewer may retry or
+replan; deterministic host code alone enforces tool/root allowlists, local-only
+tiers, cycle/task/failure budgets, mutation validation, pause/cancel, and the
+completion gate. Runs live in a process-safe private `autopilot.db` and survive
+server replacement. Stale owners become `interrupted` and are never silently
+replayed.
+
+```text
+/autopilot status [id]
+/autopilot plan [--observe] [--no-web] <objective>
+/autopilot run [--observe] [--no-web] <objective>
+/autopilot resume|pause|cancel <id>
+```
+
+Workspace mode can inspect, create, and edit through bounded tools, but cannot
+delete files, change accounts/permissions/memory, launch fleets, use cloud tiers,
+or infer location. Observe mode is read-only. The Flutter System page exposes the
+same goal composer, persisted checklist, budgets, events, end report, and lifecycle
+controls. Starting, resuming, pausing, or cancelling through hosted HTTP requires a
+developer/admin account; status remains read-only.
+
 ### General artifact forge and greenfield games
 
 `artifact_generate(name, brief)` turns a free-form request into a deterministic,
@@ -383,6 +408,7 @@ Flat, mostly-stdlib Python modules (plus `mcp`):
 | `reward.py` / `reflection.py` | outcome → score; distill deduped lessons |
 | `orchestrator.py` | the retrieve → augment → generate → capture flow |
 | `master_orchestrator.py` / `fleet_store.py` | RAM/CPU-bounded fleet execution plus a process-shared restart/recovery ledger |
+| `autopilot_controller.py` / `autopilot_store.py` | Persistent local goal planning, guarded execution/review, evidence gates, budgets, and explicit lifecycle control |
 | `creative_router.py` | conservative natural-language routing from concrete master build requests into grounded artifact, game, or game-campaign workflows |
 | `server.py` / `workbench.py` / `activity_tracker.py` / `code_runner.py` / `web_tools.py` / `workflow_store.py` / `self_heal.py` | MCP workbench/agent tools, guarded discovery and execution, persistent checklists, exact action/end reports, bounded code/project runners, web tools, workflows, and self-healing |
 | `server.py` | MCP server: `offload` / `trilobite` / `parallel_run_code` / `parallel_generate_run` / `parallel_generate_run_languages` / `campaign_generate_compile_execute_record` / `learn_tiers` / `record_outcome` / `trilobite_stats` / `trilobite_sessions` / `trilobite_remember_fact` |

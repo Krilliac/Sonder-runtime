@@ -1,12 +1,16 @@
 import 'dart:convert';
+import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:trilobite/main.dart';
 import 'package:trilobite/models.dart';
 import 'package:trilobite/api.dart';
+import 'package:trilobite/settings.dart';
 import 'package:trilobite/system_screen.dart';
 
 void main() {
@@ -41,6 +45,163 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.text('New chat'), findsOneWidget);
+  });
+
+  testWidgets('System exposes persistent autopilot goal controls',
+      (tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+
+    await tester.pumpWidget(const TrilobiteApp(manageLocalServer: false));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('System'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final list = find.byType(Scrollable).first;
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('autopilot-goal')),
+      240,
+      scrollable: list,
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.text('Autopilot'), findsOneWidget);
+    expect(find.byKey(const Key('autopilot-goal')), findsOneWidget);
+    expect(find.byKey(const Key('autopilot-plan')), findsOneWidget);
+    expect(find.byKey(const Key('autopilot-run')), findsOneWidget);
+    expect(find.text('Workspace'), findsOneWidget);
+    expect(find.text('Observe only'), findsOneWidget);
+  });
+
+  testWidgets('Completed autopilot run renders its persisted ledger',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 1800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final info = SystemInfo.fromJson({
+      'status': 'Ollama local runtime ready',
+      'stats': '805 checks passed',
+      'learn_tiers': 'local tiers: fast, code, general',
+      'improvements': 'No urgent improvement items detected.',
+      'autopilot': {
+        'active_runs': 0,
+        'resumable_runs': 0,
+        'total_runs': 1,
+        'total_listed': 1,
+        'latest': {
+          'id': 'auto-885ca53e8ef6',
+          'objective':
+              'Inspect the autonomous controller and verify its completion gates.',
+          'project': 'trilobite',
+          'tier': 'code',
+          'policy': 'observe',
+          'allow_web': false,
+          'status': 'completed',
+          'phase': 'completed',
+          'cycles': 3,
+          'failures': 0,
+          'max_failures': 2,
+          'max_tasks': 3,
+          'summary': 'Objective completed with host-verified task evidence.',
+          'final_report': 'autopilot end report\n3 tasks passed\n0 failures',
+          'last_error': '',
+          'criteria': [
+            'Persistence service exists.',
+            'Completion gates are enforced.',
+          ],
+          'plan': [
+            {
+              'id': 'task-01',
+              'title': 'Verify file existence',
+              'instruction': 'Inspect both modules.',
+              'kind': 'inspect',
+              'status': 'passed',
+              'attempts': 1,
+            },
+            {
+              'id': 'task-02',
+              'title': 'Check persistence',
+              'instruction': 'Read the lifecycle store.',
+              'kind': 'research',
+              'status': 'passed',
+              'attempts': 1,
+            },
+            {
+              'id': 'task-03',
+              'title': 'Validate completion gates',
+              'instruction': 'Ground every success criterion.',
+              'kind': 'validate',
+              'status': 'passed',
+              'attempts': 1,
+            },
+          ],
+        },
+        'runs': const [],
+        'events': [
+          {'event_id': 1, 'kind': 'created', 'message': 'goal created'},
+          {'event_id': 2, 'kind': 'planned', 'message': 'plan accepted'},
+          {
+            'event_id': 3,
+            'kind': 'completed',
+            'message': 'evidence gates passed'
+          },
+        ],
+      },
+      'models': const [],
+    });
+    final captureKey = GlobalKey();
+    final scheme = ColorScheme.fromSeed(
+      seedColor: const Color(0xFF63D6C8),
+      brightness: Brightness.dark,
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData(
+          useMaterial3: true,
+          colorScheme: scheme,
+          brightness: Brightness.dark,
+          scaffoldBackgroundColor: const Color(0xFF0B1117),
+          cardTheme: CardThemeData(
+            elevation: 0,
+            color: const Color(0xFF121B23),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(18),
+              side: const BorderSide(color: Color(0xFF24343D)),
+            ),
+          ),
+        ),
+        home: RepaintBoundary(
+          key: captureKey,
+          child: SystemScreen(
+            settings: Settings(),
+            initialInfo: info,
+            liveUpdates: false,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Persistent checklist'), findsOneWidget);
+    expect(
+      find.text('3/3 tasks settled • 3 cycles • 0/2 failures'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Validate completion gates'), findsWidgets);
+
+    if (Platform.environment['TRILOBITE_CAPTURE_UI'] == '1') {
+      await tester.runAsync(() async {
+        final boundary = captureKey.currentContext!.findRenderObject()!
+            as RenderRepaintBoundary;
+        final image = await boundary.toImage(pixelRatio: 1);
+        final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+        final output = File('build/ui-smoke-autopilot.png');
+        await output.parent.create(recursive: true);
+        await output.writeAsBytes(bytes!.buffer.asUint8List(), flush: true);
+        image.dispose();
+      });
+    }
   });
 
   testWidgets('Settings always has an explicit return to main chat',

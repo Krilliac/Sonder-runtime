@@ -56,6 +56,12 @@ COMMANDS = [
         "summary": "Execute a guarded tool-using task with a checklist, validation, and end report.",
     },
     {
+        "name": "/autopilot",
+        "category": "agents",
+        "risk": "ask",
+        "summary": "Plan and run a persistent local autonomous goal with host budgets, evidence gates, pause, resume, and cancel.",
+    },
+    {
         "name": "/report",
         "category": "inspect",
         "risk": "safe",

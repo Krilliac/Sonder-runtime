@@ -29,6 +29,10 @@ DEFAULT_TEXT = """# Trilobite standing instructions
   diversity separately from RAM/CPU-limited worker slots, honor cooperative
   cancellation, persist cross-process state, never auto-replay interrupted work,
   and serialize compile-heavy jobs under memory pressure.
+- Use `/autopilot run` for an explicitly requested persistent goal. Decompose,
+  execute, review, and replan within the host's local-tier, tool, root, task,
+  failure, and cycle limits. Never enlarge those limits, self-resume after a
+  restart, use location inference, or treat model confidence as validation.
 - Show only redacted memory privacy findings. Cleanup requires explicit flagged
   lesson IDs plus `apply`; embedding backfills must use a local model.
 """

@@ -38,6 +38,11 @@ cloud tiers and invoked web tools contact their named external services.
   `/inventory`, `/privacy`, `/embeddings`, `/improve`,
   `/agents`, `/capacity`, `/agentcancel`, `/agentretry`, `/train 10` and `/help`, start/stop the bundled desktop server,
   launch endless training, and pull updates from Git.
+- **Persistent Autopilot workspace**: compose a high-level goal, choose guarded
+  workspace or observe-only policy, enable/disable public web access, plan or run
+  it, then inspect its persisted success gates, task ledger, cycle/failure
+  budgets, events, and evidence-backed end report. Active runs can be paused or
+  cancelled; interrupted/paused work resumes only after an explicit tap.
 - **Live footer**: chat shows context %, active agents, project scope, token
   estimates, selected model and latest agent activity while work is running.
 - **Restart-safe fleets**: the System panel reads the shared private fleet ledger,
