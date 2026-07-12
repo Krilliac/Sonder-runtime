@@ -55,6 +55,17 @@ _TRAILING_TIME = re.compile(
     r"this weekend|next week)\b.*$",
     re.IGNORECASE,
 )
+# Post-hoc guard: a generated reply that wrongly claims the assistant has no
+# internet/web/real-time access. Deliberately narrow (see denies_web_access);
+# phrases like "web tools are disabled" intentionally do NOT match.
+_WEB_DENIAL = re.compile(
+    r"\bas an ai(?: language)? model\b"
+    r"|\b(?:do(?:es)?(?:n['’]t| not)|can(?:['’]t|not)|unable to)"
+    r"(?:\s+\w+){0,2}?\s+(?:have|access|browse|reach|use|connect to)"
+    r"(?:\s+\w+){0,3}?\s+(?:internet|web|real[-\s]?time)\b"
+    r"|\bno\s+(?:direct\s+)?(?:internet|web)\s+access\b",
+    re.IGNORECASE,
+)
 
 
 def _content(message) -> str:
@@ -169,3 +180,14 @@ def classify(prompt: str, history=None) -> dict | None:
     if _CURRENT_INFO.search(text):
         return {"kind": "research", "query": text}
     return None
+
+
+def denies_web_access(reply) -> bool:
+    """Return True when a model reply claims it lacks internet/web access.
+
+    Used as a post-hoc safety net for denial phrasings the pre-model routing
+    regexes miss. Kept narrow on purpose: callers must additionally require
+    web_tools.enabled() and a positive classify() signal before re-dispatching,
+    so honest "browsing is disabled" replies are never rewritten.
+    """
+    return bool(_WEB_DENIAL.search(str(reply or "")))

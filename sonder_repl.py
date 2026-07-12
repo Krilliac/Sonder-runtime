@@ -69,6 +69,7 @@ HELP = """commands:
   /trace [on|off]    toggle trace mode (bare = on); shows retrieval + prompt
   /strict [on|off]   toggle strict mode (bare = on); pins to the sonder alias
   /persona [name]    show/set active persona (coder/explainer/reviewer/teacher)
+  /location [on|off] allow approximate IP location for "my area" weather answers
   /stats             show Sonder Runtime's learning stats
   /context           show context, session, and memory health meters
   /contextsize [N]   show/set requested context (8k..1m; native num_ctx is clamped)
@@ -320,6 +321,7 @@ def main():
     global CURRENT_TOKEN
     trace = False
     strict = None  # None = env default
+    location_consent = None  # None = env default (SONDER_LOCATION_CONSENT)
     persona = personas.DEFAULT
     last_iid = None
     last_response = None
@@ -448,6 +450,21 @@ def main():
                 apply_strict(_on_off(arg, strict))
             elif cmd == "/persona":
                 do_persona(arg)
+            elif cmd == "/location":
+                a = (arg or "").strip().lower()
+                if a in ("on", "off"):
+                    location_consent = a == "on"
+                elif a:
+                    print("usage: /location [on|off]")
+                    continue
+                effective = (
+                    server._env_location_consent()
+                    if location_consent is None else location_consent
+                )
+                print("approximate IP location: %s%s" % (
+                    "on" if effective else "off",
+                    " (env default)" if location_consent is None else "",
+                ))
             elif cmd == "/stats":
                 print(server.sonder_stats())
             elif cmd == "/context":
@@ -823,7 +840,8 @@ def main():
             continue
 
         out = server.sonder(line, trace=trace, strict=strict, persona=persona,
-                               session=session_id, project=project)
+                            session=session_id, project=project,
+                            location_consent=location_consent)
         if out.startswith("ERROR"):
             print(out)
             continue

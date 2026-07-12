@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import assetgen
 import code_runner
+import import_autofix
 
 
 LANGUAGES = {"python", "javascript", "cpp", "csharp"}
@@ -92,10 +93,43 @@ def normalize_dimension(dimension: str) -> str:
     return value
 
 
+def _strip_comments(code: str, language: str) -> str:
+    """Drop comments before the forbidden-token scan so prose like
+    '// no nlohmann allowed' cannot hard-fail an otherwise clean candidate.
+    (The hardened prompt names the banned libraries, so models echo them.)"""
+    text = code or ""
+    if language == "python":
+        return re.sub(r"#[^\n]*", "", text)
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+    return re.sub(r"//[^\n]*", "", text)
+
+
 def validate_in_house(code: str, language: str) -> list[str]:
     language = normalize_language(language)
-    lowered = (code or "").lower()
+    lowered = _strip_comments(code or "", language).lower()
     return [token for token in FORBIDDEN[language] if token in lowered]
+
+
+REMEDIATION = {
+    "python": "Use only the Python standard library (json, math, pathlib, tkinter).",
+    "javascript": "Use only Node.js built-in modules (fs, path).",
+    "cpp": (
+        "Use only C++ standard headers; read assets/scene.json as plain text "
+        "with <fstream> exactly like the provided scaffold does — no "
+        "nlohmann/json, Boost, GLM, SDL, or any other external library."
+    ),
+    "csharp": "Use only the .NET base class library (System, System.IO).",
+}
+
+
+def forbidden_remediation(tokens: list[str], language: str) -> str:
+    """Actionable repair instruction for a forbidden-token rejection, so the
+    retry prompt tells the model HOW to fix it, not just which token tripped."""
+    language = normalize_language(language)
+    return (
+        "third-party dependency token(s): %s. Remove every use of them. %s"
+        % (", ".join(tokens), REMEDIATION[language])
+    )
 
 
 def contract_issues(code: str, language: str) -> list[str]:
@@ -127,18 +161,39 @@ def contract_issues(code: str, language: str) -> list[str]:
     return issues
 
 
+# usage-pattern -> required standard header, applied pre-compile. Word-bounded
+# regexes plus the "header not already present" guard keep this double-include
+# safe; an occasionally unnecessary standard include is harmless.
+_CPP_HEADER_PATTERNS = (
+    (r"\b(?:u?int(?:8|16|32|64)_t)\b", "<cstdint>"),
+    (r"\bassert\s*\(", "<cassert>"),
+    (r"\b(?:memcpy|memset|memmove|strcpy|strncpy|strlen|strcmp|strncmp)\s*\(", "<cstring>"),
+    (r"\b(?:printf|fprintf|sprintf|snprintf)\s*\(", "<cstdio>"),
+    (r"\b(?:malloc|calloc|realloc|srand|rand|exit)\s*\(", "<cstdlib>"),
+    (r"\bstd::array\b", "<array>"),
+    (r"\bstd::filesystem\b", "<filesystem>"),
+    (r"\bstd::(?:multi)?map\b", "<map>"),
+    (r"\bstd::unordered_map\b", "<unordered_map>"),
+    (r"\bstd::(?:sort|max|min|clamp|find|fill|reverse|max_element|min_element)\b", "<algorithm>"),
+    (r"\bstd::(?:sin|cos|tan|atan2?|sqrt|fabs|pow|floor|ceil|fmod|round|abs)\b", "<cmath>"),
+    (r"\bstd::(?:string|to_string|getline|stoi|stod)\b", "<string>"),
+    (r"\bstd::vector\b", "<vector>"),
+    (r"\bstd::(?:setw|setprecision|setfill)\b", "<iomanip>"),
+    (r"\bstd::(?:cout|cerr|cin|endl)\b", "<iostream>"),
+    (r"\bstd::[io]?fstream\b", "<fstream>"),
+    (r"\bstd::[io]?stringstream\b", "<sstream>"),
+)
+
+
 def autofix_standard_library(code: str, language: str) -> str:
     """Apply only mechanical standard-header fixes with no design judgment."""
     language = normalize_language(language)
     fixed = code or ""
     if language == "cpp":
         headers = []
-        if re.search(r"\b(?:u?int(?:8|16|32|64)_t)\b", fixed) and "<cstdint>" not in fixed:
-            headers.append("#include <cstdint>")
-        if "std::array" in fixed and "<array>" not in fixed:
-            headers.append("#include <array>")
-        if "std::filesystem" in fixed and "<filesystem>" not in fixed:
-            headers.append("#include <filesystem>")
+        for pattern, header in _CPP_HEADER_PATTERNS:
+            if header not in fixed and re.search(pattern, fixed):
+                headers.append("#include %s" % header)
         if headers:
             fixed = "\n".join(headers) + "\n" + fixed
     return fixed
@@ -384,7 +439,10 @@ def _valid_frame(path: str) -> bool:
         return False
 
 
-def run_project(project: dict, code: str, timeout: int = 20) -> dict:
+_CPP_COMPILE_ERROR_RE = re.compile(r"\berror\s*:|\berror C\d{4}\b|\bfatal error\b")
+
+
+def _run_project_once(project: dict, code: str, timeout: int) -> dict:
     save_source(project, code)
     result = code_runner.run_code(
         code,
@@ -406,6 +464,27 @@ def run_project(project: dict, code: str, timeout: int = 20) -> dict:
         "output": output,
         "runner": result,
     }
+
+
+def run_project(project: dict, code: str, timeout: int = 20) -> dict:
+    run = _run_project_once(project, code, timeout)
+    if (not run["ok"] and project["language"] == "cpp"
+            and _CPP_COMPILE_ERROR_RE.search(run["output"])):
+        # cheap mechanical recovery before spending a model repair round: if the
+        # compiler named an undeclared stdlib symbol, prepend its header and
+        # re-run once (mirrors solver.solve's Python missing-import recovery).
+        fixed = import_autofix.fix_cpp_missing_headers(code, run["output"])
+        if fixed != code:
+            retry = _run_project_once(project, fixed, timeout)
+            retry["header_autofix"] = True
+            run = retry
+    if (not run["ok"] and project["language"] == "cpp"
+            and _CPP_COMPILE_ERROR_RE.search(run["output"])):
+        # keep the repair note grounded in the actual errors: bounded repair
+        # prompts truncate this output, and warnings must not push the real
+        # error past the cut. Full raw output stays in run["runner"].
+        run["output"] = import_autofix.distill_cpp_errors(run["output"])
+    return run
 
 
 def run_reference(name: str, language: str, dimension: str, theme: str = "arcane",

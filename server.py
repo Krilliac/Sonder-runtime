@@ -1577,6 +1577,81 @@ def offload(
     return with_footer(response, iid)
 
 
+def _env_location_consent() -> bool:
+    """Opt-in approximate-IP-location consent for the local MCP/REPL surfaces.
+
+    Off by default to preserve the privacy contract. SONDER_LOCATION_CONSENT is
+    canonical; the former TRILOBITE_LOCATION_CONSENT name remains a compatibility
+    fallback for existing local launchers.
+    """
+    raw = os.environ.get("SONDER_LOCATION_CONSENT")
+    if raw is None:
+        raw = os.environ.get("TRILOBITE_LOCATION_CONSENT", "")
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _session_messages_light(conn, session_id, max_turns=None):
+    """Recent session turns as chat messages, without summarization side effects."""
+    msgs = []
+    for task, resp in memory_store.session_history(
+        conn, session_id, MAX_TURNS if max_turns is None else max_turns
+    ):
+        msgs.append({"role": "user", "content": task})
+        msgs.append({"role": "assistant", "content": resp})
+    return msgs
+
+
+def _route_chat_web(prompt, session, project, location_consent):
+    """Pre-model web routing for the local chat surfaces (MCP tool + REPL).
+
+    Mirrors the serve handler's chat_web_response dispatch so the local model is
+    never asked to answer weather/capability/current-info prompts it has no
+    tools for (it would wrongly claim to have no internet access). Gated to
+    non-work prompts so coding requests that merely mention e.g. "weather"
+    still reach the model. A routed reply is stored on the session thread (so a
+    bare follow-up location like "Chicago, IL" still routes on the next turn)
+    but is NOT captured as a learnable interaction: no footer is returned, so
+    record_outcome/lesson distillation can never ingest canned tool output, and
+    the row has neither embedding nor outcome so recall/training skip it too.
+    Returns the routed reply, or None to continue to the model.
+    """
+    if intents.classify_work(prompt):
+        return None
+    session_id = _resolve_session(session)
+    history = None
+    if session_id:
+        conn = _open_db()
+        try:
+            history = _session_messages_light(conn, session_id)
+        finally:
+            conn.close()
+    reply = chat_web_response(
+        prompt,
+        history=history,
+        tier="code",
+        location_consent=location_consent,
+        # This is the machine owner's own local surface (stdio MCP / REPL), so
+        # a server-side lookup is allowed -- but still only behind the explicit
+        # consent flag above.
+        allow_server_location_lookup=location_consent,
+    )
+    if reply is None:
+        return None
+    if session_id:
+        conn = _open_db()
+        try:
+            memory_store.touch_session(conn, session_id, _resolve_project(project))
+            memory_store.log_interaction(
+                conn, memory_store.new_id(), prompt, "", reply, "web-routed",
+                session_id=session_id,
+            )
+        except Exception:
+            pass
+        finally:
+            conn.close()
+    return reply
+
+
 def _sonder_impl(
     prompt: str,
     system: str = "",
@@ -1590,6 +1665,7 @@ def _sonder_impl(
     session: str = "",
     project: str = "",
     tier: str = "",
+    location_consent: bool = None,
 ) -> str:
     """Ask through Sonder Runtime's local learning loop.
 
@@ -1630,11 +1706,23 @@ def _sonder_impl(
 
     persona selects one of personas.names() (e.g. "explainer", "reviewer", "teacher")
     to steer tone; its system prompt is prepended ahead of `system`/trace instructions.
+
+    Chat prompts with an explicit web intent (weather, "do you have internet?",
+    current-info) are answered by the live tool dispatch (chat_web_response)
+    instead of plain generation, exactly like the serve/app surface.
+    location_consent opts in to approximate IP location for "my area" weather
+    (None = env SONDER_LOCATION_CONSENT, default off).
     """
     _maybe_live_reload()
     command = control_command(prompt, session=session, project=project)
     if command is not None:
         return _append_activity(command)
+    location_consent = (
+        _env_location_consent() if location_consent is None else bool(location_consent)
+    )
+    web_reply = _route_chat_web(prompt, session, project, location_consent)
+    if web_reply is not None:
+        return _append_activity(web_reply)
     tgt_model, cloud, augment, tier_label = _serve_target(tier, strict)
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()
@@ -1672,6 +1760,14 @@ def _sonder_impl(
     finally:
         conn.close()
 
+    replacement = _web_denial_guard(
+        prompt, response, history=history,
+        location_consent=location_consent,
+        allow_server_location_lookup=location_consent,
+    )
+    if replacement is not None:
+        return _append_activity(replacement)
+
     if trace:
         params = {
             "temperature": temperature,
@@ -1699,6 +1795,7 @@ def sonder(
     session: str = "",
     project: str = "",
     tier: str = "",
+    location_consent: bool = None,
 ) -> str:
     """Ask through Sonder Runtime and show observable activity for the response."""
     command = control_command(prompt, session=session, project=project)
@@ -1726,6 +1823,7 @@ def sonder(
             session=session,
             project=project,
             tier=tier,
+            location_consent=location_consent,
         )
     return _append_activity(result, response=response, replace=True)
 
@@ -1796,6 +1894,11 @@ def _answer_with_history_impl(
                 "running? (the tray app / `ollama serve`)" % (BASE, e))
     finally:
         conn.close()
+    # The serve handler already routes web intents pre-model (no double routing
+    # here); this is only the post-hoc net for denial phrasings it missed.
+    replacement = _web_denial_guard(prompt, response, history=history)
+    if replacement is not None:
+        return _append_activity(replacement)
     if trace and trace_ctx is not None:
         params = {
             "temperature": 0.2,
@@ -6003,6 +6106,40 @@ def chat_web_response(
         allow_web=True,
         required_tool_names=("web_search", "web_fetch"),
     )
+
+
+def _web_denial_guard(
+    prompt,
+    reply,
+    history=None,
+    tier: str = "code",
+    location_consent: bool = False,
+    allow_server_location_lookup: bool = False,
+):
+    """Replace a reply that wrongly claims no web access with a tool-backed one.
+
+    Post-hoc safety net for denial phrasings the pre-model regexes missed.
+    Deliberately narrow to avoid rewriting legitimate answers: web tools must
+    actually be enabled, the reply must match web_intents.denies_web_access,
+    AND the prompt itself must carry a positive web intent. Returns the
+    replacement text (never captured / no footer) or None to keep the reply.
+    """
+    if not web_intents.denies_web_access(reply):
+        return None
+    if not web_tools.enabled():
+        return None
+    if web_intents.classify(prompt, history=history) is None:
+        return None
+    try:
+        return chat_web_response(
+            prompt,
+            history=history,
+            tier=tier,
+            location_consent=location_consent,
+            allow_server_location_lookup=allow_server_location_lookup,
+        )
+    except Exception:
+        return None
 
 
 def mcp_runtime_data() -> dict:
