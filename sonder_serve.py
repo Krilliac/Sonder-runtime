@@ -584,6 +584,57 @@ def _on_off(arg, current):
     return current
 
 
+_SUPPORTED_CHAT_ROLES = frozenset({"system", "user", "assistant"})
+
+
+def _validate_chat_messages(messages):
+    """Validate the supported OpenAI-compatible chat message subset.
+
+    Sonder currently accepts text-only system, user, and assistant messages.
+    Reject unsupported multimodal/tool shapes at the HTTP boundary so malformed
+    requests receive a structured 400 instead of reaching history helpers.
+    """
+    if not isinstance(messages, list):
+        raise HTTPRequestError(400, "messages must be an array")
+
+    last_user_content = None
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            raise HTTPRequestError(
+                400, "messages[%d] must be an object" % index,
+            )
+        if "role" not in message:
+            raise HTTPRequestError(
+                400, "messages[%d].role is required" % index,
+            )
+        role = message["role"]
+        if not isinstance(role, str) or role not in _SUPPORTED_CHAT_ROLES:
+            raise HTTPRequestError(
+                400,
+                "messages[%d].role must be one of: assistant, system, user"
+                % index,
+            )
+        if "content" not in message:
+            raise HTTPRequestError(
+                400, "messages[%d].content is required" % index,
+            )
+        content = message["content"]
+        if not isinstance(content, str):
+            raise HTTPRequestError(
+                400,
+                "messages[%d].content must be a string; multimodal content is not supported"
+                % index,
+            )
+        if role == "user":
+            last_user_content = content
+
+    if last_user_content is None or not last_user_content.strip():
+        raise HTTPRequestError(
+            400, "messages must contain a non-empty user message",
+        )
+    return messages
+
+
 def _last_user_message(messages):
     for msg in reversed(messages or []):
         if msg.get("role") == "user":
@@ -1463,7 +1514,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send_auth_error()
             return
         account = context["account"]
-        messages = req.get("messages", [])
+        try:
+            messages = _validate_chat_messages(req.get("messages"))
+        except HTTPRequestError as error:
+            self._send_json_payload(
+                {"error": {"message": error.message, "type": error.error_type}},
+                status=error.status,
+            )
+            return
         prompt = _last_user_message(messages)
         if _dangerous_http_slash(prompt) and not _developer_authorized(context):
             self._send_json_payload(

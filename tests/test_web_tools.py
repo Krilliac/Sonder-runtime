@@ -1,6 +1,8 @@
 import base64
+import gzip
 import json
 import urllib.parse
+import zlib
 
 import pytest
 
@@ -21,7 +23,7 @@ def public_dns(monkeypatch):
 
 class FakeResponse:
     def __init__(self, body, content_type="text/html"):
-        self._body = body.encode("utf-8")
+        self._body = body if isinstance(body, bytes) else body.encode("utf-8")
         self.headers = {"Content-Type": content_type}
 
     def read(self, n=-1):
@@ -150,6 +152,126 @@ def test_web_fetch_strips_html(monkeypatch):
     assert "Title" in text
     assert "Hello" in text
     assert "script" not in text
+
+
+@pytest.mark.parametrize(("body", "content_type", "expected"), [
+    ("café".encode("utf-8"), "text/plain; charset=UTF-8", "café"),
+    (b"\xef\xbb\xbfhello", "text/plain", "hello"),
+    ("hello ☃".encode("utf-16"), "text/plain", "hello ☃"),
+    ("hello ☃".encode("utf-16-le"), "text/plain; charset=utf-16le", "hello ☃"),
+    (b"caf\xe9", "text/plain; charset=iso-8859-1", "café"),
+    (b"price \x8010", "text/plain; charset=windows-1252", "price €10"),
+    (b'{"release":"3.14"}', "application/problem+json", '"release":"3.14"'),
+    (
+        b'<?xml version="1.0"?><feed><title>Release 3.14</title></feed>',
+        "application/atom+xml",
+        "Release 3.14",
+    ),
+])
+def test_web_fetch_decodes_allowlisted_text_formats(
+    monkeypatch, body, content_type, expected,
+):
+    monkeypatch.setattr(
+        web_tools, "_request", lambda *_args, **_kwargs: (body, content_type),
+    )
+
+    assert expected in web_tools.web_fetch("https://example.com/page")
+
+
+def test_web_fetch_uses_allowlisted_html_meta_charset(monkeypatch):
+    body = b'<html><head><meta charset="windows-1252"></head><body>\x93Hi\x94</body></html>'
+    monkeypatch.setattr(
+        web_tools, "_request", lambda *_args, **_kwargs: (body, "text/html"),
+    )
+
+    assert web_tools.web_fetch("https://example.com/page") == "“Hi”"
+
+
+@pytest.mark.parametrize("content_type", [
+    "application/pdf", "image/png", "application/octet-stream", "audio/mpeg",
+])
+def test_web_fetch_rejects_non_text_media_types(monkeypatch, content_type):
+    monkeypatch.setattr(
+        web_tools,
+        "_request",
+        lambda *_args, **_kwargs: (b"not readable text", content_type),
+    )
+
+    with pytest.raises(ValueError, match="non-text HTTP media type"):
+        web_tools.web_fetch("https://example.com/file")
+
+
+def test_web_fetch_rejects_binary_signature_even_if_mislabeled(monkeypatch):
+    monkeypatch.setattr(
+        web_tools,
+        "_request",
+        lambda *_args, **_kwargs: (b"%PDF-1.7 binary", "text/plain"),
+    )
+
+    with pytest.raises(ValueError, match="binary web content"):
+        web_tools.web_fetch("https://example.com/file")
+
+
+def test_web_fetch_rejects_binary_controls_even_if_mislabeled(monkeypatch):
+    monkeypatch.setattr(
+        web_tools,
+        "_request",
+        lambda *_args, **_kwargs: (
+            b"readable prefix\x01\x02binary suffix",
+            "text/plain; charset=latin-1",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="binary control bytes"):
+        web_tools.web_fetch("https://example.com/file")
+
+
+@pytest.mark.parametrize(("body", "content_type", "message"), [
+    (b"hello", "text/plain; charset=shift_jis", "unsupported HTTP text charset"),
+    (b"hello", "", "missing Content-Type"),
+    (b"\xef\xbb\xbfhello", "text/plain; charset=latin-1", "BOM conflicts"),
+    (b"\xff\xfe\x00\x00x", "text/plain", "UTF-32"),
+])
+def test_web_fetch_fails_closed_on_unsafe_encoding_metadata(
+    monkeypatch, body, content_type, message,
+):
+    monkeypatch.setattr(
+        web_tools,
+        "_request",
+        lambda *_args, **_kwargs: (body, content_type),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        web_tools.web_fetch("https://example.com/page")
+
+
+@pytest.mark.parametrize(("body", "content_type"), [
+    (b"   \r\n\t", "text/plain; charset=utf-8"),
+    (b"<html><script>only_code()</script></html>", "text/html"),
+])
+def test_web_fetch_rejects_pages_without_readable_text(
+    monkeypatch, body, content_type,
+):
+    monkeypatch.setattr(
+        web_tools, "_request", lambda *_args, **_kwargs: (body, content_type),
+    )
+
+    with pytest.raises(ValueError, match="no readable text"):
+        web_tools.web_fetch("https://example.com/empty")
+
+
+def test_http_content_encoding_decodes_gzip_and_deflate():
+    payload = b"<html><body>official release 3.14</body></html>"
+
+    assert web_tools._decode_content_encoding(gzip.compress(payload), "gzip") == payload
+    assert web_tools._decode_content_encoding(zlib.compress(payload), "deflate") == payload
+
+
+def test_http_content_encoding_rejects_expansion_bomb():
+    compressed = gzip.compress(b"x" * (web_tools.MAX_DECOMPRESSED_BYTES + 1))
+
+    with pytest.raises(ValueError, match="safety limit"):
+        web_tools._decode_content_encoding(compressed, "gzip")
 
 
 def test_web_fetch_rejects_localhost():

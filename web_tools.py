@@ -7,6 +7,7 @@ SONDER_SEARCH_URL at another endpoint containing "{query}".
 import html
 from html.parser import HTMLParser
 import base64
+from email.message import Message
 import http.client
 import ipaddress
 import json
@@ -18,6 +19,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+import zlib
 
 
 DEFAULT_SEARCH_URL = "https://duckduckgo.com/html/?q={query}"
@@ -26,8 +28,30 @@ BING_SEARCH_URL = "https://www.bing.com/search?q={query}"
 BING_SEARCH_RSS_URL = "https://www.bing.com/search?q={query}&format=rss"
 USER_AGENT = "sonder-local-agent/1.0"
 MAX_REDIRECTS = 5
+MAX_DECOMPRESSED_BYTES = 2_000_000
 _REDIRECT_CODES = {301, 302, 303, 307, 308}
 _NUMERIC_HOST_PART = re.compile(r"^(?:0[xX][0-9a-fA-F]+|[0-9]+)$")
+_MEDIA_TYPE = re.compile(
+    r"^[A-Za-z0-9!#$&^_.+\-]+/[A-Za-z0-9!#$&^_.+\-]+$"
+)
+_JSON_MEDIA_TYPES = {
+    "application/json", "application/json-seq", "application/ndjson",
+    "application/x-ndjson",
+}
+_XML_MEDIA_TYPES = {"application/xml", "text/xml"}
+_BINARY_SIGNATURES = (
+    b"%PDF-", b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a",
+    b"GIF89a", b"PK\x03\x04", b"\x7fELF",
+)
+_XML_DECLARED_ENCODING = re.compile(
+    br"<\?xml\b[^>]{0,200}\bencoding\s*=\s*['\"]\s*([^'\"\s]+)",
+    re.IGNORECASE,
+)
+_HTML_DECLARED_CHARSET = re.compile(
+    br"<meta\b[^>]{0,500}\bcharset\s*=\s*['\"]?\s*"
+    br"([A-Za-z0-9._-]+)",
+    re.IGNORECASE,
+)
 OPEN_METEO_GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_DOCS_URL = "https://open-meteo.com/en/docs"
@@ -81,6 +105,15 @@ _RECENCY_SIGNAL = re.compile(
     r"most\s+recent(?:ly)?|as\s+of\s+(?:now|today)|news)\b",
     re.IGNORECASE,
 )
+_UPCOMING_RECENCY_SIGNAL = re.compile(
+    r"^\s*(?:(?:when|where)(?:['’]s|\s+is)|"
+    r"what\s+(?:date|time)(?:['’]s|\s+is))\s+(?:the\s+)?"
+    r"(?:next|upcoming)\b(?![^\n]*(?:regex|iterator|state\s+machine|"
+    r"algorithm|button|branch|selector|sender))[^\n]{0,60}"
+    r"\b(?:race|grand\s+prix|game|match|"
+    r"election|release|launch|episode|concert)\b\s*[?!.]*$",
+    re.IGNORECASE,
+)
 
 
 def build_search_query(prompt, intent_kind="research", now=None):
@@ -97,12 +130,20 @@ def build_search_query(prompt, intent_kind="research", now=None):
     text = str(prompt or "").strip()
     if not text or intent_kind not in ("research", "current-info", "news"):
         return text
-    if not _RECENCY_SIGNAL.search(text):
+    upcoming = bool(_UPCOMING_RECENCY_SIGNAL.search(text))
+    if not (_RECENCY_SIGNAL.search(text) or upcoming):
         return text
     content = []
-    for word in re.findall(r"[A-Za-z0-9][\w'./-]*", text):
+    for word in re.findall(
+        r"(?:\.[A-Za-z][\w+#./-]*|[A-Za-z0-9][\w'./+#-]*)",
+        text,
+    ):
         lowered = word.lower()
-        if lowered in _QUERY_FILLER or lowered in _RECENCY_FILLER:
+        if (
+            lowered in _QUERY_FILLER
+            or lowered in _RECENCY_FILLER
+            or (upcoming and lowered in {"next", "upcoming"})
+        ):
             continue
         content.append(word)
     if not content:
@@ -595,12 +636,43 @@ def _search_relevance(query, results):
     return best, min(2, len(terms))
 
 
+def _decode_content_encoding(raw, encoding):
+    """Decode bounded HTTP gzip/deflate bodies; fail closed on expansion bombs."""
+    encoding = str(encoding or "").split(",", 1)[0].strip().lower()
+    if not encoding or encoding == "identity":
+        return raw
+    if encoding not in {"gzip", "x-gzip", "deflate"}:
+        raise ValueError("unsupported HTTP content encoding %r" % encoding)
+
+    def expand(wbits):
+        decoder = zlib.decompressobj(wbits)
+        decoded = decoder.decompress(raw, MAX_DECOMPRESSED_BYTES + 1)
+        if decoder.unconsumed_tail or len(decoded) > MAX_DECOMPRESSED_BYTES:
+            raise ValueError("HTTP response expands beyond the safety limit")
+        tail = decoder.flush()
+        if len(decoded) + len(tail) > MAX_DECOMPRESSED_BYTES:
+            raise ValueError("HTTP response expands beyond the safety limit")
+        if not decoder.eof:
+            raise ValueError("HTTP response compression stream is incomplete")
+        return decoded + tail
+
+    if encoding in {"gzip", "x-gzip"}:
+        return expand(zlib.MAX_WBITS | 16)
+    try:
+        return expand(zlib.MAX_WBITS)
+    except zlib.error:
+        return expand(-zlib.MAX_WBITS)
+
+
 def _request(url, timeout=10):
     current_url = url
     redirects = 0
     while True:
         _, addresses = _validated_public_target(current_url)
-        req = urllib.request.Request(current_url, headers={"User-Agent": USER_AGENT})
+        req = urllib.request.Request(current_url, headers={
+            "User-Agent": USER_AGENT,
+            "Accept-Encoding": "identity",
+        })
         req._sonder_addresses = addresses
         try:
             response = _urlopen(req, timeout=timeout)
@@ -621,7 +693,11 @@ def _request(url, timeout=10):
                 current_url = urllib.parse.urljoin(current_url, location)
                 redirects += 1
                 continue
-            return resp.read(512000), resp.headers.get("Content-Type", "")
+            raw = resp.read(512000)
+            raw = _decode_content_encoding(
+                raw, resp.headers.get("Content-Encoding", "")
+            )
+            return raw, resp.headers.get("Content-Type", "")
 
 
 def web_search(query, limit=5, timeout=10):
@@ -696,16 +772,152 @@ def web_search(query, limit=5, timeout=10):
     return []
 
 
+def _canonical_charset(value):
+    """Return an allowlisted codec label, or reject an unsafe/unknown one."""
+    token = str(value or "").strip().strip("\"'").lower().replace("_", "-")
+    aliases = {
+        "utf-8": "utf-8", "utf8": "utf-8",
+        "unicode-1-1-utf-8": "utf-8",
+        "utf-16": "utf-16", "utf16": "utf-16",
+        "utf-16le": "utf-16le", "utf16le": "utf-16le",
+        "utf-16-le": "utf-16le",
+        "utf-16be": "utf-16be", "utf16be": "utf-16be",
+        "utf-16-be": "utf-16be",
+        "iso-8859-1": "latin-1", "iso8859-1": "latin-1",
+        "latin-1": "latin-1", "latin1": "latin-1", "cp819": "latin-1",
+        "windows-1252": "windows-1252", "windows1252": "windows-1252",
+        "cp1252": "windows-1252", "x-cp1252": "windows-1252",
+        "us-ascii": "ascii", "ascii": "ascii",
+    }
+    canonical = aliases.get(token)
+    if canonical is None:
+        raise ValueError("unsupported HTTP text charset %r" % value)
+    return canonical
+
+
+def _parse_text_content_type(value):
+    """Parse and validate an HTTP Content-Type for a readable web document."""
+    header = str(value or "").strip()
+    if not header:
+        raise ValueError("web page response is missing Content-Type")
+    media_type = header.split(";", 1)[0].strip().lower()
+    if not _MEDIA_TYPE.fullmatch(media_type):
+        raise ValueError("invalid HTTP Content-Type %r" % header)
+
+    if media_type in _JSON_MEDIA_TYPES or media_type.endswith("+json"):
+        document_kind = "json"
+    elif media_type in {"text/html", "application/xhtml+xml"}:
+        document_kind = "html"
+    elif media_type in _XML_MEDIA_TYPES or media_type.endswith("+xml"):
+        document_kind = "xml"
+    elif media_type.startswith("text/"):
+        document_kind = "text"
+    else:
+        raise ValueError("unsupported non-text HTTP media type %r" % media_type)
+
+    message = Message()
+    message["content-type"] = header
+    declared = []
+    for key, parameter in (message.get_params(header="content-type") or [])[1:]:
+        if str(key or "").lower() == "charset":
+            if parameter in (None, ""):
+                raise ValueError("HTTP Content-Type has an empty charset")
+            declared.append(_canonical_charset(parameter))
+    if len(set(declared)) > 1:
+        raise ValueError("HTTP Content-Type has conflicting charset parameters")
+    return media_type, document_kind, (declared[0] if declared else "")
+
+
+def _document_declared_charset(raw, document_kind):
+    """Read only allowlisted in-document HTML/XML charset declarations."""
+    sample = raw[:4096]
+    if sample.startswith(b"\xef\xbb\xbf"):
+        sample = sample[3:]
+    match = None
+    if document_kind == "xml":
+        match = _XML_DECLARED_ENCODING.search(sample)
+    elif document_kind == "html":
+        match = _HTML_DECLARED_CHARSET.search(sample)
+    if not match:
+        return ""
+    try:
+        value = match.group(1).decode("ascii", "strict")
+    except UnicodeDecodeError as exc:
+        raise ValueError("document charset declaration is not ASCII") from exc
+    return _canonical_charset(value)
+
+
+def _decode_web_document(raw, content_type):
+    """Decode one bounded web document using MIME, BOM, and charset evidence."""
+    if not isinstance(raw, (bytes, bytearray)):
+        raise ValueError("web page response body is not bytes")
+    raw = bytes(raw)
+    media_type, document_kind, header_charset = _parse_text_content_type(
+        content_type
+    )
+    signature = raw.lstrip(b" \t\r\n\x00")
+    if any(signature.startswith(prefix) for prefix in _BINARY_SIGNATURES):
+        raise ValueError(
+            "binary web content is not readable text (%s)" % media_type
+        )
+
+    body_charset = _document_declared_charset(raw, document_kind)
+    if header_charset and body_charset and header_charset != body_charset:
+        raise ValueError("conflicting HTTP and document charset declarations")
+    declared_charset = header_charset or body_charset
+
+    if raw.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+        raise ValueError("unsupported UTF-32 byte order mark")
+    if raw.startswith(b"\xef\xbb\xbf"):
+        if declared_charset and declared_charset != "utf-8":
+            raise ValueError("UTF-8 BOM conflicts with declared charset")
+        codec = "utf-8-sig"
+    elif raw.startswith(b"\xff\xfe"):
+        if declared_charset not in ("", "utf-16", "utf-16le"):
+            raise ValueError("UTF-16LE BOM conflicts with declared charset")
+        codec = "utf-16"
+    elif raw.startswith(b"\xfe\xff"):
+        if declared_charset not in ("", "utf-16", "utf-16be"):
+            raise ValueError("UTF-16BE BOM conflicts with declared charset")
+        codec = "utf-16"
+    else:
+        codec = declared_charset or "utf-8"
+        if codec == "utf-16":
+            raise ValueError("declared UTF-16 text requires a byte order mark")
+        codec = {
+            "utf-16le": "utf-16-le",
+            "utf-16be": "utf-16-be",
+        }.get(codec, codec)
+    try:
+        text = raw.decode(codec, "strict")
+    except (LookupError, UnicodeDecodeError) as exc:
+        raise ValueError("web page body is not valid %s text" % codec) from exc
+    if "\x00" in text:
+        raise ValueError("web page body contains binary NUL bytes")
+    if any(
+        (ord(char) < 32 and char not in "\t\r\n\f")
+        or 0x7F <= ord(char) <= 0x9F
+        for char in text
+    ):
+        raise ValueError("web page body contains binary control bytes")
+
+    if document_kind in {"html", "xml"} or (
+        document_kind == "text" and "<html" in text[:1000].lower()
+    ):
+        parser = _TextParser()
+        parser.feed(text)
+        text = parser.text()
+    if not text.strip():
+        raise ValueError("web page contained no readable text")
+    return text
+
+
 def web_fetch(url, max_chars=8000, timeout=10):
     if not enabled():
         raise RuntimeError("web tools disabled by SONDER_WEB_TOOLS")
     max_chars = max(1000, min(int(max_chars or 8000), 30000))
     raw, ctype = _request(url, timeout=timeout)
-    text = raw.decode("utf-8", "replace")
-    if "html" in ctype or "<html" in text[:1000].lower():
-        parser = _TextParser()
-        parser.feed(text)
-        text = parser.text()
+    text = _decode_web_document(raw, ctype)
     return text[:max_chars]
 
 

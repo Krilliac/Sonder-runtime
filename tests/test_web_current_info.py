@@ -145,15 +145,16 @@ def test_sonder_impl_routes_implicit_recency_before_model(monkeypatch):
     )
 
     assert "TOOL-BACKED ANSWER" in out
-    assert calls[0][1]["required_tool_names"] == ("web_search", "web_fetch")
+    assert calls[0][1]["required_tool_names"] == ("web_fetch",)
     assert "[interaction_id" not in out
 
 
 def test_sonder_impl_fabricated_reply_is_rewritten_and_discarded(monkeypatch):
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
-    # Force the work gate open so the prompt reaches the model path.
-    monkeypatch.setattr(server.intents, "classify_work", lambda text: True)
+    # Force only the pre-model route to miss; the repair path must still honor
+    # the real shared work gate.
+    monkeypatch.setattr(server, "_route_chat_web", lambda *a, **k: None)
     monkeypatch.setattr(
         server, "_serve_target",
         lambda tier, strict: ("fake-model", False, True, "sonder"),

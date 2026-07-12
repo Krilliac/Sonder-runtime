@@ -102,7 +102,7 @@ def test_research_dispatch_suggests_constructed_query(monkeypatch):
     assert "current news headline" in task  # original question kept as task
     assert "Suggested web_search query" in task
     assert "news headline" in task
-    assert kwargs["required_tool_names"] == ("web_search", "web_fetch")
+    assert kwargs["required_tool_names"] == ("web_fetch",)
 
 
 def test_research_dispatch_is_web_tool_only(monkeypatch):
@@ -114,7 +114,7 @@ def test_research_dispatch_is_web_tool_only(monkeypatch):
     )
     assert "text_search" not in kwargs["tool_allowlist"]
     assert kwargs["system"] == server._RESEARCH_AGENT_SYSTEM
-    assert kwargs["max_steps"] == 4
+    assert kwargs["max_steps"] == 5
 
 
 def test_specific_research_prompt_gets_no_suggestion_line(monkeypatch):

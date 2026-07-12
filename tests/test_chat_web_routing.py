@@ -110,9 +110,7 @@ def test_near_me_research_augments_agent_and_requires_web_tool(monkeypatch):
 
     assert output == "RESEARCHED"
     assert "Chicago, Illinois, United States" in calls[0][0]
-    assert calls[0][1]["required_tool_names"] == (
-        "web_search", "web_fetch",
-    )
+    assert calls[0][1]["required_tool_names"] == ("web_fetch",)
 
 
 def test_approximate_location_tool_requires_consent(monkeypatch):
@@ -184,7 +182,6 @@ def test_sonder_impl_weather_my_area_asks_for_location(monkeypatch):
 def test_sonder_impl_work_prompts_are_not_hijacked(monkeypatch):
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
-    monkeypatch.setattr(server.intents, "classify_work", lambda text: True)
     monkeypatch.setattr(
         server, "_serve_target",
         lambda tier, strict: ("fake-model", False, True, "sonder"),
@@ -321,7 +318,7 @@ def test_missed_denial_skips_capture_and_footer(monkeypatch):
 def test_rewritten_denial_discards_captured_refusal(monkeypatch):
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
-    monkeypatch.setattr(server.intents, "classify_work", lambda text: True)
+    monkeypatch.setattr(server, "_route_chat_web", lambda *a, **k: None)
     monkeypatch.setattr(
         server, "_serve_target",
         lambda tier, strict: ("fake-model", False, True, "sonder"),
@@ -375,7 +372,7 @@ def test_capability_news_prompt_dispatches_web_research(monkeypatch):
     )
 
     assert out == "ONE HEADLINE"
-    assert calls[0][1]["required_tool_names"] == ("web_search", "web_fetch")
+    assert calls[0][1]["required_tool_names"] == ("web_fetch",)
 
 
 def test_explicit_search_detector():
@@ -442,8 +439,9 @@ def test_resolved_weather_thread_capability_prompt_stays_capability():
 def test_sonder_impl_denial_guard_rewrites_refusal(monkeypatch):
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
-    # Force the work gate open so the prompt reaches the model path.
-    monkeypatch.setattr(server.intents, "classify_work", lambda text: True)
+    # Force only the pre-model route to miss; the repair path must still honor
+    # the real shared work gate.
+    monkeypatch.setattr(server, "_route_chat_web", lambda *a, **k: None)
     monkeypatch.setattr(
         server, "_serve_target",
         lambda tier, strict: ("fake-model", False, True, "sonder"),

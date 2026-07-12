@@ -981,7 +981,7 @@ def _execute_selfmod_run(run_id, explicit_tests=None):
         selfmod.begin_testing(run_id)
         for kind, command in test_commands:
             selfmod.record_test(run_id, kind, command)
-        reviewed = selfmod.review(run_id)
+        selfmod.review(run_id)
         return selfmod.format_run(run_id) + "\n\nAgent evidence:\n" + output
     except Exception as exc:
         current = selfmod.get_run(run_id)
@@ -6227,11 +6227,14 @@ def _chat_location(
 # only, no workspace discovery, stop as soon as the results answer.
 _RESEARCH_AGENT_SYSTEM = (
     "You are answering a live-information question with public web tools. "
-    "Use web_search (and web_fetch when a snippet is not enough) to gather "
-    "evidence; workspace and file tools are outside this run's allowlist. "
-    "Cite fetched URLs in the final answer. As soon as the tool results "
-    "already answer the question, return {\"final\": ...} immediately "
-    "instead of calling more tools."
+    "Use web_search to locate an authoritative source unless the user already "
+    "supplied its URL. ALWAYS call web_fetch on the best source before "
+    "answering, even if a search snippet looks sufficient. Never fill a "
+    "missing version, price, office-holder, or "
+    "date from model memory. Workspace and file tools are outside this run's "
+    "allowlist. Cite fetched URLs in the final answer. As soon as the fetched "
+    "source answers the question, return {\"final\": ...} immediately instead "
+    "of calling more tools."
 )
 
 
@@ -6245,6 +6248,12 @@ def chat_web_response(
 ) -> str | None:
     """Handle explicit web chat intent before the plain model fallback."""
     _maybe_live_reload()
+    # This function is the shared boundary for HTTP, MCP, and REPL chat. Keep
+    # developer/work requests on the execution/model path even when their text
+    # mentions a volatile noun ("build a current-price widget"). Explicit web
+    # search orders remain authoritative and intentionally bypass this gate.
+    if intents.classify_work(prompt) and not web_intents.explicit_search(prompt):
+        return None
     intent = web_intents.classify(prompt, history=history)
     if intent is None:
         return None
@@ -6332,9 +6341,9 @@ def chat_web_response(
     return _agent_impl(
         task,
         tier=tier or "code",
-        max_steps=4,
+        max_steps=5,
         allow_web=True,
-        required_tool_names=("web_search", "web_fetch"),
+        required_tool_names=("web_fetch",),
         tool_allowlist=(
             "web_search", "web_fetch", "weather_lookup",
             "approximate_location_lookup",
@@ -7969,6 +7978,23 @@ def _agent_observation_ok(observation):
     )
 
 
+def _agent_tool_observation_ok(tool_name, observation):
+    """Apply evidence-quality checks that are specific to a tool contract."""
+    if str(tool_name or "") == "web_fetch" and observation is None:
+        return False
+    if not _agent_observation_ok(observation):
+        return False
+    if str(tool_name or "") != "web_fetch":
+        return True
+    # A transport-level success with an empty page is not grounding. Require
+    # at least one readable letter or digit before a fetch can satisfy the
+    # research agent's required-tool evidence gate. Keep the generic success
+    # predicate unchanged because empty/zero-ish output is valid for several
+    # execution and inspection tools.
+    text = str(observation or "").strip()
+    return bool(text and any(character.isalnum() for character in text))
+
+
 def _agent_normalized_path(value):
     text = str(value or "").strip()
     if not text:
@@ -8279,7 +8305,7 @@ def _agent_impl(
                 allow_web=False,
                 read_only=True,
             ))
-        tool_ok = _agent_observation_ok(observation_text)
+        tool_ok = _agent_tool_observation_ok(tool_name, observation)
         if tool_ok:
             used_tool = True
             used_tool_names.add(tool_name)
@@ -8465,7 +8491,7 @@ def _agent_impl(
                 tool_name, tool_args, **dispatch_options,
             )
         observation_text = str(observation)
-        tool_ok = _agent_observation_ok(observation_text)
+        tool_ok = _agent_tool_observation_ok(tool_name, observation)
         if tool_ok:
             failed_call_counts.pop(call_signature, None)
             if tool_name in _WORK_MUTATION_TOOLS:

@@ -70,6 +70,95 @@ def _request(port, method, path, body=None, headers=None):
     return result
 
 
+@pytest.mark.parametrize(("messages", "message"), [
+    ([None], "messages[0] must be an object"),
+    (["junk"], "messages[0] must be an object"),
+    ({"role": "user", "content": "hello"}, "messages must be an array"),
+    (
+        [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
+        "messages[0].content must be a string",
+    ),
+    ([{"content": "hello"}], "messages[0].role is required"),
+    ([{"role": "user"}], "messages[0].content is required"),
+    (
+        [{"role": "tool", "content": "tool output"}],
+        "messages[0].role must be one of",
+    ),
+    ([{"role": "system", "content": "system only"}], "non-empty user message"),
+    ([{"role": "user", "content": "   "}], "non-empty user message"),
+])
+def test_chat_rejects_invalid_messages_with_structured_400(
+    monkeypatch, messages, message,
+):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    request = json.dumps({"model": "sonder", "messages": messages}).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    payload = json.loads(body)
+    assert status == 400
+    assert payload["error"]["type"] == "invalid_request"
+    assert message in payload["error"]["message"]
+
+
+def test_chat_accepts_valid_text_messages_and_forwards_history(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+
+    class FakeConnection:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ts.server, "_open_db", lambda: FakeConnection())
+    monkeypatch.setattr(ts.admin_auth, "rate_limit", lambda conn, account: (True, ""))
+    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+    forwarded = []
+
+    def fake_answer(prompt, history, **kwargs):
+        forwarded.append((prompt, history))
+        return "VALID ANSWER"
+
+    monkeypatch.setattr(ts.server, "answer_with_history", fake_answer)
+    messages = [
+        {"role": "system", "content": "Be concise."},
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "follow up"},
+    ]
+    request = json.dumps({"model": "sonder", "messages": messages}).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            body=request,
+            headers={"Content-Type": "application/json"},
+    )
+
+    assert status == 200
+    assert json.loads(body)["choices"][0]["message"]["content"].startswith(
+        "VALID ANSWER"
+    )
+    assert forwarded == [(
+        "follow up",
+        [
+            {"role": "user", "content": "first question"},
+            {"role": "assistant", "content": "first answer"},
+        ],
+    )]
+
+
 def test_api_key_mode_cannot_be_bypassed_by_account_token(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "k" * 32)
     monkeypatch.setattr(ts, "AUTH_MODE", "api-key")

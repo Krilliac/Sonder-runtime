@@ -471,6 +471,43 @@ def test_agent_does_not_repeat_identical_successful_web_call(monkeypatch):
     assert len(dispatches) == 1
 
 
+def test_agent_required_web_fetch_rejects_empty_page_before_memory_final(
+    monkeypatch,
+):
+    responses = [
+        '{"tool": "web_fetch", "args": {"url": "https://example.com"}}',
+        '{"final": "Python 3.10.6, from memory."}',
+    ]
+    prompts = []
+
+    def generate(prompt, history=None):
+        prompts.append(prompt)
+        return responses.pop(0)
+
+    monkeypatch.setattr(server, "_make_generate", lambda *a, **k: generate)
+    monkeypatch.setattr(
+        server, "_agent_dispatch_observed", lambda *a, **k: "  \n\t",
+    )
+
+    output = server._agent_impl(
+        "What is the latest Python version?",
+        max_steps=2,
+        required_tool_names=("web_fetch",),
+    )
+
+    assert output.startswith("ERROR: agent reached max_steps=2")
+    assert "web_fetch" in output
+    assert "Python 3.10.6" not in output
+    assert "HOST RECOVERY" in prompts[1]
+
+
+def test_agent_tool_evidence_keeps_zero_output_valid_for_non_web_tools():
+    assert server._agent_tool_observation_ok("workspace_run", "0") is True
+    assert server._agent_tool_observation_ok("web_fetch", "0") is True
+    assert server._agent_tool_observation_ok("web_fetch", " \n\t") is False
+    assert server._agent_tool_observation_ok("web_fetch", None) is False
+
+
 def test_agent_requires_successful_file_evidence(monkeypatch):
     monkeypatch.setattr(
         server,

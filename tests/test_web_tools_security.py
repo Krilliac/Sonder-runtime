@@ -3,11 +3,13 @@ import web_tools
 
 
 class Response:
-    def __init__(self, status=200, location=""):
+    def __init__(self, status=200, location="", body=b"readable response"):
         self.status = self.code = status
+        self._body = body
         self.headers = {"Content-Type": "text/html"}
-        if location: self.headers["Location"] = location
-    def read(self, n=-1): return b""
+        if location:
+            self.headers["Location"] = location
+    def read(self, n=-1): return self._body if n == -1 else self._body[:n]
     def __enter__(self): return self
     def __exit__(self, *args): return False
 
