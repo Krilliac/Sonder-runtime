@@ -50,6 +50,8 @@ jobs:
           channel: ${{ env.FLUTTER_CHANNEL }}
           cache: true
       - run: flutter create --org $APP_ORG --project-name trilobite --platforms=android .
+      - name: Configure explicit LAN networking
+        run: python ../scripts/configure_flutter_networking.py . --allow-android-cleartext
       - name: Bundle local system
         run: python ../scripts/package_local_system.py --out app/build/local-system --zip app/assets/local-system.zip
       - run: flutter pub get
@@ -77,6 +79,8 @@ jobs:
           channel: ${{ env.FLUTTER_CHANNEL }}
           cache: true
       - run: flutter create --org $APP_ORG --project-name trilobite --platforms=android .
+      - name: Configure explicit LAN networking
+        run: python ../scripts/configure_flutter_networking.py . --allow-android-cleartext
       - name: Bundle local system
         run: python ../scripts/package_local_system.py --out app/build/local-system --zip app/assets/local-system.zip
       - run: flutter pub get
@@ -182,6 +186,8 @@ jobs:
           cache: true
       - run: flutter config --enable-macos-desktop
       - run: flutter create --org $APP_ORG --project-name trilobite --platforms=macos .
+      - name: Configure local-network privacy description
+        run: python ../scripts/configure_flutter_networking.py .
       - name: Bundle local system
         run: python ../scripts/package_local_system.py --out app/build/local-system --zip app/assets/local-system.zip
       - run: flutter pub get

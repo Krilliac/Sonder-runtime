@@ -78,6 +78,9 @@ HELP = """commands:
   /work <task>       execute a guarded tool-using workflow with checklist/report
   /autopilot ...     persistent plan/run/status/resume/pause/cancel autonomy
   /runtime ...       shared local model mappings and execution-lane tiers
+  /hardware          detect RAM, GPU runtime, VRAM, and offload support
+  /training ...      plan/start/status/deploy/rollback attended weight training
+  /selfmod ...       inspect/plan/test/approve/deploy/rollback isolated improvements
   /mcp ...           audit/refresh atomic MCP source and tool convergence
   /learning          show grounded outcomes, lesson sources, and memory hygiene
   /report            show the latest grounded end report and action transcript
@@ -524,6 +527,8 @@ def main():
                 ))
             elif cmd in (
                 "/runtime", "/models", "/mcp", "/convergence",
+                "/hardware", "/training", "/weighttraining",
+                "/selfmod", "/selfmodify",
                 "/learning", "/learnhealth", "/metrics",
             ):
                 print(server.control_command(

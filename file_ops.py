@@ -10,7 +10,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import stat
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import trilobite_paths
 
@@ -203,7 +203,12 @@ def resolve_repository_read_path(
         raise ValueError("repository path must be a non-empty relative path")
     candidate = Path(path.strip())
     expanded = candidate.expanduser()
-    if candidate.is_absolute() or expanded.is_absolute() or candidate.drive or candidate.anchor:
+    windows_candidate = PureWindowsPath(path.strip())
+    if (
+        candidate.is_absolute() or expanded.is_absolute()
+        or candidate.drive or candidate.anchor
+        or windows_candidate.is_absolute() or windows_candidate.drive
+    ):
         raise PermissionError("repository path must be relative")
     root = _resolve_best_effort(workspace_root())
     resolved = _resolve_best_effort(root / candidate)

@@ -10,6 +10,8 @@ class Settings {
   static const _kContextSize = 'context_size';
   static const _kKeepServerRunning = 'keep_server_running';
   static const _kAllowApproximateLocation = 'allow_approximate_location';
+  static const _kLauncherUrl = 'launcher_url';
+  static const _kLauncherToken = 'launcher_token';
 
   static const defaultModel = 'trilobite';
 
@@ -21,6 +23,8 @@ class Settings {
   String contextSize;
   bool keepServerRunning;
   bool allowApproximateLocation;
+  String launcherUrl;
+  String launcherToken;
 
   Settings({
     this.serverUrl = 'http://127.0.0.1:11435',
@@ -31,9 +35,21 @@ class Settings {
     this.contextSize = '8192',
     this.keepServerRunning = false,
     this.allowApproximateLocation = false,
+    this.launcherUrl = '',
+    this.launcherToken = '',
   });
 
   bool get isConfigured => serverUrl.trim().isNotEmpty;
+
+  String get effectiveLauncherUrl {
+    if (launcherUrl.trim().isNotEmpty) return launcherUrl.trim();
+    final server = Uri.tryParse(serverUrl.trim());
+    if (server == null || server.host.isEmpty) return '';
+    return server
+        .replace(port: 11436, path: '', query: null, fragment: null)
+        .toString()
+        .replaceAll(RegExp(r'/$'), '');
+  }
 
   static Future<Settings> load() async {
     final p = await SharedPreferences.getInstance();
@@ -46,6 +62,8 @@ class Settings {
       contextSize: p.getString(_kContextSize) ?? '8192',
       keepServerRunning: p.getBool(_kKeepServerRunning) ?? false,
       allowApproximateLocation: p.getBool(_kAllowApproximateLocation) ?? false,
+      launcherUrl: p.getString(_kLauncherUrl) ?? '',
+      launcherToken: p.getString(_kLauncherToken) ?? '',
     );
   }
 
@@ -62,5 +80,7 @@ class Settings {
     );
     await p.setBool(_kKeepServerRunning, keepServerRunning);
     await p.setBool(_kAllowApproximateLocation, allowApproximateLocation);
+    await p.setString(_kLauncherUrl, launcherUrl.trim());
+    await p.setString(_kLauncherToken, launcherToken.trim());
   }
 }
