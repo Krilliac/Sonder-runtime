@@ -142,3 +142,130 @@ def fix_common_generation_errors(code, traceback_text):
     fixed = fix_missing_imports(code, traceback_text)
     fixed = fix_wrong_module_attrs(fixed, traceback_text)
     return fixed
+
+
+# --- C++: compile-error-driven missing-header fixes ---------------------------
+# The C++ game forge hits the same failure class as the Python NameError path:
+# generated code calls assert()/sqrt()/memcpy() without the standard header.
+# These helpers read the REAL compiler diagnostic (g++/clang++/MSVC) and prepend
+# only the headers the compiler itself complained about — same contract as
+# fix_missing_imports: pure function of (code, compiler_output), never raises.
+
+_CPP_SYMBOL_HEADERS = {
+    "assert": "cassert",
+    # <cmath>
+    "sqrt": "cmath", "sin": "cmath", "cos": "cmath", "tan": "cmath",
+    "atan": "cmath", "atan2": "cmath", "fabs": "cmath", "pow": "cmath",
+    "floor": "cmath", "ceil": "cmath", "fmod": "cmath", "hypot": "cmath",
+    "round": "cmath",
+    # <cstring>
+    "memcpy": "cstring", "memset": "cstring", "memmove": "cstring",
+    "strcpy": "cstring", "strncpy": "cstring", "strlen": "cstring",
+    "strcmp": "cstring", "strncmp": "cstring", "strcat": "cstring",
+    # <cstdio>
+    "printf": "cstdio", "fprintf": "cstdio", "sprintf": "cstdio",
+    "snprintf": "cstdio", "puts": "cstdio",
+    # <cstdlib>
+    "malloc": "cstdlib", "calloc": "cstdlib", "realloc": "cstdlib",
+    "free": "cstdlib", "rand": "cstdlib", "srand": "cstdlib",
+    "exit": "cstdlib", "atoi": "cstdlib", "atof": "cstdlib",
+    # <algorithm>
+    "sort": "algorithm", "max": "algorithm", "min": "algorithm",
+    "clamp": "algorithm", "find": "algorithm", "fill": "algorithm",
+    "max_element": "algorithm", "min_element": "algorithm",
+    "reverse": "algorithm",
+    # containers / strings / streams
+    "string": "string", "to_string": "string", "getline": "string",
+    "stoi": "string", "stod": "string",
+    "vector": "vector", "array": "array",
+    "map": "map", "multimap": "map", "unordered_map": "unordered_map",
+    "pair": "utility", "make_pair": "utility", "move": "utility",
+    "swap": "utility",
+    "setw": "iomanip", "setprecision": "iomanip", "setfill": "iomanip",
+    "cout": "iostream", "cerr": "iostream", "cin": "iostream",
+    "endl": "iostream",
+    "ifstream": "fstream", "ofstream": "fstream", "fstream": "fstream",
+    "stringstream": "sstream", "ostringstream": "sstream",
+    "istringstream": "sstream",
+    # misc stdlib
+    "size_t": "cstddef",
+    "uint8_t": "cstdint", "uint16_t": "cstdint", "uint32_t": "cstdint",
+    "uint64_t": "cstdint", "int8_t": "cstdint", "int16_t": "cstdint",
+    "int32_t": "cstdint", "int64_t": "cstdint",
+    "numeric_limits": "limits", "accumulate": "numeric", "iota": "numeric",
+    "unique_ptr": "memory", "shared_ptr": "memory",
+    "make_unique": "memory", "make_shared": "memory",
+    "mt19937": "random", "uniform_int_distribution": "random",
+    "uniform_real_distribution": "random",
+    "chrono": "chrono", "filesystem": "filesystem",
+}
+
+# g++/clang++/MSVC "missing declaration" diagnostics, one capture group each.
+_CPP_UNDECLARED_RES = (
+    # g++: error: 'assert' was not declared in this scope
+    re.compile(r"'([A-Za-z_][A-Za-z0-9_:]*)' was not declared in this scope"),
+    # g++: error: 'filesystem' has not been declared
+    re.compile(r"error: '([A-Za-z_][A-Za-z0-9_:]*)' has not been declared"),
+    # g++/clang++: error: 'sort' is not a member of 'std'
+    re.compile(r"'([A-Za-z_][A-Za-z0-9_]*)' is not a member of '?std'?"),
+    # clang++: use of undeclared identifier 'memcpy'
+    re.compile(r"use of undeclared identifier '([A-Za-z_][A-Za-z0-9_:]*)'"),
+    # MSVC: error C3861: 'sqrt': identifier not found
+    re.compile(r"error C3861: '([A-Za-z_][A-Za-z0-9_]*)': identifier not found"),
+    # MSVC: error C2039: 'sort': is not a member of 'std'
+    re.compile(r"error C2039: '([A-Za-z_][A-Za-z0-9_]*)'"),
+)
+
+
+def _cpp_missing_symbols(compiler_output):
+    """Yield undeclared symbol names from real compiler output, in order,
+    with any std:: qualifier stripped."""
+    seen = []
+    for pattern in _CPP_UNDECLARED_RES:
+        for name in pattern.findall(compiler_output or ""):
+            name = name.rsplit("::", 1)[-1]
+            if name and name not in seen:
+                seen.append(name)
+    return seen
+
+
+def _cpp_has_include(code, header):
+    return re.search(
+        r"^\s*#\s*include\s*<%s>" % re.escape(header), code or "", re.M,
+    ) is not None
+
+
+def fix_cpp_missing_headers(code, compiler_output):
+    """code, compiler_output -> code with missing standard headers prepended.
+
+    Returns `code` unchanged when the compiler output names no covered symbol
+    or every needed header is already included. Only ever adds `#include <...>`
+    lines for the C++ standard library — never third-party headers.
+    """
+    includes = []
+    for name in _cpp_missing_symbols(compiler_output):
+        header = _CPP_SYMBOL_HEADERS.get(name)
+        if not header:
+            continue
+        line = "#include <%s>" % header
+        if line not in includes and not _cpp_has_include(code, header):
+            includes.append(line)
+    if not includes:
+        return code
+    return "\n".join(includes) + "\n" + (code or "")
+
+
+_CPP_ERROR_LINE_RE = re.compile(
+    r"(?:\berror\s*:|\berror C\d{4}\b|\bfatal error\b|undefined reference)", re.I,
+)
+
+
+def distill_cpp_errors(text, limit=1800):
+    """Reduce raw compiler output to its actual error lines so a bounded
+    repair-note truncation cannot cut the error off behind pages of warnings.
+    Falls back to the (truncated) original text when no error line is found."""
+    lines = [ln for ln in (text or "").splitlines() if _CPP_ERROR_LINE_RE.search(ln)]
+    distilled = "\n".join(lines).strip()
+    if not distilled:
+        return (text or "")[:limit]
+    return distilled[:limit]

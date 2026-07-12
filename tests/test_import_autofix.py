@@ -129,6 +129,76 @@ def test_fix_common_generation_errors_handles_pygame_math_namespace():
     assert "pygame.math.cos" not in fixed
 
 
+# --- fix_cpp_missing_headers ---------------------------------------------------
+
+def test_cpp_fix_maps_real_gcc_assert_error_to_cassert():
+    code = "int main() { assert(1); return 0; }"
+    err = ("game.cpp: In function 'int main()':\n"
+           "game.cpp:1:14: error: 'assert' was not declared in this scope")
+    fixed = import_autofix.fix_cpp_missing_headers(code, err)
+    assert fixed.splitlines()[0] == "#include <cassert>"
+    assert "int main()" in fixed
+
+
+def test_cpp_fix_maps_msvc_identifier_not_found_to_cmath():
+    code = "int main() { double d = sqrt(2.0); return (int)d; }"
+    err = "game.cpp(1): error C3861: 'sqrt': identifier not found"
+    fixed = import_autofix.fix_cpp_missing_headers(code, err)
+    assert fixed.splitlines()[0] == "#include <cmath>"
+
+
+def test_cpp_fix_maps_not_a_member_of_std_to_algorithm():
+    code = "int main() { int v[3]{3,1,2}; std::sort(v, v+3); return v[0]; }"
+    err = "game.cpp:1:31: error: 'sort' is not a member of 'std'"
+    fixed = import_autofix.fix_cpp_missing_headers(code, err)
+    assert fixed.splitlines()[0] == "#include <algorithm>"
+
+
+def test_cpp_fix_handles_multiple_symbols_without_duplicates():
+    code = "int main() { assert(1); double d = std::sqrt(2.0); return (int)d; }"
+    err = ("game.cpp:1:14: error: 'assert' was not declared in this scope\n"
+           "game.cpp:1:30: error: 'sqrt' is not a member of 'std'\n"
+           "game.cpp:1:30: error: 'sqrt' is not a member of 'std'")
+    fixed = import_autofix.fix_cpp_missing_headers(code, err)
+    lines = fixed.splitlines()
+    assert lines.count("#include <cassert>") == 1
+    assert lines.count("#include <cmath>") == 1
+
+
+def test_cpp_fix_is_noop_when_header_already_included():
+    code = "#include <cassert>\nint main() { assert(1); return 0; }"
+    err = "game.cpp:2:14: error: 'assert' was not declared in this scope"
+    assert import_autofix.fix_cpp_missing_headers(code, err) == code
+
+
+def test_cpp_fix_is_noop_for_unknown_symbols_and_clean_output():
+    code = "int main() { return 0; }"
+    assert import_autofix.fix_cpp_missing_headers(code, "") == code
+    err = "game.cpp:1:1: error: 'nlohmann' has not been declared"
+    assert import_autofix.fix_cpp_missing_headers(code, err) == code
+
+
+# --- distill_cpp_errors ----------------------------------------------------------
+
+def test_distill_keeps_only_error_lines():
+    raw = ("game.cpp: In function 'int main()':\n"
+           "game.cpp:2:1: warning: unused variable 'x'\n"
+           "game.cpp:9:3: error: 'assert' was not declared in this scope\n"
+           "game.cpp(4): error C3861: 'sqrt': identifier not found\n"
+           "note: suggested alternative: 'short'\n")
+    distilled = import_autofix.distill_cpp_errors(raw)
+    assert "error: 'assert'" in distilled
+    assert "error C3861" in distilled
+    assert "warning" not in distilled
+    assert "note:" not in distilled
+
+
+def test_distill_falls_back_to_truncated_original_without_error_lines():
+    raw = "linker exploded mysteriously\n" * 100
+    distilled = import_autofix.distill_cpp_errors(raw, limit=50)
+    assert distilled == raw[:50]
+
+
 # --- grounded end-to-end: the exact breakout-class failure --------------------
 
 def test_grounded_random_choice_breakout_case():
