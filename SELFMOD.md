@@ -126,8 +126,16 @@ reloaded; a reload error also triggers rollback. Restart-critical supervisor,
 server, ledger, and recovery modules are protected maintenance targets, so the
 running process never replaces its own recovery/control path automatically.
 
-Only one deployment or rollback can hold the cross-process SQLite lease. Dead
-or expired owners are detected. Editing/testing runs with stale owners become
+Deployment records the exact post-deploy hash or absence of every changed
+path. A later manual rollback refuses to overwrite a file that the user changed
+after deployment; it reports a conflict and preserves the current bytes for
+explicit resolution. Immediate health-check recovery still restores the
+verified pre-deploy bundle automatically.
+
+Only one deployment, rollback, or crash recovery can hold the cross-process
+SQLite lease. A live local owner cannot lose its lock solely because a lease
+timestamp expires; crash recovery atomically takes ownership and holds the
+global lock through exact restoration. Editing/testing runs with stale owners become
 `interrupted`; they never resume without `/selfmod resume <run-id>`.
 
 No command pushes, fetches, rebases, resets, cleans, installs dependencies, or

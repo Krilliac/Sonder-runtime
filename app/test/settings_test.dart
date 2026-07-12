@@ -5,12 +5,34 @@ import 'package:trilobite/settings.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  test('launcher URL is derived from the configured host', () {
+  test('launcher URL is never derived from the configured chat host', () {
     final settings = Settings(serverUrl: 'https://trilobite.example:11435/v1');
-    expect(settings.effectiveLauncherUrl, 'https://trilobite.example:11436');
+    expect(settings.effectiveLauncherUrl, '');
+    expect(settings.usesHostLauncher, isFalse);
 
     settings.launcherUrl = 'https://control.example:443/';
-    expect(settings.effectiveLauncherUrl, 'https://control.example:443/');
+    settings.launcherToken = 'xxxxxxxxxxxxxxxxxxxxxxxx';
+    expect(settings.effectiveLauncherUrl, 'https://control.example:443');
+    expect(settings.usesHostLauncher, isTrue);
+  });
+
+  test('launcher configuration rejects unsafe or weak remote origins', () {
+    final embedded = Settings(
+      launcherUrl: 'https://user:secret@host.test:11436',
+      launcherToken: 'xxxxxxxxxxxxxxxxxxxxxxxx',
+    );
+    expect(embedded.usesHostLauncher, isFalse);
+    expect(embedded.launcherConfigurationError, contains('without credentials'));
+
+    final weak = Settings(
+      launcherUrl: 'https://host.test:11436',
+      launcherToken: 'short',
+    );
+    expect(weak.usesHostLauncher, isFalse);
+    expect(weak.launcherConfigurationError, contains('at least 24'));
+
+    final loopback = Settings(launcherUrl: 'http://127.0.0.1:11436');
+    expect(loopback.usesHostLauncher, isTrue);
   });
 
   test('launcher credentials persist independently from the API key', () async {

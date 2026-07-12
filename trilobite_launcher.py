@@ -7,9 +7,11 @@ arbitrary arguments from clients.
 from __future__ import annotations
 
 import argparse
+from decimal import Decimal, InvalidOperation
 import hmac
 import json
 import os
+import re
 import secrets
 import socket
 import ssl
@@ -26,6 +28,10 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 11436
 SERVER_PORT = 11435
 MAX_BODY = 16_384
+MAX_CONTEXT_TOKENS = 1_000_000
+ACTION_TIMEOUT_SECONDS = 40.0
+POLL_INTERVAL_SECONDS = 0.25
+_CONTEXT_SIZE = re.compile(r"^(\d{1,7})(?:\.(\d{1,3}))?([km]?)$")
 
 
 def _loopback(host):
@@ -46,6 +52,41 @@ def _reachable(host="127.0.0.1", port=SERVER_PORT, timeout=0.4):
         return False
 
 
+def normalize_context_size(value):
+    """Validate the bounded context syntax accepted by the main server."""
+    text = str(value or "8192").strip().lower()
+    match = _CONTEXT_SIZE.fullmatch(text)
+    if not match:
+        raise ValueError("invalid context_size")
+    try:
+        number = Decimal(match.group(1) + ("." + match.group(2) if match.group(2) else ""))
+    except InvalidOperation as exc:  # Defensive: the regular expression is stricter.
+        raise ValueError("invalid context_size") from exc
+    multiplier = {"": 1, "k": 1_000, "m": 1_000_000}[match.group(3)]
+    tokens = number * multiplier
+    if tokens < 1 or tokens > MAX_CONTEXT_TOKENS:
+        raise ValueError(
+            "context_size must resolve to between 1 and %s tokens"
+            % MAX_CONTEXT_TOKENS
+        )
+    if tokens != tokens.to_integral_value():
+        raise ValueError("context_size must resolve to a whole number of tokens")
+    return text
+
+
+def _output_text(*values):
+    chunks = []
+    for value in values:
+        if not value:
+            continue
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        value = str(value).strip()
+        if value:
+            chunks.append(value)
+    return "\n".join(chunks)[:20_000]
+
+
 class LauncherController:
     def __init__(self, root=ROOT, python=sys.executable, server_host="0.0.0.0", server_port=SERVER_PORT):
         self.root = Path(root).resolve()
@@ -61,28 +102,49 @@ class LauncherController:
     def command_base(self):
         return [self.python, str(self.root / "trilobite_headless.py")]
 
-    def _run(self, action, context_size="8192"):
+    def _run(self, action, context_size="8192", timeout=ACTION_TIMEOUT_SECONDS):
         if action not in {"start", "stop", "restart", "status"}:
             raise ValueError("unsupported launcher action")
         command = [*self.command_base, action]
+        command.extend([
+            "--host", self.server_host,
+            "--port", str(self.server_port),
+        ])
         if action in {"start", "restart"}:
-            command.extend([
-                "--host", self.server_host,
-                "--port", str(self.server_port),
-                "--context-size", str(context_size or "8192")[:32],
-            ])
+            command.extend(["--context-size", normalize_context_size(context_size)])
         env = os.environ.copy()
-        env.setdefault("TRILOBITE_HOST", self.server_host)
-        env.setdefault("TRILOBITE_PORT", str(self.server_port))
-        result = subprocess.run(
-            command, cwd=self.root, env=env, text=True, capture_output=True,
-            timeout=90, check=False,
-        )
-        output = "\n".join(
-            value.strip() for value in (result.stdout, result.stderr)
-            if value and value.strip()
-        )[:20_000]
-        return result.returncode, output, command
+        # Controller configuration is authoritative; stale parent variables must
+        # not redirect the child to a different interface or port.
+        env["TRILOBITE_HOST"] = self.server_host
+        env["TRILOBITE_PORT"] = str(self.server_port)
+        try:
+            result = subprocess.run(
+                command,
+                cwd=self.root,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=max(0.1, float(timeout)),
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            output = _output_text(exc.stdout, exc.stderr)
+            detail = "launcher command timed out after %.1f seconds" % max(
+                0.1, float(timeout)
+            )
+            return 124, _output_text(output, detail), command
+        except OSError as exc:
+            return 126, "launcher command could not start: %s" % exc, command
+        return result.returncode, _output_text(result.stdout, result.stderr), command
+
+    def _wait_for_state(self, running, deadline):
+        while True:
+            if _reachable("127.0.0.1", self.server_port) == bool(running):
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(POLL_INTERVAL_SECONDS, remaining))
 
     def status(self):
         running = _reachable("127.0.0.1", self.server_port)
@@ -99,23 +161,61 @@ class LauncherController:
 
     def action(self, action, context_size="8192"):
         with self._lock:
+            if action not in {"start", "stop", "restart"}:
+                raise ValueError("unsupported launcher action")
+            context_size = normalize_context_size(context_size)
             if action == "start" and _reachable("127.0.0.1", self.server_port):
                 return {**self.status(), "message": "Trilobite server is already running."}
-            code, output, command = self._run(action, context_size)
+
             self.last_action = action
             self.last_action_ts = int(time.time())
-            self.last_error = "" if code == 0 else output or "launcher command failed"
-            if action in {"start", "restart"} and code == 0:
-                deadline = time.monotonic() + 30
-                while time.monotonic() < deadline:
-                    if _reachable("127.0.0.1", self.server_port):
-                        break
-                    time.sleep(0.25)
+            deadline = time.monotonic() + ACTION_TIMEOUT_SECONDS
+            steps = ("stop", "start") if action == "restart" else (action,)
+            outputs = []
+            commands = []
+            failure = ""
+            for step in steps:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    failure = "launcher action timed out before %s could run" % step
+                    break
+                code, output, command = self._run(step, context_size, remaining)
+                commands.append(
+                    [Path(command[0]).name, Path(command[1]).name, *command[2:]]
+                )
+                if output:
+                    outputs.append("%s: %s" % (step, output))
+                if code != 0:
+                    failure = output or "%s command failed with exit code %s" % (step, code)
+                    break
+                expected_running = step == "start"
+                if not self._wait_for_state(expected_running, deadline):
+                    failure = (
+                        "server did not become reachable before the deadline"
+                        if expected_running
+                        else "server remained reachable after the stop request"
+                    )
+                    break
+
             payload = self.status()
+            expected_running = action != "stop"
+            if not failure and payload["server_running"] is not expected_running:
+                failure = (
+                    "server is not reachable after the %s request" % action
+                    if expected_running
+                    else "server is still reachable after the stop request"
+                )
+            self.last_error = failure
+            payload["last_error"] = failure
+            failure_is_reported = any(failure and failure in output for output in outputs)
+            message_parts = outputs + (
+                [failure] if failure and not failure_is_reported else []
+            )
             payload.update({
-                "ok": code == 0 and (action == "stop" or payload["server_running"]),
-                "message": output or "%s requested" % action,
-                "command": [Path(command[0]).name, Path(command[1]).name, *command[2:]],
+                "ok": not failure,
+                "message": "\n".join(message_parts) or "%s completed" % action,
+                "command": commands[-1] if commands else [],
+                "commands": commands,
             })
             return payload
 
@@ -198,9 +298,10 @@ class LauncherHandler(BaseHTTPRequestHandler):
         if not isinstance(body, dict):
             self._send({"ok": False, "error": "JSON body must be an object"}, 400)
             return
-        context_size = str(body.get("context_size") or "8192")
-        if not context_size.lower().rstrip("km").replace(".", "", 1).isdigit():
-            self._send({"ok": False, "error": "invalid context_size"}, 400)
+        try:
+            context_size = normalize_context_size(body.get("context_size") or "8192")
+        except ValueError as exc:
+            self._send({"ok": False, "error": str(exc)}, 400)
             return
         payload = self.server.controller.action(action, context_size)
         self._send(payload, 200 if payload.get("ok") else 503)

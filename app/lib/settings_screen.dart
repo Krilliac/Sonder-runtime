@@ -110,6 +110,41 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  Future<void> _testLauncher() async {
+    final settings = _current();
+    final error = settings.launcherConfigurationError;
+    if (!settings.hasHostLauncher || error != null) {
+      setState(() {
+        _statusOk = false;
+        _status = error ?? 'Configure the host launcher URL first.';
+      });
+      return;
+    }
+    setState(() {
+      _testing = true;
+      _status = null;
+    });
+    try {
+      final status = await TrilobiteLauncherApi(
+        baseUrl: settings.effectiveLauncherUrl,
+        token: settings.launcherToken,
+      ).status();
+      setState(() {
+        _statusOk = status.ok;
+        _status = status.ok
+            ? 'Host launcher is ready; main server is ${status.serverRunning ? "running" : "stopped"}.'
+            : 'Host launcher did not report ready.';
+      });
+    } on TrilobiteException catch (e) {
+      setState(() {
+        _statusOk = false;
+        _status = e.message;
+      });
+    } finally {
+      if (mounted) setState(() => _testing = false);
+    }
+  }
+
   Future<void> _register() async {
     await _accountAction(register: true);
   }
@@ -149,9 +184,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  void _save() {
+  Future<void> _save() async {
     final s = _current();
-    s.save();
+    final launcherError = s.launcherConfigurationError;
+    if (launcherError != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(launcherError)),
+      );
+      return;
+    }
+    await s.save();
+    if (!mounted) return;
     widget.onChanged(s);
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Settings saved')),
@@ -225,7 +268,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               labelText: 'Host launcher URL (optional)',
               hintText: 'https://your-host:11436',
               helperText:
-                  'Lets mobile start the main server. If blank, port 11436 is derived from the server URL.',
+                  'Explicit control endpoint for remote/mobile Start, Stop, and Restart. Never derived from the server URL.',
               prefixIcon: Icon(Icons.power_settings_new_outlined),
               border: OutlineInputBorder(),
             ),
@@ -351,16 +394,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ],
           ),
           const SizedBox(height: 16),
-          FilledButton.tonalIcon(
-            onPressed: _testing ? null : _test,
-            icon: _testing
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.wifi_tethering),
-            label: Text(_testing ? 'Testing…' : 'Test connection'),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              FilledButton.tonalIcon(
+                onPressed: _testing ? null : _test,
+                icon: _testing
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.wifi_tethering),
+                label: Text(_testing ? 'Testing…' : 'Test main server'),
+              ),
+              OutlinedButton.icon(
+                onPressed: _testing ? null : _testLauncher,
+                icon: const Icon(Icons.power_settings_new_outlined),
+                label: const Text('Test host control'),
+              ),
+            ],
           ),
           if (_status != null) ...[
             const SizedBox(height: 12),

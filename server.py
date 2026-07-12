@@ -878,11 +878,19 @@ def _selfmod_agent_policy(run):
     allowed = {(workspace / path).resolve(strict=False) for path in run["files"]}
     mutation_tools = {"file_write", "file_edit", "file_delete"}
     path_tools = mutation_tools | {"file_read", "file_read_range", "file_find", "text_search", "directory_tree", "workspace_inventory", "script_search"}
+    path_keys = {
+        "file_write": "path", "file_edit": "path", "file_delete": "path",
+        "file_read": "path", "file_read_range": "path",
+        "directory_tree": "path", "workspace_inventory": "path",
+        "file_find": "root", "text_search": "root", "script_search": "root",
+    }
     inspected = set()
     counters = {"tools": 0}
     started = time.monotonic()
 
     def policy(tool_name, args):
+        if not isinstance(args, dict):
+            return "ERROR: SELFMOD POLICY: tool arguments must be an object."
         counters["tools"] += 1
         if counters["tools"] > run["budgets"]["max_tool_calls"]:
             return "ERROR: SELFMOD POLICY: tool-call budget exhausted."
@@ -898,6 +906,8 @@ def _selfmod_agent_policy(run):
             return ""
         if tool_name not in path_tools:
             return ""
+        if any(args.get(name) for name in ("token", "approval", "extra_roots")):
+            return "ERROR: SELFMOD POLICY: filesystem authority cannot be expanded by the candidate."
         raw = args.get("path") or args.get("root") or args.get("cwd") or ""
         target = Path(str(raw)).expanduser()
         if not target.is_absolute():
@@ -911,6 +921,15 @@ def _selfmod_agent_policy(run):
             inspected.add(str(target))
             if len(inspected) > run["budgets"]["max_files_inspected"]:
                 return "ERROR: SELFMOD POLICY: file-inspection budget exhausted."
+        # Generic file tools resolve relative paths against the live checkout.
+        # Pin the checked path to the candidate before dispatch so the model
+        # cannot accidentally (or deliberately) mutate the live repository.
+        key = path_keys.get(tool_name)
+        if key:
+            args[key] = str(target)
+        args.pop("token", None)
+        args.pop("approval", None)
+        args.pop("extra_roots", None)
         return ""
     return policy
 

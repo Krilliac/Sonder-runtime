@@ -12,9 +12,11 @@ import json
 import os
 import shutil
 import shlex
+import socket
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -59,6 +61,11 @@ MODEL_ALIASES = {
     "1.5": "1.5b", "1.5b": "1.5b", "3": "3b", "3b": "3b",
     "7": "7b", "7b": "7b",
 }
+TRAINING_CPU_OFFLOAD_SUPPORTED = False
+TRAINING_CPU_OFFLOAD_REASON = (
+    "Training CPU offload is disabled for the current bitsandbytes/Trainer "
+    "backend: its device_map='auto' path is intended for inference, not QLoRA training."
+)
 
 
 @dataclass(frozen=True)
@@ -214,6 +221,8 @@ def build_plan(profile=None, options=None):
         train_rejected.append(
             "Local QLoRA disabled: this bitsandbytes path requires a supported NVIDIA CUDA runtime."
         )
+    if options.allow_cpu_offload:
+        train_rejected.append(TRAINING_CPU_OFFLOAD_REASON)
     candidates = [requested] if requested != "auto" else ["7b", "3b", "1.5b"]
     for size in candidates:
         est_vram, est_ram = _training_estimate(size, options)
@@ -225,22 +234,23 @@ def build_plan(profile=None, options=None):
             or (size == "7b" and available_vram >= 11.5 and usable_ram >= 16.0)
         )
         direct_fit = est_vram <= usable_vram and est_ram <= usable_ram
-        offload_fit = (
-            options.allow_cpu_offload
-            and profile.cpu_offload_supported
-            and est_vram <= usable_vram + min(4.0, usable_ram * 0.15)
-            and est_ram + max(0.0, est_vram - usable_vram) <= usable_ram
-        )
-        if runtime_supported and range_ok and (direct_fit or offload_fit):
+        if (
+            runtime_supported
+            and not options.allow_cpu_offload
+            and range_ok
+            and direct_fit
+        ):
             training_size = size
             break
         reasons = []
         if not range_ok:
             reasons.append("outside the conservative free-VRAM starting range")
-        if est_vram > usable_vram and not offload_fit:
+        if est_vram > usable_vram:
             reasons.append(f"~{est_vram:.1f} GB VRAM exceeds {usable_vram:.1f} GB budget")
         if est_ram > usable_ram:
             reasons.append(f"~{est_ram:.1f} GB RAM exceeds {usable_ram:.1f} GB budget")
+        if options.allow_cpu_offload:
+            reasons.append("requested CPU offload backend is unavailable")
         train_rejected.append(f"QLoRA {size} rejected: " + "; ".join(reasons or ["runtime unsupported"]) + ".")
 
     method = "QLoRA (4-bit NF4)"
@@ -262,7 +272,6 @@ def build_plan(profile=None, options=None):
             est_vram, est_ram = dense_vram, dense_ram
         else:
             est_vram, est_ram = _training_estimate(training_size, options)
-        use_offload = est_vram > usable_vram
         training = Recommendation(
             enabled=True,
             model_size=training_size,
@@ -270,7 +279,7 @@ def build_plan(profile=None, options=None):
             method=method,
             estimated_vram_gb=est_vram,
             estimated_system_ram_gb=est_ram,
-            cpu_offload=use_offload,
+            cpu_offload=False,
             reason=(
                 f"{available_vram:.1f} GB currently free VRAM; {usable_vram:.1f} GB GPU budget "
                 f"and {usable_ram:.1f} GB RAM budget after desktop/OS reserves."
@@ -303,15 +312,20 @@ def build_plan(profile=None, options=None):
 def format_hardware(profile=None):
     p = profile or system_profile.detect_hardware()
     runtime = "CUDA" if p.cuda_available else "ROCm" if p.rocm_available else "none"
-    freshness = "live" if p.availability_live else "conservative fallback"
+    ram_freshness = (
+        "live" if p.system_ram_availability_live else "conservative fallback"
+    )
+    vram_freshness = (
+        "live" if p.vram_availability_live else "conservative fallback"
+    )
     return "\n".join([
         "Trilobite hardware",
         f"  OS: {p.os_name} {p.architecture}",
-        f"  system RAM: {p.system_ram_available_gb:.1f} GB available / {p.system_ram_total_gb:.1f} GB total ({freshness})",
+        f"  system RAM: {p.system_ram_available_gb:.1f} GB available / {p.system_ram_total_gb:.1f} GB total ({ram_freshness})",
         f"  GPU: {p.gpu_vendor} {p.gpu_name or '(none)'} | runtime: {runtime}",
-        f"  VRAM: {p.vram_free_gb:.1f} GB free / {p.vram_total_gb:.1f} GB total",
+        f"  VRAM: {p.vram_free_gb:.1f} GB free / {p.vram_total_gb:.1f} GB total ({vram_freshness})",
         f"  compute capability: {p.compute_capability or 'n/a'}",
-        f"  CPU offload supported: {'yes' if p.cpu_offload_supported else 'no'}",
+        f"  CPU offload hardware/runtime capability: {'yes' if p.cpu_offload_supported else 'no'}; QLoRA backend: disabled",
     ])
 
 
@@ -431,7 +445,8 @@ def start_training(plan, *, confirmed=False, dry_run=False, runner=subprocess.ru
         "TRILOBITE_MAX_LEN": str(plan.options.sequence_length),
         "TRILOBITE_BATCH_SIZE": str(plan.options.batch_size),
         "TRILOBITE_GRAD_ACCUM": str(plan.options.gradient_accumulation),
-        "TRILOBITE_ALLOW_CPU_OFFLOAD": "1" if plan.training.cpu_offload else "0",
+        # Defense in depth: the supported Trainer path must stay GPU-resident.
+        "TRILOBITE_ALLOW_CPU_OFFLOAD": "0",
         "TRILOBITE_TRAIN_GPU_BUDGET_GB": str(plan.usable_vram_gb),
         "TRILOBITE_TRAIN_RAM_BUDGET_GB": str(plan.usable_system_ram_gb),
         "TRILOBITE_TRAINING_MANIFEST": str(plan_file),
@@ -499,7 +514,86 @@ def _converter_path(explicit=""):
     return None
 
 
+def _validated_output(result):
+    return result.returncode == 0 and (result.stdout or "").strip() == "TRILOBITE_VALID"
+
+
+def _run_external(runner, command, **kwargs):
+    try:
+        return runner(command, **kwargs)
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            command, 124, stdout=exc.stdout or "", stderr="command timed out"
+        )
+    except OSError as exc:
+        return subprocess.CompletedProcess(command, 126, stdout="", stderr=str(exc))
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+@contextlib.contextmanager
+def _deployment_lock():
+    path = state_path().with_name("training-deployment.lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    token = uuid.uuid4().hex
+    payload = {
+        "token": token, "pid": os.getpid(), "host": socket.gethostname(),
+        "created_ts": time.time(),
+    }
+    for _ in range(2):
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(payload, stream, sort_keys=True)
+                stream.flush()
+                os.fsync(stream.fileno())
+            break
+        except FileExistsError:
+            try:
+                current = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                current = {}
+            local_live = (
+                current.get("host") == socket.gethostname()
+                and _pid_alive(current.get("pid"))
+            )
+            recent = time.time() - float(current.get("created_ts") or 0) < 7200
+            if local_live or recent:
+                raise RuntimeError("another training deployment is already running")
+            with contextlib.suppress(OSError):
+                path.unlink()
+    else:
+        raise RuntimeError("could not acquire the training deployment lock")
+    try:
+        yield
+    finally:
+        try:
+            current = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            current = {}
+        if current.get("token") == token:
+            with contextlib.suppress(OSError):
+                path.unlink()
+
+
 def deploy(adapter_dir="", *, converter="", ollama="", runner=subprocess.run):
+    try:
+        with _deployment_lock():
+            return _deploy_locked(
+                adapter_dir, converter=converter, ollama=ollama, runner=runner
+            )
+    except RuntimeError as exc:
+        return False, f"Deployment blocked: {exc}"
+
+
+def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess.run):
+    run = lambda command, **kwargs: _run_external(runner, command, **kwargs)
     state = _read_state()
     adapter_dir = Path(adapter_dir or state.get("adapter_dir") or ROOT / "trilobite-personal-lora")
     ok, manifest = validate_adapter(adapter_dir, state.get("base_hf", ""))
@@ -525,56 +619,151 @@ def deploy(adapter_dir="", *, converter="", ollama="", runner=subprocess.run):
         # Pin the converter to the identity already checked in PEFT metadata;
         # do not let a stale cache or renamed local folder choose the base.
         command.extend(["--base-model-id", manifest["base_hf"]])
-    converted = runner(command, cwd=converter_path.parent)
+    converted = run(command, cwd=converter_path.parent, timeout=1800)
     if converted.returncode or not gguf.exists() or gguf.stat().st_size < 1024:
         return False, "GGUF adapter conversion failed; the runtime policy was not changed."
     ollama = ollama or os.environ.get("TRILOBITE_OLLAMA_EXE", "").strip() or shutil.which("ollama") or "ollama"
-    base_probe = runner(
-        [ollama, "show", manifest["base_ollama"]], capture_output=True, text=True
+    base_probe = run(
+        [ollama, "show", manifest["base_ollama"]],
+        capture_output=True, text=True, timeout=30,
     )
     if base_probe.returncode:
         return False, (
             f"Deployment blocked: exact Ollama base {manifest['base_ollama']} is not installed. "
             "No substitute base was selected."
         )
-    candidate = f"trilobite-personal-candidate:{int(time.time())}"
+    deployment_id = "%s-%s" % (time.time_ns(), uuid.uuid4().hex[:8])
+    candidate = f"trilobite-personal-candidate:{deployment_id}"
     modelfile = adapter_dir / "Modelfile.personal"
     modelfile.write_text(
         f"FROM {manifest['base_ollama']}\nADAPTER {gguf.resolve()}\nPARAMETER temperature 0.2\n",
         encoding="utf-8",
     )
-    created = runner([ollama, "create", candidate, "-f", str(modelfile)], capture_output=True, text=True)
+    created = run(
+        [ollama, "create", candidate, "-f", str(modelfile)],
+        capture_output=True, text=True, timeout=600,
+    )
     if created.returncode:
+        run([ollama, "rm", candidate], capture_output=True, text=True, timeout=30)
         return False, "Ollama candidate creation failed; existing models and policy were preserved."
-    probe = runner(
+    probe = run(
         [ollama, "run", candidate, "Reply with only: TRILOBITE_VALID"],
         capture_output=True, text=True, timeout=120,
     )
-    if probe.returncode or not (probe.stdout or "").strip():
-        runner([ollama, "rm", candidate], capture_output=True, text=True)
-        return False, "Candidate inference validation failed; runtime policy was not changed."
-    final = runner([ollama, "create", PERSONAL_MODEL, "-f", str(modelfile)], capture_output=True, text=True)
-    if final.returncode:
-        runner([ollama, "rm", candidate], capture_output=True, text=True)
-        return False, "Final personal model creation failed; runtime policy was not changed."
-    final_probe = runner(
+    if not _validated_output(probe):
+        run([ollama, "rm", candidate], capture_output=True, text=True, timeout=30)
+        return False, (
+            "Candidate inference validation failed: expected the exact marker "
+            "TRILOBITE_VALID; runtime policy was not changed."
+        )
+
+    previous_exists = run(
+        [ollama, "show", PERSONAL_MODEL],
+        capture_output=True, text=True, timeout=30,
+    ).returncode == 0
+    previous_alias = ""
+    if previous_exists:
+        previous_alias = f"trilobite-personal-previous:{deployment_id}"
+        preserved = run(
+            [ollama, "cp", PERSONAL_MODEL, previous_alias],
+            capture_output=True, text=True, timeout=30,
+        )
+        if preserved.returncode:
+            run([ollama, "rm", candidate], capture_output=True, text=True, timeout=30)
+            return False, (
+                "Deployment blocked: the existing personal model could not be "
+                "preserved before promotion."
+            )
+
+    prior_policy = runtime_policy.load(create=True)
+    prior_models = dict(prior_policy["local_models"])
+    active_personal = any(model == PERSONAL_MODEL for model in prior_models.values())
+
+    def restore_prior_policy():
+        try:
+            runtime_policy.update(
+                local_models=prior_models,
+                source="failed personal deployment policy restore",
+            )
+            return True
+        except (OSError, ValueError):
+            return False
+
+    if active_personal:
+        safe_models = {
+            tier: ROLLBACK_MODEL if model == PERSONAL_MODEL else model
+            for tier, model in prior_models.items()
+        }
+        try:
+            runtime_policy.update(
+                local_models=safe_models,
+                source="safe personal model deployment transition",
+            )
+        except (OSError, ValueError) as exc:
+            run([ollama, "rm", candidate], capture_output=True, text=True, timeout=30)
+            return False, f"Deployment blocked: could not quiesce active personal alias: {exc}"
+
+    promoted = run(
+        [ollama, "cp", candidate, PERSONAL_MODEL],
+        capture_output=True, text=True, timeout=30,
+    )
+    if promoted.returncode:
+        run([ollama, "rm", candidate], capture_output=True, text=True, timeout=30)
+        if active_personal:
+            restore_prior_policy()
+        return False, "Personal alias promotion failed; runtime policy was not changed."
+
+    def restore_previous_alias():
+        if previous_alias:
+            restored = run(
+                [ollama, "cp", previous_alias, PERSONAL_MODEL],
+                capture_output=True, text=True, timeout=30,
+            )
+            return restored.returncode == 0
+        removed = run(
+            [ollama, "rm", PERSONAL_MODEL],
+            capture_output=True, text=True, timeout=30,
+        )
+        return removed.returncode == 0
+
+    final_probe = run(
         [ollama, "run", PERSONAL_MODEL, "Reply with only: TRILOBITE_VALID"],
         capture_output=True, text=True, timeout=120,
     )
-    runner([ollama, "rm", candidate], capture_output=True, text=True)
-    if final_probe.returncode or not (final_probe.stdout or "").strip():
-        return False, "Final model validation failed; runtime policy remains on the rollback model."
+    run([ollama, "rm", candidate], capture_output=True, text=True, timeout=30)
+    if not _validated_output(final_probe):
+        restored = restore_previous_alias()
+        policy_restored = restore_prior_policy() if active_personal else True
+        return False, (
+            "Final model validation failed; the previous personal alias and policy were restored."
+            if restored and policy_restored else
+            "Final model validation failed and automatic personal-alias restoration failed; "
+            f"preserved recovery alias: {previous_alias or '(none)'}."
+        )
     try:
+        desired_models = dict(prior_models)
+        desired_models.update({"code": PERSONAL_MODEL, "general": PERSONAL_MODEL})
         policy = runtime_policy.update(
-            local_models={"code": PERSONAL_MODEL, "general": PERSONAL_MODEL},
+            local_models=desired_models,
             source="validated personal QLoRA deployment",
         )
     except (OSError, ValueError) as exc:
+        restored = restore_previous_alias()
+        policy_restored = restore_prior_policy()
         return False, (
             f"Personal model validated, but runtime policy activation failed: {exc}. "
-            f"Code/general remain unchanged; {ROLLBACK_MODEL} is available."
+            + (
+                "The previous personal alias and policy were restored. "
+                if restored and policy_restored else
+                f"Alias restoration failed; preserved recovery alias: {previous_alias or '(none)'}. "
+            )
+            + f"Code/general policy remains unchanged; {ROLLBACK_MODEL} is available."
         )
-    state.update(status="deployed", deployed_ts=int(time.time()), model=PERSONAL_MODEL, policy_revision=policy["revision"])
+    state.update(
+        status="deployed", deployed_ts=int(time.time()), model=PERSONAL_MODEL,
+        previous_personal_model=previous_alias,
+        policy_revision=policy["revision"],
+    )
     _write_state(state)
     return True, f"Validated and deployed {PERSONAL_MODEL}; {ROLLBACK_MODEL} remains available for rollback."
 
@@ -598,7 +787,12 @@ def _parser():
         item = sub.add_parser(name)
         item.add_argument("--dry-run", action="store_true")
         item.add_argument("--model", default=os.environ.get("TRILOBITE_TRAIN_MODEL", "auto"))
-        item.add_argument("--allow-cpu-offload", action="store_true", default=os.environ.get("TRILOBITE_ALLOW_CPU_OFFLOAD") == "1")
+        item.add_argument(
+            "--allow-cpu-offload",
+            action="store_true",
+            default=os.environ.get("TRILOBITE_ALLOW_CPU_OFFLOAD") == "1",
+            help="request training CPU offload (currently rejected: this Trainer backend only supports GPU-resident QLoRA)",
+        )
         item.add_argument("--max-vram", type=float, default=_env_optional("TRILOBITE_MAX_VRAM_GB"))
         item.add_argument("--max-system-ram", type=float, default=_env_optional("TRILOBITE_MAX_SYSTEM_RAM_GB"))
         item.add_argument("--context-length", type=lambda value: parse_length(value, 8192), default=parse_length(os.environ.get("TRILOBITE_CONTEXT_SIZE"), 8192))

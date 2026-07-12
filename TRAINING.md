@@ -13,8 +13,8 @@ training, and defaults to QLoRA with 4-bit NF4 base weights, bf16/fp16 compute,
 gradient checkpointing, batch 1, and gradient accumulation 8.
 
 The 1.5B, 3B, and 7B choices are starting ranges followed by explicit memory
-estimates. Sequence length, batch size, context length, live free memory, OS
-reserves, and optional CPU offload change the final decision. Full-parameter
+estimates. Sequence length, batch size, context length, live free memory, and OS
+reserves change the final decision. Full-parameter
 training is an advanced explicit *feasibility report* and is rejected unless
 its bf16 model, gradients, optimizer state, activations, and RAM headroom fit.
 The attended local start/deploy lifecycle intentionally remains QLoRA-only.
@@ -51,6 +51,14 @@ Planning options include `--model auto|1.5b|3b|7b`,
 `--gradient-accumulation`. Corresponding `TRILOBITE_*` environment overrides
 remain supported; see `adaptive_training.py` for the exact names.
 
+`--allow-cpu-offload` is retained as an explicit capability request, but the
+current bitsandbytes/Trainer backend rejects it. Hugging Face documents the
+available `device_map="auto"` mechanism as an inference-only path, so Trilobite
+does not present it as safe QLoRA training or silently attempt it. Select a
+smaller GPU-resident plan instead. CPU offload can be enabled in a future
+backend only after that backend has a supported implementation and attended
+validation coverage.
+
 Training dependencies are intentionally separate:
 
 ```bash
@@ -75,9 +83,12 @@ Deployment then:
 2. Converts the PEFT adapter to an F16 GGUF adapter.
 3. Creates a temporary Ollama candidate using the exactly mapped
    `qwen2.5-coder:1.5b`, `:3b`, or `:7b` base.
-4. Runs candidate inference validation.
-5. Creates and validates `trilobite-personal:latest`.
-6. Only after both validations pass, updates runtime `code` and `general` tiers.
+4. Requires candidate inference to return the exact validation marker.
+5. Preserves any existing personal alias, promotes the validated timestamped
+   candidate with `ollama cp`, and validates `trilobite-personal:latest` again.
+6. Restores the previous personal alias if final validation or policy activation
+   fails.
+7. Only after both validations pass, updates runtime `code` and `general` tiers.
 
 `trilobite:latest` is never overwritten or deleted. Existing 1.5B/3B/7B
 models, adapters, converted files, and checkpoints are also never deleted.

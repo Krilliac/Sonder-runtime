@@ -133,6 +133,24 @@ def test_existing_new_and_deleted_files_restore_atomically(isolated):
     assert (root / "tests/test_calc.py").is_file()
 
 
+def test_candidate_rejection_recovers_unexpected_live_source_change(isolated):
+    root = repository(isolated, use_git=False)
+    original = (root / "calc.py").read_bytes()
+    run = prepare(plan(root))
+
+    # Defense in depth for a broken editing integration: rejection must not
+    # retain an accidental write to a backed-up live path.
+    (root / "calc.py").write_text("accidental live edit\n", encoding="utf-8")
+    restored = selfmod.reject(run["id"], "fixture isolation breach")
+
+    assert restored["phase"] == "restored"
+    assert (root / "calc.py").read_bytes() == original
+    assert any(
+        event["kind"] == "live_source_recovery"
+        for event in selfmod.events(run["id"])
+    )
+
+
 def test_corrupted_backup_fails_closed(isolated):
     root = repository(isolated, use_git=False)
     run = plan(root)
@@ -265,6 +283,19 @@ def test_concurrent_deployment_lock_and_stale_owner(isolated):
         pass
 
 
+def test_expired_lease_does_not_steal_from_live_local_owner(isolated):
+    root = repository(isolated, use_git=False)
+    run = plan(root)
+    with selfmod._tx() as conn:
+        conn.execute(
+            "UPDATE selfmod_deployment_lock SET owner_id='live',owner_pid=?,owner_host=?,lease_until=?,run_id=? WHERE id=1",
+            (os.getpid(), selfmod.socket.gethostname(), time.time() - 10, run["id"]),
+        )
+    with pytest.raises(RuntimeError, match="another deployment"):
+        with selfmod.deployment_lock(run["id"], "thief"):
+            pass
+
+
 @pytest.mark.parametrize("use_git", [False, True])
 def test_deploy_health_failure_automatically_restores(monkeypatch, isolated, use_git):
     root = repository(isolated, use_git=use_git)
@@ -310,6 +341,72 @@ def test_crashed_deployment_owner_is_reconciled_and_restored(isolated):
         )
     assert selfmod.reconcile_stale_deployment() == 1
     assert (root / "calc.py").read_bytes() == original
+    assert selfmod.get_run(run["id"])["phase"] == "restored"
+
+
+def test_crash_during_rollback_requested_retries_exact_restore(isolated):
+    root = repository(isolated, use_git=False)
+    run = reviewed(root)
+    selfmod.approve(run["id"], "user:test")
+    original = (root / "calc.py").read_bytes()
+    (root / "calc.py").write_text("partially restored garbage\n", encoding="utf-8")
+    with selfmod._tx() as conn:
+        conn.execute(
+            "UPDATE selfmod_runs SET phase='rollback_requested' WHERE id=?",
+            (run["id"],),
+        )
+        conn.execute(
+            "UPDATE selfmod_deployment_lock SET owner_id='crashed',owner_pid=99999999,owner_host=?,lease_until=?,run_id=? WHERE id=1",
+            (selfmod.socket.gethostname(), time.time() - 1, run["id"]),
+        )
+
+    assert selfmod.reconcile_stale_deployment() == 1
+    assert (root / "calc.py").read_bytes() == original
+    assert selfmod.get_run(run["id"])["phase"] == "restored"
+
+
+def test_git_commit_is_recovered_when_later_deploy_metadata_fails(monkeypatch, isolated):
+    root = repository(isolated, use_git=True)
+    starting_commit = git(root, "rev-parse", "HEAD").stdout.strip()
+    run = reviewed(root)
+    selfmod.approve(run["id"], "user:test")
+    monkeypatch.setattr(
+        selfmod,
+        "_record_deployed_files",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("ledger failure")),
+    )
+
+    with pytest.raises(OSError, match="ledger failure"):
+        selfmod.deploy(run["id"], commit=True)
+
+    assert selfmod.get_run(run["id"])["phase"] == "restored"
+    assert git(root, "status", "--porcelain", "--untracked-files=no").stdout == ""
+    assert git(root, "rev-parse", "HEAD").stdout.strip() != starting_commit
+    assert (root / "calc.py").read_text(encoding="utf-8") == "def add(a, b):\n    return a - b\n"
+
+
+def test_stale_recovery_holds_global_lock_until_restore_finishes(monkeypatch, isolated):
+    root = repository(isolated, use_git=False)
+    run = reviewed(root)
+    selfmod.approve(run["id"], "user:test")
+    with selfmod._tx() as conn:
+        conn.execute(
+            "UPDATE selfmod_deployment_lock SET owner_id='crashed',owner_pid=99999999,owner_host=?,lease_until=?,run_id=? WHERE id=1",
+            (selfmod.socket.gethostname(), time.time() - 1, run["id"]),
+        )
+    real_restore = selfmod.restore
+    observed = {"blocked": False}
+
+    def restore_while_probing(run_id):
+        with pytest.raises(RuntimeError, match="another deployment"):
+            with selfmod.deployment_lock(run_id, "competing-deployer"):
+                pass
+        observed["blocked"] = True
+        return real_restore(run_id)
+
+    monkeypatch.setattr(selfmod, "restore", restore_while_probing)
+    assert selfmod.reconcile_stale_deployment() == 1
+    assert observed["blocked"]
     assert selfmod.get_run(run["id"])["phase"] == "restored"
 
 
@@ -385,3 +482,59 @@ def test_end_to_end_edit_deploy_rollback_restores_every_hash(isolated):
     restored_hashes = hashes(root)
     assert {path: restored_hashes[path] for path in original_hashes} == original_hashes
     assert not (root / "tests/test_new.py").exists()
+
+
+def test_manual_rollback_preserves_post_deployment_user_edit(isolated):
+    root = repository(isolated, use_git=False)
+    run = prepare(plan(root))
+    selfmod.apply_candidate_changes(run["id"], {"calc.py": "def add(a, b):\n    return a + b\n"})
+    assert all(row["passed"] for row in validate(run["id"]))
+    selfmod.review(run["id"])
+    selfmod.approve(run["id"], "user:fixture")
+    selfmod.deploy(run["id"], health_command=[sys.executable, "-c", "print('ok')"])
+    user_bytes = b"# user changed this after deployment\n"
+    (root / "calc.py").write_bytes(user_bytes)
+
+    with pytest.raises(RuntimeError, match="rollback conflict"):
+        selfmod.rollback(run["id"])
+
+    assert (root / "calc.py").read_bytes() == user_bytes
+    assert selfmod.get_run(run["id"])["phase"] == "deployed"
+
+
+def test_manual_rollback_preserves_post_deployment_recreated_file(isolated):
+    root = repository(isolated, use_git=False)
+    (root / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    (root / "obsolete.txt").write_text("remove me\n", encoding="utf-8")
+    run = selfmod.create_plan(
+        "remove obsolete fixture", root,
+        problem="obsolete.txt should not exist",
+        evidence=["bounded fixture confirms obsolete.txt exists"],
+        files=["obsolete.txt"], criteria=["obsolete file is absent"],
+        risk="low", rollback_plan="restore exact hashes",
+    )
+    run = prepare(run)
+    selfmod.apply_candidate_changes(run["id"], {"obsolete.txt": None})
+    targeted = [
+        sys.executable, "-c",
+        "import pathlib; assert not pathlib.Path('obsolete.txt').exists()",
+    ]
+    selfmod.record_reproducer_before(run["id"], targeted)
+    selfmod.begin_testing(run["id"])
+    for kind, command in {
+        "syntax": [sys.executable, "-c", "print('no syntax target')"],
+        "targeted": targeted,
+        "regression": [sys.executable, "-m", "pytest", "-q"],
+        "smoke": [sys.executable, "-c", "from calc import add; assert add(1, 2) == 3"],
+    }.items():
+        assert selfmod.record_test(run["id"], kind, command)["passed"]
+    selfmod.review(run["id"])
+    selfmod.approve(run["id"], "user:fixture")
+    selfmod.deploy(run["id"], health_command=[sys.executable, "-c", "print('ok')"])
+    replacement = b"# user recreated this path\n"
+    (root / "obsolete.txt").write_bytes(replacement)
+
+    with pytest.raises(RuntimeError, match="rollback conflict"):
+        selfmod.rollback(run["id"])
+
+    assert (root / "obsolete.txt").read_bytes() == replacement
