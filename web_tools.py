@@ -1,8 +1,8 @@
 """Minimal stdlib web search/fetch helpers for the local agent.
 
-Network access is opt-out via TRILOBITE_WEB_TOOLS=0. Search defaults to
+Network access is opt-out via SONDER_WEB_TOOLS=0. Search defaults to
 DuckDuckGo's HTML endpoint and uses lightweight HTML parsing; callers can point
-TRILOBITE_SEARCH_URL at another endpoint containing "{query}".
+SONDER_SEARCH_URL at another endpoint containing "{query}".
 """
 import html
 from html.parser import HTMLParser
@@ -23,7 +23,7 @@ DEFAULT_SEARCH_URL = "https://duckduckgo.com/html/?q={query}"
 MOJEEK_SEARCH_URL = "https://www.mojeek.com/search?q={query}"
 BING_SEARCH_URL = "https://www.bing.com/search?q={query}"
 BING_SEARCH_RSS_URL = "https://www.bing.com/search?q={query}&format=rss"
-USER_AGENT = "trilobite-local-agent/1.0"
+USER_AGENT = "sonder-local-agent/1.0"
 MAX_REDIRECTS = 5
 _REDIRECT_CODES = {301, 302, 303, 307, 308}
 _NUMERIC_HOST_PART = re.compile(r"^(?:0[xX][0-9a-fA-F]+|[0-9]+)$")
@@ -74,7 +74,7 @@ _US_STATE_NAMES = {
 
 
 def enabled():
-    return os.environ.get("TRILOBITE_WEB_TOOLS", "1").strip().lower() not in (
+    return os.environ.get("SONDER_WEB_TOOLS", "1").strip().lower() not in (
         "0",
         "false",
         "no",
@@ -162,7 +162,7 @@ def _host_header(host, port, scheme):
 
 def _urlopen(req, timeout=10):
     """Open a validated request using only its pre-resolved public addresses."""
-    addresses = tuple(getattr(req, "_trilobite_addresses", ()))
+    addresses = tuple(getattr(req, "_sonder_addresses", ()))
     if not addresses:
         raise ValueError("request has no validated pinned address")
     parsed = urllib.parse.urlparse(req.full_url)
@@ -538,7 +538,7 @@ def _request(url, timeout=10):
     while True:
         _, addresses = _validated_public_target(current_url)
         req = urllib.request.Request(current_url, headers={"User-Agent": USER_AGENT})
-        req._trilobite_addresses = addresses
+        req._sonder_addresses = addresses
         try:
             response = _urlopen(req, timeout=timeout)
         except urllib.error.HTTPError as exc:
@@ -563,12 +563,12 @@ def _request(url, timeout=10):
 
 def web_search(query, limit=5, timeout=10):
     if not enabled():
-        raise RuntimeError("web tools disabled by TRILOBITE_WEB_TOOLS")
+        raise RuntimeError("web tools disabled by SONDER_WEB_TOOLS")
     query = (query or "").strip()
     if not query:
         raise ValueError("empty search query")
     limit = max(1, min(int(limit or 5), 10))
-    configured_endpoint = os.environ.get("TRILOBITE_SEARCH_URL", "").strip()
+    configured_endpoint = os.environ.get("SONDER_SEARCH_URL", "").strip()
     endpoints = (
         [configured_endpoint] if configured_endpoint
         else [DEFAULT_SEARCH_URL, MOJEEK_SEARCH_URL, BING_SEARCH_RSS_URL]
@@ -635,7 +635,7 @@ def web_search(query, limit=5, timeout=10):
 
 def web_fetch(url, max_chars=8000, timeout=10):
     if not enabled():
-        raise RuntimeError("web tools disabled by TRILOBITE_WEB_TOOLS")
+        raise RuntimeError("web tools disabled by SONDER_WEB_TOOLS")
     max_chars = max(1000, min(int(max_chars or 8000), 30000))
     raw, ctype = _request(url, timeout=timeout)
     text = raw.decode("utf-8", "replace")
@@ -713,7 +713,7 @@ def _weather_place(location, timeout):
 def weather_lookup(location, forecast_days=3, units="auto", timeout=10):
     """Resolve a user-supplied place and fetch current plus daily weather."""
     if not enabled():
-        raise RuntimeError("web tools disabled by TRILOBITE_WEB_TOOLS")
+        raise RuntimeError("web tools disabled by SONDER_WEB_TOOLS")
     location = re.sub(r"\s+", " ", str(location or "")).strip()
     if len(location) < 2:
         raise ValueError("location must be a city/region or postal code")
@@ -802,7 +802,7 @@ def normalize_location_hint(data):
 def approximate_location_lookup(timeout=10):
     """Resolve this process's public egress IP to an approximate place."""
     if not enabled():
-        raise RuntimeError("web tools disabled by TRILOBITE_WEB_TOOLS")
+        raise RuntimeError("web tools disabled by SONDER_WEB_TOOLS")
     return normalize_location_hint(_json_request(IP_LOCATION_URL, timeout=timeout))
 
 

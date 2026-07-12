@@ -23,12 +23,12 @@ def test_command_and_compaction_tools(monkeypatch, tmp_path):
 
     assert "/todo" in server.command_registry_list("planning")
     plan = server.context_compaction_plan()
-    assert "trilobite context compaction plan" in plan
+    assert "sonder context compaction plan" in plan
     assert "recommended actions" in plan
 
 
 def test_permission_policy_tool(monkeypatch, tmp_path):
-    monkeypatch.setattr(server.trilobite_paths, "default_home", lambda: tmp_path)
+    monkeypatch.setattr(server.sonder_paths, "default_home", lambda: tmp_path)
     out = server.permission_policy("file_delete")
     assert "permission check: file_delete" in out
     assert "action: deny" in out

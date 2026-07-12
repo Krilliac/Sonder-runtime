@@ -1,4 +1,4 @@
-"""Structured, read-only health metrics for Trilobite's learning loop."""
+"""Structured, read-only health metrics for Sonder's learning loop."""
 
 from __future__ import annotations
 
@@ -162,7 +162,7 @@ def format_report(report: dict) -> str:
     quality = report.get("quality") or {}
     yield_value = report.get("distillation_yield")
     lines = [
-        "trilobite learning health",
+        "sonder learning health",
         "  status: %s" % report.get("status", "unknown"),
         "  interactions: %s | outcome coverage: %s%% (%s grounded)"
         % (

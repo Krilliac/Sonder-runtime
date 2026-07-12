@@ -1,11 +1,13 @@
 from contextlib import contextmanager
 import http.client
 import json
+import os
 import threading
 
 import pytest
 
-import trilobite_serve as ts
+import sonder_serve as ts
+import sonder_health
 
 
 def test_check_auth_open_when_no_key():
@@ -87,6 +89,145 @@ def test_non_loopback_bind_fails_without_strong_auth():
     ts._validate_bind_security(
         "127.0.0.1", api_key="", auth_mode="local-open", auth_secret=""
     )
+
+
+def test_sonder_health_requires_exact_private_loopback_challenge(monkeypatch):
+    token = "health-proof-" + ("x" * 32)
+    nonce = sonder_health.new_nonce()
+    monkeypatch.setattr(ts, "LAUNCHER_HEALTH_TOKEN", token)
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port,
+            "GET",
+            sonder_health.PATH,
+            headers={sonder_health.NONCE_HEADER: nonce},
+        )
+
+    assert status == 200
+    payload = json.loads(body)
+    assert payload == sonder_health.response_payload(
+        token, nonce, port, pid=os.getpid()
+    )
+    assert sonder_health.payload_matches(
+        payload, token=token, nonce=nonce, port=port
+    )
+    assert set(payload) == {
+        "identity", "service", "version", "pid", "port", "nonce", "proof",
+    }
+    assert token not in body.decode("utf-8")
+
+
+@pytest.mark.parametrize(
+    ("configured", "nonce"),
+    [
+        ("", ""),
+        ("x" * 31, "0" * 64),
+        ("x" * 32, ""),
+        ("x" * 32, "not-a-valid-nonce"),
+        ("x" * 32, "A" * 64),
+    ],
+)
+def test_sonder_health_failure_is_indistinguishable(
+    monkeypatch,
+    configured,
+    nonce,
+):
+    monkeypatch.setattr(ts, "LAUNCHER_HEALTH_TOKEN", configured)
+    headers = (
+        {sonder_health.NONCE_HEADER: nonce}
+        if nonce
+        else {}
+    )
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "GET", sonder_health.PATH, headers=headers,
+        )
+
+    assert status == 404
+    assert json.loads(body) == {
+        "error": {"message": "not found", "type": "not_found"}
+    }
+
+
+def test_sonder_health_rejects_non_loopback_client(monkeypatch):
+    token = "x" * 32
+    nonce = sonder_health.new_nonce()
+    monkeypatch.setattr(ts, "LAUNCHER_HEALTH_TOKEN", token)
+    monkeypatch.setattr(ts, "_is_loopback_host", lambda host: False)
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port,
+            "GET",
+            sonder_health.PATH,
+            headers={sonder_health.NONCE_HEADER: nonce},
+        )
+
+    assert status == 404
+    assert "identity" not in body.decode("utf-8")
+
+
+def test_sonder_health_rejects_legacy_and_main_api_credentials(monkeypatch):
+    token = "x" * 32
+    monkeypatch.setattr(ts, "LAUNCHER_HEALTH_TOKEN", token)
+
+    with _http_server(monkeypatch) as port:
+        for headers in (
+            {"Authorization": "Bearer " + token},
+            {"X-Sonder-Launcher-Health-Token": token},
+        ):
+            status, _, body = _request(
+                port,
+                "GET",
+                sonder_health.PATH,
+                headers=headers,
+            )
+            assert status == 404
+            assert "identity" not in body.decode("utf-8")
+
+
+def test_sonder_health_nonce_is_header_only(monkeypatch):
+    token = "x" * 32
+    nonce = sonder_health.new_nonce()
+    monkeypatch.setattr(ts, "LAUNCHER_HEALTH_TOKEN", token)
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port,
+            "GET",
+            sonder_health.PATH + "?nonce=" + nonce,
+        )
+
+    assert status == 404
+    assert "proof" not in body.decode("utf-8")
+    assert sonder_health.request_path_matches(sonder_health.PATH)
+    assert sonder_health.request_path_matches(sonder_health.PATH + "/")
+    assert not sonder_health.request_path_matches(sonder_health.PATH + "//")
+
+
+def test_sonder_health_payload_validator_rejects_tampering_or_replay():
+    token = "x" * 32
+    nonce = "0" * 64
+    payload = sonder_health.response_payload(token, nonce, 11435, pid=123)
+
+    def matches(candidate, **overrides):
+        return sonder_health.payload_matches(
+            candidate,
+            token=overrides.get("token", token),
+            nonce=overrides.get("nonce", nonce),
+            port=overrides.get("port", 11435),
+        )
+
+    assert matches(payload)
+    assert not matches({**payload, "extra": True})
+    assert not matches({**payload, "service": "other"})
+    assert not matches({**payload, "pid": 124})
+    assert not matches({**payload, "proof": "f" * 64})
+    assert not matches(payload, port=11436)
+    assert not matches(payload, nonce="1" * 64)
+    assert not matches(payload, token="y" * 32)
 
 
 def test_cors_denies_hostile_origin_and_echoes_only_allowlisted(monkeypatch):
@@ -200,7 +341,7 @@ def test_chat_forwards_consent_and_client_location_to_web_router(monkeypatch):
         "timezone": "America/Chicago",
     }
     request = json.dumps({
-        "model": "trilobite",
+        "model": "sonder",
         "messages": [{"role": "user", "content": "weather in my area"}],
         "location_consent": True,
         "location_hint": hint,
@@ -233,7 +374,7 @@ def test_dangerous_slash_denied_before_handler(monkeypatch):
     called = []
     monkeypatch.setattr(ts, "_handle_slash", lambda *args, **kwargs: called.append(True))
     request = json.dumps({
-        "model": "trilobite",
+        "model": "sonder",
         "messages": [{"role": "user", "content": "/run"}],
     }).encode("utf-8")
     with _http_server(monkeypatch) as port:
@@ -299,7 +440,7 @@ def test_ordinary_account_cannot_trigger_natural_control_intents(
         lambda *args, **kwargs: "model answer\n\n[interaction_id: abc123]",
     )
     request = json.dumps({
-        "model": "trilobite",
+        "model": "sonder",
         "session": "ordinary-user-chat",
         "messages": [{"role": "user", "content": prompt}],
     }).encode("utf-8")
@@ -347,7 +488,7 @@ def test_durable_session_and_project_ids_are_principal_scoped(monkeypatch):
 
     monkeypatch.setattr(ts.server, "answer_with_history", fake_answer)
     request = json.dumps({
-        "model": "trilobite",
+        "model": "sonder",
         "session": "common-session",
         "project": "common-project",
         "messages": [{"role": "user", "content": "hello"}],

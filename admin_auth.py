@@ -1,4 +1,4 @@
-"""Local account, role, ban, and rate-limit helpers for hosted Trilobite."""
+"""Local account, role, ban, and rate-limit helpers for hosted Sonder."""
 from __future__ import annotations
 
 import hashlib
@@ -15,11 +15,11 @@ BOOTSTRAP_SECRET_MIN_LENGTH = 16
 
 
 def _secret() -> str:
-    return os.environ.get("TRILOBITE_AUTH_SECRET") or "trilobite-local-dev-secret"
+    return os.environ.get("SONDER_AUTH_SECRET") or "sonder-local-dev-secret"
 
 
 def _bootstrap_secret() -> str:
-    return os.environ.get("TRILOBITE_BOOTSTRAP_SECRET", "")
+    return os.environ.get("SONDER_BOOTSTRAP_SECRET", "")
 
 
 def _now() -> int:

@@ -22,12 +22,12 @@ from pathlib import Path
 
 import runtime_policy
 import system_profile
-import trilobite_paths
+import sonder_paths
 
 
 ROOT = Path(__file__).resolve().parent
-PERSONAL_MODEL = "trilobite-personal:latest"
-ROLLBACK_MODEL = "trilobite:latest"
+PERSONAL_MODEL = "sonder-personal:latest"
+ROLLBACK_MODEL = "sonder:latest"
 MODEL_SPECS = {
     "1.5b": {
         "params": 1.5,
@@ -319,7 +319,7 @@ def format_hardware(profile=None):
         "live" if p.vram_availability_live else "conservative fallback"
     )
     return "\n".join([
-        "Trilobite hardware",
+        "Sonder Runtime hardware",
         f"  OS: {p.os_name} {p.architecture}",
         f"  system RAM: {p.system_ram_available_gb:.1f} GB available / {p.system_ram_total_gb:.1f} GB total ({ram_freshness})",
         f"  GPU: {p.gpu_vendor} {p.gpu_name or '(none)'} | runtime: {runtime}",
@@ -356,7 +356,7 @@ def format_plan(plan):
 
 
 def state_path():
-    return Path(trilobite_paths.state_path("training_state.json", "TRILOBITE_TRAINING_STATE"))
+    return Path(sonder_paths.state_path("training_state.json", "SONDER_TRAINING_STATE"))
 
 
 def _read_state():
@@ -403,12 +403,12 @@ def start_training(plan, *, confirmed=False, dry_run=False, runner=subprocess.ru
             "Training was not started. The first/next run must be attended. Re-run with "
             "`training start --confirm` while watching GPU memory."
         )
-    output = Path(os.environ.get("TRILOBITE_LORA_OUT", ROOT / "trilobite-personal-lora"))
+    output = Path(os.environ.get("SONDER_LORA_OUT", ROOT / "sonder-personal-lora"))
     ok, free = _disk_ok(output.parent, 3 + MODEL_SPECS[plan.training.model_size]["params"] * 2.2)
     if not ok:
         return False, f"Training not started: only {free:.1f} GB disk free."
     output.mkdir(parents=True, exist_ok=True)
-    data_path = Path(os.environ.get("TRILOBITE_DATA", ROOT / "training_data.jsonl"))
+    data_path = Path(os.environ.get("SONDER_DATA", ROOT / "training_data.jsonl"))
     if not data_path.exists():
         try:
             import export_training_data
@@ -439,18 +439,18 @@ def start_training(plan, *, confirmed=False, dry_run=False, runner=subprocess.ru
     _write_state(state)
     env = os.environ.copy()
     env.update({
-        "TRILOBITE_BASE": manifest["base_hf"],
-        "TRILOBITE_DATA": str(data_path),
-        "TRILOBITE_LORA_OUT": str(output),
-        "TRILOBITE_MAX_LEN": str(plan.options.sequence_length),
-        "TRILOBITE_BATCH_SIZE": str(plan.options.batch_size),
-        "TRILOBITE_GRAD_ACCUM": str(plan.options.gradient_accumulation),
+        "SONDER_BASE": manifest["base_hf"],
+        "SONDER_DATA": str(data_path),
+        "SONDER_LORA_OUT": str(output),
+        "SONDER_MAX_LEN": str(plan.options.sequence_length),
+        "SONDER_BATCH_SIZE": str(plan.options.batch_size),
+        "SONDER_GRAD_ACCUM": str(plan.options.gradient_accumulation),
         # Defense in depth: the supported Trainer path must stay GPU-resident.
-        "TRILOBITE_ALLOW_CPU_OFFLOAD": "0",
-        "TRILOBITE_TRAIN_GPU_BUDGET_GB": str(plan.usable_vram_gb),
-        "TRILOBITE_TRAIN_RAM_BUDGET_GB": str(plan.usable_system_ram_gb),
-        "TRILOBITE_TRAINING_MANIFEST": str(plan_file),
-        "TRILOBITE_RESUME": "1",
+        "SONDER_ALLOW_CPU_OFFLOAD": "0",
+        "SONDER_TRAIN_GPU_BUDGET_GB": str(plan.usable_vram_gb),
+        "SONDER_TRAIN_RAM_BUDGET_GB": str(plan.usable_system_ram_gb),
+        "SONDER_TRAINING_MANIFEST": str(plan_file),
+        "SONDER_RESUME": "1",
     })
     try:
         result = runner([sys.executable, str(ROOT / "qlora_train.py")], cwd=ROOT, env=env)
@@ -501,7 +501,7 @@ def validate_adapter(adapter_dir, expected_base=""):
 
 
 def _converter_path(explicit=""):
-    roots = [explicit, os.environ.get("TRILOBITE_LLAMA_CPP", ""), ROOT / "llama.cpp", ROOT / "third_party" / "llama.cpp"]
+    roots = [explicit, os.environ.get("SONDER_LLAMA_CPP", ""), ROOT / "llama.cpp", ROOT / "third_party" / "llama.cpp"]
     for root in roots:
         if not root:
             continue
@@ -515,7 +515,7 @@ def _converter_path(explicit=""):
 
 
 def _validated_output(result):
-    return result.returncode == 0 and (result.stdout or "").strip() == "TRILOBITE_VALID"
+    return result.returncode == 0 and (result.stdout or "").strip() == "SONDER_VALID"
 
 
 def _run_external(runner, command, **kwargs):
@@ -595,7 +595,7 @@ def deploy(adapter_dir="", *, converter="", ollama="", runner=subprocess.run):
 def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess.run):
     run = lambda command, **kwargs: _run_external(runner, command, **kwargs)
     state = _read_state()
-    adapter_dir = Path(adapter_dir or state.get("adapter_dir") or ROOT / "trilobite-personal-lora")
+    adapter_dir = Path(adapter_dir or state.get("adapter_dir") or ROOT / "sonder-personal-lora")
     ok, manifest = validate_adapter(adapter_dir, state.get("base_hf", ""))
     if not ok:
         return False, f"Deployment blocked: {manifest}"
@@ -603,15 +603,15 @@ def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess
     if not converter_path:
         return False, (
             "Deployment blocked: llama.cpp/convert_lora_to_gguf.py was not found. "
-            "Set TRILOBITE_LLAMA_CPP to a current llama.cpp checkout. Raw PEFT "
+            "Set SONDER_LLAMA_CPP to a current llama.cpp checkout. Raw PEFT "
             "Safetensors are not used for Qwen deployment."
         )
     required = MODEL_SPECS[manifest["model_size"]]["params"] * 1.5 + 2
     disk_ok, free = _disk_ok(adapter_dir, required)
     if not disk_ok:
         return False, f"Deployment blocked: {free:.1f} GB disk free; about {required:.1f} GB required."
-    gguf = adapter_dir / "trilobite-personal-lora.gguf"
-    base_dir = os.environ.get("TRILOBITE_HF_BASE_DIR", "").strip()
+    gguf = adapter_dir / "sonder-personal-lora.gguf"
+    base_dir = os.environ.get("SONDER_HF_BASE_DIR", "").strip()
     command = [sys.executable, str(converter_path), str(adapter_dir), "--outfile", str(gguf), "--outtype", "f16"]
     if base_dir:
         command.extend(["--base", base_dir])
@@ -622,7 +622,7 @@ def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess
     converted = run(command, cwd=converter_path.parent, timeout=1800)
     if converted.returncode or not gguf.exists() or gguf.stat().st_size < 1024:
         return False, "GGUF adapter conversion failed; the runtime policy was not changed."
-    ollama = ollama or os.environ.get("TRILOBITE_OLLAMA_EXE", "").strip() or shutil.which("ollama") or "ollama"
+    ollama = ollama or os.environ.get("SONDER_OLLAMA_EXE", "").strip() or shutil.which("ollama") or "ollama"
     base_probe = run(
         [ollama, "show", manifest["base_ollama"]],
         capture_output=True, text=True, timeout=30,
@@ -633,7 +633,7 @@ def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess
             "No substitute base was selected."
         )
     deployment_id = "%s-%s" % (time.time_ns(), uuid.uuid4().hex[:8])
-    candidate = f"trilobite-personal-candidate:{deployment_id}"
+    candidate = f"sonder-personal-candidate:{deployment_id}"
     modelfile = adapter_dir / "Modelfile.personal"
     modelfile.write_text(
         f"FROM {manifest['base_ollama']}\nADAPTER {gguf.resolve()}\nPARAMETER temperature 0.2\n",
@@ -647,14 +647,14 @@ def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess
         run([ollama, "rm", candidate], capture_output=True, text=True, timeout=30)
         return False, "Ollama candidate creation failed; existing models and policy were preserved."
     probe = run(
-        [ollama, "run", candidate, "Reply with only: TRILOBITE_VALID"],
+        [ollama, "run", candidate, "Reply with only: SONDER_VALID"],
         capture_output=True, text=True, timeout=120,
     )
     if not _validated_output(probe):
         run([ollama, "rm", candidate], capture_output=True, text=True, timeout=30)
         return False, (
             "Candidate inference validation failed: expected the exact marker "
-            "TRILOBITE_VALID; runtime policy was not changed."
+            "SONDER_VALID; runtime policy was not changed."
         )
 
     previous_exists = run(
@@ -663,7 +663,7 @@ def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess
     ).returncode == 0
     previous_alias = ""
     if previous_exists:
-        previous_alias = f"trilobite-personal-previous:{deployment_id}"
+        previous_alias = f"sonder-personal-previous:{deployment_id}"
         preserved = run(
             [ollama, "cp", PERSONAL_MODEL, previous_alias],
             capture_output=True, text=True, timeout=30,
@@ -727,7 +727,7 @@ def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess
         return removed.returncode == 0
 
     final_probe = run(
-        [ollama, "run", PERSONAL_MODEL, "Reply with only: TRILOBITE_VALID"],
+        [ollama, "run", PERSONAL_MODEL, "Reply with only: SONDER_VALID"],
         capture_output=True, text=True, timeout=120,
     )
     run([ollama, "rm", candidate], capture_output=True, text=True, timeout=30)
@@ -786,23 +786,23 @@ def _parser():
     for name in ("plan", "start"):
         item = sub.add_parser(name)
         item.add_argument("--dry-run", action="store_true")
-        item.add_argument("--model", default=os.environ.get("TRILOBITE_TRAIN_MODEL", "auto"))
+        item.add_argument("--model", default=os.environ.get("SONDER_TRAIN_MODEL", "auto"))
         item.add_argument(
             "--allow-cpu-offload",
             action="store_true",
-            default=os.environ.get("TRILOBITE_ALLOW_CPU_OFFLOAD") == "1",
+            default=os.environ.get("SONDER_ALLOW_CPU_OFFLOAD") == "1",
             help="request training CPU offload (currently rejected: this Trainer backend only supports GPU-resident QLoRA)",
         )
-        item.add_argument("--max-vram", type=float, default=_env_optional("TRILOBITE_MAX_VRAM_GB"))
-        item.add_argument("--max-system-ram", type=float, default=_env_optional("TRILOBITE_MAX_SYSTEM_RAM_GB"))
-        item.add_argument("--context-length", type=lambda value: parse_length(value, 8192), default=parse_length(os.environ.get("TRILOBITE_CONTEXT_SIZE"), 8192))
-        item.add_argument("--sequence-length", type=lambda value: parse_length(value, 1024), default=parse_length(os.environ.get("TRILOBITE_MAX_LEN"), 1024))
-        item.add_argument("--batch-size", type=int, default=int(os.environ.get("TRILOBITE_BATCH_SIZE", "1")))
-        item.add_argument("--gradient-accumulation", type=int, default=int(os.environ.get("TRILOBITE_GRAD_ACCUM", "8")))
+        item.add_argument("--max-vram", type=float, default=_env_optional("SONDER_MAX_VRAM_GB"))
+        item.add_argument("--max-system-ram", type=float, default=_env_optional("SONDER_MAX_SYSTEM_RAM_GB"))
+        item.add_argument("--context-length", type=lambda value: parse_length(value, 8192), default=parse_length(os.environ.get("SONDER_CONTEXT_SIZE"), 8192))
+        item.add_argument("--sequence-length", type=lambda value: parse_length(value, 1024), default=parse_length(os.environ.get("SONDER_MAX_LEN"), 1024))
+        item.add_argument("--batch-size", type=int, default=int(os.environ.get("SONDER_BATCH_SIZE", "1")))
+        item.add_argument("--gradient-accumulation", type=int, default=int(os.environ.get("SONDER_GRAD_ACCUM", "8")))
         item.add_argument(
             "--full-finetune",
             action="store_true",
-            default=os.environ.get("TRILOBITE_FULL_FINETUNE") == "1",
+            default=os.environ.get("SONDER_FULL_FINETUNE") == "1",
         )
         if name == "start":
             item.add_argument("--confirm", action="store_true")

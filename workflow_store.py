@@ -32,7 +32,7 @@ def workspace_root():
 
 def default_path():
     return os.environ.get(
-        "TRILOBITE_WORKFLOWS",
+        "SONDER_WORKFLOWS",
         os.path.join(workspace_root(), "workflows.json"),
     )
 

@@ -3,13 +3,13 @@ import system_profile
 
 def test_profile_missing_reads_empty(monkeypatch, tmp_path):
     monkeypatch.setattr(system_profile, "workspace_root", lambda: str(tmp_path))
-    monkeypatch.delenv("TRILOBITE_SYSTEM_PROFILE", raising=False)
+    monkeypatch.delenv("SONDER_SYSTEM_PROFILE", raising=False)
     assert system_profile.read_profile() == ""
 
 
 def test_ensure_profile_creates_default(monkeypatch, tmp_path):
     monkeypatch.setattr(system_profile, "workspace_root", lambda: str(tmp_path))
-    monkeypatch.delenv("TRILOBITE_SYSTEM_PROFILE", raising=False)
+    monkeypatch.delenv("SONDER_SYSTEM_PROFILE", raising=False)
     text, path = system_profile.ensure_profile()
     assert "standing instructions" in text.lower()
     assert "workspace_inventory" in text
@@ -19,7 +19,7 @@ def test_ensure_profile_creates_default(monkeypatch, tmp_path):
 
 def test_system_prompt_initializes_missing_profile_on_first_use(monkeypatch, tmp_path):
     monkeypatch.setattr(system_profile, "workspace_root", lambda: str(tmp_path))
-    monkeypatch.delenv("TRILOBITE_SYSTEM_PROFILE", raising=False)
+    monkeypatch.delenv("SONDER_SYSTEM_PROFILE", raising=False)
 
     prompt = system_profile.system_prompt()
 
@@ -29,7 +29,7 @@ def test_system_prompt_initializes_missing_profile_on_first_use(monkeypatch, tmp
 
 def test_system_prompt_preserves_intentionally_empty_profile(monkeypatch, tmp_path):
     monkeypatch.setattr(system_profile, "workspace_root", lambda: str(tmp_path))
-    monkeypatch.delenv("TRILOBITE_SYSTEM_PROFILE", raising=False)
+    monkeypatch.delenv("SONDER_SYSTEM_PROFILE", raising=False)
     system_profile.write_profile("")
 
     assert system_profile.system_prompt() == ""
@@ -38,7 +38,7 @@ def test_system_prompt_preserves_intentionally_empty_profile(monkeypatch, tmp_pa
 
 def test_append_profile_preserves_existing(monkeypatch, tmp_path):
     monkeypatch.setattr(system_profile, "workspace_root", lambda: str(tmp_path))
-    monkeypatch.delenv("TRILOBITE_SYSTEM_PROFILE", raising=False)
+    monkeypatch.delenv("SONDER_SYSTEM_PROFILE", raising=False)
     system_profile.write_profile("first")
     system_profile.append_profile("- second")
     assert system_profile.read_profile() == "first\n\n- second"
@@ -59,7 +59,7 @@ def test_profile_path_must_stay_inside_workspace(monkeypatch, tmp_path):
 
 def test_system_prompt_labels_profile(monkeypatch, tmp_path):
     monkeypatch.setattr(system_profile, "workspace_root", lambda: str(tmp_path))
-    monkeypatch.delenv("TRILOBITE_SYSTEM_PROFILE", raising=False)
+    monkeypatch.delenv("SONDER_SYSTEM_PROFILE", raising=False)
     system_profile.write_profile("Always say less.")
     assert system_profile.system_prompt().startswith("Standing instructions")
     assert "Always say less." in system_profile.system_prompt()
@@ -70,7 +70,7 @@ def test_build_system_includes_profile(monkeypatch, tmp_path):
 
     monkeypatch.setattr(system_profile, "workspace_root", lambda: str(tmp_path))
     monkeypatch.setattr(server.system_profile, "workspace_root", lambda: str(tmp_path))
-    monkeypatch.delenv("TRILOBITE_SYSTEM_PROFILE", raising=False)
+    monkeypatch.delenv("SONDER_SYSTEM_PROFILE", raising=False)
     system_profile.write_profile("Prefer tiny answers.")
     out = server._build_system("Base system", False, "")
     assert "Prefer tiny answers." in out
@@ -81,7 +81,7 @@ def test_update_system_profile_modes(monkeypatch, tmp_path):
     import server
 
     monkeypatch.setattr(server.system_profile, "workspace_root", lambda: str(tmp_path))
-    monkeypatch.delenv("TRILOBITE_SYSTEM_PROFILE", raising=False)
+    monkeypatch.delenv("SONDER_SYSTEM_PROFILE", raising=False)
     assert "Updated system profile" in server.update_system_profile("alpha", mode="replace")
     assert server.system_profile.read_profile() == "alpha"
     server.update_system_profile("beta", mode="append")
@@ -95,9 +95,9 @@ def test_diagnostics_reports_sections(monkeypatch, tmp_path):
 
     monkeypatch.setattr(server.system_profile, "workspace_root", lambda: str(tmp_path))
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
-    monkeypatch.setattr(server, "_get", lambda path: {"models": [{"name": "trilobite"}]})
+    monkeypatch.setattr(server, "_get", lambda path: {"models": [{"name": "sonder"}]})
     out = server.diagnostics()
-    assert "trilobite diagnostics" in out
+    assert "sonder diagnostics" in out
     assert "system profile: ok" in out
     assert "memory db: ok" in out
     assert "ollama: ok" in out

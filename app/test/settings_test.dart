@@ -1,12 +1,12 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:trilobite/settings.dart';
+import 'package:sonder_runtime/settings.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   test('launcher URL is never derived from the configured chat host', () {
-    final settings = Settings(serverUrl: 'https://trilobite.example:11435/v1');
+    final settings = Settings(serverUrl: 'https://sonder.example:11435/v1');
     expect(settings.effectiveLauncherUrl, '');
     expect(settings.usesHostLauncher, isFalse);
 
@@ -48,5 +48,23 @@ void main() {
     expect(restored.apiKey, 'main-api-key');
     expect(restored.launcherUrl, 'https://host.test:11436');
     expect(restored.launcherToken, 'launcher-token');
+    final preferences = await SharedPreferences.getInstance();
+    expect(preferences.getString('sonder_api_key'), 'main-api-key');
+    expect(
+      preferences.getString('sonder_launcher_token'),
+      'launcher-token',
+    );
+  });
+
+  test('new installs use the Sonder route and preference namespace', () async {
+    SharedPreferences.setMockInitialValues({
+      'server_url': 'https://old.example:11435',
+      'model': 'old-route',
+    });
+
+    final settings = await Settings.load();
+
+    expect(settings.serverUrl, 'http://127.0.0.1:11435');
+    expect(settings.model, 'sonder');
   });
 }

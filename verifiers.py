@@ -165,7 +165,7 @@ def cpp_compile(artifact, spec=None):
 def llm_judge(artifact, spec=None):
     """spec={'rubric': str, 'threshold': int 0-10, 'judge_fn': callable?}. Weak
     oracle for outputs with no executable check (design, prose). judge_fn(prompt)
-    -> text is injectable; defaults to the local trilobite model."""
+    -> text is injectable; defaults to the local model selected by Sonder Runtime."""
     import re
     spec = spec or {}
     rubric = spec.get("rubric", "Is this a correct, complete, high-quality answer?")
@@ -173,7 +173,7 @@ def llm_judge(artifact, spec=None):
     judge_fn = spec.get("judge_fn")
     if judge_fn is None:
         import server
-        model = server.resolve_trilobite_model(False)
+        model = server.resolve_sonder_model(False)
         judge_fn = server._make_generate(
             model, "You are a strict grader. Reply with one integer 0-10, then a brief reason.",
             0.0, 256, 4096)

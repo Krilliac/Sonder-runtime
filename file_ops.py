@@ -1,4 +1,4 @@
-"""Guarded filesystem operations for Trilobite tools.
+"""Guarded filesystem operations for Sonder tools.
 
 Default policy is intentionally conservative: read/write/delete are limited to
 approved roots, file sizes are bounded, and deletes dry-run unless explicitly
@@ -12,7 +12,7 @@ import os
 import stat
 from pathlib import Path, PureWindowsPath
 
-import trilobite_paths
+import sonder_paths
 
 
 MAX_READ_BYTES = 256_000
@@ -60,11 +60,11 @@ def _split_roots(raw: str) -> list[Path]:
 
 
 def roots_file_path() -> Path:
-    configured = os.environ.get("TRILOBITE_FILE_ROOTS_FILE", "").strip()
+    configured = os.environ.get("SONDER_FILE_ROOTS_FILE", "").strip()
     return (
         Path(configured).expanduser()
         if configured
-        else Path(trilobite_paths.default_home()) / DEFAULT_ROOTS_FILE
+        else Path(sonder_paths.default_home()) / DEFAULT_ROOTS_FILE
     )
 
 
@@ -82,8 +82,8 @@ def _roots_from_file() -> list[Path]:
 
 
 def allowed_roots(extra_roots: str = "") -> list[Path]:
-    roots = [workspace_root(), Path(trilobite_paths.default_home())]
-    roots.extend(_split_roots(os.environ.get("TRILOBITE_FILE_ROOTS", "")))
+    roots = [workspace_root(), Path(sonder_paths.default_home())]
+    roots.extend(_split_roots(os.environ.get("SONDER_FILE_ROOTS", "")))
     roots.extend(_roots_from_file())
     roots.extend(_split_roots(extra_roots))
     out = []
@@ -98,7 +98,7 @@ def allowed_roots(extra_roots: str = "") -> list[Path]:
 
 
 def bypass_enabled() -> bool:
-    return os.environ.get("TRILOBITE_FILE_BYPASS", "").strip().lower() in (
+    return os.environ.get("SONDER_FILE_BYPASS", "").strip().lower() in (
         "1", "true", "yes", "on"
     )
 
@@ -120,17 +120,17 @@ def _workspace_config_path(env_name: str, default_name: str) -> Path:
 
 def _control_plane_paths() -> set[Path]:
     root = _resolve_best_effort(workspace_root())
-    home = _resolve_best_effort(Path(trilobite_paths.default_home()))
+    home = _resolve_best_effort(Path(sonder_paths.default_home()))
     paths = {
         _resolve_best_effort(roots_file_path()),
         root / DEFAULT_ROOTS_FILE,
         root / "permissions.json",
         home / "permissions.json",
-        _workspace_config_path("TRILOBITE_WORKFLOWS", "workflows.json"),
-        _workspace_config_path("TRILOBITE_EMOTION_VECTORS", "emotion_vectors.json"),
-        _workspace_config_path("TRILOBITE_SYSTEM_PROFILE", "system_profile.md"),
+        _workspace_config_path("SONDER_WORKFLOWS", "workflows.json"),
+        _workspace_config_path("SONDER_EMOTION_VECTORS", "emotion_vectors.json"),
+        _workspace_config_path("SONDER_SYSTEM_PROFILE", "system_profile.md"),
     }
-    db_override = os.environ.get("TRILOBITE_DB", "").strip()
+    db_override = os.environ.get("SONDER_DB", "").strip()
     if db_override:
         db = Path(db_override).expanduser()
         if not db.is_absolute():
@@ -180,7 +180,7 @@ def _is_protected_mutation_path(path: Path) -> bool:
 def _require_mutation_access(path: Path, developer_authorized: bool) -> None:
     if _is_protected_mutation_path(path) and not developer_authorized:
         raise PermissionError(
-            "refusing to mutate protected Trilobite control-plane path "
+            "refusing to mutate protected Sonder control-plane path "
             "without an authenticated developer token: %s" % path
         )
 
@@ -355,7 +355,7 @@ def resolve_path(path: str, *, extra_roots: str = "", bypass: bool = False) -> P
     if any(_is_inside(resolved, root) for root in roots):
         return resolved
     raise PermissionError(
-        "path is outside allowed roots. Set TRILOBITE_FILE_ROOTS or use an approved admin/dev bypass."
+        "path is outside allowed roots. Set SONDER_FILE_ROOTS or use an approved admin/dev bypass."
     )
 
 
@@ -372,9 +372,9 @@ def policy_text(*, bypass: bool = False, extra_roots: str = "") -> str:
         lines.append("    - %s" % root)
     lines.extend([
         "  hot roots file: %s" % roots_file_path(),
-        "  env bypass: TRILOBITE_FILE_BYPASS=1",
-        "  approval code: TRILOBITE_FILE_APPROVAL_CODE plus approval=<code>",
-        "  env extra roots: TRILOBITE_FILE_ROOTS=<path%spath>" % os.pathsep,
+        "  env bypass: SONDER_FILE_BYPASS=1",
+        "  approval code: SONDER_FILE_APPROVAL_CODE plus approval=<code>",
+        "  env extra roots: SONDER_FILE_ROOTS=<path%spath>" % os.pathsep,
     ])
     return "\n".join(lines)
 

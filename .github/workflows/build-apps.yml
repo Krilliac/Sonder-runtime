@@ -1,7 +1,7 @@
 name: build-apps
 
-# Compiles the trilobite mobile/desktop client for Android, Linux, Windows and
-# macOS. Every run uploads installable artifacts (downloadable from the run's
+# Compiles Sonder Runtime for Android, Linux, Windows, and macOS. Every run
+# uploads installable artifacts (downloadable from the run's
 # "Summary" page). Manual workflow runs can refresh the README's direct
 # artifact download badges; normal push builds avoid bot commits so local GUI
 # pushes are not rejected by surprise README updates. Pushing a tag like
@@ -32,7 +32,7 @@ permissions:
 
 env:
   FLUTTER_CHANNEL: stable
-  APP_ORG: com.trilobite
+  APP_ORG: com.sonder.runtime
 
 jobs:
   analyze:
@@ -49,7 +49,7 @@ jobs:
         with:
           channel: ${{ env.FLUTTER_CHANNEL }}
           cache: true
-      - run: flutter create --org $APP_ORG --project-name trilobite --platforms=android .
+      - run: flutter create --org $APP_ORG --project-name sonder_runtime --platforms=android .
       - name: Configure explicit LAN networking
         run: python ../scripts/configure_flutter_networking.py . --allow-android-cleartext
       - name: Bundle local system
@@ -78,7 +78,7 @@ jobs:
         with:
           channel: ${{ env.FLUTTER_CHANNEL }}
           cache: true
-      - run: flutter create --org $APP_ORG --project-name trilobite --platforms=android .
+      - run: flutter create --org $APP_ORG --project-name sonder_runtime --platforms=android .
       - name: Configure explicit LAN networking
         run: python ../scripts/configure_flutter_networking.py . --allow-android-cleartext
       - name: Bundle local system
@@ -87,12 +87,12 @@ jobs:
       - name: Build APK (release, debug-signed so it installs directly)
         run: flutter build apk --release
       - name: Rename APK
-        run: cp build/app/outputs/flutter-apk/app-release.apk trilobite-android.apk
+        run: cp build/app/outputs/flutter-apk/app-release.apk sonder-runtime-android.apk
       - uses: actions/upload-artifact@v4
         id: upload-artifact
         with:
-          name: trilobite-android-apk
-          path: app/trilobite-android.apk
+          name: sonder-runtime-android-apk
+          path: app/sonder-runtime-android.apk
           if-no-files-found: error
 
   linux:
@@ -117,7 +117,9 @@ jobs:
           channel: ${{ env.FLUTTER_CHANNEL }}
           cache: true
       - run: flutter config --enable-linux-desktop
-      - run: flutter create --org $APP_ORG --project-name trilobite --platforms=linux .
+      - run: flutter create --org $APP_ORG --project-name sonder_runtime --platforms=linux .
+      - name: Configure Sonder Runtime identity
+        run: python ../scripts/configure_flutter_networking.py .
       - name: Bundle local system
         run: python ../scripts/package_local_system.py --out app/build/local-system --zip app/assets/local-system.zip
       - run: flutter pub get
@@ -127,12 +129,12 @@ jobs:
       - name: Package Linux bundle
         run: |
           cd build/linux/x64/release/bundle
-          tar -czf "$GITHUB_WORKSPACE/app/trilobite-linux-x64.tar.gz" .
+          tar -czf "$GITHUB_WORKSPACE/app/sonder-runtime-linux-x64.tar.gz" .
       - uses: actions/upload-artifact@v4
         id: upload-artifact
         with:
-          name: trilobite-linux-x64
-          path: app/trilobite-linux-x64.tar.gz
+          name: sonder-runtime-linux-x64
+          path: app/sonder-runtime-linux-x64.tar.gz
           if-no-files-found: error
 
   windows:
@@ -152,7 +154,9 @@ jobs:
           channel: ${{ env.FLUTTER_CHANNEL }}
           cache: true
       - run: flutter config --enable-windows-desktop
-      - run: flutter create --org com.trilobite --project-name trilobite --platforms=windows .
+      - run: flutter create --org $env:APP_ORG --project-name sonder_runtime --platforms=windows .
+      - name: Configure Sonder Runtime identity
+        run: python ../scripts/configure_flutter_networking.py .
       - name: Bundle local system
         run: python ../scripts/package_local_system.py --out app/build/local-system --zip app/assets/local-system.zip
       - run: flutter pub get
@@ -160,12 +164,12 @@ jobs:
       - name: Add local system to Windows app
         run: Copy-Item -Recurse -Force build/local-system build/windows/x64/runner/Release/local-system
       - name: Package Windows bundle
-        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath trilobite-windows-x64.zip
+        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath sonder-runtime-windows-x64.zip
       - uses: actions/upload-artifact@v4
         id: upload-artifact
         with:
-          name: trilobite-windows-x64
-          path: app/trilobite-windows-x64.zip
+          name: sonder-runtime-windows-x64
+          path: app/sonder-runtime-windows-x64.zip
           if-no-files-found: error
 
   macos:
@@ -185,7 +189,7 @@ jobs:
           channel: ${{ env.FLUTTER_CHANNEL }}
           cache: true
       - run: flutter config --enable-macos-desktop
-      - run: flutter create --org $APP_ORG --project-name trilobite --platforms=macos .
+      - run: flutter create --org $APP_ORG --project-name sonder_runtime --platforms=macos .
       - name: Configure local-network privacy description
         run: python ../scripts/configure_flutter_networking.py .
       - name: Bundle local system
@@ -193,16 +197,16 @@ jobs:
       - run: flutter pub get
       - run: flutter build macos --release
       - name: Add local system to macOS app
-        run: cp -a build/local-system build/macos/Build/Products/Release/trilobite.app/Contents/Resources/local-system
+        run: cp -a build/local-system "build/macos/Build/Products/Release/Sonder Runtime.app/Contents/Resources/local-system"
       - name: Package macOS app
         run: |
           cd build/macos/Build/Products/Release
-          zip -r -y "$GITHUB_WORKSPACE/app/trilobite-macos.zip" trilobite.app
+          zip -r -y "$GITHUB_WORKSPACE/app/sonder-runtime-macos.zip" "Sonder Runtime.app"
       - uses: actions/upload-artifact@v4
         id: upload-artifact
         with:
-          name: trilobite-macos
-          path: app/trilobite-macos.zip
+          name: sonder-runtime-macos
+          path: app/sonder-runtime-macos.zip
           if-no-files-found: error
 
   update-readme-artifacts:
@@ -249,12 +253,12 @@ jobs:
           files: dist/**/*
           generate_release_notes: true
           body: |
-            Trilobite client builds — install on your phone or desktop, then
-            point the app at your `trilobite_serve.py` server (Settings → Server URL).
+            Sonder Runtime builds — install on your phone or desktop, then
+            point the app at your `sonder_serve.py` server (Settings → Server URL).
 
             | Platform | Download |
             |---|---|
-            | Android  | `trilobite-android.apk` |
-            | Linux    | `trilobite-linux-x64.tar.gz` |
-            | Windows  | `trilobite-windows-x64.zip` |
-            | macOS    | `trilobite-macos.zip` |
+            | Android  | `sonder-runtime-android.apk` |
+            | Linux    | `sonder-runtime-linux-x64.tar.gz` |
+            | Windows  | `sonder-runtime-windows-x64.zip` |
+            | macOS    | `sonder-runtime-macos.zip` |

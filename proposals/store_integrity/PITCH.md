@@ -21,6 +21,6 @@ Integration: run `python proposals/store_integrity/store_integrity.py --db
 memory.db` as a periodic maintenance step (e.g. alongside `lesson_pruner` in
 `curriculum_run.py` or a standalone cron), or `import store_integrity;
 ok, issues = store_integrity.check_store(conn)` anywhere a live connection is
-already open (e.g. a startup check in `server.py` or `trilobite_serve.py`).
+already open (e.g. a startup check in `server.py` or `sonder_serve.py`).
 It is strictly read-only and made no changes to `memory_store.py`,
 `embeddings.py`, or any other existing module.

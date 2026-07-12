@@ -57,7 +57,7 @@ def test_hot_roots_file_allows_explicit_read_root(monkeypatch, tmp_path):
     target.write_text("ground truth", encoding="utf-8")
     monkeypatch.setattr(file_ops, "workspace_root", lambda: workspace)
     roots_file = workspace / "trusted-roots.local"
-    monkeypatch.setenv("TRILOBITE_FILE_ROOTS_FILE", str(roots_file))
+    monkeypatch.setenv("SONDER_FILE_ROOTS_FILE", str(roots_file))
     roots_file.write_text(str(repo), encoding="utf-8")
 
     assert file_ops.read_file(str(target))["text"] == "ground truth"
@@ -68,7 +68,7 @@ def test_hot_roots_file_ignores_comments_and_missing_paths(monkeypatch, tmp_path
     workspace.mkdir()
     monkeypatch.setattr(file_ops, "workspace_root", lambda: workspace)
     roots_file = workspace / "trusted-roots.local"
-    monkeypatch.setenv("TRILOBITE_FILE_ROOTS_FILE", str(roots_file))
+    monkeypatch.setenv("SONDER_FILE_ROOTS_FILE", str(roots_file))
     roots_file.write_text(
         "# approved roots\n\n" + str(tmp_path / "missing") + "\n",
         encoding="utf-8",
@@ -98,7 +98,7 @@ def test_recursive_delete_allows_plain_subdirectory(monkeypatch, tmp_path):
     state.mkdir()
     (target / "ordinary.txt").write_text("delete me", encoding="utf-8")
     monkeypatch.setattr(file_ops, "workspace_root", lambda: workspace)
-    monkeypatch.setattr(file_ops.trilobite_paths, "default_home", lambda: state)
+    monkeypatch.setattr(file_ops.sonder_paths, "default_home", lambda: state)
 
     preview = file_ops.delete_path(str(target), recursive=True)
     result = file_ops.delete_path(

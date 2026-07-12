@@ -8,8 +8,8 @@ def test_parse_size_accepts_suffixes():
 
 
 def test_policy_clamps_native_but_allows_virtual(monkeypatch):
-    monkeypatch.setenv("TRILOBITE_NATIVE_CONTEXT_MAX", "256k")
-    monkeypatch.setenv("TRILOBITE_VIRTUAL_CONTEXT_MAX", "1m")
+    monkeypatch.setenv("SONDER_NATIVE_CONTEXT_MAX", "256k")
+    monkeypatch.setenv("SONDER_VIRTUAL_CONTEXT_MAX", "1m")
 
     policy = context_policy.policy("1m")
 
@@ -20,6 +20,6 @@ def test_policy_clamps_native_but_allows_virtual(monkeypatch):
 
 
 def test_requested_clamps_to_virtual_max(monkeypatch):
-    monkeypatch.setenv("TRILOBITE_VIRTUAL_CONTEXT_MAX", "500k")
+    monkeypatch.setenv("SONDER_VIRTUAL_CONTEXT_MAX", "500k")
 
     assert context_policy.requested("1m") == 500000

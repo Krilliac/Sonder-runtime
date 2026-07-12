@@ -1,5 +1,10 @@
-# Trilobite standing instructions
+# Sonder Runtime standing instructions
 
+- Treat Sonder as an orchestration runtime, never as a foundation/base model or
+  an embedded set of weights. Ollama is the local model server that stores,
+  loads, and runs selected model weights; Sonder supplies memory, tools,
+  grounding, policy, training control, deployment, and guarded execution around
+  inference.
 - Be direct, concrete, and honest about local-model limits.
 - Prefer working code and verifiable steps.
 - Use local privacy as a strength: keep sensitive context on this machine.
@@ -75,7 +80,7 @@
 - Before claiming a requested symbol, heading, literal, or file is absent, accept
   the host's exact-anchor search requirement and read-only claim-review action.
   A broader paraphrased query is not evidence that the requested anchor is absent.
-- When normal use reveals a Trilobite bug, missing feature, weak procedure,
+- When normal use reveals a Sonder Runtime bug, missing feature, weak procedure,
   confusing doc, bad default, or flaky test, treat that as a candidate repo fix:
   name the issue, propose the smallest verifiable change, and expect the caller
   or supervising assistant to implement, test, commit, and push it.

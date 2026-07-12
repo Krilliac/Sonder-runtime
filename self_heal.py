@@ -1,4 +1,4 @@
-"""Conservative self-healing checks and safe repairs for trilobite."""
+"""Conservative self-healing checks and safe repairs for sonder."""
 import collections
 import os
 import time

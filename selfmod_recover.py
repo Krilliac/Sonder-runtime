@@ -1,4 +1,4 @@
-"""Emergency selfmod recovery; intentionally imports no Trilobite modules."""
+"""Emergency selfmod recovery; intentionally imports no Sonder modules."""
 import argparse
 import hashlib
 import json

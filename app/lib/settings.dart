@@ -2,23 +2,25 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 /// Persisted connection settings (server URL, API key, theme).
 class Settings {
-  static const _kServer = 'server_url';
-  static const _kKey = 'api_key';
-  static const _kDark = 'dark_mode';
-  static const _kModel = 'model';
-  static const _kAllowHosted = 'allow_hosted';
-  static const _kContextSize = 'context_size';
-  static const _kKeepServerRunning = 'keep_server_running';
-  static const _kAllowApproximateLocation = 'allow_approximate_location';
-  static const _kLauncherUrl = 'launcher_url';
-  static const _kLauncherToken = 'launcher_token';
+  static const _kServer = 'sonder_server_url';
+  static const _kKey = 'sonder_api_key';
+  static const _kDark = 'sonder_dark_mode';
+  static const _kModel = 'sonder_model';
+  static const _kAllowHosted = 'sonder_allow_hosted';
+  static const _kContextSize = 'sonder_context_size';
+  static const _kKeepServerRunning = 'sonder_keep_server_running';
+  static const _kAllowApproximateLocation =
+      'sonder_allow_approximate_location';
+  static const _kLauncherUrl = 'sonder_launcher_url';
+  static const _kLauncherToken = 'sonder_launcher_token';
 
-  static const defaultModel = 'trilobite';
+  static const defaultModel = 'sonder';
 
   String serverUrl;
   String apiKey;
   bool darkMode;
-  String model; // which server tier/model to use ("trilobite" = local student)
+  // Inference route/model identifier exposed by the Sonder Runtime server.
+  String model;
   bool allowHosted;
   String contextSize;
   bool keepServerRunning;

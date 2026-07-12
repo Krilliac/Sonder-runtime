@@ -2,12 +2,12 @@ import pytest
 
 import autopilot_store
 import server
-import trilobite_serve
+import sonder_serve
 
 
 @pytest.fixture(autouse=True)
 def isolated_autopilot_db(monkeypatch, tmp_path):
-    monkeypatch.setenv("TRILOBITE_AUTOPILOT_DB", str(tmp_path / "autopilot.db"))
+    monkeypatch.setenv("SONDER_AUTOPILOT_DB", str(tmp_path / "autopilot.db"))
     autopilot_store.reset_schema_cache_for_tests()
     yield
     autopilot_store.reset_schema_cache_for_tests()
@@ -236,10 +236,10 @@ def test_agent_host_allowlist_rejects_model_tool_expansion(monkeypatch):
 
 
 def test_http_autopilot_status_is_safe_but_lifecycle_changes_require_developer():
-    assert trilobite_serve._dangerous_http_slash("/autopilot") is False
-    assert trilobite_serve._dangerous_http_slash("/autopilot status auto-1") is False
-    assert trilobite_serve._dangerous_http_slash("/autopilot run change files") is True
-    assert trilobite_serve._dangerous_http_slash("/auto cancel auto-1") is True
+    assert sonder_serve._dangerous_http_slash("/autopilot") is False
+    assert sonder_serve._dangerous_http_slash("/autopilot status auto-1") is False
+    assert sonder_serve._dangerous_http_slash("/autopilot run change files") is True
+    assert sonder_serve._dangerous_http_slash("/auto cancel auto-1") is True
 
 
 def test_diagnostics_manifest_and_improvement_expose_autopilot(monkeypatch, tmp_path):

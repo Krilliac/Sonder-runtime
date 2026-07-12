@@ -9,7 +9,7 @@ import web_tools
 
 @pytest.fixture(autouse=True)
 def public_dns(monkeypatch):
-    monkeypatch.setenv("TRILOBITE_WEB_TOOLS", "1")
+    monkeypatch.setenv("SONDER_WEB_TOOLS", "1")
     monkeypatch.setattr(
         web_tools.socket,
         "getaddrinfo",
@@ -158,7 +158,7 @@ def test_web_fetch_rejects_localhost():
 
 
 def test_web_tools_can_be_disabled(monkeypatch):
-    monkeypatch.setenv("TRILOBITE_WEB_TOOLS", "0")
+    monkeypatch.setenv("SONDER_WEB_TOOLS", "0")
     with pytest.raises(RuntimeError):
         web_tools.web_search("x")
 

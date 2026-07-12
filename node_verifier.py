@@ -1,4 +1,4 @@
-"""node_verifier — Node.js execution backend for trilobite's verifiers registry.
+"""node_verifier — Node.js execution backend for sonder's verifiers registry.
 
 Mirrors verifiers.python_exec / verifiers.cpp_compile but grounds JavaScript
 artifacts: writes the artifact (plus an optional appended assertion-style

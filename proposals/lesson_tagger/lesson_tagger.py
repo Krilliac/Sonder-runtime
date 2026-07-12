@@ -1,6 +1,6 @@
 """lesson_tagger — infer domain/language tags for a lesson's text.
 
-trilobite's `lessons` table (see memory_store.py) is a flat bag of free-text
+sonder's `lessons` table (see memory_store.py) is a flat bag of free-text
 strings retrieved by FTS5 + semantic similarity (retriever.py). That works
 well when the *topic* of the current task matches the topic of a past lesson,
 but retrieval has no notion of *domain* — a task about a SQL injection bug

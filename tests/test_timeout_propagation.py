@@ -23,7 +23,7 @@ def test_learning_offload_bounds_timeout(monkeypatch):
     monkeypatch.setattr(server, "_post", lambda p, d, timeout=None: seen.append(timeout) or {"message": {"content": "ok"}})
     monkeypatch.setattr(server, "_open_db", lambda: Conn())
     monkeypatch.setattr(server, "_should_learn", lambda tier, learn: True)
-    monkeypatch.setattr(server, "resolve_trilobite_model", lambda strict=False: "trilobite")
+    monkeypatch.setattr(server, "resolve_sonder_model", lambda strict=False: "sonder")
     monkeypatch.setattr(server.orchestrator, "run_with_learning", lambda c, p, t, g, **k: (g(p), "abc123"))
     out = server.offload("x", tier="code", learn=True, timeout=server.TIMEOUT + 99)
     assert server.parse_interaction_id(out) == "abc123"

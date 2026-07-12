@@ -1,5 +1,6 @@
-"""Honestly measure whether the fine-tune helped: base 1.5B vs trilobite-tuned
-(the same 1.5B, QLoRA-fine-tuned) on HELD-OUT coding tasks, graded by real
+"""Honestly measure whether the fine-tune helped: base 1.5B versus the
+``sonder-tuned`` Ollama alias (the same 1.5B with a QLoRA adapter) on HELD-OUT
+coding tasks, graded by real
 execution (grounding.run_code), not the model's say-so.
 
 Fair comparison: same 1.5B family, same system prompt, same params, tasks that
@@ -81,7 +82,7 @@ def evaluate(model):
 
 
 def main():
-    models = sys.argv[1:] or ["qwen2.5-coder:1.5b", "trilobite-tuned"]
+    models = sys.argv[1:] or ["qwen2.5-coder:1.5b", "sonder-tuned"]
     results = {}
     for m in models:
         print("=== %s ===" % m)

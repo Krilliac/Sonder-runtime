@@ -344,7 +344,7 @@ def format_run(run: dict | None, include_report: bool = True) -> str:
     passed = sum(1 for task in plan if task.get("status") == "passed")
     pending = sum(1 for task in plan if task.get("status") == "pending")
     lines = [
-        "trilobite autopilot",
+        "sonder autopilot",
         "  id: %s" % run.get("id", ""),
         "  status/phase: %s / %s" % (run.get("status", ""), run.get("phase", "")),
         "  objective: %s" % run.get("objective", ""),

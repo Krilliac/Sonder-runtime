@@ -55,7 +55,7 @@ MAX_LOOP_ITERATIONS = 50
 MAX_LOOP_DELAY_SECONDS = 10.0
 MAX_PROJECT_FILES = 80
 MAX_PROJECT_BYTES = 750000
-RUN_WINDOW_DIR_ENV = "TRILOBITE_RUN_WINDOW_DIR"
+RUN_WINDOW_DIR_ENV = "SONDER_RUN_WINDOW_DIR"
 
 
 def _powershell_exe():
@@ -174,9 +174,9 @@ def _persistent_run_dir():
     base = os.environ.get(RUN_WINDOW_DIR_ENV, "").strip()
     if not base:
         home = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
-        base = os.path.join(home, "trilobite", "runs")
+        base = os.path.join(home, "sonder", "runs")
     os.makedirs(base, exist_ok=True)
-    return tempfile.mkdtemp(prefix="trilobite-window-", dir=base)
+    return tempfile.mkdtemp(prefix="sonder-window-", dir=base)
 
 
 def _bat_quote(value):
@@ -238,7 +238,7 @@ def _cpp_compiler():
 
 
 def _find_visual_studio_vcvars():
-    override = os.environ.get("TRILOBITE_VCVARS64", "").strip()
+    override = os.environ.get("SONDER_VCVARS64", "").strip()
     if override and os.path.isfile(override):
         return override
 
@@ -294,7 +294,7 @@ def _find_visual_studio_vcvars():
 
 
 def _msvc_compile_result(vcvars, sources, exe, cwd, timeout, language):
-    bat = os.path.join(cwd, "trilobite_build_msvc.bat")
+    bat = os.path.join(cwd, "sonder_build_msvc.bat")
     quoted_sources = " ".join('"%s"' % src for src in sources)
     with open(bat, "w", encoding="utf-8") as f:
         f.write(
@@ -445,7 +445,7 @@ def run_code(code, language="python", stdin="", timeout=DEFAULT_TIMEOUT, cwd=Non
     cwd = resolve_cwd(cwd)
     cfg = SUPPORTED_LANGUAGES[language]
 
-    with tempfile.TemporaryDirectory(prefix="trilobite-run-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="sonder-run-") as tmp:
         path = os.path.join(tmp, "snippet" + cfg["suffix"])
         with open(path, "w", encoding="utf-8") as f:
             f.write(code)
@@ -648,14 +648,14 @@ def _auto_project_commands(root, files):
         return [{"cmd": ["dotnet", "run", "--project", csproj], "cwd": ""}]
     cs_files = [p for p in paths if p.lower().endswith(".cs")]
     if cs_files:
-        project = os.path.join(root, "TrilobiteGenerated.csproj")
+        project = os.path.join(root, "SonderGenerated.csproj")
         with open(project, "w", encoding="utf-8") as f:
             f.write(
                 '<Project Sdk="Microsoft.NET.Sdk">\n'
                 '  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework></PropertyGroup>\n'
                 '</Project>\n'
             )
-        return [{"cmd": ["dotnet", "run", "--project", "TrilobiteGenerated.csproj"], "cwd": ""}]
+        return [{"cmd": ["dotnet", "run", "--project", "SonderGenerated.csproj"], "cwd": ""}]
     cpp_files = [p for p in paths if p.lower().endswith((".cpp", ".cc", ".cxx"))]
     if cpp_files:
         name, compiler = _cpp_compiler()
@@ -664,7 +664,7 @@ def _auto_project_commands(root, files):
         exe = os.path.abspath(os.path.join(root, "app.exe" if os.name == "nt" else "app"))
         if name == "msvc-vcvars":
             sources = [os.path.abspath(os.path.join(root, p)) for p in cpp_files]
-            bat = os.path.join(root, "trilobite_build_msvc.bat")
+            bat = os.path.join(root, "sonder_build_msvc.bat")
             quoted_sources = " ".join('"%s"' % src for src in sources)
             with open(bat, "w", encoding="utf-8") as f:
                 f.write(
@@ -688,7 +688,7 @@ def run_project(files_json, commands_json="", stdin="", timeout=MAX_TIMEOUT):
     files = _project_files_from_json(files_json)
     commands = _commands_from_json(commands_json)
     timeout = _clamp_timeout(timeout)
-    with tempfile.TemporaryDirectory(prefix="trilobite-project-") as root:
+    with tempfile.TemporaryDirectory(prefix="sonder-project-") as root:
         root = os.path.abspath(root)
         _write_project_files(root, files)
         if commands is None:

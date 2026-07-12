@@ -1,4 +1,4 @@
-"""Endless grounded training loop for trilobite.
+"""Endless grounded-practice loop for Sonder Runtime.
 
 Runs bounded campaign rounds until Ctrl+C or until a round records no useful
 progress. Configuration is via environment variables so the .cmd launcher stays
@@ -38,15 +38,15 @@ def _env_float(name, default, lo=0.0, hi=3600.0):
 
 def _round_config():
     return {
-        "total": _env_int("TRILOBITE_ENDLESS_TOTAL", 30, 1, 120),
+        "total": _env_int("SONDER_ENDLESS_TOTAL", 30, 1, 120),
         "languages": os.environ.get(
-            "TRILOBITE_ENDLESS_LANGUAGES",
+            "SONDER_ENDLESS_LANGUAGES",
             "python,javascript,powershell,cpp,csharp",
         ),
-        "tier": os.environ.get("TRILOBITE_ENDLESS_TIER", "fast"),
-        "max_workers": _env_int("TRILOBITE_ENDLESS_WORKERS", 4, 1, 12),
-        "timeout": _env_int("TRILOBITE_ENDLESS_TIMEOUT", 10, 1, 120),
-        "repair_rounds": _env_int("TRILOBITE_ENDLESS_REPAIRS", 2, 0, 3),
+        "tier": os.environ.get("SONDER_ENDLESS_TIER", "fast"),
+        "max_workers": _env_int("SONDER_ENDLESS_WORKERS", 4, 1, 12),
+        "timeout": _env_int("SONDER_ENDLESS_TIMEOUT", 10, 1, 120),
+        "repair_rounds": _env_int("SONDER_ENDLESS_REPAIRS", 2, 0, 3),
     }
 
 
@@ -61,14 +61,14 @@ def _parse_summary(text):
 
 
 def main():
-    sleep_seconds = _env_float("TRILOBITE_ENDLESS_SLEEP", 2.0, 0.0, 3600.0)
+    sleep_seconds = _env_float("SONDER_ENDLESS_SLEEP", 2.0, 0.0, 3600.0)
     stop_after_no_progress = _env_int(
-        "TRILOBITE_ENDLESS_STOP_AFTER_NO_PROGRESS", 1, 1, 100
+        "SONDER_ENDLESS_STOP_AFTER_NO_PROGRESS", 1, 1, 100
     )
     no_progress = 0
     round_no = 0
 
-    print("trilobite endless training")
+    print("Sonder Runtime endless practice")
     print("Press Ctrl+C to stop after the current in-flight process is interrupted.")
     print("Config: %r" % _round_config())
     print()
@@ -76,7 +76,7 @@ def main():
     while True:
         round_no += 1
         cfg = _round_config()
-        print("=== endless training round %d ===" % round_no)
+        print("=== endless practice round %d ===" % round_no)
         started = time.time()
         try:
             output = server.campaign_generate_compile_execute_record(**cfg)

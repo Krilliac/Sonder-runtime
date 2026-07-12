@@ -77,7 +77,7 @@ def test_missing_runtime_is_reported(monkeypatch):
 
 def test_cpp_compiler_finds_visual_studio_vcvars_from_env(monkeypatch):
     monkeypatch.setattr(code_runner.shutil, "which", lambda exe: None)
-    monkeypatch.setenv("TRILOBITE_VCVARS64", r"C:\VS\VC\Auxiliary\Build\vcvars64.bat")
+    monkeypatch.setenv("SONDER_VCVARS64", r"C:\VS\VC\Auxiliary\Build\vcvars64.bat")
     monkeypatch.setattr(code_runner.os.path, "isfile", lambda path: path.endswith("vcvars64.bat"))
 
     assert code_runner._cpp_compiler() == (
@@ -87,7 +87,7 @@ def test_cpp_compiler_finds_visual_studio_vcvars_from_env(monkeypatch):
 
 
 def test_cpp_compiler_finds_visual_studio_vcvars_from_vswhere(monkeypatch):
-    monkeypatch.delenv("TRILOBITE_VCVARS64", raising=False)
+    monkeypatch.delenv("SONDER_VCVARS64", raising=False)
     monkeypatch.setattr(code_runner.shutil, "which", lambda exe: r"C:\VS\Installer\vswhere.exe" if exe == "vswhere" else None)
     monkeypatch.setattr(code_runner.os.path, "isfile", lambda path: path.endswith("vcvars64.bat") or path.endswith("vswhere.exe"))
 
@@ -138,7 +138,7 @@ def test_run_cpp_uses_msvc_batch_when_vcvars_available(monkeypatch, tmp_path):
     assert out["ok"] is True
     assert seen[0][:2] == ["cmd", "/c"]
     assert seen[1][0].endswith("snippet.exe")
-    assert (tmp_path / "trilobite_build_msvc.bat").exists()
+    assert (tmp_path / "sonder_build_msvc.bat").exists()
 
 
 def test_run_code_window_launches_python_console(monkeypatch, tmp_path):

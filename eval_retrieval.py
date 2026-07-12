@@ -1,9 +1,9 @@
-"""eval_retrieval — measures whether trilobite's learned-lesson retrieval actually
+"""eval_retrieval — measures whether Sonder Runtime's learned-lesson retrieval actually
 improves grounded pass-rate on HELD-OUT tasks (names disjoint from training_tasks.TASKS).
 
 Compares two conditions on the SAME held-out task, both served by the SAME
-trilobite model:
-  * retrieval ON  -> server.trilobite(prompt)            (real loop: lessons injected + captured)
+model selected by Sonder Runtime:
+  * retrieval ON  -> server.sonder(prompt)            (real loop: lessons injected + captured)
   * baseline OFF  -> baseline_generate(prompt)            (same model, no lessons, no capture)
 
 Grounded pass/fail: extract the model's fenced python code block (grounding.extract_code_block)
@@ -82,8 +82,8 @@ HELDOUT = [
 
 
 def baseline_generate(prompt):
-    """Same trilobite model as the retrieval path, but NO lesson injection and NO capture."""
-    model = server.resolve_trilobite_model(False)
+    """Same model selected by Sonder Runtime, but NO lesson injection and NO capture."""
+    model = server.resolve_sonder_model(False)
     gen = server._make_generate(model, "", 0.2, 1024, 4096)
     return gen(prompt)
 
@@ -110,7 +110,7 @@ def run_task(task):
     """Run one held-out task under both conditions. Never raises."""
     name, prompt, check = task["name"], task["prompt"], task["check"]
     retrieval_ok, retrieval_detail = _run_condition(
-        prompt, check, lambda p: server.trilobite(p))
+        prompt, check, lambda p: server.sonder(p))
     baseline_ok, baseline_detail = _run_condition(
         prompt, check, baseline_generate)
     return {

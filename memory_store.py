@@ -1,4 +1,4 @@
-"""SQLite-backed memory for the trilobite learning loop. Stdlib only."""
+"""SQLite-backed memory for the sonder learning loop. Stdlib only."""
 import os
 import re
 import sqlite3

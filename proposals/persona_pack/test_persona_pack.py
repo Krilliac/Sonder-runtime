@@ -35,9 +35,9 @@ def test_all_prompts_are_reasonably_substantive():
         assert len(prompt) >= 80
 
 
-def test_each_prompt_mentions_trilobite_and_its_own_mode():
+def test_each_prompt_mentions_sonder_and_its_own_mode():
     for name, prompt in persona_pack.get_pack().items():
-        assert "trilobite" in prompt.lower()
+        assert "sonder" in prompt.lower()
         assert name.split("-")[0] in prompt.lower()
 
 

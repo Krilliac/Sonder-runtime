@@ -337,13 +337,13 @@ def write_avi(
         b"strl",
         _riff_chunk(b"strh", video_stream_header)
         + _riff_chunk(b"strf", video_format)
-        + _riff_chunk(b"strn", b"Trilobite Video\x00"),
+        + _riff_chunk(b"strn", b"Sonder Video\x00"),
     )
     audio_stream = _riff_list(
         b"strl",
         _riff_chunk(b"strh", audio_stream_header)
         + _riff_chunk(b"strf", audio_format)
-        + _riff_chunk(b"strn", b"Trilobite Audio\x00"),
+        + _riff_chunk(b"strn", b"Sonder Audio\x00"),
     )
     header_list = _riff_list(
         b"hdrl", _riff_chunk(b"avih", main_header) + video_stream + audio_stream
@@ -394,7 +394,7 @@ def write_midi(path, title, theme="arcane", seed=1337):
         str(theme).lower(), 81
     )
     scale = (0, 3, 5, 7, 10, 12, 15, 17)
-    name = _clean(title, 80).encode("utf-8") or b"Trilobite score"
+    name = _clean(title, 80).encode("utf-8") or b"Sonder score"
     track = bytearray()
     track.extend(_midi_meta(0, 0x03, name))
     track.extend(_midi_meta(0, 0x51, bytes((0x07, 0xA1, 0x20))))
@@ -459,7 +459,7 @@ def write_srt(path, brief):
 
 def write_vtt(path, brief):
     """Write a deterministic UTF-8 WebVTT caption track."""
-    blocks = ["WEBVTT\n\nNOTE Generated locally by Trilobite"]
+    blocks = ["WEBVTT\n\nNOTE Generated locally by Sonder"]
     for index, phrase in enumerate(_caption_phrases(brief), 1):
         start = (index - 1) * 2500
         end = start + 1800
@@ -481,7 +481,7 @@ def _timecode(total_frames, fps=DEFAULT_FPS):
 def write_edl(path, title, brief, fps=DEFAULT_FPS, clip_name="preview.avi"):
     """Write a CMX 3600-style non-drop-frame editable video timeline."""
     fps = max(24, min(int(fps), 60))
-    lines = ["TITLE: %s" % (_clean(title, 72) or "TRILOBITE TIMELINE"), "FCM: NON-DROP FRAME", ""]
+    lines = ["TITLE: %s" % (_clean(title, 72) or "SONDER TIMELINE"), "FCM: NON-DROP FRAME", ""]
     clip_name = Path(_clean(clip_name, 120)).name or "animation.gif"
     subject = re.sub(r"[^A-Za-z0-9_-]+", "_", _clean(brief, 40)).strip("_")
     record_start = fps * 3600

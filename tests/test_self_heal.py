@@ -41,8 +41,8 @@ def test_self_heal_repairs_invalid_json_configs(monkeypatch, tmp_path):
 
     monkeypatch.setattr(emotion_vectors, "workspace_root", lambda: str(tmp_path))
     monkeypatch.setattr(workflow_store, "workspace_root", lambda: str(tmp_path))
-    monkeypatch.delenv("TRILOBITE_EMOTION_VECTORS", raising=False)
-    monkeypatch.delenv("TRILOBITE_WORKFLOWS", raising=False)
+    monkeypatch.delenv("SONDER_EMOTION_VECTORS", raising=False)
+    monkeypatch.delenv("SONDER_WORKFLOWS", raising=False)
     (tmp_path / "emotion_vectors.json").write_text("{bad", encoding="utf-8")
     (tmp_path / "workflows.json").write_text("{bad", encoding="utf-8")
     db = str(tmp_path / "mem.db")

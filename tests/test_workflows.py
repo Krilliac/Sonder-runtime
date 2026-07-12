@@ -5,7 +5,7 @@ import workflow_store
 
 def test_ensure_workflows_creates_defaults(monkeypatch, tmp_path):
     monkeypatch.setattr(workflow_store, "workspace_root", lambda: str(tmp_path))
-    monkeypatch.delenv("TRILOBITE_WORKFLOWS", raising=False)
+    monkeypatch.delenv("SONDER_WORKFLOWS", raising=False)
     workflows, path = workflow_store.ensure_workflows()
     assert path.endswith("workflows.json")
     assert "status_sweep" in workflows
@@ -13,7 +13,7 @@ def test_ensure_workflows_creates_defaults(monkeypatch, tmp_path):
 
 def test_save_and_delete_workflow(monkeypatch, tmp_path):
     monkeypatch.setattr(workflow_store, "workspace_root", lambda: str(tmp_path))
-    monkeypatch.delenv("TRILOBITE_WORKFLOWS", raising=False)
+    monkeypatch.delenv("SONDER_WORKFLOWS", raising=False)
     wf, _ = workflow_store.save_workflow(
         "my_flow",
         [{"type": "code", "code": "print(1)"}],
@@ -39,7 +39,7 @@ def test_server_workflow_save_and_run(monkeypatch, tmp_path):
     import server
 
     monkeypatch.setattr(server.workflow_store, "workspace_root", lambda: str(tmp_path))
-    monkeypatch.delenv("TRILOBITE_WORKFLOWS", raising=False)
+    monkeypatch.delenv("SONDER_WORKFLOWS", raising=False)
     actions = json.dumps([{"type": "code", "language": "python", "code": "print('wf')"}])
     assert "Saved workflow" in server.workflow_save("demo_flow", actions, "demo")
     out = server.workflow_run("demo_flow")
@@ -51,6 +51,6 @@ def test_server_workflow_list(monkeypatch, tmp_path):
     import server
 
     monkeypatch.setattr(server.workflow_store, "workspace_root", lambda: str(tmp_path))
-    monkeypatch.delenv("TRILOBITE_WORKFLOWS", raising=False)
+    monkeypatch.delenv("SONDER_WORKFLOWS", raising=False)
     out = server.workflow_list()
     assert "status_sweep" in out
