@@ -26,11 +26,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late final TextEditingController _contextSize;
   late final TextEditingController _username;
   late final TextEditingController _password;
+  late final TextEditingController _launcherUrl;
+  late final TextEditingController _launcherToken;
   late bool _dark;
   late bool _allowHosted;
   late bool _keepServerRunning;
   late bool _allowApproximateLocation;
   bool _obscureKey = true;
+  bool _obscureLauncherToken = true;
   String? _status;
   bool _statusOk = false;
   bool _testing = false;
@@ -44,6 +47,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _contextSize = TextEditingController(text: widget.settings.contextSize);
     _username = TextEditingController();
     _password = TextEditingController();
+    _launcherUrl = TextEditingController(text: widget.settings.launcherUrl);
+    _launcherToken = TextEditingController(text: widget.settings.launcherToken);
     _dark = widget.settings.darkMode;
     _allowHosted = widget.settings.allowHosted;
     _keepServerRunning = widget.settings.keepServerRunning;
@@ -58,6 +63,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _contextSize.dispose();
     _username.dispose();
     _password.dispose();
+    _launcherUrl.dispose();
+    _launcherToken.dispose();
     super.dispose();
   }
 
@@ -71,6 +78,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             : _contextSize.text.trim(),
         keepServerRunning: _keepServerRunning,
         allowApproximateLocation: _allowApproximateLocation,
+        launcherUrl: _launcherUrl.text,
+        launcherToken: _launcherToken.text,
         model: _model.text.trim().isEmpty
             ? Settings.defaultModel
             : _model.text.trim(),
@@ -203,6 +212,42 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 icon:
                     Icon(_obscureKey ? Icons.visibility : Icons.visibility_off),
                 onPressed: () => setState(() => _obscureKey = !_obscureKey),
+              ),
+              border: const OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _launcherUrl,
+            keyboardType: TextInputType.url,
+            autocorrect: false,
+            decoration: const InputDecoration(
+              labelText: 'Host launcher URL (optional)',
+              hintText: 'https://your-host:11436',
+              helperText:
+                  'Lets mobile start the main server. If blank, port 11436 is derived from the server URL.',
+              prefixIcon: Icon(Icons.power_settings_new_outlined),
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _launcherToken,
+            obscureText: _obscureLauncherToken,
+            autocorrect: false,
+            enableSuggestions: false,
+            decoration: InputDecoration(
+              labelText: 'Host launcher token',
+              helperText:
+                  'Separate from the main API key; required for LAN startup control.',
+              prefixIcon: const Icon(Icons.vpn_key_outlined),
+              suffixIcon: IconButton(
+                icon: Icon(_obscureLauncherToken
+                    ? Icons.visibility
+                    : Icons.visibility_off),
+                onPressed: () => setState(
+                  () => _obscureLauncherToken = !_obscureLauncherToken,
+                ),
               ),
               border: const OutlineInputBorder(),
             ),

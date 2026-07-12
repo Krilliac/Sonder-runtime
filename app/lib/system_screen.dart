@@ -33,6 +33,8 @@ class _SystemScreenState extends State<SystemScreen> {
   bool _autopilotAdaptive = true;
   SystemInfo? _info;
   LocalInstallInfo? _localInfo;
+  LauncherStatus? _launcherInfo;
+  String _launcherError = '';
   String? _message;
   bool _loading = false;
   bool _working = false;
@@ -42,6 +44,11 @@ class _SystemScreenState extends State<SystemScreen> {
   TrilobiteApi get _api => TrilobiteApi(
         baseUrl: widget.settings.serverUrl,
         apiKey: widget.settings.apiKey,
+      );
+
+  TrilobiteLauncherApi get _launcherApi => TrilobiteLauncherApi(
+        baseUrl: widget.settings.effectiveLauncherUrl,
+        token: widget.settings.launcherToken,
       );
 
   @override
@@ -69,12 +76,30 @@ class _SystemScreenState extends State<SystemScreen> {
   Future<void> _pollSystemInfo() async {
     if (!mounted || _loading || _working || _polling) return;
     _polling = true;
+    SystemInfo? info;
+    LauncherStatus? launcherInfo;
     try {
-      final info = await _api.systemInfo();
-      if (mounted) setState(() => _info = info);
+      try {
+        info = await _api.systemInfo();
+      } catch (_) {
+        // The explicit Refresh path reports connection errors. Background
+        // polls preserve the last useful snapshot.
+      }
+      if (widget.settings.effectiveLauncherUrl.isNotEmpty) {
+        try {
+          launcherInfo = await _launcherApi.status();
+        } catch (_) {
+          // Launcher diagnostics are shown by the explicit Refresh path.
+        }
+      }
+      if (mounted) {
+        setState(() {
+          if (info != null) _info = info;
+          if (launcherInfo != null) _launcherInfo = launcherInfo;
+        });
+      }
     } catch (_) {
-      // The explicit Refresh path reports connection errors. Background polls
-      // preserve the last useful snapshot and keep the screen visually stable.
+      // Keep polling best-effort so a sleeping host does not destabilize UI.
     } finally {
       _polling = false;
     }
@@ -86,27 +111,81 @@ class _SystemScreenState extends State<SystemScreen> {
       if (!preserveMessage) _message = null;
     });
     try {
-      final info = await _api.systemInfo();
       final localInfo = await LocalManager.inspect();
+      SystemInfo? info;
+      LauncherStatus? launcherInfo;
+      String serverError = '';
+      String launcherError = '';
+      try {
+        info = await _api.systemInfo();
+      } on TrilobiteException catch (e) {
+        serverError = e.message;
+      }
+      if (widget.settings.effectiveLauncherUrl.isNotEmpty) {
+        try {
+          launcherInfo = await _launcherApi.status();
+        } on TrilobiteException catch (e) {
+          launcherError = e.message;
+        }
+      }
       if (!mounted) return;
       setState(() {
-        _info = info;
+        if (info != null) _info = info;
         _localInfo = localInfo;
-      });
-    } on TrilobiteException catch (e) {
-      final localInfo = await LocalManager.inspect();
-      if (!mounted) return;
-      setState(() {
-        _localInfo = localInfo;
-        _message = e.message;
+        _launcherInfo = launcherInfo;
+        _launcherError = launcherError;
+        if (!preserveMessage && serverError.isNotEmpty) {
+          _message = serverError;
+        }
       });
     } catch (e) {
-      if (!mounted) return;
-      setState(() => _message = e.toString());
+      if (mounted) setState(() => _message = e.toString());
     } finally {
       if (mounted) setState(() => _loading = false);
     }
   }
+
+  Future<LocalActionResult> _launcherAction(String action) async {
+    if (widget.settings.effectiveLauncherUrl.isEmpty) {
+      return const LocalActionResult(
+        false,
+        'Configure the host launcher URL in Settings first.',
+      );
+    }
+    try {
+      final result = await _launcherApi.action(
+        action,
+        contextSize: widget.settings.contextSize,
+      );
+      _launcherInfo = result;
+      return LocalActionResult(
+        result.ok,
+        result.message.isNotEmpty
+            ? result.message
+            : 'Host launcher $action completed.',
+      );
+    } on TrilobiteException catch (e) {
+      return LocalActionResult(false, e.message);
+    }
+  }
+
+  Future<LocalActionResult> _startServer() {
+    if (LocalManager.canRunLocalTools) {
+      return LocalManager.startServer(
+        allowHosted: widget.settings.allowHosted,
+        contextSize: widget.settings.contextSize,
+        persistOnAppClose: widget.settings.keepServerRunning,
+      );
+    }
+    return _launcherAction('start');
+  }
+
+  Future<LocalActionResult> _stopServer() {
+    if (LocalManager.canRunLocalTools) return LocalManager.stopServers();
+    return _launcherAction('stop');
+  }
+
+  Future<LocalActionResult> _restartServer() => _launcherAction('restart');
 
   Future<void> _run(Future<LocalActionResult> Function() action) async {
     setState(() {
@@ -314,7 +393,7 @@ class _SystemScreenState extends State<SystemScreen> {
                   _StatusRow(
                     label: 'Platform',
                     value: localInfo.platform,
-                    ok: localInfo.canLaunch,
+                    ok: true,
                   ),
                   _StatusRow(
                     label: 'Local system',
@@ -331,10 +410,14 @@ class _SystemScreenState extends State<SystemScreen> {
                   ),
                   _StatusRow(
                     label: 'Local server',
-                    value: localInfo.defaultServerReachable
-                        ? 'Reachable on 127.0.0.1:11435'
-                        : 'Not detected on 127.0.0.1:11435',
-                    ok: localInfo.defaultServerReachable,
+                    value: LocalManager.canRunLocalTools
+                        ? (localInfo.defaultServerReachable
+                            ? 'Reachable on 127.0.0.1:11435'
+                            : 'Not detected on 127.0.0.1:11435')
+                        : widget.settings.serverUrl,
+                    ok: LocalManager.canRunLocalTools
+                        ? localInfo.defaultServerReachable
+                        : _info != null,
                   ),
                   _StatusRow(
                     label: 'Updater',
@@ -363,52 +446,102 @@ class _SystemScreenState extends State<SystemScreen> {
             const SizedBox(height: 12),
           ],
           _Section(
-            title: 'Local Runtime',
-            child: Wrap(
-              spacing: 8,
-              runSpacing: 8,
+            title: 'Host Launcher',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                FilledButton.icon(
-                  onPressed: _working
-                      ? null
-                      : () => _run(() => LocalManager.setupEngine(
-                            allowHosted: widget.settings.allowHosted,
-                            contextSize: widget.settings.contextSize,
-                          )),
-                  icon: const Icon(Icons.auto_fix_high_outlined),
-                  label: const Text('Setup engine'),
+                _StatusRow(
+                  label: 'Control endpoint',
+                  value: widget.settings.effectiveLauncherUrl.isEmpty
+                      ? 'Not configured'
+                      : widget.settings.effectiveLauncherUrl,
+                  ok: _launcherInfo != null,
                 ),
-                FilledButton.icon(
-                  onPressed: _working
-                      ? null
-                      : () => _run(() => LocalManager.startServer(
-                            allowHosted: widget.settings.allowHosted,
-                            contextSize: widget.settings.contextSize,
-                            persistOnAppClose:
-                                widget.settings.keepServerRunning,
-                          )),
-                  icon: const Icon(Icons.play_arrow_outlined),
-                  label: const Text('Start server'),
+                _StatusRow(
+                  label: 'Launcher',
+                  value: _launcherInfo?.launcher ?? 'Not reachable',
+                  ok: _launcherInfo?.ok ?? false,
                 ),
-                FilledButton.tonalIcon(
-                  onPressed:
-                      _working ? null : () => _run(LocalManager.stopServers),
-                  icon: const Icon(Icons.stop_circle_outlined),
-                  label: const Text('Stop servers'),
+                _StatusRow(
+                  label: 'Main server',
+                  value: _launcherInfo == null
+                      ? 'Unknown'
+                      : (_launcherInfo!.serverRunning
+                          ? 'Running on ${_launcherInfo!.serverHost}:${_launcherInfo!.serverPort}'
+                          : 'Stopped'),
+                  ok: _launcherInfo?.serverRunning ?? false,
                 ),
-                FilledButton.tonalIcon(
-                  onPressed: _working
-                      ? null
-                      : () => _run(LocalManager.startEndlessTraining),
-                  icon: const Icon(Icons.all_inclusive),
-                  label: const Text('Endless train'),
+                if (_launcherError.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    _launcherError,
+                    style: TextStyle(color: Theme.of(context).colorScheme.error),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          _Section(
+            title: 'Runtime Control',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    FilledButton.icon(
+                      onPressed: _working || !LocalManager.canRunLocalTools
+                          ? null
+                          : () => _run(() => LocalManager.setupEngine(
+                                allowHosted: widget.settings.allowHosted,
+                                contextSize: widget.settings.contextSize,
+                              )),
+                      icon: const Icon(Icons.auto_fix_high_outlined),
+                      label: const Text('Setup engine'),
+                    ),
+                    FilledButton.icon(
+                      onPressed: _working ? null : () => _run(_startServer),
+                      icon: const Icon(Icons.play_arrow_outlined),
+                      label: const Text('Start server'),
+                    ),
+                    FilledButton.tonalIcon(
+                      onPressed: _working ? null : () => _run(_stopServer),
+                      icon: const Icon(Icons.stop_circle_outlined),
+                      label: const Text('Stop server'),
+                    ),
+                    FilledButton.tonalIcon(
+                      onPressed: _working ||
+                              widget.settings.effectiveLauncherUrl.isEmpty
+                          ? null
+                          : () => _run(_restartServer),
+                      icon: const Icon(Icons.restart_alt),
+                      label: const Text('Restart host'),
+                    ),
+                    FilledButton.tonalIcon(
+                      onPressed: _working || !LocalManager.canRunLocalTools
+                          ? null
+                          : () => _run(LocalManager.startEndlessTraining),
+                      icon: const Icon(Icons.all_inclusive),
+                      label: const Text('Endless train'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: _working || !LocalManager.canRunLocalTools
+                          ? null
+                          : () => _run(LocalManager.updateFromGit),
+                      icon: const Icon(Icons.system_update_alt),
+                      label: const Text('Update from Git'),
+                    ),
+                  ],
                 ),
-                OutlinedButton.icon(
-                  onPressed:
-                      _working ? null : () => _run(LocalManager.updateFromGit),
-                  icon: const Icon(Icons.system_update_alt),
-                  label: const Text('Update from Git'),
-                ),
+                if (!LocalManager.canRunLocalTools) ...[
+                  const SizedBox(height: 10),
+                  const Text(
+                    'This device controls the configured host launcher. Engine '
+                    'setup, Git updates, and local training stay on the host.',
+                  ),
+                ],
               ],
             ),
           ),
@@ -680,6 +813,13 @@ class _SystemScreenState extends State<SystemScreen> {
               ),
               const SizedBox(height: 12),
             ],
+            if (info.selfmod != null) ...[
+              _Section(
+                title: 'Safe Self-Improvement',
+                child: _SelfmodPanel(info: info.selfmod!),
+              ),
+              const SizedBox(height: 12),
+            ],
             if (info.mcpRuntime != null) ...[
               _Section(
                 title: 'Runtime Convergence',
@@ -783,11 +923,52 @@ class _SystemScreenState extends State<SystemScreen> {
             'otherwise setup uses installed runtimes and may download missing components. '
             'Runtime memory is shared through '
             '${localInfo?.sharedHome ?? LocalManager.sharedHomePath()}. '
-            'Android can connect to a LAN/hosted server, but cannot launch the Python server itself.',
+            'Android, iOS, and other client-only builds use the authenticated '
+            'host launcher to start or stop the configured computer without '
+            'exposing a remote shell.',
             style: Theme.of(context).textTheme.bodySmall,
           ),
         ],
       ),
+    );
+  }
+}
+
+class _SelfmodPanel extends StatelessWidget {
+  final SelfmodInfo info;
+
+  const _SelfmodPanel({required this.info});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      key: const Key('selfmod-panel'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            Chip(label: Text(info.enabled ? 'Enabled' : 'Disabled')),
+            Chip(label: Text('Mode: ${info.mode}')),
+            Chip(label: Text('${info.active} active')),
+            Chip(label: Text('${info.rollbackPoints} rollback points')),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Text('Backups: ${info.backupRoot}'),
+        if (info.runs.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          ...info.runs.take(5).map((run) => Text(
+                '${run['id']}  ${run['phase']}  ${run['risk']}\n${run['objective']}',
+              )),
+        ],
+        const SizedBox(height: 8),
+        const Text(
+          'Inspect: /selfmod status · /selfmod diff <id> · '
+          '/selfmod tests <id> · /selfmod rollback <id>',
+        ),
+      ],
     );
   }
 }

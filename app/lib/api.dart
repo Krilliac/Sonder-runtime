@@ -3,6 +3,121 @@ import 'package:http/http.dart' as http;
 
 import 'models.dart';
 
+class LauncherStatus {
+  final bool ok;
+  final String launcher;
+  final bool serverRunning;
+  final String serverHost;
+  final int serverPort;
+  final String lastAction;
+  final String lastError;
+  final String message;
+
+  const LauncherStatus({
+    required this.ok,
+    required this.launcher,
+    required this.serverRunning,
+    required this.serverHost,
+    required this.serverPort,
+    required this.lastAction,
+    required this.lastError,
+    this.message = '',
+  });
+
+  factory LauncherStatus.fromJson(Map<String, dynamic> json) =>
+      LauncherStatus(
+        ok: json['ok'] == true,
+        launcher: json['launcher']?.toString() ?? '',
+        serverRunning: json['server_running'] == true,
+        serverHost: json['server_host']?.toString() ?? '',
+        serverPort: _asInt(json['server_port']),
+        lastAction: json['last_action']?.toString() ?? '',
+        lastError: json['last_error']?.toString() ?? '',
+        message: json['message']?.toString() ?? '',
+      );
+}
+
+class TrilobiteLauncherApi {
+  static const _actions = {'start', 'stop', 'restart'};
+
+  final String baseUrl;
+  final String token;
+
+  const TrilobiteLauncherApi({required this.baseUrl, required this.token});
+
+  Uri _uri(String path) {
+    final base = baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    return Uri.parse('$base$path');
+  }
+
+  Map<String, String> _headers() => {
+        'Accept': 'application/json',
+        if (token.trim().isNotEmpty)
+          'Authorization': 'Bearer ${token.trim()}',
+      };
+
+  LauncherStatus _decode(http.Response response) {
+    Map<String, dynamic> body;
+    try {
+      body = jsonDecode(utf8.decode(response.bodyBytes))
+          as Map<String, dynamic>;
+    } catch (_) {
+      throw TrilobiteException('Could not parse host launcher response.');
+    }
+    if (response.statusCode == 401) {
+      throw TrilobiteException('Host launcher authentication failed.');
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw TrilobiteException(
+        body['error']?.toString() ??
+            body['message']?.toString() ??
+            'Host launcher returned HTTP ${response.statusCode}.',
+      );
+    }
+    return LauncherStatus.fromJson(body);
+  }
+
+  Future<LauncherStatus> status() async {
+    if (baseUrl.trim().isEmpty) {
+      throw TrilobiteException('Host launcher URL is not configured.');
+    }
+    try {
+      final response = await http
+          .get(_uri('/v1/launcher/status'), headers: _headers())
+          .timeout(const Duration(seconds: 8));
+      return _decode(response);
+    } catch (error) {
+      if (error is TrilobiteException) rethrow;
+      throw TrilobiteException('Cannot reach host launcher: $error');
+    }
+  }
+
+  Future<LauncherStatus> action(
+    String action, {
+    String contextSize = '8192',
+  }) async {
+    if (!_actions.contains(action)) {
+      throw TrilobiteException('Unsupported host launcher action.');
+    }
+    if (baseUrl.trim().isEmpty) {
+      throw TrilobiteException('Host launcher URL is not configured.');
+    }
+    try {
+      final response = await http
+          .post(
+            _uri('/v1/launcher/$action'),
+            headers: {..._headers(), 'Content-Type': 'application/json'},
+            body: jsonEncode({'context_size': contextSize}),
+          )
+          .timeout(const Duration(seconds: 45));
+      return _decode(response);
+    } catch (error) {
+      if (error is TrilobiteException) rethrow;
+      throw TrilobiteException('Host launcher request failed: $error');
+    }
+  }
+}
+
 /// Thin client for a hosted trilobite instance (trilobite_serve.py).
 ///
 /// The server speaks the OpenAI chat-completions dialect:
@@ -375,6 +490,7 @@ class SystemInfo {
   final AgentStatus? agents;
   final AutopilotStatus? autopilot;
   final RuntimePolicyInfo? runtimePolicy;
+  final SelfmodInfo? selfmod;
   final McpRuntimeInfo? mcpRuntime;
   final LearningHealthInfo? learningHealth;
   final ActivityStatus? activity;
@@ -391,6 +507,7 @@ class SystemInfo {
     required this.agents,
     required this.autopilot,
     this.runtimePolicy,
+    this.selfmod,
     this.mcpRuntime,
     this.learningHealth,
     required this.activity,
@@ -423,6 +540,9 @@ class SystemInfo {
               json['runtime_policy'] as Map<String, dynamic>,
             )
           : null,
+      selfmod: json['selfmod'] is Map<String, dynamic>
+          ? SelfmodInfo.fromJson(json['selfmod'] as Map<String, dynamic>)
+          : null,
       mcpRuntime: json['mcp_runtime'] is Map<String, dynamic>
           ? McpRuntimeInfo.fromJson(
               json['mcp_runtime'] as Map<String, dynamic>,
@@ -439,6 +559,38 @@ class SystemInfo {
       models: models,
     );
   }
+}
+
+class SelfmodInfo {
+  final bool enabled;
+  final String mode;
+  final int active;
+  final int deployed;
+  final int rollbackPoints;
+  final String backupRoot;
+  final List<Map<String, dynamic>> runs;
+
+  const SelfmodInfo({
+    required this.enabled,
+    required this.mode,
+    required this.active,
+    required this.deployed,
+    required this.rollbackPoints,
+    required this.backupRoot,
+    required this.runs,
+  });
+
+  factory SelfmodInfo.fromJson(Map<String, dynamic> json) => SelfmodInfo(
+        enabled: json['enabled'] == true,
+        mode: json['mode']?.toString() ?? 'propose',
+        active: _asInt(json['active']),
+        deployed: _asInt(json['deployed']),
+        rollbackPoints: _asInt(json['rollback_points']),
+        backupRoot: json['backup_root']?.toString() ?? '',
+        runs: (json['runs'] as List? ?? const [])
+            .whereType<Map<String, dynamic>>()
+            .toList(),
+      );
 }
 
 class RuntimePolicyInfo {

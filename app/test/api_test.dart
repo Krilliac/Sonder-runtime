@@ -7,6 +7,76 @@ import 'package:trilobite/api.dart';
 import 'package:trilobite/models.dart';
 
 void main() {
+  test('host launcher status uses its independent bearer token', () async {
+    late http.Request seen;
+    final client = MockClient((request) async {
+      seen = request;
+      return http.Response(
+        jsonEncode({
+          'ok': true,
+          'launcher': 'ready',
+          'server_running': false,
+          'server_host': '0.0.0.0',
+          'server_port': 11435,
+          'last_action': '',
+          'last_error': '',
+        }),
+        200,
+      );
+    });
+
+    final status = await http.runWithClient(
+      () => const TrilobiteLauncherApi(
+        baseUrl: 'https://host.test:11436/',
+        token: 'launcher-secret',
+      ).status(),
+      () => client,
+    );
+
+    expect(seen.url.toString(),
+        'https://host.test:11436/v1/launcher/status');
+    expect(seen.headers['authorization'], 'Bearer launcher-secret');
+    expect(status.launcher, 'ready');
+    expect(status.serverRunning, isFalse);
+  });
+
+  test('host launcher sends only a bounded action and context size', () async {
+    late http.Request seen;
+    final client = MockClient((request) async {
+      seen = request;
+      return http.Response(
+        jsonEncode({
+          'ok': true,
+          'launcher': 'ready',
+          'server_running': true,
+          'server_host': '0.0.0.0',
+          'server_port': 11435,
+          'last_action': 'start',
+          'last_error': '',
+          'message': 'started',
+        }),
+        200,
+      );
+    });
+
+    final status = await http.runWithClient(
+      () => const TrilobiteLauncherApi(
+        baseUrl: 'https://host.test:11436',
+        token: 'secret',
+      ).action('start', contextSize: '32k'),
+      () => client,
+    );
+
+    expect(seen.url.path, '/v1/launcher/start');
+    expect(jsonDecode(seen.body), {'context_size': '32k'});
+    expect(status.serverRunning, isTrue);
+    expect(status.message, 'started');
+    expect(
+      const TrilobiteLauncherApi(baseUrl: 'x', token: '').action('run'),
+      throwsA(isA<TrilobiteException>()),
+    );
+  });
+
   test('location opt-in sends a minimized client-side place hint', () async {
     Map<String, dynamic>? chatBody;
     final client = MockClient((request) async {

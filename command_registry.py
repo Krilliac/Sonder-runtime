@@ -68,6 +68,24 @@ COMMANDS = [
         "summary": "Inspect or guarded-edit shared local model mappings and execution-lane tiers; cloud remains separate.",
     },
     {
+        "name": "/hardware",
+        "category": "system",
+        "risk": "safe",
+        "summary": "Detect live system RAM, GPU runtime, VRAM, and offload support.",
+    },
+    {
+        "name": "/training",
+        "category": "learning",
+        "risk": "ask",
+        "summary": "Plan, explicitly start, inspect, deploy, or roll back adaptive weight training.",
+    },
+    {
+        "name": "/selfmod",
+        "category": "system",
+        "risk": "ask",
+        "summary": "Inspect, isolate, test, approve, deploy, or roll back auditable self-improvements.",
+    },
+    {
         "name": "/mcp",
         "category": "system",
         "risk": "safe",

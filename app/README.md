@@ -7,6 +7,10 @@ macOS. The app is a thin chat front-end: it talks to your own
 memory and lessons stay on the machine *you* run by default. Explicitly selected
 cloud tiers and invoked web tools contact their named external services.
 
+Client-only platforms can also start, stop, and restart their configured host
+through Trilobite's bounded authenticated launcher. See
+[Mobile host control](../MOBILE_HOST_CONTROL.md) for host setup and security.
+
 ```
   ┌────────────┐        HTTP /v1/chat/completions        ┌────────────────────┐
   │  this app  │  ───────────────────────────────────►   │  trilobite_serve.py │
@@ -26,6 +30,9 @@ cloud tiers and invoked web tools contact their named external services.
 - **Settings**: server URL + optional API key, default model/tier, optional hosted
   tiers opt-in, approximate IP-location opt-in, account register/login for hosted
   deployments, with a one-tap *Test connection*.
+- **Cross-platform host controls**: the shared System page shows launcher and
+  main-server state and gives Android/iOS the same Start, Stop, and Restart
+  controls as desktop without exposing a remote shell.
 - **Grounded web/weather**: explicit current-web requests use visible tools;
   weather uses Open-Meteo. When approximate location is enabled, the app asks
   `ipwho.is` for a city/region only on location-dependent prompts, strips the raw
@@ -121,9 +128,9 @@ or `~/.local/share/trilobite` on Linux, and the equivalent app data home on
 macOS. Set `TRILOBITE_HOME` to force every install/server to use a specific
 shared memory folder.
 
-Android builds include the same payload as `local-system.zip` inside the APK,
-but Android still connects to a desktop or LAN server because it cannot launch
-the Python/Ollama runtime directly.
+Android builds include the same payload as `local-system.zip` inside the APK.
+Android cannot execute that Python/Ollama payload directly, so its System page
+uses the authenticated launcher already running on the configured computer.
 
 ### Installing
 
@@ -138,12 +145,12 @@ the Python/Ollama runtime directly.
 
 ## First run
 
-1. Start the server on your machine: `bash deploy_trilobite.sh --serve`
-   (prints the URL + API key), or `python trilobite_serve.py` for a local run.
-   For phone access, bind it to your LAN: `TRILOBITE_HOST=0.0.0.0 python trilobite_serve.py`.
+1. Configure the host launcher by following
+   [Mobile host control](../MOBILE_HOST_CONTROL.md), or start the server manually
+   with `bash deploy_trilobite.sh --serve`.
 2. Open the app → **Settings** (gear icon).
-3. Enter the **Server URL** (e.g. `http://192.168.1.20:11435`) and the **API
-   key** if the server has auth enabled. Tap **Test connection**, then **Save**.
+3. Enter the **Server URL** and API key, plus the **Host launcher URL** and its
+   separate token. Tap **Test connection**, then **Save**.
 4. Optionally enable **Allow approximate IP location** for weather/nearby prompts.
    This contacts `ipwho.is`; VPN or ISP routing can report the wrong city.
 5. Start chatting.
@@ -187,6 +194,7 @@ project scaffolding locally with `flutter create`, then build:
 ```bash
 cd app
 flutter create --org com.trilobite --project-name trilobite .
+python ../scripts/configure_flutter_networking.py . --allow-android-cleartext
 python ../scripts/package_local_system.py --out app/build/local-system --zip app/assets/local-system.zip
 flutter pub get
 

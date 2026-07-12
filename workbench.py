@@ -563,7 +563,10 @@ def program_search(query="*", *, max_results=100):
     if exact:
         candidates.append((Path(exact).name, exact, "which"))
     path_exts = [""]
-    if os.name == "nt":
+    windows_path_semantics = os.name == "nt" or bool(
+        os.environ.get("PATHEXT", "").strip()
+    )
+    if windows_path_semantics:
         path_exts = [ext.lower() for ext in os.environ.get("PATHEXT", ".EXE;.CMD;.BAT;.COM").split(";") if ext]
     for raw_dir in os.environ.get("PATH", "").split(os.pathsep):
         if len(candidates) >= MAX_PROGRAM_CANDIDATES:
@@ -581,9 +584,9 @@ def program_search(query="*", *, max_results=100):
                 if not entry.is_file(follow_symlinks=False):
                     continue
                 suffix = Path(entry.name).suffix.lower()
-                if os.name == "nt" and suffix not in path_exts:
+                if windows_path_semantics and suffix not in path_exts:
                     continue
-                if os.name != "nt" and not os.access(entry.path, os.X_OK):
+                if not windows_path_semantics and not os.access(entry.path, os.X_OK):
                     continue
                 if not _program_match(str(query), entry.name, entry.path):
                     continue

@@ -16,6 +16,8 @@ import time
 from pathlib import Path
 
 import engine_bundle
+import adaptive_training
+import system_profile
 
 
 MODEL_SMALL = "qwen2.5-coder:1.5b"
@@ -188,6 +190,19 @@ def main(argv=None):
     )
     parser.add_argument("--model", default="", help="override the base model")
     parser.add_argument(
+        "--allow-cpu-offload",
+        action="store_true",
+        default=os.environ.get("TRILOBITE_ALLOW_CPU_OFFLOAD") == "1",
+    )
+    parser.add_argument(
+        "--max-vram", type=float,
+        default=adaptive_training._env_optional("TRILOBITE_MAX_VRAM_GB"),
+    )
+    parser.add_argument(
+        "--max-system-ram", type=float,
+        default=adaptive_training._env_optional("TRILOBITE_MAX_SYSTEM_RAM_GB"),
+    )
+    parser.add_argument(
         "--offline",
         action="store_true",
         help="never use pip or an Ollama model registry",
@@ -205,14 +220,39 @@ def main(argv=None):
         print(f"  bundle: INVALID - {exc}", file=sys.stderr)
         return 4
 
-    ram = total_ram_gb()
+    hardware = system_profile.detect_hardware()
+    ram = hardware.system_ram_total_gb or total_ram_gb()
     offline = args.offline or bundle is not None
     requested = args.model.strip() or os.environ.get("TRILOBITE_BASE_MODEL", "").strip()
+    if requested.lower() == "auto":
+        requested = ""
+    requested_size = "auto"
+    for size in ("1.5b", "3b", "7b"):
+        if size in requested.lower():
+            requested_size = size
+            break
+    plan = adaptive_training.build_plan(
+        hardware,
+        adaptive_training.PlanOptions(
+            model=requested_size,
+            allow_cpu_offload=args.allow_cpu_offload,
+            max_vram_gb=args.max_vram,
+            max_system_ram_gb=args.max_system_ram,
+            context_length=adaptive_training.parse_length(
+                os.environ.get("TRILOBITE_CONTEXT_SIZE"), 8192
+            ),
+        ),
+    )
     try:
         model = (
-            engine_bundle.select_base_model(bundle, ram, requested)
+            engine_bundle.select_base_model(
+                bundle,
+                plan.usable_system_ram_gb,
+                requested,
+                preferred=plan.inference.model,
+            )
             if bundle is not None
-            else requested or choose_model(ram)
+            else requested or plan.inference.model
         )
     except ValueError as exc:
         print(f"  model: INVALID - {exc}", file=sys.stderr)
@@ -220,8 +260,19 @@ def main(argv=None):
 
     print("Trilobite engine bootstrap")
     print("  system: %s %s" % (platform.system(), platform.machine()))
-    print("  detected RAM: %.1f GB" % ram if ram else "  detected RAM: unknown")
+    print("  detected RAM: %.1f GB total / %.1f GB available" % (
+        hardware.system_ram_total_gb, hardware.system_ram_available_gb,
+    ))
+    print("  detected GPU: %s %s; %.1f/%.1f GB VRAM free/total" % (
+        hardware.gpu_vendor, hardware.gpu_name or "(none)",
+        hardware.vram_free_gb, hardware.vram_total_gb,
+    ))
     print("  selected model: %s" % model)
+    print("  inference reason: %s" % plan.inference.reason)
+    print("  training recommendation: %s" % (
+        "%s %s" % (plan.training.method, plan.training.model_size)
+        if plan.training.enabled else "disabled"
+    ))
     print("  network policy: %s" % ("offline" if offline else "online fallback allowed"))
     if bundle is not None:
         print("  bundle: %s (%s)" % (bundle.root, bundle.identity))
@@ -230,6 +281,8 @@ def main(argv=None):
         print("  bundle: none; using host runtimes")
 
     if args.dry_run:
+        print()
+        print(adaptive_training.format_plan(plan))
         return 0
 
     process_env = os.environ.copy()

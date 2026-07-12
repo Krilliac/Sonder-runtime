@@ -22,11 +22,13 @@ import contextlib
 import json
 import os
 import re
+import sys
 import threading
 import time
 import urllib.request
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 import memory_store
 import orchestrator
@@ -56,6 +58,8 @@ import admin_auth
 import file_ops
 import context_policy
 import command_registry
+import adaptive_training
+import selfmod
 import permission_rules
 import debug_dump
 import activity_tracker
@@ -835,6 +839,246 @@ def _mcp_command(arg: str) -> str:
     return "ERROR: unknown MCP action '%s'; try /mcp help." % action
 
 
+def _training_command(arg: str) -> str:
+    text = str(arg or "").strip()
+    if not text or text.lower() in {"plan", "status", "hardware"}:
+        return adaptive_training.command_text(text or "plan")
+    if text.lower() in {"help", "?"}:
+        return (
+            "training commands:\n"
+            "  /hardware\n"
+            "  /training plan [--dry-run] [--model auto|1.5b|3b|7b]\n"
+            "  /training start --confirm [planning options]\n"
+            "  /training status\n"
+            "  /training deploy [--adapter-dir PATH] [--llama-cpp PATH]\n"
+            "  /training rollback\n"
+            "Options: --allow-cpu-offload --max-vram N --max-system-ram N "
+            "--context-length N --sequence-length N --batch-size N."
+        )
+    return adaptive_training.command_text(text)
+
+
+def _selfmod_test_commands(run, explicit_tests):
+    import shlex
+    workspace = Path(run["workspace_path"])
+    python_files = [path for path in run["files"] if path.endswith(".py") and (workspace / path).is_file()]
+    syntax = [sys.executable, "-m", "py_compile", *python_files] if python_files else [sys.executable, "-c", "print('no Python syntax targets')"]
+    targeted = shlex.split(explicit_tests[0], posix=os.name != "nt") if explicit_tests else [sys.executable, "-c", "raise SystemExit('explicit reproducing/targeted test required')"]
+    regression = [sys.executable, "-m", "pytest", "-q"]
+    smoke = [sys.executable, "-c", "import pathlib; assert pathlib.Path('.').is_dir(); print('selfmod smoke ok')"]
+    commands = [("syntax", syntax), ("targeted", targeted), ("regression", regression), ("smoke", smoke)]
+    if run["maintenance_authorized"]:
+        security = shlex.split(explicit_tests[1], posix=os.name != "nt") if len(explicit_tests) > 1 else [sys.executable, "-c", "raise SystemExit('explicit protected security test required')"]
+        commands.append(("security", security))
+    return commands
+
+
+def _selfmod_agent_policy(run):
+    workspace = Path(run["workspace_path"]).resolve()
+    allowed = {(workspace / path).resolve(strict=False) for path in run["files"]}
+    mutation_tools = {"file_write", "file_edit", "file_delete"}
+    path_tools = mutation_tools | {"file_read", "file_read_range", "file_find", "text_search", "directory_tree", "workspace_inventory", "script_search"}
+    inspected = set()
+    counters = {"tools": 0}
+    started = time.monotonic()
+
+    def policy(tool_name, args):
+        counters["tools"] += 1
+        if counters["tools"] > run["budgets"]["max_tool_calls"]:
+            return "ERROR: SELFMOD POLICY: tool-call budget exhausted."
+        if time.monotonic() - started > run["budgets"]["max_runtime_seconds"]:
+            return "ERROR: SELFMOD POLICY: total runtime budget exhausted."
+        if tool_name == "workspace_run":
+            cwd = Path(str(args.get("cwd") or workspace)).expanduser().resolve(strict=False)
+            if cwd != workspace and workspace not in cwd.parents:
+                return "ERROR: SELFMOD POLICY: commands must run inside the candidate workspace."
+            command_text = " ".join(str(item) for item in (args.get("args_json") or args.get("args") or []))
+            if "selfmod" in command_text.lower():
+                return "ERROR: SELFMOD POLICY: recursive self-improvement is forbidden."
+            return ""
+        if tool_name not in path_tools:
+            return ""
+        raw = args.get("path") or args.get("root") or args.get("cwd") or ""
+        target = Path(str(raw)).expanduser()
+        if not target.is_absolute():
+            target = workspace / target
+        target = target.resolve(strict=False)
+        if target != workspace and workspace not in target.parents:
+            return "ERROR: SELFMOD POLICY: path is outside the isolated candidate workspace."
+        if tool_name in mutation_tools and target not in allowed:
+            return "ERROR: SELFMOD POLICY: mutation is outside the pre-backed-up file scope."
+        if tool_name not in mutation_tools:
+            inspected.add(str(target))
+            if len(inspected) > run["budgets"]["max_files_inspected"]:
+                return "ERROR: SELFMOD POLICY: file-inspection budget exhausted."
+        return ""
+    return policy
+
+
+def _execute_selfmod_run(run_id, explicit_tests=None):
+    run = selfmod.get_run(run_id)
+    if run["phase"] == "proposed":
+        selfmod.create_backup(run_id)
+        run = selfmod.prepare_workspace(run_id)
+    elif run["phase"] == "backed_up":
+        run = selfmod.prepare_workspace(run_id)
+    if run["phase"] != "editing":
+        return "ERROR: selfmod run is not ready for editing: %s" % run["phase"]
+    owner = selfmod.claim(run_id)
+    heartbeat_stop = threading.Event()
+    def heartbeat_worker():
+        while not heartbeat_stop.wait(30):
+            if not selfmod.heartbeat(run_id, owner):
+                return
+    heartbeat_thread = threading.Thread(
+        target=heartbeat_worker, name="trilobite-selfmod-heartbeat", daemon=True,
+    )
+    heartbeat_thread.start()
+    previous = os.environ.get("TRILOBITE_SELFMOD_ACTIVE")
+    os.environ["TRILOBITE_SELFMOD_ACTIVE"] = "1"
+    try:
+        workspace = run["workspace_path"]
+        test_commands = _selfmod_test_commands(run, explicit_tests or [])
+        selfmod.record_reproducer_before(run_id, test_commands[1][1])
+        prompt = (
+            "Implement this bounded self-improvement only inside the isolated workspace.\n"
+            "Objective: %s\nEvidence: %s\nAcceptance criteria: %s\n"
+            "Authorized files (no others may change): %s\nWorkspace: %s\n"
+            "Inspect first, then use guarded file tools. Do not approve, deploy, alter tests outside scope, "
+            "change permissions, install dependencies, invoke selfmod, or touch the live repository."
+            % (run["objective"], "; ".join(run["evidence"]), "; ".join(run["criteria"]), ", ".join(run["files"]), workspace)
+        )
+        output = _agent_impl(
+            prompt, tier="code", max_steps=min(run["budgets"]["max_tool_calls"], run["budgets"]["max_model_calls"], 20),
+            allow_web=False, require_file_evidence=True, read_only=False,
+            include_evidence=True, auto_checklist=True,
+            tool_allowlist={"workspace_inventory", "directory_tree", "text_search", "file_read", "file_read_range", "file_write", "file_edit", "file_delete"},
+            tool_policy=_selfmod_agent_policy(run),
+        )
+        diff = selfmod.inspect_diff(run_id)
+        if not diff["changed_files"]:
+            selfmod.reject(run_id, "editing agent produced no scoped diff")
+            return "Selfmod rejected: editing agent produced no scoped diff.\n\n" + output
+        selfmod.begin_testing(run_id)
+        for kind, command in test_commands:
+            selfmod.record_test(run_id, kind, command)
+        reviewed = selfmod.review(run_id)
+        return selfmod.format_run(run_id) + "\n\nAgent evidence:\n" + output
+    except Exception as exc:
+        current = selfmod.get_run(run_id)
+        if current["phase"] in {"editing", "testing", "reviewing"}:
+            with contextlib.suppress(Exception):
+                selfmod.reject(run_id, "selfmod execution failed: %s" % exc)
+        return "ERROR: selfmod run failed closed: %s" % exc
+    finally:
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=2)
+        if previous is None:
+            os.environ.pop("TRILOBITE_SELFMOD_ACTIVE", None)
+        else:
+            os.environ["TRILOBITE_SELFMOD_ACTIVE"] = previous
+        with contextlib.suppress(Exception):
+            selfmod.release(run_id, owner)
+
+
+def _selfmod_command(arg: str, *, repository_root="") -> str:
+    text = str(arg or "status").strip() or "status"
+    action, _, rest = text.partition(" ")
+    action = action.lower()
+    rest = rest.strip()
+    root = Path(repository_root or Path(__file__).resolve().parent).resolve()
+    try:
+        if action in {"status", "show", "list"}:
+            return selfmod.format_status()
+        if action == "opportunities":
+            return "Concrete host evidence for proposals:\n\n" + system_improvement_report()
+        if action == "history":
+            return selfmod.format_status()
+        if action == "inspect":
+            return selfmod.format_run(rest)
+        if action == "diff":
+            return selfmod.diff_text(rest) or "(no candidate diff)"
+        if action == "tests":
+            return json.dumps(selfmod.test_results(rest), indent=2, ensure_ascii=False)
+        if action == "backups":
+            rows = [run for run in selfmod.list_runs(100) if run.get("backup_manifest")]
+            return "\n".join("%s %s %s" % (run["id"], run["phase"], run["backup_manifest"]) for run in rows) or "(no backups)"
+        if action == "verify-backup":
+            manifest = selfmod.verify_backup(rest)
+            return "Backup verified: %s (%d file records)" % (rest, len(manifest["files"]))
+        if action == "mode":
+            if not rest:
+                return "selfmod mode: %s" % selfmod.settings()["mode"]
+            return "selfmod mode: %s" % selfmod.set_mode(rest)["mode"]
+        if action in {"disable", "enable"}:
+            return "selfmod enabled: %s" % selfmod.set_enabled(action == "enable")["enabled"]
+        if action == "retention":
+            values = rest.split()
+            if len(values) != 2:
+                return "usage: /selfmod retention <days> <max-gb>"
+            configured = selfmod.set_retention(int(values[0]), int(float(values[1]) * 1024**3))
+            return "selfmod retention: %d days, %.2f GB" % (configured["retention_days"], configured["retention_bytes"] / 1024**3)
+        if action == "prune-backups":
+            removed = selfmod.prune_backups()
+            return "pruned backups: %s" % (", ".join(removed) or "none")
+        if action in {"plan", "run"}:
+            selfmod.recursive_guard()
+            maintenance = "--maintenance" in rest.split()
+            parsed_rest = " ".join(part for part in rest.split() if part != "--maintenance")
+            objective, files, tests = selfmod.parse_plan_text(parsed_rest)
+            if not files:
+                return "usage: /selfmod %s <objective> --files path.py,test_path.py [--tests python -m pytest ...]" % action
+            evidence = ["explicit user-authorized objective: %s" % objective, "host improvement report: %s" % system_improvement_report()[:2000]]
+            run = selfmod.create_plan(
+                objective, root, problem=objective, evidence=evidence, files=files,
+                criteria=["explicit reproducing/targeted check passes", "syntax and regression checks do not regress", "diff remains inside declared file scope"],
+                expected_benefit="resolve the explicit grounded defect", rollback_plan="restore immutable per-user backup",
+                maintenance_authorized=maintenance,
+            )
+            if action == "plan":
+                return selfmod.format_run(run["id"])
+            return _execute_selfmod_run(run["id"], tests)
+        if action == "resume":
+            run = selfmod.resume(rest)
+            return selfmod.format_run(run["id"])
+        if action == "cancel":
+            return selfmod.format_run(selfmod.cancel(rest)["id"])
+        if action == "approve":
+            return selfmod.format_run(selfmod.approve(rest, approver="explicit local/developer user")["id"])
+        if action == "reject":
+            run_id, _, reason = rest.partition(" ")
+            return selfmod.format_run(selfmod.reject(run_id, reason or "explicit user rejection")["id"])
+        if action == "deploy":
+            run = selfmod.deploy(rest, health_command=[sys.executable, "-c", "import server; print(server.status())"])
+            module_names = {
+                Path(path).stem for path in run["files"]
+                if path.endswith(".py") and "/" not in path
+            }
+            reloadable = module_names & set(LIVE_RELOAD_MODULES)
+            if reloadable:
+                _maybe_live_reload()
+                failures = [
+                    row for row in live_reload.snapshot(sorted(reloadable))
+                    if row.get("error")
+                ]
+                if failures:
+                    selfmod.rollback(rest, reason="in-process live reload health failed")
+                    return "ERROR: live reload failed; automatic rollback completed: %s" % failures
+            return selfmod.format_run(run["id"])
+        if action == "rollback":
+            return selfmod.format_run(selfmod.rollback(rest)["id"])
+        if action in {"help", "?"}:
+            return (
+                "selfmod: status|opportunities|history|inspect <id>|plan <objective> --files a,b|"
+                "run <objective> --files a,b --tests <command>|diff <id>|tests <id>|approve <id>|"
+                "reject <id>|deploy <id>|rollback <id>|backups|verify-backup <id>|"
+                "mode observe|propose|auto-low-risk|resume <id>|cancel <id>|retention <days> <GB>|prune-backups|disable|enable"
+            )
+        return "ERROR: unknown selfmod action; try /selfmod help"
+    except (KeyError, ValueError, RuntimeError, PermissionError, OSError) as exc:
+        return "ERROR: %s" % exc
+
+
 def control_command(prompt: str, history=None, session="", project=""):
     """Handle safe slash commands before a prompt reaches the model.
 
@@ -865,6 +1109,12 @@ def control_command(prompt: str, history=None, session="", project=""):
         return _autopilot_command(arg, project=project)
     if cmd in ("/runtime", "/models"):
         return _runtime_command(arg)
+    if cmd in ("/hardware",):
+        return _training_command("hardware")
+    if cmd in ("/training", "/weighttraining"):
+        return _training_command(arg)
+    if cmd in ("/selfmod", "/selfmodify"):
+        return _selfmod_command(arg)
     if cmd in ("/mcp", "/convergence"):
         return _mcp_command(arg)
     if cmd in ("/learning", "/learnhealth", "/metrics"):
