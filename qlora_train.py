@@ -8,19 +8,12 @@ What this does: reads training_data.jsonl (chat-format {"messages":[user,
 assistant]} pairs exported by export_training_data.py), formats each example
 with the Qwen chat template, masks the prompt so loss is only computed on the
 assistant span, and QLoRA-fine-tunes a small Qwen2.5-Coder base in 4-bit (NF4)
-with a LoRA adapter on top. The adapter is saved to ./trilobite-lora/.
+with a LoRA adapter on top. The adapter is saved to
+./trilobite-personal-lora/ by default.
 
-Hardware target: single RTX 4050, 6 GB VRAM, 16 GB system RAM, Windows.
-
-IMPORTANT — base model size:
-    7B QLoRA on 6 GB VRAM is marginal to infeasible without CPU offload
-    (4-bit 7B weights alone are ~4-4.5 GB; add optimizer state, activations,
-    gradient checkpointing overhead, and the Windows/desktop VRAM budget and
-    it commonly OOMs). The default base here is therefore the 1.5B-Instruct
-    model, which comfortably fits. Override with TRILOBITE_BASE if you want
-    to attempt 7B (expect to need CPU offload via `device_map="auto"` +
-    `llm_int8_enable_fp32_cpu_offload`, or to run this under WSL2/Linux where
-    bitsandbytes is far more reliable, or to use a cloud GPU instead).
+Use ``adaptive_training.py plan`` (or ``/training plan``) to select the model
+and memory strategy. Direct invocation retains a conservative 1.5B default,
+but it will never silently fall back to CPU training.
 
 Usage (after `pip install -r requirements-train.txt`):
     ./venv/Scripts/python.exe qlora_train.py
@@ -32,17 +25,17 @@ peft/bitsandbytes installed — all heavy imports are deferred into main().
 import json
 import os
 import sys
+import time
 
 # ---------------------------------------------------------------------------
 # Configuration (override via env vars; kept as simple constants on purpose)
 # ---------------------------------------------------------------------------
 
-# Default to the 1.5B model: 7B QLoRA is marginal on a 6 GB card. See the
-# module docstring above for why, and what to do if you want 7B anyway.
+# Direct use defaults to 1.5B; the lifecycle manager supplies its planned base.
 BASE = os.environ.get("TRILOBITE_BASE", "Qwen/Qwen2.5-Coder-1.5B-Instruct")
 
 DATA_PATH = os.environ.get("TRILOBITE_DATA", os.path.join(os.path.dirname(__file__), "training_data.jsonl"))
-OUTPUT_DIR = os.environ.get("TRILOBITE_LORA_OUT", os.path.join(os.path.dirname(__file__), "trilobite-lora"))
+OUTPUT_DIR = os.environ.get("TRILOBITE_LORA_OUT", os.path.join(os.path.dirname(__file__), "trilobite-personal-lora"))
 
 MAX_LEN = int(os.environ.get("TRILOBITE_MAX_LEN", "1024"))
 
@@ -56,7 +49,7 @@ LORA_TARGET_MODULES = [
     "gate_proj", "up_proj", "down_proj",           # MLP
 ]
 
-# Training hyperparameters — tiny batch + grad accumulation for 6 GB VRAM.
+# Conservative defaults; the lifecycle manager supplies its planned values.
 PER_DEVICE_BATCH_SIZE = int(os.environ.get("TRILOBITE_BATCH_SIZE", "1"))
 GRAD_ACCUM_STEPS = int(os.environ.get("TRILOBITE_GRAD_ACCUM", "8"))
 NUM_EPOCHS = float(os.environ.get("TRILOBITE_EPOCHS", "3"))
@@ -76,17 +69,8 @@ def _print_vram_guidance():
     print(f"Data       : {DATA_PATH}")
     print(f"Output     : {OUTPUT_DIR}")
     print()
-    print("VRAM reality check (target: RTX 4050, 6 GB):")
-    print("  - The 1.5B-Instruct base in 4-bit NF4 is comfortably small (roughly")
-    print("    1-1.5 GB of weights) and should train fine on 6 GB with room to")
-    print("    spare for optimizer state, activations, and gradient checkpoints.")
-    print("  - A 7B base in 4-bit is ~4-4.5 GB of weights alone; once you add")
-    print("    LoRA optimizer state, activations, and Windows/desktop VRAM")
-    print("    overhead, 6 GB is marginal and OOM is likely without CPU offload")
-    print("    (device_map='auto' + llm_int8_enable_fp32_cpu_offload=True) or")
-    print("    running under WSL2/Linux, or using a cloud GPU instead.")
-    print("  - Watch `nvidia-smi` / Task Manager GPU memory while this runs.")
-    print("    Be ready to Ctrl-C if VRAM climbs toward the ceiling.")
+    print("The hardware planner selected this configuration. Keep the first run")
+    print("attended, watch `nvidia-smi` / Task Manager, and be ready to Ctrl-C.")
     print("=" * 78)
 
 
@@ -195,9 +179,10 @@ def main():
         total_vram = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
         print(f"  total VRAM: {total_vram:.1f} GB")
     else:
-        print("  No CUDA GPU visible — training will fall back to CPU, which will")
-        print("  be extremely slow for a 1.5B+ model. Verify your torch install is")
-        print("  a CUDA build (see requirements-train.txt) and drivers are current.")
+        print("ERROR: no CUDA GPU is visible. Trilobite will not silently fall back")
+        print("to CPU weight training. Verify the CUDA torch build and driver, or")
+        print("use `training plan` on a supported host.")
+        return 3
 
     compute_dtype = torch.bfloat16 if (has_cuda and torch.cuda.is_bf16_supported()) else torch.float16
 
@@ -206,19 +191,29 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    allow_offload = os.environ.get("TRILOBITE_ALLOW_CPU_OFFLOAD", "0") == "1"
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
         bnb_4bit_compute_dtype=compute_dtype,
         bnb_4bit_use_double_quant=True,
+        llm_int8_enable_fp32_cpu_offload=allow_offload,
     )
 
-    model = AutoModelForCausalLM.from_pretrained(
-        BASE,
-        quantization_config=bnb_config,
-        device_map="auto",
-        trust_remote_code=True,
-    )
+    model_kwargs = {
+        "quantization_config": bnb_config,
+        "device_map": "auto" if allow_offload else {"": 0},
+        "trust_remote_code": True,
+    }
+    if allow_offload:
+        gpu_budget = os.environ.get("TRILOBITE_TRAIN_GPU_BUDGET_GB", "").strip()
+        ram_budget = os.environ.get("TRILOBITE_TRAIN_RAM_BUDGET_GB", "").strip()
+        if gpu_budget and ram_budget:
+            model_kwargs["max_memory"] = {
+                0: f"{max(1, int(float(gpu_budget)))}GiB",
+                "cpu": f"{max(2, int(float(ram_budget)))}GiB",
+            }
+    model = AutoModelForCausalLM.from_pretrained(BASE, **model_kwargs)
     model.gradient_checkpointing_enable()
     model = prepare_model_for_kbit_training(model)
 
@@ -271,13 +266,60 @@ def main():
     )
 
     print("Starting training ... (this is the attended part — watch VRAM)")
-    trainer.train()
+    checkpoints_dir = os.path.join(OUTPUT_DIR, "checkpoints")
+    resume = None
+    if os.environ.get("TRILOBITE_RESUME", "1") == "1" and os.path.isdir(checkpoints_dir):
+        candidates = [
+            os.path.join(checkpoints_dir, name)
+            for name in os.listdir(checkpoints_dir)
+            if name.startswith("checkpoint-") and name.split("-")[-1].isdigit()
+        ]
+        if candidates:
+            resume = max(candidates, key=lambda path: int(path.rsplit("-", 1)[-1]))
+            print(f"Resuming from checkpoint: {resume}")
+    try:
+        trainer.train(resume_from_checkpoint=resume)
+    except (torch.cuda.OutOfMemoryError, RuntimeError) as exc:
+        if not isinstance(exc, torch.cuda.OutOfMemoryError) and "out of memory" not in str(exc).lower():
+            raise
+        print("ERROR: CUDA out of memory. Training stopped cleanly; existing")
+        print("checkpoints are preserved. Re-run `training plan` with a smaller")
+        print("model/sequence length or enable supported CPU offload explicitly.")
+        if has_cuda:
+            torch.cuda.empty_cache()
+        return 4
 
     print(f"Saving LoRA adapter to {OUTPUT_DIR} ...")
     model.save_pretrained(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)
-    print("Done. See TRAINING.md for how to register the adapter with Ollama.")
+    manifest_path = os.environ.get("TRILOBITE_TRAINING_MANIFEST", "")
+    manifest = {}
+    if manifest_path and os.path.exists(manifest_path):
+        with open(manifest_path, "r", encoding="utf-8") as stream:
+            manifest = json.load(stream)
+    manifest.update({
+        "base_hf": BASE,
+        "completed_ts": int(time.time()),
+        "adapter_config": os.path.join(OUTPUT_DIR, "adapter_config.json"),
+    })
+    with open(os.path.join(OUTPUT_DIR, "training-manifest.json"), "w", encoding="utf-8") as stream:
+        json.dump(manifest, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+    print("Done. Run `training deploy` for checked GGUF conversion and validation.")
+    return 0
+
+
+def _entrypoint():
+    try:
+        return main()
+    except RuntimeError as exc:
+        if "out of memory" not in str(exc).lower():
+            raise
+        print("ERROR: CUDA out of memory while loading/preparing the model.")
+        print("No CPU fallback was attempted. Preserve any existing checkpoints and")
+        print("re-run `training plan` with a smaller model or sequence length.")
+        return 4
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(_entrypoint())

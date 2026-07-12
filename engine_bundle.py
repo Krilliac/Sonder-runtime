@@ -380,6 +380,7 @@ def select_base_model(
     bundle: EngineBundle,
     ram_gb: float,
     requested: str = "",
+    preferred: str = "",
 ) -> str:
     if requested:
         for model in bundle.base_models:
@@ -389,6 +390,10 @@ def select_base_model(
             f"requested model {requested!r} is not in offline bundle; available: "
             + ", ".join(model.name for model in bundle.base_models)
         )
+    if preferred:
+        for model in bundle.base_models:
+            if model.name == preferred and model.min_ram_gb <= ram_gb:
+                return model.name
     eligible = [model for model in bundle.base_models if model.min_ram_gb <= ram_gb]
     if not eligible:
         return min(bundle.base_models, key=lambda item: item.min_ram_gb).name

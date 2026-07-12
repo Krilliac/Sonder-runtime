@@ -177,6 +177,22 @@ def test_privacy_scan_fails_closed_before_replacing_output(
     assert sentinel.read_text(encoding="utf-8") == "keep"
 
 
+def test_shipped_selfmod_documentation_contains_no_absolute_user_home():
+    package._privacy_scan(package.ROOT / "SELFMOD.md")
+
+
+def test_privacy_scan_distinguishes_prose_from_an_actual_home_path(tmp_path):
+    document = tmp_path / "README.md"
+    document.write_text("tool/root allowlists are guarded\n", encoding="utf-8")
+    package._privacy_scan(document)
+    document.write_text(
+        f"private file: {Path.home() / 'secrets.txt'}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="absolute user-home"):
+        package._privacy_scan(document)
+
+
 def test_zip_rejects_noncanonical_source_and_archive_paths(monkeypatch, tmp_path):
     root = _fake_repo(tmp_path, monkeypatch)
     dest = root / "app" / "build" / "local-system"

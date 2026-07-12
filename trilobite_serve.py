@@ -310,6 +310,9 @@ HELP_TEXT = """commands:
   /work <task>       execute a guarded workflow with checklist and end report
   /autopilot ...     persistent plan/run/status/resume/pause/cancel autonomy
   /runtime ...       shared local model mappings and execution-lane tiers
+  /hardware          inspect live RAM/GPU/VRAM capacity
+  /training ...      plan/start/status/deploy/rollback attended weight training
+  /selfmod ...       isolated inspect/plan/test/approve/deploy/rollback lifecycle
   /mcp ...           audit/refresh atomic MCP source and tool convergence
   /learning          show grounded outcomes, lesson sources, and memory hygiene
   natural work       auto-select foreground, Autopilot, or explicit fleet mode
@@ -497,6 +500,7 @@ DANGEROUS_HTTP_SLASH_COMMANDS = frozenset({
     "/capacity", "/agentcapacity", "/agentcancel", "/cancelagents",
     "/agentretry", "/retryagent",
     "/runtime", "/models",
+    "/selfmod", "/selfmodify",
 })
 
 
@@ -512,6 +516,9 @@ def _dangerous_http_slash(content):
     if command in ("/runtime", "/models"):
         action = pieces[1].lower() if len(pieces) > 1 else "status"
         return action not in ("status", "show", "list", "help", "?")
+    if command in ("/selfmod", "/selfmodify"):
+        action = pieces[1].lower() if len(pieces) > 1 else "status"
+        return action not in ("status", "show", "list", "history", "inspect", "diff", "tests", "backups", "verify-backup", "opportunities", "help", "?")
     return command in DANGEROUS_HTTP_SLASH_COMMANDS
 
 
@@ -847,6 +854,8 @@ def _handle_slash(content, messages=None, state=None, project=""):
     if cmd in ("/autopilot", "/auto"):
         return server.control_command(stripped, project=project)
     if cmd in ("/runtime", "/models"):
+        return server.control_command(stripped, project=project)
+    if cmd in ("/selfmod", "/selfmodify"):
         return server.control_command(stripped, project=project)
     if cmd in ("/mcp", "/convergence"):
         return server.control_command(stripped, project=project)
@@ -1292,6 +1301,7 @@ class Handler(BaseHTTPRequestHandler):
                 "agents": server.master_orchestrator.snapshot(),
                 "autopilot": server.autopilot_controller.snapshot(),
                 "runtime_policy": server.runtime_policy_data(),
+                "selfmod": server.selfmod.status_data(),
                 "mcp_runtime": server.mcp_runtime_data(),
                 "learning_health": server.learning_health_data(),
                 "activity": server.activity_tracker.snapshot(),
