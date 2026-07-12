@@ -82,6 +82,21 @@ try {
         }
         Push-Location $AppRoot
         try {
+            $Platforms = @()
+            if ($Target -in @("windows", "all")) { $Platforms += "windows" }
+            if ($Target -in @("android", "all", "test")) { $Platforms += "android" }
+            if ($Platforms.Count -gt 0) {
+                $PlatformList = $Platforms -join ","
+                Invoke-NativeStep "Generate Sonder Runtime platform projects" {
+                    & $Flutter create --org com.sonder.runtime `
+                        --project-name sonder_runtime `
+                        --platforms $PlatformList .
+                }
+                Invoke-NativeStep "Configure Sonder Runtime identity and networking" {
+                    & $Python "$RepoRoot\scripts\configure_flutter_networking.py" `
+                        . --allow-android-cleartext
+                }
+            }
             Invoke-NativeStep "Resolve Flutter packages" { & $Flutter pub get }
             if (-not $SkipTests) {
                 Invoke-NativeStep "Analyze Flutter app" { & $Flutter analyze }
@@ -105,11 +120,14 @@ try {
                     Remove-Item -LiteralPath $PayloadTarget -Recurse -Force
                 }
                 Copy-Item -LiteralPath "build\local-system" -Destination $PayloadTarget -Recurse
-                Write-Host "Windows app: $(Join-Path $ReleaseRoot 'trilobite.exe')" -ForegroundColor Green
+                Write-Host "Windows app: $(Join-Path $ReleaseRoot 'sonder.exe')" -ForegroundColor Green
             }
             if ($Target -in @("android", "all")) {
                 Invoke-NativeStep "Build Android release" { & $Flutter build apk --release }
-                Write-Host "Android app: $AppRoot\build\app\outputs\flutter-apk\app-release.apk" -ForegroundColor Green
+                $AndroidArtifact = Join-Path $AppRoot "build\sonder-runtime-android.apk"
+                Copy-Item -LiteralPath "build\app\outputs\flutter-apk\app-release.apk" `
+                    -Destination $AndroidArtifact -Force
+                Write-Host "Android app: $AndroidArtifact" -ForegroundColor Green
             }
         }
         finally {

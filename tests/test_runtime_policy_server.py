@@ -4,7 +4,7 @@ import pytest
 
 import runtime_policy
 import server
-import trilobite_serve
+import sonder_serve
 
 
 @pytest.fixture
@@ -12,7 +12,7 @@ def isolated_runtime_policy(monkeypatch, tmp_path):
     original_tiers = dict(server.TIERS)
     original_policy = dict(server._RUNTIME_POLICY)
     path = tmp_path / "runtime_policy.json"
-    monkeypatch.setenv("TRILOBITE_RUNTIME_POLICY", str(path))
+    monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(path))
     yield path
     server.TIERS.clear()
     server.TIERS.update(original_tiers)
@@ -21,7 +21,7 @@ def isolated_runtime_policy(monkeypatch, tmp_path):
 
 def test_server_refresh_applies_external_policy_edit(isolated_runtime_policy):
     policy = runtime_policy.load(create=True)
-    policy["local_models"]["code"] = "trilobite-personal:latest"
+    policy["local_models"]["code"] = "sonder-personal:latest"
     policy["routing"]["workbench"] = "general"
     isolated_runtime_policy.write_text(
         json.dumps({key: policy[key] for key in (
@@ -32,8 +32,8 @@ def test_server_refresh_applies_external_policy_edit(isolated_runtime_policy):
 
     refreshed = server._refresh_runtime_policy(create=False)
 
-    assert refreshed["local_models"]["code"] == "trilobite-personal:latest"
-    assert server.TIERS["code"] == "trilobite-personal:latest"
+    assert refreshed["local_models"]["code"] == "sonder-personal:latest"
+    assert server.TIERS["code"] == "sonder-personal:latest"
     assert runtime_policy.route_tier("workbench", refreshed) == "general"
 
 
@@ -45,7 +45,7 @@ def test_guarded_update_requires_installed_local_model(
         "_get",
         lambda _path: {"models": [
             {"name": "qwen2.5:3b"},
-            {"name": "trilobite:latest"},
+            {"name": "sonder:latest"},
             {"name": "qwen2.5:7b-instruct"},
         ]},
     )
@@ -78,10 +78,10 @@ def test_runtime_slash_parses_models_and_routes(isolated_runtime_policy, monkeyp
 
     assert server.control_command("/runtime") == "status"
     assert server.control_command(
-        "/runtime set code=trilobite:latest workbench=general"
+        "/runtime set code=sonder:latest workbench=general"
     ) == "updated"
     assert calls == [{
-        "local_models_json": '{"code": "trilobite:latest"}',
+        "local_models_json": '{"code": "sonder:latest"}',
         "routing_json": '{"workbench": "general"}',
     }]
     assert server.control_command("/runtime reset") == "updated"
@@ -89,13 +89,13 @@ def test_runtime_slash_parses_models_and_routes(isolated_runtime_policy, monkeyp
 
 
 def test_runtime_http_status_is_safe_but_updates_require_developer():
-    assert trilobite_serve._dangerous_http_slash("/runtime") is False
-    assert trilobite_serve._dangerous_http_slash("/runtime status") is False
-    assert trilobite_serve._dangerous_http_slash("/runtime help") is False
-    assert trilobite_serve._dangerous_http_slash(
+    assert sonder_serve._dangerous_http_slash("/runtime") is False
+    assert sonder_serve._dangerous_http_slash("/runtime status") is False
+    assert sonder_serve._dangerous_http_slash("/runtime help") is False
+    assert sonder_serve._dangerous_http_slash(
         "/runtime set workbench=general"
     ) is True
-    assert trilobite_serve._dangerous_http_slash("/runtime reset") is True
+    assert sonder_serve._dangerous_http_slash("/runtime reset") is True
 
 
 def test_runtime_policy_data_reports_missing_models(
@@ -106,7 +106,7 @@ def test_runtime_policy_data_reports_missing_models(
     monkeypatch.setattr(
         server,
         "_runtime_installed_models",
-        lambda: {"qwen2.5:3b", "trilobite:latest"},
+        lambda: {"qwen2.5:3b", "sonder:latest"},
     )
 
     data = server.runtime_policy_data()
@@ -117,11 +117,11 @@ def test_runtime_policy_data_reports_missing_models(
 
 
 def test_installed_model_check_requires_the_requested_tag():
-    installed = {"qwen2.5:3b", "trilobite:latest", "bare-model"}
+    installed = {"qwen2.5:3b", "sonder:latest", "bare-model"}
 
     assert server._runtime_model_is_installed("qwen2.5:3b", installed)
     assert not server._runtime_model_is_installed("qwen2.5:999b", installed)
-    assert server._runtime_model_is_installed("trilobite", installed)
+    assert server._runtime_model_is_installed("sonder", installed)
     assert server._runtime_model_is_installed("bare-model:latest", installed)
 
 

@@ -48,7 +48,7 @@ def test_rate_limit_blocks_free_tier_after_limit():
 
 def test_public_bootstrap_requires_secret_and_is_one_use(monkeypatch):
     secret = "bootstrap-secret-123456"
-    monkeypatch.setenv("TRILOBITE_BOOTSTRAP_SECRET", secret)
+    monkeypatch.setenv("SONDER_BOOTSTRAP_SECRET", secret)
     conn = memory_store.connect(":memory:")
 
     with pytest.raises(PermissionError):
@@ -75,7 +75,7 @@ def test_public_bootstrap_requires_secret_and_is_one_use(monkeypatch):
 
 def test_concurrent_bootstrap_creates_exactly_one_admin(monkeypatch, tmp_path):
     secret = "bootstrap-secret-123456"
-    monkeypatch.setenv("TRILOBITE_BOOTSTRAP_SECRET", secret)
+    monkeypatch.setenv("SONDER_BOOTSTRAP_SECRET", secret)
     path = str(tmp_path / "concurrent.db")
     initial = memory_store.connect(path)
     admin_auth.init(initial)

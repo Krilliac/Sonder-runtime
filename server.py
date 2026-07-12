@@ -1,5 +1,5 @@
 """
-local-llm MCP server
+sonder-runtime MCP server
 ---------------------
 Bridges Claude Code to a local Ollama instance running on the RTX 4050 (6 GB VRAM).
 
@@ -49,7 +49,7 @@ import web_tools
 import web_intents
 import self_heal
 import grounding
-import trilobite_paths
+import sonder_paths
 import memory_quality
 import learning_health
 import domain_grounding
@@ -85,9 +85,9 @@ if OLLAMA_HOST.startswith("0.0.0.0"):
     OLLAMA_HOST = OLLAMA_HOST.replace("0.0.0.0", "127.0.0.1", 1)
 BASE = f"http://{OLLAMA_HOST}"
 # How long a model stays in VRAM after its last call. Short = frees GPU quickly.
-KEEP_ALIVE = os.environ.get("LOCAL_LLM_KEEP_ALIVE", "2m")
-TIMEOUT = int(os.environ.get("LOCAL_LLM_TIMEOUT", "300"))
-LOCAL_CODE_MODEL = os.environ.get("LOCAL_LLM_CODE_LOCAL", "qwen2.5-coder:7b")
+KEEP_ALIVE = os.environ.get("SONDER_KEEP_ALIVE", "2m")
+TIMEOUT = int(os.environ.get("SONDER_TIMEOUT", "300"))
+LOCAL_CODE_MODEL = os.environ.get("SONDER_CODE_LOCAL", "qwen2.5-coder:7b")
 
 
 def _env_int_option(name, default=None):
@@ -119,9 +119,9 @@ def _local_model_options(temperature, num_predict, num_ctx):
         "num_ctx": context_policy.native(num_ctx),
     }
     runtime = {
-        "num_thread": _env_int_option("LOCAL_LLM_NUM_THREAD", _cpu_thread_default()),
-        "num_gpu": _env_int_option("LOCAL_LLM_NUM_GPU", 999),
-        "num_batch": _env_int_option("LOCAL_LLM_NUM_BATCH", 512),
+        "num_thread": _env_int_option("SONDER_NUM_THREAD", _cpu_thread_default()),
+        "num_gpu": _env_int_option("SONDER_NUM_GPU", 999),
+        "num_batch": _env_int_option("SONDER_NUM_BATCH", 512),
     }
     for key, value in runtime.items():
         if value is not None:
@@ -149,11 +149,11 @@ def _context_native(value=None):
 
 
 TIERS = {
-    "fast": os.environ.get("LOCAL_LLM_FAST", "qwen2.5:3b"),
-    "code": os.environ.get("LOCAL_LLM_CODE", "qwen2.5-coder:7b"),
-    "general": os.environ.get("LOCAL_LLM_GENERAL", "qwen2.5:7b-instruct"),
-    "cloud-code": os.environ.get("LOCAL_LLM_CLOUD_CODE", "qwen3-coder:480b-cloud"),
-    "cloud-general": os.environ.get("LOCAL_LLM_CLOUD_GENERAL", "gpt-oss:120b-cloud"),
+    "fast": os.environ.get("SONDER_FAST", "qwen2.5:3b"),
+    "code": os.environ.get("SONDER_CODE", "qwen2.5-coder:7b"),
+    "general": os.environ.get("SONDER_GENERAL", "qwen2.5:7b-instruct"),
+    "cloud-code": os.environ.get("SONDER_CLOUD_CODE", "qwen3-coder:480b-cloud"),
+    "cloud-general": os.environ.get("SONDER_CLOUD_GENERAL", "gpt-oss:120b-cloud"),
 }
 # Tiers whose ":...-cloud" model runs on Ollama's servers (data leaves the machine).
 CLOUD_TIERS = {"cloud-code", "cloud-general"}
@@ -161,7 +161,7 @@ LOCAL_TIERS = tuple(k for k in TIERS if k not in CLOUD_TIERS)
 
 
 def cloud_allowed():
-    return os.environ.get("TRILOBITE_ALLOW_CLOUD", "").strip().lower() in (
+    return os.environ.get("SONDER_ALLOW_CLOUD", "").strip().lower() in (
         "1", "true", "yes", "on"
     )
 
@@ -178,7 +178,7 @@ def _valid_tier_names():
 
 def _cloud_disabled_message():
     return (
-        "ERROR: hosted/cloud tiers are disabled. Set TRILOBITE_ALLOW_CLOUD=1 "
+        "ERROR: hosted/cloud tiers are disabled. Set SONDER_ALLOW_CLOUD=1 "
         "to opt in; prompts sent to cloud tiers leave this machine."
     )
 
@@ -229,35 +229,35 @@ def _is_cloud_tier(tier, model=None):
     return _is_cloud_model_name(model)
 
 # Which offload tiers feed the learning loop (capture + distill lessons). A stronger
-# paid/cloud model makes an excellent *teacher*: its grounded good outcomes become
-# lessons and fine-tuning data the local student retrieves later. All configured tiers
-# learn by default; override machine-wide with e.g. TRILOBITE_LEARN_TIERS="code"
+# paid/cloud model can provide grounded good outcomes that become lessons and
+# fine-tuning data for later local retrieval. All configured tiers
+# learn by default; override machine-wide with e.g. SONDER_LEARN_TIERS="code"
 # (local coder only) or "fast,code,general" (local-only all sizes).
 DEFAULT_LEARN_TIERS = ",".join(LOCAL_TIERS)
 LEARN_TIERS = {
     t.strip()
     for t in os.environ.get(
-        "TRILOBITE_LEARN_TIERS", DEFAULT_LEARN_TIERS
+        "SONDER_LEARN_TIERS", DEFAULT_LEARN_TIERS
     ).split(",")
     if t.strip()
 }
 
-# strict=True pins trilobite to the fine-tuned alias only (errors if missing) instead
-# of silently falling back to the base coder model. Env default lets ops flip this
-# machine-wide without touching call sites.
-_STRICT_DEFAULT = os.environ.get("TRILOBITE_STRICT", "").strip().lower() in ("1", "true", "yes", "on")
+# strict=True pins the local runtime route to the `sonder:latest` Ollama alias
+# (errors if missing) instead of silently falling back to the base coder model.
+# The environment default lets operators change this without touching call sites.
+_STRICT_DEFAULT = os.environ.get("SONDER_STRICT", "").strip().lower() in ("1", "true", "yes", "on")
 
 # Conversation memory is ON by default: a call with no explicit session threads the
 # shared DEFAULT_SESSION so follow-ups are remembered. Pass session="none" to opt out
 # (single-turn), or a distinct id to isolate a thread. Same idea for project facts.
-DEFAULT_SESSION = os.environ.get("TRILOBITE_DEFAULT_SESSION", "default")
-DEFAULT_PROJECT = os.environ.get("TRILOBITE_DEFAULT_PROJECT", "default")
+DEFAULT_SESSION = os.environ.get("SONDER_DEFAULT_SESSION", "default")
+DEFAULT_PROJECT = os.environ.get("SONDER_DEFAULT_PROJECT", "default")
 # Sessioned calls get a roomier context (fits easily on the 6 GB 4050) and keep the
 # last MAX_TURNS turns live; older turns are rolled into a summary.
 SESSION_NUM_CTX = context_policy.default_requested()
-MAX_TURNS = int(os.environ.get("TRILOBITE_MAX_TURNS", "12"))
+MAX_TURNS = int(os.environ.get("SONDER_MAX_TURNS", "12"))
 
-_DB_PATH = trilobite_paths.memory_db_path()
+_DB_PATH = sonder_paths.memory_db_path()
 
 FOOTER_PREFIX = "\n\n[interaction_id: "
 _FOOTER_RE = re.compile(r"\[interaction_id: ([0-9a-f]+)\]\s*$")
@@ -381,7 +381,7 @@ def _format_trace(model, tier, params, trace):
     lessons = trace.get("lessons", [])
     lines = [
         "",
-        "=== TRACE (how trilobite decided) ===",
+        "=== TRACE (how Sonder Runtime decided) ===",
         "model: %s   tier: %s" % (model, tier),
         "generation params: %r" % (params,),
         "lessons retrieved: %d" % len(lessons),
@@ -401,13 +401,13 @@ def _should_learn(tier, learn):
     return bool(learn) and tier in LEARN_TIERS
 
 
-def resolve_trilobite_model(strict=False):
+def resolve_sonder_model(strict=False):
     try:
         tags = [m.get("name", "") for m in _get("/api/tags").get("models", [])]
     except Exception:
         tags = []
-    if any(t.split(":")[0] == "trilobite" for t in tags):
-        return "trilobite"
+    if any(t.split(":")[0] == "sonder" for t in tags):
+        return "sonder"
     return None if strict else TIERS["code"]
 
 
@@ -529,12 +529,12 @@ def _build_system(system, trace, persona):
 
 
 def _resolve_model_and_system(system, trace, strict, persona):
-    """Shared prep for the trilobite tool and the serve layer.
+    """Shared prep for the Sonder Runtime tool and HTTP serve layer.
 
     Returns (model, effective_system); model is None if the strict alias is missing.
     """
     strict_eff = _STRICT_DEFAULT if strict is None else strict
-    model = resolve_trilobite_model(strict_eff)
+    model = resolve_sonder_model(strict_eff)
     if model is None:
         return None, None
     return model, _build_system(system, trace, persona)
@@ -547,18 +547,18 @@ def _serve_target(tier, strict):
       - model:      the Ollama model to generate with (None if a strict alias is
                     missing, or tier_label is None for an unknown name)
       - cloud:      True if it runs on Ollama's servers (payload omits VRAM knobs)
-      - augment:    inject facts/lessons/recall? Only the local student ('code'/
-                    trilobite) does; any other model answers clean (teacher mode)
+      - augment:    inject facts/lessons/recall? Only the local learning route
+                    ('code'/"sonder") does; other model routes answer clean
       - tier_label: what to record on the interaction (None => unknown model)
 
-    Default / "" / "trilobite" / "local" => the local self-improving student.
+    Default / "" / "sonder" / "local" => Sonder Runtime's local learning route.
     Any TIERS key (e.g. "cloud-code", "general") selects that model directly, so a
     single server can drive many models — pick per request.
     """
     t = (tier or "").strip().lower()
-    if t in ("", "trilobite", "local"):
+    if t in ("", "sonder", "local"):
         strict_eff = _STRICT_DEFAULT if strict is None else strict
-        return resolve_trilobite_model(strict_eff), False, True, "trilobite"
+        return resolve_sonder_model(strict_eff), False, True, "sonder"
     if t in TIERS:
         model = TIERS[t]
         if _is_cloud_tier(t, model) and not cloud_allowed():
@@ -689,7 +689,7 @@ def _control_dump(arg, prompt, history=None, session="", project=""):
         ("diagnostics", diagnostics()),
     ]
     path = debug_dump.write_dump(
-        trilobite_paths.default_home(),
+        sonder_paths.default_home(),
         label=label,
         messages=messages,
         sections=sections,
@@ -950,11 +950,11 @@ def _execute_selfmod_run(run_id, explicit_tests=None):
             if not selfmod.heartbeat(run_id, owner):
                 return
     heartbeat_thread = threading.Thread(
-        target=heartbeat_worker, name="trilobite-selfmod-heartbeat", daemon=True,
+        target=heartbeat_worker, name="sonder-selfmod-heartbeat", daemon=True,
     )
     heartbeat_thread.start()
-    previous = os.environ.get("TRILOBITE_SELFMOD_ACTIVE")
-    os.environ["TRILOBITE_SELFMOD_ACTIVE"] = "1"
+    previous = os.environ.get("SONDER_SELFMOD_ACTIVE")
+    os.environ["SONDER_SELFMOD_ACTIVE"] = "1"
     try:
         workspace = run["workspace_path"]
         test_commands = _selfmod_test_commands(run, explicit_tests or [])
@@ -993,9 +993,9 @@ def _execute_selfmod_run(run_id, explicit_tests=None):
         heartbeat_stop.set()
         heartbeat_thread.join(timeout=2)
         if previous is None:
-            os.environ.pop("TRILOBITE_SELFMOD_ACTIVE", None)
+            os.environ.pop("SONDER_SELFMOD_ACTIVE", None)
         else:
-            os.environ["TRILOBITE_SELFMOD_ACTIVE"] = previous
+            os.environ["SONDER_SELFMOD_ACTIVE"] = previous
         with contextlib.suppress(Exception):
             selfmod.release(run_id, owner)
 
@@ -1113,7 +1113,7 @@ def control_command(prompt: str, history=None, session="", project=""):
     cmd = parts[0].lower()
     arg = parts[1] if len(parts) > 1 else ""
     if cmd == "/stats":
-        return trilobite_stats()
+        return sonder_stats()
     if cmd == "/context":
         return context_health()
     if cmd in ("/contextsize", "/ctxsize"):
@@ -1271,7 +1271,7 @@ def control_command(prompt: str, history=None, session="", project=""):
             return "usage: /weather <city/state or ZIP>"
         return weather_lookup(arg.strip())
     if cmd in ("/forge", "/gamesuite"):
-        return game_reference_suite(name=arg.strip() or "trilobite-reference")
+        return game_reference_suite(name=arg.strip() or "sonder-reference")
     if cmd in ("/game", "/gamegen"):
         game_parts = arg.strip().split(None, 2)
         if len(game_parts) != 3 or "|" not in game_parts[2]:
@@ -1299,9 +1299,9 @@ def control_command(prompt: str, history=None, session="", project=""):
 
 def _canonical_learn_tier(tier_label):
     """Map a recorded tier label to the LEARN_TIERS key that governs it. The local
-    student is labeled 'trilobite' on interactions but is gated by the same 'code'
+    learning route is labeled 'sonder' on interactions but is gated by the same 'code'
     switch as offload's local coder, so both flip together."""
-    return "code" if tier_label == "trilobite" else tier_label
+    return "code" if tier_label == "sonder" else tier_label
 
 
 def _session_history_messages(conn, session_id, max_turns):
@@ -1384,7 +1384,7 @@ def _capture_preferences(conn, text, source_interaction=None, scope="global"):
 
 def _answer(conn, prompt, model, effective_system, temperature, num_predict,
             num_ctx, session_id, project, history, trace=False,
-            tier="trilobite", cloud=False, augment=True):
+            tier="sonder", cloud=False, augment=True):
     """Core answer path shared by the tool and serve: (optionally) augment
     (facts/lessons/recall), generate with `history`, capture. Returns
     (response, interaction_id, trace_ctx).
@@ -1429,7 +1429,7 @@ if isinstance(_existing_mcp, reloadable_mcp.ReloadableFastMCP):
     mcp = _existing_mcp
     mcp.begin_module_refresh()
 else:
-    mcp = reloadable_mcp.ReloadableFastMCP("local-llm")
+    mcp = reloadable_mcp.ReloadableFastMCP("sonder-runtime")
 _PERSISTENT_MCP = mcp
 
 
@@ -1471,11 +1471,11 @@ def offload(
     """Offload a self-contained subtask to a local-GPU or Ollama-cloud model.
 
     Local tiers (fast/code/general) run privately on the 6 GB 4050. The learning tiers
-    (TRILOBITE_LEARN_TIERS, default local 'code' + both cloud tiers) participate in the
+    (SONDER_LEARN_TIERS, default local 'code' + both cloud tiers) participate in the
     lesson loop: with learn=True (default) the call is captured and the response ends
     with a '[interaction_id: <id>]' footer you can pass to record_outcome once you know
     whether it compiled / passed tests, so a good outcome distills a lesson. The local
-    'code' tier is also memory-augmented (student); cloud tiers answer CLEAN (teacher)
+    'code' tier is also memory-augmented; cloud tiers answer without augmentation
     but are still captured — so a paid frontier model's grounded wins become lessons and
     fine-tuning data for the local model. 'fast'/'general' (mechanical work) and
     learn=False run the plain path: no capture, no footer, just text.
@@ -1545,10 +1545,10 @@ def offload(
                 elapsed_ms=int((time.time() - started) * 1000),
             )
 
-    # Learning path. Local tiers are answered by the trilobite student model/alias and
-    # augmented with lessons (consistent with the trilobite tool). Cloud tiers act as a
-    # 'teacher': the actual cloud model answers CLEAN (no augmentation), and its grounded
-    # good outcomes are still captured + distilled into lessons for the local student.
+    # Learning path. Local tiers are answered by the selected local model behind
+    # Sonder Runtime's learning route and augmented with lessons. Cloud tiers answer
+    # cleanly without augmentation; grounded good outcomes can still be captured and
+    # distilled into lessons for later local retrieval.
     retrieve_kwargs = {}
     if _is_cloud_tier(tier, model):
         gen = _make_generate(
@@ -1557,9 +1557,9 @@ def offload(
         )
         retrieve_kwargs["retrieve_fn"] = _no_retrieve
     else:
-        learning_model = resolve_trilobite_model(_STRICT_DEFAULT)
+        learning_model = resolve_sonder_model(_STRICT_DEFAULT)
         if learning_model is None:
-            return ("ERROR: trilobite model/alias not found. Run setup_alias.py, or call "
+            return ("ERROR: `sonder:latest` Ollama alias not found. Run setup_alias.py, or call "
                     "with strict=False to fall back to the base coder.")
         gen = _make_generate(
             learning_model, system, temperature, num_predict, num_ctx,
@@ -1577,7 +1577,7 @@ def offload(
     return with_footer(response, iid)
 
 
-def _trilobite_impl(
+def _sonder_impl(
     prompt: str,
     system: str = "",
     temperature: float = 0.2,
@@ -1591,21 +1591,22 @@ def _trilobite_impl(
     project: str = "",
     tier: str = "",
 ) -> str:
-    """Ask 'trilobite', the local self-improving coding model, for help.
+    """Ask through Sonder Runtime's local learning loop.
 
     This is the interactive front door to the same learning loop the fleet uses:
     the prompt is augmented with project facts, lessons distilled from past work, and
     similar past solutions, answered locally on the 4050, captured, and returned with
     a '[interaction_id: <id>]' footer. After you learn how it went, call
     record_outcome(<id>, "tests_passed" | "used" | "copied" | "edited" |
-    "accepted" | "compiled" | "rejected" | "failed") so trilobite gets better over time. Defaults to the 7B coder base model,
-    or the 'trilobite' Ollama alias if it exists.
+    "accepted" | "compiled" | "rejected" | "failed") so Sonder Runtime can learn
+    over time. The route uses the selected coder base model or the `sonder:latest`
+    Ollama alias when it exists.
 
-    `tier` picks which model answers (default "" / "trilobite" = the local student).
+    `tier` picks which model answers (default "" / "sonder" = the local learning route).
     Pass any tier name (e.g. "cloud-code") to route this call to that model instead —
-    cloud/non-student tiers answer CLEAN (teacher mode: no lesson/fact injection) but
+    cloud/non-learning tiers answer CLEAN (no lesson/fact injection) but
     are still captured, so a stronger model's grounded good outcomes distill into
-    lessons for the local student. Conversation memory (session) is threaded either
+    lessons for future local retrieval. Conversation memory (session) is threaded either
     way. The turn is always captured (the tool is the deliberate learning front door);
     LEARN_TIERS governs the automatic capture in offload / the serve layer instead.
 
@@ -1614,18 +1615,18 @@ def _trilobite_impl(
     Pass a distinct `session` id to keep an isolated thread (recommended: one id per
     conversation), or session="none" for a one-off single-turn answer. Threads persist
     in memory.db across restarts; older turns are auto-summarized to stay in the local
-    context window (the most recent turns are kept verbatim). Use trilobite_sessions()
+    context window (the most recent turns are kept verbatim). Use sonder_sessions()
     to list threads.
 
-    `project` scopes durable facts (see trilobite_remember_fact); those facts are
+    `project` scopes durable facts (see sonder_remember_fact); those facts are
     always injected. No project -> the "default" project; project="none" -> no facts.
 
     trace=True instructs the model to externalize its step-by-step reasoning
     ('## Reasoning' then '## Answer'), and appends a TRACE block showing the SYSTEM's
     actual decision context (retrieved lessons, exact augmented prompt, model/params).
 
-    strict=True (or env TRILOBITE_STRICT=1) pins this call to the fine-tuned
-    'trilobite' alias only, erroring if it isn't installed instead of falling back.
+    strict=True (or env SONDER_STRICT=1) pins this call to the stable
+    `sonder:latest` Ollama alias, erroring if it isn't installed instead of falling back.
 
     persona selects one of personas.names() (e.g. "explainer", "reviewer", "teacher")
     to steer tone; its system prompt is prepended ahead of `system`/trace instructions.
@@ -1638,9 +1639,9 @@ def _trilobite_impl(
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()
     if tier_label is None:
-        return "ERROR: unknown tier '%s'. Valid: trilobite, %s." % (tier, _valid_tier_names())
+        return "ERROR: unknown tier '%s'. Valid: sonder, %s." % (tier, _valid_tier_names())
     if tgt_model is None:
-        return ("ERROR: trilobite model/alias not found. Run setup_alias.py, or call "
+        return ("ERROR: `sonder:latest` Ollama alias not found. Run setup_alias.py, or call "
                 "with strict=False to fall back to the base coder.")
     effective_system = _build_system(system, trace, persona)
 
@@ -1685,7 +1686,7 @@ def _trilobite_impl(
 
 
 @mcp.tool()
-def trilobite(
+def sonder(
     prompt: str,
     system: str = "",
     temperature: float = 0.2,
@@ -1699,20 +1700,20 @@ def trilobite(
     project: str = "",
     tier: str = "",
 ) -> str:
-    """Ask Trilobite and show observable activity for the response."""
+    """Ask through Sonder Runtime and show observable activity for the response."""
     command = control_command(prompt, session=session, project=project)
     if command is not None:
         return command
-    label = "trilobite:%s" % ((tier or "trilobite").strip() or "trilobite")
+    label = "sonder:%s" % ((tier or "sonder").strip() or "sonder")
     with activity_tracker.response_span(
         label,
         prompt,
         surface="terminal/mcp",
-        model=tier or "trilobite",
+        model=tier or "sonder",
         session=session,
         project=project,
     ) as response:
-        result = _trilobite_impl(
+        result = _sonder_impl(
             prompt,
             system=system,
             temperature=temperature,
@@ -1746,10 +1747,11 @@ def _answer_with_history_impl(
     still scope captured interactions and project facts.
 
     `tier` maps the request's OpenAI `model` field to a target (see _serve_target):
-    default/"trilobite" is the local self-improving student (augmented with facts +
-    lessons); any other tier (e.g. a paid cloud model) answers CLEAN as a teacher. The
+    default/"sonder" is the local learning route (augmented with facts + lessons);
+    any other tier (e.g. a paid cloud model) answers without augmentation. The
     turn is always captured so record_outcome can ground it and distill lessons — so
-    the app learns from whatever model you point it at. Returns the reply (with footer).
+    the runtime can learn from whichever model route you select. Returns the reply
+    (with footer).
     """
     _maybe_live_reload()
     command = control_command(prompt, history=history, session=session, project=project)
@@ -1759,16 +1761,16 @@ def _answer_with_history_impl(
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()
     if tier_label is None:
-        return "ERROR: unknown model '%s'. Valid: trilobite, %s." % (
+        return "ERROR: unknown model '%s'. Valid: sonder, %s." % (
             tier, _valid_tier_names())
     if model is None:
-        return ("ERROR: trilobite model/alias not found. Run setup_alias.py, or call "
+        return ("ERROR: `sonder:latest` Ollama alias not found. Run setup_alias.py, or call "
                 "with strict=False to fall back to the base coder.")
     effective_system = _build_system("", trace, "")
     # Honor LEARN_TIERS here too. Serve conversation memory is client-side (the app
     # resends history each request), so a non-learning model can skip capture entirely:
     # no interaction row, no footer, nothing distilled. This lets a user exclude e.g.
-    # cloud from learning and have the app respect it. The student is gated via 'code'.
+    # cloud from learning and have the app respect it. The local route is gated via 'code'.
     learn = _should_learn(_canonical_learn_tier(tier_label), True)
     req_ctx = _context_requested(context_size or SESSION_NUM_CTX)
     session_id = _resolve_session(session) if (session or "").strip() else None
@@ -1818,12 +1820,12 @@ def answer_with_history(
     session="",
     project="",
 ):
-    label = "chat:%s" % ((tier or "trilobite").strip() or "trilobite")
+    label = "chat:%s" % ((tier or "sonder").strip() or "sonder")
     with activity_tracker.response_span(
         label,
         prompt,
         surface="chat-api",
-        model=tier or "trilobite",
+        model=tier or "sonder",
         session=session,
         project=project,
     ) as response:
@@ -1842,9 +1844,9 @@ def answer_with_history(
 
 @mcp.tool()
 def record_outcome(interaction_id: str, signal: str) -> str:
-    """Feed a real-world outcome back into trilobite's learning loop.
+    """Feed a real-world outcome back into sonder's learning loop.
 
-    Call this after a trilobite/offload response once you know how it went.
+    Call this after a sonder/offload response once you know how it went.
     signal is one of: tests_passed, used, copied, edited, accepted, compiled,
     rejected, failed.
     A good outcome triggers a distilled 'lesson' that future prompts will retrieve.
@@ -2145,10 +2147,10 @@ def parallel_generate_run_languages(
 
 
 _CAMPAIGN_TASKS = [
-    ("hello", "print exactly: trilobite-ok"),
+    ("hello", "print exactly: sonder-ok"),
     ("sum", "compute 12 + 30 and print exactly: 42"),
     ("loop", "print the numbers 1, 2, and 3 each on its own line"),
-    ("string", "reverse the string 'trilobite' and print exactly: etibolirt"),
+    ("string", "reverse the string 'sonder' and print exactly: rednos"),
     ("branch", "if 17 is prime print exactly: prime"),
     ("list", "compute the sum of [2, 4, 6, 8] and print exactly: 20"),
 ]
@@ -2156,10 +2158,10 @@ _CAMPAIGN_TASKS = [
 
 def _campaign_expected(task_name):
     return {
-        "hello": "trilobite-ok",
+        "hello": "sonder-ok",
         "sum": "42",
         "loop": "1\n2\n3",
-        "string": "etibolirt",
+        "string": "rednos",
         "branch": "prime",
         "list": "20",
     }.get(task_name, "")
@@ -2236,7 +2238,7 @@ def campaign_generate_compile_execute_record(
         for attempt in range(repair_rounds + 1):
             prompt = _campaign_prompt(lang, task_name, task_text, last_note)
             with _CAMPAIGN_LEARN_LOCK:
-                response = trilobite(
+                response = sonder(
                     prompt,
                     tier=tier,
                     session="none",
@@ -2335,8 +2337,8 @@ def campaign_generate_compile_execute_record(
 
 
 @mcp.tool()
-def trilobite_stats() -> str:
-    """Report what trilobite has learned so far.
+def sonder_stats() -> str:
+    """Report what sonder has learned so far.
 
     Read-only observability into the learning loop's SQLite memory: how many
     interactions have been logged, how outcomes break down by signal, and the
@@ -2360,7 +2362,7 @@ def trilobite_stats() -> str:
         if signal_counts else "(none yet)"
     )
     lines = [
-        "trilobite learning stats",
+        "sonder learning stats",
         "  lessons: %d" % n_lessons,
         "  interactions: %d | outcomes: %d" % (n_interactions, n_outcomes),
         "  tokens: in=%d out=%d total=%d" % (
@@ -2432,7 +2434,7 @@ def context_health_data(session: str = "", project: str = "") -> dict:
 
     This reports an approximate context load. Ollama does not expose the exact
     live prompt token count here, so we estimate from the active session summary
-    plus the recent turns that Trilobite keeps in the prompt.
+    plus the recent turns that Sonder keeps in the prompt.
     """
     _maybe_live_reload()
     session_id = _resolve_session(session)
@@ -2510,13 +2512,13 @@ def context_health_data(session: str = "", project: str = "") -> dict:
         "memory_percent": round(memory_ratio * 100.0, 1),
         "memory_bar": _health_bar(memory_ratio),
         "db_path": _DB_PATH,
-        "state_home": str(trilobite_paths.default_home()),
+        "state_home": str(sonder_paths.default_home()),
     }
 
 
 def format_context_health(data: dict) -> str:
     lines = [
-        "trilobite context health",
+        "sonder context health",
         "  status: %s" % data.get("status", "unknown"),
         "  session: %s%s" % (
             data.get("session", "none"),
@@ -2569,7 +2571,7 @@ def activity_status(include_events: bool = True) -> str:
     _maybe_live_reload()
     snap = activity_tracker.snapshot()
     lines = [
-        "trilobite activity",
+        "sonder activity",
         "  active responses: %s" % snap.get("active_count", 0),
         "  total tool calls since start: %s" % snap.get("total_tool_calls", 0),
     ]
@@ -2606,7 +2608,7 @@ def context_policy_status(context_size: str = "") -> str:
 
 @mcp.tool()
 def set_context_size(context_size: str) -> str:
-    """Select Trilobite's requested virtual context size, up to 1m by default."""
+    """Select Sonder's requested virtual context size, up to 1m by default."""
     global SESSION_NUM_CTX
     _maybe_live_reload()
     SESSION_NUM_CTX = context_policy.requested(context_size)
@@ -2693,7 +2695,7 @@ def task_list(
         return "ERROR: %s" % e
     finally:
         conn.close()
-    lines = ["trilobite tasks"]
+    lines = ["sonder tasks"]
     if not rows:
         lines.append("  (no matching tasks)")
     for row in rows:
@@ -2793,7 +2795,7 @@ def context_compaction_plan_data(session: str = "", project: str = "") -> dict:
 def format_context_compaction_plan(plan: dict) -> str:
     ctx = plan.get("context", {})
     lines = [
-        "trilobite context compaction plan",
+        "sonder context compaction plan",
         "  session: %s" % ctx.get("session", "none"),
         "  context: %s%%  ~%s/%s tokens (%s mode)" % (
             ctx.get("context_percent", 0),
@@ -2816,7 +2818,7 @@ def format_context_compaction_plan(plan: dict) -> str:
 
 @mcp.tool()
 def context_compaction_plan(session: str = "", project: str = "") -> str:
-    """Preview when/how Trilobite should summarize or split context."""
+    """Preview when/how Sonder should summarize or split context."""
     _maybe_live_reload()
     return format_context_compaction_plan(context_compaction_plan_data(session, project))
 
@@ -2825,7 +2827,7 @@ def context_compaction_plan(session: str = "", project: str = "") -> str:
 def permission_policy(tool_name: str = "") -> str:
     """Show local permission rules, or the matching rule for one tool."""
     _maybe_live_reload()
-    return permission_rules.format_policy(trilobite_paths.default_home(), tool_name)
+    return permission_rules.format_policy(sonder_paths.default_home(), tool_name)
 
 
 @mcp.tool()
@@ -2839,19 +2841,19 @@ def permission_rule_set(
     _maybe_live_reload()
     account = _admin_account_from_token(token) if token else None
     ok, _ = admin_auth.require(account, "developer")
-    env_ok = os.environ.get("TRILOBITE_ALLOW_PERMISSION_EDITS", "").strip().lower() in (
+    env_ok = os.environ.get("SONDER_ALLOW_PERMISSION_EDITS", "").strip().lower() in (
         "1", "true", "yes", "on"
     )
     if not ok and not env_ok:
         return (
             "ERROR: permission edits require a developer token or "
-            "TRILOBITE_ALLOW_PERMISSION_EDITS=1."
+            "SONDER_ALLOW_PERMISSION_EDITS=1."
         )
     try:
-        permission_rules.add_rule(trilobite_paths.default_home(), pattern, action, note)
+        permission_rules.add_rule(sonder_paths.default_home(), pattern, action, note)
     except Exception as e:
         return "ERROR: %s" % e
-    return permission_rules.format_policy(trilobite_paths.default_home())
+    return permission_rules.format_policy(sonder_paths.default_home())
 
 
 @mcp.tool()
@@ -3047,12 +3049,12 @@ def learn_tiers() -> str:
     if cloud_allowed():
         lines.append(
             "cloud tiers are available; opt into cloud learning explicitly with "
-            "TRILOBITE_LEARN_TIERS"
+            "SONDER_LEARN_TIERS"
         )
     else:
         lines.append(
-            "cloud tiers require TRILOBITE_ALLOW_CLOUD=1; override learning with "
-            "TRILOBITE_LEARN_TIERS"
+            "cloud tiers require SONDER_ALLOW_CLOUD=1; override learning with "
+            "SONDER_LEARN_TIERS"
         )
     return "\n".join(lines)
 
@@ -3105,14 +3107,14 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
             "learning",
             "medium",
             "No learning interactions have been captured yet.",
-            "Ask through trilobite or run /train so answers can become local lessons.",
+            "Ask through Sonder Runtime or run /train so answers can become local lessons.",
         )
     if lesson_count < 10:
         add(
             "memory",
             "medium",
             "Lesson memory is still thin.",
-            "Run grounded training or teach examples from known-good work.",
+            "Run grounded practice or teach examples from known-good work.",
         )
     if quality.get("exact_duplicate_prunable", 0):
         add(
@@ -3147,7 +3149,7 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
             "store",
             "medium",
             "Search index drift was detected.",
-            "Run self_heal_check and repair the store before large training sessions.",
+            "Run self_heal_check and repair the store before large practice batches.",
         )
     if context.get("status") == "hot":
         add(
@@ -3248,7 +3250,7 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
 
 def format_improvement_report(report: dict) -> str:
     lines = [
-        "trilobite improvement report",
+        "sonder improvement report",
         "  readiness score: %s/100" % report.get("score", 0),
         "  learning: %s interactions, %s outcomes, %s%% covered, %s%% positive" % (
             report.get("interactions", 0),
@@ -3466,7 +3468,7 @@ def master_orchestrate(
         else _orchestrator_worker(
             tier,
             learn=learn,
-            timeout=_master_timeout("TRILOBITE_MASTER_AGENT_TIMEOUT", 150),
+            timeout=_master_timeout("SONDER_MASTER_AGENT_TIMEOUT", 150),
         )
     )
     if mode in ("inline", "master"):
@@ -3485,7 +3487,7 @@ def master_orchestrate(
             audit_fn=_orchestrator_worker(
                 audit_tier,
                 learn=False,
-                timeout=_master_timeout("TRILOBITE_MASTER_AUDIT_TIMEOUT", 120),
+                timeout=_master_timeout("SONDER_MASTER_AUDIT_TIMEOUT", 120),
             ),
             agents=agents,
             metadata={
@@ -3719,10 +3721,10 @@ def admin_status(token: str = "") -> str:
     finally:
         conn.close()
     lines = [
-        "trilobite admin status",
+        "sonder admin status",
         "  accounts: %d" % count,
-        "  auth mode: %s" % ("api-key" if os.environ.get("TRILOBITE_API_KEY") else "local-open"),
-        "  require account: %s" % os.environ.get("TRILOBITE_REQUIRE_ACCOUNT", "0"),
+        "  auth mode: %s" % ("api-key" if os.environ.get("SONDER_API_KEY") else "local-open"),
+        "  require account: %s" % os.environ.get("SONDER_REQUIRE_ACCOUNT", "0"),
         "  hosted/cloud allowed: %s" % ("yes" if cloud_allowed() else "no"),
         "  logged in: %s" % (_format_account(account) if account else "no"),
         "  safeguards: role gates, bans, session tokens, per-tier rate limits, bounded execution",
@@ -3740,7 +3742,7 @@ def debug_inspect(token: str = "", include_status: bool = True) -> str:
         if not ok:
             return "ERROR: %s." % msg
     sections = [
-        "trilobite debug inspect",
+        "sonder debug inspect",
         "  note: private hidden chain-of-thought is not exposed; use trace/tool/activity logs instead.",
         "",
         admin_status(token),
@@ -3778,7 +3780,7 @@ def _file_developer_allowed(token: str = "") -> bool:
 def _file_bypass_allowed(token: str = "", approval: str = "") -> bool:
     if file_ops.bypass_enabled():
         return True
-    expected = os.environ.get("TRILOBITE_FILE_APPROVAL_CODE", "").strip()
+    expected = os.environ.get("SONDER_FILE_APPROVAL_CODE", "").strip()
     if expected and approval and approval == expected:
         return True
     return _file_developer_allowed(token)
@@ -3815,7 +3817,7 @@ def _checklist_data(conn, checklist_id: str) -> dict:
 def _format_checklist(data: dict) -> str:
     symbols = {"done": "[x]", "in_progress": "[~]", "blocked": "[!]", "canceled": "[-]"}
     lines = [
-        "trilobite checklist %s" % data.get("id", "")[:8],
+        "sonder checklist %s" % data.get("id", "")[:8],
         "  %s [%s] %s" % (
             data.get("title", ""), data.get("status", "pending"),
             data.get("summary", "0/0 complete"),
@@ -4594,10 +4596,10 @@ def image_inspect(
 
 
 @mcp.tool()
-def trilobite_sessions(limit: int = 20) -> str:
-    """List trilobite conversation threads, most recently used first.
+def sonder_sessions(limit: int = 20) -> str:
+    """List sonder conversation threads, most recently used first.
 
-    Each line shows the session id (pass it as `session` to trilobite to resume),
+    Each line shows the session id (pass it as `session` to sonder to resume),
     its auto-generated title, live turn count, and last-updated time. Read-only.
     """
     _maybe_live_reload()
@@ -4608,7 +4610,7 @@ def trilobite_sessions(limit: int = 20) -> str:
         conn.close()
     if not sessions:
         return "no conversation sessions yet."
-    lines = ["trilobite sessions (most recent first):"]
+    lines = ["sonder sessions (most recent first):"]
     for s in sessions:
         lines.append("  %s  [%d turns]  %s  (updated %s)" % (
             s["session_id"], s["turn_count"], s.get("title") or "(untitled)",
@@ -4618,13 +4620,13 @@ def trilobite_sessions(limit: int = 20) -> str:
 
 
 @mcp.tool()
-def trilobite_remember_fact(text: str, project: str = "") -> str:
-    """Store a durable fact trilobite should ALWAYS know for a project.
+def sonder_remember_fact(text: str, project: str = "") -> str:
+    """Store a durable fact sonder should ALWAYS know for a project.
 
     Unlike lessons (earned from good outcomes), facts are asserted directly and are
-    injected into every trilobite call for that project — a mini project brief the
+    injected into every sonder call for that project — a mini project brief the
     model carries itself (toolchain, conventions, key paths, gotchas). No `project`
-    stores it under the "default" project. Use trilobite(..., project="<name>") to
+    stores it under the "default" project. Use sonder(..., project="<name>") to
     scope which facts apply to a call.
     """
     _maybe_live_reload()
@@ -4654,7 +4656,7 @@ def run_code(
 ) -> str:
     """Execute a short local code snippet and return stdout/stderr.
 
-    This gives Claude/Codex a Claude-like execution tool through the local-llm MCP
+    This gives Claude/Codex a Claude-like execution tool through the sonder-runtime MCP
     server. Supported languages: python, javascript/js/node, powershell/ps1,
     cpp/c++, and csharp/cs. Code runs on this machine with the same permissions as the MCP server, so treat it
     like a local terminal: use it for small checks, experiments, and diagnostics,
@@ -4814,7 +4816,7 @@ def artifact_verify(path: str) -> str:
 
 @mcp.tool()
 def game_reference_suite(
-    name: str = "trilobite-reference",
+    name: str = "sonder-reference",
     theme: str = "arcane",
     seed: int = 1337,
     max_workers: int = 2,
@@ -4873,7 +4875,7 @@ def _game_generate_result(
                 "\n\nThe previous candidate failed this exact grounded check:\n%s\n"
                 "Return a corrected complete program." % repair_note[:1800]
             )
-        response = trilobite(
+        response = sonder(
             prompt,
             tier=tier,
             session="none",
@@ -4968,7 +4970,7 @@ def game_generate_and_test(
     repair_rounds: int = 1,
     use_reference_fallback: bool = True,
 ) -> str:
-    """Have Trilobite create, execute, repair, and ground a persistent game.
+    """Have Sonder create, execute, repair, and ground a persistent game.
 
     Generated games must use only standard-library/OS-native APIs, consume an
     in-house artifact pack, render frame.ppm, emit GAME_OK, and terminate within
@@ -5232,7 +5234,7 @@ def _loop_dispatch(action):
         ), "artifact grounding: PASS")
     if action_type in ("game_reference", "game_reference_suite"):
         return _loop_text_result("game_reference_suite", game_reference_suite(
-            name=action.get("name", "trilobite-reference"),
+            name=action.get("name", "sonder-reference"),
             theme=action.get("theme", "arcane"),
             seed=action.get("seed", 1337),
             max_workers=action.get("max_workers", 2),
@@ -5273,8 +5275,8 @@ def _loop_dispatch(action):
             num_ctx=action.get("num_ctx", 4096),
             learn=action.get("learn", True),
         ))
-    if action_type == "trilobite":
-        return _loop_text_result("trilobite", trilobite(
+    if action_type == "sonder":
+        return _loop_text_result("sonder", sonder(
             prompt=action.get("prompt", ""),
             system=action.get("system", ""),
             temperature=action.get("temperature", 0.2),
@@ -5618,7 +5620,7 @@ def _loop_dispatch(action):
         "ok": False,
         "type": action_type or "(unknown)",
         "summary": "unknown action type",
-        "output": "Valid action types: code, project, artifact_generate, artifact_ground, game_reference_suite, game_generate_and_test, game_generation_campaign, offload, trilobite, master_orchestrate, master_status, master_capacity, master_cancel, master_retry, file_policy, workspace_inventory, directory_tree, text_search, script_search, program_search, workspace_run, script_run, image_inspect, file_find, file_read, file_write, file_edit, file_delete, status, diagnostics, context_health, learning_health, memory_quality_report, memory_quality_repair, memory_privacy_review, memory_privacy_repair, memory_embedding_backfill, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, weather_lookup, approximate_location_lookup, unload, sleep.",
+        "output": "Valid action types: code, project, artifact_generate, artifact_ground, game_reference_suite, game_generate_and_test, game_generation_campaign, offload, sonder, master_orchestrate, master_status, master_capacity, master_cancel, master_retry, file_policy, workspace_inventory, directory_tree, text_search, script_search, program_search, workspace_run, script_run, image_inspect, file_find, file_read, file_write, file_edit, file_delete, status, diagnostics, context_health, learning_health, memory_quality_report, memory_quality_repair, memory_privacy_review, memory_privacy_repair, memory_embedding_backfill, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, weather_lookup, approximate_location_lookup, unload, sleep.",
     }
 
 
@@ -5641,8 +5643,8 @@ def loop(
       - {"type":"game_generate_and_test","name":"arena","concept":"isometric action RPG","language":"cpp","dimension":"2.5d"}
       - {"type":"game_generation_campaign","name":"game-fleet","concept":"action roguelite","total":6,"language":"cpp","dimension":"2.5d","max_workers":2}
       - {"type":"offload","prompt":"...","tier":"fast|code|general|cloud-code|cloud-general"}
-      - {"type":"trilobite","prompt":"...","session":"none"}
-      - {"type":"trilobite","prompt":"...","context_size":"1m"}
+      - {"type":"sonder","prompt":"...","session":"none"}
+      - {"type":"sonder","prompt":"...","context_size":"1m"}
       - {"type":"master_orchestrate","task":"...","mode":"inline|delegate|fleet","agents":3}
       - {"type":"master_status"}
       - {"type":"master_capacity","requested_agents":32}
@@ -5770,8 +5772,8 @@ def workflow_delete(name: str) -> str:
 def web_search(query: str, limit: int = 5) -> str:
     """Search the public web and return compact result links.
 
-    Uses a stdlib HTML parser against TRILOBITE_SEARCH_URL (default:
-    DuckDuckGo HTML). Disable with TRILOBITE_WEB_TOOLS=0.
+    Uses a stdlib HTML parser against SONDER_SEARCH_URL (default:
+    DuckDuckGo HTML). Disable with SONDER_WEB_TOOLS=0.
     """
     _maybe_live_reload()
     started = time.time()
@@ -5801,7 +5803,7 @@ def web_fetch(url: str, max_chars: int = 8000) -> str:
     """Fetch a public HTTP/HTTPS URL as readable text.
 
     Blocks localhost/private-network literal IPs and trims output. Disable with
-    TRILOBITE_WEB_TOOLS=0.
+    SONDER_WEB_TOOLS=0.
     """
     _maybe_live_reload()
     started = time.time()
@@ -5937,11 +5939,11 @@ def chat_web_response(
                 "Ask me to search the web or give me a city/state or ZIP for weather."
             )
         return (
-            "This Trilobite build has web tools, but they are disabled in the current "
-            "runtime by TRILOBITE_WEB_TOOLS."
+            "This Sonder build has web tools, but they are disabled in the current "
+            "runtime by SONDER_WEB_TOOLS."
         )
     if not web_tools.enabled():
-        return "Web tools are disabled in the current runtime by TRILOBITE_WEB_TOOLS."
+        return "Web tools are disabled in the current runtime by SONDER_WEB_TOOLS."
     location = None
     if intent["kind"] == "location" or intent.get("needs_location"):
         if not location_consent:
@@ -6013,7 +6015,7 @@ def format_mcp_runtime(data: dict | None = None) -> str:
     loaded = str(data.get("loaded_digest") or "")[:12] or "unknown"
     current = str(data.get("current_digest") or "")[:12] or "unknown"
     lines = [
-        "trilobite MCP runtime",
+        "sonder MCP runtime",
         "  status: %s | live source refresh: %s"
         % (
             data.get("status", "unknown"),
@@ -6128,10 +6130,10 @@ def live_reload_status() -> str:
 
 @mcp.tool()
 def system_profile_text() -> str:
-    """Read the editable standing instructions injected into trilobite.
+    """Read the editable standing instructions injected into sonder.
 
     The profile lives in system_profile.md by default and is read on every
-    trilobite/serve request, so edits take effect without restarting the proxy or
+    sonder/serve request, so edits take effect without restarting the proxy or
     REPL. Empty means no extra standing instructions are injected.
     """
     _maybe_live_reload()
@@ -6141,7 +6143,7 @@ def system_profile_text() -> str:
 
 @mcp.tool()
 def update_system_profile(text: str, mode: str = "append") -> str:
-    """Append, replace, or clear trilobite's editable standing instructions.
+    """Append, replace, or clear sonder's editable standing instructions.
 
     mode: append (default), replace, or clear. The profile is plain Markdown in
     system_profile.md, so direct file edits work too and are reflected on the
@@ -6270,10 +6272,10 @@ def emotion_command(arg: str = "") -> str:
 
 @mcp.tool()
 def learn_preference(text: str, scope: str = "global") -> str:
-    """Teach Trilobite a durable user preference immediately.
+    """Teach Sonder a durable user preference immediately.
 
     This is for behavior, style, workflow defaults, names, and recurring user
-    expectations. Learned preferences are injected into future local-student
+    expectations. Learned preferences are injected into future local-model
     prompts and apply without restarting.
     """
     _maybe_live_reload()
@@ -6419,7 +6421,7 @@ def learn_from_example(task: str, solution: str, signal: str = "accepted") -> st
     """Distill a reusable lesson from a known-good example.
 
     This is a direct teaching path: provide a task and solution that worked, and
-    trilobite will try to extract one concrete lesson into memory. Use grounded
+    sonder will try to extract one concrete lesson into memory. Use grounded
     signals like accepted, tests_passed, or compiled for best results.
     """
     _maybe_live_reload()
@@ -6540,7 +6542,7 @@ def session_export(session: str = "", limit: int = 50) -> str:
 
 @mcp.tool()
 def tool_manifest() -> str:
-    """List the local-llm MCP tools and what they are for."""
+    """List the sonder-runtime MCP tools and what they are for."""
     tools = {
         "agent": "Run a Claude-like tool-calling loop that can use local tools and web tools.",
         "autopilot_start/autopilot_status/autopilot_resume/autopilot_pause/autopilot_cancel": "Run a restart-persistent local goal with evidence-aware checkpoints, bounded replans, host tool gates, and explicit lifecycle control.",
@@ -6549,7 +6551,7 @@ def tool_manifest() -> str:
         "master_orchestrate/master_status/master_capacity/master_cancel/master_retry": "Run restart-safe hardware-scheduled orchestration, inspect capacity/activity, cancel fleets, and explicitly retry interrupted work.",
         "admin_register/admin_login/admin_accounts/admin_set_account": "Manage hosted accounts, roles, bans, tiers, and developer flags.",
         "admin_status/debug_inspect/admin_private_chain_of_thought": "Inspect admin/debug state and safely deny private chain-of-thought exposure.",
-        "trilobite": "Ask the local self-improving coding model.",
+        "sonder": "Ask through Sonder Runtime's local learning loop.",
         "offload": "Route a self-contained task to a configured local/cloud tier.",
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
         "workspace_inventory/directory_tree/directory_create/text_search/file_read_range": "Budgeted guarded workspace inventory, folder discovery, creation, text search, and bounded line-range reads.",
@@ -6583,7 +6585,7 @@ def tool_manifest() -> str:
         "self_heal_check/self_heal_repair": "Detect and safely repair common local breakage.",
         "context_health/diagnostics/live_reload_status/status/unload": "Observe and manage runtime health.",
         "record_outcome": "Feed grounded outcomes back into learning.",
-        "trilobite_stats/trilobite_sessions/trilobite_remember_fact": "Memory observability and durable facts.",
+        "sonder_stats/sonder_sessions/sonder_remember_fact": "Memory observability and durable facts.",
     }
     return "\n".join("  %s: %s" % item for item in sorted(tools.items()))
 
@@ -7099,7 +7101,7 @@ def _agent_dispatch(
         )
     if tool_name == "game_reference_suite":
         return game_reference_suite(
-            name=args.get("name", "trilobite-reference"),
+            name=args.get("name", "sonder-reference"),
             theme=args.get("theme", "arcane"),
             seed=args.get("seed", 1337),
             max_workers=args.get("max_workers", 2),
@@ -7710,12 +7712,12 @@ def _start_agent_checklist(prompt: str, project: str, read_only: bool):
         title=title,
         items_json=json.dumps(items),
         project=project,
-        owner="trilobite-agent",
+        owner="sonder-agent",
         priority=1,
     )
     if created.startswith("ERROR:"):
         return "", {}
-    match = re.search(r"trilobite checklist ([0-9a-f]+)", created)
+    match = re.search(r"sonder checklist ([0-9a-f]+)", created)
     checklist_id = match.group(1) if match else ""
     states = {}
     if checklist_id:
@@ -7766,9 +7768,9 @@ def _agent_impl(
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()
     if tier_label is None:
-        return "ERROR: unknown tier '%s'. Valid: trilobite, %s." % (tier, _valid_tier_names())
+        return "ERROR: unknown tier '%s'. Valid: sonder, %s." % (tier, _valid_tier_names())
     if model is None:
-        return "ERROR: trilobite model/alias not found."
+        return "ERROR: `sonder:latest` Ollama alias not found."
     system = _build_system(
         "You are a local tool-using coding agent. Inspect real workspace evidence before making claims. "
         "For action tasks, use tools instead of merely describing commands. Prefer workspace_inventory, directory_tree, "
@@ -8398,7 +8400,7 @@ def _autopilot_json_model(run: dict, role: str, prompt: str, validator) -> dict:
     if model is None or cloud or tier_label not in autopilot_controller.LOCAL_TIERS:
         raise RuntimeError("autopilot requires an available local model tier")
     system = _build_system(
-        "You are Trilobite's bounded autonomous %s. Return exactly one JSON "
+        "You are Sonder's bounded autonomous %s. Return exactly one JSON "
         "object, with no markdown or private chain-of-thought. Make concrete "
         "decisions from the supplied state. Never expand policy, tools, roots, "
         "budgets, or completion rules." % role,
@@ -8649,7 +8651,7 @@ def _execute_autopilot(run_id: str, *, max_cycles=12, plan_only=False) -> dict:
     heartbeat = threading.Thread(
         target=_autopilot_heartbeat,
         args=(run_id, owner_id, stop),
-        name="trilobite-autopilot-heartbeat",
+        name="sonder-autopilot-heartbeat",
         daemon=True,
     )
     heartbeat.start()
@@ -8705,7 +8707,7 @@ def _launch_autopilot(run_id: str, max_cycles=12, plan_only=False) -> bool:
         thread = threading.Thread(
             target=_autopilot_thread_main,
             args=(run_id, int(max_cycles), bool(plan_only)),
-            name="trilobite-autopilot-%s" % run_id,
+            name="sonder-autopilot-%s" % run_id,
             daemon=True,
         )
         _AUTOPILOT_THREADS[run_id] = thread
@@ -8832,7 +8834,7 @@ def _execution_route_model(prompt: str, project: str = "") -> dict:
     if model is None or cloud or tier_label not in LOCAL_TIERS:
         raise RuntimeError("local execution router model is unavailable")
     system = _build_system(
-        "You are Trilobite's execution-mode router. Return exactly one JSON "
+        "You are Sonder's execution-mode router. Return exactly one JSON "
         "object and no prose or chain-of-thought. You may choose only workbench "
         "or autopilot and only fast, code, or general local tiers. Workbench is a "
         "foreground task with at most 12 tool steps. "
@@ -8905,7 +8907,7 @@ def _execution_route_header(
         "deferred": "Autopilot deferred",
     }
     lines = [
-        "trilobite execution decision",
+        "sonder execution decision",
         "  mode: %s" % labels.get(mode, mode),
         "  source: %s" % source,
         "  reason: %s" % reason,
@@ -9145,9 +9147,9 @@ def self_heal_repair(apply: bool = False) -> str:
 
 @mcp.tool()
 def diagnostics() -> str:
-    """Run lightweight health checks for the local trilobite system."""
+    """Run lightweight health checks for the local Sonder Runtime installation."""
     _maybe_live_reload()
-    lines = ["trilobite diagnostics"]
+    lines = ["sonder diagnostics"]
     lines.append("  live reload: %s" % ("on" if live_reload.enabled() else "off"))
     mcp_state = mcp_runtime_data()
     lines.append(
@@ -9263,7 +9265,7 @@ def diagnostics() -> str:
 
 @mcp.tool()
 def status() -> str:
-    """Report local-LLM state: which models are installed, and which are currently in VRAM.
+    """Report Sonder Runtime's local-model state and current VRAM residency.
 
     Use this to check whether the GPU is busy before offloading, or to confirm models pulled.
     """

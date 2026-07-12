@@ -22,7 +22,7 @@ import time
 import uuid
 from pathlib import Path
 
-import trilobite_paths
+import sonder_paths
 
 
 ACTIVE_STATUSES = ("planning", "running")
@@ -98,7 +98,7 @@ _RUN_COLUMN_MIGRATIONS = {
 
 
 def database_path() -> str:
-    return trilobite_paths.state_path("autopilot.db", "TRILOBITE_AUTOPILOT_DB")
+    return sonder_paths.state_path("autopilot.db", "SONDER_AUTOPILOT_DB")
 
 
 def _clamp_text(value, limit: int) -> str:

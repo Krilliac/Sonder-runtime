@@ -3,7 +3,7 @@
 Runs a fixed set of held-out tasks through an INJECTED `solve_fn` (so the
 caller decides how "solving" happens: a live model, solver.solve, a stub for
 tests, whatever), computes a pass-rate, and appends one JSONL record per run
-to a log file so pass-rate can be tracked over time (e.g. across trilobite
+to a log file so pass-rate can be tracked over time (e.g. across sonder
 fine-tunes, prompt tweaks, or verifier changes) to catch regressions.
 
 Deliberately dependency-free: no model/GPU calls happen here, and `ts` is

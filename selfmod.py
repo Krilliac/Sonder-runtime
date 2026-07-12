@@ -3,7 +3,7 @@
 Candidate code never calls acceptance or deployment primitives directly. This
 module owns state transitions, immutable backups, deterministic checks, locks,
 deployment, and rollback. It is stdlib-only so recovery remains available when
-the rest of Trilobite cannot import.
+the rest of Sonder cannot import.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ import time
 import uuid
 from pathlib import Path
 
-import trilobite_paths
+import sonder_paths
 
 
 MODES = ("observe", "propose", "auto-low-risk")
@@ -38,8 +38,8 @@ TERMINAL_PHASES = {"rejected", "restored", "cancelled"}
 SENSITIVE_PREFIXES = (
     "permission_rules.py", "admin_auth.py", "file_ops.py", "safe_update.py",
     "selfmod.py", "selfmod_recover.py", "server.py", "reloadable_mcp.py",
-    "autopilot_controller.py", "autopilot_store.py", "trilobite_paths.py", "trilobite_serve.py",
-    "deploy_", "trilobite-runtime", "tests/test_permission", "tests/test_admin",
+    "autopilot_controller.py", "autopilot_store.py", "sonder_paths.py", "sonder_serve.py",
+    "deploy_", "sonder-runtime", "tests/test_permission", "tests/test_admin",
     "tests/test_control_plane", "tests/test_read_only_agent_policy",
     "tests/test_selfmod",
 )
@@ -111,11 +111,11 @@ INSERT OR IGNORE INTO selfmod_deployment_lock(id) VALUES (1);
 
 
 def state_root() -> Path:
-    return Path(trilobite_paths.state_path("selfmod", "TRILOBITE_SELFMOD_HOME"))
+    return Path(sonder_paths.state_path("selfmod", "SONDER_SELFMOD_HOME"))
 
 
 def database_path() -> Path:
-    override = os.environ.get("TRILOBITE_SELFMOD_DB", "").strip()
+    override = os.environ.get("SONDER_SELFMOD_DB", "").strip()
     return Path(override).expanduser() if override else state_root() / "selfmod.db"
 
 
@@ -719,7 +719,7 @@ def test_results(run_id):
 
 def _backup_rehearsal(run_id):
     manifest = verify_backup(run_id)
-    with tempfile.TemporaryDirectory(prefix="trilobite-selfmod-rehearse-") as temp:
+    with tempfile.TemporaryDirectory(prefix="sonder-selfmod-rehearse-") as temp:
         root = Path(temp)
         for record in manifest["files"]:
             target = root / record["path"]
@@ -1265,7 +1265,7 @@ def status_data():
 def format_status(data=None):
     data = data or status_data()
     lines = [
-        "Trilobite self-modification",
+        "Sonder self-modification",
         "  enabled: %s | mode: %s" % ("yes" if data["enabled"] else "no", data["mode"]),
         "  active: %d | deployed: %d | rollback points: %d" % (data["active"], data["deployed"], data["rollback_points"]),
         "  backup root: %s" % data["backup_root"],
@@ -1307,5 +1307,5 @@ def parse_plan_text(text):
 
 
 def recursive_guard():
-    if os.environ.get("TRILOBITE_SELFMOD_ACTIVE") == "1":
+    if os.environ.get("SONDER_SELFMOD_ACTIVE") == "1":
         raise RuntimeError("recursive self-improvement runs are forbidden")

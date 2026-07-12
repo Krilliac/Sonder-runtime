@@ -1,4 +1,4 @@
-"""Install a hermetic Trilobite state directory before test collection."""
+"""Install a hermetic Sonder state directory before test collection."""
 from __future__ import annotations
 
 import atexit
@@ -12,20 +12,20 @@ import pytest
 
 
 _REPO_ROOT = Path(__file__).resolve().parent
-_TEST_STATE_ROOT = Path(tempfile.mkdtemp(prefix="trilobite-pytest-")).resolve()
+_TEST_STATE_ROOT = Path(tempfile.mkdtemp(prefix="sonder-pytest-")).resolve()
 _cleanup_complete = False
 os.environ.update(
     {
-        "TRILOBITE_HOME": str(_TEST_STATE_ROOT),
-        "TRILOBITE_DB": str(_TEST_STATE_ROOT / "memory.db"),
-        "TRILOBITE_FLEET_DB": str(_TEST_STATE_ROOT / "fleet.db"),
-        "TRILOBITE_FLEET_HEARTBEAT": "0",
-        "TRILOBITE_ALLOW_CLOUD": "0",
-        "TRILOBITE_WEB_TOOLS": "0",
-        "TRILOBITE_LIVE_RELOAD": "0",
-        "TRILOBITE_FALLBACK_LOCAL": "0",
-        "TRILOBITE_SERVER": "http://127.0.0.1:1",
-        "TRILOBITE_LOCAL_FALLBACK": "http://127.0.0.1:1",
+        "SONDER_HOME": str(_TEST_STATE_ROOT),
+        "SONDER_DB": str(_TEST_STATE_ROOT / "memory.db"),
+        "SONDER_FLEET_DB": str(_TEST_STATE_ROOT / "fleet.db"),
+        "SONDER_FLEET_HEARTBEAT": "0",
+        "SONDER_ALLOW_CLOUD": "0",
+        "SONDER_WEB_TOOLS": "0",
+        "SONDER_LIVE_RELOAD": "0",
+        "SONDER_FALLBACK_LOCAL": "0",
+        "SONDER_SERVER": "http://127.0.0.1:1",
+        "SONDER_LOCAL_FALLBACK": "http://127.0.0.1:1",
         "OLLAMA_HOST": "127.0.0.1:1",
     }
 )
@@ -42,7 +42,7 @@ def _cleanup_test_state() -> None:
         _TEST_STATE_ROOT.relative_to(temp_root)
     except ValueError:
         return
-    if _TEST_STATE_ROOT.name.startswith("trilobite-pytest-"):
+    if _TEST_STATE_ROOT.name.startswith("sonder-pytest-"):
         shutil.rmtree(_TEST_STATE_ROOT, ignore_errors=True)
 
 
@@ -55,7 +55,7 @@ def pytest_sessionfinish(session, exitstatus) -> None:
 
 
 def pytest_addoption(parser) -> None:
-    group = parser.getgroup("trilobite")
+    group = parser.getgroup("sonder")
     group.addoption(
         "--run-network",
         action="store_true",

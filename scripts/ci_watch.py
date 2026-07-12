@@ -10,6 +10,7 @@ import subprocess
 import sys
 
 DEFAULT_FIELDS = "databaseId,name,status,conclusion,headSha,event,workflowName,url,createdAt"
+DEFAULT_REPO = "Krilliac/Sonder-runtime"
 
 
 def _short_sha(value):
@@ -96,7 +97,7 @@ def run_gh(repo, branch, limit):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Show recent GitHub Actions status.")
-    parser.add_argument("--repo", default="Krilliac/Trilobite-model")
+    parser.add_argument("--repo", default=DEFAULT_REPO)
     parser.add_argument("--branch", default="main")
     parser.add_argument("--limit", type=int, default=8)
     args = parser.parse_args(argv)

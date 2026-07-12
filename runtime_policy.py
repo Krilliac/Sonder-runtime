@@ -1,6 +1,6 @@
 """Shared, hot-reloadable policy for local models and execution lanes.
 
-Every Trilobite surface uses the same per-user file. The policy intentionally
+Every Sonder Runtime surface uses the same per-user file. The policy intentionally
 cannot configure cloud models, permissions, roots, or credentials.
 """
 from __future__ import annotations
@@ -13,7 +13,7 @@ import time
 import uuid
 from pathlib import Path
 
-import trilobite_paths
+import sonder_paths
 
 
 VERSION = 1
@@ -21,8 +21,8 @@ LOCAL_TIERS = ("fast", "code", "general")
 ROUTING_LANES = ("router", "workbench", "autopilot", "fleet", "review")
 DEFAULT_MODELS = {
     "fast": "qwen2.5:3b",
-    "code": "trilobite:latest",
-    "general": "trilobite:latest",
+    "code": "sonder:latest",
+    "general": "sonder:latest",
 }
 DEFAULT_ROUTING = {
     "router": "fast",
@@ -36,10 +36,10 @@ _LOCK = threading.RLock()
 
 
 def policy_path() -> Path:
-    override = os.environ.get("TRILOBITE_RUNTIME_POLICY", "").strip()
+    override = os.environ.get("SONDER_RUNTIME_POLICY", "").strip()
     if override:
         return Path(override).expanduser()
-    return Path(trilobite_paths.state_path("runtime_policy.json"))
+    return Path(sonder_paths.state_path("runtime_policy.json"))
 
 
 def _is_cloud_name(value: str) -> bool:
@@ -57,9 +57,9 @@ def _model(value, fallback: str) -> str:
 
 
 def _seed_model(env, tier: str) -> str:
-    configured = str(env.get("LOCAL_LLM_%s" % tier.upper(), "") or "").strip()
+    configured = str(env.get("SONDER_%s" % tier.upper(), "") or "").strip()
     if tier == "code" and _is_cloud_name(configured):
-        configured = str(env.get("LOCAL_LLM_CODE_LOCAL", "") or "").strip()
+        configured = str(env.get("SONDER_CODE_LOCAL", "") or "").strip()
     if configured and not _is_cloud_name(configured):
         return _model(configured, DEFAULT_MODELS[tier])
     return DEFAULT_MODELS[tier]
@@ -199,7 +199,7 @@ def route_tier(lane: str, policy=None, fallback="code") -> str:
 def format_policy(policy=None) -> str:
     policy = load(create=True) if policy is None else policy
     lines = [
-        "trilobite local runtime policy",
+        "Sonder Runtime local model policy",
         "  path: %s" % policy.get("path", policy_path()),
         "  revision: %s | source: %s" % (
             policy.get("revision", 0), policy.get("source", ""),

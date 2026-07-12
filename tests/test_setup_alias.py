@@ -37,6 +37,7 @@ def test_online_pulls_only_missing_models_and_creates_alias(monkeypatch):
     ) == 0
     verbs = [command[1] for command in calls]
     assert verbs == ["show", "pull", "show", "create"]
+    assert calls[-1][2] == setup_alias.STABLE_ALIAS == "sonder:latest"
     assert not any(command[1:3] == ["pull", "embed:model"] for command in calls)
 
 
@@ -54,6 +55,8 @@ def test_failed_alias_creation_is_reported(monkeypatch):
 
 def test_system_prompt_uses_exposed_tools_without_inventing_them():
     content = setup_alias.model_file("base:model")
+    assert "inside Sonder Runtime" in content
+    assert "not a foundation model" in content
     assert "Use tools that the host lists" in content
     assert "Never invent tools" in content
     assert "FROM base:model" in content

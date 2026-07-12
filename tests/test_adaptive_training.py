@@ -11,6 +11,11 @@ import system_profile
 from system_profile import HardwareProfile
 
 
+def test_training_lifecycle_uses_only_sonder_ollama_aliases():
+    assert adaptive_training.ROLLBACK_MODEL == "sonder:latest"
+    assert adaptive_training.PERSONAL_MODEL == "sonder-personal:latest"
+
+
 def profile(vram=0, ram=32, *, free_vram=None, available_ram=None, vendor="nvidia", cuda=True):
     return HardwareProfile(
         os_name="Linux",
@@ -104,7 +109,7 @@ def test_cpu_offload_request_fails_closed_for_current_training_backend():
 
 
 def test_direct_qlora_cpu_offload_request_fails_before_heavy_imports(monkeypatch, capsys):
-    monkeypatch.setenv("TRILOBITE_ALLOW_CPU_OFFLOAD", "1")
+    monkeypatch.setenv("SONDER_ALLOW_CPU_OFFLOAD", "1")
     assert qlora_train.main() == 5
     assert "CPU offload is disabled" in capsys.readouterr().out
 
@@ -113,10 +118,10 @@ def _mock_hardware_detection(monkeypatch):
     monkeypatch.setattr(system_profile, "_system_memory", lambda: (64.0, 48.0, True))
     monkeypatch.setattr(system_profile, "_rocm_profile", lambda: None)
     for name in (
-        "TRILOBITE_GPU_VENDOR",
-        "TRILOBITE_VRAM_GB",
-        "TRILOBITE_FREE_VRAM_GB",
-        "TRILOBITE_CUDA_AVAILABLE",
+        "SONDER_GPU_VENDOR",
+        "SONDER_VRAM_GB",
+        "SONDER_FREE_VRAM_GB",
+        "SONDER_CUDA_AVAILABLE",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -124,10 +129,10 @@ def _mock_hardware_detection(monkeypatch):
 def test_explicit_zero_free_vram_is_preserved_and_disables_training(monkeypatch):
     _mock_hardware_detection(monkeypatch)
     monkeypatch.setattr(system_profile, "_nvidia_profile", lambda: None)
-    monkeypatch.setenv("TRILOBITE_GPU_VENDOR", "nvidia")
-    monkeypatch.setenv("TRILOBITE_VRAM_GB", "24")
-    monkeypatch.setenv("TRILOBITE_FREE_VRAM_GB", "0")
-    monkeypatch.setenv("TRILOBITE_CUDA_AVAILABLE", "1")
+    monkeypatch.setenv("SONDER_GPU_VENDOR", "nvidia")
+    monkeypatch.setenv("SONDER_VRAM_GB", "24")
+    monkeypatch.setenv("SONDER_FREE_VRAM_GB", "0")
+    monkeypatch.setenv("SONDER_CUDA_AVAILABLE", "1")
 
     detected = system_profile.detect_hardware()
 
@@ -153,9 +158,9 @@ def test_live_zero_free_vram_is_not_replaced_by_fallback(monkeypatch):
 def test_total_only_vram_uses_marked_conservative_fallback(monkeypatch):
     _mock_hardware_detection(monkeypatch)
     monkeypatch.setattr(system_profile, "_nvidia_profile", lambda: None)
-    monkeypatch.setenv("TRILOBITE_GPU_VENDOR", "nvidia")
-    monkeypatch.setenv("TRILOBITE_VRAM_GB", "24")
-    monkeypatch.setenv("TRILOBITE_CUDA_AVAILABLE", "1")
+    monkeypatch.setenv("SONDER_GPU_VENDOR", "nvidia")
+    monkeypatch.setenv("SONDER_VRAM_GB", "24")
+    monkeypatch.setenv("SONDER_CUDA_AVAILABLE", "1")
 
     detected = system_profile.detect_hardware()
 
@@ -216,8 +221,8 @@ def test_invalid_adapter_base_combination_is_rejected(tmp_path):
 def test_failed_candidate_deployment_preserves_runtime_policy(monkeypatch, tmp_path):
     policy_path = tmp_path / "runtime-policy.json"
     state_path = tmp_path / "training-state.json"
-    monkeypatch.setenv("TRILOBITE_RUNTIME_POLICY", str(policy_path))
-    monkeypatch.setenv("TRILOBITE_TRAINING_STATE", str(state_path))
+    monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(policy_path))
+    monkeypatch.setenv("SONDER_TRAINING_STATE", str(state_path))
     runtime_policy.load(create=True)
     adapter = _adapter(
         tmp_path,
@@ -245,8 +250,8 @@ def test_failed_candidate_deployment_preserves_runtime_policy(monkeypatch, tmp_p
 
 
 def test_successful_deployment_activates_both_tiers_after_inference(monkeypatch, tmp_path):
-    monkeypatch.setenv("TRILOBITE_RUNTIME_POLICY", str(tmp_path / "runtime-policy.json"))
-    monkeypatch.setenv("TRILOBITE_TRAINING_STATE", str(tmp_path / "training-state.json"))
+    monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(tmp_path / "runtime-policy.json"))
+    monkeypatch.setenv("SONDER_TRAINING_STATE", str(tmp_path / "training-state.json"))
     monkeypatch.setattr(adaptive_training.shutil, "which", lambda name: None)
     adapter = _adapter(
         tmp_path,
@@ -261,7 +266,7 @@ def test_successful_deployment_activates_both_tiers_after_inference(monkeypatch,
         calls.append(command)
         if str(converter) in command:
             Path(command[command.index("--outfile") + 1]).write_bytes(b"G" * 2048)
-        return SimpleNamespace(returncode=0, stdout="TRILOBITE_VALID", stderr="")
+        return SimpleNamespace(returncode=0, stdout="SONDER_VALID", stderr="")
 
     ok, message = adaptive_training.deploy(adapter, converter=str(converter), runner=runner)
     policy = runtime_policy.load(create=False)
@@ -277,11 +282,16 @@ def test_successful_deployment_activates_both_tiers_after_inference(monkeypatch,
         and command[3] == adaptive_training.PERSONAL_MODEL
         for command in calls
     )
+    removed = {
+        command[2] for command in calls if command[1:2] == ["rm"]
+    }
+    assert "qwen2.5-coder:1.5b" not in removed
+    assert adaptive_training.ROLLBACK_MODEL not in removed
 
 
 def test_deployment_rejects_non_marker_output_and_cleans_candidate(monkeypatch, tmp_path):
-    monkeypatch.setenv("TRILOBITE_RUNTIME_POLICY", str(tmp_path / "runtime-policy.json"))
-    monkeypatch.setenv("TRILOBITE_TRAINING_STATE", str(tmp_path / "training-state.json"))
+    monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(tmp_path / "runtime-policy.json"))
+    monkeypatch.setenv("SONDER_TRAINING_STATE", str(tmp_path / "training-state.json"))
     adapter = _adapter(
         tmp_path,
         config_base="Qwen/Qwen2.5-Coder-1.5B-Instruct",
@@ -308,8 +318,8 @@ def test_deployment_rejects_non_marker_output_and_cleans_candidate(monkeypatch, 
 
 
 def test_failed_final_probe_restores_previous_personal_alias(monkeypatch, tmp_path):
-    monkeypatch.setenv("TRILOBITE_RUNTIME_POLICY", str(tmp_path / "runtime-policy.json"))
-    monkeypatch.setenv("TRILOBITE_TRAINING_STATE", str(tmp_path / "training-state.json"))
+    monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(tmp_path / "runtime-policy.json"))
+    monkeypatch.setenv("SONDER_TRAINING_STATE", str(tmp_path / "training-state.json"))
     adapter = _adapter(
         tmp_path,
         config_base="Qwen/Qwen2.5-Coder-1.5B-Instruct",
@@ -327,7 +337,7 @@ def test_failed_final_probe_restores_previous_personal_alias(monkeypatch, tmp_pa
             Path(command[command.index("--outfile") + 1]).write_bytes(b"G" * 2048)
         if command[1:2] == ["run"]:
             run_count += 1
-            output = "TRILOBITE_VALID" if run_count == 1 else "wrong"
+            output = "SONDER_VALID" if run_count == 1 else "wrong"
             return SimpleNamespace(returncode=0, stdout=output, stderr="")
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
@@ -343,8 +353,8 @@ def test_failed_final_probe_restores_previous_personal_alias(monkeypatch, tmp_pa
 
 
 def test_final_probe_timeout_restores_active_alias_and_policy(monkeypatch, tmp_path):
-    monkeypatch.setenv("TRILOBITE_RUNTIME_POLICY", str(tmp_path / "runtime-policy.json"))
-    monkeypatch.setenv("TRILOBITE_TRAINING_STATE", str(tmp_path / "training-state.json"))
+    monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(tmp_path / "runtime-policy.json"))
+    monkeypatch.setenv("SONDER_TRAINING_STATE", str(tmp_path / "training-state.json"))
     runtime_policy.update(local_models={
         "code": adaptive_training.PERSONAL_MODEL,
         "general": adaptive_training.PERSONAL_MODEL,
@@ -368,7 +378,7 @@ def test_final_probe_timeout_restores_active_alias_and_policy(monkeypatch, tmp_p
             run_count += 1
             if run_count == 2:
                 raise adaptive_training.subprocess.TimeoutExpired(command, 120)
-            return SimpleNamespace(returncode=0, stdout="TRILOBITE_VALID", stderr="")
+            return SimpleNamespace(returncode=0, stdout="SONDER_VALID", stderr="")
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     ok, message = adaptive_training.deploy(
@@ -385,7 +395,7 @@ def test_final_probe_timeout_restores_active_alias_and_policy(monkeypatch, tmp_p
 
 
 def test_deployment_lock_rejects_concurrent_promotion(monkeypatch, tmp_path):
-    monkeypatch.setenv("TRILOBITE_TRAINING_STATE", str(tmp_path / "training-state.json"))
+    monkeypatch.setenv("SONDER_TRAINING_STATE", str(tmp_path / "training-state.json"))
     with adaptive_training._deployment_lock():
         ok, message = adaptive_training.deploy(tmp_path)
     assert not ok
@@ -393,8 +403,8 @@ def test_deployment_lock_rejects_concurrent_promotion(monkeypatch, tmp_path):
 
 
 def test_rollback_updates_both_tiers_without_deleting_personal_model(monkeypatch, tmp_path):
-    monkeypatch.setenv("TRILOBITE_RUNTIME_POLICY", str(tmp_path / "runtime-policy.json"))
-    monkeypatch.setenv("TRILOBITE_TRAINING_STATE", str(tmp_path / "training-state.json"))
+    monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(tmp_path / "runtime-policy.json"))
+    monkeypatch.setenv("SONDER_TRAINING_STATE", str(tmp_path / "training-state.json"))
     runtime_policy.update(
         local_models={"code": adaptive_training.PERSONAL_MODEL, "general": adaptive_training.PERSONAL_MODEL}
     )
@@ -420,9 +430,9 @@ def test_minimal_mocked_training_flow_builds_command_and_validates(monkeypatch, 
     data = tmp_path / "training.jsonl"
     data.write_text('{"messages":[{"role":"user","content":"x"},{"role":"assistant","content":"y"}]}\n', encoding="utf-8")
     output = tmp_path / "lora"
-    monkeypatch.setenv("TRILOBITE_DATA", str(data))
-    monkeypatch.setenv("TRILOBITE_LORA_OUT", str(output))
-    monkeypatch.setenv("TRILOBITE_TRAINING_STATE", str(tmp_path / "state.json"))
+    monkeypatch.setenv("SONDER_DATA", str(data))
+    monkeypatch.setenv("SONDER_LORA_OUT", str(output))
+    monkeypatch.setenv("SONDER_TRAINING_STATE", str(tmp_path / "state.json"))
     seen = {}
 
     def runner(command, **kwargs):
@@ -438,6 +448,6 @@ def test_minimal_mocked_training_flow_builds_command_and_validates(monkeypatch, 
     ok, message = adaptive_training.start_training(plan, confirmed=True, runner=runner)
     assert ok and "completed" in message
     assert seen["command"][-1].endswith("qlora_train.py")
-    assert seen["env"]["TRILOBITE_BASE"] == "Qwen/Qwen2.5-Coder-3B-Instruct"
-    assert seen["env"]["TRILOBITE_ALLOW_CPU_OFFLOAD"] == "0"
+    assert seen["env"]["SONDER_BASE"] == "Qwen/Qwen2.5-Coder-3B-Instruct"
+    assert seen["env"]["SONDER_ALLOW_CPU_OFFLOAD"] == "0"
     assert json.loads((tmp_path / "state.json").read_text())["status"] == "trained"

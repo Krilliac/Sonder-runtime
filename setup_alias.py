@@ -1,4 +1,4 @@
-"""Create Trilobite's stable Ollama alias with online or offline-safe setup."""
+"""Create Sonder Runtime's stable Ollama alias safely online or offline."""
 from __future__ import annotations
 
 import argparse
@@ -10,8 +10,9 @@ import tempfile
 
 DEFAULT_BASE_MODEL = "qwen2.5-coder:7b"
 DEFAULT_EMBED_MODEL = "nomic-embed-text"
+STABLE_ALIAS = "sonder:latest"
 
-_SYSTEM_PROMPT = '''You are trilobite, a self-improving coding assistant that runs primarily on the user's own CPU/GPU through Ollama. A local host system gives you private memory, guarded file and program tools, artifact generation, orchestration, and optional web or hosted-model tools when those capabilities are explicitly exposed for the current request. Use tools that the host lists; never deny a listed capability merely because a base language model would not normally have it. Never invent tools, permissions, results, location, or configuration that the host did not provide.
+_SYSTEM_PROMPT = '''You are the local language model operating inside Sonder Runtime. Sonder is the host orchestration runtime, not a foundation model or a set of weights. The runtime gives you private memory, guarded file and program tools, artifact generation, orchestration, and optional web or hosted-model tools when those capabilities are explicitly exposed for the current request. Use tools that the host lists; never deny a listed capability merely because a base language model would not normally have it. Never invent tools, permissions, results, location, or configuration that the host did not provide.
 
 Relevant lessons from grounded past work may be retrieved into new tasks, and outcomes that compile, pass tests, or are accepted can become reusable lessons. Be direct, honest, and concrete. Do not expose hidden chain-of-thought. Report observable actions, evidence, failures, and remaining work. Prefer correct working code, make progress autonomously within granted permissions, and keep answers concise unless detail is useful.'''
 
@@ -25,7 +26,7 @@ def model_file(base_model: str) -> str:
 
 
 def ollama_executable(explicit: str = "") -> str:
-    candidate = explicit.strip() or os.environ.get("TRILOBITE_OLLAMA_EXE", "").strip()
+    candidate = explicit.strip() or os.environ.get("SONDER_OLLAMA_EXE", "").strip()
     if candidate:
         return candidate
     return shutil.which("ollama") or "ollama"
@@ -70,24 +71,24 @@ def create_alias(
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             stream.write(model_file(base_model))
-        created = _run(ollama, ["create", "trilobite", "-f", path], env=env)
+        created = _run(ollama, ["create", STABLE_ALIAS, "-f", path], env=env)
     finally:
         try:
             os.unlink(path)
         except OSError:
             pass
     if created.returncode == 0:
-        return True, "Created the trilobite alias."
+        return True, f"Created the {STABLE_ALIAS} alias."
     detail = (created.stderr or created.stdout).strip()
-    return False, f"Could not create trilobite alias: {detail or 'ollama create failed'}"
+    return False, f"Could not create {STABLE_ALIAS}: {detail or 'ollama create failed'}"
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", default=os.environ.get("TRILOBITE_BASE_MODEL", DEFAULT_BASE_MODEL))
+    parser.add_argument("--model", default=os.environ.get("SONDER_BASE_MODEL", DEFAULT_BASE_MODEL))
     parser.add_argument(
         "--embed-model",
-        default=os.environ.get("TRILOBITE_EMBED_MODEL", DEFAULT_EMBED_MODEL),
+        default=os.environ.get("SONDER_EMBED_MODEL", DEFAULT_EMBED_MODEL),
     )
     parser.add_argument("--ollama", default="")
     parser.add_argument(

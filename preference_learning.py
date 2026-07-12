@@ -1,7 +1,7 @@
 """Conservative preference capture for dynamic personalization.
 
 This is separate from technical lessons. Preferences describe how the user wants
-Trilobite to behave, speak, or choose defaults. The extractor intentionally
+Sonder to behave, speak, or choose defaults. The extractor intentionally
 handles clear first-person or imperative preference statements and ignores broad
 new tasks.
 """
@@ -17,10 +17,10 @@ _KEY_RE = re.compile(r"[^a-z0-9]+")
 _PATTERNS = [
     (re.compile(r"\b(?:i|we)\s+prefer(?:\s+that)?\s+(?P<body>[^.!?\n]+)", re.I), "User prefers %s."),
     (re.compile(r"\b(?:i|we)\s+like\s+it\s+when\s+(?P<body>[^.!?\n]+)", re.I), "User likes it when %s."),
-    (re.compile(r"\bplease\s+always\s+(?P<body>[^.!?\n]+)", re.I), "User wants Trilobite to always %s."),
-    (re.compile(r"\balways\s+(?P<body>[^.!?\n]+)", re.I), "User wants Trilobite to always %s."),
+    (re.compile(r"\bplease\s+always\s+(?P<body>[^.!?\n]+)", re.I), "User wants Sonder to always %s."),
+    (re.compile(r"\balways\s+(?P<body>[^.!?\n]+)", re.I), "User wants Sonder to always %s."),
     (re.compile(r"\bfrom\s+now\s+on,?\s+(?P<body>[^.!?\n]+)", re.I), "From now on, %s."),
-    (re.compile(r"\b(?:do\s+not|don't)\s+(?P<body>[^.!?\n]+)", re.I), "User does not want Trilobite to %s."),
+    (re.compile(r"\b(?:do\s+not|don't)\s+(?P<body>[^.!?\n]+)", re.I), "User does not want Sonder to %s."),
     (re.compile(r"\bcall\s+me\s+(?P<body>[^.!?\n]+)", re.I), "User wants to be called %s."),
     (re.compile(r"\bmy\s+name\s+is\s+(?P<body>[^.!?\n]+)", re.I), "User's name is %s."),
     (re.compile(r"\bremember\s+that\s+(?P<body>[^.!?\n]+)", re.I), "Remember that %s."),

@@ -5,7 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'models.dart';
 
 class ChatStore {
-  static const _key = 'chat_threads_v1';
+  static const _key = 'sonder_chat_threads_v1';
   static const _maxThreads = 60;
 
   static Future<List<ChatThread>> load() async {

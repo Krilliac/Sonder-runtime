@@ -1,4 +1,4 @@
-"""intents — conservative natural-language classifier for trilobite's control commands.
+"""intents — conservative natural-language classifier for sonder's control commands.
 
 Lets short, control-like chat turns like "strict on, show your reasoning" or
 "run it" work the same as their slash-command equivalents (/strict on, /trace
@@ -49,7 +49,7 @@ _WORK_TARGET_RE = re.compile(
     r"files|folder|folders|function|game|graphic|icon|image|library|logo|model|"
     r"music|package|path|presentation|program|project|readme|report|repo|repository|"
     r"scene|script|scripts|sound|spreadsheet|sprite|system|test|tests|texture|"
-    r"tool|tools|trilobite|ui|vector|web|webpage|website|workspace)\b"
+    r"tool|tools|sonder|ui|vector|web|webpage|website|workspace)\b"
 )
 _WORK_DIRECT_RE = re.compile(
     r"\b(use (the )?tools|work on|continue working|take care of|make the change|implement it|fix it|"

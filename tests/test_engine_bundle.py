@@ -182,7 +182,7 @@ def test_installs_model_store_atomically_and_reuses_verified_files(tmp_path):
     model_records = [item for item in bundle.files if item.relative.parts[0] == "models"]
     assert copied == len(model_records)
     assert reused == 0
-    assert (destination / "TRILOBITE-BUNDLE-RECEIPT.json").is_file()
+    assert (destination / "SONDER-BUNDLE-RECEIPT.json").is_file()
 
     _, copied, reused = engine_bundle.install_model_store(bundle, home)
     assert copied == 0
@@ -195,14 +195,22 @@ def test_runtime_environment_uses_explicit_bundle_paths(tmp_path, monkeypatch):
     bundle = engine_bundle.load_engine_bundle(root)
     monkeypatch.setenv("PATH", "system-path")
     env = engine_bundle.runtime_environment(bundle, tmp_path / "models")
-    assert env["TRILOBITE_OLLAMA_EXE"] == str(bundle.ollama_executable)
-    assert env["TRILOBITE_EMBED_MODEL"] == "nomic-embed-text:latest"
+    assert env["SONDER_OLLAMA_EXE"] == str(bundle.ollama_executable)
+    assert env["SONDER_EMBED_MODEL"] == "nomic-embed-text:latest"
     assert env["OLLAMA_MODELS"] == str(tmp_path / "models")
     assert env["OLLAMA_NO_CLOUD"] == "1"
     assert env["PATH"].startswith(str(bundle.ollama_executable.parent) + os.pathsep)
 
 
+def test_default_sonder_home_honors_sonder_home(monkeypatch, tmp_path):
+    expected = tmp_path / "sonder-state"
+    monkeypatch.setenv("SONDER_HOME", str(expected))
+
+    assert engine_bundle.default_sonder_home() == expected
+
+
 def test_discovers_explicit_bundle_override(tmp_path, monkeypatch):
+    assert engine_bundle.ENGINE_BUNDLE_ENV == "SONDER_ENGINE_BUNDLE"
     root = make_bundle(tmp_path)
     monkeypatch.setenv(engine_bundle.ENGINE_BUNDLE_ENV, str(root))
     found = engine_bundle.discover_engine_bundle(tmp_path / "unrelated")

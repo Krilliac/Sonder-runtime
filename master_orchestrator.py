@@ -76,7 +76,7 @@ def _remember_store_error(exc) -> None:
 
 
 def _heartbeat_enabled() -> bool:
-    return os.environ.get("TRILOBITE_FLEET_HEARTBEAT", "1").strip().lower() not in (
+    return os.environ.get("SONDER_FLEET_HEARTBEAT", "1").strip().lower() not in (
         "0", "false", "no", "off",
     )
 
@@ -113,7 +113,7 @@ def _ensure_owner() -> None:
         ):
             _HEARTBEAT_THREAD = threading.Thread(
                 target=_heartbeat_loop,
-                name="trilobite-fleet-heartbeat",
+                name="sonder-fleet-heartbeat",
                 daemon=True,
             )
             _HEARTBEAT_THREAD.start()
@@ -138,7 +138,7 @@ def hardware_max_agents() -> int:
     This controls breadth/diversity, not simultaneous model calls. Concurrent
     execution is separately constrained by :func:`capacity`. The default queues
     two candidates per logical CPU, capped by the global safety limit.
-    ``TRILOBITE_MAX_AGENTS`` can lower or raise it up to that safety limit.
+    ``SONDER_MAX_AGENTS`` can lower or raise it up to that safety limit.
     """
     logical = max(1, int(os.cpu_count() or 1))
     return max(DEFAULT_MAX_AGENTS, min(ABSOLUTE_MAX_AGENTS, logical * 2))
@@ -194,7 +194,7 @@ def capacity(requested_agents: int | str | None = None) -> dict:
     automatic = max(1, min(requested, cpu_slots, int(ram_slots), DEFAULT_MAX_WORKERS))
     source = "auto"
     slots = automatic
-    raw_override = os.environ.get("TRILOBITE_PARALLEL_WORKERS", "").strip()
+    raw_override = os.environ.get("SONDER_PARALLEL_WORKERS", "").strip()
     if raw_override:
         try:
             override = int(raw_override)
@@ -203,7 +203,7 @@ def capacity(requested_agents: int | str | None = None) -> dict:
             source = "invalid override; auto"
         else:
             slots = max(1, min(override, requested, ABSOLUTE_MAX_WORKERS))
-            source = "TRILOBITE_PARALLEL_WORKERS"
+            source = "SONDER_PARALLEL_WORKERS"
     return {
         "logical_cpus": logical,
         "total_memory_bytes": total,
@@ -257,7 +257,7 @@ def _repository_worker(prompt: str) -> str:
 
 def max_agents() -> int:
     """Configured upper bound for delegated subagents."""
-    raw = os.environ.get("TRILOBITE_MAX_AGENTS", str(hardware_max_agents()))
+    raw = os.environ.get("SONDER_MAX_AGENTS", str(hardware_max_agents()))
     try:
         value = int(raw)
     except (TypeError, ValueError):

@@ -11,7 +11,7 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434").replace("http://"
 if OLLAMA_HOST.startswith("0.0.0.0"):
     OLLAMA_HOST = OLLAMA_HOST.replace("0.0.0.0", "127.0.0.1", 1)
 BASE = "http://%s" % OLLAMA_HOST
-EMBED_MODEL = os.environ.get("TRILOBITE_EMBED_MODEL", "nomic-embed-text")
+EMBED_MODEL = os.environ.get("SONDER_EMBED_MODEL", "nomic-embed-text")
 
 
 def to_blob(vec):

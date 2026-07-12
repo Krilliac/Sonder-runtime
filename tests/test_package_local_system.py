@@ -60,11 +60,29 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     assert package.REQUIRED_FILES <= set(entries)
     assert "runtime_policy.py" in entries
     assert "learning_health.py" in entries
+    assert "sonder_health.py" in entries
     assert "artifact_grounding.py" in entries
     assert "media_assets.py" in entries
     assert "model_assets.py" in entries
     assert "ooxml_assets.py" in entries
     assert "BUNDLED_SYSTEM_README.txt" in entries
+    assert {
+        "sonder-headless.cmd",
+        "sonder-headless.sh",
+        "sonder_headless.py",
+        "sonder-runtime.cmd",
+        "sonder-runtime.sh",
+        "sonder-serve.cmd",
+        "sonder-serve.sh",
+        "sonder_serve.py",
+    } <= package.REQUIRED_FILES
+    bundled_readme = (dest / "BUNDLED_SYSTEM_README.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "Sonder Runtime local system" in bundled_readme
+    assert "sonder-headless" in bundled_readme
+    assert "sonder-launcher" in bundled_readme
+    assert "mobile clients can start, stop, or restart" in bundled_readme
     for private in (
         "file_roots.local",
         "Modelfile.personal",

@@ -1,6 +1,6 @@
 """prompt_clarifier — detect an underspecified coding prompt and ask about it.
 
-trilobite's model is frozen: it will happily generate a confident, wrong
+The base model selected by Sonder Runtime is frozen: it will happily generate a confident, wrong
 answer to a vague task ("write something that processes the data") because
 nothing upstream stops it and asks what's actually meant. That guess then
 burns a solver.solve() repair loop, or worse, produces plausible-looking code

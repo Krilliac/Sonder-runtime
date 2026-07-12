@@ -2,6 +2,7 @@ from scripts import ci_watch
 
 
 def test_load_and_format_runs():
+    assert ci_watch.DEFAULT_REPO == "Krilliac/Sonder-runtime"
     runs = ci_watch.load_runs(
         """
         [

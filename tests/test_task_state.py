@@ -8,12 +8,12 @@ def test_task_create_list_update_and_events():
         "port useful workflow controls",
         detail="visible task state",
         priority=1,
-        project="trilobite",
+        project="sonder",
     )
 
     assert task["status"] == "pending"
     assert task["priority"] == 1
-    assert memory_store.list_tasks(conn, project="trilobite")[0]["id"] == task["id"]
+    assert memory_store.list_tasks(conn, project="sonder")[0]["id"] == task["id"]
 
     updated = memory_store.update_task(
         conn,

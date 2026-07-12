@@ -24,7 +24,8 @@ class SystemScreen extends StatefulWidget {
   State<SystemScreen> createState() => _SystemScreenState();
 }
 
-class _SystemScreenState extends State<SystemScreen> {
+class _SystemScreenState extends State<SystemScreen>
+    with WidgetsBindingObserver {
   final _customCommand = TextEditingController(text: '/diagnostics');
   final _trainCount = TextEditingController(text: '10');
   final _autopilotGoal = TextEditingController();
@@ -34,25 +35,34 @@ class _SystemScreenState extends State<SystemScreen> {
   SystemInfo? _info;
   LocalInstallInfo? _localInfo;
   LauncherStatus? _launcherInfo;
+  LauncherOperation? _launcherOperation;
   String _launcherError = '';
   String? _message;
   bool _loading = false;
   bool _working = false;
   bool _polling = false;
+  bool _waitingForLauncherOperation = false;
+  bool _stopLauncherWait = false;
+  bool _appActive = true;
+  int _launcherActionEpoch = 0;
+  String _ignoredLauncherOperationId = '';
   Timer? _pollTimer;
 
-  TrilobiteApi get _api => TrilobiteApi(
+  SonderApi get _api => SonderApi(
         baseUrl: widget.settings.serverUrl,
         apiKey: widget.settings.apiKey,
       );
 
-  TrilobiteLauncherApi get _launcherApi => TrilobiteLauncherApi(
+  SonderLauncherApi get _launcherApi => SonderLauncherApi(
         baseUrl: widget.settings.effectiveLauncherUrl,
         token: widget.settings.launcherToken,
       );
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _stopLauncherWait = true;
+    _launcherActionEpoch += 1;
     _customCommand.dispose();
     _trainCount.dispose();
     _autopilotGoal.dispose();
@@ -63,6 +73,7 @@ class _SystemScreenState extends State<SystemScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _info = widget.initialInfo;
     if (widget.liveUpdates) {
       _refresh();
@@ -73,18 +84,100 @@ class _SystemScreenState extends State<SystemScreen> {
     }
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _appActive = true;
+      if (widget.liveUpdates && !_loading) {
+        unawaited(_refresh(preserveMessage: true));
+      }
+      return;
+    }
+    _appActive = false;
+    _stopLauncherWait = true;
+    _launcherActionEpoch += 1;
+    if (_waitingForLauncherOperation && mounted) {
+      setState(() => _waitingForLauncherOperation = false);
+    }
+  }
+
+  void _recordLauncherStatus(LauncherStatus status) {
+    _launcherInfo = status;
+    _launcherError = '';
+    final operation = status.currentOperation;
+    if (operation != null) {
+      _launcherOperation = operation;
+    } else if (_launcherOperation != null &&
+        !_launcherOperation!.isTerminal &&
+        !_waitingForLauncherOperation) {
+      // A previously active operation has left the launcher's active slot.
+      // A locally followed operation records its terminal response directly;
+      // otherwise clear the stale snapshot and allow another explicit action.
+      _launcherOperation = null;
+    }
+  }
+
+  void _resumeLauncherOperation(LauncherOperation operation) {
+    if (!mounted ||
+        !_appActive ||
+        operation.isTerminal ||
+        operation.id.isEmpty ||
+        operation.id == _ignoredLauncherOperationId ||
+        _waitingForLauncherOperation ||
+        _working) {
+      return;
+    }
+    unawaited(_followLauncherOperation(operation));
+  }
+
+  Future<void> _followLauncherOperation(LauncherOperation operation) async {
+    final actionEpoch = ++_launcherActionEpoch;
+    _stopLauncherWait = false;
+    setState(() {
+      _launcherOperation = operation;
+      _waitingForLauncherOperation = true;
+      _message = operation.displayMessage;
+    });
+    try {
+      final result = await _launcherApi.waitForOperation(
+        operation.id,
+        isCancelled: () => !mounted ||
+            !_appActive ||
+            actionEpoch != _launcherActionEpoch ||
+            _stopLauncherWait,
+        onProgress: (status) {
+          if (!mounted || actionEpoch != _launcherActionEpoch) return;
+          setState(() {
+            _recordLauncherStatus(status);
+            final current = status.currentOperation;
+            if (current != null) _message = current.displayMessage;
+          });
+        },
+      );
+      if (mounted && actionEpoch == _launcherActionEpoch) {
+        setState(() {
+          _recordLauncherStatus(result);
+          _message = result.currentOperation?.displayMessage ??
+              result.message;
+        });
+      }
+    } on SonderException catch (error) {
+      if (mounted && actionEpoch == _launcherActionEpoch) {
+        setState(() => _message = error.message);
+      }
+    } finally {
+      if (mounted && actionEpoch == _launcherActionEpoch) {
+        setState(() => _waitingForLauncherOperation = false);
+      }
+    }
+  }
+
   Future<void> _pollSystemInfo() async {
-    if (!mounted || _loading || _working || _polling) return;
+    if (!mounted || !_appActive || _loading || _working || _polling) return;
     _polling = true;
     SystemInfo? info;
     LauncherStatus? launcherInfo;
     try {
-      try {
-        info = await _api.systemInfo();
-      } catch (_) {
-        // The explicit Refresh path reports connection errors. Background
-        // polls preserve the last useful snapshot.
-      }
       if (widget.settings.usesHostLauncher) {
         try {
           launcherInfo = await _launcherApi.status();
@@ -92,10 +185,23 @@ class _SystemScreenState extends State<SystemScreen> {
           // Launcher diagnostics are shown by the explicit Refresh path.
         }
       }
-      if (mounted) {
+      final launcherStatus = launcherInfo;
+      if (mounted && _appActive && launcherStatus != null) {
+        setState(() => _recordLauncherStatus(launcherStatus));
+        final activeOperation = launcherStatus.activeOperation;
+        if (activeOperation != null) {
+          _resumeLauncherOperation(activeOperation);
+        }
+      }
+      try {
+        info = await _api.systemInfo();
+      } catch (_) {
+        // The explicit Refresh path reports connection errors. Background
+        // polls preserve the last useful snapshot.
+      }
+      if (mounted && _appActive) {
         setState(() {
           if (info != null) _info = info;
-          if (launcherInfo != null) _launcherInfo = launcherInfo;
         });
       }
     } catch (_) {
@@ -116,23 +222,31 @@ class _SystemScreenState extends State<SystemScreen> {
       LauncherStatus? launcherInfo;
       String serverError = '';
       String launcherError = '';
-      try {
-        info = await _api.systemInfo();
-      } on TrilobiteException catch (e) {
-        serverError = e.message;
-      }
       if (widget.settings.usesHostLauncher) {
         try {
           launcherInfo = await _launcherApi.status();
-        } on TrilobiteException catch (e) {
+        } on SonderException catch (e) {
           launcherError = e.message;
         }
       }
-      if (!mounted) return;
+      if (!mounted || !_appActive) return;
+      final launcherStatus = launcherInfo;
+      if (launcherStatus != null) {
+        setState(() => _recordLauncherStatus(launcherStatus));
+        final activeOperation = launcherStatus.activeOperation;
+        if (activeOperation != null) {
+          _resumeLauncherOperation(activeOperation);
+        }
+      }
+      try {
+        info = await _api.systemInfo();
+      } on SonderException catch (e) {
+        serverError = e.message;
+      }
+      if (!mounted || !_appActive) return;
       setState(() {
         if (info != null) _info = info;
         _localInfo = localInfo;
-        _launcherInfo = launcherInfo;
         _launcherError = launcherError;
         if (!preserveMessage && serverError.isNotEmpty) {
           _message = serverError;
@@ -152,21 +266,58 @@ class _SystemScreenState extends State<SystemScreen> {
         'Configure a valid explicit host launcher URL and token in Settings first.',
       );
     }
+    final actionEpoch = ++_launcherActionEpoch;
+    _stopLauncherWait = false;
+    _ignoredLauncherOperationId = '';
     try {
       final result = await _launcherApi.action(
         action,
         contextSize: widget.settings.contextSize,
+        isCancelled: () => !mounted ||
+            !_appActive ||
+            actionEpoch != _launcherActionEpoch ||
+            _stopLauncherWait,
+        onProgress: (status) {
+          if (!mounted || actionEpoch != _launcherActionEpoch) return;
+          final operation = status.currentOperation;
+          setState(() {
+            _recordLauncherStatus(status);
+            _waitingForLauncherOperation =
+                operation != null && !operation.isTerminal;
+            if (operation != null) {
+              _message = operation.displayMessage;
+            }
+          });
+        },
       );
-      _launcherInfo = result;
+      if (mounted && actionEpoch == _launcherActionEpoch) {
+        setState(() {
+          _recordLauncherStatus(result);
+        });
+      }
       return LocalActionResult(
         result.ok,
         result.message.isNotEmpty
             ? result.message
             : 'Host launcher $action completed.',
       );
-    } on TrilobiteException catch (e) {
+    } on SonderException catch (e) {
       return LocalActionResult(false, e.message);
+    } finally {
+      if (mounted && actionEpoch == _launcherActionEpoch) {
+        setState(() => _waitingForLauncherOperation = false);
+      }
     }
+  }
+
+  void _stopWaitingForLauncherAction() {
+    if (!_waitingForLauncherOperation) return;
+    setState(() {
+      _stopLauncherWait = true;
+      _ignoredLauncherOperationId = _launcherOperation?.id ?? '';
+      _message = 'Stopping this device\'s wait. The host operation is not '
+          'cancelled and may still be running.';
+    });
   }
 
   Future<LocalActionResult> _startServer() {
@@ -225,7 +376,7 @@ class _SystemScreenState extends State<SystemScreen> {
           model: widget.settings.model,
           contextSize: widget.settings.contextSize);
       if (mounted) setState(() => _message = reply);
-    } on TrilobiteException catch (e) {
+    } on SonderException catch (e) {
       if (mounted) setState(() => _message = e.message);
     } finally {
       if (mounted) setState(() => _working = false);
@@ -272,7 +423,7 @@ class _SystemScreenState extends State<SystemScreen> {
       builder: (context) => AlertDialog(
         title: const Text('Retry interrupted work?'),
         content: Text(
-          'Trilobite will rerun $agentId from its private restart-safe ledger. '
+          'Sonder Runtime will rerun $agentId from its private restart-safe ledger. '
           'Retries use the local code tier unless you run /agentretry manually '
           'with a different tier.',
         ),
@@ -367,6 +518,18 @@ class _SystemScreenState extends State<SystemScreen> {
         LocalManager.canRunLocalTools && !widget.settings.hasHostLauncher;
     final canControlServer =
         localRuntimeControls || widget.settings.usesHostLauncher;
+    final hostOperationActive =
+        _launcherOperation != null && !_launcherOperation!.isTerminal;
+    var launcherServerText = 'Unknown';
+    if (_launcherInfo?.serverState == 'foreign_listener') {
+      launcherServerText = 'Conflict: another service is listening on '
+          '${_launcherInfo!.serverHost}:${_launcherInfo!.serverPort}';
+    } else if (_launcherInfo?.serverRunning == true) {
+      launcherServerText =
+          'Running on ${_launcherInfo!.serverHost}:${_launcherInfo!.serverPort}';
+    } else if (_launcherInfo != null) {
+      launcherServerText = 'Stopped';
+    }
     return Scaffold(
       appBar: AppBar(
         automaticallyImplyLeading: false,
@@ -395,6 +558,19 @@ class _SystemScreenState extends State<SystemScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          _Section(
+            title: 'Runtime architecture',
+            child: Text(
+              'Sonder Runtime is the orchestration layer, not a standalone '
+              'foundation model. Ollama loads and serves selected local '
+              'base-model weights for inference. Sonder Runtime supplies '
+              'routing, prompts, memory, tools, and policy. QLoRA/LoRA adapter '
+              'training runs through PEFT/Hugging Face; only validated '
+              'adapters or merged models are deployed to Ollama.',
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+          ),
+          const SizedBox(height: 12),
           if (localInfo != null) ...[
             _Section(
               title: 'Install',
@@ -438,7 +614,7 @@ class _SystemScreenState extends State<SystemScreen> {
                     ok: true,
                   ),
                   _StatusRow(
-                    label: 'Engine setup',
+                    label: 'Host runtime setup',
                     value: localInfo.bootstrapScript
                         ? 'One-click setup available'
                         : 'Bootstrap script not bundled',
@@ -475,13 +651,20 @@ class _SystemScreenState extends State<SystemScreen> {
                 ),
                 _StatusRow(
                   label: 'Main server',
-                  value: _launcherInfo == null
-                      ? 'Unknown'
-                      : (_launcherInfo!.serverRunning
-                          ? 'Running on ${_launcherInfo!.serverHost}:${_launcherInfo!.serverPort}'
-                          : 'Stopped'),
-                  ok: _launcherInfo?.serverRunning ?? false,
+                  value: launcherServerText,
+                  ok: _launcherInfo?.serverState == 'healthy',
                 ),
+                if (_launcherOperation != null)
+                  _StatusRow(
+                    label: hostOperationActive
+                        ? 'Active operation'
+                        : 'Last operation',
+                    value: _launcherOperation!.action.isEmpty
+                        ? _launcherOperation!.phase
+                        : '${_launcherOperation!.action}: '
+                            '${_launcherOperation!.phase}',
+                    ok: _launcherOperation!.succeeded || hostOperationActive,
+                  ),
                 if (_launcherError.isNotEmpty) ...[
                   const SizedBox(height: 8),
                   Text(
@@ -517,17 +700,21 @@ class _SystemScreenState extends State<SystemScreen> {
                                 contextSize: widget.settings.contextSize,
                               )),
                       icon: const Icon(Icons.auto_fix_high_outlined),
-                      label: const Text('Setup engine'),
+                      label: const Text('Setup host runtime'),
                     ),
                     FilledButton.icon(
-                      onPressed: _working || !canControlServer
+                      onPressed: _working ||
+                              hostOperationActive ||
+                              !canControlServer
                           ? null
                           : () => _run(_startServer),
                       icon: const Icon(Icons.play_arrow_outlined),
                       label: const Text('Start server'),
                     ),
                     FilledButton.tonalIcon(
-                      onPressed: _working || !canControlServer
+                      onPressed: _working ||
+                              hostOperationActive ||
+                              !canControlServer
                           ? null
                           : () => _run(_stopServer),
                       icon: const Icon(Icons.stop_circle_outlined),
@@ -535,18 +722,26 @@ class _SystemScreenState extends State<SystemScreen> {
                     ),
                     FilledButton.tonalIcon(
                       onPressed: _working ||
+                              hostOperationActive ||
                               !widget.settings.usesHostLauncher
                           ? null
                           : () => _run(_restartServer),
                       icon: const Icon(Icons.restart_alt),
                       label: const Text('Restart server'),
                     ),
+                    if (_waitingForLauncherOperation)
+                      OutlinedButton.icon(
+                        key: const Key('launcher-stop-waiting'),
+                        onPressed: _stopWaitingForLauncherAction,
+                        icon: const Icon(Icons.close),
+                        label: const Text('Stop waiting'),
+                      ),
                     FilledButton.tonalIcon(
                       onPressed: _working || !localRuntimeControls
                           ? null
                           : () => _run(LocalManager.startEndlessTraining),
                       icon: const Icon(Icons.all_inclusive),
-                      label: const Text('Endless train'),
+                      label: const Text('Grounded practice'),
                     ),
                     OutlinedButton.icon(
                       onPressed: _working || !localRuntimeControls
@@ -561,7 +756,9 @@ class _SystemScreenState extends State<SystemScreen> {
                   const SizedBox(height: 10),
                   Text(
                     widget.settings.usesHostLauncher
-                        ? 'Start, Stop, and Restart control the explicitly configured host. Engine setup, Git updates, and local training remain on that host.'
+                        ? 'Start, Stop, and Restart control the configured host. '
+                            'Runtime setup, Git updates, grounded practice, and '
+                            'PEFT adapter training remain on that host.'
                         : 'Configure an explicit host launcher URL to control a server from this client-only device.',
                   ),
                 ],
@@ -575,7 +772,7 @@ class _SystemScreenState extends State<SystemScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Give Trilobite an outcome, then let its local planner build '
+                  'Give Sonder Runtime an outcome, then let its local planner build '
                   'a persistent checklist, execute one guarded task at a time, '
                   'validate the result, and pause safely when a budget or '
                   'decision boundary is reached.',
@@ -767,7 +964,7 @@ class _SystemScreenState extends State<SystemScreen> {
                     keyboardType: TextInputType.number,
                     decoration: const InputDecoration(
                       isDense: true,
-                      labelText: 'Train',
+                      labelText: 'Practice cases',
                       border: OutlineInputBorder(),
                     ),
                   ),
@@ -776,7 +973,7 @@ class _SystemScreenState extends State<SystemScreen> {
                   onPressed:
                       _working ? null : () => _sendCommand(_trainCommand()),
                   icon: const Icon(Icons.school_outlined),
-                  label: const Text('Run'),
+                  label: const Text('Run practice'),
                 ),
                 OutlinedButton.icon(
                   onPressed: _working ? null : () => _sendCommand('/help'),
@@ -899,7 +1096,10 @@ class _SystemScreenState extends State<SystemScreen> {
               ),
             ),
             const SizedBox(height: 12),
-            _Section(title: 'Learning', child: _OutputText(info.learnTiers)),
+            _Section(
+              title: 'Memory & grounded learning',
+              child: _OutputText(info.learnTiers),
+            ),
             const SizedBox(height: 12),
             if (info.agents != null) ...[
               _Section(
@@ -921,26 +1121,37 @@ class _SystemScreenState extends State<SystemScreen> {
             _Section(title: 'Stats', child: _OutputText(info.stats)),
             const SizedBox(height: 12),
             _Section(
-              title: 'Models',
-              child: Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: info.models
-                    .map((m) => Chip(
-                          label: Text('${m.id} - ${m.ownedBy}'),
-                          avatar: Icon(
-                            m.ownedBy == 'cloud'
-                                ? Icons.cloud_outlined
-                                : Icons.memory_outlined,
-                            size: 18,
-                          ),
-                        ))
-                    .toList(),
+              title: 'Inference models',
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Sonder Runtime routes requests to these providers. '
+                    'Ollama hosts and runs the local model weights.',
+                  ),
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: info.models
+                        .map((m) => Chip(
+                              label: Text('${m.id} - ${m.ownedBy}'),
+                              avatar: Icon(
+                                m.ownedBy == 'cloud'
+                                    ? Icons.cloud_outlined
+                                    : Icons.memory_outlined,
+                                size: 18,
+                              ),
+                            ))
+                        .toList(),
+                  ),
+                ],
               ),
             ),
           ],
           const SizedBox(height: 24),
           Text(
+            'Sonder Runtime orchestrates inference; it is not the model itself. '
             'Desktop builds look for a bundled local-system folder next to the app. '
             'A sealed engine payload can include Python, Ollama, and models for offline setup; '
             'otherwise setup uses installed runtimes and may download missing components. '

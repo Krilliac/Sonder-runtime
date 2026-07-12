@@ -7,7 +7,7 @@ the same `Verdict(passed, reason, detail)` shape used throughout `verifiers.py`,
 with `detail` listing every violation (not just the first) so a repair loop
 gets a full diagnostic in one pass instead of fixing one field at a time.
 
-It's valuable wherever trilobite (or any agent it drives) is asked to emit
+It's valuable wherever Sonder Runtime (or any agent it drives) is asked to emit
 structured JSON -- tool-call arguments, config/manifest files, API response
 shapes, the very `spec` dicts this repo's verifiers consume -- and needs a fast,
 deterministic, zero-dependency oracle instead of an `llm_judge` call for a

@@ -11,7 +11,7 @@ import workbench
 
 def _guard_root(monkeypatch, tmp_path):
     monkeypatch.setattr(file_ops, "workspace_root", lambda: tmp_path)
-    monkeypatch.setattr(file_ops.trilobite_paths, "default_home", lambda: tmp_path / "home")
+    monkeypatch.setattr(file_ops.sonder_paths, "default_home", lambda: tmp_path / "home")
 
 
 def test_directory_tree_is_bounded_and_skips_noise(monkeypatch, tmp_path):
@@ -208,10 +208,10 @@ def test_run_python_script_end_to_end(monkeypatch, tmp_path):
     script = tmp_path / "hello.py"
     script.write_text("import sys\nprint('hello', sys.argv[1])\n", encoding="utf-8")
 
-    result = workbench.run_script("hello.py", args_json=["trilobite"], timeout=10)
+    result = workbench.run_script("hello.py", args_json=["sonder"], timeout=10)
 
     assert result["ok"]
-    assert result["stdout"].strip() == "hello trilobite"
+    assert result["stdout"].strip() == "hello sonder"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows batch runner")

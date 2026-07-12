@@ -1,4 +1,4 @@
-# Trilobite C++ coding eval — 2026-07-06
+# Sonder Runtime C++ coding eval — 2026-07-06
 
 Handed the local coder 33 self-contained C++17 tasks (pure logic, known algorithms,
 boilerplate). Every output was compiled with g++ and run against test vectors.

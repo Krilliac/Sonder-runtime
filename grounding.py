@@ -1,4 +1,4 @@
-"""grounding — sandboxed code execution for trilobite's self-learning loop.
+"""grounding — sandboxed code execution for Sonder Runtime's grounded-practice loop.
 
 Stdlib only. Pulls a fenced python code block out of a model response and
 actually runs it (optionally with an appended assertion-based check) in a

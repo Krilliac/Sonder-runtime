@@ -1,6 +1,6 @@
 """General-purpose grounding checks beyond code execution.
 
-These checks score text/artifacts against deterministic criteria so Trilobite can
+These checks score text/artifacts against deterministic criteria so Sonder can
 learn from domains where "compiled" is not the right success signal.
 """
 from __future__ import annotations

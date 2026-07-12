@@ -29,7 +29,7 @@ def test_history_is_passed_to_generate_fn():
 
     hist = [{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "ok"}]
     resp, iid = o.run_with_learning(
-        c, "now", "trilobite", gen,
+        c, "now", "sonder", gen,
         retrieve_fn=lambda conn, task: [], id_fn=lambda: "id1",
         history=hist, session_id="S",
     )
@@ -46,7 +46,7 @@ def test_no_history_calls_single_arg_gen():
         return "ans"
 
     resp, iid = o.run_with_learning(
-        c, "now", "trilobite", gen,
+        c, "now", "sonder", gen,
         retrieve_fn=lambda conn, task: [], id_fn=lambda: "id2",
     )
     assert resp == "ans"
@@ -61,7 +61,7 @@ def test_recalls_and_facts_reach_the_prompt():
         return "ans"
 
     o.run_with_learning(
-        c, "task", "trilobite", gen,
+        c, "task", "sonder", gen,
         retrieve_fn=lambda conn, t: ["a lesson"], id_fn=lambda: "id3",
         recalls=["a recall"], facts=["a fact"],
     )

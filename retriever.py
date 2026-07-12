@@ -88,7 +88,7 @@ def _usage_boost(conn, lesson_id):
 
 def retrieve_with_ids(conn, task, k=5, embed_fn=embeddings.embed, min_sim=None):
     if min_sim is None:
-        min_sim = float(os.environ.get("TRILOBITE_MIN_SIM", str(DEFAULT_MIN_SIM)))
+        min_sim = float(os.environ.get("SONDER_MIN_SIM", str(DEFAULT_MIN_SIM)))
 
     lexical = memory_store.fts_search(conn, task, limit=10)
     qv = embed_fn(task)
