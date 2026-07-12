@@ -256,7 +256,11 @@ def _privacy_scan(path: Path, *, allow_binary: bool = False) -> None:
             return
         raise ValueError(f"payload text is not valid UTF-8: {path.name}") from exc
     home = str(Path.home())
-    if len(home) > 3 and home.casefold() in text.casefold():
+    home_pattern = re.compile(
+        r"(?<![A-Za-z0-9_])" + re.escape(home) + r"(?:[\\/]|$)",
+        re.IGNORECASE,
+    )
+    if len(home) > 3 and home_pattern.search(text):
         raise ValueError(f"payload contains an absolute user-home path: {path.name}")
     if not allow_binary:
         for pattern in HOME_PATH_PATTERNS:

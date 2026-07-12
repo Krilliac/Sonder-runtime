@@ -148,7 +148,7 @@ python /absolute/path/to/selfmod_recover.py \
 On Windows:
 
 ```bat
-py C:\absolute\path\selfmod_recover.py C:\Users\you\...\selfmod\backups\<run-id>\manifest.json
+py C:\absolute\path\selfmod_recover.py %LOCALAPPDATA%\trilobite\selfmod\backups\<run-id>\manifest.json
 ```
 
 The command verifies the manifest checksum and every backup hash, atomically
