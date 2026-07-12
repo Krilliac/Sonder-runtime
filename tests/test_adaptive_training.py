@@ -499,6 +499,54 @@ def test_resume_requires_proven_interrupted_or_failed_run(monkeypatch, tmp_path)
     assert "interrupted or failed" in message
 
 
+def _create_failed_training_run(monkeypatch, tmp_path):
+    data = tmp_path / "training.jsonl"
+    data.write_text(
+        '{"messages":[{"role":"user","content":"x"},{"role":"assistant","content":"y"}]}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SONDER_DATA", str(data))
+    monkeypatch.setenv("SONDER_LORA_OUT", str(tmp_path / "lora"))
+    monkeypatch.setenv("SONDER_TRAINING_STATE", str(tmp_path / "state.json"))
+    plan = adaptive_training.build_plan(profile(8, 32))
+    ok, _message = adaptive_training.start_training(
+        plan,
+        confirmed=True,
+        runner=lambda *args, **kwargs: SimpleNamespace(returncode=1),
+    )
+    assert not ok
+    assert json.loads((tmp_path / "state.json").read_text())["status"] == "failed"
+    return plan, data
+
+
+def test_resume_rejects_changed_dataset_content(monkeypatch, tmp_path):
+    plan, data = _create_failed_training_run(monkeypatch, tmp_path)
+    data.write_text(data.read_text(encoding="utf-8") + "{}\n", encoding="utf-8")
+    called = []
+    ok, message = adaptive_training.start_training(
+        plan, confirmed=True, resume=True,
+        runner=lambda *args, **kwargs: called.append(args),
+    )
+    assert not ok
+    assert "dataset changed" in message
+    assert called == []
+
+
+def test_resume_rejects_changed_dataset_path(monkeypatch, tmp_path):
+    plan, data = _create_failed_training_run(monkeypatch, tmp_path)
+    replacement = tmp_path / "replacement.jsonl"
+    replacement.write_bytes(data.read_bytes())
+    monkeypatch.setenv("SONDER_DATA", str(replacement))
+    called = []
+    ok, message = adaptive_training.start_training(
+        plan, confirmed=True, resume=True,
+        runner=lambda *args, **kwargs: called.append(args),
+    )
+    assert not ok
+    assert "dataset path" in message
+    assert called == []
+
+
 def test_programmatic_start_rejects_negative_gpu_index():
     plan = adaptive_training.build_plan(
         profile(8, 32), adaptive_training.PlanOptions(gpu_index=-1)
