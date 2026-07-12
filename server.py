@@ -8136,7 +8136,9 @@ def _agent_impl(
             validation_covered = tool_ok and _agent_validation_covers(
                 tool_name, tool_args, mutations, observation_text,
             )
-            validation_ok = validation_ok or validation_covered
+            # The latest host-observed validator decides current validity. A
+            # later failing/bad-coverage check must invalidate an earlier pass.
+            validation_ok = validation_covered
             if mutated and tool_ok and not validation_covered:
                 observation_text += (
                     "\nHOST VALIDATION: this check did not cover the changed on-disk path(s). "
