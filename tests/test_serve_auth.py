@@ -95,6 +95,7 @@ def test_sonder_health_requires_exact_private_loopback_challenge(monkeypatch):
     token = "health-proof-" + ("x" * 32)
     nonce = sonder_health.new_nonce()
     monkeypatch.setattr(ts, "LAUNCHER_HEALTH_TOKEN", token)
+    monkeypatch.setattr(ts, "RUNTIME_ROLE", sonder_health.MANAGED_ROLE)
 
     with _http_server(monkeypatch) as port:
         status, _, body = _request(
@@ -113,7 +114,7 @@ def test_sonder_health_requires_exact_private_loopback_challenge(monkeypatch):
         payload, token=token, nonce=nonce, port=port
     )
     assert set(payload) == {
-        "identity", "service", "version", "pid", "port", "nonce", "proof",
+        "identity", "service", "version", "role", "pid", "port", "nonce", "proof",
     }
     assert token not in body.decode("utf-8")
 
