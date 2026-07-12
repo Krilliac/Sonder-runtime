@@ -1,8 +1,57 @@
 import json
+import hashlib
 
 import pytest
 
 import qlora_train
+
+
+def _launch(monkeypatch, tmp_path, *, created=100, token="secret"):
+    run = tmp_path / "runs" / "run-1"
+    output = run / "adapter"
+    output.mkdir(parents=True)
+    data = tmp_path / "training.jsonl"
+    data.write_text("{}\n", encoding="utf-8")
+    manifest = run / "training-plan.json"
+    manifest.write_text(json.dumps({
+        "schema": 2,
+        "run_id": "run-1",
+        "created_ts": created,
+        "base_hf": qlora_train.BASE,
+        "data_path": str(data.resolve()),
+        "data_sha256": hashlib.sha256(data.read_bytes()).hexdigest(),
+        "adapter_dir": str(output.resolve()),
+        "gpu_index": 0,
+        "launch_token_sha256": hashlib.sha256(token.encode()).hexdigest(),
+    }), encoding="utf-8")
+    monkeypatch.setenv("SONDER_TRAINING_MANIFEST", str(manifest))
+    monkeypatch.setenv("SONDER_TRAINING_LAUNCH_TOKEN", token)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setattr(qlora_train, "DATA_PATH", str(data))
+    monkeypatch.setattr(qlora_train, "OUTPUT_DIR", str(output))
+    return manifest, data
+
+
+def test_launch_authorization_is_consumed_once(monkeypatch, tmp_path):
+    manifest, _ = _launch(monkeypatch, tmp_path)
+    approved = qlora_train.authorize_launch(now=100)
+    assert approved["run_id"] == "run-1"
+    assert json.loads(manifest.read_text())["launch_consumed_ts"] == 100
+    with pytest.raises(RuntimeError, match="already claimed"):
+        qlora_train.authorize_launch(now=100)
+
+
+def test_launch_rejects_changed_training_data(monkeypatch, tmp_path):
+    _, data = _launch(monkeypatch, tmp_path)
+    data.write_text("changed\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="changed"):
+        qlora_train.authorize_launch(now=100)
+
+
+def test_launch_rejects_expired_capability(monkeypatch, tmp_path):
+    _launch(monkeypatch, tmp_path, created=100)
+    with pytest.raises(RuntimeError, match="expired"):
+        qlora_train.authorize_launch(now=401)
 
 
 def test_default_adapter_output_uses_sonder_namespace():

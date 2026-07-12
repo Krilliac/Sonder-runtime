@@ -108,8 +108,39 @@ def test_cpu_offload_request_fails_closed_for_current_training_backend():
     assert adaptive_training.TRAINING_CPU_OFFLOAD_REASON in direct_fit.training.rejected
 
 
-def test_direct_qlora_cpu_offload_request_fails_before_heavy_imports(monkeypatch, capsys):
+def test_direct_qlora_invocation_fails_before_heavy_imports(monkeypatch):
+    monkeypatch.delenv("SONDER_TRAINING_MANIFEST", raising=False)
+    monkeypatch.delenv("SONDER_TRAINING_LAUNCH_TOKEN", raising=False)
+    with pytest.raises(RuntimeError, match="training start --confirm"):
+        qlora_train.main()
+
+
+def test_authorized_qlora_cpu_offload_request_fails_before_heavy_imports(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("SONDER_ALLOW_CPU_OFFLOAD", "1")
+    data = tmp_path / "training.jsonl"
+    data.write_text("{}\n", encoding="utf-8")
+    output = tmp_path / "runs" / "run-1" / "adapter"
+    output.mkdir(parents=True)
+    token = "test-token"
+    manifest = output.parent / "training-plan.json"
+    payload = {
+        "schema": 2,
+        "run_id": "run-1",
+        "created_ts": 100,
+        "base_hf": qlora_train.BASE,
+        "data_path": str(data.resolve()),
+        "data_sha256": __import__("hashlib").sha256(data.read_bytes()).hexdigest(),
+        "adapter_dir": str(output.resolve()),
+        "gpu_index": 0,
+        "launch_token_sha256": __import__("hashlib").sha256(token.encode()).hexdigest(),
+    }
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setenv("SONDER_TRAINING_MANIFEST", str(manifest))
+    monkeypatch.setenv("SONDER_TRAINING_LAUNCH_TOKEN", token)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setattr(qlora_train, "DATA_PATH", str(data))
+    monkeypatch.setattr(qlora_train, "OUTPUT_DIR", str(output))
+    monkeypatch.setattr(qlora_train.time, "time", lambda: 100)
     assert qlora_train.main() == 5
     assert "CPU offload is disabled" in capsys.readouterr().out
 
@@ -437,17 +468,41 @@ def test_minimal_mocked_training_flow_builds_command_and_validates(monkeypatch, 
 
     def runner(command, **kwargs):
         seen.update(command=command, env=kwargs["env"], cwd=kwargs["cwd"])
-        (output / "adapter_config.json").write_text(json.dumps({
+        adapter = Path(kwargs["env"]["SONDER_LORA_OUT"])
+        (adapter / "adapter_config.json").write_text(json.dumps({
             "base_model_name_or_path": "Qwen/Qwen2.5-Coder-3B-Instruct",
         }), encoding="utf-8")
-        plan_manifest = json.loads((output / "training-plan.json").read_text(encoding="utf-8"))
-        (output / "training-manifest.json").write_text(json.dumps(plan_manifest), encoding="utf-8")
+        plan_manifest = json.loads(Path(kwargs["env"]["SONDER_TRAINING_MANIFEST"]).read_text(encoding="utf-8"))
+        (adapter / "training-manifest.json").write_text(json.dumps(plan_manifest), encoding="utf-8")
         return SimpleNamespace(returncode=0)
 
-    plan = adaptive_training.build_plan(profile(8, 32))
+    plan = adaptive_training.build_plan(
+        profile(8, 32), adaptive_training.PlanOptions(gpu_index=2)
+    )
     ok, message = adaptive_training.start_training(plan, confirmed=True, runner=runner)
     assert ok and "completed" in message
     assert seen["command"][-1].endswith("qlora_train.py")
     assert seen["env"]["SONDER_BASE"] == "Qwen/Qwen2.5-Coder-3B-Instruct"
     assert seen["env"]["SONDER_ALLOW_CPU_OFFLOAD"] == "0"
+    assert seen["env"]["CUDA_VISIBLE_DEVICES"] == "2"
+    assert Path(seen["env"]["SONDER_LORA_OUT"]).parent.parent.parent == output
     assert json.loads((tmp_path / "state.json").read_text())["status"] == "trained"
+
+
+def test_resume_requires_proven_interrupted_or_failed_run(monkeypatch, tmp_path):
+    monkeypatch.setenv("SONDER_TRAINING_STATE", str(tmp_path / "state.json"))
+    plan = adaptive_training.build_plan(profile(8, 32))
+    ok, message = adaptive_training.start_training(
+        plan, confirmed=True, resume=True, runner=lambda *args, **kwargs: None
+    )
+    assert not ok
+    assert "interrupted or failed" in message
+
+
+def test_programmatic_start_rejects_negative_gpu_index():
+    plan = adaptive_training.build_plan(
+        profile(8, 32), adaptive_training.PlanOptions(gpu_index=-1)
+    )
+    ok, message = adaptive_training.start_training(plan, confirmed=True)
+    assert not ok
+    assert "GPU index" in message

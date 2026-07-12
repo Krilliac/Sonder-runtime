@@ -42,6 +42,7 @@ Inside the Sonder Runtime REPL:
 /training plan --dry-run
 /training plan --model auto --sequence-length 1024 --batch-size 1
 /training start --confirm
+/training start --confirm --resume
 /training status
 /training deploy --llama-cpp /path/to/llama.cpp
 /training rollback
@@ -54,6 +55,7 @@ python adaptive_training.py hardware
 python adaptive_training.py plan --dry-run --model auto
 python export_training_data.py
 python adaptive_training.py start --confirm --model auto
+python adaptive_training.py start --confirm --resume --model auto
 python adaptive_training.py status
 python adaptive_training.py deploy --llama-cpp /path/to/llama.cpp
 python adaptive_training.py rollback
@@ -61,9 +63,16 @@ python adaptive_training.py rollback
 
 Planning options include `--model auto|1.5b|3b|7b`,
 `--allow-cpu-offload`, `--max-vram`, `--max-system-ram`,
-`--context-length`, `--sequence-length`, `--batch-size`, and
+`--context-length`, `--sequence-length`, `--batch-size`, `--gpu-index`, and
 `--gradient-accumulation`. Corresponding `SONDER_*` environment overrides
 remain supported; see `adaptive_training.py` for the exact names.
+
+Every confirmed start creates a unique run directory under
+`sonder-personal-lora/runs/<run-id>/`. Its plan records the exact base, adapter
+path, selected physical GPU, and SHA-256 of the approved dataset. The controller
+passes a fresh five-minute, one-use launch capability to `qlora_train.py`; direct
+script invocation and replay are rejected before heavyweight ML imports. Set
+`--gpu-index` to bind the physical CUDA device before Torch initializes.
 
 `--allow-cpu-offload` is retained as an explicit capability request, but the
 current bitsandbytes/Trainer backend rejects it. Hugging Face documents the
@@ -81,7 +90,10 @@ python -m pip install -r requirements-train.txt
 
 On native Windows, WSL2 remains the more reliable bitsandbytes environment.
 Sonder Runtime refuses silent CPU training and stops CUDA OOM failures with
-checkpoints intact. A later start resumes the newest checkpoint.
+checkpoints intact. Resume is never inferred from a shared output folder: use
+`start --confirm --resume` to reauthorize the recorded interrupted/failed run.
+The base model, sequence length, batch size, gradient accumulation, and GPU must
+match that run's manifest before its checkpoints can be resumed.
 
 ## Qwen adapter deployment
 

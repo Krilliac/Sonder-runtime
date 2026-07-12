@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import io
 import json
 import os
+import secrets
 import shutil
 import shlex
 import socket
@@ -79,6 +81,7 @@ class PlanOptions:
     batch_size: int = 1
     gradient_accumulation: int = 8
     full_finetune: bool = False
+    gpu_index: int = 0
 
 
 @dataclass
@@ -341,7 +344,7 @@ def format_plan(plan):
     ]
     if t.enabled:
         lines += [
-            f"Training: {t.method} {t.model_size}, batch {t.settings['batch_size']}, gradient accumulation {t.settings['gradient_accumulation']}",
+            f"Training: {t.method} {t.model_size}, GPU {plan.options.gpu_index}, batch {t.settings['batch_size']}, gradient accumulation {t.settings['gradient_accumulation']}",
             f"  base: {t.model}",
             f"  estimate: {t.estimated_vram_gb:.1f} GB VRAM; {t.estimated_system_ram_gb:.1f} GB RAM; CPU offload: {'yes' if t.cpu_offload else 'no'}",
             f"  reason: {t.reason}",
@@ -378,6 +381,38 @@ def _write_state(payload):
     return path
 
 
+def _write_json_atomic(path, payload):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name("%s.tmp-%s" % (path.name, uuid.uuid4().hex))
+    try:
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _resume_signature(plan_payload):
+    options = dict((plan_payload or {}).get("options") or {})
+    return {
+        "model": ((plan_payload or {}).get("training") or {}).get("model"),
+        "method": ((plan_payload or {}).get("training") or {}).get("method"),
+        "sequence_length": options.get("sequence_length"),
+        "batch_size": options.get("batch_size"),
+        "gradient_accumulation": options.get("gradient_accumulation"),
+        "gpu_index": options.get("gpu_index", 0),
+    }
+
+
 def _disk_ok(path, required_gb):
     probe = Path(path).expanduser().absolute()
     while not probe.exists() and probe != probe.parent:
@@ -388,7 +423,7 @@ def _disk_ok(path, required_gb):
     return free >= required_gb, free
 
 
-def start_training(plan, *, confirmed=False, dry_run=False, runner=subprocess.run):
+def start_training(plan, *, confirmed=False, dry_run=False, resume=False, runner=subprocess.run):
     if dry_run:
         return True, format_plan(plan) + "\nDry run only: no training process started."
     if not plan.training.enabled:
@@ -403,8 +438,33 @@ def start_training(plan, *, confirmed=False, dry_run=False, runner=subprocess.ru
             "Training was not started. The first/next run must be attended. Re-run with "
             "`training start --confirm` while watching GPU memory."
         )
-    output = Path(os.environ.get("SONDER_LORA_OUT", ROOT / "sonder-personal-lora"))
-    ok, free = _disk_ok(output.parent, 3 + MODEL_SPECS[plan.training.model_size]["params"] * 2.2)
+    if plan.options.gpu_index < 0:
+        return False, "Training GPU index must be zero or greater."
+    output_root = Path(os.environ.get("SONDER_LORA_OUT", ROOT / "sonder-personal-lora"))
+    current = _read_state()
+    if resume:
+        if current.get("status") not in {"interrupted", "failed"}:
+            return False, "Training resume requires an interrupted or failed run."
+        run_id = str(current.get("run_id") or "")
+        run_dir = Path(current.get("run_dir") or "")
+        if not run_id or not run_dir.is_dir():
+            return False, "Training resume provenance is missing; start a new run."
+        if current.get("base_hf") != plan.training.model:
+            return False, "Training resume plan does not match the interrupted run base model."
+        prior_plan_file = run_dir / "training-plan.json"
+        try:
+            prior = json.loads(prior_plan_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False, "Training resume plan is missing or unreadable."
+        if _resume_signature(prior.get("plan")) != _resume_signature(plan.to_dict()):
+            return False, "Training resume settings do not match the interrupted run."
+        with contextlib.suppress(OSError):
+            (run_dir / ".launch-claimed").unlink()
+    else:
+        run_id = uuid.uuid4().hex
+        run_dir = output_root / "runs" / run_id
+    output = run_dir / "adapter"
+    ok, free = _disk_ok(run_dir.parent, 3 + MODEL_SPECS[plan.training.model_size]["params"] * 2.2)
     if not ok:
         return False, f"Training not started: only {free:.1f} GB disk free."
     output.mkdir(parents=True, exist_ok=True)
@@ -417,21 +477,32 @@ def start_training(plan, *, confirmed=False, dry_run=False, runner=subprocess.ru
             return False, f"Training data preparation failed: {exc}"
         if not exported:
             return False, "Training data preparation produced no good-outcome examples."
+    launch_token = secrets.token_urlsafe(32)
     manifest = {
-        "schema": 1,
+        "schema": 2,
+        "run_id": run_id,
         "base_hf": plan.training.model,
         "base_ollama": MODEL_SPECS[plan.training.model_size]["ollama"],
         "model_size": plan.training.model_size,
         "method": plan.training.method,
         "created_ts": int(time.time()),
+        "data_path": str(data_path.resolve()),
+        "data_sha256": _sha256_file(data_path),
+        "adapter_dir": str(output.resolve()),
+        "gpu_index": plan.options.gpu_index,
+        "resume": bool(resume),
+        "launch_token_sha256": hashlib.sha256(launch_token.encode("utf-8")).hexdigest(),
         "plan": plan.to_dict(),
     }
-    plan_file = output / "training-plan.json"
-    plan_file.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    plan_file = run_dir / "training-plan.json"
+    _write_json_atomic(plan_file, manifest)
     state = {
         "status": "running",
         "started_ts": int(time.time()),
         "adapter_dir": str(output),
+        "run_id": run_id,
+        "run_dir": str(run_dir),
+        "plan_file": str(plan_file),
         "base_hf": manifest["base_hf"],
         "base_ollama": manifest["base_ollama"],
         "rollback_model": ROLLBACK_MODEL,
@@ -450,14 +521,22 @@ def start_training(plan, *, confirmed=False, dry_run=False, runner=subprocess.ru
         "SONDER_TRAIN_GPU_BUDGET_GB": str(plan.usable_vram_gb),
         "SONDER_TRAIN_RAM_BUDGET_GB": str(plan.usable_system_ram_gb),
         "SONDER_TRAINING_MANIFEST": str(plan_file),
-        "SONDER_RESUME": "1",
+        "SONDER_TRAINING_LAUNCH_TOKEN": launch_token,
+        "SONDER_RESUME": "1" if resume else "0",
     })
+    # Bind the selected physical GPU before torch initializes. Inside the child
+    # it is intentionally device 0 because CUDA_VISIBLE_DEVICES remaps it.
+    env["CUDA_VISIBLE_DEVICES"] = str(plan.options.gpu_index)
     try:
         result = runner([sys.executable, str(ROOT / "qlora_train.py")], cwd=ROOT, env=env)
     except KeyboardInterrupt:
         state.update(status="interrupted", ended_ts=int(time.time()))
         _write_state(state)
         return False, "Training interrupted cleanly; checkpoints were preserved for resume."
+    except OSError as exc:
+        state.update(status="failed", ended_ts=int(time.time()), error=str(exc))
+        _write_state(state)
+        return False, "Training process could not start; the run is preserved for an explicit resume."
     if result.returncode:
         state.update(status="failed", ended_ts=int(time.time()), returncode=result.returncode)
         _write_state(state)
@@ -799,6 +878,7 @@ def _parser():
         item.add_argument("--sequence-length", type=lambda value: parse_length(value, 1024), default=parse_length(os.environ.get("SONDER_MAX_LEN"), 1024))
         item.add_argument("--batch-size", type=int, default=int(os.environ.get("SONDER_BATCH_SIZE", "1")))
         item.add_argument("--gradient-accumulation", type=int, default=int(os.environ.get("SONDER_GRAD_ACCUM", "8")))
+        item.add_argument("--gpu-index", type=int, default=int(os.environ.get("SONDER_TRAIN_GPU_INDEX", "0")))
         item.add_argument(
             "--full-finetune",
             action="store_true",
@@ -806,6 +886,7 @@ def _parser():
         )
         if name == "start":
             item.add_argument("--confirm", action="store_true")
+            item.add_argument("--resume", action="store_true")
     sub.add_parser("status")
     deploy_parser = sub.add_parser("deploy")
     deploy_parser.add_argument("--adapter-dir", default="")
@@ -847,6 +928,7 @@ def _options(args):
         batch_size=max(1, args.batch_size),
         gradient_accumulation=max(1, args.gradient_accumulation),
         full_finetune=args.full_finetune,
+        gpu_index=max(0, args.gpu_index),
     )
 
 
@@ -860,7 +942,9 @@ def main(argv=None):
         if args.command == "plan":
             print(format_plan(plan))
             return 0
-        ok, message = start_training(plan, confirmed=args.confirm, dry_run=args.dry_run)
+        ok, message = start_training(
+            plan, confirmed=args.confirm, dry_run=args.dry_run, resume=args.resume
+        )
         print(message)
         return 0 if ok else 2
     if args.command == "status":
