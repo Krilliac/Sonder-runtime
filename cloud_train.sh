@@ -14,16 +14,26 @@
 #   bash cloud_train.sh
 #
 # Env knobs (all optional):
-#   SONDER_BASE       HF base model (default Qwen/Qwen2.5-Coder-7B-Instruct)
-#   SONDER_LORA_OUT   adapter directory (default ./sonder-personal-lora)
+#   SONDER_BASE       supported HF base model (default Qwen/Qwen2.5-Coder-7B-Instruct)
+#   SONDER_LORA_OUT   run root (default ./sonder-personal-lora)
+#   SONDER_TRAIN_GPU_INDEX physical CUDA GPU index (default 0)
 #   HF_TOKEN          set to also push the adapter to the Hugging Face Hub
 #   HF_REPO           e.g. Krilliac/sonder-personal-lora (needed with HF_TOKEN)
 set -euo pipefail
 
 BASE="${SONDER_BASE:-Qwen/Qwen2.5-Coder-7B-Instruct}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ADAPTER_DIR="${SONDER_LORA_OUT:-$HERE/sonder-personal-lora}"
-ADAPTER_NAME="$(basename "$ADAPTER_DIR")"
+OUTPUT_ROOT="${SONDER_LORA_OUT:-$HERE/sonder-personal-lora}"
+TRAINING_STATE="$HERE/.cloud-training-state.json"
+case "$BASE" in
+  Qwen/Qwen2.5-Coder-1.5B-Instruct) MODEL_SIZE="1.5b" ;;
+  Qwen/Qwen2.5-Coder-3B-Instruct) MODEL_SIZE="3b" ;;
+  Qwen/Qwen2.5-Coder-7B-Instruct) MODEL_SIZE="7b" ;;
+  *)
+    echo "ERROR: unsupported SONDER_BASE '$BASE'; choose the mapped 1.5B, 3B, or 7B Qwen2.5-Coder base." >&2
+    exit 2
+    ;;
+esac
 cd "$HERE"
 
 echo "======================================================================"
@@ -79,10 +89,25 @@ if [ "$N" -lt 50 ]; then
 fi
 
 echo "== 4/5 QLoRA fine-tune (this is the long part) =="
-export SONDER_BASE="$BASE"
-export SONDER_LORA_OUT="$ADAPTER_DIR"
-python qlora_train.py
-# qlora_train.py writes the LoRA adapter to $SONDER_LORA_OUT.
+export SONDER_DATA="$HERE/training_data.jsonl"
+export SONDER_LORA_OUT="$OUTPUT_ROOT"
+export SONDER_TRAINING_STATE="$TRAINING_STATE"
+python adaptive_training.py start --confirm --model "$MODEL_SIZE" \
+  --gpu-index "${SONDER_TRAIN_GPU_INDEX:-0}"
+ADAPTER_DIR="$(python - "$TRAINING_STATE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+state = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if state.get("status") != "trained" or not state.get("adapter_dir"):
+    raise SystemExit("training state did not record a trained adapter")
+print(state["adapter_dir"])
+PY
+)"
+RUN_ID="$(basename "$(dirname "$ADAPTER_DIR")")"
+ADAPTER_NAME="sonder-personal-lora-$RUN_ID"
+export SONDER_CLOUD_ADAPTER_DIR="$ADAPTER_DIR"
 
 echo "== 5/5 package the adapter =="
 if [ ! -d "$ADAPTER_DIR" ]; then
@@ -90,7 +115,9 @@ if [ ! -d "$ADAPTER_DIR" ]; then
   exit 1
 fi
 TARBALL="${ADAPTER_NAME}.tar.gz"
-tar -czf "$TARBALL" -C "$(dirname "$ADAPTER_DIR")" "$ADAPTER_NAME"
+tar -czf "$TARBALL" \
+  --transform "s,^$(basename "$ADAPTER_DIR"),$ADAPTER_NAME," \
+  -C "$(dirname "$ADAPTER_DIR")" "$(basename "$ADAPTER_DIR")"
 echo "adapter packaged -> $HERE/$TARBALL ($(du -h "$TARBALL" | cut -f1))"
 
 # Optional: push to the HF Hub if credentials are provided
@@ -102,7 +129,7 @@ import os
 from huggingface_hub import HfApi
 api = HfApi(token=os.environ["HF_TOKEN"])
 api.create_repo(os.environ["HF_REPO"], exist_ok=True)
-api.upload_folder(folder_path=os.environ["SONDER_LORA_OUT"], repo_id=os.environ["HF_REPO"])
+api.upload_folder(folder_path=os.environ["SONDER_CLOUD_ADAPTER_DIR"], repo_id=os.environ["HF_REPO"])
 print("pushed to", os.environ["HF_REPO"])
 PY
 fi

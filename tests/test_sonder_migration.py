@@ -116,6 +116,14 @@ def test_user_facing_terminology_never_presents_runtime_as_model_weights():
     assert "model-store entry rather than the runtime itself" in plan
 
 
+def test_cloud_training_uses_supervised_controller_launch():
+    script = (ROOT / "cloud_train.sh").read_text(encoding="utf-8")
+    assert "python adaptive_training.py start --confirm" in script
+    assert "python qlora_train.py" not in script
+    assert "SONDER_TRAINING_STATE" in script
+    assert 'state.get("adapter_dir")' in script
+
+
 def test_checked_in_peft_cards_identify_adapter_runtime_boundary():
     cards = (
         "sonder-personal-lora/README.md",
