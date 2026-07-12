@@ -162,6 +162,21 @@ def test_start_sonder_preserves_sonder_health_token(monkeypatch):
     assert seen["env"]["SONDER_LAUNCHER_HEALTH_TOKEN"] == token
 
 
+def test_start_sonder_preserves_only_managed_runtime_role(monkeypatch):
+    seen = {}
+    monkeypatch.setenv(H.sonder_health.ROLE_ENV, H.sonder_health.MANAGED_ROLE)
+    monkeypatch.setattr(H, "port_open", lambda host, port: False)
+    monkeypatch.setattr(H, "wait_until", lambda fn, seconds: True)
+    monkeypatch.setattr(H, "python_exe", lambda: "python")
+    monkeypatch.setattr(H, "runtime_environment", lambda: {"PATH": "fixture"})
+    monkeypatch.setattr(H, "_listener_pid", lambda host, port: None)
+    monkeypatch.setattr(
+        H, "_popen", lambda command, name, env=None: seen.setdefault("env", env) or 123
+    )
+    H.start_sonder("127.0.0.1", 11435)
+    assert seen["env"][H.sonder_health.ROLE_ENV] == H.sonder_health.MANAGED_ROLE
+
+
 def test_generic_runtime_environment_strips_sonder_health_token(
     monkeypatch,
 ):

@@ -85,6 +85,7 @@ MAX_REQUEST_BYTES = max(1, min(16 * 1024 * 1024, _env_int(
     "SONDER_MAX_REQUEST_BYTES", 1024 * 1024
 )))
 LAUNCHER_HEALTH_TOKEN = os.environ.get(sonder_health.TOKEN_ENV, "")
+RUNTIME_ROLE = os.environ.get(sonder_health.ROLE_ENV, "")
 
 # Server state (module globals, single-user local — mirrors sonder_repl.py).
 TRACE = False
@@ -1239,6 +1240,7 @@ class Handler(BaseHTTPRequestHandler):
         if (
             not _is_loopback_host(client_host)
             or not sonder_health.token_is_configured(LAUNCHER_HEALTH_TOKEN)
+            or RUNTIME_ROLE != sonder_health.MANAGED_ROLE
             or not sonder_health.nonce_is_valid(nonce)
         ):
             return ""
@@ -1295,6 +1297,7 @@ class Handler(BaseHTTPRequestHandler):
                     LAUNCHER_HEALTH_TOKEN,
                     nonce,
                     port,
+                    role=RUNTIME_ROLE,
                 )
             )
             return

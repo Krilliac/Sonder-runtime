@@ -355,6 +355,10 @@ def test_controller_constructs_fixed_headless_command(monkeypatch, tmp_path):
     assert seen["kwargs"]["env"]["SONDER_HOST"] == "0.0.0.0"
     assert seen["kwargs"]["env"]["SONDER_PORT"] == "11435"
     assert seen["kwargs"]["env"][sonder_launcher.CONTROL_GATE_ENV] == "1"
+    assert (
+        seen["kwargs"]["env"][sonder_launcher.sonder_health.ROLE_ENV]
+        == sonder_launcher.sonder_health.MANAGED_ROLE
+    )
     assert bytes(seen["process"].stdin.data) == b"\x01"
     assert seen["process"].stdin.closed is True
     assert seen["persisted"] is True
@@ -645,6 +649,14 @@ def test_health_token_is_persistent_private_and_passed_without_proxy(
     assert sonder_launcher.sonder_health.NONCE_HEADER.lower() in header_values
     assert "x-sonder-launcher-health-token" not in header_values
     assert controller.health_token not in header_values.values()
+
+
+def test_launcher_status_reports_only_verified_managed_role(monkeypatch, tmp_path):
+    controller = make_controller(tmp_path)
+    monkeypatch.setattr(controller, "_server_state", lambda: "healthy")
+    payload = controller.status()
+    assert payload["server_running"] is True
+    assert payload["server_role"] == sonder_launcher.sonder_health.MANAGED_ROLE
 
 
 def test_foreign_listener_blocks_all_mutating_commands(monkeypatch, tmp_path):

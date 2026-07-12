@@ -1169,6 +1169,7 @@ class LauncherController:
         env["SONDER_HOST"] = self.server_host
         env["SONDER_PORT"] = str(self.server_port)
         env[sonder_health.TOKEN_ENV] = self.health_token
+        env[sonder_health.ROLE_ENV] = sonder_health.MANAGED_ROLE
         env[CONTROL_GATE_ENV] = "1"
         try:
             process = subprocess.Popen(
@@ -1362,6 +1363,9 @@ class LauncherController:
             "launcher": "ready",
             "server_running": running,
             "server_state": server_state,
+            "server_role": (
+                sonder_health.MANAGED_ROLE if running else ""
+            ),
             "server_host": self.server_host,
             "server_port": self.server_port,
             "last_action": persisted["action"] if persisted else self.last_action,

@@ -29,6 +29,7 @@ def _child_environment() -> dict[str, str]:
     """Return inherited state without the server-only health proof secret."""
     env = os.environ.copy()
     env.pop(sonder_health.TOKEN_ENV, None)
+    env.pop(sonder_health.ROLE_ENV, None)
     env.pop(CONTROL_GATE_ENV, None)
     return env
 
@@ -254,6 +255,7 @@ def runtime_environment() -> dict[str, str]:
     # The launcher proof secret belongs only to sonder_serve.py. Ollama,
     # bootstrap, model inspection, and conversion children must never inherit it.
     env.pop(sonder_health.TOKEN_ENV, None)
+    env.pop(sonder_health.ROLE_ENV, None)
     return env
 
 
@@ -353,12 +355,20 @@ def start_sonder(host=DEFAULT_HOST, port=DEFAULT_PORT, env=None) -> str:
         sonder_health.TOKEN_ENV,
         os.environ.get(sonder_health.TOKEN_ENV, ""),
     )
+    runtime_role = child_overrides.pop(
+        sonder_health.ROLE_ENV,
+        os.environ.get(sonder_health.ROLE_ENV, ""),
+    )
     merged_env.update(child_overrides)
     if health_token:
         # Explicitly restore the proof secret only for the managed API child.
         merged_env[sonder_health.TOKEN_ENV] = health_token
     else:
         merged_env.pop(sonder_health.TOKEN_ENV, None)
+    if runtime_role == sonder_health.MANAGED_ROLE:
+        merged_env[sonder_health.ROLE_ENV] = runtime_role
+    else:
+        merged_env.pop(sonder_health.ROLE_ENV, None)
     merged_env.setdefault("SONDER_HOST", host)
     merged_env.setdefault("SONDER_PORT", str(port))
     pid = _popen(cmd, "sonder_serve", env=merged_env)
