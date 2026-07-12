@@ -1,8 +1,8 @@
-"""One-click local engine bootstrap for bundled Trilobite installs.
+"""One-click local engine bootstrap for bundled Sonder Runtime installs.
 
 The lightweight path uses host Python/Ollama and may download missing pieces.
 A sealed platform engine bundle supplies Python, Ollama, and model weights for a
-strictly offline setup. Both paths create the stable ``trilobite`` alias.
+strictly offline setup. Both paths create the stable ``sonder:latest`` alias.
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def _run(cmd, check=False, env=None, cwd=None, **kwargs):
 
 
 def total_ram_gb():
-    override = os.environ.get("TRILOBITE_RAM_GB", "").strip()
+    override = os.environ.get("SONDER_RAM_GB", "").strip()
     if override:
         try:
             return float(override)
@@ -74,7 +74,7 @@ def total_ram_gb():
 
 
 def choose_model(ram_gb=None):
-    forced = os.environ.get("TRILOBITE_BASE_MODEL", "").strip()
+    forced = os.environ.get("SONDER_BASE_MODEL", "").strip()
     if forced:
         return forced
     ram = total_ram_gb() if ram_gb is None else float(ram_gb)
@@ -86,7 +86,7 @@ def choose_model(ram_gb=None):
 
 
 def _ollama_executable(explicit: str = "") -> str:
-    candidate = explicit.strip() or os.environ.get("TRILOBITE_OLLAMA_EXE", "").strip()
+    candidate = explicit.strip() or os.environ.get("SONDER_OLLAMA_EXE", "").strip()
     if candidate:
         return candidate
     return shutil.which("ollama") or ""
@@ -192,15 +192,15 @@ def main(argv=None):
     parser.add_argument(
         "--allow-cpu-offload",
         action="store_true",
-        default=os.environ.get("TRILOBITE_ALLOW_CPU_OFFLOAD") == "1",
+        default=os.environ.get("SONDER_ALLOW_CPU_OFFLOAD") == "1",
     )
     parser.add_argument(
         "--max-vram", type=float,
-        default=adaptive_training._env_optional("TRILOBITE_MAX_VRAM_GB"),
+        default=adaptive_training._env_optional("SONDER_MAX_VRAM_GB"),
     )
     parser.add_argument(
         "--max-system-ram", type=float,
-        default=adaptive_training._env_optional("TRILOBITE_MAX_SYSTEM_RAM_GB"),
+        default=adaptive_training._env_optional("SONDER_MAX_SYSTEM_RAM_GB"),
     )
     parser.add_argument(
         "--offline",
@@ -223,7 +223,7 @@ def main(argv=None):
     hardware = system_profile.detect_hardware()
     ram = hardware.system_ram_total_gb or total_ram_gb()
     offline = args.offline or bundle is not None
-    requested = args.model.strip() or os.environ.get("TRILOBITE_BASE_MODEL", "").strip()
+    requested = args.model.strip() or os.environ.get("SONDER_BASE_MODEL", "").strip()
     if requested.lower() == "auto":
         requested = ""
     requested_size = "auto"
@@ -239,7 +239,7 @@ def main(argv=None):
             max_vram_gb=args.max_vram,
             max_system_ram_gb=args.max_system_ram,
             context_length=adaptive_training.parse_length(
-                os.environ.get("TRILOBITE_CONTEXT_SIZE"), 8192
+                os.environ.get("SONDER_CONTEXT_SIZE"), 8192
             ),
         ),
     )
@@ -258,7 +258,7 @@ def main(argv=None):
         print(f"  model: INVALID - {exc}", file=sys.stderr)
         return 4
 
-    print("Trilobite engine bootstrap")
+    print("Sonder Runtime engine bootstrap")
     print("  system: %s %s" % (platform.system(), platform.machine()))
     print("  detected RAM: %.1f GB total / %.1f GB available" % (
         hardware.system_ram_total_gb, hardware.system_ram_available_gb,
@@ -316,10 +316,10 @@ def main(argv=None):
     if not ok:
         return 2
 
-    process_env["TRILOBITE_BASE_MODEL"] = model
-    process_env.setdefault("LOCAL_LLM_NUM_THREAD", str(os.cpu_count() or 4))
-    process_env.setdefault("LOCAL_LLM_NUM_GPU", "999")
-    process_env.setdefault("LOCAL_LLM_NUM_BATCH", "512")
+    process_env["SONDER_BASE_MODEL"] = model
+    process_env.setdefault("SONDER_NUM_THREAD", str(os.cpu_count() or 4))
+    process_env.setdefault("SONDER_NUM_GPU", "999")
+    process_env.setdefault("SONDER_NUM_BATCH", "512")
     process_env.setdefault("OLLAMA_FLASH_ATTENTION", "1")
     command = [
         str(python_executable),
@@ -327,7 +327,7 @@ def main(argv=None):
         "--model",
         model,
         "--embed-model",
-        process_env.get("TRILOBITE_EMBED_MODEL", "nomic-embed-text"),
+        process_env.get("SONDER_EMBED_MODEL", "nomic-embed-text"),
         "--ollama",
         ollama,
     ]

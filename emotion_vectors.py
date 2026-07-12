@@ -1,4 +1,4 @@
-"""File-backed emotional steering vectors for trilobite.
+"""File-backed emotional steering vectors for sonder.
 
 These are behavioral tone controls, not claims about internal feelings. The
 values are normalized to [-1.0, 1.0] and rendered into the system prompt so the
@@ -104,7 +104,7 @@ def workspace_root():
 
 def default_path():
     return os.environ.get(
-        "TRILOBITE_EMOTION_VECTORS",
+        "SONDER_EMOTION_VECTORS",
         os.path.join(workspace_root(), "emotion_vectors.json"),
     )
 

@@ -1,49 +1,140 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
+
 import 'package:http/http.dart' as http;
 
 import 'models.dart';
+
+class LauncherOperation {
+  static const terminalPhases = {
+    'succeeded',
+    'failed',
+    'cancelled',
+    'interrupted',
+  };
+
+  final String id;
+  final String action;
+  final String phase;
+  final String message;
+  final String lastError;
+
+  const LauncherOperation({
+    required this.id,
+    required this.action,
+    required this.phase,
+    this.message = '',
+    this.lastError = '',
+  });
+
+  factory LauncherOperation.fromJson(Map<String, dynamic> json) =>
+      LauncherOperation(
+        id: json['id']?.toString() ?? '',
+        action: json['action']?.toString() ?? '',
+        phase: json['phase']?.toString().trim().toLowerCase() ?? '',
+        message: json['message']?.toString() ?? '',
+        lastError: json['last_error']?.toString() ?? '',
+      );
+
+  bool get isTerminal => terminalPhases.contains(phase);
+  bool get succeeded => phase == 'succeeded';
+
+  String get displayMessage {
+    if (lastError.isNotEmpty) return lastError;
+    if (message.isNotEmpty) return message;
+    if (action.isEmpty || phase.isEmpty) return 'Host operation is pending.';
+    return 'Host $action is $phase.';
+  }
+}
 
 class LauncherStatus {
   final bool ok;
   final String launcher;
   final bool serverRunning;
+  final String serverState;
   final String serverHost;
   final int serverPort;
   final String lastAction;
   final String lastError;
   final String message;
+  final LauncherOperation? operation;
+  final LauncherOperation? activeOperation;
 
   const LauncherStatus({
     required this.ok,
     required this.launcher,
     required this.serverRunning,
+    required this.serverState,
     required this.serverHost,
     required this.serverPort,
     required this.lastAction,
     required this.lastError,
     this.message = '',
+    this.operation,
+    this.activeOperation,
   });
 
-  factory LauncherStatus.fromJson(Map<String, dynamic> json) =>
-      LauncherStatus(
-        ok: json['ok'] == true,
-        launcher: json['launcher']?.toString() ?? '',
-        serverRunning: json['server_running'] == true,
-        serverHost: json['server_host']?.toString() ?? '',
-        serverPort: _asInt(json['server_port']),
-        lastAction: json['last_action']?.toString() ?? '',
-        lastError: json['last_error']?.toString() ?? '',
-        message: json['message']?.toString() ?? '',
+  factory LauncherStatus.fromJson(Map<String, dynamic> json) {
+    final operationJson = json['operation'];
+    final activeOperationJson = json['active_operation'];
+    LauncherOperation? operation;
+    if (operationJson is Map) {
+      operation = LauncherOperation.fromJson(
+        Map<String, dynamic>.from(operationJson),
       );
+    } else if ((json['operation_id']?.toString() ?? '').isNotEmpty) {
+      // Tolerate early async-launcher builds that returned only top-level
+      // operation fields while still requiring a concrete operation id.
+      operation = LauncherOperation(
+        id: json['operation_id'].toString(),
+        action: json['operation_action']?.toString() ??
+            json['last_action']?.toString() ??
+            '',
+        phase:
+            json['operation_phase']?.toString().trim().toLowerCase() ?? '',
+        message: json['operation_message']?.toString() ??
+            json['message']?.toString() ??
+            '',
+        lastError: json['operation_error']?.toString() ??
+            json['last_error']?.toString() ??
+            '',
+      );
+    }
+    LauncherOperation? activeOperation;
+    if (activeOperationJson is Map) {
+      activeOperation = LauncherOperation.fromJson(
+        Map<String, dynamic>.from(activeOperationJson),
+      );
+    }
+    final serverRunning = json['server_running'] == true;
+    return LauncherStatus(
+      ok: json['ok'] == true,
+      launcher: json['launcher']?.toString() ?? '',
+      serverRunning: serverRunning,
+      serverState: json['server_state']?.toString() ??
+          (serverRunning ? 'healthy' : 'stopped'),
+      serverHost: json['server_host']?.toString() ?? '',
+      serverPort: _asInt(json['server_port']),
+      lastAction: json['last_action']?.toString() ?? '',
+      lastError: json['last_error']?.toString() ?? '',
+      message: json['message']?.toString() ?? '',
+      operation: operation,
+      activeOperation: activeOperation,
+    );
+  }
+
+  LauncherOperation? get currentOperation => operation ?? activeOperation;
 }
 
-class TrilobiteLauncherApi {
+class SonderLauncherApi {
   static const _actions = {'start', 'stop', 'restart'};
+  static final Random _secureRandom = Random.secure();
 
   final String baseUrl;
   final String token;
 
-  const TrilobiteLauncherApi({required this.baseUrl, required this.token});
+  const SonderLauncherApi({required this.baseUrl, required this.token});
 
   Uri _uri(String path) {
     final base = baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
@@ -56,19 +147,30 @@ class TrilobiteLauncherApi {
           'Authorization': 'Bearer ${token.trim()}',
       };
 
+  static String _newIdempotencyKey() {
+    final bytes = List<int>.generate(16, (_) => _secureRandom.nextInt(256));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    final hex = bytes.map((byte) => byte.toRadixString(16).padLeft(2, '0'));
+    final value = hex.join();
+    return '${value.substring(0, 8)}-${value.substring(8, 12)}-'
+        '${value.substring(12, 16)}-${value.substring(16, 20)}-'
+        '${value.substring(20)}';
+  }
+
   LauncherStatus _decode(http.Response response) {
     Map<String, dynamic> body;
     try {
       body = jsonDecode(utf8.decode(response.bodyBytes))
           as Map<String, dynamic>;
     } catch (_) {
-      throw TrilobiteException('Could not parse host launcher response.');
+      throw SonderException('Could not parse host launcher response.');
     }
     if (response.statusCode == 401) {
-      throw TrilobiteException('Host launcher authentication failed.');
+      throw SonderException('Host launcher authentication failed.');
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw TrilobiteException(
+      throw SonderException(
         body['error']?.toString() ??
             body['message']?.toString() ??
             'Host launcher returned HTTP ${response.statusCode}.',
@@ -79,7 +181,7 @@ class TrilobiteLauncherApi {
 
   Future<LauncherStatus> status() async {
     if (baseUrl.trim().isEmpty) {
-      throw TrilobiteException('Host launcher URL is not configured.');
+      throw SonderException('Host launcher URL is not configured.');
     }
     try {
       final response = await http
@@ -87,50 +189,170 @@ class TrilobiteLauncherApi {
           .timeout(const Duration(seconds: 8));
       return _decode(response);
     } catch (error) {
-      if (error is TrilobiteException) rethrow;
-      throw TrilobiteException('Cannot reach host launcher: $error');
+      if (error is SonderException) rethrow;
+      throw SonderException('Cannot reach host launcher: $error');
     }
   }
 
   Future<LauncherStatus> action(
     String action, {
     String contextSize = '8192',
+    String? idempotencyKey,
+    Duration maxWait = const Duration(minutes: 30),
+    Duration pollInterval = const Duration(seconds: 1),
+    void Function(LauncherStatus status)? onProgress,
+    bool Function()? isCancelled,
   }) async {
     if (!_actions.contains(action)) {
-      throw TrilobiteException('Unsupported host launcher action.');
+      throw SonderException('Unsupported host launcher action.');
     }
     if (baseUrl.trim().isEmpty) {
-      throw TrilobiteException('Host launcher URL is not configured.');
+      throw SonderException('Host launcher URL is not configured.');
+    }
+    final requestKey = (idempotencyKey ?? _newIdempotencyKey()).trim();
+    if (!RegExp(r'^[A-Za-z0-9._:-]{8,128}$').hasMatch(requestKey)) {
+      throw SonderException('Invalid host launcher idempotency key.');
     }
     try {
       final response = await http
           .post(
             _uri('/v1/launcher/$action'),
-            headers: {..._headers(), 'Content-Type': 'application/json'},
+            headers: {
+              ..._headers(),
+              'Content-Type': 'application/json',
+              'Idempotency-Key': requestKey,
+            },
             body: jsonEncode({'context_size': contextSize}),
           )
-          .timeout(const Duration(seconds: 45));
-      return _decode(response);
+          .timeout(const Duration(seconds: 8));
+      final accepted = _decode(response);
+      if (response.statusCode != 202) return accepted;
+
+      final operation = accepted.operation;
+      if (operation == null || operation.id.isEmpty) {
+        throw SonderException(
+          'Host launcher accepted the request without an operation ID.',
+        );
+      }
+      onProgress?.call(accepted);
+      return waitForOperation(
+        operation.id,
+        maxWait: maxWait,
+        pollInterval: pollInterval,
+        onProgress: onProgress,
+        isCancelled: isCancelled,
+      );
     } catch (error) {
-      if (error is TrilobiteException) rethrow;
-      throw TrilobiteException('Host launcher request failed: $error');
+      if (error is SonderException) rethrow;
+      if (error is TimeoutException) {
+        throw SonderException(
+          'Host launcher did not acknowledge the action in time. It may have '
+          'accepted it; refresh Host Launcher status before retrying.',
+        );
+      }
+      throw SonderException('Host launcher request failed: $error');
+    }
+  }
+
+  Future<LauncherStatus> waitForOperation(
+    String operationId, {
+    Duration maxWait = const Duration(minutes: 30),
+    Duration pollInterval = const Duration(seconds: 1),
+    void Function(LauncherStatus status)? onProgress,
+    bool Function()? isCancelled,
+  }) async {
+    if (baseUrl.trim().isEmpty) {
+      throw SonderException('Host launcher URL is not configured.');
+    }
+    if (operationId.trim().isEmpty) {
+      throw SonderException('Host launcher operation ID is missing.');
+    }
+    final stopwatch = Stopwatch()..start();
+    final boundedWait = maxWait.isNegative ? Duration.zero : maxWait;
+    final boundedInterval =
+        pollInterval.isNegative ? Duration.zero : pollInterval;
+    String lastPollError = '';
+    while (true) {
+      if (isCancelled?.call() == true) {
+        throw SonderException(
+          'Stopped waiting for the host operation. It may still be running; '
+          'refresh Host Launcher status before starting another action.',
+        );
+      }
+      if (stopwatch.elapsed >= boundedWait) {
+        final detail = lastPollError.isEmpty
+            ? ''
+            : ' Last status error: $lastPollError.';
+        throw SonderException(
+          'Timed out waiting for host operation $operationId. It may still be '
+          'running; refresh Host Launcher status before retrying.$detail',
+        );
+      }
+      if (boundedInterval > Duration.zero) {
+        final remaining = boundedWait - stopwatch.elapsed;
+        await Future<void>.delayed(
+          boundedInterval < remaining ? boundedInterval : remaining,
+        );
+      }
+      if (isCancelled?.call() == true) continue;
+      if (stopwatch.elapsed >= boundedWait) continue;
+
+      http.Response response;
+      try {
+        final remaining = boundedWait - stopwatch.elapsed;
+        final requestTimeout = remaining < const Duration(seconds: 8)
+            ? remaining
+            : const Duration(seconds: 8);
+        response = await http
+            .get(
+              _uri(
+                '/v1/launcher/operations/'
+                '${Uri.encodeComponent(operationId)}',
+              ),
+              headers: _headers(),
+            )
+            .timeout(requestTimeout);
+      } catch (error) {
+        if (error is SonderException) rethrow;
+        final detail = error.toString();
+        lastPollError = detail.length > 240
+            ? '${detail.substring(0, 240)}…'
+            : detail;
+        continue;
+      }
+      if (response.statusCode >= 500) {
+        lastPollError = 'HTTP ${response.statusCode}';
+        continue;
+      }
+      final status = _decode(response);
+      lastPollError = '';
+      final operation = status.operation;
+      if (operation == null || operation.id != operationId) {
+        throw SonderException(
+          'Host launcher returned a mismatched operation status.',
+        );
+      }
+      onProgress?.call(status);
+      if (!operation.isTerminal) continue;
+      if (operation.succeeded && status.ok) return status;
+      throw SonderException(operation.displayMessage);
     }
   }
 }
 
-/// Thin client for a hosted trilobite instance (trilobite_serve.py).
+/// Thin client for a hosted Sonder Runtime instance (sonder_serve.py).
 ///
 /// The server speaks the OpenAI chat-completions dialect:
 ///   GET  <base>/v1/models
 ///   POST <base>/v1/chat/completions   { model, messages[], stream }
 /// with an optional `Authorization: Bearer <key>` header when the host
-/// enabled auth. This mirrors trilobite_client.py, but for a GUI.
-class TrilobiteApi {
+/// enabled auth. This mirrors sonder_client.py, but for a GUI.
+class SonderApi {
   final String baseUrl; // e.g. http://192.168.1.10:11435
   final String apiKey; // empty when the server has auth disabled
   final String localFallbackUrl;
 
-  const TrilobiteApi({
+  const SonderApi({
     required this.baseUrl,
     this.apiKey = '',
     this.localFallbackUrl = 'http://127.0.0.1:11435',
@@ -273,7 +495,7 @@ class TrilobiteApi {
   }
 
   /// Verify connectivity + auth. Returns the list of model ids the server
-  /// advertises (typically just ["trilobite"]). Throws [TrilobiteException]
+  /// advertises (typically just ["sonder"]). Throws [SonderException]
   /// on any failure so the UI can show a precise reason.
   Future<List<String>> listModels() async {
     late http.Response resp;
@@ -288,17 +510,17 @@ class TrilobiteApi {
               .get(_uri('/v1/models', localFallbackUrl), headers: _headers(''))
               .timeout(const Duration(seconds: 15));
         } catch (_) {
-          throw TrilobiteException('Cannot reach server: $e');
+          throw SonderException('Cannot reach server: $e');
         }
       } else {
-        throw TrilobiteException('Cannot reach server: $e');
+        throw SonderException('Cannot reach server: $e');
       }
     }
     if (resp.statusCode == 401) {
-      throw TrilobiteException('Unauthorized — check the API key.');
+      throw SonderException('Unauthorized — check the API key.');
     }
     if (resp.statusCode != 200) {
-      throw TrilobiteException('Server returned HTTP ${resp.statusCode}.');
+      throw SonderException('Server returned HTTP ${resp.statusCode}.');
     }
     try {
       final obj = jsonDecode(resp.body) as Map<String, dynamic>;
@@ -308,7 +530,7 @@ class TrilobiteApi {
           .where((s) => s.isNotEmpty)
           .toList();
     } catch (_) {
-      throw TrilobiteException('Unexpected response from server.');
+      throw SonderException('Unexpected response from server.');
     }
   }
 
@@ -316,34 +538,34 @@ class TrilobiteApi {
     late http.Response resp;
     try {
       resp = await http
-          .get(_uri('/v1/trilobite/status'), headers: _headers())
+          .get(_uri('/v1/sonder/status'), headers: _headers())
           .timeout(const Duration(seconds: 20));
     } catch (e) {
       if (_canFallback) {
         try {
           resp = await http
-              .get(_uri('/v1/trilobite/status', localFallbackUrl),
+              .get(_uri('/v1/sonder/status', localFallbackUrl),
                   headers: _headers(''))
               .timeout(const Duration(seconds: 20));
         } catch (_) {
-          throw TrilobiteException('Cannot reach server: $e');
+          throw SonderException('Cannot reach server: $e');
         }
       } else {
-        throw TrilobiteException('Cannot reach server: $e');
+        throw SonderException('Cannot reach server: $e');
       }
     }
     if (resp.statusCode == 401) {
-      throw TrilobiteException('Unauthorized - check the API key.');
+      throw SonderException('Unauthorized - check the API key.');
     }
     if (resp.statusCode != 200) {
-      throw TrilobiteException('Server returned HTTP ${resp.statusCode}.');
+      throw SonderException('Server returned HTTP ${resp.statusCode}.');
     }
     try {
       final obj =
           jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
       return SystemInfo.fromJson(obj);
     } catch (_) {
-      throw TrilobiteException('Could not parse system status.');
+      throw SonderException('Could not parse system status.');
     }
   }
 
@@ -355,7 +577,7 @@ class TrilobiteApi {
   /// typed as the last user message.
   Future<String> chat(
     List<ChatMessage> messages, {
-    String model = 'trilobite',
+    String model = 'sonder',
     String contextSize = '8192',
     String sessionId = '',
     String project = '',
@@ -392,18 +614,18 @@ class TrilobiteApi {
               .timeout(const Duration(minutes: 5));
           warning = _fallbackWarning('chat', e);
         } catch (_) {
-          throw TrilobiteException('Request failed: $e');
+          throw SonderException('Request failed: $e');
         }
       } else {
-        throw TrilobiteException('Request failed: $e');
+        throw SonderException('Request failed: $e');
       }
     }
 
     if (resp.statusCode == 401) {
-      throw TrilobiteException('Unauthorized — check the API key.');
+      throw SonderException('Unauthorized — check the API key.');
     }
     if (resp.statusCode != 200) {
-      throw TrilobiteException('Server returned HTTP ${resp.statusCode}.');
+      throw SonderException('Server returned HTTP ${resp.statusCode}.');
     }
 
     try {
@@ -411,22 +633,22 @@ class TrilobiteApi {
           jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
       final choices = (obj['choices'] as List?) ?? const [];
       if (choices.isEmpty) {
-        throw TrilobiteException('Empty response from server.');
+        throw SonderException('Empty response from server.');
       }
       final msg = (choices.first as Map<String, dynamic>)['message']
           as Map<String, dynamic>?;
       final content = msg?['content']?.toString() ?? '';
       final reply = content.trimRight();
       return warning.isEmpty ? reply : '$warning\n\n$reply';
-    } on TrilobiteException {
+    } on SonderException {
       rethrow;
     } catch (_) {
-      throw TrilobiteException('Could not parse server response.');
+      throw SonderException('Could not parse server response.');
     }
   }
 
   Future<String> register(String username, String password) async {
-    return _accountAction('/v1/trilobite/register', username, password);
+    return _accountAction('/v1/sonder/register', username, password);
   }
 
   Future<String> login(String username, String password) async {
@@ -434,17 +656,17 @@ class TrilobiteApi {
     try {
       resp = await http
           .post(
-            _uri('/v1/trilobite/login'),
+            _uri('/v1/sonder/login'),
             headers: _headers(),
             body: jsonEncode({'username': username, 'password': password}),
           )
           .timeout(const Duration(seconds: 20));
     } catch (e) {
-      throw TrilobiteException('Login failed: $e');
+      throw SonderException('Login failed: $e');
     }
     final obj = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
     if (resp.statusCode != 200 || obj['ok'] != true) {
-      throw TrilobiteException(obj['message']?.toString() ?? 'Login failed.');
+      throw SonderException(obj['message']?.toString() ?? 'Login failed.');
     }
     return obj['token']?.toString() ?? '';
   }
@@ -461,20 +683,20 @@ class TrilobiteApi {
           )
           .timeout(const Duration(seconds: 20));
     } catch (e) {
-      throw TrilobiteException('Account request failed: $e');
+      throw SonderException('Account request failed: $e');
     }
     final obj = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
     if (resp.statusCode != 200 || obj['ok'] != true) {
-      throw TrilobiteException(
+      throw SonderException(
           obj['message']?.toString() ?? 'Account request failed.');
     }
     return obj['message']?.toString() ?? 'OK';
   }
 }
 
-class TrilobiteException implements Exception {
+class SonderException implements Exception {
   final String message;
-  TrilobiteException(this.message);
+  SonderException(this.message);
   @override
   String toString() => message;
 }

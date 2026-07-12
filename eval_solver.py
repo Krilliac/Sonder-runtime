@@ -1,6 +1,6 @@
 """eval_solver — measure the reasoning lift from execution-grounded self-repair.
 
-For each hard task, runs solver.solve() on the SAME trilobite model and reports:
+For each hard task, runs solver.solve() on the SAME model selected by Sonder Runtime and reports:
   * pass@1     — did the FIRST single-shot attempt already pass (baseline)?
   * pass@repair — did the generate->run->repair loop eventually pass?
 The gap is the lift the verifier buys at test time. Uses grounding.run_code for
@@ -25,7 +25,7 @@ HARD_NAMES = [
 def _gen_fn():
     """Escalating-temperature generator: each successive attempt samples hotter so
     self-repair actually explores instead of re-emitting the same buggy answer."""
-    model = server.resolve_trilobite_model(False)
+    model = server.resolve_sonder_model(False)
     temps = [0.2, 0.6, 0.9, 1.1, 1.2]
     state = {"i": 0}
 

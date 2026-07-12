@@ -1,9 +1,10 @@
-# Safe self-improvement
+# Safe self-improvement in Sonder Runtime
 
-Trilobite self-improvement is a host-controlled state machine. Candidate model
-output can inspect and edit only an isolated candidate workspace; it cannot
-approve itself, decide that tests passed, deploy source, edit backups, or invoke
-another self-improvement run.
+Sonder Runtime self-improvement is a host-controlled state machine. Sonder is
+not the candidate or base model: candidate model output is only one untrusted
+input to the runtime. Candidate output can inspect and edit only an isolated
+workspace; it cannot approve itself, decide that tests passed, deploy source,
+edit backups, or invoke another self-improvement run.
 
 ## Trust boundaries and phases
 
@@ -41,17 +42,17 @@ with `/selfmod enable`.
 
 ## Backup and audit storage
 
-State is stored under the per-user Trilobite directory:
+State is stored under the per-user Sonder Runtime directory:
 
 ```text
-<TRILOBITE_HOME>/selfmod/selfmod.db
-<TRILOBITE_HOME>/selfmod/backups/<run-id>/manifest.json
-<TRILOBITE_HOME>/selfmod/backups/<run-id>/manifest.sha256
-<TRILOBITE_HOME>/selfmod/backups/<run-id>/files/...
-<TRILOBITE_HOME>/selfmod/workspaces/<run-id>/...
+<SONDER_HOME>/selfmod/selfmod.db
+<SONDER_HOME>/selfmod/backups/<run-id>/manifest.json
+<SONDER_HOME>/selfmod/backups/<run-id>/manifest.sha256
+<SONDER_HOME>/selfmod/backups/<run-id>/files/...
+<SONDER_HOME>/selfmod/workspaces/<run-id>/...
 ```
 
-`TRILOBITE_SELFMOD_HOME` and `TRILOBITE_SELFMOD_DB` can relocate state, but the
+`SONDER_SELFMOD_HOME` and `SONDER_SELFMOD_DB` can relocate state, but the
 state directory must remain outside the editable repository. Each manifest
 records the absolute repository, starting commit, existence, SHA-256, size,
 mode, backup path, and backup hash for every authorized file. New files are
@@ -109,7 +110,7 @@ Acceptance also rejects:
 ```
 
 The hosted chat API accepts the same slash lifecycle with developer/admin
-authorization for mutating actions. `/v1/trilobite/status` exposes the current
+authorization for mutating actions. `/v1/sonder/status` exposes the current
 mode, phase summaries, active runs, backup root, and rollback-point count for
 the Flutter System page.
 
@@ -119,9 +120,9 @@ Before deployment, the host re-verifies backups, the complete candidate diff,
 the starting commit, dirty-tree fingerprint, scope, inventory, and approval.
 Files are replaced with same-directory temporary files plus `fsync` and
 `os.replace`. Deletions happen only for declared files whose candidate version
-was removed. A separate Python health subprocess imports Trilobite and requests
-status. Failure automatically restores exact backup hashes. Already-loaded
-helper modules on Trilobite's conservative live-reload allowlist are then
+was removed. A separate Python health subprocess imports Sonder Runtime and
+requests status. Failure automatically restores exact backup hashes. Already-loaded
+helper modules on Sonder Runtime's conservative live-reload allowlist are then
 reloaded; a reload error also triggers rollback. Restart-critical supervisor,
 server, ledger, and recovery modules are protected maintenance targets, so the
 running process never replaces its own recovery/control path automatically.
@@ -145,18 +146,18 @@ commit so unrelated staged/unstaged user work is untouched.
 
 ## Emergency recovery
 
-If Trilobite cannot import or start, use the standalone stdlib-only script. It
-does not import `server`, `selfmod`, or any application module:
+If Sonder Runtime cannot import or start, use the standalone stdlib-only
+script. It does not import `server`, `selfmod`, or any application module:
 
 ```bash
 python /absolute/path/to/selfmod_recover.py \
-  /absolute/path/to/TRILOBITE_HOME/selfmod/backups/<run-id>/manifest.json
+  /absolute/path/to/SONDER_HOME/selfmod/backups/<run-id>/manifest.json
 ```
 
 On Windows:
 
 ```bat
-py C:\absolute\path\selfmod_recover.py %LOCALAPPDATA%\trilobite\selfmod\backups\<run-id>\manifest.json
+py C:\absolute\path\selfmod_recover.py %LOCALAPPDATA%\sonder\selfmod\backups\<run-id>\manifest.json
 ```
 
 The command verifies the manifest checksum and every backup hash, atomically

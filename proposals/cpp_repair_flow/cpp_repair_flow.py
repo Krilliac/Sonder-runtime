@@ -1,6 +1,6 @@
 """cpp_repair_flow — a thin C++-specific seam over solver.solve_verified().
 
-solver.solve_verified() already generalizes trilobite's generate->verify->repair
+solver.solve_verified() already generalizes sonder's generate->verify->repair
 loop to ANY named backend in verifiers.REGISTRY: it takes a `verifier` key, calls
 verifiers.verify(verifier, code, spec) (or an injected verify_fn), and feeds the
 verifier's Verdict.detail back into the repair prompt on failure. cpp_compile is

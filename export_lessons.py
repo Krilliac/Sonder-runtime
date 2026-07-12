@@ -1,4 +1,4 @@
-"""Export trilobite's distilled lessons from memory.db to lessons.jsonl.
+"""Export sonder's distilled lessons from memory.db to lessons.jsonl.
 
 The raw memory.db is a binary SQLite file (churns every interaction, and will
 eventually hold interactions with private code) so it stays gitignored. This

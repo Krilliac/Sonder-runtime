@@ -8,7 +8,7 @@ import autopilot_store
 
 @pytest.fixture(autouse=True)
 def isolated_autopilot_db(monkeypatch, tmp_path):
-    monkeypatch.setenv("TRILOBITE_AUTOPILOT_DB", str(tmp_path / "autopilot.db"))
+    monkeypatch.setenv("SONDER_AUTOPILOT_DB", str(tmp_path / "autopilot.db"))
     autopilot_store.reset_schema_cache_for_tests()
     yield
     autopilot_store.reset_schema_cache_for_tests()

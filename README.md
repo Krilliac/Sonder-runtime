@@ -1,39 +1,89 @@
-# trilobite
+# Sonder Runtime
 
 <!-- ci-artifact-badges:start -->
-[![Latest CI artifacts 4 files](https://img.shields.io/badge/Latest%20CI%20artifacts-4%20files-2088FF?style=for-the-badge&logo=githubactions&logoColor=white)](https://github.com/Krilliac/Trilobite-model/actions/runs/28965607688)
-[![Android download](https://img.shields.io/badge/Android-download-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/Krilliac/Trilobite-model/actions/runs/28965607688/artifacts/8178000122)
-[![Linux download](https://img.shields.io/badge/Linux-download-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/Krilliac/Trilobite-model/actions/runs/28965607688/artifacts/8177919570)
-[![Windows download](https://img.shields.io/badge/Windows-download-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Krilliac/Trilobite-model/actions/runs/28965607688/artifacts/8177965622)
-[![macOS download](https://img.shields.io/badge/macOS-download-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/Krilliac/Trilobite-model/actions/runs/28965607688/artifacts/8177924740)
+[![Latest CI artifacts 4 files](https://img.shields.io/badge/Latest%20CI%20artifacts-4%20files-2088FF?style=for-the-badge&logo=githubactions&logoColor=white)](https://github.com/Krilliac/Sonder-runtime/actions/runs/28965607688)
+[![Android download](https://img.shields.io/badge/Android-download-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/Krilliac/Sonder-runtime/actions/runs/28965607688/artifacts/8178000122)
+[![Linux download](https://img.shields.io/badge/Linux-download-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/Krilliac/Sonder-runtime/actions/runs/28965607688/artifacts/8177919570)
+[![Windows download](https://img.shields.io/badge/Windows-download-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Krilliac/Sonder-runtime/actions/runs/28965607688/artifacts/8177965622)
+[![macOS download](https://img.shields.io/badge/macOS-download-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/Krilliac/Sonder-runtime/actions/runs/28965607688/artifacts/8177924740)
 <!-- ci-artifact-badges:end -->
 
-**A private AI that's *yours*.** It runs entirely on your own machine, learns from your work over time, and no one can read it, rate-limit it, reset it, or take it away.
+**A private, adaptive AI runtime that's *yours*.** It orchestrates models,
+memory, tools, grounded work, and optional adapter training on hardware you
+control.
 
-trilobite is **not** trying to be smarter than ChatGPT or Claude — a local model won't win that race, and this README won't pretend otherwise. It's built for a different thing those can't give you: **privacy, ownership, and personalization.** Nothing leaves your computer. It works offline. It adapts to *you*. And it's yours to keep.
+> [!IMPORTANT]
+> **Sonder is a runtime, not a foundation model and not a set of base-model
+> weights.** [Ollama](https://ollama.com) is the local model server: it stores
+> model artifacts, loads the selected weights into system RAM/VRAM, and performs
+> inference. Sonder sits around that server. It selects an Ollama model,
+> builds grounded prompts, manages memory and tools, applies runtime policy, and
+> validates/deploys optional trained adapters. The `sonder:latest` and
+> `sonder-personal:latest` names are Ollama model aliases, not models embedded
+> in this Git repository.
+
+Sonder is **not** trying to turn a small local model into a frontier model,
+and this README will not pretend otherwise. It is built for privacy, ownership,
+grounded work, and personalization. Local operation works offline; web and cloud
+tiers are separate, explicit opt-ins.
+
+The project uses `sonder` commands, `SONDER_*` environment variables, Sonder
+state paths, and `sonder:*` Ollama aliases. These are runtime identifiers; the
+actual base-model files remain managed by Ollama rather than this repository.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the complete component and model
+lifecycle boundary.
 
 ---
 
 ## The honest pitch (what this is, and isn't)
 
 **What it is**
-- **Local & private.** The model runs on your CPU/GPU via [Ollama](https://ollama.com). No prompt, no file, no lesson ever leaves your machine. Works on a plane, on sensitive data, with no subscription.
+- **A model-agnostic runtime.** Sonder provides the API, REPL, apps, memory,
+  retrieval, tools, policies, activity evidence, training workflow, and guarded
+  automation around a selected inference model.
+- **Local & private by default.** Ollama serves the selected local model on your
+  CPU/GPU. With cloud and web opt-ins disabled, prompts, files, memory, and
+  lessons stay on your machine.
 - **Self-improving on *your* context.** Every coding interaction can be captured, scored by real outcomes (did it compile? pass tests?), and distilled into short "lessons" it retrieves next time. Over time it learns *your* patterns, not the internet's average.
-- **Yours to own.** You keep the weights, the memory, and the lessons. Nothing is rented or deprecated out from under you.
+- **Yours to own.** You keep the Ollama model files, optional adapter weights,
+  runtime state, memory, and lessons. Nothing in Sonder Runtime requires
+  renting a hosted model.
 
 **What it isn't**
-- **Not a frontier model.** A local 7B is genuinely *weaker* than a hosted giant. If you just want the smartest possible answer with zero setup, use ChatGPT/Claude — honestly.
+- **Not a standalone or pretrained model.** Cloning this repository does not
+  download Qwen weights. Setup asks Ollama to use an installed or downloaded
+  compatible model, or imports a separately built sealed model bundle.
+- **Not a frontier model.** A local 7B served through the runtime is genuinely
+  *weaker* than a hosted giant. If you just want the smartest possible answer
+  with zero setup, use ChatGPT/Claude — honestly.
 - **Not "for literally everyone" yet.** Today it needs a decent machine and some setup. See the [Roadmap](#roadmap-toward-for-everyone) for how that changes.
 
 **Who it's for:** privacy-conscious people, offline/field use, tinkerers and the local-LLM crowd, and organizations that need a private assistant on their *own* data (a clinic, a firm, a studio) — anyone who values *owning* their AI over squeezing out the last IQ point.
 
-> The moat isn't the weights — a generically fine-tuned model just re-derives what you'd get from Google, and the base model already knows it. The moat is **your** private, grounded data: your code, your bugs and fixes, your conventions. trilobite is built to accumulate exactly that.
+> The moat isn't the weights — a generically fine-tuned model just re-derives what you'd get from Google, and the base model already knows it. The moat is **your** private, grounded data: your code, your bugs and fixes, your conventions. Sonder is built to accumulate exactly that.
 
 ---
 
 ## How it works
 
-trilobite is a frozen local model (Qwen2.5-Coder) wrapped in a small, dependency-light Python **learning loop**:
+Sonder is a mostly Python orchestration runtime. Ollama is a separate local
+inference service, and Qwen2.5-Coder is one supported default model family—not
+the Sonder project itself:
+
+```text
+Android / desktop / REPL / MCP
+              |
+              v
+Sonder Runtime: policy + memory + tools + grounding + training control
+              |
+              v
+Ollama model server: model storage + RAM/VRAM loading + token inference
+              |
+              v
+Selected base or personal model weights (for example Qwen2.5-Coder)
+```
+
+For a normal response, the runtime's learning loop is:
 
 ```
 your task ─► retrieve relevant lessons ─► augment prompt ─► local model ─► answer
@@ -47,13 +97,13 @@ your task ─► retrieve relevant lessons ─► augment prompt ─► local mo
 - **Grounding** — you (or your fleet) call `record_outcome` with a real signal; execution outcomes are the reward.
 - **Reflection** — a good outcome distills a deduped one-line lesson future prompts can retrieve.
 
-The loop is model-agnostic: point it at whatever LLM you have. The local student
-(`code`) is memory-augmented; a stronger paid/cloud model can act as a **teacher** —
-it answers *clean* (no local-lesson injection) and its grounded good outcomes are
-distilled into lessons and fine-tuning data the local model retrieves later. Which
-tiers learn is configurable (`TRILOBITE_LEARN_TIERS`, default local-only:
+The loop is model-agnostic: point it at a compatible Ollama model. The selected
+local `code` model is memory-augmented; a stronger paid/cloud model can answer
+without local-lesson injection while its grounded good outcomes are distilled into
+lessons and fine-tuning data the local model retrieves later. Which
+tiers learn is configurable (`SONDER_LEARN_TIERS`, default local-only:
 `fast,code,general`). The memory, capture, and distillation always stay local; only a
-cloud-tier *prompt* leaves the machine, and only after `TRILOBITE_ALLOW_CLOUD=1`.
+cloud-tier *prompt* leaves the machine, and only after `SONDER_ALLOW_CLOUD=1`.
 The `fast`, `code`, and `general` aliases are local-only. Their shared mappings
 and each execution lane's preferred alias live in the hot-reloadable runtime
 policy described below. Environment values seed the first policy file; cloud
@@ -61,24 +111,24 @@ aliases and cloud opt-in remain separate host-owned configuration.
 
 ### Memory beyond lessons
 
-The learning loop above is *cross-task* memory. On top of it trilobite also has:
+The learning loop above is *cross-task* memory. On top of it Sonder also has:
 
-- **Conversation memory (ON by default).** Successive `trilobite` calls remember each
+- **Conversation memory (ON by default).** Successive `sonder` calls remember each
   other, so follow-ups have context. With no `session`, calls share the `default`
   thread; pass a distinct `session` id to isolate a conversation, or `session="none"`
   for a one-off single turn. Threads persist in `memory.db` across restarts and are
   auto-titled; older turns are rolled into a running summary so a thread never
   overflows the local context window. (The 7B is a ~32K-context model on a 6 GB GPU —
   memory is *carrying the right turns + summarizing the rest*, not a giant window.)
-  List/resume threads with `trilobite_sessions()` / REPL `/sessions` / `/resume`.
+  List/resume threads with `sonder_sessions()` / REPL `/sessions` / `/resume`.
 - **Semantic recall.** Each call also surfaces the most similar *past good-outcome
   solutions* (vector search over prior interactions), not just distilled lessons.
-- **Project facts.** `trilobite_remember_fact(text, project=…)` stores durable facts
+- **Project facts.** `sonder_remember_fact(text, project=…)` stores durable facts
   (toolchain, conventions, key paths) that are injected into every call for that
   project — a mini-brief the model carries itself. Scope a call with `project=…`.
-- **Dynamic user preferences.** Trilobite now captures clear preference statements
+- **Dynamic user preferences.** Sonder now captures clear preference statements
   like "I prefer concise status updates" during normal chat, stores them with
-  evidence counts, and injects active preferences into future local-student
+  evidence counts, and injects active preferences into future local-model
   prompts. Use `/prefer`, `/prefer <text>`, or `/prefer forget <id-or-key>` to
   inspect, teach, or disable them explicitly.
 - **Visible activity.** Each response tracks observable work: model calls, tool
@@ -98,10 +148,10 @@ The learning loop above is *cross-task* memory. On top of it trilobite also has:
 
 ## Four ways to run it
 
-1. **Local, in your terminal** — `trilobite` (like launching `claude`). Interactive REPL routed through the full loop, with `/work`, `/report`, `/checklist`, `/inventory`, `/tree`, `/search`, `/programs`, `/scripts`, `/image`, `/mkdir`, `/runprogram`, `/runscript`, `/trace`, `/strict`, `/run`, `/train`, `/master`, `/agents`, `/capacity`, `/agentcancel`, `/agentretry`, `/asset`, `/artifactcheck`, `/forge`, `/game`, `/gamefleet`, `/todo`, `/commands`, `/activity`, `/runtime`, `/mcp`, `/learning`, `/dump`, `/permissions`, `/compact`, `/debug`, `/pass`, `/fail`, `/stats`, `/context`, `/quality`, `/privacy`, `/embeddings`, `/emotion`, and `/improve`, plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts`. Concrete natural-language workspace requests route to the same guarded workbench. Each REPL launch is its own remembered thread.
-2. **Hosted on your own server + a thin client anywhere** — run `deploy_trilobite.sh --serve` on your box (systemd service, API key), then any machine runs the single-file `trilobite_client.py` pointed at it. The serve layer threads the chat UI's own conversation history.
-3. **Integrated with Claude/Codex** — the MCP `local-llm` tools include `workbench_agent`, budgeted workspace inventory, guarded tree/range/text/script/program/image inspection, argv-only program/script execution, persistent checklists, exact activity reports, agent/master orchestration, universal artifact generation, grounded game generation, bounded code/project runners, workflows, web tools, self-healing, privacy-safe memory review, local embedding backfill, and the remaining learning/memory surfaces. `master_orchestrate` can delegate to parallel subagents and audit their outputs; artifact and game tools create persistent assets/projects and accept only grounded checks. Local tiers remain the default for private workspace code.
-4. **Mobile & desktop app (GUI)** — a cross-platform [Flutter client](app/) with a shared Windows/Android/Linux/macOS System experience. Android and other client-only builds can start, stop, and restart the configured computer through a bounded authenticated host launcher; they do not receive a remote shell. See [app/README.md](app/README.md) and [mobile host control](MOBILE_HOST_CONTROL.md).
+1. **Local, in your terminal** — `sonder` (like launching `claude`). Interactive REPL routed through the full loop, with `/work`, `/report`, `/checklist`, `/inventory`, `/tree`, `/search`, `/programs`, `/scripts`, `/image`, `/mkdir`, `/runprogram`, `/runscript`, `/trace`, `/strict`, `/run`, `/train`, `/master`, `/agents`, `/capacity`, `/agentcancel`, `/agentretry`, `/asset`, `/artifactcheck`, `/forge`, `/game`, `/gamefleet`, `/todo`, `/commands`, `/activity`, `/runtime`, `/mcp`, `/learning`, `/dump`, `/permissions`, `/compact`, `/debug`, `/pass`, `/fail`, `/stats`, `/context`, `/quality`, `/privacy`, `/embeddings`, `/emotion`, and `/improve`, plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts`. Concrete natural-language workspace requests route to the same guarded workbench. Each REPL launch is its own remembered thread.
+2. **Hosted on your own server + a thin client anywhere** — run `deploy_sonder.sh --serve` on your box (systemd service, API key), then any machine runs the single-file `sonder_client.py` pointed at it. The serve layer threads the chat UI's own conversation history.
+3. **Integrated with Claude/Codex** — the MCP `sonder-runtime` tools include `workbench_agent`, budgeted workspace inventory, guarded tree/range/text/script/program/image inspection, argv-only program/script execution, persistent checklists, exact activity reports, agent/master orchestration, universal artifact generation, grounded game generation, bounded code/project runners, workflows, web tools, self-healing, privacy-safe memory review, local embedding backfill, and the remaining learning/memory surfaces. `master_orchestrate` can delegate to parallel subagents and audit their outputs; artifact and game tools create persistent assets/projects and accept only grounded checks. Local tiers remain the default for private workspace code.
+4. **Mobile & desktop app (GUI)** — a cross-platform [Flutter client](app/) with a shared Windows/Android/Linux/macOS System experience. Android and other client-only builds can start, stop, and restart the configured computer through a bounded authenticated host launcher; long first-run starts continue as persistent, resumable host operations and never expose a remote shell. See [app/README.md](app/README.md) and [mobile host control](MOBILE_HOST_CONTROL.md).
 
 ### Persistent autopilot
 
@@ -215,7 +265,8 @@ through the verified default matrix. The direct command form is
 
 ## Recommended offload procedure
 
-Use Trilobite as a local junior implementer, not as the final authority:
+Use Sonder Runtime to orchestrate a local junior implementer, not as the final
+authority:
 
 1. Start substantial work with `status()` or `diagnostics()` so you know model,
    VRAM, context, and memory-quality state before launching a batch.
@@ -224,7 +275,7 @@ Use Trilobite as a local junior implementer, not as the final authority:
    `master_orchestrate` only when independent perspectives are actually useful.
    For repository tasks, `master_orchestrate` switches to guarded read-only
    tool agents and requires successful file evidence before accepting an answer.
-   Allowed roots come from `TRILOBITE_FILE_ROOTS` plus the hot-read
+   Allowed roots come from `SONDER_FILE_ROOTS` plus the hot-read
    `file_roots.local`; denied/unavailable access falls back to EVIDENCE_REQUIRED.
 3. Keep prompts narrow and complete. Include the relevant files, constraints,
    acceptance checks, and what "done" means; the local model cannot see the
@@ -235,7 +286,7 @@ Use Trilobite as a local junior implementer, not as the final authority:
    diversity. Explicit `fleet`, `swarm`, `workflow`, `parallel agents`, or
    spawn-as-many requests queue the hardware-derived breadth ceiling (two
    candidates per logical CPU, capped at 64 and overridable with
-   `TRILOBITE_MAX_AGENTS`). A separate scheduler bounds simultaneous model calls
+   `SONDER_MAX_AGENTS`). A separate scheduler bounds simultaneous model calls
    from CPU and currently available RAM (8 automatic slots maximum). Inspect it
    with `/capacity [requested-agents]`; use `/agentcancel <id|prefix|all>` for
    cooperative cancellation. Queued work stops immediately. Already-running
@@ -251,11 +302,11 @@ Use Trilobite as a local junior implementer, not as the final authority:
    quality is part of model quality.
 8. Keep cloud tiers opt-in. Local tiers are the default for private code and
    user-specific memory; cloud tiers are metered and prompts leave the machine.
-9. Dogfood automatically. When normal Trilobite use reveals a bug, missing
+9. Dogfood automatically. When normal Sonder use reveals a bug, missing
    feature, weak procedure, confusing docs, bad default, flaky test, or other
    fixable issue in this repo, the assistant working with the user is authorized
    to implement the fix, run the relevant tests, commit, and push to
-   `Krilliac/Trilobite-model` without waiting for a separate planning round.
+   `Krilliac/Sonder-runtime` without waiting for a separate planning round.
 
 Do not offload secrets, credential material, final security review, subtle
 correctness decisions, hot-path performance work, or changes whose failure mode
@@ -268,24 +319,24 @@ explicit approval.
 
 ## Quickstart
 
-**On a server (get the model live):**
+**On a server (start the runtime and its Ollama-backed model):**
 ```bash
-git clone https://github.com/Krilliac/Trilobite-model.git && cd Trilobite-model
-bash deploy_trilobite.sh            # installs Ollama, picks a model that fits your RAM, creates the alias
-# or:  bash deploy_trilobite.sh --serve   # also host it as a public API service (prints URL + API key)
+git clone https://github.com/Krilliac/Sonder-runtime.git && cd Sonder-runtime
+bash deploy_sonder.sh            # installs Ollama, picks a model that fits your RAM, creates the alias
+# or:  bash deploy_sonder.sh --serve   # also host it as a public API service (prints URL + API key)
 ```
 
 **Local dev:**
 ```bash
 python -m venv venv && venv/Scripts/pip install mcp -r requirements-dev.txt
 venv/Scripts/python -m pytest -q          # run the test suite
-python trilobite_repl.py                  # interactive session
+python sonder_repl.py                  # interactive session
 ```
 
 **Bundled desktop engine setup:** run `bootstrap-engine.cmd` on Windows,
 `./bootstrap-engine.sh` on Linux/macOS, or press **Setup engine** in the app.
 It starts Ollama if needed, detects RAM, chooses an available `qwen2.5-coder`
-size, and creates the `trilobite` alias. Lightweight packages use installed
+size, and creates the `sonder` alias. Lightweight packages use installed
 Python/Ollama and may install `mcp` or download missing models on first setup.
 
 For a network-independent package, assemble and include a sealed platform
@@ -317,52 +368,52 @@ installed sizes. Linux/macOS use the same format and launchers but should pass a
 relocatable platform Python distribution with `--python-runtime`.
 
 **Headless server/console mode:** the chat app is optional. On Windows run
-`trilobite-headless.cmd start` to launch Ollama and `trilobite_serve.py`
-without a visible app, `trilobite-headless.cmd status` to inspect it, and
-`trilobite-headless.cmd stop` to stop the Trilobite API process. Use
+`sonder-headless.cmd start` to launch Ollama and `sonder_serve.py`
+without a visible app, `sonder-headless.cmd status` to inspect it, and
+`sonder-headless.cmd stop` to stop the Sonder API process. Use
 `--stop-ollama` with stop if you also want to shut down the Ollama daemon.
 Cross-platform equivalent:
-`python trilobite_headless.py start --port 11435 --context-size 32k`.
-Then connect with `trilobite_client.py`, any OpenAI-compatible client pointed at
+`python sonder_headless.py start --port 11435 --context-size 32k`.
+Then connect with `sonder_client.py`, any OpenAI-compatible client pointed at
 `http://127.0.0.1:11435/v1`, the REPL, Claude MCP, or the Flutter app later.
 HTTP clients used by more than one conversation or device should send a stable,
 unique `session` value per conversation. Session state is isolated by the
 authenticated principal plus that explicit ID; a blank session is intentionally
 ephemeral and should not be used when multiple clients need continuity.
-Calling `trilobite` from a Windows terminal now follows the same local-first
+Calling `sonder` from a Windows terminal now follows the same local-first
 startup path as the app: it sets the shared state home, bootstraps the engine on
 first run, starts the background API server, then opens the REPL. Set
-`TRILOBITE_TERMINAL_BOOTSTRAP=0` to skip first-run setup or
-`TRILOBITE_TERMINAL_START_SERVER=0` to open only the REPL. If
-`TRILOBITE_SERVER` is set, the same command opens the hosted/API client after
-warming up the local fallback server; set `TRILOBITE_TERMINAL_REMOTE=0` to force
+`SONDER_TERMINAL_BOOTSTRAP=0` to skip first-run setup or
+`SONDER_TERMINAL_START_SERVER=0` to open only the REPL. If
+`SONDER_SERVER` is set, the same command opens the hosted/API client after
+warming up the local fallback server; set `SONDER_TERMINAL_REMOTE=0` to force
 the local REPL.
 
 **Use the hosted model from any PC:** see [CLIENT.md](CLIENT.md).
 
-**HTTP auth and hosted/admin mode:** `TRILOBITE_AUTH_MODE` accepts `api-key`,
+**HTTP auth and hosted/admin mode:** `SONDER_AUTH_MODE` accepts `api-key`,
 `account`, `both`, or `either`. If it is unset, configuring
-`TRILOBITE_API_KEY` selects API-key mode, `TRILOBITE_REQUIRE_ACCOUNT=1` selects
+`SONDER_API_KEY` selects API-key mode, `SONDER_REQUIRE_ACCOUNT=1` selects
 account mode, and a credential-free server remains `local-open` only on
 loopback. `both` requires the API key in `Authorization: Bearer ...` and the
-account session token in `X-Trilobite-Account-Token`; `either` accepts either
+account session token in `X-Sonder-Account-Token`; `either` accepts either
 credential. A non-loopback bind is refused unless authentication is explicitly
 strong: API keys must be at least 24 characters, account signing secrets in
-`TRILOBITE_AUTH_SECRET` at least 32, and `both`/`either` require both strengths.
+`SONDER_AUTH_SECRET` at least 32, and `both`/`either` require both strengths.
 
 The first HTTP admin registration is a one-time bootstrap: configure a
-`TRILOBITE_BOOTSTRAP_SECRET` of at least 16 characters and send it in
-`X-Trilobite-Bootstrap-Secret`. Successful creation consumes that bootstrap.
-Later HTTP registration is disabled unless `TRILOBITE_ALLOW_REGISTRATION=1`
+`SONDER_BOOTSTRAP_SECRET` of at least 16 characters and send it in
+`X-Sonder-Bootstrap-Secret`. Successful creation consumes that bootstrap.
+Later HTTP registration is disabled unless `SONDER_ALLOW_REGISTRATION=1`
 and the request is authenticated as an admin. `/login` returns an account
 session token; `/accounts` and `/setaccount` manage roles, tiers, dev flags and
 bans. `/debug` exposes only safe inspectable state. `/cot` remains denied; use
 `/trace`, `/debug`, `/agents`, retrieved lessons, tool calls and status logs.
 
 Browser origins are denied unless they exactly match a comma-separated entry in
-`TRILOBITE_CORS_ORIGINS`; `*` is intentionally ignored. HTTP POST bodies must
+`SONDER_CORS_ORIGINS`; `*` is intentionally ignored. HTTP POST bodies must
 have `Content-Type: application/json` and an explicit `Content-Length`.
-`TRILOBITE_MAX_REQUEST_BYTES` defaults to 1 MiB and is capped at 16 MiB.
+`SONDER_MAX_REQUEST_BYTES` defaults to 1 MiB and is capped at 16 MiB.
 
 **Workbench/filesystem tools:** guarded `/inventory`, `/tree`, `/search`, `/programs`,
 `/scripts`, `/image`, `/mkdir`, `/runprogram`, `/runscript`, `/files`, `/read`,
@@ -371,15 +422,15 @@ local roots. Program execution is argv-only (no shell command strings), bounded
 by time/output limits, and kills timed-out process trees. Scripts use known
 interpreters; direct inline PowerShell/cmd execution is rejected. The matching
 server tools are available to agents and reusable workflows. The default roots
-are the checkout and `TRILOBITE_HOME`;
-`file_roots.local` now defaults to `TRILOBITE_HOME/file_roots.local`, not the
-checkout. Override that file with `TRILOBITE_FILE_ROOTS_FILE`, or add roots with
-`TRILOBITE_FILE_ROOTS`. Control-plane files (root policy/config/state files,
+are the checkout and `SONDER_HOME`;
+`file_roots.local` now defaults to `SONDER_HOME/file_roots.local`, not the
+checkout. Override that file with `SONDER_FILE_ROOTS_FILE`, or add roots with
+`SONDER_FILE_ROOTS`. Control-plane files (root policy/config/state files,
 the memory database, credential-like files, and root-level Python modules) may
 be read under the guarded policy but mutation requires an authenticated
 developer/admin token; an approval code or broad root alone does not bypass
-that protection. `TRILOBITE_FILE_APPROVAL_CODE` and
-`TRILOBITE_FILE_BYPASS=1` remain local-owner controls for ordinary broader
+that protection. `SONDER_FILE_APPROVAL_CODE` and
+`SONDER_FILE_BYPASS=1` remain local-owner controls for ordinary broader
 paths. Deletes require the exact `DELETE <resolved path>` confirmation string
 returned by the dry-run.
 
@@ -391,39 +442,39 @@ generated/tooling directories unless explicitly included.
 
 **Selectable context:** use `/contextsize 32k`, `/contextsize 256k`, or
 `/contextsize 1m` to select the requested virtual context. Ollama receives a
-safe native `num_ctx` clamped by `TRILOBITE_NATIVE_CONTEXT_MAX` (default around
-256k), while Trilobite represents larger budgets with summaries, retrieval,
+safe native `num_ctx` clamped by `SONDER_NATIVE_CONTEXT_MAX` (default around
+256k), while Sonder represents larger budgets with summaries, retrieval,
 facts, and recent-turn selection. App Settings has the same Context size field;
-env defaults are `TRILOBITE_CONTEXT_SIZE`, `TRILOBITE_NATIVE_CONTEXT_MAX`, and
-`TRILOBITE_VIRTUAL_CONTEXT_MAX`.
+env defaults are `SONDER_CONTEXT_SIZE`, `SONDER_NATIVE_CONTEXT_MAX`, and
+`SONDER_VIRTUAL_CONTEXT_MAX`.
 
 ---
 
 ## GPU and thread tuning
 
-trilobite sends Ollama local-runtime options on every local model call so it uses
+Sonder sends Ollama local-runtime options on every local model call so it uses
 the machine instead of idling on conservative defaults:
 
-- `LOCAL_LLM_NUM_THREAD` - CPU threads per request. Defaults to all detected CPU
+- `SONDER_NUM_THREAD` - CPU threads per request. Defaults to all detected CPU
   threads (`%NUMBER_OF_PROCESSORS%` on Windows, `nproc` on Linux).
-- `LOCAL_LLM_NUM_GPU` - model layers to offload to GPU. Defaults to `999`, which
+- `SONDER_NUM_GPU` - model layers to offload to GPU. Defaults to `999`, which
   asks Ollama to place all supported layers on the GPU. Set `0` for CPU-only, or
   `auto`/`none` to let Ollama decide.
-- `LOCAL_LLM_NUM_BATCH` - inference batch size. Defaults to `512`.
-- `TRILOBITE_MAX_AGENTS` - queued breadth cap for delegated orchestration.
+- `SONDER_NUM_BATCH` - inference batch size. Defaults to `512`.
+- `SONDER_MAX_AGENTS` - queued breadth cap for delegated orchestration.
   Defaults to two candidates per logical CPU (minimum 16), hard-bounded at 64.
   Raising it adds perspectives; it does not increase simultaneous model calls.
-- `TRILOBITE_PARALLEL_WORKERS` - explicit concurrent model-call override,
+- `SONDER_PARALLEL_WORKERS` - explicit concurrent model-call override,
   bounded to 1..16 and never above the requested agent count. Without it,
-  Trilobite derives 1..8 slots from CPU count and available physical RAM.
-- `TRILOBITE_FLEET_DB` - optional path for the private process-shared fleet
-  ledger. Defaults to `TRILOBITE_HOME/fleet.db`.
-- `TRILOBITE_FLEET_HEARTBEAT` - set `0` to disable owner heartbeats (primarily
+  Sonder derives 1..8 slots from CPU count and available physical RAM.
+- `SONDER_FLEET_DB` - optional path for the private process-shared fleet
+  ledger. Defaults to `SONDER_HOME/fleet.db`.
+- `SONDER_FLEET_HEARTBEAT` - set `0` to disable owner heartbeats (primarily
   for deterministic tests). Production defaults to a five-second heartbeat.
-- `TRILOBITE_RUNTIME_POLICY` - optional path to the shared JSON policy for local
+- `SONDER_RUNTIME_POLICY` - optional path to the shared JSON policy for local
   aliases and execution lanes. By default it is
-  `TRILOBITE_HOME/runtime_policy.json`. `LOCAL_LLM_FAST`, `LOCAL_LLM_CODE`,
-  `LOCAL_LLM_CODE_LOCAL`, and `LOCAL_LLM_GENERAL` seed only its first creation.
+  `SONDER_HOME/runtime_policy.json`. `SONDER_FAST`, `SONDER_CODE`,
+  `SONDER_CODE_LOCAL`, and `SONDER_GENERAL` seed only its first creation.
 - `OLLAMA_FLASH_ATTENTION` - enabled as `1` by the launch scripts when they start
   Ollama.
 
@@ -434,25 +485,28 @@ residency with `status()`.
 
 ## Making it *yours*
 
-A fresh trilobite is just base Qwen — you make it valuable by feeding it *your* world:
+A fresh Sonder installation uses an unpersonalized base model through
+Ollama. The runtime becomes useful to *you* by accumulating grounded local
+context and, only when explicitly requested, training adapter weights:
 - **`/train`** — it practices real tasks, runs its own solutions to check them, and keeps the lessons from what works.
-- **Endless training** — run `endless-train.cmd` on Windows to continuously generate,
+- **Endless practice** — run `endless-train.cmd` on Windows to continuously generate,
   compile, execute, repair, and record passing multi-language campaign work until
-  Ctrl+C or a no-progress round. Tune it with `TRILOBITE_ENDLESS_TOTAL`,
-  `TRILOBITE_ENDLESS_LANGUAGES`, `TRILOBITE_ENDLESS_TIER`,
-  `TRILOBITE_ENDLESS_WORKERS`, `TRILOBITE_ENDLESS_TIMEOUT`, and
-  `TRILOBITE_ENDLESS_REPAIRS`.
+  Ctrl+C or a no-progress round. Tune it with `SONDER_ENDLESS_TOTAL`,
+  `SONDER_ENDLESS_LANGUAGES`, `SONDER_ENDLESS_TIER`,
+  `SONDER_ENDLESS_WORKERS`, `SONDER_ENDLESS_TIMEOUT`, and
+  `SONDER_ENDLESS_REPAIRS`.
 - **Use it on your actual work** — the more real, grounded outcomes it sees, the more its lessons reflect *your* code and conventions (not textbook generalities).
-- **Fine-tune** (optional) — `/hardware` and `/training plan --dry-run` make separate inference/training decisions from live VRAM and RAM. Explicit attended QLoRA trains real adapter weights; `/training deploy` converts the Qwen PEFT adapter to GGUF, validates `trilobite-personal:latest`, and only then activates it. `/training rollback` immediately restores `trilobite:latest` without deleting models or checkpoints ([TRAINING.md](TRAINING.md)).
+- **Fine-tune** (optional) — `/hardware` and `/training plan --dry-run` make separate inference/training decisions from live VRAM and RAM. Explicit attended QLoRA trains real adapter weights; `/training deploy` converts the Qwen PEFT adapter to GGUF, validates `sonder-personal:latest`, and only then activates it. `/training rollback` immediately restores `sonder:latest` without deleting models or checkpoints ([TRAINING.md](TRAINING.md)).
 - **Safe source self-improvement** (optional) — `/selfmod` uses isolated Git worktrees or snapshot workspaces, immutable per-file backups, deterministic host-run tests, protected paths, explicit approval, atomic deployment, health checks, and exact rollback. It never pushes or rewrites user history ([SELFMOD.md](SELFMOD.md)).
 
 Keep your grounded, personal data **private** (it stays gitignored). The distilled, non-sensitive lessons can be exported to `lessons.jsonl`.
 
 ---
 
-## Contributing improvements (without hosting the model)
+## Contributing improvements (without publishing model weights)
 
-The model and your raw interactions always stay local — only small, distilled **lesson text** ever travels, and only if you opt in:
+The Ollama model files, adapter weights, and raw interactions stay local. Only
+small, distilled **lesson text** is prepared for sharing, and only if you opt in:
 
 1. **`contribute.py`** exports lessons that pass a conservative privacy scrub (no paths, secrets, or emails; short generic sentences only) to `contrib/lessons_contrib.jsonl`. Nothing is sent anywhere yet — review the file yourself.
 2. **Send it home base** — open a PR adding your file under `contrib/`, or copy it to your own file server.
@@ -477,7 +531,7 @@ Privacy is opt-in and scrubbed at every step — nothing auto-uploads, and no PR
 - ✅ **One-click engine setup** — bundled installs can bootstrap the local engine, detect available memory, pick a practical default model size, and start the local server without terminal setup.
 - ✅ **Sealed offline engine bundles** — optional per-platform payloads carry portable Python/Ollama runtimes and complete model-store subsets behind a fail-closed SHA-256 manifest; launchers and the Flutter System panel prefer them without removing lightweight host-runtime fallback.
 - ✅ **Richer passive learning** — accepts explicit accept/use/copy/edit signals from the CLI, server, and GUI in addition to natural follow-up phrasing.
-- ✅ **Local-first hosted opt-in** — cloud/hosted tiers are disabled unless `TRILOBITE_ALLOW_CLOUD=1` or the app setting is explicitly enabled.
+- ✅ **Local-first hosted opt-in** — cloud/hosted tiers are disabled unless `SONDER_ALLOW_CLOUD=1` or the app setting is explicitly enabled.
 - ✅ **General artifact grounding** — `ground_artifact` validates in-memory content, while `artifact_ground` and `/artifactcheck` validate guarded files and bundles with format-specific writing, editable Office, data, UI, image, audio, model, and manifest recipes. Generated packs must pass these contracts before success is reported.
 - ✅ **Editable Office deliverables** — deterministic stdlib-only DOCX reports, XLSX workbooks, and PPTX decks are inferred from natural-language requests, open in installed Microsoft Office, and fail closed on unsafe ZIP paths, malformed XML, missing relationships, active content, external dependencies, or unmet content requirements.
 - ✅ **Editable media and timelines** — deterministic animated GIFs, MIDI scores, SRT/WebVTT captions, and EDL edit timelines are inferred from media requests, independently parseable, and grounded for real frames, notes, timing, cue text, and non-overlapping edits.
@@ -485,7 +539,7 @@ Privacy is opt-in and scrubbed at every step — nothing auto-uploads, and no PR
 - ✅ **Passive learning** — infers outcomes from natural follow-up ("that worked" / "no, still errors") so it learns without manual scoring.
 - ✅ **Personas** — `/persona coder|explainer|reviewer|teacher` so non-coders get value too.
 - ✅ **Federated contribution** — share scrubbed lessons back without hosting the model (see [above](#contributing-improvements-without-hosting-the-model)).
-- ✅ **Mobile & desktop app (GUI)** — a [Flutter client](app/) with a shared chat and System UI (Android APK + Windows/Linux/macOS), CI-built with download links. Client-only apps can start, stop, and restart a configured host through the authenticated launcher.
+- ✅ **Mobile & desktop app (GUI)** — a [Flutter client](app/) with a shared chat and System UI (Android APK + Windows/Linux/macOS), CI-built with download links. Client-only apps can start, stop, and restart a configured host through authenticated, persistent launcher operations that survive client disconnects.
 
 - ✅ **Grounded animated humanoid 3D models** — deterministic binary glTF 2.0 characters carry 384 vertices and 192 triangles, unit normals, orthogonal tangent frames, UVs, three embedded PBR maps, a canonical 17-joint humanoid hierarchy with affine inverse-bind matrices and normalized per-vertex weights, two nonzero position/normal/tangent morph frames, six named skeletal/blend-shape clips, and two validated clip sequences in one dependency-free GLB. The output passes Khronos glTF Validator with zero findings and independently imports through glTF Transform with every mesh, skin, morph frame, texture, clip, and sequence intact.
 
@@ -517,12 +571,12 @@ Flat, mostly-stdlib Python modules (plus `mcp`):
 | `model_assets.py` | Deterministic stdlib-only binary glTF humanoids, embedded PBR textures, canonical skinning, full morph frames, affine inverse-bind matrices, and named animation clips/sequences |
 | `creative_router.py` | conservative natural-language routing from concrete master build requests into grounded artifact, game, or game-campaign workflows |
 | `server.py` / `workbench.py` / `activity_tracker.py` / `code_runner.py` / `web_tools.py` / `workflow_store.py` / `self_heal.py` | MCP workbench/agent tools, guarded discovery and execution, persistent checklists, exact action/end reports, bounded code/project runners, web tools, workflows, and self-healing |
-| `server.py` | MCP server: `offload` / `trilobite` / `parallel_run_code` / `parallel_generate_run` / `parallel_generate_run_languages` / `campaign_generate_compile_execute_record` / `learn_tiers` / `record_outcome` / `trilobite_stats` / `trilobite_sessions` / `trilobite_remember_fact` |
+| `server.py` | MCP server: `offload` / `sonder` / `parallel_run_code` / `parallel_generate_run` / `parallel_generate_run_languages` / `campaign_generate_compile_execute_record` / `learn_tiers` / `record_outcome` / `sonder_stats` / `sonder_sessions` / `sonder_remember_fact` |
 | `assetgen.py` / `game_forge.py` | stdlib-only general artifact generation, manifest verification, portable cross-language game projects, model campaigns, and verified 4-language x 3-dimension fallbacks |
 | `recall.py` | semantic recall of past good-outcome solutions (vector search over interactions) |
 | `summarizer.py` | rolling conversation summaries + session auto-titles (fast tier) |
-| `trilobite_repl.py` / `trilobite_client.py` | local REPL / thin remote client |
-| `trilobite_serve.py` | OpenAI-compatible proxy (for chat UIs) |
+| `sonder_repl.py` / `sonder_client.py` | local REPL / thin remote client |
+| `sonder_serve.py` | OpenAI-compatible proxy (for chat UIs) |
 | `intents.py`, `grounding.py`, `training_tasks.py`, `self_curriculum.py`, `eval_retrieval.py`, `game_ladder.py` | NL control, sandboxed execution, practice tasks, self-generated curriculum, retrieval eval, capability gauntlet |
 | `qlora_train.py`, `export_training_data.py`, `cloud_train.sh` | fine-tuning pipeline |
 
@@ -530,7 +584,7 @@ Flat, mostly-stdlib Python modules (plus `mcp`):
 
 ## Live reload
 
-Long-running `trilobite_serve.py` and `trilobite_repl.py` processes check for source edits before each request/turn. Edits to `server.py` and helper modules such as personas, retrieval, summarization, feedback, and code execution are picked up on the next call without hard restarting the proxy or REPL. Set `TRILOBITE_LIVE_RELOAD=0` to disable this.
+Long-running `sonder_serve.py` and `sonder_repl.py` processes check for source edits before each request/turn. Edits to `server.py` and helper modules such as personas, retrieval, summarization, feedback, and code execution are picked up on the next call without hard restarting the proxy or REPL. Set `SONDER_LIVE_RELOAD=0` to disable this.
 
 The MCP server now stages the complete updated `server.py` tool registry in an
 isolated namespace at the next list/tool request. A clean load atomically swaps
@@ -546,11 +600,11 @@ itself is loaded. Inspect convergence with `/mcp`, `mcp_runtime_status()`, or
 
 Multiple installs can run the same system code, but they should not each own a
 separate memory database. Runtime state defaults to one per-user home directory:
-`%LOCALAPPDATA%\trilobite` on Windows, `$XDG_DATA_HOME/trilobite` or
-`~/.local/share/trilobite` on Linux, and the matching app data home on macOS.
-Set `TRILOBITE_HOME` to force a specific shared state folder, or `TRILOBITE_DB`
+`%LOCALAPPDATA%\sonder` on Windows, `$XDG_DATA_HOME/sonder` or
+`~/.local/share/sonder` on Linux, and the matching app data home on macOS.
+Set `SONDER_HOME` to force a specific shared state folder, or `SONDER_DB`
 to point directly at a database file. If an older install has `memory.db` beside
-the code and the shared DB does not exist yet, trilobite copies it into the
+the code and the shared DB does not exist yet, sonder copies it into the
 shared home on first run.
 
 The same home contains `runtime_policy.json`, the single source of truth for
@@ -567,7 +621,7 @@ path, and any missing-model warning alongside MCP source/tool convergence.
 
 ## Standing instructions
 
-`system_profile.md` is an editable Markdown profile injected into every `trilobite` / OpenAI-proxy answer. Edit the file directly, or use `system_profile_text()` and `update_system_profile(mode="append"|"replace"|"clear")` through MCP. Because the profile is read at request time, changes apply on the next call.
+`system_profile.md` is an editable Markdown profile injected into every `sonder` / OpenAI-proxy answer. Edit the file directly, or use `system_profile_text()` and `update_system_profile(mode="append"|"replace"|"clear")` through MCP. Because the profile is read at request time, changes apply on the next call.
 
 ## Emotion Vectors
 
@@ -593,7 +647,7 @@ mutate guarded files, generate arbitrary asset packs or games, execute bounded
 checks, use memory/workflows/web, and return exact observable evidence.
 
 `web_search()` and `web_fetch()` use stdlib HTTP only. Search defaults to
-DuckDuckGo HTML, or set `TRILOBITE_SEARCH_URL` to an endpoint containing
+DuckDuckGo HTML, or set `SONDER_SEARCH_URL` to an endpoint containing
 `{query}`. `weather_lookup()` resolves a supplied city/postal code and gets
 sourced current conditions plus a short forecast from Open-Meteo. Ordinary chat
 now routes explicit weather/current-web requests through these tools instead of
@@ -602,12 +656,12 @@ letting the base model falsely claim that internet access is unavailable.
 Approximate location remains opt-in. The Flutter Settings switch contacts
 `ipwho.is` only for a location-dependent prompt, minimizes the response to
 city/region/country/timezone, discards coordinates, and never sends the raw IP
-to Trilobite.
+to Sonder.
 The chat response identifies the resolved place as an approximate public-IP
 estimate because VPN and ISP routing can make it wrong. Loopback clients can use
 the same consented server-side fallback through `approximate_location_lookup()`;
 remote hosted clients must provide the client-side hint so the server's data
-center location is not mistaken for the user's. Set `TRILOBITE_WEB_TOOLS=0` to
+center location is not mistaken for the user's. Set `SONDER_WEB_TOOLS=0` to
 disable all web and location access.
 
 ## Self Healing

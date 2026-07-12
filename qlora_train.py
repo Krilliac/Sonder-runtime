@@ -1,4 +1,4 @@
-"""QLoRA fine-tune of trilobite's base model on its own good-outcome examples.
+"""Train a QLoRA adapter for the base model selected by Sonder Runtime.
 
 ⚠️  NOT RUN. This script has been prepared but never executed. It needs an
     ATTENDED first run — watch VRAM usage, watch for OOM, be ready to Ctrl-C.
@@ -9,7 +9,7 @@ assistant]} pairs exported by export_training_data.py), formats each example
 with the Qwen chat template, masks the prompt so loss is only computed on the
 assistant span, and QLoRA-fine-tunes a small Qwen2.5-Coder base in 4-bit (NF4)
 with a LoRA adapter on top. The adapter is saved to
-./trilobite-personal-lora/ by default.
+./sonder-personal-lora/ by default.
 
 Use ``adaptive_training.py plan`` (or ``/training plan``) to select the model
 and memory strategy. Direct invocation retains a conservative 1.5B default,
@@ -17,7 +17,7 @@ but it will never silently fall back to CPU training.
 
 Usage (after `pip install -r requirements-train.txt`):
     ./venv/Scripts/python.exe qlora_train.py
-    TRILOBITE_BASE=Qwen/Qwen2.5-Coder-7B-Instruct ./venv/Scripts/python.exe qlora_train.py
+    SONDER_BASE=Qwen/Qwen2.5-Coder-7B-Instruct ./venv/Scripts/python.exe qlora_train.py
 
 This file must remain importable/py_compile-able WITHOUT torch/transformers/
 peft/bitsandbytes installed — all heavy imports are deferred into main().
@@ -32,17 +32,17 @@ import time
 # ---------------------------------------------------------------------------
 
 # Direct use defaults to 1.5B; the lifecycle manager supplies its planned base.
-BASE = os.environ.get("TRILOBITE_BASE", "Qwen/Qwen2.5-Coder-1.5B-Instruct")
+BASE = os.environ.get("SONDER_BASE", "Qwen/Qwen2.5-Coder-1.5B-Instruct")
 
-DATA_PATH = os.environ.get("TRILOBITE_DATA", os.path.join(os.path.dirname(__file__), "training_data.jsonl"))
-OUTPUT_DIR = os.environ.get("TRILOBITE_LORA_OUT", os.path.join(os.path.dirname(__file__), "trilobite-personal-lora"))
+DATA_PATH = os.environ.get("SONDER_DATA", os.path.join(os.path.dirname(__file__), "training_data.jsonl"))
+OUTPUT_DIR = os.environ.get("SONDER_LORA_OUT", os.path.join(os.path.dirname(__file__), "sonder-personal-lora"))
 
-MAX_LEN = int(os.environ.get("TRILOBITE_MAX_LEN", "1024"))
+MAX_LEN = int(os.environ.get("SONDER_MAX_LEN", "1024"))
 
 # LoRA hyperparameters
-LORA_R = int(os.environ.get("TRILOBITE_LORA_R", "16"))
-LORA_ALPHA = int(os.environ.get("TRILOBITE_LORA_ALPHA", "32"))
-LORA_DROPOUT = float(os.environ.get("TRILOBITE_LORA_DROPOUT", "0.05"))
+LORA_R = int(os.environ.get("SONDER_LORA_R", "16"))
+LORA_ALPHA = int(os.environ.get("SONDER_LORA_ALPHA", "32"))
+LORA_DROPOUT = float(os.environ.get("SONDER_LORA_DROPOUT", "0.05"))
 # Attention + MLP projection modules for the Qwen2 architecture.
 LORA_TARGET_MODULES = [
     "q_proj", "k_proj", "v_proj", "o_proj",       # attention
@@ -50,10 +50,10 @@ LORA_TARGET_MODULES = [
 ]
 
 # Conservative defaults; the lifecycle manager supplies its planned values.
-PER_DEVICE_BATCH_SIZE = int(os.environ.get("TRILOBITE_BATCH_SIZE", "1"))
-GRAD_ACCUM_STEPS = int(os.environ.get("TRILOBITE_GRAD_ACCUM", "8"))
-NUM_EPOCHS = float(os.environ.get("TRILOBITE_EPOCHS", "3"))
-LEARNING_RATE = float(os.environ.get("TRILOBITE_LR", "2e-4"))
+PER_DEVICE_BATCH_SIZE = int(os.environ.get("SONDER_BATCH_SIZE", "1"))
+GRAD_ACCUM_STEPS = int(os.environ.get("SONDER_GRAD_ACCUM", "8"))
+NUM_EPOCHS = float(os.environ.get("SONDER_EPOCHS", "3"))
+LEARNING_RATE = float(os.environ.get("SONDER_LR", "2e-4"))
 LR_SCHEDULER = "cosine"
 WARMUP_RATIO = 0.03
 LOGGING_STEPS = 5
@@ -63,7 +63,7 @@ SEED = 42
 
 def _print_vram_guidance():
     print("=" * 78)
-    print("trilobite QLoRA training — attended run required")
+    print("Sonder Runtime QLoRA training — attended run required")
     print("=" * 78)
     print(f"Base model : {BASE}")
     print(f"Data       : {DATA_PATH}")
@@ -157,10 +157,10 @@ def build_supervised_example(tokenizer, messages, max_len):
 def main():
     _print_vram_guidance()
 
-    if os.environ.get("TRILOBITE_ALLOW_CPU_OFFLOAD", "0") == "1":
+    if os.environ.get("SONDER_ALLOW_CPU_OFFLOAD", "0") == "1":
         print("ERROR: QLoRA CPU offload is disabled for this training backend.")
         print("Hugging Face documents device_map='auto' as an inference-only path;")
-        print("Trilobite will not use it for weight training. Choose a smaller")
+        print("Sonder Runtime will not use it for weight training. Choose a smaller")
         print("GPU-resident plan or configure a separately validated training backend.")
         return 5
 
@@ -173,7 +173,7 @@ def main():
     print(f"Loaded {len(examples)} training examples from {DATA_PATH}")
     if len(examples) == 0:
         print("ERROR: no examples to train on. Run export_training_data.py first"
-              " (and use trilobite for a while so it has good-outcome interactions).")
+              " (and use Sonder Runtime so it has good-outcome interactions).")
         sys.exit(1)
     if len(examples) < 20:
         print(f"WARNING: only {len(examples)} examples — this is a proof-of-pipeline")
@@ -212,7 +212,7 @@ def main():
         total_vram = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
         print(f"  total VRAM: {total_vram:.1f} GB")
     else:
-        print("ERROR: no CUDA GPU is visible. Trilobite will not silently fall back")
+        print("ERROR: no CUDA GPU is visible. Sonder Runtime will not silently fall back")
         print("to CPU weight training. Verify the CUDA torch build and driver, or")
         print("use `training plan` on a supported host.")
         return 3
@@ -291,7 +291,7 @@ def main():
     print("Starting training ... (this is the attended part — watch VRAM)")
     checkpoints_dir = os.path.join(OUTPUT_DIR, "checkpoints")
     resume = None
-    if os.environ.get("TRILOBITE_RESUME", "1") == "1" and os.path.isdir(checkpoints_dir):
+    if os.environ.get("SONDER_RESUME", "1") == "1" and os.path.isdir(checkpoints_dir):
         candidates = [
             os.path.join(checkpoints_dir, name)
             for name in os.listdir(checkpoints_dir)
@@ -315,7 +315,7 @@ def main():
     print(f"Saving LoRA adapter to {OUTPUT_DIR} ...")
     model.save_pretrained(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)
-    manifest_path = os.environ.get("TRILOBITE_TRAINING_MANIFEST", "")
+    manifest_path = os.environ.get("SONDER_TRAINING_MANIFEST", "")
     manifest = {}
     if manifest_path and os.path.exists(manifest_path):
         with open(manifest_path, "r", encoding="utf-8") as stream:

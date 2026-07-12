@@ -14,7 +14,7 @@ class Response:
 
 @pytest.fixture(autouse=True)
 def enable_web(monkeypatch):
-    monkeypatch.setenv("TRILOBITE_WEB_TOOLS", "1")
+    monkeypatch.setenv("SONDER_WEB_TOOLS", "1")
 
 
 def _dns(address):
@@ -51,7 +51,7 @@ def test_request_pins_first_validated_dns_answer(monkeypatch):
         return _dns(address)(host, port, *args, **kwargs)
 
     def fake_open(req, timeout=10):
-        opened.append(tuple(req._trilobite_addresses))
+        opened.append(tuple(req._sonder_addresses))
         return Response()
 
     monkeypatch.setattr(web_tools.socket, "getaddrinfo", resolve)
@@ -86,7 +86,7 @@ def test_urlopen_connects_to_pinned_address_and_preserves_host(monkeypatch):
 
     monkeypatch.setattr(web_tools, "_PinnedHTTPSConnection", Connection)
     req = web_tools.urllib.request.Request("https://public.example/a?q=1")
-    req._trilobite_addresses = ("93.184.216.34",)
+    req._sonder_addresses = ("93.184.216.34",)
 
     with web_tools._urlopen(req, timeout=7):
         pass

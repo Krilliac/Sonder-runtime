@@ -102,7 +102,7 @@ def test_repository_delegation_refuses_outputs_without_tool_ledger(monkeypatch):
 
 
 def test_run_delegated_default_cap_allows_sixteen_agents(monkeypatch):
-    monkeypatch.delenv("TRILOBITE_MAX_AGENTS", raising=False)
+    monkeypatch.delenv("SONDER_MAX_AGENTS", raising=False)
 
     result = master_orchestrator.run_delegated(
         "fan out",
@@ -122,7 +122,7 @@ def test_fleet_keywords_request_hardware_fanout():
 
 
 def test_run_delegated_agent_cap_is_configurable(monkeypatch):
-    monkeypatch.setenv("TRILOBITE_MAX_AGENTS", "24")
+    monkeypatch.setenv("SONDER_MAX_AGENTS", "24")
 
     result = master_orchestrator.run_delegated(
         "fan out",
@@ -137,8 +137,8 @@ def test_run_delegated_agent_cap_is_configurable(monkeypatch):
 
 def test_capacity_separates_agent_ceiling_from_memory_safe_worker_slots(monkeypatch):
     gib = 1024 ** 3
-    monkeypatch.delenv("TRILOBITE_MAX_AGENTS", raising=False)
-    monkeypatch.delenv("TRILOBITE_PARALLEL_WORKERS", raising=False)
+    monkeypatch.delenv("SONDER_MAX_AGENTS", raising=False)
+    monkeypatch.delenv("SONDER_PARALLEL_WORKERS", raising=False)
     monkeypatch.setattr(master_orchestrator.os, "cpu_count", lambda: 16)
     monkeypatch.setattr(
         master_orchestrator, "physical_memory_bytes", lambda: (16 * gib, 2 * gib)
@@ -160,7 +160,7 @@ def test_capacity_separates_agent_ceiling_from_memory_safe_worker_slots(monkeypa
 
 def test_parallel_worker_override_is_explicit_and_bounded(monkeypatch):
     gib = 1024 ** 3
-    monkeypatch.setenv("TRILOBITE_PARALLEL_WORKERS", "6")
+    monkeypatch.setenv("SONDER_PARALLEL_WORKERS", "6")
     monkeypatch.setattr(master_orchestrator.os, "cpu_count", lambda: 16)
     monkeypatch.setattr(
         master_orchestrator, "physical_memory_bytes", lambda: (16 * gib, 2 * gib)
@@ -169,7 +169,7 @@ def test_parallel_worker_override_is_explicit_and_bounded(monkeypatch):
     report = master_orchestrator.capacity(10)
 
     assert report["worker_slots"] == 6
-    assert report["source"] == "TRILOBITE_PARALLEL_WORKERS"
+    assert report["source"] == "SONDER_PARALLEL_WORKERS"
     assert "concurrent worker slots: 6" in master_orchestrator.format_capacity(report)
 
 

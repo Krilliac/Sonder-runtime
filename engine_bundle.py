@@ -1,4 +1,4 @@
-"""Verified, platform-specific runtime bundles for offline Trilobite installs.
+"""Verified platform-specific bundles for offline Sonder Runtime installs.
 
 An engine bundle is optional. Lightweight source/app packages continue to use
 the host's Python and Ollama installations, while a sealed bundle can provide
@@ -22,7 +22,7 @@ from pathlib import Path, PurePosixPath
 MANIFEST_NAME = "ENGINE-BUNDLE.json"
 SCHEMA_VERSION = 1
 MAX_MANIFEST_BYTES = 4 * 1024 * 1024
-ENGINE_BUNDLE_ENV = "TRILOBITE_ENGINE_BUNDLE"
+ENGINE_BUNDLE_ENV = "SONDER_ENGINE_BUNDLE"
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _MODEL_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*(?::[A-Za-z0-9][A-Za-z0-9._-]*)?")
 
@@ -400,17 +400,17 @@ def select_base_model(
     return max(eligible, key=lambda item: item.min_ram_gb).name
 
 
-def default_trilobite_home() -> Path:
-    configured = os.environ.get("TRILOBITE_HOME", "").strip()
+def default_sonder_home() -> Path:
+    configured = os.environ.get("SONDER_HOME", "").strip()
     if configured:
         return Path(configured).expanduser()
     if os.name == "nt":
         root = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
-        return Path(root or Path.home()) / "trilobite"
+        return Path(root or Path.home()) / "sonder"
     xdg = os.environ.get("XDG_DATA_HOME", "").strip()
     if xdg:
-        return Path(xdg).expanduser() / "trilobite"
-    return Path.home() / ".local" / "share" / "trilobite"
+        return Path(xdg).expanduser() / "sonder"
+    return Path.home() / ".local" / "share" / "sonder"
 
 
 def _assert_safe_destination(root: Path, target: Path) -> None:
@@ -419,10 +419,10 @@ def _assert_safe_destination(root: Path, target: Path) -> None:
     try:
         relative = target_absolute.relative_to(root_absolute)
     except ValueError as exc:
-        raise ValueError("model-store destination escapes Trilobite home") from exc
+        raise ValueError("model-store destination escapes Sonder home") from exc
     current = root_absolute
     if current.exists() and _is_reparse(current):
-        raise ValueError("Trilobite home may not be a symlink or junction")
+        raise ValueError("Sonder home may not be a symlink or junction")
     for part in relative.parts:
         current = current / part
         if (current.exists() or current.is_symlink()) and _is_reparse(current):
@@ -434,7 +434,7 @@ def install_model_store(
     home: Path | None = None,
 ) -> tuple[Path, int, int]:
     """Copy the sealed model subset into writable shared state atomically."""
-    home = (home or default_trilobite_home()).absolute()
+    home = (home or default_sonder_home()).absolute()
     destination = home / "ollama-models"
     _assert_safe_destination(home, destination)
     destination.mkdir(parents=True, exist_ok=True)
@@ -476,7 +476,7 @@ def install_model_store(
         "base_models": [model.name for model in bundle.base_models],
         "embedding_model": bundle.embedding_model.name,
     }
-    receipt_path = destination / "TRILOBITE-BUNDLE-RECEIPT.json"
+    receipt_path = destination / "SONDER-BUNDLE-RECEIPT.json"
     fd, temp_name = tempfile.mkstemp(prefix=".receipt.", dir=str(destination))
     os.close(fd)
     temp_path = Path(temp_name)
@@ -497,6 +497,6 @@ def runtime_environment(bundle: EngineBundle, model_store: Path) -> dict[str, st
         "OLLAMA_MODELS": str(model_store),
         "OLLAMA_NO_CLOUD": "1",
         "PATH": path_value,
-        "TRILOBITE_OLLAMA_EXE": str(bundle.ollama_executable),
-        "TRILOBITE_EMBED_MODEL": bundle.embedding_model.name,
+        "SONDER_OLLAMA_EXE": str(bundle.ollama_executable),
+        "SONDER_EMBED_MODEL": bundle.embedding_model.name,
     }

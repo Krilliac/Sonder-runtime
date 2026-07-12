@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:trilobite/models.dart';
+import 'package:sonder_runtime/models.dart';
 
 void main() {
   test('ChatMessage serializes to OpenAI wire format', () {

@@ -2,9 +2,9 @@ import domain_grounding
 
 
 def test_evaluate_contains_regex_and_json_field():
-    artifact = '{"title":"Trilobite","score":7}'
+    artifact = '{"title":"Sonder","score":7}'
     result = domain_grounding.evaluate(artifact, [
-        {"type": "contains", "text": "Trilobite"},
+        {"type": "contains", "text": "Sonder"},
         {"type": "regex", "pattern": r'"score":\s*7'},
         {"type": "json_field", "path": "score", "equals": 7},
     ])

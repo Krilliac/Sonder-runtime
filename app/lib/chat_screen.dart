@@ -38,11 +38,11 @@ class _ChatScreenState extends State<ChatScreen> {
   Timer? _statusTimer;
   SystemInfo? _systemInfo;
 
-  // The model/tier to answer with. "trilobite" is the local self-improving student;
-  // other entries route to that model on the server. Populated from
-  // GET /v1/models, with a sensible fallback if the server is unreachable.
+  // The inference route/model to answer with. "sonder" is the local route;
+  // other entries route to a model on the server.
+  // Populated from GET /v1/models, with a fallback if the server is unreachable.
   late String _model;
-  List<String> _models = const ['trilobite'];
+  List<String> _models = const ['sonder'];
 
   // Quick-access slash commands the serve layer understands.
   static const _quickCommands = <String, String>{
@@ -82,14 +82,14 @@ class _ChatScreenState extends State<ChatScreen> {
     '/master': 'Choose inline or delegated execution',
     '/runwindow': 'Launch last code in a Windows console',
     '/help': 'List commands',
-    '/train': 'Practice & self-learn',
+    '/train': 'Grounded practice; does not update model weights',
     '/pass': 'Mark last answer good',
     '/accept': 'Mark last answer useful',
     '/edited': 'Mark answer used after edits',
     '/fail': 'Mark last answer bad',
   };
 
-  TrilobiteApi get _api => TrilobiteApi(
+  SonderApi get _api => SonderApi(
         baseUrl: widget.settings.serverUrl,
         apiKey: widget.settings.apiKey,
       );
@@ -264,7 +264,7 @@ class _ChatScreenState extends State<ChatScreen> {
           content: reply.isEmpty ? '(empty response)' : reply,
         );
       });
-    } on TrilobiteException catch (e) {
+    } on SonderException catch (e) {
       setState(() {
         _messages[_messages.length - 1] = ChatMessage(
           role: Role.assistant,
@@ -374,7 +374,7 @@ class _ChatScreenState extends State<ChatScreen> {
     ));
   }
 
-  String _modelLabel(String m) => m == 'trilobite' ? 'trilobite (local)' : m;
+  String _modelLabel(String m) => m == 'sonder' ? 'sonder (local route)' : m;
 
   @override
   Widget build(BuildContext context) {
@@ -407,7 +407,7 @@ class _ChatScreenState extends State<ChatScreen> {
             const SizedBox(width: 10),
             // Model picker: switch which LLM answers, per conversation.
             PopupMenuButton<String>(
-              tooltip: 'Choose model',
+              tooltip: 'Choose inference route or model',
               onSelected: _selectModel,
               itemBuilder: (_) => _models
                   .map((m) => PopupMenuItem<String>(
@@ -553,11 +553,19 @@ class _EmptyState extends StatelessWidget {
             ),
             const SizedBox(height: 16),
             Text(
-              'Your private AI',
+              'Sonder Runtime',
               style: Theme.of(context).textTheme.headlineSmall?.copyWith(
                     fontWeight: FontWeight.w800,
                     letterSpacing: -0.5,
                   ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Not a standalone model: Sonder Runtime supplies routing, prompts, '
+              'memory, tools, and policy to model weights served locally by '
+              'Ollama.',
+              style: Theme.of(context).textTheme.bodyMedium,
+              textAlign: TextAlign.center,
             ),
             const SizedBox(height: 8),
             Text(
@@ -924,7 +932,7 @@ class _Bubble extends StatelessWidget {
                   ),
                   const SizedBox(width: 8),
                   Text(
-                    'trilobite',
+                    'Sonder Runtime',
                     style: Theme.of(context).textTheme.labelLarge?.copyWith(
                           color: cs.onSurfaceVariant,
                           fontWeight: FontWeight.w700,
@@ -1192,7 +1200,7 @@ class _InputBar extends StatelessWidget {
                     textInputAction: TextInputAction.send,
                     onSubmitted: (_) => onSend(),
                     decoration: InputDecoration(
-                      hintText: 'Message trilobite…',
+                      hintText: 'Message Sonder Runtime…',
                       filled: true,
                       fillColor: cs.surfaceContainerHighest,
                       contentPadding: const EdgeInsets.symmetric(

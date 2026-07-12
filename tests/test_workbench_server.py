@@ -61,7 +61,7 @@ def test_checklist_lifecycle_persists_order_and_parent_status(monkeypatch, tmp_p
     created = server.checklist_create(
         "Ship workbench",
         json.dumps(["Inspect files", {"title": "Run tests", "detail": "focused"}]),
-        project="trilobite",
+        project="sonder",
     )
     checklist_id = created.splitlines()[0].rsplit(" ", 1)[-1]
 
@@ -119,7 +119,7 @@ def test_workbench_agent_forces_validation_after_mutation(monkeypatch, tmp_path)
         "create and run demo.py",
         max_steps=5,
         auto_checklist=True,
-        project="trilobite",
+        project="sonder",
     )
 
     assert result == "created and validated demo.py"

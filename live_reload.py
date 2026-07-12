@@ -1,4 +1,4 @@
-"""Tiny source-file live reload helper for long-running trilobite processes.
+"""Tiny source-file live reload helper for long-running sonder processes.
 
 This is deliberately conservative: it reloads already-imported helper modules at
 request/tool boundaries when their source file's mtime changes. It does not try
@@ -17,7 +17,7 @@ _ERRORS = {}
 
 
 def enabled():
-    return os.environ.get("TRILOBITE_LIVE_RELOAD", "1").strip().lower() not in (
+    return os.environ.get("SONDER_LIVE_RELOAD", "1").strip().lower() not in (
         "0",
         "false",
         "no",

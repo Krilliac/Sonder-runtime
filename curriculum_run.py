@@ -1,8 +1,8 @@
-"""curriculum_run — the LIVE controller for trilobite's self-curriculum loop.
+"""curriculum_run — the LIVE controller for Sonder Runtime's self-curriculum loop.
 
 Builds a real model-backed gen_fn, harvests up to N valid+novel self-invented
 tasks (self_curriculum.harvest), persists the accepted ones (curriculum_store),
-then trains trilobite on them: ask -> ground the answer against the task's own
+then runs grounded practice through Sonder Runtime: ask -> check the answer against the task's own
 check (grounding) -> record_outcome. Needs a live Ollama/GPU — this module is
 written but intentionally NOT executed by the agent that wrote it.
 
@@ -18,16 +18,16 @@ import server
 
 
 def build_gen_fn():
-    """Wire a gen_fn() -> raw model text closure to the real trilobite model,
+    """Wire a gen_fn() -> raw model text closure to Sonder Runtime's selected model,
     prompted with GEN_PROMPT at a higher temperature for task-generation variety.
     """
-    model = server.resolve_trilobite_model(False)
+    model = server.resolve_sonder_model(False)
     raw_gen = server._make_generate(model, "", 0.7, 512, 4096)
     return lambda: raw_gen(self_curriculum.GEN_PROMPT)
 
 
-def train_on(tasks):
-    """Train trilobite on each accepted generated task: ask -> ground -> record.
+def practice_on(tasks):
+    """Practice each accepted task through Sonder Runtime: ask -> ground -> record.
 
     Wrapped per-task in try/except so one bad task can't abort the whole run.
     Returns (passed, new_lessons).
@@ -37,8 +37,8 @@ def train_on(tasks):
     for t in tasks:
         name = t.get("name", "?")
         try:
-            print("  training: %s ..." % name)
-            resp = server.trilobite(t["prompt"])
+            print("  practice: %s ..." % name)
+            resp = server.sonder(t["prompt"])
             iid = server.parse_interaction_id(resp)
             code = grounding.extract_code_block(resp)
             ok = False
@@ -55,7 +55,7 @@ def train_on(tasks):
             else:
                 print("    -> %s (no interaction id)" % ("PASS" if ok else "FAIL"))
         except Exception as e:
-            print("    -> ERROR training '%s': %r" % (name, e))
+            print("    -> ERROR practicing '%s': %r" % (name, e))
     return passed, new_lessons
 
 
@@ -69,11 +69,11 @@ def main():
             return
     n = max(1, n)
 
-    print("CURRICULUM: resolving trilobite model ...")
+    print("CURRICULUM: resolving the local model selected by Sonder Runtime ...")
     gen_fn = build_gen_fn()
 
     print("--- lessons before ---")
-    print(server.trilobite_stats())
+    print(server.sonder_stats())
 
     existing_names = curriculum_store.names()
     print("CURRICULUM: harvesting up to %d valid+novel task(s) ..." % n)
@@ -84,13 +84,13 @@ def main():
 
     curriculum_store.append(accepted)
 
-    print("CURRICULUM: training on %d accepted task(s) ..." % len(accepted))
-    passed, new_lessons = train_on(accepted)
+    print("CURRICULUM: practicing %d accepted task(s) ..." % len(accepted))
+    passed, new_lessons = practice_on(accepted)
 
     print("--- lessons after ---")
-    print(server.trilobite_stats())
+    print(server.sonder_stats())
 
-    print("CURRICULUM done: harvested=%d trained=%d passed=%d new_lessons=%d" % (
+    print("CURRICULUM done: harvested=%d practiced=%d passed=%d new_lessons=%d" % (
         len(accepted), len(accepted), passed, new_lessons))
 
 

@@ -1,4 +1,4 @@
-"""Safely update a Trilobite Git checkout while preserving local edits."""
+"""Safely update a Sonder Git checkout while preserving local edits."""
 
 import argparse
 import subprocess
@@ -39,14 +39,14 @@ def main(argv=None):
     stashed = False
     if status.strip():
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        print("[trilobite] saving local edits before update...")
+        print("[sonder] saving local edits before update...")
         code, out = run(
             [
                 "stash",
                 "push",
                 "--include-untracked",
                 "-m",
-                "trilobite gui update backup %s" % stamp,
+                "sonder gui update backup %s" % stamp,
             ],
             repo,
         )
@@ -56,7 +56,7 @@ def main(argv=None):
             return 1
         stashed = True
 
-    print("[trilobite] fetching latest main...")
+    print("[sonder] fetching latest main...")
     code, out = run(["fetch", "origin", "main"], repo)
     print(out)
     if code != 0:
@@ -64,7 +64,7 @@ def main(argv=None):
             print("Your local edits are saved in git stash. Run: git stash list")
         return 1
 
-    print("[trilobite] rebasing local checkout...")
+    print("[sonder] rebasing local checkout...")
     code, out = run(["rebase", "origin/main"], repo)
     print(out)
     if code != 0:
@@ -74,7 +74,7 @@ def main(argv=None):
         return 1
 
     if stashed:
-        print("[trilobite] restoring saved local edits...")
+        print("[sonder] restoring saved local edits...")
         code, out = run(["stash", "apply"], repo)
         print(out)
         if code != 0:
@@ -86,7 +86,7 @@ def main(argv=None):
             return 2
         run(["stash", "drop"], repo)
 
-    print("[trilobite] update complete.")
+    print("[sonder] update complete.")
     return 0
 
 

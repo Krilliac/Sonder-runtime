@@ -21,7 +21,7 @@ from mcp.server.lowlevel.server import NotificationOptions
 
 
 def _enabled() -> bool:
-    return os.environ.get("TRILOBITE_LIVE_RELOAD", "1").strip().lower() not in {
+    return os.environ.get("SONDER_LIVE_RELOAD", "1").strip().lower() not in {
         "0",
         "false",
         "no",

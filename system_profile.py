@@ -12,7 +12,7 @@ import subprocess
 from dataclasses import asdict, dataclass
 
 
-DEFAULT_TEXT = """# Trilobite standing instructions
+DEFAULT_TEXT = """# Sonder standing instructions
 
 - Be direct, concrete, and honest about local-model limits.
 - Prefer working code and verifiable steps.
@@ -70,7 +70,7 @@ def workspace_root():
 
 def default_path():
     return os.environ.get(
-        "TRILOBITE_SYSTEM_PROFILE",
+        "SONDER_SYSTEM_PROFILE",
         os.path.join(workspace_root(), "system_profile.md"),
     )
 
@@ -181,7 +181,7 @@ class HardwareProfile:
 def _system_memory():
     total = available = 0.0
     try:
-        import psutil  # optional; already present in many Trilobite installs
+        import psutil  # optional; already present in many Sonder installs
         vm = psutil.virtual_memory()
         return vm.total / 1024**3, vm.available / 1024**3, True
     except ImportError:
@@ -298,8 +298,8 @@ def _rocm_profile():
 def detect_hardware() -> HardwareProfile:
     """Detect live capacity with environment overrides for testing/admin use."""
     total, available, ram_live = _system_memory()
-    total = _env_float("TRILOBITE_RAM_GB", total) or 0.0
-    available_override = _env_float("TRILOBITE_AVAILABLE_RAM_GB")
+    total = _env_float("SONDER_RAM_GB", total) or 0.0
+    available_override = _env_float("SONDER_AVAILABLE_RAM_GB")
     if available_override is not None:
         available, ram_live = min(total or available_override, available_override), True
     elif not available and total:
@@ -312,9 +312,9 @@ def detect_hardware() -> HardwareProfile:
     name, vram_total, vram_free, capability = (
         (*nvidia, ) if nvidia else (*rocm, "") if rocm else ("", 0.0, 0.0, "")
     )
-    vendor = os.environ.get("TRILOBITE_GPU_VENDOR", vendor).strip().lower() or "none"
-    vram_total = _env_float("TRILOBITE_VRAM_GB", vram_total) or 0.0
-    free_override = _env_float("TRILOBITE_FREE_VRAM_GB")
+    vendor = os.environ.get("SONDER_GPU_VENDOR", vendor).strip().lower() or "none"
+    vram_total = _env_float("SONDER_VRAM_GB", vram_total) or 0.0
+    free_override = _env_float("SONDER_FREE_VRAM_GB")
     if free_override is not None:
         # An explicit/live zero means the GPU is occupied, not that detection
         # failed. Preserve it so the planner cannot fabricate training room.
@@ -325,8 +325,8 @@ def detect_hardware() -> HardwareProfile:
         # conservative fallback and report that it is not a live reading.
         vram_free = vram_total * 0.75
         vram_live = False
-    cuda = _env_bool("TRILOBITE_CUDA_AVAILABLE", bool(nvidia))
-    rocm_available = _env_bool("TRILOBITE_ROCM_AVAILABLE", bool(rocm))
+    cuda = _env_bool("SONDER_CUDA_AVAILABLE", bool(nvidia))
+    rocm_available = _env_bool("SONDER_ROCM_AVAILABLE", bool(rocm))
     os_name = platform.system() or os.name
     offload = bool((cuda or rocm_available) and os_name in {"Linux", "Windows"})
     return HardwareProfile(
@@ -335,12 +335,12 @@ def detect_hardware() -> HardwareProfile:
         system_ram_total_gb=round(total, 2),
         system_ram_available_gb=round(min(total or available, available), 2),
         gpu_vendor=vendor,
-        gpu_name=os.environ.get("TRILOBITE_GPU_NAME", name).strip(),
+        gpu_name=os.environ.get("SONDER_GPU_NAME", name).strip(),
         cuda_available=cuda,
         rocm_available=rocm_available,
         vram_total_gb=round(vram_total, 2),
         vram_free_gb=round(min(vram_total or vram_free, vram_free), 2),
-        compute_capability=os.environ.get("TRILOBITE_COMPUTE_CAPABILITY", capability).strip(),
+        compute_capability=os.environ.get("SONDER_COMPUTE_CAPABILITY", capability).strip(),
         cpu_offload_supported=offload,
         # Preserve the original aggregate field for callers that have not yet
         # adopted the independent freshness fields.

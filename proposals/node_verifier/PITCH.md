@@ -8,7 +8,7 @@ trusting the model's own claim that the code works. It follows the exact shape o
 raise when `node` isn't on PATH (detected via `FileNotFoundError` or a "not recognized"/"command
 not found" shell message), and a truncated `detail` for the repair loop.
 
-This is valuable because trilobite's solver/reward/ladder loop is verifier-agnostic by design —
+This is valuable because Sonder Runtime's solver/reward/ladder loop is verifier-agnostic by design —
 today it only grounds Python, C++, pytest, and mypy, so any JS-generation task (a common request
 class) gets no real pass/fail oracle and silently falls back to ungrounded self-report. Adding
 `node_run` extends real execution-grounded self-repair to JavaScript with zero changes to

@@ -20,9 +20,9 @@ def git(root, *args):
 @pytest.fixture
 def isolated(monkeypatch, tmp_path):
     state = tmp_path / "state"
-    monkeypatch.setenv("TRILOBITE_SELFMOD_HOME", str(state))
-    monkeypatch.setenv("TRILOBITE_SELFMOD_DB", str(state / "selfmod.db"))
-    monkeypatch.delenv("TRILOBITE_SELFMOD_ACTIVE", raising=False)
+    monkeypatch.setenv("SONDER_SELFMOD_HOME", str(state))
+    monkeypatch.setenv("SONDER_SELFMOD_DB", str(state / "selfmod.db"))
+    monkeypatch.delenv("SONDER_SELFMOD_ACTIVE", raising=False)
     return tmp_path
 
 
@@ -449,7 +449,7 @@ def test_retention_never_deletes_newest_valid_rollback(isolated):
 
 
 def test_recursive_self_improvement_rejected(monkeypatch, isolated):
-    monkeypatch.setenv("TRILOBITE_SELFMOD_ACTIVE", "1")
+    monkeypatch.setenv("SONDER_SELFMOD_ACTIVE", "1")
     with pytest.raises(RuntimeError, match="recursive"):
         selfmod.recursive_guard()
 

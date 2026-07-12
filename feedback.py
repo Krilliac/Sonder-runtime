@@ -1,5 +1,5 @@
 """feedback — conservative classifier for whether a chat turn is FEEDBACK on the
-previous answer (thumbs up/down on what trilobite just said), as opposed to a new
+previous answer (thumbs up/down on what sonder just said), as opposed to a new
 task or question.
 
 Lets the passive-learning loop infer record_outcome() calls from ordinary

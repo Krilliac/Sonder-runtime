@@ -11,7 +11,7 @@ def test_write_dump_creates_text_file(tmp_path):
     )
 
     text = open(path, encoding="utf-8").read()
-    assert "trilobite debug dump" in text
+    assert "sonder debug dump" in text
     assert "label: bug report" in text
     assert "/quality" in text
     assert "== context ==" in text

@@ -1,5 +1,5 @@
-name: trilobite
-description: Trilobite — a private, local AI client for mobile and desktop.
+name: sonder_runtime
+description: Sonder Runtime — private, local AI orchestration for mobile and desktop.
 publish_to: "none"
 version: 1.0.0+1
 

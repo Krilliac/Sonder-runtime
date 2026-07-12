@@ -6,19 +6,19 @@ import 'settings.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const TrilobiteApp());
+  runApp(const SonderRuntimeApp());
 }
 
-class TrilobiteApp extends StatefulWidget {
+class SonderRuntimeApp extends StatefulWidget {
   final bool manageLocalServer;
 
-  const TrilobiteApp({super.key, this.manageLocalServer = true});
+  const SonderRuntimeApp({super.key, this.manageLocalServer = true});
 
   @override
-  State<TrilobiteApp> createState() => _TrilobiteAppState();
+  State<SonderRuntimeApp> createState() => _SonderRuntimeAppState();
 }
 
-class _TrilobiteAppState extends State<TrilobiteApp> with WidgetsBindingObserver {
+class _SonderRuntimeAppState extends State<SonderRuntimeApp> with WidgetsBindingObserver {
   Settings? _settings;
   bool _startedLocalServer = false;
   bool _startingLocalServer = false;
@@ -93,7 +93,7 @@ class _TrilobiteAppState extends State<TrilobiteApp> with WidgetsBindingObserver
   @override
   Widget build(BuildContext context) {
     final settings = _settings;
-    const seed = Color(0xFF63D6C8); // trilobite signal teal
+    const seed = Color(0xFF63D6C8); // Sonder signal teal
 
     ThemeData buildTheme(Brightness brightness) {
       final dark = brightness == Brightness.dark;
@@ -166,7 +166,7 @@ class _TrilobiteAppState extends State<TrilobiteApp> with WidgetsBindingObserver
     }
 
     return MaterialApp(
-      title: 'trilobite',
+      title: 'Sonder Runtime',
       debugShowCheckedModeBanner: false,
       theme: buildTheme(Brightness.light),
       darkTheme: buildTheme(Brightness.dark),

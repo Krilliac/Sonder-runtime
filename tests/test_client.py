@@ -1,7 +1,7 @@
 import json
 import urllib.error
 
-import trilobite_client as tc
+import sonder_client as tc
 
 
 def test_build_request_with_key():
@@ -10,7 +10,7 @@ def test_build_request_with_key():
     assert headers["Authorization"] == "Bearer k"
     assert headers["Content-Type"] == "application/json"
     obj = json.loads(body.decode("utf-8"))
-    assert obj["model"] == "trilobite"
+    assert obj["model"] == "sonder"
     assert obj["messages"] == [{"role": "user", "content": "hi"}]
     assert obj["stream"] is False
 
@@ -29,7 +29,7 @@ def test_build_request_strips_trailing_slash():
 
 def test_send_prompt_falls_back_to_local_on_connection_error(monkeypatch):
     calls = []
-    monkeypatch.setenv("TRILOBITE_FALLBACK_LOCAL", "1")
+    monkeypatch.setenv("SONDER_FALLBACK_LOCAL", "1")
 
     def fake_send(server, key, prompt):
         calls.append((server, key, prompt))

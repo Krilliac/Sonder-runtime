@@ -96,7 +96,7 @@ def test_clean_grounded_learning_store_is_healthy_and_formats():
     text = learning_health.format_report(report)
     assert report["status"] == "healthy"
     assert report["distillation_yield"] == 1.0
-    assert "trilobite learning health" in text
+    assert "sonder learning health" in text
     assert "outcome coverage: 100.0%" in text
     assert "interaction=1" in text
     assert "compiled=1" in text

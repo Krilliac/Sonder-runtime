@@ -68,7 +68,7 @@ def test_work_intent_does_not_hijack_questions_or_chat():
     assert intents.classify_work("how do I search folders in Python?") is False
     assert intents.classify_work("explain why this test failed") is False
     assert intents.classify_work("write me a short poem") is False
-    assert intents.classify_work("hello trilobite") is False
+    assert intents.classify_work("hello sonder") is False
 
 
 def test_execution_intent_routes_explicit_autonomy_fleet_and_foreground():
@@ -90,7 +90,7 @@ def test_execution_intent_routes_explicit_autonomy_fleet_and_foreground():
         "Spawn as much subagents as possible to inspect this repo."
     )["mode"] == "fleet"
     assert intents.classify_execution(
-        "Continue working on Trilobite autonomously."
+        "Continue working on Sonder autonomously."
     )["mode"] == "autopilot"
 
 

@@ -21,7 +21,7 @@ def _row(agent_id, *, role="agent", parent_id="", task="work"):
 
 
 def _isolated_store(monkeypatch, tmp_path):
-    monkeypatch.setenv("TRILOBITE_FLEET_DB", str(tmp_path / "fleet.db"))
+    monkeypatch.setenv("SONDER_FLEET_DB", str(tmp_path / "fleet.db"))
     fleet_store.reset_schema_cache_for_tests()
     fleet_store.clear_all()
 

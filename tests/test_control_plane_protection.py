@@ -14,8 +14,8 @@ def test_repo_local_roots_file_is_not_trusted(monkeypatch, tmp_path):
     target = outside / "secret.txt"
     target.write_text("secret", encoding="utf-8")
     monkeypatch.setattr(file_ops, "workspace_root", lambda: workspace)
-    monkeypatch.setattr(file_ops.trilobite_paths, "default_home", lambda: state)
-    monkeypatch.delenv("TRILOBITE_FILE_ROOTS_FILE", raising=False)
+    monkeypatch.setattr(file_ops.sonder_paths, "default_home", lambda: state)
+    monkeypatch.delenv("SONDER_FILE_ROOTS_FILE", raising=False)
     (workspace / file_ops.DEFAULT_ROOTS_FILE).write_text(str(outside), encoding="utf-8")
     with pytest.raises(PermissionError):
         file_ops.read_file(str(target))
@@ -70,7 +70,7 @@ def test_approval_code_cannot_edit_control_plane(monkeypatch, tmp_path):
     target = root / "permissions.json"
     target.write_text("before", encoding="utf-8")
     monkeypatch.setattr(server.file_ops, "workspace_root", lambda: root)
-    monkeypatch.setenv("TRILOBITE_FILE_APPROVAL_CODE", "let-me")
+    monkeypatch.setenv("SONDER_FILE_APPROVAL_CODE", "let-me")
     out = server.file_edit(
         str(target), "before", "after", approval="let-me"
     )
@@ -86,7 +86,7 @@ def test_recursive_delete_rejects_allowed_root(monkeypatch, tmp_path):
     marker = workspace / "ordinary.txt"
     marker.write_text("keep", encoding="utf-8")
     monkeypatch.setattr(file_ops, "workspace_root", lambda: workspace)
-    monkeypatch.setattr(file_ops.trilobite_paths, "default_home", lambda: state)
+    monkeypatch.setattr(file_ops.sonder_paths, "default_home", lambda: state)
 
     with pytest.raises(PermissionError, match="allowed/configured root"):
         file_ops.delete_path(
@@ -112,7 +112,7 @@ def test_recursive_delete_rejects_protected_descendant(
     protected = nested / protected_name
     protected.write_text("keep", encoding="utf-8")
     monkeypatch.setattr(file_ops, "workspace_root", lambda: workspace)
-    monkeypatch.setattr(file_ops.trilobite_paths, "default_home", lambda: state)
+    monkeypatch.setattr(file_ops.sonder_paths, "default_home", lambda: state)
 
     with pytest.raises(PermissionError, match="protected control state"):
         file_ops.delete_path(
@@ -133,7 +133,7 @@ def test_recursive_delete_rejects_reparse_descendant(monkeypatch, tmp_path):
     junction.mkdir(parents=True)
     state.mkdir()
     monkeypatch.setattr(file_ops, "workspace_root", lambda: workspace)
-    monkeypatch.setattr(file_ops.trilobite_paths, "default_home", lambda: state)
+    monkeypatch.setattr(file_ops.sonder_paths, "default_home", lambda: state)
     original = file_ops._is_reparse_point
     monkeypatch.setattr(
         file_ops,
@@ -162,7 +162,7 @@ def test_developer_can_recursively_delete_tree_with_protected_descendant(
     state.mkdir()
     (target / "permissions.json").write_text("ok", encoding="utf-8")
     monkeypatch.setattr(file_ops, "workspace_root", lambda: workspace)
-    monkeypatch.setattr(file_ops.trilobite_paths, "default_home", lambda: state)
+    monkeypatch.setattr(file_ops.sonder_paths, "default_home", lambda: state)
 
     result = file_ops.delete_path(
         str(target),

@@ -1,6 +1,7 @@
 """solver — execution-grounded self-repair (reflexion) + best-of-N for the coder.
 
-trilobite's model is frozen, so its single-shot answer is a fixed guess. But the
+The base model selected by Sonder Runtime is frozen, so its single-shot answer
+is a fixed guess. But the
 loop already owns a VERIFIER (grounding.run_code), which lets us spend test-time
 compute to reason harder: generate a candidate, run it against the task's check,
 and if it fails, feed the exact traceback back to the model and ask for a fix.
