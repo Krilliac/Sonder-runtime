@@ -30,47 +30,47 @@ def test_agent_tool_help_advertises_strict_humanoid_artifact_contract():
     assert '"required_animation_clips": ["Idle", "Walk", "Run"' in help_text
 
 
-def test_resolve_trilobite_falls_back(monkeypatch):
+def test_resolve_sonder_falls_back(monkeypatch):
     # no alias present -> code tier model
     monkeypatch.setattr(server, "_get", lambda path: {"models": [{"name": "qwen2.5:3b"}]})
-    assert server.resolve_trilobite_model() == server.TIERS["code"]
+    assert server.resolve_sonder_model() == server.TIERS["code"]
 
 
-def test_resolve_trilobite_prefers_alias(monkeypatch):
-    monkeypatch.setattr(server, "_get", lambda path: {"models": [{"name": "trilobite:latest"}]})
-    assert server.resolve_trilobite_model() == "trilobite"
+def test_resolve_sonder_prefers_alias(monkeypatch):
+    monkeypatch.setattr(server, "_get", lambda path: {"models": [{"name": "sonder:latest"}]})
+    assert server.resolve_sonder_model() == "sonder"
 
 
-def test_resolve_trilobite_soft_fails_when_ollama_down(monkeypatch):
+def test_resolve_sonder_soft_fails_when_ollama_down(monkeypatch):
     def boom(path):
         raise Exception("ollama down")
     monkeypatch.setattr(server, "_get", boom)
-    assert server.resolve_trilobite_model() == server.TIERS["code"]
+    assert server.resolve_sonder_model() == server.TIERS["code"]
 
 
-def test_resolve_trilobite_strict_true_prefers_alias(monkeypatch):
-    monkeypatch.setattr(server, "_get", lambda path: {"models": [{"name": "trilobite:latest"}]})
-    assert server.resolve_trilobite_model(strict=True) == "trilobite"
+def test_resolve_sonder_strict_true_prefers_alias(monkeypatch):
+    monkeypatch.setattr(server, "_get", lambda path: {"models": [{"name": "sonder:latest"}]})
+    assert server.resolve_sonder_model(strict=True) == "sonder"
 
 
-def test_resolve_trilobite_strict_true_alias_absent_returns_none(monkeypatch):
+def test_resolve_sonder_strict_true_alias_absent_returns_none(monkeypatch):
     monkeypatch.setattr(server, "_get", lambda path: {"models": [{"name": "qwen2.5:3b"}]})
-    assert server.resolve_trilobite_model(strict=True) is None
+    assert server.resolve_sonder_model(strict=True) is None
 
 
-def test_resolve_trilobite_strict_false_alias_absent_falls_back(monkeypatch):
+def test_resolve_sonder_strict_false_alias_absent_falls_back(monkeypatch):
     monkeypatch.setattr(server, "_get", lambda path: {"models": [{"name": "qwen2.5:3b"}]})
-    assert server.resolve_trilobite_model(strict=False) == server.TIERS["code"]
+    assert server.resolve_sonder_model(strict=False) == server.TIERS["code"]
 
 
-def test_trilobite_strict_true_errors_when_alias_missing_before_any_ollama_call(monkeypatch):
+def test_sonder_strict_true_errors_when_alias_missing_before_any_ollama_call(monkeypatch):
     monkeypatch.setattr(server, "_get", lambda path: {"models": [{"name": "qwen2.5:3b"}]})
 
     def boom_post(path, payload):
         raise AssertionError("must not call Ollama when strict + alias missing")
     monkeypatch.setattr(server, "_post", boom_post)
 
-    out = server.trilobite("hi", strict=True)
+    out = server.sonder("hi", strict=True)
     assert "not found" in out
 
 
@@ -99,9 +99,9 @@ def test_make_generate_adds_local_runtime_options(monkeypatch):
         seen["payload"] = payload
         return {"message": {"content": "ok"}}
 
-    monkeypatch.setenv("LOCAL_LLM_NUM_THREAD", "12")
-    monkeypatch.setenv("LOCAL_LLM_NUM_GPU", "99")
-    monkeypatch.setenv("LOCAL_LLM_NUM_BATCH", "256")
+    monkeypatch.setenv("SONDER_NUM_THREAD", "12")
+    monkeypatch.setenv("SONDER_NUM_GPU", "99")
+    monkeypatch.setenv("SONDER_NUM_BATCH", "256")
     monkeypatch.setattr(server, "_post", fake_post)
 
     gen = server._make_generate("local-model", "system", 0.3, 77, 4096)
@@ -122,7 +122,7 @@ def test_make_generate_adds_local_runtime_options(monkeypatch):
 
 
 def test_local_model_options_clamps_native_context(monkeypatch):
-    monkeypatch.setenv("TRILOBITE_NATIVE_CONTEXT_MAX", "256k")
+    monkeypatch.setenv("SONDER_NATIVE_CONTEXT_MAX", "256k")
 
     opts = server._local_model_options(0.2, 10, 1000000)
 
@@ -136,9 +136,9 @@ def test_make_generate_cloud_omits_local_runtime_options(monkeypatch):
         seen["payload"] = payload
         return {"message": {"content": "ok"}}
 
-    monkeypatch.setenv("LOCAL_LLM_NUM_THREAD", "12")
-    monkeypatch.setenv("LOCAL_LLM_NUM_GPU", "99")
-    monkeypatch.setenv("LOCAL_LLM_NUM_BATCH", "256")
+    monkeypatch.setenv("SONDER_NUM_THREAD", "12")
+    monkeypatch.setenv("SONDER_NUM_GPU", "99")
+    monkeypatch.setenv("SONDER_NUM_BATCH", "256")
     monkeypatch.setattr(server, "_post", fake_post)
 
     gen = server._make_generate("cloud-model", "", 0.4, 88, 8192, cloud=True)
@@ -167,7 +167,7 @@ def test_make_generate_captures_ollama_token_counts(monkeypatch):
 
 
 def test_serve_target_cloud_tier_requires_opt_in(monkeypatch):
-    monkeypatch.delenv("TRILOBITE_ALLOW_CLOUD", raising=False)
+    monkeypatch.delenv("SONDER_ALLOW_CLOUD", raising=False)
     model, cloud, augment, label = server._serve_target("cloud-code", None)
     assert model is None
     assert cloud is True
@@ -176,7 +176,7 @@ def test_serve_target_cloud_tier_requires_opt_in(monkeypatch):
 
 
 def test_serve_target_cloud_tier_is_clean_teacher_when_enabled(monkeypatch):
-    monkeypatch.setenv("TRILOBITE_ALLOW_CLOUD", "1")
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
     # Cloud tier: real cloud model, cloud=True, augment=False (clean), labeled by tier.
     model, cloud, augment, label = server._serve_target("cloud-code", None)
     assert model == server.TIERS["cloud-code"]
@@ -194,7 +194,7 @@ def test_serve_target_treats_code_as_local():
 
 
 def test_serve_target_cloud_detection_helper_detects_cloud_model_name(monkeypatch):
-    monkeypatch.setenv("TRILOBITE_ALLOW_CLOUD", "1")
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
     monkeypatch.setitem(server.TIERS, "code", "qwen3-coder:480b-cloud")
     model, cloud, augment, label = server._serve_target("code", None)
     assert model == "qwen3-coder:480b-cloud"
@@ -218,16 +218,16 @@ def test_serve_target_unknown_model_is_rejected():
 
 
 def test_canonical_learn_tier_maps_student_to_code():
-    assert server._canonical_learn_tier("trilobite") == "code"
+    assert server._canonical_learn_tier("sonder") == "code"
     assert server._canonical_learn_tier("cloud-code") == "cloud-code"
     assert server._canonical_learn_tier("general") == "general"
 
 
-def test_trilobite_tool_unknown_tier_errors_before_ollama(monkeypatch):
+def test_sonder_tool_unknown_tier_errors_before_ollama(monkeypatch):
     def boom_post(path, payload):
         raise AssertionError("must not call Ollama for an unknown tier")
     monkeypatch.setattr(server, "_post", boom_post)
-    out = server.trilobite("hi", tier="does-not-exist")
+    out = server.sonder("hi", tier="does-not-exist")
     assert "unknown tier" in out
 
 
@@ -242,17 +242,17 @@ def test_answer_with_history_unknown_model_errors_before_ollama(monkeypatch):
 def test_serve_target_default_is_local_student(monkeypatch):
     monkeypatch.setattr(server, "_get",
                         lambda path: {"models": [{"name": "qwen2.5:3b"}]})
-    for name in ("", "trilobite", "local", None):
+    for name in ("", "sonder", "local", None):
         model, cloud, augment, label = server._serve_target(name, None)
         assert model == server.TIERS["code"]  # falls back to base coder alias target
         assert cloud is False
         assert augment is True
-        assert label == "trilobite"
+        assert label == "sonder"
 
 
-def test_trilobite_stats_runs_against_empty_db(monkeypatch, tmp_path):
+def test_sonder_stats_runs_against_empty_db(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "empty.db"))
-    out = server.trilobite_stats()
+    out = server.sonder_stats()
     assert isinstance(out, str)
     assert "lessons:" in out
     assert "tokens:" in out
@@ -283,7 +283,7 @@ def test_learning_health_is_structured_and_routed(monkeypatch, tmp_path):
     assert data["status"] == "healthy"
     assert data["outcome_coverage_percent"] == 100.0
     assert data["grounded_lessons"] == 1
-    assert "trilobite learning health" in text
+    assert "sonder learning health" in text
     assert server.control_command("/learning") == text
     assert server.control_command("/metrics") == text
 
@@ -330,14 +330,14 @@ def test_context_health_reports_session_and_memory(monkeypatch, tmp_path):
 def test_context_health_formats_console_meter(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
     out = server.context_health()
-    assert "trilobite context health" in out
+    assert "sonder context health" in out
     assert "context [" in out
     assert "native" in out
     assert "memory  [" in out
 
 
 def test_set_context_size_selects_virtual_context(monkeypatch):
-    monkeypatch.setenv("TRILOBITE_NATIVE_CONTEXT_MAX", "256k")
+    monkeypatch.setenv("SONDER_NATIVE_CONTEXT_MAX", "256k")
     old = server.SESSION_NUM_CTX
     try:
         out = server.set_context_size("1m")
@@ -400,7 +400,7 @@ def test_control_command_routes_weather_without_model(monkeypatch):
 
 
 def test_control_command_dump_writes_file(monkeypatch, tmp_path):
-    monkeypatch.setattr(server.trilobite_paths, "default_home", lambda: tmp_path)
+    monkeypatch.setattr(server.sonder_paths, "default_home", lambda: tmp_path)
     monkeypatch.setattr(server, "context_health", lambda session="", project="": "context")
     monkeypatch.setattr(server, "memory_quality_report", lambda sample_limit=5: "quality")
     monkeypatch.setattr(server, "master_status", lambda limit=20: "agents")
@@ -442,11 +442,11 @@ def test_control_command_run_uses_history(monkeypatch):
     assert seen == {"code": "int main(){return 0;}", "language": "cpp", "timeout": 9}
 
 
-def test_trilobite_slash_command_does_not_call_model(monkeypatch):
+def test_sonder_slash_command_does_not_call_model(monkeypatch):
     monkeypatch.setattr(server, "context_health", lambda: "context health")
     monkeypatch.setattr(server, "_serve_target", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("model should not resolve")))
 
-    assert server.trilobite("/context") == "context health"
+    assert server.sonder("/context") == "context health"
 
 
 def test_preference_command_learns_and_lists(monkeypatch, tmp_path):
@@ -529,13 +529,13 @@ def test_improvement_report_flags_ungrounded_learning(monkeypatch, tmp_path):
     assert report["interactions"] == 1
     assert report["outcomes"] == 0
     assert any(i["area"] == "learning" for i in report["issues"])
-    assert "trilobite improvement report" in text
+    assert "sonder improvement report" in text
     assert "next improvements:" in text
 
 
 def test_improvement_report_honors_cloud_opt_in(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
-    monkeypatch.setenv("TRILOBITE_ALLOW_CLOUD", "1")
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
 
     report = server.improvement_report_data()
 
@@ -571,7 +571,7 @@ def test_master_orchestrate_asks_for_execution_mode():
 
 
 def test_master_orchestrate_ask_reports_widened_agent_cap(monkeypatch):
-    monkeypatch.setenv("TRILOBITE_MAX_AGENTS", "16")
+    monkeypatch.setenv("SONDER_MAX_AGENTS", "16")
 
     out = server.master_orchestrate("build a parser", mode="ask", agents=99)
 
@@ -917,7 +917,7 @@ def test_file_tools_allow_extra_root_with_approval(monkeypatch, tmp_path):
     target = outside / "ok.txt"
     target.write_text("ok", encoding="utf-8")
     monkeypatch.setattr(server.file_ops, "workspace_root", lambda: root)
-    monkeypatch.setenv("TRILOBITE_FILE_APPROVAL_CODE", "let-me")
+    monkeypatch.setenv("SONDER_FILE_APPROVAL_CODE", "let-me")
 
     out = server.file_read(
         str(target),
@@ -962,7 +962,7 @@ def test_game_generate_records_grounded_success(monkeypatch):
     monkeypatch.setattr(server.game_forge, "generation_prompt", lambda *a, **k: "prompt")
     monkeypatch.setattr(
         server,
-        "trilobite",
+        "sonder",
         lambda *a, **k: (
             "```python\n# assets/tiles.png assets/hit.wav\n"
             "open('frame.ppm','wb').write(b'P6')\nprint('GAME_OK')\n```\n\n"
@@ -1114,16 +1114,22 @@ def test_parallel_generate_run_languages_spreads_languages(monkeypatch):
     assert ("javascript", "console.log('js')") in calls
 
 
+def test_campaign_string_task_uses_the_actual_reversal():
+    task = dict(server._CAMPAIGN_TASKS)["string"]
+    assert "print exactly: rednos" in task
+    assert server._campaign_expected("string") == "rednos"
+
+
 def test_campaign_records_passing_interactions(monkeypatch):
-    def fake_trilobite(prompt, **kwargs):
-        return "```python\nprint('trilobite-ok')\n```\n\n[interaction_id: abc123]"
+    def fake_sonder(prompt, **kwargs):
+        return "```python\nprint('sonder-ok')\n```\n\n[interaction_id: abc123]"
 
     records = []
-    monkeypatch.setattr(server, "trilobite", fake_trilobite)
+    monkeypatch.setattr(server, "sonder", fake_sonder)
     monkeypatch.setattr(
         server.grounding,
         "run_language_code",
-        lambda code, language, timeout=8, execute=True: (True, "trilobite-ok"),
+        lambda code, language, timeout=8, execute=True: (True, "sonder-ok"),
     )
     monkeypatch.setattr(server, "record_outcome", lambda iid, signal: records.append((iid, signal)) or "recorded")
 
@@ -1140,15 +1146,15 @@ def test_campaign_records_passing_interactions(monkeypatch):
 def test_campaign_repairs_then_records(monkeypatch):
     calls = {"n": 0}
 
-    def fake_trilobite(prompt, **kwargs):
+    def fake_sonder(prompt, **kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
             return "```python\nprint('wrong')\n```\n\n[interaction_id: bad123]"
-        return "```python\nprint('trilobite-ok')\n```\n\n[interaction_id: feed123]"
+        return "```python\nprint('sonder-ok')\n```\n\n[interaction_id: feed123]"
 
-    outputs = iter([(True, "wrong"), (True, "trilobite-ok")])
+    outputs = iter([(True, "wrong"), (True, "sonder-ok")])
     records = []
-    monkeypatch.setattr(server, "trilobite", fake_trilobite)
+    monkeypatch.setattr(server, "sonder", fake_sonder)
     monkeypatch.setattr(
         server.grounding,
         "run_language_code",
@@ -1167,11 +1173,11 @@ def test_campaign_repairs_then_records(monkeypatch):
 
 
 def test_campaign_records_terminal_failures(monkeypatch):
-    def fake_trilobite(prompt, **kwargs):
+    def fake_sonder(prompt, **kwargs):
         return "```python\nprint('wrong')\n```\n\n[interaction_id: bad123]"
 
     records = []
-    monkeypatch.setattr(server, "trilobite", fake_trilobite)
+    monkeypatch.setattr(server, "sonder", fake_sonder)
     monkeypatch.setattr(
         server.grounding,
         "run_language_code",
@@ -1192,7 +1198,7 @@ def test_campaign_records_terminal_failures(monkeypatch):
 
 
 def test_learn_tiers_reports_all_defaults(monkeypatch):
-    monkeypatch.delenv("TRILOBITE_ALLOW_CLOUD", raising=False)
+    monkeypatch.delenv("SONDER_ALLOW_CLOUD", raising=False)
     out = server.learn_tiers()
     for tier in ("fast", "code", "general"):
         assert "%s: on" % tier in out
@@ -1201,7 +1207,7 @@ def test_learn_tiers_reports_all_defaults(monkeypatch):
 
 
 def test_learn_tiers_distinguishes_available_cloud_from_learning(monkeypatch):
-    monkeypatch.setenv("TRILOBITE_ALLOW_CLOUD", "1")
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
     out = server.learn_tiers()
 
     assert "cloud-code: off" in out
@@ -1212,8 +1218,8 @@ def test_learn_tiers_distinguishes_available_cloud_from_learning(monkeypatch):
 def test_format_trace_contains_model_lessons_and_prompt():
     trace = {"lessons": ["prefer RRF", "avoid globals"], "augmented_prompt": "# Task:\nfix the bug"}
     params = {"temperature": 0.2, "num_predict": 1024, "num_ctx": 4096}
-    out = server._format_trace("trilobite", "code", params, trace)
-    assert "trilobite" in out
+    out = server._format_trace("sonder", "code", params, trace)
+    assert "sonder" in out
     assert "lessons retrieved: 2" in out
     assert "prefer RRF" in out
     assert "avoid globals" in out
@@ -1223,7 +1229,7 @@ def test_format_trace_contains_model_lessons_and_prompt():
 def test_format_trace_roundtrip_with_footer_does_not_break_id_parsing():
     trace = {"lessons": ["prefer RRF"], "augmented_prompt": "# Task:\nfix the bug"}
     params = {"temperature": 0.2, "num_predict": 1024, "num_ctx": 4096}
-    trace_block = server._format_trace("trilobite", "code", params, trace)
+    trace_block = server._format_trace("sonder", "code", params, trace)
     # Mirrors the real tool's ordering: answer, then trace block, then footer LAST.
     body = server.with_footer("answer" + trace_block, "abcd1234")
     assert server.parse_interaction_id(body) == "abcd1234"

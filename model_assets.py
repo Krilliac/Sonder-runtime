@@ -26,7 +26,7 @@ def _clean(value, limit=240):
         and not 0xD800 <= ord(character) <= 0xDFFF
         and ord(character) not in {0xFFFE, 0xFFFF}
     )
-    return safe[:limit] or "Trilobite rigged model"
+    return safe[:limit] or "Sonder rigged model"
 
 
 def _atomic_write_bytes(path, payload):
@@ -220,7 +220,7 @@ def _rotated_delta(vector, axis, angle):
     return tuple(round(changed - original, 7) for changed, original in zip(rotated, vector))
 
 
-def write_rigged_glb(path, palette, theme="arcane", seed=1337, title="Trilobite", brief=""):
+def write_rigged_glb(path, palette, theme="arcane", seed=1337, title="Sonder", brief=""):
     """Write a self-contained humanoid GLB with PBR, skinning, morphs, and clips."""
     seed = int(seed)
     variation = ((seed & 255) / 255.0 - 0.5) * 0.16
@@ -591,7 +591,7 @@ def write_rigged_glb(path, palette, theme="arcane", seed=1337, title="Trilobite"
         "accessors": accessors,
         "animations": animations,
         "asset": {
-            "generator": "Trilobite stdlib rigged-model forge",
+            "generator": "Sonder stdlib rigged-model forge",
             "version": "2.0",
         },
         "bufferViews": builder.views,

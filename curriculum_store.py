@@ -1,4 +1,4 @@
-"""curriculum_store — persist trilobite's self-generated (and self-validated)
+"""curriculum_store — persist sonder's self-generated (and self-validated)
 training tasks as JSONL, so the curriculum grows across runs instead of being
 regenerated from scratch every time.
 """

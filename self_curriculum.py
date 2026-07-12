@@ -1,4 +1,4 @@
-"""self_curriculum — trilobite invents its own grounded practice tasks.
+"""self_curriculum — sonder invents its own grounded practice tasks.
 
 The model is asked to emit a JSON object describing ONE new coding task
 (name/prompt/check/reference). We parse it, validate it by actually

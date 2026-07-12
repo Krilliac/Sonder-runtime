@@ -5,6 +5,10 @@ import pytest
 import qlora_train
 
 
+def test_default_adapter_output_uses_sonder_namespace():
+    assert qlora_train.OUTPUT_DIR.endswith("sonder-personal-lora")
+
+
 class FakeTokenizer:
     def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
         assert tokenize

@@ -3,8 +3,8 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:trilobite/api.dart';
-import 'package:trilobite/models.dart';
+import 'package:sonder_runtime/api.dart';
+import 'package:sonder_runtime/models.dart';
 
 void main() {
   test('host launcher status uses its independent bearer token', () async {
@@ -26,7 +26,7 @@ void main() {
     });
 
     final status = await http.runWithClient(
-      () => const TrilobiteLauncherApi(
+      () => const SonderLauncherApi(
         baseUrl: 'https://host.test:11436/',
         token: 'launcher-secret',
       ).status(),
@@ -38,6 +38,7 @@ void main() {
     expect(seen.headers['authorization'], 'Bearer launcher-secret');
     expect(status.launcher, 'ready');
     expect(status.serverRunning, isFalse);
+    expect(status.serverState, 'stopped');
   });
 
   test('host launcher sends only a bounded action and context size', () async {
@@ -60,7 +61,7 @@ void main() {
     });
 
     final status = await http.runWithClient(
-      () => const TrilobiteLauncherApi(
+      () => const SonderLauncherApi(
         baseUrl: 'https://host.test:11436',
         token: 'secret',
       ).action('start', contextSize: '32k'),
@@ -69,12 +70,268 @@ void main() {
 
     expect(seen.url.path, '/v1/launcher/start');
     expect(jsonDecode(seen.body), {'context_size': '32k'});
+    expect(
+      seen.headers['idempotency-key'],
+      matches(RegExp(
+        r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-'
+        r'[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+      )),
+    );
     expect(status.serverRunning, isTrue);
     expect(status.message, 'started');
     expect(
-      const TrilobiteLauncherApi(baseUrl: 'x', token: '').action('run'),
-      throwsA(isA<TrilobiteException>()),
+      const SonderLauncherApi(baseUrl: 'x', token: '').action('run'),
+      throwsA(isA<SonderException>()),
     );
+  });
+
+  test('host launcher follows an accepted async operation to success',
+      () async {
+    final requests = <http.Request>[];
+    var operationReads = 0;
+    Map<String, dynamic> payload(String phase) => {
+          'ok': phase != 'failed',
+          'launcher': 'ready',
+          'server_running': phase == 'succeeded',
+          'server_host': '0.0.0.0',
+          'server_port': 11435,
+          'last_action': 'start',
+          'last_error': '',
+          'operation_id': 'op-12345678',
+          'operation_phase': phase,
+          'operation': {
+            'id': 'op-12345678',
+            'action': 'start',
+            'phase': phase,
+            'message': phase == 'succeeded' ? 'Server started.' : 'Working.',
+            'last_error': '',
+          },
+        };
+    final client = MockClient((request) async {
+      requests.add(request);
+      if (request.method == 'POST') {
+        return http.Response(jsonEncode(payload('queued')), 202);
+      }
+      operationReads += 1;
+      if (operationReads == 1) {
+        return http.Response(jsonEncode({'error': 'temporarily unavailable'}),
+            503);
+      }
+      return http.Response(
+        jsonEncode(payload(operationReads == 2 ? 'running' : 'succeeded')),
+        200,
+      );
+    });
+    final phases = <String>[];
+
+    final result = await http.runWithClient(
+      () => const SonderLauncherApi(
+        baseUrl: 'https://host.test:11436',
+        token: 'secret',
+      ).action(
+        'start',
+        idempotencyKey: 'tap-key-12345678',
+        maxWait: const Duration(seconds: 1),
+        pollInterval: Duration.zero,
+        onProgress: (status) {
+          phases.add(status.currentOperation!.phase);
+        },
+      ),
+      () => client,
+    );
+
+    expect(result.serverRunning, isTrue);
+    expect(phases, ['queued', 'running', 'succeeded']);
+    expect(requests, hasLength(4));
+    expect(requests.first.headers['idempotency-key'], 'tap-key-12345678');
+    expect(
+      requests.last.url.path,
+      '/v1/launcher/operations/op-12345678',
+    );
+  });
+
+  test('host launcher reports terminal async failures without another POST',
+      () async {
+    var posts = 0;
+    final client = MockClient((request) async {
+      if (request.method == 'POST') {
+        posts += 1;
+        return http.Response(
+          jsonEncode({
+            'ok': true,
+            'launcher': 'ready',
+            'operation': {
+              'id': 'op-failure',
+              'action': 'restart',
+              'phase': 'queued',
+            },
+          }),
+          202,
+        );
+      }
+      return http.Response(
+        jsonEncode({
+          'ok': false,
+          'launcher': 'ready',
+          'last_error': 'server health check failed',
+          'operation': {
+            'id': 'op-failure',
+            'action': 'restart',
+            'phase': 'failed',
+            'last_error': 'server health check failed',
+          },
+        }),
+        200,
+      );
+    });
+
+    await expectLater(
+      http.runWithClient(
+        () => const SonderLauncherApi(
+          baseUrl: 'https://host.test:11436',
+          token: 'secret',
+        ).action(
+          'restart',
+          maxWait: const Duration(seconds: 1),
+          pollInterval: Duration.zero,
+        ),
+        () => client,
+      ),
+      throwsA(
+        isA<SonderException>().having(
+          (error) => error.message,
+          'message',
+          contains('health check failed'),
+        ),
+      ),
+    );
+    expect(posts, 1);
+  });
+
+  test('stopping async wait does not send a second launcher request',
+      () async {
+    var requests = 0;
+    var cancelled = false;
+    final client = MockClient((request) async {
+      requests += 1;
+      return http.Response(
+        jsonEncode({
+          'ok': true,
+          'launcher': 'ready',
+          'operation': {
+            'id': 'op-cancel-wait',
+            'action': 'start',
+            'phase': 'queued',
+          },
+        }),
+        202,
+      );
+    });
+
+    await expectLater(
+      http.runWithClient(
+        () => const SonderLauncherApi(
+          baseUrl: 'https://host.test:11436',
+          token: 'secret',
+        ).action(
+          'start',
+          maxWait: const Duration(seconds: 1),
+          pollInterval: Duration.zero,
+          onProgress: (_) => cancelled = true,
+          isCancelled: () => cancelled,
+        ),
+        () => client,
+      ),
+      throwsA(
+        isA<SonderException>().having(
+          (error) => error.message,
+          'message',
+          contains('may still be running'),
+        ),
+      ),
+    );
+    expect(requests, 1);
+  });
+
+  test('launcher status exposes a resumable active operation', () async {
+    final client = MockClient((request) async => http.Response(
+          jsonEncode({
+            'ok': true,
+            'launcher': 'ready',
+            'active_operation': {
+              'id': 'op-resume',
+              'action': 'start',
+              'phase': 'running',
+              'message': 'Downloading model.',
+            },
+          }),
+          200,
+        ));
+
+    final result = await http.runWithClient(
+      () => const SonderLauncherApi(
+        baseUrl: 'https://host.test:11436',
+        token: 'secret',
+      ).status(),
+      () => client,
+    );
+
+    expect(result.activeOperation?.id, 'op-resume');
+    expect(result.currentOperation?.phase, 'running');
+    expect(result.currentOperation?.displayMessage, 'Downloading model.');
+  });
+
+  test('launcher status distinguishes a foreign listener from Sonder Runtime',
+      () {
+    final status = LauncherStatus.fromJson({
+      'ok': true,
+      'launcher': 'ready',
+      'server_running': false,
+      'server_state': 'foreign_listener',
+      'server_host': '0.0.0.0',
+      'server_port': 11435,
+      'last_error': 'configured port is occupied by another service',
+    });
+
+    expect(status.ok, isTrue);
+    expect(status.serverRunning, isFalse);
+    expect(status.serverState, 'foreign_listener');
+    expect(status.lastError, contains('another service'));
+  });
+
+  test('Sonder API uses the canonical status namespace', () async {
+    late http.Request seen;
+    final client = MockClient((request) async {
+      seen = request;
+      return http.Response(jsonEncode({'models': []}), 200);
+    });
+
+    await http.runWithClient(
+      () => const SonderApi(baseUrl: 'http://sonder.test').systemInfo(),
+      () => client,
+    );
+
+    expect(seen.url.path, '/v1/sonder/status');
+  });
+
+  test('Sonder account calls use the canonical command namespace', () async {
+    late http.Request seen;
+    final client = MockClient((request) async {
+      seen = request;
+      return http.Response(
+        jsonEncode({'ok': true, 'message': 'registered'}),
+        200,
+      );
+    });
+
+    final result = await http.runWithClient(
+      () => const SonderApi(baseUrl: 'http://sonder.test')
+          .register('person', 'password123'),
+      () => client,
+    );
+
+    expect(result, 'registered');
+    expect(seen.url.path, '/v1/sonder/register');
   });
 
   test('location opt-in sends a minimized client-side place hint', () async {
@@ -112,7 +369,7 @@ void main() {
     });
 
     final output = await http.runWithClient(
-      () => const TrilobiteApi(baseUrl: 'http://trilobite.test').chat(
+      () => const SonderApi(baseUrl: 'http://sonder.test').chat(
         const [ChatMessage(role: Role.user, content: 'weather in my area')],
         allowApproximateLocation: true,
       ),
@@ -120,6 +377,7 @@ void main() {
     );
 
     expect(output, 'weather live');
+    expect(chatBody?['model'], 'sonder');
     expect(chatBody?['location_consent'], isTrue);
     final hint = chatBody?['location_hint'] as Map<String, dynamic>;
     expect(hint['city'], 'Chicago');
@@ -151,7 +409,7 @@ void main() {
     });
 
     final output = await http.runWithClient(
-      () => const TrilobiteApi(baseUrl: 'http://trilobite.test').chat(
+      () => const SonderApi(baseUrl: 'http://sonder.test').chat(
         const [ChatMessage(role: Role.user, content: 'weather in Tokyo')],
         allowApproximateLocation: true,
       ),
@@ -330,12 +588,12 @@ void main() {
       'runtime_policy': {
         'revision': 7,
         'updated_ts': 1783731000,
-        'path': r'C:\Users\natew\AppData\Local\trilobite\runtime_policy.json',
+        'path': r'C:\Users\natew\AppData\Local\sonder\runtime_policy.json',
         'source': 'runtime_policy_update',
         'error': '',
         'local_models': {
           'fast': 'qwen2.5:3b',
-          'code': 'trilobite:latest',
+          'code': 'sonder:latest',
           'general': 'qwen2.5:7b-instruct',
         },
         'routing': {
@@ -351,7 +609,7 @@ void main() {
 
     final policy = info.runtimePolicy!;
     expect(policy.revision, 7);
-    expect(policy.localModels['code'], 'trilobite:latest');
+    expect(policy.localModels['code'], 'sonder:latest');
     expect(policy.routing['review'], 'general');
     expect(policy.modelForLane('review'), 'qwen2.5:7b-instruct');
     expect(policy.missingModels, ['missing-local:latest']);
@@ -364,7 +622,7 @@ void main() {
         'status': 'current',
         'enabled': true,
         'module': '__main__',
-        'path': r'C:\trilobite\server.py',
+        'path': r'C:\sonder\server.py',
         'loaded_digest': '1234567890abcdef',
         'current_digest': '1234567890abcdef',
         'source_changed': false,

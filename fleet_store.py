@@ -4,7 +4,7 @@ Ownership and concurrency contract:
 
 * This module is a service, not per-agent state. It owns the SQLite schema and
   short transactions; ``master_orchestrator`` owns execution threads/model calls.
-* Every public operation is safe from any thread or local Trilobite process.
+* Every public operation is safe from any thread or local Sonder process.
 * Queued -> running, finish, cancellation, and stale-owner reconciliation are
   conditional ``BEGIN IMMEDIATE`` transactions. Callers never write rows directly.
 * The module is intentionally not hot-reloaded. Its database survives process
@@ -21,7 +21,7 @@ import threading
 import time
 from pathlib import Path
 
-import trilobite_paths
+import sonder_paths
 
 
 ACTIVE_STATUSES = ("queued", "running")
@@ -98,7 +98,7 @@ CREATE INDEX IF NOT EXISTS idx_fleet_events_agent
 
 
 def database_path() -> str:
-    return trilobite_paths.state_path("fleet.db", "TRILOBITE_FLEET_DB")
+    return sonder_paths.state_path("fleet.db", "SONDER_FLEET_DB")
 
 
 def _clamp_text(value, limit: int) -> str:

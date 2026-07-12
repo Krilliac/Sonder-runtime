@@ -147,7 +147,7 @@ def test_format_report_is_readable_text_with_key_sections():
     ms.record_outcome_row(c, "i1", "tests_passed", 1.0)
     ms.add_lesson(c, ms.new_id(), "Use array.array for a compact numeric buffer.", None, "i1")
     text = mr.format_report(mr.build_report(c))
-    assert "trilobite metrics report" in text
+    assert "sonder metrics report" in text
     assert "lessons/interaction" in text
     assert "distillation yield" in text
     assert "lesson sources" in text

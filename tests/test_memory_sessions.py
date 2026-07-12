@@ -22,9 +22,9 @@ def test_log_interaction_defaults_are_session_less():
 
 def test_session_turns_ordered_oldest_first():
     c = _conn()
-    ms.log_interaction(c, "i1", "q1", "", "a1", "trilobite", session_id="S")
-    ms.log_interaction(c, "i2", "q2", "", "a2", "trilobite", session_id="S")
-    ms.log_interaction(c, "i3", "q3", "", "a3", "trilobite", session_id="other")
+    ms.log_interaction(c, "i1", "q1", "", "a1", "sonder", session_id="S")
+    ms.log_interaction(c, "i2", "q2", "", "a2", "sonder", session_id="S")
+    ms.log_interaction(c, "i3", "q3", "", "a3", "sonder", session_id="other")
     turns = ms.session_turns(c, "S")
     assert [t["task"] for t in turns] == ["q1", "q2"]
     assert [t["id"] for t in turns] == ["i1", "i2"]
@@ -33,7 +33,7 @@ def test_session_turns_ordered_oldest_first():
 def test_session_history_caps_to_last_n():
     c = _conn()
     for i in range(5):
-        ms.log_interaction(c, "i%d" % i, "q%d" % i, "", "a%d" % i, "trilobite", session_id="S")
+        ms.log_interaction(c, "i%d" % i, "q%d" % i, "", "a%d" % i, "sonder", session_id="S")
     hist = ms.session_history(c, "S", max_turns=2)
     assert hist == [("q3", "a3"), ("q4", "a4")]
 
@@ -41,7 +41,7 @@ def test_session_history_caps_to_last_n():
 def test_session_turn_count():
     c = _conn()
     assert ms.session_turn_count(c, "S") == 0
-    ms.log_interaction(c, "i1", "q", "", "a", "trilobite", session_id="S")
+    ms.log_interaction(c, "i1", "q", "", "a", "sonder", session_id="S")
     assert ms.session_turn_count(c, "S") == 1
 
 
@@ -69,8 +69,8 @@ def test_touch_session_does_not_clobber_existing_project():
 def test_list_sessions_has_turn_counts():
     c = _conn()
     ms.touch_session(c, "S")
-    ms.log_interaction(c, "i1", "q", "", "a", "trilobite", session_id="S")
-    ms.log_interaction(c, "i2", "q", "", "a", "trilobite", session_id="S")
+    ms.log_interaction(c, "i1", "q", "", "a", "sonder", session_id="S")
+    ms.log_interaction(c, "i2", "q", "", "a", "sonder", session_id="S")
     rows = ms.list_sessions(c)
     assert rows[0]["session_id"] == "S"
     assert rows[0]["turn_count"] == 2
@@ -87,11 +87,11 @@ def test_find_session_by_id_and_title_prefix():
 
 def test_good_interactions_with_embeddings_filters_and_excludes():
     c = _conn()
-    ms.log_interaction(c, "g", "task g", "", "resp", "trilobite",
+    ms.log_interaction(c, "g", "task g", "", "resp", "sonder",
                        session_id="A", task_embedding=b"\x00\x01")
-    ms.log_interaction(c, "bad", "task bad", "", "resp", "trilobite",
+    ms.log_interaction(c, "bad", "task bad", "", "resp", "sonder",
                        task_embedding=b"\x00\x01")
-    ms.log_interaction(c, "noemb", "task noemb", "", "resp", "trilobite")
+    ms.log_interaction(c, "noemb", "task noemb", "", "resp", "sonder")
     ms.record_outcome_row(c, "g", "tests_passed", 1.0)
     ms.record_outcome_row(c, "bad", "failed", -1.0)
     ms.record_outcome_row(c, "noemb", "tests_passed", 1.0)

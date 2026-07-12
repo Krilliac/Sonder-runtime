@@ -103,7 +103,7 @@ def test_agent_dispatch_exposes_learning_health_as_read_only(monkeypatch):
 
 def test_agent_dispatch_can_tune_emotion_vectors(monkeypatch, tmp_path):
     monkeypatch.setattr(server.emotion_vectors, "workspace_root", lambda: str(tmp_path))
-    monkeypatch.delenv("TRILOBITE_EMOTION_VECTORS", raising=False)
+    monkeypatch.delenv("SONDER_EMOTION_VECTORS", raising=False)
 
     out = server._agent_dispatch(
         "tune_emotion_vectors",

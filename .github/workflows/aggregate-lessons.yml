@@ -1,4 +1,4 @@
-# Home-base aggregation job for trilobite's federated lesson sharing.
+# Home-base aggregation job for Sonder Runtime's federated lesson sharing.
 #
 # This does NOT run or host the model — it only merges small, opt-in,
 # already-scrubbed lesson text files that users contributed under contrib/

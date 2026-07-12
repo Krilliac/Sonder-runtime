@@ -66,6 +66,7 @@ REQUIRED_FILES = {
     "game_forge.py",
     "fleet_store.py",
     "learning_health.py",
+    "sonder_health.py",
     "media_assets.py",
     "model_assets.py",
     "ooxml_assets.py",
@@ -73,15 +74,15 @@ REQUIRED_FILES = {
     "runtime_policy.py",
     "server.py",
     "setup_alias.py",
-    "trilobite-headless.cmd",
-    "trilobite-headless.sh",
-    "trilobite_headless.py",
-    "trilobite-runtime.cmd",
-    "trilobite-runtime.sh",
+    "sonder-headless.cmd",
+    "sonder-headless.sh",
+    "sonder_headless.py",
+    "sonder-runtime.cmd",
+    "sonder-runtime.sh",
     "web_intents.py",
-    "trilobite-serve.cmd",
-    "trilobite-serve.sh",
-    "trilobite_serve.py",
+    "sonder-serve.cmd",
+    "sonder-serve.sh",
+    "sonder_serve.py",
 }
 EXACT_OUTPUTS = (
     Path("app/build/local-system"),
@@ -356,10 +357,12 @@ def copy_payload(dest: Path, engine_bundle_source: Path | None = None) -> None:
         if engine_bundle_source is not None:
             _copy_engine_bundle(engine_bundle_source, stage)
         (stage / "BUNDLED_SYSTEM_README.txt").write_text(
-            "This folder is the bundled trilobite local system.\n"
+            "This folder is the bundled Sonder Runtime local system.\n"
             "Run bootstrap-engine.cmd for one-click local model setup on Windows.\n"
             "Run ./bootstrap-engine.sh on Linux or macOS.\n"
-            "Run trilobite-headless.cmd or ./trilobite-headless.sh for the managed server.\n"
+            "Run sonder-headless.cmd or ./sonder-headless.sh for the managed server.\n"
+            "Run sonder-launcher.cmd or ./sonder-launcher.sh on a powered-on host so\n"
+            "authenticated mobile clients can start, stop, or restart that server.\n"
             "If engine/<platform>-<architecture>/ exists, setup verifies and uses its sealed\n"
             "Python, Ollama, and model payload without network access. Code-only packages use\n"
             "host runtimes and may install mcp or pull missing models on first setup.\n",
@@ -492,7 +495,7 @@ def main() -> int:
     parser.add_argument("--zip", default="")
     parser.add_argument(
         "--engine-bundle",
-        default=os.environ.get("TRILOBITE_ENGINE_BUNDLE_SOURCE", ""),
+        default=os.environ.get("SONDER_ENGINE_BUNDLE_SOURCE", ""),
         help="optional sealed platform engine bundle to include",
     )
     args = parser.parse_args()

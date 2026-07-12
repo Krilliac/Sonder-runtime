@@ -56,7 +56,7 @@ if __name__ == "__main__" and not globals().get("_MCP_HOT_RELOAD_EXEC"):
 
 
 def test_registry_refresh_adds_updates_and_removes_tools(monkeypatch, tmp_path):
-    monkeypatch.setenv("TRILOBITE_LIVE_RELOAD", "1")
+    monkeypatch.setenv("SONDER_LIVE_RELOAD", "1")
     module_name = "reloadable_mcp_sample"
     module_path = tmp_path / (module_name + ".py")
     module_path.write_text(_module_source("v1"), encoding="utf-8")
@@ -99,7 +99,7 @@ def test_registry_refresh_adds_updates_and_removes_tools(monkeypatch, tmp_path):
 
 
 def test_broken_refresh_preserves_last_known_good_registry(monkeypatch, tmp_path):
-    monkeypatch.setenv("TRILOBITE_LIVE_RELOAD", "1")
+    monkeypatch.setenv("SONDER_LIVE_RELOAD", "1")
     module_name = "reloadable_mcp_failure_sample"
     module_path = tmp_path / (module_name + ".py")
     module_path.write_text(
@@ -130,7 +130,7 @@ def test_refresh_tracks_exact_executed_bytes_when_source_changes_during_exec(
     monkeypatch,
     tmp_path,
 ):
-    monkeypatch.setenv("TRILOBITE_LIVE_RELOAD", "1")
+    monkeypatch.setenv("SONDER_LIVE_RELOAD", "1")
     module_name = "reloadable_mcp_racing_editor_sample"
     module_path = tmp_path / (module_name + ".py")
     module_path.write_text(_module_source("v1"), encoding="utf-8")
@@ -163,7 +163,7 @@ def test_refresh_tracks_exact_executed_bytes_when_source_changes_during_exec(
 
 
 def test_tool_call_refresh_sends_list_changed_notification(monkeypatch, tmp_path):
-    monkeypatch.setenv("TRILOBITE_LIVE_RELOAD", "1")
+    monkeypatch.setenv("SONDER_LIVE_RELOAD", "1")
     module_name = "reloadable_mcp_notification_sample"
     module_path = tmp_path / (module_name + ".py")
     module_path.write_text(_module_source("before"), encoding="utf-8")
@@ -193,7 +193,7 @@ def test_tool_call_refresh_sends_list_changed_notification(monkeypatch, tmp_path
 
 
 def test_server_uses_reloadable_registry_and_reports_current_source(monkeypatch):
-    monkeypatch.setenv("TRILOBITE_LIVE_RELOAD", "1")
+    monkeypatch.setenv("SONDER_LIVE_RELOAD", "1")
     import server
 
     state = server.mcp_runtime_data()
@@ -212,7 +212,7 @@ def test_real_stdio_session_hot_adds_updates_removes_and_fails_closed(
     monkeypatch,
     tmp_path,
 ):
-    monkeypatch.setenv("TRILOBITE_LIVE_RELOAD", "1")
+    monkeypatch.setenv("SONDER_LIVE_RELOAD", "1")
     server_path = tmp_path / "stdio_reload_server.py"
     server_path.write_text(_stdio_source("v1"), encoding="utf-8")
     repo_root = os.path.dirname(os.path.dirname(__file__))

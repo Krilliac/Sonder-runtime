@@ -1,4 +1,4 @@
-"""Persistent greenfield game projects backed by Trilobite procedural assets.
+"""Persistent greenfield game projects backed by Sonder procedural assets.
 
 Reference projects are intentionally small and dependency-free. They provide a
 known-good end-to-end baseline for the model-generated campaign: load the pack,
@@ -176,7 +176,7 @@ def prepare_project(name: str, language: str, dimension: str, theme: str = "arca
     }
 
 
-PYTHON_2D = r'''"""Trilobite stdlib-only 2D arena. Run with --play for Tk controls."""
+PYTHON_2D = r'''"""Sonder stdlib-only 2D arena. Run with --play for Tk controls."""
 import json, math, pathlib, sys
 
 SCRIPT_ROOT = pathlib.Path(__file__).resolve().parent
@@ -212,7 +212,7 @@ with (ROOT / "frame.ppm").open("wb") as out:
 
 if "--play" in sys.argv:
     import tkinter as tk
-    window = tk.Tk(); window.title("Trilobite 2D Arena")
+    window = tk.Tk(); window.title("Sonder 2D Arena")
     canvas = tk.Canvas(window, width=560, height=360, bg="#0c121c"); canvas.pack()
     hero = canvas.create_oval(50, 50, 70, 70, fill="#57dacf", outline="")
     def move(event):

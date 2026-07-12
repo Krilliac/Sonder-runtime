@@ -1,4 +1,4 @@
-"""Integration tests for trilobite's conversation memory, with Ollama stubbed out."""
+"""Integration tests for sonder's conversation memory, with Ollama stubbed out."""
 import embeddings
 import pytest
 import server
@@ -8,7 +8,7 @@ import server
 def stub(monkeypatch, tmp_path):
     """Point the DB at a temp file, stub Ollama /api/chat, and disable embeddings."""
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
-    # No trilobite alias -> resolve to the base coder model (no network needed).
+    # No sonder alias -> resolve to the base coder model (no network needed).
     monkeypatch.setattr(server, "_get", lambda path: {"models": [{"name": "qwen2.5:3b"}]})
     monkeypatch.setattr(embeddings, "embed", lambda text: None)  # no recall, no vectors
 
@@ -39,8 +39,8 @@ def _contents(payload):
 
 
 def test_followup_sees_prior_turn(stub):
-    server.trilobite("first question", session="S1")
-    server.trilobite("second question", session="S1")
+    server.sonder("first question", session="S1")
+    server.sonder("second question", session="S1")
     p2 = _answer_payload(stub, "second question")
     contents = _contents(p2)
     assert "first question" in contents   # prior user turn threaded
@@ -48,15 +48,15 @@ def test_followup_sees_prior_turn(stub):
 
 
 def test_memory_on_by_default_shared_session(stub):
-    server.trilobite("q1")   # no session -> DEFAULT_SESSION
-    server.trilobite("q2")
+    server.sonder("q1")   # no session -> DEFAULT_SESSION
+    server.sonder("q2")
     p2 = _answer_payload(stub, "q2")
     assert "q1" in _contents(p2)
 
 
 def test_session_none_is_single_turn(stub):
-    server.trilobite("first", session="none")
-    server.trilobite("solo", session="none")
+    server.sonder("first", session="none")
+    server.sonder("solo", session="none")
     p = _answer_payload(stub, "solo")
     # Only the current user turn — no system (empty) and no prior history.
     contents = _contents(p)
@@ -65,15 +65,15 @@ def test_session_none_is_single_turn(stub):
 
 
 def test_isolated_sessions_do_not_bleed(stub):
-    server.trilobite("alpha", session="A")
-    server.trilobite("beta", session="B")
+    server.sonder("alpha", session="A")
+    server.sonder("beta", session="B")
     p = _answer_payload(stub, "beta")
     assert "alpha" not in _contents(p)
 
 
 def test_first_turn_gets_a_title(stub):
-    server.trilobite("build a fibonacci function", session="T")
-    out = server.trilobite_sessions()
+    server.sonder("build a fibonacci function", session="T")
+    out = server.sonder_sessions()
     assert "T" in out
     # title came from the stubbed model ("ECHO")
     conn = server._open_db()
@@ -86,16 +86,16 @@ def test_first_turn_gets_a_title(stub):
 
 
 def test_remember_fact_is_injected_for_project(stub):
-    server.trilobite_remember_fact("this project uses MSVC", project="proj")
-    server.trilobite("compile it", session="X", project="proj")
+    server.sonder_remember_fact("this project uses MSVC", project="proj")
+    server.sonder("compile it", session="X", project="proj")
     p = _answer_payload(stub, "compile it")
     joined = "\n".join(_contents(p))
     assert "this project uses MSVC" in joined
 
 
 def test_learned_preference_is_injected_next_turn(stub):
-    server.trilobite("I prefer concise status updates.", session="P")
-    server.trilobite("what changed?", session="P")
+    server.sonder("I prefer concise status updates.", session="P")
+    server.sonder("what changed?", session="P")
 
     p = _answer_payload(stub, "what changed?")
     joined = "\n".join(_contents(p))
@@ -103,29 +103,29 @@ def test_learned_preference_is_injected_next_turn(stub):
 
 
 def test_fact_not_injected_when_project_none(stub):
-    server.trilobite_remember_fact("secret fact", project="proj")
-    server.trilobite("do it", session="Y", project="none")
+    server.sonder_remember_fact("secret fact", project="proj")
+    server.sonder("do it", session="Y", project="none")
     p = _answer_payload(stub, "do it")
     assert "secret fact" not in "\n".join(_contents(p))
 
 
 def test_sessions_list_reflects_turns(stub):
-    server.trilobite("one", session="Z")
-    server.trilobite("two", session="Z")
-    out = server.trilobite_sessions()
+    server.sonder("one", session="Z")
+    server.sonder("two", session="Z")
+    out = server.sonder_sessions()
     assert "Z" in out
     assert "2 turns" in out
 
 
-def test_trilobite_remember_fact_rejects_empty(stub):
-    assert server.trilobite_remember_fact("   ").startswith("ERROR")
+def test_sonder_remember_fact_rejects_empty(stub):
+    assert server.sonder_remember_fact("   ").startswith("ERROR")
 
 
 def test_long_thread_summarizes_overflow(stub, monkeypatch):
     import memory_store
     monkeypatch.setattr(server, "MAX_TURNS", 2)  # small cap so overflow triggers fast
     for i in range(4):
-        server.trilobite("turn %d" % i, session="L")
+        server.sonder("turn %d" % i, session="L")
     p = _answer_payload(stub, "turn 3")
     contents = _contents(p)
     # Oldest turns are folded into a summary system message instead of being sent raw.

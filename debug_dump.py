@@ -1,4 +1,4 @@
-"""Write human-readable Trilobite chat/debug dumps."""
+"""Write human-readable Sonder chat/debug dumps."""
 
 from datetime import datetime
 from pathlib import Path
@@ -32,9 +32,9 @@ def write_dump(state_home, label="chat", messages=None, sections=None, events=No
     dump_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     safe_label = "".join(c if c.isalnum() or c in ("-", "_") else "-" for c in label)
-    path = dump_dir / ("trilobite-%s-%s.txt" % (safe_label or "chat", stamp))
+    path = dump_dir / ("sonder-%s-%s.txt" % (safe_label or "chat", stamp))
     parts = [
-        "trilobite debug dump",
+        "sonder debug dump",
         "created: %s" % datetime.now().isoformat(timespec="seconds"),
         "label: %s" % label,
         "",

@@ -8,7 +8,7 @@ def _conn():
 
 
 def _store_good(c, iid, task, response, vec, session_id=None):
-    ms.log_interaction(c, iid, task, "", response, "trilobite",
+    ms.log_interaction(c, iid, task, "", response, "sonder",
                        session_id=session_id, task_embedding=embeddings.to_blob(vec))
     ms.record_outcome_row(c, iid, "tests_passed", 1.0)
 
@@ -47,7 +47,7 @@ def test_recall_excludes_current_session():
 
 def test_recall_ignores_bad_outcomes():
     c = _conn()
-    ms.log_interaction(c, "i1", "task", "", "resp", "trilobite",
+    ms.log_interaction(c, "i1", "task", "", "resp", "sonder",
                        task_embedding=embeddings.to_blob([1.0, 0.0]))
     ms.record_outcome_row(c, "i1", "failed", -1.0)
     assert recall.recall(c, "q", embed_fn=lambda t: [1.0, 0.0], min_sim=0.5) == []

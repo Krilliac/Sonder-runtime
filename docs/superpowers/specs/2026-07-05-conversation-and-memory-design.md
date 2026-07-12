@@ -1,8 +1,8 @@
-# trilobite conversation memory + memory subsystem — design
+# Sonder Runtime conversation memory + memory subsystem — design
 
 Date: 2026-07-05
 Status: implemented (all 5 phases; 225 tests green; live 2-turn recall verified)
-Repo: `~/.claude/mcp-servers/local-llm`
+Repo: `~/.claude/mcp-servers/sonder-runtime`
 Memory default: **ON**. A call with no `session` threads the shared `default`
 session; pass `session="none"` for a one-off single turn, or a distinct id to isolate
 a thread. Same convention for `project` facts. (Chosen over the original default-off
@@ -10,12 +10,12 @@ proposal per user direction — the goal is that follow-ups "just work".)
 
 ## Problem
 
-trilobite forgets follow-ups. Every entry surface sends the model only
+Sonder Runtime forgets follow-ups. Every entry surface sends the model only
 `[system, current_prompt]` — no prior turns:
 
-- **MCP `trilobite` tool** (`server.py`) — single `prompt`, single turn.
-- **REPL** (`trilobite_repl.py:233`) — calls `server.trilobite(line)` fresh per line.
-- **HTTP serve** (`trilobite_serve.py:345`) — `_last_user_message(messages)` deliberately
+- **MCP `sonder` tool** (`server.py`) — single `prompt`, single turn.
+- **REPL** (`sonder_repl.py:233`) — calls `server.sonder(line)` fresh per line.
+- **HTTP serve** (`sonder_serve.py:345`) — `_last_user_message(messages)` deliberately
   discards everything the chat UI sends except the final user turn.
 
 The existing "memory" is the *lessons* learning loop (distilled tips retrieved by
@@ -25,21 +25,24 @@ lessons/reward loop.
 
 ### Why not "just use a giant / 1M context"
 
-trilobite is Qwen2.5-Coder 7B: trained context 32K native (~128K with YaRN), so it
-is not a 1M model regardless. And KV-cache cost is ~56 KB/token for this arch, so on
-the 6 GB RTX 4050 (model itself ~4.7 GB) the practical local ceiling is ~16–32K
-tokens; 1M would need ~56 GB (fp16) / ~14 GB (4-bit KV) — impossible locally. The
-correct lever is *carrying the right few turns* (threading) and *compressing the rest*
-(summarization), not enlarging the window. 1M context is only reachable via the
-metered `cloud-code` tier (Qwen3-Coder 480B), which trilobite deliberately never uses.
+At the time of this design, Sonder Runtime's selected local inference base was
+Qwen2.5-Coder 7B, served by Ollama. Sonder Runtime itself is the orchestration
+system, not those weights. That base has a 32K native context (~128K with YaRN),
+and KV-cache cost is ~56 KB/token for this architecture, so on the 6 GB RTX 4050
+(model itself ~4.7 GB) the practical local ceiling is ~16–32K tokens; 1M would
+need ~56 GB (fp16) / ~14 GB (4-bit KV) and is not feasible locally. The correct
+lever is *carrying the right few turns* (threading) and *compressing the rest*
+(summarization), not enlarging the window. A metered hosted tier may expose a
+longer context, but Sonder Runtime uses it only after explicit hosted-tier opt-in;
+it is not part of the local path.
 
 ## Goals
 
 1. Follow-up turns reach the model, on every surface.
 2. Threads are navigable and resumable across days.
 3. Long threads don't overflow the local window (summarize, don't drop-and-forget).
-4. trilobite can reuse whole past solutions, not just distilled lessons.
-5. trilobite carries durable per-project facts it should always know.
+4. Sonder Runtime can reuse whole past solutions, not just distilled lessons.
+5. Sonder Runtime carries durable per-project facts it should always know.
 
 ## Non-goals
 
@@ -93,8 +96,8 @@ single-turn path is untouched.
 
 `orchestrator.run_with_learning(conn, task, tier, gen, history=None)` passes `history`
 straight through to `gen`. Only the *current* turn is lesson-augmented and logged;
-history turns are raw context. Env `LOCAL_LLM_SESSION_NUM_CTX` (default **8192**)
-applies to sessioned calls; env `TRILOBITE_MAX_TURNS` (default **12**) caps live turns.
+history turns are raw context. Env `SONDER_SESSION_NUM_CTX` (default **8192**)
+applies to sessioned calls; env `SONDER_MAX_TURNS` (default **12**) caps live turns.
 
 ---
 
@@ -106,14 +109,14 @@ applies to sessioned calls; env `TRILOBITE_MAX_TURNS` (default **12**) caps live
 - `log_interaction(..., session_id=None)` — persist the column.
 - migration for `interactions.session_id` + `sessions` table.
 
-**server.trilobite** — new param `session: str = ""`. When set:
-1. `history_pairs = session_history(session, TRILOBITE_MAX_TURNS)`
+**server.sonder** — new param `session: str = ""`. When set:
+1. `history_pairs = session_history(session, SONDER_MAX_TURNS)`
 2. build `history` messages (user=task, assistant=response) from the pairs,
-3. generate with `num_ctx = LOCAL_LLM_SESSION_NUM_CTX`,
+3. generate with `num_ctx = SONDER_SESSION_NUM_CTX`,
 4. log the new interaction with `session_id=session` (and upsert `sessions.updated_ts`).
 
 **Surfaces**
-- **REPL** — mint one `session_id` at startup, pass on every `server.trilobite` call;
+- **REPL** — mint one `session_id` at startup, pass on every `server.sonder` call;
   `/new` starts a fresh session. `/train` keeps using session-less calls.
 - **serve** — build `history` from the UI's own `messages` array (all turns before the
   final user message) and thread it; stop discarding it. The UI owns context here, so
@@ -127,7 +130,7 @@ server session round-trip (turn N sees turn N-1); serve builds history from a UI
 
 ## Phase 2 — Rolling summarization
 
-When a session's turn count exceeds `TRILOBITE_MAX_TURNS`, fold the overflow (turns
+When a session's turn count exceeds `SONDER_MAX_TURNS`, fold the overflow (turns
 older than the live window) into `sessions.summary` via the `fast` tier, incrementally:
 `new_summary = summarize(old_summary + newly-overflowed turns)`, advancing
 `summarized_through` so each turn is summarized once. History sent to the model becomes:
@@ -148,7 +151,7 @@ summary is injected ahead of live turns; empty/short sessions never summarize.
   fall back to a truncated first prompt if the model call fails.
 - **memory_store** — `list_sessions(conn, limit)` → `[(session_id, title, updated_ts, turn_count)]`.
 - **REPL** — `/sessions` (list), `/resume <id-or-title-prefix>` (switch), `/new` (fresh).
-- **MCP** — new read-only tool `trilobite_sessions()` (mirrors `trilobite_stats`) so the
+- **MCP** — new read-only tool `sonder_sessions()` (mirrors `sonder_stats`) so the
   caller can discover and resume threads by id.
 
 **Tests** — titling from first prompt (+ fallback on model failure); list ordering by
@@ -163,7 +166,7 @@ Reuse whole prior solutions, not just distilled lessons.
 - **recall** (mirrors `retriever._semantic_rank` + `min_sim` threshold) —
   `recall(conn, task, k=2, min_sim=…)` returns the top-k past interactions whose task
   is semantically similar **and** that carry a good outcome (join `outcomes`), each
-  truncated. Reuses `TRILOBITE_MIN_SIM` threshold semantics.
+  truncated. Reuses `SONDER_MIN_SIM` threshold semantics.
 - **orchestrator.build_prompt** — add a bounded "Similar past solved task" block
   alongside the existing lessons block (both optional, both capped).
 
@@ -173,16 +176,16 @@ excludes the current session's own in-flight turn.
 
 ## Phase 5 — Project facts
 
-Durable per-project facts trilobite always knows (toolchain, conventions, key paths) —
+Durable per-project facts Sonder Runtime always knows (toolchain, conventions, key paths) —
 injected like lessons but **not** outcome-gated.
 
 - **facts** table (above). `add_fact(conn, project, text)` embeds + stores;
   `facts_for_project(conn, project, task, k)` returns all facts for a small set, or
   semantic top-k when many.
-- **server.trilobite** — new param `project: str = ""`; when set, facts for that
+- **server.sonder** — new param `project: str = ""`; when set, facts for that
   project are injected into the augmented prompt (own labeled block).
 - **sessions.project** links a session to a project so resuming reloads its facts.
-- **management** — MCP tool `trilobite_remember_fact(project, text)`; REPL `/fact <text>`
+- **management** — MCP tool `sonder_remember_fact(project, text)`; REPL `/fact <text>`
   and `/facts` (uses the REPL's active project, settable via `/project <name>`).
 
 **Tests** — facts injected for the active project only; add/list round-trip;
@@ -194,7 +197,7 @@ New params (`session`, `project`) default to `""`, which resolves to the shared
 `default` session/project (memory ON). `session="none"` / `project="none"` opt out to
 today's single-turn, fact-less behavior. Migrations are idempotent and additive; old
 `interactions` rows have `session_id = NULL` and are excluded from all session/recall
-queries. The lessons/reward/`record_outcome`/`trilobite_stats` paths are unchanged.
+queries. The lessons/reward/`record_outcome`/`sonder_stats` paths are unchanged.
 `offload` is untouched (still single-turn, self-contained). REPL mints a fresh thread
 per launch; `/train` runs with `session="none"` so practice never pollutes a chat.
 

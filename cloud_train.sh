@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# cloud_train.sh — one-shot QLoRA fine-tune of trilobite on a rented cloud GPU.
+# cloud_train.sh — one-shot QLoRA adapter training for the base model selected
+# by Sonder Runtime, performed on an explicitly provisioned cloud GPU.
 #
 # Where to run: any Linux box with an NVIDIA GPU + CUDA (RunPod, Lambda,
 # vast.ai, Paperspace, a cloud VM with an A100/H100/4090/3090, etc.). A 24 GB
@@ -7,23 +8,26 @@
 # the smaller bases.
 #
 # Usage (on the GPU box):
-#   git clone https://github.com/Krilliac/Trilobite-model.git
-#   cd Trilobite-model
+#   git clone https://github.com/Krilliac/Sonder-runtime.git
+#   cd Sonder-runtime
 #   # upload your dataset (see step 3 below) then:
 #   bash cloud_train.sh
 #
 # Env knobs (all optional):
-#   TRILOBITE_BASE   HF base model (default Qwen/Qwen2.5-Coder-7B-Instruct)
-#   HF_TOKEN         set to also push the adapter to the Hugging Face Hub
-#   HF_REPO          e.g. Krilliac/trilobite-lora  (needed if HF_TOKEN set)
+#   SONDER_BASE       HF base model (default Qwen/Qwen2.5-Coder-7B-Instruct)
+#   SONDER_LORA_OUT   adapter directory (default ./sonder-personal-lora)
+#   HF_TOKEN          set to also push the adapter to the Hugging Face Hub
+#   HF_REPO           e.g. Krilliac/sonder-personal-lora (needed with HF_TOKEN)
 set -euo pipefail
 
-BASE="${TRILOBITE_BASE:-Qwen/Qwen2.5-Coder-7B-Instruct}"
+BASE="${SONDER_BASE:-Qwen/Qwen2.5-Coder-7B-Instruct}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ADAPTER_DIR="${SONDER_LORA_OUT:-$HERE/sonder-personal-lora}"
+ADAPTER_NAME="$(basename "$ADAPTER_DIR")"
 cd "$HERE"
 
 echo "======================================================================"
-echo " trilobite cloud QLoRA trainer"
+echo " Sonder Runtime adapter-training helper"
 echo " base model: $BASE"
 echo "======================================================================"
 
@@ -61,7 +65,7 @@ from your local machine:
   # regenerate it locally first if needed:
   ./venv/Scripts/python.exe export_training_data.py
   # then upload it to this box:
-  scp training_data.jsonl user@THIS_BOX_IP:PATH/Trilobite-model/
+  scp training_data.jsonl user@THIS_BOX_IP:PATH/Sonder-runtime/
 
 Then re-run:  bash cloud_train.sh
 MSG
@@ -71,22 +75,22 @@ N=$(wc -l < training_data.jsonl | tr -d ' ')
 echo "found training_data.jsonl with $N examples"
 if [ "$N" -lt 50 ]; then
   echo "NOTE: only $N examples — this will over/under-fit; it is a pipeline proof."
-  echo "Grow the dataset first (run trilobite /train locally) for a real tune."
+  echo "Grow the dataset first (open the sonder REPL and run /train) for a real tune."
 fi
 
 echo "== 4/5 QLoRA fine-tune (this is the long part) =="
-export TRILOBITE_BASE="$BASE"
+export SONDER_BASE="$BASE"
+export SONDER_LORA_OUT="$ADAPTER_DIR"
 python qlora_train.py
-# qlora_train.py writes the LoRA adapter to ./trilobite-lora/
+# qlora_train.py writes the LoRA adapter to $SONDER_LORA_OUT.
 
 echo "== 5/5 package the adapter =="
-if [ ! -d trilobite-lora ]; then
-  echo "WARNING: trilobite-lora/ not produced — check the training log above." >&2
+if [ ! -d "$ADAPTER_DIR" ]; then
+  echo "WARNING: $ADAPTER_DIR not produced — check the training log above." >&2
   exit 1
 fi
-STAMP="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 | tr ' /' '__')"
-TARBALL="trilobite-lora.tar.gz"
-tar -czf "$TARBALL" trilobite-lora
+TARBALL="${ADAPTER_NAME}.tar.gz"
+tar -czf "$TARBALL" -C "$(dirname "$ADAPTER_DIR")" "$ADAPTER_NAME"
 echo "adapter packaged -> $HERE/$TARBALL ($(du -h "$TARBALL" | cut -f1))"
 
 # Optional: push to the HF Hub if credentials are provided
@@ -98,7 +102,7 @@ import os
 from huggingface_hub import HfApi
 api = HfApi(token=os.environ["HF_TOKEN"])
 api.create_repo(os.environ["HF_REPO"], exist_ok=True)
-api.upload_folder(folder_path="trilobite-lora", repo_id=os.environ["HF_REPO"])
+api.upload_folder(folder_path=os.environ["SONDER_LORA_OUT"], repo_id=os.environ["HF_REPO"])
 print("pushed to", os.environ["HF_REPO"])
 PY
 fi
@@ -106,17 +110,17 @@ fi
 cat <<MSG
 
 ======================================================================
- DONE. LoRA adapter is in:  $HERE/trilobite-lora/   (also $TARBALL)
+ DONE. LoRA adapter is in:  $ADAPTER_DIR/   (also $TARBALL)
 ======================================================================
 Get it back to your machine:
   scp user@THIS_BOX_IP:$HERE/$TARBALL .
 
 Then turn it into a runnable Ollama model locally. peft outputs a safetensors
 adapter; Ollama's Modelfile ADAPTER wants a GGUF LoRA, so convert with llama.cpp:
-  python llama.cpp/convert_lora_to_gguf.py trilobite-lora --outfile trilobite-lora.gguf
+  python llama.cpp/convert_lora_to_gguf.py $ADAPTER_NAME --outfile $ADAPTER_NAME.gguf
   # Modelfile:
   #   FROM $BASE-equivalent-gguf   (or your base ollama model)
-  #   ADAPTER ./trilobite-lora.gguf
-  ollama create trilobite -f Modelfile
+  #   ADAPTER ./$ADAPTER_NAME.gguf
+  ollama create sonder-personal -f Modelfile
 See TRAINING.md in this repo for the full, honest walkthrough + caveats.
 MSG

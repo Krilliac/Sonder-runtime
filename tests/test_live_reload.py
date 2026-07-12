@@ -10,7 +10,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def _enable_live_reload(monkeypatch):
     """Opt this unit-test module into the feature disabled by the global test sandbox."""
-    monkeypatch.setenv("TRILOBITE_LIVE_RELOAD", "1")
+    monkeypatch.setenv("SONDER_LIVE_RELOAD", "1")
 
 
 def test_reload_changed_modules_reloads_source_edit(monkeypatch, tmp_path):
@@ -35,7 +35,7 @@ def test_reload_changed_modules_reloads_source_edit(monkeypatch, tmp_path):
 
 
 def test_live_reload_can_be_disabled(monkeypatch):
-    monkeypatch.setenv("TRILOBITE_LIVE_RELOAD", "0")
+    monkeypatch.setenv("SONDER_LIVE_RELOAD", "0")
     assert live_reload.reload_changed_modules(["definitely_missing_mod"]) == {}
 
 
@@ -80,7 +80,7 @@ def test_server_rebinds_reloaded_modules(monkeypatch):
 
 
 def test_serve_rebinds_reloaded_server(monkeypatch):
-    import trilobite_serve as ts
+    import sonder_serve as ts
 
     original = ts.server
     replacement = object()
@@ -97,7 +97,7 @@ def test_serve_rebinds_reloaded_server(monkeypatch):
 
 
 def test_repl_rebinds_reloaded_personas(monkeypatch):
-    import trilobite_repl as repl
+    import sonder_repl as repl
 
     original = repl.personas
     replacement = object()

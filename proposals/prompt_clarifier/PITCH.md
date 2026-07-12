@@ -6,12 +6,12 @@ parameter/return types (vague nouns like "data"/"items"/"numbers" with no
 concrete type nearby and no Python type hints anywhere) — and returns a list
 of specific clarifying questions via `clarify(prompt) -> list[str]` (empty
 if the prompt is already well-specified; `is_well_specified(prompt)` is the
-boolean convenience). It's valuable because trilobite's model is frozen and
-will confidently answer a vague spec anyway, burning a `solver.solve()`
+boolean convenience). It's valuable because a local inference model can
+confidently answer a vague spec anyway, burning a `solver.solve()`
 repair loop (or producing code that "looks right" but silently picked the
 wrong types/edge cases) instead of asking the one question that would have
 fixed it up front. Integration is a pre-filter ahead of generation: in
-`server.py`'s `trilobite`/`offload` handlers (or before `solver.solve()`),
+`server.py`'s `sonder`/`offload` handlers (or before `solver.solve()`),
 call `prompt_clarifier.clarify(prompt)` and, if non-empty, return the
 questions to the user instead of spending a generation — no changes needed
 to solver.py, grounding.py, or verifiers.py, since it only gates whether

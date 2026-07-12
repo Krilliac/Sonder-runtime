@@ -11,7 +11,7 @@ import autopilot_store
 @pytest.fixture(autouse=True)
 def isolated_autopilot_db(monkeypatch, tmp_path):
     path = tmp_path / "autopilot.db"
-    monkeypatch.setenv("TRILOBITE_AUTOPILOT_DB", str(path))
+    monkeypatch.setenv("SONDER_AUTOPILOT_DB", str(path))
     autopilot_store.reset_schema_cache_for_tests()
     yield path
     autopilot_store.reset_schema_cache_for_tests()
@@ -109,7 +109,7 @@ def test_second_process_can_request_pause(isolated_autopilot_db):
     run = autopilot_store.create_run("cross-process control")
     autopilot_store.claim_run(run["id"], "owner", owner_pid=os.getpid())
     env = dict(os.environ)
-    env["TRILOBITE_AUTOPILOT_DB"] = str(isolated_autopilot_db)
+    env["SONDER_AUTOPILOT_DB"] = str(isolated_autopilot_db)
     code = (
         "import autopilot_store; "
         "row=autopilot_store.request_pause(%r); "

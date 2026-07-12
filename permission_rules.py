@@ -1,7 +1,7 @@
 """Small local permission policy for tool/action visibility.
 
 Rules are intentionally simple and auditable. They do not replace the OS,
-filesystem guardrails, or Codex approvals; they give Trilobite a stable place to
+filesystem guardrails, or Codex approvals; they give Sonder a stable place to
 record local preferences such as "ask before file_delete" or "allow status".
 """
 
@@ -92,7 +92,7 @@ def format_policy(home, tool_name=""):
             "  matched: %s\n"
             "  note: %s"
         ) % (tool_name, rule["action"], rule["pattern"], rule["note"])
-    lines = ["trilobite permission rules", "  path: %s" % policy_path(home)]
+    lines = ["sonder permission rules", "  path: %s" % policy_path(home)]
     for rule in load(home):
         lines.append("  %(action)-5s %(pattern)-32s %(note)s" % rule)
     return "\n".join(lines)

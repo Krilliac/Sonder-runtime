@@ -90,7 +90,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _testing = true;
       _status = null;
     });
-    final api = TrilobiteApi(
+    final api = SonderApi(
       baseUrl: _server.text,
       apiKey: _key.text,
     );
@@ -100,7 +100,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _statusOk = true;
         _status = 'Connected. Models: ${models.join(", ")}';
       });
-    } on TrilobiteException catch (e) {
+    } on SonderException catch (e) {
       setState(() {
         _statusOk = false;
         _status = e.message;
@@ -125,17 +125,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _status = null;
     });
     try {
-      final status = await TrilobiteLauncherApi(
+      final status = await SonderLauncherApi(
         baseUrl: settings.effectiveLauncherUrl,
         token: settings.launcherToken,
       ).status();
+      if (!mounted) return;
+      final foreignListener = status.serverState == 'foreign_listener';
+      final String message;
+      if (foreignListener) {
+        message = 'Host launcher is reachable, but another service is using '
+            'the configured main-server port.';
+      } else if (status.ok) {
+        message = 'Host launcher is ready; main server is '
+            '${status.serverRunning ? "running" : "stopped"}.';
+      } else {
+        message = 'Host launcher did not report ready.';
+      }
       setState(() {
-        _statusOk = status.ok;
-        _status = status.ok
-            ? 'Host launcher is ready; main server is ${status.serverRunning ? "running" : "stopped"}.'
-            : 'Host launcher did not report ready.';
+        _statusOk = status.ok && !foreignListener;
+        _status = message;
       });
-    } on TrilobiteException catch (e) {
+    } on SonderException catch (e) {
+      if (!mounted) return;
       setState(() {
         _statusOk = false;
         _status = e.message;
@@ -158,7 +169,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _testing = true;
       _status = null;
     });
-    final api = TrilobiteApi(baseUrl: _server.text, apiKey: _key.text);
+    final api = SonderApi(baseUrl: _server.text, apiKey: _key.text);
     try {
       if (register) {
         final msg = await api.register(_username.text, _password.text);
@@ -174,7 +185,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _status = 'Logged in. Token saved in the API key/token field.';
         });
       }
-    } on TrilobiteException catch (e) {
+    } on SonderException catch (e) {
       setState(() {
         _statusOk = false;
         _status = e.message;
@@ -227,6 +238,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
       body: ListView(
         padding: const EdgeInsets.all(20),
         children: [
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Runtime architecture',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Sonder Runtime is an orchestration system, not a '
+                    'standalone foundation model. Ollama loads and serves the '
+                    'selected local model weights for inference. Sonder Runtime '
+                    'adds prompts, memory, tools, routing, and policy; adapter '
+                    'training uses PEFT/Hugging Face before validated results '
+                    'are deployed to Ollama.',
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 20),
           Text('Connection', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 12),
           TextField(
@@ -236,7 +271,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             decoration: const InputDecoration(
               labelText: 'Server URL',
               hintText: 'http://your-host:11435',
-              helperText: 'Where trilobite_serve.py is listening',
+              helperText: 'Where the Sonder Runtime server listens',
               prefixIcon: Icon(Icons.dns_outlined),
               border: OutlineInputBorder(),
             ),
@@ -300,9 +335,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
             controller: _model,
             autocorrect: false,
             decoration: const InputDecoration(
-              labelText: 'Default model / tier',
-              hintText: 'trilobite, code, fast...',
-              helperText: 'Used by chat and system commands',
+              labelText: 'Default inference route / model',
+              hintText: 'sonder, code, fast...',
+              helperText:
+                  'Sonder Runtime routes it; Ollama serves local weights',
               prefixIcon: Icon(Icons.memory_outlined),
               border: OutlineInputBorder(),
             ),
@@ -346,7 +382,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             subtitle: const Text(
               'Off by default. For weather or nearby requests, the app asks '
               'ipwho.is for an approximate city/region. Raw IP is never sent '
-              'to Trilobite, displayed, or retained.',
+              'to Sonder Runtime, displayed, or retained.',
             ),
             value: _allowApproximateLocation,
             onChanged: (v) => setState(() => _allowApproximateLocation = v),
@@ -463,10 +499,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           const SizedBox(height: 24),
           Text(
-            'Trilobite is local-first. Hosted tiers, explicit web tools, and '
-            'approximate location can contact external services only when you '
-            'enable or invoke them. Run the server yourself with '
-            'deploy_trilobite.sh --serve.',
+            'Sonder Runtime is local-first orchestration. It is not the foundation '
+            'model and does not make Ollama a trainer. Hosted tiers, explicit '
+            'web tools, and approximate location contact external services '
+            'only when you enable or invoke them.',
             style: Theme.of(context).textTheme.bodySmall,
           ),
         ],

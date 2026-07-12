@@ -1,6 +1,6 @@
 """difficulty_estimator — heuristic task-difficulty score in [0, 1].
 
-trilobite's solver spends a FIXED repair budget (max_attempts) on every task,
+sonder's solver spends a FIXED repair budget (max_attempts) on every task,
 whether it's "reverse a string" or "write a thread-safe LRU cache with a
 custom eviction policy". That's wasted budget on the easy end and often not
 enough on the hard end. This module scores a task's TEXT (no execution, no

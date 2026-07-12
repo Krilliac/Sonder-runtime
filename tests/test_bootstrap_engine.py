@@ -11,7 +11,7 @@ def test_choose_model_by_ram():
 
 
 def test_choose_model_env_override(monkeypatch):
-    monkeypatch.setenv("TRILOBITE_BASE_MODEL", "custom:model")
+    monkeypatch.setenv("SONDER_BASE_MODEL", "custom:model")
     assert bootstrap_engine.choose_model(1) == "custom:model"
 
 
@@ -39,6 +39,7 @@ def test_main_runs_setup_alias_from_script_root(monkeypatch, tmp_path):
     assert bootstrap_engine.main([]) == 0
     assert Path(seen["cmd"][1]) == bootstrap_engine.ROOT / "setup_alias.py"
     assert Path(seen["cwd"]) == bootstrap_engine.ROOT
+    assert "SONDER_BASE_MODEL" in seen["env"]
 
 
 def test_offline_without_bundle_never_installs_dependency(monkeypatch):

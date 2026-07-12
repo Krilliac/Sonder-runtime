@@ -1,6 +1,6 @@
-"""Selectable native/virtual context sizing for Trilobite.
+"""Selectable native/virtual context sizing for Sonder Runtime.
 
-Ollama/local models have a real native context window. Trilobite can expose a
+Ollama/local models have a real native context window. Sonder Runtime can expose a
 larger virtual budget by relying on summaries, retrieval, facts, and recent-turn
 selection while clamping the actual Ollama num_ctx to a safe native limit.
 """
@@ -34,17 +34,17 @@ def parse_size(value, default=DEFAULT_CONTEXT):
 
 
 def native_max():
-    return parse_size(os.environ.get("TRILOBITE_NATIVE_CONTEXT_MAX"), DEFAULT_NATIVE_MAX)
+    return parse_size(os.environ.get("SONDER_NATIVE_CONTEXT_MAX"), DEFAULT_NATIVE_MAX)
 
 
 def virtual_max():
-    return parse_size(os.environ.get("TRILOBITE_VIRTUAL_CONTEXT_MAX"), DEFAULT_VIRTUAL_MAX)
+    return parse_size(os.environ.get("SONDER_VIRTUAL_CONTEXT_MAX"), DEFAULT_VIRTUAL_MAX)
 
 
 def default_requested():
     return parse_size(
-        os.environ.get("TRILOBITE_CONTEXT_SIZE")
-        or os.environ.get("LOCAL_LLM_SESSION_NUM_CTX"),
+        os.environ.get("SONDER_CONTEXT_SIZE")
+        or os.environ.get("SONDER_SESSION_NUM_CTX"),
         DEFAULT_CONTEXT,
     )
 
@@ -87,4 +87,3 @@ def format_policy(value=None):
             "retrieval, facts, and recent turns represent the larger virtual budget."
         )
     return "\n".join(lines)
-

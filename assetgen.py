@@ -6,7 +6,7 @@ SVG, animated GIF, AVI video, HTML, Markdown, CSV, DOCX, XLSX, PPTX, MIDI, capti
 EDL timelines, PCM WAV, Wavefront OBJ/MTL, textured morphing multi-clip binary glTF,
 and JSON. Packs are useful
 for branding, UI, documents, data prototypes, media, games, and other greenfield
-work. Output stays under the local-llm workspace.
+work. Output stays under the sonder-runtime workspace.
 """
 from __future__ import annotations
 
@@ -371,7 +371,7 @@ def _write_document(path: str, brief: str, dimension: str, theme: str, kinds) ->
 
 ## Provenance
 
-Generated locally by Trilobite's deterministic standard-library artifact forge.
+Generated locally by Sonder's deterministic standard-library artifact forge.
 No downloaded or third-party assets are included. See `manifest.json` for hashes.
 """ % (brief.strip(), theme, dimension, ", ".join(sorted(kinds)))
     with open(path, "w", encoding="utf-8", newline="\n") as handle:
@@ -405,7 +405,7 @@ def _write_web_preview(path: str, palette, brief: str) -> None:
 body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 20%% 0%%,var(--surface),var(--canvas) 58%%);color:#fff;font:16px/1.5 system-ui,sans-serif}
 main{width:min(900px,92vw);padding:56px;border:1px solid color-mix(in srgb,var(--highlight),transparent 65%%);border-radius:28px;background:color-mix(in srgb,var(--canvas),transparent 12%%);box-shadow:0 30px 90px #0008}
 .eyebrow{color:var(--highlight);letter-spacing:.16em;text-transform:uppercase}h1{font-size:clamp(2.4rem,8vw,5.4rem);line-height:.92;margin:.3em 0}.button{display:inline-block;margin-top:22px;padding:13px 20px;border-radius:999px;background:var(--accent);font-weight:700}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:42px}.grid div{height:86px;border-radius:16px;background:linear-gradient(135deg,var(--surface),var(--accent))}@media(max-width:600px){main{padding:30px}.grid{grid-template-columns:1fr}}
-</style><body><main><div class="eyebrow">Trilobite concept</div><h1>%s</h1><p>A self-contained, dependency-free web mockup generated directly from the request.</p><span class="button">Explore concept</span><div class="grid"><div></div><div></div><div></div></div></main></body></html>
+</style><body><main><div class="eyebrow">Sonder concept</div><h1>%s</h1><p>A self-contained, dependency-free web mockup generated directly from the request.</p><span class="button">Explore concept</span><div class="grid"><div></div><div></div><div></div></div></main></body></html>
 """ % (title, _hex(base), _hex(accent), _hex(bright), _hex(earth), title)
     with open(path, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(document)
@@ -741,7 +741,7 @@ def generate_artifacts(name: str, brief: str, kinds: str = "auto",
         files.append({"path": filename, "bytes": os.path.getsize(path), "sha256": _hash_file(path)})
     manifest = {
         "schema": 2,
-        "generator": "trilobite-artifact-forge-stdlib",
+        "generator": "sonder-artifact-forge-stdlib",
         "name": _safe_slug(name),
         "brief": request["brief"],
         "kinds": request["kinds"],

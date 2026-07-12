@@ -7,21 +7,24 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:trilobite/main.dart';
-import 'package:trilobite/models.dart';
-import 'package:trilobite/api.dart';
-import 'package:trilobite/settings.dart';
-import 'package:trilobite/system_screen.dart';
+import 'package:sonder_runtime/main.dart';
+import 'package:sonder_runtime/models.dart';
+import 'package:sonder_runtime/api.dart';
+import 'package:sonder_runtime/settings.dart';
+import 'package:sonder_runtime/system_screen.dart';
 
 void main() {
   testWidgets('App boots to the chat screen', (tester) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
 
-    await tester.pumpWidget(const TrilobiteApp(manageLocalServer: false));
+    await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
     await tester.pumpAndSettle();
 
     // Model picker in the title bar shows the local model once settings resolve.
-    expect(find.textContaining('trilobite'), findsWidgets);
+    expect(find.textContaining('sonder'), findsWidgets);
+    expect(find.text('Sonder Runtime'), findsOneWidget);
+    expect(find.textContaining('Not a standalone model'), findsOneWidget);
+    expect(find.textContaining('served locally by Ollama'), findsOneWidget);
     // Empty state shows the message composer.
     expect(find.byType(TextField), findsOneWidget);
   });
@@ -31,7 +34,7 @@ void main() {
       (tester) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
 
-    await tester.pumpWidget(const TrilobiteApp(manageLocalServer: false));
+    await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Commands'));
     await tester.pumpAndSettle();
@@ -48,13 +51,18 @@ void main() {
       (tester) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
 
-    await tester.pumpWidget(const TrilobiteApp(manageLocalServer: false));
+    await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('System'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.text('System'), findsOneWidget);
+    expect(find.text('Runtime architecture'), findsOneWidget);
+    expect(find.textContaining('not a standalone foundation model'),
+        findsOneWidget);
+    expect(find.textContaining('training runs through PEFT/Hugging Face'),
+        findsOneWidget);
     expect(find.byTooltip('Back to chat'), findsOneWidget);
     expect(find.text('Chat'), findsOneWidget);
 
@@ -69,7 +77,7 @@ void main() {
       (tester) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
 
-    await tester.pumpWidget(const TrilobiteApp(manageLocalServer: false));
+    await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('System'));
     await tester.pump();
@@ -100,12 +108,12 @@ void main() {
       'status': 'Ollama local runtime ready',
       'runtime_policy': {
         'revision': 4,
-        'path': r'C:\Users\natew\AppData\Local\trilobite\runtime_policy.json',
+        'path': r'C:\Users\natew\AppData\Local\sonder\runtime_policy.json',
         'source': 'runtime_policy_update',
         'error': '',
         'local_models': {
           'fast': 'qwen2.5:3b',
-          'code': 'trilobite:latest',
+          'code': 'sonder:latest',
           'general': 'qwen2.5:7b-instruct',
         },
         'routing': {
@@ -121,7 +129,7 @@ void main() {
         'status': 'current',
         'enabled': true,
         'module': '__main__',
-        'path': r'C:\trilobite\server.py',
+        'path': r'C:\sonder\server.py',
         'loaded_digest': '1234567890abcdef',
         'current_digest': '1234567890abcdef',
         'source_changed': false,
@@ -236,7 +244,7 @@ void main() {
     expect(find.text('tests passed  3559'), findsOneWidget);
     expect(find.textContaining('Memory hygiene is clean'), findsOneWidget);
 
-    if (Platform.environment['TRILOBITE_CAPTURE_UI'] == '1') {
+    if (Platform.environment['SONDER_CAPTURE_UI'] == '1') {
       await tester.runAsync(() async {
         final boundary = captureKey.currentContext!.findRenderObject()!
             as RenderRepaintBoundary;
@@ -328,7 +336,7 @@ void main() {
           'id': 'auto-885ca53e8ef6',
           'objective':
               'Inspect the autonomous controller and verify its completion gates.',
-          'project': 'trilobite',
+          'project': 'sonder',
           'tier': 'code',
           'policy': 'observe',
           'allow_web': false,
@@ -433,7 +441,7 @@ void main() {
     );
     expect(find.textContaining('Validate completion gates'), findsWidgets);
 
-    if (Platform.environment['TRILOBITE_CAPTURE_UI'] == '1') {
+    if (Platform.environment['SONDER_CAPTURE_UI'] == '1') {
       await tester.runAsync(() async {
         final boundary = captureKey.currentContext!.findRenderObject()!
             as RenderRepaintBoundary;
@@ -451,13 +459,18 @@ void main() {
       (tester) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
 
-    await tester.pumpWidget(const TrilobiteApp(manageLocalServer: false));
+    await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Settings'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.text('Settings'), findsOneWidget);
+    expect(find.text('Runtime architecture'), findsOneWidget);
+    expect(find.textContaining('not a standalone foundation model'),
+        findsOneWidget);
+    expect(find.textContaining('training uses PEFT/Hugging Face'),
+        findsOneWidget);
     expect(find.byTooltip('Back to chat'), findsOneWidget);
     expect(find.text('Chat'), findsOneWidget);
 
@@ -472,7 +485,7 @@ void main() {
       (tester) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
 
-    await tester.pumpWidget(const TrilobiteApp(manageLocalServer: false));
+    await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Settings'));
     await tester.pumpAndSettle();
@@ -500,7 +513,7 @@ void main() {
     await tester.pumpAndSettle();
 
     final preferences = await SharedPreferences.getInstance();
-    expect(preferences.getBool('allow_approximate_location'), isTrue);
+    expect(preferences.getBool('sonder_allow_approximate_location'), isTrue);
   });
 
   testWidgets(
@@ -523,10 +536,10 @@ void main() {
       ],
     );
     SharedPreferences.setMockInitialValues(<String, Object>{
-      'chat_threads_v1': jsonEncode([thread.toJson()]),
+      'sonder_chat_threads_v1': jsonEncode([thread.toJson()]),
     });
 
-    await tester.pumpWidget(const TrilobiteApp(manageLocalServer: false));
+    await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
     await tester.pumpAndSettle();
 
     expect(find.byType(MarkdownBody), findsOneWidget);

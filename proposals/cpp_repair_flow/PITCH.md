@@ -6,7 +6,7 @@ to the already-registered `'cpp_compile'` backend (MSVC `/c` via vcvars) and for
 else, so callers get "generate C++ -> compile -> repair on the compiler error" without having to
 know the registry key or hand-thread `spec`/`verify_fn` through `solve_verified`'s full signature.
 
-It's valuable because C++ is trilobite's primary domain (mangos/Cambrian/MMORPG/SparkEngine are
+It's valuable because C++ is Sonder Runtime's primary domain (mangos/Cambrian/MMORPG/SparkEngine are
 all MSVC C++), yet today reaching compile-grounded self-repair requires remembering to say
 `solver.solve_verified(..., verifier="cpp_compile")` by hand each time — a one-liner removes that
 friction and makes compile-repair the obvious default for any C++ generation call site.

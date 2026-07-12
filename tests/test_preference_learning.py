@@ -7,7 +7,7 @@ def test_extract_preferences_from_clear_user_statements():
     )
 
     assert "User prefers concise answers." in prefs
-    assert "User wants Trilobite to always mention what changed." in prefs
+    assert "User wants Sonder to always mention what changed." in prefs
 
 
 def test_extract_preferences_ignores_broad_tasks_and_code():

@@ -1,4 +1,4 @@
-"""Read-only observability over the trilobite learning loop's memory_store.
+"""Read-only observability over the sonder learning loop's memory_store.
 
 Answers three questions the raw tables don't answer directly:
 
@@ -130,8 +130,8 @@ def build_report(conn):
 
 
 def format_report(report):
-    """Render build_report()'s dict as the multi-line text trilobite_stats uses."""
-    lines = ["trilobite metrics report"]
+    """Render build_report()'s dict as the multi-line text sonder_stats uses."""
+    lines = ["sonder metrics report"]
     lines.append(
         "  interactions: %d | lessons: %d | good-outcome interactions: %d"
         % (

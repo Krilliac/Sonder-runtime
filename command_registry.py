@@ -257,7 +257,7 @@ COMMANDS = [
         "name": "/train",
         "category": "learning",
         "risk": "ask",
-        "summary": "Run grounded self-training tasks and record outcomes.",
+        "summary": "Run grounded practice tasks and record outcomes; no weights change.",
     },
     {
         "name": "/quality",
@@ -360,7 +360,7 @@ def list_commands(filter_text=""):
 
 def format_commands(filter_text=""):
     rows = list_commands(filter_text)
-    title = "trilobite command registry"
+    title = "sonder command registry"
     if filter_text:
         title += " (filter=%s)" % filter_text
     lines = [title]

@@ -1,9 +1,9 @@
-"""game_ladder — trilobite's "game gauntlet".
+"""game_ladder — sonder's "game gauntlet".
 
-Escalating-difficulty ladder: for each level, trilobite generates a
+Escalating-difficulty ladder: for each level, sonder generates a
 complete, runnable game (code + procedurally-drawn assets), we ground it
 by actually running it headless, and the ladder stops at the first level
-that fails. Also feeds pass/fail back into trilobite's learning loop via
+that fails. Also feeds pass/fail back into sonder's learning loop via
 server.record_outcome, so the gauntlet doubles as training signal.
 
 Stdlib only (+ py_compile/subprocess). No GPU/model calls at import time —
@@ -328,7 +328,7 @@ if __name__ == "__main__":
     def gen_fn(prompt):
         # session="none": each call is single-turn; the repair context (prior code
         # + traceback) is embedded in the prompt itself, so no thread to balloon.
-        text = server.trilobite(prompt, session="none", num_ctx=6144, num_predict=4096)
+        text = server.sonder(prompt, session="none", num_ctx=6144, num_predict=4096)
         _last_raw["text"] = text
         return text
 

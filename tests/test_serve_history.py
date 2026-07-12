@@ -1,4 +1,4 @@
-import trilobite_serve as ts
+import sonder_serve as ts
 from concurrent.futures import ThreadPoolExecutor
 import threading
 
@@ -18,7 +18,7 @@ def test_history_from_messages_excludes_last_user_turn():
 
 def test_history_from_messages_drops_system_and_empty():
     messages = [
-        {"role": "system", "content": "you are trilobite"},
+        {"role": "system", "content": "you are a local model inside Sonder Runtime"},
         {"role": "user", "content": "q1"},
         {"role": "assistant", "content": ""},   # empty -> dropped
         {"role": "user", "content": "current"},
@@ -37,8 +37,8 @@ def test_history_from_messages_handles_empty():
     assert ts._history_from_messages(None) == []
 
 
-def test_model_to_tier_defaults_to_local_student():
-    for m in ("", None, "trilobite", "gpt-4o-mini"):
+def test_model_to_tier_defaults_to_local_learning_route():
+    for m in ("", None, "sonder", "gpt-4o-mini"):
         assert ts._model_to_tier(m) is None
 
 
@@ -74,7 +74,7 @@ def test_run_uses_answer_source_not_trace(monkeypatch):
     seen = {}
     ts.LAST_RESPONSE = (
         "```python\nprint('answer')\n```\n"
-        "=== TRACE (how trilobite decided) ===\n"
+        "=== TRACE (how Sonder Runtime decided) ===\n"
         "```python\nprint('trace')\n```"
     )
     ts.LAST_RUN_SOURCE = "```python\nprint('answer')\n```"
@@ -137,7 +137,7 @@ def test_runwindow_uses_prior_runnable_block(monkeypatch):
             "cwd": "C:/repo",
             "error": "",
             "detached": True,
-            "run_dir": "C:/tmp/trilobite-window",
+            "run_dir": "C:/tmp/sonder-window",
         }
 
     monkeypatch.setattr(ts.code_runner, "run_code_window", fake_run_window)
@@ -145,7 +145,7 @@ def test_runwindow_uses_prior_runnable_block(monkeypatch):
     out = ts._handle_slash("/runwindow 7")
 
     assert out.endswith("[launched]")
-    assert "run dir: C:/tmp/trilobite-window" in out
+    assert "run dir: C:/tmp/sonder-window" in out
     assert seen == {"code": "int main(){return 0;}", "language": "cpp", "timeout": 7}
 
 
@@ -329,7 +329,7 @@ def test_claude_like_slash_controls_route(monkeypatch):
 
 
 def test_dump_slash_writes_debug_file(monkeypatch, tmp_path):
-    monkeypatch.setattr(ts.server.trilobite_paths, "default_home", lambda: tmp_path)
+    monkeypatch.setattr(ts.server.sonder_paths, "default_home", lambda: tmp_path)
     monkeypatch.setattr(ts.server, "context_health", lambda: "context")
     monkeypatch.setattr(ts.server, "memory_quality_report", lambda sample_limit=5: "quality")
     monkeypatch.setattr(ts.server, "master_status", lambda limit=20: "agents")
