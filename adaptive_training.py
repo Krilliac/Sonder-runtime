@@ -171,8 +171,8 @@ def _requested_size(value):
 
 
 def build_plan(profile=None, options=None):
-    profile = profile or system_profile.detect_hardware()
     options = options or PlanOptions()
+    profile = profile or system_profile.detect_hardware(gpu_index=options.gpu_index)
     requested = _requested_size(options.model)
     usable_vram, usable_ram = memory_budgets(profile, options)
     available_vram = _bounded_available(profile.vram_free_gb, options.max_vram_gb)
