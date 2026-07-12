@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import time
 
 
 _WEATHER = re.compile(
@@ -31,6 +32,29 @@ _CURRENT_INFO = re.compile(
     r"[^\n]{0,60}\b(?:latest|today|current|recent|now)\b)",
     re.IGNORECASE,
 )
+# Implicit-recency event/result questions ("who won the super bowl?"). These
+# carry no explicit "latest news" wording, so the base _CURRENT_INFO regex
+# misses them and the offline model confidently hallucinates a stale answer.
+# Precision-first: the left side must be a result/incumbent question shape and
+# the right side must be a recurring named event or a recency superlative;
+# _mentions_past_year() suppresses explicitly historical questions.
+_EVENT_RESULT = re.compile(
+    r"\b(?:who\s+won|who\s+wins|winner\s+of|"
+    r"who\s+is\s+the\s+(?:current|new|reigning))\b"
+    r"[^\n]{0,60}?"
+    r"\b(?:super\s*bowl|world\s+cup|world\s+series|olympics?|election|"
+    r"finals|championship|stanley\s+cup|grand\s+prix|"
+    r"most\s+recent|latest|this\s+(?:year|season))\b",
+    re.IGNORECASE,
+)
+# Generic interrogative + recency superlative ("what is the most recent /
+# latest X?", "who ... as of today?").
+_RECENCY_QUESTION = re.compile(
+    r"\b(?:who|what|when|which|where)(?:['’]s)?\b[^\n]{0,80}?"
+    r"\b(?:most\s+recent(?:ly)?|latest|as\s+of\s+(?:now|today)|right\s+now)\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_YEAR = re.compile(r"\b(19\d{2}|20\d{2})\b")
 _WEATHER_FOLLOWUP = re.compile(
     r"^\s*(?:what about\s+)?(?:today|tomorrow|tonight|this weekend|next week|"
     r"later|and tomorrow|how about tomorrow)[?!.\s]*$",
@@ -81,6 +105,36 @@ _EXPLICIT_SEARCH = re.compile(
     r"|\bgoogle\s+the\s+web\b",
     re.IGNORECASE,
 )
+
+
+def _mentions_past_year(text: str) -> bool:
+    """True when the prompt names an explicit year before the current one.
+
+    Keeps the implicit-recency rules precision-first: "who won the world cup
+    in 1998" is a historical question the offline model can answer."""
+    try:
+        current_year = time.localtime().tm_year
+    except Exception:
+        current_year = 2026
+    for match in _EXPLICIT_YEAR.finditer(str(text or "")):
+        if int(match.group(1)) < current_year:
+            return True
+    return False
+
+
+def _current_info(text: str) -> bool:
+    """Current-info signal shared by classify() and the post-hoc guards.
+
+    The base _CURRENT_INFO regex requires an explicit recency word next to a
+    news-ish noun. Implicit-recency shapes ("who won the super bowl?",
+    "what is the latest ...?") are covered by _EVENT_RESULT and
+    _RECENCY_QUESTION, suppressed when an explicit past year marks the
+    question as historical."""
+    if _CURRENT_INFO.search(text):
+        return True
+    if _EVENT_RESULT.search(text) or _RECENCY_QUESTION.search(text):
+        return not _mentions_past_year(text)
+    return False
 
 
 def _content(message) -> str:
@@ -208,7 +262,7 @@ def classify(prompt: str, history=None) -> dict | None:
         previous_weather
         and _CAPABILITY.search(text)
         and _weather_unresolved(history)
-        and not _CURRENT_INFO.search(text)
+        and not _current_info(text)
     ):
         return {"kind": "weather", "location": _previous_weather_location(history)}
     if _awaiting_location(history):
@@ -222,7 +276,7 @@ def classify(prompt: str, history=None) -> dict | None:
     # Current-info outranks capability: "you have a web tool, use it to tell
     # me one current news headline" must attempt a live search, not return the
     # canned capability answer.
-    if _CURRENT_INFO.search(text):
+    if _current_info(text):
         return {"kind": "research", "query": text}
     if _CAPABILITY.search(text):
         return {"kind": "capability"}
@@ -246,3 +300,30 @@ def denies_web_access(reply) -> bool:
     so honest "browsing is disabled" replies are never rewritten.
     """
     return bool(_WEB_DENIAL.search(str(reply or "")))
+
+
+# A generated reply that FAKES tool usage instead of denying access: a fenced
+# block invoking web_search/web_fetch as a pseudo-command or pseudo-call. The
+# denial guard cannot catch these (nothing is denied), yet the reply is pure
+# hallucination on a web-intent prompt.
+_FENCED_BLOCK = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
+_PSEUDO_WEB_CALL = re.compile(
+    r"^\s*(?:[$>]\s*)?(?:await\s+)?(?:web_search|web_fetch)\s*(?:\(|['\"]|\s+\S)",
+    re.IGNORECASE,
+)
+
+
+def fabricated_tool_call(reply) -> bool:
+    """True when a reply contains a fenced block that pretends to run the
+    web_search/web_fetch tools as shell commands or function calls.
+
+    Deliberately narrow: only fenced blocks count (prose that merely mentions
+    the tool names never matches), and callers must additionally require
+    web_tools.enabled() plus a positive classify() before re-dispatching, so a
+    legitimate code answer that happens to call a user-defined web_search()
+    function on a non-web prompt is never rewritten."""
+    for _info, body in _FENCED_BLOCK.findall(str(reply or "")):
+        for line in body.splitlines():
+            if _PSEUDO_WEB_CALL.match(line):
+                return True
+    return False

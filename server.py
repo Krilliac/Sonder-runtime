@@ -1424,6 +1424,138 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
     return resp, iid, None
 
 
+# --- chat code gate -----------------------------------------------------------
+# Chat-path code answers used to ship unverified (runtime-broken code in two
+# consecutive probes) while the gating infrastructure already existed for
+# parallel_generate and /run. When a chat reply carries a runnable fenced
+# Python block that defines real code (def/class/import), compile+smoke-run it
+# in the same sandbox; on failure do one repair round-trip, then append an
+# explicit NOT VERIFIED banner and record a negative outcome so broken code
+# never distills into lessons. Python-only for now; opt out with
+# TRILOBITE_CODE_GATE=0.
+_CODE_GATE_SIGNS = re.compile(
+    r"^\s*(?:def\s+\w+|class\s+\w+|import\s+\w+|from\s+[\w.]+\s+import\s)",
+    re.MULTILINE,
+)
+_CODE_GATE_TIMEOUT = 8
+
+
+def _code_gate_enabled() -> bool:
+    return os.environ.get("TRILOBITE_CODE_GATE", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+
+
+def _code_gate_target(reply):
+    """Return the reply's runnable Python block worth gating, or None.
+
+    Only fenced Python with real definitions/imports is gated (keeps latency
+    off trivial snippet turns on this RAM-tight box), and interactive samples
+    that read stdin are skipped: a smoke run would EOFError on correct code.
+    """
+    if "```" not in str(reply or ""):
+        return None
+    block = grounding.extract_runnable_code_block(reply)
+    if not block or block.get("language") != "python":
+        return None
+    code = block.get("code") or ""
+    if not _CODE_GATE_SIGNS.search(code):
+        return None
+    if re.search(r"\binput\s*\(", code):
+        return None
+    return code
+
+
+def _record_code_gate_failure(interaction_id):
+    """Record a negative 'failed' outcome for a reply whose code did not run.
+
+    Best-effort: the auto-negative both keeps broken code out of lesson
+    distillation and corrects the outcome-signal skew (previously ~97%
+    positive because failures were simply never recorded)."""
+    if not interaction_id:
+        return
+    try:
+        conn = _open_db()
+        try:
+            r = reward.score("failed")
+            memory_store.record_outcome_row(conn, interaction_id, "failed", r)
+            memory_store.record_lesson_usage_outcome(
+                conn, interaction_id, "failed", r,
+            )
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+def _apply_code_gate(reply, interaction_id=None, regenerate=None):
+    """Compile+smoke-run the reply's runnable Python block before returning it.
+
+    Returns (reply, verified):
+      True  -> the block ran cleanly (reply unchanged, or the repaired reply).
+      False -> still failing after one repair round-trip; the reply carries an
+               explicit NOT VERIFIED banner and the captured interaction got a
+               negative 'failed' outcome.
+      None  -> nothing to gate, gate disabled, or inconclusive (a timeout is
+               not treated as failure: long-running demos/servers are legal).
+    """
+    if not _code_gate_enabled():
+        return reply, None
+    code = _code_gate_target(reply)
+    if code is None:
+        return reply, None
+    try:
+        result = grounding.run_code_detail(
+            code, timeout=_CODE_GATE_TIMEOUT, compile_first=True,
+        )
+    except Exception:
+        return reply, None
+    if result.get("ok"):
+        return reply, True
+    if result.get("timed_out"):
+        return reply, None
+    failure = (
+        result.get("stderr") or result.get("stdout") or "exited with an error"
+    ).strip()
+    if regenerate is not None:
+        repair_prompt = (
+            "The Python code block in your previous answer fails when run:\n"
+            "%s\n\nReturn the corrected complete answer with a fixed, "
+            "runnable Python code block." % failure[:1200]
+        )
+        try:
+            repaired = str(regenerate(repair_prompt) or "")
+        except Exception:
+            repaired = ""
+        repaired_code = _code_gate_target(repaired) if repaired else None
+        if repaired_code:
+            try:
+                retry = grounding.run_code_detail(
+                    repaired_code, timeout=_CODE_GATE_TIMEOUT,
+                    compile_first=True,
+                )
+            except Exception:
+                retry = {"ok": False, "timed_out": False}
+            if retry.get("ok"):
+                return repaired, True
+            if retry.get("timed_out"):
+                return repaired, None
+            failure = (
+                retry.get("stderr") or retry.get("stdout") or failure
+            ).strip() or failure
+    summary = "exited with an error"
+    for line in reversed(failure.splitlines()):
+        if line.strip():
+            summary = line.strip()
+            break
+    _record_code_gate_failure(interaction_id)
+    return (
+        "%s\n\nNOT VERIFIED: the Python code block in this answer fails when "
+        "run (%s)." % (reply, summary[:300]),
+        False,
+    )
+
+
 _existing_mcp = globals().get("_PERSISTENT_MCP")
 if isinstance(_existing_mcp, reloadable_mcp.ReloadableFastMCP):
     mcp = _existing_mcp
@@ -1782,6 +1914,21 @@ def _sonder_impl(
         _discard_interaction(iid)
         return _append_activity(response)
 
+    def _code_repair(repair_prompt):
+        gen = _make_generate(
+            tgt_model, effective_system, temperature, num_predict,
+            num_ctx_eff, cloud=cloud,
+        )
+        repair_history = list(history or []) + [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": response},
+        ]
+        return gen(repair_prompt, repair_history)
+
+    response, _code_verified = _apply_code_gate(
+        response, interaction_id=iid, regenerate=_code_repair,
+    )
+
     if trace:
         params = {
             "temperature": temperature,
@@ -1920,6 +2067,19 @@ def _answer_with_history_impl(
         # reach lessons or the training export.
         _discard_interaction(iid)
         return _append_activity(response)
+
+    def _code_repair(repair_prompt):
+        gen = _make_generate(model, effective_system, 0.2, 1024, req_ctx,
+                             cloud=cloud)
+        repair_history = list(history or []) + [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": response},
+        ]
+        return gen(repair_prompt, repair_history)
+
+    response, _code_verified = _apply_code_gate(
+        response, interaction_id=iid, regenerate=_code_repair,
+    )
     if trace and trace_ctx is not None:
         params = {
             "temperature": 0.2,
@@ -6064,6 +6224,18 @@ def _chat_location(
     return location
 
 
+# System prompt for web-routed research runs (chat_web_response): web tools
+# only, no workspace discovery, stop as soon as the results answer.
+_RESEARCH_AGENT_SYSTEM = (
+    "You are answering a live-information question with public web tools. "
+    "Use web_search (and web_fetch when a snippet is not enough) to gather "
+    "evidence; workspace and file tools are outside this run's allowlist. "
+    "Cite fetched URLs in the final answer. As soon as the tool results "
+    "already answer the question, return {\"final\": ...} immediately "
+    "instead of calling more tools."
+)
+
+
 def chat_web_response(
     prompt: str,
     history=None,
@@ -6134,19 +6306,41 @@ def chat_web_response(
             )
         return prefix + weather_lookup(requested_location)
     query = intent.get("query", prompt)
+    # Current-info/news phrasing is conversational ("current news headline");
+    # searching it verbatim ranks literal-match domains (current.com) first.
+    # Construct a purposeful, dated provider query and hand it to the agent as
+    # a suggestion while keeping the original question as the task.
+    task = query
+    search_query = web_tools.build_search_query(query, intent.get("kind", "research"))
+    if search_query and search_query != query:
+        task = (
+            "Answer this question using live web results: %s\n"
+            "Suggested web_search query (conversational filler already "
+            "removed; use it or refine it): %s" % (query, search_query)
+        )
     if intent.get("needs_location"):
-        query = (
+        task = (
             "%s\n\nThe user explicitly enabled approximate IP location. Their "
             "approximate city/region is %s. Use only that place label, disclose that "
             "it may be inaccurate, and do not claim precise location."
-            % (query, web_tools.location_label(location))
+            % (task, web_tools.location_label(location))
         )
+    # Live-information questions get a web-only toolset and a research system
+    # prompt: the default workspace-agent prompt invites text_search /
+    # workspace discovery, which wastes serialized local-model steps on a pure
+    # web question (observed: a spurious local text_search after web results
+    # already answered the prompt).
     return _agent_impl(
-        query,
+        task,
         tier=tier or "code",
-        max_steps=6,
+        max_steps=4,
         allow_web=True,
         required_tool_names=("web_search", "web_fetch"),
+        tool_allowlist=(
+            "web_search", "web_fetch", "weather_lookup",
+            "approximate_location_lookup",
+        ),
+        system=_RESEARCH_AGENT_SYSTEM,
     )
 
 
@@ -6182,11 +6376,16 @@ def _web_denial_guard(
 
     Post-hoc safety net for denial phrasings the pre-model regexes missed.
     Deliberately narrow to avoid rewriting legitimate answers: web tools must
-    actually be enabled, the reply must match web_intents.denies_web_access,
+    actually be enabled, the reply must match web_intents.denies_web_access
+    (a claimed lack of access) or web_intents.fabricated_tool_call (a fenced
+    block that fakes running web_search/web_fetch instead of denying access),
     AND the prompt itself must carry a positive web intent. Returns the
     replacement text (never captured / no footer) or None to keep the reply.
     """
-    if not web_intents.denies_web_access(reply):
+    if not (
+        web_intents.denies_web_access(reply)
+        or web_intents.fabricated_tool_call(reply)
+    ):
         return None
     if not web_tools.enabled():
         return None
@@ -7954,7 +8153,8 @@ def _agent_impl(
     tool_allowlist=None,
     tool_policy=None,
     return_host_receipt: bool = False,
-):
+    system: str | None = None,
+) -> str:
     """Run a Claude-like local agent loop that can call tools.
 
     The model chooses one JSON tool call at a time, receives the observation,
@@ -7972,6 +8172,7 @@ def _agent_impl(
     if model is None:
         return "ERROR: `sonder:latest` Ollama alias not found."
     system = _build_system(
+        system or
         "You are a local tool-using coding agent. Inspect real workspace evidence before making claims. "
         "For action tasks, use tools instead of merely describing commands. Prefer workspace_inventory, directory_tree, "
         "text_search, file_read_range, and program_search for discovery; use guarded file tools for "

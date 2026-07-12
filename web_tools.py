@@ -13,6 +13,7 @@ import json
 import os
 import re
 import socket
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -53,6 +54,68 @@ _SEARCH_STOPWORDS = {
     "search", "show", "tell", "the", "this", "today", "url", "weather",
     "web", "with",
 }
+# Conversational filler stripped from provider queries by build_search_query.
+# Distinct from _SEARCH_STOPWORDS (post-hoc relevance scoring): this set is
+# about how users *phrase* requests to a chat assistant, and must NOT contain
+# topical nouns like "news" that make a search query purposeful.
+_QUERY_FILLER = {
+    "a", "access", "an", "and", "about", "any", "are", "at", "be", "being", "can",
+    "could", "did", "do", "does", "fetch", "find", "for", "get", "give",
+    "grab", "had", "has", "have", "hey", "hi", "how", "i", "in", "internet",
+    "is", "it", "just", "kindly", "know", "like", "me", "my", "need", "of",
+    "on", "one", "or", "please", "pull", "should", "show", "some", "tell",
+    "that", "the", "this", "those", "to", "tool", "tools", "us", "use",
+    "using", "want", "was", "we", "web", "were", "what", "what's", "whats",
+    "when", "where", "which", "who", "who's", "whos", "will", "with",
+    "would", "you", "your",
+}
+# Recency adverbs dropped from the query text and replaced by an explicit
+# month+year anchor, so "current news headline" becomes a dated news query
+# instead of ranking literal-match domains (current.com) first.
+_RECENCY_FILLER = {
+    "breaking", "current", "currently", "latest", "most", "now", "recent",
+    "recently", "today", "today's", "todays",
+}
+_RECENCY_SIGNAL = re.compile(
+    r"\b(?:latest|breaking|current(?:ly)?|today(?:'s)?|right\s+now|"
+    r"most\s+recent(?:ly)?|as\s+of\s+(?:now|today)|news)\b",
+    re.IGNORECASE,
+)
+
+
+def build_search_query(prompt, intent_kind="research", now=None):
+    """Construct a purposeful provider query from conversational phrasing.
+
+    Only rewrites research/current-info prompts that carry a recency signal
+    (news / latest / current / today ...): conversational filler and recency
+    adverbs are stripped, and an explicit "<Month> <Year>" anchor is appended
+    so generic phrasing stops ranking irrelevant literal-match domains first.
+    Everything else is returned verbatim, so already-specific queries are
+    never degraded. Callers should keep the original prompt available as
+    context/fallback.
+    """
+    text = str(prompt or "").strip()
+    if not text or intent_kind not in ("research", "current-info", "news"):
+        return text
+    if not _RECENCY_SIGNAL.search(text):
+        return text
+    content = []
+    for word in re.findall(r"[A-Za-z0-9][\w'./-]*", text):
+        lowered = word.lower()
+        if lowered in _QUERY_FILLER or lowered in _RECENCY_FILLER:
+            continue
+        content.append(word)
+    if not content:
+        content = ["news"]
+    stamp = time.strftime(
+        "%B %Y", time.localtime(time.time() if now is None else now)
+    )
+    query = " ".join(content)
+    if stamp.lower() not in query.lower():
+        query = "%s %s" % (query, stamp)
+    return query[:200]
+
+
 _US_STATE_NAMES = {
     "AL": "alabama", "AK": "alaska", "AZ": "arizona", "AR": "arkansas",
     "CA": "california", "CO": "colorado", "CT": "connecticut",
