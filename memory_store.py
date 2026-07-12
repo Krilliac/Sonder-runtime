@@ -201,6 +201,21 @@ def log_interaction(conn, interaction_id, task, retrieved_ctx, response, tier,
     conn.commit()
 
 
+def delete_interaction(conn, interaction_id):
+    """Remove a captured interaction and its learning traces.
+
+    Used to purge replies that must never influence learning (e.g. a model
+    refusal that wrongly denied web access while web tools were enabled)."""
+    conn.execute(
+        "DELETE FROM outcomes WHERE interaction_id=?", (interaction_id,)
+    )
+    conn.execute(
+        "DELETE FROM lesson_usage WHERE interaction_id=?", (interaction_id,)
+    )
+    conn.execute("DELETE FROM interactions WHERE id=?", (interaction_id,))
+    conn.commit()
+
+
 def get_interaction(conn, interaction_id):
     row = conn.execute(
         "SELECT * FROM interactions WHERE id=?", (interaction_id,)

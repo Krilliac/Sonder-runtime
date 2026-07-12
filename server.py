@@ -1613,9 +1613,13 @@ def _route_chat_web(prompt, session, project, location_consent):
     but is NOT captured as a learnable interaction: no footer is returned, so
     record_outcome/lesson distillation can never ingest canned tool output, and
     the row has neither embedding nor outcome so recall/training skip it too.
+    An explicit imperative search ("search the web for X", "look it up
+    online") overrides the work gate: intents.classify_work also matches
+    "search ... for ..." phrasings, but an explicit web-search order must
+    reach the live tools, not the offline model.
     Returns the routed reply, or None to continue to the model.
     """
-    if intents.classify_work(prompt):
+    if intents.classify_work(prompt) and not web_intents.explicit_search(prompt):
         return None
     session_id = _resolve_session(session)
     history = None
@@ -1766,7 +1770,17 @@ def _sonder_impl(
         allow_server_location_lookup=location_consent,
     )
     if replacement is not None:
+        # The refusal turn was already captured by _answer; purge it so it can
+        # never distill into lessons or the training export.
+        _discard_interaction(iid)
         return _append_activity(replacement)
+    if web_tools.enabled() and web_intents.denies_web_access(response):
+        # Guard miss (no re-dispatch possible), but the reply still denies web
+        # access while web tools are actually enabled: keep the reply visible,
+        # yet drop the captured interaction and suppress the footer so the
+        # refusal never poisons lessons or the training export.
+        _discard_interaction(iid)
+        return _append_activity(response)
 
     if trace:
         params = {
@@ -1898,7 +1912,14 @@ def _answer_with_history_impl(
     # here); this is only the post-hoc net for denial phrasings it missed.
     replacement = _web_denial_guard(prompt, response, history=history)
     if replacement is not None:
+        _discard_interaction(iid)
         return _append_activity(replacement)
+    if web_tools.enabled() and web_intents.denies_web_access(response):
+        # Guard miss: the reply denies web access while web tools are enabled.
+        # Drop the captured refusal and return it footer-less so it can never
+        # reach lessons or the training export.
+        _discard_interaction(iid)
+        return _append_activity(response)
     if trace and trace_ctx is not None:
         params = {
             "temperature": 0.2,
@@ -4942,6 +4963,20 @@ def game_reference_suite(
     return game_forge.format_suite(result)
 
 
+def _resolve_repair_rounds(repair_rounds, language) -> int:
+    """Clamp explicit repair_rounds to [0, 2]; None picks a language default.
+
+    C++ candidates default to 2 repair rounds (header/toolchain issues usually
+    take more than one grounded retry); every other language defaults to 1."""
+    if repair_rounds is None:
+        try:
+            normalized = game_forge.normalize_language(language)
+        except ValueError:
+            normalized = ""
+        return 2 if normalized == "cpp" else 1
+    return max(0, min(int(repair_rounds), 2))
+
+
 def _game_generate_result(
     name: str,
     concept: str,
@@ -4951,9 +4986,10 @@ def _game_generate_result(
     seed: int,
     tier: str,
     timeout: int,
-    repair_rounds: int,
+    repair_rounds: int | None,
     use_reference_fallback: bool = True,
 ) -> dict:
+    repair_rounds = _resolve_repair_rounds(repair_rounds, language)
     project = game_forge.prepare_project(name, language, dimension, theme, seed)
     base_prompt = game_forge.generation_prompt(project, concept)
     try:
@@ -4971,7 +5007,7 @@ def _game_generate_result(
     attempts = []
     repair_note = ""
     final_iid = None
-    for attempt in range(max(0, min(int(repair_rounds), 2)) + 1):
+    for attempt in range(repair_rounds + 1):
         prompt = base_prompt
         if repair_note:
             prompt += (
@@ -4994,9 +5030,14 @@ def _game_generate_result(
             code = game_forge.autofix_standard_library(code, project["language"])
             forbidden = game_forge.validate_in_house(code, project["language"])
             if forbidden:
+                # Actionable remediation (which tokens, and HOW to replace
+                # them with standard-library equivalents) so the repair round
+                # actually converges instead of re-tripping the same token.
                 run = {
                     "ok": False,
-                    "output": "third-party dependency token(s): %s" % ", ".join(forbidden),
+                    "output": game_forge.forbidden_remediation(
+                        forbidden, project["language"],
+                    ),
                 }
             else:
                 contract = game_forge.contract_issues(code, project["language"])
@@ -5070,7 +5111,7 @@ def game_generate_and_test(
     seed: int = 1337,
     tier: str = "code",
     timeout: int = 30,
-    repair_rounds: int = 1,
+    repair_rounds: int | None = None,
     use_reference_fallback: bool = True,
 ) -> str:
     """Have Sonder create, execute, repair, and ground a persistent game.
@@ -5078,6 +5119,7 @@ def game_generate_and_test(
     Generated games must use only standard-library/OS-native APIs, consume an
     in-house artifact pack, render frame.ppm, emit GAME_OK, and terminate within
     the bounded timeout. Passing/failed outcomes are recorded into learning.
+    repair_rounds=None picks a language default: 2 for C++, 1 otherwise.
     """
     _maybe_live_reload()
     started = time.time()
@@ -5137,7 +5179,7 @@ def game_generation_campaign(
     tier: str = "code",
     max_workers: int = 2,
     timeout: int = 30,
-    repair_rounds: int = 1,
+    repair_rounds: int | None = None,
     use_reference_fallback: bool = True,
     language: str = "",
     dimension: str = "",
@@ -5353,7 +5395,7 @@ def _loop_dispatch(action):
             seed=action.get("seed", 1337),
             tier=action.get("tier", "code"),
             timeout=action.get("timeout", 30),
-            repair_rounds=action.get("repair_rounds", 1),
+            repair_rounds=action.get("repair_rounds"),
         ))
     if action_type in ("game_campaign", "game_generation_campaign"):
         return _loop_text_result("game_generation_campaign", game_generation_campaign(
@@ -5366,7 +5408,7 @@ def _loop_dispatch(action):
             tier=action.get("tier", "code"),
             max_workers=action.get("max_workers", 2),
             timeout=action.get("timeout", 30),
-            repair_rounds=action.get("repair_rounds", 1),
+            repair_rounds=action.get("repair_rounds"),
         ))
     if action_type == "offload":
         return _loop_text_result("offload", offload(
@@ -6106,6 +6148,26 @@ def chat_web_response(
         allow_web=True,
         required_tool_names=("web_search", "web_fetch"),
     )
+
+
+def _discard_interaction(interaction_id):
+    """Purge a captured interaction so it can never reach the learning loop.
+
+    Used when a model reply turned out to be a web-access refusal: the row was
+    already logged by the answer path, and merely withholding the footer still
+    leaves a poisoned task/response pair in the store. Best-effort; failures
+    are swallowed (the row without an outcome is skipped by training exports
+    anyway)."""
+    if not interaction_id:
+        return
+    try:
+        conn = _open_db()
+        try:
+            memory_store.delete_interaction(conn, interaction_id)
+        finally:
+            conn.close()
+    except Exception:
+        pass
 
 
 def _web_denial_guard(
@@ -7254,7 +7316,7 @@ def _agent_dispatch(
             seed=args.get("seed", 1337),
             tier=args.get("tier", "code"),
             timeout=args.get("timeout", 30),
-            repair_rounds=args.get("repair_rounds", 1),
+            repair_rounds=args.get("repair_rounds"),
         )
     if tool_name in ("game_generation_campaign", "game_campaign"):
         return game_generation_campaign(
@@ -7267,7 +7329,7 @@ def _agent_dispatch(
             tier=args.get("tier", "code"),
             max_workers=args.get("max_workers", 2),
             timeout=args.get("timeout", 30),
-            repair_rounds=args.get("repair_rounds", 1),
+            repair_rounds=args.get("repair_rounds"),
         )
     if tool_name == "web_search":
         if not allow_web:

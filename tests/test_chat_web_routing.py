@@ -274,6 +274,171 @@ def test_denies_web_access_patterns():
     )
 
 
+def test_denies_web_access_perform_conduct_do_variants():
+    assert web_intents.denies_web_access("I can't perform live web searches.")
+    assert web_intents.denies_web_access(
+        "I cannot conduct web searches on my own."
+    )
+    assert web_intents.denies_web_access(
+        "Sorry, I can't do a web search for that."
+    )
+    assert web_intents.denies_web_access("I am unable to run internet queries.")
+    assert not web_intents.denies_web_access(
+        "Web tools are disabled in the current runtime by TRILOBITE_WEB_TOOLS."
+    )
+    assert not web_intents.denies_web_access(
+        "Here is how web search engines work."
+    )
+
+
+def test_missed_denial_skips_capture_and_footer(monkeypatch):
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
+    monkeypatch.setattr(
+        server, "_serve_target",
+        lambda tier, strict: ("fake-model", False, True, "trilobite"),
+    )
+    monkeypatch.setattr(
+        server, "_answer",
+        lambda *a, **k: ("I can't perform live web searches.", "iid-7", None),
+    )
+    discarded = []
+    monkeypatch.setattr(
+        server, "_discard_interaction", lambda iid: discarded.append(iid),
+    )
+
+    # No positive web intent, so the guard cannot re-dispatch -- but the
+    # refusal must still stay out of the learning loop.
+    out = server._trilobite_impl(
+        "explain how DNS works", session="none", project="none",
+    )
+
+    assert "can't perform live web searches" in out
+    assert "[interaction_id" not in out
+    assert discarded == ["iid-7"]
+
+
+def test_rewritten_denial_discards_captured_refusal(monkeypatch):
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
+    monkeypatch.setattr(server.intents, "classify_work", lambda text: True)
+    monkeypatch.setattr(
+        server, "_serve_target",
+        lambda tier, strict: ("fake-model", False, True, "trilobite"),
+    )
+    monkeypatch.setattr(
+        server, "_answer",
+        lambda *a, **k: ("I don't have access to the internet.", "iid-8", None),
+    )
+    monkeypatch.setattr(
+        server, "weather_lookup", lambda location: "LIVE FORECAST",
+    )
+    discarded = []
+    monkeypatch.setattr(
+        server, "_discard_interaction", lambda iid: discarded.append(iid),
+    )
+
+    out = server._trilobite_impl(
+        "check the weather in Madison, WI", session="none", project="none",
+    )
+
+    assert "LIVE FORECAST" in out
+    assert discarded == ["iid-8"]
+
+
+# --- intent ordering & work-gate overrides -----------------------------------
+
+
+def test_current_info_beats_capability_intent():
+    prompt = (
+        "you have a tool to access the internet, use it to tell me one "
+        "current news headline"
+    )
+
+    assert web_intents.classify(prompt) == {"kind": "research", "query": prompt}
+
+
+def test_capability_news_prompt_dispatches_web_research(monkeypatch):
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
+    calls = []
+
+    def fake_agent(prompt, **kwargs):
+        calls.append((prompt, kwargs))
+        return "ONE HEADLINE"
+
+    monkeypatch.setattr(server, "_agent_impl", fake_agent)
+
+    out = server.chat_web_response(
+        "you have a tool to access the internet, use it to tell me one "
+        "current news headline"
+    )
+
+    assert out == "ONE HEADLINE"
+    assert calls[0][1]["required_tool_names"] == ("web_search", "web_fetch")
+
+
+def test_explicit_search_detector():
+    assert web_intents.explicit_search(
+        "search the web for today's top news headline and tell me one"
+    )
+    assert web_intents.explicit_search("please look it up online")
+    assert web_intents.explicit_search("google it for me")
+    assert not web_intents.explicit_search("search the repo for TODO markers")
+    assert not web_intents.explicit_search("write a weather app in Python")
+    assert not web_intents.explicit_search("set up google cloud auth in my repo")
+
+
+def test_explicit_search_overrides_work_gate(monkeypatch):
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
+    monkeypatch.setattr(server.intents, "classify_work", lambda text: True)
+    monkeypatch.setattr(server, "_answer", _no_model)
+    monkeypatch.setattr(server, "_agent_impl", lambda *a, **k: "TOP HEADLINE")
+
+    out = server._trilobite_impl(
+        "search the web for today's top news headline and tell me one",
+        session="none", project="none",
+    )
+
+    assert "TOP HEADLINE" in out
+    assert "[interaction_id" not in out
+
+
+def test_resolved_weather_thread_news_prompt_is_research():
+    history = [
+        {"role": "user", "content": "what's the weather in Chicago?"},
+        {
+            "role": "assistant",
+            "content": "Weather for Chicago, Illinois, United States\nNow: Clear",
+        },
+    ]
+    prompt = (
+        "you have a tool to access the internet, use it to tell me one "
+        "current news headline"
+    )
+
+    assert web_intents.classify(prompt, history) == {
+        "kind": "research", "query": prompt,
+    }
+
+
+def test_resolved_weather_thread_capability_prompt_stays_capability():
+    history = [
+        {"role": "user", "content": "what's the weather in Chicago?"},
+        {
+            "role": "assistant",
+            "content": "Weather for Chicago, Illinois, United States\nNow: Clear",
+        },
+    ]
+
+    # The weather request was fulfilled; a bare capability question must not
+    # re-run the Chicago lookup.
+    assert web_intents.classify("do you have internet access?", history) == {
+        "kind": "capability",
+    }
+
+
 def test_trilobite_impl_denial_guard_rewrites_refusal(monkeypatch):
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(server.web_tools, "enabled", lambda: True)

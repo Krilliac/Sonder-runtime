@@ -986,6 +986,75 @@ def test_game_generate_records_grounded_success(monkeypatch):
     assert activity["file_creates"] == 1
 
 
+def test_forbidden_dependency_repair_note_uses_remediation(monkeypatch):
+    project = {
+        "language": "cpp", "dimension": "2d", "root": "C:/repo/game",
+        "source": "C:/repo/game/game.cpp", "frame": "C:/repo/game/frame.ppm",
+    }
+    monkeypatch.setattr(server.game_forge, "prepare_project", lambda *a, **k: project)
+    monkeypatch.setattr(server.game_forge, "generation_prompt", lambda *a, **k: "prompt")
+
+    def no_reference(*a, **k):
+        raise ValueError("no reference")
+
+    monkeypatch.setattr(server.game_forge, "reference_source", no_reference)
+    prompts = []
+
+    def fake_trilobite(prompt, **kwargs):
+        prompts.append(prompt)
+        return "```cpp\n#include <nlohmann/json.hpp>\nint main(){return 0;}\n```"
+
+    monkeypatch.setattr(server, "trilobite", fake_trilobite)
+
+    result = server._game_generate_result(
+        "demo", "arena", "cpp", "2d", "arcane", 1, "code", 5, 1,
+        use_reference_fallback=False,
+    )
+
+    assert result["ok"] is False
+    assert len(prompts) == 2
+    # The repair prompt must carry the actionable remediation, not just the
+    # bare token list.
+    assert "nlohmann" in prompts[1]
+    assert "Remove every use of them" in prompts[1]
+    assert "<fstream>" in prompts[1]
+
+
+def test_repair_rounds_default_resolution():
+    assert server._resolve_repair_rounds(None, "cpp") == 2
+    assert server._resolve_repair_rounds(None, "c++") == 2
+    assert server._resolve_repair_rounds(None, "python") == 1
+    assert server._resolve_repair_rounds(None, "not-a-language") == 1
+    assert server._resolve_repair_rounds(0, "cpp") == 0
+    assert server._resolve_repair_rounds(5, "python") == 2
+
+
+def test_cpp_default_gets_two_repair_rounds_end_to_end(monkeypatch):
+    project = {
+        "language": "cpp", "dimension": "2d", "root": "C:/repo/game",
+        "source": "C:/repo/game/game.cpp", "frame": "C:/repo/game/frame.ppm",
+    }
+    monkeypatch.setattr(server.game_forge, "prepare_project", lambda *a, **k: project)
+    monkeypatch.setattr(server.game_forge, "generation_prompt", lambda *a, **k: "prompt")
+
+    def no_reference(*a, **k):
+        raise ValueError("no reference")
+
+    monkeypatch.setattr(server.game_forge, "reference_source", no_reference)
+    monkeypatch.setattr(
+        server, "trilobite",
+        lambda *a, **k: "```cpp\n#include <nlohmann/json.hpp>\nint main(){}\n```",
+    )
+
+    result = server._game_generate_result(
+        "demo", "arena", "cpp", "2d", "arcane", 1, "code", 5, None,
+        use_reference_fallback=False,
+    )
+
+    # None resolves to the cpp default of 2 repair rounds -> 3 attempts.
+    assert len(result["attempts"]) == 3
+
+
 def test_game_campaign_rotates_languages_and_dimensions(monkeypatch):
     seen = []
 

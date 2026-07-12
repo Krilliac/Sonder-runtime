@@ -61,9 +61,24 @@ _TRAILING_TIME = re.compile(
 _WEB_DENIAL = re.compile(
     r"\bas an ai(?: language)? model\b"
     r"|\b(?:do(?:es)?(?:n['’]t| not)|can(?:['’]t|not)|unable to)"
-    r"(?:\s+\w+){0,2}?\s+(?:have|access|browse|reach|use|connect to)"
+    r"(?:\s+\w+){0,2}?\s+(?:have|access|browse|reach|use|connect to|"
+    r"perform|conduct|do|run|execute|carry out)"
     r"(?:\s+\w+){0,3}?\s+(?:internet|web|real[-\s]?time)\b"
     r"|\bno\s+(?:direct\s+)?(?:internet|web)\s+access\b",
+    re.IGNORECASE,
+)
+# Explicit imperative search request ("search the web for X", "look it up
+# online", "google it"). Used to override the classify_work gate in the
+# pre-model chat routing: an explicit web-search order is never a workspace
+# task even when it also parses as work ("search ... for ..." looks like a
+# repo search to intents.classify_work).
+_EXPLICIT_SEARCH = re.compile(
+    r"\b(?:search|scour|query)\s+(?:the\s+)?(?:web|internet|net)\b"
+    r"|\bsearch\s+online\b"
+    r"|\blook(?:ing)?(?:\s+\w+){0,2}?\s+up\b[^\n]{0,60}?"
+    r"\b(?:online|on\s+the\s+(?:web|internet))\b"
+    r"|\bgoogle\s+(?:it|that|this|for)\b"
+    r"|\bgoogle\s+the\s+web\b",
     re.IGNORECASE,
 )
 
@@ -119,6 +134,26 @@ def _recent_weather_context(history) -> bool:
     return False
 
 
+def _weather_unresolved(history) -> bool:
+    """True while the thread has asked for weather but no forecast landed yet.
+
+    A delivered forecast is an assistant turn starting a line with
+    ``Weather for <place>``. Once one lands, the pending weather context is
+    resolved and capability-style follow-ups must NOT re-run the lookup
+    (a news-flavored capability prompt on a weather-primed thread was being
+    misrouted into a stale weather re-fetch)."""
+    asked = False
+    for message in list(history or [])[-8:]:
+        text = _content(message)
+        role = str(message.get("role") or "").lower()
+        if role == "assistant":
+            if re.search(r"^Weather for ", text, re.MULTILINE):
+                asked = False
+        elif _WEATHER.search(text):
+            asked = True
+    return asked
+
+
 def _awaiting_location(history) -> bool:
     for message in reversed(list(history or [])[-4:]):
         if str(message.get("role") or "").lower() != "assistant":
@@ -165,7 +200,16 @@ def classify(prompt: str, history=None) -> dict | None:
         return {"kind": "weather", "location": extract_weather_location(text)}
     if _LOCATION_QUERY.search(text):
         return {"kind": "location"}
-    if previous_weather and _CAPABILITY.search(text):
+    # Capability phrasing only continues a weather thread while that weather
+    # request is still unresolved AND the prompt carries no competing
+    # current-info signal; a resolved forecast or a news-flavored prompt must
+    # not re-trigger a stale weather lookup.
+    if (
+        previous_weather
+        and _CAPABILITY.search(text)
+        and _weather_unresolved(history)
+        and not _CURRENT_INFO.search(text)
+    ):
         return {"kind": "weather", "location": _previous_weather_location(history)}
     if _awaiting_location(history):
         location = _plausible_location_reply(text)
@@ -173,13 +217,24 @@ def classify(prompt: str, history=None) -> dict | None:
             return {"kind": "weather", "location": location}
     if previous_weather and _WEATHER_FOLLOWUP.match(text):
         return {"kind": "weather", "location": _previous_weather_location(history)}
-    if _CAPABILITY.search(text):
-        return {"kind": "capability"}
     if _LOCAL_QUERY.search(text):
         return {"kind": "research", "query": text, "needs_location": True}
+    # Current-info outranks capability: "you have a web tool, use it to tell
+    # me one current news headline" must attempt a live search, not return the
+    # canned capability answer.
     if _CURRENT_INFO.search(text):
         return {"kind": "research", "query": text}
+    if _CAPABILITY.search(text):
+        return {"kind": "capability"}
     return None
+
+
+def explicit_search(prompt) -> bool:
+    """True for an explicit imperative web search ("search the web for X",
+    "look it up online", "google it"). Callers use this to bypass the
+    classify_work gate: an explicit search order must reach the web routing
+    even when the phrasing also classifies as a workspace task."""
+    return bool(_EXPLICIT_SEARCH.search(str(prompt or "")))
 
 
 def denies_web_access(reply) -> bool:
