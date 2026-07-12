@@ -12,7 +12,6 @@ Ownership and lifecycle contract:
 from __future__ import annotations
 
 import contextlib
-import ctypes
 import json
 import os
 import socket
@@ -23,6 +22,7 @@ import uuid
 from pathlib import Path
 
 import sonder_paths
+from process_liveness import pid_alive as _process_pid_alive
 
 
 ACTIVE_STATUSES = ("planning", "running")
@@ -196,43 +196,7 @@ def _event(conn, run_id: str, kind: str, message: str, now=None) -> None:
 
 
 def _pid_alive(pid: int) -> bool:
-    if int(pid or 0) <= 0:
-        return False
-    if int(pid) == os.getpid():
-        return True
-    if os.name == "nt":
-        # Python's os.kill(pid, 0) is not a reliable existence probe on
-        # Windows. Query the process handle directly and fail closed on access
-        # denial so another server process cannot steal a live run.
-        try:
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
-            kernel32.OpenProcess.restype = ctypes.c_void_p
-            kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
-            kernel32.GetExitCodeProcess.restype = ctypes.c_int
-            kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-            kernel32.CloseHandle.restype = ctypes.c_int
-            handle = kernel32.OpenProcess(0x1000, 0, int(pid))
-            if not handle:
-                return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED => alive
-            try:
-                exit_code = ctypes.c_ulong()
-                if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-                    return True
-                return exit_code.value == 259  # STILL_ACTIVE
-            finally:
-                kernel32.CloseHandle(handle)
-        except (AttributeError, OSError, ValueError):
-            return True
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except PermissionError:
-        # A process we cannot signal still exists. Treating access denial as a
-        # dead owner could let a second controller claim the same run.
-        return True
-    except (OSError, ProcessLookupError):
-        return False
+    return _process_pid_alive(pid)
 
 
 def create_run(

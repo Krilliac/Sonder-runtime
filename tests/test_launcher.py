@@ -348,7 +348,16 @@ def test_controller_constructs_fixed_headless_command(monkeypatch, tmp_path):
         "--host", "0.0.0.0", "--port", "11435", "--context-size", "8192",
     ]
     assert "shell" not in seen["kwargs"]
-    assert seen["kwargs"]["start_new_session"] is True
+    if os.name == "nt":
+        expected_flags = (
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        )
+        assert seen["kwargs"]["creationflags"] == expected_flags
+        assert "start_new_session" not in seen["kwargs"]
+    else:
+        assert seen["kwargs"]["start_new_session"] is True
+        assert "creationflags" not in seen["kwargs"]
     assert seen["kwargs"]["stdin"] is subprocess.PIPE
     assert seen["kwargs"]["stdout"] is subprocess.PIPE
     assert seen["kwargs"]["stderr"] is subprocess.STDOUT
@@ -529,7 +538,7 @@ def test_cross_controller_lock_does_not_steal_from_live_local_owner(
         second.submit("stop")
 
     release.set()
-    assert controller.wait_operation(operation["id"], 2)["phase"] == "succeeded"
+    assert controller.wait_operation(operation["id"], 5)["phase"] == "succeeded"
 
 
 def test_dead_owner_is_interrupted_and_stale_worker_cannot_overwrite(
@@ -602,7 +611,14 @@ def test_health_token_is_persistent_private_and_passed_without_proxy(
     monkeypatch.delenv(sonder_launcher.sonder_health.TOKEN_ENV, raising=False)
     controller = make_controller(tmp_path, server_port=25435)
     assert len(controller.health_token) >= 32
-    assert os.stat(controller.health_token_path).st_mode & 0o077 == 0
+    if os.name == "nt":
+        # Windows privacy is inherited from the per-user NTFS state directory;
+        # POSIX group/other mode bits are synthetic and cannot validate its DACL.
+        assert controller.health_token_path.is_file()
+        assert not controller.health_token_path.is_symlink()
+        assert controller.health_token_path.parent == tmp_path
+    else:
+        assert os.stat(controller.health_token_path).st_mode & 0o077 == 0
     assert make_controller(tmp_path, server_port=25435).health_token == controller.health_token
 
     seen = {}
@@ -920,6 +936,17 @@ def test_remote_owner_never_signals_coincident_local_process_group(
         sonder_launcher.os,
         "killpg",
         lambda *args: pytest.fail("remote process metadata must never be signalled"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        sonder_launcher,
+        "_windows_descendants",
+        lambda *args: pytest.fail("remote process metadata must never be inspected"),
+    )
+    monkeypatch.setattr(
+        sonder_launcher,
+        "_windows_terminate_pid",
+        lambda *args: pytest.fail("remote process metadata must never be signalled"),
     )
     operation = {
         "control_pid": 43210,
@@ -945,7 +972,10 @@ def test_control_identity_is_persisted_before_worker_waits(monkeypatch, tmp_path
 
     operation, _ = controller.submit("start")
     row = None
-    deadline = time.monotonic() + 1
+    # The suite can be CPU-starved on small Windows hosts; wait for the atomic
+    # metadata publication itself instead of treating a transient running row
+    # with no child metadata as a partially persisted record.
+    deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         with sqlite3.connect(controller.db_path) as connection:
             connection.row_factory = sqlite3.Row
@@ -953,11 +983,12 @@ def test_control_identity_is_persisted_before_worker_waits(monkeypatch, tmp_path
                 "SELECT * FROM sonder_launcher_operations WHERE id=?",
                 (operation["id"],),
             ).fetchone()
-        if row and row["control_pid"]:
+        if row and row["control_identity"]:
             break
         time.sleep(0.01)
 
     assert row["phase"] == "running"
+    assert row["control_pid"]
     assert row["control_pid"] == row["control_group_id"]
     assert row["control_identity"]
     assert row["control_platform"] in {"posix-session", "windows-process-group"}

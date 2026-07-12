@@ -1000,11 +1000,11 @@ def test_forbidden_dependency_repair_note_uses_remediation(monkeypatch):
     monkeypatch.setattr(server.game_forge, "reference_source", no_reference)
     prompts = []
 
-    def fake_trilobite(prompt, **kwargs):
+    def fake_sonder(prompt, **kwargs):
         prompts.append(prompt)
         return "```cpp\n#include <nlohmann/json.hpp>\nint main(){return 0;}\n```"
 
-    monkeypatch.setattr(server, "trilobite", fake_trilobite)
+    monkeypatch.setattr(server, "sonder", fake_sonder)
 
     result = server._game_generate_result(
         "demo", "arena", "cpp", "2d", "arcane", 1, "code", 5, 1,
@@ -1042,7 +1042,7 @@ def test_cpp_default_gets_two_repair_rounds_end_to_end(monkeypatch):
 
     monkeypatch.setattr(server.game_forge, "reference_source", no_reference)
     monkeypatch.setattr(
-        server, "trilobite",
+        server, "sonder",
         lambda *a, **k: "```cpp\n#include <nlohmann/json.hpp>\nint main(){}\n```",
     )
 

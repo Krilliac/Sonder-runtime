@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 import engine_bundle
+from process_liveness import pid_alive as _process_pid_alive
 import sonder_health
 import sonder_paths
 
@@ -112,30 +113,7 @@ def _read_pid(name: str) -> int | None:
 
 
 def pid_alive(pid: int | None) -> bool:
-    if not pid:
-        return False
-    if os.name == "nt":
-        try:
-            import ctypes
-            kernel32 = ctypes.windll.kernel32
-            handle = kernel32.OpenProcess(0x1000, False, int(pid))
-            if not handle:
-                return False
-            try:
-                exit_code = ctypes.c_ulong()
-                return bool(
-                    kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
-                    and exit_code.value == 259  # STILL_ACTIVE
-                )
-            finally:
-                kernel32.CloseHandle(handle)
-        except (AttributeError, OSError, ValueError):
-            return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
+    return _process_pid_alive(pid)
 
 
 def port_open(host=DEFAULT_HOST, port=DEFAULT_PORT, timeout=0.5) -> bool:

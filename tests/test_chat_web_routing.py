@@ -132,10 +132,10 @@ def test_approximate_location_tool_requires_consent(monkeypatch):
     assert calls == [True]
 
 
-# --- MCP/REPL surface routing (_trilobite_impl) -----------------------------
+# --- MCP/REPL surface routing (_sonder_impl) -----------------------------
 
 
-def test_trilobite_impl_routes_weather_without_model(monkeypatch):
+def test_sonder_impl_routes_weather_without_model(monkeypatch):
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
     monkeypatch.setattr(server, "_answer", _no_model)
@@ -144,7 +144,7 @@ def test_trilobite_impl_routes_weather_without_model(monkeypatch):
         lambda location: "LIVE FORECAST for %s" % location,
     )
 
-    out = server._trilobite_impl(
+    out = server._sonder_impl(
         "Weather in Madison, WI tomorrow", session="none", project="none",
     )
 
@@ -152,12 +152,12 @@ def test_trilobite_impl_routes_weather_without_model(monkeypatch):
     assert "[interaction_id" not in out
 
 
-def test_trilobite_impl_capability_answer_is_not_a_denial(monkeypatch):
+def test_sonder_impl_capability_answer_is_not_a_denial(monkeypatch):
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
     monkeypatch.setattr(server, "_answer", _no_model)
 
-    out = server._trilobite_impl(
+    out = server._sonder_impl(
         "you have a tool to access the internet, right?",
         session="none", project="none",
     )
@@ -166,13 +166,13 @@ def test_trilobite_impl_capability_answer_is_not_a_denial(monkeypatch):
     assert not web_intents.denies_web_access(out)
 
 
-def test_trilobite_impl_weather_my_area_asks_for_location(monkeypatch):
-    monkeypatch.delenv("TRILOBITE_LOCATION_CONSENT", raising=False)
+def test_sonder_impl_weather_my_area_asks_for_location(monkeypatch):
+    monkeypatch.delenv("SONDER_LOCATION_CONSENT", raising=False)
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
     monkeypatch.setattr(server, "_answer", _no_model)
 
-    out = server._trilobite_impl(
+    out = server._sonder_impl(
         "can you tell me the weather in my area", session="none", project="none",
     )
 
@@ -181,20 +181,20 @@ def test_trilobite_impl_weather_my_area_asks_for_location(monkeypatch):
     assert not web_intents.denies_web_access(out)
 
 
-def test_trilobite_impl_work_prompts_are_not_hijacked(monkeypatch):
+def test_sonder_impl_work_prompts_are_not_hijacked(monkeypatch):
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
     monkeypatch.setattr(server.intents, "classify_work", lambda text: True)
     monkeypatch.setattr(
         server, "_serve_target",
-        lambda tier, strict: ("fake-model", False, True, "trilobite"),
+        lambda tier, strict: ("fake-model", False, True, "sonder"),
     )
     monkeypatch.setattr(
         server, "_answer",
         lambda *a, **k: ("def weather_app(): ...", "iid-1", None),
     )
 
-    out = server._trilobite_impl(
+    out = server._sonder_impl(
         "write a weather app in Python", session="none", project="none",
     )
 
@@ -203,7 +203,7 @@ def test_trilobite_impl_work_prompts_are_not_hijacked(monkeypatch):
 
 
 def test_env_location_consent_enables_server_lookup(monkeypatch):
-    monkeypatch.setenv("TRILOBITE_LOCATION_CONSENT", "1")
+    monkeypatch.setenv("SONDER_LOCATION_CONSENT", "1")
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
     monkeypatch.setattr(
@@ -212,7 +212,7 @@ def test_env_location_consent_enables_server_lookup(monkeypatch):
     monkeypatch.setattr(server, "_answer", _no_model)
     monkeypatch.setattr(server, "weather_lookup", lambda location: "LIVE FORECAST")
 
-    out = server._trilobite_impl(
+    out = server._sonder_impl(
         "what's the weather in my area?", session="none", project="none",
     )
 
@@ -220,8 +220,8 @@ def test_env_location_consent_enables_server_lookup(monkeypatch):
     assert "Approximate location: Chicago" in out
 
 
-def test_trilobite_impl_session_followup_bare_location(monkeypatch):
-    monkeypatch.delenv("TRILOBITE_LOCATION_CONSENT", raising=False)
+def test_sonder_impl_session_followup_bare_location(monkeypatch):
+    monkeypatch.delenv("SONDER_LOCATION_CONSENT", raising=False)
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
     monkeypatch.setattr(server, "_answer", _no_model)
@@ -231,10 +231,10 @@ def test_trilobite_impl_session_followup_bare_location(monkeypatch):
     )
     sid = "web-followup-%s" % server.memory_store.new_id()
 
-    first = server._trilobite_impl(
+    first = server._sonder_impl(
         "what's the weather in my area", session=sid, project="none",
     )
-    second = server._trilobite_impl("Chicago, IL", session=sid, project="none")
+    second = server._sonder_impl("Chicago, IL", session=sid, project="none")
 
     assert "city/state or ZIP" in first
     assert "LIVE FORECAST for Chicago, IL" in second
@@ -243,16 +243,16 @@ def test_trilobite_impl_session_followup_bare_location(monkeypatch):
     assert "[interaction_id" not in second
 
 
-def test_trilobite_tool_passes_location_consent(monkeypatch):
+def test_sonder_tool_passes_location_consent(monkeypatch):
     captured = {}
 
     def fake_impl(prompt, **kwargs):
         captured.update(kwargs)
         return "ok"
 
-    monkeypatch.setattr(server, "_trilobite_impl", fake_impl)
+    monkeypatch.setattr(server, "_sonder_impl", fake_impl)
 
-    server.trilobite("hello", location_consent=True)
+    server.sonder("hello", location_consent=True)
 
     assert captured["location_consent"] is True
 
@@ -270,7 +270,7 @@ def test_denies_web_access_patterns():
     )
     assert not web_intents.denies_web_access("Here's a weather app in Python.")
     assert not web_intents.denies_web_access(
-        "Web tools are disabled in the current runtime by TRILOBITE_WEB_TOOLS."
+        "Web tools are disabled in the current runtime by SONDER_WEB_TOOLS."
     )
 
 
@@ -284,7 +284,7 @@ def test_denies_web_access_perform_conduct_do_variants():
     )
     assert web_intents.denies_web_access("I am unable to run internet queries.")
     assert not web_intents.denies_web_access(
-        "Web tools are disabled in the current runtime by TRILOBITE_WEB_TOOLS."
+        "Web tools are disabled in the current runtime by SONDER_WEB_TOOLS."
     )
     assert not web_intents.denies_web_access(
         "Here is how web search engines work."
@@ -296,7 +296,7 @@ def test_missed_denial_skips_capture_and_footer(monkeypatch):
     monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
     monkeypatch.setattr(
         server, "_serve_target",
-        lambda tier, strict: ("fake-model", False, True, "trilobite"),
+        lambda tier, strict: ("fake-model", False, True, "sonder"),
     )
     monkeypatch.setattr(
         server, "_answer",
@@ -309,7 +309,7 @@ def test_missed_denial_skips_capture_and_footer(monkeypatch):
 
     # No positive web intent, so the guard cannot re-dispatch -- but the
     # refusal must still stay out of the learning loop.
-    out = server._trilobite_impl(
+    out = server._sonder_impl(
         "explain how DNS works", session="none", project="none",
     )
 
@@ -324,7 +324,7 @@ def test_rewritten_denial_discards_captured_refusal(monkeypatch):
     monkeypatch.setattr(server.intents, "classify_work", lambda text: True)
     monkeypatch.setattr(
         server, "_serve_target",
-        lambda tier, strict: ("fake-model", False, True, "trilobite"),
+        lambda tier, strict: ("fake-model", False, True, "sonder"),
     )
     monkeypatch.setattr(
         server, "_answer",
@@ -338,7 +338,7 @@ def test_rewritten_denial_discards_captured_refusal(monkeypatch):
         server, "_discard_interaction", lambda iid: discarded.append(iid),
     )
 
-    out = server._trilobite_impl(
+    out = server._sonder_impl(
         "check the weather in Madison, WI", session="none", project="none",
     )
 
@@ -396,7 +396,7 @@ def test_explicit_search_overrides_work_gate(monkeypatch):
     monkeypatch.setattr(server, "_answer", _no_model)
     monkeypatch.setattr(server, "_agent_impl", lambda *a, **k: "TOP HEADLINE")
 
-    out = server._trilobite_impl(
+    out = server._sonder_impl(
         "search the web for today's top news headline and tell me one",
         session="none", project="none",
     )
@@ -439,14 +439,14 @@ def test_resolved_weather_thread_capability_prompt_stays_capability():
     }
 
 
-def test_trilobite_impl_denial_guard_rewrites_refusal(monkeypatch):
+def test_sonder_impl_denial_guard_rewrites_refusal(monkeypatch):
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
     # Force the work gate open so the prompt reaches the model path.
     monkeypatch.setattr(server.intents, "classify_work", lambda text: True)
     monkeypatch.setattr(
         server, "_serve_target",
-        lambda tier, strict: ("fake-model", False, True, "trilobite"),
+        lambda tier, strict: ("fake-model", False, True, "sonder"),
     )
     monkeypatch.setattr(
         server, "_answer",
@@ -457,7 +457,7 @@ def test_trilobite_impl_denial_guard_rewrites_refusal(monkeypatch):
         lambda location: "LIVE FORECAST for %s" % location,
     )
 
-    out = server._trilobite_impl(
+    out = server._sonder_impl(
         "check the weather in Madison, WI", session="none", project="none",
     )
 
@@ -495,7 +495,7 @@ def test_answer_with_history_denial_guard(monkeypatch):
     monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
     monkeypatch.setattr(
         server, "_serve_target",
-        lambda tier, strict: ("fake-model", False, True, "trilobite"),
+        lambda tier, strict: ("fake-model", False, True, "sonder"),
     )
     monkeypatch.setattr(
         server, "_answer",

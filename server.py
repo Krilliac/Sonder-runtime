@@ -1432,7 +1432,7 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
 # in the same sandbox; on failure do one repair round-trip, then append an
 # explicit NOT VERIFIED banner and record a negative outcome so broken code
 # never distills into lessons. Python-only for now; opt out with
-# TRILOBITE_CODE_GATE=0.
+# SONDER_CODE_GATE=0.
 _CODE_GATE_SIGNS = re.compile(
     r"^\s*(?:def\s+\w+|class\s+\w+|import\s+\w+|from\s+[\w.]+\s+import\s)",
     re.MULTILINE,
@@ -1441,7 +1441,7 @@ _CODE_GATE_TIMEOUT = 8
 
 
 def _code_gate_enabled() -> bool:
-    return os.environ.get("TRILOBITE_CODE_GATE", "1").strip().lower() not in (
+    return os.environ.get("SONDER_CODE_GATE", "1").strip().lower() not in (
         "0", "false", "no", "off",
     )
 
@@ -1712,14 +1712,13 @@ def offload(
 def _env_location_consent() -> bool:
     """Opt-in approximate-IP-location consent for the local MCP/REPL surfaces.
 
-    Off by default to preserve the privacy contract. SONDER_LOCATION_CONSENT is
-    canonical; the former TRILOBITE_LOCATION_CONSENT name remains a compatibility
-    fallback for existing local launchers.
+    Off by default to preserve the privacy contract. Set
+    SONDER_LOCATION_CONSENT=1 to allow server-side approximate location lookup
+    on this machine's own chat surfaces.
     """
-    raw = os.environ.get("SONDER_LOCATION_CONSENT")
-    if raw is None:
-        raw = os.environ.get("TRILOBITE_LOCATION_CONSENT", "")
-    return raw.strip().lower() in ("1", "true", "yes", "on")
+    return os.environ.get("SONDER_LOCATION_CONSENT", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 
 
 def _session_messages_light(conn, session_id, max_turns=None):

@@ -58,7 +58,7 @@ lifecycle boundary.
   with zero setup, use ChatGPT/Claude — honestly.
 - **Not "for literally everyone" yet.** Today it needs a decent machine and some setup. See the [Roadmap](#roadmap-toward-for-everyone) for how that changes.
 
-**Who it's for:** privacy-conscious people, offline/field use, tinkerers and the local-LLM crowd, and organizations that need a private assistant on their *own* data (a clinic, a firm, a studio) — anyone who values *owning* their AI over squeezing out the last IQ point.
+**Who it's for:** privacy-conscious people, offline/field use, tinkerers and the on-device AI crowd, and organizations that need a private assistant on their *own* data (a clinic, a firm, a studio) — anyone who values *owning* their AI over squeezing out the last IQ point.
 
 > The moat isn't the weights — a generically fine-tuned model just re-derives what you'd get from Google, and the base model already knows it. The moat is **your** private, grounded data: your code, your bugs and fixes, your conventions. Sonder is built to accumulate exactly that.
 

@@ -128,7 +128,7 @@ def test_denial_guard_keeps_fabricated_reply_without_web_intent(monkeypatch):
     assert replaced is None
 
 
-def test_trilobite_impl_routes_implicit_recency_before_model(monkeypatch):
+def test_sonder_impl_routes_implicit_recency_before_model(monkeypatch):
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
     monkeypatch.setattr(server, "_answer", _no_model)
@@ -140,7 +140,7 @@ def test_trilobite_impl_routes_implicit_recency_before_model(monkeypatch):
 
     monkeypatch.setattr(server, "_agent_impl", fake_agent)
 
-    out = server._trilobite_impl(
+    out = server._sonder_impl(
         "who won the most recent super bowl?", session="none", project="none",
     )
 
@@ -149,14 +149,14 @@ def test_trilobite_impl_routes_implicit_recency_before_model(monkeypatch):
     assert "[interaction_id" not in out
 
 
-def test_trilobite_impl_fabricated_reply_is_rewritten_and_discarded(monkeypatch):
+def test_sonder_impl_fabricated_reply_is_rewritten_and_discarded(monkeypatch):
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
     # Force the work gate open so the prompt reaches the model path.
     monkeypatch.setattr(server.intents, "classify_work", lambda text: True)
     monkeypatch.setattr(
         server, "_serve_target",
-        lambda tier, strict: ("fake-model", False, True, "trilobite"),
+        lambda tier, strict: ("fake-model", False, True, "sonder"),
     )
     monkeypatch.setattr(
         server, "_answer",
@@ -172,7 +172,7 @@ def test_trilobite_impl_fabricated_reply_is_rewritten_and_discarded(monkeypatch)
         server, "_discard_interaction", lambda iid: discarded.append(iid),
     )
 
-    out = server._trilobite_impl(
+    out = server._sonder_impl(
         "who won the most recent super bowl?", session="none", project="none",
     )
 

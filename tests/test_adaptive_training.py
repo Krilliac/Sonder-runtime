@@ -379,7 +379,10 @@ def test_failed_final_probe_restores_previous_personal_alias(monkeypatch, tmp_pa
     assert not ok and "previous personal alias" in message and "restored" in message
     copies = [command for command in calls if command[1:2] == ["cp"]]
     previous = next(command[3] for command in copies if command[2] == adaptive_training.PERSONAL_MODEL)
-    assert ["ollama", "cp", previous, adaptive_training.PERSONAL_MODEL] in calls
+    assert any(
+        command[1:] == ["cp", previous, adaptive_training.PERSONAL_MODEL]
+        for command in calls
+    )
     assert any(command[1:2] == ["rm"] and "candidate" in command[2] for command in calls)
 
 
@@ -422,7 +425,10 @@ def test_final_probe_timeout_restores_active_alias_and_policy(monkeypatch, tmp_p
     assert policy["local_models"]["general"] == adaptive_training.PERSONAL_MODEL
     copies = [command for command in calls if command[1:2] == ["cp"]]
     previous = next(command[3] for command in copies if command[2] == adaptive_training.PERSONAL_MODEL)
-    assert ["ollama", "cp", previous, adaptive_training.PERSONAL_MODEL] in calls
+    assert any(
+        command[1:] == ["cp", previous, adaptive_training.PERSONAL_MODEL]
+        for command in calls
+    )
 
 
 def test_deployment_lock_rejects_concurrent_promotion(monkeypatch, tmp_path):

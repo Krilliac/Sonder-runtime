@@ -70,6 +70,7 @@ REQUIRED_FILES = {
     "media_assets.py",
     "model_assets.py",
     "ooxml_assets.py",
+    "process_liveness.py",
     "reloadable_mcp.py",
     "runtime_policy.py",
     "server.py",

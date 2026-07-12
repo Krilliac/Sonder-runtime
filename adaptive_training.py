@@ -23,6 +23,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import runtime_policy
+from process_liveness import pid_alive as _process_pid_alive
 import system_profile
 import sonder_paths
 
@@ -616,11 +617,7 @@ def _run_external(runner, command, **kwargs):
 
 
 def _pid_alive(pid):
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except (OSError, ValueError):
-        return False
+    return _process_pid_alive(pid)
 
 
 @contextlib.contextmanager

@@ -197,7 +197,8 @@ def test_protected_paths_and_backup_policy_require_maintenance(isolated):
     root = repository(isolated, use_git=False)
     (root / "permission_rules.py").write_text("rules=[]\n")
     (root / "selfmod.py").write_text("unsafe=True\n")
-    for path in ("permission_rules.py", "selfmod.py"):
+    (root / "process_liveness.py").write_text("unsafe=True\n")
+    for path in ("permission_rules.py", "selfmod.py", "process_liveness.py"):
         with pytest.raises(PermissionError, match="maintenance"):
             plan(root, files=(path,))
     approved = plan(root, files=("permission_rules.py",), risk="high", maintenance=True)

@@ -127,7 +127,7 @@ def test_timeout_is_inconclusive_not_failure(monkeypatch):
 
 
 def test_env_kill_switch_disables_gate(monkeypatch):
-    monkeypatch.setenv("TRILOBITE_CODE_GATE", "0")
+    monkeypatch.setenv("SONDER_CODE_GATE", "0")
 
     reply, verified = server._apply_code_gate(BAD_REPLY, interaction_id="iid-13")
 
@@ -138,12 +138,12 @@ def test_env_kill_switch_disables_gate(monkeypatch):
 # --- chat-surface wiring ---------------------------------------------------------
 
 
-def test_trilobite_impl_banners_broken_code(monkeypatch):
+def test_sonder_impl_banners_broken_code(monkeypatch):
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(server.web_tools, "enabled", lambda: False)
     monkeypatch.setattr(
         server, "_serve_target",
-        lambda tier, strict: ("fake-model", False, True, "trilobite"),
+        lambda tier, strict: ("fake-model", False, True, "sonder"),
     )
     monkeypatch.setattr(
         server, "_answer", lambda *a, **k: (BAD_REPLY, "iid-14", None),
@@ -158,7 +158,7 @@ def test_trilobite_impl_banners_broken_code(monkeypatch):
         server, "_record_code_gate_failure", lambda iid: recorded.append(iid),
     )
 
-    out = server._trilobite_impl(
+    out = server._sonder_impl(
         "write a duration parser", session="none", project="none",
     )
 
@@ -167,12 +167,12 @@ def test_trilobite_impl_banners_broken_code(monkeypatch):
     assert recorded == ["iid-14"]
 
 
-def test_trilobite_impl_repairs_broken_code(monkeypatch):
+def test_sonder_impl_repairs_broken_code(monkeypatch):
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(server.web_tools, "enabled", lambda: False)
     monkeypatch.setattr(
         server, "_serve_target",
-        lambda tier, strict: ("fake-model", False, True, "trilobite"),
+        lambda tier, strict: ("fake-model", False, True, "sonder"),
     )
     monkeypatch.setattr(
         server, "_answer", lambda *a, **k: (BAD_REPLY, "iid-15", None),
@@ -182,7 +182,7 @@ def test_trilobite_impl_repairs_broken_code(monkeypatch):
         lambda *a, **k: (lambda p, h=None: FIXED_REPLY),
     )
 
-    out = server._trilobite_impl(
+    out = server._sonder_impl(
         "write a duration parser", session="none", project="none",
     )
 
@@ -191,18 +191,18 @@ def test_trilobite_impl_repairs_broken_code(monkeypatch):
     assert "[interaction_id: iid-15]" in out
 
 
-def test_trilobite_impl_leaves_verified_code_alone(monkeypatch):
+def test_sonder_impl_leaves_verified_code_alone(monkeypatch):
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(server.web_tools, "enabled", lambda: False)
     monkeypatch.setattr(
         server, "_serve_target",
-        lambda tier, strict: ("fake-model", False, True, "trilobite"),
+        lambda tier, strict: ("fake-model", False, True, "sonder"),
     )
     monkeypatch.setattr(
         server, "_answer", lambda *a, **k: (GOOD_REPLY, "iid-16", None),
     )
 
-    out = server._trilobite_impl(
+    out = server._sonder_impl(
         "write a doubler", session="none", project="none",
     )
 
@@ -216,7 +216,7 @@ def test_answer_with_history_gates_code_too(monkeypatch):
     monkeypatch.setattr(server.web_tools, "enabled", lambda: False)
     monkeypatch.setattr(
         server, "_serve_target",
-        lambda tier, strict: ("fake-model", False, True, "trilobite"),
+        lambda tier, strict: ("fake-model", False, True, "sonder"),
     )
     monkeypatch.setattr(
         server, "_answer", lambda *a, **k: (BAD_REPLY, "iid-17", None),

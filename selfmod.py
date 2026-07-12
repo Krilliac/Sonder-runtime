@@ -25,6 +25,7 @@ import uuid
 from pathlib import Path
 
 import sonder_paths
+from process_liveness import pid_alive as _process_pid_alive
 
 
 MODES = ("observe", "propose", "auto-low-risk")
@@ -38,6 +39,7 @@ TERMINAL_PHASES = {"rejected", "restored", "cancelled"}
 SENSITIVE_PREFIXES = (
     "permission_rules.py", "admin_auth.py", "file_ops.py", "safe_update.py",
     "selfmod.py", "selfmod_recover.py", "server.py", "reloadable_mcp.py",
+    "process_liveness.py",
     "autopilot_controller.py", "autopilot_store.py", "sonder_paths.py", "sonder_serve.py",
     "deploy_", "sonder-runtime", "tests/test_permission", "tests/test_admin",
     "tests/test_control_plane", "tests/test_read_only_agent_policy",
@@ -216,7 +218,31 @@ def _run(command, cwd, timeout=30):
 
 
 def _git(root: Path, *args, timeout=30):
-    return _run(["git", *args], root, timeout)[:2]
+    command = ["git", *args]
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(root),
+            text=True,
+            capture_output=True,
+            timeout=max(1, int(timeout)),
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        output = "\n".join(str(x or "") for x in (exc.stdout, exc.stderr)).strip()
+        return 124, (output + "\nTIMEOUT")[:100_000]
+    if result.returncode:
+        output = "\n".join(
+            value.strip()
+            for value in (result.stdout, result.stderr)
+            if value and value.strip()
+        )
+    else:
+        # Successful Git commands may still emit advisory CRLF or fsmonitor
+        # warnings on stderr. Structured callers parse stdout as refs or file
+        # names, so never let advisory text enter that data channel.
+        output = (result.stdout or "").strip()
+    return result.returncode, output[:100_000]
 
 
 def _git_info(root: Path):
@@ -808,11 +834,7 @@ def reject(run_id, reason="user rejected"):
 
 
 def _pid_alive(pid):
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except (OSError, ValueError):
-        return False
+    return _process_pid_alive(pid)
 
 
 def _deployment_owner_stale(row, now=None):

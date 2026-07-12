@@ -29,6 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import sonder_health
+from process_liveness import pid_alive as _process_pid_alive
 from sonder_paths import state_path
 
 
@@ -200,36 +201,7 @@ def _retention_limit(value):
 
 
 def _pid_alive(pid):
-    try:
-        pid = int(pid)
-    except (TypeError, ValueError):
-        return False
-    if pid <= 0:
-        return False
-    if os.name == "nt":
-        try:
-            import ctypes
-
-            kernel32 = ctypes.windll.kernel32
-            kernel32.OpenProcess.restype = ctypes.c_void_p
-            handle = kernel32.OpenProcess(0x1000, False, pid)
-            if not handle:
-                return False
-            try:
-                exit_code = ctypes.c_ulong()
-                return bool(
-                    kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
-                    and exit_code.value == 259  # STILL_ACTIVE
-                )
-            finally:
-                kernel32.CloseHandle(handle)
-        except (AttributeError, ImportError, OSError, ValueError):
-            return False
-    try:
-        os.kill(pid, 0)
-    except OSError as exc:
-        return exc.errno == errno.EPERM
-    return True
+    return _process_pid_alive(pid)
 
 
 def _windows_process_identity(pid):
@@ -242,8 +214,23 @@ def _windows_process_identity(pid):
                 ("high", ctypes.c_uint32),
             ]
 
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = (
+            ctypes.c_ulong,
+            ctypes.c_int,
+            ctypes.c_ulong,
+        )
         kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.GetProcessTimes.argtypes = (
+            ctypes.c_void_p,
+            ctypes.POINTER(FileTime),
+            ctypes.POINTER(FileTime),
+            ctypes.POINTER(FileTime),
+            ctypes.POINTER(FileTime),
+        )
+        kernel32.GetProcessTimes.restype = ctypes.c_int
+        kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+        kernel32.CloseHandle.restype = ctypes.c_int
         handle = kernel32.OpenProcess(0x1000, False, int(pid))
         if not handle:
             return ""
@@ -456,8 +443,24 @@ def _windows_process_table():
                 ("szExeFile", wintypes.WCHAR * 260),
             ]
 
-        kernel32 = ctypes.windll.kernel32
-        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateToolhelp32Snapshot.argtypes = (
+            wintypes.DWORD,
+            wintypes.DWORD,
+        )
+        kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+        kernel32.Process32FirstW.argtypes = (
+            ctypes.c_void_p,
+            ctypes.POINTER(ProcessEntry),
+        )
+        kernel32.Process32FirstW.restype = wintypes.BOOL
+        kernel32.Process32NextW.argtypes = (
+            ctypes.c_void_p,
+            ctypes.POINTER(ProcessEntry),
+        )
+        kernel32.Process32NextW.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
         snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
         if snapshot == ctypes.c_void_p(-1).value:
             return {}
@@ -498,8 +501,17 @@ def _windows_terminate_pid(pid, identity=""):
     try:
         import ctypes
 
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = (
+            ctypes.c_ulong,
+            ctypes.c_int,
+            ctypes.c_ulong,
+        )
         kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.TerminateProcess.argtypes = (ctypes.c_void_p, ctypes.c_uint)
+        kernel32.TerminateProcess.restype = ctypes.c_int
+        kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+        kernel32.CloseHandle.restype = ctypes.c_int
         handle = kernel32.OpenProcess(0x0001 | 0x1000, False, int(pid))
         if not handle:
             return not _pid_alive(pid)
