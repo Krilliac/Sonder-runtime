@@ -171,6 +171,8 @@ class HardwareProfile:
     compute_capability: str = ""
     cpu_offload_supported: bool = False
     availability_live: bool = True
+    system_ram_availability_live: bool = True
+    vram_availability_live: bool = True
 
     def to_dict(self):
         return asdict(self)
@@ -295,16 +297,17 @@ def _rocm_profile():
 
 def detect_hardware() -> HardwareProfile:
     """Detect live capacity with environment overrides for testing/admin use."""
-    total, available, live = _system_memory()
+    total, available, ram_live = _system_memory()
     total = _env_float("TRILOBITE_RAM_GB", total) or 0.0
     available_override = _env_float("TRILOBITE_AVAILABLE_RAM_GB")
     if available_override is not None:
-        available, live = min(total or available_override, available_override), True
+        available, ram_live = min(total or available_override, available_override), True
     elif not available and total:
-        available, live = total * 0.75, False
+        available, ram_live = total * 0.75, False
 
     nvidia = _nvidia_profile()
     rocm = None if nvidia else _rocm_profile()
+    vram_live = bool(nvidia or rocm)
     vendor = "nvidia" if nvidia else "amd" if rocm else "none"
     name, vram_total, vram_free, capability = (
         (*nvidia, ) if nvidia else (*rocm, "") if rocm else ("", 0.0, 0.0, "")
@@ -312,9 +315,16 @@ def detect_hardware() -> HardwareProfile:
     vendor = os.environ.get("TRILOBITE_GPU_VENDOR", vendor).strip().lower() or "none"
     vram_total = _env_float("TRILOBITE_VRAM_GB", vram_total) or 0.0
     free_override = _env_float("TRILOBITE_FREE_VRAM_GB")
-    vram_free = min(vram_total, free_override) if free_override is not None else vram_free
-    if vram_total and not vram_free:
-        vram_free, live = vram_total * 0.75, False
+    if free_override is not None:
+        # An explicit/live zero means the GPU is occupied, not that detection
+        # failed. Preserve it so the planner cannot fabricate training room.
+        vram_free = min(vram_total or free_override, free_override)
+        vram_live = True
+    elif not vram_live and vram_total:
+        # Total-only overrides cannot reveal current pressure. Use a
+        # conservative fallback and report that it is not a live reading.
+        vram_free = vram_total * 0.75
+        vram_live = False
     cuda = _env_bool("TRILOBITE_CUDA_AVAILABLE", bool(nvidia))
     rocm_available = _env_bool("TRILOBITE_ROCM_AVAILABLE", bool(rocm))
     os_name = platform.system() or os.name
@@ -332,5 +342,9 @@ def detect_hardware() -> HardwareProfile:
         vram_free_gb=round(min(vram_total or vram_free, vram_free), 2),
         compute_capability=os.environ.get("TRILOBITE_COMPUTE_CAPABILITY", capability).strip(),
         cpu_offload_supported=offload,
-        availability_live=live,
+        # Preserve the original aggregate field for callers that have not yet
+        # adopted the independent freshness fields.
+        availability_live=ram_live and (vram_live or not vram_total),
+        system_ram_availability_live=ram_live,
+        vram_availability_live=vram_live,
     )

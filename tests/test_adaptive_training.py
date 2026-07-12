@@ -5,7 +5,9 @@ from types import SimpleNamespace
 import pytest
 
 import adaptive_training
+import qlora_train
 import runtime_policy
+import system_profile
 from system_profile import HardwareProfile
 
 
@@ -78,7 +80,7 @@ def test_explicit_model_and_memory_overrides_are_enforced():
     assert plan.usable_vram_gb == 8
 
 
-def test_cpu_offload_requires_both_opt_in_and_support():
+def test_cpu_offload_request_fails_closed_for_current_training_backend():
     host = profile(12, 64, free_vram=11.5)
     without = adaptive_training.build_plan(host, adaptive_training.PlanOptions(model="7b"))
     with_offload = adaptive_training.build_plan(
@@ -89,8 +91,76 @@ def test_cpu_offload_requires_both_opt_in_and_support():
         adaptive_training.PlanOptions(model="7b", allow_cpu_offload=True),
     )
     assert not without.training.enabled
-    assert with_offload.training.enabled and with_offload.training.cpu_offload
+    assert not with_offload.training.enabled
+    assert adaptive_training.TRAINING_CPU_OFFLOAD_REASON in with_offload.training.rejected
     assert not unsupported.training.enabled
+
+    direct_fit = adaptive_training.build_plan(
+        profile(24, 64),
+        adaptive_training.PlanOptions(model="1.5b", allow_cpu_offload=True),
+    )
+    assert not direct_fit.training.enabled
+    assert adaptive_training.TRAINING_CPU_OFFLOAD_REASON in direct_fit.training.rejected
+
+
+def test_direct_qlora_cpu_offload_request_fails_before_heavy_imports(monkeypatch, capsys):
+    monkeypatch.setenv("TRILOBITE_ALLOW_CPU_OFFLOAD", "1")
+    assert qlora_train.main() == 5
+    assert "CPU offload is disabled" in capsys.readouterr().out
+
+
+def _mock_hardware_detection(monkeypatch):
+    monkeypatch.setattr(system_profile, "_system_memory", lambda: (64.0, 48.0, True))
+    monkeypatch.setattr(system_profile, "_rocm_profile", lambda: None)
+    for name in (
+        "TRILOBITE_GPU_VENDOR",
+        "TRILOBITE_VRAM_GB",
+        "TRILOBITE_FREE_VRAM_GB",
+        "TRILOBITE_CUDA_AVAILABLE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_explicit_zero_free_vram_is_preserved_and_disables_training(monkeypatch):
+    _mock_hardware_detection(monkeypatch)
+    monkeypatch.setattr(system_profile, "_nvidia_profile", lambda: None)
+    monkeypatch.setenv("TRILOBITE_GPU_VENDOR", "nvidia")
+    monkeypatch.setenv("TRILOBITE_VRAM_GB", "24")
+    monkeypatch.setenv("TRILOBITE_FREE_VRAM_GB", "0")
+    monkeypatch.setenv("TRILOBITE_CUDA_AVAILABLE", "1")
+
+    detected = system_profile.detect_hardware()
+
+    assert detected.vram_free_gb == 0
+    assert detected.vram_availability_live
+    assert not adaptive_training.build_plan(detected).training.enabled
+
+
+def test_live_zero_free_vram_is_not_replaced_by_fallback(monkeypatch):
+    _mock_hardware_detection(monkeypatch)
+    monkeypatch.setattr(
+        system_profile,
+        "_nvidia_profile",
+        lambda: ("fully occupied GPU", 24.0, 0.0, "8.9"),
+    )
+
+    detected = system_profile.detect_hardware()
+
+    assert detected.vram_free_gb == 0
+    assert detected.vram_availability_live
+
+
+def test_total_only_vram_uses_marked_conservative_fallback(monkeypatch):
+    _mock_hardware_detection(monkeypatch)
+    monkeypatch.setattr(system_profile, "_nvidia_profile", lambda: None)
+    monkeypatch.setenv("TRILOBITE_GPU_VENDOR", "nvidia")
+    monkeypatch.setenv("TRILOBITE_VRAM_GB", "24")
+    monkeypatch.setenv("TRILOBITE_CUDA_AVAILABLE", "1")
+
+    detected = system_profile.detect_hardware()
+
+    assert detected.vram_free_gb == 18
+    assert not detected.vram_availability_live
 
 
 def test_dense_training_is_never_automatic_and_must_fit():
@@ -200,6 +270,126 @@ def test_successful_deployment_activates_both_tiers_after_inference(monkeypatch,
     assert policy["local_models"]["general"] == adaptive_training.PERSONAL_MODEL
     assert ["ollama", "show", "qwen2.5-coder:1.5b"] in calls
     assert any(command[1:3] == ["run", adaptive_training.PERSONAL_MODEL] for command in calls)
+    assert any(command[1:3] == ["cp", adaptive_training.PERSONAL_MODEL] for command in calls)
+    assert any(
+        command[1:2] == ["cp"]
+        and "candidate" in command[2]
+        and command[3] == adaptive_training.PERSONAL_MODEL
+        for command in calls
+    )
+
+
+def test_deployment_rejects_non_marker_output_and_cleans_candidate(monkeypatch, tmp_path):
+    monkeypatch.setenv("TRILOBITE_RUNTIME_POLICY", str(tmp_path / "runtime-policy.json"))
+    monkeypatch.setenv("TRILOBITE_TRAINING_STATE", str(tmp_path / "training-state.json"))
+    adapter = _adapter(
+        tmp_path,
+        config_base="Qwen/Qwen2.5-Coder-1.5B-Instruct",
+        manifest_base="Qwen/Qwen2.5-Coder-1.5B-Instruct",
+    )
+    converter = tmp_path / "convert_lora_to_gguf.py"
+    converter.write_text("# mock", encoding="utf-8")
+    calls = []
+
+    def runner(command, **kwargs):
+        calls.append(command)
+        if str(converter) in command:
+            Path(command[command.index("--outfile") + 1]).write_bytes(b"G" * 2048)
+        output = "wrong marker" if command[1:2] == ["run"] else "ok"
+        return SimpleNamespace(returncode=0, stdout=output, stderr="")
+
+    ok, message = adaptive_training.deploy(
+        adapter, converter=str(converter), runner=runner
+    )
+
+    assert not ok and "exact marker" in message
+    assert any(command[1:2] == ["rm"] for command in calls)
+    assert not any(command[1:2] == ["cp"] for command in calls)
+
+
+def test_failed_final_probe_restores_previous_personal_alias(monkeypatch, tmp_path):
+    monkeypatch.setenv("TRILOBITE_RUNTIME_POLICY", str(tmp_path / "runtime-policy.json"))
+    monkeypatch.setenv("TRILOBITE_TRAINING_STATE", str(tmp_path / "training-state.json"))
+    adapter = _adapter(
+        tmp_path,
+        config_base="Qwen/Qwen2.5-Coder-1.5B-Instruct",
+        manifest_base="Qwen/Qwen2.5-Coder-1.5B-Instruct",
+    )
+    converter = tmp_path / "convert_lora_to_gguf.py"
+    converter.write_text("# mock", encoding="utf-8")
+    calls = []
+    run_count = 0
+
+    def runner(command, **kwargs):
+        nonlocal run_count
+        calls.append(command)
+        if str(converter) in command:
+            Path(command[command.index("--outfile") + 1]).write_bytes(b"G" * 2048)
+        if command[1:2] == ["run"]:
+            run_count += 1
+            output = "TRILOBITE_VALID" if run_count == 1 else "wrong"
+            return SimpleNamespace(returncode=0, stdout=output, stderr="")
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    ok, message = adaptive_training.deploy(
+        adapter, converter=str(converter), runner=runner
+    )
+
+    assert not ok and "previous personal alias" in message and "restored" in message
+    copies = [command for command in calls if command[1:2] == ["cp"]]
+    previous = next(command[3] for command in copies if command[2] == adaptive_training.PERSONAL_MODEL)
+    assert ["ollama", "cp", previous, adaptive_training.PERSONAL_MODEL] in calls
+    assert any(command[1:2] == ["rm"] and "candidate" in command[2] for command in calls)
+
+
+def test_final_probe_timeout_restores_active_alias_and_policy(monkeypatch, tmp_path):
+    monkeypatch.setenv("TRILOBITE_RUNTIME_POLICY", str(tmp_path / "runtime-policy.json"))
+    monkeypatch.setenv("TRILOBITE_TRAINING_STATE", str(tmp_path / "training-state.json"))
+    runtime_policy.update(local_models={
+        "code": adaptive_training.PERSONAL_MODEL,
+        "general": adaptive_training.PERSONAL_MODEL,
+    })
+    adapter = _adapter(
+        tmp_path,
+        config_base="Qwen/Qwen2.5-Coder-1.5B-Instruct",
+        manifest_base="Qwen/Qwen2.5-Coder-1.5B-Instruct",
+    )
+    converter = tmp_path / "convert_lora_to_gguf.py"
+    converter.write_text("# mock", encoding="utf-8")
+    calls = []
+    run_count = 0
+
+    def runner(command, **kwargs):
+        nonlocal run_count
+        calls.append(command)
+        if str(converter) in command:
+            Path(command[command.index("--outfile") + 1]).write_bytes(b"G" * 2048)
+        if command[1:2] == ["run"]:
+            run_count += 1
+            if run_count == 2:
+                raise adaptive_training.subprocess.TimeoutExpired(command, 120)
+            return SimpleNamespace(returncode=0, stdout="TRILOBITE_VALID", stderr="")
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    ok, message = adaptive_training.deploy(
+        adapter, converter=str(converter), runner=runner
+    )
+
+    policy = runtime_policy.load(create=False)
+    assert not ok and "restored" in message
+    assert policy["local_models"]["code"] == adaptive_training.PERSONAL_MODEL
+    assert policy["local_models"]["general"] == adaptive_training.PERSONAL_MODEL
+    copies = [command for command in calls if command[1:2] == ["cp"]]
+    previous = next(command[3] for command in copies if command[2] == adaptive_training.PERSONAL_MODEL)
+    assert ["ollama", "cp", previous, adaptive_training.PERSONAL_MODEL] in calls
+
+
+def test_deployment_lock_rejects_concurrent_promotion(monkeypatch, tmp_path):
+    monkeypatch.setenv("TRILOBITE_TRAINING_STATE", str(tmp_path / "training-state.json"))
+    with adaptive_training._deployment_lock():
+        ok, message = adaptive_training.deploy(tmp_path)
+    assert not ok
+    assert "already running" in message
 
 
 def test_rollback_updates_both_tiers_without_deleting_personal_model(monkeypatch, tmp_path):

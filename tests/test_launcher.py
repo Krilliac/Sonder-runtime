@@ -1,4 +1,5 @@
 import json
+import subprocess
 import threading
 import urllib.error
 import urllib.request
@@ -76,12 +77,45 @@ def test_launcher_exposes_only_bounded_actions(launcher_server):
     assert controller.actions == [("start", "32k")]
 
 
+def test_launcher_returns_structured_service_failure(launcher_server, monkeypatch):
+    base, token, controller = launcher_server
+    monkeypatch.setattr(
+        controller,
+        "action",
+        lambda *args, **kwargs: {
+            **controller.status(),
+            "ok": False,
+            "message": "launcher command timed out",
+            "last_error": "launcher command timed out",
+        },
+    )
+
+    with pytest.raises(urllib.error.HTTPError) as error:
+        request(base + "/v1/launcher/start", token, "POST", {})
+
+    assert error.value.code == 503
+    payload = json.loads(error.value.read())
+    assert payload["ok"] is False
+    assert payload["last_error"] == "launcher command timed out"
+
+
 def test_launcher_rejects_invalid_or_oversized_inputs(launcher_server):
     base, token, controller = launcher_server
-    with pytest.raises(urllib.error.HTTPError) as error:
-        request(base + "/v1/launcher/start", token, "POST", {"context_size": "$(bad)"})
-    assert error.value.code == 400
+    for value in ("$(bad)", "1mk", "0", "1.1", "1000001", "1.1m"):
+        with pytest.raises(urllib.error.HTTPError) as error:
+            request(
+                base + "/v1/launcher/start",
+                token,
+                "POST",
+                {"context_size": value},
+            )
+        assert error.value.code == 400
     assert controller.actions == []
+
+
+@pytest.mark.parametrize("value", ["1", "8192", "32k", "256.5k", "1m"])
+def test_launcher_accepts_bounded_context_sizes(value):
+    assert trilobite_launcher.normalize_context_size(value) == value
 
 
 def test_lan_binding_requires_strong_token():
@@ -94,13 +128,16 @@ def test_lan_binding_requires_strong_token():
 def test_controller_constructs_fixed_headless_command(monkeypatch, tmp_path):
     (tmp_path / "trilobite_headless.py").write_text("# fixture", encoding="utf-8")
     seen = {}
-    monkeypatch.setattr(trilobite_launcher, "_reachable", lambda *args, **kwargs: False)
+    reachable = iter([False, True, True])
+    monkeypatch.setattr(
+        trilobite_launcher,
+        "_reachable",
+        lambda *args, **kwargs: next(reachable),
+    )
     def fake_run(command, **kwargs):
         seen.update(command=command, kwargs=kwargs)
         return SimpleNamespace(returncode=0, stdout="started", stderr="")
     monkeypatch.setattr(trilobite_launcher.subprocess, "run", fake_run)
-    monotonic = iter([0, 31])
-    monkeypatch.setattr(trilobite_launcher.time, "monotonic", lambda: next(monotonic))
     controller = trilobite_launcher.LauncherController(
         tmp_path, python="python-test", server_host="0.0.0.0", server_port=11435,
     )
@@ -110,4 +147,78 @@ def test_controller_constructs_fixed_headless_command(monkeypatch, tmp_path):
         "--host", "0.0.0.0", "--port", "11435", "--context-size", "8192",
     ]
     assert "shell" not in seen["kwargs"]
+    assert seen["kwargs"]["timeout"] <= trilobite_launcher.ACTION_TIMEOUT_SECONDS
+    assert seen["kwargs"]["env"]["TRILOBITE_HOST"] == "0.0.0.0"
+    assert seen["kwargs"]["env"]["TRILOBITE_PORT"] == "11435"
     assert payload["command"][:3] == ["python-test", "trilobite_headless.py", "start"]
+    assert payload["ok"] is True
+
+
+def test_stop_fails_when_server_remains_reachable(monkeypatch, tmp_path):
+    controller = trilobite_launcher.LauncherController(tmp_path)
+    monkeypatch.setattr(
+        controller,
+        "_run",
+        lambda *args, **kwargs: (0, "stop requested", ["python", "headless", "stop"]),
+    )
+    monkeypatch.setattr(controller, "_wait_for_state", lambda *args: False)
+    monkeypatch.setattr(trilobite_launcher, "_reachable", lambda *args, **kwargs: True)
+
+    payload = controller.action("stop")
+
+    assert payload["ok"] is False
+    assert payload["server_running"] is True
+    assert "remained reachable" in payload["last_error"]
+
+
+def test_restart_waits_for_down_transition_before_start(monkeypatch, tmp_path):
+    controller = trilobite_launcher.LauncherController(tmp_path)
+    calls = []
+    transitions = []
+
+    def fake_run(action, context_size, timeout):
+        calls.append(action)
+        return 0, "%s complete" % action, ["python", "headless", action]
+
+    def fake_wait(running, deadline):
+        transitions.append(running)
+        return True
+
+    monkeypatch.setattr(controller, "_run", fake_run)
+    monkeypatch.setattr(controller, "_wait_for_state", fake_wait)
+    monkeypatch.setattr(trilobite_launcher, "_reachable", lambda *args, **kwargs: True)
+
+    payload = controller.action("restart", "32k")
+
+    assert payload["ok"] is True
+    assert calls == ["stop", "start"]
+    assert transitions == [False, True]
+    assert [command[-1] for command in payload["commands"]] == ["stop", "start"]
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (subprocess.TimeoutExpired(["python", "headless"], 40), "timed out"),
+        (OSError("runtime missing"), "could not start"),
+    ],
+)
+def test_launcher_command_failures_are_structured(
+    monkeypatch,
+    tmp_path,
+    error,
+    expected,
+):
+    controller = trilobite_launcher.LauncherController(tmp_path)
+    monkeypatch.setattr(
+        trilobite_launcher.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(error),
+    )
+    monkeypatch.setattr(trilobite_launcher, "_reachable", lambda *args, **kwargs: False)
+
+    payload = controller.action("start")
+
+    assert payload["ok"] is False
+    assert expected in payload["message"]
+    assert expected in payload["last_error"]

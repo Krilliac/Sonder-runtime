@@ -93,6 +93,11 @@ CREATE TABLE IF NOT EXISTS selfmod_tests (
   command_json TEXT NOT NULL, exit_code INTEGER, duration_ms INTEGER NOT NULL,
   output TEXT NOT NULL, passed INTEGER NOT NULL, created_ts REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS selfmod_deployed_files (
+  run_id TEXT NOT NULL, path TEXT NOT NULL, existed_after INTEGER NOT NULL,
+  sha256_after TEXT, mode_after INTEGER, recorded_ts REAL NOT NULL,
+  PRIMARY KEY(run_id, path)
+);
 CREATE TABLE IF NOT EXISTS selfmod_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, ts REAL NOT NULL,
   kind TEXT NOT NULL, details TEXT NOT NULL
@@ -810,13 +815,44 @@ def _pid_alive(pid):
         return False
 
 
+def _deployment_owner_stale(row, now=None):
+    now = float(now or time.time())
+    if not row["owner_id"]:
+        return True
+    if row["owner_host"] == socket.gethostname():
+        # Never steal a local lock from a demonstrably live process merely
+        # because a long health check crossed the lease timestamp.
+        return not _pid_alive(row["owner_pid"])
+    return float(row["lease_until"] or 0) < now
+
+
+def _renew_deployment_lock(owner_id, lease_seconds=LEASE_SECONDS):
+    with _tx() as conn:
+        cursor = conn.execute(
+            "UPDATE selfmod_deployment_lock SET lease_until=? WHERE id=1 AND owner_id=?",
+            (time.time() + max(60, int(lease_seconds)), owner_id),
+        )
+    if cursor.rowcount != 1:
+        raise RuntimeError("deployment lock ownership was lost")
+
+
+def _release_deployment_lock(run_id, owner_id):
+    with _tx() as conn:
+        cursor = conn.execute(
+            "UPDATE selfmod_deployment_lock SET owner_id=NULL,owner_pid=NULL,owner_host=NULL,lease_until=NULL,run_id=NULL WHERE id=1 AND owner_id=?",
+            (owner_id,),
+        )
+        if cursor.rowcount:
+            _event(conn, run_id, "unlock", "deployment lock released")
+
+
 @contextlib.contextmanager
 def deployment_lock(run_id, owner_id=None):
     owner_id = owner_id or uuid.uuid4().hex
     now = time.time()
     with _tx() as conn:
         row = conn.execute("SELECT * FROM selfmod_deployment_lock WHERE id=1").fetchone()
-        stale = not row["owner_id"] or float(row["lease_until"] or 0) < now or (row["owner_host"] == socket.gethostname() and not _pid_alive(row["owner_pid"]))
+        stale = _deployment_owner_stale(row, now)
         if not stale:
             raise RuntimeError("another deployment/rollback holds the process-safe lock")
         conn.execute(
@@ -827,9 +863,7 @@ def deployment_lock(run_id, owner_id=None):
     try:
         yield owner_id
     finally:
-        with _tx() as conn:
-            conn.execute("UPDATE selfmod_deployment_lock SET owner_id=NULL,owner_pid=NULL,owner_host=NULL,lease_until=NULL,run_id=NULL WHERE id=1 AND owner_id=?", (owner_id,))
-            _event(conn, run_id, "unlock", "deployment lock released")
+        _release_deployment_lock(run_id, owner_id)
 
 
 def _current_source_matches(run):
@@ -859,6 +893,83 @@ def _atomic_copy(source: Path, target: Path, mode=None):
             os.unlink(temp_name)
 
 
+def _manifest_live_mismatches(manifest):
+    """Return backed-up paths whose live bytes or existence no longer match."""
+    root = Path(manifest["repository_root"])
+    mismatches = []
+    for record in manifest["files"]:
+        target = root / record["path"]
+        if record["existed_before"]:
+            if not target.is_file() or _sha(target) != record["sha256_before"]:
+                mismatches.append(record["path"])
+        elif target.exists():
+            mismatches.append(record["path"])
+    return mismatches
+
+
+def _restore_manifest_files(manifest):
+    """Restore only the manifest's preflight-verified, scoped files."""
+    root = Path(manifest["repository_root"])
+    for record in manifest["files"]:
+        target = root / record["path"]
+        if record["existed_before"]:
+            _atomic_copy(Path(record["backup_path"]), target, record.get("mode_before"))
+            _remove_bytecode_cache(target)
+            if _sha(target) != record["sha256_before"]:
+                raise RuntimeError("restored hash mismatch for %s" % record["path"])
+        elif target.exists():
+            target.unlink()
+            _remove_bytecode_cache(target)
+
+
+def _record_deployed_files(run_id, root, paths):
+    records = []
+    for rel in paths:
+        target = Path(root) / rel
+        existed = target.is_file()
+        mode = target.stat().st_mode & 0o777 if target.exists() else None
+        records.append((rel, existed, _sha(target) if existed else None, mode))
+    with _tx() as conn:
+        conn.execute("DELETE FROM selfmod_deployed_files WHERE run_id=?", (run_id,))
+        conn.executemany(
+            "INSERT INTO selfmod_deployed_files(run_id,path,existed_after,sha256_after,mode_after,recorded_ts) VALUES(?,?,?,?,?,?)",
+            [
+                (run_id, rel, int(existed), digest, mode, time.time())
+                for rel, existed, digest, mode in records
+            ],
+        )
+        _event(conn, run_id, "deployed_hashes", "%d deployed paths recorded" % len(records))
+    return records
+
+
+def _deployed_file_mismatches(run_id):
+    run = get_run(run_id)
+    root = Path(run["repository_root"])
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT path,existed_after,sha256_after,mode_after FROM selfmod_deployed_files WHERE run_id=? ORDER BY path",
+            (run_id,),
+        ).fetchall()
+    if not rows:
+        return ["deployed state was not recorded"]
+    mismatches = []
+    for row in rows:
+        target = root / row["path"]
+        existed = bool(row["existed_after"])
+        if existed:
+            if not target.is_file() or _sha(target) != row["sha256_after"]:
+                mismatches.append(row["path"])
+            elif (
+                os.name != "nt"
+                and row["mode_after"] is not None
+                and target.stat().st_mode & 0o777 != int(row["mode_after"])
+            ):
+                mismatches.append(row["path"])
+        elif target.exists():
+            mismatches.append(row["path"])
+    return mismatches
+
+
 def _remove_bytecode_cache(target: Path):
     if target.suffix != ".py":
         return
@@ -874,12 +985,13 @@ def deploy(run_id, *, health_command=None, commit=True):
     run = get_run(run_id)
     if run["phase"] != "approved":
         raise RuntimeError("deployment requires explicit/host approval")
-    with deployment_lock(run_id):
+    with deployment_lock(run_id) as deployment_owner:
         verify_backup(run_id)
         ok, conflict = _current_source_matches(run)
         if not ok:
             raise RuntimeError(conflict)
         diff = inspect_diff(run_id)
+        _renew_deployment_lock(deployment_owner)
         if set(diff["changed_files"]) - set(run["files"]):
             raise RuntimeError("candidate diff no longer matches approved scope")
         root, workspace = Path(run["repository_root"]), candidate_path(run_id)
@@ -896,6 +1008,12 @@ def deploy(run_id, *, health_command=None, commit=True):
             deployed_commit = ""
             git_mode, _, _ = _git_info(root)
             if git_mode and commit and not run["git_status_start"].strip():
+                with _tx() as conn:
+                    conn.execute(
+                        "UPDATE selfmod_runs SET last_error=?,updated_ts=? WHERE id=?",
+                        ("deployment Git commit in progress", time.time(), run_id),
+                    )
+                    _event(conn, run_id, "deploy_commit_start", "recording isolated selfmod commit")
                 code, output = _git(root, "add", "--", *diff["changed_files"])
                 if code:
                     raise RuntimeError("could not stage isolated self-improvement: %s" % output)
@@ -904,8 +1022,18 @@ def deploy(run_id, *, health_command=None, commit=True):
                     raise RuntimeError("could not commit self-improvement: %s" % output)
                 _, deployed_commit = _git(root, "rev-parse", "HEAD")
                 deployed_commit = deployed_commit.strip()
+                with _tx() as conn:
+                    conn.execute(
+                        "UPDATE selfmod_runs SET deployed_commit=?,last_error='',updated_ts=? WHERE id=?",
+                        (deployed_commit, time.time(), run_id),
+                    )
+                    _event(conn, run_id, "deploy_commit", "Git commit persisted: %s" % deployed_commit)
+            # Bind rollback to the exact bytes that were actually deployed.
+            # A later user edit must be treated as a conflict, not discarded.
+            _record_deployed_files(run_id, root, diff["changed_files"])
             _phase(run_id, {"approved"}, "deployed", "deploy", "candidate deployed atomically", deployed_commit=deployed_commit, deployed_ts=time.time())
             if health_command:
+                _renew_deployment_lock(deployment_owner)
                 code, output, duration = _run(health_command, root, min(120, run["budgets"]["max_test_seconds"]))
                 with _tx() as conn:
                     conn.execute(
@@ -929,26 +1057,42 @@ def deploy(run_id, *, health_command=None, commit=True):
 def restore(run_id, from_candidate_only=False):
     run = get_run(run_id)
     if from_candidate_only and run["phase"] in {"rejected", "reviewing", "testing", "editing", "interrupted"}:
-        # Live source was never changed; verify backup and mark restored.
-        verify_backup(run_id)
-        return _phase(run_id, {run["phase"]}, "restored", "restore", "candidate rejected; live source unchanged", restored_ts=time.time())
+        manifest = verify_backup(run_id)
+        mismatches = _manifest_live_mismatches(manifest)
+        if mismatches:
+            # Candidate edits must be isolated. Recover exact backed-up bytes if
+            # an integration bug nevertheless touched an authorized live path;
+            # unrelated live paths are deliberately left alone.
+            with _tx() as conn:
+                _event(
+                    conn, run_id, "live_source_recovery",
+                    "restoring unexpected live changes: %s" % ", ".join(mismatches),
+                )
+            _restore_manifest_files(manifest)
+            remaining = _manifest_live_mismatches(manifest)
+            if remaining:
+                raise RuntimeError(
+                    "unexpected live source changes could not be restored: %s"
+                    % ", ".join(remaining)
+                )
+            details = "candidate rejected; unexpected live source changes restored"
+        else:
+            details = "candidate rejected; live source unchanged"
+        return _phase(
+            run_id, {run["phase"]}, "restored", "restore", details,
+            restored_ts=time.time(),
+        )
     if run["phase"] not in {"rollback_requested", "deployed", "approved"}:
         raise RuntimeError("restore is not valid from %s" % run["phase"])
     manifest = verify_backup(run_id)
     root = Path(manifest["repository_root"])
-    for record in manifest["files"]:
-        target = root / record["path"]
-        if record["existed_before"]:
-            _atomic_copy(Path(record["backup_path"]), target, record.get("mode_before"))
-            _remove_bytecode_cache(target)
-            if _sha(target) != record["sha256_before"]:
-                raise RuntimeError("restored hash mismatch for %s" % record["path"])
-        elif target.exists():
-            target.unlink()
-            _remove_bytecode_cache(target)
-    if run.get("deployed_commit") and not run.get("git_status_start", "").strip():
-        git_mode, _, _ = _git_info(root)
-        if git_mode:
+    _restore_manifest_files(manifest)
+    if not run.get("git_status_start", "").strip():
+        git_mode, current_commit, _ = _git_info(root)
+        deployment_commit_present = bool(run.get("deployed_commit")) or (
+            current_commit and current_commit != run.get("starting_commit")
+        )
+        if git_mode and deployment_commit_present:
             paths = [record["path"] for record in manifest["files"]]
             code, output = _git(root, "add", "--", *paths)
             if code:
@@ -964,6 +1108,12 @@ def rollback(run_id, reason="user requested rollback"):
     if run["phase"] != "deployed":
         raise RuntimeError("only a deployed run can be rolled back")
     with deployment_lock(run_id):
+        conflicts = _deployed_file_mismatches(run_id)
+        if conflicts:
+            raise RuntimeError(
+                "rollback conflict: deployed files changed after deployment; "
+                "preserving current bytes: %s" % ", ".join(conflicts)
+            )
         _phase(run_id, {"deployed"}, "rollback_requested", "rollback", reason)
         return restore(run_id)
 
@@ -993,26 +1143,41 @@ def reconcile_stale_deployment(now=None):
     """Fail closed after a deployer dies between atomic file replacements."""
     current = float(now or time.time())
     run_id = ""
+    recovery_owner = "recovery-" + uuid.uuid4().hex
     with _tx() as conn:
         lock = conn.execute("SELECT * FROM selfmod_deployment_lock WHERE id=1").fetchone()
         if not lock["owner_id"]:
             return 0
-        stale = float(lock["lease_until"] or 0) < current or (
-            lock["owner_host"] == socket.gethostname() and not _pid_alive(lock["owner_pid"])
-        )
+        stale = _deployment_owner_stale(lock, current)
         if not stale:
             return 0
         run_id = lock["run_id"] or ""
-        conn.execute("UPDATE selfmod_deployment_lock SET owner_id=NULL,owner_pid=NULL,owner_host=NULL,lease_until=NULL,run_id=NULL WHERE id=1")
         row = conn.execute("SELECT phase FROM selfmod_runs WHERE id=?", (run_id,)).fetchone() if run_id else None
-        if row and row["phase"] in {"approved", "deployed"}:
-            conn.execute("UPDATE selfmod_runs SET phase='rollback_requested',last_error='deployment owner interrupted',updated_ts=? WHERE id=?", (current, run_id))
+        if row and row["phase"] in {"approved", "deployed", "rollback_requested"}:
+            # Atomically transfer the stale lease to this recovery process.
+            # No new deployer can enter while exact restoration is running.
+            conn.execute(
+                "UPDATE selfmod_deployment_lock SET owner_id=?,owner_pid=?,owner_host=?,lease_until=? WHERE id=1 AND owner_id=?",
+                (
+                    recovery_owner, os.getpid(), socket.gethostname(),
+                    current + LEASE_SECONDS, lock["owner_id"],
+                ),
+            )
+            if row["phase"] != "rollback_requested":
+                conn.execute("UPDATE selfmod_runs SET phase='rollback_requested',last_error='deployment owner interrupted',updated_ts=? WHERE id=?", (current, run_id))
             _event(conn, run_id, "deployment_interrupted", "stale deployment owner; exact restore required")
         else:
+            conn.execute(
+                "UPDATE selfmod_deployment_lock SET owner_id=NULL,owner_pid=NULL,owner_host=NULL,lease_until=NULL,run_id=NULL WHERE id=1 AND owner_id=?",
+                (lock["owner_id"],),
+            )
             run_id = ""
     if run_id:
-        restore(run_id)
-        return 1
+        try:
+            restore(run_id)
+            return 1
+        finally:
+            _release_deployment_lock(run_id, recovery_owner)
     return 0
 
 

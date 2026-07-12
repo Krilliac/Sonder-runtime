@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 
 import 'chat_screen.dart';
@@ -23,6 +21,7 @@ class TrilobiteApp extends StatefulWidget {
 class _TrilobiteAppState extends State<TrilobiteApp> with WidgetsBindingObserver {
   Settings? _settings;
   bool _startedLocalServer = false;
+  bool _startingLocalServer = false;
 
   @override
   void initState() {
@@ -37,18 +36,33 @@ class _TrilobiteAppState extends State<TrilobiteApp> with WidgetsBindingObserver
   Future<void> _autoStartServer(Settings settings) async {
     if (!widget.manageLocalServer ||
         _startedLocalServer ||
+        _startingLocalServer ||
+        settings.hasHostLauncher ||
         !LocalManager.canRunLocalTools) {
       return;
     }
-    _startedLocalServer = true;
-    await LocalManager.startServer(
-      allowHosted: settings.allowHosted,
-      contextSize: settings.contextSize,
-      persistOnAppClose: settings.keepServerRunning,
-    );
+    _startingLocalServer = true;
+    try {
+      final result = await LocalManager.startServer(
+        allowHosted: settings.allowHosted,
+        contextSize: settings.contextSize,
+        persistOnAppClose: settings.keepServerRunning,
+      );
+      _startedLocalServer = result.ok;
+    } finally {
+      _startingLocalServer = false;
+    }
   }
 
   void _update(Settings s) {
+    final previous = _settings;
+    if (_startedLocalServer &&
+        !(previous?.hasHostLauncher ?? false) &&
+        s.hasHostLauncher &&
+        !(previous?.keepServerRunning ?? false)) {
+      LocalManager.stopManagedServerNow();
+      _startedLocalServer = false;
+    }
     setState(() => _settings = s);
     _autoStartServer(s);
   }
@@ -56,10 +70,11 @@ class _TrilobiteAppState extends State<TrilobiteApp> with WidgetsBindingObserver
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (widget.manageLocalServer &&
+        _startedLocalServer &&
         state == AppLifecycleState.detached &&
+        !(_settings?.hasHostLauncher ?? false) &&
         !(_settings?.keepServerRunning ?? false)) {
       LocalManager.stopManagedServerNow();
-      unawaited(LocalManager.stopServers());
     }
   }
 
@@ -67,9 +82,10 @@ class _TrilobiteAppState extends State<TrilobiteApp> with WidgetsBindingObserver
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     if (widget.manageLocalServer &&
+        _startedLocalServer &&
+        !(_settings?.hasHostLauncher ?? false) &&
         !(_settings?.keepServerRunning ?? false)) {
       LocalManager.stopManagedServerNow();
-      unawaited(LocalManager.stopServers());
     }
     super.dispose();
   }

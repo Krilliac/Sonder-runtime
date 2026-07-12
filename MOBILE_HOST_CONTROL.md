@@ -66,13 +66,24 @@ In **Settings → Connection**, enter:
 
 1. Main server URL, such as `http://192.168.1.20:11435`.
 2. Main API key.
-3. Host launcher URL, such as `http://192.168.1.20:11436`.
+3. Host launcher URL, such as `http://192.168.1.20:11436`. This must be
+   entered explicitly; Trilobite never derives a credential-bearing control
+   endpoint from the chat server URL.
 4. Host launcher token.
 
 Save, open **System**, and verify that **Host Launcher** says `ready`. The
 Start, Stop, and Restart controls then operate the host. Setup engine, Git
 updates, and local training stay disabled on client-only devices because those
 operations require direct access to host files.
+
+The launcher verifies the requested server transition before reporting success:
+Stop must make port `11435` unreachable, while Start and Restart must make it
+reachable. Restart performs a complete Stop transition before starting the new
+process, avoiding a race with the old listener. A transition failure, missing
+runtime, or bounded command timeout returns HTTP `503` with a JSON `message` and
+`last_error`; it is never reported as a successful action. Requested context
+sizes must resolve to 1–1,000,000 whole tokens (`8192`, `32k`, and `1m` are
+examples).
 
 ## Transport and mobile packaging
 

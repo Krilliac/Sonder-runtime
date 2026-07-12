@@ -41,15 +41,36 @@ class Settings {
 
   bool get isConfigured => serverUrl.trim().isNotEmpty;
 
-  String get effectiveLauncherUrl {
-    if (launcherUrl.trim().isNotEmpty) return launcherUrl.trim();
-    final server = Uri.tryParse(serverUrl.trim());
-    if (server == null || server.host.isEmpty) return '';
-    return server
-        .replace(port: 11436, path: '', query: null, fragment: null)
-        .toString()
-        .replaceAll(RegExp(r'/$'), '');
+  /// Host control is intentionally explicit. Deriving this from [serverUrl]
+  /// could send a persisted launcher credential to a newly selected server.
+  String get effectiveLauncherUrl =>
+      launcherUrl.trim().replaceAll(RegExp(r'/+$'), '');
+
+  bool get hasHostLauncher => effectiveLauncherUrl.isNotEmpty;
+
+  String? get launcherConfigurationError {
+    if (!hasHostLauncher) return null;
+    final uri = Uri.tryParse(effectiveLauncherUrl);
+    if (uri == null ||
+        !const {'http', 'https'}.contains(uri.scheme.toLowerCase()) ||
+        uri.host.isEmpty ||
+        uri.userInfo.isNotEmpty ||
+        uri.path.isNotEmpty && uri.path != '/') {
+      return 'Host launcher URL must be an http(s) origin without credentials or a path.';
+    }
+    final host = uri.host.toLowerCase();
+    final loopback = host == 'localhost' ||
+        host == '::1' ||
+        host == '0:0:0:0:0:0:0:1' ||
+        host.startsWith('127.');
+    if (!loopback && launcherToken.trim().length < 24) {
+      return 'A non-loopback host launcher requires a token of at least 24 characters.';
+    }
+    return null;
   }
+
+  bool get usesHostLauncher =>
+      hasHostLauncher && launcherConfigurationError == null;
 
   static Future<Settings> load() async {
     final p = await SharedPreferences.getInstance();
