@@ -458,8 +458,6 @@ def start_training(plan, *, confirmed=False, dry_run=False, resume=False, runner
             return False, "Training resume plan is missing or unreadable."
         if _resume_signature(prior.get("plan")) != _resume_signature(plan.to_dict()):
             return False, "Training resume settings do not match the interrupted run."
-        with contextlib.suppress(OSError):
-            (run_dir / ".launch-claimed").unlink()
     else:
         run_id = uuid.uuid4().hex
         run_dir = output_root / "runs" / run_id
@@ -477,6 +475,15 @@ def start_training(plan, *, confirmed=False, dry_run=False, resume=False, runner
             return False, f"Training data preparation failed: {exc}"
         if not exported:
             return False, "Training data preparation produced no good-outcome examples."
+    data_path = data_path.resolve()
+    data_sha256 = _sha256_file(data_path)
+    if resume:
+        if str(prior.get("data_path") or "") != str(data_path):
+            return False, "Training resume dataset path does not match the interrupted run."
+        if str(prior.get("data_sha256") or "") != data_sha256:
+            return False, "Training resume dataset changed since the interrupted run."
+        with contextlib.suppress(OSError):
+            (run_dir / ".launch-claimed").unlink()
     launch_token = secrets.token_urlsafe(32)
     manifest = {
         "schema": 2,
@@ -486,8 +493,8 @@ def start_training(plan, *, confirmed=False, dry_run=False, resume=False, runner
         "model_size": plan.training.model_size,
         "method": plan.training.method,
         "created_ts": int(time.time()),
-        "data_path": str(data_path.resolve()),
-        "data_sha256": _sha256_file(data_path),
+        "data_path": str(data_path),
+        "data_sha256": data_sha256,
         "adapter_dir": str(output.resolve()),
         "gpu_index": plan.options.gpu_index,
         "resume": bool(resume),
