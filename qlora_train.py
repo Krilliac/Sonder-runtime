@@ -84,7 +84,19 @@ def load_examples(path):
                 continue
             obj = json.loads(line)
             msgs = obj.get("messages")
-            if not msgs or len(msgs) < 2:
+            if (
+                not isinstance(msgs, list)
+                or len(msgs) < 2
+                or not all(isinstance(message, dict) for message in msgs)
+                or not all(
+                    isinstance(message.get("role"), str)
+                    and isinstance(message.get("content"), str)
+                    for message in msgs
+                )
+                or msgs[-1].get("role") != "assistant"
+                or not str(msgs[-1].get("content") or "").strip()
+                or not any(message.get("role") == "user" for message in msgs[:-1])
+            ):
                 continue
             examples.append(obj)
     return examples
@@ -110,19 +122,33 @@ def build_supervised_example(tokenizer, messages, max_len):
         add_generation_prompt=False,
     )
 
-    # Guard against templates that don't cleanly prefix (defensive, keeps
-    # masking correct even if apply_chat_template output isn't a strict
-    # prefix relationship for some edge case).
-    prompt_len = min(len(prompt_ids), len(full_ids))
+    if max_len < 2:
+        raise ValueError("max_len must preserve prompt and assistant tokens")
+    if full_ids[:len(prompt_ids)] != prompt_ids:
+        raise ValueError("chat template prompt is not a prefix of the full example")
+    assistant_ids = full_ids[len(prompt_ids):]
+    if not assistant_ids:
+        raise ValueError("chat template produced no assistant training tokens")
 
-    full_ids = full_ids[:max_len]
-    labels = list(full_ids)
-    for i in range(min(prompt_len, len(labels))):
-        labels[i] = -100
+    if len(full_ids) <= max_len:
+        input_ids = list(full_ids)
+        prompt_len = len(prompt_ids)
+    else:
+        # Preserve the generation marker and tail of a long prompt while
+        # reserving assistant loss tokens. Keep at least one prompt token so
+        # the generation boundary remains represented for very long answers.
+        assistant_budget = min(len(assistant_ids), max_len - 1)
+        prompt_budget = min(len(prompt_ids), max_len - assistant_budget)
+        input_ids = list(prompt_ids[-prompt_budget:]) if prompt_budget else []
+        input_ids.extend(assistant_ids[:assistant_budget])
+        prompt_len = prompt_budget
+    labels = [-100] * prompt_len + input_ids[prompt_len:]
+    if not any(label != -100 for label in labels):
+        raise ValueError("supervised example contains no assistant loss tokens")
 
-    attention_mask = [1] * len(full_ids)
+    attention_mask = [1] * len(input_ids)
     return {
-        "input_ids": full_ids,
+        "input_ids": input_ids,
         "attention_mask": attention_mask,
         "labels": labels,
     }
@@ -130,6 +156,13 @@ def build_supervised_example(tokenizer, messages, max_len):
 
 def main():
     _print_vram_guidance()
+
+    if os.environ.get("TRILOBITE_ALLOW_CPU_OFFLOAD", "0") == "1":
+        print("ERROR: QLoRA CPU offload is disabled for this training backend.")
+        print("Hugging Face documents device_map='auto' as an inference-only path;")
+        print("Trilobite will not use it for weight training. Choose a smaller")
+        print("GPU-resident plan or configure a separately validated training backend.")
+        return 5
 
     if not os.path.exists(DATA_PATH):
         print(f"ERROR: training data not found at {DATA_PATH}")
@@ -191,28 +224,18 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    allow_offload = os.environ.get("TRILOBITE_ALLOW_CPU_OFFLOAD", "0") == "1"
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
         bnb_4bit_compute_dtype=compute_dtype,
         bnb_4bit_use_double_quant=True,
-        llm_int8_enable_fp32_cpu_offload=allow_offload,
     )
 
     model_kwargs = {
         "quantization_config": bnb_config,
-        "device_map": "auto" if allow_offload else {"": 0},
+        "device_map": {"": 0},
         "trust_remote_code": True,
     }
-    if allow_offload:
-        gpu_budget = os.environ.get("TRILOBITE_TRAIN_GPU_BUDGET_GB", "").strip()
-        ram_budget = os.environ.get("TRILOBITE_TRAIN_RAM_BUDGET_GB", "").strip()
-        if gpu_budget and ram_budget:
-            model_kwargs["max_memory"] = {
-                0: f"{max(1, int(float(gpu_budget)))}GiB",
-                "cpu": f"{max(2, int(float(ram_budget)))}GiB",
-            }
     model = AutoModelForCausalLM.from_pretrained(BASE, **model_kwargs)
     model.gradient_checkpointing_enable()
     model = prepare_model_for_kbit_training(model)

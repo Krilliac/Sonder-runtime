@@ -85,7 +85,7 @@ class _SystemScreenState extends State<SystemScreen> {
         // The explicit Refresh path reports connection errors. Background
         // polls preserve the last useful snapshot.
       }
-      if (widget.settings.effectiveLauncherUrl.isNotEmpty) {
+      if (widget.settings.usesHostLauncher) {
         try {
           launcherInfo = await _launcherApi.status();
         } catch (_) {
@@ -121,7 +121,7 @@ class _SystemScreenState extends State<SystemScreen> {
       } on TrilobiteException catch (e) {
         serverError = e.message;
       }
-      if (widget.settings.effectiveLauncherUrl.isNotEmpty) {
+      if (widget.settings.usesHostLauncher) {
         try {
           launcherInfo = await _launcherApi.status();
         } on TrilobiteException catch (e) {
@@ -146,10 +146,10 @@ class _SystemScreenState extends State<SystemScreen> {
   }
 
   Future<LocalActionResult> _launcherAction(String action) async {
-    if (widget.settings.effectiveLauncherUrl.isEmpty) {
+    if (!widget.settings.usesHostLauncher) {
       return const LocalActionResult(
         false,
-        'Configure the host launcher URL in Settings first.',
+        'Configure a valid explicit host launcher URL and token in Settings first.',
       );
     }
     try {
@@ -170,6 +170,8 @@ class _SystemScreenState extends State<SystemScreen> {
   }
 
   Future<LocalActionResult> _startServer() {
+    if (widget.settings.usesHostLauncher) return _launcherAction('start');
+    if (widget.settings.hasHostLauncher) return _launcherAction('start');
     if (LocalManager.canRunLocalTools) {
       return LocalManager.startServer(
         allowHosted: widget.settings.allowHosted,
@@ -181,8 +183,13 @@ class _SystemScreenState extends State<SystemScreen> {
   }
 
   Future<LocalActionResult> _stopServer() {
+    if (widget.settings.usesHostLauncher) return _launcherAction('stop');
+    if (widget.settings.hasHostLauncher) return _launcherAction('stop');
     if (LocalManager.canRunLocalTools) return LocalManager.stopServers();
-    return _launcherAction('stop');
+    return Future.value(const LocalActionResult(
+      false,
+      'Configure an explicit host launcher URL in Settings first.',
+    ));
   }
 
   Future<LocalActionResult> _restartServer() => _launcherAction('restart');
@@ -356,6 +363,10 @@ class _SystemScreenState extends State<SystemScreen> {
   Widget build(BuildContext context) {
     final info = _info;
     final localInfo = _localInfo;
+    final localRuntimeControls =
+        LocalManager.canRunLocalTools && !widget.settings.hasHostLauncher;
+    final canControlServer =
+        localRuntimeControls || widget.settings.usesHostLauncher;
     return Scaffold(
       appBar: AppBar(
         automaticallyImplyLeading: false,
@@ -455,7 +466,7 @@ class _SystemScreenState extends State<SystemScreen> {
                   value: widget.settings.effectiveLauncherUrl.isEmpty
                       ? 'Not configured'
                       : widget.settings.effectiveLauncherUrl,
-                  ok: _launcherInfo != null,
+                  ok: widget.settings.usesHostLauncher && _launcherInfo != null,
                 ),
                 _StatusRow(
                   label: 'Launcher',
@@ -478,6 +489,13 @@ class _SystemScreenState extends State<SystemScreen> {
                     style: TextStyle(color: Theme.of(context).colorScheme.error),
                   ),
                 ],
+                if (widget.settings.launcherConfigurationError != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    widget.settings.launcherConfigurationError!,
+                    style: TextStyle(color: Theme.of(context).colorScheme.error),
+                  ),
+                ],
               ],
             ),
           ),
@@ -492,7 +510,7 @@ class _SystemScreenState extends State<SystemScreen> {
                   runSpacing: 8,
                   children: [
                     FilledButton.icon(
-                      onPressed: _working || !LocalManager.canRunLocalTools
+                      onPressed: _working || !localRuntimeControls
                           ? null
                           : () => _run(() => LocalManager.setupEngine(
                                 allowHosted: widget.settings.allowHosted,
@@ -502,32 +520,36 @@ class _SystemScreenState extends State<SystemScreen> {
                       label: const Text('Setup engine'),
                     ),
                     FilledButton.icon(
-                      onPressed: _working ? null : () => _run(_startServer),
+                      onPressed: _working || !canControlServer
+                          ? null
+                          : () => _run(_startServer),
                       icon: const Icon(Icons.play_arrow_outlined),
                       label: const Text('Start server'),
                     ),
                     FilledButton.tonalIcon(
-                      onPressed: _working ? null : () => _run(_stopServer),
+                      onPressed: _working || !canControlServer
+                          ? null
+                          : () => _run(_stopServer),
                       icon: const Icon(Icons.stop_circle_outlined),
                       label: const Text('Stop server'),
                     ),
                     FilledButton.tonalIcon(
                       onPressed: _working ||
-                              widget.settings.effectiveLauncherUrl.isEmpty
+                              !widget.settings.usesHostLauncher
                           ? null
                           : () => _run(_restartServer),
                       icon: const Icon(Icons.restart_alt),
-                      label: const Text('Restart host'),
+                      label: const Text('Restart server'),
                     ),
                     FilledButton.tonalIcon(
-                      onPressed: _working || !LocalManager.canRunLocalTools
+                      onPressed: _working || !localRuntimeControls
                           ? null
                           : () => _run(LocalManager.startEndlessTraining),
                       icon: const Icon(Icons.all_inclusive),
                       label: const Text('Endless train'),
                     ),
                     OutlinedButton.icon(
-                      onPressed: _working || !LocalManager.canRunLocalTools
+                      onPressed: _working || !localRuntimeControls
                           ? null
                           : () => _run(LocalManager.updateFromGit),
                       icon: const Icon(Icons.system_update_alt),
@@ -535,11 +557,12 @@ class _SystemScreenState extends State<SystemScreen> {
                     ),
                   ],
                 ),
-                if (!LocalManager.canRunLocalTools) ...[
+                if (!localRuntimeControls) ...[
                   const SizedBox(height: 10),
-                  const Text(
-                    'This device controls the configured host launcher. Engine '
-                    'setup, Git updates, and local training stay on the host.',
+                  Text(
+                    widget.settings.usesHostLauncher
+                        ? 'Start, Stop, and Restart control the explicitly configured host. Engine setup, Git updates, and local training remain on that host.'
+                        : 'Configure an explicit host launcher URL to control a server from this client-only device.',
                   ),
                 ],
               ],
