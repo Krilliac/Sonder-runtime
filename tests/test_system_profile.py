@@ -1,6 +1,21 @@
 import system_profile
 
 
+def test_nvidia_profile_selects_requested_physical_gpu(monkeypatch):
+    output = (
+        "busy small, 8192, 1024, 8.6\n"
+        "free large, 24576, 22000, 8.9\n"
+    )
+    monkeypatch.setattr(
+        system_profile.subprocess, "check_output", lambda *args, **kwargs: output
+    )
+    assert system_profile._nvidia_profile(0)[:3] == ("busy small", 8.0, 1.0)
+    assert system_profile._nvidia_profile(1)[:3] == (
+        "free large", 24.0, 22000 / 1024,
+    )
+    assert system_profile._nvidia_profile(2) is None
+
+
 def test_profile_missing_reads_empty(monkeypatch, tmp_path):
     monkeypatch.setattr(system_profile, "workspace_root", lambda: str(tmp_path))
     monkeypatch.delenv("SONDER_SYSTEM_PROFILE", raising=False)

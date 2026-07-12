@@ -1,6 +1,32 @@
 import server
 
 
+def test_host_receipt_uses_latest_validator_result(monkeypatch):
+    responses = [
+        '{"tool":"workspace_run","args":{"program":"python","args":["-m","pytest"]}}',
+        '{"tool":"workspace_run","args":{"program":"python","args":["-m","pytest","tests"]}}',
+        '{"final":"validation finished"}',
+    ]
+    observations = iter(["tests passed", "ERROR: broader suite failed"])
+    monkeypatch.setattr(
+        server, "_make_generate",
+        lambda *args, **kwargs: lambda prompt, history=None: responses.pop(0),
+    )
+    monkeypatch.setattr(
+        server, "_agent_dispatch_observed",
+        lambda *args, **kwargs: next(observations),
+    )
+
+    receipt = server._agent_impl(
+        "validate the workspace",
+        max_steps=3,
+        return_host_receipt=True,
+    )
+
+    assert receipt.validation_attempted
+    assert not receipt.validation_passed
+
+
 def test_extract_agent_json_accepts_plain_json():
     out = server._extract_agent_json('{"final": "done"}')
     assert out == {"final": "done"}

@@ -1,5 +1,6 @@
 import pytest
 
+import autopilot_controller
 import autopilot_store
 import server
 import sonder_serve
@@ -26,7 +27,12 @@ def _plan(_run):
 
 def _work(_run, task, _prior):
     tool = "workspace_run" if task["kind"] == "validate" else "file_read"
-    return "done\n\n=== TOOL EVIDENCE ===\nstep 1 tool=%s reason=test\nPASS" % tool
+    return autopilot_controller.HostTaskResult(
+        output="done\n\n=== TOOL EVIDENCE ===\nstep 1 tool=%s reason=test\nPASS" % tool,
+        tools=(tool,),
+        validation_attempted=task["kind"] == "validate",
+        validation_passed=task["kind"] == "validate",
+    )
 
 
 def _review(_run, _issue):

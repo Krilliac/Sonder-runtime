@@ -230,7 +230,7 @@ def _system_memory():
     return total, available, False
 
 
-def _nvidia_profile():
+def _nvidia_profile(gpu_index=None):
     query = "name,memory.total,memory.free,compute_cap"
     try:
         raw = subprocess.check_output(
@@ -253,18 +253,24 @@ def _nvidia_profile():
     if not rows:
         return None
     parsed = []
-    for row in rows:
+    for index, row in enumerate(rows):
         fields = [part.strip() for part in row.split(",")]
         if len(fields) < 4:
             continue
         try:
-            parsed.append((fields[0], float(fields[1]), float(fields[2]), fields[3]))
+            parsed.append((index, fields[0], float(fields[1]), float(fields[2]), fields[3]))
         except ValueError:
             continue
     if not parsed:
         return None
-    # Training is single-GPU. Recommend against the GPU with the most free VRAM.
-    name, total_mib, free_mib, capability = max(parsed, key=lambda item: item[2])
+    if gpu_index is None:
+        # Training is single-GPU. Recommend against the GPU with the most free VRAM.
+        selected = max(parsed, key=lambda item: item[3])
+    else:
+        selected = next((item for item in parsed if item[0] == gpu_index), None)
+        if selected is None:
+            return None
+    _index, name, total_mib, free_mib, capability = selected
     return name, total_mib / 1024, free_mib / 1024, capability
 
 
@@ -295,7 +301,7 @@ def _rocm_profile():
     return max(cards, key=lambda item: item[2]) if cards else None
 
 
-def detect_hardware() -> HardwareProfile:
+def detect_hardware(gpu_index=None) -> HardwareProfile:
     """Detect live capacity with environment overrides for testing/admin use."""
     total, available, ram_live = _system_memory()
     total = _env_float("SONDER_RAM_GB", total) or 0.0
@@ -305,7 +311,7 @@ def detect_hardware() -> HardwareProfile:
     elif not available and total:
         available, ram_live = total * 0.75, False
 
-    nvidia = _nvidia_profile()
+    nvidia = _nvidia_profile() if gpu_index is None else _nvidia_profile(gpu_index)
     rocm = None if nvidia else _rocm_profile()
     vram_live = bool(nvidia or rocm)
     vendor = "nvidia" if nvidia else "amd" if rocm else "none"

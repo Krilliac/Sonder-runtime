@@ -7754,7 +7754,8 @@ def _agent_impl(
     allow_location: bool = False,
     tool_allowlist=None,
     tool_policy=None,
-) -> str:
+    return_host_receipt: bool = False,
+):
     """Run a Claude-like local agent loop that can call tools.
 
     The model chooses one JSON tool call at a time, receives the observation,
@@ -7844,6 +7845,14 @@ def _agent_impl(
         activity_tracker.set_result_summary(
             final.splitlines()[0] if final else "agent completed"
         )
+        if return_host_receipt:
+            return autopilot_controller.HostTaskResult(
+                output=final,
+                tools=tuple(sorted(used_tool_names)),
+                mutation_observed=mutated,
+                validation_attempted=validation_attempted,
+                validation_passed=validation_ok,
+            )
         return final
 
     def run_claim_review_action(review, review_number):
@@ -8127,7 +8136,9 @@ def _agent_impl(
             validation_covered = tool_ok and _agent_validation_covers(
                 tool_name, tool_args, mutations, observation_text,
             )
-            validation_ok = validation_ok or validation_covered
+            # The latest host-observed validator decides current validity. A
+            # later failing/bad-coverage check must invalidate an earlier pass.
+            validation_ok = validation_covered
             if mutated and tool_ok and not validation_covered:
                 observation_text += (
                     "\nHOST VALIDATION: this check did not cover the changed on-disk path(s). "
@@ -8589,7 +8600,9 @@ def _autopilot_evidence_has(output: str, tools) -> bool:
     )
 
 
-def _autopilot_work_model(run: dict, task: dict, prior: str) -> str:
+def _autopilot_work_model(
+    run: dict, task: dict, prior: str
+) -> autopilot_controller.HostTaskResult | str:
     allowed = _autopilot_allowed_tools(run)
     prompt = (
         "Autopilot objective: {objective}\n"
@@ -8622,20 +8635,8 @@ def _autopilot_work_model(run: dict, task: dict, prior: str) -> str:
         allow_location=False,
         tool_allowlist=allowed,
         tool_policy=_autopilot_tool_policy(run),
+        return_host_receipt=True,
     )
-    if (
-        task.get("kind") == "implement"
-        and not _autopilot_evidence_has(output, _AUTOPILOT_MUTATION_EVIDENCE)
-    ):
-        return (
-            "EVIDENCE_REQUIRED: implementation task produced no allowed persistent "
-            "workspace mutation.\n\n" + output
-        )
-    if (
-        task.get("kind") == "validate"
-        and not _autopilot_evidence_has(output, _WORK_VALIDATION_TOOLS)
-    ):
-        return "EVIDENCE_REQUIRED: validation task ran no grounded validator.\n\n" + output
     return output
 
 

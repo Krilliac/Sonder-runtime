@@ -9,6 +9,7 @@ which states/actions are legal and whether evidence satisfies completion gates.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Callable
 
 import autopilot_store
@@ -27,6 +28,26 @@ FAILURE_PREFIXES = (
 
 class AutopilotError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class HostTaskResult:
+    """Non-model host observations returned by the guarded workbench."""
+
+    output: str
+    tools: tuple[str, ...] = ()
+    mutation_observed: bool = False
+    validation_attempted: bool = False
+    validation_passed: bool = False
+
+    def receipt(self) -> dict:
+        return {
+            "schema": 1,
+            "tools": list(self.tools),
+            "mutation_observed": self.mutation_observed,
+            "validation_attempted": self.validation_attempted,
+            "validation_passed": self.validation_passed,
+        }
 
 
 def normalize_policy(value: str) -> str:
@@ -156,14 +177,23 @@ def normalize_review(payload: dict) -> dict:
     }
 
 
-def _task_passed(output: str) -> tuple[bool, str]:
-    text = str(output or "").strip()
+def _task_passed(result, task: dict) -> tuple[bool, str]:
+    if not isinstance(result, HostTaskResult):
+        return False, "workbench returned no host-issued execution receipt"
+    text = str(result.output or "").strip()
     if not text:
         return False, "workbench returned an empty result"
     if text.startswith(FAILURE_PREFIXES):
         return False, text.splitlines()[0][:500]
-    if "=== TOOL EVIDENCE ===" not in text:
+    if not result.tools:
         return False, "workbench returned no host-observed tool evidence"
+    if task.get("kind") == "implement" and not result.mutation_observed:
+        return False, "implementation task produced no host-observed persistent mutation"
+    if task.get("kind") == "validate":
+        if not result.validation_attempted:
+            return False, "validation task ran no host-observed validator"
+        if not result.validation_passed:
+            return False, "validation task did not pass host coverage checks"
     return True, ""
 
 
@@ -202,7 +232,9 @@ def _completion_gate(run: dict) -> tuple[bool, str]:
         return False, "%d plan task(s) are not passed" % len(incomplete)
     validations = [
         task for task in plan
-        if task.get("kind") == "validate" and task.get("status") == "passed"
+        if task.get("kind") == "validate"
+        and task.get("status") == "passed"
+        and (task.get("host_receipt") or {}).get("validation_passed") is True
     ]
     if not validations:
         return False, "no validation task passed"
@@ -555,8 +587,11 @@ def execute_run(
                 )
                 for item in plan[:task_index]
             )
-            output = str(work_fn(run, task, prior) or "")[:MAX_TASK_OUTPUT]
-            passed, error = _task_passed(output)
+            result = work_fn(run, task, prior)
+            output = str(
+                result.output if isinstance(result, HostTaskResult) else result or ""
+            )[:MAX_TASK_OUTPUT]
+            passed, error = _task_passed(result, task)
             flags = autopilot_store.control_flags(run["id"], owner_id)
             if flags.get("lost"):
                 raise AutopilotError("autopilot ownership was lost during task execution")
@@ -568,6 +603,9 @@ def execute_run(
             task["status"] = "passed" if passed else "failed"
             task["output"] = output
             task["error"] = error
+            task["host_receipt"] = (
+                result.receipt() if isinstance(result, HostTaskResult) else {}
+            )
             plan[task_index] = task
             run = autopilot_store.save_progress(
                 run["id"], owner_id,
