@@ -22,10 +22,13 @@ Usage (after `pip install -r requirements-train.txt`):
 This file must remain importable/py_compile-able WITHOUT torch/transformers/
 peft/bitsandbytes installed — all heavy imports are deferred into main().
 """
+import hashlib
+import hmac
 import json
 import os
 import sys
 import time
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Configuration (override via env vars; kept as simple constants on purpose)
@@ -59,6 +62,69 @@ WARMUP_RATIO = 0.03
 LOGGING_STEPS = 5
 SAVE_STRATEGY = "epoch"
 SEED = 42
+
+
+def _write_json_atomic(path, payload):
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp-%s" % os.getpid())
+    try:
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def authorize_launch(now=None):
+    """Consume the lifecycle controller's fresh, one-use launch capability."""
+    manifest_path = Path(os.environ.get("SONDER_TRAINING_MANIFEST", ""))
+    token = os.environ.get("SONDER_TRAINING_LAUNCH_TOKEN", "")
+    if not manifest_path.is_file() or not token:
+        raise RuntimeError("QLoRA must be launched by `training start --confirm`")
+    claim_path = manifest_path.with_name(".launch-claimed")
+    try:
+        claim_fd = os.open(claim_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as exc:
+        raise RuntimeError("training launch authorization was already claimed") from exc
+    with os.fdopen(claim_fd, "w", encoding="ascii") as stream:
+        stream.write(str(os.getpid()))
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("training launch manifest is unreadable") from exc
+    now = int(time.time() if now is None else now)
+    expected = str(manifest.get("launch_token_sha256") or "")
+    supplied = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    if not expected or not hmac.compare_digest(expected, supplied):
+        raise RuntimeError("training launch authorization is invalid")
+    if manifest.get("launch_consumed_ts"):
+        raise RuntimeError("training launch authorization was already consumed")
+    age = now - int(manifest.get("created_ts") or 0)
+    if age < 0 or age > 300:
+        raise RuntimeError("training launch authorization expired")
+    if manifest.get("schema") != 2:
+        raise RuntimeError("training launch manifest schema is unsupported")
+    if manifest_path.name != "training-plan.json" or manifest_path.parent.name != manifest.get("run_id"):
+        raise RuntimeError("training launch manifest is outside its approved run directory")
+    required = {
+        "base_hf": BASE,
+        "data_path": str(Path(DATA_PATH).resolve()),
+        "adapter_dir": str(Path(OUTPUT_DIR).resolve()),
+        "gpu_index": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
+    }
+    for key, actual in required.items():
+        value = manifest.get(key) if key == "gpu_index" else manifest.get(key) or ""
+        if str(value) != actual:
+            raise RuntimeError("training launch %s does not match the controller plan" % key)
+    digest = hashlib.sha256(Path(DATA_PATH).read_bytes()).hexdigest()
+    if digest != manifest.get("data_sha256"):
+        raise RuntimeError("training data changed after the controller approved the run")
+    manifest["launch_consumed_ts"] = now
+    manifest.pop("launch_token_sha256", None)
+    _write_json_atomic(manifest_path, manifest)
+    return manifest
 
 
 def _print_vram_guidance():
@@ -155,6 +221,7 @@ def build_supervised_example(tokenizer, messages, max_len):
 
 
 def main():
+    launch_manifest = authorize_launch()
     _print_vram_guidance()
 
     if os.environ.get("SONDER_ALLOW_CPU_OFFLOAD", "0") == "1":
@@ -315,11 +382,7 @@ def main():
     print(f"Saving LoRA adapter to {OUTPUT_DIR} ...")
     model.save_pretrained(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)
-    manifest_path = os.environ.get("SONDER_TRAINING_MANIFEST", "")
-    manifest = {}
-    if manifest_path and os.path.exists(manifest_path):
-        with open(manifest_path, "r", encoding="utf-8") as stream:
-            manifest = json.load(stream)
+    manifest = dict(launch_manifest)
     manifest.update({
         "base_hf": BASE,
         "completed_ts": int(time.time()),
