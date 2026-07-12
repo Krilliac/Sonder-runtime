@@ -1,3 +1,5 @@
+import sqlite3
+
 import embeddings as _e
 import memory_store as ms
 
@@ -19,6 +21,25 @@ def test_delete_lesson_removes_from_table_and_fts():
 
 def _conn():
     return ms.connect(":memory:")
+
+
+def test_connect_migrates_lesson_usage_outcome_timestamp(tmp_path):
+    path = tmp_path / "legacy-memory.db"
+    legacy = sqlite3.connect(path)
+    legacy.execute(
+        "CREATE TABLE lesson_usage ("
+        "lesson_id TEXT, interaction_id TEXT, task TEXT, outcome_signal TEXT, "
+        "reward REAL, ts TEXT DEFAULT CURRENT_TIMESTAMP, "
+        "PRIMARY KEY(lesson_id, interaction_id))"
+    )
+    legacy.commit()
+    legacy.close()
+
+    conn = ms.connect(path)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(lesson_usage)")}
+    conn.close()
+
+    assert "outcome_ts" in columns
 
 
 def test_new_id_is_16_hex():

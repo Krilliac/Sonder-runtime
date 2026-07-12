@@ -1,5 +1,6 @@
 import memory_store as ms
 import orchestrator as o
+import retriever
 
 
 def test_build_prompt_orders_facts_lessons_recalls_then_task():
@@ -68,3 +69,34 @@ def test_recalls_and_facts_reach_the_prompt():
     assert "a fact" in seen["prompt"]
     assert "a lesson" in seen["prompt"]
     assert "a recall" in seen["prompt"]
+
+
+def test_prompt_and_trace_omit_quarantined_lesson(monkeypatch):
+    conn = ms.connect(":memory:")
+    bad_text = "threading lock advice that repeatedly failed"
+    good_text = "threading lock advice with neutral evidence"
+    ms.add_lesson(conn, "bad", bad_text, None, "seed")
+    ms.add_lesson(conn, "good", good_text, None, "seed")
+    for index in range(retriever.QUARANTINE_REPEAT_TASK_MIN_LOSSES):
+        interaction_id = "bad-use-%s" % index
+        ms.log_lesson_usage(conn, ["bad"], interaction_id, "threading lock")
+        ms.record_lesson_usage_outcome(conn, interaction_id, "failed", -1.0)
+
+    real_retrieve = retriever.retrieve_with_ids
+    monkeypatch.setattr(
+        retriever,
+        "retrieve_with_ids",
+        lambda stored, task: real_retrieve(
+            stored, task, embed_fn=lambda _text: None,
+        ),
+    )
+
+    _response, _interaction_id, trace = o.run_with_learning_traced(
+        conn, "threading lock advice", "code", lambda prompt: "answer",
+        id_fn=lambda: "new-interaction",
+    )
+
+    assert good_text in trace["lessons"]
+    assert bad_text not in trace["lessons"]
+    assert good_text in trace["augmented_prompt"]
+    assert bad_text not in trace["augmented_prompt"]

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import memory_quality
+import memory_store
+import retriever
 import reward
 
 
@@ -89,6 +91,51 @@ def _outcome_metrics(conn) -> dict:
     }
 
 
+def _lesson_outcome_metrics(conn) -> dict:
+    stats = memory_store.lesson_usage_stats(conn)
+    evaluated = 0
+    with_losses = 0
+    loss_only = 0
+    quarantined = 0
+    quarantine_details = []
+    for lesson_id, row in stats.items():
+        wins = int(row.get("wins") or 0)
+        losses = int(row.get("losses") or 0)
+        if wins + losses:
+            evaluated += 1
+        if losses:
+            with_losses += 1
+        if losses and not wins:
+            loss_only += 1
+        decision = retriever.lesson_quarantine(row)
+        if decision.get("active"):
+            quarantined += 1
+            if len(quarantine_details) < 10:
+                quarantine_details.append({
+                    "lesson_id": lesson_id,
+                    "losses_since_win": decision.get("losses_since_win", 0),
+                    "distinct_loss_tasks_since_win": decision.get(
+                        "distinct_loss_tasks_since_win", 0
+                    ),
+                    "avg_reward_since_win": decision.get(
+                        "avg_reward_since_win"
+                    ),
+                    "last_failure_ts": decision.get("last_failure_ts"),
+                    "retry_after": decision.get("retry_after"),
+                })
+    return {
+        "evaluated_lessons": evaluated,
+        "lessons_with_losses": with_losses,
+        "loss_only_lessons": loss_only,
+        "quarantined_lessons": quarantined,
+        "quarantined_lesson_details": quarantine_details,
+        "quarantine_review": (
+            "Lessons automatically re-enter probation after retry_after; "
+            "a grounded success resets the evidence epoch."
+        ),
+    }
+
+
 def _status(report: dict) -> str:
     quality = report["quality"]
     severe = (
@@ -107,7 +154,9 @@ def _status(report: dict) -> str:
     if hygiene or (
         report["interactions"] >= 20
         and report["outcome_coverage_percent"] < 35.0
-    ) or (report["outcomes"] and report["positive_percent"] < 80.0):
+    ) or (report["outcomes"] and report["positive_percent"] < 80.0) or (
+        report.get("quarantined_lessons", 0)
+    ):
         return "watch"
     if not report["interactions"] or not report["outcomes"] or not report["lessons"]:
         return "building"
@@ -121,6 +170,7 @@ def build_report(conn) -> dict:
     facts = int(conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0])
     sources, grounded_lessons = _lesson_sources(conn)
     outcomes = _outcome_metrics(conn)
+    lesson_outcomes = _lesson_outcome_metrics(conn)
     audit = memory_quality.audit(conn)
     quality = {
         "exact_duplicate_groups": int(audit.get("exact_duplicate_groups", 0)),
@@ -137,6 +187,7 @@ def build_report(conn) -> dict:
     report = {
         "interactions": interactions,
         **outcomes,
+        **lesson_outcomes,
         "outcome_coverage_percent": _percent(
             outcomes["outcome_interactions"], interactions
         ),
@@ -182,6 +233,13 @@ def format_report(report: dict) -> str:
             report.get("grounded_lessons", 0),
             report.get("synthetic_lessons", 0),
         ),
+        "  lesson feedback: evaluated=%s | with losses=%s | loss-only=%s | quarantined=%s"
+        % (
+            report.get("evaluated_lessons", 0),
+            report.get("lessons_with_losses", 0),
+            report.get("loss_only_lessons", 0),
+            report.get("quarantined_lessons", 0),
+        ),
         "  distillation yield: %s grounded lesson(s) per positive interaction"
         % ("n/a" if yield_value is None else yield_value),
         "  embeddings: %s%% | duplicate rows: %s | vague: %s | privacy flags: %s"
@@ -192,6 +250,17 @@ def format_report(report: dict) -> str:
             quality.get("path_or_secret_like", 0),
         ),
     ]
+    for item in report.get("quarantined_lesson_details") or []:
+        lines.append(
+            "    quarantine %s: losses=%s | tasks=%s | avg=%s | retry after=%s"
+            % (
+                item.get("lesson_id", "unknown"),
+                item.get("losses_since_win", 0),
+                item.get("distinct_loss_tasks_since_win", 0),
+                item.get("avg_reward_since_win"),
+                item.get("retry_after") or "manual review",
+            )
+        )
     sources = report.get("lesson_sources") or {}
     lines.append(
         "  lesson sources: %s"

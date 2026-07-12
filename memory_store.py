@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS lesson_usage (
     outcome_signal TEXT,
     reward REAL,
     ts TEXT DEFAULT CURRENT_TIMESTAMP,
+    outcome_ts TEXT,
     PRIMARY KEY(lesson_id, interaction_id)
 );
 CREATE TABLE IF NOT EXISTS tasks (
@@ -120,6 +121,9 @@ def _migrate(conn):
         conn.execute("ALTER TABLE interactions ADD COLUMN tokens_out INTEGER")
     if "token_source" not in cols:
         conn.execute("ALTER TABLE interactions ADD COLUMN token_source TEXT")
+    usage_cols = _column_names(conn, "lesson_usage")
+    if "outcome_ts" not in usage_cols:
+        conn.execute("ALTER TABLE lesson_usage ADD COLUMN outcome_ts TEXT")
 
 
 def init_db(conn):
@@ -307,7 +311,8 @@ def log_lesson_usage(conn, lesson_ids, interaction_id, task):
 
 def record_lesson_usage_outcome(conn, interaction_id, signal, reward):
     conn.execute(
-        "UPDATE lesson_usage SET outcome_signal=?, reward=? WHERE interaction_id=?",
+        "UPDATE lesson_usage SET outcome_signal=?, reward=?, "
+        "outcome_ts=CURRENT_TIMESTAMP WHERE interaction_id=?",
         (signal, reward, interaction_id),
     )
     conn.commit()
@@ -321,7 +326,70 @@ def lesson_usage_stats(conn):
         "AVG(CASE WHEN reward IS NOT NULL THEN reward END) AS avg_reward "
         "FROM lesson_usage GROUP BY lesson_id"
     ).fetchall()
-    return {r["lesson_id"]: dict(r) for r in rows}
+    stats = {r["lesson_id"]: dict(r) for r in rows}
+
+    # Keep ordered evidence alongside the lifetime counters. Retrieval policy
+    # needs to distinguish a lesson that recovered from one that relapsed after
+    # an old success; all-history aggregates cannot express that distinction.
+    histories = conn.execute(
+        "SELECT lesson_id, task, reward, COALESCE(outcome_ts, ts) AS evidence_ts "
+        "FROM lesson_usage WHERE reward IS NOT NULL "
+        "ORDER BY lesson_id, datetime(evidence_ts), rowid"
+    ).fetchall()
+    current_id = None
+    losses_since_win = 0
+    loss_tasks = set()
+    rewards_since_win = []
+    last_failure_ts = None
+
+    def finish(lesson_id):
+        if lesson_id is None or lesson_id not in stats:
+            return
+        row = stats[lesson_id]
+        row["losses_since_win"] = losses_since_win
+        row["distinct_loss_tasks_since_win"] = len(loss_tasks)
+        row["avg_reward_since_win"] = (
+            sum(rewards_since_win) / len(rewards_since_win)
+            if rewards_since_win else None
+        )
+        row["last_failure_ts"] = last_failure_ts
+
+    for evidence in histories:
+        lesson_id = evidence["lesson_id"]
+        if lesson_id != current_id:
+            finish(current_id)
+            current_id = lesson_id
+            losses_since_win = 0
+            loss_tasks = set()
+            rewards_since_win = []
+            last_failure_ts = None
+        value = float(evidence["reward"])
+        if value > 0:
+            # A grounded success starts a fresh evidence epoch. Later failures
+            # can still quarantine the lesson again instead of inheriting
+            # permanent immunity from this win.
+            losses_since_win = 0
+            loss_tasks = set()
+            rewards_since_win = []
+            last_failure_ts = None
+        else:
+            rewards_since_win.append(value)
+            if value < 0:
+                losses_since_win += 1
+                normalized_task = re.sub(
+                    r"\s+", " ", (evidence["task"] or "").strip().casefold()
+                )
+                if normalized_task:
+                    loss_tasks.add(normalized_task)
+                last_failure_ts = evidence["evidence_ts"]
+    finish(current_id)
+
+    for row in stats.values():
+        row.setdefault("losses_since_win", 0)
+        row.setdefault("distinct_loss_tasks_since_win", 0)
+        row.setdefault("avg_reward_since_win", None)
+        row.setdefault("last_failure_ts", None)
+    return stats
 
 
 def _sanitize_fts(query):

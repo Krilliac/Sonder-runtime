@@ -100,3 +100,39 @@ def test_clean_grounded_learning_store_is_healthy_and_formats():
     assert "outcome coverage: 100.0%" in text
     assert "interaction=1" in text
     assert "compiled=1" in text
+
+
+def test_learning_health_reports_quarantined_lessons_as_watch():
+    conn = _conn()
+    try:
+        memory_store.add_lesson(
+            conn,
+            "harmful",
+            "Repeatedly harmful parser advice.",
+            b"\x01\x02\x03\x04",
+            "seed:quality:test",
+        )
+        for index in range(6):
+            interaction_id = "harmful-use-%s" % index
+            memory_store.log_lesson_usage(
+                conn, ["harmful"], interaction_id, "parser task",
+            )
+            memory_store.record_lesson_usage_outcome(
+                conn, interaction_id, "failed", -1.0,
+            )
+        report = learning_health.build_report(conn)
+    finally:
+        conn.close()
+
+    text = learning_health.format_report(report)
+    assert report["status"] == "watch"
+    assert report["evaluated_lessons"] == 1
+    assert report["lessons_with_losses"] == 1
+    assert report["loss_only_lessons"] == 1
+    assert report["quarantined_lessons"] == 1
+    assert report["quarantined_lesson_details"][0]["lesson_id"] == "harmful"
+    assert report["quarantined_lesson_details"][0]["losses_since_win"] == 6
+    assert report["quarantined_lesson_details"][0]["retry_after"]
+    assert "automatically re-enter probation" in report["quarantine_review"]
+    assert "quarantined=1" in text
+    assert "quarantine harmful: losses=6" in text
