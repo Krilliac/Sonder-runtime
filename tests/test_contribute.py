@@ -1,5 +1,6 @@
 import memory_store as ms
 import contribute
+import time
 
 
 def _conn():
@@ -32,11 +33,63 @@ def test_privacy_review_helpers_name_and_redact_findings():
     reasons = contribute.private_reasons(text)
     preview = contribute.privacy_preview(text)
 
-    assert reasons == ["email", "credential_assignment"]
+    assert reasons == ["email", "credential_assignment", "known_credential"]
     assert "bob@example.com" not in preview
     assert "sk-super-private" not in preview
     assert "<email>" in preview
     assert "<credential>" in preview
+
+
+def test_privacy_rules_cover_common_header_json_cloud_and_system_path_forms():
+    samples = {
+        "authorization_header": "Authorization: Bearer sk-proj-abcdefghijklmnop",
+        "credential_assignment": '{"api_key": "sk-proj-abcdefghijklmnop"}',
+        "sensitive_header": "Cookie: sessionid=abcdefghijklmnop",
+        "known_credential": "aws id AKIAABCDEFGHIJKLMNOP",
+        "unix_system_path": "read /etc/ssh/id_rsa before connecting",
+        "windows_path": "read D:/secrets/token.txt before connecting",
+        "tilde_private_path": "read ~/.aws/credentials before connecting",
+        "url_credentials": "fetch https://user:private-pass@example.invalid/repo",
+    }
+
+    for expected, text in samples.items():
+        reasons = contribute.private_reasons(text)
+        preview = contribute.privacy_preview(text)
+        assert expected in reasons
+        assert contribute.is_shareable(text) is False
+        assert "private-pass" not in preview
+        assert "abcdefghijklmnop" not in preview
+        assert "id_rsa" not in preview
+        assert "credentials" not in preview
+        assert "sessionid" not in preview
+
+
+def test_privacy_rules_cover_vendor_prefixed_credentials_and_api_headers():
+    samples = (
+        "X-API-Key: abcdefghijklmnop",
+        "x-auth-token: abcdefghijklmnop",
+        "Set-Cookie: sessionid=abcdefghijklmnop; HttpOnly",
+        "OPENAI_API_KEY=abcdefghijklmnop",
+        "ANTHROPIC_API_KEY=abcdefghijklmnop",
+    )
+
+    for text in samples:
+        assert contribute.private_reasons(text)
+        assert contribute.is_shareable(text) is False
+        assert "abcdefghijklmnop" not in contribute.privacy_preview(text)
+
+
+def test_privacy_scan_is_bounded_on_long_non_secret_identifier_text():
+    for text in (
+        "foo_" * 4000 + "bar=1",
+        "x-" * 8000 + "noop",
+    ):
+        started = time.perf_counter()
+        reasons = contribute.private_reasons(text)
+        elapsed = time.perf_counter() - started
+
+        assert reasons == []
+        assert elapsed < 0.5
 
 
 def test_privacy_preview_never_leaks_path_suffixes_with_spaces():
@@ -58,7 +111,7 @@ def test_scrubbed_lessons_filters_mixed_db():
 
     result = contribute.scrubbed_lessons(c)
 
-    ids = {l["id"] for l in result}
+    ids = {lesson["id"] for lesson in result}
     assert ids == {"1", "3"}
-    for l in result:
-        assert set(l.keys()) == {"id", "text"}
+    for lesson in result:
+        assert set(lesson.keys()) == {"id", "text"}

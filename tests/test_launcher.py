@@ -961,11 +961,22 @@ def test_remote_owner_never_signals_coincident_local_process_group(
 
 
 def test_control_identity_is_persisted_before_worker_waits(monkeypatch, tmp_path):
+    release = tmp_path / "release-control"
     (tmp_path / "sonder_headless.py").write_text(
-        "import time\nprint('working', flush=True)\ntime.sleep(0.5)\n",
+        "from pathlib import Path\n"
+        "import time\n"
+        "release = Path(__file__).with_name('release-control')\n"
+        "deadline = time.monotonic() + 15\n"
+        "while not release.exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.01)\n"
+        "if not release.exists():\n"
+        "    raise SystemExit(9)\n"
+        "print('working', flush=True)\n",
         encoding="utf-8",
     )
-    controller = make_controller(tmp_path, python=sys.executable)
+    controller = make_controller(
+        tmp_path, python=sys.executable, start_timeout=15,
+    )
     states = iter(["stopped", "healthy"])
     monkeypatch.setattr(controller, "_server_state", lambda: next(states))
     monkeypatch.setattr(controller, "_wait_for_state", lambda *args: True)
@@ -975,7 +986,7 @@ def test_control_identity_is_persisted_before_worker_waits(monkeypatch, tmp_path
     # The suite can be CPU-starved on small Windows hosts; wait for the atomic
     # metadata publication itself instead of treating a transient running row
     # with no child metadata as a partially persisted record.
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         with sqlite3.connect(controller.db_path) as connection:
             connection.row_factory = sqlite3.Row
@@ -987,13 +998,15 @@ def test_control_identity_is_persisted_before_worker_waits(monkeypatch, tmp_path
             break
         time.sleep(0.01)
 
+    release.write_text("release\n", encoding="ascii")
     assert row["phase"] == "running"
     assert row["control_pid"]
     assert row["control_pid"] == row["control_group_id"]
     assert row["control_identity"]
     assert row["control_platform"] in {"posix-session", "windows-process-group"}
     assert row["hard_deadline"] > row["created_ts"]
-    assert controller.wait_operation(operation["id"], 2)["phase"] == "succeeded"
+    finished = controller.wait_operation(operation["id"], 15)
+    assert finished["phase"] == "succeeded", finished
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX detached recovery regression")

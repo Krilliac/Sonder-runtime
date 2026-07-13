@@ -31,6 +31,7 @@ import promotion_eval
 from process_liveness import pid_alive as _process_pid_alive
 import system_profile
 import sonder_paths
+import training_data
 
 
 ROOT = Path(__file__).resolve().parent
@@ -414,6 +415,31 @@ def _sha256_file(path):
     return digest.hexdigest()
 
 
+def _inspect_export_manifest(path, inspection):
+    """Validate and hash the privacy-selection receipt beside a memory export."""
+    path = Path(path)
+    try:
+        raw = path.read_bytes()
+        if len(raw) > 64 * 1024:
+            raise ValueError("training export selection manifest is too large")
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, TypeError, UnicodeError, ValueError) as exc:
+        raise ValueError("training export selection manifest is unreadable") from exc
+    expected = {
+        "schema": 1,
+        "format": "sonder-chat-jsonl",
+        "accepted": len(inspection.examples),
+        "characters": inspection.content_chars,
+        "sha256": inspection.sha256,
+        "privacy_policy": "exclude-shared-private-markers",
+    }
+    if not isinstance(payload, dict) or any(
+        payload.get(key) != value for key, value in expected.items()
+    ):
+        raise ValueError("training export selection manifest does not match its dataset")
+    return hashlib.sha256(raw).hexdigest()
+
+
 def _resume_signature(plan_payload):
     options = dict((plan_payload or {}).get("options") or {})
     return {
@@ -484,14 +510,33 @@ def _start_training_locked(plan, *, confirmed=False, dry_run=False, resume=False
             return False, "Training resume requires an interrupted or failed run."
         run_id = str(current.get("run_id") or "")
         run_dir = Path(current.get("run_dir") or "")
-        if not run_id or not run_dir.is_dir():
+        if not re.fullmatch(r"[0-9a-f]{32}", run_id) or not run_dir.is_dir():
             return False, "Training resume provenance is missing; start a new run."
+        expected_run_dir = (output_root / "runs" / run_id).resolve()
+        if run_dir.resolve() != expected_run_dir:
+            return False, "Training resume run directory is outside the configured output root."
+        run_dir = expected_run_dir
         if current.get("base_hf") != plan.training.model:
             return False, "Training resume plan does not match the interrupted run base model."
         expected_revision = MODEL_SPECS[plan.training.model_size]["hf_revision"]
         if current.get("hf_revision") != expected_revision:
             return False, "Training resume base revision does not match the interrupted run."
         prior_plan_file = run_dir / "training-plan.json"
+        try:
+            recorded_plan_file = Path(current.get("plan_file") or "").resolve()
+        except (OSError, TypeError, ValueError):
+            return False, "Training resume plan provenance is invalid."
+        recorded_plan_sha256 = str(current.get("plan_sha256") or "")
+        if recorded_plan_file != prior_plan_file.resolve():
+            return False, "Training resume plan path does not match the interrupted run."
+        if (
+            len(recorded_plan_sha256) != 64
+            or not prior_plan_file.is_file()
+            or not hmac.compare_digest(
+                _sha256_file(prior_plan_file), recorded_plan_sha256,
+            )
+        ):
+            return False, "Training resume plan changed after the interrupted run."
         try:
             prior = json.loads(prior_plan_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -503,30 +548,99 @@ def _start_training_locked(plan, *, confirmed=False, dry_run=False, resume=False
     else:
         run_id = uuid.uuid4().hex
         run_dir = output_root / "runs" / run_id
+
+    def prelaunch_failure(message):
+        if not resume:
+            try:
+                expected = (output_root / "runs" / run_id).resolve()
+                if re.fullmatch(r"[0-9a-f]{32}", run_id) and run_dir.resolve() == expected:
+                    shutil.rmtree(expected)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return False, message + " The incomplete run directory could not be removed."
+        return False, message
+
     output = run_dir / "adapter"
     ok, free = _disk_ok(run_dir.parent, 3 + MODEL_SPECS[plan.training.model_size]["params"] * 2.2)
     if not ok:
         return False, f"Training not started: only {free:.1f} GB disk free."
     output.mkdir(parents=True, exist_ok=True)
-    source_data_path = Path(os.environ.get("SONDER_DATA", ROOT / "training_data.jsonl"))
-    if not source_data_path.exists():
-        try:
-            import export_training_data
-            exported = export_training_data.main(str(source_data_path))
-        except Exception as exc:
-            return False, f"Training data preparation failed: {exc}"
-        if not exported:
-            return False, "Training data preparation produced no good-outcome examples."
-    source_data_path = source_data_path.resolve()
-    source_data_sha256 = _sha256_file(source_data_path)
+    explicit_data = os.environ.get("SONDER_DATA")
     if resume:
-        if str(prior.get("source_data_path") or "") != str(source_data_path):
-            return False, "Training resume dataset path does not match the interrupted run."
-        if str(prior.get("source_data_sha256") or "") != source_data_sha256:
-            return False, "Training resume dataset changed since the interrupted run."
         data_path = Path(prior.get("data_path") or "")
-        if not data_path.is_file() or _sha256_file(data_path) != prior.get("data_sha256"):
+        expected_data_path = (run_dir / "training-data.jsonl").resolve()
+        if data_path.resolve() != expected_data_path:
+            return False, "Training resume snapshot is outside the immutable run directory."
+        if not data_path.is_file():
             return False, "Training resume snapshot is missing or changed."
+        try:
+            data_inspection = training_data.inspect_jsonl(
+                data_path, expected_sha256=str(prior.get("data_sha256") or ""),
+            )
+        except (OSError, training_data.TrainingDataError) as exc:
+            return False, f"Training resume snapshot is invalid: {_bounded_error(exc)}"
+        if not data_inspection.examples:
+            return False, "Training resume snapshot contains no examples."
+        data_source = str(prior.get("data_source") or "")
+        if data_source not in {"explicit", "memory_export"}:
+            return False, "Training resume dataset source is unsupported."
+        if data_source == "memory_export":
+            # A generated corpus is immutable for the lifetime of its run.
+            # Resume must not silently retrain on a newer live-memory export.
+            source_data_path = Path(prior.get("source_data_path") or "")
+            if source_data_path.resolve() != data_path.resolve():
+                return False, "Training resume generated-dataset provenance is invalid."
+            source_data_sha256 = data_inspection.sha256
+            if source_data_sha256 != str(prior.get("source_data_sha256") or ""):
+                return False, "Training resume dataset changed since the interrupted run."
+            selection_manifest_path = Path(
+                prior.get("selection_manifest_path") or ""
+            )
+            expected_selection_path = Path(str(data_path) + ".manifest.json").resolve()
+            if selection_manifest_path.resolve() != expected_selection_path:
+                return False, "Training resume selection manifest is outside the run."
+            try:
+                selection_manifest_sha256 = _inspect_export_manifest(
+                    selection_manifest_path, data_inspection,
+                )
+            except (OSError, ValueError) as exc:
+                return False, f"Training resume selection evidence is invalid: {_bounded_error(exc)}"
+            if selection_manifest_sha256 != str(
+                prior.get("selection_manifest_sha256") or ""
+            ):
+                return False, "Training resume selection manifest changed."
+        else:
+            source_data_path = Path(explicit_data or (ROOT / "training_data.jsonl"))
+            if not source_data_path.is_file():
+                return False, "Training resume source dataset is missing."
+            source_data_path = source_data_path.resolve()
+            try:
+                source_inspection = training_data.inspect_jsonl(
+                    source_data_path,
+                    expected_sha256=str(prior.get("source_data_sha256") or ""),
+                )
+            except (OSError, training_data.TrainingDataError) as exc:
+                return False, f"Training resume source dataset is invalid: {_bounded_error(exc)}"
+            source_data_sha256 = source_inspection.sha256
+            if str(prior.get("source_data_path") or "") != str(source_data_path):
+                return False, "Training resume dataset path does not match the interrupted run."
+            selection_manifest_path = ""
+            selection_manifest_sha256 = ""
+        trusted_fields = {
+            "data_path": str(data_path),
+            "data_sha256": data_inspection.sha256,
+            "data_examples": len(data_inspection.examples),
+            "data_bytes": data_inspection.file_bytes,
+            "data_content_chars": data_inspection.content_chars,
+            "data_source": data_source,
+            "source_data_path": str(source_data_path),
+            "source_data_sha256": source_data_sha256,
+            "selection_manifest_path": str(selection_manifest_path),
+            "selection_manifest_sha256": selection_manifest_sha256,
+        }
+        if any(current.get(key) != value for key, value in trusted_fields.items()):
+            return False, "Training resume dataset provenance does not match trusted state."
         claim = run_dir / ".launch-claimed"
         if claim.exists():
             try:
@@ -539,11 +653,69 @@ def _start_training_locked(plan, *, confirmed=False, dry_run=False, resume=False
                 claim.unlink()
     else:
         data_path = run_dir / "training-data.jsonl"
-        shutil.copyfile(source_data_path, data_path)
-        if _sha256_file(data_path) != source_data_sha256:
-            return False, "Training dataset changed while creating the immutable run snapshot."
+        if explicit_data:
+            data_source = "explicit"
+            source_data_path = Path(explicit_data)
+            if not source_data_path.is_file():
+                return prelaunch_failure("Explicit training dataset does not exist.")
+            source_data_path = source_data_path.resolve()
+            try:
+                source_inspection = training_data.inspect_jsonl(source_data_path)
+            except (OSError, training_data.TrainingDataError) as exc:
+                return prelaunch_failure(
+                    f"Explicit training dataset is invalid: {_bounded_error(exc)}"
+                )
+            if not source_inspection.examples:
+                return prelaunch_failure("Explicit training dataset contains no examples.")
+            source_data_sha256 = source_inspection.sha256
+            try:
+                shutil.copyfile(source_data_path, data_path)
+                data_inspection = training_data.inspect_jsonl(
+                    data_path, expected_sha256=source_data_sha256,
+                )
+            except (OSError, training_data.TrainingDataError) as exc:
+                return prelaunch_failure(
+                    "Training dataset changed while creating the immutable run "
+                    f"snapshot: {_bounded_error(exc)}"
+                )
+            selection_manifest_path = ""
+            selection_manifest_sha256 = ""
+        else:
+            # Never reuse a stale default export.  Each new run gets a fresh,
+            # policy-filtered export directly inside its immutable run folder.
+            data_source = "memory_export"
+            try:
+                import export_training_data
+                exported = export_training_data.main(str(data_path))
+            except Exception as exc:
+                return prelaunch_failure(
+                    f"Training data preparation failed: {_bounded_error(exc)}"
+                )
+            if not exported:
+                return prelaunch_failure(
+                    "Training data preparation produced no eligible examples."
+                )
+            source_data_path = data_path.resolve()
+            try:
+                data_inspection = training_data.inspect_jsonl(source_data_path)
+            except (OSError, training_data.TrainingDataError) as exc:
+                return prelaunch_failure(
+                    f"Generated training dataset is invalid: {_bounded_error(exc)}"
+                )
+            source_data_sha256 = data_inspection.sha256
+            selection_manifest_path = Path(
+                str(source_data_path) + ".manifest.json"
+            ).resolve()
+            try:
+                selection_manifest_sha256 = _inspect_export_manifest(
+                    selection_manifest_path, data_inspection,
+                )
+            except (OSError, ValueError) as exc:
+                return prelaunch_failure(
+                    f"Training selection evidence is invalid: {_bounded_error(exc)}"
+                )
     data_path = data_path.resolve()
-    data_sha256 = _sha256_file(data_path)
+    data_sha256 = data_inspection.sha256
     launch_token = secrets.token_urlsafe(32)
     manifest = {
         "schema": 2,
@@ -556,8 +728,14 @@ def _start_training_locked(plan, *, confirmed=False, dry_run=False, resume=False
         "created_ts": int(time.time()),
         "data_path": str(data_path),
         "data_sha256": data_sha256,
+        "data_examples": len(data_inspection.examples),
+        "data_bytes": data_inspection.file_bytes,
+        "data_content_chars": data_inspection.content_chars,
+        "data_source": data_source,
         "source_data_path": str(source_data_path),
         "source_data_sha256": source_data_sha256,
+        "selection_manifest_path": str(selection_manifest_path),
+        "selection_manifest_sha256": selection_manifest_sha256,
         "adapter_dir": str(output.resolve()),
         "gpu_index": plan.options.gpu_index,
         "resume": bool(resume),
@@ -573,6 +751,17 @@ def _start_training_locked(plan, *, confirmed=False, dry_run=False, resume=False
         "run_id": run_id,
         "run_dir": str(run_dir),
         "plan_file": str(plan_file),
+        "plan_sha256": _sha256_file(plan_file),
+        "data_path": manifest["data_path"],
+        "data_sha256": manifest["data_sha256"],
+        "data_examples": manifest["data_examples"],
+        "data_bytes": manifest["data_bytes"],
+        "data_content_chars": manifest["data_content_chars"],
+        "data_source": manifest["data_source"],
+        "source_data_path": manifest["source_data_path"],
+        "source_data_sha256": manifest["source_data_sha256"],
+        "selection_manifest_path": manifest["selection_manifest_path"],
+        "selection_manifest_sha256": manifest["selection_manifest_sha256"],
         "base_hf": manifest["base_hf"],
         "hf_revision": manifest["hf_revision"],
         "base_ollama": manifest["base_ollama"],
@@ -602,6 +791,8 @@ def _start_training_locked(plan, *, confirmed=False, dry_run=False, resume=False
     try:
         result = runner([sys.executable, str(ROOT / "qlora_train.py")], cwd=ROOT, env=env)
     except KeyboardInterrupt:
+        with contextlib.suppress(OSError):
+            state["plan_sha256"] = _sha256_file(plan_file)
         state.update(status="interrupted", ended_ts=int(time.time()))
         _write_state(state)
         return False, "Training interrupted cleanly; checkpoints were preserved for resume."
@@ -609,6 +800,8 @@ def _start_training_locked(plan, *, confirmed=False, dry_run=False, resume=False
         state.update(status="failed", ended_ts=int(time.time()), error=str(exc))
         _write_state(state)
         return False, "Training process could not start; the run is preserved for an explicit resume."
+    with contextlib.suppress(OSError):
+        state["plan_sha256"] = _sha256_file(plan_file)
     with contextlib.suppress(OSError):
         (run_dir / ".launch-claimed").unlink()
     if result.returncode:
@@ -783,7 +976,10 @@ def _validate_deployment_adapter(adapter_dir, state):
         return False, "adapter manifest does not prove a completed authorized run"
     immutable = (
         "run_id", "base_hf", "hf_revision", "base_ollama", "model_size", "method",
-        "data_path", "data_sha256", "source_data_path", "source_data_sha256",
+        "data_path", "data_sha256", "data_examples", "data_bytes",
+        "data_content_chars", "data_source", "source_data_path",
+        "source_data_sha256", "selection_manifest_path",
+        "selection_manifest_sha256",
         "adapter_dir", "gpu_index",
     )
     for key in immutable:
@@ -796,6 +992,10 @@ def _validate_deployment_adapter(adapter_dir, state):
         "base_ollama": state.get("base_ollama"),
         "adapter_dir": str(requested),
         "data_sha256": state.get("data_sha256"),
+        "data_examples": state.get("data_examples"),
+        "data_bytes": state.get("data_bytes"),
+        "data_content_chars": state.get("data_content_chars"),
+        "selection_manifest_sha256": state.get("selection_manifest_sha256"),
     }
     for key, value in expected.items():
         if str(manifest.get(key) or "") != str(value or ""):
@@ -806,8 +1006,39 @@ def _validate_deployment_adapter(adapter_dir, state):
         return False, f"trusted training dataset snapshot is unavailable: {exc}"
     if snapshot_path != run_dir / "training-data.jsonl":
         return False, "trusted training dataset snapshot is outside the run"
-    if _sha256_file(snapshot_path) != str(manifest.get("data_sha256") or ""):
+    try:
+        inspection = training_data.inspect_jsonl(
+            snapshot_path, expected_sha256=str(manifest.get("data_sha256") or ""),
+        )
+    except (OSError, training_data.TrainingDataError):
         return False, "trusted training dataset snapshot integrity failed"
+    dataset_fields = {
+        "data_examples": len(inspection.examples),
+        "data_bytes": inspection.file_bytes,
+        "data_content_chars": inspection.content_chars,
+    }
+    if any(manifest.get(key) != value for key, value in dataset_fields.items()):
+        return False, "trusted training dataset snapshot metadata changed"
+    if manifest.get("data_source") == "memory_export":
+        try:
+            selection_path = Path(
+                manifest.get("selection_manifest_path") or ""
+            ).resolve(strict=True)
+        except OSError:
+            return False, "trusted training selection manifest is unavailable"
+        if selection_path != Path(str(snapshot_path) + ".manifest.json"):
+            return False, "trusted training selection manifest is outside the run"
+        try:
+            selection_hash = _inspect_export_manifest(selection_path, inspection)
+        except (OSError, ValueError):
+            return False, "trusted training selection manifest integrity failed"
+        if selection_hash != str(manifest.get("selection_manifest_sha256") or ""):
+            return False, "trusted training selection manifest changed"
+    elif (
+        manifest.get("selection_manifest_path")
+        or manifest.get("selection_manifest_sha256")
+    ):
+        return False, "explicit training data must not claim export selection evidence"
     for key in ("artifact_sha256", "artifact_sizes"):
         if state.get(key) != manifest.get(key):
             return False, f"training state does not match adapter {key}"

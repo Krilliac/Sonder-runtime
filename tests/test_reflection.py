@@ -2,6 +2,7 @@
 import embeddings as e
 import memory_store as ms
 import reflection
+import pytest
 
 
 def _off(**kw):
@@ -120,3 +121,29 @@ def test_maybe_add_lesson_stores_when_embeddings_unavailable():
     assert lid is not None
     stored = ms.all_lessons(c)[0]
     assert stored["embedding"] is None
+
+
+@pytest.mark.parametrize(
+    "private_lesson",
+    (
+        r"Read C:\Users\example\secret.env with pathlib.Path.read_text().",
+        "Set api_key=super-secret-value before calling the client.",
+        "Send the failure report to developer@example.com.",
+        "Use Authorization: Bearer sk-proj-abcdefghijklmnop for the request.",
+        "Read /etc/ssh/id_rsa before connecting.",
+    ),
+)
+def test_maybe_add_lesson_rejects_privacy_flagged_distillation(private_lesson):
+    c = ms.connect(":memory:")
+    embed_calls = []
+
+    lid = reflection.maybe_add_lesson(
+        c, "private-source", "task", "response", "tests_passed",
+        offload_fn=lambda **kw: private_lesson,
+        embed_fn=lambda text: embed_calls.append(text) or [1.0],
+    )
+
+    assert lid is None
+    assert embed_calls == []
+    assert ms.all_lessons(c) == []
+    assert c.execute("SELECT COUNT(*) FROM lessons_fts").fetchone()[0] == 0

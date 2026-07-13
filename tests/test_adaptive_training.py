@@ -183,7 +183,11 @@ def test_direct_qlora_invocation_fails_before_heavy_imports(monkeypatch):
 def test_authorized_qlora_cpu_offload_request_fails_before_heavy_imports(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("SONDER_ALLOW_CPU_OFFLOAD", "1")
     data = tmp_path / "training.jsonl"
-    data.write_text("{}\n", encoding="utf-8")
+    data.write_text(
+        '{"messages":[{"role":"user","content":"question"},'
+        '{"role":"assistant","content":"answer"}]}\n',
+        encoding="utf-8",
+    )
     output = tmp_path / "runs" / "run-1" / "adapter"
     output.mkdir(parents=True)
     token = "test-token"
@@ -301,9 +305,14 @@ def _trusted_adapter(
     adapter = run_dir / "adapter"
     adapter.mkdir(parents=True)
     data = tmp_path / "training.jsonl"
-    data.write_text('{"messages": []}\n', encoding="utf-8")
+    data.write_text(
+        '{"messages":[{"role":"user","content":"question"},'
+        '{"role":"assistant","content":"answer"}]}\n',
+        encoding="utf-8",
+    )
     data_snapshot = run_dir / "training-data.jsonl"
     data_snapshot.write_bytes(data.read_bytes())
+    data_inspection = adaptive_training.training_data.inspect_jsonl(data_snapshot)
     config = adapter / "adapter_config.json"
     weights = adapter / "adapter_model.safetensors"
     config.write_text(json.dumps({"base_model_name_or_path": config_base}), encoding="utf-8")
@@ -322,9 +331,15 @@ def _trusted_adapter(
         "model_size": "1.5b",
         "method": "QLoRA (4-bit NF4)",
         "data_path": str(data_snapshot.resolve()),
-        "data_sha256": hashlib.sha256(data_snapshot.read_bytes()).hexdigest(),
+        "data_sha256": data_inspection.sha256,
+        "data_examples": len(data_inspection.examples),
+        "data_bytes": data_inspection.file_bytes,
+        "data_content_chars": data_inspection.content_chars,
+        "data_source": "explicit",
         "source_data_path": str(data.resolve()),
         "source_data_sha256": hashlib.sha256(data.read_bytes()).hexdigest(),
+        "selection_manifest_path": "",
+        "selection_manifest_sha256": "",
         "adapter_dir": str(adapter.resolve()),
         "gpu_index": 0,
         "created_ts": 100,
@@ -352,6 +367,10 @@ def _trusted_adapter(
         "hf_revision": plan["hf_revision"],
         "base_ollama": ollama_base,
         "data_sha256": plan["data_sha256"],
+        "data_examples": plan["data_examples"],
+        "data_bytes": plan["data_bytes"],
+        "data_content_chars": plan["data_content_chars"],
+        "selection_manifest_sha256": "",
         "source_data_sha256": plan["source_data_sha256"],
         "plan_sha256": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
         "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
@@ -1824,6 +1843,122 @@ def test_minimal_mocked_training_flow_builds_command_and_validates(monkeypatch, 
     assert json.loads((tmp_path / "state.json").read_text())["status"] == "trained"
 
 
+def test_new_training_run_freshly_exports_memory_into_immutable_run(
+    monkeypatch, tmp_path,
+):
+    import export_training_data
+
+    monkeypatch.delenv("SONDER_DATA", raising=False)
+    monkeypatch.setenv("SONDER_LORA_OUT", str(tmp_path / "lora"))
+    monkeypatch.setenv("SONDER_TRAINING_STATE", str(tmp_path / "state.json"))
+    exported_paths = []
+
+    def export(out_path):
+        destination = Path(out_path)
+        exported_paths.append(destination)
+        payload = (
+            '{"messages":[{"role":"user","content":"fresh"},'
+            '{"role":"assistant","content":"snapshot"}]}\n'
+        )
+        destination.write_bytes(payload.encode("utf-8"))
+        Path(str(destination) + ".manifest.json").write_text(json.dumps({
+            "schema": 1,
+            "format": "sonder-chat-jsonl",
+            "accepted": 1,
+            "characters": len("freshsnapshot"),
+            "sha256": hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+            "privacy_policy": "exclude-shared-private-markers",
+        }), encoding="utf-8")
+        return 1
+
+    monkeypatch.setattr(export_training_data, "main", export)
+    plan = adaptive_training.build_plan(profile(8, 32))
+
+    ok, message = adaptive_training.start_training(
+        plan,
+        confirmed=True,
+        runner=lambda *args, **kwargs: SimpleNamespace(returncode=1),
+    )
+
+    assert not ok and "preserved" in message
+    assert len(exported_paths) == 1
+    assert exported_paths[0].name == "training-data.jsonl"
+    state = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    plan_manifest = json.loads(Path(state["plan_file"]).read_text(encoding="utf-8"))
+    assert exported_paths[0].parent == Path(state["run_dir"])
+    assert plan_manifest["data_source"] == "memory_export"
+    assert plan_manifest["source_data_path"] == plan_manifest["data_path"]
+    assert plan_manifest["selection_manifest_sha256"]
+    assert state["selection_manifest_sha256"] == plan_manifest[
+        "selection_manifest_sha256"
+    ]
+
+
+def test_memory_export_resume_reuses_exact_snapshot_without_reexport(
+    monkeypatch, tmp_path,
+):
+    import export_training_data
+
+    monkeypatch.delenv("SONDER_DATA", raising=False)
+    monkeypatch.setenv("SONDER_LORA_OUT", str(tmp_path / "lora"))
+    monkeypatch.setenv("SONDER_TRAINING_STATE", str(tmp_path / "state.json"))
+
+    def export(out_path):
+        destination = Path(out_path)
+        payload = (
+            '{"messages":[{"role":"user","content":"fresh"},'
+            '{"role":"assistant","content":"snapshot"}]}\n'
+        ).encode("utf-8")
+        destination.write_bytes(payload)
+        Path(str(destination) + ".manifest.json").write_text(json.dumps({
+            "schema": 1,
+            "format": "sonder-chat-jsonl",
+            "accepted": 1,
+            "characters": len("freshsnapshot"),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "privacy_policy": "exclude-shared-private-markers",
+        }), encoding="utf-8")
+        return 1
+
+    monkeypatch.setattr(export_training_data, "main", export)
+    plan = adaptive_training.build_plan(profile(8, 32))
+    ok, _message = adaptive_training.start_training(
+        plan, confirmed=True,
+        runner=lambda *args, **kwargs: SimpleNamespace(returncode=1),
+    )
+    assert not ok
+    monkeypatch.setattr(
+        export_training_data, "main",
+        lambda *args, **kwargs: pytest.fail("resume must not re-export memory"),
+    )
+    calls = []
+
+    ok, message = adaptive_training.start_training(
+        plan, confirmed=True, resume=True,
+        runner=lambda *args, **kwargs: calls.append(args)
+        or SimpleNamespace(returncode=1),
+    )
+
+    assert not ok and "preserved" in message
+    assert len(calls) == 1
+
+
+def test_prelaunch_dataset_failures_remove_new_run_directory(monkeypatch, tmp_path):
+    invalid = tmp_path / "invalid.jsonl"
+    invalid.write_text("{}\n", encoding="utf-8")
+    output_root = tmp_path / "lora"
+    monkeypatch.setenv("SONDER_DATA", str(invalid))
+    monkeypatch.setenv("SONDER_LORA_OUT", str(output_root))
+    monkeypatch.setenv("SONDER_TRAINING_STATE", str(tmp_path / "state.json"))
+    plan = adaptive_training.build_plan(profile(8, 32))
+
+    ok, message = adaptive_training.start_training(plan, confirmed=True)
+
+    assert not ok and "dataset is invalid" in message
+    runs = output_root / "runs"
+    assert not runs.exists() or list(runs.iterdir()) == []
+
+
 def test_resume_requires_proven_interrupted_or_failed_run(monkeypatch, tmp_path):
     monkeypatch.setenv("SONDER_TRAINING_STATE", str(tmp_path / "state.json"))
     plan = adaptive_training.build_plan(profile(8, 32))
@@ -1856,14 +1991,19 @@ def _create_failed_training_run(monkeypatch, tmp_path):
 
 def test_resume_rejects_changed_dataset_content(monkeypatch, tmp_path):
     plan, data = _create_failed_training_run(monkeypatch, tmp_path)
-    data.write_text(data.read_text(encoding="utf-8") + "{}\n", encoding="utf-8")
+    data.write_text(
+        data.read_text(encoding="utf-8")
+        + '{"messages":[{"role":"user","content":"new"},'
+        '{"role":"assistant","content":"row"}]}\n',
+        encoding="utf-8",
+    )
     called = []
     ok, message = adaptive_training.start_training(
         plan, confirmed=True, resume=True,
         runner=lambda *args, **kwargs: called.append(args),
     )
     assert not ok
-    assert "dataset changed" in message
+    assert "data changed" in message
     assert called == []
 
 
@@ -1879,6 +2019,51 @@ def test_resume_rejects_changed_dataset_path(monkeypatch, tmp_path):
     )
     assert not ok
     assert "dataset path" in message
+    assert called == []
+
+
+def test_resume_rejects_tampered_plan_and_out_of_run_snapshot(monkeypatch, tmp_path):
+    plan, _data = _create_failed_training_run(monkeypatch, tmp_path)
+    state_path = tmp_path / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    plan_path = Path(state["plan_file"])
+    manifest = json.loads(plan_path.read_text(encoding="utf-8"))
+    attacker_data = tmp_path / "attacker.jsonl"
+    attacker_data.write_text(
+        '{"messages":[{"role":"user","content":"untrusted"},'
+        '{"role":"assistant","content":"payload"}]}\n',
+        encoding="utf-8",
+    )
+    attacker_hash = hashlib.sha256(attacker_data.read_bytes()).hexdigest()
+    manifest.update(
+        data_path=str(attacker_data.resolve()),
+        data_sha256=attacker_hash,
+        data_source="memory_export",
+        source_data_path=str(attacker_data.resolve()),
+        source_data_sha256=attacker_hash,
+    )
+    plan_path.write_text(json.dumps(manifest), encoding="utf-8")
+    # Even if mutable state is changed alongside the plan, containment remains
+    # an independent invariant: training input must be the run-local snapshot.
+    state.update(
+        plan_sha256=hashlib.sha256(plan_path.read_bytes()).hexdigest(),
+        data_path=str(attacker_data.resolve()),
+        data_sha256=attacker_hash,
+        data_source="memory_export",
+        source_data_path=str(attacker_data.resolve()),
+        source_data_sha256=attacker_hash,
+    )
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    called = []
+
+    ok, message = adaptive_training.start_training(
+        plan,
+        confirmed=True,
+        resume=True,
+        runner=lambda *args, **kwargs: called.append(args),
+    )
+
+    assert not ok and "outside the immutable run directory" in message
     assert called == []
 
 

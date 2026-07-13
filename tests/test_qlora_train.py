@@ -13,7 +13,10 @@ def _launch(monkeypatch, tmp_path, *, created=100, token="secret"):
     output = run / "adapter"
     output.mkdir(parents=True)
     data = tmp_path / "training.jsonl"
-    data.write_text("{}\n", encoding="utf-8")
+    data.write_text(json.dumps({"messages": [
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": "answer"},
+    ]}) + "\n", encoding="utf-8")
     manifest = run / "training-plan.json"
     manifest.write_text(json.dumps({
         "schema": 2,
@@ -46,7 +49,10 @@ def test_launch_authorization_is_consumed_once(monkeypatch, tmp_path):
 
 def test_launch_rejects_changed_training_data(monkeypatch, tmp_path):
     _, data = _launch(monkeypatch, tmp_path)
-    data.write_text("changed\n", encoding="utf-8")
+    data.write_text(json.dumps({"messages": [
+        {"role": "user", "content": "changed question"},
+        {"role": "assistant", "content": "changed answer"},
+    ]}) + "\n", encoding="utf-8")
     with pytest.raises(RuntimeError, match="changed"):
         qlora_train.authorize_launch(now=100)
 
@@ -130,20 +136,125 @@ class FakeTokenizer:
         return tokens
 
 
-def test_load_examples_rejects_non_assistant_or_empty_targets(tmp_path):
-    rows = [
-        {"messages": [{"role": "user", "content": "x"}, {"role": "assistant", "content": "good"}]},
-        {"messages": [{"role": "user", "content": "x"}, {"role": "user", "content": "not a target"}]},
-        {"messages": [{"role": "system", "content": "x"}, {"role": "assistant", "content": "no user"}]},
-        {"messages": [{"role": "user", "content": "x"}, {"role": "assistant", "content": "  "}]},
-        {"messages": [{"role": "user", "content": ["not", "text"]}, {"role": "assistant", "content": "bad"}]},
-    ]
+def test_load_examples_accepts_exact_user_assistant_pairs(tmp_path):
+    row = {"messages": [
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": "answer"},
+    ]}
     path = tmp_path / "training.jsonl"
-    path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
 
     loaded = qlora_train.load_examples(path)
 
-    assert loaded == [rows[0]]
+    assert loaded == [row]
+
+
+def test_load_examples_rejects_blank_lines(tmp_path):
+    path = tmp_path / "training.jsonl"
+    path.write_text("\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="line 1 is empty"):
+        qlora_train.load_examples(path)
+
+
+@pytest.mark.parametrize("record, error", [
+    ([], "must be a JSON object"),
+    ({}, "only the messages field"),
+    ({"messages": "not a list"}, "exactly two messages"),
+    ({"messages": [{"role": "user", "content": "x"}]}, "exactly two messages"),
+    ({"messages": [
+        {"role": "user", "content": "x"},
+        {"role": "assistant", "content": "y"},
+        {"role": "assistant", "content": "z"},
+    ]}, "exactly two messages"),
+    ({"messages": ["not an object", {"role": "assistant", "content": "y"}]},
+     "message 1 must be an object"),
+    ({"messages": [
+        {"role": "system", "content": "x"},
+        {"role": "assistant", "content": "y"},
+    ]}, "ordered user then assistant"),
+    ({"messages": [
+        {"role": "user", "content": "x"},
+        {"role": "user", "content": "y"},
+    ]}, "ordered user then assistant"),
+    ({"messages": [
+        {"role": "user", "content": "  "},
+        {"role": "assistant", "content": "y"},
+    ]}, "content must be non-empty text"),
+    ({"messages": [
+        {"role": "user", "content": "x"},
+        {"role": "assistant", "content": ["not", "text"]},
+    ]}, "content must be non-empty text"),
+    ({"messages": [
+        {"role": "user", "content": "x", "extra": "not allowed"},
+        {"role": "assistant", "content": "y"},
+    ]}, "only role and content"),
+    ({"messages": [
+        {"role": "user", "content": "x"},
+        {"role": "assistant", "content": "y"},
+    ], "extra": "not allowed"}, "only the messages field"),
+])
+def test_load_examples_rejects_entire_snapshot_for_invalid_records(
+    tmp_path, record, error
+):
+    good = {"messages": [
+        {"role": "user", "content": "valid question"},
+        {"role": "assistant", "content": "valid answer"},
+    ]}
+    path = tmp_path / "training.jsonl"
+    path.write_text(
+        json.dumps(good) + "\n" + json.dumps(record) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match=error):
+        qlora_train.load_examples(path)
+
+
+def test_load_examples_rejects_malformed_json_and_utf8_without_echoing_data(tmp_path):
+    malformed = tmp_path / "malformed.jsonl"
+    malformed.write_text('{"messages": [secret-value\n', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="line 1 is not valid strict JSON") as json_error:
+        qlora_train.load_examples(malformed)
+    assert "secret-value" not in str(json_error.value)
+
+    invalid_utf8 = tmp_path / "invalid-utf8.jsonl"
+    invalid_utf8.write_bytes(b'\xffprivate-value\n')
+    with pytest.raises(RuntimeError, match="line 1 is not valid UTF-8") as utf8_error:
+        qlora_train.load_examples(invalid_utf8)
+    assert "private-value" not in str(utf8_error.value)
+
+
+def test_load_examples_enforces_file_record_field_and_example_limits(
+    monkeypatch, tmp_path
+):
+    valid = {"messages": [
+        {"role": "user", "content": "ask"},
+        {"role": "assistant", "content": "answer"},
+    ]}
+    encoded = json.dumps(valid) + "\n"
+    path = tmp_path / "training.jsonl"
+    path.write_text(encoded, encoding="utf-8")
+
+    monkeypatch.setattr(qlora_train, "MAX_TRAINING_FILE_BYTES", len(encoded) - 1)
+    with pytest.raises(RuntimeError, match="file exceeds"):
+        qlora_train.load_examples(path)
+
+    monkeypatch.setattr(qlora_train, "MAX_TRAINING_FILE_BYTES", 1024)
+    monkeypatch.setattr(qlora_train, "MAX_TRAINING_RECORD_BYTES", len(encoded) - 1)
+    with pytest.raises(RuntimeError, match="record size"):
+        qlora_train.load_examples(path)
+
+    monkeypatch.setattr(qlora_train, "MAX_TRAINING_RECORD_BYTES", 1024)
+    monkeypatch.setattr(qlora_train, "MAX_TRAINING_FIELD_CHARS", 3)
+    with pytest.raises(RuntimeError, match="field size"):
+        qlora_train.load_examples(path)
+
+    monkeypatch.setattr(qlora_train, "MAX_TRAINING_FIELD_CHARS", 1024)
+    monkeypatch.setattr(qlora_train, "MAX_TRAINING_EXAMPLES", 1)
+    path.write_text(encoded + encoded, encoding="utf-8")
+    with pytest.raises(RuntimeError, match="too many examples"):
+        qlora_train.load_examples(path)
 
 
 def test_load_examples_hashes_the_same_bytes_it_parses(tmp_path):
@@ -176,6 +287,21 @@ def test_long_prompt_truncation_preserves_assistant_loss_tokens():
     assert result["labels"][:25] == [-100] * 25
     assert all(label != -100 for label in result["labels"][25:])
     assert result["input_ids"][24] == 99
+
+
+def test_format_training_examples_fails_before_token_lists_exceed_budget(monkeypatch):
+    examples = [
+        {"messages": [
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": "answer"},
+        ]},
+    ]
+    monkeypatch.setattr(qlora_train, "formatted_token_limit", lambda _value=None: 5)
+
+    with pytest.raises(RuntimeError, match="safe in-memory token budget"):
+        qlora_train.format_training_examples(
+            FakeTokenizer(), examples, max_len=64, ram_budget_gb=1,
+        )
 
 
 def test_template_without_prefix_match_fails_closed():

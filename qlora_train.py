@@ -32,6 +32,8 @@ import sys
 import time
 from pathlib import Path
 
+import training_data
+
 # ---------------------------------------------------------------------------
 # Configuration (override via env vars; kept as simple constants on purpose)
 # ---------------------------------------------------------------------------
@@ -49,6 +51,16 @@ DATA_PATH = os.environ.get("SONDER_DATA", os.path.join(os.path.dirname(__file__)
 OUTPUT_DIR = os.environ.get("SONDER_LORA_OUT", os.path.join(os.path.dirname(__file__), "sonder-personal-lora"))
 
 MAX_LEN = int(os.environ.get("SONDER_MAX_LEN", "1024"))
+
+# Public aliases remain monkeypatchable in boundary tests while all producers
+# share the implementation and reviewed defaults in training_data.py.
+MAX_TRAINING_FILE_BYTES = training_data.MAX_TRAINING_FILE_BYTES
+MAX_TRAINING_RECORD_BYTES = training_data.MAX_TRAINING_RECORD_BYTES
+MAX_TRAINING_FIELD_CHARS = training_data.MAX_TRAINING_FIELD_CHARS
+MAX_TRAINING_TOTAL_CHARS = training_data.MAX_TRAINING_TOTAL_CHARS
+MAX_TRAINING_EXAMPLES = training_data.MAX_TRAINING_EXAMPLES
+MAX_FORMATTED_TOKENS = 2_000_000
+FORMATTED_TOKEN_BYTES_ESTIMATE = 192
 
 # LoRA hyperparameters
 LORA_R = int(os.environ.get("SONDER_LORA_R", "16"))
@@ -91,6 +103,16 @@ def _sha256_file(path):
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _training_limits():
+    return training_data.Limits(
+        file_bytes=MAX_TRAINING_FILE_BYTES,
+        record_bytes=MAX_TRAINING_RECORD_BYTES,
+        field_chars=MAX_TRAINING_FIELD_CHARS,
+        total_chars=MAX_TRAINING_TOTAL_CHARS,
+        examples=MAX_TRAINING_EXAMPLES,
+    )
 
 
 def authorize_launch(now=None):
@@ -145,9 +167,19 @@ def authorize_launch(now=None):
         value = manifest.get(key) if key == "gpu_index" else manifest.get(key) or ""
         if str(value) != actual:
             raise RuntimeError("training launch %s does not match the controller plan" % key)
-    digest = _sha256_file(DATA_PATH)
-    if digest != manifest.get("data_sha256"):
-        raise RuntimeError("training data changed after the controller approved the run")
+    inspection = training_data.inspect_jsonl(
+        DATA_PATH,
+        str(manifest.get("data_sha256") or ""),
+        limits=_training_limits(),
+    )
+    recorded = {
+        "data_examples": len(inspection.examples),
+        "data_bytes": inspection.file_bytes,
+        "data_content_chars": inspection.content_chars,
+    }
+    for key, actual in recorded.items():
+        if key in manifest and int(manifest[key]) != actual:
+            raise RuntimeError("training %s does not match the controller plan" % key)
     manifest["launch_consumed_ts"] = now
     manifest.pop("launch_token_sha256", None)
     _write_json_atomic(manifest_path, manifest)
@@ -168,35 +200,55 @@ def _print_vram_guidance():
 
 
 def load_examples(path, expected_sha256=""):
-    """Read training_data.jsonl -> list of {"messages": [user, assistant]}."""
-    examples = []
-    digest = hashlib.sha256()
-    with open(path, "rb") as f:
-        for raw_line in f:
-            digest.update(raw_line)
-            line = raw_line.decode("utf-8").strip()
-            if not line:
-                continue
-            obj = json.loads(line)
-            msgs = obj.get("messages")
-            if (
-                not isinstance(msgs, list)
-                or len(msgs) < 2
-                or not all(isinstance(message, dict) for message in msgs)
-                or not all(
-                    isinstance(message.get("role"), str)
-                    and isinstance(message.get("content"), str)
-                    for message in msgs
-                )
-                or msgs[-1].get("role") != "assistant"
-                or not str(msgs[-1].get("content") or "").strip()
-                or not any(message.get("role") == "user" for message in msgs[:-1])
-            ):
-                continue
-            examples.append(obj)
-    if expected_sha256 and not hmac.compare_digest(digest.hexdigest(), expected_sha256):
-        raise RuntimeError("training data changed while loading the authorized snapshot")
-    return examples
+    """Strictly read a bounded ``{"messages": [user, assistant]}`` JSONL file.
+
+    The authorized snapshot is an all-or-nothing training input: malformed or
+    unsupported records abort the load rather than silently changing the
+    approved corpus by skipping rows.
+    """
+    limits = training_data.Limits(
+        file_bytes=MAX_TRAINING_FILE_BYTES,
+        record_bytes=MAX_TRAINING_RECORD_BYTES,
+        field_chars=MAX_TRAINING_FIELD_CHARS,
+        total_chars=MAX_TRAINING_TOTAL_CHARS,
+        examples=MAX_TRAINING_EXAMPLES,
+    )
+    return training_data.inspect_jsonl(
+        path, expected_sha256=expected_sha256, limits=limits,
+    ).examples
+
+
+def formatted_token_limit(ram_budget_gb=None):
+    """Return a conservative cap for simultaneously materialized token lists."""
+    value = (
+        os.environ.get("SONDER_TRAIN_RAM_BUDGET_GB", "4")
+        if ram_budget_gb is None
+        else ram_budget_gb
+    )
+    try:
+        ram_bytes = float(value) * (1024 ** 3)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("training RAM budget is invalid") from exc
+    if ram_bytes <= 0:
+        raise RuntimeError("training RAM budget must be positive")
+    derived = int((ram_bytes * 0.08) / FORMATTED_TOKEN_BYTES_ESTIMATE)
+    return max(10_000, min(MAX_FORMATTED_TOKENS, derived))
+
+
+def format_training_examples(tokenizer, examples, max_len, *, ram_budget_gb=None):
+    """Tokenize examples while enforcing the reviewed in-memory expansion cap."""
+    limit = formatted_token_limit(ram_budget_gb)
+    total_tokens = 0
+    formatted = []
+    for example in examples:
+        item = build_supervised_example(tokenizer, example["messages"], max_len)
+        total_tokens += len(item["input_ids"])
+        if total_tokens > limit:
+            raise RuntimeError(
+                "formatted training corpus exceeds the safe in-memory token budget"
+            )
+        formatted.append(item)
+    return formatted
 
 
 def build_training_arguments(
@@ -387,11 +439,10 @@ def main():
     model.print_trainable_parameters()
 
     print("Formatting + tokenizing examples (prompt masked, assistant-only loss) ...")
-    formatted = [
-        build_supervised_example(tokenizer, ex["messages"], MAX_LEN)
-        for ex in examples
-    ]
+    formatted = format_training_examples(tokenizer, examples, MAX_LEN)
+    examples.clear()
     dataset = Dataset.from_list(formatted)
+    del formatted
 
     data_collator = DataCollatorForSeq2Seq(
         tokenizer=tokenizer,
