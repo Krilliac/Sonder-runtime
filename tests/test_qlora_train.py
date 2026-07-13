@@ -1,5 +1,7 @@
-import json
 import hashlib
+import importlib.util
+import json
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +20,7 @@ def _launch(monkeypatch, tmp_path, *, created=100, token="secret"):
         "run_id": "run-1",
         "created_ts": created,
         "base_hf": qlora_train.BASE,
+        "hf_revision": qlora_train.HF_REVISION,
         "data_path": str(data.resolve()),
         "data_sha256": hashlib.sha256(data.read_bytes()).hexdigest(),
         "adapter_dir": str(output.resolve()),
@@ -54,8 +57,59 @@ def test_launch_rejects_expired_capability(monkeypatch, tmp_path):
         qlora_train.authorize_launch(now=401)
 
 
+def test_launch_rejects_unreviewed_revision_even_when_manifest_matches(monkeypatch, tmp_path):
+    monkeypatch.setattr(qlora_train, "HF_REVISION", "0" * 40)
+    _launch(monkeypatch, tmp_path)
+
+    with pytest.raises(RuntimeError, match="reviewed Hugging Face commit"):
+        qlora_train.authorize_launch(now=101)
+
+
 def test_default_adapter_output_uses_sonder_namespace():
     assert qlora_train.OUTPUT_DIR.endswith("sonder-personal-lora")
+    assert qlora_train.HF_REVISION == qlora_train.HF_REVISIONS[qlora_train.BASE]
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("transformers") is None
+    or importlib.util.find_spec("accelerate") is None
+    or importlib.util.find_spec("peft") is None,
+    reason="training-only dependencies are not installed",
+)
+def test_installed_trainer_stack_builds_real_peft_trainer(tmp_path):
+    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+    from transformers import (
+        Qwen2Config,
+        Qwen2ForCausalLM,
+        Trainer,
+        TrainingArguments,
+    )
+
+    arguments = qlora_train.build_training_arguments(
+        TrainingArguments,
+        output_dir=tmp_path / "checkpoints",
+    )
+
+    assert Path(arguments.output_dir) == tmp_path / "checkpoints"
+    assert arguments.report_to == []
+    model = Qwen2ForCausalLM(Qwen2Config(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+    ))
+    model = prepare_model_for_kbit_training(model)
+    model = get_peft_model(model, LoraConfig(
+        r=2,
+        lora_alpha=4,
+        target_modules=["q_proj", "v_proj"],
+        revision=qlora_train.HF_REVISION,
+        task_type="CAUSAL_LM",
+    ))
+    trainer = Trainer(model=model, args=arguments)
+    assert trainer.model is model
 
 
 class FakeTokenizer:
@@ -90,6 +144,21 @@ def test_load_examples_rejects_non_assistant_or_empty_targets(tmp_path):
     loaded = qlora_train.load_examples(path)
 
     assert loaded == [rows[0]]
+
+
+def test_load_examples_hashes_the_same_bytes_it_parses(tmp_path):
+    path = tmp_path / "training.jsonl"
+    path.write_text(
+        json.dumps({"messages": [
+            {"role": "user", "content": "x"},
+            {"role": "assistant", "content": "y"},
+        ]}) + "\n",
+        encoding="utf-8",
+    )
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert len(qlora_train.load_examples(path, digest)) == 1
+    with pytest.raises(RuntimeError, match="changed while loading"):
+        qlora_train.load_examples(path, "0" * 64)
 
 
 def test_long_prompt_truncation_preserves_assistant_loss_tokens():

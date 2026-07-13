@@ -11,13 +11,15 @@ assistant span, and QLoRA-fine-tunes a small Qwen2.5-Coder base in 4-bit (NF4)
 with a LoRA adapter on top. The adapter is saved to
 ./sonder-personal-lora/ by default.
 
-Use ``adaptive_training.py plan`` (or ``/training plan``) to select the model
-and memory strategy. Direct invocation retains a conservative 1.5B default,
-but it will never silently fall back to CPU training.
+This is an internal training child, not a standalone entrypoint. Use
+``adaptive_training.py start --confirm`` (or ``/training start --confirm``) to
+select the model, create an integrity-bound run manifest, and issue the fresh
+one-use launch capability required by :func:`authorize_launch`. Direct
+invocation is rejected before heavyweight imports and there is never a silent
+CPU-training fallback.
 
-Usage (after `pip install -r requirements-train.txt`):
-    ./venv/Scripts/python.exe qlora_train.py
-    SONDER_BASE=Qwen/Qwen2.5-Coder-7B-Instruct ./venv/Scripts/python.exe qlora_train.py
+Supported launch (after `pip install -r requirements-train.txt`):
+    ./venv/Scripts/python.exe adaptive_training.py start --confirm --model auto
 
 This file must remain importable/py_compile-able WITHOUT torch/transformers/
 peft/bitsandbytes installed — all heavy imports are deferred into main().
@@ -36,6 +38,12 @@ from pathlib import Path
 
 # Direct use defaults to 1.5B; the lifecycle manager supplies its planned base.
 BASE = os.environ.get("SONDER_BASE", "Qwen/Qwen2.5-Coder-1.5B-Instruct")
+HF_REVISIONS = {
+    "Qwen/Qwen2.5-Coder-1.5B-Instruct": "2e1fd397ee46e1388853d2af2c993145b0f1098a",
+    "Qwen/Qwen2.5-Coder-3B-Instruct": "488639f1ff808d1d3d0ba301aef8c11461451ec5",
+    "Qwen/Qwen2.5-Coder-7B-Instruct": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
+}
+HF_REVISION = os.environ.get("SONDER_HF_REVISION", HF_REVISIONS.get(BASE, ""))
 
 DATA_PATH = os.environ.get("SONDER_DATA", os.path.join(os.path.dirname(__file__), "training_data.jsonl"))
 OUTPUT_DIR = os.environ.get("SONDER_LORA_OUT", os.path.join(os.path.dirname(__file__), "sonder-personal-lora"))
@@ -77,8 +85,26 @@ def _write_json_atomic(path, payload):
             pass
 
 
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def authorize_launch(now=None):
     """Consume the lifecycle controller's fresh, one-use launch capability."""
+    reviewed_revision = HF_REVISIONS.get(BASE, "")
+    if (
+        len(HF_REVISION) != 40
+        or any(char not in "0123456789abcdef" for char in HF_REVISION)
+        or not reviewed_revision
+        or not hmac.compare_digest(HF_REVISION, reviewed_revision)
+    ):
+        raise RuntimeError(
+            "training base revision does not match the reviewed Hugging Face commit"
+        )
     manifest_path = Path(os.environ.get("SONDER_TRAINING_MANIFEST", ""))
     token = os.environ.get("SONDER_TRAINING_LAUNCH_TOKEN", "")
     if not manifest_path.is_file() or not token:
@@ -110,6 +136,7 @@ def authorize_launch(now=None):
         raise RuntimeError("training launch manifest is outside its approved run directory")
     required = {
         "base_hf": BASE,
+        "hf_revision": HF_REVISION,
         "data_path": str(Path(DATA_PATH).resolve()),
         "adapter_dir": str(Path(OUTPUT_DIR).resolve()),
         "gpu_index": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
@@ -118,7 +145,7 @@ def authorize_launch(now=None):
         value = manifest.get(key) if key == "gpu_index" else manifest.get(key) or ""
         if str(value) != actual:
             raise RuntimeError("training launch %s does not match the controller plan" % key)
-    digest = hashlib.sha256(Path(DATA_PATH).read_bytes()).hexdigest()
+    digest = _sha256_file(DATA_PATH)
     if digest != manifest.get("data_sha256"):
         raise RuntimeError("training data changed after the controller approved the run")
     manifest["launch_consumed_ts"] = now
@@ -140,12 +167,14 @@ def _print_vram_guidance():
     print("=" * 78)
 
 
-def load_examples(path):
+def load_examples(path, expected_sha256=""):
     """Read training_data.jsonl -> list of {"messages": [user, assistant]}."""
     examples = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for raw_line in f:
+            digest.update(raw_line)
+            line = raw_line.decode("utf-8").strip()
             if not line:
                 continue
             obj = json.loads(line)
@@ -165,7 +194,31 @@ def load_examples(path):
             ):
                 continue
             examples.append(obj)
+    if expected_sha256 and not hmac.compare_digest(digest.hexdigest(), expected_sha256):
+        raise RuntimeError("training data changed while loading the authorized snapshot")
     return examples
+
+
+def build_training_arguments(
+    training_arguments_cls, *, output_dir, use_bf16=False, use_fp16=False,
+):
+    """Construct the real Trainer arguments before any model is downloaded."""
+    return training_arguments_cls(
+        output_dir=str(output_dir),
+        per_device_train_batch_size=PER_DEVICE_BATCH_SIZE,
+        gradient_accumulation_steps=GRAD_ACCUM_STEPS,
+        num_train_epochs=NUM_EPOCHS,
+        learning_rate=LEARNING_RATE,
+        lr_scheduler_type=LR_SCHEDULER,
+        warmup_ratio=WARMUP_RATIO,
+        logging_steps=LOGGING_STEPS,
+        save_strategy=SAVE_STRATEGY,
+        bf16=bool(use_bf16),
+        fp16=bool(use_fp16),
+        gradient_checkpointing=True,
+        report_to=[],
+        seed=SEED,
+    )
 
 
 def build_supervised_example(tokenizer, messages, max_len):
@@ -236,7 +289,7 @@ def main():
         print("Run: ./venv/Scripts/python.exe export_training_data.py")
         sys.exit(1)
 
-    examples = load_examples(DATA_PATH)
+    examples = load_examples(DATA_PATH, launch_manifest["data_sha256"])
     print(f"Loaded {len(examples)} training examples from {DATA_PATH}")
     if len(examples) == 0:
         print("ERROR: no examples to train on. Run export_training_data.py first"
@@ -286,8 +339,21 @@ def main():
 
     compute_dtype = torch.bfloat16 if (has_cuda and torch.cuda.is_bf16_supported()) else torch.float16
 
+    # TrainingArguments performs Transformers' actual Trainer dependency and
+    # device compatibility checks (including the accelerate minimum). Do this
+    # before a tokenizer/model download so a stale training environment fails
+    # quickly without consuming GPU memory or Hub bandwidth.
+    training_args = build_training_arguments(
+        TrainingArguments,
+        output_dir=os.path.join(OUTPUT_DIR, "checkpoints"),
+        use_bf16=(compute_dtype == torch.bfloat16),
+        use_fp16=(compute_dtype == torch.float16),
+    )
+
     print(f"Loading tokenizer + base model ({BASE}) in 4-bit NF4 ...")
-    tokenizer = AutoTokenizer.from_pretrained(BASE, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        BASE, revision=HF_REVISION, trust_remote_code=False,
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -301,7 +367,8 @@ def main():
     model_kwargs = {
         "quantization_config": bnb_config,
         "device_map": {"": 0},
-        "trust_remote_code": True,
+        "revision": HF_REVISION,
+        "trust_remote_code": False,
     }
     model = AutoModelForCausalLM.from_pretrained(BASE, **model_kwargs)
     model.gradient_checkpointing_enable()
@@ -313,6 +380,7 @@ def main():
         lora_dropout=LORA_DROPOUT,
         target_modules=LORA_TARGET_MODULES,
         bias="none",
+        revision=HF_REVISION,
         task_type="CAUSAL_LM",
     )
     model = get_peft_model(model, lora_config)
@@ -329,23 +397,6 @@ def main():
         tokenizer=tokenizer,
         padding=True,
         label_pad_token_id=-100,
-    )
-
-    training_args = TrainingArguments(
-        output_dir=os.path.join(OUTPUT_DIR, "checkpoints"),
-        per_device_train_batch_size=PER_DEVICE_BATCH_SIZE,
-        gradient_accumulation_steps=GRAD_ACCUM_STEPS,
-        num_train_epochs=NUM_EPOCHS,
-        learning_rate=LEARNING_RATE,
-        lr_scheduler_type=LR_SCHEDULER,
-        warmup_ratio=WARMUP_RATIO,
-        logging_steps=LOGGING_STEPS,
-        save_strategy=SAVE_STRATEGY,
-        bf16=(compute_dtype == torch.bfloat16),
-        fp16=(compute_dtype == torch.float16),
-        gradient_checkpointing=True,
-        report_to=[],
-        seed=SEED,
     )
 
     trainer = Trainer(
@@ -382,15 +433,37 @@ def main():
     print(f"Saving LoRA adapter to {OUTPUT_DIR} ...")
     model.save_pretrained(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)
+    required_artifacts = ("adapter_config.json", "adapter_model.safetensors")
+    adapter_config_path = Path(OUTPUT_DIR) / "adapter_config.json"
+    try:
+        saved_adapter_config = json.loads(adapter_config_path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError) as exc:
+        raise RuntimeError("training output adapter config is unreadable") from exc
+    if (
+        not isinstance(saved_adapter_config, dict)
+        or saved_adapter_config.get("base_model_name_or_path") != BASE
+        or saved_adapter_config.get("revision") != HF_REVISION
+    ):
+        raise RuntimeError(
+            "training output adapter config lost its pinned base provenance"
+        )
+    artifact_sha256 = {}
+    artifact_sizes = {}
+    for name in required_artifacts:
+        artifact_path = Path(OUTPUT_DIR) / name
+        if not artifact_path.is_file() or artifact_path.is_symlink():
+            raise RuntimeError(f"training output is missing trusted artifact {name}")
+        artifact_sha256[name] = _sha256_file(artifact_path)
+        artifact_sizes[name] = artifact_path.stat().st_size
     manifest = dict(launch_manifest)
     manifest.update({
         "base_hf": BASE,
         "completed_ts": int(time.time()),
         "adapter_config": os.path.join(OUTPUT_DIR, "adapter_config.json"),
+        "artifact_sha256": artifact_sha256,
+        "artifact_sizes": artifact_sizes,
     })
-    with open(os.path.join(OUTPUT_DIR, "training-manifest.json"), "w", encoding="utf-8") as stream:
-        json.dump(manifest, stream, indent=2, sort_keys=True)
-        stream.write("\n")
+    _write_json_atomic(Path(OUTPUT_DIR) / "training-manifest.json", manifest)
     print("Done. Run `training deploy` for checked GGUF conversion and validation.")
     return 0
 

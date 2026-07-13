@@ -13,6 +13,7 @@ def isolated_runtime_policy(monkeypatch, tmp_path):
     original_policy = dict(server._RUNTIME_POLICY)
     path = tmp_path / "runtime_policy.json"
     monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(path))
+    monkeypatch.setenv("SONDER_HOME", str(tmp_path / "sonder-home"))
     yield path
     server.TIERS.clear()
     server.TIERS.update(original_tiers)
