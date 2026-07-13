@@ -851,9 +851,13 @@ def _training_command(arg: str) -> str:
             "  /training start --confirm [planning options]\n"
             "  /training status\n"
             "  /training deploy [--adapter-dir PATH] [--llama-cpp PATH]\n"
+            "  /training adopt-legacy --confirm\n"
+            "  /training release-alias --confirm\n"
             "  /training rollback\n"
             "Options: --allow-cpu-offload --max-vram N --max-system-ram N "
-            "--context-length N --sequence-length N --batch-size N."
+            "--context-length N --sequence-length N --batch-size N "
+            "--gradient-accumulation N --gpu-index N --resume. "
+            "--full-finetune is planning-only; attended start supports QLoRA."
         )
     return adaptive_training.command_text(text)
 

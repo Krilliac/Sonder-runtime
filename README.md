@@ -496,7 +496,7 @@ context and, only when explicitly requested, training adapter weights:
   `SONDER_ENDLESS_WORKERS`, `SONDER_ENDLESS_TIMEOUT`, and
   `SONDER_ENDLESS_REPAIRS`.
 - **Use it on your actual work** — the more real, grounded outcomes it sees, the more its lessons reflect *your* code and conventions (not textbook generalities).
-- **Fine-tune** (optional) — `/hardware` and `/training plan --dry-run` make separate inference/training decisions from live VRAM and RAM. Explicit attended QLoRA trains real adapter weights; `/training deploy` converts the Qwen PEFT adapter to GGUF, validates `sonder-personal:latest`, and only then activates it. `/training rollback` immediately restores `sonder:latest` without deleting models or checkpoints ([TRAINING.md](TRAINING.md)).
+- **Fine-tune** (optional) — `/hardware` and `/training plan --dry-run` make separate inference/training decisions from live VRAM and RAM. Explicit attended QLoRA trains integrity-bound adapter weights; `/training deploy` seals a reviewed llama.cpp converter tree, compares the digest-pinned base and candidate on confined, nonce-varied SQL and instruction-following probes, allows no canary regression, requires measurable lift whenever the base is imperfect, verifies the published alias, and only then keeps it active. `/training rollback` verifies and restores an exact observed `sonder:latest` identity without deleting models or checkpoints ([TRAINING.md](TRAINING.md)).
 - **Safe source self-improvement** (optional) — `/selfmod` uses isolated Git worktrees or snapshot workspaces, immutable per-file backups, deterministic host-run tests, protected paths, explicit approval, atomic deployment, health checks, and exact rollback. It never pushes or rewrites user history ([SELFMOD.md](SELFMOD.md)).
 
 Keep your grounded, personal data **private** (it stays gitignored). The distilled, non-sensitive lessons can be exported to `lessons.jsonl`.
@@ -564,7 +564,8 @@ Flat, mostly-stdlib Python modules (plus `mcp`):
 | `orchestrator.py` | the retrieve → augment → generate → capture flow |
 | `master_orchestrator.py` / `fleet_store.py` | RAM/CPU-bounded fleet execution plus a process-shared restart/recovery ledger |
 | `autopilot_controller.py` / `autopilot_store.py` | Persistent local goal planning, guarded execution/review, evidence gates, budgets, and explicit lifecycle control |
-| `runtime_policy.py` | Atomic per-user local-model aliases and execution-lane routing shared across live surfaces |
+| `runtime_policy.py` | OS-locked, revision-checked per-user local-model aliases and execution-lane routing shared across live surfaces |
+| `adaptive_training.py` / `promotion_eval.py` / `eval_models.py` | Attended QLoRA lifecycle, crash-recoverable alias/policy transactions, and digest-bound nonce-varied SQL/instruction promotion evaluation |
 | `reloadable_mcp.py` | Fail-closed live server-source execution, atomic tool-manager swaps, schema-cache invalidation, and MCP tool-list notifications |
 | `learning_health.py` | Outcome coverage, reward distribution, lesson provenance, distillation yield, and memory-hygiene reporting |
 | `artifact_grounding.py` | Guarded format contracts for writing, data, UI, images, audio, models, and complete artifact bundles |
