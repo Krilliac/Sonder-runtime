@@ -44,6 +44,104 @@ def test_connect_migrates_lesson_usage_outcome_timestamp(tmp_path):
     assert "outcome_ts" in columns
 
 
+def test_outcome_and_distillation_migration_is_deterministic_and_one_time(tmp_path):
+    path = tmp_path / "legacy-outcomes.db"
+    legacy = sqlite3.connect(path)
+    legacy.executescript(
+        "CREATE TABLE interactions ("
+        "id TEXT PRIMARY KEY, task TEXT, retrieved_ctx TEXT, response TEXT, "
+        "tier TEXT, ts TEXT DEFAULT CURRENT_TIMESTAMP);"
+        "CREATE TABLE outcomes ("
+        "interaction_id TEXT, signal TEXT, reward REAL, "
+        "ts TEXT DEFAULT CURRENT_TIMESTAMP);"
+        "CREATE TABLE lessons ("
+        "id TEXT PRIMARY KEY, text TEXT, embedding BLOB, "
+        "source_interaction TEXT, ts TEXT DEFAULT CURRENT_TIMESTAMP);"
+    )
+    legacy.executemany(
+        "INSERT INTO interactions(id, task, response, tier) VALUES(?, ?, ?, ?)",
+        (
+            ("stored", "task", "response", "code"),
+            ("without-lesson", "task", "response", "code"),
+            ("bad-only", "task", "response", "code"),
+        ),
+    )
+    legacy.executemany(
+        "INSERT INTO outcomes(interaction_id, signal, reward, ts) "
+        "VALUES(?, ?, ?, ?)",
+        (
+            ("stored", "tests_passed", 1.0, "2020-01-01 00:00:00"),
+            ("stored", "tests_passed", 0.9, "2021-01-01 00:00:00"),
+            ("stored", None, 1.0, "2020-01-01 00:00:00"),
+            ("stored", None, 1.0, "2021-01-01 00:00:00"),
+            ("without-lesson", "compiled", 0.7, "2020-01-01 00:00:00"),
+            ("bad-only", "failed", -1.0, "2020-01-01 00:00:00"),
+        ),
+    )
+    # Shared provenance remains legal; source_interaction is intentionally not unique.
+    legacy.executemany(
+        "INSERT INTO lessons(id, text, source_interaction) VALUES(?, ?, ?)",
+        (
+            ("legacy-a", "first", "stored"),
+            ("legacy-b", "second", "stored"),
+        ),
+    )
+    legacy.commit()
+    legacy.close()
+
+    conn = ms.connect(path)
+    stored_outcomes = conn.execute(
+        "SELECT signal, reward, ts FROM outcomes WHERE interaction_id='stored' "
+        "ORDER BY rowid"
+    ).fetchall()
+    assert [(row["signal"], row["reward"]) for row in stored_outcomes] == [
+        ("tests_passed", 1.0),
+        (None, 1.0),
+        (None, 1.0),
+    ]
+    jobs = {
+        row["interaction_id"]: row["state"]
+        for row in conn.execute(
+            "SELECT interaction_id, state FROM lesson_distillations"
+        )
+    }
+    assert jobs == {
+        "stored": ms.DISTILLATION_STORED,
+        "without-lesson": ms.DISTILLATION_LEGACY_NO_LESSON,
+    }
+    assert conn.execute(
+        "SELECT COUNT(*) FROM memory_migrations WHERE name=?",
+        (ms._DISTILLATION_BACKFILL_MIGRATION,),
+    ).fetchone()[0] == 1
+    unique_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' "
+        "AND name='uq_outcomes_interaction_signal_nonnull'"
+    ).fetchone()[0]
+    assert "WHERE interaction_id IS NOT NULL AND signal IS NOT NULL" in unique_sql
+
+    conn.execute(
+        "INSERT INTO interactions(id, task, response, tier) "
+        "VALUES('post-migration', 'task', 'response', 'code')"
+    )
+    conn.execute(
+        "INSERT INTO outcomes(interaction_id, signal, reward) "
+        "VALUES('post-migration', 'tests_passed', 1.0)"
+    )
+    conn.commit()
+    conn.close()
+
+    reopened = ms.connect(path)
+    assert reopened.execute(
+        "SELECT 1 FROM lesson_distillations "
+        "WHERE interaction_id='post-migration'"
+    ).fetchone() is None
+    assert reopened.execute(
+        "SELECT COUNT(*) FROM memory_migrations WHERE name=?",
+        (ms._DISTILLATION_BACKFILL_MIGRATION,),
+    ).fetchone()[0] == 1
+    reopened.close()
+
+
 def test_new_id_is_16_hex():
     i = ms.new_id()
     assert len(i) == 16
@@ -426,13 +524,390 @@ def test_get_missing_interaction_returns_none():
     assert ms.get_interaction(_conn(), "nope") is None
 
 
+def test_delete_interaction_removes_distillation_trace():
+    conn = _conn()
+    ms.log_interaction(conn, "job", "task", "", "response", "code")
+    assert _claim_good_outcome(conn)["claimed"] is True
+
+    ms.delete_interaction(conn, "job")
+
+    assert conn.execute(
+        "SELECT 1 FROM lesson_distillations WHERE interaction_id='job'"
+    ).fetchone() is None
+    assert conn.execute(
+        "SELECT 1 FROM outcomes WHERE interaction_id='job'"
+    ).fetchone() is None
+
+
 def test_record_outcome_row():
     c = _conn()
     ms.log_interaction(c, "abc", "t", "", "r", "code")
-    ms.record_outcome_row(c, "abc", "tests_passed", 1.0)
-    row = c.execute("SELECT signal, reward FROM outcomes WHERE interaction_id='abc'").fetchone()
+    assert ms.record_outcome_row(c, "abc", "tests_passed", 1.0) is True
+    assert ms.record_outcome_row(c, "abc", "tests_passed", 0.9) is False
+    assert ms.record_outcome_row(c, "abc", "compiled", 0.7) is True
+    row = c.execute(
+        "SELECT signal, reward FROM outcomes WHERE interaction_id='abc' "
+        "AND signal='tests_passed'"
+    ).fetchone()
     assert row[0] == "tests_passed"
     assert row[1] == 1.0
+
+
+def _owner_probe(pid, expected_identity=None):
+    return ms.process_liveness.PROCESS_ALIVE, expected_identity or "owner-%s" % pid
+
+
+def _claim_good_outcome(
+    conn, interaction_id="job", token="claim-1", owner_pid=101,
+    owner_identity="owner-101", probe=_owner_probe,
+):
+    return ms.record_outcome_and_claim_lesson_distillation(
+        conn, interaction_id, "tests_passed", 1.0,
+        claim_token=token, owner_pid=owner_pid,
+        owner_identity=owner_identity, owner_probe=probe, now=100,
+    )
+
+
+def test_atomic_outcome_duplicate_preserves_usage_time_but_reclaims_retryable():
+    conn = _conn()
+    ms.log_interaction(conn, "job", "task", "", "response", "code")
+    ms.add_lesson(conn, "seed", "seed lesson", None, "seed-source")
+    ms.log_lesson_usage(conn, ["seed"], "job", "task")
+
+    first = _claim_good_outcome(conn)
+    assert first == {
+        "outcome_inserted": True,
+        "usage_rows_updated": 1,
+        "distillation_state": ms.DISTILLATION_CLAIMED,
+        "claimed": True,
+        "claim_token": "claim-1",
+        "attempts": 1,
+    }
+    assert ms.mark_lesson_distillation_retryable(
+        conn, "job", "claim-1", "temporary model failure",
+    )
+    conn.execute(
+        "UPDATE lesson_usage SET outcome_ts='2000-01-01 00:00:00' "
+        "WHERE interaction_id='job'"
+    )
+    conn.commit()
+
+    duplicate = _claim_good_outcome(conn, token="claim-2")
+    assert duplicate["outcome_inserted"] is False
+    assert duplicate["usage_rows_updated"] == 0
+    assert duplicate["claimed"] is True
+    assert duplicate["claim_token"] == "claim-2"
+    assert duplicate["attempts"] == 2
+    assert conn.execute(
+        "SELECT outcome_ts FROM lesson_usage WHERE interaction_id='job'"
+    ).fetchone()[0] == "2000-01-01 00:00:00"
+
+    different = ms.record_outcome_and_claim_lesson_distillation(
+        conn, "job", "accepted", 0.8, claim_token="claim-2",
+        owner_pid=101, owner_identity="owner-101", owner_probe=_owner_probe,
+        now=101,
+    )
+    assert different["outcome_inserted"] is True
+    assert different["usage_rows_updated"] == 1
+    assert different["claimed"] is True
+    assert conn.execute(
+        "SELECT COUNT(*) FROM outcomes WHERE interaction_id='job'"
+    ).fetchone()[0] == 2
+    assert conn.execute(
+        "SELECT outcome_ts FROM lesson_usage WHERE interaction_id='job'"
+    ).fetchone()[0] != "2000-01-01 00:00:00"
+
+
+def test_atomic_outcome_unknown_owner_fails_closed_and_dead_owner_recovers():
+    conn = _conn()
+    ms.log_interaction(conn, "job", "task", "", "response", "code")
+
+    assert _claim_good_outcome(conn)["claimed"] is True
+
+    def unknown_probe(pid, expected_identity=None):
+        return ms.process_liveness.PROCESS_UNKNOWN, None
+
+    blocked = _claim_good_outcome(
+        conn, token="blocked", owner_pid=202, owner_identity="owner-202",
+        probe=unknown_probe,
+    )
+    assert blocked["claimed"] is False
+    assert blocked["distillation_state"] == ms.DISTILLATION_CLAIMED
+    assert conn.execute(
+        "SELECT claim_token FROM lesson_distillations WHERE interaction_id='job'"
+    ).fetchone()[0] == "claim-1"
+
+    def recovery_probe(pid, expected_identity=None):
+        if pid == 202 and expected_identity == "owner-202":
+            return ms.process_liveness.PROCESS_ALIVE, "owner-202"
+        if pid == 101 and expected_identity == "owner-101":
+            return ms.process_liveness.PROCESS_DEAD, None
+        return ms.process_liveness.PROCESS_UNKNOWN, None
+
+    recovered = _claim_good_outcome(
+        conn, token="recovered", owner_pid=202, owner_identity="owner-202",
+        probe=recovery_probe,
+    )
+    assert recovered["outcome_inserted"] is False
+    assert recovered["claimed"] is True
+    assert recovered["claim_token"] == "recovered"
+    assert recovered["attempts"] == 2
+
+
+def test_initial_unknown_owner_leaves_retryable_job_for_duplicate_reacquire():
+    conn = _conn()
+    ms.log_interaction(conn, "job", "task", "", "response", "code")
+
+    def unknown_probe(pid, expected_identity=None):
+        return ms.process_liveness.PROCESS_UNKNOWN, None
+
+    first = _claim_good_outcome(conn, probe=unknown_probe)
+    assert first["outcome_inserted"] is True
+    assert first["claimed"] is False
+    assert first["distillation_state"] == ms.DISTILLATION_RETRYABLE
+    assert first["attempts"] == 0
+
+    recovered = _claim_good_outcome(conn, token="claim-2")
+    assert recovered["outcome_inserted"] is False
+    assert recovered["claimed"] is True
+    assert recovered["distillation_state"] == ms.DISTILLATION_CLAIMED
+    assert recovered["attempts"] == 1
+
+    idempotent = _claim_good_outcome(conn, token="claim-2")
+    assert idempotent["claimed"] is True
+    assert idempotent["attempts"] == 1
+
+
+def test_abandoned_same_process_distillation_claim_is_reclaimable():
+    conn = _conn()
+    ms.log_interaction(conn, "job", "task", "", "response", "code")
+    assert _claim_good_outcome(conn)["claimed"] is True
+    assert ms.abandon_lesson_distillation_claim(
+        "job", "claim-1", 101, "owner-101",
+    )
+
+    reclaimed = _claim_good_outcome(conn, token="claim-2")
+
+    assert reclaimed["claimed"] is True
+    assert reclaimed["claim_token"] == "claim-2"
+    assert reclaimed["attempts"] == 2
+
+
+def test_concurrent_same_outcome_has_one_row_and_one_claim_owner(tmp_path):
+    path = tmp_path / "concurrent-outcome.db"
+    seed = ms.connect(path)
+    ms.log_interaction(seed, "job", "task", "", "response", "code")
+    seed.close()
+
+    worker_count = 6
+    barrier = threading.Barrier(worker_count)
+    results = []
+    errors = []
+    result_lock = threading.Lock()
+
+    def worker(index):
+        conn = ms.connect(path)
+        try:
+            barrier.wait(timeout=5)
+            result = ms.record_outcome_and_claim_lesson_distillation(
+                conn, "job", "tests_passed", 1.0,
+                claim_token="claim-%d" % index,
+                owner_pid=1000 + index,
+                owner_identity="owner-%d" % index,
+                owner_probe=_owner_probe,
+                now=100 + index,
+            )
+            with result_lock:
+                results.append(result)
+        except Exception as exc:
+            with result_lock:
+                errors.append(exc)
+        finally:
+            conn.close()
+
+    threads = [threading.Thread(target=worker, args=(index,)) for index in range(worker_count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == []
+    assert len(results) == worker_count
+    assert sum(result["outcome_inserted"] for result in results) == 1
+    assert sum(result["claimed"] for result in results) == 1
+
+    conn = ms.connect(path)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM outcomes WHERE interaction_id='job' "
+        "AND signal='tests_passed'"
+    ).fetchone()[0] == 1
+    row = conn.execute(
+        "SELECT state, attempts FROM lesson_distillations "
+        "WHERE interaction_id='job'"
+    ).fetchone()
+    assert row["state"] == ms.DISTILLATION_CLAIMED
+    assert row["attempts"] == 1
+    conn.close()
+
+
+def test_non_good_evidence_cancels_live_claim_and_blocks_finalization():
+    conn = _conn()
+    ms.log_interaction(conn, "job", "task", "", "response", "code")
+    assert _claim_good_outcome(conn)["claimed"] is True
+
+    failed = ms.record_outcome_and_claim_lesson_distillation(
+        conn, "job", "failed", -1.0, claim_token="unused",
+        owner_pid=101, owner_identity="owner-101", owner_probe=_owner_probe,
+    )
+    assert failed["outcome_inserted"] is True
+    assert failed["claimed"] is False
+    assert failed["distillation_state"] == ms.DISTILLATION_CANCELLED
+    row = conn.execute(
+        "SELECT state, claim_token, owner_pid, completed_ts "
+        "FROM lesson_distillations WHERE interaction_id='job'"
+    ).fetchone()
+    assert row["state"] == ms.DISTILLATION_CANCELLED
+    assert row["claim_token"] is None
+    assert row["owner_pid"] is None
+    assert row["completed_ts"] is not None
+
+    called = []
+    finalized = ms.finalize_lesson_distillation(
+        conn, "job", "claim-1", lambda tx: called.append(True),
+    )
+    assert finalized["finalized"] is False
+    assert finalized["distillation_state"] == ms.DISTILLATION_CANCELLED
+    assert called == []
+
+
+def test_finalization_rechecks_legacy_contradiction_before_callback():
+    conn = _conn()
+    ms.log_interaction(conn, "job", "task", "", "response", "code")
+    assert _claim_good_outcome(conn)["claimed"] is True
+    # Simulate an older writer that records evidence without touching the ledger.
+    assert ms.record_outcome_row(conn, "job", "rejected", -0.5)
+
+    called = []
+    result = ms.finalize_lesson_distillation(
+        conn,
+        "job",
+        "claim-1",
+        lambda tx: called.append(True),
+    )
+    assert result == {
+        "finalized": False,
+        "distillation_state": ms.DISTILLATION_CANCELLED,
+        "lesson_id": None,
+        "result": None,
+    }
+    assert called == []
+
+
+def test_finalization_callback_atomically_inserts_lesson_and_fts():
+    conn = _conn()
+    ms.log_interaction(conn, "job", "task", "", "response", "code")
+    assert _claim_good_outcome(conn)["claimed"] is True
+
+    def store(tx):
+        lesson_id = ms.insert_lesson_in_transaction(
+            tx, "lesson-1", "Use a bounded transaction callback.", None, "job",
+        )
+        return {
+            "terminal_state": ms.DISTILLATION_STORED,
+            "lesson_id": lesson_id,
+            "result": {"dedupe": "unique"},
+        }
+
+    result = ms.finalize_lesson_distillation(conn, "job", "claim-1", store)
+    assert result == {
+        "finalized": True,
+        "distillation_state": ms.DISTILLATION_STORED,
+        "lesson_id": "lesson-1",
+        "result": {"dedupe": "unique"},
+    }
+    assert conn.execute(
+        "SELECT state, claim_token FROM lesson_distillations "
+        "WHERE interaction_id='job'"
+    ).fetchone()["state"] == ms.DISTILLATION_STORED
+    assert conn.execute(
+        "SELECT text FROM lessons WHERE id='lesson-1'"
+    ).fetchone()[0] == "Use a bounded transaction callback."
+    assert conn.execute(
+        "SELECT text FROM lessons_fts WHERE lesson_id='lesson-1'"
+    ).fetchone()[0] == "Use a bounded transaction callback."
+
+
+def test_finalization_callback_selects_no_lesson_and_returns_metadata():
+    conn = _conn()
+    ms.log_interaction(conn, "job", "task", "", "response", "code")
+    assert _claim_good_outcome(conn)["claimed"] is True
+
+    result = ms.finalize_lesson_distillation(
+        conn,
+        "job",
+        "claim-1",
+        lambda tx: {
+            "terminal_state": ms.DISTILLATION_NO_LESSON,
+            "result": {"dedupe": "exact"},
+        },
+    )
+    assert result == {
+        "finalized": True,
+        "distillation_state": ms.DISTILLATION_NO_LESSON,
+        "lesson_id": None,
+        "result": {"dedupe": "exact"},
+    }
+
+
+def test_finalization_callback_failure_rolls_back_lesson_fts_and_ledger():
+    conn = _conn()
+    ms.log_interaction(conn, "job", "task", "", "response", "code")
+    assert _claim_good_outcome(conn)["claimed"] is True
+
+    def fail_after_insert(tx):
+        ms.insert_lesson_in_transaction(
+            tx, "rolled-back", "must disappear", None, "job",
+        )
+        raise RuntimeError("distiller crashed")
+
+    with pytest.raises(RuntimeError, match="distiller crashed"):
+        ms.finalize_lesson_distillation(
+            conn, "job", "claim-1", fail_after_insert,
+        )
+
+    assert conn.execute(
+        "SELECT 1 FROM lessons WHERE id='rolled-back'"
+    ).fetchone() is None
+    assert conn.execute(
+        "SELECT 1 FROM lessons_fts WHERE lesson_id='rolled-back'"
+    ).fetchone() is None
+    row = conn.execute(
+        "SELECT state, claim_token FROM lesson_distillations "
+        "WHERE interaction_id='job'"
+    ).fetchone()
+    assert row["state"] == ms.DISTILLATION_CLAIMED
+    assert row["claim_token"] == "claim-1"
+    assert ms.mark_lesson_distillation_retryable(
+        conn, "job", "claim-1", "distiller crashed",
+    )
+
+
+def test_explicit_cancel_and_transition_tokens_are_guarded():
+    conn = _conn()
+    ms.log_interaction(conn, "job", "task", "", "response", "code")
+    assert _claim_good_outcome(conn)["claimed"] is True
+
+    assert not ms.mark_lesson_distillation_retryable(
+        conn, "job", "wrong", "wrong owner",
+    )
+    assert not ms.cancel_lesson_distillation(
+        conn, "job", "wrong owner", claim_token="wrong",
+    )
+    assert ms.cancel_lesson_distillation(
+        conn, "job", "operator cancelled", claim_token="claim-1",
+    )
+    assert not ms.cancel_lesson_distillation(conn, "job", "already terminal")
 
 
 def test_add_lesson_and_read_back():
@@ -816,7 +1291,7 @@ def test_outcome_signal_counts_groups_by_signal():
     ms.record_outcome_row(c, "a", "tests_passed", 1.0)
     ms.record_outcome_row(c, "a", "tests_passed", 1.0)
     ms.record_outcome_row(c, "a", "failed", -1.0)
-    assert ms.outcome_signal_counts(c) == {"tests_passed": 2, "failed": 1}
+    assert ms.outcome_signal_counts(c) == {"tests_passed": 1, "failed": 1}
 
 
 def test_recent_lessons_empty():

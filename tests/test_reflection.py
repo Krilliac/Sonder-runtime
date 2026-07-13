@@ -119,6 +119,89 @@ def test_maybe_add_lesson_dedupes_near_but_not_exact(monkeypatch):
     assert len(ms.all_lessons(c)) == 1
 
 
+def test_prepare_candidate_does_not_touch_sqlite_and_defers_dedupe():
+    candidate = reflection.prepare_lesson_candidate(
+        "task", "response", "tests_passed",
+        offload_fn=lambda **kw: "Use collections.deque for O(1) queue pops.",
+        embed_fn=lambda text: [1.0, 0.0],
+        id_fn=lambda: "candidate-id",
+    )
+
+    assert candidate == {
+        "status": "candidate",
+        "lesson_id": "candidate-id",
+        "text": "Use collections.deque for O(1) queue pops.",
+        "embedding": [1.0, 0.0],
+        "embedding_blob": e.to_blob([1.0, 0.0]),
+        "embedding_model": None,
+        "embedding_revision": None,
+        "embedding_dim": None,
+    }
+
+
+def test_store_prepared_lesson_publishes_lesson_and_fts_in_active_transaction():
+    c = ms.connect(":memory:")
+    candidate = {
+        "status": "candidate",
+        "lesson_id": "prepared-id",
+        "text": "Use collections.deque for O(1) queue pops.",
+        "embedding": [1.0, 0.0],
+        "embedding_blob": e.to_blob([1.0, 0.0]),
+        "embedding_model": e.EMBED_IDENTITY,
+        "embedding_revision": e.EMBED_REVISION,
+        "embedding_dim": 2,
+    }
+
+    c.execute("BEGIN IMMEDIATE")
+    result = reflection.store_prepared_lesson(c, "source-id", candidate)
+    assert c.in_transaction
+    c.commit()
+
+    assert result == {
+        "terminal_state": ms.DISTILLATION_STORED,
+        "lesson_id": "prepared-id",
+        "result": "stored",
+    }
+    assert ms.get_lesson_text(c, "prepared-id") == candidate["text"]
+    assert c.execute(
+        "SELECT text FROM lessons_fts WHERE lesson_id='prepared-id'"
+    ).fetchone()[0] == candidate["text"]
+
+
+def test_store_prepared_lesson_dedupes_inside_transaction_without_committing():
+    c = ms.connect(":memory:")
+    ms.add_lesson(c, "existing", "Use pathlib.Path.resolve() before comparison.", None, "old")
+    candidate = {
+        "status": "candidate",
+        "lesson_id": "duplicate-id",
+        "text": "  use   PATHLIB.path.resolve() before comparison. ",
+        "embedding": None,
+        "embedding_blob": None,
+        "embedding_model": None,
+        "embedding_revision": None,
+        "embedding_dim": None,
+    }
+
+    c.execute("BEGIN IMMEDIATE")
+    result = reflection.store_prepared_lesson(c, "new-source", candidate)
+    assert c.in_transaction
+    c.commit()
+
+    assert result == {
+        "terminal_state": ms.DISTILLATION_NO_LESSON,
+        "result": "exact_duplicate",
+    }
+    assert len(ms.all_lessons(c)) == 1
+
+
+def test_store_prepared_lesson_requires_finalizer_transaction():
+    c = ms.connect(":memory:")
+    with pytest.raises(RuntimeError, match="active transaction"):
+        reflection.store_prepared_lesson(
+            c, "source", {"status": "no_lesson", "reason": "not_concrete"},
+        )
+
+
 def test_is_duplicate_requires_exact_finite_current_provenance():
     c = ms.connect(":memory:")
     candidate = [1.0, 0.0]

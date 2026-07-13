@@ -1623,6 +1623,149 @@ def _code_gate_target(reply):
     return code
 
 
+def _defer_lesson_distillation(
+    interaction_id, claim_token, owner_pid, owner_identity, failure,
+):
+    """Best-effort release of an exact distillation claim for a later retry."""
+    if not interaction_id or not claim_token:
+        return False
+    # Persist only a stable error class. Transport exception text can contain
+    # endpoints, filesystem paths, or fragments derived from private prompts.
+    error = "distillation failed: %s" % type(failure).__name__
+    try:
+        conn = _open_db()
+        try:
+            released = memory_store.mark_lesson_distillation_retryable(
+                conn, interaction_id, claim_token, error,
+            )
+            if released:
+                return True
+            exact_claim = conn.execute(
+                "SELECT 1 FROM lesson_distillations WHERE interaction_id=? "
+                "AND state=? AND claim_token=? AND owner_pid=? "
+                "AND owner_identity=?",
+                (
+                    interaction_id, memory_store.DISTILLATION_CLAIMED,
+                    claim_token, owner_pid, owner_identity,
+                ),
+            ).fetchone()
+            if exact_claim is None:
+                return False
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return memory_store.abandon_lesson_distillation_claim(
+        interaction_id, claim_token, owner_pid, owner_identity,
+    )
+
+
+def _record_outcome_and_maybe_distill(interaction_id, signal):
+    """Atomically record an outcome and run at most one claimed distillation."""
+    claim_token = memory_store.new_id()
+    owner_pid = os.getpid()
+    owner_state, owner_identity = process_liveness.probe_process(owner_pid)
+    if owner_state != process_liveness.PROCESS_ALIVE or not owner_identity:
+        owner_pid = 0
+        owner_identity = None
+    recorded = None
+    result = None
+    claim_may_exist = False
+    try:
+        conn = _open_db()
+        try:
+            inter = memory_store.get_interaction(conn, interaction_id)
+            if inter is None:
+                return {"found": False}
+            score = reward.score(signal)
+            claim_may_exist = True
+            recorded = memory_store.record_outcome_and_claim_lesson_distillation(
+                conn,
+                interaction_id,
+                signal,
+                score,
+                claim_token=claim_token,
+                owner_pid=owner_pid,
+                owner_identity=owner_identity,
+            )
+            if not recorded["claimed"]:
+                claim_may_exist = False
+        finally:
+            conn.close()
+
+        result = {
+            "found": True,
+            "reward": score,
+            "outcome_inserted": recorded["outcome_inserted"],
+            "distillation_state": recorded["distillation_state"],
+            "lesson_id": None,
+            "distillation_deferred": (
+                recorded["distillation_state"]
+                == memory_store.DISTILLATION_RETRYABLE
+            ),
+        }
+        if not recorded["claimed"]:
+            return result
+
+        candidate = reflection.prepare_lesson_candidate(
+            inter["task"],
+            inter["response"],
+            signal,
+            offload_fn=_generate_text,
+            embed_fn=embeddings.embed,
+        )
+        conn = _open_db()
+        try:
+            finalized = memory_store.finalize_lesson_distillation(
+                conn,
+                interaction_id,
+                claim_token,
+                lambda transaction: reflection.store_prepared_lesson(
+                    transaction, interaction_id, candidate,
+                ),
+            )
+            claim_may_exist = False
+        finally:
+            conn.close()
+
+        result["distillation_state"] = finalized["distillation_state"]
+        result["distillation_deferred"] = False
+        if (
+            finalized["finalized"]
+            and finalized["distillation_state"]
+            == memory_store.DISTILLATION_STORED
+        ):
+            result["lesson_id"] = finalized["lesson_id"]
+        return result
+    except BaseException as failure:
+        released = False
+        if claim_may_exist:
+            released = _defer_lesson_distillation(
+                interaction_id,
+                claim_token,
+                owner_pid,
+                owner_identity,
+                failure,
+            )
+        if not isinstance(failure, Exception):
+            raise
+        if recorded is None or not recorded.get("claimed"):
+            raise
+        if result is None:
+            result = {
+                "found": True,
+                "reward": score,
+                "outcome_inserted": recorded["outcome_inserted"],
+                "distillation_state": recorded["distillation_state"],
+                "lesson_id": None,
+                "distillation_deferred": False,
+            }
+        result["distillation_deferred"] = released
+        if released:
+            result["distillation_state"] = memory_store.DISTILLATION_RETRYABLE
+        return result
+
+
 def _record_code_gate_failure(interaction_id):
     """Record a negative 'failed' outcome for a reply whose code did not run.
 
@@ -1632,15 +1775,7 @@ def _record_code_gate_failure(interaction_id):
     if not interaction_id:
         return
     try:
-        conn = _open_db()
-        try:
-            r = reward.score("failed")
-            memory_store.record_outcome_row(conn, interaction_id, "failed", r)
-            memory_store.record_lesson_usage_outcome(
-                conn, interaction_id, "failed", r,
-            )
-        finally:
-            conn.close()
+        _record_outcome_and_maybe_distill(interaction_id, "failed")
     except Exception:
         pass
 
@@ -2814,28 +2949,17 @@ def record_outcome(interaction_id: str, signal: str) -> str:
     if signal not in reward.VALID_SIGNALS:
         return "ERROR: unknown signal '%s'. Valid: %s." % (
             signal, ", ".join(sorted(reward.VALID_SIGNALS)))
-    conn = _open_db()
-    try:
-        inter = memory_store.get_interaction(conn, interaction_id)
-        if inter is None:
-            return "ERROR: no interaction '%s' (already expired or wrong id)." % interaction_id
-        r = reward.score(signal)
-        memory_store.record_outcome_row(conn, interaction_id, signal, r)
-        memory_store.record_lesson_usage_outcome(conn, interaction_id, signal, r)
-        lesson_id = None
-        if reward.is_good(signal):
-            try:
-                lesson_id = reflection.maybe_add_lesson(
-                    conn, interaction_id, inter["task"], inter["response"], signal,
-                    offload_fn=_generate_text, embed_fn=embeddings.embed,
-                )
-            except urllib.error.URLError:
-                lesson_id = None
-    finally:
-        conn.close()
-    msg = "Recorded '%s' (reward %+.2f) for %s." % (signal, r, interaction_id)
-    if lesson_id:
-        msg += " Distilled lesson %s." % lesson_id
+    result = _record_outcome_and_maybe_distill(interaction_id, signal)
+    if not result["found"]:
+        return "ERROR: no interaction '%s' (already expired or wrong id)." % interaction_id
+    verb = "Recorded" if result["outcome_inserted"] else "Already recorded"
+    msg = "%s '%s' (reward %+.2f) for %s." % (
+        verb, signal, result["reward"], interaction_id,
+    )
+    if result["lesson_id"]:
+        msg += " Distilled lesson %s." % result["lesson_id"]
+    elif result["distillation_deferred"]:
+        msg += " Lesson distillation was deferred for retry."
     return msg
 
 
@@ -7798,18 +7922,18 @@ def learn_from_example(task: str, solution: str, signal: str = "accepted") -> st
             task_embedding_revision=provenance.get("revision"),
             task_embedding_dim=provenance.get("dimension"),
         )
-        r = reward.score(signal)
-        memory_store.record_outcome_row(conn, interaction_id, signal, r)
-        lesson_id = None
-        if reward.is_good(signal):
-            lesson_id = reflection.maybe_add_lesson(
-                conn, interaction_id, task, solution, signal,
-                offload_fn=_generate_text, embed_fn=embeddings.embed,
-            )
     finally:
         conn.close()
-    if lesson_id:
-        return "Learned lesson %s from example interaction %s." % (lesson_id, interaction_id)
+    result = _record_outcome_and_maybe_distill(interaction_id, signal)
+    if result["lesson_id"]:
+        return "Learned lesson %s from example interaction %s." % (
+            result["lesson_id"], interaction_id,
+        )
+    if result["distillation_deferred"]:
+        return (
+            "Example recorded as %s; lesson distillation was deferred for retry."
+            % interaction_id
+        )
     return "Example recorded as %s, but no non-duplicate concrete lesson was distilled." % interaction_id
 
 

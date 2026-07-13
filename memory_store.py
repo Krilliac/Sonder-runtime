@@ -17,6 +17,31 @@ _ABANDONED_SESSION_CLAIMS_LOCK = globals().get(
 _ABANDONED_SESSION_CLAIMS = globals().get(
     "_ABANDONED_SESSION_CLAIMS", set()
 )
+_ABANDONED_DISTILLATION_CLAIMS_LOCK = globals().get(
+    "_ABANDONED_DISTILLATION_CLAIMS_LOCK", threading.RLock()
+)
+_ABANDONED_DISTILLATION_CLAIMS = globals().get(
+    "_ABANDONED_DISTILLATION_CLAIMS", set()
+)
+
+DISTILLATION_CLAIMED = "claimed"
+DISTILLATION_RETRYABLE = "retryable"
+DISTILLATION_STORED = "stored"
+DISTILLATION_NO_LESSON = "no_lesson"
+DISTILLATION_LEGACY_NO_LESSON = "legacy_no_lesson"
+DISTILLATION_CANCELLED = "cancelled"
+
+_DISTILLATION_LIVE_STATES = frozenset({
+    DISTILLATION_CLAIMED,
+    DISTILLATION_RETRYABLE,
+})
+_DISTILLATION_TERMINAL_STATES = frozenset({
+    DISTILLATION_STORED,
+    DISTILLATION_NO_LESSON,
+    DISTILLATION_LEGACY_NO_LESSON,
+    DISTILLATION_CANCELLED,
+})
+_DISTILLATION_BACKFILL_MIGRATION = "lesson_distillations_v1_backfill"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS interactions (
@@ -37,6 +62,10 @@ CREATE TABLE IF NOT EXISTS outcomes (
     signal TEXT,
     reward REAL,
     ts TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS memory_migrations (
+    name TEXT PRIMARY KEY,
+    applied_ts TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS lessons (
     id TEXT PRIMARY KEY,
@@ -90,6 +119,32 @@ CREATE TABLE IF NOT EXISTS lesson_usage (
     outcome_ts TEXT,
     PRIMARY KEY(lesson_id, interaction_id)
 );
+CREATE TABLE IF NOT EXISTS lesson_distillations (
+    interaction_id TEXT PRIMARY KEY,
+    state TEXT NOT NULL CHECK(state IN (
+        'claimed', 'retryable', 'stored', 'no_lesson',
+        'legacy_no_lesson', 'cancelled'
+    )),
+    signal TEXT,
+    claim_token TEXT,
+    owner_pid INTEGER,
+    owner_identity TEXT,
+    claimed_at REAL,
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+    last_error TEXT,
+    created_ts TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_ts TEXT DEFAULT CURRENT_TIMESTAMP,
+    completed_ts TEXT,
+    CHECK (
+        (state = 'claimed' AND claim_token IS NOT NULL
+         AND owner_pid IS NOT NULL AND owner_identity IS NOT NULL
+         AND claimed_at IS NOT NULL)
+        OR
+        (state != 'claimed' AND claim_token IS NULL
+         AND owner_pid IS NULL AND owner_identity IS NULL
+         AND claimed_at IS NULL)
+    )
+);
 CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -136,6 +191,69 @@ def connect(path=":memory:", check_same_thread=True):
 
 def _column_names(conn, table):
     return {r[1] for r in conn.execute("PRAGMA table_info(%s)" % table).fetchall()}
+
+
+def _good_outcome_signals():
+    return tuple(sorted(
+        signal for signal in reward.VALID_SIGNALS if reward.is_good(signal)
+    ))
+
+
+def _dedupe_outcomes_for_unique_index(conn):
+    """Keep the earliest append for each non-null interaction/signal pair."""
+    index_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",
+        ("uq_outcomes_interaction_signal_nonnull",),
+    ).fetchone()
+    if index_exists is not None:
+        return
+    conn.execute(
+        "DELETE FROM outcomes WHERE interaction_id IS NOT NULL "
+        "AND signal IS NOT NULL AND rowid NOT IN ("
+        "SELECT MIN(rowid) FROM outcomes "
+        "WHERE interaction_id IS NOT NULL AND signal IS NOT NULL "
+        "GROUP BY interaction_id, signal)"
+    )
+
+
+def _backfill_lesson_distillations_once(conn):
+    """Mark legacy good outcomes terminal without invoking a model or embedder."""
+    already_applied = conn.execute(
+        "SELECT 1 FROM memory_migrations WHERE name=?",
+        (_DISTILLATION_BACKFILL_MIGRATION,),
+    ).fetchone()
+    if already_applied is not None:
+        return
+
+    good_signals = _good_outcome_signals()
+    if good_signals:
+        placeholders = ",".join("?" for _ in good_signals)
+        conn.execute(
+            "INSERT OR IGNORE INTO lesson_distillations("
+            "interaction_id, state, signal, attempts, completed_ts) "
+            "SELECT i.id, CASE WHEN EXISTS ("
+            "SELECT 1 FROM lessons l WHERE l.source_interaction=i.id"
+            ") THEN ? ELSE ? END, ("
+            "SELECT o2.signal FROM outcomes o2 "
+            "WHERE o2.interaction_id=i.id AND o2.signal IN (%s) "
+            "AND o2.reward >= ? ORDER BY o2.rowid ASC LIMIT 1"
+            "), 0, CURRENT_TIMESTAMP FROM interactions i "
+            "WHERE EXISTS (SELECT 1 FROM outcomes o "
+            "WHERE o.interaction_id=i.id AND o.signal IN (%s) "
+            "AND o.reward >= ?)" % (placeholders, placeholders),
+            (
+                DISTILLATION_STORED,
+                DISTILLATION_LEGACY_NO_LESSON,
+                *good_signals,
+                reward.GOOD_THRESHOLD,
+                *good_signals,
+                reward.GOOD_THRESHOLD,
+            ),
+        )
+    conn.execute(
+        "INSERT INTO memory_migrations(name) VALUES(?)",
+        (_DISTILLATION_BACKFILL_MIGRATION,),
+    )
 
 
 def _migrate(conn):
@@ -193,6 +311,8 @@ def _migrate(conn):
     usage_cols = _column_names(conn, "lesson_usage")
     if "outcome_ts" not in usage_cols:
         conn.execute("ALTER TABLE lesson_usage ADD COLUMN outcome_ts TEXT")
+    _dedupe_outcomes_for_unique_index(conn)
+    _backfill_lesson_distillations_once(conn)
     claim_cols = _column_names(conn, "session_turn_claims")
     if "owner_pid" not in claim_cols or "owner_identity" not in claim_cols:
         # Claims are ephemeral coordination state, so replacing the old
@@ -224,6 +344,12 @@ def init_db(conn):
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_outcomes_interaction_signal_reward "
             "ON outcomes(interaction_id, signal, reward)"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "uq_outcomes_interaction_signal_nonnull "
+            "ON outcomes(interaction_id, signal) "
+            "WHERE interaction_id IS NOT NULL AND signal IS NOT NULL"
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_project ON facts(project)")
         conn.execute(
@@ -331,6 +457,10 @@ def delete_interaction(conn, interaction_id):
     )
     conn.execute(
         "DELETE FROM lesson_usage WHERE interaction_id=?", (interaction_id,)
+    )
+    conn.execute(
+        "DELETE FROM lesson_distillations WHERE interaction_id=?",
+        (interaction_id,),
     )
     conn.execute("DELETE FROM interactions WHERE id=?", (interaction_id,))
     conn.commit()
@@ -509,14 +639,574 @@ def replace_interaction_response_cas(
 
 
 def record_outcome_row(conn, interaction_id, signal, reward):
-    conn.execute(
-        "INSERT INTO outcomes(interaction_id, signal, reward) VALUES(?, ?, ?)",
-        (interaction_id, signal, reward),
+    """Record one signal once; return whether this call inserted the evidence."""
+    try:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO outcomes(interaction_id, signal, reward) "
+            "VALUES(?, ?, ?)",
+            (interaction_id, signal, reward),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return cur.rowcount == 1
+
+
+def _distillation_owner(owner_pid, owner_identity, owner_probe):
+    """Return a verified process-instance tuple or None (UNKNOWN fails closed)."""
+    if isinstance(owner_pid, bool):
+        return None
+    try:
+        owner_pid = os.getpid() if owner_pid is None else int(owner_pid)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if owner_pid <= 0:
+        return None
+    owner_probe = owner_probe or process_liveness.probe_process
+    owner_identity = str(owner_identity or "").strip() or None
+    try:
+        if owner_identity is None:
+            owner_state, owner_identity = owner_probe(owner_pid)
+        else:
+            owner_state, _actual_identity = owner_probe(
+                owner_pid, expected_identity=owner_identity,
+            )
+    except Exception:
+        return None
+    owner_identity = str(owner_identity or "").strip()
+    if (
+        owner_state != process_liveness.PROCESS_ALIVE
+        or not owner_identity
+    ):
+        return None
+    return owner_pid, owner_identity
+
+
+def abandon_lesson_distillation_claim(
+    interaction_id, claim_token, owner_pid, owner_identity,
+):
+    """Mark an exact same-process claim reclaimable after release I/O failure."""
+    interaction_id = str(interaction_id or "").strip()
+    claim_token = str(claim_token or "").strip()
+    owner_identity = str(owner_identity or "").strip()
+    try:
+        owner_pid = int(owner_pid)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if not interaction_id or not claim_token or owner_pid <= 0 or not owner_identity:
+        return False
+    marker = (interaction_id, claim_token, owner_pid, owner_identity)
+    with _ABANDONED_DISTILLATION_CLAIMS_LOCK:
+        _ABANDONED_DISTILLATION_CLAIMS.add(marker)
+    return True
+
+
+def _consume_abandoned_distillation_claim(row, interaction_id, owner):
+    if row is None or row["state"] != DISTILLATION_CLAIMED:
+        return False
+    marker = (
+        interaction_id, row["claim_token"], row["owner_pid"],
+        row["owner_identity"],
     )
-    conn.commit()
+    if owner is not None and owner != (row["owner_pid"], row["owner_identity"]):
+        return False
+    with _ABANDONED_DISTILLATION_CLAIMS_LOCK:
+        if marker not in _ABANDONED_DISTILLATION_CLAIMS:
+            return False
+        _ABANDONED_DISTILLATION_CLAIMS.discard(marker)
+    return True
 
 
-def add_lesson(
+def _discard_abandoned_distillation_claims(interaction_id):
+    with _ABANDONED_DISTILLATION_CLAIMS_LOCK:
+        stale = {
+            marker for marker in _ABANDONED_DISTILLATION_CLAIMS
+            if isinstance(marker, tuple) and len(marker) == 4
+            and marker[0] == interaction_id
+        }
+        _ABANDONED_DISTILLATION_CLAIMS.difference_update(stale)
+
+
+def _distillation_evidence(conn, interaction_id):
+    """Return (has_grounded_good, has_contradiction) from persisted evidence."""
+    good_signals = _good_outcome_signals()
+    if not good_signals:
+        has_any = conn.execute(
+            "SELECT 1 FROM outcomes WHERE interaction_id=? LIMIT 1",
+            (interaction_id,),
+        ).fetchone()
+        return False, has_any is not None
+    placeholders = ",".join("?" for _ in good_signals)
+    row = conn.execute(
+        "SELECT EXISTS(SELECT 1 FROM outcomes good "
+        "WHERE good.interaction_id=? AND good.signal IN (%s) "
+        "AND good.reward >= ?) AS has_good, "
+        "EXISTS(SELECT 1 FROM outcomes bad "
+        "WHERE bad.interaction_id=? AND (bad.signal IS NULL "
+        "OR bad.signal NOT IN (%s) OR bad.reward IS NULL "
+        "OR bad.reward < ?)) AS has_contradiction"
+        % (placeholders, placeholders),
+        (
+            interaction_id, *good_signals, reward.GOOD_THRESHOLD,
+            interaction_id, *good_signals, reward.GOOD_THRESHOLD,
+        ),
+    ).fetchone()
+    return bool(row["has_good"]), bool(row["has_contradiction"])
+
+
+def _distillation_row(conn, interaction_id):
+    return conn.execute(
+        "SELECT * FROM lesson_distillations WHERE interaction_id=?",
+        (interaction_id,),
+    ).fetchone()
+
+
+def _cancel_live_distillation(conn, interaction_id, signal, reason):
+    row = _distillation_row(conn, interaction_id)
+    if row is None:
+        conn.execute(
+            "INSERT INTO lesson_distillations("
+            "interaction_id, state, signal, attempts, last_error, completed_ts) "
+            "VALUES(?, ?, ?, 0, ?, CURRENT_TIMESTAMP)",
+            (
+                interaction_id, DISTILLATION_CANCELLED, signal,
+                str(reason or "contradictory outcome"),
+            ),
+        )
+        return True
+    if row["state"] not in _DISTILLATION_LIVE_STATES:
+        return False
+    cur = conn.execute(
+        "UPDATE lesson_distillations SET state=?, signal=?, claim_token=NULL, "
+        "owner_pid=NULL, owner_identity=NULL, claimed_at=NULL, last_error=?, "
+        "updated_ts=CURRENT_TIMESTAMP, completed_ts=CURRENT_TIMESTAMP "
+        "WHERE interaction_id=? AND state IN (?, ?)",
+        (
+            DISTILLATION_CANCELLED, signal,
+            str(reason or "contradictory outcome"), interaction_id,
+            DISTILLATION_CLAIMED, DISTILLATION_RETRYABLE,
+        ),
+    )
+    return cur.rowcount == 1
+
+
+def _claim_distillation(
+    conn, interaction_id, signal, claim_token, owner, owner_probe, claimed_at,
+):
+    """Acquire/recover a job while the caller holds BEGIN IMMEDIATE."""
+    row = _distillation_row(conn, interaction_id)
+    if row is None:
+        _discard_abandoned_distillation_claims(interaction_id)
+        if owner is None:
+            conn.execute(
+                "INSERT INTO lesson_distillations("
+                "interaction_id, state, signal, attempts, last_error) "
+                "VALUES(?, ?, ?, 0, ?)",
+                (
+                    interaction_id, DISTILLATION_RETRYABLE, signal,
+                    "owner identity unavailable",
+                ),
+            )
+            return False
+        owner_pid, owner_identity = owner
+        conn.execute(
+            "INSERT INTO lesson_distillations("
+            "interaction_id, state, signal, claim_token, owner_pid, "
+            "owner_identity, claimed_at, attempts) VALUES(?, ?, ?, ?, ?, ?, ?, 1)",
+            (
+                interaction_id, DISTILLATION_CLAIMED, signal, claim_token,
+                owner_pid, owner_identity, claimed_at,
+            ),
+        )
+        return True
+
+    if row["state"] == DISTILLATION_RETRYABLE:
+        _discard_abandoned_distillation_claims(interaction_id)
+        if owner is None:
+            return False
+        owner_pid, owner_identity = owner
+        cur = conn.execute(
+            "UPDATE lesson_distillations SET state=?, signal=?, claim_token=?, "
+            "owner_pid=?, owner_identity=?, claimed_at=?, attempts=attempts+1, "
+            "last_error=NULL, updated_ts=CURRENT_TIMESTAMP, completed_ts=NULL "
+            "WHERE interaction_id=? AND state=?",
+            (
+                DISTILLATION_CLAIMED, signal, claim_token, owner_pid,
+                owner_identity, claimed_at, interaction_id,
+                DISTILLATION_RETRYABLE,
+            ),
+        )
+        return cur.rowcount == 1
+
+    if row["state"] != DISTILLATION_CLAIMED:
+        _discard_abandoned_distillation_claims(interaction_id)
+        return False
+
+    if _consume_abandoned_distillation_claim(row, interaction_id, owner):
+        if owner is None:
+            conn.execute(
+                "UPDATE lesson_distillations SET state=?, claim_token=NULL, "
+                "owner_pid=NULL, owner_identity=NULL, claimed_at=NULL, "
+                "last_error=?, updated_ts=CURRENT_TIMESTAMP "
+                "WHERE interaction_id=? AND state=? AND claim_token=? "
+                "AND owner_pid=? AND owner_identity=?",
+                (
+                    DISTILLATION_RETRYABLE, "same-process claim abandoned",
+                    interaction_id, DISTILLATION_CLAIMED, row["claim_token"],
+                    row["owner_pid"], row["owner_identity"],
+                ),
+            )
+            return False
+        owner_pid, owner_identity = owner
+        cur = conn.execute(
+            "UPDATE lesson_distillations SET signal=?, claim_token=?, "
+            "owner_pid=?, owner_identity=?, claimed_at=?, attempts=attempts+1, "
+            "last_error=NULL, updated_ts=CURRENT_TIMESTAMP "
+            "WHERE interaction_id=? AND state=? AND claim_token=? "
+            "AND owner_pid=? AND owner_identity=?",
+            (
+                signal, claim_token, owner_pid, owner_identity, claimed_at,
+                interaction_id, DISTILLATION_CLAIMED, row["claim_token"],
+                row["owner_pid"], row["owner_identity"],
+            ),
+        )
+        return cur.rowcount == 1
+
+    if owner is not None:
+        owner_pid, owner_identity = owner
+        if (
+            row["claim_token"] == claim_token
+            and row["owner_pid"] == owner_pid
+            and row["owner_identity"] == owner_identity
+        ):
+            return True
+
+    owner_probe = owner_probe or process_liveness.probe_process
+    try:
+        existing_state, _actual_identity = owner_probe(
+            row["owner_pid"], expected_identity=row["owner_identity"],
+        )
+    except Exception:
+        existing_state = process_liveness.PROCESS_UNKNOWN
+    if existing_state != process_liveness.PROCESS_DEAD:
+        return False
+
+    if owner is None:
+        conn.execute(
+            "UPDATE lesson_distillations SET state=?, claim_token=NULL, "
+            "owner_pid=NULL, owner_identity=NULL, claimed_at=NULL, last_error=?, "
+            "updated_ts=CURRENT_TIMESTAMP WHERE interaction_id=? "
+            "AND state=? AND claim_token=? AND owner_pid=? AND owner_identity=?",
+            (
+                DISTILLATION_RETRYABLE, "previous owner is dead",
+                interaction_id, DISTILLATION_CLAIMED, row["claim_token"],
+                row["owner_pid"], row["owner_identity"],
+            ),
+        )
+        return False
+
+    owner_pid, owner_identity = owner
+    cur = conn.execute(
+        "UPDATE lesson_distillations SET signal=?, claim_token=?, owner_pid=?, "
+        "owner_identity=?, claimed_at=?, attempts=attempts+1, last_error=NULL, "
+        "updated_ts=CURRENT_TIMESTAMP WHERE interaction_id=? AND state=? "
+        "AND claim_token=? AND owner_pid=? AND owner_identity=?",
+        (
+            signal, claim_token, owner_pid, owner_identity, claimed_at,
+            interaction_id, DISTILLATION_CLAIMED, row["claim_token"],
+            row["owner_pid"], row["owner_identity"],
+        ),
+    )
+    return cur.rowcount == 1
+
+
+def _outcome_distillation_result(
+    row, *, outcome_inserted, usage_rows_updated, claimed, claim_token,
+):
+    return {
+        "outcome_inserted": bool(outcome_inserted),
+        "usage_rows_updated": int(usage_rows_updated or 0),
+        "distillation_state": row["state"] if row is not None else None,
+        "claimed": bool(claimed),
+        "claim_token": claim_token if claimed else None,
+        "attempts": int(row["attempts"] or 0) if row is not None else 0,
+    }
+
+
+def record_outcome_and_claim_lesson_distillation(
+    conn, interaction_id, signal, reward_value, *, claim_token=None,
+    owner_pid=None, owner_identity=None, owner_probe=None, now=None,
+):
+    """Atomically record evidence, credit usage, and claim eligible distillation.
+
+    A duplicate non-null interaction/signal is a storage no-op and does not move
+    ``lesson_usage.outcome_ts``. It can still reacquire a retryable job or recover
+    one whose exact PID/process-start owner is confirmed dead. UNKNOWN liveness
+    never steals a claim. Contradictory evidence cancels only live jobs.
+    """
+    interaction_id = str(interaction_id or "").strip()
+    signal = str(signal or "").strip()
+    if not interaction_id or not signal:
+        raise ValueError("interaction_id and signal are required")
+    try:
+        reward_value = float(reward_value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("reward_value must be finite") from exc
+    if not math.isfinite(reward_value):
+        raise ValueError("reward_value must be finite")
+
+    claim_token = str(claim_token or new_id()).strip()
+    if not claim_token:
+        raise ValueError("claim_token is required")
+    owner = _distillation_owner(owner_pid, owner_identity, owner_probe)
+    claimed_at = time.time() if now is None else float(now)
+
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        interaction_exists = conn.execute(
+            "SELECT 1 FROM interactions WHERE id=?", (interaction_id,),
+        ).fetchone()
+        if interaction_exists is None:
+            conn.commit()
+            return _outcome_distillation_result(
+                None, outcome_inserted=False, usage_rows_updated=0,
+                claimed=False, claim_token=claim_token,
+            )
+
+        outcome_cur = conn.execute(
+            "INSERT OR IGNORE INTO outcomes(interaction_id, signal, reward) "
+            "VALUES(?, ?, ?)",
+            (interaction_id, signal, reward_value),
+        )
+        outcome_inserted = outcome_cur.rowcount == 1
+        usage_rows_updated = 0
+        if outcome_inserted:
+            usage_cur = conn.execute(
+                "UPDATE lesson_usage SET outcome_signal=?, reward=?, "
+                "outcome_ts=CURRENT_TIMESTAMP WHERE interaction_id=?",
+                (signal, reward_value, interaction_id),
+            )
+            usage_rows_updated = usage_cur.rowcount
+
+        has_good, has_contradiction = _distillation_evidence(
+            conn, interaction_id,
+        )
+        claimed = False
+        if not has_good or has_contradiction:
+            _cancel_live_distillation(
+                conn, interaction_id, signal, "contradictory outcome evidence",
+            )
+        else:
+            claimed = _claim_distillation(
+                conn, interaction_id, signal, claim_token, owner, owner_probe,
+                claimed_at,
+            )
+        row = _distillation_row(conn, interaction_id)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return _outcome_distillation_result(
+        row, outcome_inserted=outcome_inserted,
+        usage_rows_updated=usage_rows_updated, claimed=claimed,
+        claim_token=claim_token,
+    )
+
+
+def mark_lesson_distillation_retryable(
+    conn, interaction_id, claim_token, error="",
+):
+    """Release an exact live claim for retry; contradictory evidence cancels it."""
+    interaction_id = str(interaction_id or "").strip()
+    claim_token = str(claim_token or "").strip()
+    if not interaction_id or not claim_token:
+        return False
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = _distillation_row(conn, interaction_id)
+        if (
+            row is None
+            or row["state"] != DISTILLATION_CLAIMED
+            or row["claim_token"] != claim_token
+        ):
+            conn.commit()
+            return False
+        has_good, has_contradiction = _distillation_evidence(
+            conn, interaction_id,
+        )
+        if not has_good or has_contradiction:
+            _cancel_live_distillation(
+                conn, interaction_id, row["signal"],
+                "contradictory outcome evidence",
+            )
+            conn.commit()
+            return False
+        cur = conn.execute(
+            "UPDATE lesson_distillations SET state=?, claim_token=NULL, "
+            "owner_pid=NULL, owner_identity=NULL, claimed_at=NULL, last_error=?, "
+            "updated_ts=CURRENT_TIMESTAMP WHERE interaction_id=? AND state=? "
+            "AND claim_token=?",
+            (
+                DISTILLATION_RETRYABLE, str(error or ""), interaction_id,
+                DISTILLATION_CLAIMED, claim_token,
+            ),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return cur.rowcount == 1
+
+
+def cancel_lesson_distillation(
+    conn, interaction_id, reason="", claim_token=None,
+):
+    """Cancel a live job, optionally requiring its exact active claim token."""
+    interaction_id = str(interaction_id or "").strip()
+    claim_token = str(claim_token or "").strip() or None
+    if not interaction_id:
+        return False
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = _distillation_row(conn, interaction_id)
+        if row is None or row["state"] not in _DISTILLATION_LIVE_STATES:
+            conn.commit()
+            return False
+        if claim_token is not None and (
+            row["state"] != DISTILLATION_CLAIMED
+            or row["claim_token"] != claim_token
+        ):
+            conn.commit()
+            return False
+        cur = conn.execute(
+            "UPDATE lesson_distillations SET state=?, claim_token=NULL, "
+            "owner_pid=NULL, owner_identity=NULL, claimed_at=NULL, last_error=?, "
+            "updated_ts=CURRENT_TIMESTAMP, completed_ts=CURRENT_TIMESTAMP "
+            "WHERE interaction_id=? AND state IN (?, ?)",
+            (
+                DISTILLATION_CANCELLED, str(reason or "cancelled"),
+                interaction_id, DISTILLATION_CLAIMED,
+                DISTILLATION_RETRYABLE,
+            ),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return cur.rowcount == 1
+
+
+def finalize_lesson_distillation(
+    conn, interaction_id, claim_token, transaction_body=None,
+):
+    """Run locked dedupe/write work and atomically make a claim terminal.
+
+    ``transaction_body(conn)`` must not commit or roll back. It runs under the
+    same ``BEGIN IMMEDIATE`` as the terminal transition and returns a mapping
+    containing ``terminal_state`` (``stored`` or ``no_lesson``), plus optional
+    ``lesson_id`` and ``result`` metadata. Any exception rolls back both lesson
+    tables and the ledger. Persisted contradictory evidence cancels the claim
+    before the callback runs.
+    """
+    interaction_id = str(interaction_id or "").strip()
+    claim_token = str(claim_token or "").strip()
+    if not interaction_id or not claim_token:
+        return {
+            "finalized": False,
+            "distillation_state": None,
+            "lesson_id": None,
+            "result": None,
+        }
+    if transaction_body is not None and not callable(transaction_body):
+        raise TypeError("transaction_body must be callable")
+
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = _distillation_row(conn, interaction_id)
+        if (
+            row is None
+            or row["state"] != DISTILLATION_CLAIMED
+            or row["claim_token"] != claim_token
+        ):
+            conn.commit()
+            return {
+                "finalized": False,
+                "distillation_state": row["state"] if row is not None else None,
+                "lesson_id": None,
+                "result": None,
+            }
+
+        has_good, has_contradiction = _distillation_evidence(
+            conn, interaction_id,
+        )
+        if not has_good or has_contradiction:
+            _cancel_live_distillation(
+                conn, interaction_id, row["signal"],
+                "contradictory outcome evidence",
+            )
+            conn.commit()
+            return {
+                "finalized": False,
+                "distillation_state": DISTILLATION_CANCELLED,
+                "lesson_id": None,
+                "result": None,
+            }
+
+        body_result = (
+            transaction_body(conn) if transaction_body is not None
+            else {"terminal_state": DISTILLATION_NO_LESSON}
+        )
+        if body_result is None:
+            body_result = {"terminal_state": DISTILLATION_NO_LESSON}
+        if not isinstance(body_result, dict):
+            raise TypeError("transaction_body must return a mapping or None")
+        terminal_state = body_result.get("terminal_state")
+        if terminal_state not in (
+            DISTILLATION_STORED,
+            DISTILLATION_NO_LESSON,
+        ):
+            raise ValueError(
+                "transaction_body terminal_state must be stored or no_lesson"
+            )
+
+        lesson_row = conn.execute(
+            "SELECT id FROM lessons WHERE source_interaction=? "
+            "ORDER BY rowid ASC LIMIT 1",
+            (interaction_id,),
+        ).fetchone()
+        if terminal_state == DISTILLATION_STORED and lesson_row is None:
+            raise ValueError("stored finalization requires an interaction lesson")
+        if lesson_row is not None:
+            terminal_state = DISTILLATION_STORED
+        # Report persisted provenance, never unverified callback metadata.
+        lesson_id = lesson_row["id"] if lesson_row is not None else None
+
+        cur = conn.execute(
+            "UPDATE lesson_distillations SET state=?, claim_token=NULL, "
+            "owner_pid=NULL, owner_identity=NULL, claimed_at=NULL, last_error=NULL, "
+            "updated_ts=CURRENT_TIMESTAMP, completed_ts=CURRENT_TIMESTAMP "
+            "WHERE interaction_id=? AND state=? AND claim_token=?",
+            (
+                terminal_state, interaction_id, DISTILLATION_CLAIMED,
+                claim_token,
+            ),
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError("distillation claim changed during finalization")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return {
+        "finalized": True,
+        "distillation_state": terminal_state,
+        "lesson_id": lesson_id,
+        "result": body_result.get("result", body_result),
+    }
+
+
+def _insert_lesson_rows(
     conn, lesson_id, text, embedding, source_interaction,
     embedding_model=None, embedding_revision=None, embedding_dim=None,
 ):
@@ -546,7 +1236,39 @@ def add_lesson(
     conn.execute(
         "INSERT INTO lessons_fts(lesson_id, text) VALUES(?, ?)", (lesson_id, text)
     )
-    conn.commit()
+    return lesson_id
+
+
+def insert_lesson_in_transaction(
+    conn, lesson_id, text, embedding, source_interaction,
+    embedding_model=None, embedding_revision=None, embedding_dim=None,
+):
+    """Insert the lesson and FTS mirror without committing an active transaction."""
+    if not conn.in_transaction:
+        raise RuntimeError("insert_lesson_in_transaction requires an active transaction")
+    return _insert_lesson_rows(
+        conn, lesson_id, text, embedding, source_interaction,
+        embedding_model=embedding_model,
+        embedding_revision=embedding_revision,
+        embedding_dim=embedding_dim,
+    )
+
+
+def add_lesson(
+    conn, lesson_id, text, embedding, source_interaction,
+    embedding_model=None, embedding_revision=None, embedding_dim=None,
+):
+    try:
+        _insert_lesson_rows(
+            conn, lesson_id, text, embedding, source_interaction,
+            embedding_model=embedding_model,
+            embedding_revision=embedding_revision,
+            embedding_dim=embedding_dim,
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def lesson_exists_for_interaction(conn, interaction_id):

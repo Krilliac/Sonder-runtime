@@ -152,23 +152,21 @@ def exact_text_exists(text, conn):
     return False
 
 
-def maybe_add_lesson(conn, interaction_id, task, response, signal, offload_fn,
-                     embed_fn=None, id_fn=memory_store.new_id):
+def prepare_lesson_candidate(
+    task, response, signal, offload_fn, embed_fn=None,
+    id_fn=memory_store.new_id,
+):
+    """Generate and embed a candidate without reading or mutating SQLite."""
     runtime_default = embed_fn is None
     embed_fn = embed_fn or embeddings.embed
-    if memory_store.lesson_exists_for_interaction(conn, interaction_id):
-        return None
     text = distill(task, response, signal, offload_fn)
     if not text:
-        return None
+        return {"status": "no_lesson", "reason": "not_concrete"}
     # Keep secret- and path-like material out of both the lesson row and its
-    # FTS mirror. Use the shared privacy classifier so ingestion, maintenance,
-    # and opt-in export enforce the same conservative boundary. The classifier
-    # returns stable reason names only; never surface the matched text here.
+    # FTS mirror. The classifier returns stable reason names only; never retain
+    # or surface the matched text in status metadata.
     if contribute.private_reasons(text):
-        return None
-    if exact_text_exists(text, conn):
-        return None
+        return {"status": "no_lesson", "reason": "private"}
     emb = embed_fn(text)
     if not embeddings.valid_vector(emb):
         emb = None
@@ -177,20 +175,111 @@ def maybe_add_lesson(conn, interaction_id, task, response, signal, offload_fn,
         if emb is not None and (runtime_default or embed_fn is embeddings.embed)
         else {}
     )
+    return {
+        "status": "candidate",
+        "lesson_id": id_fn(),
+        "text": text,
+        "embedding": emb,
+        "embedding_blob": embeddings.to_blob(emb) if emb else None,
+        "embedding_model": provenance.get("model"),
+        "embedding_revision": provenance.get("revision"),
+        "embedding_dim": provenance.get("dimension"),
+    }
+
+
+def store_prepared_lesson(conn, interaction_id, candidate):
+    """Deduplicate and store a prepared candidate inside an active transaction.
+
+    The returned mapping is the callback contract accepted by
+    ``memory_store.finalize_lesson_distillation``. Candidate generation and
+    embedding deliberately happen before this function so the database write
+    lock covers only deterministic dedupe and publication work.
+    """
+    if not conn.in_transaction:
+        raise RuntimeError("store_prepared_lesson requires an active transaction")
+    if not isinstance(candidate, dict):
+        raise TypeError("candidate must be a mapping")
+    if candidate.get("status") != "candidate":
+        return {
+            "terminal_state": memory_store.DISTILLATION_NO_LESSON,
+            "result": candidate.get("reason") or "no_lesson",
+        }
+
+    existing = conn.execute(
+        "SELECT id FROM lessons WHERE source_interaction=? "
+        "ORDER BY rowid ASC LIMIT 1",
+        (interaction_id,),
+    ).fetchone()
+    if existing is not None:
+        return {
+            "terminal_state": memory_store.DISTILLATION_STORED,
+            "lesson_id": existing["id"],
+            "result": "existing_interaction_lesson",
+        }
+
+    text = str(candidate.get("text") or "").strip()
+    lesson_id = str(candidate.get("lesson_id") or "").strip()
+    if not text or not lesson_id:
+        raise ValueError("prepared candidate requires lesson_id and text")
+    if exact_text_exists(text, conn):
+        return {
+            "terminal_state": memory_store.DISTILLATION_NO_LESSON,
+            "result": "exact_duplicate",
+        }
     if is_duplicate(
-        emb,
+        candidate.get("embedding"),
         conn,
-        embedding_model=provenance.get("model"),
-        embedding_revision=provenance.get("revision"),
-        embedding_dim=provenance.get("dimension"),
+        embedding_model=candidate.get("embedding_model"),
+        embedding_revision=candidate.get("embedding_revision"),
+        embedding_dim=candidate.get("embedding_dim"),
+    ):
+        return {
+            "terminal_state": memory_store.DISTILLATION_NO_LESSON,
+            "result": "semantic_duplicate",
+        }
+
+    memory_store.insert_lesson_in_transaction(
+        conn,
+        lesson_id,
+        text,
+        candidate.get("embedding_blob"),
+        interaction_id,
+        embedding_model=candidate.get("embedding_model"),
+        embedding_revision=candidate.get("embedding_revision"),
+        embedding_dim=candidate.get("embedding_dim"),
+    )
+    return {
+        "terminal_state": memory_store.DISTILLATION_STORED,
+        "lesson_id": lesson_id,
+        "result": "stored",
+    }
+
+
+def maybe_add_lesson(conn, interaction_id, task, response, signal, offload_fn,
+                     embed_fn=None, id_fn=memory_store.new_id):
+    if memory_store.lesson_exists_for_interaction(conn, interaction_id):
+        return None
+    candidate = prepare_lesson_candidate(
+        task, response, signal, offload_fn, embed_fn=embed_fn, id_fn=id_fn,
+    )
+    if candidate["status"] != "candidate":
+        return None
+    text = candidate["text"]
+    if exact_text_exists(text, conn):
+        return None
+    if is_duplicate(
+        candidate["embedding"],
+        conn,
+        embedding_model=candidate["embedding_model"],
+        embedding_revision=candidate["embedding_revision"],
+        embedding_dim=candidate["embedding_dim"],
     ):
         return None
-    lesson_id = id_fn()
-    blob = embeddings.to_blob(emb) if emb else None
+    lesson_id = candidate["lesson_id"]
     memory_store.add_lesson(
-        conn, lesson_id, text, blob, interaction_id,
-        embedding_model=provenance.get("model"),
-        embedding_revision=provenance.get("revision"),
-        embedding_dim=provenance.get("dimension"),
+        conn, lesson_id, text, candidate["embedding_blob"], interaction_id,
+        embedding_model=candidate["embedding_model"],
+        embedding_revision=candidate["embedding_revision"],
+        embedding_dim=candidate["embedding_dim"],
     )
     return lesson_id
