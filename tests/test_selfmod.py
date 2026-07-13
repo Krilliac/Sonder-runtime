@@ -185,7 +185,7 @@ def test_partial_backup_failure_removes_incomplete_bundle(monkeypatch, isolated)
 def test_interrupted_editing_and_explicit_resume(isolated):
     root = repository(isolated, use_git=False)
     run = prepare(plan(root))
-    owner = selfmod.claim(run["id"], "dead-owner", lease_seconds=60)
+    selfmod.claim(run["id"], "dead-owner", lease_seconds=60)
     with selfmod._tx() as conn:
         conn.execute("UPDATE selfmod_runs SET owner_pid=?,owner_host=?,lease_until=? WHERE id=?", (99999999, selfmod.socket.gethostname(), time.time() - 1, run["id"]))
     assert selfmod.reconcile_interrupted() == 1
@@ -198,7 +198,11 @@ def test_protected_paths_and_backup_policy_require_maintenance(isolated):
     (root / "permission_rules.py").write_text("rules=[]\n")
     (root / "selfmod.py").write_text("unsafe=True\n")
     (root / "process_liveness.py").write_text("unsafe=True\n")
-    for path in ("permission_rules.py", "selfmod.py", "process_liveness.py"):
+    (root / "model_transport.py").write_text("unsafe=True\n")
+    for path in (
+        "permission_rules.py", "selfmod.py", "process_liveness.py",
+        "model_transport.py",
+    ):
         with pytest.raises(PermissionError, match="maintenance"):
             plan(root, files=(path,))
     approved = plan(root, files=("permission_rules.py",), risk="high", maintenance=True)
@@ -439,9 +443,11 @@ def test_dirty_declared_file_is_never_overwritten(isolated):
 
 def test_retention_never_deletes_newest_valid_rollback(isolated):
     root = repository(isolated, use_git=False)
-    first = plan(root); selfmod.create_backup(first["id"])
+    first = plan(root)
+    selfmod.create_backup(first["id"])
     time.sleep(0.02)
-    second = plan(root); selfmod.create_backup(second["id"])
+    second = plan(root)
+    selfmod.create_backup(second["id"])
     old = selfmod._backup_dir(first["id"])
     os.utime(old, (1, 1))
     removed = selfmod.prune_backups(retention_days=1, retention_bytes=1)

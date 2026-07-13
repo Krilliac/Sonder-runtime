@@ -1191,6 +1191,7 @@ def _run_prompt(
     out = server.answer_with_history(
         prompt, history, trace=state.trace, strict=state.strict, tier=tier,
         context_size=context_size, session=session, project=project,
+        raise_model_errors=True,
     )
     if out.startswith("ERROR"):
         result = TurnResult(out, None, "")
@@ -1297,12 +1298,14 @@ class Handler(BaseHTTPRequestHandler):
             return ""
         return nonce
 
-    def _send_json_payload(self, payload, status=200):
+    def _send_json_payload(self, payload, status=200, headers=None):
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self._cors()
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        for name, value in (headers or {}).items():
+            self.send_header(str(name), str(value))
         self.end_headers()
         self.wfile.write(body)
 
@@ -1655,6 +1658,33 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                     state=state,
                 )
+        except server.ModelCallError as error:
+            status = error.status or (
+                502 if error.kind in ("protocol", "empty_response", "request")
+                else 504 if error.kind == "timeout"
+                else 503
+            )
+            if status == 408:
+                status = 504
+            if status not in (400, 401, 403, 404, 408, 413, 429, 500, 502, 503, 504):
+                status = 502
+            error_type = (
+                "rate_limit_error" if status == 429 else
+                "invalid_request_error" if 400 <= status < 500 else
+                "server_error"
+            )
+            headers = {"Retry-After": "1"} if status in (429, 503, 504) else None
+            self._send_json_payload(
+                {
+                    "error": {
+                        "message": error.detail,
+                        "type": error_type,
+                    }
+                },
+                status=status,
+                headers=headers,
+            )
+            return
         except Exception as error:
             self.log_error("request failed: %s", type(error).__name__)
             self._send_json_payload(

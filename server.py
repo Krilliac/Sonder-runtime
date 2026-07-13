@@ -19,6 +19,7 @@ Tiers (escalation ladder, cheapest first):
 """
 
 import contextlib
+import http.client
 import json
 import os
 import re
@@ -73,6 +74,7 @@ import runtime_policy
 import reloadable_mcp
 import autopilot_store
 import autopilot_controller
+from model_transport import ModelCallError
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434").replace("http://", "")
 # OLLAMA_HOST may be set to 0.0.0.0 so `ollama serve` binds all interfaces (e.g.
@@ -412,7 +414,8 @@ def resolve_sonder_model(strict=False):
 
 
 def _make_generate(
-    model, system, temperature, num_predict, num_ctx, cloud=False, timeout=None
+    model, system, temperature, num_predict, num_ctx, cloud=False, timeout=None,
+    cancel_check=None,
 ):
     """Build a generate(prompt, history) closure for `model`.
 
@@ -420,8 +423,11 @@ def _make_generate(
     (they're VRAM/local-context knobs the remote tier doesn't take), matching how the
     non-learning cloud path posts.
     """
+    cloud = bool(cloud or _is_cloud_model_name(model))
+
     def gen(prompt, history=None):
         gen.last_usage = {}
+        usage = {}
         started = time.time()
         messages = []
         if system:
@@ -440,26 +446,28 @@ def _make_generate(
         ok = False
         content = ""
         try:
-            if timeout is None:
-                out = _post("/api/chat", payload)
-            else:
-                out = _post("/api/chat", payload, timeout=timeout)
-            content = out.get("message", {}).get("content", "")
-            tokens_in = out.get("prompt_eval_count")
-            tokens_out = out.get("eval_count")
+            out, content = _chat_request(
+                payload,
+                model=model,
+                cloud=cloud,
+                timeout=timeout,
+                cancel_check=cancel_check,
+            )
+            tokens_in = _model_usage_count(out.get("prompt_eval_count"))
+            tokens_out = _model_usage_count(out.get("eval_count"))
             source = "ollama" if tokens_in is not None or tokens_out is not None else "estimated"
             if tokens_in is None:
                 tokens_in = sum(_rough_token_count(m.get("content", "")) for m in messages)
             if tokens_out is None:
                 tokens_out = _rough_token_count(content)
-            gen.last_usage = {
+            usage = {
                 "tokens_in": int(tokens_in or 0),
                 "tokens_out": int(tokens_out or 0),
                 "token_source": source,
             }
+            gen.last_usage = dict(usage)
             ok = True
         finally:
-            usage = getattr(gen, "last_usage", {}) or {}
             activity_tracker.record_model_call(
                 model=model,
                 prompt_chars=len(prompt or ""),
@@ -1615,6 +1623,291 @@ def _bounded_timeout(value) -> int:
     return max(1, min(value, TIMEOUT))
 
 
+_TRANSIENT_MODEL_HTTP_CODES = frozenset({408, 429, 502, 503, 504})
+_MAX_LOCAL_MODEL_RETRIES = 2
+_MAX_MODEL_RESPONSE_BYTES = 16 * 1024 * 1024
+
+
+def _local_model_retries() -> int:
+    raw = os.environ.get("SONDER_LOCAL_RETRIES", "1").strip()
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 1
+    return max(0, min(value, _MAX_LOCAL_MODEL_RETRIES))
+
+
+def _local_retry_delay(attempt: int) -> float:
+    raw = os.environ.get("SONDER_LOCAL_RETRY_DELAY_MS", "150").strip()
+    try:
+        base_ms = float(raw)
+    except (TypeError, ValueError):
+        base_ms = 150.0
+    base_ms = max(0.0, min(base_ms, 1000.0))
+    return min(1.0, (base_ms / 1000.0) * (2 ** max(0, attempt - 1)))
+
+
+def _redact_model_error_value(value, depth: int = 0):
+    if depth > 4:
+        return "<nested>"
+    if isinstance(value, dict):
+        redacted = {}
+        for key, item in list(value.items())[:64]:
+            name = str(key)
+            lowered = name.lower().replace("-", "_")
+            if any(part in lowered for part in (
+                "password", "passwd", "secret", "token", "api_key",
+                "authorization", "credential",
+            )):
+                redacted[name] = "<redacted>"
+            else:
+                redacted[name] = _redact_model_error_value(item, depth + 1)
+        return redacted
+    if isinstance(value, (list, tuple)):
+        return [_redact_model_error_value(item, depth + 1) for item in list(value)[:64]]
+    return value
+
+
+def _safe_model_error_detail(value, limit: int = 600) -> str:
+    structured = isinstance(value, (dict, list, tuple))
+    if structured:
+        value = json.dumps(
+            _redact_model_error_value(value), ensure_ascii=False, sort_keys=True,
+        )
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    # Error bodies should not become a second persistence surface for bearer
+    # tokens or API keys accidentally echoed by an upstream proxy.
+    if not structured:
+        text = re.sub(
+            r"(?i)\b(bearer|token|secret|api[-_]?key)\b\s*[:=]?\s*\S+",
+            r"\1=<redacted>",
+            text,
+        )
+    return text[:limit] or "model request failed"
+
+
+def _http_error_detail(error: urllib.error.HTTPError) -> str:
+    detail = getattr(error, "reason", "") or "HTTP %s" % error.code
+    try:
+        raw = error.read(4097)
+        if raw:
+            decoded = raw[:4096].decode("utf-8", errors="replace")
+            try:
+                parsed = json.loads(decoded)
+                if isinstance(parsed, dict) and parsed.get("error"):
+                    decoded = parsed["error"]
+                elif isinstance(parsed, (dict, list)):
+                    decoded = parsed
+            except (TypeError, ValueError):
+                pass
+            detail = decoded
+    except Exception:
+        pass
+    return _safe_model_error_detail(detail)
+
+
+def _transport_error_detail(error) -> str:
+    reason = getattr(error, "reason", error)
+    return _safe_model_error_detail(reason)
+
+
+def _cancel_requested(cancel_check) -> bool:
+    if cancel_check is None:
+        return False
+    try:
+        return bool(cancel_check())
+    except Exception:
+        # Cancellation state is a safety gate. If the durable fleet ledger
+        # cannot be read, do not authorize another expensive request.
+        return True
+
+
+def _post_model(
+    path: str,
+    payload: dict,
+    *,
+    model: str,
+    cloud: bool = False,
+    timeout: int | None = None,
+    cancel_check=None,
+) -> tuple[dict, int]:
+    """POST one logical model request with a narrow local-only retry policy.
+
+    Cloud calls stay single-attempt to avoid duplicate metered work. Local calls
+    retry only transport failures and explicitly transient HTTP statuses, using
+    the original timeout as one total monotonic budget. The endpoint, model, and
+    payload never change between attempts.
+    """
+    cloud = bool(cloud or _is_cloud_model_name(model))
+    if cloud and not cloud_allowed():
+        raise ModelCallError(
+            "configuration",
+            _cloud_disabled_message().removeprefix("ERROR: "),
+            attempts=0,
+            cloud=True,
+        )
+    request_timeout = _bounded_timeout(timeout)
+    deadline = time.monotonic() + request_timeout
+    max_attempts = 1 if cloud else 1 + _local_model_retries()
+
+    for attempt_index in range(max_attempts):
+        attempt = attempt_index + 1
+        if _cancel_requested(cancel_check):
+            raise ModelCallError(
+                "cancelled",
+                "model call cancelled before another request was sent",
+                attempts=attempt_index,
+                cloud=cloud,
+            )
+        remaining = deadline - time.monotonic()
+        if attempt > 1 and remaining < 1.0:
+            raise ModelCallError(
+                "timeout",
+                "model retry budget exhausted",
+                transient=True,
+                attempts=attempt_index,
+                cloud=cloud,
+            )
+        try:
+            if timeout is None and attempt == 1:
+                result = _post(path, payload)
+            else:
+                call_timeout = request_timeout if attempt == 1 else max(1, int(remaining))
+                result = _post(path, payload, timeout=call_timeout)
+            return result, attempt
+        except ModelCallError as error:
+            raise ModelCallError(
+                error.kind,
+                error.detail,
+                transient=False,
+                status=error.status,
+                attempts=attempt,
+                cloud=cloud,
+            ) from error
+        except urllib.error.HTTPError as error:
+            status = int(getattr(error, "code", 0) or 0)
+            transient = status in _TRANSIENT_MODEL_HTTP_CODES
+            failure = ModelCallError(
+                "http",
+                _http_error_detail(error),
+                transient=transient,
+                status=status,
+                attempts=attempt,
+                cloud=cloud,
+            )
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            ConnectionError,
+            http.client.IncompleteRead,
+        ) as error:
+            reason = getattr(error, "reason", error)
+            failure = ModelCallError(
+                "timeout" if isinstance(reason, TimeoutError) else "transport",
+                _transport_error_detail(error),
+                transient=True,
+                attempts=attempt,
+                cloud=cloud,
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise ModelCallError(
+                "protocol",
+                "Ollama returned malformed JSON",
+                attempts=attempt,
+                cloud=cloud,
+            ) from error
+
+        if cloud or not failure.transient or attempt >= max_attempts:
+            raise failure
+        delay = _local_retry_delay(attempt)
+        remaining = deadline - time.monotonic()
+        if remaining < delay + 1.0:
+            raise failure
+        activity_tracker.record_event(
+            "model_retry",
+            model=str(model or "")[:80],
+            attempt=attempt + 1,
+            max_attempts=max_attempts,
+            reason=(
+                "http-%s" % failure.status
+                if failure.status is not None else failure.kind
+            ),
+            delay_ms=int(delay * 1000),
+        )
+        if delay:
+            time.sleep(delay)
+
+    raise AssertionError("unreachable model retry state")
+
+
+def _chat_request(
+    payload: dict,
+    *,
+    model: str,
+    cloud: bool = False,
+    timeout: int | None = None,
+    cancel_check=None,
+) -> tuple[dict, str]:
+    out, attempts = _post_model(
+        "/api/chat",
+        payload,
+        model=model,
+        cloud=cloud,
+        timeout=timeout,
+        cancel_check=cancel_check,
+    )
+    if not isinstance(out, dict):
+        raise ModelCallError(
+            "protocol", "Ollama response was not a JSON object",
+            attempts=attempts, cloud=cloud,
+        )
+    if out.get("error"):
+        raise ModelCallError(
+            "request", _safe_model_error_detail(out.get("error")),
+            attempts=attempts, cloud=cloud,
+        )
+    message = out.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, str) or not content.strip():
+        raise ModelCallError(
+            "empty_response",
+            "Ollama returned no assistant content",
+            attempts=attempts,
+            cloud=cloud,
+        )
+    return out, content
+
+
+def _model_usage_count(value):
+    if value is None:
+        return None
+    try:
+        value = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value if value >= 0 else None
+
+
+def _format_model_call_error(error: ModelCallError) -> str:
+    target = "hosted Ollama" if error.cloud else "local Ollama"
+    suffix = " after %d attempt(s)" % error.attempts
+    if error.kind == "http":
+        return "ERROR: %s rejected the model request (HTTP %s)%s: %s" % (
+            target, error.status or "unknown", suffix, error.detail,
+        )
+    if error.kind == "configuration":
+        return "ERROR: %s" % error.detail
+    if error.kind in ("protocol", "empty_response", "request"):
+        return "ERROR: invalid response from %s%s: %s" % (
+            target, suffix, error.detail,
+        )
+    if error.kind == "cancelled":
+        return "ERROR: %s" % error.detail
+    return "ERROR contacting %s at %s%s: %s" % (
+        target, BASE, suffix, error.detail,
+    )
+
+
 def _post(path: str, payload: dict, timeout: int | None = None) -> dict:
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -1622,13 +1915,147 @@ def _post(path: str, payload: dict, timeout: int | None = None) -> dict:
     )
     request_timeout = _bounded_timeout(timeout)
     with urllib.request.urlopen(req, timeout=request_timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        raw = resp.read(_MAX_MODEL_RESPONSE_BYTES + 1)
+        if len(raw) > _MAX_MODEL_RESPONSE_BYTES:
+            raise ModelCallError(
+                "protocol",
+                "Ollama response exceeded the 16 MiB safety limit",
+            )
+        return json.loads(raw.decode("utf-8"))
 
 
 def _get(path: str) -> dict:
     req = urllib.request.Request(f"{BASE}{path}")
     with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def _offload_impl(
+    prompt: str,
+    tier: str = "fast",
+    system: str = "",
+    temperature: float = 0.2,
+    num_predict: int = 1024,
+    num_ctx: int = 4096,
+    learn: bool = True,
+    timeout: int = TIMEOUT,
+    cancel_check=None,
+) -> str:
+    """Internal offload path; model failures stay typed for orchestrators."""
+    request_timeout = _bounded_timeout(timeout)
+    model = TIERS.get(tier)
+    if model is None:
+        raise ModelCallError(
+            "configuration",
+            "unknown tier '%s'. Valid tiers: %s." % (tier, _valid_tier_names()),
+        )
+    cloud = _is_cloud_tier(tier, model)
+    if cloud and not cloud_allowed():
+        raise ModelCallError(
+            "configuration",
+            _cloud_disabled_message().removeprefix("ERROR: "),
+            cloud=True,
+        )
+
+    if not _should_learn(tier, learn):
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        if cloud:
+            options = {"temperature": temperature, "num_predict": num_predict}
+        else:
+            options = _local_model_options(temperature, num_predict, num_ctx)
+        payload = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            "options": options,
+        }
+        if not cloud:
+            payload["keep_alive"] = KEEP_ALIVE
+        started = time.time()
+        ok = False
+        usage = {}
+        try:
+            out, msg = _chat_request(
+                payload,
+                model=model,
+                cloud=cloud,
+                timeout=request_timeout,
+                cancel_check=cancel_check,
+            )
+            tokens_in = _model_usage_count(out.get("prompt_eval_count"))
+            tokens_out = _model_usage_count(out.get("eval_count"))
+            source = (
+                "ollama"
+                if tokens_in is not None or tokens_out is not None
+                else "estimated"
+            )
+            if tokens_in is None:
+                tokens_in = sum(
+                    _rough_token_count(message.get("content", ""))
+                    for message in messages
+                )
+            if tokens_out is None:
+                tokens_out = _rough_token_count(msg)
+            usage = {
+                "tokens_in": int(tokens_in or 0),
+                "tokens_out": int(tokens_out or 0),
+                "token_source": source,
+            }
+            ok = True
+            return msg
+        finally:
+            activity_tracker.record_model_call(
+                model=model,
+                prompt_chars=len(prompt or ""),
+                history_messages=0,
+                tokens_in=usage.get("tokens_in", 0),
+                tokens_out=usage.get("tokens_out", 0),
+                token_source=usage.get("token_source", ""),
+                ok=ok,
+                elapsed_ms=int((time.time() - started) * 1000),
+            )
+
+    retrieve_kwargs = {}
+    if cloud:
+        gen = _make_generate(
+            model,
+            system,
+            temperature,
+            num_predict,
+            num_ctx,
+            cloud=True,
+            timeout=request_timeout,
+            cancel_check=cancel_check,
+        )
+        retrieve_kwargs["retrieve_fn"] = _no_retrieve
+    else:
+        learning_model = resolve_sonder_model(_STRICT_DEFAULT)
+        if learning_model is None:
+            raise ModelCallError(
+                "configuration",
+                "`sonder:latest` Ollama alias not found. Run setup_alias.py, "
+                "or call with strict=False to fall back to the base coder.",
+            )
+        gen = _make_generate(
+            learning_model,
+            system,
+            temperature,
+            num_predict,
+            num_ctx,
+            timeout=request_timeout,
+            cancel_check=cancel_check,
+        )
+    conn = _open_db()
+    try:
+        response, iid = orchestrator.run_with_learning(
+            conn, prompt, tier, gen, **retrieve_kwargs,
+        )
+    finally:
+        conn.close()
+    return with_footer(response, iid)
 
 
 @mcp.tool()
@@ -1659,96 +2086,19 @@ def offload(
     Give a FULLY self-contained prompt (the model can't see this chat or your files).
     """
     _maybe_live_reload()
-    request_timeout = _bounded_timeout(timeout)
-    timeout = request_timeout
-    model = TIERS.get(tier)
-    if model is None:
-        return "ERROR: unknown tier '%s'. Valid tiers: %s." % (tier, _valid_tier_names())
-    if _is_cloud_tier(tier, model) and not cloud_allowed():
-        return _cloud_disabled_message()
-
-    # Only the local 'code' tier (with learn not disabled) takes the learning path.
-    if not _should_learn(tier, learn):
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
-        if tier in CLOUD_TIERS:
-            options = {"temperature": temperature, "num_predict": num_predict}
-        else:
-            options = _local_model_options(temperature, num_predict, num_ctx)
-        payload = {"model": model, "messages": messages, "stream": False,
-                   "options": options}
-        if not _is_cloud_tier(tier, model):
-            payload["keep_alive"] = KEEP_ALIVE
-        started = time.time()
-        ok = False
-        usage = {}
-        try:
-            out = _post("/api/chat", payload, timeout=timeout)
-            msg = out.get("message", {}).get("content", "")
-            tokens_in = out.get("prompt_eval_count")
-            tokens_out = out.get("eval_count")
-            source = "ollama" if tokens_in is not None or tokens_out is not None else "estimated"
-            if tokens_in is None:
-                tokens_in = sum(
-                    _rough_token_count(message.get("content", ""))
-                    for message in messages
-                )
-            if tokens_out is None:
-                tokens_out = _rough_token_count(msg)
-            usage = {
-                "tokens_in": int(tokens_in or 0),
-                "tokens_out": int(tokens_out or 0),
-                "token_source": source,
-            }
-            ok = True
-            return msg if msg else "(empty response) raw=%s" % json.dumps(out)[:500]
-        except urllib.error.URLError as e:
-            return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
-                    "running? (the tray app / `ollama serve`)" % (BASE, e))
-        finally:
-            activity_tracker.record_model_call(
-                model=model,
-                prompt_chars=len(prompt or ""),
-                history_messages=0,
-                tokens_in=usage.get("tokens_in", 0),
-                tokens_out=usage.get("tokens_out", 0),
-                token_source=usage.get("token_source", ""),
-                ok=ok,
-                elapsed_ms=int((time.time() - started) * 1000),
-            )
-
-    # Learning path. Local tiers are answered by the selected local model behind
-    # Sonder Runtime's learning route and augmented with lessons. Cloud tiers answer
-    # cleanly without augmentation; grounded good outcomes can still be captured and
-    # distilled into lessons for later local retrieval.
-    retrieve_kwargs = {}
-    if _is_cloud_tier(tier, model):
-        gen = _make_generate(
-            model, system, temperature, num_predict, num_ctx,
-            cloud=True, timeout=request_timeout,
-        )
-        retrieve_kwargs["retrieve_fn"] = _no_retrieve
-    else:
-        learning_model = resolve_sonder_model(_STRICT_DEFAULT)
-        if learning_model is None:
-            return ("ERROR: `sonder:latest` Ollama alias not found. Run setup_alias.py, or call "
-                    "with strict=False to fall back to the base coder.")
-        gen = _make_generate(
-            learning_model, system, temperature, num_predict, num_ctx,
-            timeout=request_timeout,
-        )
-    conn = _open_db()
     try:
-        response, iid = orchestrator.run_with_learning(
-            conn, prompt, tier, gen, **retrieve_kwargs)
-    except urllib.error.URLError as e:
-        return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
-                "running? (the tray app / `ollama serve`)" % (BASE, e))
-    finally:
-        conn.close()
-    return with_footer(response, iid)
+        return _offload_impl(
+            prompt=prompt,
+            tier=tier,
+            system=system,
+            temperature=temperature,
+            num_predict=num_predict,
+            num_ctx=num_ctx,
+            learn=learn,
+            timeout=timeout,
+        )
+    except ModelCallError as error:
+        return _format_model_call_error(error)
 
 
 def _env_location_consent() -> bool:
@@ -1943,6 +2293,8 @@ def _sonder_impl(
         )
         if session_id and is_first:
             _maybe_title(conn, session_id, prompt)
+    except ModelCallError as error:
+        return _format_model_call_error(error)
     except urllib.error.URLError as e:
         return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
                 "running? (the tray app / `ollama serve`)" % (BASE, e))
@@ -2051,6 +2403,7 @@ def _answer_with_history_impl(
     context_size="",
     session="",
     project="",
+    raise_model_errors=False,
 ):
     """Answer a turn using caller-supplied prior `history` (list of {role, content}).
 
@@ -2106,6 +2459,10 @@ def _answer_with_history_impl(
                                  req_ctx, cloud=cloud)
             response = gen(prompt, history or None)
             iid, trace_ctx = None, None
+    except ModelCallError as error:
+        if raise_model_errors:
+            raise
+        return _format_model_call_error(error)
     except urllib.error.URLError as e:
         return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
                 "running? (the tray app / `ollama serve`)" % (BASE, e))
@@ -2159,6 +2516,7 @@ def answer_with_history(
     context_size="",
     session="",
     project="",
+    raise_model_errors=False,
 ):
     label = "chat:%s" % ((tier or "sonder").strip() or "sonder")
     with activity_tracker.response_span(
@@ -2178,6 +2536,7 @@ def answer_with_history(
             context_size=context_size,
             session=session,
             project=project,
+            raise_model_errors=raise_model_errors,
         )
     return _append_activity(result, response=response, replace=True)
 
@@ -3904,13 +4263,14 @@ def _orchestrator_worker(tier: str, learn: bool = False, timeout: int = 150):
 
     def worker(prompt: str) -> str:
         with activity_tracker.bind_response(response_id):
-            return offload(
+            return _offload_impl(
                 prompt=prompt,
                 tier=tier,
                 temperature=0.2,
                 num_predict=1400,
                 learn=learn,
                 timeout=timeout,
+                cancel_check=master_orchestrator.current_worker_cancel_requested,
             )
     return worker
 
@@ -3920,7 +4280,7 @@ def _orchestrator_agent_worker(tier: str, max_steps: int = 8):
 
     def worker(prompt: str) -> str:
         with activity_tracker.bind_response(response_id):
-            return _agent_impl(
+            result = _agent_impl(
                 prompt,
                 tier=tier,
                 max_steps=max_steps,
@@ -3928,7 +4288,11 @@ def _orchestrator_agent_worker(tier: str, max_steps: int = 8):
                 require_file_evidence=True,
                 read_only=True,
                 include_evidence=True,
+                cancel_check=master_orchestrator.current_worker_cancel_requested,
             )
+            if str(result or "").startswith("ERROR:"):
+                raise RuntimeError(str(result)[:800])
+            return result
     return worker
 
 
@@ -7716,6 +8080,7 @@ def _agent_negative_claim_review(
     observations,
     model: str,
     cloud: bool = False,
+    cancel_check=None,
 ) -> dict:
     """Audit negative existence claims without letting the reviewer invent facts."""
     if not _AGENT_NEGATIVE_CLAIM_RE.search(str(final or "")):
@@ -7746,7 +8111,10 @@ def _agent_negative_claim_review(
             _agent_observation_prompt(observations, max_chars=7000),
         )
     )
-    gen = _make_generate(model, system, 0.0, 260, 4096, cloud=cloud)
+    gen = _make_generate(
+        model, system, 0.0, 260, 4096, cloud=cloud,
+        cancel_check=cancel_check,
+    )
     correction = ""
     last_error = "invalid claim review"
     for _attempt in range(2):
@@ -8526,6 +8894,7 @@ def _agent_impl(
     tool_policy=None,
     return_host_receipt: bool = False,
     system: str | None = None,
+    cancel_check=None,
 ) -> str:
     """Run a Claude-like local agent loop that can call tools.
 
@@ -8558,7 +8927,10 @@ def _agent_impl(
         False,
         "",
     )
-    gen = _make_generate(model, system, 0.1, 1200, SESSION_NUM_CTX, cloud=cloud)
+    gen = _make_generate(
+        model, system, 0.1, 1200, SESSION_NUM_CTX, cloud=cloud,
+        cancel_check=cancel_check,
+    )
     observations = []
     file_evidence = False
     used_tool = False
@@ -8586,6 +8958,15 @@ def _agent_impl(
             "\n\nHOST TOOL ALLOWLIST (cannot be expanded by the model):\n- %s"
             % "\n- ".join(sorted(allowed_tools))
         )
+
+    def ensure_not_cancelled():
+        if cancel_check is not None and _cancel_requested(cancel_check):
+            raise ModelCallError(
+                "cancelled",
+                "agent call cancelled before another model/tool action",
+                attempts=0,
+                cloud=cloud,
+            )
 
     def finish_final(final):
         final = str(final or "")
@@ -8646,13 +9027,14 @@ def _agent_impl(
         if policy_error:
             observation_text = policy_error
         else:
+            ensure_not_cancelled()
             observation_text = str(_agent_dispatch_observed(
                 tool_name,
                 tool_args,
                 allow_web=False,
                 read_only=True,
             ))
-        tool_ok = _agent_tool_observation_ok(tool_name, observation)
+        tool_ok = _agent_tool_observation_ok(tool_name, observation_text)
         if tool_ok:
             used_tool = True
             used_tool_names.add(tool_name)
@@ -8725,6 +9107,7 @@ def _agent_impl(
             if _AGENT_NEGATIVE_CLAIM_RE.search(final):
                 claim_review = _agent_negative_claim_review(
                     prompt, final, observations, model, cloud=cloud,
+                    cancel_check=cancel_check,
                 )
                 if claim_review["decision"] == "continue":
                     claim_review_requests += 1
@@ -8828,6 +9211,7 @@ def _agent_impl(
         elif read_only and tool_name in {"command_registry_list", "tool_manifest"}:
             observation = _agent_tool_help(read_only=True)
         else:
+            ensure_not_cancelled()
             dispatch_options = {
                 "allow_web": allow_web,
                 "read_only": read_only,
@@ -8973,6 +9357,7 @@ def _agent_impl(
             break
         claim_review = _agent_negative_claim_review(
             prompt, final, observations, model, cloud=cloud,
+            cancel_check=cancel_check,
         )
         if claim_review["decision"] == "accept":
             break
@@ -9956,6 +10341,14 @@ def diagnostics() -> str:
     runtime = _local_runtime_summary()
     lines.append("  local runtime: threads=%s, gpu_layers=%s, batch=%s" % (
         runtime["num_thread"], runtime["num_gpu"], runtime["num_batch"]))
+    lines.append(
+        "  local model retry: %d transient retry(s), %dms base delay; "
+        "same endpoint/model only, cloud retries off"
+        % (
+            _local_model_retries(),
+            int(_local_retry_delay(1) * 1000),
+        )
+    )
     try:
         profile_text, profile_path = system_profile.ensure_profile()
         lines.append("  system profile: ok (%s, %d chars)" % (
@@ -10070,6 +10463,9 @@ def status() -> str:
         f"Installed/registered models: {', '.join(installed) if installed else '(none)'}",
         f"In VRAM now: {', '.join(loaded) if loaded else '(none — GPU idle)'}",
         f"local keep_alive: {KEEP_ALIVE}",
+        "local retry: %d transient retry(s), %dms base delay; cloud retries off" % (
+            _local_model_retries(), int(_local_retry_delay(1) * 1000),
+        ),
         "local runtime: threads={num_thread}, gpu_layers={num_gpu}, batch={num_batch}".format(
             **_local_runtime_summary()
         ),

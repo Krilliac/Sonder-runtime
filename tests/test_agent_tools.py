@@ -1,3 +1,5 @@
+import pytest
+
 import server
 
 
@@ -222,6 +224,38 @@ def test_agent_repairs_invalid_json_decision_then_continues(monkeypatch):
     assert "HOST FORMAT REPAIR 1/2" in prompts[1]
     assert "exactly one JSON object" in prompts[1]
     assert "grounded observation" in prompts[2]
+
+
+def test_agent_cancellation_stops_before_next_tool_dispatch(monkeypatch):
+    responses = [
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"tool":"file_write","args":{"path":"out.txt","content":"no"}}',
+    ]
+    cancelled = {"value": False}
+    dispatches = []
+
+    monkeypatch.setattr(
+        server,
+        "_make_generate",
+        lambda *args, **kwargs: lambda prompt, history=None: responses.pop(0),
+    )
+
+    def dispatch(tool, *args, **kwargs):
+        dispatches.append(tool)
+        cancelled["value"] = True
+        return "README evidence"
+
+    monkeypatch.setattr(server, "_agent_dispatch_observed", dispatch)
+
+    with pytest.raises(server.ModelCallError) as caught:
+        server._agent_impl(
+            "inspect then edit",
+            max_steps=2,
+            cancel_check=lambda: cancelled["value"],
+        )
+
+    assert caught.value.kind == "cancelled"
+    assert dispatches == ["file_read"]
 
 
 def test_agent_stops_repeating_identical_failed_tool_call(monkeypatch):

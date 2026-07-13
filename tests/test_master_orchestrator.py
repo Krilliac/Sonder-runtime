@@ -81,6 +81,58 @@ def test_run_delegated_tracks_children_and_audit():
     assert "latest completed master result:\nmerged" in master_orchestrator.format_snapshot(snap)
 
 
+def test_all_failed_workers_fail_master_and_skip_audit():
+    audited = []
+
+    def fail(_prompt):
+        raise RuntimeError("backend unavailable")
+
+    result = master_orchestrator.run_delegated(
+        "compare options",
+        worker_fn=fail,
+        audit_fn=lambda prompt: audited.append(prompt) or "must not run",
+        agents=2,
+    )
+    snap = master_orchestrator.snapshot()
+    master = next(row for row in snap["agents"] if row["role"] == "master")
+    children = [row for row in snap["agents"] if row["role"] == "agent"]
+
+    assert result["outputs"] == []
+    assert "all delegated workers failed" in result["output"]
+    assert master["status"] == "failed"
+    assert {row["status"] for row in children} == {"failed"}
+    assert audited == []
+
+
+def test_partial_fleet_audits_successful_outputs_only():
+    audited = []
+
+    def worker(prompt):
+        if "subagent 1/2" in prompt:
+            raise RuntimeError("first worker failed")
+        return "usable worker result"
+
+    def audit(prompt):
+        audited.append(prompt)
+        assert "usable worker result" in prompt
+        assert "first worker failed" not in prompt
+        return "merged success"
+
+    result = master_orchestrator.run_delegated(
+        "compare options", worker_fn=worker, audit_fn=audit, agents=2,
+    )
+    snap = master_orchestrator.snapshot()
+
+    assert result["output"] == "merged success"
+    assert len(result["outputs"]) == 1
+    assert len(audited) == 1
+    assert any(row["status"] == "failed" for row in snap["agents"])
+    assert any(
+        row["role"] == "master" and row["status"] == "done"
+        for row in snap["agents"]
+    )
+
+
 def test_repository_delegation_refuses_outputs_without_tool_ledger(monkeypatch):
     monkeypatch.setattr(
         master_orchestrator,
@@ -293,3 +345,34 @@ def test_hot_reload_preserves_owner_and_active_execution_state():
 
     assert reloaded._OWNER_ID == owner_id
     assert any(row["id"] == agent_id for row in snap["agents"])
+
+
+def test_hot_reload_preserves_worker_failure_sentinel_identity():
+    sentinel = master_orchestrator._WORKER_FAILED
+
+    reloaded = importlib.reload(master_orchestrator)
+
+    assert reloaded._WORKER_FAILED is sentinel
+
+
+def test_inline_and_audit_bind_current_ledger_agent():
+    inline_ids = []
+    audit_ids = []
+
+    inline = master_orchestrator.run_inline(
+        "inline",
+        lambda prompt: inline_ids.append(
+            getattr(master_orchestrator._WORKER_LOCAL, "agent_id", None)
+        ) or "done",
+    )
+    delegated = master_orchestrator.run_delegated(
+        "delegate",
+        worker_fn=lambda prompt: "worker",
+        audit_fn=lambda prompt: audit_ids.append(
+            getattr(master_orchestrator._WORKER_LOCAL, "agent_id", None)
+        ) or "merged",
+        agents=1,
+    )
+
+    assert inline_ids == [inline["master_id"]]
+    assert audit_ids == [delegated["master_id"]]

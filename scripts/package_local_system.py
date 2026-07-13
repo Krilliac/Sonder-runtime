@@ -68,6 +68,7 @@ REQUIRED_FILES = {
     "learning_health.py",
     "sonder_health.py",
     "media_assets.py",
+    "model_transport.py",
     "model_assets.py",
     "ooxml_assets.py",
     "process_liveness.py",

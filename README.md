@@ -109,6 +109,14 @@ and each execution lane's preferred alias live in the hot-reloadable runtime
 policy described below. Environment values seed the first policy file; cloud
 aliases and cloud opt-in remain separate host-owned configuration.
 
+Local model requests use one bounded, same-model retry by default for narrowly
+transient transport failures and HTTP 408/429/502/503/504 responses. The retry
+shares the original timeout budget, checks fleet cancellation before resending,
+and never changes endpoint, model, or tier. Hosted/cloud calls are always
+single-attempt to avoid silently duplicating metered work. Set
+`SONDER_LOCAL_RETRIES=0..2` and `SONDER_LOCAL_RETRY_DELAY_MS=0..1000` to tune the
+local policy.
+
 ### Memory beyond lessons
 
 The learning loop above is *cross-task* memory. On top of it Sonder also has:

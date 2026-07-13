@@ -139,6 +139,7 @@ def test_make_generate_cloud_omits_local_runtime_options(monkeypatch):
     monkeypatch.setenv("SONDER_NUM_THREAD", "12")
     monkeypatch.setenv("SONDER_NUM_GPU", "99")
     monkeypatch.setenv("SONDER_NUM_BATCH", "256")
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
     monkeypatch.setattr(server, "_post", fake_post)
 
     gen = server._make_generate("cloud-model", "", 0.4, 88, 8192, cloud=True)
@@ -723,7 +724,7 @@ def test_orchestrator_worker_propagates_activity_into_worker_thread(monkeypatch)
         )
         return "worker output"
 
-    monkeypatch.setattr(server, "offload", fake_offload)
+    monkeypatch.setattr(server, "_offload_impl", fake_offload)
     server.activity_tracker.reset_for_tests()
     with server.activity_tracker.response_span("master", "delegate") as response:
         worker = server._orchestrator_worker("code")
@@ -736,6 +737,44 @@ def test_orchestrator_worker_propagates_activity_into_worker_thread(monkeypatch)
         assert response["model_calls"] == 1
         assert response["tokens_in"] == 4
         assert response["tokens_out"] == 2
+
+
+def test_orchestrator_agent_worker_raises_host_generated_errors(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "_agent_impl",
+        lambda *args, **kwargs: "ERROR: model decision failed",
+    )
+
+    worker = server._orchestrator_agent_worker("code")
+
+    try:
+        worker("inspect repository")
+    except RuntimeError as error:
+        assert "model decision failed" in str(error)
+    else:
+        raise AssertionError("host-generated agent error was treated as success")
+
+
+def test_repo_master_uses_cancel_aware_worker_and_persists_host_failure(monkeypatch):
+    calls = []
+
+    def fail_agent(*args, **kwargs):
+        calls.append(kwargs)
+        return "ERROR: repository agent failed"
+
+    monkeypatch.setattr(server, "_agent_impl", fail_agent)
+
+    out = server.master_orchestrate(
+        "Repository: D:\\demo. Inspect current files.",
+        mode="inline",
+    )
+    snap = server.master_orchestrator.snapshot()
+    master = next(row for row in snap["agents"] if row["role"] == "master")
+
+    assert "repository agent failed" in out
+    assert callable(calls[0]["cancel_check"])
+    assert master["status"] == "failed"
 
 
 def test_non_learning_offload_records_model_usage(monkeypatch):
@@ -858,7 +897,7 @@ def test_master_grounded_campaign_preserves_explicit_targets(monkeypatch):
 
 
 def test_master_does_not_hijack_game_questions(monkeypatch):
-    monkeypatch.setattr(server, "offload", lambda prompt, **kwargs: "ordinary answer")
+    monkeypatch.setattr(server, "_offload_impl", lambda prompt, **kwargs: "ordinary answer")
 
     out = server.master_orchestrate("How do I build a C++ game?", mode="inline")
 
@@ -922,7 +961,7 @@ def test_master_orchestrate_delegates_and_audits(monkeypatch):
             return "audited merge"
         return "agent output"
 
-    monkeypatch.setattr(server, "offload", fake_offload)
+    monkeypatch.setattr(server, "_offload_impl", fake_offload)
 
     out = server.master_orchestrate("find risks", mode="delegate", agents=2)
 
@@ -944,7 +983,7 @@ def test_master_orchestrate_uses_tool_agent_for_repo_inspection(monkeypatch):
             "grounded agent output\n\n=== TOOL EVIDENCE ===\nstep 1 tool=file_read\nsource"
         ),
     )
-    monkeypatch.setattr(server, "offload", lambda prompt, **kwargs: "audited merge")
+    monkeypatch.setattr(server, "_offload_impl", lambda prompt, **kwargs: "audited merge")
 
     out = server.master_orchestrate(
         "Repository: D:\\SparkEngine. Review current uncommitted files using local file-reading tools.",

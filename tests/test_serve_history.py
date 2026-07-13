@@ -364,6 +364,7 @@ def test_run_prompt_passes_context_size(monkeypatch):
         context_size="",
         session="",
         project="",
+        **kwargs,
     ):
         seen["context_size"] = context_size
         return "ok"
@@ -388,6 +389,7 @@ def test_run_prompt_passes_session_and_project(monkeypatch):
         context_size="",
         session="",
         project="",
+        **kwargs,
     ):
         seen["session"] = session
         seen["project"] = project

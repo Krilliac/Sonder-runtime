@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import atexit
+import contextlib
 import ctypes
 import itertools
 import os
@@ -27,6 +28,10 @@ if "_EVENTS" not in globals():
     _EVENTS = []
 if "_UPDATE_SEQUENCE" not in globals():
     _UPDATE_SEQUENCE = itertools.count()
+if "_WORKER_LOCAL" not in globals():
+    _WORKER_LOCAL = threading.local()
+if "_WORKER_FAILED" not in globals():
+    _WORKER_FAILED = object()
 if "_OWNER_ID" not in globals():
     _OWNER_ID = "owner-%s-%s" % (os.getpid(), uuid.uuid4().hex[:12])
     _OWNER_STARTED_TS = time.time()
@@ -244,7 +249,7 @@ def _repository_worker(prompt: str) -> str:
     """Lazily enter server's guarded agent loop without an import cycle."""
     import server
 
-    return server._agent_impl(
+    result = server._agent_impl(
         prompt,
         tier="code",
         max_steps=8,
@@ -252,7 +257,11 @@ def _repository_worker(prompt: str) -> str:
         require_file_evidence=True,
         read_only=True,
         include_evidence=True,
+        cancel_check=current_worker_cancel_requested,
     )
+    if str(result or "").startswith("ERROR:"):
+        raise RuntimeError(str(result)[:800])
+    return result
 
 
 def max_agents() -> int:
@@ -428,6 +437,22 @@ def request_cancel(selector: str) -> dict:
     return result
 
 
+def current_worker_cancel_requested() -> bool:
+    """Whether the delegated worker bound to this thread was cancelled."""
+    agent_id = getattr(_WORKER_LOCAL, "agent_id", None)
+    return bool(agent_id and cancel_requested(agent_id))
+
+
+@contextlib.contextmanager
+def _bind_worker_agent(agent_id: str):
+    previous_agent_id = getattr(_WORKER_LOCAL, "agent_id", None)
+    _WORKER_LOCAL.agent_id = agent_id
+    try:
+        yield
+    finally:
+        _WORKER_LOCAL.agent_id = previous_agent_id
+
+
 def _finish(agent_id: str, output: str = "", error: str = "") -> str:
     stored, final = fleet_store.finish_agent(
         agent_id, _OWNER_ID, output=output, error=error,
@@ -444,17 +469,18 @@ def _finish(agent_id: str, output: str = "", error: str = "") -> str:
     return final
 
 
-def _run_worker(agent_id: str, prompt: str, worker_fn) -> str:
+def _run_worker(agent_id: str, prompt: str, worker_fn):
     if not _start_agent(
         agent_id, "calling model for delegated task", tool_calls=1,
         in_model_call=True,
     ):
         return "CANCELLED"
-    try:
-        output = worker_fn(prompt)
-    except Exception as exc:  # defensive boundary for worker threads
-        final = _finish(agent_id, error=str(exc))
-        return final if final in ABORT_MARKERS else "ERROR: %s" % exc
+    with _bind_worker_agent(agent_id):
+        try:
+            output = worker_fn(prompt)
+        except Exception as exc:  # defensive boundary for worker threads
+            final = _finish(agent_id, error=str(exc))
+            return final if final in ABORT_MARKERS else _WORKER_FAILED
     return _finish(agent_id, output=output)
 
 
@@ -468,15 +494,16 @@ def run_inline(task: str, worker_fn, metadata: dict | None = None) -> dict:
         master_id, "running inline as master", tool_calls=1, in_model_call=True,
     ):
         return {"mode": "inline", "master_id": master_id, "output": "CANCELLED"}
-    try:
-        output = worker_fn(task)
-    except Exception as exc:
-        final = _finish(master_id, error=str(exc))
-        return {
-            "mode": "inline",
-            "master_id": master_id,
-            "output": final if final in ABORT_MARKERS else "ERROR: %s" % exc,
-        }
+    with _bind_worker_agent(master_id):
+        try:
+            output = worker_fn(task)
+        except Exception as exc:
+            final = _finish(master_id, error=str(exc))
+            return {
+                "mode": "inline",
+                "master_id": master_id,
+                "output": final if final in ABORT_MARKERS else "ERROR: %s" % exc,
+            }
     final = _finish(master_id, output=output)
     return {"mode": "inline", "master_id": master_id, "output": final}
 
@@ -549,10 +576,9 @@ def run_delegated(
             agent_id = futures[future]
             try:
                 output = future.result()
-                if output != "CANCELLED":
+                if output not in ABORT_MARKERS and output is not _WORKER_FAILED:
                     outputs.append((agent_id, output))
             except Exception as exc:
-                outputs.append((agent_id, "ERROR: %s" % exc))
                 _finish(agent_id, error=str(exc))
     if cancel_requested(master_id):
         final = _finish(master_id)
@@ -563,6 +589,17 @@ def run_delegated(
             "worker_slots": worker_slots,
             "outputs": outputs,
             "output": final,
+        }
+    if not outputs:
+        error = "all delegated workers failed before producing an auditable result"
+        final = _finish(master_id, error=error)
+        return {
+            "mode": "delegated",
+            "master_id": master_id,
+            "agents": child_ids,
+            "worker_slots": worker_slots,
+            "outputs": [],
+            "output": final if final in ABORT_MARKERS else "ERROR: %s" % error,
         }
     if repository_task:
         outputs = [
@@ -619,19 +656,20 @@ def run_delegated(
     ]
     for agent_id, output in outputs:
         audit_prompt.extend(["--- %s ---" % agent_id, output, ""])
-    try:
-        merged = audit_fn("\n".join(audit_prompt))
-    except Exception as exc:
-        merged = "ERROR: audit failed: %s" % exc
-        final = _finish(master_id, error=str(exc))
-        return {
-            "mode": "delegated",
-            "master_id": master_id,
-            "agents": child_ids,
-            "worker_slots": worker_slots,
-            "outputs": outputs,
-            "output": final if final in ABORT_MARKERS else merged,
-        }
+    with _bind_worker_agent(master_id):
+        try:
+            merged = audit_fn("\n".join(audit_prompt))
+        except Exception as exc:
+            merged = "ERROR: audit failed: %s" % exc
+            final = _finish(master_id, error=str(exc))
+            return {
+                "mode": "delegated",
+                "master_id": master_id,
+                "agents": child_ids,
+                "worker_slots": worker_slots,
+                "outputs": outputs,
+                "output": final if final in ABORT_MARKERS else merged,
+            }
     final = _finish(master_id, output=merged)
     return {
         "mode": "delegated",
