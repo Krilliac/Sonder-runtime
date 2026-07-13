@@ -21,6 +21,7 @@ def isolated_runtime_policy(monkeypatch, tmp_path):
 
 
 def test_server_refresh_applies_external_policy_edit(isolated_runtime_policy):
+    base_fallback = server.LOCAL_CODE_MODEL
     policy = runtime_policy.load(create=True)
     policy["local_models"]["code"] = "sonder-personal:latest"
     policy["routing"]["workbench"] = "general"
@@ -35,6 +36,7 @@ def test_server_refresh_applies_external_policy_edit(isolated_runtime_policy):
 
     assert refreshed["local_models"]["code"] == "sonder-personal:latest"
     assert server.TIERS["code"] == "sonder-personal:latest"
+    assert server.LOCAL_CODE_MODEL == base_fallback
     assert runtime_policy.route_tier("workbench", refreshed) == "general"
 
 

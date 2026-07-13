@@ -86,6 +86,7 @@ OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
 # How long a model stays in VRAM after its last call. Short = frees GPU quickly.
 KEEP_ALIVE = os.environ.get("SONDER_KEEP_ALIVE", "2m")
 TIMEOUT = int(os.environ.get("SONDER_TIMEOUT", "300"))
+SONDER_STABLE_ALIAS = "sonder:latest"
 LOCAL_CODE_MODEL = os.environ.get("SONDER_CODE_LOCAL", "qwen2.5-coder:7b")
 
 
@@ -196,11 +197,10 @@ _RUNTIME_POLICY = {}
 
 def _refresh_runtime_policy(create=True):
     """Apply the shared local-only policy without touching cloud configuration."""
-    global LOCAL_CODE_MODEL, _RUNTIME_POLICY
+    global _RUNTIME_POLICY
     policy = runtime_policy.load(create=create)
     for tier in runtime_policy.LOCAL_TIERS:
         TIERS[tier] = policy["local_models"][tier]
-    LOCAL_CODE_MODEL = policy["local_models"]["code"]
     _RUNTIME_POLICY = policy
     return policy
 
@@ -409,12 +409,18 @@ def _should_learn(tier, learn):
 
 def resolve_sonder_model(strict=False):
     try:
-        tags = [m.get("name", "") for m in _get("/api/tags").get("models", [])]
+        payload = _get("/api/tags")
     except Exception:
-        tags = []
-    if any(t.split(":")[0] == "sonder" for t in tags):
-        return "sonder"
-    return None if strict else TIERS["code"]
+        payload = {}
+    models = payload.get("models") if isinstance(payload, dict) else None
+    if isinstance(models, list):
+        for model in models:
+            if not isinstance(model, dict):
+                continue
+            name = str(model.get("name") or model.get("model") or "").strip()
+            if name.casefold() == SONDER_STABLE_ALIAS:
+                return SONDER_STABLE_ALIAS
+    return None if strict else LOCAL_CODE_MODEL
 
 
 def _make_generate(

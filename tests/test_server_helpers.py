@@ -31,26 +31,26 @@ def test_agent_tool_help_advertises_strict_humanoid_artifact_contract():
 
 
 def test_resolve_sonder_falls_back(monkeypatch):
-    # no alias present -> code tier model
+    # no alias present -> immutable base coder, not mutable policy model
     monkeypatch.setattr(server, "_get", lambda path: {"models": [{"name": "qwen2.5:3b"}]})
-    assert server.resolve_sonder_model() == server.TIERS["code"]
+    assert server.resolve_sonder_model() == server.LOCAL_CODE_MODEL
 
 
 def test_resolve_sonder_prefers_alias(monkeypatch):
     monkeypatch.setattr(server, "_get", lambda path: {"models": [{"name": "sonder:latest"}]})
-    assert server.resolve_sonder_model() == "sonder"
+    assert server.resolve_sonder_model() == server.SONDER_STABLE_ALIAS
 
 
 def test_resolve_sonder_soft_fails_when_ollama_down(monkeypatch):
     def boom(path):
         raise Exception("ollama down")
     monkeypatch.setattr(server, "_get", boom)
-    assert server.resolve_sonder_model() == server.TIERS["code"]
+    assert server.resolve_sonder_model() == server.LOCAL_CODE_MODEL
 
 
 def test_resolve_sonder_strict_true_prefers_alias(monkeypatch):
     monkeypatch.setattr(server, "_get", lambda path: {"models": [{"name": "sonder:latest"}]})
-    assert server.resolve_sonder_model(strict=True) == "sonder"
+    assert server.resolve_sonder_model(strict=True) == server.SONDER_STABLE_ALIAS
 
 
 def test_resolve_sonder_strict_true_alias_absent_returns_none(monkeypatch):
@@ -60,7 +60,52 @@ def test_resolve_sonder_strict_true_alias_absent_returns_none(monkeypatch):
 
 def test_resolve_sonder_strict_false_alias_absent_falls_back(monkeypatch):
     monkeypatch.setattr(server, "_get", lambda path: {"models": [{"name": "qwen2.5:3b"}]})
-    assert server.resolve_sonder_model(strict=False) == server.TIERS["code"]
+    assert server.resolve_sonder_model(strict=False) == server.LOCAL_CODE_MODEL
+
+
+def test_resolve_sonder_rejects_non_latest_sonder_tag(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "_get",
+        lambda path: {"models": [{"name": "sonder:experimental"}]},
+    )
+
+    assert server.resolve_sonder_model(strict=True) is None
+    assert server.resolve_sonder_model(strict=False) == server.LOCAL_CODE_MODEL
+
+
+def test_resolve_sonder_policy_alias_cannot_shadow_base_fallback(monkeypatch):
+    monkeypatch.setitem(server.TIERS, "code", server.SONDER_STABLE_ALIAS)
+    monkeypatch.setattr(
+        server,
+        "_get",
+        lambda path: {"models": [{"name": "sonder:experimental"}]},
+    )
+
+    assert server.resolve_sonder_model(strict=False) == server.LOCAL_CODE_MODEL
+    assert server.resolve_sonder_model(strict=False) != server.TIERS["code"]
+
+
+def test_resolve_sonder_accepts_exact_alias_from_model_field(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "_get",
+        lambda path: {"models": [{"model": " SONDER:latest "}]},
+    )
+
+    assert server.resolve_sonder_model(strict=True) == server.SONDER_STABLE_ALIAS
+
+
+def test_resolve_sonder_ignores_malformed_tag_entries(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "_get",
+        lambda path: {
+            "models": [None, "sonder:latest", 7, {"name": "sonder:preview"}],
+        },
+    )
+
+    assert server.resolve_sonder_model(strict=True) is None
 
 
 def test_sonder_strict_true_errors_when_alias_missing_before_any_ollama_call(monkeypatch):
@@ -245,10 +290,25 @@ def test_serve_target_default_is_local_student(monkeypatch):
                         lambda path: {"models": [{"name": "qwen2.5:3b"}]})
     for name in ("", "sonder", "local", None):
         model, cloud, augment, label = server._serve_target(name, None)
-        assert model == server.TIERS["code"]  # falls back to base coder alias target
+        assert model == server.LOCAL_CODE_MODEL
         assert cloud is False
         assert augment is True
         assert label == "sonder"
+
+
+def test_serve_target_strict_uses_explicit_stable_alias(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "_get",
+        lambda path: {"models": [{"name": "sonder:latest"}]},
+    )
+
+    model, cloud, augment, label = server._serve_target("sonder", True)
+
+    assert model == server.SONDER_STABLE_ALIAS
+    assert cloud is False
+    assert augment is True
+    assert label == "sonder"
 
 
 def test_sonder_stats_runs_against_empty_db(monkeypatch, tmp_path):
