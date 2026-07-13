@@ -50,6 +50,10 @@ def test_privacy_rules_cover_common_header_json_cloud_and_system_path_forms():
         "windows_path": "read D:/secrets/token.txt before connecting",
         "tilde_private_path": "read ~/.aws/credentials before connecting",
         "url_credentials": "fetch https://user:private-pass@example.invalid/repo",
+        "environment_home_path": r"read %USERPROFILE%\.ssh\id_rsa",
+        "file_uri": "read file:///home/alice/private.txt",
+        "workspace_path": "read /workspace/acme-private/config.json",
+        "relative_private_path": "read secrets/production-token.txt",
     }
 
     for expected, text in samples.items():
@@ -71,6 +75,11 @@ def test_privacy_rules_cover_vendor_prefixed_credentials_and_api_headers():
         "Set-Cookie: sessionid=abcdefghijklmnop; HttpOnly",
         "OPENAI_API_KEY=abcdefghijklmnop",
         "ANTHROPIC_API_KEY=abcdefghijklmnop",
+        "Authorization: Token glpat-abcdefghijklmnopqrstuvwxyz123456",
+        "token hf_abcdefghijklmnopqrstuvwxyz123456",
+        "token npm_abcdefghijklmnopqrstuvwxyz123456",
+        "sessionid=abcdefghijklmnopqrstuvwxyz123456",
+        "opaque " + "aB3_" * 16,
     )
 
     for text in samples:
@@ -92,6 +101,16 @@ def test_privacy_scan_is_bounded_on_long_non_secret_identifier_text():
         assert elapsed < 0.5
 
 
+def test_private_key_header_scan_is_linear_and_rejects_incomplete_material():
+    text = ("-----BEGIN PRIVATE KEY-----\n" * 1000) + "no footer"
+    started = time.perf_counter()
+
+    reasons = contribute.private_reasons(text)
+
+    assert "private_key" in reasons
+    assert time.perf_counter() - started < 0.5
+
+
 def test_privacy_preview_never_leaks_path_suffixes_with_spaces():
     preview = contribute.privacy_preview(
         r"open C:\Users\alice\My Documents\private notes.txt"
@@ -111,7 +130,23 @@ def test_scrubbed_lessons_filters_mixed_db():
 
     result = contribute.scrubbed_lessons(c)
 
-    ids = {lesson["id"] for lesson in result}
-    assert ids == {"1", "3"}
+    texts = {lesson["text"] for lesson in result}
+    assert texts == {
+        "Use a set for O(1) membership tests.",
+        "Prefer early returns over deep nesting.",
+    }
     for lesson in result:
         assert set(lesson.keys()) == {"id", "text"}
+        assert lesson["id"].startswith("lesson-")
+        assert len(lesson["id"]) == len("lesson-") + 24
+
+
+def test_scrubbed_lessons_never_exports_arbitrary_local_identifier():
+    c = _conn()
+    private_id = "alice@example.com"
+    ms.add_lesson(c, private_id, "Prefer immutable data at API boundaries.", None, "int")
+
+    result = contribute.scrubbed_lessons(c)
+
+    assert len(result) == 1
+    assert private_id not in repr(result)

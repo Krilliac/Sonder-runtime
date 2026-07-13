@@ -11,6 +11,7 @@ a short generic sentence are excluded.
 Run: ./venv/Scripts/python.exe contribute.py
 """
 import io
+import hashlib
 import json
 import os
 import re
@@ -44,6 +45,37 @@ PRIVATE_RULES = [
         "<private-home-path>",
     ),
     (
+        "environment_home_path",
+        re.compile(
+            r"(?i)(?<!\w)(?:\$(?:HOME|USERPROFILE)|\$\{(?:HOME|USERPROFILE)\}|"
+            r"%(?:HOME|USERPROFILE)%)[\\/][^\s\"']*"
+        ),
+        "<private-home-path>",
+    ),
+    (
+        "file_uri",
+        re.compile(
+            r"(?i)\bfile:/{2,3}(?:[A-Z]:[\\/]|"
+            r"(?:home|Users|root|etc|var|workspace|workspaces)/)[^\s\"']*"
+        ),
+        "<private-file-uri>",
+    ),
+    (
+        "workspace_path",
+        re.compile(r"(?<![\w/])/(?:workspace|workspaces)/[^\s\"']*", re.I),
+        "<workspace-path>",
+    ),
+    (
+        "relative_private_path",
+        re.compile(
+            r"(?i)(?<!\w)(?:(?:\.{0,2}[\\/])?(?:\.ssh|\.aws|\.kube)"
+            r"(?:[\\/][^\s\"']*)?|(?:\.{0,2}[\\/])?\.config[\\/]"
+            r"(?:gcloud|gh)(?:[\\/][^\s\"']*)?|(?:\.{0,2}[\\/])?"
+            r"(?:secrets?|credentials?)[\\/][^\s\"']+)"
+        ),
+        "<private-relative-path>",
+    ),
+    (
         "unix_system_path",
         re.compile(
             r"(?<![\w/])/(?:root|etc/(?:ssh|ssl|pki)|var/(?:lib|log|run)|"
@@ -70,7 +102,8 @@ PRIVATE_RULES = [
         re.compile(
             r"(?i)(?<![\w-])[\"']?(?:[a-z0-9]{1,24}[_-]){0,6}(?:api[_-]?key|secret|password|passwd|token|"
             r"access[_-]?key|aws[_-]?(?:access[_-]?key[_-]?id|secret[_-]?access[_-]?key)|"
-            r"client[_-]?secret|private[_-]?token|auth[_-]?token|refresh[_-]?token)"
+            r"client[_-]?secret|private[_-]?token|auth[_-]?token|refresh[_-]?token|"
+            r"session[_-]?(?:id|token)|sessionid)"
             r"[\"']?\s*[:=]\s*[\"']?[^\s,;\"']+"
         ),
         "<credential>",
@@ -86,8 +119,7 @@ PRIVATE_RULES = [
     (
         "authorization_header",
         re.compile(
-            r"(?i)\b(?:proxy-)?authorization\b\s*:\s*"
-            r"(?:bearer|basic)\s+[^\s,;]+"
+            r"(?im)\b(?:proxy-)?authorization\b\s*:\s*[^\r\n]+"
         ),
         "<authorization>",
     ),
@@ -96,6 +128,9 @@ PRIVATE_RULES = [
         re.compile(
             r"(?<![A-Za-z0-9])(?:sk-(?:proj-)?[A-Za-z0-9_-]{12,}|"
             r"github_pat_[A-Za-z0-9_]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|"
+            r"glpat-[A-Za-z0-9_-]{12,}|hf_[A-Za-z0-9]{12,}|"
+            r"npm_[A-Za-z0-9]{12,}|pypi-[A-Za-z0-9_-]{16,}|"
+            r"ya29\.[A-Za-z0-9_-]{12,}|"
             r"AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|"
             r"xox[baprs]-[A-Za-z0-9-]{10,})"
         ),
@@ -112,9 +147,7 @@ PRIVATE_RULES = [
     (
         "private_key",
         re.compile(
-            r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?"
-            r"-----END [A-Z ]*PRIVATE KEY-----",
-            re.S,
+            r"-----BEGIN [A-Z0-9 ]{0,64}PRIVATE KEY-----"
         ),
         "<private-key>",
     ),
@@ -127,6 +160,23 @@ PRIVATE_RULES = [
         "long_base64",
         re.compile(r"\b[A-Za-z0-9+/]{40,}={0,2}\b"),
         "<opaque-token>",
+    ),
+    (
+        "long_urlsafe_token",
+        re.compile(
+            r"(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]{48,}(?![A-Za-z0-9_-]))"
+            r"(?=[A-Za-z0-9_-]*[a-z])(?=[A-Za-z0-9_-]*[A-Z])"
+            r"(?=[A-Za-z0-9_-]*[0-9])[A-Za-z0-9_-]+"
+        ),
+        "<opaque-token>",
+    ),
+    (
+        "jwt",
+        re.compile(
+            r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\."
+            r"[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
+        ),
+        "<jwt>",
     ),
 ]
 PRIVATE_MARKERS = [pattern for _name, pattern, _replacement in PRIVATE_RULES]
@@ -167,7 +217,12 @@ def is_shareable(text):
 def scrubbed_lessons(conn):
     lessons = memory_store.all_lessons(conn)
     return [
-        {"id": lesson["id"], "text": lesson["text"]}
+        {
+            "id": "lesson-" + hashlib.sha256(
+                lesson["text"].encode("utf-8")
+            ).hexdigest()[:24],
+            "text": lesson["text"],
+        }
         for lesson in lessons
         if is_shareable(lesson["text"])
     ]

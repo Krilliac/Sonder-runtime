@@ -56,7 +56,11 @@ def test_build_examples_vetoes_interaction_with_any_bad_or_unknown_outcome():
     for interaction_id in ("failed-later", "unknown", "recovered"):
         ms.record_outcome_row(c, interaction_id, "tests_passed", 1.0)
     ms.record_outcome_row(c, "failed-later", "failed", -1.0)
-    ms.record_outcome_row(c, "unknown", "future_signal", 99.0)
+    c.execute(
+        "INSERT INTO outcomes(interaction_id,signal,reward) VALUES(?,?,?)",
+        ("unknown", "future_signal", 99.0),
+    )
+    c.commit()
     ms.record_outcome_row(c, "recovered", "failed", -1.0)
     ms.record_outcome_row(c, "recovered", "tests_passed", 1.0)
 
@@ -78,6 +82,33 @@ def test_build_examples_normalizes_prompts_and_selects_strongest_then_newest():
     responses = [row["messages"][1]["content"] for row in examples]
 
     assert responses == ["new tie", "strong response"]
+
+
+@pytest.mark.parametrize(
+    "signal,stored_reward",
+    (
+        ("tests_passed", -1.0),
+        ("compiled", None),
+        ("compiled", 1.0),
+        ("compiled", float("inf")),
+        ("future_signal", 99.0),
+    ),
+)
+def test_export_vetoes_noncanonical_persisted_outcome_evidence(
+    signal, stored_reward,
+):
+    conn = _conn()
+    ms.log_interaction(conn, "poison", "task", "", "response", "code")
+    conn.execute(
+        "INSERT INTO outcomes(interaction_id,signal,reward) VALUES(?,?,?)",
+        ("poison", signal, stored_reward),
+    )
+    conn.commit()
+
+    examples, stats = etd._select_examples(conn)
+
+    assert examples == []
+    assert stats["rejected_by_reason"]["no_good_outcome"] == 1
 
 
 def test_export_excludes_private_content_and_writes_non_sensitive_manifest(tmp_path):
@@ -193,6 +224,26 @@ def test_manifest_failure_never_leaves_a_stale_manifest_for_new_data(
 
     assert out.read_bytes() != b"old-data\n"
     assert not manifest.exists()
+
+
+@pytest.mark.parametrize("collision", ("data", "manifest"))
+def test_export_outputs_cannot_replace_memory_database(tmp_path, collision):
+    db_path = tmp_path / "memory.db"
+    conn = ms.connect(db_path)
+    ms.log_interaction(conn, "safe", "safe task", "", "safe response", "code")
+    ms.record_outcome_row(conn, "safe", "tests_passed", 1.0)
+    conn.close()
+    out = db_path if collision == "data" else tmp_path / "training.jsonl"
+    manifest = db_path if collision == "manifest" else tmp_path / "selection.json"
+
+    with pytest.raises(ValueError, match="memory database"):
+        etd.main(out, db_path=db_path, manifest_path=manifest)
+
+    verify = ms.connect(db_path)
+    try:
+        assert verify.execute("SELECT COUNT(*) FROM interactions").fetchone()[0] == 1
+    finally:
+        verify.close()
 
 
 def test_atomic_write_preserves_existing_output_when_replace_fails(monkeypatch, tmp_path):

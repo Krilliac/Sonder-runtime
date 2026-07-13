@@ -543,7 +543,13 @@ def test_record_outcome_row():
     c = _conn()
     ms.log_interaction(c, "abc", "t", "", "r", "code")
     assert ms.record_outcome_row(c, "abc", "tests_passed", 1.0) is True
-    assert ms.record_outcome_row(c, "abc", "tests_passed", 0.9) is False
+    assert ms.record_outcome_row(c, "abc", "tests_passed", 1.0) is False
+    with pytest.raises(ValueError, match="canonical signal reward"):
+        ms.record_outcome_row(c, "abc", "tests_passed", 0.9)
+    with pytest.raises(ValueError, match="supported grounded outcome"):
+        ms.record_outcome_row(c, "abc", "future_signal", 99.0)
+    with pytest.raises(ValueError, match="canonical signal reward"):
+        ms.record_outcome_row(c, "abc", "compiled", float("nan"))
     assert ms.record_outcome_row(c, "abc", "compiled", 0.7) is True
     row = c.execute(
         "SELECT signal, reward FROM outcomes WHERE interaction_id='abc' "
@@ -551,6 +557,18 @@ def test_record_outcome_row():
     ).fetchone()
     assert row[0] == "tests_passed"
     assert row[1] == 1.0
+
+
+def test_atomic_outcome_rejects_noncanonical_signal_reward_pair():
+    c = _conn()
+    ms.log_interaction(c, "job", "task", "", "response", "code")
+
+    with pytest.raises(ValueError, match="canonical signal reward"):
+        ms.record_outcome_and_claim_lesson_distillation(
+            c, "job", "tests_passed", -1.0,
+        )
+
+    assert c.execute("SELECT COUNT(*) FROM outcomes").fetchone()[0] == 0
 
 
 def _owner_probe(pid, expected_identity=None):
@@ -1331,6 +1349,27 @@ def test_interactions_with_good_outcome_empty_signals_returns_empty():
     ms.log_interaction(c, "a", "task A", "", "resp A", "code")
     ms.record_outcome_row(c, "a", "tests_passed", 1.0)
     assert ms.interactions_with_good_outcome(c, set()) == []
+
+
+def test_outcome_evidence_query_is_indexed_bounded_and_truncates_text():
+    c = _conn()
+    ms.log_interaction(c, "a", "x" * 20, "", "y" * 20, "code")
+    ms.log_interaction(c, "b", "second", "", "response", "code")
+    ms.record_outcome_row(c, "a", "tests_passed", 1.0)
+    ms.record_outcome_row(c, "b", "compiled", 0.7)
+
+    rows = list(ms.interaction_outcome_evidence(c, limit=1, field_limit=5))
+    plan = c.execute(
+        "EXPLAIN QUERY PLAN " + ms._INTERACTION_OUTCOME_EVIDENCE_SQL,
+        (5, 5, 2),
+    ).fetchall()
+    detail = " ".join(row[3] for row in plan)
+
+    assert len(rows) == 1
+    assert rows[0]["task"] == "xxxxx" and rows[0]["task_length"] == 20
+    assert rows[0]["response"] == "yyyyy" and rows[0]["response_length"] == 20
+    assert "idx_outcomes_interaction" in detail
+    assert "TEMP B-TREE" not in detail
 
 
 def test_lesson_usage_stats_records_outcomes():

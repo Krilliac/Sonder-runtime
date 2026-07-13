@@ -28,6 +28,7 @@ jobs:
         run: |
           python - <<'PY'
           import glob
+          import hashlib
           import json
 
           seen = {}
@@ -49,7 +50,10 @@ jobs:
                               continue
                           key = text.lower()
                           if key not in seen:
-                              seen[key] = {"id": item.get("id") or key[:16], "text": text}
+                              safe_id = "lesson-" + hashlib.sha256(
+                                  text.encode("utf-8")
+                              ).hexdigest()[:24]
+                              seen[key] = {"id": safe_id, "text": text}
               except FileNotFoundError:
                   continue
 
