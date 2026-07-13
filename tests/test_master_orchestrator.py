@@ -538,3 +538,22 @@ def test_inline_and_audit_bind_current_ledger_agent():
 
     assert inline_ids == [inline["master_id"]]
     assert audit_ids == [delegated["master_id"]]
+
+
+def test_requires_repository_tools_detects_explicit_file_paths():
+    # Regression (2026-07-13 audit): "generate a summary of the file <abs path>"
+    # missed the repository lane (verb not read/inspect/...) and routed to an
+    # ungrounded generation path that fabricated file contents. An absolute path
+    # to a concrete source/text file names repository state regardless of verb.
+    assert master_orchestrator.requires_repository_tools(
+        r"generate a summary of the file D:\SparkEngine\Tests\TestFontSystem.cpp")
+    assert master_orchestrator.requires_repository_tools(
+        "summarize /home/u/app/main.py and list its classes")
+    # Relative paths and greenfield tasks must NOT be pulled into the repo lane.
+    assert not master_orchestrator.requires_repository_tools(
+        "write a python script that saves output to results.txt")
+    assert not master_orchestrator.requires_repository_tools(
+        "Create a C++ 2.5D isometric RPG game with in-house assets")
+    # Embedded evidence still short-circuits to False (answer from the excerpt).
+    assert not master_orchestrator.requires_repository_tools(
+        "summarize /home/u/app/main.py\n```\nclass A: pass\n```")

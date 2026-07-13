@@ -304,3 +304,33 @@ def test_activity_transcript_and_end_report_are_replay_friendly():
     assert "output-secret" not in json.dumps(latest)
     assert "checklist: 1/2 complete" in report
     assert "summary: Image verified" in report
+
+
+def test_find_files_signals_truncation(tmp_path, monkeypatch):
+    # Regression (2026-07-13 audit): file_find silently truncated at max_results
+    # with no indicator, inducing undercounts for any counting use case.
+    import file_ops
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: tmp_path)
+    for i in range(6):
+        (tmp_path / ("m%d.log" % i)).write_text("x", encoding="utf-8")
+    capped = file_ops.find_files(query="*.log", root=".", max_results=3)
+    assert capped["truncated"] is True
+    assert len(capped["results"]) == 3
+    full = file_ops.find_files(query="*.log", root=".", max_results=50)
+    assert full["truncated"] is False
+    assert len(full["results"]) == 6
+
+
+def test_read_line_range_rejects_inverted_range(tmp_path, monkeypatch):
+    # Regression (2026-07-13 audit): an inverted range (start > end) was silently
+    # clamped to a single line instead of erroring.
+    import workbench
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path))
+    f = tmp_path / "lines.txt"
+    f.write_text("\n".join("line%d" % i for i in range(1, 21)), encoding="utf-8")
+    import pytest
+    with pytest.raises(ValueError, match="before start_line"):
+        workbench.read_line_range(str(f), start_line=10, end_line=3)
+    # a normal range still works
+    ok = workbench.read_line_range(str(f), start_line=2, end_line=4)
+    assert [row["line"] for row in ok["lines"]] == [2, 3, 4]

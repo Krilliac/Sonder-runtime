@@ -13,6 +13,39 @@ DEFAULT_NATIVE_MAX = 262144
 DEFAULT_VIRTUAL_MAX = 1_000_000
 
 
+# Smallest context worth selecting: below this, inference is unusable. Used to
+# reject degenerate set_context_size requests (a 0/1-token context).
+MIN_CONTEXT = 512
+
+
+def parse_strict(value):
+    """Parse a size token, returning None if it is not a valid positive size.
+
+    Unlike parse_size (which silently falls back to a default for env parsing),
+    this distinguishes "invalid input" from "valid size" so the user-facing
+    set_context_size can reject junk instead of silently applying the default.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value) if value > 0 else None
+    text = str(value).strip().lower().replace("_", "").replace(",", "")
+    if not text:
+        return None
+    m = re.match(r"^(\d+(?:\.\d+)?)(k|m)?$", text)
+    if not m:
+        return None
+    num = float(m.group(1))
+    if m.group(2) == "k":
+        num *= 1000
+    elif m.group(2) == "m":
+        num *= 1000000
+    n = int(num)
+    return n if n > 0 else None
+
+
 def parse_size(value, default=DEFAULT_CONTEXT):
     if value is None:
         return int(default)
