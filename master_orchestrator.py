@@ -82,6 +82,19 @@ _EMBEDDED_EVIDENCE = re.compile(
     r"(?:```|\bsource\s+excerpts?\s*:|\bbegin\s+file\b|\bpatch\s*:|\bdiff\s+--git\b)",
     re.IGNORECASE,
 )
+# An ABSOLUTE path to a concrete source/text file names existing repository
+# state to inspect, whatever the verb. Without this, "generate a summary of the
+# file D:\repo\X.cpp" missed the repository lane (its verb is not read/inspect/
+# ...) and routed to an ungrounded generation path that fabricated the file's
+# contents. Relative paths (output.txt, models/foo.glb) are NOT matched, so
+# greenfield "write to <relative>" tasks stay creative.
+_REPO_FILE_PATH = re.compile(
+    r"(?:[A-Za-z]:[\\/]|/)[^\s'\"]+\."
+    r"(?:py|js|ts|tsx|jsx|cpp|cc|cxx|c|h|hpp|hxx|cs|java|go|rs|rb|php|swift|kt|"
+    r"md|txt|rst|json|ya?ml|toml|ini|cfg|conf|xml|html?|css|scss|sh|ps1|bat|"
+    r"cmake|gradle|sql|proto|glsl|hlsl)\b",
+    re.IGNORECASE,
+)
 _FLEET_REQUEST = re.compile(
     r"(?:\bfleet\b|\bswarm\b|\bfan[- ]?out\b|\bparallel\s+agents?\b|"
     r"\bspawn\s+(?:as\s+much|as\s+many|the\s+maximum|maximum|parallel|subagents?)\b|"
@@ -420,7 +433,9 @@ def requests_fleet(task: str) -> bool:
 def requires_repository_tools(task: str) -> bool:
     """Return true when a task asks the model to inspect external repo state."""
     task = task or ""
-    return bool(_REPOSITORY_REQUEST.search(task) and not _EMBEDDED_EVIDENCE.search(task))
+    if _EMBEDDED_EVIDENCE.search(task):
+        return False
+    return bool(_REPOSITORY_REQUEST.search(task) or _REPO_FILE_PATH.search(task))
 
 
 def evidence_gate(task: str, tools_available: bool = True) -> str:

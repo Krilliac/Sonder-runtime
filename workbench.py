@@ -376,7 +376,12 @@ def read_line_range(
     if not target.is_file():
         raise FileNotFoundError(str(target))
     start = _bounded_int(start_line, 1, 1, 10_000_000)
-    end = _bounded_int(end_line, start + 199, start, start + MAX_RANGE_LINES - 1)
+    end = _bounded_int(end_line, start + 199, 1, 10_000_000)
+    if end < start:
+        # An inverted range was previously clamped to a single line, silently
+        # returning misleading output; reject it explicitly instead.
+        raise ValueError("end_line (%d) is before start_line (%d)" % (end, start))
+    end = min(end, start + MAX_RANGE_LINES - 1)
     lines = []
     total_seen = 0
     with target.open("r", encoding="utf-8", errors="replace", newline="") as handle:

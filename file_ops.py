@@ -438,8 +438,12 @@ def find_files(
                     "bytes": p.stat().st_size if p.is_file() else 0,
                 })
                 if len(results) >= limit:
-                    return {"root": str(root_path), "query": pattern, "results": results}
-    return {"root": str(root_path), "query": pattern, "results": results}
+                    # Hit the cap with the walk unfinished: more may match.
+                    # Signal it so counting callers don't silently undercount.
+                    return {"root": str(root_path), "query": pattern,
+                            "results": results, "truncated": True, "limit": limit}
+    return {"root": str(root_path), "query": pattern, "results": results,
+            "truncated": False, "limit": limit}
 
 
 def read_file(path: str, *, max_bytes: int = MAX_READ_BYTES, extra_roots: str = "", bypass: bool = False) -> dict:

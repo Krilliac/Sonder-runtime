@@ -23,3 +23,19 @@ def test_requested_clamps_to_virtual_max(monkeypatch):
     monkeypatch.setenv("SONDER_VIRTUAL_CONTEXT_MAX", "500k")
 
     assert context_policy.requested("1m") == 500000
+
+
+def test_parse_strict_rejects_invalid_and_degenerate_sizes():
+    import context_policy as cp
+    # valid
+    assert cp.parse_strict("8192") == 8192
+    assert cp.parse_strict("32k") == 32000
+    assert cp.parse_strict("1m") == 1000000
+    assert cp.parse_strict(4096) == 4096
+    # invalid / degenerate -> None (so set_context_size can reject, not default)
+    assert cp.parse_strict("0") is None
+    assert cp.parse_strict("-5") is None
+    assert cp.parse_strict("abc") is None
+    assert cp.parse_strict("") is None
+    assert cp.parse_strict(None) is None
+    assert cp.parse_strict(True) is None

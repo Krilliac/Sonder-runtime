@@ -106,7 +106,7 @@ def test_workbench_agent_forces_validation_after_mutation(monkeypatch, tmp_path)
     monkeypatch.setattr(
         server,
         "_agent_dispatch_observed",
-        lambda tool, args, allow_web=True, read_only=False: (
+        lambda tool, args, allow_web=True, read_only=False, project="", allow_location=False: (
             "directory tree: workspace"
             if tool == "directory_tree"
             else "file write\n  action: created"

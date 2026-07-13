@@ -3710,6 +3710,20 @@ def set_context_size(context_size: str) -> str:
     """Select Sonder's requested virtual context size, up to 1m by default."""
     global SESSION_NUM_CTX
     _maybe_live_reload()
+    # Validate before applying. Previously an invalid value (non-numeric,
+    # negative) silently fell back to the 8192 default and reported success,
+    # overwriting the prior valid size; and 0 produced a 1-token context. Reject
+    # junk and degenerate sizes with a clear error instead of quietly changing
+    # state. An empty value keeps the "reset to default" convenience.
+    if context_size not in (None, ""):
+        parsed = context_policy.parse_strict(context_size)
+        if parsed is None:
+            return ("ERROR: invalid context size %r. Use a positive integer, "
+                    "optionally suffixed k/m (e.g. 8192, 32k, 1m)." % context_size)
+        if parsed < context_policy.MIN_CONTEXT:
+            return ("ERROR: context size %d is below the %d-token minimum; a "
+                    "context that small makes inference unusable."
+                    % (parsed, context_policy.MIN_CONTEXT))
     SESSION_NUM_CTX = context_policy.requested(context_size)
     return "context size selected\n" + context_policy.format_policy(SESSION_NUM_CTX)
 
@@ -5402,7 +5416,14 @@ def file_find(
         summary="%s result(s) for %s" % (len(data["results"]), data["query"]),
         path=data.get("root", ""),
     )
-    lines = ["file find: %s under %s" % (data["query"], data["root"])]
+    count = len(data["results"])
+    header = "file find: %s under %s" % (data["query"], data["root"])
+    if data.get("truncated"):
+        # Make the cap explicit so a counting caller does not read N as a total.
+        header += " (TRUNCATED at %d — more matches exist; raise max_results for a full count)" % data.get("limit", count)
+    else:
+        header += " (%d match(es))" % count
+    lines = [header]
     for row in data["results"]:
         lines.append("  %(type)s %(relative)s (%(bytes)s bytes)" % row)
     if not data["results"]:
@@ -9035,12 +9056,49 @@ def _agent_activity_command(tool_name, args):
     return ""
 
 
+_PROJECT_SCOPED_PATH_TOOLS = frozenset({
+    "file_read", "file_read_range", "image_inspect", "file_write", "file_edit",
+    "file_delete", "directory_create", "workspace_inventory", "directory_tree",
+    "file_find", "text_search", "script_search",
+})
+
+
+def _project_scope_args(tool_name, args, project):
+    """Scope an agent file/inspection tool call to the run's project directory.
+
+    When a caller passes project=<dir> to the agent/workbench surface, its file
+    tools must actually inspect that directory. Previously `project` was wired
+    only to the checklist namespace, so relative paths (".", "VERSIONS.txt")
+    resolved against Sonder's own workspace and the agent returned confidently
+    wrong "not found"/"empty" answers for the real project. Here we (1) authorize
+    the project dir for the call and (2) rebase a relative or omitted path/root
+    onto it. The guard (allowed_roots / resolve_*) still validates the final
+    path, so this grants nothing outside the authorized project root.
+    """
+    if not project or not isinstance(args, dict) or tool_name not in _PROJECT_SCOPED_PATH_TOOLS:
+        return args
+    scoped = dict(args)
+    existing = str(scoped.get("extra_roots") or "").strip()
+    scoped["extra_roots"] = existing + os.pathsep + project if existing else project
+
+    key = "root" if tool_name in {"file_find", "text_search", "script_search"} else "path"
+    raw = str(scoped.get(key) or "").strip()
+    is_abs = os.path.isabs(raw) or bool(re.match(r"^[A-Za-z]:[\\/]", raw))
+    if not raw or raw == ".":
+        scoped[key] = project
+    elif not is_abs:
+        scoped[key] = os.path.join(project, raw)
+    return scoped
+
+
 def _agent_dispatch_observed(
     tool_name, args, allow_web=True, read_only=False, allow_location=False,
+    project="",
 ):
     started = time.time()
     ok = False
     observation = ""
+    args = _project_scope_args(tool_name, args, project)
     try:
         with activity_tracker.tool_dispatch_context():
             dispatch_options = {"allow_web": allow_web}
@@ -9361,7 +9419,25 @@ def _agent_impl(
         _start_agent_checklist(prompt, project, read_only)
         if auto_checklist else ("", {})
     )
+    # Filesystem scope: when `project` names a real directory, root the agent's
+    # file tools there (see _project_scope_args) so relative paths inspect the
+    # project rather than Sonder's own workspace. A non-directory project (a
+    # bare namespace label like "default") leaves file tools at the default.
+    project_scope = ""
+    if project:
+        try:
+            candidate = os.path.abspath(os.path.expanduser(str(project)))
+            if os.path.isdir(candidate):
+                project_scope = candidate
+        except (OSError, ValueError):
+            project_scope = ""
     transcript = "Task:\n%s\n\n%s" % (prompt, _agent_tool_help(read_only=read_only))
+    if project_scope:
+        transcript += (
+            "\n\nPROJECT ROOT: %s\nYour file/inspection tools are rooted at this "
+            "directory: a relative path or '.' inspects the PROJECT, not Sonder's "
+            "own workspace. Use paths relative to the project root." % project_scope
+        )
     if allowed_tools is not None:
         transcript += (
             "\n\nHOST TOOL ALLOWLIST (cannot be expanded by the model):\n- %s"
@@ -9442,6 +9518,7 @@ def _agent_impl(
                 tool_args,
                 allow_web=False,
                 read_only=True,
+                project=project_scope,
             ))
         tool_ok = _agent_tool_observation_ok(tool_name, observation_text)
         if tool_ok:
@@ -9628,7 +9705,7 @@ def _agent_impl(
             if allow_location:
                 dispatch_options["allow_location"] = True
             observation = _agent_dispatch_observed(
-                tool_name, tool_args, **dispatch_options,
+                tool_name, tool_args, project=project_scope, **dispatch_options,
             )
         observation_text = str(observation)
         tool_ok = _agent_tool_observation_ok(tool_name, observation)
@@ -10867,8 +10944,14 @@ def diagnostics() -> str:
     try:
         tags = _get("/api/tags").get("models", [])
         names = sorted(m.get("name", "?") for m in tags)
-        lines.append("  ollama: ok (%d models: %s)" % (
-            len(names), ", ".join(names[:8]) if names else "none"))
+        # Show the count AND an enumeration consistent with it: truncating the
+        # list to 8 while printing "11 models" silently hid three models
+        # (including sonder:latest, the active tier). Cap the enumeration but
+        # make the omission explicit.
+        shown = ", ".join(names[:8]) if names else "none"
+        if len(names) > 8:
+            shown += ", +%d more" % (len(names) - 8)
+        lines.append("  ollama: ok (%d models: %s)" % (len(names), shown))
     except Exception as e:
         lines.append("  ollama: ERROR %s" % e)
     lines.append("  web tools: %s" % ("on" if web_tools.enabled() else "off"))

@@ -186,7 +186,7 @@ def test_agent_runs_tool_then_final(monkeypatch):
     monkeypatch.setattr(
         server,
         "_agent_dispatch",
-        lambda tool, args, allow_web=True, read_only=False: "OBSERVATION",
+        lambda tool, args, allow_web=True, read_only=False, project="", allow_location=False: "OBSERVATION",
     )
     out = server.agent("answer with tools", tier="code", max_steps=2, checklist=False)
     assert out.startswith("done after observation")
@@ -625,7 +625,7 @@ def test_agent_attaches_successful_file_evidence(monkeypatch):
     monkeypatch.setattr(
         server,
         "_agent_dispatch_observed",
-        lambda tool, args, allow_web=True, read_only=False: "file read: README.md\nhello",
+        lambda tool, args, allow_web=True, read_only=False, project="", allow_location=False: "file read: README.md\nhello",
     )
 
     out = server._agent_impl(
@@ -640,3 +640,29 @@ def test_agent_attaches_successful_file_evidence(monkeypatch):
     assert out.startswith("README says hello.")
     assert "=== TOOL EVIDENCE ===" in out
     assert "tool=file_read" in out
+
+
+def test_project_scope_args_roots_agent_file_tools_at_the_project(tmp_path):
+    # Regression (2026-07-13 audit): agent/workbench_agent accepted a `project`
+    # arg but it never affected the filesystem root — relative paths resolved
+    # against Sonder's own workspace, so the agent returned confidently wrong
+    # "not found" answers for the requested project. _project_scope_args must
+    # rebase a relative/omitted path or root onto the project and authorize it.
+    proj = str(tmp_path)
+
+    # relative path -> under project; project added to extra_roots
+    r = server._project_scope_args("file_read", {"path": "VERSIONS.txt"}, proj)
+    assert r["path"] == server.os.path.join(proj, "VERSIONS.txt")
+    assert r["extra_roots"] == proj
+
+    # search tools use "root"; "." and omitted both become the project
+    assert server._project_scope_args("file_find", {"query": "*.log", "root": "."}, proj)["root"] == proj
+    assert server._project_scope_args("text_search", {"query": "x"}, proj)["root"] == proj
+
+    # an absolute path is authorized but not rewritten
+    abs_path = server.os.path.join(proj, "sub", "a.cpp")
+    assert server._project_scope_args("file_read", {"path": abs_path}, proj)["path"] == abs_path
+
+    # no project, or a non-scoped tool, leaves args untouched
+    assert server._project_scope_args("file_read", {"path": "VERSIONS.txt"}, "") == {"path": "VERSIONS.txt"}
+    assert server._project_scope_args("run_code", {"code": "x"}, proj) == {"code": "x"}
