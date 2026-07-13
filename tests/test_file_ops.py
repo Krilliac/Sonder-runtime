@@ -111,3 +111,68 @@ def test_recursive_delete_allows_plain_subdirectory(monkeypatch, tmp_path):
     assert result["deleted"] is True
     assert not target.exists()
 
+
+
+def test_repository_read_honors_an_authorized_absolute_root(monkeypatch, tmp_path):
+    # Regression (2026-07-13): resolve_repository_read_path rejected EVERY
+    # absolute path ("must be relative") and only ever rooted at Sonder's own
+    # install dir, so a repository-scoped agent could never read the repo it was
+    # pointed at -- while the failure text told the operator to authorize it in
+    # file_roots.local, which this resolver never consulted. The delegated
+    # repository lane was therefore unusable on any external repo.
+    workspace = tmp_path / "sonder"
+    repo = tmp_path / "repo"
+    (workspace / "sub").mkdir(parents=True)
+    (repo / "src").mkdir(parents=True)
+    target = repo / "src" / "main.cpp"
+    target.write_text("int main() { return 0; }", encoding="utf-8")
+
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: workspace)
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(repo))
+
+    resolved = file_ops.resolve_repository_read_path(str(target))
+
+    assert resolved == target.resolve()
+
+
+def test_repository_read_still_rejects_unauthorized_absolute_paths(monkeypatch, tmp_path):
+    workspace = tmp_path / "sonder"
+    outside = tmp_path / "not-authorized"
+    workspace.mkdir(parents=True)
+    outside.mkdir(parents=True)
+    secret = outside / "creds.txt"
+    secret.write_text("token", encoding="utf-8")
+
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: workspace)
+    monkeypatch.delenv("SONDER_FILE_ROOTS", raising=False)
+
+    with pytest.raises(PermissionError):
+        file_ops.resolve_repository_read_path(str(secret))
+
+
+def test_repository_read_rejects_sensitive_dirs_inside_an_authorized_root(monkeypatch, tmp_path):
+    # Authorizing a repo must not expose its .git (or .ssh/.aws/...) contents.
+    workspace = tmp_path / "sonder"
+    repo = tmp_path / "repo"
+    workspace.mkdir(parents=True)
+    (repo / ".git").mkdir(parents=True)
+    config = repo / ".git" / "config"
+    config.write_text("[core]", encoding="utf-8")
+
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: workspace)
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(repo))
+
+    with pytest.raises(PermissionError):
+        file_ops.resolve_repository_read_path(str(config))
+
+
+def test_repository_read_rejects_traversal_out_of_the_workspace(monkeypatch, tmp_path):
+    workspace = tmp_path / "sonder"
+    workspace.mkdir(parents=True)
+    (tmp_path / "secret.txt").write_text("nope", encoding="utf-8")
+
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: workspace)
+    monkeypatch.delenv("SONDER_FILE_ROOTS", raising=False)
+
+    with pytest.raises(PermissionError):
+        file_ops.resolve_repository_read_path("../secret.txt")

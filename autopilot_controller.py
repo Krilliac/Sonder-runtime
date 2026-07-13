@@ -159,7 +159,13 @@ def normalize_review(payload: dict) -> dict:
     normalized_assessments = []
     for item in assessments:
         if not isinstance(item, dict):
-            raise ValueError("each autopilot pending assessment must be a JSON object")
+            # Skip malformed entries rather than failing the whole run: this
+            # function already silently drops items with a missing/bad verdict
+            # just below, and a local reviewer occasionally emits a stray
+            # non-object in the list. The host re-derives every pending task's
+            # verdict (defaulting to "keep") downstream, so a dropped junk entry
+            # changes no decision.
+            continue
         task_id = _clean_text(item.get("id"), 80)
         verdict = str(item.get("verdict") or "").strip().lower()
         if task_id and verdict in {"keep", "stale"}:

@@ -313,6 +313,43 @@ def test_agent_gets_final_only_pass_after_tool_step_budget(monkeypatch):
     assert "HOST FINALIZATION ONLY" in prompts[2]
 
 
+def test_negative_claim_regex_catches_artifact_existence_denials():
+    # Regression (2026-07-13): a workbench agent answered "There are no .cpp
+    # files" (its own directory listing showed 44 — it had misused text_search
+    # as a content search). That sailed past the negative-claim guard because
+    # only "no matches"/"does not exist" style phrasings were recognized, so no
+    # re-verification pass fired. These artifact-existence denials must trigger
+    # a review.
+    must_trigger = [
+        "There are no .cpp files in the directory.",
+        "There are no matching functions.",
+        "No .cpp files exist under that path.",
+        "The directory contains no source files.",
+        "There is no such file.",
+        "found no results",
+        "no occurrences of the symbol were found",
+    ]
+    for claim in must_trigger:
+        assert server._AGENT_NEGATIVE_CLAIM_RE.search(claim), claim
+
+
+def test_negative_claim_regex_ignores_ordinary_negatives():
+    # The broadening must NOT turn every "no <noun>" into a re-verification
+    # pass — those are common, correct, and cheap to state.
+    must_not_trigger = [
+        "The build completed with no errors.",
+        "There are 44 .cpp files.",
+        "I found no reason to change the config.",
+        "No changes were needed; the file already had the fix.",
+        "This has no side effects and is safe.",
+        "no issues detected",
+        "no problems found here",
+        "made no modifications to the file",
+    ]
+    for claim in must_not_trigger:
+        assert not server._AGENT_NEGATIVE_CLAIM_RE.search(claim), claim
+
+
 def test_negative_claim_review_repairs_schema(monkeypatch):
     responses = [
         "needs more evidence",

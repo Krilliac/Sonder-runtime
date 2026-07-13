@@ -4804,12 +4804,19 @@ def master_orchestrate(
         return "ERROR: empty task."
     tier = _runtime_lane_tier("fleet", tier)
     audit_tier = _runtime_lane_tier("review")
-    creative_intent = creative_router.classify(task, mode=mode)
+    # A task that needs repository/filesystem inspection is by definition not
+    # a greenfield build request (creative_router's own docstring: "Conservative
+    # routing for explicit greenfield game/artifact build requests") -- check
+    # this FIRST so ordinary code-analysis tasks (e.g. "generate a summary of
+    # these files") never get misclassified into the asset/game forge pipeline
+    # just because they contain a common verb+noun pair the regex also uses
+    # for creative intent (generate/create/build + model/document/diagram/...).
+    needs_repo_tools = master_orchestrator.requires_repository_tools(task)
+    creative_intent = None if needs_repo_tools else creative_router.classify(task, mode=mode)
     if creative_intent:
         return _master_grounded_build(
             task, mode, tier, creative_intent, retry_of=retry_of,
         )
-    needs_repo_tools = master_orchestrator.requires_repository_tools(task)
     worker = (
         _orchestrator_agent_worker(tier)
         if needs_repo_tools
@@ -8268,7 +8275,20 @@ _AGENT_DECISION_REPAIR_LIMIT = 2
 _AGENT_NEGATIVE_CLAIM_RE = re.compile(
     r"\b(?:does not|doesn't|did not|could not|cannot|can't)\s+"
     r"(?:contain|include|find|locate|exist)\b|"
-    r"\b(?:not found|no matches?|none found|missing from)\b",
+    r"\b(?:not found|no matches?|none found|missing from)\b|"
+    # "There are no .cpp files", "contains no source files", "no such file",
+    # "found no results" -- existence denials phrased around a SEARCHED-FOR
+    # artifact (files/matches/functions/symbols/...), which the plain
+    # "no matches"/"does not exist" forms above missed. A workbench agent
+    # answering "There are no .cpp files" (while its own directory listing
+    # showed 44) sailed past this guard because none of the original phrasings
+    # matched. Scoped to concrete search artifacts so ordinary negatives ("no
+    # errors", "no changes needed", "no side effects") do NOT trigger a
+    # re-verification pass.
+    r"\bno\s+(?:such\s+)?(?:[\w.*-]+\s+){0,2}"
+    r"(?:files?|matches?|results?|occurrences?|instances?|entries|entry|"
+    r"functions?|methods?|classes|class|symbols?|references?|definitions?|"
+    r"declarations?|usages?|hits?|records?|rows?|directories|directory|folders?)\b",
     re.IGNORECASE,
 )
 _AGENT_CLAIM_REVIEW_TOOLS = frozenset({
@@ -10020,14 +10040,22 @@ def _autopilot_plan_model(run: dict) -> dict:
     )
 
     def validate(payload):
+        # Truncate an over-long initial plan rather than failing the whole
+        # autonomous run over it. The prompt asks the model to keep the initial
+        # plan within initial_limit "so adaptive review has room to replace
+        # stale pending work" -- truncation IS that intent. A local 7B planner
+        # routinely emits one or two tasks too many; previously that raised, the
+        # single retry often over-planned again, and the entire run failed
+        # ("initial plan exceeds the 3-task adaptive planning limit") before a
+        # single task ran. Trim the surplus (the caller re-normalizes and
+        # re-appends the grounded validate task) so the run proceeds; adaptive
+        # review adds tasks back if the objective needs them.
+        tasks = payload.get("tasks")
+        if isinstance(tasks, list) and len(tasks) > initial_limit:
+            payload["tasks"] = tasks[:initial_limit]
         normalized = autopilot_controller.normalize_plan(
             payload, run.get("objective", ""), max_tasks,
         )
-        if len(normalized["tasks"]) > initial_limit:
-            raise ValueError(
-                "initial plan exceeds the %d-task adaptive planning limit"
-                % initial_limit
-            )
         if run.get("policy") == "observe" and any(
             task.get("kind") == "implement" for task in normalized["tasks"]
         ):
@@ -10102,37 +10130,53 @@ def _autopilot_review_model(run: dict, issue: str) -> dict:
         assessments = payload.get("pending_assessment") or []
         if not isinstance(assessments, list):
             raise ValueError("adaptive pending assessment must be a JSON list")
+        # Sanitize benign local-model noise instead of failing the whole run.
+        # A 7B reviewer routinely assesses already-completed tasks (unknown
+        # pending id), repeats a task, or emits a junk verdict -- each of which
+        # previously raised, survived a fruitless retry, and killed the run
+        # mid-execution with valid pending tasks still queued. Drop the
+        # unusable entries: the controller only ever acts on a "stale" verdict
+        # for a genuinely-pending task, so discarding non-pending / malformed /
+        # duplicate assessments changes no real decision. Any pending task the
+        # reviewer left unassessed still defaults to "keep" below.
         assessed = {}
+        reasons = {}
         for item in assessments:
             if not isinstance(item, dict):
-                raise ValueError("each pending assessment must be a JSON object")
+                continue
             task_id = str(item.get("id") or "").strip()
             verdict = str(item.get("verdict") or "").strip().lower()
-            if task_id in assessed:
-                raise ValueError("adaptive review assessed a pending task twice")
-            if verdict not in {"keep", "stale"}:
-                raise ValueError("pending task verdict must be keep or stale")
-            assessed[task_id] = verdict
-        unknown = set(assessed) - pending_ids
-        if unknown:
-            raise ValueError(
-                "adaptive review assessed unknown pending tasks: %s"
-                % ", ".join(sorted(unknown))
-            )
+            if task_id not in pending_ids or verdict not in {"keep", "stale"}:
+                continue
+            assessed[task_id] = verdict  # a later duplicate simply overrides
+            reasons[task_id] = str(item.get("reason") or "adaptive review").strip()
+        rebuilt = [
+            {"id": task_id, "verdict": verdict, "reason": reasons.get(task_id, "adaptive review")}
+            for task_id, verdict in assessed.items()
+        ]
         for task_id in sorted(pending_ids - set(assessed)):
-            assessments.append({
+            rebuilt.append({
                 "id": task_id,
                 "verdict": "keep",
                 "reason": "host default: reviewer did not mark this pending task stale",
             })
             assessed[task_id] = "keep"
-        payload["pending_assessment"] = assessments
+        payload["pending_assessment"] = rebuilt
         stale = {task_id for task_id, verdict in assessed.items() if verdict == "stale"}
         if stale and normalized["decision"] == "continue":
             raise ValueError("continue is invalid while a pending task is stale")
-        if normalized["decision"] == "replan":
-            if not stale:
-                raise ValueError("replan requires at least one stale pending task")
+        if normalized["decision"] == "replan" and not stale:
+            # "replan" with nothing marked stale is not actionable -- there is
+            # nothing to replace -- so it means the same thing as "continue with
+            # the existing pending plan". Coerce it rather than raising: a local
+            # 7B reviewer routinely says "replan" while marking every pending
+            # task keep, and failing the whole autonomous run over that
+            # inconsistency (it previously raised, the retry repeated it, and the
+            # run died mid-execution with valid pending tasks still queued) is far
+            # worse than just continuing. The controller already treats a
+            # replan-with-no-tasks/no-stale as continue by falling through; this
+            # keeps the returned payload consistent with that.
+            payload["decision"] = "continue"
 
     return _autopilot_json_model(
         run,

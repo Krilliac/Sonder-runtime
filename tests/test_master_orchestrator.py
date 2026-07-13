@@ -1,7 +1,9 @@
 import importlib
-import master_orchestrator
+import sys
 import threading
 import time
+
+import master_orchestrator
 
 
 def setup_function():
@@ -44,6 +46,45 @@ def test_repository_prompts_require_guarded_read_tools():
 
     assert "guarded read-only file tools" in prompt
     assert "never request write/edit/delete tools" in prompt
+
+
+def test_tool_equipped_prompts_are_not_primed_to_bail_with_evidence_required():
+    # Regression (2026-07-13): the tool-access prompt carried the no-tools
+    # branch's "if repository evidence is absent, answer EVIDENCE_REQUIRED"
+    # line. A local model holding real file tools took that bait and finalized
+    # on step 1 without calling them; the host then rejected the toolless answer
+    # (require_file_evidence), so EVERY delegated repository task came back
+    # EVIDENCE_REQUIRED. A tool-equipped agent must be told to go read first.
+    tooled = master_orchestrator._subtask_prompts("Inspect the repo files.", 1, tool_access=True)[0]
+
+    assert "USE THEM" in tooled
+    assert "BEFORE answering" in tooled
+    # It may still surrender AFTER genuinely trying -- but only after trying.
+    assert "actually tried" in tooled
+
+    # The no-tools branch keeps the original refuse-without-evidence contract.
+    toolless = master_orchestrator._subtask_prompts("compare these excerpts", 1)[0]
+    assert "EVIDENCE_REQUIRED" in toolless
+    assert "no filesystem, shell, web" in toolless
+
+
+def test_repository_worker_arms_the_inspect_before_final_nudge(monkeypatch):
+    # auto_checklist is what arms the host's "use an inspection tool before you
+    # finalize" retry. Without it the repository lane was one-shot and failed
+    # any model that did not call a tool on its very first step.
+    captured = {}
+
+    class _FakeServer:
+        def _agent_impl(self, prompt, **kwargs):
+            captured.update(kwargs)
+            return "ok"
+
+    monkeypatch.setitem(sys.modules, "server", _FakeServer())
+
+    assert master_orchestrator._repository_worker("inspect the repo") == "ok"
+    assert captured["auto_checklist"] is True
+    assert captured["require_file_evidence"] is True
+    assert captured["read_only"] is True
 
 
 def test_run_inline_tracks_master_agent():
@@ -187,36 +228,157 @@ def test_run_delegated_agent_cap_is_configurable(monkeypatch):
     assert len(result["agents"]) == 24
 
 
-def test_capacity_separates_agent_ceiling_from_memory_safe_worker_slots(monkeypatch):
-    gib = 1024 ** 3
+GIB = 1024 ** 3
+
+
+def _fake_hardware(
+    monkeypatch, *, cpus=16, ram_avail_gib=10, vram_gib=0.0, model_gib=0.0,
+    ollama_parallel=16,
+):
+    """Pin every hardware probe so capacity() tests never read the real host.
+
+    vram_gib=0 means "no GPU detected" -> VRAM does not constrain.
+    ollama_parallel defaults to the absolute max so it is never the binding
+    constraint unless a test deliberately makes it one (the real machine's
+    OLLAMA_NUM_PARALLEL must not leak in and skew unrelated assertions).
+    """
     monkeypatch.delenv("SONDER_MAX_AGENTS", raising=False)
     monkeypatch.delenv("SONDER_PARALLEL_WORKERS", raising=False)
-    monkeypatch.setattr(master_orchestrator.os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(master_orchestrator.os, "cpu_count", lambda: cpus)
     monkeypatch.setattr(
-        master_orchestrator, "physical_memory_bytes", lambda: (16 * gib, 2 * gib)
+        master_orchestrator, "physical_memory_bytes",
+        lambda: (16 * GIB, int(ram_avail_gib * GIB)),
+    )
+    monkeypatch.setattr(
+        master_orchestrator, "gpu_memory_bytes",
+        lambda: (int(vram_gib * GIB), int(vram_gib * GIB)),
+    )
+    monkeypatch.setattr(
+        master_orchestrator, "fleet_model_bytes", lambda: int(model_gib * GIB)
+    )
+    monkeypatch.setattr(
+        master_orchestrator, "ollama_parallel_limit", lambda: int(ollama_parallel)
     )
 
+
+def test_capacity_separates_agent_ceiling_from_memory_safe_worker_slots(monkeypatch):
+    # No GPU -> RAM/CPU bound. Scarce RAM must throttle concurrency.
+    _fake_hardware(monkeypatch, cpus=16, ram_avail_gib=2)
     low = master_orchestrator.capacity(32)
 
     assert low["agent_ceiling"] == 32
     assert low["requested_agents"] == 32
-    assert low["worker_slots"] == 1
     assert low["source"] == "auto"
+    # usable = 2.0 - 1.5 reserve = 0.5 GiB; at 0.25 GiB/worker -> 2 slots.
+    assert low["worker_slots"] == 2
+    assert low["bound_by"] == "ram"
 
-    monkeypatch.setattr(
-        master_orchestrator, "physical_memory_bytes", lambda: (16 * gib, 10 * gib)
-    )
+    # Plentiful RAM -> the CPU/policy ceiling binds instead, not RAM.
+    _fake_hardware(monkeypatch, cpus=16, ram_avail_gib=10)
     healthy = master_orchestrator.capacity(32)
-    assert healthy["worker_slots"] == 4
+    assert healthy["worker_slots"] == 8
+    assert healthy["bound_by"] in ("cpu", "policy")
+
+
+def test_capacity_is_bound_by_vram_when_model_nearly_fills_the_card(monkeypatch):
+    # The real RTX-4050 case: a 7B model (4.36 GiB) on a 6 GiB card leaves
+    # ~1.1 GiB of headroom -> only ~2 concurrent KV caches fit.
+    _fake_hardware(monkeypatch, cpus=16, ram_avail_gib=10, vram_gib=6.0, model_gib=4.36)
+
+    report = master_orchestrator.capacity(32)
+
+    assert report["worker_slots"] == 2
+    assert report["bound_by"] == "gpu_vram"
+    assert report["slot_limits"]["gpu_vram"] == 2
+    # RAM/CPU had plenty of room -- VRAM is what actually limits it.
+    assert report["slot_limits"]["cpu"] == 8
+    assert report["slot_limits"]["ram"] > 8
+
+
+def test_capacity_scales_up_on_a_big_card_and_down_on_a_small_one(monkeypatch):
+    # Same model, roomy card -> VRAM stops being the binding constraint.
+    _fake_hardware(monkeypatch, cpus=16, ram_avail_gib=10, vram_gib=24.0, model_gib=4.36)
+    big = master_orchestrator.capacity(32)
+    assert big["slot_limits"]["gpu_vram"] >= 8
+    assert big["bound_by"] in ("cpu", "policy")
+
+    # Same card, a small model -> far more parallel sequences fit.
+    _fake_hardware(monkeypatch, cpus=16, ram_avail_gib=10, vram_gib=6.0, model_gib=0.92)
+    small_model = master_orchestrator.capacity(32)
+    assert small_model["slot_limits"]["gpu_vram"] > 2
+
+
+def test_capacity_serializes_rather_than_thrashing_when_model_overcommits_vram(monkeypatch):
+    # A 40 GiB model on a 24 GiB card cannot batch at all -- run one at a time
+    # instead of spilling to CPU / thrashing.
+    _fake_hardware(monkeypatch, cpus=16, ram_avail_gib=10, vram_gib=24.0, model_gib=40.0)
+
+    report = master_orchestrator.capacity(32)
+
+    assert report["worker_slots"] == 1
+    assert report["bound_by"] == "gpu_vram"
+
+
+def test_capacity_ignores_vram_when_no_gpu_is_detected(monkeypatch):
+    # CPU-only inference: VRAM must not appear as a (zero) constraint.
+    _fake_hardware(monkeypatch, cpus=16, ram_avail_gib=10, vram_gib=0.0, model_gib=4.36)
+
+    report = master_orchestrator.capacity(32)
+
+    assert "gpu_vram" not in report["slot_limits"]
+    assert report["worker_slots"] == 8
+    assert "not detected" in master_orchestrator.format_capacity(report)
+
+
+def test_gpu_worker_slots_is_unconstrained_when_model_size_is_unknown(monkeypatch):
+    # A GPU we can see but a model we can't size -> don't invent a limit.
+    monkeypatch.setattr(
+        master_orchestrator, "gpu_memory_bytes", lambda: (6 * GIB, 6 * GIB)
+    )
+    monkeypatch.setattr(master_orchestrator, "fleet_model_bytes", lambda: 0)
+
+    assert master_orchestrator.gpu_worker_slots() == 0
+
+
+def test_capacity_warns_when_ollama_would_serialize_the_slots(monkeypatch):
+    # The real bug found 2026-07-13: OLLAMA_NUM_PARALLEL unset -> Ollama batches
+    # one sequence at a time, so every worker slot past the first buys nothing
+    # (measured: 2 concurrent requests took 2.07x a single one). Capacity must
+    # say so out loud instead of advertising concurrency that does not exist.
+    _fake_hardware(monkeypatch, cpus=16, ram_avail_gib=10, ollama_parallel=0)
+
+    report = master_orchestrator.capacity(32)
+
+    assert report["worker_slots"] > 1
+    assert "OLLAMA_NUM_PARALLEL is unset" in report["warning"]
+    assert "WARNING" in master_orchestrator.format_capacity(report)
+
+
+def test_ollama_batch_width_caps_real_concurrency(monkeypatch):
+    # Handing Ollama more concurrent requests than it will batch just queues
+    # them, so its batch width is a hard ceiling on the slot count.
+    _fake_hardware(monkeypatch, cpus=16, ram_avail_gib=10, ollama_parallel=2)
+
+    report = master_orchestrator.capacity(32)
+
+    assert report["slot_limits"]["ollama_num_parallel"] == 2
+    assert report["worker_slots"] == 2
+    assert report["bound_by"] == "ollama_num_parallel"
+    assert not report["warning"]  # matched to hardware -> nothing to warn about
+
+
+def test_ollama_parallel_limit_reads_process_env(monkeypatch):
+    monkeypatch.setenv("OLLAMA_NUM_PARALLEL", "4")
+    assert master_orchestrator.ollama_parallel_limit() == 4
+
+    # Garbage is treated as unset rather than crashing capacity().
+    monkeypatch.setenv("OLLAMA_NUM_PARALLEL", "not-a-number")
+    assert master_orchestrator.ollama_parallel_limit() == 0
 
 
 def test_parallel_worker_override_is_explicit_and_bounded(monkeypatch):
-    gib = 1024 ** 3
+    _fake_hardware(monkeypatch, cpus=16, ram_avail_gib=2)
     monkeypatch.setenv("SONDER_PARALLEL_WORKERS", "6")
-    monkeypatch.setattr(master_orchestrator.os, "cpu_count", lambda: 16)
-    monkeypatch.setattr(
-        master_orchestrator, "physical_memory_bytes", lambda: (16 * gib, 2 * gib)
-    )
 
     report = master_orchestrator.capacity(10)
 

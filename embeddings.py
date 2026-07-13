@@ -17,6 +17,19 @@ OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
 # on the LAN), not connectable on Windows — dial loopback instead.
 EMBED_MODEL = os.environ.get("SONDER_EMBED_MODEL", "nomic-embed-text")
 
+# nomic-embed-text (and the other local embedders) have a bounded context —
+# 2048 tokens for nomic. Ollama does NOT truncate for us: an over-length prompt
+# comes back as HTTP 500 "the input length exceeds the context length", which
+# embed() then soft-fails to None. For memory recall that meant any long task
+# (dense hex-dump / reverse-engineering prompts tokenize far past this at only
+# ~5k chars) could never be embedded and was re-selected as "stale" on every
+# backfill forever. Truncating the prompt to a conservative char budget keeps
+# it under the token limit even for worst-case dense text (~2.7 chars/token
+# here vs the ~4-5 of prose) and yields a usable vector from the task's opening
+# — which carries its semantic gist — instead of nothing. Overridable for a
+# larger-context embedder.
+EMBED_MAX_CHARS = int(os.environ.get("SONDER_EMBED_MAX_CHARS", "4000"))
+
 
 def canonical_model_name(model):
     value = str(model or "").strip().casefold()
@@ -219,7 +232,11 @@ def embed(text, timeout=30, base=None, model=None):
         current_revision(model=selected_model, base=selected_base)
         if explicit_runtime else refresh_runtime_revision()
     )
-    payload = json.dumps({"model": selected_model, "prompt": text}).encode("utf-8")
+    # Cap the prompt to the embedder's context budget. Without this an
+    # over-length input is an HTTP 500 that soft-fails to None (see
+    # EMBED_MAX_CHARS) rather than a usable vector.
+    prompt = text if text is None else str(text)[:EMBED_MAX_CHARS]
+    payload = json.dumps({"model": selected_model, "prompt": prompt}).encode("utf-8")
     req = urllib.request.Request(
         "%s/api/embeddings" % selected_base,
         data=payload,

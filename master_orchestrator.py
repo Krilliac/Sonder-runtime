@@ -5,11 +5,14 @@ import atexit
 import contextlib
 import ctypes
 import itertools
+import json
 import os
 import re
 import sqlite3
+import subprocess
 import threading
 import time
+import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -46,7 +49,20 @@ ABSOLUTE_MAX_AGENTS = 64
 DEFAULT_MAX_WORKERS = 8
 ABSOLUTE_MAX_WORKERS = 16
 RAM_RESERVE_BYTES = int(1.5 * 1024 ** 3)
-RAM_PER_WORKER_BYTES = int(1.25 * 1024 ** 3)
+# A "worker" is a Python thread that POSTs to Ollama and waits -- the model
+# weights live in the ollama server process (and in VRAM), NOT once per worker.
+# This budget therefore covers only the thread's own prompt/response buffers.
+# (It was 1.25 GiB, i.e. a whole model per worker, which silently pinned every
+# GPU box to 2-3 slots for a cost that is not actually paid here.)
+RAM_PER_WORKER_BYTES = int(0.25 * 1024 ** 3)
+# VRAM held back for the display/compositor and allocator slack.
+GPU_RESERVE_BYTES = int(0.5 * 1024 ** 3)
+# Ollama loads ONE copy of the model and batches concurrent requests against
+# it, so extra concurrency costs a per-sequence KV cache, not another model.
+# ~0.5 GiB covers a 7B-class model at an 8k context; smaller models/contexts
+# leave more headroom and therefore allow more parallel sequences.
+GPU_KV_CACHE_PER_WORKER_BYTES = int(0.5 * 1024 ** 3)
+_GPU_QUERY_CACHE_SECONDS = 15.0
 HEARTBEAT_SECONDS = 5
 ABORT_MARKERS = ("CANCELLED", "INTERRUPTED")
 
@@ -182,6 +198,132 @@ def physical_memory_bytes() -> tuple[int, int]:
         return 0, 0
 
 
+def gpu_memory_bytes() -> tuple[int, int]:
+    """Return ``(total, free)`` VRAM of the largest local GPU, or zeros.
+
+    Zeros mean "no GPU detected / unknown" -- callers must treat that as
+    "do not constrain on VRAM" rather than as a zero-capacity GPU.
+    """
+    cached = globals().get("_GPU_MEM_CACHE")
+    if cached and (time.time() - cached[0]) < _GPU_QUERY_CACHE_SECONDS:
+        return cached[1], cached[2]
+    total = free = 0
+    try:
+        out = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.total,memory.free",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True, text=True, timeout=5,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if out.returncode == 0:
+            # Pick the largest GPU when several are present.
+            for line in (out.stdout or "").strip().splitlines():
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) != 2:
+                    continue
+                mib_total, mib_free = int(parts[0]), int(parts[1])
+                if mib_total > total // (1024 ** 2):
+                    total = mib_total * 1024 ** 2
+                    free = mib_free * 1024 ** 2
+    except (OSError, ValueError, subprocess.SubprocessError):
+        total = free = 0
+    globals()["_GPU_MEM_CACHE"] = (time.time(), total, free)
+    return total, free
+
+
+def fleet_model_bytes() -> int:
+    """On-disk size of the model the fleet lane runs, or 0 if unknown.
+
+    Ollama's resident footprint tracks this closely enough to budget VRAM
+    against; an unknown model (0) simply means "don't constrain on VRAM".
+    """
+    cached = globals().get("_FLEET_MODEL_CACHE")
+    if cached and (time.time() - cached[0]) < _GPU_QUERY_CACHE_SECONDS:
+        return cached[1]
+    size = 0
+    try:
+        import runtime_policy  # local import: runtime_policy never imports this module
+
+        policy = runtime_policy.load(create=True)
+        tier = runtime_policy.route_tier("fleet", policy=policy)
+        wanted = str((policy.get("local_models") or {}).get(tier) or "").strip()
+        if wanted:
+            host = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434").strip()
+            host = host.replace("0.0.0.0", "127.0.0.1")
+            if not host.startswith("http"):
+                host = "http://" + host
+            with urllib.request.urlopen(host + "/api/tags", timeout=5) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            for model in payload.get("models") or []:
+                if str(model.get("name") or "").strip() == wanted:
+                    size = int(model.get("size") or 0)
+                    break
+    except Exception:
+        size = 0
+    globals()["_FLEET_MODEL_CACHE"] = (time.time(), size)
+    return size
+
+
+def ollama_parallel_limit() -> int:
+    """``OLLAMA_NUM_PARALLEL`` as the server would see it, or 0 when unset.
+
+    This is the number of sequences the Ollama server will actually batch
+    against the resident model. It is the hard ceiling on real concurrency:
+    Sonder can hand N requests to Ollama, but if Ollama's parallelism is 1
+    they queue and every extra worker slot buys exactly nothing (measured on
+    this box 2026-07-13: with it unset, 2 concurrent requests took 2.07x a
+    single one, and 4 took 4.18x -- perfectly serial).
+
+    0 means "unset": Ollama auto-selects, which on a VRAM-tight box silently
+    collapses to 1. :func:`capacity` reports that as a warning rather than
+    pretending the slots are real.
+
+    Falls back to the persisted Windows user environment when our own process
+    does not carry the variable -- the Ollama server reads that same store at
+    launch, and Sonder is typically started before it is set, so trusting only
+    ``os.environ`` here would report a stale "unset" for the rest of the session.
+    """
+    raw = os.environ.get("OLLAMA_NUM_PARALLEL", "").strip()
+    if not raw and os.name == "nt":
+        try:
+            import winreg
+
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+                raw = str(winreg.QueryValueEx(key, "OLLAMA_NUM_PARALLEL")[0]).strip()
+        except (OSError, ValueError, ImportError):
+            raw = ""
+    if not raw:
+        return 0
+    try:
+        return max(0, min(int(raw), ABSOLUTE_MAX_WORKERS))
+    except (TypeError, ValueError):
+        return 0
+
+
+def gpu_worker_slots() -> int:
+    """Concurrent sequences the local GPU can batch, or 0 when unconstrained.
+
+    Ollama keeps ONE copy of the model resident and batches concurrent
+    requests against it, so the cost of another parallel worker is one more
+    KV cache, not another set of weights. Returns 0 when there is no GPU or
+    the model is unknown (CPU inference is bounded by ``cpu_slots`` instead).
+    """
+    total, _free = gpu_memory_bytes()
+    if total <= 0:
+        return 0
+    model = fleet_model_bytes()
+    if model <= 0:
+        return 0
+    headroom = total - model - GPU_RESERVE_BYTES
+    if headroom <= 0:
+        # The model only just fits: serialize rather than thrash/spill to CPU.
+        return 1
+    return max(1, min(ABSOLUTE_MAX_WORKERS, headroom // GPU_KV_CACHE_PER_WORKER_BYTES))
+
+
 def capacity(requested_agents: int | str | None = None) -> dict:
     """Describe queued-agent ceiling separately from safe concurrent slots."""
     logical = max(1, int(os.cpu_count() or 1))
@@ -190,13 +332,32 @@ def capacity(requested_agents: int | str | None = None) -> dict:
         requested_agents, default=ceiling if requested_agents is None else 3,
     )
     total, available = physical_memory_bytes()
-    cpu_slots = max(1, min(DEFAULT_MAX_WORKERS, logical // 4 or 1))
+    # Workers block on a network call to Ollama rather than burning a core
+    # each, so half the logical CPUs is a sane ceiling (was logical // 4).
+    cpu_slots = max(1, min(DEFAULT_MAX_WORKERS, logical // 2 or 1))
     if available > 0:
         usable = max(0, available - RAM_RESERVE_BYTES)
         ram_slots = max(1, usable // RAM_PER_WORKER_BYTES)
     else:
         ram_slots = DEFAULT_MAX_WORKERS
-    automatic = max(1, min(requested, cpu_slots, int(ram_slots), DEFAULT_MAX_WORKERS))
+    gpu_slots = gpu_worker_slots()
+
+    limits = {
+        "requested": int(requested),
+        "cpu": int(cpu_slots),
+        "ram": int(ram_slots),
+        "policy": int(DEFAULT_MAX_WORKERS),
+    }
+    if gpu_slots > 0:
+        limits["gpu_vram"] = int(gpu_slots)
+    # Ollama's own batching width is the hard ceiling on REAL concurrency --
+    # handing it more concurrent requests than it will batch just queues them.
+    ollama_parallel = ollama_parallel_limit()
+    if ollama_parallel > 0:
+        limits["ollama_num_parallel"] = int(ollama_parallel)
+    automatic = max(1, min(limits.values()))
+    bound_by = min(limits, key=lambda key: (limits[key], key))
+
     source = "auto"
     slots = automatic
     raw_override = os.environ.get("SONDER_PARALLEL_WORKERS", "").strip()
@@ -209,15 +370,39 @@ def capacity(requested_agents: int | str | None = None) -> dict:
         else:
             slots = max(1, min(override, requested, ABSOLUTE_MAX_WORKERS))
             source = "SONDER_PARALLEL_WORKERS"
+            bound_by = "SONDER_PARALLEL_WORKERS"
+    gpu_total, gpu_free = gpu_memory_bytes()
+    warning = ""
+    if ollama_parallel <= 0 and slots > 1:
+        warning = (
+            "OLLAMA_NUM_PARALLEL is unset -- Ollama auto-selects its batch width and "
+            "collapses to 1 on a VRAM-tight box, which serializes every request and "
+            "makes these %d worker slots buy nothing. Set OLLAMA_NUM_PARALLEL=%d and "
+            "restart the Ollama server to actually get the concurrency."
+            % (slots, slots)
+        )
+    elif 0 < ollama_parallel < automatic:
+        warning = (
+            "OLLAMA_NUM_PARALLEL=%d is below the %d slots this hardware could sustain; "
+            "raise it (and restart Ollama) to use the remaining headroom."
+            % (ollama_parallel, automatic)
+        )
     return {
         "logical_cpus": logical,
         "total_memory_bytes": total,
         "available_memory_bytes": available,
+        "gpu_total_memory_bytes": gpu_total,
+        "gpu_free_memory_bytes": gpu_free,
+        "fleet_model_bytes": fleet_model_bytes(),
+        "ollama_num_parallel": int(ollama_parallel),
         "agent_ceiling": ceiling,
         "requested_agents": requested,
         "worker_slots": slots,
         "automatic_worker_slots": automatic,
+        "slot_limits": limits,
+        "bound_by": bound_by,
         "source": source,
+        "warning": warning,
         "ram_reserve_bytes": RAM_RESERVE_BYTES,
         "ram_per_worker_bytes": RAM_PER_WORKER_BYTES,
     }
@@ -257,6 +442,13 @@ def _repository_worker(prompt: str) -> str:
         require_file_evidence=True,
         read_only=True,
         include_evidence=True,
+        # auto_checklist is what arms the host's "use an inspection tool before
+        # you finalize" nudge (and its retry). Without it this lane was
+        # one-shot: a local model that answered on step 1 without touching a
+        # file tool was immediately failed for missing file evidence, which is
+        # exactly why delegated repository tasks always came back
+        # EVIDENCE_REQUIRED. The direct agent surface passes it and works.
+        auto_checklist=True,
         cancel_check=current_worker_cancel_requested,
     )
     if str(result or "").startswith("ERROR:"):
@@ -512,21 +704,37 @@ def _subtask_prompts(task: str, count: int, tool_access: bool = False) -> list[s
     count = clamp_agent_count(count, default=1)
     prompts = []
     for i in range(count):
-        access_contract = (
-            "You have guarded read-only file tools. Inspect the relevant allowed files "
-            "before making codebase claims, and never request write/edit/delete tools. "
-            if tool_access else
-            "This is a greenfield design/implementation task, not a request to inspect "
-            "an existing repository. You have no filesystem, shell, web, or hidden tool "
-            "access; use the task as the specification and make explicit assumptions. "
-        )
+        if tool_access:
+            # A tool-equipped agent must be told to GO READ THE FILES. The
+            # no-tools branch below tells the model to answer EVIDENCE_REQUIRED
+            # when repository evidence is missing -- handing that same line to
+            # an agent that actually HAS file tools primes it to bail out on
+            # step 1 instead of calling them, and the host then rejects the
+            # toolless answer (require_file_evidence), so the whole delegated
+            # repository lane returned EVIDENCE_REQUIRED even on an authorized
+            # root. Only claim the evidence is unreachable after the tools have
+            # actually failed to reach it.
+            access_contract = (
+                "You have guarded read-only file tools. USE THEM: inspect the relevant "
+                "allowed files with your file tools BEFORE answering -- an answer with "
+                "no tool call is rejected by the host -- and never request "
+                "write/edit/delete tools. Only if your file tools genuinely cannot reach "
+                "the files (permission denied / not found after you have actually tried) "
+                "answer EVIDENCE_REQUIRED and list the smallest missing inputs. "
+            )
+        else:
+            access_contract = (
+                "This is a greenfield design/implementation task, not a request to inspect "
+                "an existing repository. You have no filesystem, shell, web, or hidden tool "
+                "access; use the task as the specification and make explicit assumptions. "
+                "If the task explicitly requires current repository evidence and it is "
+                "absent, answer EVIDENCE_REQUIRED and list the smallest missing inputs. "
+            )
         prompts.append(
             "You are delegated subagent %d/%d. %sNever "
             "claim that you inspected, edited, compiled, ran, or verified anything "
             "you were not explicitly shown. Quote the exact supporting excerpt for "
             "each codebase finding; label unsupported possibilities as hypotheses. "
-            "If the task explicitly requires current repository evidence and it is "
-            "absent, answer EVIDENCE_REQUIRED and list the smallest missing inputs. "
             "For greenfield architecture, design, or implementation requests, make "
             "clearly labeled proposals from the task itself instead of refusing. "
             "Work independently and keep the answer concise."
@@ -732,22 +940,59 @@ def format_capacity(data: dict | None = None) -> str:
     gib = float(1024 ** 3)
     total = float(data.get("total_memory_bytes") or 0) / gib
     available = float(data.get("available_memory_bytes") or 0) / gib
-    return "\n".join([
+    gpu_total = float(data.get("gpu_total_memory_bytes") or 0) / gib
+    gpu_free = float(data.get("gpu_free_memory_bytes") or 0) / gib
+    model = float(data.get("fleet_model_bytes") or 0) / gib
+    limits = data.get("slot_limits") or {}
+    lines = [
         "master orchestration capacity",
         "  logical CPUs: %s | RAM: %.1f/%.1f GiB available" % (
             data.get("logical_cpus", 0), available, total,
         ),
+    ]
+    if gpu_total > 0:
+        lines.append(
+            "  GPU VRAM: %.1f/%.1f GiB free | fleet model: %.2f GiB resident" % (
+                gpu_free, gpu_total, model,
+            )
+        )
+    else:
+        lines.append("  GPU VRAM: not detected (CPU inference; bounded by CPU slots)")
+    lines.extend([
         "  agent ceiling: %s queued | concurrent worker slots: %s" % (
             data.get("agent_ceiling", 0), data.get("worker_slots", 0),
         ),
-        "  automatic slots: %s | source: %s" % (
-            data.get("automatic_worker_slots", 0), data.get("source", "auto"),
-        ),
-        "  policy: reserve %.1f GiB, budget %.2f GiB per active worker" % (
-            float(data.get("ram_reserve_bytes") or 0) / gib,
-            float(data.get("ram_per_worker_bytes") or 0) / gib,
+        "  automatic slots: %s | bound by: %s | source: %s" % (
+            data.get("automatic_worker_slots", 0),
+            data.get("bound_by", "?"),
+            data.get("source", "auto"),
         ),
     ])
+    if limits:
+        lines.append(
+            "  per-constraint max: %s" % ", ".join(
+                "%s=%s" % (name, limits[name]) for name in sorted(limits)
+            )
+        )
+    parallel = int(data.get("ollama_num_parallel") or 0)
+    lines.append(
+        "  ollama batch width: %s" % (
+            parallel if parallel > 0 else "unset (auto -- may serialize!)"
+        )
+    )
+    lines.append(
+        "  policy: reserve %.1f GiB RAM, %.2f GiB per worker; VRAM %.1f GiB reserved, "
+        "%.2f GiB KV cache per parallel sequence" % (
+            float(data.get("ram_reserve_bytes") or 0) / gib,
+            float(data.get("ram_per_worker_bytes") or 0) / gib,
+            GPU_RESERVE_BYTES / gib,
+            GPU_KV_CACHE_PER_WORKER_BYTES / gib,
+        )
+    )
+    warning = str(data.get("warning") or "").strip()
+    if warning:
+        lines.append("  WARNING: %s" % warning)
+    return "\n".join(lines)
 
 
 def format_snapshot(data: dict) -> str:

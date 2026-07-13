@@ -267,3 +267,52 @@ def test_embed_non_dict_json_returns_none(monkeypatch):
     monkeypatch.setattr(e.ollama_endpoint, "open_url", mock_urlopen)
     result = e.embed("hi")
     assert result is None
+
+
+def test_embed_truncates_overlength_prompt_to_context_budget(monkeypatch):
+    # Regression (2026-07-13): nomic-embed-text has a 2048-token context and
+    # Ollama returns HTTP 500 "input length exceeds the context length" (which
+    # embed() soft-fails to None) rather than truncating. That made any long
+    # task permanently un-embeddable -- 24 interactions could never be backfilled
+    # and were re-selected as stale forever. embed() must cap the prompt itself.
+    import json
+
+    sent = {}
+
+    def fake_open_url(request, timeout=30, **kwargs):
+        sent["body"] = json.loads(request.data.decode("utf-8"))
+        dim = e.expected_dimension()
+        return FakeResponse(json.dumps({"embedding": [0.1] * dim}).encode("utf-8"))
+
+    monkeypatch.setattr(e.ollama_endpoint, "open_url", fake_open_url)
+    monkeypatch.setattr(e.ollama_endpoint, "configured_origin", lambda *a, **k: "http://127.0.0.1:11434")
+    monkeypatch.setattr(e, "current_revision", lambda **k: "rev-test")
+    monkeypatch.setattr(e, "refresh_runtime_revision", lambda **k: "rev-test")
+    monkeypatch.setattr(e, "EMBED_MAX_CHARS", 4000)
+
+    huge = "A" * 9000
+    vec = e.embed(huge, base="http://127.0.0.1:11434", model="nomic-embed-text")
+
+    assert vec is not None  # would have been None (HTTP 500) without truncation
+    assert len(sent["body"]["prompt"]) == 4000  # capped, not the full 9000
+
+
+def test_embed_leaves_short_prompt_untouched(monkeypatch):
+    import json
+
+    sent = {}
+
+    def fake_open_url(request, timeout=30, **kwargs):
+        sent["body"] = json.loads(request.data.decode("utf-8"))
+        dim = e.expected_dimension()
+        return FakeResponse(json.dumps({"embedding": [0.1] * dim}).encode("utf-8"))
+
+    monkeypatch.setattr(e.ollama_endpoint, "open_url", fake_open_url)
+    monkeypatch.setattr(e.ollama_endpoint, "configured_origin", lambda *a, **k: "http://127.0.0.1:11434")
+    monkeypatch.setattr(e, "current_revision", lambda **k: "rev-test")
+    monkeypatch.setattr(e, "refresh_runtime_revision", lambda **k: "rev-test")
+    monkeypatch.setattr(e, "EMBED_MAX_CHARS", 4000)
+
+    e.embed("short prompt", base="http://127.0.0.1:11434", model="nomic-embed-text")
+
+    assert sent["body"]["prompt"] == "short prompt"

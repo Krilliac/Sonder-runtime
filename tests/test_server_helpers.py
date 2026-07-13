@@ -19,6 +19,66 @@ def test_parse_none_when_absent():
     assert server.parse_interaction_id("just some text") is None
 
 
+def test_master_orchestrate_never_forges_a_repo_scoped_task(monkeypatch):
+    # Regression for a 2026-07-13 bug: master_orchestrate() called
+    # creative_router.classify(task) BEFORE checking
+    # master_orchestrator.requires_repository_tools(task), so an ordinary
+    # code-analysis task containing a common verb+noun pair the creative
+    # regex also matches (e.g. "generate" + "model"/"document"/"diagram")
+    # was misrouted into the greenfield game/artifact forge pipeline instead
+    # of being handled as repo-scoped work -- it has no filesystem access,
+    # so it silently returned unrelated fake game-build output.
+    #
+    # requires_repository_tools is a real regex match (not mocked) so this
+    # exercises the actual production classification, not a stub.
+    forge_calls = []
+    monkeypatch.setattr(
+        server, "_master_grounded_build",
+        lambda *a, **k: forge_calls.append((a, k)) or "SHOULD NOT BE CALLED",
+    )
+    monkeypatch.setattr(
+        server.master_orchestrator, "run_inline",
+        lambda task, worker, metadata=None: {"output": "stub-inline-result", "master_id": "m-test"},
+    )
+
+    task = (
+        "Read the current repository files and generate a structural model "
+        "of the class groupings, then draft a one-line document summary."
+    )
+    assert server.master_orchestrator.requires_repository_tools(task), (
+        "test task must actually match the repository-tools detector, "
+        "otherwise this test doesn't exercise the guard it's regressing"
+    )
+
+    result = server.master_orchestrate(task=task, mode="inline")
+
+    assert forge_calls == [], (
+        "master_orchestrate routed a repository-scoped task into the "
+        "greenfield forge pipeline -- the requires_repository_tools guard "
+        "must be checked before creative_router.classify()"
+    )
+    assert result == "stub-inline-result"
+
+
+def test_master_orchestrate_still_forges_explicit_greenfield_requests(monkeypatch):
+    # The fix above must not break genuine greenfield build requests that
+    # don't reference existing repository state.
+    forge_calls = []
+    monkeypatch.setattr(
+        server, "_master_grounded_build",
+        lambda task, mode, tier, intent, retry_of="": forge_calls.append(intent) or "forged",
+    )
+
+    task = "Create a C++ 2.5D isometric Diablo-like RPG game with in-house assets and no third-party libraries."
+    assert not server.master_orchestrator.requires_repository_tools(task)
+
+    result = server.master_orchestrate(task=task, mode="inline")
+
+    assert len(forge_calls) == 1
+    assert forge_calls[0]["kind"] in ("game", "game_campaign")
+    assert result == "forged"
+
+
 def test_agent_tool_help_advertises_strict_humanoid_artifact_contract():
     help_text = server._agent_tool_help()
 

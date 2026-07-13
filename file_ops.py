@@ -197,28 +197,57 @@ def resolve_repository_read_path(
     *,
     allow_workspace_root: bool = False,
     reject_sensitive: bool = True,
+    extra_roots: str = "",
 ) -> Path:
-    """Resolve an agent read path inside the repository without broader roots."""
+    """Resolve an agent read path inside an AUTHORIZED root.
+
+    A relative path resolves against the workspace root, as before. An absolute
+    path is accepted only when it lands inside one of the roots the operator
+    already authorized for the guarded file tools (``allowed_roots()`` --
+    i.e. ``file_roots.local`` / ``SONDER_FILE_ROOTS``).
+
+    Previously ANY absolute path was rejected outright ("must be relative") and
+    the only root was Sonder's own install directory, so a repository-scoped
+    agent could never read the repository it was pointed at -- while the failure
+    message told the operator to authorize it in ``file_roots.local``, which
+    this resolver never consulted. That made the whole delegated repository lane
+    unusable on any external repo. Authorized roots are now honored here too;
+    every other guard (no escaping a root, no secrets, no .git/.ssh/control
+    state) is unchanged, so this grants nothing the operator has not already
+    granted the direct file tools.
+    """
     if not isinstance(path, str) or not path.strip():
-        raise ValueError("repository path must be a non-empty relative path")
-    candidate = Path(path.strip())
+        raise ValueError("repository path must be a non-empty path")
+    raw = path.strip()
+    candidate = Path(raw)
     expanded = candidate.expanduser()
-    windows_candidate = PureWindowsPath(path.strip())
-    if (
+    windows_candidate = PureWindowsPath(raw)
+    is_absolute = bool(
         candidate.is_absolute() or expanded.is_absolute()
         or candidate.drive or candidate.anchor
         or windows_candidate.is_absolute() or windows_candidate.drive
-    ):
-        raise PermissionError("repository path must be relative")
-    root = _resolve_best_effort(workspace_root())
-    resolved = _resolve_best_effort(root / candidate)
-    if resolved == root:
-        if not allow_workspace_root:
-            raise PermissionError("repository file path must resolve below the workspace root")
-    elif not _is_inside(resolved, root):
-        raise PermissionError("repository path escapes the workspace root")
+    )
+
+    workspace = _resolve_best_effort(workspace_root())
+    if is_absolute:
+        resolved = _resolve_best_effort(expanded)
+        roots = [_resolve_best_effort(root) for root in allowed_roots(extra_roots)]
+        root = next((r for r in roots if _is_inside(resolved, r) or resolved == r), None)
+        if root is None:
+            raise PermissionError(
+                "repository path is outside every authorized root; add it to "
+                "file_roots.local or pass a path relative to the workspace"
+            )
+    else:
+        root = workspace
+        resolved = _resolve_best_effort(root / candidate)
+        if not _is_inside(resolved, root) and resolved != root:
+            raise PermissionError("repository path escapes the workspace root")
+
+    if resolved == root and not allow_workspace_root:
+        raise PermissionError("repository file path must resolve below its root")
     if reject_sensitive:
-        relative = resolved.relative_to(root)
+        relative = resolved.relative_to(root) if resolved != root else Path(".")
         if (
             _is_sensitive_control_path(resolved)
             or any(part.lower() in SENSITIVE_READ_DIRECTORIES for part in relative.parts)
