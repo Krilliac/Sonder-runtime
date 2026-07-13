@@ -6,15 +6,19 @@ sonder_serve.py API without requiring the Flutter app or a visible console.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import engine_bundle
+import ollama_endpoint
 from process_liveness import pid_alive as _process_pid_alive
 import sonder_health
 import sonder_paths
@@ -24,6 +28,7 @@ DEFAULT_HOST = os.environ.get("SONDER_HOST", "127.0.0.1")
 DEFAULT_PORT = int(os.environ.get("SONDER_PORT", "11435"))
 CONTROL_GATE_ENV = "SONDER_LAUNCHER_CONTROL_GATE"
 CONTROL_GATE_ALLOW = b"\x01"
+_MAX_OLLAMA_TAGS_BYTES = 4 * 1024 * 1024
 
 
 def _child_environment() -> dict[str, str]:
@@ -237,21 +242,39 @@ def runtime_environment() -> dict[str, str]:
     return env
 
 
-def ollama_ok() -> bool:
-    executable = ollama_exe()
-    if not executable:
-        return False
+def ollama_client_environment() -> dict[str, str]:
+    return ollama_endpoint.client_environment(runtime_environment())
+
+
+def ollama_models() -> set[str] | None:
+    """Return registered model names, or None when the gated endpoint is unavailable."""
     try:
-        proc = subprocess.run(
-            [executable, "list"],
-            capture_output=True,
-            text=True,
-            timeout=8,
-            env=runtime_environment(),
+        client_env = ollama_client_environment()
+        request = urllib.request.Request(
+            client_env["OLLAMA_HOST"] + "/api/tags", method="GET",
         )
-        return proc.returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        return False
+        with ollama_endpoint.open_url(request, timeout=8) as response:
+            raw = response.read(_MAX_OLLAMA_TAGS_BYTES + 1)
+        if len(raw) > _MAX_OLLAMA_TAGS_BYTES:
+            return None
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, TimeoutError, ValueError, urllib.error.URLError):
+        return None
+    models = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(models, list):
+        return None
+    names = set()
+    for model in models:
+        if not isinstance(model, dict):
+            continue
+        name = str(model.get("name") or model.get("model") or "").strip()
+        if name:
+            names.add(name)
+    return names
+
+
+def ollama_ok() -> bool:
+    return ollama_models() is not None
 
 
 def wait_until(fn, seconds: float) -> bool:
@@ -269,29 +292,35 @@ def start_ollama() -> str:
     executable = ollama_exe()
     if not executable:
         return "ollama: not installed or not on PATH"
-    pid = _popen([executable, "serve"], "ollama", env=runtime_environment())
+    server_env = runtime_environment()
+    try:
+        client_env = ollama_endpoint.client_environment(server_env)
+    except ValueError as exc:
+        return "ollama: endpoint blocked - %s" % exc
+    if not ollama_endpoint.is_loopback(client_env["OLLAMA_HOST"]):
+        return "ollama: remote endpoint is unavailable; local daemon not started"
+    pid = _popen([executable, "serve"], "ollama", env=server_env)
     if wait_until(ollama_ok, 12):
         return "ollama: started pid=%s" % pid
     return "ollama: start requested pid=%s, not reachable yet (see %s)" % (pid, log_file("ollama"))
 
 
 def ensure_sonder_alias() -> tuple[bool, str]:
-    executable = ollama_exe()
-    if not executable or not ollama_ok():
+    models = ollama_models()
+    if models is None:
         return False, "engine: Ollama is not reachable; alias setup skipped"
-    env = runtime_environment()
-    try:
-        probe = subprocess.run(
-            [executable, "show", "sonder"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env=env,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return False, "engine: could not inspect sonder alias: %s" % exc
-    if probe.returncode == 0:
+    if any(name.casefold() == "sonder:latest" for name in models):
         return True, "engine: sonder alias is ready"
+    executable = ollama_exe()
+    if not executable:
+        return False, (
+            "engine: Ollama is reachable but the sonder alias is missing; "
+            "install the Ollama CLI to create it"
+        )
+    try:
+        env = ollama_client_environment()
+    except ValueError as exc:
+        return False, "engine: Ollama endpoint blocked: %s" % exc
     command = [python_exe(), str(repo_root() / "bootstrap_engine.py")]
     try:
         bundle = engine_bundle.discover_engine_bundle(repo_root())
@@ -438,7 +467,10 @@ def main(argv=None) -> int:
     if not _launcher_control_gate():
         return 2
     parser = argparse.ArgumentParser(description="Run Sonder Runtime and Ollama headlessly.")
-    parser.add_argument("command", nargs="?", default="start", choices=["start", "status", "stop", "restart"])
+    parser.add_argument(
+        "command", nargs="?", default="start",
+        choices=["start", "engine", "status", "stop", "restart"],
+    )
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--stop-ollama", action="store_true", help="Also stop Ollama when stopping.")
@@ -467,6 +499,8 @@ def main(argv=None) -> int:
     print(alias_message)
     if not alias_ok:
         return 2
+    if args.command == "engine":
+        return 0
     print(start_sonder(args.host, args.port, env=env))
     print(status(args.host, args.port))
     return 0

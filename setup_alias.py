@@ -7,6 +7,8 @@ import shutil
 import subprocess
 import tempfile
 
+import ollama_endpoint
+
 
 DEFAULT_BASE_MODEL = "qwen2.5-coder:7b"
 DEFAULT_EMBED_MODEL = "nomic-embed-text"
@@ -34,9 +36,10 @@ def ollama_executable(explicit: str = "") -> str:
 
 def _run(ollama: str, args: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess:
     print("+ " + " ".join([ollama, *args]))
+    client_env = ollama_endpoint.client_environment(env)
     return subprocess.run(
         [ollama, *args],
-        env=env,
+        env=client_env,
         text=True,
         capture_output=True,
     )
@@ -102,8 +105,13 @@ def main(argv=None) -> int:
     if not base_model or not embed_model:
         parser.error("model names may not be empty")
 
+    try:
+        env = ollama_endpoint.client_environment(os.environ)
+    except ValueError as error:
+        print("Ollama endpoint blocked: %s" % error)
+        return 4
+
     ollama = ollama_executable(args.ollama)
-    env = os.environ.copy()
     for model, label in ((base_model, "base"), (embed_model, "embedding")):
         ok, message = ensure_model(ollama, model, offline=args.offline, env=env)
         print(f"  {label}: {message}")

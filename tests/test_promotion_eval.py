@@ -2,6 +2,8 @@ import json
 import sqlite3
 from urllib.error import URLError
 
+import pytest
+
 import eval_models
 import promotion_eval as pe
 
@@ -464,6 +466,18 @@ def test_default_generator_rejects_non_loopback_host(monkeypatch):
         raise AssertionError("non-loopback network request attempted") from error
     else:
         raise AssertionError("non-loopback Ollama host accepted")
+
+
+def test_promotion_origin_rewrites_ipv6_bind_all_and_ignores_remote_opt_in(
+    monkeypatch,
+):
+    monkeypatch.setenv("OLLAMA_HOST", "[::]:11434")
+    assert pe._local_ollama_origin() == "http://[::1]:11434"
+
+    monkeypatch.setenv("OLLAMA_HOST", "http://models.example.test:11434")
+    monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
+    with pytest.raises(ValueError, match="loopback"):
+        pe._local_ollama_origin()
 
 
 def test_local_opener_disables_proxies_and_redirects(monkeypatch):

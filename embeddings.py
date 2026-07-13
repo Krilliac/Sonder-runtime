@@ -1,7 +1,6 @@
 """Local Ollama embeddings + vector helpers. Stdlib only. Soft-fails to None."""
 import array
 import hashlib
-import ipaddress
 import json
 import math
 import os
@@ -10,13 +9,12 @@ import threading
 import urllib.error
 import urllib.request
 import urllib.parse
+import ollama_endpoint
 
-OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434").replace("http://", "")
+BASE = ollama_endpoint.normalize()
+OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
 # 0.0.0.0 is a bind-all address (used so `ollama serve` is reachable from a phone
 # on the LAN), not connectable on Windows — dial loopback instead.
-if OLLAMA_HOST.startswith("0.0.0.0"):
-    OLLAMA_HOST = OLLAMA_HOST.replace("0.0.0.0", "127.0.0.1", 1)
-BASE = "http://%s" % OLLAMA_HOST
 EMBED_MODEL = os.environ.get("SONDER_EMBED_MODEL", "nomic-embed-text")
 
 
@@ -75,8 +73,12 @@ def serving_model_revision(model=None, base=None, timeout=0.5):
     """Read the digest advertised by the Ollama endpoint serving this model."""
     identity = canonical_model_name(model or EMBED_MODEL)
     try:
-        with urllib.request.urlopen(
-            "%s/api/tags" % (base or BASE), timeout=timeout,
+        selected_base = ollama_endpoint.configured_origin(base or BASE)
+    except ValueError:
+        return ""
+    try:
+        with ollama_endpoint.open_url(
+            "%s/api/tags" % selected_base, timeout=timeout,
         ) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (OSError, TimeoutError, ValueError, urllib.error.URLError):
@@ -179,15 +181,7 @@ def valid_vector(vector):
 
 
 def endpoint_is_loopback(base=None):
-    try:
-        hostname = urllib.parse.urlparse(base or BASE).hostname
-        if not hostname:
-            return False
-        if hostname.casefold().rstrip(".") == "localhost":
-            return True
-        return ipaddress.ip_address(hostname).is_loopback
-    except ValueError:
-        return False
+    return ollama_endpoint.is_loopback(base or BASE)
 
 
 def to_blob(vec):
@@ -215,7 +209,10 @@ def embed(text, timeout=30, base=None, model=None):
     _EMBED_STATE.vector = None
     _EMBED_STATE.revision = None
     _EMBED_STATE.model = None
-    selected_base = base or BASE
+    try:
+        selected_base = ollama_endpoint.configured_origin(base or BASE)
+    except ValueError:
+        return None
     selected_model = model or EMBED_MODEL
     explicit_runtime = base is not None or model is not None
     revision_before = (
@@ -229,7 +226,7 @@ def embed(text, timeout=30, base=None, model=None):
         headers={"Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with ollama_endpoint.open_url(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             vector = data.get("embedding") if isinstance(data, dict) else None
             revision_after = (

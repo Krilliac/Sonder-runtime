@@ -147,6 +147,83 @@ def test_cloud_model_name_cannot_bypass_cloud_opt_in(monkeypatch):
     assert calls == []
 
 
+def test_remote_ollama_requires_separate_opt_in_before_request(monkeypatch):
+    calls = []
+    monkeypatch.setattr(server, "BASE", "http://models.example.test:11434")
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    monkeypatch.delenv("SONDER_ALLOW_REMOTE_OLLAMA", raising=False)
+    monkeypatch.setattr(
+        server, "_post", lambda *args, **kwargs: calls.append(1) or {},
+    )
+
+    with pytest.raises(server.ModelCallError) as caught:
+        server._chat_request({}, model="local", timeout=20)
+
+    assert caught.value.kind == "configuration"
+    assert "non-loopback" in caught.value.detail
+    assert calls == []
+
+
+def test_remote_opt_in_is_single_attempt_even_for_transient_failure(monkeypatch):
+    calls = []
+
+    def fail(*args, **kwargs):
+        calls.append(1)
+        raise urllib.error.URLError(ConnectionResetError("reset"))
+
+    monkeypatch.setattr(server, "BASE", "http://models.example.test:11434")
+    monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
+    monkeypatch.setenv("SONDER_LOCAL_RETRIES", "2")
+    monkeypatch.setattr(server, "_post", fail)
+
+    with pytest.raises(server.ModelCallError) as caught:
+        server._chat_request({}, model="remote-local-model", timeout=20)
+
+    assert caught.value.attempts == 1
+    assert caught.value.cloud is False
+    assert len(calls) == 1
+
+
+def test_cloud_model_on_remote_endpoint_requires_both_opt_ins(monkeypatch):
+    calls = []
+    monkeypatch.setattr(server, "BASE", "https://models.example.test:11434")
+    monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
+    monkeypatch.delenv("SONDER_ALLOW_CLOUD", raising=False)
+    monkeypatch.setattr(
+        server,
+        "_post",
+        lambda *args, **kwargs: calls.append(1) or {
+            "message": {"content": "ok"},
+        },
+    )
+
+    with pytest.raises(server.ModelCallError) as blocked:
+        server._chat_request({}, model="teacher-cloud", timeout=20)
+    assert "hosted/cloud tiers are disabled" in blocked.value.detail
+    assert calls == []
+
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    _, content = server._chat_request({}, model="teacher-cloud", timeout=20)
+    assert content == "ok"
+    assert calls == [1]
+
+
+def test_status_labels_explicit_remote_endpoint(monkeypatch):
+    monkeypatch.setattr(server, "BASE", "http://models.example.test:11434")
+    monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
+    monkeypatch.setattr(
+        server,
+        "_get",
+        lambda path: {"models": []},
+    )
+
+    result = server.status()
+
+    assert "remote-opt-in" in result
+    assert "REMOTE OLLAMA - leaves machine" in result
+    assert "remote/cloud retries off" in result
+
+
 def test_cancellation_between_attempts_suppresses_retry(monkeypatch):
     calls = []
     cancelled = {"value": False}
@@ -296,7 +373,7 @@ def test_oversized_model_response_is_rejected_without_retry(monkeypatch):
         return Response()
 
     monkeypatch.setattr(server, "_MAX_MODEL_RESPONSE_BYTES", 32)
-    monkeypatch.setattr(server.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(server.ollama_endpoint, "open_url", fake_urlopen)
 
     with pytest.raises(server.ModelCallError) as caught:
         server._chat_request({}, model="local", timeout=20)

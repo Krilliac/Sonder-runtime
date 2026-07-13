@@ -38,6 +38,7 @@ SENSITIVE_PREFIXES = (
     "permission_rules.py", "admin_auth.py", "file_ops.py", "safe_update.py",
     "selfmod.py", "selfmod_recover.py", "server.py", "reloadable_mcp.py",
     "model_transport.py",
+    "ollama_endpoint.py",
     "process_liveness.py",
     "autopilot_controller.py", "autopilot_store.py", "sonder_paths.py", "sonder_serve.py",
     "deploy_", "sonder-runtime", "tests/test_permission", "tests/test_admin",

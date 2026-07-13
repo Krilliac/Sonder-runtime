@@ -17,6 +17,7 @@ from pathlib import Path
 
 import engine_bundle
 import adaptive_training
+import ollama_endpoint
 import system_profile
 
 
@@ -100,19 +101,28 @@ def ensure_ollama_running(
     executable = _ollama_executable(ollama)
     if not executable:
         return False, "Ollama is not installed, on PATH, or present in an engine bundle."
-    process_env = env or os.environ.copy()
+    process_env = dict(os.environ if env is None else env)
+    try:
+        client_env = ollama_endpoint.client_environment(process_env)
+    except ValueError as exc:
+        return False, "Ollama endpoint blocked: %s" % exc
     try:
         probe = subprocess.run(
             [executable, "list"],
             capture_output=True,
             text=True,
             timeout=10,
-            env=process_env,
+            env=client_env,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"Could not execute Ollama: {exc}"
     if probe.returncode == 0:
         return True, "Ollama is already running."
+    if not ollama_endpoint.is_loopback(client_env["OLLAMA_HOST"]):
+        return False, (
+            "Remote Ollama is unavailable; refusing to start a local daemon "
+            "for a remote endpoint."
+        )
     print("Starting Ollama...")
     popen_kwargs = {"env": process_env}
     if os.name == "nt":
@@ -131,7 +141,7 @@ def ensure_ollama_running(
                 capture_output=True,
                 text=True,
                 timeout=5,
-                env=process_env,
+                env=client_env,
             )
         except (OSError, subprocess.SubprocessError):
             continue
@@ -221,7 +231,6 @@ def main(argv=None):
         return 4
 
     hardware = system_profile.detect_hardware()
-    ram = hardware.system_ram_total_gb or total_ram_gb()
     offline = args.offline or bundle is not None
     requested = args.model.strip() or os.environ.get("SONDER_BASE_MODEL", "").strip()
     if requested.lower() == "auto":
@@ -302,6 +311,12 @@ def main(argv=None):
             % (copied, reused, model_store)
         )
 
+    try:
+        ollama_endpoint.client_environment(process_env)
+    except ValueError as exc:
+        print("  ollama endpoint: BLOCKED - %s" % exc, file=sys.stderr)
+        return 4
+
     ok, msg = ensure_python_deps(
         python_executable,
         offline=offline,
@@ -333,7 +348,8 @@ def main(argv=None):
     ]
     if offline:
         command.append("--offline")
-    result = _run(command, env=process_env, cwd=str(ROOT))
+    setup_env = ollama_endpoint.client_environment(process_env)
+    result = _run(command, env=setup_env, cwd=str(ROOT))
     return result.returncode
 
 

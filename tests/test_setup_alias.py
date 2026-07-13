@@ -60,3 +60,47 @@ def test_system_prompt_uses_exposed_tools_without_inventing_them():
     assert "Use tools that the host lists" in content
     assert "Never invent tools" in content
     assert "FROM base:model" in content
+
+
+def test_remote_ollama_is_blocked_before_cli_without_explicit_opt_in(monkeypatch):
+    calls = []
+    monkeypatch.setenv("OLLAMA_HOST", "http://models.example.test:11434")
+    monkeypatch.delenv("SONDER_ALLOW_REMOTE_OLLAMA", raising=False)
+    monkeypatch.setattr(
+        setup_alias.subprocess,
+        "run",
+        lambda command, **kwargs: calls.append(command),
+    )
+
+    assert setup_alias.main(["--offline", "--ollama", "ollama-test"]) == 4
+    assert calls == []
+
+
+def test_remote_ollama_opt_in_allows_cli(monkeypatch):
+    calls = []
+    monkeypatch.setenv("OLLAMA_HOST", "http://models.example.test:11434")
+    monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(setup_alias.subprocess, "run", fake_run)
+
+    assert setup_alias.main(["--offline", "--ollama", "ollama-test"]) == 0
+    assert calls
+
+
+def test_bind_all_ollama_cli_uses_numeric_loopback(monkeypatch):
+    environments = []
+    monkeypatch.setenv("OLLAMA_HOST", "[::]:11434")
+
+    def fake_run(command, **kwargs):
+        environments.append(kwargs["env"])
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(setup_alias.subprocess, "run", fake_run)
+
+    assert setup_alias.main(["--offline", "--ollama", "ollama-test"]) == 0
+    assert environments
+    assert all(env["OLLAMA_HOST"] == "http://[::1]:11434" for env in environments)

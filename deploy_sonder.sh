@@ -21,6 +21,13 @@
 #   SONDER_NUM_BATCH  inference batch size (default: 512)
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "python3 is required for the fail-closed Ollama endpoint preflight" >&2
+  exit 1
+fi
+CLIENT_OLLAMA_HOST="$(PYTHONPATH="$SCRIPT_DIR" python3 -c 'import ollama_endpoint; print(ollama_endpoint.configured_origin(allow_remote=False))')"
+
 export SONDER_NUM_THREAD="${SONDER_NUM_THREAD:-$(nproc 2>/dev/null || echo 4)}"
 export SONDER_NUM_GPU="${SONDER_NUM_GPU:-999}"
 export SONDER_NUM_BATCH="${SONDER_NUM_BATCH:-512}"
@@ -61,8 +68,8 @@ fi
 echo "detected ${RAM_GB}GB RAM -> base model: $BASE"
 
 echo "== 3/4 pull models (this downloads a few GB) =="
-ollama pull "$BASE"
-ollama pull nomic-embed-text
+OLLAMA_HOST="$CLIENT_OLLAMA_HOST" ollama pull "$BASE"
+OLLAMA_HOST="$CLIENT_OLLAMA_HOST" ollama pull nomic-embed-text
 
 echo "== 4/4 create the stable sonder:latest Ollama alias =="
 MF="$(mktemp)"
@@ -73,7 +80,7 @@ SYSTEM """You are the local language model operating inside Sonder Runtime. Sond
 
 Be direct, honest, and concrete. Never fabricate capabilities, tools, results, or configuration. Do not expose hidden chain-of-thought; report observable actions and evidence. Prefer correct, working code and keep answers concise."""
 EOF
-ollama create sonder -f "$MF"
+OLLAMA_HOST="$CLIENT_OLLAMA_HOST" ollama create sonder -f "$MF"
 rm -f "$MF"
 
 echo ""
@@ -98,7 +105,7 @@ echo "== hosting: Sonder Runtime as a public systemd service =="
 # This script must live inside the cloned repo (it references sibling files
 # like sonder_serve.py). Resolve that directory so the service works
 # regardless of cwd.
-CLONE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CLONE_DIR="$SCRIPT_DIR"
 if [ ! -f "$CLONE_DIR/sonder_serve.py" ]; then
   echo "ERROR: $CLONE_DIR/sonder_serve.py not found." >&2
   echo "  --serve expects this script to be run from inside a checkout of" >&2

@@ -41,8 +41,9 @@ lifecycle boundary.
 - **A model-agnostic runtime.** Sonder provides the API, REPL, apps, memory,
   retrieval, tools, policies, activity evidence, training workflow, and guarded
   automation around a selected inference model.
-- **Local & private by default.** Ollama serves the selected local model on your
-  CPU/GPU. With cloud and web opt-ins disabled, prompts, files, memory, and
+- **Local & private by default.** Ollama serves the selected model through a
+  loopback endpoint on your CPU/GPU. With cloud and web opt-ins disabled,
+  prompts, files, memory, and
   lessons stay on your machine.
 - **Self-improving on *your* context.** Every coding interaction can be captured, scored by real outcomes (did it compile? pass tests?), and distilled into short "lessons" it retrieves next time. Over time it learns *your* patterns, not the internet's average.
 - **Yours to own.** You keep the Ollama model files, optional adapter weights,
@@ -101,21 +102,24 @@ The loop is model-agnostic: point it at a compatible Ollama model. The selected
 local `code` model is memory-augmented; a stronger paid/cloud model can answer
 without local-lesson injection while its grounded good outcomes are distilled into
 lessons and fine-tuning data the local model retrieves later. Which
-tiers learn is configurable (`SONDER_LEARN_TIERS`, default local-only:
-`fast,code,general`). The memory, capture, and distillation always stay local; only a
-cloud-tier *prompt* leaves the machine, and only after `SONDER_ALLOW_CLOUD=1`.
-The `fast`, `code`, and `general` aliases are local-only. Their shared mappings
+tiers learn is configurable (`SONDER_LEARN_TIERS`, default local aliases:
+`fast,code,general`). Memory, capture, and distillation stay on the runtime host.
+A cloud-tier prompt leaves only after `SONDER_ALLOW_CLOUD=1`. The `fast`, `code`,
+and `general` aliases use loopback Ollama by default; pointing `OLLAMA_HOST` at a
+non-loopback server is blocked unless `SONDER_ALLOW_REMOTE_OLLAMA=1` explicitly
+acknowledges that prompts and embeddings leave this machine. Remote Ollama and
+hosted/cloud consent are separate gates. Their shared mappings
 and each execution lane's preferred alias live in the hot-reloadable runtime
 policy described below. Environment values seed the first policy file; cloud
 aliases and cloud opt-in remain separate host-owned configuration.
 
-Local model requests use one bounded, same-model retry by default for narrowly
+Loopback model requests use one bounded, same-model retry by default for narrowly
 transient transport failures and HTTP 408/429/502/503/504 responses. The retry
 shares the original timeout budget, checks fleet cancellation before resending,
 and never changes endpoint, model, or tier. Hosted/cloud calls are always
 single-attempt to avoid silently duplicating metered work. Set
 `SONDER_LOCAL_RETRIES=0..2` and `SONDER_LOCAL_RETRY_DELAY_MS=0..1000` to tune the
-local policy.
+loopback policy. Explicit remote Ollama and hosted/cloud calls are single-attempt.
 
 ### Memory beyond lessons
 
@@ -465,6 +469,15 @@ env defaults are `SONDER_CONTEXT_SIZE`, `SONDER_NATIVE_CONTEXT_MAX`, and
 Sonder sends Ollama local-runtime options on every local model call so it uses
 the machine instead of idling on conservative defaults:
 
+- `OLLAMA_HOST` - Ollama origin with an explicit port (default
+  `127.0.0.1:11434`). Exact `0.0.0.0`/`[::]` bind addresses and `localhost`
+  are dialed through numeric loopback. Changing the origin requires restarting
+  or reconnecting the runtime because the base URL is loaded at process start.
+- `SONDER_ALLOW_REMOTE_OLLAMA` - set `1` only when intentionally sending model
+  prompts and embeddings to a non-loopback Ollama host. It does not enable
+  hosted/cloud model tiers; those separately require `SONDER_ALLOW_CLOUD=1`.
+  Prefer HTTPS or a trusted private LAN: opting into a remote `http://` origin
+  acknowledges the destination but does not encrypt transport.
 - `SONDER_NUM_THREAD` - CPU threads per request. Defaults to all detected CPU
   threads (`%NUMBER_OF_PROCESSORS%` on Windows, `nproc` on Linux).
 - `SONDER_NUM_GPU` - model layers to offload to GPU. Defaults to `999`, which
@@ -569,6 +582,7 @@ Flat, mostly-stdlib Python modules (plus `mcp`):
 |---|---|
 | `memory_store.py` | SQLite + FTS5 store (interactions, outcomes, lessons, visible tasks/todos) |
 | `embeddings.py` | local Ollama embeddings + cosine (soft-fail) |
+| `ollama_endpoint.py` | canonical Ollama origin, loopback/remote consent, proxy-free no-redirect transport |
 | `retriever.py` | hybrid lexical+semantic retrieval with relevance threshold |
 | `reward.py` / `reflection.py` | outcome → score; distill deduped lessons |
 | `orchestrator.py` | the retrieve → augment → generate → capture flow |

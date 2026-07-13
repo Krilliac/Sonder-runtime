@@ -28,6 +28,7 @@ from pathlib import Path
 
 import runtime_policy
 import promotion_eval
+import ollama_endpoint
 from process_liveness import pid_alive as _process_pid_alive
 import system_profile
 import sonder_paths
@@ -1211,7 +1212,14 @@ def _stage_reviewed_converter(converter_path, destination, runner=subprocess.run
     }
 
 
-def _run_external(runner, command, **kwargs):
+def _run_external(runner, command, *, ollama_command=False, **kwargs):
+    if ollama_command:
+        try:
+            kwargs["env"] = ollama_endpoint.client_environment(kwargs.get("env"))
+        except ValueError as exc:
+            return subprocess.CompletedProcess(
+                command, 125, stdout="", stderr="Ollama endpoint blocked: %s" % exc,
+            )
     try:
         return runner(command, **kwargs)
     except subprocess.TimeoutExpired as exc:
@@ -1495,7 +1503,7 @@ def _reconcile_pending_model_cleanup(*, ollama="", runner=subprocess.run):
         return False, str(exc)
 
     def run(command, **kwargs):
-        return _run_external(runner, command, **kwargs)
+        return _run_external(runner, command, ollama_command=True, **kwargs)
 
     ollama = _ollama_executable(ollama)
     removed = []
@@ -1653,7 +1661,7 @@ def _reconcile_pending_deployment(*, ollama="", runner=subprocess.run):
         recorded_state = {}
 
     def run(command, **kwargs):
-        return _run_external(runner, command, **kwargs)
+        return _run_external(runner, command, ollama_command=True, **kwargs)
 
     ollama = _ollama_executable(ollama)
 
@@ -2108,7 +2116,12 @@ def deploy(adapter_dir="", *, converter="", ollama="", runner=subprocess.run):
 
 def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess.run):
     def run(command, **kwargs):
-        return _run_external(runner, command, **kwargs)
+        is_ollama = bool(command) and os.path.normcase(str(command[0])) == os.path.normcase(
+            str(ollama)
+        )
+        return _run_external(
+            runner, command, ollama_command=is_ollama, **kwargs,
+        )
 
     state = _read_state()
     adapter_dir = Path(adapter_dir or state.get("adapter_dir") or ROOT / "sonder-personal-lora")
@@ -2937,6 +2950,7 @@ def adopt_legacy_personal(*, confirmed=False, ollama="", runner=subprocess.run):
             probe = _run_external(
                 runner,
                 [ollama, "show", PERSONAL_MODEL],
+                ollama_command=True,
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -3006,7 +3020,7 @@ def release_personal_owner(*, confirmed=False):
 
 def _rollback_locked(*, ollama="", runner=subprocess.run):
     def run(command, **kwargs):
-        return _run_external(runner, command, **kwargs)
+        return _run_external(runner, command, ollama_command=True, **kwargs)
 
     ollama = (
         ollama or os.environ.get("SONDER_OLLAMA_EXE", "").strip()

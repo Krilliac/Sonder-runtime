@@ -144,7 +144,7 @@ def test_serving_digest_is_authoritative_over_loopback_filesystem(
     import json
     monkeypatch.delenv("SONDER_EMBED_REVISION", raising=False)
     monkeypatch.setenv("OLLAMA_MODELS", str(tmp_path))
-    monkeypatch.setattr(e.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(e.ollama_endpoint, "open_url", fake_urlopen)
 
     assert e.current_revision(base="http://127.0.0.1:11434") == (
         "ollama-manifest-sha256:" + served_digest
@@ -168,8 +168,9 @@ def test_embed_fails_closed_if_serving_digest_changes_mid_request(monkeypatch):
 
     import json
     monkeypatch.delenv("SONDER_EMBED_REVISION", raising=False)
+    monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
     monkeypatch.setattr(e, "BASE", "http://example.test:11434")
-    monkeypatch.setattr(e.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(e.ollama_endpoint, "open_url", fake_urlopen)
 
     assert e.embed("task") is None
 
@@ -190,8 +191,9 @@ def test_provenance_stays_bound_after_another_revision_refresh(monkeypatch):
 
     import json
     monkeypatch.delenv("SONDER_EMBED_REVISION", raising=False)
+    monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
     monkeypatch.setattr(e, "BASE", "http://example.test:11434")
-    monkeypatch.setattr(e.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(e.ollama_endpoint, "open_url", fake_urlopen)
     vector = e.embed("task")
     bound = e.provenance(vector)["revision"]
     state["digest"] = "b" * 64
@@ -210,15 +212,46 @@ def test_embed_soft_fails_to_none(monkeypatch):
     def boom(*a, **k):
         raise OSError("no ollama")
 
-    monkeypatch.setattr(e.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(e.ollama_endpoint, "open_url", boom)
     assert e.embed("anything") is None
+
+
+def test_remote_embedding_endpoint_is_blocked_before_network(monkeypatch):
+    calls = []
+    monkeypatch.delenv("SONDER_ALLOW_REMOTE_OLLAMA", raising=False)
+    monkeypatch.setattr(
+        e.ollama_endpoint,
+        "open_url",
+        lambda *args, **kwargs: calls.append(1),
+    )
+
+    assert e.serving_model_revision(base="http://models.example.test:11434") == ""
+    assert e.embed("private task", base="http://models.example.test:11434") is None
+    assert calls == []
+
+
+def test_explicit_bind_all_embedding_base_is_dialed_as_loopback(monkeypatch):
+    requested = []
+
+    def fake_open(request, timeout=30):
+        requested.append(request.full_url if hasattr(request, "full_url") else request)
+        if requested[-1].endswith("/api/tags"):
+            return FakeResponse(b'{"models": []}')
+        return FakeResponse(b'{"embedding": [0.1, 0.2]}')
+
+    monkeypatch.setattr(e.ollama_endpoint, "open_url", fake_open)
+    vector = e.embed("task", base="http://0.0.0.0:11434")
+
+    assert vector is not None
+    assert requested
+    assert all(url.startswith("http://127.0.0.1:11434/") for url in requested)
 
 
 def test_embed_success_path(monkeypatch):
     def mock_urlopen(*a, **k):
         return FakeResponse(b'{"embedding": [0.1, 0.2, 0.3]}')
 
-    monkeypatch.setattr(e.urllib.request, "urlopen", mock_urlopen)
+    monkeypatch.setattr(e.ollama_endpoint, "open_url", mock_urlopen)
     result = e.embed("hi")
     assert result is not None
     assert len(result) == 3
@@ -231,6 +264,6 @@ def test_embed_non_dict_json_returns_none(monkeypatch):
     def mock_urlopen(*a, **k):
         return FakeResponse(b'[1, 2, 3]')
 
-    monkeypatch.setattr(e.urllib.request, "urlopen", mock_urlopen)
+    monkeypatch.setattr(e.ollama_endpoint, "open_url", mock_urlopen)
     result = e.embed("hi")
     assert result is None
