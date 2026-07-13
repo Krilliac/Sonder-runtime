@@ -26,7 +26,7 @@ MAX_LEN = 300
 PRIVATE_RULES = [
     (
         "windows_path",
-        re.compile(r"(?i)\b[A-Z]:\\[^\s\"']*"),
+        re.compile(r"(?i)\b[A-Z]:[\\/][^\s\"']*"),
         "<windows-path>",
     ),
     (
@@ -35,22 +35,79 @@ PRIVATE_RULES = [
         "<home-path>",
     ),
     (
+        "tilde_private_path",
+        re.compile(
+            r"(?<!\w)~[\\/](?:\.ssh|\.aws|\.config|\.kube)"
+            r"(?:[\\/][^\s\"']*)?",
+            re.I,
+        ),
+        "<private-home-path>",
+    ),
+    (
+        "unix_system_path",
+        re.compile(
+            r"(?<![\w/])/(?:root|etc/(?:ssh|ssl|pki)|var/(?:lib|log|run)|"
+            r"opt|srv|mnt|media|tmp)(?:/[^\s\"']*)?",
+            re.I,
+        ),
+        "<system-path>",
+    ),
+    (
         "unc_path",
         re.compile(r"\\\\[A-Za-z0-9._-]+\\[^\s\"']*"),
         "<unc-path>",
     ),
     (
         "email",
-        re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"),
+        re.compile(
+            r"(?<![\w.+-])[\w.+-]{1,64}@[\w-]{1,63}"
+            r"(?:\.[\w-]{1,63})+"
+        ),
         "<email>",
     ),
     (
         "credential_assignment",
         re.compile(
-            r"(?i)\b(?:api[_-]?key|secret|password|passwd|token|access[_-]?key)"
-            r"\b\s*[:=]\s*[^\s,;]+"
+            r"(?i)(?<![\w-])[\"']?(?:[a-z0-9]{1,24}[_-]){0,6}(?:api[_-]?key|secret|password|passwd|token|"
+            r"access[_-]?key|aws[_-]?(?:access[_-]?key[_-]?id|secret[_-]?access[_-]?key)|"
+            r"client[_-]?secret|private[_-]?token|auth[_-]?token|refresh[_-]?token)"
+            r"[\"']?\s*[:=]\s*[\"']?[^\s,;\"']+"
         ),
         "<credential>",
+    ),
+    (
+        "sensitive_header",
+        re.compile(
+            r"(?im)\b(?:x-api-key|x-auth-token|api-key|cookie|set-cookie)\b"
+            r"\s*:\s*[^\r\n]+"
+        ),
+        "<sensitive-header>",
+    ),
+    (
+        "authorization_header",
+        re.compile(
+            r"(?i)\b(?:proxy-)?authorization\b\s*:\s*"
+            r"(?:bearer|basic)\s+[^\s,;]+"
+        ),
+        "<authorization>",
+    ),
+    (
+        "known_credential",
+        re.compile(
+            r"(?<![A-Za-z0-9])(?:sk-(?:proj-)?[A-Za-z0-9_-]{12,}|"
+            r"github_pat_[A-Za-z0-9_]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|"
+            r"AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|"
+            r"xox[baprs]-[A-Za-z0-9-]{10,})"
+        ),
+        "<known-credential>",
+    ),
+    (
+        "url_credentials",
+        re.compile(
+            r"(?i)(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,31}://"
+            r"[^\s/@:]{1,128}:[^\s/@]{1,256}@"
+        ),
+        "<credential-url>",
     ),
     (
         "private_key",
@@ -109,7 +166,11 @@ def is_shareable(text):
 
 def scrubbed_lessons(conn):
     lessons = memory_store.all_lessons(conn)
-    return [{"id": l["id"], "text": l["text"]} for l in lessons if is_shareable(l["text"])]
+    return [
+        {"id": lesson["id"], "text": lesson["text"]}
+        for lesson in lessons
+        if is_shareable(lesson["text"])
+    ]
 
 
 def main(out="contrib/lessons_contrib.jsonl", db=None):
@@ -125,8 +186,11 @@ def main(out="contrib/lessons_contrib.jsonl", db=None):
         os.makedirs(out_dir)
 
     with io.open(out, "w", encoding="utf-8", newline="\n") as f:
-        for l in sorted(lessons, key=lambda x: x["id"]):
-            f.write(json.dumps({"id": l["id"], "text": l["text"]}, ensure_ascii=False) + "\n")
+        for lesson in sorted(lessons, key=lambda item: item["id"]):
+            f.write(json.dumps(
+                {"id": lesson["id"], "text": lesson["text"]},
+                ensure_ascii=False,
+            ) + "\n")
 
     print("wrote %d shareable lessons to %s" % (len(lessons), out))
     print("This is OPT-IN: nothing was sent anywhere. Review %s before sharing it." % out)

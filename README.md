@@ -579,7 +579,7 @@ Flat, mostly-stdlib Python modules (plus `mcp`):
 | `sonder_repl.py` / `sonder_client.py` | local REPL / thin remote client |
 | `sonder_serve.py` | OpenAI-compatible proxy (for chat UIs) |
 | `intents.py`, `grounding.py`, `training_tasks.py`, `self_curriculum.py`, `eval_retrieval.py`, `game_ladder.py` | NL control, sandboxed execution, practice tasks, self-generated curriculum, retrieval eval, capability gauntlet |
-| `qlora_train.py`, `export_training_data.py`, `cloud_train.sh` | fine-tuning pipeline |
+| `training_data.py`, `qlora_train.py`, `export_training_data.py`, `cloud_train.sh` | strict shared dataset contract and fine-tuning pipeline |
 
 ---
 

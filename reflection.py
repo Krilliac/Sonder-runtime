@@ -1,6 +1,7 @@
 """Distill reusable lessons from good outcomes; dedup by embedding similarity."""
 import re
 
+import contribute
 import embeddings
 import memory_store
 
@@ -120,6 +121,12 @@ def maybe_add_lesson(conn, interaction_id, task, response, signal, offload_fn,
         return None
     text = distill(task, response, signal, offload_fn)
     if not text:
+        return None
+    # Keep secret- and path-like material out of both the lesson row and its
+    # FTS mirror. Use the shared privacy classifier so ingestion, maintenance,
+    # and opt-in export enforce the same conservative boundary. The classifier
+    # returns stable reason names only; never surface the matched text here.
+    if contribute.private_reasons(text):
         return None
     if exact_text_exists(text, conn):
         return None

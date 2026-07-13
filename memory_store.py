@@ -501,10 +501,30 @@ def interactions_with_good_outcome(conn, good_signals):
     rows = conn.execute(
         "SELECT DISTINCT i.id, i.task, i.response FROM interactions i "
         "JOIN outcomes o ON o.interaction_id = i.id "
-        "WHERE o.signal IN (%s)" % placeholders,
-        tuple(good_signals),
+        "WHERE o.signal IN (%s) "
+        "ORDER BY i.rowid ASC" % placeholders,
+        tuple(sorted(good_signals)),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def interaction_outcome_evidence(conn):
+    """Return stable, append-ordered evidence for training-data selection.
+
+    Export policy belongs outside the storage layer, but it needs every outcome
+    (including later failures) and stable row identifiers.  Keeping the query
+    here prevents callers from accidentally selecting only positive rows and
+    overlooking contradictory evidence.
+    """
+    rows = conn.execute(
+        "SELECT i.id, i.task, i.response, i.ts AS interaction_ts, "
+        "i.rowid AS interaction_rowid, o.signal, o.reward, "
+        "o.ts AS outcome_ts, o.rowid AS outcome_rowid "
+        "FROM interactions i JOIN outcomes o ON o.interaction_id=i.id "
+        "ORDER BY i.rowid ASC, o.rowid ASC"
+    )
+    for row in rows:
+        yield dict(row)
 
 
 # --- conversation sessions -------------------------------------------------

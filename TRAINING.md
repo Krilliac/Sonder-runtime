@@ -80,6 +80,21 @@ passes a fresh five-minute, one-use launch capability to `qlora_train.py`; direc
 script invocation and replay are rejected before heavyweight ML imports. Set
 `--gpu-index` to bind the physical CUDA device before Torch initializes.
 
+For each new run, the default dataset is freshly exported from shared memory
+directly into that run directory; an old repo-level `training_data.jsonl` is not
+silently reused. The exporter requires grounded positive outcomes, vetoes an
+interaction if it has any negative or unknown outcome, excludes task/response
+text caught by the shared path/credential/privacy rules, and deterministically
+chooses the strongest then newest response for repeated normalized prompts. It
+writes atomically and records only aggregate rejection counts plus the dataset
+SHA-256 in `training-data.jsonl.manifest.json`. Set `SONDER_DATA` only when you
+intentionally want a separately curated JSONL input. Resume never re-exports:
+it verifies and reuses the exact immutable snapshot authorized for that run.
+
+The training child treats the authorized JSONL as all-or-nothing. Invalid UTF-8
+or JSON, blank/oversized rows, unsupported message structure, empty content, or
+dataset bounds violations abort the run instead of silently dropping examples.
+
 `--allow-cpu-offload` is retained as an explicit capability request, but the
 current bitsandbytes/Trainer backend rejects it. Hugging Face documents the
 available `device_map="auto"` mechanism as an inference-only path, so Sonder
@@ -105,9 +120,10 @@ checkpoints intact. Resume is never inferred from a shared output folder: use
 The base model, sequence length, batch size, gradient accumulation, and GPU must
 match that run's manifest before its checkpoints can be resumed.
 
-Each run first copies its exported JSONL into a run-local immutable snapshot;
-the trainer hashes the same byte stream it parses and never rereads the mutable
-source dataset for that run. The supported Qwen Hugging Face repositories are
+Each default run exports directly into a run-local immutable snapshot; an
+explicit `SONDER_DATA` file is copied into that same snapshot boundary. The
+trainer hashes the same byte stream it parses and never rereads mutable source
+data for that run. The supported Qwen Hugging Face repositories are
 pinned to reviewed 40-character commits, recorded in the plan/manifest, loaded
 with `trust_remote_code=False`, and must match on resume.
 
