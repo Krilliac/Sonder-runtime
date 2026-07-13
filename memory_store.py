@@ -345,6 +345,13 @@ def init_db(conn):
             "CREATE INDEX IF NOT EXISTS idx_outcomes_interaction_signal_reward "
             "ON outcomes(interaction_id, signal, reward)"
         )
+        # A single-column index preserves outcome rowid order for each
+        # interaction, allowing bounded interaction-first evidence streaming
+        # without SQLite materializing the complete join in a temp B-tree.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_outcomes_interaction "
+            "ON outcomes(interaction_id)"
+        )
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS "
             "uq_outcomes_interaction_signal_nonnull "
@@ -638,13 +645,25 @@ def replace_interaction_response_cas(
     return cur.rowcount == 1
 
 
-def record_outcome_row(conn, interaction_id, signal, reward):
+def record_outcome_row(conn, interaction_id, signal, reward_value):
     """Record one signal once; return whether this call inserted the evidence."""
+    signal = str(signal or "").strip()
+    if signal not in reward.VALID_SIGNALS:
+        raise ValueError("signal is not a supported grounded outcome")
+    if isinstance(reward_value, bool):
+        raise ValueError("reward must match the canonical signal reward")
+    try:
+        reward_value = float(reward_value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("reward must match the canonical signal reward") from exc
+    canonical = reward.score(signal)
+    if not math.isfinite(reward_value) or reward_value != canonical:
+        raise ValueError("reward must match the canonical signal reward")
     try:
         cur = conn.execute(
             "INSERT OR IGNORE INTO outcomes(interaction_id, signal, reward) "
             "VALUES(?, ?, ?)",
-            (interaction_id, signal, reward),
+            (interaction_id, signal, canonical),
         )
         conn.commit()
     except Exception:
@@ -955,6 +974,12 @@ def record_outcome_and_claim_lesson_distillation(
         raise ValueError("reward_value must be finite") from exc
     if not math.isfinite(reward_value):
         raise ValueError("reward_value must be finite")
+    if signal not in reward.VALID_SIGNALS:
+        raise ValueError("signal is not a supported grounded outcome")
+    canonical_reward = reward.score(signal)
+    if reward_value != canonical_reward:
+        raise ValueError("reward_value must match the canonical signal reward")
+    reward_value = canonical_reward
 
     claim_token = str(claim_token or new_id()).strip()
     if not claim_token:
@@ -1958,7 +1983,21 @@ def interactions_with_good_outcome(conn, good_signals):
     return [dict(r) for r in rows]
 
 
-def interaction_outcome_evidence(conn):
+_INTERACTION_OUTCOME_EVIDENCE_SQL = (
+    "SELECT i.id, substr(COALESCE(i.task,''),1,?) AS task, "
+    "length(COALESCE(i.task,'')) AS task_length, "
+    "substr(COALESCE(i.response,''),1,?) AS response, "
+    "length(COALESCE(i.response,'')) AS response_length, "
+    "i.ts AS interaction_ts, i.rowid AS interaction_rowid, "
+    "o.signal, o.reward, o.ts AS outcome_ts, o.rowid AS outcome_rowid "
+    "FROM interactions AS i NOT INDEXED "
+    "JOIN outcomes AS o INDEXED BY idx_outcomes_interaction "
+    "ON o.interaction_id=i.id "
+    "ORDER BY i.rowid ASC, o.rowid ASC LIMIT ?"
+)
+
+
+def interaction_outcome_evidence(conn, *, limit=200_001, field_limit=32_769):
     """Return stable, append-ordered evidence for training-data selection.
 
     Export policy belongs outside the storage layer, but it needs every outcome
@@ -1966,12 +2005,13 @@ def interaction_outcome_evidence(conn):
     here prevents callers from accidentally selecting only positive rows and
     overlooking contradictory evidence.
     """
+    limit = int(limit)
+    field_limit = int(field_limit)
+    if limit < 1 or limit > 1_000_001 or field_limit < 1 or field_limit > 1_000_001:
+        raise ValueError("outcome evidence bounds are invalid")
     rows = conn.execute(
-        "SELECT i.id, i.task, i.response, i.ts AS interaction_ts, "
-        "i.rowid AS interaction_rowid, o.signal, o.reward, "
-        "o.ts AS outcome_ts, o.rowid AS outcome_rowid "
-        "FROM interactions i JOIN outcomes o ON o.interaction_id=i.id "
-        "ORDER BY i.rowid ASC, o.rowid ASC"
+        _INTERACTION_OUTCOME_EVIDENCE_SQL,
+        (field_limit, field_limit, limit),
     )
     for row in rows:
         yield dict(row)

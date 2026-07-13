@@ -400,12 +400,17 @@ def _write_json_atomic(path, payload):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name("%s.tmp-%s" % (path.name, uuid.uuid4().hex))
+    encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
     try:
-        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        with tmp.open("wb") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(tmp, path)
     finally:
         with contextlib.suppress(OSError):
             tmp.unlink()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _sha256_file(path):
@@ -416,11 +421,55 @@ def _sha256_file(path):
     return digest.hexdigest()
 
 
+def _launch_authorization_hmac(token, plan_sha256, data_sha256):
+    message = (
+        "sonder-training-launch-v1\n%s\n%s" % (plan_sha256, data_sha256)
+    ).encode("ascii")
+    return hmac.new(str(token).encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+
+def _inspect_launch_receipt(
+    path, *, plan_sha256, data_sha256, authorization_hmac,
+):
+    path = Path(path)
+    try:
+        with path.open("rb") as stream:
+            if os.fstat(stream.fileno()).st_size > 64 * 1024:
+                raise ValueError("training launch receipt is too large")
+            raw = stream.read(64 * 1024 + 1)
+        if len(raw) > 64 * 1024:
+            raise ValueError("training launch receipt is too large")
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, TypeError, UnicodeError, ValueError) as exc:
+        raise ValueError("training launch receipt is unreadable") from exc
+    expected = {
+        "schema": 1,
+        "plan_sha256": plan_sha256,
+        "data_sha256": data_sha256,
+        "authorization_hmac": authorization_hmac,
+    }
+    if not isinstance(payload, dict) or any(
+        payload.get(key) != value for key, value in expected.items()
+    ):
+        raise ValueError("training launch receipt does not match authorization")
+    try:
+        consumed_ts = int(payload.get("consumed_ts") or 0)
+        owner_pid = int(payload.get("owner_pid") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("training launch receipt metadata is invalid") from exc
+    if consumed_ts <= 0 or owner_pid <= 0:
+        raise ValueError("training launch receipt metadata is invalid")
+    return payload, hashlib.sha256(raw).hexdigest()
+
+
 def _inspect_export_manifest(path, inspection):
     """Validate and hash the privacy-selection receipt beside a memory export."""
     path = Path(path)
     try:
-        raw = path.read_bytes()
+        with path.open("rb") as stream:
+            if os.fstat(stream.fileno()).st_size > 64 * 1024:
+                raise ValueError("training export selection manifest is too large")
+            raw = stream.read(64 * 1024 + 1)
         if len(raw) > 64 * 1024:
             raise ValueError("training export selection manifest is too large")
         payload = json.loads(raw.decode("utf-8"))
@@ -718,6 +767,7 @@ def _start_training_locked(plan, *, confirmed=False, dry_run=False, resume=False
     data_path = data_path.resolve()
     data_sha256 = data_inspection.sha256
     launch_token = secrets.token_urlsafe(32)
+    launch_id = uuid.uuid4().hex
     manifest = {
         "schema": 2,
         "run_id": run_id,
@@ -740,11 +790,16 @@ def _start_training_locked(plan, *, confirmed=False, dry_run=False, resume=False
         "adapter_dir": str(output.resolve()),
         "gpu_index": plan.options.gpu_index,
         "resume": bool(resume),
+        "launch_id": launch_id,
         "launch_token_sha256": hashlib.sha256(launch_token.encode("utf-8")).hexdigest(),
         "plan": plan.to_dict(),
     }
     plan_file = run_dir / "training-plan.json"
-    _write_json_atomic(plan_file, manifest)
+    plan_sha256 = _write_json_atomic(plan_file, manifest)
+    launch_authorization_hmac = _launch_authorization_hmac(
+        launch_token, plan_sha256, data_sha256,
+    )
+    launch_receipt_path = run_dir / ("training-launch-%s.json" % launch_id)
     state = {
         "status": "running",
         "started_ts": int(time.time()),
@@ -752,7 +807,10 @@ def _start_training_locked(plan, *, confirmed=False, dry_run=False, resume=False
         "run_id": run_id,
         "run_dir": str(run_dir),
         "plan_file": str(plan_file),
-        "plan_sha256": _sha256_file(plan_file),
+        "plan_sha256": plan_sha256,
+        "launch_id": launch_id,
+        "launch_receipt_path": str(launch_receipt_path),
+        "launch_authorization_hmac": launch_authorization_hmac,
         "data_path": manifest["data_path"],
         "data_sha256": manifest["data_sha256"],
         "data_examples": manifest["data_examples"],
@@ -784,6 +842,9 @@ def _start_training_locked(plan, *, confirmed=False, dry_run=False, resume=False
         "SONDER_TRAIN_RAM_BUDGET_GB": str(plan.usable_system_ram_gb),
         "SONDER_TRAINING_MANIFEST": str(plan_file),
         "SONDER_TRAINING_LAUNCH_TOKEN": launch_token,
+        "SONDER_TRAINING_PLAN_SHA256": plan_sha256,
+        "SONDER_TRAINING_DATA_SHA256": data_sha256,
+        "SONDER_TRAINING_RECEIPT": str(launch_receipt_path),
         "SONDER_RESUME": "1" if resume else "0",
     })
     # Bind the selected physical GPU before torch initializes. Inside the child

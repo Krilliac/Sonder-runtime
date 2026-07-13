@@ -132,7 +132,11 @@ def test_recall_vetoes_interaction_with_contradictory_outcome():
     ) == []
 
     _store_good(c, "unknown", "other task", "response", [1.0, 0.0])
-    ms.record_outcome_row(c, "unknown", "future_signal", 99.0)
+    c.execute(
+        "INSERT INTO outcomes(interaction_id,signal,reward) VALUES(?,?,?)",
+        ("unknown", "future_signal", 99.0),
+    )
+    c.commit()
     assert recall.recall(
         c, "other task", qv=[1.0, 0.0], min_sim=0.5,
     ) == []

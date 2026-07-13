@@ -16,6 +16,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
+import contribute  # noqa: E402
 import embeddings  # noqa: E402
 import memory_store  # noqa
 
@@ -28,7 +29,7 @@ def merge_lessons(conn, lessons, embed_fn=None):
     added = 0
     for lesson in lessons:
         text = lesson.get("text")
-        if not text:
+        if not isinstance(text, str) or not contribute.is_shareable(text):
             continue
         key = text.strip().lower()
         if key in existing:

@@ -64,3 +64,19 @@ def test_merge_lessons_keeps_legacy_blob_returning_embed_callback():
     assert added == 1
     assert row["embedding"] == blob
     assert row["embedding_model"] is None
+
+
+def test_merge_lessons_rejects_private_text_before_embedding_or_fts():
+    c = _conn()
+    embedded = []
+
+    added = pc.merge_lessons(
+        c,
+        [{"id": "unsafe", "text": "Authorization: Token glpat-abcdefghijklmnop"}],
+        embed_fn=lambda text: embedded.append(text) or [1.0, 0.0],
+    )
+
+    assert added == 0
+    assert embedded == []
+    assert ms.all_lessons(c) == []
+    assert c.execute("SELECT COUNT(*) FROM lessons_fts").fetchone()[0] == 0

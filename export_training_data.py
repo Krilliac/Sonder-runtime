@@ -7,6 +7,7 @@ import collections
 import hashlib
 import heapq
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -68,8 +69,8 @@ def _select_examples(conn):
             rejected["empty_content"] += 1
             return
         if (
-            len(task) > MAX_TRAINING_FIELD_CHARS
-            or len(response) > MAX_TRAINING_FIELD_CHARS
+            int(first.get("task_length") or 0) > MAX_TRAINING_FIELD_CHARS
+            or int(first.get("response_length") or 0) > MAX_TRAINING_FIELD_CHARS
         ):
             rejected["field_too_large"] += 1
             return
@@ -134,7 +135,11 @@ def _select_examples(conn):
             rejected["selection_capacity"] += 1
 
     current = None
-    for row in memory_store.interaction_outcome_evidence(conn):
+    for row in memory_store.interaction_outcome_evidence(
+        conn,
+        limit=MAX_EXPORT_EVIDENCE_ROWS + 1,
+        field_limit=MAX_TRAINING_FIELD_CHARS + 1,
+    ):
         evidence_count += 1
         if evidence_count > MAX_EXPORT_EVIDENCE_ROWS:
             raise training_data.TrainingDataError(
@@ -150,7 +155,16 @@ def _select_examples(conn):
                 finalize_group(current)
             current = {"first": row, "best": None, "contradictory": False}
         signal = row.get("signal")
-        if signal in reward.VALID_SIGNALS and reward.is_good(signal):
+        try:
+            stored_reward = float(row.get("reward"))
+        except (TypeError, ValueError, OverflowError):
+            stored_reward = float("nan")
+        canonical = (
+            signal in reward.VALID_SIGNALS
+            and math.isfinite(stored_reward)
+            and stored_reward == reward.score(signal)
+        )
+        if canonical and reward.is_good(signal):
             if current["best"] is None or (
                 reward.score(signal), int(row.get("outcome_rowid") or 0)
             ) > (
@@ -247,6 +261,16 @@ def _atomic_write(path, payload):
 
 def main(out_path="training_data.jsonl", db_path=None, manifest_path=None):
     db_path = db_path or sonder_paths.memory_db_path()
+    manifest_path = manifest_path or (str(out_path) + ".manifest.json")
+    output_path = Path(out_path).resolve()
+    selection_path = Path(manifest_path).resolve()
+    if output_path == selection_path:
+        raise ValueError("training data and selection manifest paths must differ")
+    db_text = str(db_path)
+    if db_text != ":memory:" and not db_text.lower().startswith("file:"):
+        database_path = Path(db_path).resolve()
+        if database_path in {output_path, selection_path}:
+            raise ValueError("training outputs must not replace the memory database")
     conn = memory_store.connect(db_path)
     try:
         examples, stats = _select_examples(conn)
@@ -263,9 +287,6 @@ def main(out_path="training_data.jsonl", db_path=None, manifest_path=None):
         "sha256": digest,
         "privacy_policy": "exclude-shared-private-markers",
     }
-    manifest_path = manifest_path or (str(out_path) + ".manifest.json")
-    if Path(out_path).resolve() == Path(manifest_path).resolve():
-        raise ValueError("training data and selection manifest paths must differ")
     # A stale manifest must never claim a newly replaced dataset. Invalidate it
     # before committing data; failures can leave no manifest, never a false one.
     try:
