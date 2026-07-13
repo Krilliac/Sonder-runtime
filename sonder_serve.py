@@ -336,7 +336,7 @@ HELP_TEXT = """commands:
   /qualityfix [apply] dry-run or apply exact duplicate lesson cleanup
   /privacy [N]       review redacted path/credential-like lesson findings
   /privacyfix ...    dry-run or delete explicit flagged lesson IDs
-  /embeddings ...    dry-run or locally backfill missing lesson vectors
+  /embeddings ...    dry-run or refresh stale/missing local lesson vectors
   /emotion [cmd]     show/tune live tone vectors; try: /emotion tune warmer shorter
   /prefer [text]     show/teach preferences; /prefer forget <id-or-key>
   /improve           show the next system improvement checklist

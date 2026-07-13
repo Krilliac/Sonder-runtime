@@ -99,16 +99,100 @@ def test_maybe_add_lesson_skips_empty_distill():
 
 def test_maybe_add_lesson_dedupes_near_but_not_exact(monkeypatch):
     c = ms.connect(":memory:")
-    ms.add_lesson(c, "existing", "Always release the lock.",
-                  e.to_blob([1.0, 0.0]), "i0")
+    ms.add_lesson(
+        c,
+        "existing",
+        "Always release the lock.",
+        e.to_blob([1.0, 0.0]),
+        "i0",
+        embedding_model=e.EMBED_IDENTITY,
+        embedding_revision=e.EMBED_REVISION,
+        embedding_dim=2,
+    )
+    monkeypatch.setattr(e, "embed", lambda _text: [0.98, 0.199])
     # new interaction i1, different text, embedding cosine ~0.98 vs existing
     lid = reflection.maybe_add_lesson(
         c, "i1", "task", "resp", "tests_passed",
         offload_fn=lambda **kw: "Release locks promptly.",
-        embed_fn=lambda t: [0.98, 0.199],
     )
     assert lid is None
     assert len(ms.all_lessons(c)) == 1
+
+
+def test_is_duplicate_requires_exact_finite_current_provenance():
+    c = ms.connect(":memory:")
+    candidate = [1.0, 0.0]
+    rows = (
+        ("legacy", None, None, candidate),
+        ("stale-model", "old-model:latest", e.EMBED_REVISION, candidate),
+        ("stale-revision", e.EMBED_IDENTITY, "old-revision", candidate),
+        ("non-finite", e.EMBED_IDENTITY, e.EMBED_REVISION, candidate),
+    )
+    for lesson_id, model, revision, vector in rows:
+        ms.add_lesson(
+            c,
+            lesson_id,
+            "Different lesson %s." % lesson_id,
+            e.to_blob(vector),
+            "source-%s" % lesson_id,
+            embedding_model=model,
+            embedding_revision=revision,
+            embedding_dim=2,
+        )
+    c.execute(
+        "UPDATE lessons SET embedding=? WHERE id='non-finite'",
+        (e.to_blob([float("nan"), 0.0]),),
+    )
+    c.commit()
+
+    provenance = e.provenance(candidate)
+    assert not reflection.is_duplicate(
+        candidate,
+        c,
+        embedding_model=provenance["model"],
+        embedding_revision=provenance["revision"],
+        embedding_dim=provenance["dimension"],
+    )
+
+    ms.add_lesson(
+        c,
+        "current",
+        "A compatible current lesson.",
+        e.to_blob(candidate),
+        "source-current",
+        embedding_model=provenance["model"],
+        embedding_revision=provenance["revision"],
+        embedding_dim=provenance["dimension"],
+    )
+    assert reflection.is_duplicate(
+        candidate,
+        c,
+        embedding_model=provenance["model"],
+        embedding_revision=provenance["revision"],
+        embedding_dim=provenance["dimension"],
+    )
+
+
+def test_maybe_add_resolves_runtime_embed_and_stores_current_provenance(monkeypatch):
+    c = ms.connect(":memory:")
+    calls = []
+    monkeypatch.setattr(e, "embed", lambda text: calls.append(text) or [0.25, 0.75])
+
+    lesson_id = reflection.maybe_add_lesson(
+        c,
+        "runtime-embed",
+        "task",
+        "response",
+        "tests_passed",
+        offload_fn=lambda **_kwargs: "Use pathlib.Path.resolve() before comparison.",
+    )
+
+    assert lesson_id is not None
+    assert calls == ["Use pathlib.Path.resolve() before comparison."]
+    stored = ms.all_lessons(c)[0]
+    assert stored["embedding_model"] == e.EMBED_IDENTITY
+    assert stored["embedding_revision"] == e.EMBED_REVISION
+    assert stored["embedding_dim"] == 2
 
 
 def test_maybe_add_lesson_stores_when_embeddings_unavailable():

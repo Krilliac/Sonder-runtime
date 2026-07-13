@@ -281,7 +281,7 @@ COMMANDS = [
         "name": "/embeddings",
         "category": "learning",
         "risk": "ask",
-        "summary": "Dry-run or locally backfill missing lesson embeddings in a bounded batch.",
+        "summary": "Dry-run or locally refresh missing, legacy, or incompatible lesson embeddings.",
     },
     {
         "name": "/qualityfix",

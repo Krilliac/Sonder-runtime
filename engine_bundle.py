@@ -499,4 +499,7 @@ def runtime_environment(bundle: EngineBundle, model_store: Path) -> dict[str, st
         "PATH": path_value,
         "SONDER_OLLAMA_EXE": str(bundle.ollama_executable),
         "SONDER_EMBED_MODEL": bundle.embedding_model.name,
+        "SONDER_EMBED_REVISION": "ollama-manifest-sha256:" + sha256_file(
+            bundle.root / bundle.embedding_model.manifest
+        ),
     }

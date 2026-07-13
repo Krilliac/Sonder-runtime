@@ -37,23 +37,91 @@ def rrf_scores(rank_lists, k=60):
     return scores
 
 
-def _semantic_rank(conn, qv, limit=10, exclude_ids=None):
+def _stored_vector(row, qv, embedding_model=None, embedding_revision=None):
+    def value(key):
+        return row.get(key) if hasattr(row, "get") else row[key]
+
+    emb = value("embedding")
+    if not emb:
+        return None
+    try:
+        vector = embeddings.from_blob(emb)
+    except (TypeError, ValueError, EOFError):
+        return None
+    if not embeddings.valid_vector(vector) or len(vector) != len(qv):
+        return None
+    stored_dimension = value("embedding_dim")
+    if (
+        isinstance(stored_dimension, bool)
+        or not isinstance(stored_dimension, int)
+        or stored_dimension <= 0
+        or stored_dimension != len(vector)
+        or stored_dimension != len(qv)
+    ):
+        return None
+    stored_model = value("embedding_model")
+    stored_revision = value("embedding_revision")
+    if embedding_model and stored_model != embedding_model:
+        return None
+    if (
+        embedding_revision is not None
+        and (stored_revision or None) != (embedding_revision or None)
+    ):
+        return None
+    return vector
+
+
+def _semantic_rank_with_compatibility(
+    conn, qv, limit=10, exclude_ids=None,
+    embedding_model=None, embedding_revision=None,
+):
+    """Return ranked IDs plus whether any usable corpus vector matched ``qv``.
+
+    Embedding models can change dimensions across runtime-policy or bundle
+    updates. A stored vector from a different model is not semantic evidence:
+    skip it rather than assigning an artificial cosine of zero. The boolean
+    lets callers distinguish "compatible corpus, but no relevant hit" from
+    "no compatible semantic corpus", where lexical fallback is appropriate.
+    """
     excluded = set(exclude_ids or ())
+    if not embeddings.valid_vector(qv):
+        return [], False
     scored = []
+    compatible = False
     for les in memory_store.all_lessons(conn):
         if les["id"] in excluded:
             continue
-        emb = les["embedding"]
-        if not emb:
+        v = _stored_vector(
+            les, qv,
+            embedding_model=embedding_model,
+            embedding_revision=embedding_revision,
+        )
+        if v is None:
             continue
-        v = embeddings.from_blob(emb)
+        compatible = True
         scored.append((embeddings.cosine(qv, v), les["id"]))
     scored.sort(reverse=True)
-    return [lid for _, lid in scored[:limit]]
+    return [lid for _, lid in scored[:limit]], compatible
 
 
-def semantic_search(conn, task, embed_fn=embeddings.embed, limit=10):
+def _semantic_rank(
+    conn, qv, limit=10, exclude_ids=None,
+    embedding_model=None, embedding_revision=None,
+):
+    ranked, _compatible = _semantic_rank_with_compatibility(
+        conn, qv, limit=limit, exclude_ids=exclude_ids,
+        embedding_model=embedding_model,
+        embedding_revision=embedding_revision,
+    )
+    return ranked
+
+
+def semantic_search(conn, task, embed_fn=None, limit=10):
+    runtime_default = embed_fn is None
+    embed_fn = embed_fn or embeddings.embed
     qv = embed_fn(task)
+    if qv is not None and not embeddings.valid_vector(qv):
+        qv = None
     if qv is None:
         return []
     usage_stats = memory_store.lesson_usage_stats(conn)
@@ -61,7 +129,17 @@ def semantic_search(conn, task, embed_fn=embeddings.embed, limit=10):
         lesson_id for lesson_id, stats in usage_stats.items()
         if _lesson_quarantined(stats)
     }
-    return _semantic_rank(conn, qv, limit=limit, exclude_ids=quarantined)
+    query_provenance = embeddings.provenance(qv)
+    model = query_provenance.get("model") if (
+        runtime_default or embed_fn is embeddings.embed
+    ) else None
+    revision = query_provenance.get("revision") if (
+        runtime_default or embed_fn is embeddings.embed
+    ) else None
+    return _semantic_rank(
+        conn, qv, limit=limit, exclude_ids=quarantined,
+        embedding_model=model, embedding_revision=revision,
+    )
 
 
 def _lesson_data(conn, ids):
@@ -74,7 +152,8 @@ def _lesson_data(conn, ids):
             continue
         placeholders = ",".join("?" for _ in batch)
         for row in conn.execute(
-            "SELECT id, text, embedding FROM lessons WHERE id IN (%s)"
+            "SELECT id, text, embedding, embedding_model, embedding_revision, "
+            "embedding_dim FROM lessons WHERE id IN (%s)"
             % placeholders,
             tuple(batch),
         ).fetchall():
@@ -82,7 +161,10 @@ def _lesson_data(conn, ids):
     return rows
 
 
-def _relevant_ids(conn, qv, ids, min_sim, lesson_data=None):
+def _relevant_ids(
+    conn, qv, ids, min_sim, lesson_data=None,
+    embedding_model=None, embedding_revision=None,
+):
     """Filter fused candidate ids to those whose stored embedding clears min_sim.
 
     Lessons with no stored embedding are dropped (relevance can't be judged).
@@ -91,16 +173,21 @@ def _relevant_ids(conn, qv, ids, min_sim, lesson_data=None):
     kept = []
     for lid in ids:
         row = data.get(lid)
-        emb = row["embedding"] if row else None
-        if not emb:
+        if row is None:
             continue
-        v = embeddings.from_blob(emb)
+        v = _stored_vector(
+            dict(row), qv,
+            embedding_model=embedding_model,
+            embedding_revision=embedding_revision,
+        )
+        if v is None:
+            continue
         if embeddings.cosine(qv, v) >= min_sim:
             kept.append(lid)
     return kept
 
 
-def retrieve(conn, task, k=5, embed_fn=embeddings.embed, min_sim=None):
+def retrieve(conn, task, k=5, embed_fn=None, min_sim=None):
     rows = retrieve_with_ids(conn, task, k=k, embed_fn=embed_fn, min_sim=min_sim)
     return [r["text"] for r in rows]
 
@@ -169,7 +256,10 @@ def _usage_boost(stats):
     return max(-0.01, min(0.01, float(avg) * min(uses, 10) / 1000.0))
 
 
-def retrieve_with_ids(conn, task, k=5, embed_fn=embeddings.embed, min_sim=None):
+def retrieve_with_ids(
+    conn, task, k=5, embed_fn=None, min_sim=None,
+    embedding_model=None, embedding_revision=None,
+):
     if min_sim is None:
         min_sim = float(os.environ.get("SONDER_MIN_SIM", str(DEFAULT_MIN_SIM)))
 
@@ -189,10 +279,28 @@ def retrieve_with_ids(conn, task, k=5, embed_fn=embeddings.embed, min_sim=None):
         )
         if lesson_id not in quarantined
     ]
+    runtime_default = embed_fn is None
+    embed_fn = embed_fn or embeddings.embed
     qv = embed_fn(task)
+    query_provenance = embeddings.provenance(qv) if qv is not None else {}
+    if embedding_model is None and (runtime_default or embed_fn is embeddings.embed):
+        embedding_model = query_provenance.get("model")
+    if embedding_revision is None and (runtime_default or embed_fn is embeddings.embed):
+        embedding_revision = query_provenance.get("revision")
 
-    if qv is None:
-        # Embeddings unavailable: soft-fail to lexical-only, no threshold possible.
+    semantic = []
+    compatible_semantic_corpus = False
+    if qv is not None:
+        semantic, compatible_semantic_corpus = _semantic_rank_with_compatibility(
+            conn, qv, limit=candidate_limit, exclude_ids=quarantined,
+            embedding_model=embedding_model,
+            embedding_revision=embedding_revision,
+        )
+
+    if qv is None or not compatible_semantic_corpus:
+        # Embeddings unavailable, or all non-quarantined stored vectors belong
+        # to an incompatible embedding space: soft-fail to lexical-only. With
+        # no comparable vectors there is no semantic threshold to apply.
         scores = rrf_scores([lexical, []])
         fused = sorted(
             scores,
@@ -207,9 +315,6 @@ def retrieve_with_ids(conn, task, k=5, embed_fn=embeddings.embed, min_sim=None):
                 rows.append({"id": lid, "text": text, "score": scores[lid]})
         return rows
 
-    semantic = _semantic_rank(
-        conn, qv, limit=candidate_limit, exclude_ids=quarantined,
-    )
     scores = rrf_scores([lexical, semantic])
     fused = sorted(
         scores,
@@ -218,6 +323,8 @@ def retrieve_with_ids(conn, task, k=5, embed_fn=embeddings.embed, min_sim=None):
     data = _lesson_data(conn, fused)
     relevant = _relevant_ids(
         conn, qv, fused, min_sim, lesson_data=data,
+        embedding_model=embedding_model,
+        embedding_revision=embedding_revision,
     )[:k]
     rows = []
     for lid in relevant:

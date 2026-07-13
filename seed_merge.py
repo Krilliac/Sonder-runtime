@@ -49,15 +49,18 @@ def _text_of(rec):
     return (rec.get("lesson") or rec.get("text") or "").strip()
 
 
-def merge_records(conn, records, embed_fn=embeddings.embed, dry_run=False):
+def merge_records(conn, records, embed_fn=None, dry_run=False):
     """Merge lesson records into `conn`, applying the full quality pipeline.
 
     Returns a stats dict: {added, skipped_vague, skipped_private, skipped_dup_text,
     skipped_dup_embed, by_source}. `records` is an iterable of dicts with a
     'lesson'/'text' field and optional 'source'.
     """
+    runtime_default = embed_fn is None
+    embed_fn = embed_fn or embeddings.embed
     seen_text = {
-        (l["text"] or "").strip().lower() for l in memory_store.all_lessons(conn)
+        (lesson["text"] or "").strip().lower()
+        for lesson in memory_store.all_lessons(conn)
     }
     stats = {
         "added": 0, "skipped_vague": 0, "skipped_private": 0,
@@ -76,13 +79,29 @@ def merge_records(conn, records, embed_fn=embeddings.embed, dry_run=False):
             stats["skipped_dup_text"] += 1
             continue
         emb = embed_fn(text) if embed_fn else None
-        if emb is not None and reflection.is_duplicate(emb, conn):
+        if not embeddings.valid_vector(emb):
+            emb = None
+        provenance = (
+            embeddings.provenance(emb)
+            if emb is not None and (runtime_default or embed_fn is embeddings.embed)
+            else {}
+        )
+        if emb is not None and reflection.is_duplicate(
+            emb,
+            conn,
+            embedding_model=provenance.get("model"),
+            embedding_revision=provenance.get("revision"),
+            embedding_dim=provenance.get("dimension"),
+        ):
             stats["skipped_dup_embed"] += 1
             continue
         if not dry_run:
             blob = embeddings.to_blob(emb) if emb else None
             memory_store.add_lesson(
-                conn, memory_store.new_id(), text, blob, rec.get("source", "seed")
+                conn, memory_store.new_id(), text, blob, rec.get("source", "seed"),
+                embedding_model=provenance.get("model"),
+                embedding_revision=provenance.get("revision"),
+                embedding_dim=provenance.get("dimension"),
             )
         seen_text.add(key)
         src = rec.get("source", "seed")

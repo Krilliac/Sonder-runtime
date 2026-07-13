@@ -261,18 +261,30 @@ def test_sonder_stats_runs_against_empty_db(monkeypatch, tmp_path):
 
 def test_learning_health_is_structured_and_routed(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "learning.db"))
+    monkeypatch.setattr(server.embeddings, "EXPECTED_DIMENSION", 1)
     conn = server._open_db()
     try:
         memory_store.log_interaction(
             conn, "i1", "task", "", "answer", "code"
+        )
+        memory_store.refresh_interaction_task_embedding(
+            conn,
+            "i1",
+            server.embeddings.to_blob([1.0]),
+            server.embeddings.EMBED_IDENTITY,
+            revision=server.embeddings.EMBED_REVISION,
+            dimension=1,
         )
         memory_store.record_outcome_row(conn, "i1", "tests_passed", 1.0)
         memory_store.add_lesson(
             conn,
             "lesson-one",
             "Verify the exact packaged payload before release.",
-            b"\x00\x00\x00\x00",
+            server.embeddings.to_blob([1.0]),
             "i1",
+            embedding_model=server.embeddings.EMBED_IDENTITY,
+            embedding_revision=server.embeddings.EMBED_REVISION,
+            embedding_dim=1,
         )
     finally:
         conn.close()
@@ -286,6 +298,60 @@ def test_learning_health_is_structured_and_routed(monkeypatch, tmp_path):
     assert "sonder learning health" in text
     assert server.control_command("/learning") == text
     assert server.control_command("/metrics") == text
+
+
+def test_session_history_never_crosses_project_or_uses_shared_summary():
+    conn = memory_store.connect(":memory:")
+    memory_store.touch_session(conn, "default", project="project-a")
+    memory_store.log_interaction(
+        conn, "a", "task a", "", "PROJECT_A_PRIVATE", "sonder",
+        session_id="default", project="project-a", project_explicit=True,
+    )
+    memory_store.log_interaction(
+        conn, "b", "task b", "", "project b response", "sonder",
+        session_id="default", project="project-b", project_explicit=True,
+    )
+    memory_store.update_session_summary(
+        conn, "default", "PROJECT_A_SUMMARY_PRIVATE", "a",
+    )
+
+    history = server._session_history_messages(
+        conn, "default", 12, project="project-b",
+    )
+
+    assert history == [
+        {"role": "user", "content": "task b"},
+        {"role": "assistant", "content": "project b response"},
+    ]
+    assert "PROJECT_A" not in repr(history)
+
+
+def test_session_history_uses_a_project_keyed_summary(monkeypatch):
+    conn = memory_store.connect(":memory:")
+    memory_store.touch_session(conn, "default", project="project-b")
+    for index in range(3):
+        memory_store.log_interaction(
+            conn, "b%d" % index, "task b%d" % index, "", "response b%d" % index,
+            "sonder", session_id="default", project="project-b",
+            project_explicit=True,
+        )
+    monkeypatch.setattr(
+        server.summarizer, "summarize",
+        lambda previous, pairs, generate: "PROJECT_B_SUMMARY",
+    )
+
+    history = server._session_history_messages(
+        conn, "default", 1, project="project-b",
+    )
+    stored = memory_store.get_session_project_summary(
+        conn, "default", "project-b",
+    )
+
+    assert history[0]["content"].endswith("PROJECT_B_SUMMARY")
+    assert history[-1]["content"] == "response b2"
+    assert stored == {
+        "summary": "PROJECT_B_SUMMARY", "summarized_through": "b1",
+    }
 
 
 def test_context_health_reports_session_and_memory(monkeypatch, tmp_path):
@@ -304,6 +370,8 @@ def test_context_health_reports_session_and_memory(monkeypatch, tmp_path):
             "print('ok')",
             "code",
             session_id="demo",
+            project="proj",
+            project_explicit=True,
         )
         memory_store.add_lesson(
             conn, "lesson-one", "Prefer runnable snippets.", None, "i1"
@@ -419,6 +487,37 @@ def test_control_command_dump_writes_file(monkeypatch, tmp_path):
     text = open(path, encoding="utf-8").read()
     assert "== messages ==" in text
     assert "print('kept')" in text
+
+
+def test_control_command_dump_never_appends_another_projects_turns(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "memory.db"))
+    monkeypatch.setattr(server.sonder_paths, "default_home", lambda: tmp_path)
+    monkeypatch.setattr(server, "context_health", lambda **kwargs: "context")
+    monkeypatch.setattr(server, "memory_quality_report", lambda **kwargs: "quality")
+    monkeypatch.setattr(server, "master_status", lambda **kwargs: "agents")
+    monkeypatch.setattr(server, "diagnostics", lambda: "diagnostics")
+    conn = server._open_db()
+    memory_store.touch_session(conn, "shared", project="project-a")
+    memory_store.log_interaction(
+        conn, "a", "PRIVATE_A_TASK", "", "PRIVATE_A_RESPONSE", "sonder",
+        session_id="shared", project="project-a", project_explicit=True,
+    )
+    memory_store.log_interaction(
+        conn, "b", "project b task", "", "project b response", "sonder",
+        session_id="shared", project="project-b", project_explicit=True,
+    )
+    conn.close()
+
+    out = server.control_command(
+        "/dump scoped", session="shared", project="project-b",
+    )
+    path = out.splitlines()[0].split(" to ", 1)[1]
+    text = open(path, encoding="utf-8").read()
+
+    assert "project b response" in text
+    assert "PRIVATE_A" not in text
 
 
 def test_control_command_run_uses_history(monkeypatch):

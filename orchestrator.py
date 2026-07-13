@@ -106,7 +106,12 @@ def build_prompt(task, lessons, recalls=None, facts=None):
     if facts:
         blocks.append("%s\n%s" % (FACTS_HEADER, "\n".join("- %s" % f for f in facts)))
     if lessons:
-        blocks.append("%s\n%s" % (MEMORY_HEADER, "\n".join("- %s" % l for l in lessons)))
+        blocks.append(
+            "%s\n%s" % (
+                MEMORY_HEADER,
+                "\n".join("- %s" % lesson for lesson in lessons),
+            )
+        )
         blocks.append(
             "%s\nUse the relevant lessons above as constraints while solving. "
             "Prefer lessons with concrete APIs, algorithms, or pitfalls that match this task." %
@@ -119,11 +124,14 @@ def build_prompt(task, lessons, recalls=None, facts=None):
     return "%s\n\n# Task:\n%s" % ("\n\n".join(blocks), task)
 
 
-def _run(conn, task, tier, generate_fn, retrieve_fn=retriever.retrieve,
+def _run(conn, task, tier, generate_fn, retrieve_fn=None,
          id_fn=memory_store.new_id, history=None, recalls=None, facts=None,
-         session_id=None, task_embedding=None):
+         session_id=None, task_embedding=None, project=None,
+         project_explicit=True,
+         task_embedding_model=None, task_embedding_revision=None,
+         task_embedding_dim=None):
     lesson_rows = None
-    if retrieve_fn is retriever.retrieve:
+    if retrieve_fn is None or retrieve_fn is retriever.retrieve:
         lesson_rows = retriever.retrieve_with_ids(conn, task)
         lessons = [r["text"] for r in lesson_rows]
     else:
@@ -138,6 +146,11 @@ def _run(conn, task, tier, generate_fn, retrieve_fn=retriever.retrieve,
         conn, interaction_id, task, "\n".join(lessons), response, tier,
         session_id=session_id, task_embedding=task_embedding,
         tokens_in=tokens_in, tokens_out=tokens_out, token_source=token_source,
+        project=project,
+        project_explicit=project_explicit,
+        task_embedding_model=task_embedding_model,
+        task_embedding_revision=task_embedding_revision,
+        task_embedding_dim=task_embedding_dim,
     )
     if lesson_rows:
         memory_store.log_lesson_usage(
@@ -146,24 +159,41 @@ def _run(conn, task, tier, generate_fn, retrieve_fn=retriever.retrieve,
 
 
 def run_with_learning(conn, task, tier, generate_fn,
-                      retrieve_fn=retriever.retrieve, id_fn=memory_store.new_id,
+                      retrieve_fn=None, id_fn=memory_store.new_id,
                       history=None, recalls=None, facts=None,
-                      session_id=None, task_embedding=None):
+                      session_id=None, task_embedding=None, project=None,
+                      project_explicit=True,
+                      task_embedding_model=None, task_embedding_revision=None,
+                      task_embedding_dim=None):
     response, interaction_id, _lessons, _augmented = _run(
         conn, task, tier, generate_fn, retrieve_fn, id_fn,
         history=history, recalls=recalls, facts=facts,
         session_id=session_id, task_embedding=task_embedding,
+        project=project,
+        project_explicit=project_explicit,
+        task_embedding_model=task_embedding_model,
+        task_embedding_revision=task_embedding_revision,
+        task_embedding_dim=task_embedding_dim,
     )
     return response, interaction_id
 
 
 def run_with_learning_traced(conn, task, tier, generate_fn,
-                             retrieve_fn=retriever.retrieve, id_fn=memory_store.new_id,
+                             retrieve_fn=None, id_fn=memory_store.new_id,
                              history=None, recalls=None, facts=None,
-                             session_id=None, task_embedding=None):
+                             session_id=None, task_embedding=None, project=None,
+                             project_explicit=True,
+                             task_embedding_model=None,
+                             task_embedding_revision=None,
+                             task_embedding_dim=None):
     response, interaction_id, lessons, augmented = _run(
         conn, task, tier, generate_fn, retrieve_fn, id_fn,
         history=history, recalls=recalls, facts=facts,
         session_id=session_id, task_embedding=task_embedding,
+        project=project,
+        project_explicit=project_explicit,
+        task_embedding_model=task_embedding_model,
+        task_embedding_revision=task_embedding_revision,
+        task_embedding_dim=task_embedding_dim,
     )
     return response, interaction_id, {"lessons": lessons, "augmented_prompt": augmented}

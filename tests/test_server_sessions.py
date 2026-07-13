@@ -134,7 +134,9 @@ def test_long_thread_summarizes_overflow(stub, monkeypatch):
     assert not any(c == "turn 0" for c in contents)
     conn = server._open_db()
     try:
-        sess = memory_store.get_session(conn, "L")
+        sess = memory_store.get_session_project_summary(
+            conn, "L", server.DEFAULT_PROJECT,
+        )
     finally:
         conn.close()
     assert sess["summary"]

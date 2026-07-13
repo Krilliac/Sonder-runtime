@@ -122,7 +122,8 @@ The learning loop above is *cross-task* memory. On top of it Sonder also has:
   memory is *carrying the right turns + summarizing the rest*, not a giant window.)
   List/resume threads with `sonder_sessions()` / REPL `/sessions` / `/resume`.
 - **Semantic recall.** Each call also surfaces the most similar *past good-outcome
-  solutions* (vector search over prior interactions), not just distilled lessons.
+  solutions* from the same project (vector search over prior interactions), not
+  just distilled lessons. Cross-project raw-solution recall is never implicit.
 - **Project facts.** `sonder_remember_fact(text, project=…)` stores durable facts
   (toolchain, conventions, key paths) that are injected into every call for that
   project — a mini-brief the model carries itself. Scope a call with `project=…`.
@@ -139,8 +140,9 @@ The learning loop above is *cross-task* memory. On top of it Sonder also has:
   `/checklist`, or the app's Workbench Activity panel while work runs.
 - **Inspectable learning quality.** `/learning` and `learning_health_status()`
   report distinct outcome coverage, positive/negative signal mix, lesson source
-  provenance, grounded distillation yield, embedding coverage, duplicate rows,
-  search-index drift, missing sources, and redacted privacy-flag counts. The
+  provenance, grounded distillation yield, lesson and raw-interaction task-vector
+  provenance/integrity, embedding coverage, duplicate rows, search-index drift,
+  missing sources, and redacted privacy-flag counts. The
   Flutter System page renders the same metrics as live meters and source/signal
   chips instead of reducing self-improvement to one opaque score.
 
@@ -517,9 +519,9 @@ Local maintenance uses the same conservative privacy rules as contribution
 export. `/privacy` shows only redacted previews and stable lesson IDs;
 `/privacyfix <ids>` is a dry run, while `/privacyfix apply <ids>` can delete only
 the explicitly selected lessons that are still flagged. `/embeddings [N]`
-previews missing vectors and `/embeddings apply [N]` backfills a bounded batch
-through the configured local Ollama embedding model. Neither maintenance path
-uses a cloud model.
+previews missing, legacy, or model-incompatible vectors; `/embeddings apply [N]`
+probes the configured local model and refreshes a bounded batch with stored
+model/revision/dimension provenance. Neither maintenance path uses a cloud model.
 
 Privacy is opt-in and scrubbed at every step — nothing auto-uploads, and no PR or upload happens without you reviewing it first.
 
@@ -574,7 +576,7 @@ Flat, mostly-stdlib Python modules (plus `mcp`):
 | `server.py` / `workbench.py` / `activity_tracker.py` / `code_runner.py` / `web_tools.py` / `workflow_store.py` / `self_heal.py` | MCP workbench/agent tools, guarded discovery and execution, persistent checklists, exact action/end reports, bounded code/project runners, web tools, workflows, and self-healing |
 | `server.py` | MCP server: `offload` / `sonder` / `parallel_run_code` / `parallel_generate_run` / `parallel_generate_run_languages` / `campaign_generate_compile_execute_record` / `learn_tiers` / `record_outcome` / `sonder_stats` / `sonder_sessions` / `sonder_remember_fact` |
 | `assetgen.py` / `game_forge.py` | stdlib-only general artifact generation, manifest verification, portable cross-language game projects, model campaigns, and verified 4-language x 3-dimension fallbacks |
-| `recall.py` | semantic recall of past good-outcome solutions (vector search over interactions) |
+| `recall.py` | project-scoped, provenance-aware semantic recall of past good-outcome solutions |
 | `summarizer.py` | rolling conversation summaries + session auto-titles (fast tier) |
 | `sonder_repl.py` / `sonder_client.py` | local REPL / thin remote client |
 | `sonder_serve.py` | OpenAI-compatible proxy (for chat UIs) |
@@ -632,7 +634,7 @@ path, and any missing-model warning alongside MCP source/tool convergence.
 
 `workflows.json` stores reusable `loop` action lists. Use `workflow_save()` to keep a routine, `workflow_run()` to execute it, and `workflow_list()` / `workflow_delete()` to manage it. The built-in `status_sweep` workflow checks diagnostics, profile, emotion vectors, and Ollama state.
 
-The MCP surface also includes `memory_search()`, `memory_export()`, and `session_export()` so the model can inspect local lessons, facts, sessions, and transcripts without raw SQLite access. `tool_manifest()` prints a compact map of the available tools.
+The MCP surface also includes `memory_search()`, `memory_export()`, and `session_export()` so the model can inspect local lessons, facts, sessions, and transcripts without raw SQLite access. `memory_embedding_backfill()` and `memory_interaction_embedding_backfill()` preview or repair bounded local-only vector batches; the interaction tool reports IDs and counts without printing raw task text. `tool_manifest()` prints a compact map of the available tools.
 
 `learn_from_example()` lets you teach from a known-good task/solution pair, while `apply_learned()` shows which lessons would be applied to a new task. Lesson usage is tracked: when a retrieved lesson participates in an answer and you later call `record_outcome()`, the lesson gets credited or debited so future retrieval can prefer lessons that actually helped.
 

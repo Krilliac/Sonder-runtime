@@ -24,21 +24,65 @@ DEFAULT_THRESHOLD = 0.93
 def _load_lessons(conn):
     """All lessons with a stored embedding, decoded, oldest-first.
 
-    Lessons with no embedding are skipped -- similarity can't be judged for
-    them, and including them would either crash the cosine math or silently
-    treat them as never-duplicate, so it's clearer to filter up front.
+    Lessons with missing, malformed, non-finite, zero-norm, or dimension-
+    inconsistent embeddings are skipped -- similarity cannot be judged safely
+    for them. Provenance is loaded with each vector so clustering can keep
+    incompatible embedding spaces isolated.
     """
     rows = conn.execute(
-        "SELECT id, text, embedding, ts FROM lessons ORDER BY ts ASC, rowid ASC"
+        "SELECT id, text, embedding, embedding_model, embedding_revision, "
+        "embedding_dim, ts FROM lessons ORDER BY ts ASC, rowid ASC"
     ).fetchall()
     out = []
     for r in rows:
         row = dict(r)
-        if not row["embedding"]:
+        if row["embedding"] is None:
             continue
-        row["vector"] = embeddings.from_blob(row["embedding"])
+        try:
+            vector = embeddings.from_blob(row["embedding"])
+        except (BufferError, OverflowError, TypeError, ValueError):
+            continue
+        if not embeddings.valid_vector(vector):
+            continue
+        stored_dim = row["embedding_dim"]
+        if (
+            isinstance(stored_dim, bool)
+            or not isinstance(stored_dim, int)
+            or stored_dim <= 0
+            or stored_dim != len(vector)
+        ):
+            continue
+        row["vector"] = vector
         out.append(row)
     return out
+
+
+def _normalized_embedding_space(lesson):
+    """Return the exact comparable embedding-space identity for a lesson."""
+    return (
+        embeddings.canonical_model_name(lesson.get("embedding_model")),
+        str(lesson.get("embedding_revision") or "").strip(),
+        len(lesson["vector"]),
+    )
+
+
+def _clusterable_lesson(lesson):
+    """Whether a caller-supplied lesson is safe to pass to cosine math."""
+    vector = lesson.get("vector")
+    if not embeddings.valid_vector(vector):
+        return False
+    model, revision, _actual_dim = _normalized_embedding_space(lesson)
+    if not model or not revision:
+        return False
+    if "embedding_dim" not in lesson:
+        return True
+    stored_dim = lesson["embedding_dim"]
+    return (
+        isinstance(stored_dim, int)
+        and not isinstance(stored_dim, bool)
+        and stored_dim > 0
+        and stored_dim == len(vector)
+    )
 
 
 class _UnionFind:
@@ -65,20 +109,29 @@ def cluster_near_duplicates(lessons, threshold=DEFAULT_THRESHOLD, cosine_fn=embe
     O(n^2) comparisons -- fine for the hundreds-to-low-thousands of lessons
     this store holds; revisit (e.g. LSH/bucket by a cheap prefilter) if the
     corpus grows past ~10k. `lessons` is the shape _load_lessons returns
-    (dicts with at least id/vector). Returns only clusters with 2+ members
-    (i.e. actual duplicate groups) -- singletons are dropped.
+    (dicts with at least id/vector). Comparisons are restricted to the exact
+    normalized (model, revision, actual dimension) embedding space. Returns
+    only clusters with 2+ members (i.e. actual duplicate groups) -- singletons
+    are dropped.
     """
-    if not lessons:
+    comparable = [lesson for lesson in lessons if _clusterable_lesson(lesson)]
+    if not comparable:
         return []
-    uf = _UnionFind([l["id"] for l in lessons])
-    n = len(lessons)
-    for i in range(n):
-        for j in range(i + 1, n):
-            if cosine_fn(lessons[i]["vector"], lessons[j]["vector"]) >= threshold:
-                uf.union(lessons[i]["id"], lessons[j]["id"])
+    uf = _UnionFind([lesson["id"] for lesson in comparable])
+    by_space = {}
+    for lesson in comparable:
+        by_space.setdefault(_normalized_embedding_space(lesson), []).append(lesson)
+    for space_lessons in by_space.values():
+        n = len(space_lessons)
+        for i in range(n):
+            for j in range(i + 1, n):
+                if cosine_fn(
+                    space_lessons[i]["vector"], space_lessons[j]["vector"]
+                ) >= threshold:
+                    uf.union(space_lessons[i]["id"], space_lessons[j]["id"])
 
     groups = {}
-    for les in lessons:
+    for les in comparable:
         root = uf.find(les["id"])
         groups.setdefault(root, []).append(les)
 
@@ -101,7 +154,10 @@ def choose_keeper(cluster):
     Longest text wins (assumed most detailed/specific restatement); ties
     break on earliest ts (prefer the original over a later paraphrase).
     """
-    return sorted(cluster, key=lambda l: (-len(l["text"] or ""), l["ts"]))[0]
+    return sorted(
+        cluster,
+        key=lambda lesson: (-len(lesson["text"] or ""), lesson["ts"]),
+    )[0]
 
 
 def build_plan(conn, threshold=DEFAULT_THRESHOLD, cosine_fn=embeddings.cosine):
@@ -115,12 +171,12 @@ def build_plan(conn, threshold=DEFAULT_THRESHOLD, cosine_fn=embeddings.cosine):
     plan = []
     for cluster in clusters:
         keeper = choose_keeper(cluster)
-        losers = [l for l in cluster if l["id"] != keeper["id"]]
+        losers = [lesson for lesson in cluster if lesson["id"] != keeper["id"]]
         plan.append({
             "keeper_id": keeper["id"],
             "keeper_text": keeper["text"],
-            "prune_ids": [l["id"] for l in losers],
-            "prune_texts": [l["text"] for l in losers],
+            "prune_ids": [lesson["id"] for lesson in losers],
+            "prune_texts": [lesson["text"] for lesson in losers],
             "cluster_size": len(cluster),
             "max_sim": round(_max_pair_sim(cluster, cosine_fn), 4),
         })

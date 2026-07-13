@@ -7,6 +7,13 @@ def _conn():
     return ms.connect(":memory:")
 
 
+def _seed_raw_embedding(conn, lesson_id, text, blob, source="i1"):
+    """Bypass add_lesson validation to simulate corruption already on disk."""
+    ms.add_lesson(conn, lesson_id, text, None, source)
+    conn.execute("UPDATE lessons SET embedding=? WHERE id=?", (blob, lesson_id))
+    conn.commit()
+
+
 def _fake_decode(vec_len=4):
     """A deterministic, dependency-free stand-in for embeddings.from_blob.
 
@@ -113,26 +120,53 @@ def test_empty_and_whitespace_and_null_text_all_detected():
 def test_malformed_embedding_bytes_detected_with_real_decoder():
     c = _conn()
     # 3 bytes is not a multiple of 4 -- array.frombytes raises ValueError
-    ms.add_lesson(c, "L1", "a lesson with a truncated embedding", b"\x01\x02\x03", "i1")
+    _seed_raw_embedding(c, "L1", "a lesson with a truncated embedding", b"\x01\x02\x03")
 
     ok, issues = si.check_store(c)  # default decode_fn = embeddings.from_blob
 
     assert ok is False
     bad = [i for i in issues if i.code == "bad_embedding" and i.lesson_id == "L1"]
     assert len(bad) == 1
-    assert "failed to decode" in bad[0].detail
+    assert "malformed float32 bytes" in bad[0].detail
 
 
 def test_empty_embedding_blob_decodes_to_empty_vector_and_is_flagged():
     c = _conn()
-    ms.add_lesson(c, "L1", "a lesson with an empty embedding blob", b"", "i1")
+    _seed_raw_embedding(c, "L1", "a lesson with an empty embedding blob", b"")
 
     ok, issues = si.check_store(c)
 
     assert ok is False
     bad = [i for i in issues if i.code == "bad_embedding" and i.lesson_id == "L1"]
     assert len(bad) == 1
-    assert "empty vector" in bad[0].detail
+    assert "malformed float32 bytes" in bad[0].detail
+
+
+def test_nonfinite_and_zero_norm_embeddings_are_flagged():
+    c = _conn()
+    _seed_raw_embedding(
+        c,
+        "NAN",
+        "a lesson whose embedding contains NaN",
+        embeddings.to_blob([float("nan"), 1.0]),
+    )
+    _seed_raw_embedding(
+        c,
+        "ZERO",
+        "a lesson whose embedding has zero norm",
+        embeddings.to_blob([0.0, -0.0]),
+    )
+
+    ok, issues = si.check_store(c)
+
+    assert ok is False
+    details = {
+        issue.lesson_id: issue.detail
+        for issue in issues
+        if issue.code == "bad_embedding"
+    }
+    assert "non-finite" in details["NAN"]
+    assert "zero norm" in details["ZERO"]
 
 
 def test_null_embedding_is_not_flagged_as_bad():
@@ -176,7 +210,13 @@ def test_corrupted_store_reports_all_issue_kinds_and_report_text():
     # empty text
     ms.add_lesson(c, "EMPTY", "  ", embeddings.to_blob([1.0]), "i1")
     # malformed embedding
-    ms.add_lesson(c, "BADVEC", "text with a broken embedding", b"\x01\x02\x03", "i2")
+    _seed_raw_embedding(
+        c,
+        "BADVEC",
+        "text with a broken embedding",
+        b"\x01\x02\x03",
+        "i2",
+    )
     # orphan fts: add then delete only the lessons row
     ms.add_lesson(c, "ORPHAN", "will be half-deleted", embeddings.to_blob([1.0]), "i3")
     c.execute("DELETE FROM lessons WHERE id=?", ("ORPHAN",))

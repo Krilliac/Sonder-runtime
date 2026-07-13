@@ -1,7 +1,11 @@
 """SQLite-backed memory for the sonder learning loop. Stdlib only."""
+import array
+import math
 import os
 import re
 import sqlite3
+
+import reward
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS interactions (
@@ -10,6 +14,8 @@ CREATE TABLE IF NOT EXISTS interactions (
     retrieved_ctx TEXT,
     response TEXT,
     tier TEXT,
+    project TEXT,
+    project_explicit INTEGER NOT NULL DEFAULT 1 CHECK(project_explicit IN (0, 1)),
     ts TEXT DEFAULT CURRENT_TIMESTAMP,
     tokens_in INTEGER,
     tokens_out INTEGER,
@@ -25,6 +31,9 @@ CREATE TABLE IF NOT EXISTS lessons (
     id TEXT PRIMARY KEY,
     text TEXT,
     embedding BLOB,
+    embedding_model TEXT,
+    embedding_revision TEXT,
+    embedding_dim INTEGER,
     source_interaction TEXT,
     ts TEXT DEFAULT CURRENT_TIMESTAMP
 );
@@ -37,6 +46,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     project TEXT,
     created_ts TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_ts TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS session_project_summaries (
+    session_id TEXT NOT NULL,
+    project_key TEXT NOT NULL,
+    summary TEXT,
+    summarized_through TEXT,
+    updated_ts TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(session_id, project_key)
 );
 CREATE TABLE IF NOT EXISTS facts (
     id TEXT PRIMARY KEY,
@@ -121,41 +138,89 @@ def _migrate(conn):
         conn.execute("ALTER TABLE interactions ADD COLUMN tokens_out INTEGER")
     if "token_source" not in cols:
         conn.execute("ALTER TABLE interactions ADD COLUMN token_source TEXT")
+    if "project" not in cols:
+        conn.execute("ALTER TABLE interactions ADD COLUMN project TEXT")
+    if "project_explicit" not in cols:
+        conn.execute(
+            "ALTER TABLE interactions ADD COLUMN project_explicit INTEGER "
+            "NOT NULL DEFAULT 0 CHECK(project_explicit IN (0, 1))"
+        )
+    if "task_embedding_model" not in cols:
+        conn.execute("ALTER TABLE interactions ADD COLUMN task_embedding_model TEXT")
+    if "task_embedding_revision" not in cols:
+        conn.execute("ALTER TABLE interactions ADD COLUMN task_embedding_revision TEXT")
+    task_embedding_dim_added = "task_embedding_dim" not in cols
+    if task_embedding_dim_added:
+        conn.execute("ALTER TABLE interactions ADD COLUMN task_embedding_dim INTEGER")
+    lesson_cols = _column_names(conn, "lessons")
+    if "embedding_model" not in lesson_cols:
+        conn.execute("ALTER TABLE lessons ADD COLUMN embedding_model TEXT")
+    if "embedding_revision" not in lesson_cols:
+        conn.execute("ALTER TABLE lessons ADD COLUMN embedding_revision TEXT")
+    lesson_embedding_dim_added = "embedding_dim" not in lesson_cols
+    if lesson_embedding_dim_added:
+        conn.execute("ALTER TABLE lessons ADD COLUMN embedding_dim INTEGER")
+    if task_embedding_dim_added:
+        conn.execute(
+            "UPDATE interactions SET task_embedding_dim=length(task_embedding)/4 "
+            "WHERE task_embedding IS NOT NULL AND task_embedding_dim IS NULL "
+            "AND length(task_embedding) > 0 AND length(task_embedding) % 4 = 0"
+        )
+    if lesson_embedding_dim_added:
+        conn.execute(
+            "UPDATE lessons SET embedding_dim=length(embedding)/4 "
+            "WHERE embedding IS NOT NULL AND embedding_dim IS NULL "
+            "AND length(embedding) > 0 AND length(embedding) % 4 = 0"
+        )
     usage_cols = _column_names(conn, "lesson_usage")
     if "outcome_ts" not in usage_cols:
         conn.execute("ALTER TABLE lesson_usage ADD COLUMN outcome_ts TEXT")
 
 
 def init_db(conn):
-    conn.executescript(_SCHEMA)
-    _migrate(conn)
-    # Indexes reference migrated columns, so they must come after _migrate.
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_interactions_session "
-        "ON interactions(session_id, ts)"
-    )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_project ON facts(project)")
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_lesson_usage_lesson "
-        "ON lesson_usage(lesson_id)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_lesson_usage_interaction "
-        "ON lesson_usage(interaction_id)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_tasks_status_project "
-        "ON tasks(status, project, updated_ts)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_task_events_task "
-        "ON task_events(task_id, ts)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_preferences_scope_enabled "
-        "ON preferences(scope, enabled, updated_ts)"
-    )
-    conn.commit()
+    try:
+        # executescript commits any existing transaction first, so begin the
+        # write lock inside the script before any schema snapshot/migration.
+        conn.executescript("BEGIN IMMEDIATE;\n" + _SCHEMA)
+        _migrate(conn)
+        # Indexes reference migrated columns, so they must come after _migrate.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_interactions_session "
+            "ON interactions(session_id, ts)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_interactions_project "
+            "ON interactions(project, ts)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_outcomes_interaction_signal_reward "
+            "ON outcomes(interaction_id, signal, reward)"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_project ON facts(project)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_lesson_usage_lesson "
+            "ON lesson_usage(lesson_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_lesson_usage_interaction "
+            "ON lesson_usage(interaction_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_status_project "
+            "ON tasks(status, project, updated_ts)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_events_task "
+            "ON task_events(task_id, ts)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_preferences_scope_enabled "
+            "ON preferences(scope, enabled, updated_ts)"
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def new_id():
@@ -187,19 +252,41 @@ def estimate_interaction_tokens(task, retrieved_ctx, response):
 
 def log_interaction(conn, interaction_id, task, retrieved_ctx, response, tier,
                     session_id=None, task_embedding=None, tokens_in=None,
-                    tokens_out=None, token_source=None):
+                    tokens_out=None, token_source=None, project=None,
+                    project_explicit=True,
+                    task_embedding_model=None, task_embedding_revision=None,
+                    task_embedding_dim=None):
     tokens_in = _clean_token_count(tokens_in)
     tokens_out = _clean_token_count(tokens_out)
     if token_source is None and (tokens_in is not None or tokens_out is not None):
         token_source = "provided"
+    if task_embedding is not None:
+        actual_dimension, blob_error = _embedding_blob_integrity(task_embedding)
+        if blob_error is not None:
+            raise ValueError(
+                "task embedding must be a finite non-zero float32 vector"
+            )
+        if task_embedding_dim is None:
+            task_embedding_dim = actual_dimension
+        stored_dimension, metadata_error = _stored_embedding_dimension(
+            task_embedding_dim
+        )
+        if metadata_error is not None or stored_dimension != actual_dimension:
+            raise ValueError("task embedding dimension does not match blob")
+        task_embedding_dim = stored_dimension
     conn.execute(
         "INSERT INTO interactions"
         "(id, task, retrieved_ctx, response, tier, session_id, task_embedding, "
-        "tokens_in, tokens_out, token_source) "
-        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "tokens_in, tokens_out, token_source, project, project_explicit, "
+        "task_embedding_model, "
+        "task_embedding_revision, task_embedding_dim) "
+        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             interaction_id, task, retrieved_ctx, response, tier, session_id,
             task_embedding, tokens_in, tokens_out, token_source,
+            project, int(bool(project_explicit)), task_embedding_model,
+            task_embedding_revision or None,
+            task_embedding_dim,
         ),
     )
     conn.commit()
@@ -235,10 +322,32 @@ def record_outcome_row(conn, interaction_id, signal, reward):
     conn.commit()
 
 
-def add_lesson(conn, lesson_id, text, embedding, source_interaction):
+def add_lesson(
+    conn, lesson_id, text, embedding, source_interaction,
+    embedding_model=None, embedding_revision=None, embedding_dim=None,
+):
+    if embedding is not None:
+        actual_dimension, blob_error = _embedding_blob_integrity(embedding)
+        if blob_error is not None:
+            raise ValueError(
+                "lesson embedding must be a finite non-zero float32 vector"
+            )
+        if embedding_dim is None:
+            embedding_dim = actual_dimension
+        stored_dimension, metadata_error = _stored_embedding_dimension(
+            embedding_dim
+        )
+        if metadata_error is not None or stored_dimension != actual_dimension:
+            raise ValueError("lesson embedding dimension does not match blob")
+        embedding_dim = stored_dimension
     conn.execute(
-        "INSERT INTO lessons(id, text, embedding, source_interaction) VALUES(?, ?, ?, ?)",
-        (lesson_id, text, embedding, source_interaction),
+        "INSERT INTO lessons(id, text, embedding, source_interaction, "
+        "embedding_model, embedding_revision, embedding_dim) "
+        "VALUES(?, ?, ?, ?, ?, ?, ?)",
+        (
+            lesson_id, text, embedding, source_interaction,
+            embedding_model, embedding_revision or None, embedding_dim,
+        ),
     )
     conn.execute(
         "INSERT INTO lessons_fts(lesson_id, text) VALUES(?, ?)", (lesson_id, text)
@@ -255,7 +364,10 @@ def lesson_exists_for_interaction(conn, interaction_id):
 
 
 def all_lessons(conn):
-    rows = conn.execute("SELECT id, text, embedding FROM lessons").fetchall()
+    rows = conn.execute(
+        "SELECT id, text, embedding, embedding_model, embedding_revision, "
+        "embedding_dim FROM lessons"
+    ).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -269,16 +381,438 @@ def lessons_without_embeddings(conn, limit=100):
     return [dict(row) for row in rows]
 
 
-def set_lesson_embedding(conn, lesson_id, embedding):
+def set_lesson_embedding(
+    conn, lesson_id, embedding, model=None, revision=None, dimension=None,
+):
     """Set one missing embedding without overwriting an existing vector."""
-    if not embedding:
-        raise ValueError("embedding must be non-empty")
+    actual_dimension, blob_error = _embedding_blob_integrity(embedding)
+    if blob_error is not None:
+        raise ValueError("embedding must be a finite non-zero float32 vector")
+    if dimension is None and len(embedding) % 4 == 0:
+        dimension = actual_dimension
+    stored_dimension, metadata_error = _stored_embedding_dimension(dimension)
+    if metadata_error is not None or stored_dimension != actual_dimension:
+        raise ValueError("embedding dimension does not match blob")
+    dimension = stored_dimension
     cur = conn.execute(
-        "UPDATE lessons SET embedding=? WHERE id=? AND embedding IS NULL",
-        (embedding, lesson_id),
+        "UPDATE lessons SET embedding=?, embedding_model=?, "
+        "embedding_revision=?, embedding_dim=? "
+        "WHERE id=? AND embedding IS NULL",
+        (embedding, model, revision, dimension, lesson_id),
     )
     conn.commit()
     return cur.rowcount > 0
+
+
+def _embedding_blob_integrity(blob):
+    """Return ``(actual_dimension, error)`` for a stored float32 vector.
+
+    Metadata is deliberately ignored: callers use the bytes as the source of
+    truth so a plausible ``embedding_dim`` cannot hide a truncated or NaN
+    vector. ``actual_dimension`` remains available for non-finite vectors whose
+    byte shape is otherwise valid.
+    """
+    if blob is None:
+        return None, "missing"
+    if not isinstance(blob, (bytes, bytearray, memoryview)):
+        return None, "invalid_type"
+    raw = bytes(blob)
+    if not raw or len(raw) % 4:
+        return None, "invalid_length"
+    values = array.array("f")
+    try:
+        values.frombytes(raw)
+    except (BufferError, ValueError, TypeError):
+        return None, "invalid_length"
+    dimension = len(values)
+    if not dimension:
+        return None, "invalid_length"
+    if any(not math.isfinite(value) for value in values):
+        return dimension, "nonfinite"
+    if not any(value != 0.0 for value in values):
+        return dimension, "zero_norm"
+    return dimension, None
+
+
+def _stored_embedding_dimension(value):
+    if value is None:
+        return None, "missing"
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None, "invalid"
+    return value, None
+
+
+def _expected_embedding_dimension(value):
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("embedding dimension must be a positive integer") from exc
+    if parsed <= 0 or (isinstance(value, float) and value != parsed):
+        raise ValueError("embedding dimension must be a positive integer")
+    return parsed
+
+
+def _embedding_row_needs_refresh(row, model, revision=None, dimension=None):
+    """Whether a lesson row is missing, stale, or unsafe for vector recall."""
+    expected_dimension = _expected_embedding_dimension(dimension)
+    actual_dimension, blob_error = _embedding_blob_integrity(row["embedding"])
+    if blob_error is not None:
+        return True
+    if not row["embedding_model"] or row["embedding_model"] != model:
+        return True
+    if (
+        revision is not None
+        and (row["embedding_revision"] or None) != (revision or None)
+    ):
+        return True
+    stored_dimension, metadata_error = _stored_embedding_dimension(
+        row["embedding_dim"]
+    )
+    if metadata_error is not None or stored_dimension != actual_dimension:
+        return True
+    return (
+        expected_dimension is not None
+        and actual_dimension != expected_dimension
+    )
+
+
+def lessons_needing_embedding_refresh(
+    conn, model, revision=None, dimension=None, limit=100,
+):
+    """Missing, legacy, or incompatible lesson vectors in stable order."""
+    limit = max(1, min(int(limit or 100), 500))
+    rows = conn.execute(
+        "SELECT id, text, source_interaction, ts, embedding, embedding_model, "
+        "embedding_revision, embedding_dim FROM lessons "
+        "ORDER BY ts ASC, rowid ASC"
+    )
+    selected = []
+    for row in rows:
+        if _embedding_row_needs_refresh(
+            row, model, revision=revision, dimension=dimension,
+        ):
+            selected.append(dict(row))
+            if len(selected) >= limit:
+                break
+    return selected
+
+
+def count_lessons_needing_embedding_refresh(
+    conn, model, revision=None, dimension=None,
+):
+    rows = conn.execute(
+        "SELECT embedding, embedding_model, embedding_revision, embedding_dim "
+        "FROM lessons ORDER BY rowid ASC"
+    )
+    return sum(
+        1 for row in rows
+        if _embedding_row_needs_refresh(
+            row, model, revision=revision, dimension=dimension,
+        )
+    )
+
+
+def refresh_lesson_embedding(
+    conn, lesson_id, embedding, model, revision=None, dimension=None,
+    expected=None,
+):
+    """Replace one selected vector, optionally only if its old state is unchanged."""
+    actual_dimension, blob_error = _embedding_blob_integrity(embedding)
+    if blob_error is not None:
+        raise ValueError("embedding must be a finite non-zero float32 vector")
+    if dimension is not None:
+        stored_dimension, metadata_error = _stored_embedding_dimension(dimension)
+        if metadata_error is not None or stored_dimension != actual_dimension:
+            raise ValueError("embedding dimension does not match blob")
+    sql = (
+        "UPDATE lessons SET embedding=?, embedding_model=?, "
+        "embedding_revision=?, embedding_dim=? WHERE id=?"
+    )
+    params = [embedding, model, revision or None, actual_dimension, lesson_id]
+    if expected is not None:
+        sql += (
+            " AND embedding IS ? AND embedding_model IS ? "
+            "AND embedding_revision IS ? AND embedding_dim IS ? AND text IS ?"
+        )
+        params.extend([
+            expected.get("embedding"), expected.get("embedding_model"),
+            expected.get("embedding_revision"), expected.get("embedding_dim"),
+            expected.get("text"),
+        ])
+    cur = conn.execute(sql, tuple(params))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def embedding_provenance_stats(
+    conn, model, revision=None, dimension=None,
+):
+    expected_dimension = _expected_embedding_dimension(dimension)
+    rows = conn.execute(
+        "SELECT embedding, embedding_model, embedding_revision, embedding_dim "
+        "FROM lessons ORDER BY rowid ASC"
+    )
+    result = {
+        "lessons": 0,
+        "embedded": 0,
+        "valid": 0,
+        "missing": 0,
+        "vector_invalid": 0,
+        "legacy_model": 0,
+        "model_mismatch": 0,
+        "revision_mismatch": 0,
+        "dimension_missing": 0,
+        "dimension_invalid": 0,
+        "dimension_mismatch": 0,
+        "dimensions": {},
+    }
+    for row in rows:
+        result["lessons"] += 1
+        actual_dimension, blob_error = _embedding_blob_integrity(row["embedding"])
+        if blob_error == "missing":
+            result["missing"] += 1
+            continue
+        result["embedded"] += 1
+        dimension_invalid = blob_error in ("invalid_type", "invalid_length")
+        if blob_error is None:
+            result["valid"] += 1
+        elif blob_error in ("nonfinite", "zero_norm"):
+            result["vector_invalid"] += 1
+
+        stored_model = row["embedding_model"]
+        stored_revision = row["embedding_revision"]
+        if not stored_model:
+            result["legacy_model"] += 1
+        elif stored_model != model:
+            result["model_mismatch"] += 1
+        if (
+            revision is not None
+            and stored_model == model
+            and (stored_revision or None) != (revision or None)
+        ):
+            result["revision_mismatch"] += 1
+
+        stored_dimension, metadata_error = _stored_embedding_dimension(
+            row["embedding_dim"]
+        )
+        if metadata_error == "missing":
+            result["dimension_missing"] += 1
+        elif metadata_error == "invalid":
+            dimension_invalid = True
+        if dimension_invalid:
+            result["dimension_invalid"] += 1
+
+        if actual_dimension is not None:
+            key = str(actual_dimension)
+            result["dimensions"][key] = result["dimensions"].get(key, 0) + 1
+        if (
+            actual_dimension is not None
+            and stored_dimension is not None
+            and stored_dimension != actual_dimension
+        ) or (
+            actual_dimension is not None
+            and expected_dimension is not None
+            and stored_model == model
+            and actual_dimension != expected_dimension
+        ):
+            result["dimension_mismatch"] += 1
+    return result
+
+
+def _interaction_task_embedding_needs_refresh(
+    row, model, revision=None, dimension=None,
+):
+    """Whether one stored interaction task vector is unsafe for recall."""
+    expected_dimension = _expected_embedding_dimension(dimension)
+    actual_dimension, blob_error = _embedding_blob_integrity(
+        row["task_embedding"]
+    )
+    if blob_error is not None:
+        return True
+    if not row["task_embedding_model"] or row["task_embedding_model"] != model:
+        return True
+    if (
+        revision is not None
+        and (row["task_embedding_revision"] or None) != (revision or None)
+    ):
+        return True
+    stored_dimension, metadata_error = _stored_embedding_dimension(
+        row["task_embedding_dim"]
+    )
+    if metadata_error is not None or stored_dimension != actual_dimension:
+        return True
+    return (
+        expected_dimension is not None
+        and actual_dimension != expected_dimension
+    )
+
+
+def interactions_needing_task_embedding_refresh(
+    conn, model, revision=None, dimension=None, limit=100,
+):
+    """Return a bounded, stable batch of stale raw-interaction vectors."""
+    limit = max(1, min(int(limit or 100), 500))
+    rows = conn.execute(
+        "SELECT id, task, ts, task_embedding, task_embedding_model, "
+        "task_embedding_revision, task_embedding_dim FROM interactions "
+        "ORDER BY ts ASC, rowid ASC"
+    )
+    selected = []
+    for row in rows:
+        if _interaction_task_embedding_needs_refresh(
+            row, model, revision=revision, dimension=dimension,
+        ):
+            selected.append(dict(row))
+            if len(selected) >= limit:
+                break
+    return selected
+
+
+def count_interactions_needing_task_embedding_refresh(
+    conn, model, revision=None, dimension=None,
+):
+    """Stream-count task vectors requiring refresh without loading task text."""
+    rows = conn.execute(
+        "SELECT task_embedding, task_embedding_model, "
+        "task_embedding_revision, task_embedding_dim FROM interactions "
+        "ORDER BY rowid ASC"
+    )
+    return sum(
+        1 for row in rows
+        if _interaction_task_embedding_needs_refresh(
+            row, model, revision=revision, dimension=dimension,
+        )
+    )
+
+
+def refresh_interaction_task_embedding(
+    conn, interaction_id, embedding, model, revision=None, dimension=None,
+    expected=None,
+):
+    """Replace a task vector, optionally only if its old state is unchanged."""
+    actual_dimension, blob_error = _embedding_blob_integrity(embedding)
+    if blob_error is not None:
+        raise ValueError("task embedding must be a finite non-zero float32 vector")
+    if dimension is not None:
+        stored_dimension, metadata_error = _stored_embedding_dimension(dimension)
+        if metadata_error is not None or stored_dimension != actual_dimension:
+            raise ValueError("task embedding dimension does not match blob")
+    sql = (
+        "UPDATE interactions SET task_embedding=?, task_embedding_model=?, "
+        "task_embedding_revision=?, task_embedding_dim=? WHERE id=?"
+    )
+    params = [
+        embedding, model, revision or None, actual_dimension, interaction_id,
+    ]
+    if expected is not None:
+        sql += (
+            " AND task_embedding IS ? AND task_embedding_model IS ? "
+            "AND task_embedding_revision IS ? AND task_embedding_dim IS ? "
+            "AND task IS ?"
+        )
+        params.extend([
+            expected.get("task_embedding"),
+            expected.get("task_embedding_model"),
+            expected.get("task_embedding_revision"),
+            expected.get("task_embedding_dim"),
+            expected.get("task"),
+        ])
+    cur = conn.execute(sql, tuple(params))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def interaction_task_embedding_provenance_stats(
+    conn, model, revision=None, dimension=None,
+):
+    """Stream actual-integrity and provenance stats for raw task vectors."""
+    expected_dimension = _expected_embedding_dimension(dimension)
+    rows = conn.execute(
+        "SELECT task_embedding, task_embedding_model, "
+        "task_embedding_revision, task_embedding_dim FROM interactions "
+        "ORDER BY rowid ASC"
+    )
+    result = {
+        "interactions": 0,
+        "embedded": 0,
+        "valid": 0,
+        "compatible": 0,
+        "refresh_required": 0,
+        "missing": 0,
+        "vector_invalid": 0,
+        "legacy_model": 0,
+        "model_mismatch": 0,
+        "revision_mismatch": 0,
+        "dimension_missing": 0,
+        "dimension_invalid": 0,
+        "dimension_mismatch": 0,
+        "dimensions": {},
+    }
+    for row in rows:
+        result["interactions"] += 1
+        needs_refresh = _interaction_task_embedding_needs_refresh(
+            row, model, revision=revision, dimension=expected_dimension,
+        )
+        if needs_refresh:
+            result["refresh_required"] += 1
+        else:
+            result["compatible"] += 1
+
+        actual_dimension, blob_error = _embedding_blob_integrity(
+            row["task_embedding"]
+        )
+        if blob_error == "missing":
+            result["missing"] += 1
+            continue
+        result["embedded"] += 1
+        dimension_invalid = blob_error in ("invalid_type", "invalid_length")
+        if blob_error is None:
+            result["valid"] += 1
+        elif blob_error in ("nonfinite", "zero_norm"):
+            result["vector_invalid"] += 1
+
+        stored_model = row["task_embedding_model"]
+        stored_revision = row["task_embedding_revision"]
+        if not stored_model:
+            result["legacy_model"] += 1
+        elif stored_model != model:
+            result["model_mismatch"] += 1
+        if (
+            revision is not None
+            and stored_model == model
+            and (stored_revision or None) != (revision or None)
+        ):
+            result["revision_mismatch"] += 1
+
+        stored_dimension, metadata_error = _stored_embedding_dimension(
+            row["task_embedding_dim"]
+        )
+        if metadata_error == "missing":
+            result["dimension_missing"] += 1
+        elif metadata_error == "invalid":
+            dimension_invalid = True
+        if dimension_invalid:
+            result["dimension_invalid"] += 1
+
+        if actual_dimension is not None:
+            key = str(actual_dimension)
+            result["dimensions"][key] = (
+                result["dimensions"].get(key, 0) + 1
+            )
+        if (
+            actual_dimension is not None
+            and stored_dimension is not None
+            and stored_dimension != actual_dimension
+        ) or (
+            actual_dimension is not None
+            and expected_dimension is not None
+            and stored_model == model
+            and actual_dimension != expected_dimension
+        ):
+            result["dimension_mismatch"] += 1
+    return result
 
 
 def get_lesson_text(conn, lesson_id):
@@ -542,6 +1076,70 @@ def session_turns(conn, session_id):
     return [dict(r) for r in rows]
 
 
+def session_turns_for_project(conn, session_id, project):
+    """Session turns with per-turn project provenance matching the request."""
+    effective = "NULLIF(i.project,'')"
+    sql = (
+        "SELECT i.id, i.task, i.response FROM interactions i "
+        "WHERE i.session_id=? AND " + effective
+    )
+    params = [session_id]
+    if project is None:
+        sql += " IS NULL AND i.project_explicit=1"
+    else:
+        sql += " = ?"
+        params.append(project)
+    sql += " ORDER BY i.ts ASC, i.rowid ASC"
+    rows = conn.execute(sql, tuple(params)).fetchall()
+    return [dict(row) for row in rows]
+
+
+def ambiguous_legacy_project_turn_count(conn):
+    """Sessioned rows that predate trustworthy per-turn project provenance."""
+    return int(conn.execute(
+        "SELECT COUNT(*) FROM interactions WHERE project_explicit IS NOT 1 "
+        "AND session_id IS NOT NULL AND NULLIF(project,'') IS NULL"
+    ).fetchone()[0])
+
+
+def unscoped_session_turn_count(conn):
+    """Sessioned turns excluded from every project-scoped history."""
+    return int(conn.execute(
+        "SELECT COUNT(*) FROM interactions WHERE session_id IS NOT NULL "
+        "AND NULLIF(project,'') IS NULL"
+    ).fetchone()[0])
+
+
+def _project_scope_key(project):
+    return "none" if project is None else "project:" + str(project)
+
+
+def get_session_project_summary(conn, session_id, project):
+    row = conn.execute(
+        "SELECT summary, summarized_through FROM session_project_summaries "
+        "WHERE session_id=? AND project_key=?",
+        (session_id, _project_scope_key(project)),
+    ).fetchone()
+    return dict(row) if row else {"summary": None, "summarized_through": None}
+
+
+def update_session_project_summary(
+    conn, session_id, project, summary, summarized_through,
+):
+    conn.execute(
+        "INSERT INTO session_project_summaries"
+        "(session_id, project_key, summary, summarized_through) VALUES(?, ?, ?, ?) "
+        "ON CONFLICT(session_id, project_key) DO UPDATE SET "
+        "summary=excluded.summary, summarized_through=excluded.summarized_through, "
+        "updated_ts=CURRENT_TIMESTAMP",
+        (
+            session_id, _project_scope_key(project), summary,
+            summarized_through,
+        ),
+    )
+    conn.commit()
+
+
 def session_history(conn, session_id, max_turns=12):
     """Last `max_turns` (task, response) pairs for a session, oldest-first."""
     pairs = [(t["task"], t["response"]) for t in session_turns(conn, session_id)]
@@ -790,22 +1388,57 @@ def find_session(conn, prefix):
 
 # --- semantic recall over past interactions --------------------------------
 
-def good_interactions_with_embeddings(conn, exclude_session=None):
+def good_interactions_with_embeddings(
+    conn, exclude_session=None, project=None, include_all_projects=False,
+):
     """Past interactions that had a positive outcome and carry a task embedding.
 
-    'Good' = any recorded outcome with reward > 0 (mirrors reward.is_good without
-    importing reward here). Optionally excludes an in-flight session.
+    Eligibility is fail closed: at least one reward at the grounded-good
+    threshold and no weaker/negative outcome. Project is resolved from the
+    interaction row only. Ambiguous legacy rows remain unscoped rather than
+    inheriting a mutable session label. Cross-project recall requires the
+    explicit ``include_all_projects`` override.
     """
+    include_all_projects = include_all_projects is True
+    good_signals = tuple(sorted(
+        signal for signal in reward.VALID_SIGNALS if reward.is_good(signal)
+    ))
+    placeholders = ",".join("?" for _ in good_signals)
     sql = (
-        "SELECT DISTINCT i.id, i.task, i.response, i.task_embedding, i.session_id "
+        "SELECT DISTINCT i.id, i.task, i.response, i.task_embedding, i.session_id, "
+        "i.task_embedding_model, i.task_embedding_revision, i.task_embedding_dim, "
+        "NULLIF(i.project,'') AS project "
         "FROM interactions i JOIN outcomes o ON o.interaction_id = i.id "
-        "WHERE o.reward > 0 AND i.task_embedding IS NOT NULL"
+        "WHERE o.signal IN (%s) AND o.reward >= ? "
+        "AND i.task_embedding IS NOT NULL "
+        "AND NOT EXISTS (SELECT 1 FROM outcomes bad "
+        "WHERE bad.interaction_id=i.id AND "
+        "(bad.signal NOT IN (%s) OR bad.signal IS NULL "
+        "OR bad.reward IS NULL OR bad.reward < ?))"
+        % (placeholders, placeholders)
     )
-    params = ()
+    clauses = []
+    params = (
+        list(good_signals) + [reward.GOOD_THRESHOLD]
+        + list(good_signals) + [reward.GOOD_THRESHOLD]
+    )
     if exclude_session:
-        sql += " AND (i.session_id IS NULL OR i.session_id != ?)"
-        params = (exclude_session,)
-    rows = conn.execute(sql, params).fetchall()
+        clauses.append("(i.session_id IS NULL OR i.session_id != ?)")
+        params.append(exclude_session)
+    if not include_all_projects:
+        effective_project = "NULLIF(i.project,'')"
+        if project is None:
+            clauses.append(
+                "%s IS NULL AND (i.project_explicit=1 OR i.session_id IS NULL)"
+                % effective_project
+            )
+        else:
+            clauses.append("%s = ?" % effective_project)
+            params.append(project)
+    if clauses:
+        sql += " AND " + " AND ".join(clauses)
+    sql += " ORDER BY i.rowid ASC"
+    rows = conn.execute(sql, tuple(params)).fetchall()
     return [dict(r) for r in rows]
 
 

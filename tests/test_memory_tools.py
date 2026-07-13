@@ -53,3 +53,4 @@ def test_tool_manifest_mentions_workflows():
     out = server.tool_manifest()
     assert "workflow" in out
     assert "memory_search" in out
+    assert "memory_interaction_embedding_backfill" in out

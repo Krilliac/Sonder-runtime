@@ -1,7 +1,9 @@
 import sqlite3
+import threading
 
 import embeddings as _e
 import memory_store as ms
+import pytest
 
 
 def test_delete_lesson_removes_from_table_and_fts():
@@ -11,7 +13,7 @@ def test_delete_lesson_removes_from_table_and_fts():
     ms.log_lesson_usage(c, ["L1"], "i1", "task")
     assert ms.delete_lesson(c, "L1") is True
     assert ms.get_lesson_text(c, "L1") is None
-    assert [l["id"] for l in ms.all_lessons(c)] == ["L2"]
+    assert [lesson["id"] for lesson in ms.all_lessons(c)] == ["L2"]
     # gone from the FTS mirror too (deque token no longer matches)
     assert "L1" not in ms.fts_search(c, "deque pops")
     assert "L1" not in ms.lesson_usage_stats(c)
@@ -97,25 +99,300 @@ def test_record_outcome_row():
 
 def test_add_lesson_and_read_back():
     c = _conn()
-    ms.add_lesson(c, "L1", "always free the lock", b"\x00\x01", "abc")
+    vector = _e.to_blob([1.0, 0.0])
+    ms.add_lesson(c, "L1", "always free the lock", vector, "abc")
     assert ms.get_lesson_text(c, "L1") == "always free the lock"
     lessons = ms.all_lessons(c)
     assert lessons[0]["id"] == "L1"
-    assert lessons[0]["embedding"] == b"\x00\x01"
+    assert lessons[0]["embedding"] == vector
 
 
 def test_missing_lesson_embeddings_can_be_backfilled_without_overwrite():
     conn = ms.connect(":memory:")
+    new_vector = _e.to_blob([1.0, 0.0])
+    existing_vector = _e.to_blob([0.0, 1.0])
     ms.add_lesson(conn, "missing", "needs a vector", None, "seed")
-    ms.add_lesson(conn, "present", "already vectorized", b"existing", "seed")
+    ms.add_lesson(
+        conn, "present", "already vectorized", existing_vector, "seed",
+    )
 
     rows = ms.lessons_without_embeddings(conn, limit=10)
 
     assert [row["id"] for row in rows] == ["missing"]
-    assert ms.set_lesson_embedding(conn, "missing", b"new") is True
-    assert ms.set_lesson_embedding(conn, "present", b"replacement") is False
+    assert ms.set_lesson_embedding(conn, "missing", new_vector) is True
+    assert ms.set_lesson_embedding(conn, "present", new_vector) is False
     stored = {row["id"]: row["embedding"] for row in ms.all_lessons(conn)}
-    assert stored == {"missing": b"new", "present": b"existing"}
+    assert stored == {"missing": new_vector, "present": existing_vector}
+
+
+def test_embedding_refresh_tracks_model_revision_and_dimension():
+    conn = ms.connect(":memory:")
+    ms.add_lesson(
+        conn, "legacy", "legacy vector", _e.to_blob([1.0, 0.0]), "seed",
+    )
+    ms.add_lesson(
+        conn, "current", "current vector", _e.to_blob([1.0, 0.0, 0.0]), "seed",
+        embedding_model="embed-v2", embedding_revision="digest-2",
+        embedding_dim=3,
+    )
+
+    stale = ms.lessons_needing_embedding_refresh(
+        conn, "embed-v2", revision="digest-2", dimension=3,
+    )
+
+    assert [row["id"] for row in stale] == ["legacy"]
+    assert ms.count_lessons_needing_embedding_refresh(
+        conn, "embed-v2", revision="digest-2", dimension=3,
+    ) == 1
+    assert ms.refresh_lesson_embedding(
+        conn, "legacy", _e.to_blob([1.0, 0.0, 0.0]), "embed-v2",
+        revision="digest-2", dimension=3,
+    )
+    assert ms.count_lessons_needing_embedding_refresh(
+        conn, "embed-v2", revision="digest-2", dimension=3,
+    ) == 0
+    stats = ms.embedding_provenance_stats(
+        conn, "embed-v2", revision="digest-2", dimension=3,
+    )
+    assert stats["embedded"] == 2
+    assert stats["legacy_model"] == 0
+    assert stats["dimensions"] == {"3": 2}
+
+
+def test_unversioned_revision_expectation_rejects_hashed_vectors():
+    conn = ms.connect(":memory:")
+    ms.add_lesson(
+        conn, "stale", "stale revision", _e.to_blob([1.0, 0.0]), "seed",
+        embedding_model="embed-v2", embedding_revision="stale-hash",
+        embedding_dim=2,
+    )
+
+    selected = ms.lessons_needing_embedding_refresh(
+        conn, "embed-v2", revision="", dimension=2,
+    )
+
+    assert [row["id"] for row in selected] == ["stale"]
+
+
+def test_embedding_refresh_compare_and_swap_preserves_concurrent_update(tmp_path):
+    path = tmp_path / "memory.db"
+    first = ms.connect(str(path))
+    second = ms.connect(str(path))
+    ms.add_lesson(first, "lesson", "text", _e.to_blob([1.0, 0.0]), "seed")
+    selected = ms.lessons_needing_embedding_refresh(
+        first, "embed-v2", revision="digest-2", dimension=3,
+    )[0]
+
+    assert ms.refresh_lesson_embedding(
+        second, "lesson", _e.to_blob([1.0, 0.0, 0.0]), "embed-v2",
+        revision="newer", dimension=3,
+    )
+    assert not ms.refresh_lesson_embedding(
+        first, "lesson", _e.to_blob([0.0, 1.0, 0.0]), "embed-v2",
+        revision="digest-2", dimension=3, expected=selected,
+    )
+
+    row = first.execute(
+        "SELECT embedding, embedding_revision FROM lessons WHERE id='lesson'"
+    ).fetchone()
+    assert _e.from_blob(row["embedding"]) == [1.0, 0.0, 0.0]
+    assert row["embedding_revision"] == "newer"
+    first.close()
+    second.close()
+
+
+def test_embedding_refresh_cas_also_binds_source_text():
+    conn = ms.connect(":memory:")
+    ms.add_lesson(conn, "lesson", "old text", None, "seed")
+    selected = ms.lessons_needing_embedding_refresh(
+        conn, "embed-v2", revision="digest-2", dimension=2,
+    )[0]
+    conn.execute("UPDATE lessons SET text='new text' WHERE id='lesson'")
+    conn.commit()
+
+    assert not ms.refresh_lesson_embedding(
+        conn, "lesson", _e.to_blob([1.0, 0.0]), "embed-v2",
+        revision="digest-2", dimension=2, expected=selected,
+    )
+
+
+def test_embedding_write_apis_require_strict_float32_vectors_and_dimensions():
+    conn = ms.connect(":memory:")
+    vector = _e.to_blob([1.0, 0.0])
+    for invalid in (b"", b"xx", _e.to_blob([0.0, 0.0])):
+        with pytest.raises(ValueError):
+            ms.add_lesson(conn, ms.new_id(), "text", invalid, "seed")
+        with pytest.raises(ValueError):
+            ms.log_interaction(
+                conn, ms.new_id(), "task", "", "answer", "code",
+                task_embedding=invalid,
+            )
+    for invalid_dimension in (True, 2.5, "2"):
+        with pytest.raises(ValueError):
+            ms.add_lesson(
+                conn, ms.new_id(), "text", vector, "seed",
+                embedding_dim=invalid_dimension,
+            )
+        with pytest.raises(ValueError):
+            ms.log_interaction(
+                conn, ms.new_id(), "task", "", "answer", "code",
+                task_embedding=vector, task_embedding_dim=invalid_dimension,
+            )
+
+
+def test_interaction_task_embedding_maintenance_is_bounded_and_integrity_aware():
+    conn = ms.connect(":memory:")
+    current = _e.to_blob([1.0, 0.0])
+    for interaction_id, blob, model, revision in (
+        ("current", current, "embed-v2", "digest-2"),
+        ("missing", None, None, None),
+        ("legacy", _e.to_blob([0.0, 1.0]), None, None),
+        ("wrong-model", current, "embed-v1", "digest-2"),
+        ("malformed", current, "embed-v2", "digest-2"),
+        ("zero", current, "embed-v2", "digest-2"),
+    ):
+        ms.log_interaction(
+            conn, interaction_id, "task %s" % interaction_id, "", "answer",
+            "code", task_embedding=blob, task_embedding_model=model,
+            task_embedding_revision=revision,
+            task_embedding_dim=2 if blob is not None else None,
+        )
+    conn.execute(
+        "UPDATE interactions SET task_embedding=? WHERE id='malformed'",
+        (b"\x00" * 6,),
+    )
+    conn.execute(
+        "UPDATE interactions SET task_embedding=? WHERE id='zero'",
+        (_e.to_blob([0.0, 0.0]),),
+    )
+    conn.commit()
+
+    selected = ms.interactions_needing_task_embedding_refresh(
+        conn, "embed-v2", revision="digest-2", dimension=2, limit=3,
+    )
+    count = ms.count_interactions_needing_task_embedding_refresh(
+        conn, "embed-v2", revision="digest-2", dimension=2,
+    )
+    stats = ms.interaction_task_embedding_provenance_stats(
+        conn, "embed-v2", revision="digest-2", dimension=2,
+    )
+
+    assert [row["id"] for row in selected] == [
+        "missing", "legacy", "wrong-model",
+    ]
+    assert count == 5
+    assert stats["interactions"] == 6
+    assert stats["compatible"] == 1
+    assert stats["refresh_required"] == 5
+    assert stats["missing"] == 1
+    assert stats["legacy_model"] == 1
+    assert stats["model_mismatch"] == 1
+    assert stats["dimension_invalid"] == 1
+    assert stats["vector_invalid"] == 1
+    assert stats["dimensions"] == {"2": 4}
+    conn.close()
+
+
+def test_interaction_task_embedding_refresh_compare_and_swap(tmp_path):
+    path = tmp_path / "interaction-memory.db"
+    first = ms.connect(str(path))
+    second = ms.connect(str(path))
+    ms.log_interaction(
+        first, "interaction", "task", "", "answer", "code",
+        task_embedding=_e.to_blob([1.0, 0.0]),
+    )
+    selected = ms.interactions_needing_task_embedding_refresh(
+        first, "embed-v2", revision="digest-2", dimension=2,
+    )[0]
+
+    assert ms.refresh_interaction_task_embedding(
+        second, "interaction", _e.to_blob([0.0, 1.0]), "embed-v2",
+        revision="newer", dimension=2,
+    )
+    assert not ms.refresh_interaction_task_embedding(
+        first, "interaction", _e.to_blob([0.5, 0.5]), "embed-v2",
+        revision="digest-2", dimension=2, expected=selected,
+    )
+
+    row = first.execute(
+        "SELECT task_embedding, task_embedding_revision FROM interactions "
+        "WHERE id='interaction'"
+    ).fetchone()
+    assert _e.from_blob(row["task_embedding"]) == [0.0, 1.0]
+    assert row["task_embedding_revision"] == "newer"
+    first.close()
+    second.close()
+
+
+def test_interaction_embedding_refresh_cas_also_binds_task_text():
+    conn = ms.connect(":memory:")
+    ms.log_interaction(conn, "interaction", "old task", "", "answer", "code")
+    selected = ms.interactions_needing_task_embedding_refresh(
+        conn, "embed-v2", revision="digest-2", dimension=2,
+    )[0]
+    conn.execute("UPDATE interactions SET task='new task' WHERE id='interaction'")
+    conn.commit()
+
+    assert not ms.refresh_interaction_task_embedding(
+        conn, "interaction", _e.to_blob([1.0, 0.0]), "embed-v2",
+        revision="digest-2", dimension=2, expected=selected,
+    )
+
+
+def test_repeated_init_does_not_rescan_embedding_tables():
+    conn = ms.connect(":memory:")
+    statements = []
+    conn.set_trace_callback(statements.append)
+
+    ms.init_db(conn)
+
+    normalized = [statement.upper() for statement in statements]
+    assert not any(
+        "UPDATE INTERACTIONS SET TASK_EMBEDDING_DIM" in statement
+        for statement in normalized
+    )
+    assert not any(
+        "UPDATE LESSONS SET EMBEDDING_DIM" in statement
+        for statement in normalized
+    )
+
+
+def test_concurrent_first_connect_serializes_legacy_schema_migration(tmp_path):
+    path = tmp_path / "legacy.db"
+    legacy = sqlite3.connect(path)
+    legacy.execute("PRAGMA journal_mode=WAL")
+    legacy.execute(
+        "CREATE TABLE interactions(id TEXT PRIMARY KEY, task TEXT, "
+        "retrieved_ctx TEXT, response TEXT, tier TEXT, "
+        "ts TEXT DEFAULT CURRENT_TIMESTAMP)"
+    )
+    legacy.commit()
+    legacy.close()
+    barrier = threading.Barrier(4)
+    errors = []
+
+    def migrate():
+        try:
+            barrier.wait()
+            conn = ms.connect(str(path))
+            conn.close()
+        except Exception as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=migrate) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert errors == []
+    assert not any(thread.is_alive() for thread in threads)
+    conn = ms.connect(str(path))
+    try:
+        columns = ms._column_names(conn, "interactions")
+        assert {"session_id", "task_embedding", "project_explicit"} <= columns
+    finally:
+        conn.close()
 
 
 def test_fts_search_matches_tokens():
@@ -170,8 +447,10 @@ def test_concurrent_writes_from_threads(tmp_path):
         except Exception as e:  # noqa
             errors.append(e)
     threads = [threading.Thread(target=worker, args=(n,)) for n in range(8)]
-    for t in threads: t.start()
-    for t in threads: t.join()
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
     assert errors == []
     conn = ms.connect(p)
     count = conn.execute("SELECT COUNT(*) FROM interactions").fetchone()[0]

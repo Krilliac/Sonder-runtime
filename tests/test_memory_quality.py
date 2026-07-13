@@ -26,6 +26,12 @@ def test_repair_exact_duplicates_dry_run_and_apply():
     assert deleted == 0
     assert len(memory_store.all_lessons(conn)) == 2
 
+    plan, deleted = memory_quality.repair_exact_duplicates(
+        conn, apply="false",
+    )
+    assert deleted == 0
+    assert len(memory_store.all_lessons(conn)) == 2
+
     plan, deleted = memory_quality.repair_exact_duplicates(conn, apply=True)
     assert deleted == 1
     assert len(memory_store.all_lessons(conn)) == 1

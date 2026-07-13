@@ -13,8 +13,28 @@ import memory_store
 import lesson_pruner
 
 
-def _seed(conn, id_, text, vector, ts=None):
-    memory_store.add_lesson(conn, id_, text, embeddings.to_blob(vector), source_interaction=None)
+TEST_EMBEDDING_MODEL = "embed-v1"
+TEST_EMBEDDING_REVISION = "rev-1"
+
+
+def _seed(
+    conn,
+    id_,
+    text,
+    vector,
+    ts=None,
+    embedding_model=TEST_EMBEDDING_MODEL,
+    embedding_revision=TEST_EMBEDDING_REVISION,
+):
+    memory_store.add_lesson(
+        conn,
+        id_,
+        text,
+        embeddings.to_blob(vector),
+        source_interaction=None,
+        embedding_model=embedding_model,
+        embedding_revision=embedding_revision,
+    )
     if ts is not None:
         conn.execute("UPDATE lessons SET ts=? WHERE id=?", (ts, id_))
         conn.commit()
@@ -44,7 +64,10 @@ def test_cluster_near_duplicates_groups_similar_vectors_and_drops_uniques():
     lessons = lesson_pruner._load_lessons(conn)
     clusters = lesson_pruner.cluster_near_duplicates(lessons, threshold=0.93)
 
-    cluster_id_sets = [set(l["id"] for l in c) for c in clusters]
+    cluster_id_sets = [
+        {lesson["id"] for lesson in cluster}
+        for cluster in clusters
+    ]
     assert {"a1", "a2"} in cluster_id_sets
     assert {"b1", "b2"} in cluster_id_sets
     assert len(clusters) == 2
@@ -63,6 +86,90 @@ def test_cluster_near_duplicates_respects_threshold():
     # clusters, no matter how near-identical the vectors are.
     clusters = lesson_pruner.cluster_near_duplicates(lessons, threshold=1.5)
     assert clusters == []
+
+
+def test_cluster_near_duplicates_never_compares_different_models():
+    conn = memory_store.connect(":memory:")
+    _seed(
+        conn,
+        "v1",
+        "same lesson",
+        [1.0, 0.0],
+        embedding_model="embed-v1",
+        embedding_revision="rev-1",
+    )
+    _seed(
+        conn,
+        "v2",
+        "same lesson",
+        [1.0, 0.0],
+        embedding_model="embed-v2",
+        embedding_revision="rev-1",
+    )
+    calls = []
+
+    def cosine(left, right):
+        calls.append((left, right))
+        return 1.0
+
+    assert lesson_pruner.build_plan(conn, cosine_fn=cosine) == []
+    assert calls == []
+
+
+def test_cluster_near_duplicates_never_compares_different_revisions():
+    conn = memory_store.connect(":memory:")
+    _seed(
+        conn,
+        "old",
+        "same lesson",
+        [1.0, 0.0],
+        embedding_model="embed-v1",
+        embedding_revision="rev-old",
+    )
+    _seed(
+        conn,
+        "new",
+        "same lesson",
+        [1.0, 0.0],
+        embedding_model="embed-v1",
+        embedding_revision="rev-new",
+    )
+    calls = []
+
+    def cosine(left, right):
+        calls.append((left, right))
+        return 1.0
+
+    assert lesson_pruner.build_plan(conn, cosine_fn=cosine) == []
+    assert calls == []
+
+
+def test_cluster_near_duplicates_never_compares_different_actual_dimensions():
+    conn = memory_store.connect(":memory:")
+    _seed(
+        conn,
+        "two-d",
+        "same lesson",
+        [1.0, 0.0],
+        embedding_model="embed-v1",
+        embedding_revision="rev-1",
+    )
+    _seed(
+        conn,
+        "three-d",
+        "same lesson",
+        [1.0, 0.0, 0.0],
+        embedding_model="embed-v1",
+        embedding_revision="rev-1",
+    )
+    calls = []
+
+    def cosine(left, right):
+        calls.append((left, right))
+        return 1.0
+
+    assert lesson_pruner.build_plan(conn, cosine_fn=cosine) == []
+    assert calls == []
 
 
 def test_choose_keeper_prefers_longest_text():
@@ -109,16 +216,60 @@ def test_load_lessons_skips_rows_with_no_embedding():
     memory_store.add_lesson(conn, "noemb", "text with no embedding", None, source_interaction=None)
     _seed(conn, "hasemb", "text with an embedding", [1.0, 0.0, 0.0])
     lessons = lesson_pruner._load_lessons(conn)
-    assert [l["id"] for l in lessons] == ["hasemb"]
+    assert [lesson["id"] for lesson in lessons] == ["hasemb"]
+
+
+def test_load_lessons_skips_malformed_unsafe_and_inconsistent_vectors():
+    conn = memory_store.connect(":memory:")
+    _seed(conn, "valid", "valid", [1.0, 0.0])
+    unsafe = [
+        ("malformed", b"bad", 1),
+        ("nonfinite", embeddings.to_blob([float("nan"), 0.0]), 2),
+        ("zero", embeddings.to_blob([0.0, 0.0]), 2),
+        ("wrong-dim", embeddings.to_blob([1.0, 0.0]), 3),
+        ("missing-dim", embeddings.to_blob([1.0, 0.0]), None),
+    ]
+    conn.executemany(
+        "INSERT INTO lessons(id, text, embedding, embedding_model, "
+        "embedding_revision, embedding_dim) VALUES(?, ?, ?, 'embed-v1', "
+        "'rev-1', ?)",
+        [(id_, id_, blob, dimension) for id_, blob, dimension in unsafe],
+    )
+    conn.commit()
+
+    lessons = lesson_pruner._load_lessons(conn)
+
+    assert [lesson["id"] for lesson in lessons] == ["valid"]
+
+
+def test_legacy_null_provenance_never_produces_plan_or_deletion():
+    conn = memory_store.connect(":memory:")
+    conn.executemany(
+        "INSERT INTO lessons(id, text, embedding, embedding_dim) "
+        "VALUES(?, ?, ?, ?)",
+        [
+            ("legacy-a", "same lesson", embeddings.to_blob([1.0, 0.0]), 2),
+            ("legacy-b", "same lesson", embeddings.to_blob([1.0, 0.0]), 2),
+        ],
+    )
+    conn.commit()
+
+    plan, deleted = lesson_pruner.prune(conn, dry_run=False)
+
+    assert plan == []
+    assert deleted == 0
+    assert {
+        lesson["id"] for lesson in memory_store.all_lessons(conn)
+    } == {"legacy-a", "legacy-b"}
 
 
 def test_prune_dry_run_default_does_not_delete():
     conn = _store_with_duplicates()
-    before = {l["id"] for l in memory_store.all_lessons(conn)}
+    before = {lesson["id"] for lesson in memory_store.all_lessons(conn)}
 
     plan, deleted = lesson_pruner.prune(conn, threshold=0.93)  # dry_run defaults True
 
-    after = {l["id"] for l in memory_store.all_lessons(conn)}
+    after = {lesson["id"] for lesson in memory_store.all_lessons(conn)}
     assert after == before
     assert deleted == 0
     assert len(plan) == 2
@@ -129,7 +280,7 @@ def test_prune_apply_deletes_losers_keeps_keepers():
 
     plan, deleted = lesson_pruner.prune(conn, threshold=0.93, dry_run=False)
 
-    remaining = {l["id"] for l in memory_store.all_lessons(conn)}
+    remaining = {lesson["id"] for lesson in memory_store.all_lessons(conn)}
     assert deleted == 2
     assert remaining == {"a2", "b1", "u1"}
     assert "a1" not in remaining and "b2" not in remaining
@@ -150,7 +301,9 @@ def test_apply_plan_uses_injected_delete_fn():
     assert deleted == 2
     assert set(calls) == {"a1", "b2"}
     # The stub never touched the real table.
-    assert {l["id"] for l in memory_store.all_lessons(conn)} == {"a1", "a2", "b1", "b2", "u1"}
+    assert {
+        lesson["id"] for lesson in memory_store.all_lessons(conn)
+    } == {"a1", "a2", "b1", "b2", "u1"}
 
 
 def test_format_report_empty_plan():

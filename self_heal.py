@@ -134,6 +134,7 @@ def _repair_file_backed_config(issue):
 
 
 def repair(db_path, module_names=None, apply=False):
+    apply = apply is True
     issues = check(db_path, module_names=module_names)
     actions = []
     if not apply:
@@ -161,7 +162,11 @@ def repair(db_path, module_names=None, apply=False):
                     )
                     actions.append("rebuilt FTS row for lesson %s" % issue.target)
             elif issue.code == "store_bad_embedding":
-                conn.execute("UPDATE lessons SET embedding=NULL WHERE id=?", (issue.target,))
+                conn.execute(
+                    "UPDATE lessons SET embedding=NULL, embedding_model=NULL, "
+                    "embedding_revision=NULL, embedding_dim=NULL WHERE id=?",
+                    (issue.target,),
+                )
                 actions.append("cleared bad embedding for lesson %s" % issue.target)
         conn.commit()
     finally:

@@ -18,11 +18,10 @@ raising an obvious error:
                     through it.
   - empty_text:    lessons.text is NULL, '', or whitespace-only -- nothing
                     for FTS or a human to match against.
-  - bad_embedding: lessons.embedding is present (NOT NULL) but does not
-                    decode as a float32 vector via embeddings.from_blob --
-                    would raise mid-retrieval (e.g. inside retriever's
-                    cosine ranking) instead of failing here, cheaply and
-                    legibly, before it ever reaches that hot path.
+  - bad_embedding: lessons.embedding is present (NOT NULL) but is not a
+                    finite, non-zero float32 vector -- malformed bytes,
+                    NaN/Inf values, and zero-norm vectors would otherwise
+                    silently degrade retrieval or fail in a hot path.
 
 Read-only: this module never mutates the store. It only reads and reports;
 `memory_store.delete_lesson` / `memory_store.add_lesson` remain the only
@@ -76,18 +75,33 @@ def check_empty_text(conn):
 
 
 def check_bad_embeddings(conn, decode_fn=_embeddings.from_blob):
-    """lessons with a non-NULL embedding blob that fails to decode.
+    """Lessons whose non-NULL embedding is not a usable float32 vector.
 
     decode_fn is injectable (bytes -> list[float], raising on malformed
     input) so tests never need a real embedding model -- defaults to
     embeddings.from_blob, which is pure array decoding with no network/GPU
-    dependency of its own.
+    dependency of its own. Blob validity comes from memory_store's central
+    integrity check so all maintenance and retrieval paths agree on malformed,
+    non-finite, and zero-norm vectors.
     """
     rows = conn.execute(
         "SELECT id, embedding FROM lessons WHERE embedding IS NOT NULL"
     ).fetchall()
     issues = []
     for lid, blob in rows:
+        _dimension, integrity_error = memory_store._embedding_blob_integrity(blob)
+        if integrity_error is not None:
+            detail = {
+                "invalid_type": "embedding has an invalid storage type",
+                "invalid_length": "embedding has malformed float32 bytes",
+                "nonfinite": "embedding contains a non-finite value",
+                "zero_norm": "embedding has zero norm",
+            }.get(
+                integrity_error,
+                "embedding failed integrity check: %s" % integrity_error,
+            )
+            issues.append(Issue("bad_embedding", lid, detail))
+            continue
         try:
             vec = decode_fn(blob)
         except Exception as exc:  # any decode failure is a reportable issue, not a crash
@@ -95,8 +109,10 @@ def check_bad_embeddings(conn, decode_fn=_embeddings.from_blob):
                 Issue("bad_embedding", lid, "embedding failed to decode: %r" % (exc,))
             )
             continue
-        if not vec:
-            issues.append(Issue("bad_embedding", lid, "embedding decoded to an empty vector"))
+        if not _embeddings.valid_vector(vec):
+            issues.append(
+                Issue("bad_embedding", lid, "embedding decoder returned an invalid vector")
+            )
     return issues
 
 

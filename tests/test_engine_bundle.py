@@ -197,6 +197,9 @@ def test_runtime_environment_uses_explicit_bundle_paths(tmp_path, monkeypatch):
     env = engine_bundle.runtime_environment(bundle, tmp_path / "models")
     assert env["SONDER_OLLAMA_EXE"] == str(bundle.ollama_executable)
     assert env["SONDER_EMBED_MODEL"] == "nomic-embed-text:latest"
+    assert env["SONDER_EMBED_REVISION"] == "ollama-manifest-sha256:" + engine_bundle.sha256_file(
+        bundle.root / bundle.embedding_model.manifest
+    )
     assert env["OLLAMA_MODELS"] == str(tmp_path / "models")
     assert env["OLLAMA_NO_CLOUD"] == "1"
     assert env["PATH"].startswith(str(bundle.ollama_executable.parent) + os.pathsep)

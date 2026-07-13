@@ -127,6 +127,19 @@ def test_agent_dispatch_exposes_learning_health_as_read_only(monkeypatch):
     ) == "learning health: grounded"
 
 
+def test_embedding_mutations_require_learning_health_validation():
+    mutations = [{
+        "tool": "memory_interaction_embedding_backfill", "path": "",
+    }]
+
+    assert server._agent_validation_covers(
+        "learning_health_status", {}, mutations,
+    ) is True
+    assert server._agent_validation_covers(
+        "memory_quality_report", {}, mutations,
+    ) is False
+
+
 def test_agent_dispatch_can_tune_emotion_vectors(monkeypatch, tmp_path):
     monkeypatch.setattr(server.emotion_vectors, "workspace_root", lambda: str(tmp_path))
     monkeypatch.delenv("SONDER_EMOTION_VECTORS", raising=False)

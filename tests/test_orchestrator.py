@@ -50,6 +50,7 @@ def test_run_with_learning_captures_and_returns_id():
         c, "fix the bug", "code", gen,
         retrieve_fn=lambda conn, task: ["prefer RRF"],
         id_fn=lambda: "fixed123",
+        project="project-a",
     )
     assert resp == "the answer"
     assert iid == "fixed123"
@@ -58,6 +59,7 @@ def test_run_with_learning_captures_and_returns_id():
     assert row["task"] == "fix the bug"
     assert row["response"] == "the answer"
     assert row["tier"] == "code"
+    assert row["project"] == "project-a"
     assert row["tokens_in"] > 0
     assert row["tokens_out"] > 0
     assert row["token_source"] == "estimated"
@@ -135,3 +137,25 @@ def test_default_retriever_logs_lesson_usage(monkeypatch):
     assert resp == "answer"
     stats = ms.lesson_usage_stats(c)["L1"]
     assert stats["uses"] == 1
+
+
+def test_default_retriever_still_logs_usage_after_hot_reload(monkeypatch):
+    import importlib
+    import retriever
+
+    c = ms.connect(":memory:")
+    ms.add_lesson(c, "L1", "use deque for queues", None, "seed")
+    reloaded = importlib.reload(retriever)
+    monkeypatch.setattr(
+        reloaded,
+        "retrieve_with_ids",
+        lambda conn, task: [
+            {"id": "L1", "text": "use deque for queues", "score": 1.0},
+        ],
+    )
+
+    o.run_with_learning(
+        c, "queue task", "code", lambda prompt: "answer", id_fn=lambda: "I2",
+    )
+
+    assert ms.lesson_usage_stats(c)["L1"]["uses"] == 1

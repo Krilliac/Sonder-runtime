@@ -1,5 +1,6 @@
 import hashlib
 
+import embeddings
 import memory_store as ms
 import seed_merge
 
@@ -23,7 +24,7 @@ def test_merge_applies_quality_pipeline():
     assert stats["added"] == 2
     assert stats["skipped_vague"] == 1
     assert stats["skipped_private"] == 1
-    texts = {l["text"] for l in ms.all_lessons(c)}
+    texts = {lesson["text"] for lesson in ms.all_lessons(c)}
     assert "Use collections.Counter(x).most_common(1) to get the mode." in texts
     assert all("secret" not in t for t in texts)
 
@@ -65,3 +66,27 @@ def test_text_of_accepts_both_field_names():
     assert seed_merge._text_of({"lesson": " a "}) == "a"
     assert seed_merge._text_of({"text": " b "}) == "b"
     assert seed_merge._text_of({}) == ""
+
+
+def test_merge_runtime_embed_records_provenance_and_dedupes_current(monkeypatch):
+    c = ms.connect(":memory:")
+    calls = []
+    monkeypatch.setattr(
+        embeddings,
+        "embed",
+        lambda text: calls.append(text) or [0.5, 0.5],
+    )
+    records = [
+        {"lesson": "Use pathlib.Path.resolve() before containment checks.", "source": "s"},
+        {"lesson": "Resolve paths with pathlib.Path.resolve() before comparison.", "source": "s"},
+    ]
+
+    stats = seed_merge.merge_records(c, records)
+
+    assert stats["added"] == 1
+    assert stats["skipped_dup_embed"] == 1
+    assert calls == [record["lesson"] for record in records]
+    stored = ms.all_lessons(c)[0]
+    assert stored["embedding_model"] == embeddings.EMBED_IDENTITY
+    assert stored["embedding_revision"] == embeddings.EMBED_REVISION
+    assert stored["embedding_dim"] == 2

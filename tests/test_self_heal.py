@@ -1,6 +1,8 @@
 import json
 
+import embeddings
 import memory_store
+import pytest
 import self_heal
 
 
@@ -23,16 +25,42 @@ def test_self_heal_rebuilds_missing_fts_and_removes_orphan(tmp_path):
     assert any("removed orphan" in a for a in actions)
 
 
-def test_self_heal_clears_bad_embedding(tmp_path):
+@pytest.mark.parametrize(
+    "bad_embedding",
+    [
+        pytest.param(b"bad", id="malformed"),
+        pytest.param(embeddings.to_blob([float("nan"), 1.0]), id="nan"),
+        pytest.param(embeddings.to_blob([0.0, -0.0]), id="zero-norm"),
+    ],
+)
+def test_self_heal_clears_bad_embedding_and_provenance(tmp_path, bad_embedding):
     db = str(tmp_path / "mem.db")
     conn = memory_store.connect(db)
     try:
-        memory_store.add_lesson(conn, "L1", "lesson", b"bad", "i1")
+        memory_store.add_lesson(conn, "L1", "lesson", None, "i1")
+        conn.execute(
+            "UPDATE lessons SET embedding=?, embedding_model=?, "
+            "embedding_revision=?, embedding_dim=? WHERE id='L1'",
+            (bad_embedding, "stale-model", "stale-revision", 999),
+        )
+        conn.commit()
     finally:
         conn.close()
+    dry_after, dry_actions = self_heal.repair(db, apply="false")
+    assert any(i.code == "store_bad_embedding" for i in dry_after)
+    assert dry_actions == ["dry run: no repairs applied"]
     after, actions = self_heal.repair(db, apply=True)
     assert not any(i.code == "store_bad_embedding" for i in after)
     assert any("cleared bad embedding" in a for a in actions)
+    conn = memory_store.connect(db)
+    try:
+        row = conn.execute(
+            "SELECT embedding, embedding_model, embedding_revision, embedding_dim "
+            "FROM lessons WHERE id='L1'"
+        ).fetchone()
+        assert tuple(row) == (None, None, None, None)
+    finally:
+        conn.close()
 
 
 def test_self_heal_repairs_invalid_json_configs(monkeypatch, tmp_path):

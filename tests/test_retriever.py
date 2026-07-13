@@ -57,11 +57,16 @@ def test_retrieve_returns_empty_when_all_candidates_below_min_sim():
     assert texts == []
 
 
-def test_retrieve_drops_lexical_candidates_with_no_stored_embedding():
+def test_retrieve_drops_unembedded_lexical_candidates_when_compatible_corpus_exists():
     c = ms.connect(":memory:")
     # Lexically matches "threading lock" but has no embedding to judge relevance by
-    # -> must be dropped from the thresholded path even though FTS surfaces it.
+    # -> must be dropped from the thresholded path when a compatible semantic
+    # corpus exists, even though FTS surfaces it.
     ms.add_lesson(c, "no-embedding", "always release the threading lock", None, "i")
+    ms.add_lesson(
+        c, "compatible-corpus", "unrelated semantic candidate",
+        e.to_blob([0.0, 1.0]), "i",
+    )
     texts = r.retrieve(c, "threading lock release", embed_fn=lambda t: [1.0, 0.0], min_sim=0.5)
     assert texts == []
 
@@ -73,6 +78,163 @@ def test_retrieve_embed_fn_none_still_uses_lexical_fallback_with_min_sim_set():
         c, "threading lock release", embed_fn=lambda t: None, min_sim=0.9
     )
     assert any("threading lock" in t for t in texts)
+
+
+def test_retrieve_falls_back_to_lexical_when_stored_vector_dimension_changed():
+    c = ms.connect(":memory:")
+    ms.add_lesson(
+        c, "old-model", "always release the threading lock",
+        e.to_blob([1.0, 0.0]), "i",
+    )
+
+    rows = r.retrieve_with_ids(
+        c, "threading lock release",
+        embed_fn=lambda _text: [1.0, 0.0, 0.0], min_sim=0.9,
+    )
+
+    assert [row["id"] for row in rows] == ["old-model"]
+
+
+def test_retrieve_skips_incompatible_vectors_when_compatible_corpus_exists():
+    c = ms.connect(":memory:")
+    ms.add_lesson(
+        c, "old-model", "threading lock release old vector",
+        e.to_blob([1.0, 0.0]), "i",
+    )
+    ms.add_lesson(
+        c, "current-model", "threading lock release current vector",
+        e.to_blob([1.0, 0.0, 0.0]), "i",
+    )
+
+    rows = r.retrieve_with_ids(
+        c, "threading lock release", k=2,
+        embed_fn=lambda _text: [1.0, 0.0, 0.0], min_sim=0.9,
+    )
+
+    assert [row["id"] for row in rows] == ["current-model"]
+
+
+def test_retrieve_skips_wrong_model_vector_even_when_dimension_matches():
+    c = ms.connect(":memory:")
+    ms.add_lesson(
+        c, "old-model", "threading lock release old model",
+        e.to_blob([1.0, 0.0]), "i", embedding_model="embed-v1",
+    )
+    ms.add_lesson(
+        c, "current-model", "threading lock release current model",
+        e.to_blob([1.0, 0.0]), "i", embedding_model="embed-v2",
+    )
+
+    rows = r.retrieve_with_ids(
+        c, "threading lock release", k=2,
+        embed_fn=lambda _text: [1.0, 0.0], min_sim=0.9,
+        embedding_model="embed-v2",
+    )
+
+    assert [row["id"] for row in rows] == ["current-model"]
+
+
+def test_retrieve_rejects_vector_with_corrupt_dimension_metadata():
+    c = ms.connect(":memory:")
+    ms.add_lesson(
+        c, "bad-metadata", "threading lock release bad metadata",
+        e.to_blob([1.0, 0.0]), "i", embedding_model="embed-v2",
+        embedding_dim=2,
+    )
+    c.execute("UPDATE lessons SET embedding_dim=3 WHERE id='bad-metadata'")
+    c.commit()
+    ms.add_lesson(
+        c, "valid", "threading lock release valid metadata",
+        e.to_blob([1.0, 0.0]), "i", embedding_model="embed-v2",
+        embedding_dim=2,
+    )
+
+    rows = r.retrieve_with_ids(
+        c, "threading lock release", k=2,
+        embed_fn=lambda _text: [1.0, 0.0], min_sim=0.9,
+        embedding_model="embed-v2",
+    )
+
+    assert [row["id"] for row in rows] == ["valid"]
+
+
+def test_missing_dimension_metadata_cannot_suppress_lexical_fallback():
+    c = ms.connect(":memory:")
+    ms.add_lesson(
+        c, "missing-dimension", "threading lock release current model",
+        e.to_blob([1.0, 0.0]), "i", embedding_model="embed-v2",
+        embedding_revision="rev-v2", embedding_dim=2,
+    )
+    c.execute(
+        "UPDATE lessons SET embedding_dim=NULL WHERE id='missing-dimension'"
+    )
+    c.commit()
+
+    rows = r.retrieve_with_ids(
+        c, "threading lock release", k=1,
+        embed_fn=lambda _text: [1.0, 0.0], min_sim=1.1,
+        embedding_model="embed-v2", embedding_revision="rev-v2",
+    )
+
+    assert [row["id"] for row in rows] == ["missing-dimension"]
+
+
+def test_unversioned_runtime_rejects_hashed_stored_revision():
+    c = ms.connect(":memory:")
+    ms.add_lesson(
+        c, "stale-revision", "threading lock release stale revision",
+        e.to_blob([1.0, 0.0]), "i", embedding_model="embed-v2",
+        embedding_revision="stale-hash", embedding_dim=2,
+    )
+
+    rows = r.retrieve_with_ids(
+        c, "threading lock release", k=1,
+        embed_fn=lambda _text: [1.0, 0.0], min_sim=1.1,
+        embedding_model="embed-v2", embedding_revision="",
+    )
+
+    assert [row["id"] for row in rows] == ["stale-revision"]
+
+
+def test_zero_norm_vector_cannot_suppress_lexical_fallback():
+    c = ms.connect(":memory:")
+    ms.add_lesson(
+        c, "zero", "threading lock release zero vector",
+        e.to_blob([1.0, 0.0]), "i", embedding_dim=2,
+    )
+    c.execute(
+        "UPDATE lessons SET embedding=? WHERE id='zero'",
+        (e.to_blob([0.0, 0.0]),),
+    )
+    c.commit()
+
+    rows = r.retrieve_with_ids(
+        c, "threading lock release", k=1,
+        embed_fn=lambda _text: [1.0, 0.0], min_sim=1.1,
+    )
+
+    assert [row["id"] for row in rows] == ["zero"]
+
+
+def test_only_quarantined_compatible_vectors_do_not_block_lexical_fallback():
+    c = ms.connect(":memory:")
+    ms.add_lesson(
+        c, "quarantined-current", "threading lock release current vector",
+        e.to_blob([1.0, 0.0, 0.0]), "i",
+    )
+    for index in range(r.QUARANTINE_REPEAT_TASK_MIN_LOSSES):
+        _lesson_outcome(c, "quarantined-current", index, "failed", -1.0)
+    ms.add_lesson(
+        c, "old-model", "threading lock release old vector",
+        e.to_blob([1.0, 0.0]), "i",
+    )
+
+    rows = r.retrieve_with_ids(
+        c, "threading lock release", k=2,
+        embed_fn=lambda _text: [1.0, 0.0, 0.0], min_sim=0.9,
+    )
+
+    assert [row["id"] for row in rows] == ["old-model"]
 
 
 def test_retrieve_with_ids_returns_ids_and_text():

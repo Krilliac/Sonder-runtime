@@ -18,6 +18,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import embeddings  # noqa: E402
 import memory_store  # noqa: E402
+import sonder_paths  # noqa: E402
 
 # Natural-language coding intents that SHOULD match a seeded lesson.
 POSITIVES = [
@@ -65,23 +66,88 @@ NEGATIVES = [
 ]
 
 
-def top1_scores(conn, queries):
-    lessons = [(l["text"], embeddings.from_blob(l["embedding"]))
-               for l in memory_store.all_lessons(conn) if l["embedding"]]
-    out = []
-    for q in queries:
-        qv = embeddings.embed(q)
-        best = max((embeddings.cosine(qv, v) for _, v in lessons), default=0.0)
-        out.append(best)
-    return out
+def _compatible_corpus(conn, model, revision, dimension):
+    corpus = []
+    for lesson in memory_store.all_lessons(conn):
+        if (
+            lesson.get("embedding_model") != model
+            or (lesson.get("embedding_revision") or None)
+            != (revision or None)
+            or lesson.get("embedding_dim") != dimension
+            or not lesson.get("embedding")
+        ):
+            continue
+        try:
+            vector = embeddings.from_blob(lesson["embedding"])
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if len(vector) == dimension and embeddings.valid_vector(vector):
+            corpus.append((lesson["text"], vector))
+    return corpus
+
+
+def top1_scores(conn, queries, embed_fn=None):
+    """Return top-1 scores against only the current compatible vector corpus."""
+    runtime_default = embed_fn is None
+    embed_fn = embed_fn or embeddings.embed
+    query_vectors = []
+    query_spaces = set()
+    for query in queries:
+        vector = embed_fn(query)
+        if not embeddings.valid_vector(vector):
+            raise RuntimeError(
+                "cannot calibrate: current embedding model returned no valid vector"
+            )
+        query_vectors.append(vector)
+        if runtime_default or embed_fn is embeddings.embed:
+            provenance = embeddings.provenance(vector)
+            query_spaces.add((
+                provenance.get("model"), provenance.get("revision"), len(vector),
+            ))
+
+    if not query_vectors:
+        return []
+    dimensions = {len(vector) for vector in query_vectors}
+    if len(dimensions) != 1:
+        raise RuntimeError(
+            "cannot calibrate: current embedding model returned mixed dimensions"
+        )
+    dimension = dimensions.pop()
+    if query_spaces and len(query_spaces) != 1:
+        raise RuntimeError(
+            "cannot calibrate: embedding model revision changed across queries"
+        )
+    if query_spaces:
+        model, revision, bound_dimension = query_spaces.pop()
+        if bound_dimension != dimension:
+            raise RuntimeError("cannot calibrate: inconsistent query provenance")
+    else:
+        model, revision = embeddings.EMBED_IDENTITY, embeddings.EMBED_REVISION
+    lessons = _compatible_corpus(
+        conn,
+        model,
+        revision,
+        dimension,
+    )
+    if not lessons:
+        raise RuntimeError(
+            "cannot calibrate: no current compatible semantic corpus exists "
+            "(refresh lesson embeddings first)"
+        )
+
+    return [
+        max(embeddings.cosine(query_vector, vector) for _, vector in lessons)
+        for query_vector in query_vectors
+    ]
 
 
 def main():
-    db = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory.db")
+    db = sonder_paths.memory_db_path()
     conn = memory_store.connect(db)
     try:
-        pos = top1_scores(conn, POSITIVES)
-        neg = top1_scores(conn, NEGATIVES)
+        scores = top1_scores(conn, POSITIVES + NEGATIVES)
+        pos = scores[:len(POSITIVES)]
+        neg = scores[len(POSITIVES):]
     finally:
         conn.close()
 

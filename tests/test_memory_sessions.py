@@ -1,4 +1,6 @@
+import embeddings
 import memory_store as ms
+import sqlite3
 
 
 def _conn():
@@ -10,6 +12,12 @@ def test_migration_adds_session_and_embedding_columns():
     cols = ms._column_names(c, "interactions")
     assert "session_id" in cols
     assert "task_embedding" in cols
+    assert "task_embedding_model" in cols
+    assert "task_embedding_revision" in cols
+    assert "task_embedding_dim" in cols
+    assert "project" in cols
+    lesson_cols = ms._column_names(c, "lessons")
+    assert {"embedding_model", "embedding_revision", "embedding_dim"} <= lesson_cols
 
 
 def test_log_interaction_defaults_are_session_less():
@@ -18,6 +26,50 @@ def test_log_interaction_defaults_are_session_less():
     row = ms.get_interaction(c, "a")
     assert row["session_id"] is None
     assert row["task_embedding"] is None
+    assert row["project"] is None
+    assert row["project_explicit"] == 1
+
+
+def test_fresh_schema_raw_insert_defaults_project_provenance_to_explicit():
+    c = _conn()
+    c.execute(
+        "INSERT INTO interactions(id, task, response, tier) VALUES(?, ?, ?, ?)",
+        ("raw", "task", "response", "code"),
+    )
+    c.commit()
+
+    assert ms.get_interaction(c, "raw")["project_explicit"] == 1
+
+
+def test_log_interaction_persists_project_scope():
+    c = _conn()
+    ms.log_interaction(
+        c, "scoped", "task", "", "response", "sonder",
+        project="project-a",
+    )
+
+    assert ms.get_interaction(c, "scoped")["project"] == "project-a"
+
+
+def test_explicit_no_project_is_not_inferred_from_session_project():
+    c = _conn()
+    ms.touch_session(c, "shared", project="project-a")
+    ms.log_interaction(
+        c, "legacy-a", "task a", "", "response a", "sonder",
+        session_id="shared", project_explicit=False,
+    )
+    ms.log_interaction(
+        c, "explicit-none", "task none", "", "response none", "sonder",
+        session_id="shared", project=None, project_explicit=True,
+    )
+
+    assert [row["id"] for row in ms.session_turns_for_project(
+        c, "shared", "project-a",
+    )] == []
+    assert [row["id"] for row in ms.session_turns_for_project(
+        c, "shared", None,
+    )] == ["explicit-none"]
+    assert ms.ambiguous_legacy_project_turn_count(c) == 1
 
 
 def test_session_turns_ordered_oldest_first():
@@ -28,6 +80,70 @@ def test_session_turns_ordered_oldest_first():
     turns = ms.session_turns(c, "S")
     assert [t["task"] for t in turns] == ["q1", "q2"]
     assert [t["id"] for t in turns] == ["i1", "i2"]
+
+
+def test_project_summaries_are_isolated_with_explicit_none_scope():
+    c = _conn()
+    ms.update_session_project_summary(c, "shared", "a", "summary a", "a1")
+    ms.update_session_project_summary(c, "shared", "b", "summary b", "b1")
+    ms.update_session_project_summary(c, "shared", None, "summary none", "n1")
+
+    assert ms.get_session_project_summary(c, "shared", "a") == {
+        "summary": "summary a", "summarized_through": "a1",
+    }
+    assert ms.get_session_project_summary(c, "shared", "b")["summary"] == "summary b"
+    assert ms.get_session_project_summary(c, "shared", None)["summary"] == "summary none"
+
+
+def test_explicit_unscoped_turn_stays_unscoped_when_session_gets_project():
+    c = _conn()
+    ms.touch_session(c, "shared", project=None)
+    ms.log_interaction(
+        c, "legacy-none", "task", "", "private unscoped response", "sonder",
+        session_id="shared",
+    )
+
+    ms.touch_session(c, "shared", project="project-b")
+
+    assert [row["id"] for row in ms.session_turns_for_project(
+        c, "shared", None,
+    )] == ["legacy-none"]
+    assert ms.session_turns_for_project(c, "shared", "project-b") == []
+    row = ms.get_interaction(c, "legacy-none")
+    assert row["project"] is None
+    assert row["project_explicit"] == 1
+
+
+def test_ambiguous_count_includes_null_marker_from_older_schema():
+    c = sqlite3.connect(":memory:")
+    c.execute(
+        "CREATE TABLE interactions(session_id TEXT, project TEXT, "
+        "project_explicit INTEGER)"
+    )
+    c.execute(
+        "INSERT INTO interactions VALUES('legacy', NULL, NULL)"
+    )
+
+    assert ms.ambiguous_legacy_project_turn_count(c) == 1
+
+
+def test_session_project_change_keeps_ambiguous_legacy_turn_quarantined():
+    c = _conn()
+    ms.touch_session(c, "shared", project="project-a")
+    ms.log_interaction(
+        c, "legacy-a", "task", "", "private a response", "sonder",
+        session_id="shared", project_explicit=False,
+    )
+
+    ms.set_session_project(c, "shared", "project-b")
+
+    assert [row["id"] for row in ms.session_turns_for_project(
+        c, "shared", "project-a",
+    )] == []
+    assert ms.session_turns_for_project(c, "shared", "project-b") == []
+    assert ms.session_turns_for_project(c, "shared", None) == []
+    assert ms.ambiguous_legacy_project_turn_count(c) == 1
+    assert ms.unscoped_session_turn_count(c) == 1
 
 
 def test_session_history_caps_to_last_n():
@@ -87,10 +203,11 @@ def test_find_session_by_id_and_title_prefix():
 
 def test_good_interactions_with_embeddings_filters_and_excludes():
     c = _conn()
+    vector = embeddings.to_blob([1.0, 0.0])
     ms.log_interaction(c, "g", "task g", "", "resp", "sonder",
-                       session_id="A", task_embedding=b"\x00\x01")
+                       session_id="A", task_embedding=vector)
     ms.log_interaction(c, "bad", "task bad", "", "resp", "sonder",
-                       task_embedding=b"\x00\x01")
+                       task_embedding=vector)
     ms.log_interaction(c, "noemb", "task noemb", "", "resp", "sonder")
     ms.record_outcome_row(c, "g", "tests_passed", 1.0)
     ms.record_outcome_row(c, "bad", "failed", -1.0)

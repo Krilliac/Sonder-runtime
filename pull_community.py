@@ -16,12 +16,14 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
+import embeddings  # noqa: E402
 import memory_store  # noqa
 
 
 def merge_lessons(conn, lessons, embed_fn=None):
     existing = {
-        (l["text"] or "").strip().lower() for l in memory_store.all_lessons(conn)
+        (lesson["text"] or "").strip().lower()
+        for lesson in memory_store.all_lessons(conn)
     }
     added = 0
     for lesson in lessons:
@@ -31,9 +33,29 @@ def merge_lessons(conn, lessons, embed_fn=None):
         key = text.strip().lower()
         if key in existing:
             continue
-        embedding = embed_fn(text) if embed_fn else None
+        result = embed_fn(text) if embed_fn else None
+        vector = None
+        embedding = None
+        if isinstance(result, (bytes, bytearray, memoryview)):
+            try:
+                candidate = embeddings.from_blob(bytes(result))
+            except (TypeError, ValueError, EOFError):
+                candidate = None
+            if embeddings.valid_vector(candidate):
+                vector = candidate
+                embedding = bytes(result)
+        elif embeddings.valid_vector(result):
+            vector = result
+            embedding = embeddings.to_blob(vector)
+        provenance = (
+            embeddings.provenance(vector)
+            if vector is not None and embed_fn is embeddings.embed else {}
+        )
         memory_store.add_lesson(
-            conn, memory_store.new_id(), text, embedding, "community"
+            conn, memory_store.new_id(), text, embedding, "community",
+            embedding_model=provenance.get("model"),
+            embedding_revision=provenance.get("revision"),
+            embedding_dim=provenance.get("dimension"),
         )
         existing.add(key)
         added += 1

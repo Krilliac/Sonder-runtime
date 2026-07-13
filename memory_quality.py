@@ -204,6 +204,7 @@ def format_audit(report, sample_limit=5):
 
 
 def repair_exact_duplicates(conn, apply=False):
+    apply = apply is True
     plan = exact_duplicate_plan(conn)
     deleted = 0 if not apply else apply_exact_duplicate_plan(conn, plan)
     return plan, deleted

@@ -91,12 +91,49 @@ def distill(task, response, signal, offload_fn):
     return text
 
 
-def is_duplicate(new_emb, conn, threshold=DUP_THRESHOLD):
-    if new_emb is None:
+def is_duplicate(
+    new_emb,
+    conn,
+    threshold=DUP_THRESHOLD,
+    *,
+    embedding_model=None,
+    embedding_revision=None,
+    embedding_dim=None,
+):
+    """Return whether *new_emb* matches a compatible, current lesson vector.
+
+    Semantic deduplication is deliberately fail-closed: a caller must identify
+    the embedding model, revision, and dimension that produced ``new_emb``.
+    Legacy or stale rows, corrupt blobs, and non-finite vectors are ignored so a
+    model migration cannot suppress an otherwise distinct lesson.
+    """
+    if (
+        not embeddings.valid_vector(new_emb)
+        or not embedding_model
+        or embedding_revision is None
+        or embedding_dim != len(new_emb)
+    ):
         return False
     for les in memory_store.all_lessons(conn):
+        if (
+            les.get("embedding_model") != embedding_model
+            or (les.get("embedding_revision") or None)
+            != (embedding_revision or None)
+            or les.get("embedding_dim") != embedding_dim
+        ):
+            continue
         emb = les["embedding"]
-        if emb and embeddings.cosine(new_emb, embeddings.from_blob(emb)) >= threshold:
+        if not emb:
+            continue
+        try:
+            stored = embeddings.from_blob(emb)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if (
+            len(stored) == embedding_dim
+            and embeddings.valid_vector(stored)
+            and embeddings.cosine(new_emb, stored) >= threshold
+        ):
             return True
     return False
 
@@ -116,7 +153,9 @@ def exact_text_exists(text, conn):
 
 
 def maybe_add_lesson(conn, interaction_id, task, response, signal, offload_fn,
-                     embed_fn=embeddings.embed, id_fn=memory_store.new_id):
+                     embed_fn=None, id_fn=memory_store.new_id):
+    runtime_default = embed_fn is None
+    embed_fn = embed_fn or embeddings.embed
     if memory_store.lesson_exists_for_interaction(conn, interaction_id):
         return None
     text = distill(task, response, signal, offload_fn)
@@ -131,9 +170,27 @@ def maybe_add_lesson(conn, interaction_id, task, response, signal, offload_fn,
     if exact_text_exists(text, conn):
         return None
     emb = embed_fn(text)
-    if is_duplicate(emb, conn):
+    if not embeddings.valid_vector(emb):
+        emb = None
+    provenance = (
+        embeddings.provenance(emb)
+        if emb is not None and (runtime_default or embed_fn is embeddings.embed)
+        else {}
+    )
+    if is_duplicate(
+        emb,
+        conn,
+        embedding_model=provenance.get("model"),
+        embedding_revision=provenance.get("revision"),
+        embedding_dim=provenance.get("dimension"),
+    ):
         return None
     lesson_id = id_fn()
     blob = embeddings.to_blob(emb) if emb else None
-    memory_store.add_lesson(conn, lesson_id, text, blob, interaction_id)
+    memory_store.add_lesson(
+        conn, lesson_id, text, blob, interaction_id,
+        embedding_model=provenance.get("model"),
+        embedding_revision=provenance.get("revision"),
+        embedding_dim=provenance.get("dimension"),
+    )
     return lesson_id

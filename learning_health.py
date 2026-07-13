@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import embeddings
 import memory_quality
 import memory_store
 import retriever
@@ -138,10 +139,23 @@ def _lesson_outcome_metrics(conn) -> dict:
 
 def _status(report: dict) -> str:
     quality = report["quality"]
+    task_embeddings = report.get("interaction_task_embeddings") or {}
     severe = (
         quality["path_or_secret_like"]
         + quality["missing_fts"]
         + quality["orphan_fts"]
+        + quality.get("embedding_model_mismatch", 0)
+        + quality.get("embedding_revision_mismatch", 0)
+        + quality.get("embedding_dimension_invalid", 0)
+        + quality.get("embedding_dimension_mismatch", 0)
+        + quality.get("embedding_vector_invalid", 0)
+        + int(bool(quality.get("embedding_mixed_dimensions")))
+        + int(task_embeddings.get("model_mismatch", 0))
+        + int(task_embeddings.get("revision_mismatch", 0))
+        + int(task_embeddings.get("dimension_invalid", 0))
+        + int(task_embeddings.get("dimension_mismatch", 0))
+        + int(task_embeddings.get("vector_invalid", 0))
+        + int(len(task_embeddings.get("dimensions") or {}) > 1)
     )
     if severe or (report["outcomes"] and report["positive_percent"] < 60.0):
         return "attention"
@@ -150,6 +164,12 @@ def _status(report: dict) -> str:
         + quality["no_embedding"]
         + quality["vague_without_anchor"]
         + quality["missing_source_interaction"]
+        + quality.get("embedding_legacy", 0)
+        + quality.get("embedding_dimension_missing", 0)
+        + int(task_embeddings.get("missing", 0))
+        + int(task_embeddings.get("legacy_model", 0))
+        + int(task_embeddings.get("dimension_missing", 0))
+        + int(report.get("ambiguous_legacy_project_turns", 0))
     )
     if hygiene or (
         report["interactions"] >= 20
@@ -172,6 +192,25 @@ def build_report(conn) -> dict:
     outcomes = _outcome_metrics(conn)
     lesson_outcomes = _lesson_outcome_metrics(conn)
     audit = memory_quality.audit(conn)
+    embedding_state = memory_store.embedding_provenance_stats(
+        conn,
+        embeddings.EMBED_IDENTITY,
+        revision=embeddings.EMBED_REVISION,
+        dimension=embeddings.EXPECTED_DIMENSION,
+    )
+    interaction_embedding_state = (
+        memory_store.interaction_task_embedding_provenance_stats(
+            conn,
+            embeddings.EMBED_IDENTITY,
+            revision=embeddings.EMBED_REVISION,
+            dimension=embeddings.EXPECTED_DIMENSION,
+        )
+    )
+    ambiguous_legacy_project_turns = (
+        memory_store.ambiguous_legacy_project_turn_count(conn)
+    )
+    unscoped_session_turns = memory_store.unscoped_session_turn_count(conn)
+    dimensions = embedding_state.get("dimensions") or {}
     quality = {
         "exact_duplicate_groups": int(audit.get("exact_duplicate_groups", 0)),
         "exact_duplicate_prunable": int(audit.get("exact_duplicate_prunable", 0)),
@@ -181,7 +220,28 @@ def build_report(conn) -> dict:
         "missing_source_interaction": int(audit.get("missing_source_interaction", 0)),
         "missing_fts": int(audit.get("missing_fts", 0)),
         "orphan_fts": int(audit.get("orphan_fts", 0)),
-        "embedding_percent": _percent(lessons - int(audit.get("no_embedding", 0)), lessons),
+        "embedding_percent": _percent(
+            int(embedding_state.get("valid", 0)), lessons,
+        ),
+        "embedding_legacy": int(embedding_state.get("legacy_model", 0)),
+        "embedding_model_mismatch": int(embedding_state.get("model_mismatch", 0)),
+        "embedding_revision_mismatch": int(
+            embedding_state.get("revision_mismatch", 0)
+        ),
+        "embedding_dimension_missing": int(
+            embedding_state.get("dimension_missing", 0)
+        ),
+        "embedding_dimension_invalid": int(
+            embedding_state.get("dimension_invalid", 0)
+        ),
+        "embedding_dimension_mismatch": int(
+            embedding_state.get("dimension_mismatch", 0)
+        ),
+        "embedding_vector_invalid": int(
+            embedding_state.get("vector_invalid", 0)
+        ),
+        "embedding_mixed_dimensions": len(dimensions) > 1,
+        "embedding_dimensions": dimensions,
     }
     good_interactions = outcomes["good_outcome_interactions"]
     report = {
@@ -203,6 +263,12 @@ def build_report(conn) -> dict:
         if good_interactions
         else None,
         "quality": quality,
+        "embedding_model": embeddings.EMBED_IDENTITY,
+        "embedding_revision": embeddings.EMBED_REVISION or None,
+        "embedding_expected_dimension": embeddings.EXPECTED_DIMENSION,
+        "interaction_task_embeddings": interaction_embedding_state,
+        "ambiguous_legacy_project_turns": ambiguous_legacy_project_turns,
+        "unscoped_session_turns": unscoped_session_turns,
     }
     report["status"] = _status(report)
     return report
@@ -248,6 +314,82 @@ def format_report(report: dict) -> str:
             quality.get("exact_duplicate_prunable", 0),
             quality.get("vague_without_anchor", 0),
             quality.get("path_or_secret_like", 0),
+        ),
+        "  embedding provenance: model=%s | revision=%s | legacy=%s | "
+        "model mismatch=%s | revision mismatch=%s | dimension missing=%s | "
+        "dimension invalid=%s | dimension mismatch=%s | invalid vectors=%s | "
+        "mixed=%s | target dimension=%s | dimensions=%s"
+        % (
+            report.get("embedding_model") or "unknown",
+            report.get("embedding_revision") or "unversioned",
+            quality.get("embedding_legacy", 0),
+            quality.get("embedding_model_mismatch", 0),
+            quality.get("embedding_revision_mismatch", 0),
+            quality.get("embedding_dimension_missing", 0),
+            quality.get("embedding_dimension_invalid", 0),
+            quality.get("embedding_dimension_mismatch", 0),
+            quality.get("embedding_vector_invalid", 0),
+            "yes" if quality.get("embedding_mixed_dimensions") else "no",
+            report.get("embedding_expected_dimension") or "unknown",
+            ", ".join(
+                "%s=%s" % item
+                for item in sorted((quality.get("embedding_dimensions") or {}).items())
+            ) or "none",
+        ),
+        "  interaction task embeddings: compatible=%s/%s | refresh needed=%s | "
+        "missing=%s | legacy=%s | model mismatch=%s | revision mismatch=%s | "
+        "dimension missing=%s | dimension invalid=%s | dimension mismatch=%s | "
+        "invalid vectors=%s | mixed=%s | dimensions=%s"
+        % (
+            (report.get("interaction_task_embeddings") or {}).get(
+                "compatible", 0
+            ),
+            (report.get("interaction_task_embeddings") or {}).get(
+                "interactions", 0
+            ),
+            (report.get("interaction_task_embeddings") or {}).get(
+                "refresh_required", 0
+            ),
+            (report.get("interaction_task_embeddings") or {}).get("missing", 0),
+            (report.get("interaction_task_embeddings") or {}).get(
+                "legacy_model", 0
+            ),
+            (report.get("interaction_task_embeddings") or {}).get(
+                "model_mismatch", 0
+            ),
+            (report.get("interaction_task_embeddings") or {}).get(
+                "revision_mismatch", 0
+            ),
+            (report.get("interaction_task_embeddings") or {}).get(
+                "dimension_missing", 0
+            ),
+            (report.get("interaction_task_embeddings") or {}).get(
+                "dimension_invalid", 0
+            ),
+            (report.get("interaction_task_embeddings") or {}).get(
+                "dimension_mismatch", 0
+            ),
+            (report.get("interaction_task_embeddings") or {}).get(
+                "vector_invalid", 0
+            ),
+            "yes" if len(
+                (report.get("interaction_task_embeddings") or {}).get(
+                    "dimensions", {}
+                )
+            ) > 1 else "no",
+            ", ".join(
+                "%s=%s" % item for item in sorted(
+                    (report.get("interaction_task_embeddings") or {}).get(
+                        "dimensions", {}
+                    ).items()
+                )
+            ) or "none",
+        ),
+        "  project provenance: ambiguous legacy session turns=%s "
+        "| sessioned unscoped turns=%s (excluded from project-scoped history)"
+        % (
+            report.get("ambiguous_legacy_project_turns", 0),
+            report.get("unscoped_session_turns", 0),
         ),
     ]
     for item in report.get("quarantined_lesson_details") or []:

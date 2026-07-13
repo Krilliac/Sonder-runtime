@@ -660,7 +660,9 @@ def _control_dump(arg, prompt, history=None, session="", project=""):
     if session_id:
         conn = _open_db()
         try:
-            for turn in memory_store.session_turns(conn, session_id):
+            for turn in memory_store.session_turns_for_project(
+                conn, session_id, project_id,
+            ):
                 persisted_turns += 1
                 messages.append({"role": "user", "content": turn.get("task") or ""})
                 messages.append({"role": "assistant", "content": turn.get("response") or ""})
@@ -1308,15 +1310,25 @@ def _canonical_learn_tier(tier_label):
     return "code" if tier_label == "sonder" else tier_label
 
 
-def _session_history_messages(conn, session_id, max_turns):
+_ALL_PROJECTS = object()
+
+
+def _session_history_messages(
+    conn, session_id, max_turns, project=_ALL_PROJECTS,
+):
     """Build the prior-turn chat messages for a session, summarizing overflow.
 
-    Turns older than the last `max_turns` are folded (once) into sessions.summary via
-    the fast tier; the summary is prepended as a system message so nothing is lost.
-    Summarization is best-effort: if it fails, we simply send the live turns.
+    Turns older than the last `max_turns` are folded (once) into either the
+    legacy all-project summary or a project-keyed summary. Summarization is
+    best-effort: if it fails, we simply send the live turns.
     """
-    turns = memory_store.session_turns(conn, session_id)
-    sess = memory_store.get_session(conn, session_id) or {}
+    scoped = project is not _ALL_PROJECTS
+    if scoped:
+        turns = memory_store.session_turns_for_project(conn, session_id, project)
+        sess = memory_store.get_session_project_summary(conn, session_id, project)
+    else:
+        turns = memory_store.session_turns(conn, session_id)
+        sess = memory_store.get_session(conn, session_id) or {}
     summary = sess.get("summary")
     summarized_through = sess.get("summarized_through")
 
@@ -1334,9 +1346,14 @@ def _session_history_messages(conn, session_id, max_turns):
             pairs = [(t["task"], t["response"]) for t in new_overflow]
             try:
                 summary = summarizer.summarize(summary, pairs, _generate_text)
-                memory_store.update_session_summary(
-                    conn, session_id, summary, new_overflow[-1]["id"]
-                )
+                if scoped:
+                    memory_store.update_session_project_summary(
+                        conn, session_id, project, summary, new_overflow[-1]["id"],
+                    )
+                else:
+                    memory_store.update_session_summary(
+                        conn, session_id, summary, new_overflow[-1]["id"],
+                    )
             except urllib.error.URLError:
                 pass  # keep prior summary; live turns still carry recent context
     else:
@@ -1402,9 +1419,20 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
     gen = _make_generate(model, effective_system, temperature, num_predict, num_ctx,
                          cloud=cloud)
     qv = embeddings.embed(prompt)
+    if not embeddings.valid_vector(qv):
+        qv = None
     blob = embeddings.to_blob(qv) if qv else None
+    embedding_provenance = embeddings.provenance(qv) if qv else {}
     if augment:
-        recalls = recall.recall(conn, prompt, qv=qv, exclude_session=session_id)
+        recalls = (
+            recall.recall(
+                conn, prompt, qv=qv, exclude_session=session_id,
+                project=project,
+                embedding_model=embedding_provenance.get("model"),
+                embedding_revision=embedding_provenance.get("revision"),
+            )
+            if project is not None else []
+        )
         facts = _preference_facts(conn)
         if project:
             facts.extend(f["text"] for f in memory_store.facts_for_project(conn, project))
@@ -1417,12 +1445,22 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
         resp, iid, tctx = orchestrator.run_with_learning_traced(
             conn, prompt, tier, gen, retrieve_fn=retrieve_fn, history=history,
             recalls=recalls, facts=facts, session_id=session_id, task_embedding=blob,
+            project=project,
+            project_explicit=True,
+            task_embedding_model=embedding_provenance.get("model"),
+            task_embedding_revision=embedding_provenance.get("revision"),
+            task_embedding_dim=embedding_provenance.get("dimension"),
         )
         _capture_preferences(conn, prompt, source_interaction=iid)
         return resp, iid, tctx
     resp, iid = orchestrator.run_with_learning(
         conn, prompt, tier, gen, retrieve_fn=retrieve_fn, history=history,
         recalls=recalls, facts=facts, session_id=session_id, task_embedding=blob,
+        project=project,
+        project_explicit=True,
+        task_embedding_model=embedding_provenance.get("model"),
+        task_embedding_revision=embedding_provenance.get("revision"),
+        task_embedding_dim=embedding_provenance.get("dimension"),
     )
     _capture_preferences(conn, prompt, source_interaction=iid)
     return resp, iid, None
@@ -1725,14 +1763,21 @@ def _env_location_consent() -> bool:
     )
 
 
-def _session_messages_light(conn, session_id, max_turns=None):
+def _session_messages_light(
+    conn, session_id, max_turns=None, project=_ALL_PROJECTS,
+):
     """Recent session turns as chat messages, without summarization side effects."""
     msgs = []
-    for task, resp in memory_store.session_history(
-        conn, session_id, MAX_TURNS if max_turns is None else max_turns
-    ):
-        msgs.append({"role": "user", "content": task})
-        msgs.append({"role": "assistant", "content": resp})
+    limit = MAX_TURNS if max_turns is None else max_turns
+    if project is _ALL_PROJECTS:
+        turns = memory_store.session_turns(conn, session_id)
+    else:
+        turns = memory_store.session_turns_for_project(conn, session_id, project)
+    if limit and limit > 0:
+        turns = turns[-limit:]
+    for turn in turns:
+        msgs.append({"role": "user", "content": turn["task"]})
+        msgs.append({"role": "assistant", "content": turn["response"]})
     return msgs
 
 
@@ -1761,7 +1806,9 @@ def _route_chat_web(prompt, session, project, location_consent):
     if session_id:
         conn = _open_db()
         try:
-            history = _session_messages_light(conn, session_id)
+            history = _session_messages_light(
+                conn, session_id, project=_resolve_project(project),
+            )
         finally:
             conn.close()
     reply = chat_web_response(
@@ -1782,7 +1829,8 @@ def _route_chat_web(prompt, session, project, location_consent):
             memory_store.touch_session(conn, session_id, _resolve_project(project))
             memory_store.log_interaction(
                 conn, memory_store.new_id(), prompt, "", reply, "web-routed",
-                session_id=session_id,
+                session_id=session_id, project=_resolve_project(project),
+                project_explicit=True,
             )
         except Exception:
             pass
@@ -1885,7 +1933,9 @@ def _sonder_impl(
         if session_id:
             is_first = memory_store.session_turn_count(conn, session_id) == 0
             memory_store.touch_session(conn, session_id, project_id)
-            history = _session_history_messages(conn, session_id, MAX_TURNS)
+            history = _session_history_messages(
+                conn, session_id, MAX_TURNS, project=project_id,
+            )
         response, iid, trace_ctx = _answer(
             conn, prompt, tgt_model, effective_system, temperature, num_predict,
             num_ctx_eff, session_id, project_id, history, trace=trace,
@@ -2042,7 +2092,10 @@ def _answer_with_history_impl(
         if session_id:
             memory_store.touch_session(conn, session_id, project_id)
         if learn:
-            capture_project = project_id if augment else None
+            # Augmentation policy controls what the model sees, not provenance.
+            # Even clean/cloud teacher turns retain their explicit project so a
+            # later grounded outcome cannot become an unscoped raw recall.
+            capture_project = project_id
             response, iid, trace_ctx = _answer(
                 conn, prompt, model, effective_system, 0.2, 1024, req_ctx,
                 session_id, capture_project, history or None, trace=trace,
@@ -2728,22 +2781,33 @@ def context_health_data(session: str = "", project: str = "") -> dict:
     project_id = _resolve_project(project)
     conn = _open_db()
     try:
-        turns = memory_store.session_history(conn, session_id, MAX_TURNS) if session_id else []
+        scoped_turns = (
+            memory_store.session_turns_for_project(conn, session_id, project_id)
+            if session_id else []
+        )
+        turns = [
+            (row["task"], row["response"])
+            for row in scoped_turns[-MAX_TURNS:]
+        ]
         session_row = memory_store.get_session(conn, session_id) if session_id else None
-        summary = (session_row or {}).get("summary") or ""
-        turn_count = memory_store.session_turn_count(conn, session_id) if session_id else 0
+        summary_row = (
+            memory_store.get_session_project_summary(conn, session_id, project_id)
+            if session_id else {}
+        )
+        summary = summary_row.get("summary") or ""
+        turn_count = len(scoped_turns)
         session_count = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
         lesson_count = conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0]
         fact_count = (
             memory_store.count_facts(conn, project_id) if project_id else
-            conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
+            conn.execute("SELECT COUNT(*) FROM facts WHERE project IS NULL").fetchone()[0]
         )
         preference_count = conn.execute(
             "SELECT COUNT(*) FROM preferences WHERE enabled=1"
         ).fetchone()[0]
         interaction_count = memory_store.count_interactions(conn)
         outcome_count = conn.execute("SELECT COUNT(*) FROM outcomes").fetchone()[0]
-        summarized_through = (session_row or {}).get("summarized_through") or ""
+        summarized_through = summary_row.get("summarized_through") or ""
         updated_ts = (session_row or {}).get("updated_ts") or ""
         title = (session_row or {}).get("title") or ""
         live_chars = sum(len(task or "") + len(response or "") for task, response in turns)
@@ -3160,9 +3224,11 @@ def memory_quality_report(sample_limit: int = 5) -> str:
 def memory_quality_repair(apply: bool = False) -> str:
     """Prune exact duplicate lessons; dry-run unless apply=True."""
     _maybe_live_reload()
+    embeddings.refresh_runtime_revision()
+    apply = apply is True
     conn = _open_db()
     try:
-        plan, deleted = memory_quality.repair_exact_duplicates(conn, apply=bool(apply))
+        plan, deleted = memory_quality.repair_exact_duplicates(conn, apply=apply)
         report = memory_quality.format_audit(memory_quality.audit(conn), sample_limit=5)
     finally:
         conn.close()
@@ -3239,6 +3305,7 @@ def memory_privacy_review(sample_limit: int = 20) -> str:
 def memory_privacy_repair(lesson_ids_json: str = "[]", apply: bool = False) -> str:
     """Delete only explicitly selected, currently privacy-flagged lessons; dry-run by default."""
     _maybe_live_reload()
+    apply = apply is True
     try:
         lesson_ids = _parse_lesson_ids(lesson_ids_json)
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -3275,51 +3342,276 @@ def memory_privacy_repair(lesson_ids_json: str = "[]", apply: bool = False) -> s
 
 @mcp.tool()
 def memory_embedding_backfill(limit: int = 25, apply: bool = False) -> str:
-    """Backfill missing lesson vectors with the configured local embedding model."""
+    """Refresh missing, legacy, or incompatible vectors with the local model."""
     _maybe_live_reload()
-    if _is_cloud_model_name(embeddings.EMBED_MODEL):
+    apply = apply is True
+    approved_model = embeddings.EMBED_MODEL
+    approved_base = embeddings.BASE
+    embed_fn = embeddings.embed
+    if _is_cloud_model_name(approved_model):
         return (
             "ERROR: embedding backfill requires a local model; configured model "
-            "%r looks cloud-hosted." % embeddings.EMBED_MODEL
+            "%r looks cloud-hosted." % approved_model
+        )
+    if not embeddings.endpoint_is_loopback(approved_base):
+        return (
+            "ERROR: embedding refresh is local-only; configured Ollama endpoint "
+            "is not loopback."
         )
     limit = _safe_limit(limit, 25, 100)
     conn = _open_db()
     updated = 0
     failed = []
+    conflicted = []
+    target_dimension = embeddings.EXPECTED_DIMENSION
+    target_model = embeddings.canonical_model_name(approved_model)
+    target_revision = embeddings.current_revision(
+        model=approved_model, base=approved_base,
+    )
+    revision_changed = False
     try:
-        rows = memory_store.lessons_without_embeddings(conn, limit=limit)
+        if apply:
+            probe = embed_fn(
+                "Sonder embedding compatibility probe", timeout=30,
+                base=approved_base, model=approved_model,
+            )
+            if not embeddings.valid_vector(probe):
+                return "ERROR: embedding refresh could not probe the configured local model."
+            if embeddings.current_revision(
+                model=approved_model, base=approved_base,
+            ) != target_revision:
+                return "ERROR: embedding model revision changed during compatibility probe."
+            probed_dimension = len(probe)
+            if (
+                target_dimension is not None
+                and probed_dimension != target_dimension
+            ):
+                return (
+                    "ERROR: local embedding probe dimension %d does not match "
+                    "the configured/known dimension %d; update SONDER_EMBED_DIM "
+                    "or the model configuration before refreshing stored text."
+                    % (probed_dimension, target_dimension)
+                )
+            target_dimension = probed_dimension
+        rows = memory_store.lessons_needing_embedding_refresh(
+            conn,
+            target_model,
+            revision=target_revision,
+            dimension=target_dimension,
+            limit=limit,
+        )
         if apply:
             for row in rows:
                 try:
-                    vector = embeddings.embed(row.get("text") or "", timeout=30)
-                    if not isinstance(vector, (list, tuple)) or not vector:
+                    if embeddings.current_revision(
+                        model=approved_model, base=approved_base,
+                    ) != target_revision:
+                        failed.append(row["id"])
+                        revision_changed = True
+                        break
+                    vector = embed_fn(
+                        row.get("text") or "", timeout=30,
+                        base=approved_base, model=approved_model,
+                    )
+                    if (
+                        not embeddings.valid_vector(vector)
+                        or len(vector) != target_dimension
+                    ):
                         failed.append(row["id"])
                         continue
                     blob = embeddings.to_blob(vector)
-                    if memory_store.set_lesson_embedding(conn, row["id"], blob):
+                    if memory_store.refresh_lesson_embedding(
+                        conn,
+                        row["id"],
+                        blob,
+                        target_model,
+                        revision=target_revision,
+                        dimension=target_dimension,
+                        expected=row,
+                    ):
                         updated += 1
+                    else:
+                        conflicted.append(row["id"])
                 except (OSError, TypeError, ValueError, OverflowError):
                     failed.append(row["id"])
-        remaining = conn.execute(
-            "SELECT COUNT(*) FROM lessons WHERE embedding IS NULL"
-        ).fetchone()[0]
+        remaining = memory_store.count_lessons_needing_embedding_refresh(
+            conn,
+            target_model,
+            revision=target_revision,
+            dimension=target_dimension,
+        )
     finally:
         conn.close()
     lines = [
         "memory embedding backfill",
         "  mode: %s | local model: %s" % (
-            "apply" if apply else "dry-run", embeddings.EMBED_MODEL,
+            "apply" if apply else "dry-run", approved_model,
         ),
-        "  selected: %d | updated: %d | failed: %d | remaining: %d" % (
-            len(rows), updated, len(failed), remaining,
+        "  target dimension: %s" % (
+            target_dimension if target_dimension else "unknown until apply probe",
+        ),
+        "  selected stale/missing: %d | updated: %d | conflicted: %d | failed: %d | remaining: %d" % (
+            len(rows), updated, len(conflicted), len(failed), remaining,
         ),
     ]
     if rows:
         lines.append("  lesson IDs: %s" % ", ".join(row["id"] for row in rows))
     if failed:
         lines.append("  failed IDs: %s" % ", ".join(failed))
+    if conflicted:
+        lines.append("  skipped concurrently changed IDs: %s" % ", ".join(conflicted))
+    if revision_changed:
+        lines.append("  model revision changed during refresh; rerun the batch.")
     if not apply and rows:
-        lines.append("  dry-run only; rerun with apply=True to call the local embedding model.")
+        lines.append(
+            "  dry-run only; apply probes the live local model, then refreshes "
+            "missing or incompatible vectors."
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def memory_interaction_embedding_backfill(
+    limit: int = 25, apply: bool = False,
+) -> str:
+    """Refresh raw interaction task vectors with the local embedding model."""
+    _maybe_live_reload()
+    apply = apply is True
+    approved_model = embeddings.EMBED_MODEL
+    approved_base = embeddings.BASE
+    embed_fn = embeddings.embed
+    if _is_cloud_model_name(approved_model):
+        return (
+            "ERROR: interaction embedding backfill requires a local model; "
+            "configured model %r looks cloud-hosted." % approved_model
+        )
+    if not embeddings.endpoint_is_loopback(approved_base):
+        return (
+            "ERROR: interaction embedding refresh is local-only; configured "
+            "Ollama endpoint is not loopback."
+        )
+    limit = _safe_limit(limit, 25, 100)
+    conn = _open_db()
+    updated = 0
+    failed = []
+    conflicted = []
+    target_dimension = embeddings.EXPECTED_DIMENSION
+    target_model = embeddings.canonical_model_name(approved_model)
+    target_revision = embeddings.current_revision(
+        model=approved_model, base=approved_base,
+    )
+    revision_changed = False
+    try:
+        if apply:
+            probe = embed_fn(
+                "Sonder interaction embedding compatibility probe", timeout=30,
+                base=approved_base, model=approved_model,
+            )
+            if not embeddings.valid_vector(probe):
+                return (
+                    "ERROR: interaction embedding refresh could not probe the "
+                    "configured local model."
+                )
+            if embeddings.current_revision(
+                model=approved_model, base=approved_base,
+            ) != target_revision:
+                return (
+                    "ERROR: interaction embedding model revision changed during "
+                    "compatibility probe."
+                )
+            probed_dimension = len(probe)
+            if (
+                target_dimension is not None
+                and probed_dimension != target_dimension
+            ):
+                return (
+                    "ERROR: local interaction embedding probe dimension %d does "
+                    "not match the configured/known dimension %d; update "
+                    "SONDER_EMBED_DIM or the model configuration before "
+                    "refreshing stored task text."
+                    % (probed_dimension, target_dimension)
+                )
+            target_dimension = probed_dimension
+        rows = memory_store.interactions_needing_task_embedding_refresh(
+            conn,
+            target_model,
+            revision=target_revision,
+            dimension=target_dimension,
+            limit=limit,
+        )
+        if apply:
+            for row in rows:
+                try:
+                    if embeddings.current_revision(
+                        model=approved_model, base=approved_base,
+                    ) != target_revision:
+                        failed.append(row["id"])
+                        revision_changed = True
+                        break
+                    vector = embed_fn(
+                        row.get("task") or "", timeout=30,
+                        base=approved_base, model=approved_model,
+                    )
+                    if (
+                        not embeddings.valid_vector(vector)
+                        or len(vector) != target_dimension
+                    ):
+                        failed.append(row["id"])
+                        continue
+                    if memory_store.refresh_interaction_task_embedding(
+                        conn,
+                        row["id"],
+                        embeddings.to_blob(vector),
+                        target_model,
+                        revision=target_revision,
+                        dimension=target_dimension,
+                        expected=row,
+                    ):
+                        updated += 1
+                    else:
+                        conflicted.append(row["id"])
+                except (OSError, TypeError, ValueError, OverflowError):
+                    failed.append(row["id"])
+        remaining = (
+            memory_store.count_interactions_needing_task_embedding_refresh(
+                conn,
+                target_model,
+                revision=target_revision,
+                dimension=target_dimension,
+            )
+        )
+    finally:
+        conn.close()
+    lines = [
+        "memory interaction embedding backfill",
+        "  mode: %s | local model: %s" % (
+            "apply" if apply else "dry-run", approved_model,
+        ),
+        "  target dimension: %s" % (
+            target_dimension if target_dimension else "unknown until apply probe",
+        ),
+        "  selected stale/missing: %d | updated: %d | conflicted: %d | "
+        "failed: %d | remaining: %d" % (
+            len(rows), updated, len(conflicted), len(failed), remaining,
+        ),
+    ]
+    if rows:
+        lines.append(
+            "  interaction IDs: %s" % ", ".join(row["id"] for row in rows)
+        )
+    if failed:
+        lines.append("  failed IDs: %s" % ", ".join(failed))
+    if conflicted:
+        lines.append(
+            "  skipped concurrently changed IDs: %s" % ", ".join(conflicted)
+        )
+    if revision_changed:
+        lines.append("  model revision changed during refresh; rerun the batch.")
+    if not apply and rows:
+        lines.append(
+            "  dry-run only; apply probes the live local model, then refreshes "
+            "bounded task vectors from their locally stored task text."
+        )
     return "\n".join(lines)
 
 
@@ -3423,6 +3715,22 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
             "medium",
             "%d lessons are missing semantic embeddings." % quality["no_embedding"],
             "Run memory_embedding_backfill(apply=False), then backfill a bounded batch with apply=True.",
+        )
+    stale_embeddings = (
+        quality.get("embedding_legacy", 0)
+        + quality.get("embedding_model_mismatch", 0)
+        + quality.get("embedding_revision_mismatch", 0)
+        + quality.get("embedding_dimension_missing", 0)
+        + quality.get("embedding_dimension_invalid", 0)
+    )
+    if stale_embeddings:
+        add(
+            "memory",
+            "medium",
+            "%d lesson embeddings lack current provenance or are incompatible."
+            % stale_embeddings,
+            "Run memory_embedding_backfill(apply=False), then refresh bounded "
+            "batches locally with apply=True.",
         )
     if quality.get("vague_without_anchor", 0):
         add(
@@ -4445,6 +4753,8 @@ def file_delete(
 ) -> str:
     """Delete a file or directory. Dry-run by default; confirm must match returned string."""
     _maybe_live_reload()
+    recursive = recursive is True
+    dry_run = dry_run is not False
     started = time.time()
     try:
         data = file_ops.delete_path(
@@ -4924,6 +5234,8 @@ def sonder_remember_fact(text: str, project: str = "") -> str:
     conn = _open_db()
     try:
         emb = embeddings.embed(text)
+        if not embeddings.valid_vector(emb):
+            emb = None
         blob = embeddings.to_blob(emb) if emb else None
         fact_id = memory_store.new_id()
         memory_store.add_fact(conn, fact_id, project_id, text, blob)
@@ -5615,7 +5927,7 @@ def _loop_dispatch(action):
         ))
     if action_type == "memory_quality_repair":
         return _loop_text_result("memory_quality_repair", memory_quality_repair(
-            apply=action.get("apply", False),
+            apply=action.get("apply") is True,
         ))
     if action_type == "memory_privacy_review":
         return _loop_text_result("memory_privacy_review", memory_privacy_review(
@@ -5624,12 +5936,19 @@ def _loop_dispatch(action):
     if action_type == "memory_privacy_repair":
         return _loop_text_result("memory_privacy_repair", memory_privacy_repair(
             lesson_ids_json=action.get("lesson_ids", action.get("lesson_ids_json", [])),
-            apply=action.get("apply", False),
+            apply=action.get("apply") is True,
         ))
     if action_type == "memory_embedding_backfill":
         return _loop_text_result("memory_embedding_backfill", memory_embedding_backfill(
-            limit=action.get("limit", 25), apply=action.get("apply", False),
+            limit=action.get("limit", 25), apply=action.get("apply") is True,
         ))
+    if action_type == "memory_interaction_embedding_backfill":
+        return _loop_text_result(
+            "memory_interaction_embedding_backfill",
+            memory_interaction_embedding_backfill(
+                limit=action.get("limit", 25), apply=action.get("apply") is True,
+            ),
+        )
     if action_type in ("improvement_report", "system_improvement_report"):
         return _loop_text_result("improvement_report", system_improvement_report(
             session=action.get("session", ""),
@@ -5839,8 +6158,8 @@ def _loop_dispatch(action):
     if action_type == "file_delete":
         return _loop_text_result("file_delete", file_delete(
             path=action.get("path", ""),
-            recursive=action.get("recursive", False),
-            dry_run=action.get("dry_run", True),
+            recursive=action.get("recursive") is True,
+            dry_run=action.get("dry_run") is not False,
             confirm=action.get("confirm", ""),
             token=action.get("token", ""),
             approval=action.get("approval", ""),
@@ -5850,7 +6169,7 @@ def _loop_dispatch(action):
         return _loop_text_result("self_heal_check", self_heal_check())
     if action_type == "self_heal_repair":
         return _loop_text_result("self_heal_repair", self_heal_repair(
-            apply=action.get("apply", False),
+            apply=action.get("apply") is True,
         ))
     if action_type == "profile_status":
         return _loop_text_result("profile_status", system_profile_text())
@@ -5928,7 +6247,7 @@ def _loop_dispatch(action):
         "ok": False,
         "type": action_type or "(unknown)",
         "summary": "unknown action type",
-        "output": "Valid action types: code, project, artifact_generate, artifact_ground, game_reference_suite, game_generate_and_test, game_generation_campaign, offload, sonder, master_orchestrate, master_status, master_capacity, master_cancel, master_retry, file_policy, workspace_inventory, directory_tree, text_search, script_search, program_search, workspace_run, script_run, image_inspect, file_find, file_read, file_write, file_edit, file_delete, status, diagnostics, context_health, learning_health, memory_quality_report, memory_quality_repair, memory_privacy_review, memory_privacy_repair, memory_embedding_backfill, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, weather_lookup, approximate_location_lookup, unload, sleep.",
+        "output": "Valid action types: code, project, artifact_generate, artifact_ground, game_reference_suite, game_generate_and_test, game_generation_campaign, offload, sonder, master_orchestrate, master_status, master_capacity, master_cancel, master_retry, file_policy, workspace_inventory, directory_tree, text_search, script_search, program_search, workspace_run, script_run, image_inspect, file_find, file_read, file_write, file_edit, file_delete, status, diagnostics, context_health, learning_health, memory_quality_report, memory_quality_repair, memory_privacy_review, memory_privacy_repair, memory_embedding_backfill, memory_interaction_embedding_backfill, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, weather_lookup, approximate_location_lookup, unload, sleep.",
     }
 
 
@@ -5971,6 +6290,7 @@ def loop(
       - {"type":"memory_search","query":"..."}
       - {"type":"memory_privacy_review","sample_limit":20}
       - {"type":"memory_embedding_backfill","limit":25,"apply":false}
+      - {"type":"memory_interaction_embedding_backfill","limit":25,"apply":false}
       - {"type":"emotion_update","vectors":{"warmth":0.5,"brevity":0.2}}
       - {"type":"emotion_tune","text":"be warmer but more concise"}
       - {"type":"learn_preference","text":"User prefers concise status updates."}
@@ -6844,9 +7164,17 @@ def learn_from_example(task: str, solution: str, signal: str = "accepted") -> st
     try:
         interaction_id = memory_store.new_id()
         emb = embeddings.embed(task)
+        if not embeddings.valid_vector(emb):
+            emb = None
         blob = embeddings.to_blob(emb) if emb else None
+        provenance = embeddings.provenance(emb) if emb else {}
         memory_store.log_interaction(
-            conn, interaction_id, task, "", solution, "example", task_embedding=blob)
+            conn, interaction_id, task, "", solution, "example",
+            task_embedding=blob,
+            task_embedding_model=provenance.get("model"),
+            task_embedding_revision=provenance.get("revision"),
+            task_embedding_dim=provenance.get("dimension"),
+        )
         r = reward.score(signal)
         memory_store.record_outcome_row(conn, interaction_id, signal, r)
         lesson_id = None
@@ -6988,7 +7316,8 @@ def tool_manifest() -> str:
         "learning_health_status": "Inspect grounded outcome coverage, signal quality, lesson provenance, distillation yield, and memory hygiene.",
         "memory_quality_report/memory_quality_repair": "Audit and dry-run/prune exact duplicate lessons.",
         "memory_privacy_review/memory_privacy_repair": "Review redacted privacy findings and explicitly dry-run/remove selected flagged lessons.",
-        "memory_embedding_backfill": "Dry-run or backfill missing semantic vectors with the local embedding model.",
+        "memory_embedding_backfill": "Dry-run or refresh stale/missing semantic vectors with the local embedding model.",
+        "memory_interaction_embedding_backfill": "Dry-run or locally refresh stale raw-interaction task vectors without printing task text.",
         "system_improvement_report": "Suggest next improvements from learning, memory, context, and deployment signals.",
         "context_policy_status/set_context_size": "Show or select requested virtual context up to 1m while clamping Ollama native num_ctx.",
         "learn_from_example/apply_learned": "Teach from examples and preview lesson application.",
@@ -7054,6 +7383,7 @@ AGENT_TOOL_HELP = """Available tools:
 - memory_privacy_review: {"sample_limit": 20}
 - memory_privacy_repair: {"lesson_ids_json": ["lesson-id"], "apply": false}
 - memory_embedding_backfill: {"limit": 25, "apply": false}
+- memory_interaction_embedding_backfill: {"limit": 25, "apply": false}
 - system_improvement_report: {}
 - master_orchestrate: {"task": "...", "mode": "ask|inline|delegate|fleet", "agents": 3, "tier": "code"}
 - master_status: {}
@@ -7815,17 +8145,21 @@ def _agent_dispatch(
     if tool_name == "memory_quality_report":
         return memory_quality_report(sample_limit=args.get("sample_limit", 5))
     if tool_name == "memory_quality_repair":
-        return memory_quality_repair(apply=args.get("apply", False))
+        return memory_quality_repair(apply=args.get("apply") is True)
     if tool_name == "memory_privacy_review":
         return memory_privacy_review(sample_limit=args.get("sample_limit", 20))
     if tool_name == "memory_privacy_repair":
         return memory_privacy_repair(
             lesson_ids_json=args.get("lesson_ids_json", args.get("lesson_ids", [])),
-            apply=args.get("apply", False),
+            apply=args.get("apply") is True,
         )
     if tool_name == "memory_embedding_backfill":
         return memory_embedding_backfill(
-            limit=args.get("limit", 25), apply=args.get("apply", False),
+            limit=args.get("limit", 25), apply=args.get("apply") is True,
+        )
+    if tool_name == "memory_interaction_embedding_backfill":
+        return memory_interaction_embedding_backfill(
+            limit=args.get("limit", 25), apply=args.get("apply") is True,
         )
     if tool_name in ("system_improvement_report", "improvement_report"):
         return system_improvement_report(
@@ -7861,7 +8195,7 @@ def _agent_dispatch(
     if tool_name == "self_heal_check":
         return self_heal_check()
     if tool_name == "self_heal_repair":
-        return self_heal_repair(apply=args.get("apply", False))
+        return self_heal_repair(apply=args.get("apply") is True)
     if tool_name == "status":
         return status()
     if tool_name == "system_profile_text":
@@ -7959,13 +8293,14 @@ _WORK_MUTATION_TOOLS = frozenset({
     "directory_create", "file_write", "file_edit", "file_delete",
     "artifact_generate", "game_generate_and_test", "game_generation_campaign",
     "memory_quality_repair", "memory_privacy_repair", "memory_embedding_backfill",
+    "memory_interaction_embedding_backfill",
 })
 _WORK_VALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_verify", "game_reference_suite", "game_generate_and_test",
     "game_generation_campaign", "self_heal_check", "workspace_inventory", "directory_tree", "file_find",
     "file_read", "file_read_range", "text_search", "image_inspect",
-    "memory_quality_report", "memory_privacy_review",
+    "memory_quality_report", "memory_privacy_review", "learning_health_status",
 })
 
 
@@ -8037,10 +8372,18 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
         "game_reference_suite", "game_generate_and_test", "game_generation_campaign",
     }:
         return True
-    if tool_name in {"memory_quality_report", "memory_privacy_review"}:
+    if tool_name == "memory_quality_report":
+        return all(
+            record["tool"] == "memory_quality_repair" for record in records
+        )
+    if tool_name == "memory_privacy_review":
+        return all(
+            record["tool"] == "memory_privacy_repair" for record in records
+        )
+    if tool_name == "learning_health_status":
         return all(record["tool"] in {
-            "memory_quality_repair", "memory_privacy_repair",
             "memory_embedding_backfill",
+            "memory_interaction_embedding_backfill",
         } for record in records)
     if tool_name in {"artifact_verify", "artifact_ground", "ground_artifact"}:
         return any(
@@ -8537,13 +8880,17 @@ def _agent_impl(
         mutation_happened = (
             tool_name in _WORK_MUTATION_TOOLS
             and tool_ok
-            and not (tool_name == "file_delete" and tool_args.get("dry_run", True))
+            and not (
+                tool_name == "file_delete"
+                and tool_args.get("dry_run") is not False
+            )
             and not (
                 tool_name in {
                     "memory_quality_repair", "memory_privacy_repair",
                     "memory_embedding_backfill",
+                    "memory_interaction_embedding_backfill",
                 }
-                and not tool_args.get("apply", False)
+                and tool_args.get("apply") is not True
             )
         )
         if mutation_happened:
@@ -9567,10 +9914,11 @@ def self_heal_repair(apply: bool = False) -> str:
     errors are reported but not auto-fixed.
     """
     _maybe_live_reload()
+    apply = apply is True
     issues, actions = self_heal.repair(
         _DB_PATH,
         module_names=LIVE_RELOAD_MODULES,
-        apply=bool(apply),
+        apply=apply,
     )
     return self_heal.format_report(issues, actions=actions)
 
