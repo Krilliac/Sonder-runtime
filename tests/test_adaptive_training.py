@@ -19,7 +19,43 @@ from system_profile import HardwareProfile
 
 STAGE_REVIEWED_CONVERTER = adaptive_training._stage_reviewed_converter
 SHARED_ALIAS_PATHS = adaptive_training._shared_alias_paths
-SHARED_ALIAS_PATHS = adaptive_training._shared_alias_paths
+
+
+def test_ollama_external_runner_uses_canonical_client_environment(monkeypatch):
+    captured = []
+
+    def runner(command, **kwargs):
+        captured.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setenv("OLLAMA_HOST", "0.0.0.0:11434")
+    result = adaptive_training._run_external(
+        runner,
+        ["ollama-test", "show", "model"],
+        ollama_command=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0
+    assert captured[0][1]["env"]["OLLAMA_HOST"] == "http://127.0.0.1:11434"
+
+
+def test_ollama_external_runner_blocks_unapproved_remote_before_subprocess(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setenv("OLLAMA_HOST", "http://models.example.test:11434")
+    monkeypatch.delenv("SONDER_ALLOW_REMOTE_OLLAMA", raising=False)
+
+    result = adaptive_training._run_external(
+        lambda *args, **kwargs: calls.append(1),
+        ["ollama-test", "show", "model"],
+        ollama_command=True,
+    )
+
+    assert result.returncode == 125
+    assert "blocked" in result.stderr.lower()
+    assert calls == []
 
 
 @pytest.fixture(autouse=True)

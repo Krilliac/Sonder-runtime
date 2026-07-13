@@ -10,16 +10,10 @@ if not defined SONDER_PYTHON (
   echo [sonder] ERROR: no bundled or system Python runtime was found.
   endlocal & exit /b 3
 )
-"%SONDER_OLLAMA_EXE%" list >nul 2>&1
+"%SONDER_PYTHON%" "%REPO%sonder_headless.py" engine
 if errorlevel 1 (
-  echo [sonder] starting Ollama...
-  start "" /b "%SONDER_OLLAMA_EXE%" serve
-  timeout /t 2 >nul
-)
-"%SONDER_OLLAMA_EXE%" list 2>nul | findstr /i "sonder" >nul
-if errorlevel 1 (
-  echo [sonder] bootstrapping engine ^(first run^)...
-  "%SONDER_PYTHON%" "%REPO%bootstrap_engine.py"
+  echo [sonder] ERROR: local engine is unavailable or blocked by endpoint policy.
+  endlocal & exit /b 2
 )
 "%SONDER_PYTHON%" "%REPO%sonder_serve.py" %*
 set "EXIT_CODE=%ERRORLEVEL%"

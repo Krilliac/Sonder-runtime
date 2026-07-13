@@ -15,16 +15,11 @@ if not defined SONDER_PYTHON (
 )
 
 if /I not "%SONDER_TERMINAL_BOOTSTRAP%"=="0" (
-  "%SONDER_OLLAMA_EXE%" list >nul 2>&1
+  echo [sonder] ensuring endpoint-gated local engine...
+  "%SONDER_PYTHON%" "%REPO%sonder_headless.py" engine
   if errorlevel 1 (
-    echo [sonder] starting local engine bootstrap...
-    "%SONDER_PYTHON%" "%REPO%bootstrap_engine.py"
-  ) else (
-    "%SONDER_OLLAMA_EXE%" list 2>nul | findstr /i "sonder" >nul
-    if errorlevel 1 (
-      echo [sonder] bootstrapping engine ^(first run^)...
-      "%SONDER_PYTHON%" "%REPO%bootstrap_engine.py"
-    )
+    echo [sonder] ERROR: local engine is unavailable or blocked by endpoint policy.
+    endlocal & exit /b 2
   )
 )
 

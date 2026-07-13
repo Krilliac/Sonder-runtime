@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import sqlite3
-import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Sequence
+
+import ollama_endpoint
 
 
 SUITE_VERSION = "sql-promotion-v2"
@@ -354,18 +354,13 @@ def _prompt(task: _Task) -> str:
 
 
 def _local_ollama_origin() -> str:
-    raw = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434")
-    if "://" not in raw:
-        raw = "http://" + raw
-    parsed = urllib.parse.urlparse(raw)
-    host = (parsed.hostname or "").lower()
-    if host in {"0.0.0.0", "localhost"}:
-        host = "127.0.0.1"
-    if host not in {"127.0.0.1", "localhost", "::1"}:
-        raise ValueError("promotion evaluation requires a loopback Ollama host")
-    port = parsed.port or 11434
-    display_host = f"[{host}]" if ":" in host else host
-    return f"http://{display_host}:{port}"
+    try:
+        return ollama_endpoint.configured_origin(allow_remote=False)
+    except ValueError as error:
+        raise ValueError(
+            "promotion evaluation requires a valid loopback Ollama host: %s"
+            % error
+        ) from error
 
 
 def _local_ollama_url() -> str:

@@ -69,6 +69,7 @@ REQUIRED_FILES = {
     "sonder_health.py",
     "media_assets.py",
     "model_transport.py",
+    "ollama_endpoint.py",
     "model_assets.py",
     "ooxml_assets.py",
     "process_liveness.py",

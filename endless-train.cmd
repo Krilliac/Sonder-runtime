@@ -27,22 +27,10 @@ if exist "%REPO%venv\Lib\site-packages" (
   set "PYTHONPATH=%REPO%venv\Lib\site-packages;%REPO%venv\Lib\site-packages\win32;%REPO%venv\Lib\site-packages\win32\lib;%REPO%venv\Lib\site-packages\pywin32_system32;%PYTHONPATH%"
 )
 
-"%SONDER_OLLAMA_EXE%" --version >nul 2>&1
+"%SONDER_PYTHON%" "%REPO%sonder_headless.py" engine
 if errorlevel 1 (
-  echo [sonder] Ollama CLI not on PATH; using HTTP connection only.
-) else (
-  "%SONDER_OLLAMA_EXE%" list >nul 2>&1
-  if errorlevel 1 (
-    echo [sonder] starting Ollama...
-    start "" /b "%SONDER_OLLAMA_EXE%" serve
-    timeout /t 2 >nul
-  )
-
-  "%SONDER_OLLAMA_EXE%" list 2>nul | findstr /i "sonder" >nul
-  if errorlevel 1 (
-    echo [sonder] creating model alias ^(first run^)...
-    "%SONDER_PYTHON%" "%REPO%bootstrap_engine.py"
-  )
+  echo [sonder] ERROR: local engine is unavailable or blocked by endpoint policy.
+  endlocal & exit /b 2
 )
 
 echo [sonder] endless grounded-practice loop starting.

@@ -28,6 +28,7 @@ import threading
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -75,17 +76,12 @@ import reloadable_mcp
 import autopilot_store
 import autopilot_controller
 from model_transport import ModelCallError
+import ollama_endpoint
 
-OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434").replace("http://", "")
-# OLLAMA_HOST may be set to 0.0.0.0 so `ollama serve` binds all interfaces (e.g.
-# for a phone app on the LAN). 0.0.0.0 is a bind-all address, not a connectable
-# one — dialing it fails on Windows (WinError 10049). Rewrite it to loopback for
-# this client without disturbing the server's bind env.
-# 0.0.0.0 is a bind-all server address, not a connectable client address on
-# Windows. Let users bind Ollama broadly while this client dials loopback.
-if OLLAMA_HOST.startswith("0.0.0.0"):
-    OLLAMA_HOST = OLLAMA_HOST.replace("0.0.0.0", "127.0.0.1", 1)
-BASE = f"http://{OLLAMA_HOST}"
+BASE = ollama_endpoint.normalize()
+OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
+# Bind-all Ollama server addresses are canonicalized to a numeric loopback
+# destination for this client without mutating the server process environment.
 # How long a model stays in VRAM after its last call. Short = frees GPU quickly.
 KEEP_ALIVE = os.environ.get("SONDER_KEEP_ALIVE", "2m")
 TIMEOUT = int(os.environ.get("SONDER_TIMEOUT", "300"))
@@ -274,6 +270,7 @@ LIVE_RELOAD_MODULES = [
     "reward",
     "reflection",
     "embeddings",
+    "ollama_endpoint",
     "personas",
     "recall",
     "summarizer",
@@ -1722,6 +1719,18 @@ def _cancel_requested(cancel_check) -> bool:
         return True
 
 
+def _ollama_display() -> str:
+    return ollama_endpoint.safe_display(BASE)
+
+
+def _require_ollama_endpoint(*, cloud: bool = False) -> None:
+    error = ollama_endpoint.policy_error(BASE)
+    if error:
+        raise ModelCallError(
+            "configuration", error, attempts=0, cloud=cloud,
+        )
+
+
 def _post_model(
     path: str,
     payload: dict,
@@ -1731,7 +1740,7 @@ def _post_model(
     timeout: int | None = None,
     cancel_check=None,
 ) -> tuple[dict, int]:
-    """POST one logical model request with a narrow local-only retry policy.
+    """POST one logical model request with a narrow loopback-only retry policy.
 
     Cloud calls stay single-attempt to avoid duplicate metered work. Local calls
     retry only transport failures and explicitly transient HTTP statuses, using
@@ -1746,9 +1755,13 @@ def _post_model(
             attempts=0,
             cloud=True,
         )
+    _require_ollama_endpoint(cloud=cloud)
+    remote_endpoint = not ollama_endpoint.is_loopback(BASE)
     request_timeout = _bounded_timeout(timeout)
     deadline = time.monotonic() + request_timeout
-    max_attempts = 1 if cloud else 1 + _local_model_retries()
+    max_attempts = (
+        1 if cloud or remote_endpoint else 1 + _local_model_retries()
+    )
 
     for attempt_index in range(max_attempts):
         attempt = attempt_index + 1
@@ -1889,7 +1902,11 @@ def _model_usage_count(value):
 
 
 def _format_model_call_error(error: ModelCallError) -> str:
-    target = "hosted Ollama" if error.cloud else "local Ollama"
+    target = (
+        "hosted Ollama" if error.cloud else
+        "remote Ollama" if not ollama_endpoint.is_loopback(BASE) else
+        "local Ollama"
+    )
     suffix = " after %d attempt(s)" % error.attempts
     if error.kind == "http":
         return "ERROR: %s rejected the model request (HTTP %s)%s: %s" % (
@@ -1904,17 +1921,18 @@ def _format_model_call_error(error: ModelCallError) -> str:
     if error.kind == "cancelled":
         return "ERROR: %s" % error.detail
     return "ERROR contacting %s at %s%s: %s" % (
-        target, BASE, suffix, error.detail,
+        target, _ollama_display(), suffix, error.detail,
     )
 
 
 def _post(path: str, payload: dict, timeout: int | None = None) -> dict:
+    _require_ollama_endpoint()
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         f"{BASE}{path}", data=data, headers={"Content-Type": "application/json"}
     )
     request_timeout = _bounded_timeout(timeout)
-    with urllib.request.urlopen(req, timeout=request_timeout) as resp:
+    with ollama_endpoint.open_url(req, timeout=request_timeout) as resp:
         raw = resp.read(_MAX_MODEL_RESPONSE_BYTES + 1)
         if len(raw) > _MAX_MODEL_RESPONSE_BYTES:
             raise ModelCallError(
@@ -1925,8 +1943,9 @@ def _post(path: str, payload: dict, timeout: int | None = None) -> dict:
 
 
 def _get(path: str) -> dict:
+    _require_ollama_endpoint()
     req = urllib.request.Request(f"{BASE}{path}")
-    with urllib.request.urlopen(req, timeout=15) as resp:
+    with ollama_endpoint.open_url(req, timeout=15) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -2071,8 +2090,9 @@ def offload(
 ) -> str:
     """Offload a self-contained subtask to a local-GPU or Ollama-cloud model.
 
-    Local tiers (fast/code/general) run privately on the 6 GB 4050. The learning tiers
-    (SONDER_LEARN_TIERS, default local 'code' + both cloud tiers) participate in the
+    Local aliases (fast/code/general) run privately on the loopback 6 GB 4050 by
+    default; an explicitly opted-in remote OLLAMA_HOST leaves this machine. The learning tiers
+    (SONDER_LEARN_TIERS, default fast/code/general) participate in the
     lesson loop: with learn=True (default) the call is captured and the response ends
     with a '[interaction_id: <id>]' footer you can pass to record_outcome once you know
     whether it compiled / passed tests, so a good outcome distills a lesson. The local
@@ -2297,7 +2317,7 @@ def _sonder_impl(
         return _format_model_call_error(error)
     except urllib.error.URLError as e:
         return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
-                "running? (the tray app / `ollama serve`)" % (BASE, e))
+                "running? (the tray app / `ollama serve`)" % (_ollama_display(), e))
     finally:
         conn.close()
 
@@ -2465,7 +2485,7 @@ def _answer_with_history_impl(
         return _format_model_call_error(error)
     except urllib.error.URLError as e:
         return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
-                "running? (the tray app / `ollama serve`)" % (BASE, e))
+                "running? (the tray app / `ollama serve`)" % (_ollama_display(), e))
     finally:
         conn.close()
     # The serve handler already routes web intents pre-model (no double routing
@@ -10314,6 +10334,14 @@ def diagnostics() -> str:
     _maybe_live_reload()
     lines = ["sonder diagnostics"]
     lines.append("  live reload: %s" % ("on" if live_reload.enabled() else "off"))
+    lines.append(
+        "  ollama endpoint: %s (%s; remote opt-in %s)"
+        % (
+            _ollama_display(),
+            ollama_endpoint.locality(BASE),
+            "on" if ollama_endpoint.remote_allowed() else "off",
+        )
+    )
     mcp_state = mcp_runtime_data()
     lines.append(
         "  mcp runtime: %s (%s tools, %s atomic refreshes, list-changed=%s)"
@@ -10342,8 +10370,8 @@ def diagnostics() -> str:
     lines.append("  local runtime: threads=%s, gpu_layers=%s, batch=%s" % (
         runtime["num_thread"], runtime["num_gpu"], runtime["num_batch"]))
     lines.append(
-        "  local model retry: %d transient retry(s), %dms base delay; "
-        "same endpoint/model only, cloud retries off"
+        "  loopback model retry: %d transient retry(s), %dms base delay; "
+        "remote/cloud retries off"
         % (
             _local_model_retries(),
             int(_local_retry_delay(1) * 1000),
@@ -10444,8 +10472,10 @@ def status() -> str:
     try:
         tags = _get("/api/tags").get("models", [])
         ps = _get("/api/ps").get("models", [])
+    except ModelCallError as error:
+        return _format_model_call_error(error)
     except urllib.error.URLError as e:
-        return f"ERROR contacting Ollama at {BASE}: {e}"
+        return f"ERROR contacting Ollama at {_ollama_display()}: {e}"
 
     installed = sorted(m.get("name", "?") for m in tags)
     loaded = [
@@ -10455,15 +10485,20 @@ def status() -> str:
         f"  {k}={v}" + ("  [CLOUD — leaves machine]" if _is_cloud_tier(k, v) else "  [local GPU]")
         for k, v in available_tiers(include_disabled=cloud_allowed()).items()
     ]
+    if not ollama_endpoint.is_loopback(BASE):
+        tier_lines = [
+            line.replace("  [local GPU]", "  [REMOTE OLLAMA - leaves machine]")
+            for line in tier_lines
+        ]
     lines = [
-        f"Ollama @ {BASE}",
+        f"Ollama @ {_ollama_display()} ({ollama_endpoint.locality(BASE)})",
         "Tiers:",
         *tier_lines,
         f"Learning tiers: {', '.join(sorted(LEARN_TIERS)) if LEARN_TIERS else '(none)'}",
         f"Installed/registered models: {', '.join(installed) if installed else '(none)'}",
         f"In VRAM now: {', '.join(loaded) if loaded else '(none — GPU idle)'}",
         f"local keep_alive: {KEEP_ALIVE}",
-        "local retry: %d transient retry(s), %dms base delay; cloud retries off" % (
+        "loopback retry: %d transient retry(s), %dms base delay; remote/cloud retries off" % (
             _local_model_retries(), int(_local_retry_delay(1) * 1000),
         ),
         "local runtime: threads={num_thread}, gpu_layers={num_gpu}, batch={num_batch}".format(
