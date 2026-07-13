@@ -4,8 +4,19 @@ import math
 import os
 import re
 import sqlite3
+import threading
+import time
 
+import process_liveness
 import reward
+
+
+_ABANDONED_SESSION_CLAIMS_LOCK = globals().get(
+    "_ABANDONED_SESSION_CLAIMS_LOCK", threading.RLock()
+)
+_ABANDONED_SESSION_CLAIMS = globals().get(
+    "_ABANDONED_SESSION_CLAIMS", set()
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS interactions (
@@ -54,6 +65,13 @@ CREATE TABLE IF NOT EXISTS session_project_summaries (
     summarized_through TEXT,
     updated_ts TEXT DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(session_id, project_key)
+);
+CREATE TABLE IF NOT EXISTS session_turn_claims (
+    session_id TEXT PRIMARY KEY,
+    claim_token TEXT NOT NULL,
+    owner_pid INTEGER NOT NULL,
+    owner_identity TEXT NOT NULL,
+    claimed_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS facts (
     id TEXT PRIMARY KEY,
@@ -175,6 +193,17 @@ def _migrate(conn):
     usage_cols = _column_names(conn, "lesson_usage")
     if "outcome_ts" not in usage_cols:
         conn.execute("ALTER TABLE lesson_usage ADD COLUMN outcome_ts TEXT")
+    claim_cols = _column_names(conn, "session_turn_claims")
+    if "owner_pid" not in claim_cols or "owner_identity" not in claim_cols:
+        # Claims are ephemeral coordination state, so replacing the old
+        # lease-based shape is safer than trying to preserve stale ownership.
+        conn.execute("DROP TABLE session_turn_claims")
+        conn.execute(
+            "CREATE TABLE session_turn_claims ("
+            "session_id TEXT PRIMARY KEY, claim_token TEXT NOT NULL, "
+            "owner_pid INTEGER NOT NULL, owner_identity TEXT NOT NULL, "
+            "claimed_at REAL NOT NULL)"
+        )
 
 
 def init_db(conn):
@@ -312,6 +341,171 @@ def get_interaction(conn, interaction_id):
         "SELECT * FROM interactions WHERE id=?", (interaction_id,)
     ).fetchone()
     return dict(row) if row else None
+
+
+def claim_session_turn(
+    conn, session_id, claim_token, *, owner_pid=None, now=None,
+    owner_identity=None, owner_probe=None,
+):
+    """Claim a session until its token is released or its owner process dies."""
+    session_id = str(session_id or "").strip()
+    claim_token = str(claim_token or "").strip()
+    if not session_id or not claim_token:
+        return False
+    owner_pid = os.getpid() if owner_pid is None else int(owner_pid)
+    if owner_pid <= 0:
+        return False
+    owner_probe = owner_probe or process_liveness.probe_process
+    if owner_identity is None:
+        owner_state, owner_identity = owner_probe(owner_pid)
+    else:
+        owner_state, _actual_identity = owner_probe(
+            owner_pid, expected_identity=owner_identity,
+        )
+    if owner_state != process_liveness.PROCESS_ALIVE or not owner_identity:
+        return False
+    owner_identity = str(owner_identity).strip()
+    if not owner_identity:
+        return False
+    current = time.time() if now is None else float(now)
+    reclaimed_token = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT claim_token, owner_pid, owner_identity "
+            "FROM session_turn_claims "
+            "WHERE session_id=?",
+            (session_id,),
+        ).fetchone()
+        if existing is not None:
+            existing_state, _actual_identity = owner_probe(
+                existing["owner_pid"],
+                expected_identity=existing["owner_identity"],
+            )
+            existing_marker = (
+                session_id,
+                existing["claim_token"],
+                existing["owner_pid"],
+                existing["owner_identity"],
+            )
+            with _ABANDONED_SESSION_CLAIMS_LOCK:
+                abandoned = existing_marker in _ABANDONED_SESSION_CLAIMS
+            same_owner = (
+                existing["owner_pid"] == owner_pid
+                and existing["owner_identity"] == owner_identity
+            )
+            if existing_state != process_liveness.PROCESS_DEAD and not (
+                same_owner and abandoned
+            ):
+                conn.commit()
+                return False
+            conn.execute(
+                "DELETE FROM session_turn_claims WHERE session_id=? "
+                "AND claim_token=? AND owner_pid=? AND owner_identity=?",
+                (
+                    session_id, existing["claim_token"], existing["owner_pid"],
+                    existing["owner_identity"],
+                ),
+            )
+            reclaimed_token = existing["claim_token"]
+        cur = conn.execute(
+            "INSERT INTO session_turn_claims"
+            "(session_id, claim_token, owner_pid, owner_identity, claimed_at) "
+            "VALUES(?, ?, ?, ?, ?) ON CONFLICT(session_id) DO NOTHING",
+            (session_id, claim_token, owner_pid, owner_identity, current),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    if reclaimed_token is not None:
+        with _ABANDONED_SESSION_CLAIMS_LOCK:
+            _ABANDONED_SESSION_CLAIMS.discard(existing_marker)
+    return cur.rowcount == 1
+
+
+def release_session_turn(conn, session_id, claim_token):
+    """Release a session claim without allowing a stale owner to clear a new one."""
+    try:
+        cur = conn.execute(
+            "DELETE FROM session_turn_claims "
+            "WHERE session_id=? AND claim_token=?",
+            (session_id, claim_token),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    if cur.rowcount == 1:
+        with _ABANDONED_SESSION_CLAIMS_LOCK:
+            stale_markers = {
+                marker for marker in _ABANDONED_SESSION_CLAIMS
+                if isinstance(marker, tuple) and len(marker) == 4
+                and marker[0] == session_id and marker[1] == claim_token
+            }
+            _ABANDONED_SESSION_CLAIMS.difference_update(stale_markers)
+    return cur.rowcount == 1
+
+
+def abandon_session_turn_claim(
+    session_id, claim_token, owner_pid, owner_identity,
+):
+    """Mark a completed same-process claim reclaimable after release I/O failure."""
+    session_id = str(session_id or "").strip()
+    claim_token = str(claim_token or "").strip()
+    owner_identity = str(owner_identity or "").strip()
+    try:
+        owner_pid = int(owner_pid)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if not session_id or not claim_token or owner_pid <= 0 or not owner_identity:
+        return False
+    marker = (session_id, claim_token, owner_pid, owner_identity)
+    with _ABANDONED_SESSION_CLAIMS_LOCK:
+        _ABANDONED_SESSION_CLAIMS.add(marker)
+    return True
+
+
+def replace_interaction_response_cas(
+    conn, interaction_id, *, expected, response, tokens_in, tokens_out,
+    token_source,
+):
+    """Replace a captured response only while its learning state is unchanged."""
+    if not isinstance(expected, dict) or expected.get("id") != interaction_id:
+        return False
+    try:
+        cur = conn.execute(
+            "UPDATE interactions SET response=?, tokens_in=?, tokens_out=?, "
+            "token_source=? WHERE id=? "
+            "AND response IS ? AND tokens_in IS ? AND tokens_out IS ? "
+            "AND token_source IS ? AND task IS ? AND retrieved_ctx IS ? "
+            "AND tier IS ? AND session_id IS ? AND project IS ? "
+            "AND project_explicit IS ? "
+            "AND NOT EXISTS ("
+            "SELECT 1 FROM outcomes "
+            "WHERE outcomes.interaction_id=interactions.id"
+            ") AND NOT EXISTS ("
+            "SELECT 1 FROM lessons "
+            "WHERE lessons.source_interaction=interactions.id"
+            ") AND NOT EXISTS ("
+            "SELECT 1 FROM lesson_usage "
+            "WHERE lesson_usage.interaction_id=interactions.id "
+            "AND lesson_usage.outcome_signal IS NOT NULL"
+            ")",
+            (
+                response, tokens_in, tokens_out, token_source, interaction_id,
+                expected["response"], expected["tokens_in"],
+                expected["tokens_out"], expected["token_source"],
+                expected["task"], expected["retrieved_ctx"], expected["tier"],
+                expected["session_id"], expected["project"],
+                expected["project_explicit"],
+            ),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return cur.rowcount == 1
 
 
 def record_outcome_row(conn, interaction_id, signal, reward):

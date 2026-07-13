@@ -65,6 +65,344 @@ def test_log_and_get_interaction_roundtrip():
     assert got["token_source"] == "ollama"
 
 
+def _log_repairable_interaction(conn, interaction_id="repairable"):
+    ms.log_interaction(
+        conn, interaction_id, "original task", "retrieved lesson",
+        "broken response", "code", session_id="session-1",
+        task_embedding=_e.to_blob([1.0, 0.0]), tokens_in=11, tokens_out=5,
+        token_source="ollama", project="project-a", project_explicit=True,
+        task_embedding_model="embed-v1", task_embedding_revision="digest-1",
+        task_embedding_dim=2,
+    )
+    return ms.get_interaction(conn, interaction_id)
+
+
+def test_replace_interaction_response_cas_preserves_metadata_and_embedding():
+    conn = _conn()
+    expected = _log_repairable_interaction(conn)
+
+    assert ms.replace_interaction_response_cas(
+        conn, "repairable", expected=expected, response="fixed response",
+        tokens_in=19, tokens_out=9, token_source="ollama+code-repair",
+    )
+
+    stored = ms.get_interaction(conn, "repairable")
+    assert stored["response"] == "fixed response"
+    assert stored["tokens_in"] == 19
+    assert stored["tokens_out"] == 9
+    assert stored["token_source"] == "ollama+code-repair"
+    for field in (
+        "id", "task", "retrieved_ctx", "tier", "session_id", "project",
+        "project_explicit", "ts", "task_embedding", "task_embedding_model",
+        "task_embedding_revision", "task_embedding_dim",
+    ):
+        assert stored[field] == expected[field]
+
+
+def test_replace_interaction_response_cas_compares_nulls_safely():
+    conn = _conn()
+    ms.log_interaction(
+        conn, "nullable", "task", None, "broken response", "code",
+        session_id=None, tokens_in=None, tokens_out=None, token_source=None,
+        project=None, project_explicit=False,
+    )
+    expected = ms.get_interaction(conn, "nullable")
+
+    assert ms.replace_interaction_response_cas(
+        conn, "nullable", expected=expected, response="fixed response",
+        tokens_in=7, tokens_out=3, token_source="estimated+code-repair",
+    )
+
+
+def test_replace_interaction_response_cas_rejects_mismatched_snapshot_id():
+    conn = _conn()
+    expected = _log_repairable_interaction(conn)
+    expected["id"] = "different-interaction"
+
+    assert not ms.replace_interaction_response_cas(
+        conn, "repairable", expected=expected, response="fixed response",
+        tokens_in=19, tokens_out=9, token_source="ollama+code-repair",
+    )
+    assert ms.get_interaction(conn, "repairable")["response"] == "broken response"
+
+
+def test_session_turn_claim_is_cross_connection_and_owner_guarded(tmp_path):
+    path = tmp_path / "session-claim.db"
+    first = ms.connect(str(path))
+    second = ms.connect(str(path))
+    try:
+        assert ms.claim_session_turn(
+            first, "shared", "owner-a", now=100,
+        )
+        assert not ms.claim_session_turn(
+            second, "shared", "owner-b", now=101,
+        )
+        assert not ms.release_session_turn(second, "shared", "owner-b")
+        assert ms.release_session_turn(first, "shared", "owner-a")
+        assert ms.claim_session_turn(
+            second, "shared", "owner-b", now=103,
+        )
+    finally:
+        first.close()
+        second.close()
+
+
+def test_session_turn_claim_dead_owner_can_be_recovered(tmp_path):
+    path = tmp_path / "stale-session-claim.db"
+    first = ms.connect(str(path))
+    second = ms.connect(str(path))
+
+    def first_probe(pid, expected_identity=None):
+        return ms.process_liveness.PROCESS_ALIVE, "old-instance"
+
+    def second_probe(pid, expected_identity=None):
+        if expected_identity == "new-instance":
+            return ms.process_liveness.PROCESS_ALIVE, "new-instance"
+        return ms.process_liveness.PROCESS_DEAD, None
+
+    try:
+        assert ms.claim_session_turn(
+            first, "shared", "stale-owner", owner_pid=111,
+            owner_identity="old-instance", now=100, owner_probe=first_probe,
+        )
+        assert ms.claim_session_turn(
+            second, "shared", "new-owner", owner_pid=222, now=111,
+            owner_identity="new-instance", owner_probe=second_probe,
+        )
+        row = second.execute(
+            "SELECT claim_token FROM session_turn_claims WHERE session_id='shared'"
+        ).fetchone()
+        assert row["claim_token"] == "new-owner"
+    finally:
+        first.close()
+        second.close()
+
+
+def test_init_db_replaces_obsolete_lease_claim_table():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE session_turn_claims ("
+        "session_id TEXT PRIMARY KEY, claim_token TEXT NOT NULL, "
+        "claimed_at REAL NOT NULL, expires_at REAL NOT NULL)"
+    )
+
+    ms.init_db(conn)
+
+    columns = {
+        row[1] for row in conn.execute(
+            "PRAGMA table_info(session_turn_claims)"
+        ).fetchall()
+    }
+    assert columns == {
+        "session_id", "claim_token", "owner_pid", "owner_identity",
+        "claimed_at",
+    }
+
+
+def test_session_turn_claim_unknown_owner_state_fails_closed(tmp_path):
+    path = tmp_path / "unknown-owner-claim.db"
+    first = ms.connect(str(path))
+    second = ms.connect(str(path))
+
+    def first_probe(pid, expected_identity=None):
+        return ms.process_liveness.PROCESS_ALIVE, "instance-a"
+
+    def second_probe(pid, expected_identity=None):
+        if expected_identity == "instance-b":
+            return ms.process_liveness.PROCESS_ALIVE, "instance-b"
+        return ms.process_liveness.PROCESS_UNKNOWN, None
+
+    try:
+        assert ms.claim_session_turn(
+            first, "shared", "owner-a", owner_pid=111,
+            owner_identity="instance-a", owner_probe=first_probe,
+        )
+        assert not ms.claim_session_turn(
+            second, "shared", "owner-b", owner_pid=222,
+            owner_identity="instance-b", owner_probe=second_probe,
+        )
+        row = second.execute(
+            "SELECT claim_token FROM session_turn_claims WHERE session_id='shared'"
+        ).fetchone()
+        assert row["claim_token"] == "owner-a"
+    finally:
+        first.close()
+        second.close()
+
+
+def test_abandoned_same_process_claim_is_reclaimable(tmp_path):
+    path = tmp_path / "abandoned-owner-claim.db"
+    first = ms.connect(str(path))
+    second = ms.connect(str(path))
+    identity = "same-process-instance"
+
+    def alive(pid, expected_identity=None):
+        return ms.process_liveness.PROCESS_ALIVE, expected_identity
+
+    try:
+        assert ms.claim_session_turn(
+            first, "shared", "orphaned-token", owner_pid=111,
+            owner_identity=identity, owner_probe=alive,
+        )
+        assert ms.abandon_session_turn_claim(
+            "shared", "orphaned-token", 111, identity,
+        )
+        assert ms.claim_session_turn(
+            second, "shared", "replacement-token", owner_pid=111,
+            owner_identity=identity, owner_probe=alive,
+        )
+    finally:
+        first.close()
+        second.close()
+
+
+def test_abandoned_marker_cannot_cross_session_on_token_reuse(tmp_path):
+    path = tmp_path / "cross-session-token.db"
+    first = ms.connect(str(path))
+    second = ms.connect(str(path))
+    identity = "same-process-instance"
+
+    def alive(pid, expected_identity=None):
+        return ms.process_liveness.PROCESS_ALIVE, expected_identity
+
+    try:
+        assert ms.claim_session_turn(
+            first, "session-a", "reused-token", owner_pid=111,
+            owner_identity=identity, owner_probe=alive,
+        )
+        assert ms.abandon_session_turn_claim(
+            "session-a", "reused-token", 111, identity,
+        )
+        assert ms.claim_session_turn(
+            second, "session-b", "reused-token", owner_pid=111,
+            owner_identity=identity, owner_probe=alive,
+        )
+        assert not ms.claim_session_turn(
+            first, "session-b", "third-token", owner_pid=111,
+            owner_identity=identity, owner_probe=alive,
+        )
+    finally:
+        ms.release_session_turn(first, "session-a", "reused-token")
+        ms.release_session_turn(second, "session-b", "reused-token")
+        first.close()
+        second.close()
+
+
+@pytest.mark.parametrize(
+    ("column", "changed_value"),
+    (
+        ("response", "concurrent response"),
+        ("tokens_in", 101),
+        ("tokens_out", 102),
+        ("token_source", "estimated"),
+        ("task", "concurrent task"),
+        ("retrieved_ctx", "concurrent context"),
+        ("tier", "general"),
+        ("session_id", "session-2"),
+        ("project", "project-b"),
+        ("project_explicit", 0),
+    ),
+)
+def test_replace_interaction_response_cas_rejects_guarded_field_conflicts(
+    column, changed_value,
+):
+    conn = _conn()
+    expected = _log_repairable_interaction(conn)
+    conn.execute(
+        "UPDATE interactions SET %s=? WHERE id='repairable'" % column,
+        (changed_value,),
+    )
+    conn.commit()
+    concurrent = ms.get_interaction(conn, "repairable")
+
+    assert not ms.replace_interaction_response_cas(
+        conn, "repairable", expected=expected, response="fixed response",
+        tokens_in=19, tokens_out=9, token_source="ollama+code-repair",
+    )
+    assert ms.get_interaction(conn, "repairable") == concurrent
+
+
+@pytest.mark.parametrize("blocker", ("outcome", "lesson", "credited_usage"))
+def test_replace_interaction_response_cas_rejects_learning_state(blocker):
+    conn = _conn()
+    expected = _log_repairable_interaction(conn)
+    if blocker == "outcome":
+        ms.record_outcome_row(conn, "repairable", "tests_passed", 1.0)
+    elif blocker == "lesson":
+        ms.add_lesson(conn, "derived", "derived lesson", None, "repairable")
+    else:
+        ms.add_lesson(conn, "retrieved", "retrieved lesson", None, "seed")
+        ms.log_lesson_usage(conn, ["retrieved"], "repairable", "original task")
+        ms.record_lesson_usage_outcome(
+            conn, "repairable", "tests_passed", 1.0,
+        )
+
+    assert not ms.replace_interaction_response_cas(
+        conn, "repairable", expected=expected, response="fixed response",
+        tokens_in=19, tokens_out=9, token_source="ollama+code-repair",
+    )
+    assert ms.get_interaction(conn, "repairable") == expected
+
+
+def test_replace_interaction_response_cas_allows_uncredited_lesson_usage():
+    conn = _conn()
+    expected = _log_repairable_interaction(conn)
+    ms.add_lesson(conn, "retrieved", "retrieved lesson", None, "seed")
+    ms.log_lesson_usage(conn, ["retrieved"], "repairable", "original task")
+
+    assert ms.replace_interaction_response_cas(
+        conn, "repairable", expected=expected, response="fixed response",
+        tokens_in=19, tokens_out=9, token_source="ollama+code-repair",
+    )
+
+
+def test_replace_interaction_response_cas_allows_concurrent_embedding_refresh(
+    tmp_path,
+):
+    path = tmp_path / "repair-memory.db"
+    first = ms.connect(str(path))
+    second = ms.connect(str(path))
+    expected = _log_repairable_interaction(first)
+
+    refreshed = _e.to_blob([0.0, 1.0])
+    assert ms.refresh_interaction_task_embedding(
+        second, "repairable", refreshed, "embed-v2",
+        revision="digest-2", dimension=2,
+    )
+    assert ms.replace_interaction_response_cas(
+        first, "repairable", expected=expected, response="fixed response",
+        tokens_in=19, tokens_out=9, token_source="ollama+code-repair",
+    )
+
+    stored = ms.get_interaction(first, "repairable")
+    assert stored["response"] == "fixed response"
+    assert stored["task_embedding"] == refreshed
+    assert stored["task_embedding_model"] == "embed-v2"
+    assert stored["task_embedding_revision"] == "digest-2"
+    assert stored["task_embedding_dim"] == 2
+    first.close()
+    second.close()
+
+
+def test_replace_interaction_response_cas_rolls_back_on_error():
+    conn = _conn()
+    expected = _log_repairable_interaction(conn)
+    conn.execute(
+        "UPDATE interactions SET task='uncommitted task' WHERE id='repairable'"
+    )
+    conn.execute("DROP TABLE outcomes")
+
+    with pytest.raises(sqlite3.OperationalError, match="no such table: outcomes"):
+        ms.replace_interaction_response_cas(
+            conn, "repairable", expected=expected, response="fixed response",
+            tokens_in=19, tokens_out=9, token_source="ollama+code-repair",
+        )
+
+    assert ms.get_interaction(conn, "repairable")["task"] == "original task"
+    assert conn.execute("SELECT COUNT(*) FROM outcomes").fetchone()[0] == 0
+
+
 def test_interaction_token_totals_mix_exact_and_estimated_rows():
     c = _conn()
     ms.log_interaction(c, "exact", "task", "ctx", "response", "code",

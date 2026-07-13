@@ -129,7 +129,11 @@ The learning loop above is *cross-task* memory. On top of it Sonder also has:
   other, so follow-ups have context. With no `session`, calls share the `default`
   thread; pass a distinct `session` id to isolate a conversation, or `session="none"`
   for a one-off single turn. Threads persist in `memory.db` across restarts and are
-  auto-titled; older turns are rolled into a running summary so a thread never
+  auto-titled. A database-backed, live-process-owned turn claim serializes each
+  remembered session across MCP, serve, and REPL processes until code verification
+  and persistence finish, so no concurrent turn can consume a response still being
+  repaired. After upgrading from a pre-claim runtime, reconnect/restart each runtime
+  process once before concurrent use. Older turns are rolled into a running summary so a thread never
   overflows the local context window. (The 7B is a ~32K-context model on a 6 GB GPU —
   memory is *carrying the right turns + summarizing the rest*, not a giant window.)
   List/resume threads with `sonder_sessions()` / REPL `/sessions` / `/resume`.
@@ -490,6 +494,11 @@ the machine instead of idling on conservative defaults:
 - `SONDER_PARALLEL_WORKERS` - explicit concurrent model-call override,
   bounded to 1..16 and never above the requested agent count. Without it,
   Sonder derives 1..8 slots from CPU count and available physical RAM.
+- `SONDER_SESSION_CLAIM_WAIT_SECONDS` - how long a second runtime waits for the
+  same remembered session before returning a retryable busy error (default `5`,
+  bounded to `0..30`). Claims bind the owner PID plus process-start identity,
+  cannot expire under a live owner, and are reclaimed only after confirmed death;
+  an unknown OS probe stays busy rather than risking split-brain session writes.
 - `SONDER_FLEET_DB` - optional path for the private process-shared fleet
   ledger. Defaults to `SONDER_HOME/fleet.db`.
 - `SONDER_FLEET_HEARTBEAT` - set `0` to disable owner heartbeats (primarily
