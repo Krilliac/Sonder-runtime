@@ -1,8 +1,18 @@
 import json
+import os
+from pathlib import Path
 import subprocess
 import sys
 
 import fleet_store
+
+
+def test_pytest_harness_never_uses_live_fleet_ledger():
+    configured = os.environ.get("SONDER_FLEET_DB", "")
+
+    assert configured
+    assert Path(configured).resolve() == Path(fleet_store.database_path()).resolve()
+    assert Path(configured).parent.name.startswith("sonder-pytest-fleet-")
 
 
 def _row(agent_id, *, role="agent", parent_id="", task="work"):
