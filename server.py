@@ -531,9 +531,11 @@ def _no_retrieve(conn, task):
 
 
 def _generate_text(prompt, tier="fast", system="", temperature=0.2,
-                   num_predict=256, num_ctx=2048):
+                   num_predict=256, num_ctx=2048, timeout=None):
     model = TIERS.get(tier, TIERS["fast"])
-    return _make_generate(model, system, temperature, num_predict, num_ctx)(prompt)
+    return _make_generate(
+        model, system, temperature, num_predict, num_ctx, timeout=timeout,
+    )(prompt)
 
 
 def _resolve_session(session):
@@ -1659,15 +1661,12 @@ def _code_gate_target(reply):
     return code
 
 
-def _defer_lesson_distillation(
-    interaction_id, claim_token, owner_pid, owner_identity, failure,
+def _release_lesson_distillation_claim(
+    interaction_id, claim_token, owner_pid, owner_identity, error,
 ):
     """Best-effort release of an exact distillation claim for a later retry."""
     if not interaction_id or not claim_token:
         return False
-    # Persist only a stable error class. Transport exception text can contain
-    # endpoints, filesystem paths, or fragments derived from private prompts.
-    error = "distillation failed: %s" % type(failure).__name__
     try:
         conn = _open_db()
         try:
@@ -1693,6 +1692,52 @@ def _defer_lesson_distillation(
         pass
     return memory_store.abandon_lesson_distillation_claim(
         interaction_id, claim_token, owner_pid, owner_identity,
+    )
+
+
+def _defer_lesson_distillation(
+    interaction_id, claim_token, owner_pid, owner_identity, failure,
+):
+    """Release a failed claim without persisting private exception details."""
+    # Persist only a stable error class. Transport exception text can contain
+    # endpoints, filesystem paths, or fragments derived from private prompts.
+    error = "distillation failed: %s" % type(failure).__name__
+    return _release_lesson_distillation_claim(
+        interaction_id, claim_token, owner_pid, owner_identity, error,
+    )
+
+
+def _distillation_timeout_seconds():
+    """Return the short, independently configurable learning-call budget."""
+    value = _env_int_option("SONDER_DISTILLATION_TIMEOUT", 20)
+    if value is None:
+        value = 20
+    return max(1, min(int(value), TIMEOUT))
+
+
+def _prepare_lesson_candidate_bounded(interaction, signal):
+    """Generate one lesson within a bounded total model/embedding budget."""
+    budget = _distillation_timeout_seconds()
+    deadline = time.monotonic() + budget
+
+    def remaining_seconds():
+        remaining = deadline - time.monotonic()
+        return max(1, min(budget, int(remaining) + 1))
+
+    def generate(prompt):
+        return _generate_text(prompt, timeout=remaining_seconds())
+
+    def embed(text):
+        if time.monotonic() >= deadline:
+            return None
+        return embeddings.embed(text, timeout=remaining_seconds())
+
+    return reflection.prepare_lesson_candidate(
+        interaction["task"],
+        interaction["response"],
+        signal,
+        offload_fn=generate,
+        embed_fn=embed,
     )
 
 
@@ -1743,13 +1788,22 @@ def _record_outcome_and_maybe_distill(interaction_id, signal):
         if not recorded["claimed"]:
             return result
 
-        candidate = reflection.prepare_lesson_candidate(
-            inter["task"],
-            inter["response"],
-            signal,
-            offload_fn=_generate_text,
-            embed_fn=embeddings.embed,
-        )
+        active_model_calls = master_orchestrator.active_model_call_count()
+        if active_model_calls:
+            released = _release_lesson_distillation_claim(
+                interaction_id,
+                claim_token,
+                owner_pid,
+                owner_identity,
+                "distillation deferred: active fleet model calls",
+            )
+            claim_may_exist = not released
+            result["distillation_deferred"] = released
+            if released:
+                result["distillation_state"] = memory_store.DISTILLATION_RETRYABLE
+            return result
+
+        candidate = _prepare_lesson_candidate_bounded(inter, signal)
         conn = _open_db()
         try:
             finalized = memory_store.finalize_lesson_distillation(
