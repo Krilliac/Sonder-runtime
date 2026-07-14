@@ -120,6 +120,12 @@ and never changes endpoint, model, or tier. Hosted/cloud calls are always
 single-attempt to avoid silently duplicating metered work. Set
 `SONDER_LOCAL_RETRIES=0..2` and `SONDER_LOCAL_RETRY_DELAY_MS=0..1000` to tune the
 loopback policy. Explicit remote Ollama and hosted/cloud calls are single-attempt.
+Good-outcome lesson reflection does not queue another model request behind an
+active fleet: the outcome is committed immediately and its lesson remains
+retryable. When the fleet is idle, reflection uses a separate shared generation
+and embedding budget (`SONDER_DISTILLATION_TIMEOUT`, default `20` seconds,
+bounded by `SONDER_TIMEOUT`) so `record_outcome` cannot inherit the normal
+five-minute model-call ceiling.
 
 ### Memory beyond lessons
 

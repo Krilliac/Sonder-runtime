@@ -1,5 +1,4 @@
 import threading
-
 import memory_store
 import pytest
 import server
@@ -155,6 +154,86 @@ def test_record_outcome_retryable_duplicate_retries_without_duplicate_evidence(
         )
     finally:
         conn.close()
+
+
+def test_record_outcome_defers_without_model_call_while_fleet_is_active(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
+    conn = server._open_db()
+    try:
+        memory_store.log_interaction(conn, "I1", "task", "", "answer", "code")
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        server.master_orchestrator, "active_model_call_count", lambda: 2,
+    )
+    prepare_calls = []
+    monkeypatch.setattr(
+        server.reflection,
+        "prepare_lesson_candidate",
+        lambda *args, **kwargs: prepare_calls.append((args, kwargs)),
+    )
+
+    out = server.record_outcome("I1", "edited")
+
+    assert out.startswith("Recorded 'edited'")
+    assert "deferred for retry" in out
+    assert prepare_calls == []
+    conn = server._open_db()
+    try:
+        row = conn.execute(
+            "SELECT state, claim_token, last_error FROM lesson_distillations "
+            "WHERE interaction_id='I1'"
+        ).fetchone()
+        assert row["state"] == memory_store.DISTILLATION_RETRYABLE
+        assert row["claim_token"] is None
+        assert row["last_error"] == "distillation deferred: active fleet model calls"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM outcomes WHERE interaction_id='I1' "
+            "AND signal='edited'"
+        ).fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_record_outcome_uses_short_shared_distillation_budget(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
+    conn = server._open_db()
+    try:
+        memory_store.log_interaction(conn, "I1", "task", "", "answer", "code")
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        server.master_orchestrator, "active_model_call_count", lambda: 0,
+    )
+    monkeypatch.setattr(server, "_distillation_timeout_seconds", lambda: 7)
+    calls = []
+
+    def generate(prompt, **kwargs):
+        calls.append(("generate", prompt, kwargs["timeout"]))
+        return "candidate text"
+
+    def embed(text, timeout=30):
+        calls.append(("embed", text, timeout))
+        return None
+
+    def prepare(task, response, signal, offload_fn, embed_fn):
+        offload_fn("distill prompt")
+        embed_fn("candidate text")
+        return {"status": "no_lesson", "reason": "test"}
+
+    monkeypatch.setattr(server, "_generate_text", generate)
+    monkeypatch.setattr(server.embeddings, "embed", embed)
+    monkeypatch.setattr(server.reflection, "prepare_lesson_candidate", prepare)
+
+    out = server.record_outcome("I1", "tests_passed")
+
+    assert out.startswith("Recorded 'tests_passed'")
+    assert [row[0] for row in calls] == ["generate", "embed"]
+    assert all(1 <= row[2] <= 7 for row in calls)
 
 
 def test_interruption_after_atomic_claim_releases_exact_token(monkeypatch, tmp_path):
