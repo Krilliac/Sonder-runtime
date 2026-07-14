@@ -1114,7 +1114,9 @@ def test_master_orchestrate_delegates_and_audits(monkeypatch):
     assert len(calls) == 3
     assert sorted(options["timeout"] for options in call_options) == [120, 150, 150]
     assert "active agents: 0" in server.master_status()
-    assert "latest completed master result:\naudited merge" in server.master_status()
+    status = server.master_status()
+    assert "latest completed master result [" in status
+    assert "  task: find risks\naudited merge" in status
 
 
 def test_master_orchestrate_uses_tool_agent_for_repo_inspection(monkeypatch):
