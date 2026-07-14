@@ -558,6 +558,26 @@ def test_cancelled_queued_worker_cannot_transition_to_running():
     assert row["status"] == "cancelled"
 
 
+def test_active_model_call_count_tracks_only_live_http_lanes():
+    active = master_orchestrator._new_agent("agent", "active model")
+    queued = master_orchestrator._new_agent("agent", "queued without model")
+    assert master_orchestrator._start_agent(
+        active, "calling model", in_model_call=True,
+    )
+    assert master_orchestrator._start_agent(
+        queued, "local preparation", in_model_call=False,
+    )
+
+    assert master_orchestrator.active_model_call_count() == 1
+
+    master_orchestrator.request_cancel("all")
+    # Cancellation is cooperative: the HTTP lane remains owned until its
+    # blocking model request returns and the worker finalizes.
+    assert master_orchestrator.active_model_call_count() == 1
+    master_orchestrator._finish(active, output="late result")
+    assert master_orchestrator.active_model_call_count() == 0
+
+
 def test_child_created_after_parent_cancellation_inherits_cancel_state():
     master_id = master_orchestrator._new_agent("master", "parent")
     master_orchestrator.request_cancel(master_id)

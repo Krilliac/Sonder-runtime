@@ -32,6 +32,30 @@ def test_reload_changed_modules_reloads_source_edit(monkeypatch, tmp_path):
     finally:
         sys.modules.pop(module_name, None)
         live_reload._MTIMES.pop(module_name, None)
+        live_reload._SIGNATURES.pop(module_name, None)
+
+
+def test_prime_closes_first_request_after_edit_window(monkeypatch, tmp_path):
+    module_name = "live_reload_primed_mod"
+    module_path = tmp_path / (module_name + ".py")
+    module_path.write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    try:
+        mod = importlib.import_module(module_name)
+        live_reload.prime_modules([module_name])
+
+        module_path.write_text("VALUE = 222\n", encoding="utf-8")
+        # A Git operation can restore an older mtime.  The source signature,
+        # rather than monotonic-mtime ordering, must still detect the edit.
+        past = time.time() - 60
+        os.utime(module_path, (past, past))
+
+        reloaded = live_reload.reload_changed_modules([module_name])[module_name]
+        assert reloaded.VALUE == 222
+    finally:
+        sys.modules.pop(module_name, None)
+        live_reload._MTIMES.pop(module_name, None)
+        live_reload._SIGNATURES.pop(module_name, None)
 
 
 def test_live_reload_can_be_disabled(monkeypatch):
@@ -59,6 +83,7 @@ def test_reload_failure_keeps_old_module(monkeypatch, tmp_path):
     finally:
         sys.modules.pop(module_name, None)
         live_reload._MTIMES.pop(module_name, None)
+        live_reload._SIGNATURES.pop(module_name, None)
         live_reload._ERRORS.pop(module_name, None)
 
 
@@ -77,6 +102,25 @@ def test_server_rebinds_reloaded_modules(monkeypatch):
         assert server.personas is replacement
     finally:
         server.personas = original
+
+
+def test_server_prime_live_reload_upgrades_legacy_helper(monkeypatch):
+    import server
+
+    legacy = object()
+    primed = []
+
+    class Refreshed:
+        @staticmethod
+        def prime_modules(names):
+            primed.append(list(names))
+
+    monkeypatch.setattr(server, "live_reload", legacy)
+    monkeypatch.setattr(server.importlib, "reload", lambda module: Refreshed)
+
+    assert server._prime_live_reload_modules() is True
+    assert server.live_reload is Refreshed
+    assert primed == [server.LIVE_RELOAD_MODULES]
 
 
 def test_serve_rebinds_reloaded_server(monkeypatch):

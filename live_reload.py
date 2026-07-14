@@ -13,6 +13,7 @@ import threading
 
 _LOCK = threading.RLock()
 _MTIMES = {}
+_SIGNATURES = {}
 _ERRORS = {}
 
 
@@ -43,6 +44,38 @@ def _mtime(module):
     return os.path.getmtime(path)
 
 
+def _signature(module):
+    path = _source_path(module)
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    return stat.st_mtime_ns, stat.st_size
+
+
+def prime_modules(module_names):
+    """Record helper source state immediately after the host imports it.
+
+    Without this startup boundary, the first request after an on-disk edit can
+    mistake the edited file for the baseline even though ``sys.modules`` still
+    contains the older code.  Existing baselines are never overwritten.
+    """
+    if not enabled():
+        return
+    with _LOCK:
+        for name in module_names:
+            module = sys.modules.get(name)
+            if module is None:
+                continue
+            signature = _signature(module)
+            if signature is None:
+                continue
+            _SIGNATURES.setdefault(name, signature)
+            _MTIMES.setdefault(name, signature[0] / 1_000_000_000)
+
+
 def reload_changed_modules(module_names):
     """Reload named modules whose source mtime changed.
 
@@ -61,15 +94,18 @@ def reload_changed_modules(module_names):
                     module = importlib.import_module(name)
                 except Exception:
                     continue
-            mtime = _mtime(module)
-            if mtime is None:
+            signature = _signature(module)
+            if signature is None:
                 continue
+            mtime = signature[0] / 1_000_000_000
             old = _MTIMES.get(name)
-            if old is None:
+            old_signature = _SIGNATURES.get(name)
+            if old is None or old_signature is None:
                 _MTIMES[name] = mtime
+                _SIGNATURES[name] = signature
                 changed[name] = module
                 continue
-            if mtime <= old:
+            if signature == old_signature:
                 changed[name] = module
                 continue
             try:
@@ -79,7 +115,9 @@ def reload_changed_modules(module_names):
                 changed[name] = module
                 continue
             _ERRORS.pop(name, None)
-            _MTIMES[name] = _mtime(module) or mtime
+            refreshed_signature = _signature(module) or signature
+            _SIGNATURES[name] = refreshed_signature
+            _MTIMES[name] = refreshed_signature[0] / 1_000_000_000
             changed[name] = module
     return changed
 

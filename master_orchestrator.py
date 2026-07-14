@@ -700,6 +700,23 @@ def current_worker_cancel_requested() -> bool:
     return bool(agent_id and cancel_requested(agent_id))
 
 
+def active_model_call_count() -> int:
+    """Return live fleet calls that still own an Ollama/HTTP request lane."""
+    try:
+        data = fleet_store.snapshot(
+            include_finished=False, limit=ABSOLUTE_MAX_AGENTS + 1,
+        )
+        return sum(
+            1 for row in (data.get("agents") or [])
+            if row.get("status") in ("queued", "running")
+            and bool(row.get("in_model_call"))
+        )
+    except Exception as exc:
+        # Resource mutation must fail closed if the durable ledger is unreadable.
+        _remember_store_error(exc)
+        return 1
+
+
 @contextlib.contextmanager
 def _bind_worker_agent(agent_id: str):
     previous_agent_id = getattr(_WORKER_LOCAL, "agent_id", None)

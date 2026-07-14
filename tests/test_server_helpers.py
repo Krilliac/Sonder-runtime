@@ -2,6 +2,7 @@ import importlib
 import threading
 
 import memory_store
+import pytest
 import server
 
 
@@ -831,6 +832,64 @@ def test_master_capacity_and_cancel_tools(monkeypatch):
     assert "active model calls awaiting return: 1" in canceled
     assert "running agents signalled: 1" in canceled
     assert "cannot be force-killed" in canceled
+
+
+def test_unload_defers_while_fleet_model_call_is_active(monkeypatch):
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(
+        server.master_orchestrator, "active_model_call_count", lambda: 2,
+    )
+    monkeypatch.setattr(
+        server, "_post", lambda *args, **kwargs: pytest.fail("must not unload"),
+    )
+
+    output = server.unload("all")
+
+    assert "unload deferred" in output
+    assert "2 fleet model call(s)" in output
+
+
+def test_unload_deduplicates_verifies_and_cleans_discovery_probes(monkeypatch):
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(
+        server.master_orchestrator, "active_model_call_count", lambda: 0,
+    )
+    monkeypatch.setattr(
+        server,
+        "TIERS",
+        {
+            "fast": "small:latest",
+            "code": "sonder:latest",
+            "general": "sonder:latest",
+            "cloud-code": "hosted-cloud",
+        },
+    )
+    posted = []
+    monkeypatch.setattr(
+        server,
+        "_post",
+        lambda path, payload: posted.append((path, payload)) or {"done": True},
+    )
+    monkeypatch.setattr(server, "_get", lambda path: {"models": []})
+    monkeypatch.setattr(
+        server.ollama_lifecycle,
+        "cleanup_orphaned_discovery_probes",
+        lambda **_kwargs: {
+            "terminated": [41, 42],
+            "terminated_model_runners": [],
+            "protected_model_runners": [],
+            "errors": [],
+        },
+    )
+
+    output = server.unload("all")
+
+    assert [payload["model"] for _path, payload in posted] == [
+        "small:latest", "sonder:latest",
+    ]
+    assert all(payload["keep_alive"] == 0 for _path, payload in posted)
+    assert "residency confirmed clear" in output
+    assert "41, 42" in output
 
 
 def test_orchestrator_worker_propagates_activity_into_worker_thread(monkeypatch):
