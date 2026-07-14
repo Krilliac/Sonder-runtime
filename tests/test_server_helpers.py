@@ -860,20 +860,49 @@ def test_orchestrator_worker_propagates_activity_into_worker_thread(monkeypatch)
 
 
 def test_orchestrator_agent_worker_raises_host_generated_errors(monkeypatch):
+    calls = []
     monkeypatch.setattr(
         server,
         "_agent_impl",
-        lambda *args, **kwargs: "ERROR: model decision failed",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or
+        "ERROR: model decision failed",
     )
 
     worker = server._orchestrator_agent_worker("code")
 
     try:
-        worker("inspect repository")
+        worker("Repository: D:\\missing-repository\ninspect repository")
     except RuntimeError as error:
         assert "model decision failed" in str(error)
     else:
         raise AssertionError("host-generated agent error was treated as success")
+
+    assert calls
+    assert calls[0][1]["auto_checklist"] is True
+    assert calls[0][1]["project"] == ""
+
+
+def test_orchestrator_agent_worker_propagates_existing_repository_root(
+    monkeypatch, tmp_path,
+):
+    calls = []
+    monkeypatch.setattr(
+        server,
+        "_agent_impl",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or
+        "grounded result\n\n=== TOOL EVIDENCE ===\nfile read",
+    )
+
+    worker = server._orchestrator_agent_worker("code")
+    prompt = "Repository: %s\nRead-only inspection." % tmp_path
+    result = worker(prompt)
+
+    assert result.startswith("grounded result")
+    assert calls
+    assert calls[0][1]["project"] == str(tmp_path.resolve())
+    assert calls[0][1]["auto_checklist"] is True
+    assert calls[0][1]["require_file_evidence"] is True
+    assert calls[0][1]["read_only"] is True
 
 
 def test_repo_master_uses_cancel_aware_worker_and_persists_host_failure(monkeypatch):

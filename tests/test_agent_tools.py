@@ -642,6 +642,88 @@ def test_agent_attaches_successful_file_evidence(monkeypatch):
     assert "tool=file_read" in out
 
 
+def test_project_scoped_agent_accepts_absolute_path_inside_host_root(
+    monkeypatch, tmp_path,
+):
+    """The model may echo PROJECT ROOT as an absolute read path.
+
+    The early read-only policy must validate that path with the same trusted
+    project scope used by dispatch; otherwise a valid fleet worker burns every
+    step recovering from a host-generated false rejection.
+    """
+    target = tmp_path / "answer.txt"
+    target.write_text("trusted project evidence", encoding="utf-8")
+    responses = [
+        '{"tool":"file_read","args":{"path":%s},"reason":"inspect project"}'
+        % server.json.dumps(str(target)),
+        '{"final":"The project evidence was inspected."}',
+    ]
+    observed = []
+    monkeypatch.setattr(
+        server,
+        "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: responses.pop(0),
+    )
+
+    def dispatch(tool, args, **kwargs):
+        observed.append((tool, args, kwargs))
+        return "file read: answer.txt\ntrusted project evidence"
+
+    monkeypatch.setattr(server, "_agent_dispatch_observed", dispatch)
+
+    out = server._agent_impl(
+        "Inspect the project root",
+        tier="code",
+        max_steps=2,
+        require_file_evidence=True,
+        read_only=True,
+        include_evidence=True,
+        project=str(tmp_path),
+    )
+
+    assert out.startswith("The project evidence was inspected.")
+    assert observed and observed[0][0] == "file_read"
+    assert observed[0][2]["project"] == str(tmp_path.resolve())
+    assert "=== TOOL EVIDENCE ===" in out
+
+
+def test_project_scoped_agent_still_rejects_absolute_path_outside_host_root(
+    monkeypatch, tmp_path,
+):
+    project = tmp_path / "project"
+    outside = tmp_path / "outside.txt"
+    project.mkdir()
+    outside.write_text("must remain unreachable", encoding="utf-8")
+    responses = [
+        '{"tool":"file_read","args":{"path":%s},"reason":"escape project"}'
+        % server.json.dumps(str(outside)),
+        '{"final":"No evidence was available."}',
+    ]
+    dispatches = []
+    monkeypatch.setattr(
+        server,
+        "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: responses.pop(0),
+    )
+    monkeypatch.setattr(
+        server,
+        "_agent_dispatch_observed",
+        lambda *a, **k: dispatches.append((a, k)) or "unexpected",
+    )
+
+    out = server._agent_impl(
+        "Inspect only the project root",
+        tier="code",
+        max_steps=2,
+        require_file_evidence=True,
+        read_only=True,
+        project=str(project),
+    )
+
+    assert out.startswith("EVIDENCE_REQUIRED:")
+    assert not dispatches
+
+
 def test_project_scope_args_roots_agent_file_tools_at_the_project(tmp_path):
     # Regression (2026-07-13 audit): agent/workbench_agent accepted a `project`
     # arg but it never affected the filesystem root — relative paths resolved

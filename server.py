@@ -4683,6 +4683,14 @@ def _orchestrator_agent_worker(tier: str, max_steps: int = 8):
 
     def worker(prompt: str) -> str:
         with activity_tracker.bind_response(response_id):
+            # Repository fleet prompts carry an explicit ``Repository:`` label.
+            # Propagate it into the guarded agent just like
+            # master_orchestrator._repository_worker does.  Without this, the
+            # worker defaults to Sonder's own checkout and cannot collect
+            # evidence from the caller's repository.  auto_checklist supplies
+            # the host retry/nudge when a local model tries to finalize before
+            # using an inspection tool.
+            project = master_orchestrator.repository_project_root(prompt)
             result = _agent_impl(
                 prompt,
                 tier=tier,
@@ -4691,6 +4699,8 @@ def _orchestrator_agent_worker(tier: str, max_steps: int = 8):
                 require_file_evidence=True,
                 read_only=True,
                 include_evidence=True,
+                auto_checklist=True,
+                project=project,
                 cancel_check=master_orchestrator.current_worker_cancel_requested,
             )
             if str(result or "").startswith("ERROR:"):
@@ -9556,6 +9566,14 @@ def _agent_impl(
         nonlocal file_evidence, inspected, used_tool
         tool_name = str(review.get("tool") or "")
         tool_args = review.get("args") or {}
+        # Validate the same host-scoped arguments that dispatch will use.  A
+        # repository model commonly echoes the absolute PROJECT ROOT from its
+        # prompt; checking the raw model arguments first incorrectly rejected
+        # that path even though the host had already authorized and confined
+        # the run to ``project_scope``.
+        policy_tool_args = _project_scope_args(
+            tool_name, tool_args, project_scope,
+        )
         policy_error = ""
         if tool_name not in _AGENT_CLAIM_REVIEW_TOOLS:
             policy_error = "ERROR: HOST CLAIM REVIEW: no approved evidence tool was supplied."
@@ -9565,9 +9583,13 @@ def _agent_impl(
                 % tool_name
             )
         if not policy_error and tool_policy is not None:
-            policy_error = str(tool_policy(tool_name, tool_args) or "")
+            policy_error = str(tool_policy(tool_name, policy_tool_args) or "")
         if not policy_error:
-            policy_error = _repository_read_only_error(tool_name, tool_args)
+            policy_error = _repository_read_only_error(
+                tool_name,
+                policy_tool_args,
+                trusted_extra_roots=project_scope,
+            )
         if policy_error:
             observation_text = policy_error
         else:
@@ -9697,6 +9719,14 @@ def _agent_impl(
                 )
             return "ERROR: agent decision missing 'tool' or 'final': %s" % decision
         tool_args = decision.get("args", {})
+        # Keep policy and dispatch on one canonical, host-confined view of a
+        # repository tool call.  Previously the early read-only check saw raw
+        # model paths while dispatch later rebased them under ``project_scope``.
+        # Absolute in-project paths were therefore rejected before dispatch,
+        # causing fleet workers to exhaust max_steps without any file evidence.
+        policy_tool_args = _project_scope_args(
+            tool_name, tool_args, project_scope,
+        )
         call_signature = (
             str(tool_name),
             json.dumps(tool_args, sort_keys=True, ensure_ascii=False, default=str),
@@ -9724,9 +9754,13 @@ def _agent_impl(
                 % tool_name
             )
         if not policy_error and tool_policy is not None:
-            policy_error = str(tool_policy(tool_name, tool_args) or "")
+            policy_error = str(tool_policy(tool_name, policy_tool_args) or "")
         if not policy_error and read_only:
-            policy_error = _repository_read_only_error(tool_name, tool_args)
+            policy_error = _repository_read_only_error(
+                tool_name,
+                policy_tool_args,
+                trusted_extra_roots=project_scope,
+            )
         if (
             auto_checklist
             and tool_name in _WORK_MUTATION_TOOLS
