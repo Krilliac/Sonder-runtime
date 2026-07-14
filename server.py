@@ -4813,20 +4813,22 @@ def _orchestrator_worker(tier: str, learn: bool = False, timeout: int = 150):
     return worker
 
 
-def _orchestrator_agent_worker(tier: str, max_steps: int = 8):
+def _orchestrator_agent_worker(
+    tier: str, project: str, max_steps: int = 8,
+):
     response_id = activity_tracker.current_response_id()
+    project_scope = master_orchestrator.resolve_repository_project_root("", project)
 
-    def worker(prompt: str) -> str:
+    def worker(prompt: str, assigned_project: str) -> master_orchestrator.RepositoryWorkerResult:
         with activity_tracker.bind_response(response_id):
-            # Repository fleet prompts carry an explicit ``Repository:`` label.
-            # Propagate it into the guarded agent just like
-            # master_orchestrator._repository_worker does.  Without this, the
-            # worker defaults to Sonder's own checkout and cannot collect
-            # evidence from the caller's repository.  auto_checklist supplies
-            # the host retry/nudge when a local model tries to finalize before
-            # using an inspection tool.
-            project = master_orchestrator.repository_project_root(prompt)
-            result = _agent_impl(
+            assigned = master_orchestrator.resolve_repository_project_root(
+                prompt, assigned_project,
+            )
+            if not master_orchestrator.same_project_root(assigned, project_scope):
+                raise RuntimeError("repository worker assignment changed after fleet start")
+            # The host-bound project is passed directly; child prompt parsing is
+            # only an ambiguity check and can never select the process cwd.
+            receipt = _agent_impl(
                 prompt,
                 tier=tier,
                 max_steps=max_steps,
@@ -4835,13 +4837,23 @@ def _orchestrator_agent_worker(tier: str, max_steps: int = 8):
                 read_only=True,
                 include_evidence=True,
                 auto_checklist=True,
-                project=project,
+                project=project_scope,
+                return_host_receipt=True,
                 cancel_check=master_orchestrator.current_worker_cancel_requested,
             )
-            if str(result or "").startswith("ERROR:"):
-                raise RuntimeError(str(result)[:800])
-            return result
+            output = str(getattr(receipt, "output", receipt) or "")
+            if output.startswith("ERROR:"):
+                raise RuntimeError(output[:800])
+            return master_orchestrator.repository_worker_result(
+                receipt, project_scope,
+            )
     return worker
+
+
+def _master_scope_error(detail) -> str:
+    return "%s\nScope error: %s" % (
+        master_orchestrator.EVIDENCE_REQUIRED, str(detail or "unknown scope error"),
+    )
 
 
 def _master_grounded_build(
@@ -4918,6 +4930,7 @@ def master_orchestrate(
     tier: str = "auto",
     learn: bool = False,
     retry_of: str = "",
+    project: str = "",
 ) -> str:
     """Run a master pass inline or with hardware-scheduled delegated agents.
 
@@ -4927,6 +4940,9 @@ def master_orchestrate(
     hardware-derived breadth ceiling in the background and returns immediately.
     Pass a positive ``agents`` value to set a smaller explicit fleet breadth;
     zero/omitted selects three delegates or the hardware ceiling for fleet mode.
+    For existing repository work, pass ``project`` as an existing root. Every
+    child and aggregate is confined to that canonical root; missing or
+    conflicting repository scope fails closed instead of inheriting the cwd.
     Status is visible through master_status().
     """
     _maybe_live_reload()
@@ -4976,14 +4992,29 @@ def master_orchestrate(
     # these files") never get misclassified into the asset/game forge pipeline
     # just because they contain a common verb+noun pair the regex also uses
     # for creative intent (generate/create/build + model/document/diagram/...).
-    needs_repo_tools = master_orchestrator.requires_repository_tools(task)
+    raw_project = str(project or "").strip()
+    explicit_project = master_orchestrator.canonical_project_root(raw_project)
+    project_requested = bool(raw_project and raw_project.lower() not in {"none", "default"})
+    if project_requested and not explicit_project:
+        return _master_scope_error(
+            "project must name an existing directory or source file"
+        )
+    needs_repo_tools = bool(explicit_project) or master_orchestrator.requires_repository_tools(task)
+    project_scope = ""
+    if needs_repo_tools:
+        try:
+            project_scope = master_orchestrator.resolve_repository_project_root(
+                task, project,
+            )
+        except ValueError as exc:
+            return _master_scope_error(exc)
     creative_intent = None if needs_repo_tools else creative_router.classify(task, mode=mode)
     if creative_intent:
         return _master_grounded_build(
             task, mode, tier, creative_intent, retry_of=retry_of,
         )
     worker = (
-        _orchestrator_agent_worker(tier)
+        _orchestrator_agent_worker(tier, project_scope)
         if needs_repo_tools
         else _orchestrator_worker(
             tier,
@@ -4995,7 +5026,11 @@ def master_orchestrate(
         result = master_orchestrator.run_inline(
             task,
             worker,
-            metadata={"tier": tier, "mode": "inline", "retry_of": retry_of},
+            metadata={
+                "tier": tier, "mode": "inline", "retry_of": retry_of,
+                "project": project_scope,
+            },
+            project=project_scope,
         )
         return result["output"]
     if mode in ("delegate", "delegated", "agents", "parallel", "fleet", "swarm", "fanout"):
@@ -5023,7 +5058,9 @@ def master_orchestrate(
                 "audit_tier": audit_tier,
                 "mode": mode,
                 "retry_of": retry_of,
+                "project": project_scope,
             },
+            project=project_scope,
         )
         if run_fleet_in_background:
             return "\n".join([
@@ -5123,10 +5160,24 @@ def master_retry(agent_id: str, tier: str = "") -> str:
         mode = "delegated"
     agents = int(candidate.get("requested_agents") or 3)
     retry_tier = str(tier or "code").strip() or "code"
-    result = master_orchestrate(
-        task=task, mode=mode, agents=agents, tier=retry_tier, learn=False,
-        retry_of=candidate["id"],
-    )
+    retry_kwargs = {
+        "task": task, "mode": mode, "agents": agents, "tier": retry_tier,
+        "learn": False, "retry_of": candidate["id"],
+    }
+    retry_project = str(candidate.get("project") or "").strip()
+    if not retry_project:
+        # Compatibility for masters created by a still-running pre-project
+        # fleet_store module.  New orchestrators mirror the canonical project
+        # root into files_json, which the old persistence path already knows
+        # how to save, until live reload reaches fleet_store itself.
+        for persisted_path in candidate.get("files") or ():
+            value = str(persisted_path or "").strip()
+            if value and os.path.isdir(value):
+                retry_project = value
+                break
+    if retry_project:
+        retry_kwargs["project"] = retry_project
+    result = master_orchestrate(**retry_kwargs)
     return "\n".join([
         "persisted master retry",
         "  source: %s [%s] | mode: %s | agents: %d" % (
@@ -6950,6 +7001,7 @@ def _loop_dispatch(action):
             agents=action.get("agents", 0),
             tier=action.get("tier", "auto"),
             learn=action.get("learn", False),
+            project=action.get("project", ""),
         ))
     if action_type in ("work", "agent", "workbench_agent"):
         return _loop_text_result("workbench_agent", workbench_agent(
@@ -7243,7 +7295,7 @@ def loop(
       - {"type":"offload","prompt":"...","tier":"fast|code|general|cloud-code|cloud-general"}
       - {"type":"sonder","prompt":"...","session":"none"}
       - {"type":"sonder","prompt":"...","context_size":"1m"}
-      - {"type":"master_orchestrate","task":"...","mode":"inline|delegate|fleet","agents":3}
+      - {"type":"master_orchestrate","task":"...","mode":"inline|delegate|fleet","agents":3,"project":"D:\\repo"}
       - {"type":"master_status"}
       - {"type":"master_capacity","requested_agents":32}
       - {"type":"master_cancel","agent_id":"master-id|prefix|all"}
@@ -8356,7 +8408,7 @@ AGENT_TOOL_HELP = """Available tools:
 - memory_embedding_backfill: {"limit": 25, "apply": false}
 - memory_interaction_embedding_backfill: {"limit": 25, "apply": false}
 - system_improvement_report: {}
-- master_orchestrate: {"task": "...", "mode": "ask|inline|delegate|fleet", "agents": 3, "tier": "code"}
+- master_orchestrate: {"task": "...", "mode": "ask|inline|delegate|fleet", "agents": 3, "tier": "code", "project": "D:\\repo"}
 - master_status: {}
 - master_capacity: {"requested_agents": 0}
 - master_cancel: {"agent_id": "master-id|prefix|all"}
@@ -8440,6 +8492,40 @@ def _agent_tool_help(read_only=False):
     return REPOSITORY_AGENT_TOOL_HELP if read_only else AGENT_TOOL_HELP
 
 
+def _repository_scope_path_error(tool_name, args, project_root):
+    """Reject a project agent path outside its one host-selected root.
+
+    Generic guarded reads authorize both Sonder's workspace and configured
+    extra roots.  Repository agents need a narrower contract: when a project is
+    bound, even another normally authorized root (especially Sonder's own cwd)
+    is out of scope.
+    """
+    if not project_root or tool_name not in _PROJECT_SCOPED_PATH_TOOLS:
+        return ""
+    try:
+        root = Path(str(project_root)).expanduser().resolve(strict=True)
+        if not root.is_dir():
+            raise ValueError("project root is not a directory")
+        key = "root" if tool_name in {"file_find", "text_search", "script_search"} else "path"
+        raw = str(args.get(key) or "").strip()
+        if not raw:
+            raw = "."
+        target = Path(raw).expanduser()
+        if not target.is_absolute():
+            target = root / target
+        target = target.resolve(strict=False)
+        try:
+            target.relative_to(root)
+        except ValueError:
+            return (
+                "ERROR: repository read-only path rejected: path is outside the "
+                "host-selected project root"
+            )
+    except (OSError, TypeError, ValueError) as exc:
+        return "ERROR: repository read-only project scope is invalid: %s" % exc
+    return ""
+
+
 def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
     if not isinstance(args, dict):
         return "ERROR: repository read-only tool args must be a JSON object."
@@ -8458,6 +8544,11 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
             "ERROR: repository read-only tool '%s' forbids argument(s): %s."
             % (tool_name, ", ".join(forbidden))
         )
+    scope_error = _repository_scope_path_error(
+        tool_name, args, trusted_extra_roots,
+    )
+    if scope_error:
+        return scope_error
     try:
         if tool_name in {"file_read", "file_read_range", "image_inspect"}:
             file_ops.resolve_repository_read_path(
@@ -8797,6 +8888,13 @@ def _agent_dispatch(
     if not isinstance(args, dict):
         return "ERROR: tool args must be a JSON object"
     if read_only:
+        if repository_extra_roots:
+            # Defense in depth for direct/internal dispatch callers.  The
+            # observed agent path already scopes before policy, but dispatch
+            # itself must not let a relative path fall back to Sonder's cwd.
+            args = _project_scope_args(
+                tool_name, args, repository_extra_roots,
+            )
         policy_error = _repository_read_only_error(
             tool_name, args, trusted_extra_roots=repository_extra_roots,
         )
@@ -9198,6 +9296,7 @@ def _agent_dispatch(
             agents=args.get("agents", 0),
             tier=args.get("tier", "auto"),
             learn=args.get("learn", False),
+            project=args.get("project", ""),
         )
     if tool_name == "self_heal_check":
         return self_heal_check()
@@ -9637,7 +9736,7 @@ def _agent_impl(
     project_scope = ""
     if project:
         try:
-            candidate = os.path.abspath(os.path.expanduser(str(project)))
+            candidate = os.path.realpath(os.path.abspath(os.path.expanduser(str(project))))
             if os.path.isdir(candidate):
                 project_scope = candidate
         except (OSError, ValueError):
@@ -9701,6 +9800,7 @@ def _agent_impl(
                 mutation_observed=mutated,
                 validation_attempted=validation_attempted,
                 validation_passed=validation_ok,
+                project_scope=project_scope,
             )
         return final
 
@@ -10867,9 +10967,13 @@ def route_work_request(prompt: str, project: str = "") -> str | None:
 
     resolved_project = _resolve_project(project) or ""
     if mode == "fleet":
-        output = master_orchestrate(
-            task=prompt, mode="fleet", tier=selected_tier, learn=False,
-        )
+        master_kwargs = {
+            "task": prompt, "mode": "fleet", "tier": selected_tier,
+            "learn": False,
+        }
+        if isinstance(resolved_project, str) and os.path.isdir(resolved_project):
+            master_kwargs["project"] = resolved_project
+        output = master_orchestrate(**master_kwargs)
     elif mode == "workbench":
         output = workbench_agent(
             prompt=prompt,

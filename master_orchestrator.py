@@ -15,6 +15,7 @@ import time
 import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 
 import fleet_store
 
@@ -65,6 +66,25 @@ GPU_KV_CACHE_PER_WORKER_BYTES = int(0.5 * 1024 ** 3)
 _GPU_QUERY_CACHE_SECONDS = 15.0
 HEARTBEAT_SECONDS = 5
 ABORT_MARKERS = ("CANCELLED", "INTERRUPTED")
+
+REPOSITORY_EVIDENCE_TOOLS = frozenset({
+    "workspace_inventory", "directory_tree", "file_find", "file_read",
+    "file_read_range", "text_search", "script_search", "image_inspect",
+})
+
+
+@dataclass(frozen=True)
+class RepositoryWorkerResult:
+    """Host-issued repository result with an exact filesystem scope receipt.
+
+    The model can emit arbitrary text (including a forged marker), so repository
+    aggregation accepts only this in-process type.  ``project`` and ``tools``
+    come from the host agent loop after guarded dispatch, never from model text.
+    """
+
+    output: str
+    project: str
+    tools: tuple[str, ...]
 
 EVIDENCE_REQUIRED = (
     "EVIDENCE_REQUIRED: guarded source evidence was unavailable. Authorize the "
@@ -478,7 +498,7 @@ def repository_project_root(task: str) -> str:
             candidate = value.strip().strip("\"'").rstrip(".,;:")
             if not candidate or not os.path.isabs(candidate):
                 continue
-            resolved = os.path.abspath(os.path.expanduser(candidate))
+            resolved = os.path.realpath(os.path.abspath(os.path.expanduser(candidate)))
             if os.path.isdir(resolved):
                 return resolved
             if os.path.isfile(resolved):
@@ -488,17 +508,124 @@ def repository_project_root(task: str) -> str:
     if file_match:
         candidate = file_match.group(0).rstrip(".,;:")
         if os.path.isabs(candidate):
-            resolved = os.path.abspath(os.path.expanduser(candidate))
+            resolved = os.path.realpath(os.path.abspath(os.path.expanduser(candidate)))
             if os.path.isfile(resolved):
                 return os.path.dirname(resolved)
     return ""
 
 
-def _repository_worker(prompt: str) -> str:
+def canonical_project_root(value: str) -> str:
+    """Return one existing canonical directory, accepting a source-file path."""
+    raw = str(value or "").strip().strip("\"'")
+    if not raw or raw.lower() in {"none", "default"}:
+        return ""
+    try:
+        resolved = os.path.realpath(os.path.abspath(os.path.expanduser(raw)))
+    except (OSError, TypeError, ValueError):
+        return ""
+    if os.path.isfile(resolved):
+        resolved = os.path.dirname(resolved)
+    return resolved if os.path.isdir(resolved) else ""
+
+
+def same_project_root(left: str, right: str) -> bool:
+    return os.path.normcase(os.path.realpath(left)) == os.path.normcase(os.path.realpath(right))
+
+
+def _is_inside(path: str, root: str) -> bool:
+    try:
+        return os.path.normcase(os.path.commonpath([path, root])) == os.path.normcase(root)
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def resolve_repository_project_root(task: str, project: str = "") -> str:
+    """Resolve one unambiguous existing repository root or fail closed.
+
+    An explicit host ``project`` is authoritative.  A labeled path in the task
+    may refine it to a file/subdirectory, but may never point outside it.  When
+    no host scope is supplied, a labeled repository or absolute source file is
+    required; silently falling back to Sonder's own cwd caused cross-repo fleet
+    evidence in live dogfood.
+    """
+    explicit_text = str(project or "").strip()
+    explicit = canonical_project_root(explicit_text)
+    inferred = repository_project_root(task)
+    if explicit_text and not explicit:
+        raise ValueError("project must name an existing directory or source file")
+    if explicit:
+        if inferred and not (
+            same_project_root(inferred, explicit) or _is_inside(inferred, explicit)
+        ):
+            raise ValueError(
+                "task repository path is outside the host-selected project root"
+            )
+        return explicit
+    if inferred:
+        return inferred
+    raise ValueError(
+        "repository work requires an explicit existing project root; no cwd fallback is allowed"
+    )
+
+
+def repository_worker_result(receipt, expected_project: str) -> RepositoryWorkerResult:
+    """Validate a guarded host receipt before it can enter fleet aggregation."""
+    expected = canonical_project_root(expected_project)
+    actual = canonical_project_root(getattr(receipt, "project_scope", ""))
+    if not expected or not actual or not same_project_root(actual, expected):
+        raise RuntimeError(
+            "repository worker scope mismatch (expected=%r, actual=%r)"
+            % (expected, actual)
+        )
+    tools = tuple(sorted(set(str(name) for name in (getattr(receipt, "tools", ()) or ()))))
+    if not REPOSITORY_EVIDENCE_TOOLS.intersection(tools):
+        raise RuntimeError("repository worker produced no host-observed file evidence")
+    output = str(getattr(receipt, "output", "") or "")
+    if "=== TOOL EVIDENCE ===" not in output:
+        raise RuntimeError("repository worker omitted its guarded tool-evidence ledger")
+    return RepositoryWorkerResult(output=output, project=expected, tools=tools)
+
+
+def _validate_repository_result(
+    result, expected_project: str,
+) -> RepositoryWorkerResult:
+    if not isinstance(result, RepositoryWorkerResult):
+        raise RuntimeError("repository worker returned no host-issued scope receipt")
+    if not same_project_root(result.project, expected_project):
+        raise RuntimeError("repository worker result escaped its assigned project scope")
+    if not REPOSITORY_EVIDENCE_TOOLS.intersection(result.tools):
+        raise RuntimeError("repository worker scope receipt has no file-evidence tool")
+    if "=== TOOL EVIDENCE ===" not in result.output:
+        raise RuntimeError("repository worker scope receipt has no tool-evidence ledger")
+    return result
+
+
+def _render_repository_result(result: RepositoryWorkerResult) -> str:
+    return (
+        "=== HOST REPOSITORY SCOPE ===\n"
+        "project=%s\n"
+        "tools=%s\n\n%s"
+        % (result.project, ",".join(result.tools), result.output)
+    )
+
+
+def _public_outputs(outputs) -> list[tuple[str, str]]:
+    return [
+        (
+            agent_id,
+            _render_repository_result(output)
+            if isinstance(output, RepositoryWorkerResult) else str(output or ""),
+        )
+        for agent_id, output in outputs
+    ]
+
+
+def _repository_worker(prompt: str, project: str = "") -> RepositoryWorkerResult:
     """Lazily enter server's guarded agent loop without an import cycle."""
     import server
 
-    result = server._agent_impl(
+    project_scope = resolve_repository_project_root(prompt, project)
+    receipt = server._agent_impl(
         prompt,
         tier="code",
         max_steps=8,
@@ -513,12 +640,14 @@ def _repository_worker(prompt: str) -> str:
         # exactly why delegated repository tasks always came back
         # EVIDENCE_REQUIRED. The direct agent surface passes it and works.
         auto_checklist=True,
-        project=repository_project_root(prompt),
+        project=project_scope,
+        return_host_receipt=True,
         cancel_check=current_worker_cancel_requested,
     )
-    if str(result or "").startswith("ERROR:"):
-        raise RuntimeError(str(result)[:800])
-    return result
+    output = str(getattr(receipt, "output", receipt) or "")
+    if output.startswith("ERROR:"):
+        raise RuntimeError(output[:800])
+    return repository_worker_result(receipt, project_scope)
 
 
 def max_agents() -> int:
@@ -617,7 +746,14 @@ def _new_agent(
         "tool_calls": 0,
         "tokens_in": estimate_tokens(task),
         "tokens_out": 0,
-        "files": [],
+        # Persist the canonical repository root in the pre-existing files_json
+        # field as a backward-compatible recovery receipt. Long-running hosts
+        # intentionally do not hot-reload fleet_store, so this keeps scoped
+        # retries safe even before its new dedicated project column is active.
+        "files": (
+            [str(metadata.get("project"))]
+            if metadata.get("project") else []
+        ),
         "summary": "",
         "output": "",
         "error": "",
@@ -627,6 +763,7 @@ def _new_agent(
         "worker_slots": int(metadata.get("worker_slots") or 0),
         "mode": str(metadata.get("mode") or ""),
         "tier": str(metadata.get("tier") or ""),
+        "project": str(metadata.get("project") or ""),
         "retry_of": str(metadata.get("retry_of") or ""),
         "retried_by": "",
     }
@@ -744,7 +881,9 @@ def _finish(agent_id: str, output: str = "", error: str = "") -> str:
     return final
 
 
-def _run_worker(agent_id: str, prompt: str, worker_fn):
+def _run_worker(
+    agent_id: str, prompt: str, worker_fn, project_scope: str = "",
+):
     if not _start_agent(
         agent_id, "calling model for delegated task", tool_calls=1,
         in_model_call=True,
@@ -752,18 +891,36 @@ def _run_worker(agent_id: str, prompt: str, worker_fn):
         return "CANCELLED"
     with _bind_worker_agent(agent_id):
         try:
-            output = worker_fn(prompt)
+            output = (
+                worker_fn(prompt, project_scope)
+                if project_scope else worker_fn(prompt)
+            )
+            if project_scope:
+                output = _validate_repository_result(output, project_scope)
         except Exception as exc:  # defensive boundary for worker threads
             final = _finish(agent_id, error=str(exc))
             return final if final in ABORT_MARKERS else _WORKER_FAILED
-    return _finish(agent_id, output=output)
+    stored_output = (
+        _render_repository_result(output)
+        if isinstance(output, RepositoryWorkerResult) else str(output or "")
+    )
+    final = _finish(agent_id, output=stored_output)
+    if final in ABORT_MARKERS:
+        return final
+    return output if isinstance(output, RepositoryWorkerResult) else final
 
 
-def run_inline(task: str, worker_fn, metadata: dict | None = None) -> dict:
-    if requires_repository_tools(task):
-        worker_fn = _repository_worker
+def run_inline(
+    task: str, worker_fn, metadata: dict | None = None, project: str = "",
+) -> dict:
+    repository_task = requires_repository_tools(task) or bool(str(project or "").strip())
+    project_scope = (
+        resolve_repository_project_root(task, project) if repository_task else ""
+    )
     metadata = dict(metadata or {})
     metadata.setdefault("mode", "inline")
+    if project_scope:
+        metadata["project"] = project_scope
     master_id = _new_agent("master", task, metadata=metadata)
     if not _start_agent(
         master_id, "running inline as master", tool_calls=1, in_model_call=True,
@@ -771,7 +928,12 @@ def run_inline(task: str, worker_fn, metadata: dict | None = None) -> dict:
         return {"mode": "inline", "master_id": master_id, "output": "CANCELLED"}
     with _bind_worker_agent(master_id):
         try:
-            output = worker_fn(task)
+            output = (
+                worker_fn(task, project_scope)
+                if project_scope else worker_fn(task)
+            )
+            if project_scope:
+                output = _validate_repository_result(output, project_scope)
         except Exception as exc:
             final = _finish(master_id, error=str(exc))
             return {
@@ -779,11 +941,17 @@ def run_inline(task: str, worker_fn, metadata: dict | None = None) -> dict:
                 "master_id": master_id,
                 "output": final if final in ABORT_MARKERS else "ERROR: %s" % exc,
             }
-    final = _finish(master_id, output=output)
+    stored_output = (
+        _render_repository_result(output)
+        if isinstance(output, RepositoryWorkerResult) else str(output or "")
+    )
+    final = _finish(master_id, output=stored_output)
     return {"mode": "inline", "master_id": master_id, "output": final}
 
 
-def _subtask_prompts(task: str, count: int, tool_access: bool = False) -> list[str]:
+def _subtask_prompts(
+    task: str, count: int, tool_access: bool = False, project: str = "",
+) -> list[str]:
     count = clamp_agent_count(count, default=1)
     prompts = []
     for i in range(count):
@@ -799,12 +967,14 @@ def _subtask_prompts(task: str, count: int, tool_access: bool = False) -> list[s
             # actually failed to reach it.
             access_contract = (
                 "You have guarded read-only file tools. USE THEM: inspect the relevant "
+                "files only inside the host-bound repository root %s. Evidence from "
+                "Sonder's own checkout or any other workspace is invalid. "
                 "allowed files with your file tools BEFORE answering -- an answer with "
                 "no tool call is rejected by the host -- and never request "
                 "write/edit/delete tools. Only if your file tools genuinely cannot reach "
                 "the files (permission denied / not found after you have actually tried) "
                 "answer EVIDENCE_REQUIRED and list the smallest missing inputs. "
-            )
+            ) % project
         else:
             access_contract = (
                 "This is a greenfield design/implementation task, not a request to inspect "
@@ -828,16 +998,20 @@ def _subtask_prompts(task: str, count: int, tool_access: bool = False) -> list[s
 
 def run_delegated(
     task: str, worker_fn, audit_fn, agents: int = 3,
-    metadata: dict | None = None, _on_started=None,
+    metadata: dict | None = None, _on_started=None, project: str = "",
 ) -> dict:
-    if requires_repository_tools(task):
-        worker_fn = _repository_worker
+    repository_task = requires_repository_tools(task) or bool(str(project or "").strip())
+    project_scope = (
+        resolve_repository_project_root(task, project) if repository_task else ""
+    )
     agents = clamp_agent_count(agents, default=3)
     worker_slots = parallel_worker_slots(agents)
     metadata = dict(metadata or {})
     metadata.setdefault("mode", "delegated")
     metadata["requested_agents"] = agents
     metadata["worker_slots"] = worker_slots
+    if project_scope:
+        metadata["project"] = project_scope
     master_id = _new_agent("master", task, metadata=metadata)
     started = _start_agent(
         master_id,
@@ -857,9 +1031,14 @@ def run_delegated(
         if _on_started is not None:
             _on_started(dict(result))
         return result
-    repository_task = requires_repository_tools(task)
-    prompts = _subtask_prompts(task, agents, tool_access=repository_task)
-    child_ids = [_new_agent("agent", prompt, parent_id=master_id) for prompt in prompts]
+    prompts = _subtask_prompts(
+        task, agents, tool_access=repository_task, project=project_scope,
+    )
+    child_metadata = {"project": project_scope} if project_scope else None
+    child_ids = [
+        _new_agent("agent", prompt, parent_id=master_id, metadata=child_metadata)
+        for prompt in prompts
+    ]
     if _on_started is not None:
         _on_started({
             "mode": "delegated",
@@ -872,7 +1051,9 @@ def run_delegated(
     outputs = []
     with ThreadPoolExecutor(max_workers=worker_slots) as pool:
         futures = {
-            pool.submit(_run_worker, agent_id, prompt, worker_fn): agent_id
+            pool.submit(
+                _run_worker, agent_id, prompt, worker_fn, project_scope,
+            ): agent_id
             for agent_id, prompt in zip(child_ids, prompts)
         }
         for future in as_completed(futures):
@@ -890,10 +1071,20 @@ def run_delegated(
             "master_id": master_id,
             "agents": child_ids,
             "worker_slots": worker_slots,
-            "outputs": outputs,
+            "outputs": _public_outputs(outputs),
             "output": final,
         }
     if not outputs:
+        if repository_task:
+            final = _finish(master_id, output=EVIDENCE_REQUIRED)
+            return {
+                "mode": "delegated",
+                "master_id": master_id,
+                "agents": child_ids,
+                "worker_slots": worker_slots,
+                "outputs": [],
+                "output": final,
+            }
         error = "all delegated workers failed before producing an auditable result"
         final = _finish(master_id, error=error)
         return {
@@ -904,23 +1095,21 @@ def run_delegated(
             "outputs": [],
             "output": final if final in ABORT_MARKERS else "ERROR: %s" % error,
         }
-    if repository_task:
-        outputs = [
-            (agent_id, output)
-            for agent_id, output in outputs
-            if "=== TOOL EVIDENCE ===" in output
-        ]
-        if not outputs:
-            merged = EVIDENCE_REQUIRED
-            _finish(master_id, output=merged)
-            return {
-                "mode": "delegated",
-                "master_id": master_id,
-                "agents": child_ids,
-                "worker_slots": worker_slots,
-                "outputs": [],
-                "output": merged,
-            }
+    if repository_task and any(
+        not isinstance(output, RepositoryWorkerResult)
+        or not same_project_root(output.project, project_scope)
+        for _agent_id, output in outputs
+    ):
+        error = "repository aggregation rejected an unscoped child result"
+        final = _finish(master_id, error=error)
+        return {
+            "mode": "delegated",
+            "master_id": master_id,
+            "agents": child_ids,
+            "worker_slots": worker_slots,
+            "outputs": [],
+            "output": final if final in ABORT_MARKERS else "ERROR: %s" % error,
+        }
     if not _begin_model_call(
         master_id, "auditing delegated outputs", tool_calls=2,
     ):
@@ -930,7 +1119,7 @@ def run_delegated(
             "master_id": master_id,
             "agents": child_ids,
             "worker_slots": worker_slots,
-            "outputs": outputs,
+            "outputs": _public_outputs(outputs),
             "output": final,
         }
     audit_prompt = [
@@ -942,23 +1131,40 @@ def run_delegated(
         "end with an Evidence gaps section. For greenfield design/build tasks, "
         "implementation plans are valid outputs even when no repository evidence is "
         "provided. Return EVIDENCE_REQUIRED only when the original task explicitly "
-        "requires current repository evidence and that evidence is unavailable. "
-        "This task is greenfield because it did not ask to inspect an existing "
-        "repository; therefore produce a concrete proposal/plan even without file "
-        "evidence. For greenfield work, choose sensible defaults for unspecified "
-        "libraries, mechanics, assets, and milestones; state those assumptions and "
-        "turn them into implementation steps. Do not call ordinary design choices "
-        "evidence gaps or ask the user to supply them. Honor explicit constraints "
-        "such as no third-party libraries; if a platform API is needed, choose and "
-        "name an in-house or OS-native alternative. End greenfield answers with "
-        "Decisions made and Open risks, not an Evidence gaps questionnaire.",
+        "requires current repository evidence and that evidence is unavailable.",
         "",
         "Original task:",
         task,
         "",
     ]
+    if repository_task:
+        audit_prompt.extend([
+            "HOST REPOSITORY SCOPE: %s" % project_scope,
+            "This is repository work, not greenfield design. Use only child evidence "
+            "carrying the exact host scope above. Do not substitute Sonder Runtime, "
+            "the process cwd, or another repository. If scoped evidence is insufficient, "
+            "return EVIDENCE_REQUIRED instead of a generic policy or architecture answer.",
+            "",
+        ])
+    else:
+        audit_prompt.extend([
+            "This task is greenfield because it did not ask to inspect an existing "
+            "repository; therefore produce a concrete proposal/plan even without file "
+            "evidence. For greenfield work, choose sensible defaults for unspecified "
+            "libraries, mechanics, assets, and milestones; state those assumptions and "
+            "turn them into implementation steps. Do not call ordinary design choices "
+            "evidence gaps or ask the user to supply them. Honor explicit constraints "
+            "such as no third-party libraries; if a platform API is needed, choose and "
+            "name an in-house or OS-native alternative. End greenfield answers with "
+            "Decisions made and Open risks, not an Evidence gaps questionnaire.",
+            "",
+        ])
     for agent_id, output in outputs:
-        audit_prompt.extend(["--- %s ---" % agent_id, output, ""])
+        rendered = (
+            _render_repository_result(output)
+            if isinstance(output, RepositoryWorkerResult) else str(output or "")
+        )
+        audit_prompt.extend(["--- %s ---" % agent_id, rendered, ""])
     with _bind_worker_agent(master_id):
         try:
             merged = audit_fn("\n".join(audit_prompt))
@@ -970,16 +1176,21 @@ def run_delegated(
                 "master_id": master_id,
                 "agents": child_ids,
                 "worker_slots": worker_slots,
-                "outputs": outputs,
+                "outputs": _public_outputs(outputs),
                 "output": final if final in ABORT_MARKERS else merged,
             }
+    if repository_task:
+        merged = (
+            "=== HOST AGGREGATION SCOPE ===\nproject=%s\nchildren=%s\n\n%s"
+            % (project_scope, ",".join(agent_id for agent_id, _ in outputs), merged)
+        )
     final = _finish(master_id, output=merged)
     return {
         "mode": "delegated",
         "master_id": master_id,
         "agents": child_ids,
         "worker_slots": worker_slots,
-        "outputs": outputs,
+        "outputs": _public_outputs(outputs),
         "output": final,
     }
 
@@ -987,6 +1198,7 @@ def run_delegated(
 def start_delegated(
     task: str, worker_fn, audit_fn, agents: int = 3,
     metadata: dict | None = None, startup_timeout: float = 5.0,
+    project: str = "",
 ) -> dict:
     """Start delegated orchestration in a daemon thread and return ledger IDs.
 
@@ -1013,6 +1225,7 @@ def start_delegated(
                 agents=agents,
                 metadata=metadata,
                 _on_started=on_started,
+                project=project,
             )
         except Exception as exc:  # keep startup failures observable
             master_id = started_result.get("master_id")
@@ -1174,6 +1387,8 @@ def format_snapshot(data: dict) -> str:
     for row in agents[:12]:
         lines.append("  - %(id)s [%(status)s] %(activity)s" % row)
         lines.append("      task: %s" % (row.get("task") or "")[:180])
+        if row.get("project"):
+            lines.append("      project: %s" % row["project"])
     latest_result = data.get("latest_master_result") or ""
     if latest_result:
         latest = data.get("latest_master") or {}
@@ -1185,6 +1400,8 @@ def format_snapshot(data: dict) -> str:
         lines.extend(["", heading + ":"])
         if latest_task:
             lines.append("  task: %s" % latest_task[:240])
+        if latest.get("project"):
+            lines.append("  project: %s" % latest["project"])
         if int(data.get("active_agents") or 0) > 0:
             lines.append(
                 "  note: completed history; this is not the result of the active agents above"

@@ -7,6 +7,17 @@ import pytest
 import server
 
 
+def _host_repo_result(project, output="grounded result"):
+    return server.autopilot_controller.HostTaskResult(
+        output=(
+            output
+            + "\n\n=== TOOL EVIDENCE ===\nstep 1 tool=file_read\nscoped source"
+        ),
+        tools=("file_read",),
+        project_scope=str(project),
+    )
+
+
 def setup_function():
     server.master_orchestrator.reset_for_tests()
 
@@ -21,7 +32,7 @@ def test_parse_none_when_absent():
     assert server.parse_interaction_id("just some text") is None
 
 
-def test_master_orchestrate_never_forges_a_repo_scoped_task(monkeypatch):
+def test_master_orchestrate_never_forges_a_repo_scoped_task(monkeypatch, tmp_path):
     # Regression for a 2026-07-13 bug: master_orchestrate() called
     # creative_router.classify(task) BEFORE checking
     # master_orchestrator.requires_repository_tools(task), so an ordinary
@@ -40,7 +51,7 @@ def test_master_orchestrate_never_forges_a_repo_scoped_task(monkeypatch):
     )
     monkeypatch.setattr(
         server.master_orchestrator, "run_inline",
-        lambda task, worker, metadata=None: {"output": "stub-inline-result", "master_id": "m-test"},
+        lambda task, worker, **kwargs: {"output": "stub-inline-result", "master_id": "m-test"},
     )
 
     task = (
@@ -52,7 +63,9 @@ def test_master_orchestrate_never_forges_a_repo_scoped_task(monkeypatch):
         "otherwise this test doesn't exercise the guard it's regressing"
     )
 
-    result = server.master_orchestrate(task=task, mode="inline")
+    result = server.master_orchestrate(
+        task=task, mode="inline", project=str(tmp_path),
+    )
 
     assert forge_calls == [], (
         "master_orchestrate routed a repository-scoped task into the "
@@ -919,7 +932,7 @@ def test_orchestrator_worker_propagates_activity_into_worker_thread(monkeypatch)
         assert response["tokens_out"] == 2
 
 
-def test_orchestrator_agent_worker_raises_host_generated_errors(monkeypatch):
+def test_orchestrator_agent_worker_raises_host_generated_errors(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(
         server,
@@ -928,10 +941,10 @@ def test_orchestrator_agent_worker_raises_host_generated_errors(monkeypatch):
         "ERROR: model decision failed",
     )
 
-    worker = server._orchestrator_agent_worker("code")
+    worker = server._orchestrator_agent_worker("code", str(tmp_path))
 
     try:
-        worker("Repository: D:\\missing-repository\ninspect repository")
+        worker("inspect repository", str(tmp_path))
     except RuntimeError as error:
         assert "model decision failed" in str(error)
     else:
@@ -939,7 +952,7 @@ def test_orchestrator_agent_worker_raises_host_generated_errors(monkeypatch):
 
     assert calls
     assert calls[0][1]["auto_checklist"] is True
-    assert calls[0][1]["project"] == ""
+    assert calls[0][1]["project"] == str(tmp_path.resolve())
 
 
 def test_orchestrator_agent_worker_propagates_existing_repository_root(
@@ -950,14 +963,15 @@ def test_orchestrator_agent_worker_propagates_existing_repository_root(
         server,
         "_agent_impl",
         lambda *args, **kwargs: calls.append((args, kwargs)) or
-        "grounded result\n\n=== TOOL EVIDENCE ===\nfile read",
+        _host_repo_result(tmp_path),
     )
 
-    worker = server._orchestrator_agent_worker("code")
+    worker = server._orchestrator_agent_worker("code", str(tmp_path))
     prompt = "Repository: %s\nRead-only inspection." % tmp_path
-    result = worker(prompt)
+    result = worker(prompt, str(tmp_path))
 
-    assert result.startswith("grounded result")
+    assert isinstance(result, server.master_orchestrator.RepositoryWorkerResult)
+    assert result.output.startswith("grounded result")
     assert calls
     assert calls[0][1]["project"] == str(tmp_path.resolve())
     assert calls[0][1]["auto_checklist"] is True
@@ -965,7 +979,9 @@ def test_orchestrator_agent_worker_propagates_existing_repository_root(
     assert calls[0][1]["read_only"] is True
 
 
-def test_repo_master_uses_cancel_aware_worker_and_persists_host_failure(monkeypatch):
+def test_repo_master_uses_cancel_aware_worker_and_persists_host_failure(
+    monkeypatch, tmp_path,
+):
     calls = []
 
     def fail_agent(*args, **kwargs):
@@ -975,8 +991,9 @@ def test_repo_master_uses_cancel_aware_worker_and_persists_host_failure(monkeypa
     monkeypatch.setattr(server, "_agent_impl", fail_agent)
 
     out = server.master_orchestrate(
-        "Repository: D:\\demo. Inspect current files.",
+        "Inspect current files.",
         mode="inline",
+        project=str(tmp_path),
     )
     snap = server.master_orchestrator.snapshot()
     master = next(row for row in snap["agents"] if row["role"] == "master")
@@ -1152,6 +1169,7 @@ def test_master_orchestrate_schema_marks_zero_as_automatic_agent_count():
     schema = server.mcp._tool_manager.get_tool("master_orchestrate").parameters
 
     assert schema["properties"]["agents"]["default"] == 0
+    assert schema["properties"]["project"]["default"] == ""
 
 
 def test_master_routes_explicit_game_build_to_grounded_forge(monkeypatch):
@@ -1262,6 +1280,57 @@ def test_master_retry_replays_persisted_task_with_local_safe_default(monkeypatch
     }]
 
 
+def test_master_retry_preserves_persisted_repository_scope(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(
+        server.master_orchestrator,
+        "recovery_candidate",
+        lambda selector: {
+            "id": "master-scoped",
+            "status": "interrupted",
+            "task": "finish the repository review",
+            "mode": "delegate",
+            "requested_agents": 2,
+            "tier": "code",
+            "project": str(tmp_path),
+        },
+    )
+    monkeypatch.setattr(
+        server, "master_orchestrate",
+        lambda **kwargs: calls.append(kwargs) or "retry complete",
+    )
+
+    server.master_retry("master-scoped")
+
+    assert calls[0]["project"] == str(tmp_path)
+
+
+def test_master_retry_recovers_scope_from_legacy_files_metadata(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(
+        server.master_orchestrator,
+        "recovery_candidate",
+        lambda selector: {
+            "id": "master-legacy-scoped",
+            "status": "interrupted",
+            "task": "finish the repository review",
+            "mode": "delegate",
+            "requested_agents": 2,
+            "tier": "code",
+            "project": "",
+            "files": [str(tmp_path)],
+        },
+    )
+    monkeypatch.setattr(
+        server, "master_orchestrate",
+        lambda **kwargs: calls.append(kwargs) or "retry complete",
+    )
+
+    server.master_retry("master-legacy-scoped")
+
+    assert calls[0]["project"] == str(tmp_path)
+
+
 def test_master_retry_rejects_completed_master(monkeypatch):
     monkeypatch.setattr(
         server.master_orchestrator,
@@ -1301,13 +1370,15 @@ def test_master_orchestrate_delegates_and_audits(monkeypatch):
 
 def test_master_orchestrate_uses_tool_agent_for_repo_inspection(monkeypatch):
     calls = []
+
+    def grounded_agent(prompt, **kwargs):
+        calls.append((prompt, kwargs))
+        return _host_repo_result(kwargs["project"], "grounded agent output")
+
     monkeypatch.setattr(
         server,
         "_agent_impl",
-        lambda prompt, **kwargs: (
-            calls.append((prompt, kwargs)) or
-            "grounded agent output\n\n=== TOOL EVIDENCE ===\nstep 1 tool=file_read\nsource"
-        ),
+        grounded_agent,
     )
     monkeypatch.setattr(server, "_offload_impl", lambda prompt, **kwargs: "audited merge")
 
@@ -1322,6 +1393,65 @@ def test_master_orchestrate_uses_tool_agent_for_repo_inspection(monkeypatch):
     assert all(options["require_file_evidence"] for _, options in calls)
     assert all(options["read_only"] for _, options in calls)
     assert all(options["include_evidence"] for _, options in calls)
+
+
+def test_master_explicit_project_forces_scoped_repository_fleet(
+    monkeypatch, tmp_path,
+):
+    agent_calls = []
+    audit_prompts = []
+    monkeypatch.setattr(
+        server.master_orchestrator, "parallel_worker_slots", lambda requested: 1,
+    )
+
+    def grounded_agent(prompt, **kwargs):
+        agent_calls.append((prompt, kwargs))
+        return _host_repo_result(kwargs["project"])
+
+    def audit(prompt, **kwargs):
+        audit_prompts.append(prompt)
+        return "requested-project merge"
+
+    monkeypatch.setattr(server, "_agent_impl", grounded_agent)
+    monkeypatch.setattr(server, "_offload_impl", audit)
+
+    out = server.master_orchestrate(
+        "Find the highest-impact implementation gaps.",
+        mode="delegate",
+        agents=2,
+        project=str(tmp_path),
+    )
+    snapshot = server.master_orchestrator.snapshot(limit=20)
+    scoped_rows = [
+        row for row in snapshot["agents"]
+        if row["role"] in {"master", "agent"}
+    ]
+    expected = str(tmp_path.resolve())
+
+    assert "=== HOST AGGREGATION SCOPE ===" in out
+    assert "requested-project merge" in out
+    assert len(agent_calls) == 2
+    assert all(kwargs["project"] == expected for _, kwargs in agent_calls)
+    assert all(kwargs["return_host_receipt"] is True for _, kwargs in agent_calls)
+    assert audit_prompts and "HOST REPOSITORY SCOPE: %s" % expected in audit_prompts[0]
+    assert scoped_rows and {row["project"] for row in scoped_rows} == {expected}
+
+
+def test_master_repository_task_without_explicit_root_fails_before_agent(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        server, "_agent_impl", lambda *a, **k: calls.append((a, k)) or "unexpected",
+    )
+
+    out = server.master_orchestrate(
+        "Inspect the current repository files for feature gaps.",
+        mode="delegate",
+        agents=2,
+    )
+
+    assert out.startswith("EVIDENCE_REQUIRED:")
+    assert "no cwd fallback" in out
+    assert calls == []
 
 
 def test_admin_register_login_and_cot_denial(monkeypatch, tmp_path):

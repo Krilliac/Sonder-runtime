@@ -64,6 +64,53 @@ def test_project_scoped_read_only_dispatch_reads_host_authorized_root(monkeypatc
     assert "trusted cross-root read" in out
 
 
+def test_direct_project_dispatch_rebases_relative_path_before_file_handler(
+    monkeypatch, tmp_path,
+):
+    workspace = tmp_path / "workspace"
+    project = tmp_path / "project"
+    workspace.mkdir()
+    project.mkdir()
+    (workspace / "answer.txt").write_text("wrong cwd evidence", encoding="utf-8")
+    (project / "answer.txt").write_text("requested project evidence", encoding="utf-8")
+    monkeypatch.setattr(server.file_ops, "workspace_root", lambda: workspace)
+
+    out = server._agent_dispatch(
+        "file_read_range",
+        {"path": "answer.txt", "start_line": 1, "end_line": 5},
+        read_only=True,
+        repository_extra_roots=str(project),
+    )
+
+    assert "requested project evidence" in out
+    assert "wrong cwd evidence" not in out
+
+
+def test_project_scoped_read_rejects_sonder_workspace_even_when_normally_authorized(
+    monkeypatch, tmp_path,
+):
+    workspace = tmp_path / "sonder-workspace"
+    project = tmp_path / "requested-project"
+    workspace.mkdir()
+    project.mkdir()
+    outside = workspace / "server.py"
+    outside.write_text("wrong repository", encoding="utf-8")
+    monkeypatch.setattr(server.file_ops, "workspace_root", lambda: workspace)
+    calls = []
+    monkeypatch.setattr(server, "file_read", lambda *a, **k: calls.append((a, k)))
+
+    out = server._agent_dispatch_observed(
+        "file_read",
+        {"path": str(outside)},
+        read_only=True,
+        project=str(project),
+    )
+
+    assert out.startswith("ERROR:")
+    assert "outside the host-selected project root" in out
+    assert calls == []
+
+
 def test_read_only_allows_guarded_read(monkeypatch):
     monkeypatch.setattr(server, "file_read", lambda path, **kwargs: "read:" + path)
     assert server._agent_dispatch("file_read", {"path": "README.md"}, read_only=True) == "read:README.md"

@@ -2,8 +2,20 @@ import importlib
 import sys
 import threading
 import time
+from types import SimpleNamespace
 
 import master_orchestrator
+
+
+def _repository_receipt(project, output="grounded result"):
+    return SimpleNamespace(
+        output=(
+            output
+            + "\n\n=== TOOL EVIDENCE ===\nstep 1 tool=file_read\nscoped source"
+        ),
+        tools=("file_read",),
+        project_scope=str(project),
+    )
 
 
 def setup_function():
@@ -68,7 +80,7 @@ def test_tool_equipped_prompts_are_not_primed_to_bail_with_evidence_required():
     assert "no filesystem, shell, web" in toolless
 
 
-def test_repository_worker_arms_the_inspect_before_final_nudge(monkeypatch):
+def test_repository_worker_arms_the_inspect_before_final_nudge(monkeypatch, tmp_path):
     # auto_checklist is what arms the host's "use an inspection tool before you
     # finalize" retry. Without it the repository lane was one-shot and failed
     # any model that did not call a tool on its very first step.
@@ -77,11 +89,14 @@ def test_repository_worker_arms_the_inspect_before_final_nudge(monkeypatch):
     class _FakeServer:
         def _agent_impl(self, prompt, **kwargs):
             captured.update(kwargs)
-            return "ok"
+            return _repository_receipt(tmp_path)
 
     monkeypatch.setitem(sys.modules, "server", _FakeServer())
 
-    assert master_orchestrator._repository_worker("inspect the repo") == "ok"
+    result = master_orchestrator._repository_worker(
+        "inspect the repo", project=str(tmp_path),
+    )
+    assert isinstance(result, master_orchestrator.RepositoryWorkerResult)
     assert captured["auto_checklist"] is True
     assert captured["require_file_evidence"] is True
     assert captured["read_only"] is True
@@ -93,12 +108,13 @@ def test_repository_worker_propagates_labeled_external_project(monkeypatch, tmp_
     class _FakeServer:
         def _agent_impl(self, prompt, **kwargs):
             captured.update(kwargs)
-            return "ok"
+            return _repository_receipt(tmp_path)
 
     monkeypatch.setitem(sys.modules, "server", _FakeServer())
     task = "Repository: %s. Read-only implementation review." % tmp_path
 
-    assert master_orchestrator._repository_worker(task) == "ok"
+    result = master_orchestrator._repository_worker(task)
+    assert isinstance(result, master_orchestrator.RepositoryWorkerResult)
     assert captured["project"] == str(tmp_path.resolve())
 
 
@@ -226,16 +242,11 @@ def test_partial_fleet_audits_successful_outputs_only():
 
 
 def test_repository_delegation_refuses_outputs_without_tool_ledger(monkeypatch):
-    monkeypatch.setattr(
-        master_orchestrator,
-        "_repository_worker",
-        lambda prompt: "I inspected it and everything passes.",
-    )
     audited = []
 
     result = master_orchestrator.run_delegated(
         "Repository: D:\\SparkEngine. Inspect current files.",
-        worker_fn=lambda prompt: "unused",
+        worker_fn=lambda prompt, project: "I inspected it and everything passes.",
         audit_fn=lambda prompt: audited.append(prompt) or "should not run",
         agents=2,
     )
@@ -243,6 +254,83 @@ def test_repository_delegation_refuses_outputs_without_tool_ledger(monkeypatch):
     assert result["output"] == master_orchestrator.EVIDENCE_REQUIRED
     assert result["outputs"] == []
     assert audited == []
+
+
+def test_repository_fleet_propagates_exact_project_and_scopes_aggregation(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(master_orchestrator, "parallel_worker_slots", lambda count: 1)
+    worker_projects = []
+    audit_prompts = []
+
+    def worker(_prompt, project):
+        worker_projects.append(project)
+        return master_orchestrator.repository_worker_result(
+            _repository_receipt(project), project,
+        )
+
+    result = master_orchestrator.run_delegated(
+        "Audit current source files.",
+        worker_fn=worker,
+        audit_fn=lambda prompt: audit_prompts.append(prompt) or "scoped merge",
+        agents=2,
+        project=str(tmp_path),
+    )
+    snapshot = master_orchestrator.snapshot(limit=20)
+    rows = [
+        row for row in snapshot["agents"]
+        if row["id"] == result["master_id"] or row["parent_id"] == result["master_id"]
+    ]
+
+    expected = str(tmp_path.resolve())
+    assert worker_projects == [expected, expected]
+    assert rows and {row["project"] for row in rows} == {expected}
+    assert all(row["files"] == [expected] for row in rows)
+    assert "project: %s" % expected in master_orchestrator.format_snapshot(snapshot)
+    assert "HOST REPOSITORY SCOPE: %s" % expected in audit_prompts[0]
+    assert "This is repository work, not greenfield design" in audit_prompts[0]
+    assert result["output"].startswith("=== HOST AGGREGATION SCOPE ===")
+    assert "project=%s" % expected in result["output"]
+
+
+def test_repository_fleet_rejects_scope_receipt_from_another_project(tmp_path):
+    requested = tmp_path / "requested"
+    wrong = tmp_path / "wrong"
+    requested.mkdir()
+    wrong.mkdir()
+    audited = []
+
+    result = master_orchestrator.run_delegated(
+        "Inspect current source files.",
+        worker_fn=lambda _prompt, _project: master_orchestrator.RepositoryWorkerResult(
+            output="fake\n\n=== TOOL EVIDENCE ===\nsource",
+            project=str(wrong),
+            tools=("file_read",),
+        ),
+        audit_fn=lambda prompt: audited.append(prompt) or "must not run",
+        agents=1,
+        project=str(requested),
+    )
+
+    assert result["output"] == master_orchestrator.EVIDENCE_REQUIRED
+    assert audited == []
+    child = next(
+        row for row in master_orchestrator.snapshot(limit=10)["agents"]
+        if row["role"] == "agent"
+    )
+    assert child["status"] == "failed"
+    assert "escaped its assigned project scope" in child["error"]
+
+
+def test_repository_scope_never_falls_back_to_process_cwd():
+    try:
+        master_orchestrator.resolve_repository_project_root(
+            "Inspect the current repository files."
+        )
+    except ValueError as exc:
+        assert "no cwd fallback" in str(exc)
+    else:
+        raise AssertionError("repository work silently inherited the process cwd")
 
 
 def test_run_delegated_default_cap_allows_sixteen_agents(monkeypatch):

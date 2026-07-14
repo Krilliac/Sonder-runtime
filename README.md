@@ -297,10 +297,12 @@ authority:
 2. Prefer `offload(tier="code")` for one self-contained coding draft,
    `run_code` / `parallel_generate_run` for bounded experiments, and
    `master_orchestrate` only when independent perspectives are actually useful.
-   For repository tasks, `master_orchestrate` switches to guarded read-only
-   tool agents and requires successful file evidence before accepting an answer.
-   Allowed roots come from `SONDER_FILE_ROOTS` plus the hot-read
-   `file_roots.local`; denied/unavailable access falls back to EVIDENCE_REQUIRED.
+   For repository tasks, pass `project="<existing repository root>"` (or put an
+   absolute `Repository:` root in the task). `master_orchestrate` binds every
+   child, ledger row, and aggregate to that one canonical root, switches to
+   guarded read-only tool agents, and requires a host-issued file-evidence
+   receipt before accepting an answer. It never falls back to Sonder's process
+   cwd; a missing, conflicting, or escaped scope returns EVIDENCE_REQUIRED.
 3. Keep prompts narrow and complete. Include the relevant files, constraints,
    acceptance checks, and what "done" means; the local model cannot see the
    caller's hidden context.

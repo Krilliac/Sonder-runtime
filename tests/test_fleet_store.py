@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 
@@ -62,6 +63,38 @@ def test_agent_lifecycle_is_durable_and_queryable(monkeypatch, tmp_path):
     assert snap["latest_master_result"] == "done"
     assert snap["latest_master"]["id"] == "master-a"
     assert snap["latest_master"]["task"] == "work"
+
+
+def test_repository_project_scope_is_durable(monkeypatch, tmp_path):
+    _isolated_store(monkeypatch, tmp_path)
+    fleet_store.register_owner("owner-project", 111, 100.0)
+    row = _row("master-project", role="master")
+    row["project"] = str(tmp_path / "requested-repo")
+
+    created = fleet_store.create_agent(row, "owner-project", 111)
+    fetched = fleet_store.get_agent("master-project")
+
+    assert created["project"] == row["project"]
+    assert fetched["project"] == row["project"]
+
+
+def test_existing_fleet_ledger_migrates_project_scope_column(monkeypatch, tmp_path):
+    database = tmp_path / "legacy-fleet.db"
+    legacy_schema = fleet_store._SCHEMA.replace(
+        "    project TEXT DEFAULT '',\n", "",
+    )
+    with sqlite3.connect(database) as conn:
+        conn.executescript(legacy_schema)
+    monkeypatch.setenv("SONDER_FLEET_DB", str(database))
+    fleet_store.reset_schema_cache_for_tests()
+
+    fleet_store.register_owner("owner-migration", 112, 100.0)
+
+    with sqlite3.connect(database) as conn:
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(fleet_agents)")
+        }
+    assert "project" in columns
 
 
 def test_cancellation_prevents_queued_start_and_inherits_to_late_child(

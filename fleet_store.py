@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS fleet_agents (
     worker_slots INTEGER DEFAULT 0,
     mode TEXT DEFAULT '',
     tier TEXT DEFAULT '',
+    project TEXT DEFAULT '',
     retry_of TEXT DEFAULT '',
     retried_by TEXT DEFAULT ''
 );
@@ -151,6 +152,14 @@ def _ensure_schema(path: str) -> None:
                     try:
                         conn.execute(
                             "ALTER TABLE fleet_agents ADD COLUMN retried_by TEXT DEFAULT ''"
+                        )
+                    except sqlite3.OperationalError as exc:
+                        if "duplicate column" not in str(exc).lower():
+                            raise
+                if "project" not in columns:
+                    try:
+                        conn.execute(
+                            "ALTER TABLE fleet_agents ADD COLUMN project TEXT DEFAULT ''"
                         )
                     except sqlite3.OperationalError as exc:
                         if "duplicate column" not in str(exc).lower():
@@ -362,9 +371,9 @@ def create_agent(row: dict, owner_id: str, owner_pid: int) -> dict:
                 activity, started_ts, updated_ts, finished_ts, tool_calls,
                 tokens_in, tokens_out, files_json, summary, output, error,
                 cancel_requested, in_model_call, requested_agents,
-                worker_slots, mode, tier, retry_of, retried_by
+                worker_slots, mode, tier, project, retry_of, retried_by
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             (
@@ -378,7 +387,8 @@ def create_agent(row: dict, owner_id: str, owner_pid: int) -> dict:
                 int(cancel_requested), int(bool(row.get("in_model_call"))),
                 int(row.get("requested_agents") or 0),
                 int(row.get("worker_slots") or 0), str(row.get("mode") or ""),
-                str(row.get("tier") or ""), str(row.get("retry_of") or ""),
+                str(row.get("tier") or ""), str(row.get("project") or ""),
+                str(row.get("retry_of") or ""),
                 str(row.get("retried_by") or ""),
             ),
         )
@@ -717,7 +727,7 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
         ).fetchone()
         latest = conn.execute(
             """
-            SELECT id, task, output, updated_ts FROM fleet_agents
+            SELECT id, task, project, output, updated_ts FROM fleet_agents
             WHERE role='master' AND status='done' AND output <> ''
             ORDER BY updated_ts DESC LIMIT 1
             """

@@ -39,6 +39,9 @@ class HostTaskResult:
     mutation_observed: bool = False
     validation_attempted: bool = False
     validation_passed: bool = False
+    # Canonical host-selected filesystem root used by guarded dispatch.  This
+    # is deliberately typed host state, not a marker parsed from model text.
+    project_scope: str = ""
 
     def receipt(self) -> dict:
         return {
