@@ -50,6 +50,8 @@ def test_agent_lifecycle_is_durable_and_queryable(monkeypatch, tmp_path):
     assert finished["tier"] == "code"
     assert snap["active_agents"] == 0
     assert snap["latest_master_result"] == "done"
+    assert snap["latest_master"]["id"] == "master-a"
+    assert snap["latest_master"]["task"] == "work"
 
 
 def test_cancellation_prevents_queued_start_and_inherits_to_late_child(

@@ -1054,6 +1054,7 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
                 "tokens_in": sum(int(row.get("tokens_in") or 0) for row in rows),
                 "tokens_out": sum(int(row.get("tokens_out") or 0) for row in rows),
                 "latest_master_result": "",
+                "latest_master": {},
                 "database": "",
             }
     data["capacity"] = capacity()
@@ -1157,7 +1158,20 @@ def format_snapshot(data: dict) -> str:
         lines.append("      task: %s" % (row.get("task") or "")[:180])
     latest_result = data.get("latest_master_result") or ""
     if latest_result:
-        lines.extend(["", "latest completed master result:", latest_result[:8000]])
+        latest = data.get("latest_master") or {}
+        latest_id = str(latest.get("id") or "").strip()
+        latest_task = str(latest.get("task") or "").strip()
+        heading = "latest completed master result"
+        if latest_id:
+            heading += " [%s]" % latest_id
+        lines.extend(["", heading + ":"])
+        if latest_task:
+            lines.append("  task: %s" % latest_task[:240])
+        if int(data.get("active_agents") or 0) > 0:
+            lines.append(
+                "  note: completed history; this is not the result of the active agents above"
+            )
+        lines.append(latest_result[:8000])
     return "\n".join(lines)
 
 

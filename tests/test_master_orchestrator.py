@@ -144,7 +144,33 @@ def test_run_delegated_tracks_children_and_audit():
     assert snap["active_agents"] == 0
     assert snap["tokens_in"] > 0
     assert snap["latest_master_result"] == "merged"
-    assert "latest completed master result:\nmerged" in master_orchestrator.format_snapshot(snap)
+    formatted = master_orchestrator.format_snapshot(snap)
+    assert "latest completed master result [" in formatted
+    assert "  task: compare options\nmerged" in formatted
+
+
+def test_status_labels_prior_result_while_an_unrelated_fleet_is_active():
+    completed = master_orchestrator.run_inline(
+        "Summarize the previous Spark font audit.",
+        lambda prompt: "old Spark result",
+    )
+
+    # Exercise formatting directly with a live row because a synchronous unit
+    # worker cannot remain active after run_inline returns.
+    data = master_orchestrator.snapshot()
+    data["active_agents"] = 2
+    data["agents"] = [{
+        "id": "master-new",
+        "status": "running",
+        "activity": "auditing D:\\smellslikenapalm",
+        "task": "Project: D:\\smellslikenapalm",
+    }]
+    formatted = master_orchestrator.format_snapshot(data)
+
+    assert completed["master_id"] in formatted
+    assert "task: Summarize the previous Spark font audit." in formatted
+    assert "completed history; this is not the result of the active agents above" in formatted
+    assert "old Spark result" in formatted
 
 
 def test_all_failed_workers_fail_master_and_skip_audit():

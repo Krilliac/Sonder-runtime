@@ -717,7 +717,7 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
         ).fetchone()
         latest = conn.execute(
             """
-            SELECT output FROM fleet_agents
+            SELECT id, task, output, updated_ts FROM fleet_agents
             WHERE role='master' AND status='done' AND output <> ''
             ORDER BY updated_ts DESC LIMIT 1
             """
@@ -738,7 +738,12 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
             "events": [dict(row) for row in reversed(events)],
             "tokens_in": int(totals["tokens_in"] or 0),
             "tokens_out": int(totals["tokens_out"] or 0),
+            # Keep the scalar for API compatibility, but also return identity
+            # and task context. A status view can otherwise place an older,
+            # unrelated repository result directly beneath a live fleet and
+            # make it look like evidence from that active run.
             "latest_master_result": latest["output"] if latest else "",
+            "latest_master": dict(latest) if latest else {},
             "reconcile": reconcile,
             "database": database_path(),
         }
