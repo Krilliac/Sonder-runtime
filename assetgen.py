@@ -609,7 +609,9 @@ def infer_request(brief: str, kinds: str = "auto", dimension: str = "auto",
         selected = {part.strip().lower() for part in kinds.split(",") if part.strip()}
         unknown = selected - ARTIFACT_KINDS
         if unknown:
-            raise ValueError("unknown artifact kinds: %s" % ", ".join(sorted(unknown)))
+            raise ValueError(
+                "unknown artifact kinds: %s. Valid kinds: %s (or 'auto'/'all')."
+                % (", ".join(sorted(unknown)), ", ".join(sorted(ARTIFACT_KINDS))))
     if seed is None:
         seed = int(hashlib.sha256(text.encode("utf-8")).hexdigest()[:8], 16)
     return {

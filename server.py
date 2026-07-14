@@ -6176,8 +6176,17 @@ def artifact_generate(
 def artifact_verify(path: str) -> str:
     """Verify every generated file against its manifest and format contract."""
     _maybe_live_reload()
+    target = os.path.abspath(os.path.expanduser(str(path or "")))
+    if not os.path.exists(target):
+        return "ERROR: artifact path not found: %s" % target
+    if not os.path.isdir(target):
+        return ("ERROR: artifact path is not a pack directory (expected a "
+                "directory containing manifest.json): %s" % target)
     try:
         result = assetgen.verify_pack(path)
+    except FileNotFoundError as exc:
+        missing = getattr(exc, "filename", None) or os.path.basename(str(exc)) or "a required file"
+        return "ERROR: artifact pack is incomplete (missing %s)" % missing
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         return "ERROR: %s" % exc
     lines = [

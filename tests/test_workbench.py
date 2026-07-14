@@ -334,3 +334,37 @@ def test_read_line_range_rejects_inverted_range(tmp_path, monkeypatch):
     # a normal range still works
     ok = workbench.read_line_range(str(f), start_line=2, end_line=4)
     assert [row["line"] for row in ok["lines"]] == [2, 3, 4]
+
+
+def test_text_search_honors_an_explicit_glob_for_unlisted_extension(tmp_path, monkeypatch):
+    # Regression (audit): text_search skipped a .tmp file (not in TEXT_SUFFIXES)
+    # even when the caller explicitly globbed it, returning a misleading "no
+    # matches". An explicit glob must be honored (binary check still guards).
+    import workbench
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path))
+    (tmp_path / "probe.tmp").write_text("UNIQUEMARKER_XYZZY here", encoding="utf-8")
+    hit = workbench.text_search("UNIQUEMARKER_XYZZY", root=str(tmp_path), glob="*.tmp")
+    assert hit["files_scanned"] >= 1
+    assert any("UNIQUEMARKER_XYZZY" in m.get("text", "") for m in hit["matches"])
+    # A broad glob still applies the extension allowlist (skips the .tmp).
+    broad = workbench.text_search("UNIQUEMARKER_XYZZY", root=str(tmp_path), glob="*")
+    assert not broad["matches"]
+
+
+def test_bundle_grounding_fails_on_absent_required_text(tmp_path):
+    # Regression (audit): the bundle recipe never evaluated required_text, so an
+    # absent required string produced a false PASS.
+    import artifact_grounding
+    (tmp_path / "a.md").write_text("hello world", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("more content", encoding="utf-8")
+
+    absent = artifact_grounding.validate(
+        str(tmp_path), recipe="bundle",
+        requirements={"required_text": ["DEFINITELY_ABSENT_STRING_98765"]})
+    assert absent["ok"] is False
+    assert any(c["name"] == "bundle-required-text" and not c["ok"] for c in absent["checks"])
+
+    present = artifact_grounding.validate(
+        str(tmp_path), recipe="bundle",
+        requirements={"required_text": ["hello world"]})
+    assert any(c["name"] == "bundle-required-text" and c["ok"] for c in present["checks"])

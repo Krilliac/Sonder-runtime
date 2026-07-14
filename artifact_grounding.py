@@ -3536,6 +3536,23 @@ def _validate_directory(path: Path, recipe: str, requirements: dict) -> dict:
     total_bytes = sum(candidate.stat().st_size for _name, candidate in declared)
     _check(checks, "bundle-total-size", total_bytes <= MAX_BUNDLE_BYTES, "%d bytes" % total_bytes)
 
+    # required_text at the bundle level: each needle must appear in at least one
+    # of the bundle's files. Previously the bundle recipe never evaluated
+    # required_text (only the single-file recipes did, and children do not
+    # inherit it), so an absent required string produced a false PASS.
+    needles = _string_list(requirements, "required_text")
+    if needles:
+        corpus_parts = []
+        for _name, candidate in declared:
+            try:
+                corpus_parts.append(_read_text(candidate))
+            except (OSError, UnicodeDecodeError, ValueError):
+                continue
+        corpus = "\n".join(corpus_parts)
+        for needle in needles:
+            _check(checks, "bundle-required-text", needle in corpus,
+                   "text %r present in bundle" % needle)
+
     if recipe == "ui":
         entry_names = ["index.html", "preview.html"]
         entry = next((candidate for name, candidate in declared if name in entry_names), None)

@@ -176,3 +176,15 @@ def test_repository_read_rejects_traversal_out_of_the_workspace(monkeypatch, tmp
 
     with pytest.raises(PermissionError):
         file_ops.resolve_repository_read_path("../secret.txt")
+
+
+def test_file_ops_errors_carry_a_reason(monkeypatch, tmp_path):
+    # Regression (audit): read/write returned a bare "ERROR: <path>" with no
+    # cause. The raised exceptions must state the reason.
+    import file_ops, pytest
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: tmp_path)
+    with pytest.raises(FileNotFoundError, match="file not found"):
+        file_ops.read_file("nope.txt")
+    file_ops.write_file("exists.txt", "x")
+    with pytest.raises(FileExistsError, match="file exists"):
+        file_ops.write_file("exists.txt", "y", mode="create")

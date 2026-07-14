@@ -374,7 +374,7 @@ def read_line_range(
 ):
     target = _resolve(path, extra_roots=extra_roots, bypass=bypass)
     if not target.is_file():
-        raise FileNotFoundError(str(target))
+        raise FileNotFoundError("image file not found: %s" % target)
     start = _bounded_int(start_line, 1, 1, 10_000_000)
     end = _bounded_int(end_line, start + 199, 1, 10_000_000)
     if end < start:
@@ -419,6 +419,12 @@ def text_search(
     )
     flags = 0 if case_sensitive else re.IGNORECASE
     pattern = re.compile(str(query) if regex else re.escape(str(query)), flags)
+    # The extension allowlist (TEXT_SUFFIXES) applies only to a broad glob. An
+    # EXPLICIT glob ("*.tmp", a filename) is an intentional request to search
+    # exactly those files, so honor it rather than silently skipping and
+    # reporting a misleading "0 files scanned". The null-byte binary check below
+    # still guards against binary content.
+    explicit_glob = str(glob or "*") not in ("", "*")
     matches = []
     files_scanned = 0
     files_skipped = 0
@@ -438,7 +444,10 @@ def text_search(
         relative = item["relative"]
         if not (fnmatch.fnmatch(name, glob) or fnmatch.fnmatch(relative, glob)):
             continue
-        if path.suffix.lower() not in TEXT_SUFFIXES or item["bytes"] > size_limit:
+        if item["bytes"] > size_limit:
+            files_skipped += 1
+            continue
+        if not explicit_glob and path.suffix.lower() not in TEXT_SUFFIXES:
             files_skipped += 1
             continue
         try:

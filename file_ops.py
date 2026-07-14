@@ -418,7 +418,7 @@ def find_files(
 ) -> dict:
     root_path = resolve_path(root or ".", extra_roots=extra_roots, bypass=bypass)
     if not root_path.exists():
-        raise FileNotFoundError(str(root_path))
+        raise FileNotFoundError("search root not found: %s" % root_path)
     if not root_path.is_dir():
         raise ValueError("root is not a directory: %s" % root_path)
     pattern = (query or "*").strip() or "*"
@@ -449,7 +449,7 @@ def find_files(
 def read_file(path: str, *, max_bytes: int = MAX_READ_BYTES, extra_roots: str = "", bypass: bool = False) -> dict:
     p = resolve_path(path, extra_roots=extra_roots, bypass=bypass)
     if not p.exists():
-        raise FileNotFoundError(str(p))
+        raise FileNotFoundError("file not found: %s" % p)
     if not p.is_file():
         raise ValueError("path is not a file: %s" % p)
     size = p.stat().st_size
@@ -506,7 +506,7 @@ def write_file(
     if mode not in {"create", "overwrite", "append"}:
         raise ValueError("mode must be create, overwrite, or append")
     if mode == "create" and p.exists():
-        raise FileExistsError(str(p))
+        raise FileExistsError("file exists (use mode=overwrite to replace): %s" % p)
     missing_parents = []
     cursor = p.parent
     while not cursor.exists():
