@@ -538,6 +538,41 @@ def _generate_text(prompt, tier="fast", system="", temperature=0.2,
     )(prompt)
 
 
+def _internal_generate_for_route(model, cloud):
+    """Return the generator subordinate steps must use for one request route.
+
+    Local requests intentionally retain the cheap ``fast`` title/summary behavior.
+    An explicit cloud route is cloud-only, however: subordinate helpers may request
+    ``tier="fast"`` as a cost hint, but must inherit the selected cloud model instead
+    of silently loading a local model between cloud calls.
+    """
+    if not cloud:
+        return _generate_text
+    if not str(model or "").strip():
+        raise ModelCallError(
+            "configuration",
+            "cloud-only request has no concrete cloud model",
+            attempts=0,
+            cloud=True,
+        )
+
+    def generate(prompt, tier="fast", system="", temperature=0.2,
+                 num_predict=256, num_ctx=2048, timeout=None):
+        # ``tier`` is deliberately ignored. It is only a subordinate cost hint;
+        # the caller's explicit cloud-only route is the stronger constraint.
+        generate.last_usage = {}
+        gen = _make_generate(
+            model, system, temperature, num_predict, num_ctx,
+            cloud=True, timeout=timeout,
+        )
+        response = gen(prompt)
+        generate.last_usage = dict(getattr(gen, "last_usage", None) or {})
+        return response
+
+    generate.last_usage = {}
+    return generate
+
+
 def _resolve_session(session):
     """"" -> DEFAULT_SESSION (memory on by default); "none" -> None (single turn)."""
     s = (session or "").strip()
@@ -1468,6 +1503,7 @@ _ALL_PROJECTS = object()
 
 def _session_history_messages(
     conn, session_id, max_turns, project=_ALL_PROJECTS,
+    internal_generate=None,
 ):
     """Build the prior-turn chat messages for a session, summarizing overflow.
 
@@ -1476,6 +1512,9 @@ def _session_history_messages(
     best-effort: if it fails, we simply send the live turns.
     """
     scoped = project is not _ALL_PROJECTS
+    generate_text = (
+        _generate_text if internal_generate is None else internal_generate
+    )
     if scoped:
         turns = memory_store.session_turns_for_project(conn, session_id, project)
         sess = memory_store.get_session_project_summary(conn, session_id, project)
@@ -1498,7 +1537,9 @@ def _session_history_messages(
         if new_overflow:
             pairs = [(t["task"], t["response"]) for t in new_overflow]
             try:
-                summary = summarizer.summarize(summary, pairs, _generate_text)
+                summary = summarizer.summarize(
+                    summary, pairs, generate_text,
+                )
                 if scoped:
                     memory_store.update_session_project_summary(
                         conn, session_id, project, summary, new_overflow[-1]["id"],
@@ -1522,13 +1563,18 @@ def _session_history_messages(
     return msgs
 
 
-def _maybe_title(conn, session_id, first_prompt):
+def _maybe_title(conn, session_id, first_prompt, internal_generate=None):
     """Give a brand-new session a short title (best-effort, never fatal)."""
+    generate_text = (
+        _generate_text if internal_generate is None else internal_generate
+    )
     sess = memory_store.get_session(conn, session_id) or {}
     if sess.get("title"):
         return
     try:
-        title = summarizer.make_title(first_prompt, _generate_text)
+        title = summarizer.make_title(
+            first_prompt, generate_text,
+        )
     except urllib.error.URLError:
         title = (first_prompt or "").strip()[:40]
     memory_store.set_session_title(conn, session_id, title)
@@ -2671,6 +2717,7 @@ def _sonder_impl_serialized(
     if tgt_model is None:
         return ("ERROR: `sonder:latest` Ollama alias not found. Run setup_alias.py, or call "
                 "with strict=False to fall back to the base coder.")
+    internal_generate = _internal_generate_for_route(tgt_model, cloud)
     effective_system = _build_system(system, trace, persona)
 
     session_id = _resolve_session(session)
@@ -2689,6 +2736,7 @@ def _sonder_impl_serialized(
             memory_store.touch_session(conn, session_id, project_id)
             history = _session_history_messages(
                 conn, session_id, MAX_TURNS, project=project_id,
+                internal_generate=internal_generate,
             )
         response, iid, trace_ctx = _answer(
             conn, prompt, tgt_model, effective_system, temperature, num_predict,
@@ -2698,7 +2746,10 @@ def _sonder_impl_serialized(
         if iid is not None:
             interaction_snapshot = memory_store.get_interaction(conn, iid)
         if session_id and is_first:
-            _maybe_title(conn, session_id, prompt)
+            _maybe_title(
+                conn, session_id, prompt,
+                internal_generate=internal_generate,
+            )
     except ModelCallError as error:
         return _format_model_call_error(error)
     except urllib.error.URLError as e:
