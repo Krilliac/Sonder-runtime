@@ -445,6 +445,55 @@ def evidence_gate(task: str, tools_available: bool = True) -> str:
     return ""
 
 
+_REPOSITORY_ROOT_LABEL = re.compile(
+    r"(?im)^\s*(?:repository|repo|project(?:\s+root)?)\s*:\s*(?P<value>[^\r\n]+)"
+)
+
+
+def repository_project_root(task: str) -> str:
+    """Resolve an explicitly named repository/file to an existing project root.
+
+    Delegated repository workers run inside Sonder's process, whose default
+    workspace is the Sonder checkout. The task text is therefore the only
+    source of the caller's intended external project unless it is propagated
+    into ``server._agent_impl(project=...)``. Labels are preferred; an absolute
+    source-file path falls back to its containing directory.
+    """
+    text = str(task or "")
+    for match in _REPOSITORY_ROOT_LABEL.finditer(text):
+        raw = match.group("value").strip()
+        if raw[:1] in {"\"", "'"}:
+            quote = raw[0]
+            close = raw.find(quote, 1)
+            if close > 1:
+                raw = raw[1:close]
+
+        # A label is often followed by another sentence on the same line
+        # ("Repository: D:\\repo. Read-only review..."). Try progressively
+        # shorter word prefixes, stripping sentence punctuation each time.
+        words = raw.split()
+        candidates = [raw]
+        candidates.extend(" ".join(words[:end]) for end in range(len(words) - 1, 0, -1))
+        for value in candidates:
+            candidate = value.strip().strip("\"'").rstrip(".,;:")
+            if not candidate or not os.path.isabs(candidate):
+                continue
+            resolved = os.path.abspath(os.path.expanduser(candidate))
+            if os.path.isdir(resolved):
+                return resolved
+            if os.path.isfile(resolved):
+                return os.path.dirname(resolved)
+
+    file_match = _REPO_FILE_PATH.search(text)
+    if file_match:
+        candidate = file_match.group(0).rstrip(".,;:")
+        if os.path.isabs(candidate):
+            resolved = os.path.abspath(os.path.expanduser(candidate))
+            if os.path.isfile(resolved):
+                return os.path.dirname(resolved)
+    return ""
+
+
 def _repository_worker(prompt: str) -> str:
     """Lazily enter server's guarded agent loop without an import cycle."""
     import server
@@ -464,6 +513,7 @@ def _repository_worker(prompt: str) -> str:
         # exactly why delegated repository tasks always came back
         # EVIDENCE_REQUIRED. The direct agent surface passes it and works.
         auto_checklist=True,
+        project=repository_project_root(prompt),
         cancel_check=current_worker_cancel_requested,
     )
     if str(result or "").startswith("ERROR:"):

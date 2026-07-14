@@ -21,6 +21,49 @@ def test_read_only_denies_bypass_args(monkeypatch):
     assert calls == []
 
 
+def test_read_only_denies_untrusted_extra_root_without_token(monkeypatch):
+    calls = []
+    monkeypatch.setattr(server, "file_read", lambda *a, **k: calls.append((a, k)))
+
+    out = server._agent_dispatch(
+        "file_read", {"path": "outside.txt", "extra_roots": "C:\\"}, read_only=True
+    )
+
+    assert out.startswith("ERROR:")
+    assert "extra_roots" in out
+    assert calls == []
+
+
+def test_project_scope_replaces_model_supplied_extra_roots():
+    scoped = server._project_scope_args(
+        "file_read",
+        {"path": "README.md", "extra_roots": "C:\\model-chosen"},
+        "D:\\host-project",
+    )
+
+    assert scoped["extra_roots"] == "D:\\host-project"
+    assert scoped["path"] == "D:\\host-project\\README.md"
+
+
+def test_project_scoped_read_only_dispatch_reads_host_authorized_root(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    project = tmp_path / "project"
+    workspace.mkdir()
+    project.mkdir()
+    target = project / "answer.txt"
+    target.write_text("trusted cross-root read", encoding="utf-8")
+    monkeypatch.setattr(server.file_ops, "workspace_root", lambda: workspace)
+
+    out = server._agent_dispatch_observed(
+        "file_read_range",
+        {"path": "answer.txt", "start_line": 1, "end_line": 5},
+        read_only=True,
+        project=str(project),
+    )
+
+    assert "trusted cross-root read" in out
+
+
 def test_read_only_allows_guarded_read(monkeypatch):
     monkeypatch.setattr(server, "file_read", lambda path, **kwargs: "read:" + path)
     assert server._agent_dispatch("file_read", {"path": "README.md"}, read_only=True) == "read:README.md"

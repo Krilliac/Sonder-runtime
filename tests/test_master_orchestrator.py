@@ -87,6 +87,31 @@ def test_repository_worker_arms_the_inspect_before_final_nudge(monkeypatch):
     assert captured["read_only"] is True
 
 
+def test_repository_worker_propagates_labeled_external_project(monkeypatch, tmp_path):
+    captured = {}
+
+    class _FakeServer:
+        def _agent_impl(self, prompt, **kwargs):
+            captured.update(kwargs)
+            return "ok"
+
+    monkeypatch.setitem(sys.modules, "server", _FakeServer())
+    task = "Repository: %s. Read-only implementation review." % tmp_path
+
+    assert master_orchestrator._repository_worker(task) == "ok"
+    assert captured["project"] == str(tmp_path.resolve())
+
+
+def test_repository_project_root_uses_absolute_file_parent(tmp_path):
+    source = tmp_path / "src" / "main.cpp"
+    source.parent.mkdir()
+    source.write_text("int main() {}\n", encoding="utf-8")
+
+    assert master_orchestrator.repository_project_root(
+        "summarize the file %s" % source
+    ) == str(source.parent.resolve())
+
+
 def test_run_inline_tracks_master_agent():
     result = master_orchestrator.run_inline("say hi", lambda prompt: "done: " + prompt)
     snap = master_orchestrator.snapshot()

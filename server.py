@@ -5166,7 +5166,16 @@ def _file_developer_allowed(token: str = "") -> bool:
     return ok
 
 
+_TRUSTED_REPOSITORY_APPROVAL = object()
+
+
 def _file_bypass_allowed(token: str = "", approval: str = "") -> bool:
+    # Repository agents may receive one host-authorized project root.  The
+    # unforgeable in-process sentinel is injected only after the read-only
+    # policy has validated the tool and path; an MCP caller can supply strings,
+    # but can never manufacture this object identity.
+    if approval is _TRUSTED_REPOSITORY_APPROVAL:
+        return True
     if file_ops.bypass_enabled():
         return True
     expected = os.environ.get("SONDER_FILE_APPROVAL_CODE", "").strip()
@@ -8279,12 +8288,19 @@ def _agent_tool_help(read_only=False):
     return REPOSITORY_AGENT_TOOL_HELP if read_only else AGENT_TOOL_HELP
 
 
-def _repository_read_only_error(tool_name, args):
+def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
     if not isinstance(args, dict):
         return "ERROR: repository read-only tool args must be a JSON object."
     if tool_name not in REPOSITORY_READ_ONLY_TOOLS:
         return "ERROR: tool '%s' is not allowed by the repository read-only policy." % tool_name
-    forbidden = sorted(REPOSITORY_READ_ONLY_FORBIDDEN_ARGS.intersection(args))
+    forbidden = sorted(
+        name for name in REPOSITORY_READ_ONLY_FORBIDDEN_ARGS.intersection(args)
+        if not (
+            name == "extra_roots"
+            and trusted_extra_roots
+            and args.get("extra_roots") == trusted_extra_roots
+        )
+    )
     if forbidden:
         return (
             "ERROR: repository read-only tool '%s' forbids argument(s): %s."
@@ -8296,12 +8312,14 @@ def _repository_read_only_error(tool_name, args):
                 args.get("path", ""),
                 allow_workspace_root=False,
                 reject_sensitive=True,
+                extra_roots=trusted_extra_roots,
             )
         elif tool_name in {"workspace_inventory", "directory_tree", "file_find", "text_search", "script_search"}:
             file_ops.resolve_repository_read_path(
                 args.get("path", "") or args.get("root", "") or ".",
                 allow_workspace_root=True,
                 reject_sensitive=True,
+                extra_roots=trusted_extra_roots,
             )
     except (PermissionError, ValueError) as exc:
         return "ERROR: repository read-only path rejected: %s" % exc
@@ -8620,17 +8638,27 @@ def _agent_negative_claim_review(
 
 def _agent_dispatch(
     tool_name, args, allow_web=True, read_only=False, allow_location=False,
+    repository_extra_roots="",
 ):
     tool_name = (tool_name or "").strip()
     args = args or {}
     if not isinstance(args, dict):
         return "ERROR: tool args must be a JSON object"
     if read_only:
-        policy_error = _repository_read_only_error(tool_name, args)
+        policy_error = _repository_read_only_error(
+            tool_name, args, trusted_extra_roots=repository_extra_roots,
+        )
         if policy_error:
             return policy_error
         if tool_name in {"command_registry_list", "tool_manifest"}:
             return _agent_tool_help(read_only=True)
+        if repository_extra_roots:
+            # The model cannot grant itself filesystem authority.  Replace any
+            # scoped value with the exact host-selected project root, then use
+            # an in-process-only approval sentinel for the guarded read tools.
+            args = dict(args)
+            args["extra_roots"] = repository_extra_roots
+            args["approval"] = _TRUSTED_REPOSITORY_APPROVAL
     if tool_name == "run_code":
         return run_code(
             code=args.get("code", ""),
@@ -9107,8 +9135,9 @@ def _project_scope_args(tool_name, args, project):
     if not project or not isinstance(args, dict) or tool_name not in _PROJECT_SCOPED_PATH_TOOLS:
         return args
     scoped = dict(args)
-    existing = str(scoped.get("extra_roots") or "").strip()
-    scoped["extra_roots"] = existing + os.pathsep + project if existing else project
+    # Never compose a model-supplied root with the trusted host root.  The
+    # project argument is the complete authorization boundary for this run.
+    scoped["extra_roots"] = project
 
     key = "root" if tool_name in {"file_find", "text_search", "script_search"} else "path"
     raw = str(scoped.get(key) or "").strip()
@@ -9135,7 +9164,8 @@ def _agent_dispatch_observed(
                 dispatch_options["allow_location"] = True
             if read_only:
                 observation = _agent_dispatch(
-                    tool_name, args, read_only=True, **dispatch_options,
+                    tool_name, args, read_only=True,
+                    repository_extra_roots=project, **dispatch_options,
                 )
             else:
                 observation = _agent_dispatch(tool_name, args, **dispatch_options)
