@@ -19,6 +19,7 @@ Tiers (escalation ladder, cheapest first):
 """
 
 import contextlib
+import importlib
 import http.client
 import json
 import os
@@ -57,6 +58,7 @@ import memory_quality
 import learning_health
 import domain_grounding
 import master_orchestrator
+import ollama_lifecycle
 import admin_auth
 import file_ops
 import context_policy
@@ -293,6 +295,7 @@ LIVE_RELOAD_MODULES = [
     "learning_health",
     "domain_grounding",
     "master_orchestrator",
+    "ollama_lifecycle",
     "admin_auth",
     "file_ops",
     "context_policy",
@@ -315,6 +318,33 @@ LIVE_RELOAD_MODULES = [
     # process-safe SQLite schema and may be serving background worker threads.
     "autopilot_controller",
 ]
+
+def _prime_live_reload_modules():
+    """Seed helper baselines across an atomic server-module upgrade.
+
+    ``server.py`` can be refreshed while the process still holds the previous
+    ``live_reload`` module object.  Feature-detect the new API and, when needed,
+    reload that small helper before using it so an otherwise-valid atomic
+    refresh cannot fail with ``AttributeError`` at import time.
+    """
+    global live_reload
+    prime = getattr(live_reload, "prime_modules", None)
+    if not callable(prime):
+        try:
+            live_reload = importlib.reload(live_reload)
+        except Exception:
+            return False
+        prime = getattr(live_reload, "prime_modules", None)
+    if not callable(prime):
+        return False
+    prime(LIVE_RELOAD_MODULES)
+    return True
+
+
+# Seed helper source state at process startup.  Otherwise an edit made before
+# the first tool call can be recorded as the baseline while the imported module
+# object still contains the older code.
+_prime_live_reload_modules()
 
 
 def _maybe_live_reload():
@@ -11115,21 +11145,95 @@ def unload(tier: str = "all") -> str:
     _maybe_live_reload()
     if tier == "all":
         # Only local tiers occupy VRAM; cloud tiers run remote.
-        targets = [v for k, v in TIERS.items() if not _is_cloud_tier(k, v)]
+        targets = list(dict.fromkeys(
+            v for k, v in TIERS.items() if not _is_cloud_tier(k, v)
+        ))
     elif _is_cloud_tier(tier):
         return f"'{tier}' is a cloud tier — it uses no local VRAM, nothing to unload."
     else:
         targets = [TIERS.get(tier)]
     if None in targets:
         return f"ERROR: unknown tier '{tier}'. Valid: all, {_valid_tier_names()}."
-    freed = []
+    active = master_orchestrator.active_model_call_count()
+    if active:
+        return (
+            "ERROR: unload deferred while %d fleet model call(s) are active; "
+            "cancel/wait for master_status() to reach zero, then retry."
+        ) % active
+    requested = []
+    errors = []
     for model in targets:
         try:
-            _post("/api/generate", {"model": model, "keep_alive": 0})
-            freed.append(model)
-        except urllib.error.URLError:
-            pass
-    return f"Unload requested for: {', '.join(freed) if freed else '(none)'}."
+            response = _post("/api/generate", {"model": model, "keep_alive": 0})
+            if isinstance(response, dict) and response.get("error"):
+                errors.append("%s: %s" % (
+                    model, _safe_model_error_detail(response.get("error"), limit=200),
+                ))
+            else:
+                requested.append(model)
+        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+            errors.append("%s: %s" % (model, _transport_error_detail(exc)))
+
+    resident = set()
+    residency_error = ""
+    try:
+        deadline = time.monotonic() + 5.0
+        while True:
+            residency_payload = _get("/api/ps")
+            if (
+                not isinstance(residency_payload, dict)
+                or not isinstance(residency_payload.get("models"), list)
+            ):
+                raise ValueError("invalid Ollama /api/ps response")
+            resident = ollama_lifecycle.resident_models(residency_payload)
+            if not any(model.casefold() in resident for model in requested):
+                break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.25)
+    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+        residency_error = _transport_error_detail(exc)
+    remaining = [model for model in requested if model.casefold() in resident]
+
+    cleanup = ollama_lifecycle.cleanup_orphaned_discovery_probes(
+        # Only an explicit all-tier unload with an authoritative empty Ollama
+        # residency list may reclaim old orphaned model runners. A specific
+        # tier unload or failed /api/ps check protects them for manual review.
+        allow_model_runners=(
+            tier == "all" and not residency_error and not resident
+        ),
+    )
+    lines = [
+        "Unload requested for: %s." % (", ".join(requested) if requested else "(none)"),
+    ]
+    if remaining:
+        lines.append("WARNING: still resident in Ollama: %s." % ", ".join(remaining))
+    elif residency_error:
+        lines.append("WARNING: residency could not be confirmed: %s." % residency_error)
+    elif requested:
+        lines.append("Ollama residency confirmed clear for the requested model(s).")
+    else:
+        lines.append("WARNING: no unload request was accepted by Ollama.")
+    if cleanup["terminated"]:
+        lines.append(
+            "Cleaned orphaned Ollama GPU-discovery probe PID(s): %s."
+            % ", ".join(str(pid) for pid in cleanup["terminated"])
+        )
+    if cleanup["terminated_model_runners"]:
+        lines.append(
+            "Cleaned verified orphaned Ollama model runner PID(s): %s."
+            % ", ".join(
+                str(pid) for pid in cleanup["terminated_model_runners"]
+            )
+        )
+    if cleanup["protected_model_runners"]:
+        lines.append(
+            "WARNING: orphaned model runner PID(s) were not terminated automatically: %s."
+            % ", ".join(str(pid) for pid in cleanup["protected_model_runners"])
+        )
+    for error in errors + cleanup["errors"]:
+        lines.append("WARNING: %s" % error)
+    return "\n".join(lines)
 
 
 mcp.finish_module_refresh(__name__, __file__, globals())
