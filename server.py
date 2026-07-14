@@ -4779,7 +4779,8 @@ def master_orchestrate(
     mode="ask" returns the choice prompt. mode="inline" keeps work in the master
     lane. mode="delegate" queues bounded subagents across RAM/CPU-safe worker
     slots, then audits and merges their outputs. mode="fleet" queues the full
-    hardware-derived breadth ceiling. Status is visible through master_status().
+    hardware-derived breadth ceiling in the background and returns immediately.
+    Status is visible through master_status().
     """
     _maybe_live_reload()
     task = (task or "").strip()
@@ -4804,7 +4805,7 @@ def master_orchestrate(
             "Choose execution mode:\n"
             "  inline   - master handles the task directly.\n"
             "  delegate - queue %d agent(s) across %d safe worker slot(s), audit, then merge.\n"
-            "  fleet    - queue the hardware ceiling (%d agents) across %d safe worker slot(s).\n"
+            "  fleet    - start the hardware ceiling (%d agents) across %d safe worker slot(s), return immediately, then monitor it.\n"
             "Keywords fleet, swarm, spawn as many agents, parallel agents, and\n"
             "parallel workflow select fleet automatically.\n"
             "Call master_orchestrate(task, mode='inline'|'delegate'|'fleet') or chat `/master inline ...`."
@@ -4848,9 +4849,15 @@ def master_orchestrate(
         )
         return result["output"]
     if mode in ("delegate", "delegated", "agents", "parallel", "fleet", "swarm", "fanout"):
-        if mode in ("fleet", "swarm", "fanout"):
+        run_fleet_in_background = mode in ("fleet", "swarm", "fanout")
+        if run_fleet_in_background:
             agents = master_orchestrator.max_agents()
-        result = master_orchestrator.run_delegated(
+        runner = (
+            master_orchestrator.start_delegated
+            if run_fleet_in_background
+            else master_orchestrator.run_delegated
+        )
+        result = runner(
             task,
             worker_fn=worker,
             audit_fn=_orchestrator_worker(
@@ -4866,6 +4873,19 @@ def master_orchestrate(
                 "retry_of": retry_of,
             },
         )
+        if run_fleet_in_background:
+            return "\n".join([
+                "master orchestration started",
+                "mode: fleet | master=%s | agents=%d" % (
+                    result["master_id"], len(result.get("agents") or []),
+                ),
+                "worker slots: %d (bounded concurrent model calls)" % (
+                    result.get("worker_slots", 1)
+                ),
+                "monitor: master_status() | cancel: master_cancel('%s')" % (
+                    result["master_id"]
+                ),
+            ])
         lines = [
             "master orchestration complete",
             "mode: %s | master=%s | agents=%d" % (

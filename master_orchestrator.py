@@ -760,7 +760,7 @@ def _subtask_prompts(task: str, count: int, tool_access: bool = False) -> list[s
 
 def run_delegated(
     task: str, worker_fn, audit_fn, agents: int = 3,
-    metadata: dict | None = None,
+    metadata: dict | None = None, _on_started=None,
 ) -> dict:
     if requires_repository_tools(task):
         worker_fn = _repository_worker
@@ -778,7 +778,7 @@ def run_delegated(
         worker_slots=worker_slots,
     )
     if not started:
-        return {
+        result = {
             "mode": "delegated",
             "master_id": master_id,
             "agents": [],
@@ -786,9 +786,21 @@ def run_delegated(
             "outputs": [],
             "output": "CANCELLED",
         }
+        if _on_started is not None:
+            _on_started(dict(result))
+        return result
     repository_task = requires_repository_tools(task)
     prompts = _subtask_prompts(task, agents, tool_access=repository_task)
     child_ids = [_new_agent("agent", prompt, parent_id=master_id) for prompt in prompts]
+    if _on_started is not None:
+        _on_started({
+            "mode": "delegated",
+            "master_id": master_id,
+            "agents": list(child_ids),
+            "worker_slots": worker_slots,
+            "outputs": [],
+            "output": "RUNNING",
+        })
     outputs = []
     with ThreadPoolExecutor(max_workers=worker_slots) as pool:
         futures = {
@@ -902,6 +914,60 @@ def run_delegated(
         "outputs": outputs,
         "output": final,
     }
+
+
+def start_delegated(
+    task: str, worker_fn, audit_fn, agents: int = 3,
+    metadata: dict | None = None, startup_timeout: float = 5.0,
+) -> dict:
+    """Start delegated orchestration in a daemon thread and return ledger IDs.
+
+    A hardware-width fleet can legitimately outlive an MCP request deadline.
+    Running it synchronously made the initiating call time out and, on a
+    single-request transport, prevented status and cancellation calls while the
+    fleet was active. The durable fleet ledger remains authoritative after this
+    function returns.
+    """
+    ready = threading.Event()
+    started_result: dict = {}
+    startup_error: list[BaseException] = []
+
+    def on_started(result: dict) -> None:
+        started_result.update(result)
+        ready.set()
+
+    def run() -> None:
+        try:
+            run_delegated(
+                task,
+                worker_fn=worker_fn,
+                audit_fn=audit_fn,
+                agents=agents,
+                metadata=metadata,
+                _on_started=on_started,
+            )
+        except Exception as exc:  # keep startup failures observable
+            master_id = started_result.get("master_id")
+            if master_id:
+                with contextlib.suppress(Exception):
+                    _finish(master_id, error=str(exc))
+            else:
+                startup_error.append(exc)
+            ready.set()
+
+    thread = threading.Thread(
+        target=run,
+        name="sonder-master-background",
+        daemon=True,
+    )
+    thread.start()
+    if not ready.wait(max(0.1, float(startup_timeout))):
+        raise RuntimeError("background fleet did not initialize its durable ledger")
+    if startup_error:
+        raise RuntimeError("background fleet failed to start: %s" % startup_error[0])
+    result = dict(started_result)
+    result["background"] = True
+    return result
 
 
 def snapshot(include_finished: bool = True, limit: int = 20) -> dict:

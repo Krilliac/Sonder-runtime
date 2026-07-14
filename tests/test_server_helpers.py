@@ -950,6 +950,30 @@ def test_master_orchestrate_accepts_common_delegate_typo(monkeypatch):
     assert "worker slots used: 1" in out
 
 
+def test_master_orchestrate_fleet_returns_monitorable_background_id(monkeypatch):
+    calls = []
+    monkeypatch.setattr(server.master_orchestrator, "max_agents", lambda: 12)
+    monkeypatch.setattr(
+        server.master_orchestrator,
+        "start_delegated",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or {
+            "master_id": "master-background",
+            "agents": ["agent-one", "agent-two"],
+            "worker_slots": 2,
+            "output": "RUNNING",
+            "background": True,
+        },
+    )
+
+    out = server.master_orchestrate("inspect risks", mode="fleet", agents=2)
+
+    assert "master orchestration started" in out
+    assert "master-background" in out
+    assert "master_status()" in out
+    assert "master_cancel('master-background')" in out
+    assert calls
+
+
 def test_master_routes_explicit_game_build_to_grounded_forge(monkeypatch):
     calls = []
     monkeypatch.setattr(

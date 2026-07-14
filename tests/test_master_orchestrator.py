@@ -412,6 +412,41 @@ def test_delegated_fleet_limits_actual_concurrency(monkeypatch):
     assert current["maximum"] == 2
 
 
+def test_start_delegated_returns_before_background_workers_finish(monkeypatch):
+    monkeypatch.setattr(master_orchestrator, "parallel_worker_slots", lambda requested: 1)
+    started = threading.Event()
+    release = threading.Event()
+
+    def worker(prompt):
+        started.set()
+        assert release.wait(2)
+        return "worker result"
+
+    result = master_orchestrator.start_delegated(
+        "background fleet",
+        worker_fn=worker,
+        audit_fn=lambda prompt: "audited result",
+        agents=2,
+    )
+
+    assert result["background"] is True
+    assert result["output"] == "RUNNING"
+    assert len(result["agents"]) == 2
+    assert started.wait(1)
+    assert master_orchestrator.snapshot(include_finished=False)["active_agents"] > 0
+
+    release.set()
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        snap = master_orchestrator.snapshot()
+        if snap["active_agents"] == 0:
+            break
+        time.sleep(0.02)
+
+    assert snap["active_agents"] == 0
+    assert snap["latest_master_result"] == "audited result"
+
+
 def test_cancel_master_skips_queued_workers_and_discards_running_result(monkeypatch):
     monkeypatch.setattr(master_orchestrator, "parallel_worker_slots", lambda requested: 1)
     started = threading.Event()
