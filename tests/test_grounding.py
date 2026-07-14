@@ -132,3 +132,40 @@ def test_run_code_jobs_records_language(monkeypatch):
     ])
     assert [r["language"] for r in results] == ["javascript", "madeup"]
     assert [r["ok"] for r in results] == [True, False]
+
+
+def test_run_code_jobs_flags_timeout_distinctly(monkeypatch):
+    # A timed-out phase must be marked timed_out (not a generic failure) so the
+    # formatter can reconcile total elapsed against the per-phase budget.
+    def fake(code, language, extra, timeout, interp=None, execute=True):
+        if "sleepy" in code:
+            return False, "(timed out after %ss)" % timeout
+        return True, "ok"
+
+    monkeypatch.setattr(grounding, "run_language_code", fake)
+    results = grounding.run_code_jobs([
+        {"name": "fast", "code": "print(1)", "timeout": 8},
+        {"name": "sleepy", "code": "sleepy loop", "timeout": 8},
+    ])
+    assert results[0]["timed_out"] is False
+    assert results[1]["timed_out"] is True
+    assert results[1]["timeout"] == 8
+
+
+def test_format_code_jobs_renders_timeout_verdict():
+    results = [
+        {"name": "fast", "language": "python", "ok": True, "output": "1",
+         "seconds": 0.01, "timed_out": False, "timeout": 8},
+        {"name": "sleepy", "language": "cpp", "ok": False, "output": "(timed out after 8s)",
+         "seconds": 9.135, "timed_out": True, "timeout": 8},
+        {"name": "broken", "language": "python", "ok": False, "output": "boom",
+         "seconds": 0.02, "timed_out": False, "timeout": 8},
+    ]
+    text = grounding.format_code_jobs(results)
+    assert "1/3 passed" in text
+    assert "(1 timed out)" in text
+    # The timeout line must show the per-phase budget so 9.135s vs 8s is
+    # reconcilable rather than looking self-contradictory.
+    assert "[TIMEOUT 8s/phase] sleepy" in text
+    assert "[PASS] fast" in text
+    assert "[FAIL] broken" in text

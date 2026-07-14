@@ -606,7 +606,25 @@ def infer_request(brief: str, kinds: str = "auto", dimension: str = "auto",
     elif kinds.strip().lower() in ("all", "pack", "everything"):
         selected = set(ARTIFACT_KINDS)
     else:
-        selected = {part.strip().lower() for part in kinds.split(",") if part.strip()}
+        # Accept the format names the docstring advertises (Markdown, JSON/CSV,
+        # HTML, SVG, ...) as synonyms for the internal kind tokens, so a caller
+        # relying on the documented interface is not rejected.
+        synonyms = {
+            "markdown": "document", "md": "document", "text": "document",
+            "json": "data", "csv": "data", "dataset": "data",
+            "html": "web", "htm": "web", "mockup": "web",
+            "svg": "vector",
+            "png": "texture", "jpg": "texture", "jpeg": "texture",
+            "image": "texture", "raster": "texture", "bitmap": "texture",
+            "xlsx": "spreadsheet", "excel": "spreadsheet", "workbook": "spreadsheet",
+            "pptx": "presentation", "slides": "presentation", "powerpoint": "presentation",
+            "wav": "sound", "audio": "sound",
+            "gif": "video", "mp4": "video", "movie": "video",
+        }
+        selected = {
+            synonyms.get(part.strip().lower(), part.strip().lower())
+            for part in kinds.split(",") if part.strip()
+        }
         unknown = selected - ARTIFACT_KINDS
         if unknown:
             raise ValueError(

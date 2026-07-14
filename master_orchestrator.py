@@ -966,8 +966,12 @@ def format_capacity(data: dict | None = None) -> str:
         ),
     ]
     if gpu_total > 0:
+        # `model` is the fleet lane model's ON-DISK size (a static footprint used
+        # for the VRAM headroom calc), NOT live residency -- labeling it
+        # "resident" contradicted the live `free` reading (they could sum past
+        # the card total, and it stayed constant while the GPU was actually idle).
         lines.append(
-            "  GPU VRAM: %.1f/%.1f GiB free | fleet model: %.2f GiB resident" % (
+            "  GPU VRAM: %.1f/%.1f GiB free | fleet model: %.2f GiB on disk" % (
                 gpu_free, gpu_total, model,
             )
         )

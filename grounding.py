@@ -495,6 +495,14 @@ def run_code_jobs(jobs, max_workers=4, default_timeout=8, interp=None):
             interp=interp,
             execute=job["execute"],
         )
+        # A job may fail because a phase exceeded its timeout. For compiled
+        # languages the timeout is enforced per phase (compile, then run), so
+        # the total `seconds` below can legitimately exceed the per-phase
+        # budget without any single phase timing out. Flag genuine timeouts
+        # explicitly so the formatter can distinguish them from other failures
+        # and show the budget — otherwise "9.1s elapsed / timed out after 8s"
+        # reads as a self-contradiction when the two are different clocks.
+        timed_out = (not ok) and "timed out after" in (out or "")
         return {
             "index": index,
             "name": job["name"],
@@ -502,6 +510,8 @@ def run_code_jobs(jobs, max_workers=4, default_timeout=8, interp=None):
             "ok": bool(ok),
             "output": out,
             "seconds": round(time.time() - started, 3),
+            "timed_out": timed_out,
+            "timeout": job["timeout"],
         }
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -514,9 +524,23 @@ def run_code_jobs(jobs, max_workers=4, default_timeout=8, interp=None):
 
 def format_code_jobs(results):
     passed = sum(1 for r in results if r.get("ok"))
-    lines = ["parallel code jobs: %d/%d passed" % (passed, len(results))]
+    timed_out = sum(1 for r in results if r.get("timed_out"))
+    header = "parallel code jobs: %d/%d passed" % (passed, len(results))
+    if timed_out:
+        header += " (%d timed out)" % timed_out
+    lines = [header]
+    compiled_langs = {"cpp", "csharp", "javascript"}
     for r in results:
-        status = "PASS" if r.get("ok") else "FAIL"
+        if r.get("timed_out"):
+            # Show the enforced budget next to the total elapsed so the two
+            # are reconcilable. For compiled languages the budget is per phase
+            # (compile and run are timed separately), so total elapsed can
+            # exceed it — say so rather than leave the reader to guess.
+            budget = r.get("timeout")
+            scope = "s/phase" if r.get("language") in compiled_langs else "s limit"
+            status = "TIMEOUT %s%s" % (budget, scope) if budget else "TIMEOUT"
+        else:
+            status = "PASS" if r.get("ok") else "FAIL"
         lines.append("[%s] %s [%s] (%.3fs)" % (
             status,
             r.get("name", "?"),

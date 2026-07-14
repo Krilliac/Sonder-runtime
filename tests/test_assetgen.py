@@ -67,6 +67,18 @@ def test_free_form_request_infers_rigged_animated_model(monkeypatch, tmp_path):
     assert result["validation"]["failed_checks"] == 0
 
 
+def test_infer_request_accepts_documented_format_synonyms():
+    # artifact_generate advertises formats (Markdown, JSON, HTML, SVG, PNG)
+    # that are not internal kind tokens; those synonyms must resolve, not raise.
+    result = assetgen.infer_request("brief", kinds="markdown, json, html, svg, png")
+    assert result["kinds"] == ["data", "document", "texture", "vector", "web"]
+
+
+def test_infer_request_still_rejects_unknown_kinds():
+    with pytest.raises(ValueError):
+        assetgen.infer_request("brief", kinds="totally-not-a-kind")
+
+
 def test_theme_inference_uses_terms_not_substrings():
     assert assetgen.infer_request("textured PBR model")["theme"] == "arcane"
     assert assetgen.infer_request("voice interface")["theme"] == "arcane"
