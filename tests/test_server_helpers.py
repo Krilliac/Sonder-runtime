@@ -1,5 +1,6 @@
 import importlib
 import threading
+import time
 
 import memory_store
 import pytest
@@ -1060,6 +1061,97 @@ def test_master_orchestrate_fleet_returns_monitorable_background_id(monkeypatch)
     assert "master_status()" in out
     assert "master_cancel('master-background')" in out
     assert calls
+    assert calls[0][1]["agents"] == 2
+
+
+def test_master_orchestrate_auto_fleet_preserves_explicit_agent_count(monkeypatch):
+    calls = []
+    monkeypatch.setattr(server.master_orchestrator, "max_agents", lambda: 32)
+    monkeypatch.setattr(
+        server.master_orchestrator,
+        "start_delegated",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or {
+            "master_id": "master-explicit-auto",
+            "agents": ["agent-%d" % i for i in range(kwargs["agents"])],
+            "worker_slots": 2,
+            "output": "RUNNING",
+            "background": True,
+        },
+    )
+
+    out = server.master_orchestrate(
+        "run a fleet audit of orchestration safety",
+        mode="delegate",
+        agents=8,
+    )
+
+    assert "agents=8" in out
+    assert calls[0][1]["agents"] == 8
+    assert calls[0][1]["metadata"]["mode"] == "fleet"
+
+
+def test_master_orchestrate_fleet_without_agent_count_uses_ceiling(monkeypatch):
+    calls = []
+    monkeypatch.setattr(server.master_orchestrator, "max_agents", lambda: 12)
+    monkeypatch.setattr(
+        server.master_orchestrator,
+        "start_delegated",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or {
+            "master_id": "master-automatic-ceiling",
+            "agents": ["agent-%d" % i for i in range(kwargs["agents"])],
+            "worker_slots": 2,
+            "output": "RUNNING",
+            "background": True,
+        },
+    )
+
+    out = server.master_orchestrate("inspect risks", mode="fleet")
+
+    assert "agents=12" in out
+    assert calls[0][1]["agents"] == 12
+
+
+def test_master_orchestrate_fleet_persists_explicit_agent_count(monkeypatch):
+    # tests/conftest.py pins SONDER_FLEET_DB to a disposable test-only database;
+    # this exercises real durable persistence without touching the live ledger.
+    monkeypatch.setattr(server.master_orchestrator, "max_agents", lambda: 32)
+    monkeypatch.setattr(
+        server.master_orchestrator, "parallel_worker_slots", lambda requested: 2,
+    )
+    monkeypatch.setattr(
+        server,
+        "_orchestrator_worker",
+        lambda *args, **kwargs: (lambda prompt: "audited"),
+    )
+
+    out = server.master_orchestrate(
+        "compare orchestration safety tradeoffs",
+        mode="fleet",
+        agents=8,
+    )
+
+    deadline = time.time() + 2.0
+    snapshot = server.master_orchestrator.snapshot(include_finished=True, limit=100)
+    while snapshot["active_agents"] and time.time() < deadline:
+        time.sleep(0.01)
+        snapshot = server.master_orchestrator.snapshot(include_finished=True, limit=100)
+
+    assert snapshot["active_agents"] == 0
+    masters = [row for row in snapshot["agents"] if row["role"] == "master"]
+    assert len(masters) == 1
+    master = masters[0]
+    children = [
+        row for row in snapshot["agents"] if row["parent_id"] == master["id"]
+    ]
+    assert "agents=8" in out
+    assert master["requested_agents"] == 8
+    assert len(children) == 8
+
+
+def test_master_orchestrate_schema_marks_zero_as_automatic_agent_count():
+    schema = server.mcp._tool_manager.get_tool("master_orchestrate").parameters
+
+    assert schema["properties"]["agents"]["default"] == 0
 
 
 def test_master_routes_explicit_game_build_to_grounded_forge(monkeypatch):

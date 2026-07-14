@@ -4863,7 +4863,7 @@ def _master_grounded_build(
 def master_orchestrate(
     task: str,
     mode: str = "ask",
-    agents: int = 3,
+    agents: int = 0,
     tier: str = "auto",
     learn: bool = False,
     retry_of: str = "",
@@ -4874,6 +4874,8 @@ def master_orchestrate(
     lane. mode="delegate" queues bounded subagents across RAM/CPU-safe worker
     slots, then audits and merges their outputs. mode="fleet" queues the full
     hardware-derived breadth ceiling in the background and returns immediately.
+    Pass a positive ``agents`` value to set a smaller explicit fleet breadth;
+    zero/omitted selects three delegates or the hardware ceiling for fleet mode.
     Status is visible through master_status().
     """
     _maybe_live_reload()
@@ -4889,24 +4891,27 @@ def master_orchestrate(
     if master_orchestrator.requests_fleet(task):
         if mode in ("ask", "choose", "prompt", "delegate", "delegated", "agents", "parallel"):
             mode = "fleet"
-            agents = master_orchestrator.max_agents()
     if mode in ("ask", "choose", "prompt"):
         delegate_count = master_orchestrator.clamp_agent_count(agents, default=3)
+        fleet_count = master_orchestrator.clamp_agent_count(
+            agents, default=master_orchestrator.max_agents(),
+        )
         delegate_capacity = master_orchestrator.capacity(delegate_count)
-        fleet_capacity = master_orchestrator.capacity(master_orchestrator.max_agents())
+        fleet_capacity = master_orchestrator.capacity(fleet_count)
         return (
             "Master orchestrator ready.\n"
             "Choose execution mode:\n"
             "  inline   - master handles the task directly.\n"
             "  delegate - queue %d agent(s) across %d safe worker slot(s), audit, then merge.\n"
-            "  fleet    - start the hardware ceiling (%d agents) across %d safe worker slot(s), return immediately, then monitor it.\n"
+            "  fleet    - queue %d agent(s) across %d safe worker slot(s), return immediately, then monitor it.\n"
+            "              Omit agents (or pass 0) to use the hardware ceiling.\n"
             "Keywords fleet, swarm, spawn as many agents, parallel agents, and\n"
-            "parallel workflow select fleet automatically.\n"
+            "parallel workflow select fleet automatically without replacing an explicit agent count.\n"
             "Call master_orchestrate(task, mode='inline'|'delegate'|'fleet') or chat `/master inline ...`."
         ) % (
             delegate_count,
             delegate_capacity["worker_slots"],
-            master_orchestrator.max_agents(),
+            fleet_count,
             fleet_capacity["worker_slots"],
         )
     if not task:
@@ -4945,7 +4950,9 @@ def master_orchestrate(
     if mode in ("delegate", "delegated", "agents", "parallel", "fleet", "swarm", "fanout"):
         run_fleet_in_background = mode in ("fleet", "swarm", "fanout")
         if run_fleet_in_background:
-            agents = master_orchestrator.max_agents()
+            agents = master_orchestrator.clamp_agent_count(
+                agents, default=master_orchestrator.max_agents(),
+            )
         runner = (
             master_orchestrator.start_delegated
             if run_fleet_in_background
@@ -6889,7 +6896,7 @@ def _loop_dispatch(action):
         return _loop_text_result("master_orchestrate", master_orchestrate(
             task=action.get("task", action.get("prompt", "")),
             mode=action.get("mode", "ask"),
-            agents=action.get("agents", 3),
+            agents=action.get("agents", 0),
             tier=action.get("tier", "auto"),
             learn=action.get("learn", False),
         ))
@@ -9137,7 +9144,7 @@ def _agent_dispatch(
         return master_orchestrate(
             task=args.get("task", args.get("prompt", "")),
             mode=args.get("mode", "ask"),
-            agents=args.get("agents", 3),
+            agents=args.get("agents", 0),
             tier=args.get("tier", "auto"),
             learn=args.get("learn", False),
         )

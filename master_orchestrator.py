@@ -532,6 +532,7 @@ def max_agents() -> int:
 
 
 def clamp_agent_count(count: int | str | None, default: int = 3) -> int:
+    """Clamp a positive explicit count, using ``default`` for zero/omitted input."""
     try:
         requested = int(count or default)
     except (TypeError, ValueError):

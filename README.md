@@ -308,9 +308,12 @@ authority:
    operations, security, and project style before applying changes.
 5. Use agent fan-out deliberately: 1-3 agents for normal work and 4-6 for useful
    diversity. Explicit `fleet`, `swarm`, `workflow`, `parallel agents`, or
-   spawn-as-many requests queue the hardware-derived breadth ceiling (two
+   spawn-as-many requests queue the hardware-derived breadth ceiling when the
+   caller omits `agents` (or passes zero). A positive `agents` value is always
+   honored up to the configured ceiling, including in fleet mode and when fleet
+   keywords trigger that mode automatically. The automatic ceiling is two
    candidates per logical CPU, capped at 64 and overridable with
-   `SONDER_MAX_AGENTS`). A separate scheduler bounds simultaneous model calls
+   `SONDER_MAX_AGENTS`. A separate scheduler bounds simultaneous model calls
    from CPU and currently available RAM (8 automatic slots maximum). Inspect it
    with `/capacity [requested-agents]`; use `/agentcancel <id|prefix|all>` for
    cooperative cancellation. Queued work stops immediately. Already-running
