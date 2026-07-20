@@ -1254,8 +1254,13 @@ def _insert_lesson_rows(
         "embedding_model, embedding_revision, embedding_dim) "
         "VALUES(?, ?, ?, ?, ?, ?, ?)",
         (
+            # Preserve the revision string exactly, including the empty string a
+            # runtime with no local manifest reports. Coercing "" -> NULL made a
+            # successfully-embedded lesson (non-null model + dim) store a NULL
+            # revision, contradicting the provenance contract and its dedupe
+            # comparison (which still normalizes "" and None together below).
             lesson_id, text, embedding, source_interaction,
-            embedding_model, embedding_revision or None, embedding_dim,
+            embedding_model, embedding_revision, embedding_dim,
         ),
     )
     conn.execute(

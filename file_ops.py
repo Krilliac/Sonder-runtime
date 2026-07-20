@@ -10,7 +10,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import stat
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import sonder_paths
 
@@ -192,6 +192,24 @@ def _is_inside(path: Path, root: Path) -> bool:
         return False
 
 
+def _foreign_absolute(raw: str) -> bool:
+    """True when *raw* is absolute in a path flavor the host cannot resolve.
+
+    A Windows drive/UNC path (``C:\\x``, ``\\\\server\\share``) on POSIX -- or a
+    POSIX-rooted path on Windows -- is absolute in a syntax the native ``Path``
+    does not understand, so ``Path()`` silently treats it as a *relative* name
+    and rebases it under the workspace, defeating every containment check. We
+    must recognize these escaping forms independent of host OS and reject them
+    outright rather than let them masquerade as workspace-relative reads.
+    """
+    windows = PureWindowsPath(raw)
+    windows_absolute = bool(windows.drive or windows.anchor)
+    posix_absolute = PurePosixPath(raw).is_absolute()
+    native_absolute = Path(raw).is_absolute()
+    # Absolute in some flavor, yet the native OS disagrees => foreign/escaping.
+    return (windows_absolute or posix_absolute) and not native_absolute
+
+
 def resolve_repository_read_path(
     path: str,
     *,
@@ -219,6 +237,15 @@ def resolve_repository_read_path(
     if not isinstance(path, str) or not path.strip():
         raise ValueError("repository path must be a non-empty path")
     raw = path.strip()
+    if _foreign_absolute(raw):
+        # e.g. a Windows drive/UNC path reaching a POSIX host: Path() would
+        # rebase it under the workspace and pass containment. Reject it as an
+        # escaping absolute regardless of which OS we are running on.
+        raise PermissionError(
+            "repository path uses a non-native absolute form "
+            "(Windows drive/UNC or foreign root) and escapes the workspace: %s"
+            % raw
+        )
     candidate = Path(raw)
     expanded = candidate.expanduser()
     windows_candidate = PureWindowsPath(raw)
