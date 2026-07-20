@@ -241,11 +241,14 @@ def test_partial_fleet_audits_successful_outputs_only():
     )
 
 
-def test_repository_delegation_refuses_outputs_without_tool_ledger(monkeypatch):
+def test_repository_delegation_refuses_outputs_without_tool_ledger(tmp_path):
     audited = []
 
+    # Use a real, existing repository root so the fail-closed resolver accepts
+    # it on every host (the retired D:\SparkEngine literal only existed on the
+    # author's Windows box and made this refusal test error out on Linux CI).
     result = master_orchestrator.run_delegated(
-        "Repository: D:\\SparkEngine. Inspect current files.",
+        "Repository: %s. Inspect current files." % tmp_path,
         worker_fn=lambda prompt, project: "I inspected it and everything passes.",
         audit_fn=lambda prompt: audited.append(prompt) or "should not run",
         agents=2,

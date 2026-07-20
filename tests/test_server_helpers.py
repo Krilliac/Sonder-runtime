@@ -1372,7 +1372,7 @@ def test_master_orchestrate_delegates_and_audits(monkeypatch):
     assert "  task: find risks\naudited merge" in status
 
 
-def test_master_orchestrate_uses_tool_agent_for_repo_inspection(monkeypatch):
+def test_master_orchestrate_uses_tool_agent_for_repo_inspection(monkeypatch, tmp_path):
     calls = []
 
     def grounded_agent(prompt, **kwargs):
@@ -1386,8 +1386,11 @@ def test_master_orchestrate_uses_tool_agent_for_repo_inspection(monkeypatch):
     )
     monkeypatch.setattr(server, "_offload_impl", lambda prompt, **kwargs: "audited merge")
 
+    # A real, existing repository root keeps the fail-closed resolver satisfied
+    # on every host; the retired D:\SparkEngine literal only resolved on the
+    # author's Windows box and errored the delegated lane on Linux CI.
     out = server.master_orchestrate(
-        "Repository: D:\\SparkEngine. Review current uncommitted files using local file-reading tools.",
+        "Repository: %s. Review current uncommitted files using local file-reading tools." % tmp_path,
         mode="delegate",
         agents=4,
     )

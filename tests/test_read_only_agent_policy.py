@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 import file_ops
@@ -35,14 +37,20 @@ def test_read_only_denies_untrusted_extra_root_without_token(monkeypatch):
 
 
 def test_project_scope_replaces_model_supplied_extra_roots():
+    # Host-portable: the host-selected project root must replace the
+    # model-supplied extra_roots verbatim, and a relative path must rebase onto
+    # it using the host's own path separator (os.path.join). Asserting a
+    # hard-coded Windows separator would spuriously fail on POSIX, where
+    # pathlib/os.path join with "/".
+    project = os.path.join("host-project", "sub")
     scoped = server._project_scope_args(
         "file_read",
-        {"path": "README.md", "extra_roots": "C:\\model-chosen"},
-        "D:\\host-project",
+        {"path": "README.md", "extra_roots": os.path.join("model-chosen", "elsewhere")},
+        project,
     )
 
-    assert scoped["extra_roots"] == "D:\\host-project"
-    assert scoped["path"] == "D:\\host-project\\README.md"
+    assert scoped["extra_roots"] == project
+    assert scoped["path"] == os.path.join(project, "README.md")
 
 
 def test_project_scoped_read_only_dispatch_reads_host_authorized_root(monkeypatch, tmp_path):
