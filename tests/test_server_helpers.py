@@ -296,6 +296,10 @@ def test_serve_target_cloud_tier_requires_opt_in(monkeypatch):
     assert label == "cloud-disabled"
 
 
+def test_cloud_code_default_tracks_supported_hosted_model():
+    assert server.DEFAULT_CLOUD_CODE_MODEL == "kimi-k2.7-code:cloud"
+
+
 def test_serve_target_cloud_tier_is_clean_teacher_when_enabled(monkeypatch):
     monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
     # Cloud tier: real cloud model, cloud=True, augment=False (clean), labeled by tier.

@@ -14,7 +14,7 @@ Tiers (escalation ladder, cheapest first):
     code        -> qwen2.5-coder:7b      (~4.7 GB Q4, strong coding model)
     general     -> qwen2.5:7b-instruct   (~4.7 GB Q4, general text grunt-work)
   CLOUD  (Ollama-hosted, huge, metered; prompt leaves this machine):
-    cloud-code  -> qwen3-coder:480b-cloud (frontier coding, no local VRAM cost)
+    cloud-code  -> kimi-k2.7-code:cloud   (frontier coding, no local VRAM cost)
     cloud-general -> gpt-oss:120b-cloud   (heavy reasoning over text)
 """
 
@@ -90,6 +90,7 @@ KEEP_ALIVE = os.environ.get("SONDER_KEEP_ALIVE", "2m")
 TIMEOUT = int(os.environ.get("SONDER_TIMEOUT", "300"))
 SONDER_STABLE_ALIAS = "sonder:latest"
 LOCAL_CODE_MODEL = os.environ.get("SONDER_CODE_LOCAL", "qwen2.5-coder:7b")
+DEFAULT_CLOUD_CODE_MODEL = "kimi-k2.7-code:cloud"
 
 
 def _env_int_option(name, default=None):
@@ -154,7 +155,7 @@ TIERS = {
     "fast": os.environ.get("SONDER_FAST", "qwen2.5:3b"),
     "code": os.environ.get("SONDER_CODE", "qwen2.5-coder:7b"),
     "general": os.environ.get("SONDER_GENERAL", "qwen2.5:7b-instruct"),
-    "cloud-code": os.environ.get("SONDER_CLOUD_CODE", "qwen3-coder:480b-cloud"),
+    "cloud-code": os.environ.get("SONDER_CLOUD_CODE", DEFAULT_CLOUD_CODE_MODEL),
     "cloud-general": os.environ.get("SONDER_CLOUD_GENERAL", "gpt-oss:120b-cloud"),
 }
 # Tiers whose ":...-cloud" model runs on Ollama's servers (data leaves the machine).
