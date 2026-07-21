@@ -311,6 +311,15 @@ def test_live_cloud_model_rewrites_known_retired_model():
     )
 
 
+def test_live_cloud_model_uses_the_callers_tier_specific_default():
+    assert (
+        server._live_cloud_model(
+            "qwen3-coder:480b-cloud", server.DEFAULT_CLOUD_GENERAL_MODEL
+        )
+        == server.DEFAULT_CLOUD_GENERAL_MODEL
+    )
+
+
 def test_live_cloud_model_rewrite_is_case_insensitive():
     assert (
         server._live_cloud_model(
@@ -334,6 +343,10 @@ def test_live_cloud_model_falls_back_to_default_when_unset():
     )
     assert (
         server._live_cloud_model("", server.DEFAULT_CLOUD_CODE_MODEL)
+        == server.DEFAULT_CLOUD_CODE_MODEL
+    )
+    assert (
+        server._live_cloud_model("   ", server.DEFAULT_CLOUD_CODE_MODEL)
         == server.DEFAULT_CLOUD_CODE_MODEL
     )
 
