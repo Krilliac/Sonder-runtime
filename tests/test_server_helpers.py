@@ -1,4 +1,5 @@
 import importlib
+import json
 import threading
 import time
 
@@ -266,6 +267,109 @@ def test_make_generate_cloud_omits_local_runtime_options(monkeypatch):
     assert gen("hello") == "ok"
     assert "keep_alive" not in seen["payload"]
     assert seen["payload"]["options"] == {"temperature": 0.4, "num_predict": 88}
+    assert "think" not in seen["payload"]
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_think"),
+    [
+        ("kimi-k2.7-code:cloud", False),
+        ("KIMI-K2.7-CODE:preview-cloud", False),
+        ("gpt-oss:120b-cloud", "low"),
+        ("GPT-OSS:custom-cloud", "low"),
+        ("custom-reasoner:cloud", None),
+    ],
+)
+def test_make_generate_applies_known_cloud_thinking_policy(
+    monkeypatch, model, expected_think,
+):
+    seen = {}
+
+    def fake_post(path, payload, timeout=None):
+        seen["payload"] = payload
+        return {"message": {"content": "ok"}}
+
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    monkeypatch.setattr(server, "_post", fake_post)
+
+    gen = server._make_generate(model, "", 0.4, 88, 8192, cloud=True)
+    assert gen("hello") == "ok"
+    if expected_think is None:
+        assert "think" not in seen["payload"]
+    else:
+        assert seen["payload"]["think"] == expected_think
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_think"),
+    [
+        ("kimi-k2.7-code:cloud", False),
+        ("gpt-oss:120b-cloud", "low"),
+        ("custom-reasoner:cloud", None),
+    ],
+)
+def test_non_learning_offload_applies_known_cloud_thinking_policy(
+    monkeypatch, model, expected_think,
+):
+    seen = {}
+
+    def fake_post(path, payload, timeout=None):
+        seen["payload"] = payload
+        return {"message": {"content": "ok"}}
+
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    monkeypatch.setitem(server.TIERS, "cloud-code", model)
+    monkeypatch.setattr(server, "_post", fake_post)
+
+    assert server._offload_impl("hello", tier="cloud-code", learn=False) == "ok"
+    if expected_think is None:
+        assert "think" not in seen["payload"]
+    else:
+        assert seen["payload"]["think"] == expected_think
+
+
+def test_thinking_only_response_reports_sanitized_metadata_without_reasoning(
+    monkeypatch,
+):
+    secret_thinking = "private chain of thought: bearer super-secret-token"
+    calls = []
+
+    def fake_post(path, payload):
+        calls.append(payload)
+        return {
+            "message": {
+                "content": "",
+                "thinking": secret_thinking,
+                "tool_calls": [{"function": {"name": "one"}}, {"secret": "two"}],
+            },
+            "eval_count": 19,
+            "done_reason": "stop\nunsafe suffix!",
+        }
+
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    monkeypatch.setattr(server, "_post", fake_post)
+
+    with pytest.raises(server.ModelCallError) as captured:
+        server._chat_request(
+            {"model": "gpt-oss:120b-cloud", "messages": [], "stream": False},
+            model="gpt-oss:120b-cloud",
+            cloud=True,
+        )
+
+    error = captured.value
+    prefix, raw_metadata = error.detail.split("; metadata=", 1)
+    assert prefix == "Ollama returned no assistant content"
+    assert json.loads(raw_metadata) == {
+        "done_reason": "other",
+        "eval_count": 19,
+        "thinking_chars": len(secret_thinking),
+        "tool_call_count": 2,
+    }
+    assert secret_thinking not in error.detail
+    assert "super-secret-token" not in server._format_model_call_error(error)
+    assert "unsafe suffix" not in error.detail
+    assert error.attempts == 1
+    assert len(calls) == 1
 
 
 def test_make_generate_captures_ollama_token_counts(monkeypatch):
