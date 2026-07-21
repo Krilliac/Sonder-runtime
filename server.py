@@ -91,6 +91,20 @@ TIMEOUT = int(os.environ.get("SONDER_TIMEOUT", "300"))
 SONDER_STABLE_ALIAS = "sonder:latest"
 LOCAL_CODE_MODEL = os.environ.get("SONDER_CODE_LOCAL", "qwen2.5-coder:7b")
 DEFAULT_CLOUD_CODE_MODEL = "kimi-k2.7-code:cloud"
+DEFAULT_CLOUD_GENERAL_MODEL = "gpt-oss:120b-cloud"
+
+# Hosted cloud models Ollama has permanently retired (HTTP 410 at request time).
+# A machine-wide SONDER_CLOUD_* override set before a retirement must not keep
+# resurrecting the dead model forever -- route it to today's default instead of
+# failing every offload call until someone notices and edits their env by hand.
+RETIRED_CLOUD_MODELS = {
+    "qwen3-coder:480b-cloud": DEFAULT_CLOUD_CODE_MODEL,  # retired 2026-07-15
+}
+
+
+def _live_cloud_model(configured, default):
+    lowered = str(configured or "").strip().lower()
+    return RETIRED_CLOUD_MODELS.get(lowered, configured or default)
 
 
 def _env_int_option(name, default=None):
@@ -155,8 +169,12 @@ TIERS = {
     "fast": os.environ.get("SONDER_FAST", "qwen2.5:3b"),
     "code": os.environ.get("SONDER_CODE", "qwen2.5-coder:7b"),
     "general": os.environ.get("SONDER_GENERAL", "qwen2.5:7b-instruct"),
-    "cloud-code": os.environ.get("SONDER_CLOUD_CODE", DEFAULT_CLOUD_CODE_MODEL),
-    "cloud-general": os.environ.get("SONDER_CLOUD_GENERAL", "gpt-oss:120b-cloud"),
+    "cloud-code": _live_cloud_model(
+        os.environ.get("SONDER_CLOUD_CODE"), DEFAULT_CLOUD_CODE_MODEL
+    ),
+    "cloud-general": _live_cloud_model(
+        os.environ.get("SONDER_CLOUD_GENERAL"), DEFAULT_CLOUD_GENERAL_MODEL
+    ),
 }
 # Tiers whose ":...-cloud" model runs on Ollama's servers (data leaves the machine).
 CLOUD_TIERS = {"cloud-code", "cloud-general"}

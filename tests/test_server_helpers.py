@@ -300,6 +300,56 @@ def test_cloud_code_default_tracks_supported_hosted_model():
     assert server.DEFAULT_CLOUD_CODE_MODEL == "kimi-k2.7-code:cloud"
 
 
+def test_live_cloud_model_rewrites_known_retired_model():
+    # A machine-wide SONDER_CLOUD_CODE set before qwen3-coder:480b-cloud's
+    # 2026-07-15 retirement must not keep resurrecting the dead model.
+    assert (
+        server._live_cloud_model(
+            "qwen3-coder:480b-cloud", server.DEFAULT_CLOUD_CODE_MODEL
+        )
+        == server.DEFAULT_CLOUD_CODE_MODEL
+    )
+
+
+def test_live_cloud_model_rewrite_is_case_insensitive():
+    assert (
+        server._live_cloud_model(
+            "QWEN3-CODER:480B-CLOUD", server.DEFAULT_CLOUD_CODE_MODEL
+        )
+        == server.DEFAULT_CLOUD_CODE_MODEL
+    )
+
+
+def test_live_cloud_model_passes_through_other_overrides():
+    assert (
+        server._live_cloud_model("some-other:cloud", server.DEFAULT_CLOUD_CODE_MODEL)
+        == "some-other:cloud"
+    )
+
+
+def test_live_cloud_model_falls_back_to_default_when_unset():
+    assert (
+        server._live_cloud_model(None, server.DEFAULT_CLOUD_CODE_MODEL)
+        == server.DEFAULT_CLOUD_CODE_MODEL
+    )
+    assert (
+        server._live_cloud_model("", server.DEFAULT_CLOUD_CODE_MODEL)
+        == server.DEFAULT_CLOUD_CODE_MODEL
+    )
+
+
+def test_tiers_cloud_code_survives_stale_retired_env_override(monkeypatch):
+    # End-to-end: even with the stale env var this machine actually had set
+    # (SONDER_CLOUD_CODE=qwen3-coder:480b-cloud), a fresh import must resolve
+    # cloud-code to the live default rather than the retired model.
+    monkeypatch.setenv("SONDER_CLOUD_CODE", "qwen3-coder:480b-cloud")
+    reloaded = importlib.reload(server)
+    try:
+        assert reloaded.TIERS["cloud-code"] == reloaded.DEFAULT_CLOUD_CODE_MODEL
+    finally:
+        importlib.reload(server)
+
+
 def test_serve_target_cloud_tier_is_clean_teacher_when_enabled(monkeypatch):
     monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
     # Cloud tier: real cloud model, cloud=True, augment=False (clean), labeled by tier.
