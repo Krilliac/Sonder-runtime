@@ -213,6 +213,15 @@ def _is_cloud_model_name(model):
     return "-cloud" in name or name.endswith(":cloud")
 
 
+def _apply_cloud_thinking_policy(payload, model):
+    """Apply hosted-model thinking controls without changing custom models."""
+    name = str(model or "").strip().casefold()
+    if name.startswith("kimi-k2.7-code:"):
+        payload["think"] = False
+    elif name.startswith("gpt-oss:"):
+        payload["think"] = "low"
+
+
 if _is_cloud_model_name(TIERS["code"]):
     TIERS["code"] = LOCAL_CODE_MODEL
 
@@ -504,7 +513,9 @@ def _make_generate(
             options = _local_model_options(temperature, num_predict, num_ctx)
         payload = {"model": model, "messages": messages, "stream": False,
                    "options": options}
-        if not cloud:
+        if cloud:
+            _apply_cloud_thinking_policy(payload, model)
+        else:
             payload["keep_alive"] = KEEP_ALIVE
         ok = False
         content = ""
@@ -2336,7 +2347,7 @@ def _chat_request(
     if not isinstance(content, str) or not content.strip():
         raise ModelCallError(
             "empty_response",
-            "Ollama returned no assistant content",
+            _empty_model_response_detail(out, message),
             attempts=attempts,
             cloud=cloud,
         )
@@ -2351,6 +2362,36 @@ def _model_usage_count(value):
     except (TypeError, ValueError, OverflowError):
         return None
     return value if value >= 0 else None
+
+
+def _empty_model_response_detail(out, message):
+    """Describe an empty response without exposing model reasoning content."""
+    metadata = {}
+    if isinstance(message, dict):
+        thinking = message.get("thinking")
+        if isinstance(thinking, str):
+            metadata["thinking_chars"] = len(thinking)
+        tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, (list, tuple)):
+            metadata["tool_call_count"] = len(tool_calls)
+
+    eval_count = _model_usage_count(out.get("eval_count"))
+    if eval_count is not None:
+        metadata["eval_count"] = eval_count
+
+    done_reason = out.get("done_reason")
+    if isinstance(done_reason, str) and done_reason.strip():
+        normalized_reason = done_reason.strip().casefold()
+        metadata["done_reason"] = (
+            normalized_reason
+            if normalized_reason in {"stop", "length"}
+            else "other"
+        )
+
+    detail = "Ollama returned no assistant content"
+    if metadata:
+        detail += "; metadata=" + json.dumps(metadata, sort_keys=True)
+    return detail
 
 
 def _format_model_call_error(error: ModelCallError) -> str:
@@ -2443,7 +2484,9 @@ def _offload_impl(
             "stream": False,
             "options": options,
         }
-        if not cloud:
+        if cloud:
+            _apply_cloud_thinking_policy(payload, model)
+        else:
             payload["keep_alive"] = KEEP_ALIVE
         started = time.time()
         ok = False
