@@ -97,14 +97,18 @@ DEFAULT_CLOUD_GENERAL_MODEL = "gpt-oss:120b-cloud"
 # A machine-wide SONDER_CLOUD_* override set before a retirement must not keep
 # resurrecting the dead model forever -- route it to today's default instead of
 # failing every offload call until someone notices and edits their env by hand.
-RETIRED_CLOUD_MODELS = {
-    "qwen3-coder:480b-cloud": DEFAULT_CLOUD_CODE_MODEL,  # retired 2026-07-15
-}
+RETIRED_CLOUD_MODELS = frozenset(
+    {
+        "qwen3-coder:480b-cloud",  # retired 2026-07-15
+    }
+)
 
 
 def _live_cloud_model(configured, default):
     lowered = str(configured or "").strip().lower()
-    return RETIRED_CLOUD_MODELS.get(lowered, configured or default)
+    if not lowered or lowered in RETIRED_CLOUD_MODELS:
+        return default
+    return configured
 
 
 def _env_int_option(name, default=None):
