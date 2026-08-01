@@ -87,7 +87,8 @@ def test_borderline_cross_domain_hits_cannot_displace_semantic_transfer():
     ms.add_lesson(
         c,
         "primality",
-        "Use fixed Miller-Rabin witnesses for deterministic primality testing.",
+        "Use the fixed witness set [2,3,...,37] for Miller-Rabin to get a "
+        "deterministic primality test for any 64-bit n.",
         e.to_blob(borderline),
         "seed",
     )
@@ -108,7 +109,8 @@ def test_borderline_cross_domain_hits_cannot_displace_semantic_transfer():
 
     rows = r.retrieve_with_ids(
         c,
-        "Design hostile kernel IPC tests for channel teardown races.",
+        "Design a deterministic hostile-test matrix for kernel IPC channel "
+        "teardown races.",
         k=5,
         embed_fn=lambda _text: query,
         min_sim=0.62,
@@ -117,7 +119,8 @@ def test_borderline_cross_domain_hits_cannot_displace_semantic_transfer():
     assert [row["id"] for row in rows] == ["channel-safety"]
     assert r.retrieve_with_ids(
         c,
-        "Design hostile kernel IPC tests for channel teardown races.",
+        "Design a deterministic hostile-test matrix for kernel IPC channel "
+        "teardown races.",
         k=5,
         embed_fn=lambda _text: None,
     ) == []
