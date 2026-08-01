@@ -30,9 +30,11 @@ QUARANTINE_COOLDOWN_HOURS = 24 * 7
 
 _LEXICAL_STOP_WORDS = {
     "a", "an", "and", "are", "as", "at", "be", "before", "by", "do",
-    "for", "from", "how", "in", "into", "is", "it", "of", "on", "or",
-    "should", "that", "the", "this", "to", "use", "using", "with",
-    "without",
+    "build", "code", "compact", "create", "design", "designer",
+    "deterministic", "example", "for", "from", "generate", "how", "in",
+    "implement", "implementation", "into", "is", "it", "of", "on", "or",
+    "review", "run", "should", "task", "test", "testing", "tests", "that",
+    "the", "this", "to", "use", "using", "with", "without", "write",
 }
 
 
