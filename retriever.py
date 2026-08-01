@@ -1,6 +1,7 @@
 """Hybrid lexical+semantic retrieval over distilled lessons. RRF fusion."""
 from datetime import datetime, timedelta, timezone
 import os
+import re
 
 import embeddings
 import memory_store
@@ -14,11 +15,25 @@ import memory_store
 # lesson at 0.650) with no precision gain. Re-run tune_min_sim.py after large
 # corpus changes.
 DEFAULT_MIN_SIM = 0.62
+# Borderline semantic-only hits need a second signal before prompt injection.
+# The live 979-lesson corpus produced a reproduced cross-domain false positive
+# at 0.650211.  Keep the calibrated 0.62 gate for candidates with at least two
+# content-word anchors, while requiring uncorroborated semantic transfer to
+# clear 0.70 (still below the prior positive median of 0.728).
+DEFAULT_UNCORROBORATED_MIN_SIM = 0.70
+MIN_LEXICAL_ANCHORS = 2
 QUARANTINE_MIN_LOSSES = 5
 QUARANTINE_REPEAT_TASK_MIN_LOSSES = 6
 QUARANTINE_MIN_DISTINCT_TASKS = 2
 QUARANTINE_MAX_AVG_REWARD = -0.5
 QUARANTINE_COOLDOWN_HOURS = 24 * 7
+
+_LEXICAL_STOP_WORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "before", "by", "do",
+    "for", "from", "how", "in", "into", "is", "it", "of", "on", "or",
+    "should", "that", "the", "this", "to", "use", "using", "with",
+    "without",
+}
 
 
 def rrf(rank_lists, k=60):
@@ -35,6 +50,25 @@ def rrf_scores(rank_lists, k=60):
         for rank, item in enumerate(lst):
             scores[item] = scores.get(item, 0.0) + 1.0 / (k + rank + 1)
     return scores
+
+
+def _content_terms(text):
+    return {
+        term
+        for term in re.findall(r"[^\W_]+", str(text or "").casefold())
+        if len(term) > 2 and term not in _LEXICAL_STOP_WORDS
+    }
+
+
+def _has_lexical_corroboration(task_terms, lesson_text):
+    anchors = task_terms.intersection(_content_terms(lesson_text))
+    return len(anchors) >= MIN_LEXICAL_ANCHORS
+
+
+def _candidate_min_sim(task_terms, lesson_text, min_sim):
+    if _has_lexical_corroboration(task_terms, lesson_text):
+        return min_sim
+    return max(min_sim, DEFAULT_UNCORROBORATED_MIN_SIM)
 
 
 def _stored_vector(row, qv, embedding_model=None, embedding_revision=None):
@@ -162,14 +196,18 @@ def _lesson_data(conn, ids):
 
 
 def _relevant_ids(
-    conn, qv, ids, min_sim, lesson_data=None,
+    conn, task, qv, ids, min_sim, lesson_data=None,
     embedding_model=None, embedding_revision=None,
 ):
-    """Filter fused candidate ids to those whose stored embedding clears min_sim.
+    """Filter fused candidates through semantic and lexical relevance gates.
 
     Lessons with no stored embedding are dropped (relevance can't be judged).
+    A candidate with fewer than two content-word anchors must clear the stronger
+    semantic-only gate.  This rejects acronym and embedding collisions without
+    disabling genuinely high-confidence semantic transfer.
     """
     data = lesson_data if lesson_data is not None else _lesson_data(conn, ids)
+    task_terms = _content_terms(task)
     kept = []
     for lid in ids:
         row = data.get(lid)
@@ -182,7 +220,8 @@ def _relevant_ids(
         )
         if v is None:
             continue
-        if embeddings.cosine(qv, v) >= min_sim:
+        required_sim = _candidate_min_sim(task_terms, row["text"], min_sim)
+        if embeddings.cosine(qv, v) >= required_sim:
             kept.append(lid)
     return kept
 
@@ -300,13 +339,21 @@ def retrieve_with_ids(
     if qv is None or not compatible_semantic_corpus:
         # Embeddings unavailable, or all non-quarantined stored vectors belong
         # to an incompatible embedding space: soft-fail to lexical-only. With
-        # no comparable vectors there is no semantic threshold to apply.
+        # no comparable vectors there is no semantic threshold to apply, so
+        # require two content-word anchors instead of trusting one ambiguous
+        # acronym or generic token.
+        task_terms = _content_terms(task)
+        data = _lesson_data(conn, lexical)
+        lexical = [
+            lid for lid in lexical
+            if data.get(lid) is not None
+            and _has_lexical_corroboration(task_terms, data[lid]["text"])
+        ]
         scores = rrf_scores([lexical, []])
         fused = sorted(
             scores,
             key=lambda lid: -(scores[lid] + _usage_boost(usage_stats.get(lid))),
         )[:k]
-        data = _lesson_data(conn, fused)
         rows = []
         for lid in fused:
             row = data.get(lid)
@@ -322,7 +369,7 @@ def retrieve_with_ids(
     )
     data = _lesson_data(conn, fused)
     relevant = _relevant_ids(
-        conn, qv, fused, min_sim, lesson_data=data,
+        conn, task, qv, fused, min_sim, lesson_data=data,
         embedding_model=embedding_model,
         embedding_revision=embedding_revision,
     )[:k]

@@ -95,6 +95,42 @@ def test_master_orchestrate_still_forges_explicit_greenfield_requests(monkeypatc
     assert result == "forged"
 
 
+def test_master_text_only_threat_model_stays_in_requested_fleet(monkeypatch):
+    forge_calls = []
+    fleet_calls = []
+    monkeypatch.setattr(
+        server, "_master_grounded_build",
+        lambda *args, **kwargs: forge_calls.append((args, kwargs)) or "forged",
+    )
+
+    def start_fleet(task, **kwargs):
+        fleet_calls.append((task, kwargs))
+        return {
+            "master_id": "master-text-review",
+            "agents": ["agent-1", "agent-2"],
+            "worker_slots": 2,
+        }
+
+    monkeypatch.setattr(
+        server.master_orchestrator, "start_delegated", start_fleet,
+    )
+    task = (
+        "Greenfield operating-system IPC design exercise. No files are needed. "
+        "Independently threat-model a service directory and duplex ChannelCore. "
+        "Generate minimal P0 race counterexamples and deterministic runtime tests; "
+        "avoid implementation code."
+    )
+
+    result = server.master_orchestrate(
+        task=task, mode="fleet", agents=2, tier="cloud-code",
+    )
+
+    assert forge_calls == []
+    assert len(fleet_calls) == 1
+    assert fleet_calls[0][0] == task
+    assert "mode: fleet | master=master-text-review | agents=2" in result
+
+
 def test_agent_tool_help_advertises_strict_humanoid_artifact_contract():
     help_text = server._agent_tool_help()
 

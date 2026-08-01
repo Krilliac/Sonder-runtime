@@ -73,6 +73,29 @@ def test_does_not_hijack_questions_or_design_only_requests():
     assert creative_router.classify("Review this existing game repository.") is None
 
 
+def test_text_only_threat_model_does_not_route_to_artifact_forge():
+    task = (
+        "Greenfield operating-system IPC design exercise; no files. "
+        "Independently threat-model a service directory and duplex ChannelCore. "
+        "Generate minimal P0 race counterexamples and deterministic runtime tests; "
+        "avoid implementation code."
+    )
+
+    assert creative_router.classify(task, mode="fleet") is None
+    assert creative_router.classify(
+        "Generate a 3D model of a robot.", mode="fleet",
+    )["kind"] == "artifact"
+
+
+def test_theme_terms_do_not_match_inside_technical_words():
+    intent = creative_router.classify(
+        "Generate a service directory diagram for an operating system."
+    )
+
+    assert intent["kind"] == "artifact"
+    assert intent["theme"] == "arcane"
+
+
 def test_names_are_stable_and_bounded():
     task = "Create a compact Python 2D dungeon crawler game with generated sprites."
 

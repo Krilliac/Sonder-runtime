@@ -71,6 +71,58 @@ def test_retrieve_drops_unembedded_lexical_candidates_when_compatible_corpus_exi
     assert texts == []
 
 
+def test_borderline_cross_domain_hits_cannot_displace_semantic_transfer():
+    c = ms.connect(":memory:")
+    query = [1.0, 0.0]
+    reproduced_false_positive = 0.650211
+    semantic_transfer = 0.72
+    borderline = [
+        reproduced_false_positive,
+        (1.0 - reproduced_false_positive ** 2) ** 0.5,
+    ]
+    transfer = [
+        semantic_transfer,
+        (1.0 - semantic_transfer ** 2) ** 0.5,
+    ]
+    ms.add_lesson(
+        c,
+        "primality",
+        "Use fixed Miller-Rabin witnesses for deterministic primality testing.",
+        e.to_blob(borderline),
+        "seed",
+    )
+    ms.add_lesson(
+        c,
+        "perf-ipc",
+        "Read perf IPC counters before choosing a hot-loop optimization.",
+        e.to_blob(borderline),
+        "seed",
+    )
+    ms.add_lesson(
+        c,
+        "channel-safety",
+        "Exercise concurrent endpoint closure, ledger draining, and stale handle reuse.",
+        e.to_blob(transfer),
+        "seed",
+    )
+
+    rows = r.retrieve_with_ids(
+        c,
+        "Design hostile kernel IPC tests for channel teardown races.",
+        k=5,
+        embed_fn=lambda _text: query,
+        min_sim=0.62,
+    )
+
+    assert [row["id"] for row in rows] == ["channel-safety"]
+    assert r.retrieve_with_ids(
+        c,
+        "Design hostile kernel IPC tests for channel teardown races.",
+        k=5,
+        embed_fn=lambda _text: None,
+    ) == []
+
+
 def test_retrieve_embed_fn_none_still_uses_lexical_fallback_with_min_sim_set():
     c = ms.connect(":memory:")
     ms.add_lesson(c, "L1", "always release the threading lock", None, "i")

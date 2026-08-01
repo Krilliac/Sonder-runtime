@@ -16,8 +16,9 @@ _GAME_TARGET = re.compile(
 )
 _ARTIFACT_TARGET = re.compile(
     r"\b(?:assets?|logos?|icons?|images?|illustrations?|sounds?|audio|music|"
-    r"models?|meshes?|textures?|sprites?|diagrams?|documents?|datasets?|"
-    r"mockups?|scenes?|palettes?|characters?|avatars?|humanoids?|brand kit)\b",
+    r"meshes?|textures?|sprites?|diagrams?|documents?|datasets?|"
+    r"mockups?|scenes?|palettes?|characters?|avatars?|humanoids?|brand kit)\b"
+    r"|(?<![-\w])models?\b",
     re.IGNORECASE,
 )
 _CAMPAIGN = re.compile(
@@ -96,7 +97,7 @@ def _theme(text: str) -> str:
         "ember": ("ember", "fire", "lava", "infernal", "diablo"),
         "arcane": ("arcane", "magic", "mystic", "wizard"),
     }.items():
-        if any(term in lowered for term in terms):
+        if any(re.search(r"\b%s\b" % re.escape(term), lowered) for term in terms):
             return theme
     return "arcane"
 
