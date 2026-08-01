@@ -309,8 +309,12 @@ def test_make_generate_cloud_omits_local_runtime_options(monkeypatch):
 @pytest.mark.parametrize(
     ("model", "expected_think"),
     [
-        ("kimi-k2.7-code:cloud", False),
-        ("KIMI-K2.7-CODE:preview-cloud", False),
+        ("kimi-k3:cloud", True),
+        ("KIMI-K3:preview-cloud", True),
+        ("glm-5.2:cloud", "high"),
+        ("GLM-5.2:preview-cloud", "high"),
+        ("kimi-k2.7-code:cloud", True),
+        ("KIMI-K2.7-CODE:preview-cloud", True),
         ("gpt-oss:120b-cloud", "low"),
         ("GPT-OSS:custom-cloud", "low"),
         ("custom-reasoner:cloud", None),
@@ -334,12 +338,16 @@ def test_make_generate_applies_known_cloud_thinking_policy(
         assert "think" not in seen["payload"]
     else:
         assert seen["payload"]["think"] == expected_think
+    if model.casefold().startswith(("kimi-k3:", "kimi-k2.7-code:", "glm-5.2:")):
+        assert seen["payload"]["options"]["num_predict"] == 4096
 
 
 @pytest.mark.parametrize(
     ("model", "expected_think"),
     [
-        ("kimi-k2.7-code:cloud", False),
+        ("kimi-k3:cloud", True),
+        ("glm-5.2:cloud", "high"),
+        ("kimi-k2.7-code:cloud", True),
         ("gpt-oss:120b-cloud", "low"),
         ("custom-reasoner:cloud", None),
     ],
@@ -362,6 +370,8 @@ def test_non_learning_offload_applies_known_cloud_thinking_policy(
         assert "think" not in seen["payload"]
     else:
         assert seen["payload"]["think"] == expected_think
+    if model.casefold().startswith(("kimi-k3:", "kimi-k2.7-code:", "glm-5.2:")):
+        assert seen["payload"]["options"]["num_predict"] == 4096
 
 
 def test_thinking_only_response_reports_sanitized_metadata_without_reasoning(
@@ -438,6 +448,72 @@ def test_serve_target_cloud_tier_requires_opt_in(monkeypatch):
 
 def test_cloud_code_default_tracks_supported_hosted_model():
     assert server.DEFAULT_CLOUD_CODE_MODEL == "kimi-k2.7-code:cloud"
+
+
+def test_cloud_general_default_tracks_supported_hosted_model():
+    assert server.DEFAULT_CLOUD_GENERAL_MODEL == "glm-5.2:cloud"
+
+
+def test_live_reload_migrates_old_cloud_general_unless_preserved(monkeypatch):
+    monkeypatch.delenv("SONDER_PRESERVE_LEGACY_CLOUD_GENERAL", raising=False)
+    monkeypatch.setitem(server.TIERS, "cloud-general", "gpt-oss:120b-cloud")
+    server._refresh_live_cloud_tiers()
+    assert server.TIERS["cloud-general"] == "glm-5.2:cloud"
+
+    monkeypatch.setenv("SONDER_PRESERVE_LEGACY_CLOUD_GENERAL", "1")
+    monkeypatch.setitem(server.TIERS, "cloud-general", "gpt-oss:120b-cloud")
+    server._refresh_live_cloud_tiers()
+    assert server.TIERS["cloud-general"] == "gpt-oss:120b-cloud"
+
+
+def test_kimi_k3_extra_usage_402_falls_back_once(monkeypatch):
+    calls = []
+
+    def fake_chat(payload, *, model, cloud, timeout=None, cancel_check=None):
+        calls.append((model, payload.get("think")))
+        if model == "kimi-k3:cloud":
+            raise server.ModelCallError(
+                "http", "extra usage balance is empty", status=402, cloud=True,
+            )
+        return {"message": {"content": "fallback-ok"}}, "fallback-ok"
+
+    monkeypatch.setattr(server, "_chat_request", fake_chat)
+    payload = {
+        "model": "kimi-k3:cloud",
+        "messages": [{"role": "user", "content": "hello"}],
+        "stream": False,
+        "think": True,
+    }
+    out, content, used_model = server._chat_request_with_cloud_fallback(
+        payload, model="kimi-k3:cloud", timeout=30,
+    )
+
+    assert out["message"]["content"] == "fallback-ok"
+    assert content == "fallback-ok"
+    assert used_model == "kimi-k2.7-code:cloud"
+    assert calls == [
+        ("kimi-k3:cloud", True),
+        ("kimi-k2.7-code:cloud", True),
+    ]
+    assert payload["model"] == "kimi-k3:cloud"
+    assert payload["think"] is True
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 429, 500, 503])
+def test_kimi_k3_non_402_failure_never_falls_back(monkeypatch, status):
+    calls = []
+
+    def fake_chat(payload, *, model, cloud, timeout=None, cancel_check=None):
+        calls.append(model)
+        raise server.ModelCallError("http", "rejected", status=status, cloud=True)
+
+    monkeypatch.setattr(server, "_chat_request", fake_chat)
+    with pytest.raises(server.ModelCallError) as caught:
+        server._chat_request_with_cloud_fallback(
+            {"model": "kimi-k3:cloud"}, model="kimi-k3:cloud", timeout=30,
+        )
+    assert caught.value.status == status
+    assert calls == ["kimi-k3:cloud"]
 
 
 def test_live_cloud_model_rewrites_known_retired_model():

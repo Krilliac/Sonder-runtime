@@ -14,8 +14,8 @@ Tiers (escalation ladder, cheapest first):
     code        -> qwen2.5-coder:7b      (~4.7 GB Q4, strong coding model)
     general     -> qwen2.5:7b-instruct   (~4.7 GB Q4, general text grunt-work)
   CLOUD  (Ollama-hosted, huge, metered; prompt leaves this machine):
-    cloud-code  -> kimi-k2.7-code:cloud   (frontier coding, no local VRAM cost)
-    cloud-general -> gpt-oss:120b-cloud   (heavy reasoning over text)
+    cloud-code  -> kimi-k2.7-code:cloud   (plan-covered coding, no local VRAM cost)
+    cloud-general -> glm-5.2:cloud        (long-context reasoning, no local VRAM cost)
 """
 
 import contextlib
@@ -91,7 +91,8 @@ TIMEOUT = int(os.environ.get("SONDER_TIMEOUT", "300"))
 SONDER_STABLE_ALIAS = "sonder:latest"
 LOCAL_CODE_MODEL = os.environ.get("SONDER_CODE_LOCAL", "qwen2.5-coder:7b")
 DEFAULT_CLOUD_CODE_MODEL = "kimi-k2.7-code:cloud"
-DEFAULT_CLOUD_GENERAL_MODEL = "gpt-oss:120b-cloud"
+DEFAULT_CLOUD_GENERAL_MODEL = "glm-5.2:cloud"
+CLOUD_EXTRA_USAGE_FALLBACK_MODEL = "kimi-k2.7-code:cloud"
 
 # Hosted cloud models Ollama has permanently retired (HTTP 410 at request time).
 # A machine-wide SONDER_CLOUD_* override set before a retirement must not keep
@@ -185,6 +186,23 @@ CLOUD_TIERS = {"cloud-code", "cloud-general"}
 LOCAL_TIERS = tuple(k for k in TIERS if k not in CLOUD_TIERS)
 
 
+def _refresh_live_cloud_tiers():
+    """Migrate import-time cloud defaults after an atomic source reload.
+
+    Live reload swaps function implementations but deliberately preserves the
+    module's process state.  Detect only the exact old default pair, so a fresh
+    process with an explicit gpt-oss override remains an intentional override.
+    """
+    preserve_legacy = os.environ.get(
+        "SONDER_PRESERVE_LEGACY_CLOUD_GENERAL", ""
+    ).strip().lower() in ("1", "true", "yes", "on")
+    if (
+        not preserve_legacy
+        and TIERS.get("cloud-general") == "gpt-oss:120b-cloud"
+    ):
+        TIERS["cloud-general"] = "glm-5.2:cloud"
+
+
 def cloud_allowed():
     return os.environ.get("SONDER_ALLOW_CLOUD", "").strip().lower() in (
         "1", "true", "yes", "on"
@@ -192,6 +210,7 @@ def cloud_allowed():
 
 
 def available_tiers(include_disabled=False):
+    _refresh_live_cloud_tiers()
     if include_disabled or cloud_allowed():
         return dict(TIERS)
     return {k: v for k, v in TIERS.items() if k not in CLOUD_TIERS}
@@ -216,10 +235,89 @@ def _is_cloud_model_name(model):
 def _apply_cloud_thinking_policy(payload, model):
     """Apply hosted-model thinking controls without changing custom models."""
     name = str(model or "").strip().casefold()
-    if name.startswith("kimi-k2.7-code:"):
-        payload["think"] = False
+    if name.startswith("kimi-k3:"):
+        # Kimi K3 is a native thinking model.  Request its reasoning mode
+        # explicitly so cloud-code and cloud-general do not depend on a
+        # changing hosted default; _chat_request keeps the separate thinking
+        # field private and returns only the final assistant content.
+        payload["think"] = True
+        _ensure_cloud_prediction_budget(payload)
+    elif name.startswith("glm-5.2:"):
+        # GLM-5.2 exposes explicit reasoning effort levels.  High is the
+        # quality-oriented plan-covered setting and remains compatible with
+        # both coding and long-context review requests.
+        payload["think"] = "high"
+        _ensure_cloud_prediction_budget(payload)
+    elif name.startswith("kimi-k2.7-code:"):
+        # Code review benefits materially from the model's native reasoning
+        # mode; the hosted API returns final content separately, so callers do
+        # not receive or depend on the private thinking stream.
+        payload["think"] = True
+        _ensure_cloud_prediction_budget(payload)
     elif name.startswith("gpt-oss:"):
         payload["think"] = "low"
+
+
+def _ensure_cloud_prediction_budget(payload, minimum=4096):
+    """Leave enough shared output budget for thinking plus final content."""
+    options = payload.get("options")
+    if not isinstance(options, dict):
+        return
+    requested = options.get("num_predict")
+    if isinstance(requested, int) and 0 < requested < minimum:
+        options = dict(options)
+        options["num_predict"] = minimum
+        payload["options"] = options
+
+
+def _cloud_extra_usage_fallback(model, error):
+    """Return the plan-covered Kimi fallback for an unfunded K3 request.
+
+    Ollama currently bills Kimi K3 only against the separate extra-usage
+    balance, even for Pro/Max accounts.  A 402 is therefore a deterministic
+    model-availability decision, not a transient transport failure.  Honor an
+    explicit K3 selection, but let opted-in cloud work consume the account's
+    ordinary resettable allowance through K2.7 when that balance is empty.
+    """
+    if not isinstance(error, ModelCallError) or error.status != 402:
+        return None
+    if not str(model or "").strip().casefold().startswith("kimi-k3:"):
+        return None
+    if str(model).strip().casefold() == CLOUD_EXTRA_USAGE_FALLBACK_MODEL.casefold():
+        return None
+    return CLOUD_EXTRA_USAGE_FALLBACK_MODEL
+
+
+def _chat_request_with_cloud_fallback(
+    payload, *, model, timeout=None, cancel_check=None,
+):
+    """Make one cloud request, falling back exactly once on K3 HTTP 402."""
+    try:
+        out, content = _chat_request(
+            payload,
+            model=model,
+            cloud=True,
+            timeout=timeout,
+            cancel_check=cancel_check,
+        )
+        return out, content, model
+    except ModelCallError as error:
+        fallback = _cloud_extra_usage_fallback(model, error)
+        if fallback is None:
+            raise
+
+    fallback_payload = dict(payload)
+    fallback_payload["model"] = fallback
+    fallback_payload.pop("think", None)
+    _apply_cloud_thinking_policy(fallback_payload, fallback)
+    out, content = _chat_request(
+        fallback_payload,
+        model=fallback,
+        cloud=True,
+        timeout=timeout,
+        cancel_check=cancel_check,
+    )
+    return out, content, fallback
 
 
 if _is_cloud_model_name(TIERS["code"]):
@@ -519,14 +617,23 @@ def _make_generate(
             payload["keep_alive"] = KEEP_ALIVE
         ok = False
         content = ""
+        used_model = model
         try:
-            out, content = _chat_request(
-                payload,
-                model=model,
-                cloud=cloud,
-                timeout=timeout,
-                cancel_check=cancel_check,
-            )
+            if cloud:
+                out, content, used_model = _chat_request_with_cloud_fallback(
+                    payload,
+                    model=model,
+                    timeout=timeout,
+                    cancel_check=cancel_check,
+                )
+            else:
+                out, content = _chat_request(
+                    payload,
+                    model=model,
+                    cloud=False,
+                    timeout=timeout,
+                    cancel_check=cancel_check,
+                )
             tokens_in = _model_usage_count(out.get("prompt_eval_count"))
             tokens_out = _model_usage_count(out.get("eval_count"))
             source = "ollama" if tokens_in is not None or tokens_out is not None else "estimated"
@@ -543,7 +650,7 @@ def _make_generate(
             ok = True
         finally:
             activity_tracker.record_model_call(
-                model=model,
+                model=used_model,
                 prompt_chars=len(prompt or ""),
                 history_messages=len(history or []),
                 tokens_in=usage.get("tokens_in", 0),
@@ -566,6 +673,7 @@ def _no_retrieve(conn, task):
 
 def _generate_text(prompt, tier="fast", system="", temperature=0.2,
                    num_predict=256, num_ctx=2048, timeout=None):
+    _refresh_live_cloud_tiers()
     model = TIERS.get(tier, TIERS["fast"])
     return _make_generate(
         model, system, temperature, num_predict, num_ctx, timeout=timeout,
@@ -777,6 +885,7 @@ def _serve_target(tier, strict):
     Any TIERS key (e.g. "cloud-code", "general") selects that model directly, so a
     single server can drive many models — pick per request.
     """
+    _refresh_live_cloud_tiers()
     t = (tier or "").strip().lower()
     if t in ("", "sonder", "local"):
         strict_eff = _STRICT_DEFAULT if strict is None else strict
@@ -2454,6 +2563,7 @@ def _offload_impl(
     cancel_check=None,
 ) -> str:
     """Internal offload path; model failures stay typed for orchestrators."""
+    _refresh_live_cloud_tiers()
     request_timeout = _bounded_timeout(timeout)
     model = TIERS.get(tier)
     if model is None:
@@ -2491,14 +2601,23 @@ def _offload_impl(
         started = time.time()
         ok = False
         usage = {}
+        used_model = model
         try:
-            out, msg = _chat_request(
-                payload,
-                model=model,
-                cloud=cloud,
-                timeout=request_timeout,
-                cancel_check=cancel_check,
-            )
+            if cloud:
+                out, msg, used_model = _chat_request_with_cloud_fallback(
+                    payload,
+                    model=model,
+                    timeout=request_timeout,
+                    cancel_check=cancel_check,
+                )
+            else:
+                out, msg = _chat_request(
+                    payload,
+                    model=model,
+                    cloud=False,
+                    timeout=request_timeout,
+                    cancel_check=cancel_check,
+                )
             tokens_in = _model_usage_count(out.get("prompt_eval_count"))
             tokens_out = _model_usage_count(out.get("eval_count"))
             source = (
@@ -2522,7 +2641,7 @@ def _offload_impl(
             return msg
         finally:
             activity_tracker.record_model_call(
-                model=model,
+                model=used_model,
                 prompt_chars=len(prompt or ""),
                 history_messages=0,
                 tokens_in=usage.get("tokens_in", 0),
@@ -3234,6 +3353,7 @@ def parallel_generate_run(
     each extracted code block, usually as assertions. This is meant for search:
     generate multiple attempts, compile them, execute them, and keep the winners.
     """
+    _refresh_live_cloud_tiers()
     variants = max(1, min(int(variants or 1), 12))
     max_workers = max(1, min(int(max_workers or 1), 8, variants))
     timeout = max(1, min(int(timeout or 8), 120))
@@ -3329,6 +3449,7 @@ def parallel_generate_run_languages(
     csharp. The model is asked for one fenced block per candidate in the requested
     language. All candidates are generated and tested in parallel.
     """
+    _refresh_live_cloud_tiers()
     language_list = [
         grounding.normalize_language(x)
         for x in (languages or "").split(",")
