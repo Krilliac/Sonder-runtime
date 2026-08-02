@@ -344,6 +344,122 @@ def test_agent_returns_transport_error_when_format_repair_fails(monkeypatch):
     assert calls["count"] == 2
 
 
+def test_agent_length_truncation_repair_requests_chunked_write():
+    prompts = []
+    responses = [
+        '{"tool":"file_write","args":{"path":"large.py","content":"truncated',
+        '{"tool":"file_write","args":{"path":"large.py","content":"chunk",'
+        '"mode":"create"}}',
+    ]
+
+    def generate(prompt, history=None):
+        prompts.append(prompt)
+        generate.last_response_meta = {
+            "done_reason": "length" if len(prompts) == 1 else "stop",
+        }
+        return responses.pop(0)
+
+    generate.last_response_meta = {}
+
+    decision, _raw, error = server._agent_generate_decision(
+        generate, "write the file",
+    )
+
+    assert error is None
+    assert decision["tool"] == "file_write"
+    assert "HOST LENGTH RECOVERY" in prompts[1]
+    assert "append" in prompts[1]
+    assert str(server._CLOUD_AGENT_WRITE_CHUNK_HINT) in prompts[1]
+
+
+def test_cloud_agent_and_claim_reviewer_share_one_output_budget(monkeypatch):
+    created = []
+    reviewer_calls = []
+
+    def make_generate(*args, **kwargs):
+        index = len(created)
+
+        def generate(_prompt, history=None):
+            if index == 0:
+                generate.last_usage = {"tokens_out": 1}
+                return '{"final":"No matching symbol exists."}'
+            reviewer_calls.append(True)
+            generate.last_usage = {"tokens_out": 1}
+            return (
+                '{"decision":"accept","reason":"evidence sufficient",'
+                '"tool":"","args":{}}'
+            )
+
+        generate.last_usage = {}
+        generate.last_response_meta = {}
+        generate.num_predict_override = None
+        created.append(generate)
+        return generate
+
+    monkeypatch.setattr(
+        server, "_serve_target",
+        lambda *a, **k: ("glm-5.2:cloud", True, False, "cloud-general"),
+    )
+    monkeypatch.setattr(server, "_make_generate", make_generate)
+    monkeypatch.setattr(server, "_CLOUD_AGENT_NUM_PREDICT", 1)
+    monkeypatch.setattr(server, "_CLOUD_AGENT_OUTPUT_BUDGET", 1)
+
+    output = server._agent_impl("inspect", tier="cloud-general", max_steps=1)
+
+    assert output.startswith("ERROR: hosted agent output budget exhausted:")
+    assert len(created) == 2
+    assert not reviewer_calls
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "offload", "master", "agent_retry", "workflow_run",
+        "game_generate", "game_campaign",
+    ],
+)
+def test_cloud_agent_rejects_nested_model_spawning_tools(
+    monkeypatch, tool,
+):
+    responses = [
+        server.json.dumps({
+            "tool": tool,
+            "args": {"prompt": "nested", "tier": "cloud-code"},
+        }),
+        '{"final":"blocked"}',
+    ]
+    dispatches = []
+
+    def generate(_prompt, history=None):
+        generate.last_usage = {"tokens_out": 4}
+        generate.last_response_meta = {"done_reason": "stop"}
+        return responses.pop(0)
+
+    generate.last_usage = {}
+    generate.last_response_meta = {}
+    generate.num_predict_override = None
+    monkeypatch.setattr(
+        server, "_serve_target",
+        lambda *a, **k: ("glm-5.2:cloud", True, False, "cloud-general"),
+    )
+    monkeypatch.setattr(server, "_make_generate", lambda *a, **k: generate)
+    monkeypatch.setattr(
+        server,
+        "_agent_dispatch_observed",
+        lambda *a, **k: dispatches.append((a, k)) or "unexpected",
+    )
+
+    output = server._agent_impl(
+        "do not nest hosted work",
+        tier="cloud-general",
+        max_steps=2,
+        include_evidence=True,
+    )
+
+    assert not dispatches
+    assert "nested model-spawning tool" in output
+
+
 def test_negative_claim_review_returns_structured_transport_error(monkeypatch):
     def fail(_prompt, history=None):
         raise server.ModelCallError(

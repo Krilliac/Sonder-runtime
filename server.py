@@ -614,6 +614,7 @@ def _make_generate(
 
     def gen(prompt, history=None):
         gen.last_usage = {}
+        gen.last_response_meta = {}
         usage = {}
         started = time.time()
         messages = []
@@ -622,10 +623,14 @@ def _make_generate(
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": prompt})
+        prediction_limit = num_predict
+        override = getattr(gen, "num_predict_override", None)
+        if isinstance(override, int) and not isinstance(override, bool):
+            prediction_limit = max(1, min(num_predict, override))
         if cloud:
-            options = {"temperature": temperature, "num_predict": num_predict}
+            options = {"temperature": temperature, "num_predict": prediction_limit}
         else:
-            options = _local_model_options(temperature, num_predict, num_ctx)
+            options = _local_model_options(temperature, prediction_limit, num_ctx)
         payload = {"model": model, "messages": messages, "stream": False,
                    "options": options}
         if cloud:
@@ -669,6 +674,9 @@ def _make_generate(
                 "token_source": source,
             }
             gen.last_usage = dict(usage)
+            gen.last_response_meta = {
+                "done_reason": str(out.get("done_reason") or "").strip().casefold(),
+            }
             ok = True
         finally:
             activity_tracker.record_model_call(
@@ -683,6 +691,8 @@ def _make_generate(
             )
         return content
     gen.last_usage = {}
+    gen.last_response_meta = {}
+    gen.num_predict_override = None
     return gen
 
 
@@ -2603,6 +2613,8 @@ def _format_model_call_error(error: ModelCallError) -> str:
         "local Ollama"
     )
     suffix = " after %d attempt(s)" % error.attempts
+    if error.kind == "budget":
+        return "ERROR: hosted agent output budget exhausted: %s" % error.detail
     if error.kind == "http":
         return "ERROR: %s rejected the model request (HTTP %s)%s: %s" % (
             target, error.status or "unknown", suffix, error.detail,
@@ -9101,6 +9113,7 @@ def _agent_generate_decision(
 ):
     """Generate one structurally valid agent decision with bounded format repair."""
     repair_limit = max(0, min(4, int(repair_limit)))
+    length_limited = False
     try:
         raw = gen(step_prompt)
     except ModelCallError as error:
@@ -9110,7 +9123,17 @@ def _agent_generate_decision(
         # agent boundary instead of leaking an MCP traceback.
         if error.kind == "cancelled":
             raise
-        return None, "", error
+        length_limited = (
+            error.kind == "empty_response"
+            and '"done_reason": "length"' in error.detail
+            and repair_limit > 0
+        )
+        if not length_limited:
+            return None, "", error
+        raw = ""
+    length_limited = length_limited or (
+        getattr(gen, "last_response_meta", {}).get("done_reason") == "length"
+    )
     error = None
     for attempt in range(repair_limit + 1):
         try:
@@ -9131,24 +9154,47 @@ def _agent_generate_decision(
             if require_final else
             '{"tool":"name","args":{},"reason":"brief"} or {"final":"answer"}'
         )
+        recovery = ""
+        if length_limited:
+            recovery = (
+                "\nHOST LENGTH RECOVERY: the previous decision hit its output "
+                "limit. Do not repeat the oversized response. For a large "
+                "file_write, emit one valid chunk of at most %d characters now "
+                "and use append on a later tool turn; otherwise simplify the "
+                "decision."
+                % _CLOUD_AGENT_WRITE_CHUNK_HINT
+            )
         repair_prompt = (
             step_prompt
             + "\n\nHOST FORMAT REPAIR %d/%d: Your previous response was invalid. "
             "Return exactly one JSON object and no prose or Markdown. Use %s.\n"
-            "Parser error: %s\nPrevious response excerpt:\n%s"
+            "Parser error: %s%s\nPrevious response excerpt:\n%s"
             % (
                 attempt + 1,
                 repair_limit,
                 valid_shape,
                 error,
+                recovery,
                 str(raw or "")[:1000],
             )
         )
         try:
             raw = gen(repair_prompt)
+            length_limited = (
+                getattr(gen, "last_response_meta", {}).get("done_reason")
+                == "length"
+            )
         except ModelCallError as model_error:
             if model_error.kind == "cancelled":
                 raise
+            if (
+                model_error.kind == "empty_response"
+                and '"done_reason": "length"' in model_error.detail
+                and attempt + 1 < repair_limit
+            ):
+                length_limited = True
+                raw = ""
+                continue
             return None, raw, model_error
     return None, raw, error
 
@@ -9220,6 +9266,7 @@ def _agent_negative_claim_review(
     model: str,
     cloud: bool = False,
     cancel_check=None,
+    cloud_budget_state=None,
 ) -> dict:
     """Audit negative existence claims without letting the reviewer invent facts."""
     if not _AGENT_NEGATIVE_CLAIM_RE.search(str(final or "")):
@@ -9250,10 +9297,24 @@ def _agent_negative_claim_review(
             _agent_observation_prompt(observations, max_chars=7000),
         )
     )
+    if cloud and cloud_budget_state is None:
+        cloud_budget_state = {
+            "spent": 0,
+            "total": _CLOUD_AGENT_OUTPUT_BUDGET,
+        }
     gen = _make_generate(
         model, system, 0.0, 260, 4096, cloud=cloud,
         cancel_check=cancel_check, compact_cloud_reasoning=True,
     )
+    if cloud and cloud_budget_state is not None:
+        gen = _bounded_cloud_agent_generate(
+            gen,
+            per_call_limit=260,
+            total_budget=int(
+                cloud_budget_state.get("total", _CLOUD_AGENT_OUTPUT_BUDGET)
+            ),
+            budget_state=cloud_budget_state,
+        )
     correction = ""
     last_error = "invalid claim review"
     for _attempt in range(2):
@@ -9827,6 +9888,10 @@ _PROJECT_BOUND_AGENT_TOOLS = (
         "emotion_vector_status", "preferences_status", "context_policy_status",
     })
 )
+_CLOUD_AGENT_NESTED_MODEL_TOOLS = frozenset({
+    "offload", "master_orchestrate", "master_retry", "workflow_run",
+    "game_reference_suite", "game_generate_and_test", "game_generation_campaign",
+})
 
 
 def _canonical_agent_tool_name(tool_name):
@@ -10302,10 +10367,92 @@ _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
 })
 _LOCAL_AGENT_NUM_PREDICT = 1200
 # A hosted agent decision may contain a complete bounded file_write payload.
-# Keep this aligned with the 64 KiB native-argument cap; metered usage is based
-# on actual output, while the higher ceiling prevents valid code tools from
-# being truncated into malformed JSON.
+# The per-call ceiling accommodates substantial native arguments, but exact
+# 64 KiB payloads may still require chunks because characters are not tokens.
 _CLOUD_AGENT_NUM_PREDICT = 16384
+_CLOUD_AGENT_OUTPUT_BUDGET = 65536
+_CLOUD_AGENT_WRITE_CHUNK_HINT = 24000
+
+
+def _bounded_cloud_agent_generate(
+    gen,
+    *,
+    per_call_limit=_CLOUD_AGENT_NUM_PREDICT,
+    total_budget=_CLOUD_AGENT_OUTPUT_BUDGET,
+    budget_state=None,
+):
+    """Hard-bound aggregate hosted output while preserving actual usage data."""
+    per_call_limit = max(1, int(per_call_limit))
+    total_budget = max(per_call_limit, int(total_budget))
+    if budget_state is None:
+        budget_state = {"spent": 0, "total": total_budget}
+    else:
+        budget_state.setdefault("spent", 0)
+        budget_state.setdefault("total", total_budget)
+        total_budget = max(1, int(budget_state["total"]))
+
+    def bounded(prompt, history=None):
+        spent = max(0, int(budget_state.get("spent", 0)))
+        remaining = total_budget - spent
+        if remaining <= 0:
+            raise ModelCallError(
+                "budget",
+                "the bounded %d-token allowance for this agent run was consumed"
+                % total_budget,
+                attempts=0,
+                cloud=True,
+            )
+        call_limit = min(per_call_limit, remaining)
+        try:
+            gen.num_predict_override = call_limit
+        except (AttributeError, TypeError):
+            pass
+        try:
+            content = gen(prompt, history=history)
+        except ModelCallError as error:
+            usage = dict(getattr(gen, "last_usage", None) or {})
+            charged = _model_usage_count(usage.get("tokens_out"))
+            # Empty/failed hosted responses may not expose usage to the
+            # caller. Charge the full request ceiling so repeated failures
+            # cannot evade the aggregate budget.
+            if error.attempts <= 0:
+                charged = 0
+            else:
+                charged = call_limit
+            spent += charged
+            budget_state["spent"] = spent
+            bounded.last_usage = usage
+            bounded.last_response_meta = dict(
+                getattr(gen, "last_response_meta", None) or {}
+            )
+            bounded.output_tokens_used = spent
+            raise
+        finally:
+            try:
+                gen.num_predict_override = None
+            except (AttributeError, TypeError):
+                pass
+        usage = dict(getattr(gen, "last_usage", None) or {})
+        reported = _model_usage_count(usage.get("tokens_out"))
+        estimated = max(1, _rough_token_count(content))
+        # Provider usage metadata is external input. Never let a zero or
+        # implausibly low count make nonempty/native-tool output free.
+        charged = max(reported or 0, estimated)
+        spent += charged
+        budget_state["spent"] = spent
+        bounded.last_usage = usage
+        bounded.last_response_meta = dict(
+            getattr(gen, "last_response_meta", None) or {}
+        )
+        bounded.output_tokens_used = spent
+        return content
+
+    bounded.last_usage = {}
+    bounded.last_response_meta = {}
+    bounded.output_tokens_used = 0
+    bounded.output_token_budget = total_budget
+    bounded.output_budget_state = budget_state
+    return bounded
 
 
 def _agent_project_scope(project):
@@ -10437,12 +10584,23 @@ def _agent_impl(
     agent_num_predict = (
         _CLOUD_AGENT_NUM_PREDICT if cloud else _LOCAL_AGENT_NUM_PREDICT
     )
+    cloud_budget_state = (
+        {"spent": 0, "total": _CLOUD_AGENT_OUTPUT_BUDGET}
+        if cloud else None
+    )
     gen = _make_generate(
         model, system, 0.1, agent_num_predict, SESSION_NUM_CTX, cloud=cloud,
         cancel_check=cancel_check,
         accept_native_tool_calls=True,
         compact_cloud_reasoning=True,
     )
+    if cloud:
+        gen = _bounded_cloud_agent_generate(
+            gen,
+            per_call_limit=agent_num_predict,
+            total_budget=_CLOUD_AGENT_OUTPUT_BUDGET,
+            budget_state=cloud_budget_state,
+        )
     observations = []
     file_evidence = False
     used_tool = False
@@ -10679,6 +10837,7 @@ def _agent_impl(
                 claim_review = _agent_negative_claim_review(
                     prompt, final, observations, model, cloud=cloud,
                     cancel_check=cancel_check,
+                    cloud_budget_state=cloud_budget_state,
                 )
                 if claim_review["decision"] == "error":
                     if auto_checklist:
@@ -10778,6 +10937,16 @@ def _agent_impl(
             )
         if not policy_error and tool_policy is not None:
             policy_error = str(tool_policy(tool_name, policy_tool_args) or "")
+        if (
+            not policy_error
+            and cloud
+            and tool_name in _CLOUD_AGENT_NESTED_MODEL_TOOLS
+        ):
+            policy_error = (
+                "ERROR: HOST POLICY: nested model-spawning tool '%s' is disabled "
+                "inside a hosted agent so all hosted output remains in one "
+                "bounded ledger." % tool_name
+            )
         if not policy_error and project_scope:
             policy_error = _repository_scope_path_error(
                 tool_name, policy_tool_args, project_scope,
@@ -11048,6 +11217,7 @@ def _agent_impl(
         claim_review = _agent_negative_claim_review(
             prompt, final, observations, model, cloud=cloud,
             cancel_check=cancel_check,
+            cloud_budget_state=cloud_budget_state,
         )
         if claim_review["decision"] == "error":
             if auto_checklist:

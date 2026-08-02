@@ -589,6 +589,157 @@ def test_agent_generate_uses_compact_cloud_reasoning_and_native_tools(
     assert seen["payload"]["options"]["num_predict"] == 1200
 
 
+def test_make_generate_honors_bounded_prediction_override(monkeypatch):
+    seen = {}
+
+    def fake_post(path, payload, timeout=None):
+        seen["payload"] = payload
+        return {"message": {"content": "ok"}, "eval_count": 2}
+
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    monkeypatch.setattr(server, "_post", fake_post)
+    gen = server._make_generate(
+        "glm-5.2:cloud", "", 0.1, 1200, 8192, cloud=True,
+        compact_cloud_reasoning=True,
+    )
+    gen.num_predict_override = 37
+
+    assert gen("bounded") == "ok"
+    assert seen["payload"]["options"]["num_predict"] == 37
+
+
+def test_bounded_cloud_agent_generate_caps_aggregate_output():
+    limits = []
+
+    def raw(_prompt, history=None):
+        limit = raw.num_predict_override
+        limits.append(limit)
+        raw.last_usage = {"tokens_out": limit}
+        raw.last_response_meta = {"done_reason": "stop"}
+        return "ok"
+
+    raw.num_predict_override = None
+    raw.last_usage = {}
+    raw.last_response_meta = {}
+    gen = server._bounded_cloud_agent_generate(
+        raw, per_call_limit=3, total_budget=5,
+    )
+
+    assert gen("one") == "ok"
+    assert gen("two") == "ok"
+    with pytest.raises(server.ModelCallError) as caught:
+        gen("three")
+
+    assert limits == [3, 2]
+    assert caught.value.kind == "budget"
+    assert gen.output_tokens_used == 5
+
+
+def test_bounded_cloud_agent_generate_charges_failed_call_ceiling():
+    def raw(_prompt, history=None):
+        raw.last_usage = {}
+        raise server.ModelCallError(
+            "empty_response", "no assistant content", cloud=True,
+        )
+
+    raw.num_predict_override = None
+    raw.last_usage = {}
+    raw.last_response_meta = {}
+    gen = server._bounded_cloud_agent_generate(
+        raw, per_call_limit=4, total_budget=4,
+    )
+
+    with pytest.raises(server.ModelCallError, match="no assistant content"):
+        gen("first")
+    with pytest.raises(server.ModelCallError) as caught:
+        gen("second")
+
+    assert caught.value.kind == "budget"
+    assert server._format_model_call_error(caught.value).startswith(
+        "ERROR: hosted agent output budget exhausted:"
+    )
+
+
+def test_bounded_cloud_agent_generate_does_not_charge_preflight_cancel():
+    limits = []
+    calls = {"count": 0}
+
+    def raw(_prompt, history=None):
+        calls["count"] += 1
+        limits.append(raw.num_predict_override)
+        if calls["count"] == 1:
+            raise server.ModelCallError(
+                "cancelled", "cancelled before request", attempts=0, cloud=True,
+            )
+        raw.last_usage = {"tokens_out": 2}
+        return "ok"
+
+    raw.num_predict_override = None
+    raw.last_usage = {}
+    raw.last_response_meta = {}
+    gen = server._bounded_cloud_agent_generate(
+        raw, per_call_limit=4, total_budget=4,
+    )
+
+    with pytest.raises(server.ModelCallError) as caught:
+        gen("cancel")
+    assert caught.value.kind == "cancelled"
+    assert gen("retry") == "ok"
+    assert limits == [4, 4]
+    assert gen.output_tokens_used == 2
+
+
+def test_bounded_cloud_agent_generate_does_not_trust_zero_usage():
+    def raw(_prompt, history=None):
+        raw.last_usage = {"tokens_out": 0}
+        return "x" * 1000
+
+    raw.num_predict_override = None
+    raw.last_usage = {}
+    raw.last_response_meta = {}
+    gen = server._bounded_cloud_agent_generate(
+        raw, per_call_limit=4, total_budget=4,
+    )
+
+    assert gen("first") == "x" * 1000
+    with pytest.raises(server.ModelCallError) as caught:
+        gen("second")
+
+    assert caught.value.kind == "budget"
+    assert gen.output_tokens_used >= 250
+
+
+def test_bounded_cloud_agent_generate_shares_reviewer_budget():
+    state = {"spent": 0, "total": 5}
+
+    def main_raw(_prompt, history=None):
+        main_raw.last_usage = {"tokens_out": 4}
+        return "main"
+
+    def review_raw(_prompt, history=None):
+        review_raw.last_usage = {"tokens_out": 1}
+        return "r"
+
+    for raw in (main_raw, review_raw):
+        raw.num_predict_override = None
+        raw.last_usage = {}
+        raw.last_response_meta = {}
+    main = server._bounded_cloud_agent_generate(
+        main_raw, per_call_limit=4, total_budget=5, budget_state=state,
+    )
+    reviewer = server._bounded_cloud_agent_generate(
+        review_raw, per_call_limit=2, total_budget=5, budget_state=state,
+    )
+
+    assert main("main") == "main"
+    assert reviewer("review") == "r"
+    with pytest.raises(server.ModelCallError) as caught:
+        reviewer("over budget")
+
+    assert caught.value.kind == "budget"
+    assert state["spent"] == 5
+
+
 def test_make_generate_captures_ollama_token_counts(monkeypatch):
     def fake_post(path, payload):
         return {
