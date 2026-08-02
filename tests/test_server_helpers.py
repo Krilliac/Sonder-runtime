@@ -418,6 +418,177 @@ def test_thinking_only_response_reports_sanitized_metadata_without_reasoning(
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"path": "README.md", "start_line": 1},
+        '{"path":"README.md","start_line":1}',
+    ],
+)
+def test_agent_chat_accepts_one_native_tool_call_without_exposing_thinking(
+    monkeypatch, arguments,
+):
+    secret_thinking = "private chain of thought: bearer hidden-token"
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+
+    def fake_post(path, payload):
+        return {
+            "message": {
+                "content": "",
+                "thinking": secret_thinking,
+                "tool_calls": [{
+                    "function": {
+                        "name": "file_read_range",
+                        "arguments": arguments,
+                    },
+                }],
+            },
+        }
+
+    monkeypatch.setattr(server, "_post", fake_post)
+
+    _, content = server._chat_request(
+        {"model": "hosted", "messages": [], "stream": False},
+        model="hosted",
+        cloud=True,
+        accept_native_tool_calls=True,
+    )
+
+    assert json.loads(content) == {
+        "tool": "file_read_range",
+        "args": {"path": "README.md", "start_line": 1},
+        "reason": "model native tool call",
+    }
+    assert secret_thinking not in content
+    assert "hidden-token" not in content
+
+
+def test_normal_chat_still_rejects_single_native_tool_call(monkeypatch):
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    monkeypatch.setattr(
+        server,
+        "_post",
+        lambda *args, **kwargs: {
+            "message": {
+                "content": "",
+                "tool_calls": [{
+                    "function": {"name": "status", "arguments": {}},
+                }],
+            },
+        },
+    )
+
+    with pytest.raises(server.ModelCallError, match="no assistant content"):
+        server._chat_request({}, model="hosted", cloud=True)
+
+
+@pytest.mark.parametrize(
+    "tool_calls",
+    [
+        [
+            {"function": {"name": "one", "arguments": {}}},
+            {"function": {"name": "two", "arguments": {}}},
+        ],
+        [{"function": {"name": "file_read", "arguments": "not json"}}],
+        [{"function": {"name": "file_read", "arguments": ["README.md"]}}],
+        [{"function": {"name": "bad tool name", "arguments": {}}}],
+        [{"function": {"name": "file_read"}}],
+    ],
+)
+def test_agent_chat_rejects_noncanonical_native_tool_calls(monkeypatch, tool_calls):
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    monkeypatch.setattr(
+        server,
+        "_post",
+        lambda *args, **kwargs: {
+            "message": {"content": "", "tool_calls": tool_calls},
+        },
+    )
+
+    with pytest.raises(server.ModelCallError, match="no assistant content"):
+        server._chat_request(
+            {},
+            model="hosted",
+            cloud=True,
+            accept_native_tool_calls=True,
+        )
+
+
+def test_agent_chat_rejects_recursively_nested_native_arguments(monkeypatch):
+    deeply_nested = '{"a":' * 10000 + "{}" + "}" * 10000
+    assert len(deeply_nested) < server._NATIVE_TOOL_ARGUMENTS_MAX_CHARS
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    monkeypatch.setattr(
+        server,
+        "_post",
+        lambda *args, **kwargs: {
+            "message": {
+                "content": "",
+                "tool_calls": [{
+                    "function": {
+                        "name": "file_read",
+                        "arguments": deeply_nested,
+                    },
+                }],
+            },
+        },
+    )
+
+    with pytest.raises(server.ModelCallError, match="no assistant content"):
+        server._chat_request(
+            {},
+            model="hosted",
+            cloud=True,
+            accept_native_tool_calls=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_think"),
+    [
+        ("kimi-k2.7-code:cloud", False),
+        ("glm-5.2:cloud", "low"),
+    ],
+)
+def test_agent_generate_uses_compact_cloud_reasoning_and_native_tools(
+    monkeypatch, model, expected_think,
+):
+    seen = {}
+
+    def fake_post(path, payload, timeout=None):
+        seen["payload"] = payload
+        return {
+            "message": {
+                "content": "",
+                "tool_calls": [{
+                    "function": {
+                        "name": "status",
+                        "arguments": "{}",
+                    },
+                }],
+            },
+        }
+
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    monkeypatch.setattr(server, "_post", fake_post)
+
+    gen = server._make_generate(
+        model,
+        "",
+        0.1,
+        1200,
+        8192,
+        cloud=True,
+        accept_native_tool_calls=True,
+        compact_cloud_reasoning=True,
+    )
+    content = gen("choose a tool")
+
+    assert json.loads(content)["tool"] == "status"
+    assert seen["payload"]["think"] == expected_think
+    assert seen["payload"]["options"]["num_predict"] == 1200
+
+
 def test_make_generate_captures_ollama_token_counts(monkeypatch):
     def fake_post(path, payload):
         return {
@@ -469,7 +640,10 @@ def test_live_reload_migrates_old_cloud_general_unless_preserved(monkeypatch):
 def test_kimi_k3_extra_usage_402_falls_back_once(monkeypatch):
     calls = []
 
-    def fake_chat(payload, *, model, cloud, timeout=None, cancel_check=None):
+    def fake_chat(
+        payload, *, model, cloud, timeout=None, cancel_check=None,
+        accept_native_tool_calls=False,
+    ):
         calls.append((model, payload.get("think")))
         if model == "kimi-k3:cloud":
             raise server.ModelCallError(
@@ -499,11 +673,52 @@ def test_kimi_k3_extra_usage_402_falls_back_once(monkeypatch):
     assert payload["think"] is True
 
 
+def test_kimi_k3_agent_fallback_preserves_compact_native_tool_flags(monkeypatch):
+    calls = []
+
+    def fake_chat(
+        payload, *, model, cloud, timeout=None, cancel_check=None,
+        accept_native_tool_calls=False,
+    ):
+        calls.append((model, payload.get("think"), accept_native_tool_calls))
+        if model == "kimi-k3:cloud":
+            raise server.ModelCallError(
+                "http", "extra usage balance is empty", status=402, cloud=True,
+            )
+        return {"message": {"content": "fallback-ok"}}, "fallback-ok"
+
+    monkeypatch.setattr(server, "_chat_request", fake_chat)
+    payload = {
+        "model": "kimi-k3:cloud",
+        "messages": [{"role": "user", "content": "choose a tool"}],
+        "stream": False,
+        "think": True,
+        "options": {"num_predict": 1200},
+    }
+
+    _, content, used_model = server._chat_request_with_cloud_fallback(
+        payload,
+        model="kimi-k3:cloud",
+        accept_native_tool_calls=True,
+        compact_cloud_reasoning=True,
+    )
+
+    assert content == "fallback-ok"
+    assert used_model == "kimi-k2.7-code:cloud"
+    assert calls == [
+        ("kimi-k3:cloud", True, True),
+        ("kimi-k2.7-code:cloud", False, True),
+    ]
+
+
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 429, 500, 503])
 def test_kimi_k3_non_402_failure_never_falls_back(monkeypatch, status):
     calls = []
 
-    def fake_chat(payload, *, model, cloud, timeout=None, cancel_check=None):
+    def fake_chat(
+        payload, *, model, cloud, timeout=None, cancel_check=None,
+        accept_native_tool_calls=False,
+    ):
         calls.append(model)
         raise server.ModelCallError("http", "rejected", status=status, cloud=True)
 

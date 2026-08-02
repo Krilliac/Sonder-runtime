@@ -436,12 +436,17 @@ def test_negative_claim_review_repairs_schema(monkeypatch):
         '"tool":"text_search","args":{"query":"Persistent autopilot"}}',
     ]
     prompts = []
+    generate_options = {}
 
     def generate(prompt, history=None):
         prompts.append(prompt)
         return responses.pop(0)
 
-    monkeypatch.setattr(server, "_make_generate", lambda *a, **k: generate)
+    def fake_make_generate(*args, **kwargs):
+        generate_options.update(kwargs)
+        return generate
+
+    monkeypatch.setattr(server, "_make_generate", fake_make_generate)
 
     review = server._agent_negative_claim_review(
         "Find the exact heading",
@@ -454,6 +459,8 @@ def test_negative_claim_review_repairs_schema(monkeypatch):
     assert review["tool"] == "text_search"
     assert review["args"] == {"query": "Persistent autopilot"}
     assert "HOST SCHEMA ERROR" in prompts[1]
+    assert generate_options["compact_cloud_reasoning"] is True
+    assert generate_options.get("accept_native_tool_calls", False) is False
 
 
 def test_negative_claim_review_requires_exact_named_heading(monkeypatch):
@@ -632,6 +639,234 @@ def test_agent_does_not_repeat_identical_successful_web_call(monkeypatch):
 
     assert output == "Used the fetched page."
     assert len(dispatches) == 1
+
+
+def test_agent_generate_enables_agent_transport_mode(monkeypatch):
+    seen = {}
+
+    def fake_make_generate(*args, **kwargs):
+        seen.update(kwargs)
+        return lambda prompt, history=None: '{"final":"done"}'
+
+    monkeypatch.setattr(server, "_make_generate", fake_make_generate)
+
+    assert server._agent_impl("finish", max_steps=1) == "done"
+    assert seen["accept_native_tool_calls"] is True
+    assert seen["compact_cloud_reasoning"] is True
+
+
+def test_agent_does_not_repeat_identical_successful_inspection(monkeypatch):
+    responses = [
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"final":"used the first read"}',
+    ]
+    prompts = []
+    dispatches = []
+
+    def generate(prompt, history=None):
+        prompts.append(prompt)
+        return responses.pop(0)
+
+    monkeypatch.setattr(server, "_make_generate", lambda *a, **k: generate)
+    monkeypatch.setattr(
+        server,
+        "_agent_dispatch_observed",
+        lambda *a, **k: dispatches.append(a) or "README evidence",
+    )
+
+    output = server._agent_impl("read the README", max_steps=3)
+
+    assert output == "used the first read"
+    assert len(dispatches) == 1
+    assert "HOST CACHED INSPECTION" in prompts[2]
+    assert "README evidence" in prompts[2]
+
+
+def test_agent_canonicalizes_equivalent_inspection_paths(monkeypatch, tmp_path):
+    responses = [
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"tool":"file_read","args":{"path":"./README.md"}}',
+        '{"final":"used canonical cached evidence"}',
+    ]
+    prompts = []
+    dispatches = []
+
+    def generate(prompt, history=None):
+        prompts.append(prompt)
+        return responses.pop(0)
+
+    monkeypatch.setattr(server, "_make_generate", lambda *a, **k: generate)
+    monkeypatch.setattr(
+        server,
+        "_agent_dispatch_observed",
+        lambda *a, **k: dispatches.append(a) or "README evidence",
+    )
+
+    output = server._agent_impl(
+        "read the README", max_steps=3, project=str(tmp_path),
+    )
+
+    assert output == "used canonical cached evidence"
+    assert len(dispatches) == 1
+    assert "HOST CACHED INSPECTION" in prompts[2]
+
+
+def test_agent_allows_identical_inspection_after_mutation(monkeypatch):
+    responses = [
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"tool":"file_write","args":{"path":"README.md","content":"updated"}}',
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"final":"verified the update"}',
+    ]
+    dispatches = []
+
+    monkeypatch.setattr(
+        server,
+        "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: responses.pop(0),
+    )
+
+    def fake_dispatch(tool, args, **kwargs):
+        dispatches.append((tool, args))
+        return "ok"
+
+    monkeypatch.setattr(server, "_agent_dispatch_observed", fake_dispatch)
+
+    output = server._agent_impl("update and reread", max_steps=4)
+
+    assert output == "verified the update"
+    assert [tool for tool, _ in dispatches] == [
+        "file_read", "file_write", "file_read",
+    ]
+
+
+def test_agent_stops_repeating_identical_successful_inspection(monkeypatch):
+    responses = [
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+    ]
+    dispatches = []
+
+    monkeypatch.setattr(
+        server,
+        "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: responses.pop(0),
+    )
+    monkeypatch.setattr(
+        server,
+        "_agent_dispatch_observed",
+        lambda *a, **k: dispatches.append(a) or "README evidence",
+    )
+
+    output = server._agent_impl("keep reading", max_steps=4)
+
+    assert output.startswith(
+        "ERROR: agent repeated the same already-successful inspection 3 times"
+    )
+    assert len(dispatches) == 1
+
+
+def test_agent_dry_run_does_not_invalidate_cached_inspection(monkeypatch):
+    responses = [
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"tool":"file_delete","args":{"path":"README.md","dry_run":true}}',
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"final":"used cached evidence"}',
+    ]
+    dispatches = []
+
+    monkeypatch.setattr(
+        server,
+        "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: responses.pop(0),
+    )
+
+    def fake_dispatch(tool, args, **kwargs):
+        dispatches.append((tool, args))
+        return "ok"
+
+    monkeypatch.setattr(server, "_agent_dispatch_observed", fake_dispatch)
+
+    output = server._agent_impl("inspect and dry-run delete", max_steps=5)
+
+    assert output == "used cached evidence"
+    assert [tool for tool, _ in dispatches] == ["file_read", "file_delete"]
+
+
+def test_agent_execution_tool_invalidates_cached_inspection(monkeypatch):
+    responses = [
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"tool":"workspace_run","args":{"program":"generator","args":[]}}',
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"final":"read generated state"}',
+    ]
+    dispatches = []
+
+    monkeypatch.setattr(
+        server,
+        "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: responses.pop(0),
+    )
+
+    def fake_dispatch(tool, args, **kwargs):
+        dispatches.append((tool, args))
+        return "ok"
+
+    monkeypatch.setattr(server, "_agent_dispatch_observed", fake_dispatch)
+
+    output = server._agent_impl("generate and reread", max_steps=4)
+
+    assert output == "read generated state"
+    assert [tool for tool, _ in dispatches] == [
+        "file_read", "workspace_run", "file_read",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("execution_decision", "execution_tool"),
+    [
+        (
+            '{"tool":"workspace_run","args":{"program":"generator"}}',
+            "workspace_run",
+        ),
+        ('{"tool":"workflow_run","args":{"name":"generator"}}', "workflow_run"),
+    ],
+)
+def test_agent_failed_execution_invalidates_cached_inspection(
+    monkeypatch, execution_decision, execution_tool,
+):
+    responses = [
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        execution_decision,
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"final":"read post-execution state"}',
+    ]
+    dispatches = []
+
+    monkeypatch.setattr(
+        server,
+        "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: responses.pop(0),
+    )
+
+    def fake_dispatch(tool, args, **kwargs):
+        dispatches.append((tool, args))
+        if tool == execution_tool:
+            return "ERROR: process exited 1 after writing output"
+        return "README evidence"
+
+    monkeypatch.setattr(server, "_agent_dispatch_observed", fake_dispatch)
+
+    output = server._agent_impl("run and reread", max_steps=4)
+
+    assert output == "read post-execution state"
+    assert [tool for tool, _ in dispatches] == [
+        "file_read", execution_tool, "file_read",
+    ]
 
 
 def test_agent_required_web_fetch_rejects_empty_page_before_memory_final(

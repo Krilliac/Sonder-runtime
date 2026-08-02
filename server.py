@@ -232,28 +232,37 @@ def _is_cloud_model_name(model):
     return "-cloud" in name or name.endswith(":cloud")
 
 
-def _apply_cloud_thinking_policy(payload, model):
-    """Apply hosted-model thinking controls without changing custom models."""
+def _apply_cloud_thinking_policy(payload, model, *, compact=False):
+    """Apply hosted-model thinking controls without changing custom models.
+
+    Tool-using agent turns need only a small JSON decision.  Keep their
+    reasoning bounded so a hosted model cannot consume the whole prediction
+    budget before returning that decision.  Ordinary offloads retain the
+    quality-oriented policy below.
+    """
     name = str(model or "").strip().casefold()
     if name.startswith("kimi-k3:"):
-        # Kimi K3 is a native thinking model.  Request its reasoning mode
-        # explicitly so cloud-code and cloud-general do not depend on a
-        # changing hosted default; _chat_request keeps the separate thinking
-        # field private and returns only the final assistant content.
+        # K3 is a native-thinking model; do not assume its hosted endpoint
+        # supports disabling thought. Request it explicitly so hosted defaults
+        # cannot drift. Compact agent mode keeps the caller's bounded budget;
+        # ordinary offloads retain headroom for thinking plus final content.
         payload["think"] = True
-        _ensure_cloud_prediction_budget(payload)
+        if not compact:
+            _ensure_cloud_prediction_budget(payload)
     elif name.startswith("glm-5.2:"):
         # GLM-5.2 exposes explicit reasoning effort levels.  High is the
         # quality-oriented plan-covered setting and remains compatible with
         # both coding and long-context review requests.
-        payload["think"] = "high"
-        _ensure_cloud_prediction_budget(payload)
+        payload["think"] = "low" if compact else "high"
+        if not compact:
+            _ensure_cloud_prediction_budget(payload)
     elif name.startswith("kimi-k2.7-code:"):
         # Code review benefits materially from the model's native reasoning
         # mode; the hosted API returns final content separately, so callers do
         # not receive or depend on the private thinking stream.
-        payload["think"] = True
-        _ensure_cloud_prediction_budget(payload)
+        payload["think"] = False if compact else True
+        if not compact:
+            _ensure_cloud_prediction_budget(payload)
     elif name.startswith("gpt-oss:"):
         payload["think"] = "low"
 
@@ -290,6 +299,7 @@ def _cloud_extra_usage_fallback(model, error):
 
 def _chat_request_with_cloud_fallback(
     payload, *, model, timeout=None, cancel_check=None,
+    accept_native_tool_calls=False, compact_cloud_reasoning=False,
 ):
     """Make one cloud request, falling back exactly once on K3 HTTP 402."""
     try:
@@ -299,6 +309,7 @@ def _chat_request_with_cloud_fallback(
             cloud=True,
             timeout=timeout,
             cancel_check=cancel_check,
+            accept_native_tool_calls=accept_native_tool_calls,
         )
         return out, content, model
     except ModelCallError as error:
@@ -309,13 +320,16 @@ def _chat_request_with_cloud_fallback(
     fallback_payload = dict(payload)
     fallback_payload["model"] = fallback
     fallback_payload.pop("think", None)
-    _apply_cloud_thinking_policy(fallback_payload, fallback)
+    _apply_cloud_thinking_policy(
+        fallback_payload, fallback, compact=compact_cloud_reasoning,
+    )
     out, content = _chat_request(
         fallback_payload,
         model=fallback,
         cloud=True,
         timeout=timeout,
         cancel_check=cancel_check,
+        accept_native_tool_calls=accept_native_tool_calls,
     )
     return out, content, fallback
 
@@ -585,13 +599,15 @@ def resolve_sonder_model(strict=False):
 
 def _make_generate(
     model, system, temperature, num_predict, num_ctx, cloud=False, timeout=None,
-    cancel_check=None,
+    cancel_check=None, accept_native_tool_calls=False,
+    compact_cloud_reasoning=False,
 ):
     """Build a generate(prompt, history) closure for `model`.
 
     cloud=True targets an Ollama-hosted model: keep_alive and num_ctx are omitted
     (they're VRAM/local-context knobs the remote tier doesn't take), matching how the
-    non-learning cloud path posts.
+    non-learning cloud path posts.  The opt-in agent flags accept one canonical
+    native tool call and keep hosted reasoning compact for a small JSON contract.
     """
     cloud = bool(cloud or _is_cloud_model_name(model))
 
@@ -612,7 +628,9 @@ def _make_generate(
         payload = {"model": model, "messages": messages, "stream": False,
                    "options": options}
         if cloud:
-            _apply_cloud_thinking_policy(payload, model)
+            _apply_cloud_thinking_policy(
+                payload, model, compact=compact_cloud_reasoning,
+            )
         else:
             payload["keep_alive"] = KEEP_ALIVE
         ok = False
@@ -625,6 +643,8 @@ def _make_generate(
                     model=model,
                     timeout=timeout,
                     cancel_check=cancel_check,
+                    accept_native_tool_calls=accept_native_tool_calls,
+                    compact_cloud_reasoning=compact_cloud_reasoning,
                 )
             else:
                 out, content = _chat_request(
@@ -633,6 +653,7 @@ def _make_generate(
                     cloud=False,
                     timeout=timeout,
                     cancel_check=cancel_check,
+                    accept_native_tool_calls=accept_native_tool_calls,
                 )
             tokens_in = _model_usage_count(out.get("prompt_eval_count"))
             tokens_out = _model_usage_count(out.get("eval_count"))
@@ -2425,6 +2446,72 @@ def _post_model(
     raise AssertionError("unreachable model retry state")
 
 
+_NATIVE_TOOL_ARGUMENTS_MAX_CHARS = 65536
+_NATIVE_TOOL_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.:-]{0,127}\Z")
+
+
+def _native_tool_call_decision(message):
+    """Translate one canonical native tool call into the agent JSON contract.
+
+    The host still applies the normal tool allowlist, path confinement, and
+    mutation policy after this translation.  Thinking text and provider-owned
+    metadata are intentionally excluded.
+    """
+    if not isinstance(message, dict):
+        return None
+    tool_calls = message.get("tool_calls")
+    if not isinstance(tool_calls, (list, tuple)) or len(tool_calls) != 1:
+        return None
+    tool_call = tool_calls[0]
+    function = tool_call.get("function") if isinstance(tool_call, dict) else None
+    if not isinstance(function, dict):
+        return None
+    name = function.get("name")
+    if not isinstance(name, str):
+        return None
+    name = name.strip()
+    if not _NATIVE_TOOL_NAME_RE.fullmatch(name):
+        return None
+    if "arguments" not in function:
+        return None
+    arguments = function.get("arguments")
+    if isinstance(arguments, str):
+        if len(arguments) > _NATIVE_TOOL_ARGUMENTS_MAX_CHARS:
+            return None
+        try:
+            arguments = json.loads(arguments)
+        except (TypeError, ValueError, RecursionError):
+            return None
+    if not isinstance(arguments, dict):
+        return None
+    try:
+        encoded_arguments = json.dumps(
+            arguments,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        return None
+    if len(encoded_arguments) > _NATIVE_TOOL_ARGUMENTS_MAX_CHARS:
+        return None
+    try:
+        return json.dumps(
+            {
+                "tool": name,
+                "args": arguments,
+                "reason": "model native tool call",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        return None
+
+
 def _chat_request(
     payload: dict,
     *,
@@ -2432,6 +2519,7 @@ def _chat_request(
     cloud: bool = False,
     timeout: int | None = None,
     cancel_check=None,
+    accept_native_tool_calls: bool = False,
 ) -> tuple[dict, str]:
     out, attempts = _post_model(
         "/api/chat",
@@ -2454,6 +2542,10 @@ def _chat_request(
     message = out.get("message")
     content = message.get("content") if isinstance(message, dict) else None
     if not isinstance(content, str) or not content.strip():
+        if accept_native_tool_calls:
+            native_decision = _native_tool_call_decision(message)
+            if native_decision is not None:
+                return out, native_decision
         raise ModelCallError(
             "empty_response",
             _empty_model_response_detail(out, message),
@@ -9024,7 +9116,7 @@ def _agent_negative_claim_review(
     )
     gen = _make_generate(
         model, system, 0.0, 260, 4096, cloud=cloud,
-        cancel_check=cancel_check,
+        cancel_check=cancel_check, compact_cloud_reasoning=True,
     )
     correction = ""
     last_error = "invalid claim review"
@@ -9680,6 +9772,25 @@ def _agent_normalized_path(value):
         return os.path.normcase(os.path.abspath(text))
 
 
+def _agent_call_signature(tool_name, args):
+    """Return a stable signature for equivalent host-scoped tool calls."""
+    canonical = dict(args) if isinstance(args, dict) else args
+    if isinstance(canonical, dict) and tool_name in _PROJECT_SCOPED_PATH_TOOLS:
+        key = "root" if tool_name in {"file_find", "text_search", "script_search"} else "path"
+        raw = canonical.get(key)
+        if raw:
+            try:
+                canonical[key] = os.path.normcase(
+                    os.path.realpath(os.path.normpath(str(raw)))
+                )
+            except (OSError, ValueError):
+                pass
+    return (
+        str(tool_name),
+        json.dumps(canonical, sort_keys=True, ensure_ascii=False, default=str),
+    )
+
+
 def _agent_mutation_record(tool_name, args):
     args = args if isinstance(args, dict) else {}
     path = args.get("path", "")
@@ -9803,6 +9914,14 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",
     "status", "diagnostics",
 })
+_AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
+    "file_policy", "workspace_inventory", "directory_tree", "file_find",
+    "file_read", "file_read_range", "text_search", "script_search",
+    "program_search", "image_inspect",
+})
+_AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
+    "workspace_run", "script_run", "run_code", "run_project", "workflow_run",
+})
 
 
 def _start_agent_checklist(prompt: str, project: str, read_only: bool):
@@ -9898,6 +10017,8 @@ def _agent_impl(
     gen = _make_generate(
         model, system, 0.1, 1200, SESSION_NUM_CTX, cloud=cloud,
         cancel_check=cancel_check,
+        accept_native_tool_calls=True,
+        compact_cloud_reasoning=True,
     )
     observations = []
     file_evidence = False
@@ -9914,6 +10035,8 @@ def _agent_impl(
     )
     used_tool_names = set()
     successful_web_calls = set()
+    successful_inspection_results = {}
+    repeated_inspection_counts = {}
     failed_call_counts = {}
     claim_review_requests = 0
     checklist_id, checklist_states = (
@@ -10184,9 +10307,10 @@ def _agent_impl(
         policy_tool_args = _project_scope_args(
             tool_name, tool_args, project_scope,
         )
-        call_signature = (
-            str(tool_name),
-            json.dumps(tool_args, sort_keys=True, ensure_ascii=False, default=str),
+        call_signature = _agent_call_signature(tool_name, policy_tool_args)
+        cached_inspection = (
+            tool_name in _AGENT_DEDUPLICATED_INSPECTION_TOOLS
+            and call_signature in successful_inspection_results
         )
         prior_identical_failures = failed_call_counts.get(call_signature, 0)
         if prior_identical_failures >= 3:
@@ -10228,6 +10352,7 @@ def _agent_impl(
                 "ERROR: HOST REQUIREMENT: inspect relevant workspace evidence "
                 "before making a mutation."
             )
+        tool_dispatched = False
         if prior_identical_failures >= 2:
             observation = (
                 "ERROR: HOST NO-PROGRESS: this exact tool call already failed twice. "
@@ -10244,6 +10369,26 @@ def _agent_impl(
             )
         elif policy_error:
             observation = policy_error
+        elif cached_inspection:
+            repeated = repeated_inspection_counts.get(call_signature, 0) + 1
+            repeated_inspection_counts[call_signature] = repeated
+            if repeated >= 3:
+                if auto_checklist:
+                    _agent_checklist_fail(
+                        checklist_id, checklist_states,
+                        "model repeated an unchanged successful inspection", 2,
+                    )
+                return _early_exit(
+                    "ERROR: agent repeated the same already-successful inspection "
+                    "%d times: %s. Use the existing evidence, change the arguments, "
+                    "or make a relevant state change.\n\n%s"
+                    % (repeated, tool_name, "\n\n".join(observations))
+                )
+            observation = (
+                "HOST CACHED INSPECTION: this identical call already succeeded; "
+                "reusing its prior observation without dispatching it again.\n"
+                + successful_inspection_results[call_signature]
+            )
         elif read_only and tool_name in {"command_registry_list", "tool_manifest"}:
             observation = _agent_tool_help(read_only=True)
         else:
@@ -10254,6 +10399,7 @@ def _agent_impl(
             }
             if allow_location:
                 dispatch_options["allow_location"] = True
+            tool_dispatched = True
             observation = _agent_dispatch_observed(
                 tool_name, tool_args, project=project_scope, **dispatch_options,
             )
@@ -10261,9 +10407,6 @@ def _agent_impl(
         tool_ok = _agent_tool_observation_ok(tool_name, observation)
         if tool_ok:
             failed_call_counts.pop(call_signature, None)
-            if tool_name in _WORK_MUTATION_TOOLS:
-                # A real state change makes prior validation failures retryable.
-                failed_call_counts.clear()
         else:
             failed_call_counts[call_signature] = prior_identical_failures + 1
             recovery = (
@@ -10284,6 +10427,12 @@ def _agent_impl(
                 "approximate_location_lookup",
             }:
                 successful_web_calls.add(call_signature)
+            if (
+                tool_name in _AGENT_DEDUPLICATED_INSPECTION_TOOLS
+                and not cached_inspection
+            ):
+                successful_inspection_results[call_signature] = observation_text[:6000]
+                repeated_inspection_counts.pop(call_signature, None)
         if tool_name in {
             "workspace_inventory", "directory_tree", "file_read", "file_read_range", "file_find",
             "text_search", "script_search", "image_inspect",
@@ -10315,6 +10464,26 @@ def _agent_impl(
         )
         if mutation_happened:
             mutated = True
+        execution_may_have_changed = (
+            tool_dispatched
+            and tool_name in _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS
+        )
+        if mutation_happened or execution_may_have_changed:
+            # A real mutation or an execution-capable tool can make prior
+            # inspection results stale even when the command exits nonzero.
+            # Dry-run mutation tools do not reach here.
+            successful_inspection_results.clear()
+            repeated_inspection_counts.clear()
+            if mutation_happened or tool_ok:
+                failed_call_counts.clear()
+            else:
+                # The failing execution itself must remain bounded, while
+                # failures against the pre-execution workspace may be stale.
+                current_failure_count = failed_call_counts.get(call_signature, 0)
+                failed_call_counts.clear()
+                if current_failure_count:
+                    failed_call_counts[call_signature] = current_failure_count
+        if mutation_happened:
             validation_attempted = False
             validation_ok = False
             record = _agent_mutation_record(tool_name, tool_args)
