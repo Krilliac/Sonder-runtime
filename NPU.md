@@ -231,6 +231,42 @@ None and the callers' lexical fallback). New typed path:
   declared pipeline, and every supplied byte, but does not claim to derive the
   ONNX conversion from Ollama automatically.
 
+## Provisioning the default bundles
+
+Two operator scripts automate the bundle provisioning NPU.md requires; both
+write only under the manifest directory and refuse to emit a manifest that
+fails verification:
+
+- `scripts/npu_distill_router.py` — builds `exec-route-v1`. Generates a
+  deterministic corpus of ambiguous-band prompts, labels each with the real
+  local router (`_execution_route_model` at temperature 0, cached to a JSONL
+  sidecar), trains a small numpy MLP on `route_features` vectors, and exports
+  a self-contained ONNX + pinned manifest. The bundle is a distillation of
+  the existing local decision, not a new policy; `--min-agreement` (default
+  0.8) gates manifest emission on holdout agreement with the baseline.
+- `scripts/npu_provision_embedder.py` — builds `embed-npu-v1`. Downloads the
+  operator-chosen ONNX export (default `nomic-ai/nomic-embed-text-v1.5`),
+  verifies numerical equivalence against the live Ollama embedder (cosine on
+  probe texts, `--min-cosine` default 0.999), pins every byte, and writes the
+  manifest with `space` bound to the current local Ollama manifest revision.
+  This turns the "operator-provisioned assertion" of ONNX/Ollama equivalence
+  into a measured, reproducible check.
+
+Model files live in `models/` under the manifest directory so the `*.json`
+manifest glob never parses them.
+
+Measured on the reference machine (Ryzen 7840HS, CPU provider, 2026-08):
+worker cold start ~6 s (spawn + full-bundle SHA-256 + session load), warm
+embedding ~23 ms (vs the Ollama HTTP path), warm routing ~1.4 ms (vs a 1–2 s
+router-tier LLM call), embedder worker RSS ~1.1 GiB. Distilled routing
+holdout agreement with the baseline router was 0.665 against a 0.626
+majority rate on a synthetic in-band corpus: the v1 feature vector carries
+phase-count/shape signal but not the verb/target semantics the LLM baseline
+actually keys on. Routing therefore ships in **shadow** (measuring live
+agreement, never changing behavior) while embeddings can run **prefer**;
+promoting routing to prefer should wait for either strong live shadow
+agreement or a semantically richer `exec-route-features-v2` contract.
+
 ## Diagnostics and telemetry
 
 - `npu_status` (tool): detected vs runtime-ready vs enabled vs healthy,
@@ -253,6 +289,20 @@ Python environment:
 - AMD Ryzen AI (`vitisai`), Intel OpenVINO (`openvino`), Qualcomm QNN
   (`qnn`): install the vendor's onnxruntime build/SDK per their
   documentation. Sonder does not fetch or bundle these.
+
+  AMD field notes (2026-08, Ryzen 7840HS / Phoenix XDNA1): AMD publishes
+  `onnxruntime-vitisai` wheels on `https://pypi.amd.com/simple` (cp312,
+  built against numpy 1.x), but the wheel alone cannot compile to the NPU —
+  its VAIP/VAIML compiler (`vaiml.dll`, xclbin firmware) ships only in the
+  Ryzen AI Software installer, which sits behind an AMD-account EULA
+  download. The alternative Windows ML catalog distributes a signed VitisAI
+  EP via Microsoft Store with no AMD account, but gates on an exact NPU
+  driver window (32.00.0203.280–297 at the time of writing); machines on a
+  newer NPU driver are filtered out of the catalog until AMD widens the
+  range. Until one of those vendor steps is taken, the `cpu` reference
+  provider serves the same pinned bundles and every manifest here lists
+  `vitisai` first so the NPU engages on the next successful vendor-runtime
+  load.
 - `pip install tokenizers` — required for real (non-simulated) embedding
   bundles with an `hf-tokenizers` tokenizer.
 
