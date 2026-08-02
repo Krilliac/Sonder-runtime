@@ -345,6 +345,18 @@ class NpuBroker:
                 return item
 
     def _warmup(self, generation, manifests):
+        # Replacement and loading are exclusive with inference. A ready worker
+        # may still be serving the call that discovered a newly configured
+        # manifest; wait for that call instead of killing it underneath the
+        # reader thread.
+        with self._flight:
+            with self._state_lock:
+                if self._generation != generation:
+                    return
+                self._teardown_worker_locked()
+            self._warmup_exclusive(generation, manifests)
+
+    def _warmup_exclusive(self, generation, manifests):
         try:
             worker = self._spawn_worker()
         except _ExchangeError as exc:
@@ -479,8 +491,6 @@ class NpuBroker:
                 ]
                 if not missing:
                     return True
-                self._teardown_worker_locked()
-                self._state = "cold"
             if self._state == "warming":
                 return True
             gate = self._ram_gate_reason()
@@ -509,12 +519,19 @@ class NpuBroker:
                 warming = (
                     self._warm_thread is not None and self._warm_thread.is_alive()
                 )
-            if state == "ready":
+            if state == "ready" and not warming:
                 return True
             if state != "warming" and not warming:
                 return False
             time.sleep(0.02)
-        return self._state == "ready"
+        with self._state_lock:
+            return (
+                self._state == "ready"
+                and (
+                    self._warm_thread is None
+                    or not self._warm_thread.is_alive()
+                )
+            )
 
     # -- calls -------------------------------------------------------------
     def call(self, manifest, payload, deadline_ms=None):
@@ -556,6 +573,14 @@ class NpuBroker:
                 row = self._models.get(str(manifest.get("manifest_hash") or ""))
                 self._last_used = time.monotonic()
             if row is None or not row.get("ok"):
+                if row is None:
+                    # The first capability used may have warmed only its own
+                    # manifest. Schedule a serialized replacement containing
+                    # every target accumulated so far, then let this call use
+                    # its existing local fallback while the worker warms.
+                    self.ensure_warm([manifest])
+                    self._count("warming")
+                    raise NpuUnavailable("warming", "manifest is warming")
                 self._count("manifest_unhealthy")
                 raise NpuUnavailable(
                     "manifest_unhealthy", (row or {}).get("error", ""),

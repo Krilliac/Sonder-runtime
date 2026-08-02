@@ -31,6 +31,29 @@ def test_npu_probe_vendor_mapping():
         == "qualcomm"
     )
     assert system_profile._npu_vendor_from_name("Mystery Neural Unit") == "unknown"
+    assert system_profile._npu_vendor_from_pnp_id("PCI\\VEN_1022&DEV_1502") == "amd"
+
+
+def test_windows_probe_does_not_mistake_input_for_npu(monkeypatch):
+    monkeypatch.setattr(system_profile.os, "name", "nt")
+    monkeypatch.setenv("SONDER_NPU_PROBE", "1")
+    system_profile._NPU_PROBE["value"] = None
+
+    def fake_check_output(command, **kwargs):
+        assert "Name,PNPDeviceID" in " ".join(str(part) for part in command)
+        return (
+            '[{"Name":"Microsoft Input Configuration Device",'
+            '"PNPDeviceID":"HID\\\\INPUT"},'
+            '{"Name":"NPU Compute Accelerator Device",'
+            '"PNPDeviceID":"PCI\\\\VEN_1022&DEV_1502"}]'
+        )
+
+    monkeypatch.setattr(
+        system_profile.subprocess, "check_output", fake_check_output,
+    )
+    assert system_profile._npu_probe() == (
+        "amd", "NPU Compute Accelerator Device", True,
+    )
 
 
 def test_npu_probe_is_cached_and_disabled_by_env(monkeypatch):
