@@ -211,6 +211,28 @@ def test_route_decide_requires_confident_winner(npu_env, monkeypatch):
     assert npu_service.route_decide("inspect, fix, and validate") is None
 
 
+@pytest.mark.parametrize(
+    "scores,reason_code",
+    [
+        ({"workbench": 1.0, "autopilot": 1.0}, "low_confidence"),
+        ({"workbench": 0.9, "autopilot": 0.1}, "low_confidence"),
+        ({"workbench": 0.55, "autopilot": 0.45}, "score_margin"),
+    ],
+)
+def test_route_decide_requires_positive_consistent_margin(
+    npu_env, monkeypatch, scores, reason_code,
+):
+    _install_routing_manifest(npu_env)
+    _set_mode("prefer")
+    fake = FakeBroker(response={
+        "scores": scores,
+        "reason_code": reason_code,
+        "provider": "cpu-sim",
+    })
+    monkeypatch.setattr(npu_service.npu_broker, "get_broker", lambda: fake)
+    assert npu_service.route_decide("inspect, fix, and validate") is None
+
+
 def test_route_shadow_records_agreement_without_changing_anything(
     npu_env, monkeypatch,
 ):

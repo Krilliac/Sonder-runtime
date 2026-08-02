@@ -79,6 +79,76 @@ def test_embedding_roundtrip_is_deterministic_and_dimensioned(
         broker.shutdown()
 
 
+def test_call_lazily_rewarms_when_second_manifest_is_missing(
+    monkeypatch, tmp_path,
+):
+    broker = _fresh_broker(monkeypatch, tmp_path)
+    routing = routing_manifest(tmp_path)
+    embedding = embedding_manifest(tmp_path)
+    try:
+        _warm(broker, [routing])
+        with pytest.raises(npu_broker.NpuUnavailable) as excinfo:
+            broker.call(embedding, {"kind": "embedding", "texts": ["hello"]})
+        assert excinfo.value.reason == "warming"
+        assert broker.wait_ready(30), broker.status()
+        response = broker.call(
+            embedding, {"kind": "embedding", "texts": ["hello"]},
+        )
+        assert len(response["vectors"][0]) == embedding["dimension"]
+        assert {row["name"] for row in broker.status()["models"]} == {
+            routing["name"], embedding["name"],
+        }
+    finally:
+        broker.shutdown()
+
+
+def test_adding_manifest_waits_for_inflight_call_instead_of_killing_it(
+    monkeypatch, tmp_path, route_features,
+):
+    import threading
+
+    broker = _fresh_broker(
+        monkeypatch, tmp_path, SONDER_NPU_SIM_DELAY_MS="700",
+    )
+    routing = routing_manifest(tmp_path)
+    embedding = embedding_manifest(tmp_path)
+    payload = {"kind": "routing", "features": route_features}
+    result = {}
+    try:
+        _warm(broker, [routing])
+        deadline = time.monotonic() + 5
+        while broker._flight.locked() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not broker._flight.locked()
+
+        def _run():
+            try:
+                result["response"] = broker.call(
+                    routing, payload, deadline_ms=2000,
+                )
+            except Exception as exc:  # test captures any regression precisely
+                result["error"] = exc
+
+        thread = threading.Thread(target=_run)
+        thread.start()
+        deadline = time.monotonic() + 5
+        while not broker._flight.locked() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert broker._flight.locked()
+        assert broker.ensure_warm([embedding]) is True
+        thread.join(timeout=10)
+        assert "error" not in result
+        assert set(result["response"]["scores"]) == {
+            "workbench", "autopilot",
+        }
+        assert broker.wait_ready(30), broker.status()
+        assert {row["name"] for row in broker.status()["models"]} == {
+            routing["name"], embedding["name"],
+        }
+    finally:
+        broker.shutdown()
+
+
 def test_detect_reports_simulator_and_honest_winml(monkeypatch, tmp_path):
     broker = _fresh_broker(monkeypatch, tmp_path)
     manifest = routing_manifest(tmp_path)

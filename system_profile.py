@@ -252,6 +252,23 @@ def _npu_vendor_from_name(name):
     return "unknown"
 
 
+_NPU_NAME_RE = re.compile(
+    r"(?:\b(?:npu|ipu|vpu)\b|ai boost|ryzen\s*ai|neural|hexagon)",
+    re.IGNORECASE,
+)
+
+
+def _npu_vendor_from_pnp_id(pnp_device_id):
+    value = str(pnp_device_id or "").upper()
+    if "VEN_1022" in value:
+        return "amd"
+    if "VEN_8086" in value:
+        return "intel"
+    if "VEN_17CB" in value:
+        return "qualcomm"
+    return "unknown"
+
+
 def _npu_probe():
     """Best-effort NPU device detection: (vendor, name, detected)."""
     cached = _NPU_PROBE["value"]
@@ -262,8 +279,9 @@ def _npu_probe():
         if os.name == "nt":
             script = (
                 "Get-CimInstance Win32_PnPEntity | Where-Object {"
-                " $_.Name -match 'NPU|AI Boost|Neural|Hexagon|VPU' } |"
-                " Select-Object -First 4 -ExpandProperty Name |"
+                " $_.Name -match '\\b(?:NPU|IPU|VPU)\\b|AI Boost|"
+                "Ryzen\\s*AI|Neural|Hexagon' } |"
+                " Select-Object -First 4 Name,PNPDeviceID |"
                 " ConvertTo-Json -Compress"
             )
             try:
@@ -272,12 +290,26 @@ def _npu_probe():
                     text=True,
                     timeout=10,
                 ).strip()
-                names = json.loads(raw) if raw else []
-                if isinstance(names, str):
-                    names = [names]
-                names = [str(item).strip() for item in names if str(item).strip()]
-                if names:
-                    result = (_npu_vendor_from_name(names[0]), names[0][:80], True)
+                rows = json.loads(raw) if raw else []
+                if isinstance(rows, (str, dict)):
+                    rows = [rows]
+                for row in rows:
+                    if isinstance(row, dict):
+                        name = str(row.get("Name") or "").strip()
+                        pnp_id = str(row.get("PNPDeviceID") or "").strip()
+                    else:
+                        name = str(row or "").strip()
+                        pnp_id = ""
+                    # Keep the same strict filter host-side as a defense against
+                    # PowerShell/regex drift. In particular, bare ``NPU`` used
+                    # to match the middle of "Input" on every Windows system.
+                    if not name or not _NPU_NAME_RE.search(name):
+                        continue
+                    vendor = _npu_vendor_from_pnp_id(pnp_id)
+                    if vendor == "unknown":
+                        vendor = _npu_vendor_from_name(name)
+                    result = (vendor, name[:80], True)
+                    break
             except (OSError, subprocess.SubprocessError, ValueError):
                 pass
         elif os.path.isdir("/sys/class/accel"):

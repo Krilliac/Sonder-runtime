@@ -33,6 +33,7 @@ FEATURES_DIM = 16
 # A prefer-mode decision needs a confidently scored winner; anything weaker
 # falls back to the existing local Ollama router.
 MIN_PREFER_SCORE = 0.6
+MIN_PREFER_MARGIN = 0.2
 
 _ACTION_RE = re.compile(
     r"\b(add|audit|build|clean|configure|convert|create|debug|deploy|diagnose|"
@@ -208,7 +209,11 @@ def route_decide(prompt):
         _event("npu_fallback", capability="routing", reason=why)
         return None
     score = decision["scores"][decision["winner"]]
-    if score < MIN_PREFER_SCORE:
+    if (
+        decision["reason_code"] != "score_margin"
+        or decision["margin"] < MIN_PREFER_MARGIN
+        or score < MIN_PREFER_SCORE
+    ):
         _event("npu_fallback", capability="routing", reason="low_confidence")
         return None
     _event(
