@@ -80,6 +80,7 @@ REQUIRED_FILES = {
     "ooxml_assets.py",
     "process_liveness.py",
     "reloadable_mcp.py",
+    "requirements-runtime.txt",
     "runtime_policy.py",
     "server.py",
     "setup_alias.py",

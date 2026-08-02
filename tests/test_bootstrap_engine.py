@@ -56,6 +56,80 @@ def test_offline_without_bundle_never_installs_dependency(monkeypatch):
     assert seen["offline"] is True
 
 
+def test_python_dependency_probe_requires_fastmcp_compatibility_api(monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=1, stdout="", stderr="missing FastMCP")
+
+    monkeypatch.setattr(bootstrap_engine.subprocess, "run", fake_run)
+
+    ok, message = bootstrap_engine.ensure_python_deps("python-test", offline=True)
+
+    assert ok is False
+    assert "FastMCP compatibility API is unavailable" in message
+    assert calls == [
+        ["python-test", "-c", bootstrap_engine.FASTMCP_IMPORT_PROBE]
+    ]
+
+
+def test_python_dependency_install_uses_runtime_contract_and_reprobes(
+    monkeypatch, tmp_path
+):
+    requirements = tmp_path / bootstrap_engine.RUNTIME_REQUIREMENTS_NAME
+    requirements.write_text("mcp>=1.28.1,<2\n", encoding="utf-8")
+    monkeypatch.setattr(bootstrap_engine, "ROOT", tmp_path)
+    calls = []
+    results = iter((1, 0, 0))
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(
+            returncode=next(results), stdout="FastMCP\n", stderr=""
+        )
+
+    monkeypatch.setattr(bootstrap_engine.subprocess, "run", fake_run)
+
+    ok, message = bootstrap_engine.ensure_python_deps("python-test")
+
+    assert ok is True
+    assert requirements.name in message
+    assert calls == [
+        ["python-test", "-c", bootstrap_engine.FASTMCP_IMPORT_PROBE],
+        [
+            "python-test",
+            "-m",
+            "pip",
+            "install",
+            "-r",
+            str(requirements),
+        ],
+        ["python-test", "-c", bootstrap_engine.FASTMCP_IMPORT_PROBE],
+    ]
+
+
+def test_python_dependency_install_fails_closed_when_fastmcp_still_missing(
+    monkeypatch, tmp_path
+):
+    requirements = tmp_path / bootstrap_engine.RUNTIME_REQUIREMENTS_NAME
+    requirements.write_text("mcp>=1.28.1,<2\n", encoding="utf-8")
+    monkeypatch.setattr(bootstrap_engine, "ROOT", tmp_path)
+    results = iter((1, 0, 1))
+    monkeypatch.setattr(
+        bootstrap_engine.subprocess,
+        "run",
+        lambda command, **kwargs: SimpleNamespace(
+            returncode=next(results), stdout="", stderr="missing FastMCP"
+        ),
+    )
+
+    ok, message = bootstrap_engine.ensure_python_deps("python-test")
+
+    assert ok is False
+    assert "still unavailable" in message
+
+
 def test_invalid_bundle_fails_before_runtime_actions(monkeypatch, tmp_path):
     monkeypatch.setattr(
         bootstrap_engine,

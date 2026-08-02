@@ -1243,9 +1243,34 @@ def test_real_embedding_requires_mask_for_variable_length_batch():
         ("softmax", [[0.1, 0.2, 0.7]]),
     ],
 )
-def test_real_routing_rejects_out_of_contract_outputs(postprocess, outputs):
+def test_real_routing_rejects_out_of_contract_outputs(
+        monkeypatch, postprocess, outputs):
     from types import SimpleNamespace
     import npu_worker
+
+    class Array:
+        def __init__(self, values):
+            self.values = values
+
+        def reshape(self, _shape):
+            values = self.values
+            while values and isinstance(values[0], list):
+                values = values[0]
+            return Array(list(values))
+
+        @property
+        def shape(self):
+            return (len(self.values),)
+
+        def __iter__(self):
+            return iter(self.values)
+
+    fake_numpy = SimpleNamespace(
+        float32=object(),
+        float64=object(),
+        asarray=lambda values, dtype=None: Array(values),
+    )
+    monkeypatch.setitem(sys.modules, "numpy", fake_numpy)
 
     class Session:
         @staticmethod

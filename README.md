@@ -363,7 +363,7 @@ bash deploy_sonder.sh            # installs Ollama, picks a model that fits your
 
 **Local dev:**
 ```bash
-python -m venv venv && venv/Scripts/pip install mcp -r requirements-dev.txt
+python -m venv venv && venv/Scripts/pip install -r requirements-dev.txt
 venv/Scripts/python -m pytest -q          # run the test suite
 python sonder_repl.py                  # interactive session
 ```

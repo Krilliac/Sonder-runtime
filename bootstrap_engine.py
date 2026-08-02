@@ -25,6 +25,12 @@ MODEL_SMALL = "qwen2.5-coder:1.5b"
 MODEL_MEDIUM = "qwen2.5-coder:3b"
 MODEL_LARGE = "qwen2.5-coder:7b"
 ROOT = Path(__file__).resolve().parent
+RUNTIME_REQUIREMENTS_NAME = "requirements-runtime.txt"
+FASTMCP_IMPORT_PROBE = (
+    "from mcp.server.fastmcp import FastMCP; "
+    "from mcp.server.fastmcp.tools import ToolManager; "
+    "print(FastMCP.__name__, ToolManager.__name__)"
+)
 
 
 def _run(cmd, check=False, env=None, cwd=None, **kwargs):
@@ -158,31 +164,50 @@ def ensure_python_deps(
 ) -> tuple[bool, str]:
     executable = str(python_executable or sys.executable)
     process_env = env or os.environ.copy()
-    try:
-        probe = subprocess.run(
-            [executable, "-c", "import mcp"],
+
+    def probe_fastmcp():
+        return subprocess.run(
+            [executable, "-c", FASTMCP_IMPORT_PROBE],
             capture_output=True,
             text=True,
             timeout=20,
             env=process_env,
         )
+
+    try:
+        probe = probe_fastmcp()
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"Could not execute bundled Python: {exc}"
     if probe.returncode == 0:
-        return True, "Python dependency mcp is already available."
+        return True, "Python MCP FastMCP compatibility API is already available."
     if offline:
-        return False, "Python dependency mcp is missing; offline mode will not use pip."
-    print("Installing Python dependency: mcp")
+        return False, (
+            "Python MCP FastMCP compatibility API is unavailable; "
+            "offline mode will not use pip."
+        )
+    requirements = ROOT / RUNTIME_REQUIREMENTS_NAME
+    if not requirements.is_file():
+        return False, f"Runtime requirements contract is missing: {requirements}"
+    print(f"Installing Python runtime dependencies from {requirements.name}")
     try:
         result = subprocess.run(
-            [executable, "-m", "pip", "install", "mcp"],
+            [executable, "-m", "pip", "install", "-r", str(requirements)],
             env=process_env,
         )
-    except OSError as exc:
+    except (OSError, subprocess.SubprocessError) as exc:
         return False, f"Could not launch pip: {exc}"
-    if result.returncode == 0:
-        return True, "Installed mcp."
-    return False, "Could not install mcp with pip."
+    if result.returncode != 0:
+        return False, f"Could not install {requirements.name} with pip."
+    try:
+        probe = probe_fastmcp()
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"Could not verify the installed Python runtime: {exc}"
+    if probe.returncode != 0:
+        return False, (
+            "Installed runtime requirements, but the MCP FastMCP compatibility "
+            "API is still unavailable."
+        )
+    return True, f"Installed Python runtime dependencies from {requirements.name}."
 
 
 def _load_bundle(args) -> engine_bundle.EngineBundle | None:

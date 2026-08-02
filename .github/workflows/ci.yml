@@ -15,6 +15,10 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install deps (stdlib core + mcp for server import)
-        run: pip install mcp -r requirements-dev.txt
+        run: python -m pip install -r requirements-dev.txt
+      - name: Verify MCP compatibility API
+        run: >-
+          python -c "from mcp.server.fastmcp import FastMCP;
+          from mcp.server.fastmcp.tools import ToolManager"
       - name: Run test suite
         run: python -m pytest -q
