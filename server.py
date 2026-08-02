@@ -1954,8 +1954,11 @@ def _prepare_lesson_candidate_bounded(interaction, signal):
         remaining = deadline - time.monotonic()
         return max(1, min(budget, int(remaining) + 1))
 
-    def generate(prompt):
-        return _generate_text(prompt, timeout=remaining_seconds())
+    def generate(prompt, **options):
+        # reflection.distill passes tier/system/temperature/num_predict;
+        # forward them, but this budget's deadline always owns the timeout.
+        options.pop("timeout", None)
+        return _generate_text(prompt, timeout=remaining_seconds(), **options)
 
     def embed(text):
         if time.monotonic() >= deadline:
@@ -2084,6 +2087,40 @@ def _record_outcome_and_maybe_distill(interaction_id, signal):
         if released:
             result["distillation_state"] = memory_store.DISTILLATION_RETRYABLE
         return result
+
+
+def _drain_deferred_distillations(limit=16):
+    """Retry deferred lesson distillations once the fleet is quiet.
+
+    Campaigns intentionally defer distillation while their own model calls
+    hold the GPU, but a retryable job is only reclaimed when another outcome
+    lands on the same interaction — which campaign interactions never get.
+    This bounded drain closes that loop; duplicate outcomes are storage
+    no-ops, so re-recording the original signal is safe.
+    """
+    if master_orchestrator.active_model_call_count():
+        return {"drained": 0, "stored": 0, "deferred": 0}
+    try:
+        conn = _open_db()
+        try:
+            pending = memory_store.list_retryable_distillations(conn, limit)
+        finally:
+            conn.close()
+    except Exception:
+        return {"drained": 0, "stored": 0, "deferred": 0}
+    stored = deferred = 0
+    for interaction_id, signal in pending:
+        if signal not in reward.VALID_SIGNALS:
+            continue
+        try:
+            result = _record_outcome_and_maybe_distill(interaction_id, signal)
+        except Exception:
+            continue
+        if result.get("lesson_id"):
+            stored += 1
+        elif result.get("distillation_deferred"):
+            deferred += 1
+    return {"drained": len(pending), "stored": stored, "deferred": deferred}
 
 
 def _record_code_gate_failure(interaction_id):
@@ -3677,6 +3714,35 @@ _CAMPAIGN_TASKS = [
     ("string", "reverse the string 'sonder' and print exactly: rednos"),
     ("branch", "if 17 is prime print exactly: prime"),
     ("list", "compute the sum of [2, 4, 6, 8] and print exactly: 20"),
+    # Harder algorithmic tier: these force the failure classes small local
+    # models actually exhibit (incomplete map initialization, eviction-order
+    # bookkeeping, interval bookkeeping, stack discipline) so campaign
+    # records and distilled lessons carry real signal, not just boilerplate.
+    ("toposort",
+     "topologically sort the directed edges d->a, a->b, b->c, a->c (an edge "
+     "u->v means u comes before v; include every node) and print the only "
+     "valid order as space-separated letters on one line, like: w x y z"),
+    ("lru",
+     "simulate an LRU cache with capacity 2 and operations put(1,10), "
+     "put(2,20), get(1), put(3,30) (this evicts the least recently used "
+     "key), get(2), get(3); print the three get results on one line "
+     "separated by single spaces, using -1 for a miss"),
+    ("intervals",
+     "merge the overlapping intervals [1,3] [2,6] [8,10] [9,12] and print "
+     "the merged intervals on one line as start-end pairs separated by a "
+     "single space, like 5-7 9-11"),
+    ("balanced",
+     # The campaign pass check is a containment check, so wrong verdicts must
+     # not be able to contain the expected text as a substring: 'ok'/'bad'
+     # verdicts cannot embed each other the way 'valid'/'invalid' can.
+     "for each of the three strings ([]{}) then ([)] then ((( decide if "
+     "the brackets are balanced and print ok if balanced or bad if not, "
+     "one verdict per line"),
+    ("wordfreq",
+     "count word frequencies in the sentence 'the quick the lazy the end' "
+     "and print the most frequent word and its count as word:count"),
+    ("fib",
+     "print the 20th Fibonacci number where fib(1)=1 and fib(2)=1"),
 ]
 
 
@@ -3688,6 +3754,12 @@ def _campaign_expected(task_name):
         "string": "rednos",
         "branch": "prime",
         "list": "20",
+        "toposort": "d a b c",
+        "lru": "10 -1 30",
+        "intervals": "1-6 8-12",
+        "balanced": "ok\nbad\nbad",
+        "wordfreq": "the:3",
+        "fib": "6765",
     }.get(task_name, "")
 
 
@@ -3847,6 +3919,12 @@ def campaign_generate_compile_execute_record(
             for lang, (ok, total_lang) in sorted(by_lang.items())
         ),
     ]
+    drain = _drain_deferred_distillations(limit=max(16, len(results)))
+    if drain["drained"]:
+        lines.append(
+            "deferred distillations drained: %d (lessons stored %d, still deferred %d)"
+            % (drain["drained"], drain["stored"], drain["deferred"]),
+        )
     for r in results:
         status = "PASS" if r["ok"] else "FAIL"
         lines.append("[%s] %s attempts=%d iid=%s" % (
