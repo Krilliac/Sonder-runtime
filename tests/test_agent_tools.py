@@ -1416,6 +1416,26 @@ def test_project_execution_rejects_inline_and_outside_argv(tmp_path):
     assert "inline interpreter" in server._agent_project_execution_argument_error(
         "workspace_run", scoped_inline, str(project),
     )
+    scoped_python3 = server._project_scope_args(
+        "workspace_run",
+        {"program": "python3.exe", "args": ["-c", "print('x')"], "cwd": "."},
+        str(project),
+    )
+    assert "inline interpreter" in server._agent_project_execution_argument_error(
+        "workspace_run", scoped_python3, str(project),
+    )
+    scoped_wrapper = server._project_scope_args(
+        "workspace_run",
+        {
+            "program": "uv",
+            "args": ["run", "python3", "-X", "utf8", "-c", "print('x')"],
+            "cwd": ".",
+        },
+        str(project),
+    )
+    assert "inline interpreter" in server._agent_project_execution_argument_error(
+        "workspace_run", scoped_wrapper, str(project),
+    )
 
     scoped_outside = server._project_scope_args(
         "workspace_run",
@@ -1463,4 +1483,158 @@ def test_project_agent_rejects_unscoped_persistent_generator(
     )
 
     assert not dispatches
-    assert "no project-rooted output contract" in output
+    assert "no project-bound execution contract" in output
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("run_code", {"code": "open(r'C:\\\\Windows\\\\win.ini').read()"}),
+        ("run_project", {"files": {"main.py": "print('x')"}}),
+        ("game_reference_suite", {"name": "outside"}),
+        ("master_orchestrate", {"task": "escape", "project": ""}),
+        ("master_retry", {"agent_id": "outside-worker"}),
+    ],
+)
+def test_project_agent_rejects_unscoped_execution_tools(
+    monkeypatch, tmp_path, tool, args,
+):
+    responses = [
+        server.json.dumps({"tool": tool, "args": args}),
+        '{"final":"blocked"}',
+    ]
+    dispatches = []
+    monkeypatch.setattr(
+        server,
+        "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: responses.pop(0),
+    )
+    monkeypatch.setattr(
+        server,
+        "_agent_dispatch_observed",
+        lambda *a, **k: dispatches.append((a, k)) or "unexpected",
+    )
+
+    output = server._agent_impl(
+        "work only in project",
+        project=str(tmp_path),
+        max_steps=2,
+        include_evidence=True,
+    )
+
+    assert not dispatches
+    assert "no project-bound execution contract" in output
+
+
+def test_mutating_tool_alias_is_canonicalized_for_receipt(monkeypatch):
+    responses = [
+        '{"tool":"assetgen","args":{"name":"pack","brief":"x"}}',
+        '{"final":"generated"}',
+    ]
+    dispatches = []
+    monkeypatch.setattr(
+        server,
+        "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: responses.pop(0),
+    )
+    monkeypatch.setattr(
+        server,
+        "_agent_dispatch_observed",
+        lambda tool, *a, **k: dispatches.append(tool) or "generated pack: PASS",
+    )
+
+    receipt = server._agent_impl(
+        "generate a pack", max_steps=2, return_host_receipt=True,
+    )
+
+    assert dispatches == ["artifact_generate"]
+    assert receipt.mutation_observed
+    assert "artifact_generate" in receipt.tools
+
+
+def test_game_validator_must_match_every_game_mutation():
+    mutations = [server._agent_mutation_record(
+        "game_generate_and_test", {"name": "partial-a"},
+    )]
+
+    assert not server._agent_validation_covers(
+        "game_generate_and_test", {"name": "fresh-b"}, mutations, "PASS",
+    )
+    assert server._agent_validation_covers(
+        "game_generate_and_test", {"name": "partial-a"}, mutations, "PASS",
+    )
+    assert not server._agent_validation_covers(
+        "game_reference_suite", {"name": "reference"}, mutations, "PASS",
+    )
+
+
+def test_validation_without_mutations_still_requires_real_validator(tmp_path):
+    cwd = str(tmp_path)
+
+    assert not server._agent_validation_covers(
+        "workspace_run",
+        {"program": "git", "cwd": cwd, "args": ["status"]},
+        [],
+        "workspace run\n  ok: true",
+    )
+    assert server._agent_validation_covers(
+        "workspace_run",
+        {"program": "pytest", "cwd": cwd, "args": []},
+        [],
+        "workspace run\n  ok: true\n10 tests passed",
+    )
+    assert server._agent_validation_covers(
+        "artifact_verify", {"path": str(tmp_path / "pack")}, [], "PASS",
+    )
+    assert server._agent_validation_covers(
+        "ground_artifact",
+        {"artifact": "hello", "checks": [{"type": "contains", "text": "hello"}]},
+        [],
+        "PASS",
+    )
+    assert server._agent_validation_covers(
+        "game_reference_suite", {"name": "reference"}, [], "PASS",
+    )
+    assert server._agent_validation_covers(
+        "self_heal_check", {}, [], "PASS",
+    )
+
+
+def test_validation_zero_test_filter_does_not_match_ten_tests(tmp_path):
+    mutation = [{
+        "tool": "file_write",
+        "path": server._agent_normalized_path(tmp_path / "target.py"),
+    }]
+    args = {"program": "pytest", "cwd": str(tmp_path), "args": []}
+
+    assert server._agent_validation_covers(
+        "workspace_run", args, mutation, "10 tests passed",
+    )
+    assert not server._agent_validation_covers(
+        "workspace_run", args, mutation, "0 tests passed",
+    )
+
+
+@pytest.mark.parametrize(
+    ("program", "args"),
+    [
+        ("msbuild", ["project.sln", "/t:Clean"]),
+        ("ninja", ["clean"]),
+        ("cmake", ["--build", ".", "--target", "clean"]),
+        ("ctest", ["--show-only"]),
+    ],
+)
+def test_clean_or_list_only_command_is_not_validation(
+    tmp_path, program, args,
+):
+    mutation = [{
+        "tool": "file_write",
+        "path": server._agent_normalized_path(tmp_path / "target.py"),
+    }]
+
+    assert not server._agent_validation_covers(
+        "workspace_run",
+        {"program": program, "cwd": str(tmp_path), "args": args},
+        mutation,
+        "workspace run\n  ok: true",
+    )
