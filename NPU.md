@@ -270,6 +270,16 @@ behavior) while embeddings can run **prefer**; promoting routing to prefer
 should be an evidence call from live shadow agreement, or a decision to
 distill from a stronger local judge than the production router tier.
 
+Stronger-judge follow-up (2026-08-02, `npu_distill_router --judge-tier
+code`): the code-tier judge is more stable (7.5% paraphrase flips vs the
+router tier's 12.5%) and far more decisive — it routed 90.6% of the
+synthetic ambiguous band to workbench. The judge-distilled bundle is
+deployed in shadow, so live shadow disagreement now measures the *policy
+difference* between the judge and the production baseline, not distillation
+fidelity. Prefer remains withheld: the distilled holdout (0.869) sits below
+the skewed labels' majority rate (0.906), and the autopilot minority has
+too few training examples to trust its margins yet.
+
 ## Diagnostics and telemetry
 
 - `npu_status` (tool): detected vs runtime-ready vs enabled vs healthy,
