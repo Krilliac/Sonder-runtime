@@ -196,8 +196,14 @@ def load_cache(path: Path) -> dict:
     return rows
 
 
-def label_prompts(prompts: list, cache_path: Path, quiet: bool) -> list:
-    """Label via the real baseline router; cache results between runs."""
+def label_prompts(prompts: list, cache_path: Path, quiet: bool,
+                  judge_tier: str = "") -> list:
+    """Label via the real baseline router; cache results between runs.
+
+    ``judge_tier`` labels with a stronger local tier than the production
+    router (e.g. code). Use a tier-specific cache path so baseline and judge
+    labels never mix.
+    """
     import server  # heavy import: the runtime module hosting the baseline
 
     cache = load_cache(cache_path)
@@ -209,7 +215,9 @@ def label_prompts(prompts: list, cache_path: Path, quiet: bool) -> list:
             row = cache.get(key)
             if row is None:
                 try:
-                    routed = server._execution_route_model(prompt)
+                    routed = server._execution_route_model(
+                        prompt, tier_override=judge_tier,
+                    )
                 except Exception as exc:
                     print("  label %d/%d failed: %s"
                           % (index + 1, len(prompts), str(exc)[:120]))
@@ -375,6 +383,10 @@ def main() -> int:
     parser.add_argument("--samples", type=int, default=480)
     parser.add_argument("--seed", type=int, default=20260802)
     parser.add_argument("--manifest-dir", default="")
+    parser.add_argument("--judge-tier", default="",
+                        help="label with this local tier instead of the "
+                             "production router tier (labels cache "
+                             "separately)")
     parser.add_argument("--min-agreement", type=float, default=0.8,
                         help="refuse to write the manifest below this "
                              "holdout agreement with the baseline router")
@@ -387,12 +399,18 @@ def main() -> int:
     manifest_dir = Path(args.manifest_dir or npu_manifest.manifest_dir())
     models_dir = manifest_dir / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = models_dir / "router-distill-cache.jsonl"
+    cache_name = (
+        "router-distill-cache-%s.jsonl" % args.judge_tier
+        if args.judge_tier else "router-distill-cache.jsonl"
+    )
+    cache_path = models_dir / cache_name
 
     started = time.time()
     corpus = filter_decide_band(generate_corpus(args.samples, args.seed))
     print("corpus: %d prompts in the ambiguous decide band" % len(corpus))
-    labeled = label_prompts(corpus, cache_path, args.quiet)
+    labeled = label_prompts(
+        corpus, cache_path, args.quiet, judge_tier=args.judge_tier,
+    )
     usable = [row for row in labeled if row.get("mode") in LABELS]
     print("labels: %d usable baseline decisions (cache: %s)"
           % (len(usable), cache_path))
@@ -426,6 +444,7 @@ def main() -> int:
         "samples": len(usable),
         "seed": args.seed,
         "features_id": npu_service.FEATURES_ID,
+        "judge_tier": args.judge_tier or "router-default",
         "stats": stats,
         "model_sha256": hashlib.sha256(payload).hexdigest(),
         "elapsed_s": round(time.time() - started, 1),
