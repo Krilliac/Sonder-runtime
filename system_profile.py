@@ -222,6 +222,11 @@ def _system_memory():
         return vm.total / 1024**3, vm.available / 1024**3, True
     except ImportError:
         pass
+    # Honor the declared host platform before probing Unix pseudo-filesystems.
+    # This also keeps MSYS/Cygwin-style /proc mounts from bypassing the native,
+    # synchronous Windows API path.
+    if os.name == "nt":
+        return _windows_system_memory()
     if os.path.exists("/proc/meminfo"):
         values = {}
         try:
@@ -235,8 +240,6 @@ def _system_memory():
             return total, available, bool(total and available)
         except (OSError, ValueError):
             pass
-    if os.name == "nt":
-        return _windows_system_memory()
     if platform.system() == "Darwin":
         try:
             total = int(subprocess.check_output(
