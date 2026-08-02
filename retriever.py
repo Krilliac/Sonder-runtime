@@ -4,6 +4,7 @@ import os
 import re
 
 import embeddings
+import mmr_rerank
 import memory_store
 
 # Recalibrated 2026-07-06 against the 557-lesson corpus via tune_min_sim.py
@@ -211,6 +212,7 @@ def _relevant_ids(
     data = lesson_data if lesson_data is not None else _lesson_data(conn, ids)
     task_terms = _content_terms(task)
     kept = []
+    vectors = {}
     for lid in ids:
         row = data.get(lid)
         if row is None:
@@ -225,7 +227,8 @@ def _relevant_ids(
         required_sim = _candidate_min_sim(task_terms, row["text"], min_sim)
         if embeddings.cosine(qv, v) >= required_sim:
             kept.append(lid)
-    return kept
+            vectors[lid] = v
+    return kept, vectors
 
 
 def retrieve(conn, task, k=5, embed_fn=None, min_sim=None):
@@ -295,6 +298,18 @@ def _usage_boost(stats):
         return 0.0
     # Keep historical outcome as a gentle tiebreaker, not a relevance override.
     return max(-0.01, min(0.01, float(avg) * min(uses, 10) / 1000.0))
+
+
+def _mmr_lambda():
+    """Relevance/diversity tradeoff for final lesson selection (see
+    mmr_rerank). 0.5 balances relevance against redundancy — the first pick
+    is always the most relevant lesson, and later picks trade relevance for
+    novelty; SONDER_MMR_LAMBDA=1 disables diversification entirely."""
+    try:
+        value = float(os.environ.get("SONDER_MMR_LAMBDA", "0.5"))
+    except ValueError:
+        return 0.5
+    return max(0.0, min(1.0, value))
 
 
 def retrieve_with_ids(
@@ -370,11 +385,21 @@ def retrieve_with_ids(
         key=lambda lid: -(scores[lid] + _usage_boost(usage_stats.get(lid))),
     )
     data = _lesson_data(conn, fused)
-    relevant = _relevant_ids(
+    relevant, relevant_vectors = _relevant_ids(
         conn, task, qv, fused, min_sim, lesson_data=data,
         embedding_model=embedding_model,
         embedding_revision=embedding_revision,
-    )[:k]
+    )
+    # MMR-select the final k: with 1000+ lessons, plain fused-order
+    # truncation stacks near-duplicate restatements of the strongest lesson
+    # and crowds out genuinely different ones. lambda=1 restores pure
+    # relevance order (the pre-MMR behavior).
+    relevant = mmr_rerank.mmr_rerank(
+        qv,
+        [(lid, relevant_vectors[lid]) for lid in relevant],
+        k=k,
+        lambda_mult=_mmr_lambda(),
+    )
     rows = []
     for lid in relevant:
         row = data.get(lid)

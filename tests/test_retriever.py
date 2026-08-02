@@ -451,3 +451,29 @@ def test_retrieval_batches_candidate_lookups():
     conn.set_trace_callback(None)
     assert len(rows) == 20
     assert len(selects) <= 8
+
+
+def test_retrieve_mmr_diversifies_near_duplicates(monkeypatch):
+    c = ms.connect(":memory:")
+    # dup1/dup2 are near-identical and most query-aligned; distinct is a
+    # weaker but genuinely different lesson. Plain relevance truncation at
+    # k=2 would pick both duplicates; MMR must swap one for the distinct.
+    ms.add_lesson(c, "dup1", "use pathlib for path joins",
+                  e.to_blob([0.9, 0.436, 0.0]), "i")
+    ms.add_lesson(c, "dup2", "use pathlib for joining paths",
+                  e.to_blob([0.89, 0.44, 0.06]), "i")
+    ms.add_lesson(c, "distinct", "cache embeddings by revision",
+                  e.to_blob([0.8, -0.6, 0.0]), "i")
+    rows = r.retrieve_with_ids(
+        c, "query", k=2, embed_fn=lambda t: [1.0, 0.0, 0.0], min_sim=0.1,
+    )
+    picked = [row["id"] for row in rows]
+    assert picked[0] == "dup1"
+    assert "distinct" in picked
+
+    # SONDER_MMR_LAMBDA=1 restores pure relevance order (both duplicates).
+    monkeypatch.setenv("SONDER_MMR_LAMBDA", "1")
+    rows = r.retrieve_with_ids(
+        c, "query", k=2, embed_fn=lambda t: [1.0, 0.0, 0.0], min_sim=0.1,
+    )
+    assert [row["id"] for row in rows] == ["dup1", "dup2"]

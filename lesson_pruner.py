@@ -13,6 +13,7 @@ import argparse
 
 import embeddings
 import memory_store
+import sonder_paths
 
 # Similarity floor for "near-duplicate". Deliberately conservative (well above
 # retriever.DEFAULT_MIN_SIM=0.62, which is a *relevance* floor for retrieval,
@@ -225,7 +226,12 @@ def prune(conn, threshold=DEFAULT_THRESHOLD, dry_run=True, cosine_fn=embeddings.
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--db", default="memory.db", help="path to the sqlite memory store")
+    ap.add_argument(
+        "--db", default=sonder_paths.memory_db_path(),
+        help="path to the sqlite memory store (default: the Sonder state "
+             "home's memory.db — a bare relative default silently opened an "
+             "empty DB in whatever directory the pruner ran from)",
+    )
     ap.add_argument(
         "--threshold", type=float, default=DEFAULT_THRESHOLD,
         help="cosine similarity floor for 'near-duplicate' (default %.2f)" % DEFAULT_THRESHOLD,

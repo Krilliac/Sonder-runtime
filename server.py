@@ -3938,6 +3938,210 @@ def campaign_generate_compile_execute_record(
     return "\n".join(lines)
 
 
+# Planted-bug repair templates: (name, buggy module source, pytest source).
+# Each bug is a class small local models actually exhibit; the fix is judged
+# by the project's own tests, not output matching, so lessons distilled from
+# these interactions reflect real repair work.
+_REPO_REPAIR_TASKS = [
+    ("offbyone",
+     "def total(values):\n"
+     "    result = 0\n"
+     "    for index in range(len(values) - 1):\n"
+     "        result += values[index]\n"
+     "    return result\n",
+     "from module import total\n\n\n"
+     "def test_total_includes_every_value():\n"
+     "    assert total([1, 2, 3, 4]) == 10\n\n\n"
+     "def test_total_single_value():\n"
+     "    assert total([7]) == 7\n\n\n"
+     "def test_total_empty():\n"
+     "    assert total([]) == 0\n"),
+    ("boundary",
+     "def bulk_discount(quantity):\n"
+     "    # spec: orders of 10 or more get the discount\n"
+     "    return 0.1 if quantity > 10 else 0.0\n",
+     "from module import bulk_discount\n\n\n"
+     "def test_discount_at_threshold():\n"
+     "    assert bulk_discount(10) == 0.1\n\n\n"
+     "def test_discount_above_threshold():\n"
+     "    assert bulk_discount(11) == 0.1\n\n\n"
+     "def test_no_discount_below():\n"
+     "    assert bulk_discount(9) == 0.0\n"),
+    ("mutabledefault",
+     "def add_tag(tag, tags=[]):\n"
+     "    tags.append(tag)\n"
+     "    return tags\n",
+     "from module import add_tag\n\n\n"
+     "def test_fresh_list_per_call():\n"
+     "    assert add_tag('a') == ['a']\n"
+     "    assert add_tag('b') == ['b']\n\n\n"
+     "def test_explicit_list_still_appends():\n"
+     "    existing = ['x']\n"
+     "    assert add_tag('y', existing) == ['x', 'y']\n"),
+    ("missingkey",
+     "def word_counts(words):\n"
+     "    counts = {}\n"
+     "    for word in words:\n"
+     "        counts[word] += 1\n"
+     "    return counts\n",
+     "from module import word_counts\n\n\n"
+     "def test_counts_new_words():\n"
+     "    assert word_counts(['a', 'b', 'a']) == {'a': 2, 'b': 1}\n\n\n"
+     "def test_counts_empty():\n"
+     "    assert word_counts([]) == {}\n"),
+    ("numericsort",
+     "def sort_ids(ids):\n"
+     "    # ids arrive as decimal strings; callers need numeric order\n"
+     "    return sorted(ids)\n",
+     "from module import sort_ids\n\n\n"
+     "def test_numeric_not_lexicographic():\n"
+     "    assert sort_ids(['10', '2', '1']) == ['1', '2', '10']\n\n\n"
+     "def test_already_sorted():\n"
+     "    assert sort_ids(['1', '2']) == ['1', '2']\n"),
+]
+
+
+def _repo_repair_pytest(workdir, timeout):
+    """Run pytest for one scratch project; (ok, bounded output)."""
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "--no-header", "-x"],
+            cwd=str(workdir), capture_output=True, text=True,
+            timeout=max(5, timeout),
+        )
+    except subprocess.TimeoutExpired:
+        return False, "pytest timed out"
+    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    return proc.returncode == 0, output[-1500:]
+
+
+@mcp.tool()
+def campaign_repo_repair(
+    total: int = 10,
+    tier: str = "code",
+    max_workers: int = 4,
+    timeout: int = 30,
+    repair_rounds: int = 1,
+    record_failures: bool = True,
+) -> str:
+    """Repair planted bugs in scratch projects, verified by their own tests.
+
+    Each job materializes a small Python project whose test suite fails on a
+    deliberately planted bug, shows the model the module and the failing
+    pytest output, and accepts only a corrected module that makes the whole
+    suite pass. Passing repairs record tests_passed; terminal failures record
+    failed, so the reward store learns from genuine repair work.
+    """
+    import shutil
+    import tempfile
+
+    total = max(1, min(int(total or 1), 60))
+    max_workers = max(1, min(int(max_workers or 1), 8, total))
+    timeout = max(5, min(int(timeout or 30), 120))
+    repair_rounds = max(0, min(int(repair_rounds or 0), 3))
+    jobs = [
+        (i, *_REPO_REPAIR_TASKS[i % len(_REPO_REPAIR_TASKS)])
+        for i in range(total)
+    ]
+
+    def run_one(index, task_name, module_src, test_src):
+        workdir = Path(tempfile.mkdtemp(prefix="sonder-repair-"))
+        attempts = []
+        try:
+            (workdir / "module.py").write_text(module_src, encoding="utf-8")
+            (workdir / "test_module.py").write_text(
+                test_src, encoding="utf-8")
+            ok, failure = _repo_repair_pytest(workdir, timeout)
+            if ok:
+                return {
+                    "index": index, "task": task_name, "ok": False,
+                    "attempts": [], "iid": None,
+                    "error": "template did not fail before repair",
+                }
+            current_module = module_src
+            for attempt in range(repair_rounds + 1):
+                prompt = (
+                    "A small Python project fails its tests because of a bug "
+                    "in module.py. Return the complete corrected module.py "
+                    "in one ```python code block. Do not modify or restate "
+                    "the tests.\n\nmodule.py:\n```python\n%s```\n\n"
+                    "Failing pytest output:\n%s"
+                    % (current_module, failure[-900:])
+                )
+                with _CAMPAIGN_LEARN_LOCK:
+                    response = sonder(
+                        prompt, tier=tier, session="none",
+                        temperature=0.2, num_predict=700,
+                    )
+                iid = parse_interaction_id(response)
+                code = grounding.extract_code_block(response, "python")
+                if code:
+                    (workdir / "module.py").write_text(
+                        code, encoding="utf-8")
+                    current_module = code
+                    ok, failure = _repo_repair_pytest(workdir, timeout)
+                else:
+                    ok, failure = False, "no python code block returned"
+                record_msg = ""
+                if ok and iid:
+                    with _CAMPAIGN_LEARN_LOCK:
+                        record_msg = record_outcome(iid, "tests_passed")
+                elif (
+                    attempt == repair_rounds and record_failures and iid
+                ):
+                    with _CAMPAIGN_LEARN_LOCK:
+                        record_msg = record_outcome(iid, "failed")
+                attempts.append({
+                    "attempt": attempt + 1, "ok": ok, "iid": iid,
+                    "output": failure[-400:], "record": record_msg,
+                })
+                if ok:
+                    break
+            final = attempts[-1]
+            return {
+                "index": index, "task": task_name,
+                "ok": bool(final["ok"]), "attempts": attempts,
+                "iid": final.get("iid"), "error": "",
+            }
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+    started = time.time()
+    results = [None] * len(jobs)
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(run_one, *job) for job in jobs]
+        for future in as_completed(futures):
+            outcome = future.result()
+            results[outcome["index"]] = outcome
+    elapsed = round(time.time() - started, 3)
+    passed = sum(1 for r in results if r and r.get("ok"))
+    lines = [
+        "campaign repo-repair: %d/%d suites fixed in %.3fs"
+        % (passed, len(results), elapsed),
+    ]
+    drain = _drain_deferred_distillations(limit=max(16, len(results)))
+    if drain["drained"]:
+        lines.append(
+            "deferred distillations drained: %d (lessons stored %d, still deferred %d)"
+            % (drain["drained"], drain["stored"], drain["deferred"]),
+        )
+    for r in results:
+        status = "PASS" if r["ok"] else "FAIL"
+        lines.append("[%s] %s-%d attempts=%d iid=%s%s" % (
+            status, r["task"], r["index"] + 1, len(r.get("attempts") or []),
+            r.get("iid") or "-",
+            (" (%s)" % r["error"]) if r.get("error") else "",
+        ))
+        attempts = r.get("attempts") or []
+        if attempts and not r["ok"]:
+            lines.append((attempts[-1].get("output") or "")[:400])
+        if attempts and attempts[-1].get("record"):
+            lines.append(attempts[-1]["record"][:200])
+    return "\n".join(lines)
+
+
 @mcp.tool()
 def sonder_stats() -> str:
     """Report what sonder has learned so far.
@@ -11968,9 +12172,16 @@ def autopilot_status(run_id: str = "", include_finished: bool = True) -> str:
     )
 
 
-def _execution_route_model(prompt: str, project: str = "") -> dict:
-    """Let a local model choose only foreground workbench or Autopilot."""
-    router_tier = runtime_policy.route_tier(
+def _execution_route_model(
+    prompt: str, project: str = "", tier_override: str = "",
+) -> dict:
+    """Let a local model choose only foreground workbench or Autopilot.
+
+    ``tier_override`` lets offline tooling (the routing distiller) label with
+    a stronger local judge than the production router tier; live routing
+    never passes it.
+    """
+    router_tier = tier_override or runtime_policy.route_tier(
         "router", _RUNTIME_POLICY or _refresh_runtime_policy(), fallback="fast",
     )
     model, cloud, _augment, tier_label = _serve_target(router_tier, False)
