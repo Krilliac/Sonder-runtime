@@ -14,19 +14,32 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
+import stat
 
 
 PROTOCOL_VERSION = 1
 
 # Bounded stdio framing: one JSON object per line, both directions.
 MAX_LINE_BYTES = 1_048_576
+MAX_JSON_DEPTH = 24
+MAX_JSON_NODES = 20_000
 
 # Input/output limits enforced by host and worker independently.
 MAX_TEXT_ITEMS = 16
 MAX_TEXT_CHARS = 8_000
 MAX_FEATURES = 64
 MAX_DIMENSION = 4_096
+
+# Utility models are deliberately bounded: this path is for small routing and
+# embedding workloads, not generative weights.  The worker reads model bytes
+# to bind exactly what the vendor runtime receives, so an unbounded declaration
+# would also be an unbounded allocation.
+MAX_PINNED_FILES = 16
+MAX_MODEL_BYTES = 768 * 1024 * 1024
+MAX_PINNED_FILE_BYTES = 768 * 1024 * 1024
+MAX_BUNDLE_BYTES = 1024 * 1024 * 1024
 
 # Deadline clamps per operation (milliseconds).
 MIN_DEADLINE_MS = 50
@@ -56,7 +69,9 @@ ROUTE_REASON_CODES = ("score_margin", "low_confidence", "degenerate")
 # deterministic simulator used for portable CI and explicit opt-in testing.
 PROVIDER_IDS = ("vitisai", "openvino", "qnn", "winml", "cpu", "cpu-sim")
 
-# Providers that actually claim NPU silicon when assigned by the runtime.
+# Provider families that require exclusive no-CPU-fallback sessions. The EP id
+# alone is not acceleration proof; worker-side effective-device attestation is
+# narrower (currently OpenVINO NPU and QNN HTP).
 NPU_CLASS_PROVIDERS = frozenset({"vitisai", "openvino", "qnn"})
 
 _SECRET_ASSIGNMENT_RE = re.compile(
@@ -135,15 +150,42 @@ def sanitize_error(value, limit=200) -> str:
     return text[:ceiling]
 
 
+def validate_json_shape(payload) -> None:
+    """Bound nested containers before/after JSON codec recursion.
+
+    The wire is intentionally a small control protocol.  An iterative walk
+    avoids turning a deeply nested object into a recursion failure in either
+    the broker pump or worker main loop.
+    """
+    stack = [(payload, 0)]
+    nodes = 0
+    while stack:
+        value, depth = stack.pop()
+        nodes += 1
+        if nodes > MAX_JSON_NODES:
+            raise ValueError("protocol message has too many JSON values")
+        if depth > MAX_JSON_DEPTH:
+            raise ValueError("protocol message exceeds JSON nesting limit")
+        if isinstance(value, dict):
+            if any(not isinstance(key, str) for key in value):
+                raise ValueError("protocol object keys must be strings")
+            stack.extend((item, depth + 1) for item in value.values())
+        elif isinstance(value, (list, tuple)):
+            stack.extend((item, depth + 1) for item in value)
+        elif isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("protocol message contains a non-finite number")
+
+
 def encode_line(payload) -> bytes:
     """Encode one protocol message as bounded, strict, compact JSONL."""
     if not isinstance(payload, dict):
         raise ValueError("protocol message must be a JSON object")
+    validate_json_shape(payload)
     try:
         text = json.dumps(
             payload, separators=(",", ":"), ensure_ascii=True, allow_nan=False,
         )
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, RecursionError) as exc:
         raise ValueError("protocol message is not strict JSON: %s" % exc)
     raw = text.encode("utf-8") + b"\n"
     if len(raw) > MAX_LINE_BYTES:
@@ -171,10 +213,11 @@ def decode_line(raw) -> dict:
     try:
         text = line.decode("utf-8", "strict")
         payload = json.loads(text, parse_constant=_reject_constant)
-    except (UnicodeDecodeError, ValueError) as exc:
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise ValueError("malformed protocol line: %s" % exc)
     if not isinstance(payload, dict):
         raise ValueError("protocol line must decode to a JSON object")
+    validate_json_shape(payload)
     return payload
 
 
@@ -252,9 +295,15 @@ def clamp_deadline_ms(value, operation) -> int:
     )
     if value is None:
         return default
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+    ):
+        return default
     try:
         number = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     return max(MIN_DEADLINE_MS, min(ceiling, number))
 
@@ -264,4 +313,30 @@ def sha256_file(path) -> str:
     with open(path, "rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sha256_file_bounded(path, expected_size, max_size) -> str:
+    """Hash one exact-size regular-file snapshot through one open handle."""
+    if (
+        isinstance(expected_size, bool)
+        or not isinstance(expected_size, int)
+        or expected_size < 0
+        or expected_size > max_size
+    ):
+        raise ValueError("invalid bounded hash size")
+    digest = hashlib.sha256()
+    total = 0
+    with open(path, "rb") as stream:
+        opened = os.fstat(stream.fileno())
+        if not stat.S_ISREG(opened.st_mode) or opened.st_size != expected_size:
+            raise ValueError("size mismatch")
+        while total <= expected_size:
+            chunk = stream.read(min(1024 * 1024, expected_size + 1 - total))
+            if not chunk:
+                break
+            digest.update(chunk)
+            total += len(chunk)
+    if total != expected_size:
+        raise ValueError("size mismatch")
     return digest.hexdigest()

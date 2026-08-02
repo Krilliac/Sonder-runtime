@@ -84,6 +84,12 @@ Ollama model server: model storage + RAM/VRAM loading + token inference
 Selected base or personal model weights (for example Qwen2.5-Coder)
 ```
 
+An optional, off-by-default NPU utility sidecar can accelerate bounded routing
+and compatible embedding work below those model tiers; it is never a generative
+model tier, and Ollama's CPU/GPU path remains responsible for token generation.
+Hardware/session claims stay separate and no current device is assumed. See
+[NPU.md](NPU.md); the MCP surface exposes `npu_status` for bounded diagnostics.
+
 For a normal response, the runtime's learning loop is:
 
 ```
@@ -174,7 +180,7 @@ The learning loop above is *cross-task* memory. On top of it Sonder also has:
 
 1. **Local, in your terminal** — `sonder` (like launching `claude`). Interactive REPL routed through the full loop, with `/work`, `/report`, `/checklist`, `/inventory`, `/tree`, `/search`, `/programs`, `/scripts`, `/image`, `/mkdir`, `/runprogram`, `/runscript`, `/trace`, `/strict`, `/run`, `/train`, `/master`, `/agents`, `/capacity`, `/agentcancel`, `/agentretry`, `/asset`, `/artifactcheck`, `/forge`, `/game`, `/gamefleet`, `/todo`, `/commands`, `/activity`, `/runtime`, `/mcp`, `/learning`, `/dump`, `/permissions`, `/compact`, `/debug`, `/pass`, `/fail`, `/stats`, `/context`, `/quality`, `/privacy`, `/embeddings`, `/emotion`, and `/improve`, plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts`. Concrete natural-language workspace requests route to the same guarded workbench. Each REPL launch is its own remembered thread.
 2. **Hosted on your own server + a thin client anywhere** — run `deploy_sonder.sh --serve` on your box (systemd service, API key), then any machine runs the single-file `sonder_client.py` pointed at it. The serve layer threads the chat UI's own conversation history.
-3. **Integrated with Claude/Codex** — the MCP `sonder-runtime` tools include `workbench_agent`, budgeted workspace inventory, guarded tree/range/text/script/program/image inspection, argv-only program/script execution, persistent checklists, exact activity reports, agent/master orchestration, universal artifact generation, grounded game generation, bounded code/project runners, workflows, web tools, self-healing, privacy-safe memory review, local embedding backfill, and the remaining learning/memory surfaces. `master_orchestrate` can delegate to parallel subagents and audit their outputs; artifact and game tools create persistent assets/projects and accept only grounded checks. Local tiers remain the default for private workspace code.
+3. **Integrated with Claude/Codex** — the MCP `sonder-runtime` tools include `workbench_agent`, `npu_status`, budgeted workspace inventory, guarded tree/range/text/script/program/image inspection, argv-only program/script execution, persistent checklists, exact activity reports, agent/master orchestration, universal artifact generation, grounded game generation, bounded code/project runners, workflows, web tools, self-healing, privacy-safe memory review, local embedding backfill, and the remaining learning/memory surfaces. `master_orchestrate` can delegate to parallel subagents and audit their outputs; artifact and game tools create persistent assets/projects and accept only grounded checks. Local tiers remain the default for private workspace code.
 4. **Mobile & desktop app (GUI)** — a cross-platform [Flutter client](app/) with a shared Windows/Android/Linux/macOS System experience. Android and other client-only builds can start, stop, and restart the configured computer through a bounded authenticated host launcher; long first-run starts continue as persistent, resumable host operations and never expose a remote shell. See [app/README.md](app/README.md) and [mobile host control](MOBILE_HOST_CONTROL.md).
 
 ### Persistent autopilot

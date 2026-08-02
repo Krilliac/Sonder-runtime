@@ -18,26 +18,35 @@ from __future__ import annotations
 
 import collections
 import itertools
+import math
 import os
 import queue
+import shutil
+import signal
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
 
 import npu_contract
 import npu_manifest
+import npu_providers
 
 
 _FAILURE_REASONS = frozenset({
-    "timeout", "crash", "malformed", "worker_error", "spawn",
+    "timeout", "crash", "malformed", "worker_error", "spawn", "rss_limit",
 })
 _CONSECUTIVE_FAILURE_LIMIT = 3
 # Restart-once: a crashed worker may be respawned automatically one time; a
 # second death without an intervening success opens the circuit.
 _DEATH_LIMIT = 2
 _STDERR_RING = 40
+_CALLER_RESERVED_KEYS = frozenset({"id", "op", "manifest_hash"})
+_STAGING_PREFIX = "sonder-npu-stage-"
+_WORKER_QUEUE_LIMIT = 8
 
 _WORKER_ENV_KEYS = frozenset({
     # Process/bootstrap inputs.
@@ -119,15 +128,325 @@ class _ExchangeError(Exception):
         self.detail = detail
 
 
+def _validated_load_provenance(response, manifest) -> dict:
+    """Validate worker load claims before a model is marked usable."""
+    if response.get("ok") is not True:
+        raise _ExchangeError("malformed", "worker load omitted literal ok=true")
+    provider = response.get("provider")
+    allowlist = list(manifest.get("providers") or [])
+    if (
+        not isinstance(provider, str)
+        or provider not in npu_contract.PROVIDER_IDS
+        or provider not in allowlist
+    ):
+        raise _ExchangeError("malformed", "worker load returned unknown provider")
+    expected_ep = (
+        npu_providers.SIMULATOR_EP
+        if provider == "cpu-sim"
+        else npu_providers.PROVIDER_EPS.get(provider, "")
+    )
+    ep = response.get("ep")
+    chain = response.get("ep_chain")
+    if (
+        not expected_ep
+        or ep != expected_ep
+        or not isinstance(chain, list)
+        or not chain
+        or len(chain) > 4
+        or any(not isinstance(item, str) for item in chain)
+        or chain[0] != expected_ep
+    ):
+        raise _ExchangeError(
+            "malformed", "worker load returned inconsistent execution providers",
+        )
+    for active_ep in chain:
+        active_provider = npu_providers.provider_id_for_ep(active_ep)
+        if not active_provider or active_provider not in allowlist:
+            raise _ExchangeError(
+                "malformed", "worker load exposed an unallowlisted provider",
+            )
+    if chain != [expected_ep]:
+        raise _ExchangeError(
+            "malformed", "worker load did not bind one exclusive provider",
+        )
+    provenance = {}
+    for name in (
+        "simulated", "cpu_fallback_disabled", "ep_fallback", "npu_attested",
+    ):
+        value = response.get(name)
+        if not isinstance(value, bool):
+            raise _ExchangeError(
+                "malformed", "worker load omitted boolean %s" % name,
+            )
+        provenance[name] = value
+    if provenance["simulated"] != (provider == "cpu-sim"):
+        raise _ExchangeError("malformed", "worker load simulator claim mismatch")
+    if provenance["ep_fallback"] != (provider != allowlist[0]):
+        raise _ExchangeError("malformed", "worker load fallback claim mismatch")
+    if provider in npu_contract.NPU_CLASS_PROVIDERS and (
+        not provenance["cpu_fallback_disabled"]
+    ):
+        raise _ExchangeError(
+            "malformed", "worker load permits ambiguous CPU fallback",
+        )
+    if provider in {"cpu", "cpu-sim"} and provenance["cpu_fallback_disabled"]:
+        raise _ExchangeError("malformed", "worker load CPU fallback claim mismatch")
+    if provenance["npu_attested"] and provider not in {"openvino", "qnn"}:
+        raise _ExchangeError(
+            "malformed", "worker load returned unsupported NPU attestation",
+        )
+    return {
+        "provider": provider,
+        "ep": ep,
+        "ep_chain": list(chain),
+        **provenance,
+    }
+
+
+def _canonical_detect_rows(response) -> list:
+    """Validate and reduce worker detection to the exact host status schema."""
+    if response.get("ok") is not True:
+        raise _ExchangeError("malformed", "worker detect omitted literal ok=true")
+    raw_rows = response.get("providers")
+    if not isinstance(raw_rows, list) or len(raw_rows) > 16:
+        raise _ExchangeError("malformed", "worker detect providers must be a list")
+    rows = []
+    seen = set()
+    for raw_row in raw_rows:
+        if not isinstance(raw_row, dict):
+            continue
+        provider_id = raw_row.get("id")
+        if (
+            not isinstance(provider_id, str)
+            or provider_id not in npu_contract.PROVIDER_IDS
+            or provider_id in seen
+        ):
+            continue
+        seen.add(provider_id)
+        rows.append({
+            "id": provider_id,
+            "label": npu_providers.provider_label(provider_id),
+            "registered": raw_row.get("registered") is True,
+            "detected": False,
+            "runtime_ready": False,
+            "ep": (
+                npu_providers.SIMULATOR_EP
+                if provider_id == "cpu-sim"
+                else npu_providers.PROVIDER_EPS.get(provider_id, "")
+            ),
+            "reason": npu_contract.sanitize_error(
+                raw_row.get("reason") or "", 160,
+            ),
+        })
+    return rows
+
+
+class _WindowsJob:
+    """Best-effort kill-on-close Job Object for the worker process tree."""
+
+    def __init__(self, proc):
+        self.handle = None
+        self._close_handle = None
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            import ctypes.wintypes as wintypes
+
+            class _IoCounters(ctypes.Structure):
+                _fields_ = [
+                    (name, ctypes.c_ulonglong)
+                    for name in (
+                        "ReadOperationCount", "WriteOperationCount",
+                        "OtherOperationCount", "ReadTransferCount",
+                        "WriteTransferCount", "OtherTransferCount",
+                    )
+                ]
+
+            class _BasicLimits(ctypes.Structure):
+                _fields_ = [
+                    ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                    ("PerJobUserTimeLimit", ctypes.c_longlong),
+                    ("LimitFlags", wintypes.DWORD),
+                    ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t),
+                    ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.c_size_t),
+                    ("PriorityClass", wintypes.DWORD),
+                    ("SchedulingClass", wintypes.DWORD),
+                ]
+
+            class _ExtendedLimits(ctypes.Structure):
+                _fields_ = [
+                    ("BasicLimitInformation", _BasicLimits),
+                    ("IoInfo", _IoCounters),
+                    ("ProcessMemoryLimit", ctypes.c_size_t),
+                    ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                    ("PeakJobMemoryUsed", ctypes.c_size_t),
+                ]
+
+            kernel32 = ctypes.windll.kernel32
+            kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+            kernel32.SetInformationJobObject.argtypes = [
+                wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+            ]
+            kernel32.SetInformationJobObject.restype = wintypes.BOOL
+            kernel32.AssignProcessToJobObject.argtypes = [
+                wintypes.HANDLE, wintypes.HANDLE,
+            ]
+            kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            handle = kernel32.CreateJobObjectW(None, None)
+            if not handle:
+                return
+            limits = _ExtendedLimits()
+            limits.BasicLimitInformation.LimitFlags = 0x00002000
+            if not kernel32.SetInformationJobObject(
+                handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)
+            ) or not kernel32.AssignProcessToJobObject(
+                handle, wintypes.HANDLE(int(proc._handle))
+            ):
+                kernel32.CloseHandle(handle)
+                return
+            self.handle = handle
+            self._close_handle = kernel32.CloseHandle
+        except Exception:
+            self.handle = None
+
+    def close(self):
+        handle, self.handle = self.handle, None
+        close_handle, self._close_handle = self._close_handle, None
+        if handle and close_handle is not None:
+            try:
+                close_handle(handle)
+            except Exception:
+                pass
+
+
+def _is_reparse(info) -> bool:
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return stat.S_ISLNK(info.st_mode) or bool(
+        getattr(info, "st_file_attributes", 0) & reparse_flag
+    )
+
+
+def _staging_identity(path):
+    info = os.stat(path, follow_symlinks=False)
+    if not stat.S_ISDIR(info.st_mode) or _is_reparse(info):
+        raise OSError("staging root is not a plain directory")
+    return (int(info.st_dev), int(info.st_ino))
+
+
+def _discard_empty_staging_dir(path) -> None:
+    """Remove a just-created empty stage without traversing its contents."""
+    target = Path(path)
+    try:
+        if (
+            target.parent.resolve() == Path(tempfile.gettempdir()).resolve()
+            and target.name.startswith(_STAGING_PREFIX)
+        ):
+            os.rmdir(target)
+    except OSError:
+        pass
+
+
+def _cleanup_staging_dir(path, identity) -> None:
+    """Remove only the exact broker-created per-worker staging directory."""
+    if path is None or identity is None:
+        return
+    target = Path(path)
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    try:
+        if (
+            target.parent.resolve() != temp_root
+            or not target.name.startswith(_STAGING_PREFIX)
+        ):
+            return
+        try:
+            if _staging_identity(target) != identity:
+                return
+        except OSError:
+            return
+        safe_directories = []
+        safe_files = []
+        links = []
+        for root, directories, files in os.walk(
+            target, topdown=True, followlinks=False,
+        ):
+            retained = []
+            for dirname in directories:
+                child = Path(root) / dirname
+                try:
+                    info = os.stat(child, follow_symlinks=False)
+                except OSError:
+                    continue
+                if _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
+                    links.append((child, info))
+                else:
+                    retained.append(dirname)
+                    safe_directories.append(child)
+            directories[:] = retained
+            for filename in files:
+                child = Path(root) / filename
+                try:
+                    info = os.stat(child, follow_symlinks=False)
+                except OSError:
+                    continue
+                if _is_reparse(info):
+                    links.append((child, info))
+                elif stat.S_ISREG(info.st_mode):
+                    safe_files.append(child)
+        # Remove links/reparse points themselves without following them. If a
+        # link cannot be removed, leak the bounded stage rather than traverse.
+        for child, info in links:
+            try:
+                if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                    os.unlink(child)
+                else:
+                    os.rmdir(child)
+            except OSError:
+                return
+        for child in safe_files:
+            try:
+                os.chmod(child, 0o600)
+            except OSError:
+                pass
+        for child in reversed(safe_directories):
+            try:
+                os.chmod(child, 0o700)
+            except OSError:
+                pass
+        if _staging_identity(target) != identity:
+            return
+        try:
+            os.chmod(target, 0o700)
+        except OSError:
+            pass
+        shutil.rmtree(target)
+    except OSError:
+        # Cleanup is best effort after the process tree is gone. Refuse any
+        # broader or worker-supplied fallback path.
+        return
+
+
 class _Worker:
     """One child-process generation with its pump threads."""
 
-    def __init__(self, proc, generation):
+    def __init__(
+        self, proc, generation, windows_job=None, staging_dir=None,
+        staging_identity=None,
+    ):
         self.proc = proc
         self.generation = generation
-        self.queue = queue.Queue()
+        self.windows_job = windows_job
+        self.staging_dir = staging_dir
+        self.staging_identity = staging_identity
+        self.queue = queue.Queue(maxsize=_WORKER_QUEUE_LIMIT)
         self.stderr_ring = collections.deque(maxlen=_STDERR_RING)
         self.dead = False
+        self._destroy_lock = threading.Lock()
         self._reader = threading.Thread(
             target=self._pump_stdout, daemon=True,
             name="npu-reader-%d" % generation,
@@ -139,6 +458,24 @@ class _Worker:
         self._reader.start()
         self._drainer.start()
 
+    def _enqueue(self, payload) -> bool:
+        try:
+            self.queue.put_nowait(payload)
+            return True
+        except queue.Full:
+            while True:
+                try:
+                    self.queue.get_nowait()
+                except queue.Empty:
+                    break
+            try:
+                self.queue.put_nowait({
+                    "_protocol_error": "worker response queue overflow",
+                })
+            except queue.Full:
+                pass
+            return False
+
     def _pump_stdout(self):
         stream = self.proc.stdout
         limit = npu_contract.MAX_LINE_BYTES
@@ -148,17 +485,18 @@ class _Worker:
             except (OSError, ValueError):
                 line = b""
             if not line:
-                self.queue.put({"_eof": True})
+                self._enqueue({"_eof": True})
                 return
             if len(line) > limit and not line.endswith(b"\n"):
-                self.queue.put({"_protocol_error": "oversized worker line"})
+                self._enqueue({"_protocol_error": "oversized worker line"})
                 return
             try:
                 payload = npu_contract.decode_line(line)
             except ValueError as exc:
-                self.queue.put({"_protocol_error": str(exc)[:200]})
+                self._enqueue({"_protocol_error": str(exc)[:200]})
                 return
-            self.queue.put(payload)
+            if not self._enqueue(payload):
+                return
 
     def _pump_stderr(self):
         stream = self.proc.stderr
@@ -178,7 +516,33 @@ class _Worker:
         self.proc.stdin.flush()
 
     def destroy(self):
-        self.dead = True
+        with self._destroy_lock:
+            if self.dead:
+                return
+            self.dead = True
+        if (
+            self.windows_job is not None
+            and self.windows_job.handle is not None
+        ):
+            self.windows_job.close()
+        elif sys.platform == "win32" and self.proc.poll() is None:
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(self.proc.pid), "/T", "/F"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    check=False,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass
+        elif sys.platform != "win32":
+            try:
+                os.killpg(self.proc.pid, signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
         try:
             self.proc.kill()
         except OSError:
@@ -193,6 +557,7 @@ class _Worker:
                     stream.close()
             except OSError:
                 pass
+        _cleanup_staging_dir(self.staging_dir, self.staging_identity)
 
 
 class NpuBroker:
@@ -204,11 +569,13 @@ class NpuBroker:
         self._flight = threading.Lock()
         self._state = "cold"  # cold | warming | ready
         self._worker = None
+        self._warming_worker = None
         self._warm_thread = None
         self._generation = 0
         self._counter = itertools.count(1)
         self._target_manifests = {}
         self._models = {}
+        self._fingerprints = {}
         self._providers = None
         self._hello = {}
         self._circuit = {"state": "closed", "opened_ts": 0.0, "opens": 0}
@@ -260,9 +627,66 @@ class NpuBroker:
         self._ram_cache = (now, result)
         return result
 
-    def _ram_gate_reason(self):
+    def _declared_bundle_bytes(self, manifests) -> int:
+        total_bundle = 0
+        seen = set()
+        for manifest in manifests or []:
+            entries = [manifest.get("model")]
+            entries.extend(manifest.get("extra_files") or [])
+            if manifest.get("tokenizer"):
+                entries.append(manifest["tokenizer"])
+            if len(entries) > npu_contract.MAX_PINNED_FILES:
+                raise ValueError("manifest declares too many pinned files")
+            total = 0
+            extra_paths = {
+                str(entry.get("path") or "").casefold()
+                for entry in manifest.get("extra_files") or []
+                if isinstance(entry, dict)
+            }
+            for values in (manifest.get("provider_options") or {}).values():
+                for value in (values or {}).values():
+                    if isinstance(value, dict) and str(
+                        value.get("path") or ""
+                    ).casefold() not in extra_paths:
+                        raise ValueError(
+                            "provider option is not a pinned extra file"
+                        )
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    raise ValueError("manifest has an invalid pinned file entry")
+                size = entry.get("bytes")
+                if (
+                    isinstance(size, bool)
+                    or not isinstance(size, int)
+                    or not 0 < size <= npu_contract.MAX_PINNED_FILE_BYTES
+                ):
+                    raise ValueError("manifest has an invalid pinned file size")
+                key = (
+                    str(manifest.get("dir") or ""),
+                    str(entry.get("path") or "").casefold(),
+                    str(entry.get("sha256") or ""),
+                )
+                if key not in seen:
+                    seen.add(key)
+                    total += size
+            if total > npu_contract.MAX_BUNDLE_BYTES:
+                raise ValueError("manifest pinned bundle exceeds size limit")
+            total_bundle += total
+        if total_bundle > npu_contract.MAX_BUNDLE_BYTES:
+            raise ValueError("combined worker bundle exceeds size limit")
+        return total_bundle
+
+    def _ram_gate_reason(self, manifests=None):
         available, live = self._available_ram_gb()
-        if live and available < self._min_free_ram_gb():
+        try:
+            bundle_gb = self._declared_bundle_bytes(manifests) / 1024**3
+        except ValueError:
+            return "bundle_limit"
+        # ORT commonly retains its own model/session allocation after Python
+        # has read the pinned bytes, so reserve two bundle copies in addition
+        # to the configured host headroom.
+        required = self._min_free_ram_gb() + (2.0 * bundle_gb)
+        if live and available < required:
             return "ram_gate"
         return ""
 
@@ -309,12 +733,34 @@ class NpuBroker:
             if self._circuit["state"] == "half_open":
                 self._circuit["state"] = "closed"
 
+    def _mark_providers_cold_locked(self):
+        if not self._providers:
+            return
+        self._providers = [
+            {
+                **row,
+                "runtime_ready": False,
+                "reason": (
+                    "worker cold; no compatible session loaded"
+                    if row.get("runtime_ready") is True
+                    else row.get("reason", "")
+                ),
+            }
+            for row in self._providers
+        ]
+
     def _teardown_worker_locked(self):
         worker = self._worker
+        warming_worker = self._warming_worker
         self._worker = None
+        self._warming_worker = None
         self._models = {}
+        self._fingerprints = {}
+        self._mark_providers_cold_locked()
         if worker is not None:
             worker.destroy()
+        if warming_worker is not None and warming_worker is not worker:
+            warming_worker.destroy()
 
     def _on_worker_dead(self, worker, reason, detail=""):
         with self._state_lock:
@@ -326,27 +772,85 @@ class NpuBroker:
             self._record_failure(reason, death=True, error=detail)
 
     # -- lifecycle ---------------------------------------------------------
-    def _spawn_worker(self):
-        gate = self._ram_gate_reason()
+    def _spawn_worker(self, manifests=None):
+        gate = self._ram_gate_reason(manifests)
         if gate:
-            raise _ExchangeError("ram_gate", "available RAM below spawn gate")
+            detail = (
+                "manifest bundle exceeds accelerator limits"
+                if gate == "bundle_limit" else "available RAM below spawn gate"
+            )
+            raise _ExchangeError(gate, detail)
         command = [sys.executable, "-X", "utf8", str(self._worker_path)]
         creationflags = 0
         if sys.platform == "win32":
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        proc = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=str(self._worker_path.parent),
-            creationflags=creationflags,
-            env=_worker_environment(),
-        )
+            creationflags = (
+                getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            )
+        staging_dir = Path(tempfile.mkdtemp(prefix=_STAGING_PREFIX)).resolve()
+        try:
+            staging_identity = _staging_identity(staging_dir)
+        except OSError:
+            _discard_empty_staging_dir(staging_dir)
+            raise
+        environment = _worker_environment()
+        environment["SONDER_NPU_STAGE_DIR"] = str(staging_dir)
+        try:
+            proc = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=str(self._worker_path.parent),
+                creationflags=creationflags,
+                env=environment,
+                start_new_session=sys.platform != "win32",
+            )
+        except Exception:
+            _cleanup_staging_dir(staging_dir, staging_identity)
+            raise
+        windows_job = _WindowsJob(proc) if sys.platform == "win32" else None
         with self._state_lock:
             self._spawns += 1
             generation = self._generation
-        return _Worker(proc, generation)
+        return _Worker(
+            proc, generation, windows_job=windows_job, staging_dir=staging_dir,
+            staging_identity=staging_identity,
+        )
+
+    def _check_response_rss(self, worker, payload, stage):
+        rss = payload.get("rss_mb") if isinstance(payload, dict) else None
+        if (
+            isinstance(rss, bool)
+            or not isinstance(rss, (int, float))
+            or not math.isfinite(float(rss))
+            or rss < 0
+        ):
+            worker.destroy()
+            raise _ExchangeError(
+                "malformed", "worker %s omitted a valid rss_mb" % stage,
+            )
+        rss = int(rss)
+        with self._state_lock:
+            self._last_rss_mb = rss
+        if rss <= self._max_rss_mb():
+            return
+        worker.destroy()
+        with self._state_lock:
+            if self._worker is worker:
+                self._worker = None
+                self._models = {}
+                self._fingerprints = {}
+                self._mark_providers_cold_locked()
+                self._state = "cold"
+            if self._warming_worker is worker:
+                self._warming_worker = None
+            self._rss_evictions += 1
+        raise _ExchangeError(
+            "rss_limit",
+            "worker RSS %dMB exceeded %dMB at %s"
+            % (rss, self._max_rss_mb(), stage),
+        )
 
     def _wait_event(self, worker, event, timeout_s):
         deadline = time.monotonic() + timeout_s
@@ -363,14 +867,17 @@ class NpuBroker:
             if item.get("_protocol_error"):
                 raise _ExchangeError("malformed", item["_protocol_error"])
             if item.get("event") == event:
+                self._check_response_rss(worker, item, event)
                 return item
 
     def _exchange(self, worker, payload, timeout_s):
-        request = {"id": next(self._counter), **payload}
+        if "id" in payload:
+            raise ValueError("protocol request id is broker-owned")
+        request = {**payload, "id": next(self._counter)}
         raw = npu_contract.encode_line(request)
         try:
             worker.send(raw)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             raise _ExchangeError("crash", "worker pipe closed: %s" % exc)
         deadline = time.monotonic() + timeout_s
         while True:
@@ -386,6 +893,9 @@ class NpuBroker:
             if item.get("_protocol_error"):
                 raise _ExchangeError("malformed", item["_protocol_error"])
             if item.get("id") == request["id"]:
+                self._check_response_rss(
+                    worker, item, str(payload.get("op") or "exchange"),
+                )
                 return item
 
     def _warmup(self, generation, manifests):
@@ -402,7 +912,12 @@ class NpuBroker:
 
     def _warmup_exclusive(self, generation, manifests):
         try:
-            worker = self._spawn_worker()
+            worker = self._spawn_worker(manifests.values())
+            with self._state_lock:
+                if self._generation != generation:
+                    worker.destroy()
+                    return
+                self._warming_worker = worker
         except _ExchangeError as exc:
             with self._state_lock:
                 if self._generation == generation:
@@ -418,16 +933,28 @@ class NpuBroker:
             )
             return
         try:
-            self._wait_event(
+            ready = self._wait_event(
                 worker, "ready", npu_contract.READY_TIMEOUT_MS / 1000.0,
             )
+            if ready.get("protocol") != npu_contract.PROTOCOL_VERSION:
+                raise _ExchangeError("malformed", "worker protocol version mismatch")
             hello = self._exchange(worker, {"op": "hello"}, 10.0)
+            if (
+                hello.get("ok") is not True
+                or hello.get("protocol") != npu_contract.PROTOCOL_VERSION
+            ):
+                raise _ExchangeError("malformed", "worker hello version mismatch")
             detect = self._exchange(worker, {"op": "detect"}, 10.0)
+            detected_provider_rows = _canonical_detect_rows(detect)
             models = {}
+            fingerprints = {}
             for manifest_hash, manifest in manifests.items():
                 row = {
                     "name": str(manifest.get("name") or "")[:64],
                     "operation": str(manifest.get("operation") or ""),
+                    # Internal correlation key. npu_service strips this before
+                    # returning status outside the broker boundary.
+                    "manifest_hash": manifest_hash,
                     "manifest_hash8": manifest_hash[:8],
                     "provider": "",
                     "ep": "",
@@ -435,6 +962,7 @@ class NpuBroker:
                     "ep_fallback": False,
                     "cpu_fallback_disabled": False,
                     "simulated": False,
+                    "npu_attested": False,
                     "ok": False,
                     "error": "",
                 }
@@ -452,52 +980,101 @@ class NpuBroker:
                     # model bytes. This catches ordinary concurrent updates;
                     # the worker's own byte hashing binds what ORT received.
                     post_load_drift = npu_manifest.verify_files(manifest)
-                    if response.get("ok") and not post_load_drift:
+                    if post_load_drift:
+                        row["error"] = npu_contract.sanitize_error(
+                            post_load_drift, 200,
+                        )
+                        self._count("hash_drift")
+                    elif response.get("ok") is True:
+                        if response.get("manifest_hash") != manifest_hash:
+                            raise _ExchangeError(
+                                "malformed",
+                                "worker returned a mismatched manifest hash",
+                            )
+                        fingerprint = npu_manifest.file_fingerprints(manifest)
                         row.update(
                             ok=True,
-                            provider=str(response.get("provider") or "")[:24],
-                            ep=str(response.get("ep") or "")[:48],
-                            ep_chain=[
-                                str(ep)[:48]
-                                for ep in (response.get("ep_chain") or [])[:4]
-                            ],
-                            ep_fallback=bool(response.get("ep_fallback")),
-                            cpu_fallback_disabled=bool(
-                                response.get("cpu_fallback_disabled")
-                            ),
-                            simulated=bool(response.get("simulated")),
+                            **_validated_load_provenance(response, manifest),
+                        )
+                        fingerprints[manifest_hash] = fingerprint
+                    elif response.get("ok") is False:
+                        error = response.get("error")
+                        if not isinstance(error, dict) or not isinstance(
+                            error.get("message"), str,
+                        ):
+                            raise _ExchangeError(
+                                "malformed", "worker load returned malformed error",
+                            )
+                        row["error"] = npu_contract.sanitize_error(
+                            error["message"], 200,
                         )
                     else:
-                        error = post_load_drift or (
-                            (response.get("error") or {}).get("message", "")
+                        raise _ExchangeError(
+                            "malformed", "worker load omitted literal boolean ok",
                         )
-                        if post_load_drift:
-                            self._count("hash_drift")
-                        if error:
-                            row["error"] = npu_contract.sanitize_error(error, 200)
                 models[manifest_hash] = row
         except _ExchangeError as exc:
             worker.destroy()
             with self._state_lock:
-                if self._generation == generation:
+                active_generation = self._generation == generation
+                if active_generation:
                     self._state = "cold"
+                if self._warming_worker is worker:
+                    self._warming_worker = None
+            if not active_generation:
+                # stop()/replacement deliberately invalidated this generation;
+                # its killed worker is not a crash or circuit-breaker death.
+                return
             reason = "crash" if exc.reason == "timeout" else exc.reason
             self._record_failure(reason, death=True, error=exc.detail)
             return
+        except Exception as exc:
+            worker.destroy()
+            with self._state_lock:
+                active_generation = self._generation == generation
+                if active_generation:
+                    self._state = "cold"
+                if self._warming_worker is worker:
+                    self._warming_worker = None
+            if active_generation:
+                self._record_failure(
+                    "malformed", death=True,
+                    error="unexpected worker response: %s" % str(exc)[:160],
+                )
+            return
         with self._state_lock:
             if self._generation != generation:
+                if self._warming_worker is worker:
+                    self._warming_worker = None
                 worker.destroy()
                 return
             self._worker = worker
+            self._warming_worker = None
             self._models = models
+            self._fingerprints = fingerprints
+            successful = {
+                row["provider"]: row
+                for row in models.values() if row.get("ok")
+            }
             providers = []
-            for raw_row in list(detect.get("providers") or [])[:16]:
-                if not isinstance(raw_row, dict):
-                    continue
-                provider_row = dict(raw_row)
-                provider_row["reason"] = npu_contract.sanitize_error(
-                    provider_row.get("reason") or "", 160,
-                )
+            for raw_row in detected_provider_rows:
+                provider_id = raw_row["id"]
+                loaded = successful.get(provider_id)
+                reason = raw_row.get("reason")
+                if loaded:
+                    reason = (
+                        "compatible NPU session loaded"
+                        if loaded.get("npu_attested")
+                        else "compatible session loaded; NPU target not attested"
+                    )
+                provider_row = {
+                    **raw_row,
+                    # Hardware detection is host-owned. The broker reports
+                    # registration and compatible-session readiness only.
+                    "detected": False,
+                    "runtime_ready": bool(loaded),
+                    "reason": npu_contract.sanitize_error(reason or "", 160),
+                }
                 providers.append(provider_row)
             self._providers = providers
             self._hello = {
@@ -553,6 +1130,12 @@ class NpuBroker:
             for manifest in manifests or []:
                 manifest_hash = str(manifest.get("manifest_hash") or "")
                 if manifest_hash:
+                    for old_hash, old in list(self._target_manifests.items()):
+                        if (
+                            old_hash != manifest_hash
+                            and old.get("operation") == manifest.get("operation")
+                        ):
+                            self._target_manifests.pop(old_hash, None)
                     self._target_manifests[manifest_hash] = manifest
             while len(self._target_manifests) > 8:
                 self._target_manifests.pop(next(iter(self._target_manifests)))
@@ -566,10 +1149,13 @@ class NpuBroker:
                     return True
             if self._state == "warming":
                 return True
-            gate = self._ram_gate_reason()
+            gate = self._ram_gate_reason(self._target_manifests.values())
             if gate:
-                self._count("ram_gate")
-                self._last_error = "available RAM below spawn gate"
+                self._count(gate)
+                self._last_error = (
+                    "manifest bundle exceeds accelerator limits"
+                    if gate == "bundle_limit" else "available RAM below spawn gate"
+                )
                 return False
             self._state = "warming"
             self._generation += 1
@@ -609,6 +1195,15 @@ class NpuBroker:
     # -- calls -------------------------------------------------------------
     def call(self, manifest, payload, deadline_ms=None):
         """Run one accelerator request; raises NpuUnavailable on any miss."""
+        if not isinstance(payload, dict):
+            raise NpuUnavailable("invalid", "accelerator payload must be an object")
+        reserved = sorted(set(payload) & _CALLER_RESERVED_KEYS)
+        if reserved:
+            raise NpuUnavailable(
+                "invalid",
+                "accelerator payload contains broker-owned key(s): %s"
+                % ", ".join(reserved),
+            )
         operation = str(manifest.get("operation") or "")
         limits = manifest.get("limits") or {}
         deadline = npu_contract.clamp_deadline_ms(
@@ -623,7 +1218,7 @@ class NpuBroker:
             state = self._state
             worker = self._worker if state == "ready" else None
             if state == "cold":
-                gate = self._ram_gate_reason()
+                gate = self._ram_gate_reason([manifest])
                 if gate:
                     self._count(gate)
                     raise NpuUnavailable(gate)
@@ -658,9 +1253,15 @@ class NpuBroker:
                 raise NpuUnavailable(
                     "manifest_unhealthy", (row or {}).get("error", ""),
                 )
-            # Hash every pinned file at each inference boundary. Metadata-only
-            # shortcuts are bypassable when an updater preserves timestamps.
-            drift = npu_manifest.verify_files(manifest)
+            # Full content hashing happened at load and bound the immutable
+            # in-memory session/private staged assets. Calls use a cheap source
+            # fingerprint check so tiny NPU work does not reread a 1 GiB bundle.
+            drift = npu_manifest.fingerprint_drift(
+                manifest,
+                self._fingerprints.get(
+                    str(manifest.get("manifest_hash") or ""),
+                ),
+            )
             if drift:
                 detail = npu_contract.sanitize_error(drift, 200)
                 with self._state_lock:
@@ -670,9 +1271,9 @@ class NpuBroker:
                 self._count("hash_drift")
                 raise NpuUnavailable("manifest_unhealthy", detail)
             request = {
+                **payload,
                 "op": "run",
                 "manifest_hash": str(manifest.get("manifest_hash") or ""),
-                **payload,
             }
             started = time.monotonic()
             try:
@@ -684,28 +1285,50 @@ class NpuBroker:
                 self._on_worker_dead(worker, exc.reason, exc.detail)
                 raise NpuUnavailable(exc.reason, exc.detail)
             elapsed_ms = int((time.monotonic() - started) * 1000)
-            if not response.get("ok"):
-                error = response.get("error") or {}
+            if not isinstance(response.get("ok"), bool):
+                self._on_worker_dead(
+                    worker, "malformed", "worker omitted literal boolean ok",
+                )
+                raise NpuUnavailable("malformed", "worker response malformed")
+            if response["ok"] is False:
+                error = response.get("error")
+                if not isinstance(error, dict) or not isinstance(
+                    error.get("message"), str,
+                ):
+                    self._on_worker_dead(
+                        worker, "malformed", "worker returned malformed error",
+                    )
+                    raise NpuUnavailable("malformed", "worker response malformed")
                 detail = npu_contract.sanitize_error(
-                    error.get("message") or "", 200,
+                    error["message"], 200,
                 )
                 self._record_failure("worker_error", error=detail)
                 raise NpuUnavailable("worker_error", detail)
+            if response.get("manifest_hash") != request["manifest_hash"]:
+                self._on_worker_dead(
+                    worker, "malformed", "worker returned mismatched manifest hash",
+                )
+                raise NpuUnavailable(
+                    "malformed", "worker returned mismatched manifest hash",
+                )
+            provenance_fields = (
+                "provider", "ep", "ep_chain", "simulated",
+                "cpu_fallback_disabled", "ep_fallback", "npu_attested",
+            )
+            if any(
+                response.get(field) != row.get(field)
+                for field in provenance_fields
+            ):
+                self._on_worker_dead(
+                    worker, "malformed",
+                    "worker run provenance differs from the loaded session",
+                )
+                raise NpuUnavailable(
+                    "malformed", "worker run provenance mismatch",
+                )
             self._record_success(elapsed_ms)
-            rss = response.get("rss_mb")
-            evict = False
             with self._state_lock:
                 self._last_used = time.monotonic()
-                if (
-                    isinstance(rss, (int, float))
-                    and not isinstance(rss, bool)
-                ):
-                    self._last_rss_mb = int(rss)
-                    evict = self._last_rss_mb > self._max_rss_mb()
-                if evict and self._worker is worker:
-                    self._teardown_worker_locked()
-                    self._state = "cold"
-                    self._rss_evictions += 1
             return response
         finally:
             self._flight.release()

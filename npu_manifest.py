@@ -55,7 +55,9 @@ def _canonical_space_model(value) -> str:
     return model
 
 
-def _file_entry(value, base_dir, label) -> dict:
+def _file_entry(
+    value, base_dir, label, *, max_bytes=npu_contract.MAX_PINNED_FILE_BYTES,
+) -> dict:
     _require(isinstance(value, dict), "%s must be an object" % label)
     raw_path = str(value.get("path") or "").strip()
     _require(raw_path, "%s needs a relative path" % label)
@@ -81,8 +83,10 @@ def _file_entry(value, base_dir, label) -> dict:
     _require(_SHA256_RE.fullmatch(digest), "%s sha256 must be 64 hex chars" % label)
     size = value.get("bytes")
     _require(
-        isinstance(size, int) and not isinstance(size, bool) and size > 0,
-        "%s bytes must be a positive integer" % label,
+        isinstance(size, int)
+        and not isinstance(size, bool)
+        and 0 < size <= max_bytes,
+        "%s bytes must be between 1 and %d" % (label, max_bytes),
     )
     return {"path": "/".join(parts), "sha256": digest, "bytes": size}
 
@@ -128,25 +132,57 @@ def _normalize_providers(raw) -> list:
     return providers
 
 
-def _normalize_provider_options(raw) -> dict:
+def _normalize_provider_options(raw, base_dir, providers, extra_files) -> dict:
     if raw in (None, ""):
-        return {}
+        raw = {}
     _require(isinstance(raw, dict), "provider_options must be an object")
     options = {}
     for provider, values in raw.items():
-        allowed = _PROVIDER_OPTION_KEYS.get(str(provider or "").strip().lower())
+        provider_id = str(provider or "").strip().lower()
+        _require(
+            provider_id in providers,
+            "provider_options entry %r is not in the provider allowlist" % provider,
+        )
+        allowed = _PROVIDER_OPTION_KEYS.get(provider_id)
         _require(allowed, "provider_options has no options for %r" % provider)
         _require(isinstance(values, dict), "provider_options values must be objects")
         entry = {}
         for key, value in values.items():
             _require(key in allowed, "unknown option %r for %s" % (key, provider))
-            text = str(value or "").strip()
-            _require(
-                0 < len(text) <= 260 and "\x00" not in text and "\n" not in text,
-                "provider option %s.%s must be a short string" % (provider, key),
+            if provider_id == "openvino" and key == "device_type":
+                text = str(value or "").strip().upper()
+                _require(
+                    text == "NPU",
+                    "OpenVINO device_type must be NPU for the NPU accelerator",
+                )
+                entry[key] = "NPU"
+                continue
+            raw_path = str(value or "").strip().replace("\\", "/")
+            pinned = next(
+                (
+                    item for item in extra_files
+                    if item["path"].casefold() == raw_path.casefold()
+                ),
+                None,
             )
-            entry[key] = text
-        options[str(provider).strip().lower()] = entry
+            _require(
+                pinned is not None,
+                "provider option %s.%s must reference a hash-pinned extra_file"
+                % (provider_id, key),
+            )
+            if provider_id == "qnn" and key == "backend_path":
+                backend = Path(pinned["path"]).name.casefold()
+                _require(
+                    "qnnhtp" in backend and "cpu" not in backend and "gpu" not in backend,
+                    "QNN backend_path must name an HTP/NPU backend",
+                )
+            entry[key] = pinned
+        options[provider_id] = entry
+    if "qnn" in providers:
+        _require(
+            isinstance((options.get("qnn") or {}).get("backend_path"), dict),
+            "QNN providers require a hash-pinned HTP backend_path",
+        )
     return options
 
 
@@ -161,12 +197,20 @@ def _normalize_space(raw) -> dict | None:
         8 <= len(revision) <= 200 and revision.isprintable(),
         "space.revision must pin the exact serving revision",
     )
-    return {"model": model, "revision": revision}
+    dimension = raw.get("dimension")
+    _require(
+        isinstance(dimension, int)
+        and not isinstance(dimension, bool)
+        and 1 <= dimension <= npu_contract.MAX_DIMENSION,
+        "space.dimension must pin the exact vector dimension",
+    )
+    return {"model": model, "revision": revision, "dimension": dimension}
 
 
 def normalize_manifest(payload, base_dir) -> dict:
     """Validate one manifest payload into the canonical in-memory shape."""
     _require(isinstance(payload, dict), "manifest must be a JSON object")
+    npu_contract.validate_json_shape(payload)
     _require(
         payload.get("schema") == SCHEMA_VERSION,
         "manifest schema must be %d" % SCHEMA_VERSION,
@@ -179,18 +223,29 @@ def normalize_manifest(payload, base_dir) -> dict:
         "manifest operation must be one of: %s"
         % ", ".join(npu_contract.OPERATIONS),
     )
+    providers = _normalize_providers(payload.get("providers"))
+    raw_extra_files = payload.get("extra_files") or []
+    _require(isinstance(raw_extra_files, (list, tuple)), "extra_files must be a list")
+    _require(
+        len(raw_extra_files) <= npu_contract.MAX_PINNED_FILES - 1,
+        "manifest declares too many pinned files",
+    )
+    extra_files = [
+        _file_entry(item, base_dir, "extra file")
+        for item in raw_extra_files
+    ]
     manifest = {
         "schema": SCHEMA_VERSION,
         "name": name,
         "operation": operation,
-        "model": _file_entry(payload.get("model"), base_dir, "model"),
-        "extra_files": [
-            _file_entry(item, base_dir, "extra file")
-            for item in (payload.get("extra_files") or [])
-        ],
-        "providers": _normalize_providers(payload.get("providers")),
+        "model": _file_entry(
+            payload.get("model"), base_dir, "model",
+            max_bytes=npu_contract.MAX_MODEL_BYTES,
+        ),
+        "extra_files": extra_files,
+        "providers": providers,
         "provider_options": _normalize_provider_options(
-            payload.get("provider_options")
+            payload.get("provider_options"), base_dir, providers, extra_files,
         ),
         "limits": _normalize_limits(payload.get("limits"), operation),
         "tokenizer": None,
@@ -249,7 +304,12 @@ def normalize_manifest(payload, base_dir) -> dict:
             "embedding pooling must be one of: %s" % ", ".join(_POOLINGS),
         )
         manifest["pooling"] = pooling
-        manifest["normalize"] = bool(payload.get("normalize", True))
+        normalize = payload.get("normalize", True)
+        _require(
+            isinstance(normalize, bool),
+            "embedding normalize must be a literal boolean",
+        )
+        manifest["normalize"] = normalize
         manifest["preprocess"] = _identity(
             payload.get("preprocess"), "embedding preprocess identity",
         )
@@ -268,6 +328,24 @@ def normalize_manifest(payload, base_dir) -> dict:
                 **_file_entry(tokenizer, base_dir, "tokenizer"),
             }
         manifest["space"] = _normalize_space(payload.get("space"))
+        if manifest["space"] is not None:
+            _require(
+                manifest["space"]["dimension"] == dimension,
+                "space.dimension must equal the manifest output dimension",
+            )
+    pinned = [manifest["model"], *manifest["extra_files"]]
+    if manifest.get("tokenizer"):
+        pinned.append(manifest["tokenizer"])
+    _require(
+        len(pinned) <= npu_contract.MAX_PINNED_FILES,
+        "manifest declares too many pinned files",
+    )
+    paths = [entry["path"].casefold() for entry in pinned]
+    _require(len(paths) == len(set(paths)), "manifest has duplicate pinned file paths")
+    _require(
+        sum(entry["bytes"] for entry in pinned) <= npu_contract.MAX_BUNDLE_BYTES,
+        "manifest pinned bundle exceeds %d bytes" % npu_contract.MAX_BUNDLE_BYTES,
+    )
     core = {
         key: manifest[key]
         for key in sorted(manifest)
@@ -304,15 +382,52 @@ def verify_files(manifest) -> str:
             inside = os.path.normcase(os.path.commonpath([str(base), str(target)]))
             if inside != os.path.normcase(str(base)) or not target.is_file():
                 return "invalid %s path: %s" % (label, entry["path"])
-            size = target.stat().st_size
-            if size != entry["bytes"]:
-                return "size mismatch for %s: %s" % (label, entry["path"])
-            if npu_contract.sha256_file(target) != entry["sha256"]:
+            digest = npu_contract.sha256_file_bounded(
+                target, entry["bytes"], npu_contract.MAX_PINNED_FILE_BYTES,
+            )
+            if digest != entry["sha256"]:
                 return "hash drift for %s: %s" % (label, entry["path"])
         except (OSError, ValueError) as exc:
             return "unreadable %s: %s" % (
                 label, npu_contract.sanitize_error(exc, 120),
             )
+    return ""
+
+
+def file_fingerprints(manifest) -> tuple:
+    """Capture cheap source metadata for an already fully verified session."""
+    base = Path(manifest.get("dir") or "").resolve()
+    entries = [manifest.get("model"), *(manifest.get("extra_files") or [])]
+    if manifest.get("tokenizer"):
+        entries.append(manifest["tokenizer"])
+    rows = []
+    for entry in entries:
+        if not entry:
+            continue
+        target = (base / entry["path"]).resolve(strict=True)
+        inside = os.path.normcase(os.path.commonpath([str(base), str(target)]))
+        if inside != os.path.normcase(str(base)) or not target.is_file():
+            raise ValueError("invalid pinned path %s" % entry["path"])
+        info = os.stat(target, follow_symlinks=False)
+        rows.append((
+            entry["path"], int(info.st_dev), int(info.st_ino),
+            int(info.st_size), int(info.st_mtime_ns),
+        ))
+    return tuple(rows)
+
+
+def fingerprint_drift(manifest, expected) -> str:
+    """Cheap per-call drift check; loaded bytes/staged assets stay immutable."""
+    if not isinstance(expected, tuple):
+        return "load-time file fingerprint is unavailable"
+    try:
+        current = file_fingerprints(manifest)
+    except (OSError, TypeError, ValueError) as exc:
+        return "pinned file metadata unavailable: %s" % (
+            npu_contract.sanitize_error(exc, 120)
+        )
+    if current != expected:
+        return "pinned file metadata changed after session load"
     return ""
 
 
@@ -325,14 +440,22 @@ def load_manifests(directory=None) -> list:
     for path in sorted(base.glob("*.json")):
         row = {"name": path.stem, "path": str(path), "error": ""}
         try:
-            if path.stat().st_size > MAX_MANIFEST_BYTES:
+            with path.open("rb") as stream:
+                opened_size = os.fstat(stream.fileno()).st_size
+                if opened_size > MAX_MANIFEST_BYTES:
+                    raise ValueError(
+                        "manifest exceeds %d bytes" % MAX_MANIFEST_BYTES
+                    )
+                raw = stream.read(MAX_MANIFEST_BYTES + 1)
+            if len(raw) > MAX_MANIFEST_BYTES:
                 raise ValueError(
                     "manifest exceeds %d bytes" % MAX_MANIFEST_BYTES
                 )
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(raw.decode("utf-8"))
+            npu_contract.validate_json_shape(payload)
             manifest = normalize_manifest(payload, base)
             row = {**manifest, "path": str(path), "error": ""}
-        except (OSError, TypeError, ValueError) as exc:
+        except (OSError, TypeError, ValueError, RecursionError) as exc:
             row["error"] = "%s: %s" % (type(exc).__name__, str(exc)[:200])
         rows.append(row)
     return rows

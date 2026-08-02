@@ -1,6 +1,8 @@
 """Server integration for ambiguous execution routing: deterministic cues
 stay authoritative, prefer falls back to the local router, shadow never
 changes behavior, and accelerator errors can never break routing."""
+import pytest
+
 import server
 
 
@@ -70,7 +72,109 @@ def test_prefer_decision_routes_without_local_model(monkeypatch):
     assert "source: npu accelerator" in output
     assert "confidence: 87%" in output
     assert "score margin" in output
-    assert calls[0]["tier"] == "general"
+    # The server recomputes the tier from its own local-only policy instead of
+    # trusting the service-returned value.
+    assert calls[0]["tier"] == "code"
+
+
+def test_server_rejects_nonlocal_or_unknown_npu_decisions(monkeypatch):
+    for bad in (
+        {"mode": "workbench", "tier": "cloud-code"},
+        {"mode": "cloud", "tier": "code"},
+    ):
+        routed = []
+        monkeypatch.setattr(
+            server.npu_service,
+            "route_decide",
+            lambda _prompt, bad=bad: {
+                **bad, "reason": "untrusted", "confidence": 1.0,
+                "source": "npu accelerator",
+            },
+        )
+        monkeypatch.setattr(
+            server,
+            "_execution_route_model",
+            lambda *_args, **_kwargs: {
+                "mode": "workbench", "tier": "code",
+                "reason": "host local fallback", "confidence": 0.8,
+            },
+        )
+        monkeypatch.setattr(
+            server, "workbench_agent",
+            lambda **kwargs: routed.append(kwargs) or "work complete",
+        )
+        output = server.route_work_request(AMBIGUOUS)
+        assert "source: bounded local mode model" in output
+        assert routed[-1]["tier"] == "code"
+
+
+def test_server_uses_canonical_validated_npu_mode(monkeypatch):
+    workbench = []
+    monkeypatch.setattr(
+        server.npu_service,
+        "route_decide",
+        lambda _prompt: {
+            "mode": " WORKBENCH ",
+            "tier": " CODE ",
+            "reason": " bounded local work ",
+            "confidence": 0.75,
+        },
+    )
+    monkeypatch.setattr(
+        server, "_execution_route_model",
+        _never_called("_execution_route_model"),
+    )
+    monkeypatch.setattr(
+        server, "workbench_agent",
+        lambda **kwargs: workbench.append(kwargs) or "work complete",
+    )
+    monkeypatch.setattr(
+        server, "autopilot_start", _never_called("autopilot_start"),
+    )
+
+    output = server.route_work_request(AMBIGUOUS)
+
+    assert "mode: foreground workbench" in output
+    assert "source: npu accelerator" in output
+    assert workbench
+
+
+@pytest.mark.parametrize(
+    "bad_decision",
+    [
+        {"mode": "workbench", "tier": "code"},
+        {"mode": "workbench", "tier": "code", "reason": "missing confidence"},
+        {
+            "mode": "workbench", "tier": "code", "reason": "bad confidence",
+            "confidence": float("nan"),
+        },
+        "not a mapping",
+    ],
+)
+def test_incomplete_npu_decision_falls_back_locally(
+    monkeypatch, bad_decision,
+):
+    routed = []
+    monkeypatch.setattr(
+        server.npu_service, "route_decide", lambda _prompt: bad_decision,
+    )
+    monkeypatch.setattr(
+        server,
+        "_execution_route_model",
+        lambda *_args, **_kwargs: {
+            "mode": "workbench", "tier": "code",
+            "reason": "host local fallback", "confidence": 0.8,
+        },
+    )
+    monkeypatch.setattr(
+        server, "workbench_agent",
+        lambda **kwargs: routed.append(kwargs) or "work complete",
+    )
+
+    output = server.route_work_request(AMBIGUOUS)
+
+    assert "source: bounded local mode model" in output
+    assert routed
 
 
 def test_prefer_miss_falls_back_to_local_ollama_router(monkeypatch):

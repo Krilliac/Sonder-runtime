@@ -46,6 +46,11 @@ def embedding_payload(directory, **overrides):
         "limits": {"deadline_ms": 2000, "max_batch": 4, "max_text_chars": 2000},
     }
     payload.update(overrides)
+    if isinstance(payload.get("space"), dict):
+        payload["space"] = {
+            **payload["space"],
+            "dimension": payload["space"].get("dimension", payload["dimension"]),
+        }
     return payload
 
 
