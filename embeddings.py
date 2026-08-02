@@ -10,6 +10,7 @@ import threading
 import urllib.error
 import urllib.request
 import urllib.parse
+import embed_cache
 import ollama_endpoint
 
 BASE = ollama_endpoint.normalize()
@@ -313,6 +314,20 @@ def embed(text, timeout=30, base=None, model=None):
     prompt = text if text is None else str(text)[:EMBED_MAX_CHARS]
     identity = canonical_model_name(selected_model)
     dimension = expected_dimension(selected_model)
+    if isinstance(prompt, str) and prompt and revision_before:
+        # Same (identity, revision, text) means the same deterministic vector
+        # regardless of which backend produced it, so a cache hit is exact —
+        # and the revision key invalidates on any model update.
+        cached = embed_cache.get(prompt, identity, revision_before)
+        if (
+            valid_vector(cached)
+            and (dimension is None or len(cached) == dimension)
+        ):
+            _EMBED_STATE.vector = cached
+            _EMBED_STATE.revision = revision_before
+            _EMBED_STATE.model = identity
+            _EMBED_STATE.provider = "cache"
+            return cached
     if isinstance(prompt, str) and prompt:
         accelerated = _accelerated_embed(
             prompt, identity, revision_before, dimension,
@@ -364,6 +379,10 @@ def embed(text, timeout=30, base=None, model=None):
                 _EMBED_STATE.provider = "cpu-reference"
             _EMBED_STATE.accelerated = npu_accelerated
             _EMBED_STATE.simulated = simulated_flag
+            embed_cache.put(
+                prompt, identity, revision_before, vector,
+                provider=_EMBED_STATE.provider,
+            )
             return vector
         if _npu_prefer_active():
             _EMBED_STATE.fallback_reason = "npu_unavailable"
@@ -390,6 +409,10 @@ def embed(text, timeout=30, base=None, model=None):
             _EMBED_STATE.model = identity
             _EMBED_STATE.provider = "ollama"
             if isinstance(prompt, str) and prompt:
+                embed_cache.put(
+                    prompt, identity, revision_before, vector,
+                    provider="ollama",
+                )
                 _npu_shadow_embed(prompt, identity, revision_before)
             return vector
     except (urllib.error.URLError, TimeoutError, ValueError, OSError):
