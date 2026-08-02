@@ -19,6 +19,8 @@ scrubbed failure isolation, not an OS sandbox, and runs as the same user.
 """
 from __future__ import annotations
 
+import json
+import os
 import re
 import threading
 
@@ -28,11 +30,14 @@ import npu_contract
 import npu_manifest
 import npu_providers
 import runtime_policy
+import sonder_paths
 import system_profile
 
 
-FEATURES_ID = "exec-route-features-v1"
-FEATURES_DIM = 16
+FEATURES_ID = "exec-route-features-v2"
+FEATURES_DIM = 36
+LEGACY_FEATURES_ID = "exec-route-features-v1"
+LEGACY_FEATURES_DIM = 16
 # A prefer-mode decision needs a confidently scored winner; anything weaker
 # falls back to the existing local Ollama router.
 MIN_PREFER_SCORE = 0.6
@@ -52,6 +57,44 @@ _INSPECT_RE = re.compile(r"\b(inspect|diagnose|investigate|analyze|audit)\b")
 _PATH_RE = re.compile(r"[/\\]|\.[a-z0-9]{1,4}\b|\brepo\b|\brepository\b")
 _QUANTIFIER_RE = re.compile(r"\b(all|every|entire|whole)\b")
 
+# v2 semantic classes. v1's shape/count features cannot see WHICH verbs and
+# targets appear, which is what the LLM router baseline actually keys on
+# (measured 2026-08: distilled v1 agreement 0.665 vs 0.626 majority). These
+# stay deterministic and bounded; raw text still never crosses the process
+# boundary.
+_VERB_CLASS_RES = (
+    re.compile(r"\b(add|build|create|generate|implement|make|scaffold|write)\b"),
+    re.compile(r"\b(correct|debug|fix|patch|repair)\b"),
+    re.compile(
+        r"\b(analyze|audit|benchmark|check|diagnose|inspect|investigate|"
+        r"review|scan|test|validate|verify)\b"
+    ),
+    re.compile(
+        r"\b(clean|convert|edit|improve|migrate|modify|move|optimize|"
+        r"refactor|rename|rewrite|update|upgrade)\b"
+    ),
+    re.compile(r"\b(describe|document|explain|summarize)\b"),
+    re.compile(r"\b(compile|configure|deploy|execute|install|run|ship)\b"),
+    re.compile(r"\b(find|list|open|read|search|view)\b"),
+    re.compile(r"\b(delete|remove)\b"),
+)
+_TARGET_CLASS_RES = (
+    re.compile(
+        r"\b(api|build|cli|code|function|library|module|package|repo|"
+        r"repository|script|scripts|test|tests|tool|tools)\b"
+    ),
+    re.compile(r"\b(changelog|doc|docs|document|presentation|readme|report)\b"),
+    re.compile(
+        r"\b(animation|audio|chart|dashboard|graphic|icon|image|logo|music|"
+        r"scene|sound|sprite|texture|ui|webpage|website)\b"
+    ),
+    re.compile(
+        r"\b(app|application|config|data|directory|file|files|folder|model|"
+        r"path|pipeline|project|system|workspace)\b"
+    ),
+)
+_NUMBERED_STEP_RE = re.compile(r"\b\d+[).:]\s")
+
 # Mutable runtime state survives helper live-reload, like activity spans do.
 if "_STATE_LOCK" not in globals():
     _STATE_LOCK = threading.Lock()
@@ -59,6 +102,16 @@ if "_MANIFEST_CACHE" not in globals():
     _MANIFEST_CACHE = {"signature": None, "rows": []}
 if "_SHADOW" not in globals():
     _SHADOW = {"agree": 0, "disagree": 0, "errors": 0}
+if "_LEDGER" not in globals():
+    _LEDGER = {"loaded": False, "recent": [], "agree": 0, "disagree": 0,
+               "errors": 0}
+
+# Promoting routing to prefer is an operator decision; these thresholds only
+# gate the ADVISORY that live evidence supports it. The ledger survives
+# restarts so shadow evidence accumulates across sessions.
+SHADOW_ADVISORY_MIN_N = 50
+SHADOW_ADVISORY_MIN_AGREEMENT = 0.85
+_LEDGER_RECENT_CAP = 500
 
 
 def reset_for_tests():
@@ -66,6 +119,97 @@ def reset_for_tests():
         _MANIFEST_CACHE["signature"] = None
         _MANIFEST_CACHE["rows"] = []
         _SHADOW.update(agree=0, disagree=0, errors=0)
+        _LEDGER.update(loaded=False, recent=[], agree=0, disagree=0, errors=0)
+
+
+def _ledger_path() -> str:
+    return sonder_paths.state_path(
+        "npu-shadow-ledger.json", "SONDER_NPU_SHADOW_LEDGER",
+    )
+
+
+def _ledger_load_locked():
+    if _LEDGER["loaded"]:
+        return
+    _LEDGER["loaded"] = True
+    try:
+        with open(_ledger_path(), "r", encoding="utf-8") as stream:
+            raw = json.load(stream)
+        recent = [
+            1 if item else 0 for item in (raw.get("recent") or [])
+        ][-_LEDGER_RECENT_CAP:]
+        _LEDGER["recent"] = recent
+        for key in ("agree", "disagree", "errors"):
+            value = raw.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                _LEDGER[key] = max(0, value)
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def _ledger_record(outcome):
+    """Persist one shadow outcome ('agree'/'disagree'/'error'); fail-soft."""
+    with _STATE_LOCK:
+        _ledger_load_locked()
+        if outcome in ("agree", "disagree"):
+            _LEDGER["recent"].append(1 if outcome == "agree" else 0)
+            del _LEDGER["recent"][:-_LEDGER_RECENT_CAP]
+            _LEDGER[outcome] += 1
+        else:
+            _LEDGER["errors"] += 1
+        snapshot = {
+            "recent": list(_LEDGER["recent"]),
+            "agree": _LEDGER["agree"],
+            "disagree": _LEDGER["disagree"],
+            "errors": _LEDGER["errors"],
+        }
+    try:
+        path = _ledger_path()
+        temp = path + ".tmp"
+        with open(temp, "w", encoding="utf-8") as stream:
+            json.dump(snapshot, stream)
+        os.replace(temp, path)
+    except OSError:
+        pass
+
+
+def shadow_advisory() -> dict:
+    """Live routing shadow evidence and the promotion advisory it supports."""
+    with _STATE_LOCK:
+        _ledger_load_locked()
+        recent = list(_LEDGER["recent"])
+        totals = {
+            "agree": _LEDGER["agree"],
+            "disagree": _LEDGER["disagree"],
+            "errors": _LEDGER["errors"],
+        }
+    window = len(recent)
+    agreement = (sum(recent) / window) if window else None
+    supported = (
+        window >= SHADOW_ADVISORY_MIN_N
+        and agreement is not None
+        and agreement >= SHADOW_ADVISORY_MIN_AGREEMENT
+    )
+    if supported:
+        advisory = (
+            "live shadow agreement supports routing prefer "
+            "(runtime_policy_update npu_json '{\"routing\": \"prefer\"}')"
+        )
+    elif window >= SHADOW_ADVISORY_MIN_N:
+        advisory = "live shadow agreement below the prefer threshold"
+    else:
+        advisory = "insufficient live shadow decisions (%d of %d)" % (
+            window, SHADOW_ADVISORY_MIN_N,
+        )
+    return {
+        "window": window,
+        "agreement": round(agreement, 4) if agreement is not None else None,
+        "totals": totals,
+        "threshold": SHADOW_ADVISORY_MIN_AGREEMENT,
+        "min_decisions": SHADOW_ADVISORY_MIN_N,
+        "prefer_supported": supported,
+        "advisory": advisory,
+    }
 
 
 def _policy():
@@ -158,6 +302,54 @@ def route_features(text) -> list:
     ]
 
 
+def route_features_v2(text) -> list:
+    """v1 features plus deterministic semantic verb/target-class features.
+
+    Dims 0-15 are exactly ``route_features``. Dims 16-35 add bounded class
+    counts and structure cues. The identity string is part of the manifest
+    contract; any change here requires a new FEATURES_ID.
+    """
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    lowered = value.lower()
+    sentences = [part.strip() for part in re.split(r"[.!?;]+", lowered)
+                 if part.strip()]
+    words = lowered.split()
+    verb_counts = [len(rx.findall(lowered)) for rx in _VERB_CLASS_RES]
+    target_counts = [len(rx.findall(lowered)) for rx in _TARGET_CLASS_RES]
+    verify_rx = _VERB_CLASS_RES[2]
+    imperative = [
+        sentence for sentence in sentences
+        if sentence and _ACTION_RE.match(sentence.split()[0])
+    ]
+    max_sentence_words = max(
+        (len(sentence.split()) for sentence in sentences), default=0,
+    )
+    avg_word_len = (
+        sum(len(word) for word in words) / len(words) if words else 0.0
+    )
+    return route_features(text) + [
+        *(_clip(count, 3.0) for count in verb_counts),
+        *(_clip(count, 3.0) for count in target_counts),
+        1.0 if _NUMBERED_STEP_RE.search(value) else 0.0,
+        1.0 if sentences and verify_rx.search(sentences[-1]) else 0.0,
+        _clip(sum(1 for count in verb_counts if count), 8.0),
+        _clip(sum(1 for count in target_counts if count), 4.0),
+        _clip(max_sentence_words, 40.0),
+        _clip(lowered.count(";") + lowered.count(":"), 4.0),
+        round(len(imperative) / len(sentences), 4) if sentences else 0.0,
+        _clip(avg_word_len, 8.0),
+    ]
+
+
+# Manifest ``input.identity`` selects the feature contract; unknown identities
+# are rejected in _routing_call so a stale manifest can never feed mismatched
+# features to a model.
+FEATURE_CONTRACTS = {
+    LEGACY_FEATURES_ID: (LEGACY_FEATURES_DIM, route_features),
+    FEATURES_ID: (FEATURES_DIM, route_features_v2),
+}
+
+
 def _execution_provenance(response, manifest) -> dict:
     """Validate that worker provider claims are internally consistent."""
     provider = str(response.get("provider") or "").strip().lower()
@@ -230,11 +422,12 @@ def _routing_call(prompt):
     if manifest is None:
         return None, "no_manifest"
     declared = manifest.get("input") or {}
-    features = route_features(prompt)
-    if (
-        declared.get("identity") != FEATURES_ID
-        or declared.get("dimension") != len(features)
-    ):
+    contract = FEATURE_CONTRACTS.get(str(declared.get("identity") or ""))
+    if contract is None:
+        return None, "identity_mismatch"
+    dimension, feature_fn = contract
+    features = feature_fn(prompt)
+    if declared.get("dimension") != dimension or len(features) != dimension:
         return None, "identity_mismatch"
     broker = npu_broker.get_broker()
     try:
@@ -326,12 +519,14 @@ def route_shadow(prompt, baseline):
     if decision is None:
         with _STATE_LOCK:
             _SHADOW["errors"] += 1
+        _ledger_record("error")
         _event("npu_route_shadow", ok=False, reason=why)
         return None
     baseline_mode = str((baseline or {}).get("mode") or "")
     agree = baseline_mode == decision["winner"]
     with _STATE_LOCK:
         _SHADOW["agree" if agree else "disagree"] += 1
+    _ledger_record("agree" if agree else "disagree")
     _event(
         "npu_route_shadow",
         ok=True,
@@ -628,6 +823,8 @@ def status(probe=False) -> dict:
         "runtime_ready": runtime_ready,
         "healthy": healthy,
         "features_id": FEATURES_ID,
+        "feature_contracts": sorted(FEATURE_CONTRACTS),
+        "shadow_live": shadow_advisory(),
         "manifest_count": len(rows),
         "manifest_errors": sum(1 for row in rows if row.get("error")),
         "manifests": {
@@ -710,6 +907,15 @@ def format_status(state=None) -> str:
         "  shadow: agree=%s disagree=%s errors=%s" % (
             state["shadow"].get("agree", 0), state["shadow"].get("disagree", 0),
             state["shadow"].get("errors", 0),
+        ),
+        "  shadow-live: %s over %s decision(s) — %s" % (
+            (
+                "%.0f%%" % (100.0 * state["shadow_live"]["agreement"])
+                if state["shadow_live"].get("agreement") is not None
+                else "n/a"
+            ),
+            state["shadow_live"].get("window", 0),
+            state["shadow_live"].get("advisory", ""),
         ),
     ]
     if hello.get("ort_version"):

@@ -260,12 +260,15 @@ worker cold start ~6 s (spawn + full-bundle SHA-256 + session load), warm
 embedding ~23 ms (vs the Ollama HTTP path), warm routing ~1.4 ms (vs a 1–2 s
 router-tier LLM call), embedder worker RSS ~1.1 GiB. Distilled routing
 holdout agreement with the baseline router was 0.665 against a 0.626
-majority rate on a synthetic in-band corpus: the v1 feature vector carries
-phase-count/shape signal but not the verb/target semantics the LLM baseline
-actually keys on. Routing therefore ships in **shadow** (measuring live
-agreement, never changing behavior) while embeddings can run **prefer**;
-promoting routing to prefer should wait for either strong live shadow
-agreement or a semantically richer `exec-route-features-v2` contract.
+majority rate on a synthetic in-band corpus with the v1 features, and 0.680
+with the v2 semantic contract (`exec-route-features-v2`, 36 dims adding
+verb/target-class and structure features). The residual gap is partly the
+baseline itself: the router-tier LLM flipped 12.5% of labels under trivial
+meaning-preserving paraphrase, capping any distillation near ~0.87. Routing
+therefore ships in **shadow** (measuring live agreement, never changing
+behavior) while embeddings can run **prefer**; promoting routing to prefer
+should be an evidence call from live shadow agreement, or a decision to
+distill from a stronger local judge than the production router tier.
 
 ## Diagnostics and telemetry
 

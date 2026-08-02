@@ -156,13 +156,37 @@ def test_route_features_are_versioned_bounded_and_deterministic():
     features = npu_service.route_features(
         "Inspect the repo, then fix the API, and validate all tests."
     )
-    assert npu_service.FEATURES_ID == "exec-route-features-v1"
-    assert len(features) == npu_service.FEATURES_DIM == 16
+    assert npu_service.LEGACY_FEATURES_ID == "exec-route-features-v1"
+    assert len(features) == npu_service.LEGACY_FEATURES_DIM == 16
     assert all(0.0 <= value <= 1.0 for value in features)
     assert features == npu_service.route_features(
         "Inspect the repo, then fix the API, and validate all tests."
     )
     assert features != npu_service.route_features("hi")
+
+
+def test_route_features_v2_extend_v1_and_stay_bounded():
+    prompt = (
+        "Inspect the repo, then fix the API, and validate all tests. "
+        "1) refactor the config 2) document the changes."
+    )
+    features = npu_service.route_features_v2(prompt)
+    assert npu_service.FEATURES_ID == "exec-route-features-v2"
+    assert len(features) == npu_service.FEATURES_DIM == 36
+    assert features[:16] == npu_service.route_features(prompt)
+    assert all(0.0 <= value <= 1.0 for value in features)
+    assert features == npu_service.route_features_v2(prompt)
+    # semantic dims must differ between create-heavy and inspect-heavy asks
+    create = npu_service.route_features_v2(
+        "Build the api, write the docs, then create the ui in ./src."
+    )
+    inspect = npu_service.route_features_v2(
+        "Audit the api, review the docs, then inspect the ui in ./src."
+    )
+    assert create[16:] != inspect[16:]
+    assert set(npu_service.FEATURE_CONTRACTS) == {
+        npu_service.LEGACY_FEATURES_ID, npu_service.FEATURES_ID,
+    }
 
 
 @pytest.mark.parametrize("field", [
@@ -679,3 +703,48 @@ def test_status_redacts_vendor_paths_and_credentials(npu_env, monkeypatch):
     assert "/home/example" not in rendered
     assert "another-secret" not in rendered
     assert "<redacted>" in rendered or "<path>" in rendered
+
+
+def test_shadow_ledger_persists_and_advises(monkeypatch, tmp_path):
+    monkeypatch.setenv(
+        "SONDER_NPU_SHADOW_LEDGER", str(tmp_path / "ledger.json"),
+    )
+    npu_service.reset_for_tests()
+    advisory = npu_service.shadow_advisory()
+    assert advisory["window"] == 0
+    assert advisory["prefer_supported"] is False
+    assert "insufficient" in advisory["advisory"]
+
+    for _ in range(60):
+        npu_service._ledger_record("agree")
+    npu_service._ledger_record("disagree")
+    npu_service._ledger_record("error")
+
+    advisory = npu_service.shadow_advisory()
+    assert advisory["window"] == 61
+    assert advisory["prefer_supported"] is True
+    assert advisory["totals"] == {"agree": 60, "disagree": 1, "errors": 1}
+    assert "prefer" in advisory["advisory"]
+
+    # a process restart (reset) must reload the persisted evidence
+    npu_service.reset_for_tests()
+    advisory = npu_service.shadow_advisory()
+    assert advisory["window"] == 61
+    assert advisory["totals"]["agree"] == 60
+
+
+def test_shadow_ledger_low_agreement_does_not_advise_prefer(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setenv(
+        "SONDER_NPU_SHADOW_LEDGER", str(tmp_path / "ledger.json"),
+    )
+    npu_service.reset_for_tests()
+    for index in range(60):
+        npu_service._ledger_record(
+            "agree" if index % 2 == 0 else "disagree",
+        )
+    advisory = npu_service.shadow_advisory()
+    assert advisory["window"] == 60
+    assert advisory["prefer_supported"] is False
+    assert "below" in advisory["advisory"]

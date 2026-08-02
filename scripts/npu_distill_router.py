@@ -9,8 +9,8 @@ capability consumes:
 2. Labels each prompt with the real baseline: ``server._execution_route_model``
    running against the local Ollama router tier (temperature 0).  Labels are
    cached to a JSONL sidecar so interrupted runs resume without re-querying.
-3. Trains a small numpy MLP (16 -> 24 -> 2) on ``npu_service.route_features``
-   vectors to reproduce the baseline decision.
+3. Trains a small numpy MLP on the current default feature contract
+   (``npu_service.FEATURES_ID``) to reproduce the baseline decision.
 4. Exports the network as a self-contained ONNX file and writes the pinned
    ``exec-route-v1`` manifest beside it.
 
@@ -345,7 +345,8 @@ def export_onnx(params, out_path: Path, features_dim: int) -> bytes:
     return payload
 
 
-def write_manifest(manifest_dir: Path, model_rel: str, payload: bytes) -> Path:
+def write_manifest(manifest_dir: Path, model_rel: str, payload: bytes,
+                   features_id: str, dimension: int) -> Path:
     manifest = {
         "schema": 1,
         "name": "exec-route-v1",
@@ -355,7 +356,7 @@ def write_manifest(manifest_dir: Path, model_rel: str, payload: bytes) -> Path:
             "sha256": hashlib.sha256(payload).hexdigest(),
             "bytes": len(payload),
         },
-        "input": {"identity": "exec-route-features-v1", "dimension": 16},
+        "input": {"identity": features_id, "dimension": dimension},
         "labels": list(LABELS),
         "postprocess": "softmax",
         "providers": ["vitisai", "cpu"],
@@ -400,7 +401,9 @@ def main() -> int:
               "router tier?")
         return 1
 
-    features = [npu_service.route_features(row["prompt"]) for row in usable]
+    features_dim, feature_fn = npu_service.FEATURE_CONTRACTS[
+        npu_service.FEATURES_ID]
+    features = [feature_fn(row["prompt"]) for row in usable]
     targets = [LABELS.index(row["mode"]) for row in usable]
     params, stats = train_mlp(features, targets, args.seed)
     print("training: %(train_n)d train / %(holdout_n)d holdout | "
@@ -413,13 +416,16 @@ def main() -> int:
               "written" % args.min_agreement)
         return 1
 
-    payload = export_onnx(params, models_dir / "route.onnx", 16)
-    manifest_path = write_manifest(manifest_dir, "models/route.onnx", payload)
+    payload = export_onnx(params, models_dir / "route.onnx", features_dim)
+    manifest_path = write_manifest(
+        manifest_dir, "models/route.onnx", payload,
+        npu_service.FEATURES_ID, features_dim)
     report = {
         "generated_utc": time.strftime(
             "%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "samples": len(usable),
         "seed": args.seed,
+        "features_id": npu_service.FEATURES_ID,
         "stats": stats,
         "model_sha256": hashlib.sha256(payload).hexdigest(),
         "elapsed_s": round(time.time() - started, 1),

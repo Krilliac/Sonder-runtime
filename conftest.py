@@ -20,6 +20,10 @@ os.environ.update(
         "SONDER_DB": str(_TEST_STATE_ROOT / "memory.db"),
         "SONDER_FLEET_DB": str(_TEST_STATE_ROOT / "fleet.db"),
         "SONDER_FLEET_HEARTBEAT": "0",
+        # The embed cache would couple tests through shared state: a text
+        # embedded by one test would satisfy another test's embed from cache
+        # and skip its mocked HTTP path. Cache tests opt back in explicitly.
+        "SONDER_EMBED_CACHE": "0",
         "SONDER_ALLOW_CLOUD": "0",
         "SONDER_WEB_TOOLS": "0",
         "SONDER_LIVE_RELOAD": "0",
