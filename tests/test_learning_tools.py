@@ -371,3 +371,98 @@ def test_code_gate_failure_uses_idempotent_atomic_outcome_path(monkeypatch, tmp_
         assert stats["losses"] == 1
     finally:
         conn.close()
+
+
+def test_drain_deferred_distillations_retries_fleet_deferred_jobs(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
+    conn = server._open_db()
+    try:
+        memory_store.log_interaction(conn, "I1", "task", "", "answer", "code")
+        memory_store.log_interaction(conn, "I2", "task", "", "answer", "code")
+    finally:
+        conn.close()
+    candidates = iter(("LNEW1", "LNEW2", "LNEW3", "LNEW4"))
+
+    def _next_candidate(*args, **kwargs):
+        lesson_id = next(candidates)
+        return _prepared_candidate(
+            lesson_id=lesson_id,
+            text="Use pathlib.Path for path joins (%s)." % lesson_id,
+        )
+
+    monkeypatch.setattr(
+        server.reflection, "prepare_lesson_candidate", _next_candidate,
+    )
+
+    # A busy fleet defers distillation for both campaign outcomes.
+    monkeypatch.setattr(
+        server.master_orchestrator, "active_model_call_count", lambda: 2,
+    )
+    assert "deferred for retry" in server.record_outcome("I1", "tests_passed")
+    assert "deferred for retry" in server.record_outcome("I2", "tests_passed")
+
+    # A busy fleet also blocks the drain itself.
+    assert server._drain_deferred_distillations() == {
+        "drained": 0, "stored": 0, "deferred": 0,
+    }
+
+    # Once quiet, the drain stores the deferred lessons without new outcomes.
+    monkeypatch.setattr(
+        server.master_orchestrator, "active_model_call_count", lambda: 0,
+    )
+    drain = server._drain_deferred_distillations()
+    assert drain["drained"] == 2
+    assert drain["stored"] == 2
+    assert drain["deferred"] == 0
+
+    conn = server._open_db()
+    try:
+        for interaction_id in ("I1", "I2"):
+            assert conn.execute(
+                "SELECT COUNT(*) FROM outcomes WHERE interaction_id=?",
+                (interaction_id,),
+            ).fetchone()[0] == 1
+            state = conn.execute(
+                "SELECT state FROM lesson_distillations WHERE interaction_id=?",
+                (interaction_id,),
+            ).fetchone()[0]
+            assert state == memory_store.DISTILLATION_STORED
+        assert conn.execute(
+            "SELECT COUNT(*) FROM lesson_distillations WHERE state='retryable'"
+        ).fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_prepare_lesson_candidate_bounded_matches_reflection_interface(
+    monkeypatch,
+):
+    """The bounded offload closure must accept reflection.distill's exact
+    call shape — an interface drift here fails every real distillation with
+    TypeError while tests that mock prepare_lesson_candidate stay green."""
+    seen = {}
+
+    def fake_generate_text(prompt, tier="fast", system="", temperature=0.2,
+                           num_predict=256, num_ctx=2048, timeout=None):
+        seen.update(tier=tier, system=system, num_predict=num_predict,
+                    timeout=timeout)
+        return "Use pathlib.Path for path joins."
+
+    monkeypatch.setattr(server, "_generate_text", fake_generate_text)
+    monkeypatch.setattr(server.embeddings, "embed", lambda *a, **k: None)
+
+    interaction = {
+        "id": "I-real",
+        "task": "join two paths",
+        "response": "used pathlib",
+        "tier": "code",
+    }
+    candidate = server._prepare_lesson_candidate_bounded(
+        interaction, "tests_passed",
+    )
+    assert isinstance(candidate, dict)
+    assert seen["tier"] == "code"
+    assert seen["system"]
+    assert seen["timeout"] is not None

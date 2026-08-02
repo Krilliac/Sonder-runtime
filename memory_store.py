@@ -1039,6 +1039,21 @@ def record_outcome_and_claim_lesson_distillation(
     )
 
 
+def list_retryable_distillations(conn, limit=32):
+    """Oldest-first (interaction_id, signal) pairs whose distillation deferred.
+
+    Deferred jobs are normally reclaimed only when another outcome lands on
+    the same interaction; campaign interactions get exactly one outcome, so a
+    quiet-time drain uses this listing to retry them explicitly.
+    """
+    rows = conn.execute(
+        "SELECT interaction_id, signal FROM lesson_distillations "
+        "WHERE state=? ORDER BY updated_ts ASC, interaction_id ASC LIMIT ?",
+        (DISTILLATION_RETRYABLE, max(1, int(limit))),
+    ).fetchall()
+    return [(str(row[0]), str(row[1] or "")) for row in rows]
+
+
 def mark_lesson_distillation_retryable(
     conn, interaction_id, claim_token, error="",
 ):
