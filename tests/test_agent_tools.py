@@ -305,6 +305,68 @@ def test_agent_repairs_invalid_json_decision_then_continues(monkeypatch):
     assert "grounded observation" in prompts[2]
 
 
+def test_agent_returns_structured_transport_error_without_traceback(monkeypatch):
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+
+    def fail(_prompt, history=None):
+        raise server.ModelCallError(
+            "empty_response",
+            'Ollama returned no assistant content; metadata={"done_reason":"length"}',
+            cloud=True,
+        )
+
+    monkeypatch.setattr(server, "_make_generate", lambda *a, **k: fail)
+
+    output = server._agent_impl("write the implementation", tier="cloud-general")
+
+    assert output.startswith("ERROR: invalid response from hosted Ollama")
+    assert "done_reason" in output
+
+
+def test_agent_returns_transport_error_when_format_repair_fails(monkeypatch):
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    calls = {"count": 0}
+
+    def generate(_prompt, history=None):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return "not a tool decision"
+        raise server.ModelCallError(
+            "empty_response", "repair produced no assistant content", cloud=True,
+        )
+
+    monkeypatch.setattr(server, "_make_generate", lambda *a, **k: generate)
+
+    output = server._agent_impl("write the implementation", tier="cloud-general")
+
+    assert output.startswith("ERROR: invalid response from hosted Ollama")
+    assert "repair produced no assistant content" in output
+    assert calls["count"] == 2
+
+
+def test_negative_claim_review_returns_structured_transport_error(monkeypatch):
+    def fail(_prompt, history=None):
+        raise server.ModelCallError(
+            "empty_response", "review produced no assistant content", cloud=True,
+        )
+
+    monkeypatch.setattr(server, "_make_generate", lambda *a, **k: fail)
+
+    review = server._agent_negative_claim_review(
+        "inspect the project",
+        "The requested symbol does not exist.",
+        ["step 1 tool=text_search\nno matches"],
+        "glm-5.2:cloud",
+        cloud=True,
+    )
+
+    assert review["decision"] == "error"
+    assert review["reason"].startswith(
+        "ERROR: invalid response from hosted Ollama"
+    )
+    assert review["tool"] == ""
+
+
 def test_agent_cancellation_stops_before_next_tool_dispatch(monkeypatch):
     responses = [
         '{"tool":"file_read","args":{"path":"README.md"}}',
@@ -1079,6 +1141,22 @@ def test_project_scope_args_roots_agent_file_tools_at_the_project(tmp_path):
     assert server._project_scope_args("file_find", {"query": "*.log", "root": "."}, proj)["root"] == proj
     assert server._project_scope_args("text_search", {"query": "x"}, proj)["root"] == proj
 
+    # validators execute against the same project root as the mutation they
+    # are expected to cover.
+    workspace = server._project_scope_args(
+        "workspace_run", {"program": "python", "cwd": "."}, proj,
+    )
+    assert workspace["cwd"] == server.os.path.join(proj, ".")
+    assert workspace["extra_roots"] == proj
+    script = server._project_scope_args(
+        "script_run", {"path": "checks.py", "cwd": "."}, proj,
+    )
+    assert script["path"] == server.os.path.join(proj, "checks.py")
+    assert script["cwd"] == server.os.path.join(proj, ".")
+    assert server._project_scope_args(
+        "ground_artifact", {"artifact": "hello"}, proj,
+    ) == {"artifact": "hello"}
+
     # an absolute path is authorized but not rewritten
     abs_path = server.os.path.join(proj, "sub", "a.cpp")
     assert server._project_scope_args("file_read", {"path": abs_path}, proj)["path"] == abs_path
@@ -1086,3 +1164,303 @@ def test_project_scope_args_roots_agent_file_tools_at_the_project(tmp_path):
     # no project, or a non-scoped tool, leaves args untouched
     assert server._project_scope_args("file_read", {"path": "VERSIONS.txt"}, "") == {"path": "VERSIONS.txt"}
     assert server._project_scope_args("run_code", {"code": "x"}, proj) == {"code": "x"}
+
+
+def test_write_agent_rejects_absolute_path_outside_project(
+    monkeypatch, tmp_path,
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "outside.py"
+    responses = [
+        '{"tool":"file_write","args":{"path":%s,"content":"escaped"}}'
+        % server.json.dumps(str(outside)),
+        '{"final":"done"}',
+    ]
+    dispatches = []
+    monkeypatch.setattr(
+        server,
+        "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: responses.pop(0),
+    )
+    monkeypatch.setattr(
+        server,
+        "_agent_dispatch_observed",
+        lambda *a, **k: dispatches.append((a, k)) or "unexpected",
+    )
+
+    output = server._agent_impl(
+        "write only inside the project",
+        project=str(project),
+        max_steps=2,
+        include_evidence=True,
+    )
+
+    assert not dispatches
+    assert not outside.exists()
+    assert "outside the host-selected project root" in output
+
+
+def test_path_like_missing_project_fails_before_model_or_tool(
+    monkeypatch, tmp_path,
+):
+    model_calls = []
+    dispatches = []
+    monkeypatch.setattr(
+        server,
+        "_make_generate",
+        lambda *a, **k: model_calls.append((a, k)) or (
+            lambda prompt, history=None: '{"final":"unexpected"}'
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "_agent_dispatch_observed",
+        lambda *a, **k: dispatches.append((a, k)) or "unexpected",
+    )
+
+    output = server._agent_impl(
+        "write a file", project=str(tmp_path / "missing"),
+    )
+
+    assert output.startswith("ERROR: invalid agent project root:")
+    assert not model_calls
+    assert not dispatches
+
+
+def test_project_mutation_and_validation_share_canonical_scope(
+    monkeypatch, tmp_path,
+):
+    responses = [
+        '{"tool":"file_write","args":{"path":"target.py","content":"x=1\\n"}}',
+        '{"tool":"workspace_run","args":{"program":"python","cwd":".",'
+        '"args_json":["-m","py_compile","target.py"]}}',
+        '{"final":"implemented and validated"}',
+    ]
+    dispatches = []
+    captured = []
+    original_covers = server._agent_validation_covers
+    monkeypatch.setattr(
+        server,
+        "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: responses.pop(0),
+    )
+
+    def dispatch(tool, args, **kwargs):
+        dispatches.append((tool, args, kwargs))
+        return "workspace run\n  ok: true\n  exit: 0" if tool == "workspace_run" else "wrote target.py"
+
+    def covers(tool, args, mutations, observation=""):
+        captured.append((tool, args, mutations))
+        return original_covers(tool, args, mutations, observation)
+
+    monkeypatch.setattr(server, "_agent_dispatch_observed", dispatch)
+    monkeypatch.setattr(server, "_agent_validation_covers", covers)
+
+    receipt = server._agent_impl(
+        "write target.py",
+        project=str(tmp_path),
+        max_steps=3,
+        return_host_receipt=True,
+    )
+
+    expected = server.os.path.normcase(
+        server.os.path.realpath(str(tmp_path / "target.py"))
+    )
+    assert receipt.validation_passed
+    assert captured[-1][2] == [{"tool": "file_write", "path": expected}]
+    assert server.os.path.normcase(server.os.path.realpath(captured[-1][1]["cwd"])) == server.os.path.normcase(server.os.path.realpath(str(tmp_path)))
+    assert dispatches[0][1]["path"] == str(tmp_path / "target.py")
+
+
+def test_validation_rejects_inline_keyword_and_partial_file_checks(tmp_path):
+    first = server._agent_normalized_path(tmp_path / "a.py")
+    second = server._agent_normalized_path(tmp_path / "b.py")
+    mutations = [
+        {"tool": "file_write", "path": first},
+        {"tool": "file_write", "path": second},
+    ]
+    cwd = str(tmp_path)
+
+    assert not server._agent_validation_covers(
+        "workspace_run",
+        {"program": "python", "cwd": cwd, "args": ["-c", "print('test')"]},
+        mutations,
+    )
+    assert not server._agent_validation_covers(
+        "workspace_run",
+        {"program": "node", "cwd": cwd, "args": ["-e", "console.log('lint')"]},
+        mutations,
+    )
+    assert not server._agent_validation_covers(
+        "workspace_run",
+        {"program": "python", "cwd": cwd, "args": ["-m", "py_compile", "a.py"]},
+        mutations,
+    )
+    assert not server._agent_validation_covers(
+        "script_run", {"path": str(tmp_path / "a.py"), "cwd": cwd}, mutations,
+    )
+    assert server._agent_validation_covers(
+        "workspace_run",
+        {"program": "python", "cwd": cwd, "args": ["-m", "py_compile", "a.py", "b.py"]},
+        mutations,
+    )
+    assert server._agent_validation_covers(
+        "workspace_run", {"program": "pytest", "cwd": cwd, "args": []}, mutations,
+    )
+    assert not server._agent_validation_covers(
+        "workspace_run",
+        {"program": "pytest", "cwd": cwd, "args": ["--help"]},
+        mutations,
+        "workspace run\n  ok: true",
+    )
+    assert not server._agent_validation_covers(
+        "workspace_run",
+        {"program": "pytest", "cwd": cwd, "args": []},
+        mutations,
+        "workspace run\n  ok: true\nno tests ran in 0.01s",
+    )
+
+
+def test_failed_mutator_invalidates_successful_inspection_cache(monkeypatch):
+    responses = [
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"tool":"game_generate_and_test","args":{"name":"partial"}}',
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"final":"reported the failed generation"}',
+    ]
+    dispatches = []
+    monkeypatch.setattr(
+        server,
+        "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: responses.pop(0),
+    )
+
+    def dispatch(tool, args, **kwargs):
+        dispatches.append(tool)
+        if tool == "game_generate_and_test":
+            return "generated game: FAIL\nroot: games/partial"
+        return "README evidence"
+
+    monkeypatch.setattr(server, "_agent_dispatch_observed", dispatch)
+
+    output = server._agent_impl("inspect, generate, inspect", max_steps=4)
+
+    assert output == "reported the failed generation"
+    assert dispatches == [
+        "file_read", "game_generate_and_test", "file_read",
+    ]
+
+
+def test_failed_mutator_marks_receipt_dirty_and_unvalidated(monkeypatch):
+    responses = [
+        '{"tool":"game_generate_and_test","args":{"name":"partial"}}',
+        '{"final":"generation failed"}',
+    ]
+    monkeypatch.setattr(
+        server,
+        "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: responses.pop(0),
+    )
+    monkeypatch.setattr(
+        server,
+        "_agent_dispatch_observed",
+        lambda *a, **k: "generated game: FAIL\nroot: games/partial",
+    )
+
+    receipt = server._agent_impl(
+        "generate a game", max_steps=2, return_host_receipt=True,
+    )
+
+    assert receipt.mutation_observed
+    assert not receipt.validation_passed
+
+
+def test_execution_after_validation_invalidates_prior_pass(monkeypatch):
+    responses = [
+        '{"tool":"file_write","args":{"path":"target.py","content":"x=1"}}',
+        '{"tool":"workspace_run","args":{"program":"pytest","args":[]}}',
+        '{"tool":"workflow_run","args":{"name":"possibly-mutating"}}',
+        '{"final":"done"}',
+    ]
+    monkeypatch.setattr(
+        server,
+        "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: responses.pop(0),
+    )
+    monkeypatch.setattr(
+        server, "_agent_dispatch_observed", lambda *a, **k: "ok",
+    )
+
+    receipt = server._agent_impl(
+        "write, validate, then run workflow",
+        max_steps=4,
+        return_host_receipt=True,
+    )
+
+    assert receipt.mutation_observed
+    assert not receipt.validation_attempted
+    assert not receipt.validation_passed
+
+
+def test_project_execution_rejects_inline_and_outside_argv(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "outside.py"
+
+    scoped_inline = server._project_scope_args(
+        "workspace_run",
+        {"program": "python", "args": ["-c", "print('x')"], "cwd": "."},
+        str(project),
+    )
+    assert "inline interpreter" in server._agent_project_execution_argument_error(
+        "workspace_run", scoped_inline, str(project),
+    )
+
+    scoped_outside = server._project_scope_args(
+        "workspace_run",
+        {"program": "python", "args": [str(outside)], "cwd": "."},
+        str(project),
+    )
+    assert "argv path is outside" in server._agent_project_execution_argument_error(
+        "workspace_run", scoped_outside, str(project),
+    )
+
+    scoped_inside = server._project_scope_args(
+        "workspace_run",
+        {"program": "python", "args": ["-m", "py_compile", "inside.py"], "cwd": "."},
+        str(project),
+    )
+    assert server._agent_project_execution_argument_error(
+        "workspace_run", scoped_inside, str(project),
+    ) == ""
+
+
+def test_project_agent_rejects_unscoped_persistent_generator(
+    monkeypatch, tmp_path,
+):
+    responses = [
+        '{"tool":"artifact_generate","args":{"name":"escape","brief":"x"}}',
+        '{"final":"blocked"}',
+    ]
+    dispatches = []
+    monkeypatch.setattr(
+        server,
+        "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: responses.pop(0),
+    )
+    monkeypatch.setattr(
+        server,
+        "_agent_dispatch_observed",
+        lambda *a, **k: dispatches.append((a, k)) or "unexpected",
+    )
+
+    output = server._agent_impl(
+        "generate inside this project",
+        project=str(tmp_path),
+        max_steps=2,
+        include_evidence=True,
+    )
+
+    assert not dispatches
+    assert "no project-rooted output contract" in output
