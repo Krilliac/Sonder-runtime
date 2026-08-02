@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -77,6 +78,74 @@ def test_assembles_and_revalidates_platform_bundle(monkeypatch, tmp_path):
     assert bundle.base_models[0].name == "qwen2.5-coder:1.5b"
     assert not list(output.rglob("*.pyc"))
     assert engine_bundle.load_engine_bundle(output).manifest_sha256 == bundle.manifest_sha256
+
+
+def test_supplied_runtime_validation_requires_fastmcp_api(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(assembler, "ROOT", repo)
+    python_runtime, ollama_runtime, model_store = _inputs(tmp_path)
+    output = repo / "dist" / "engine-bundles" / engine_bundle.platform_bundle_name()
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="No module named 'mcp.server.fastmcp'",
+        )
+
+    monkeypatch.setattr(assembler.subprocess, "run", fake_run)
+
+    with pytest.raises(ValueError, match="FastMCP compatibility API"):
+        assembler.assemble_bundle(
+            output,
+            python_runtime=python_runtime,
+            ollama_runtime=ollama_runtime,
+            model_store=model_store,
+            base_models=[("qwen2.5-coder:1.5b", 0)],
+            embedding_model="nomic-embed-text:latest",
+        )
+
+    assert calls and calls[0][1:] == [
+        "-I",
+        "-c",
+        assembler._FASTMCP_IMPORT_PROBE,
+    ]
+    assert not output.exists()
+    assert not list(output.parent.glob(f".{output.name}.stage-*"))
+
+
+def test_supplied_runtime_validation_accepts_fastmcp_api(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(assembler, "ROOT", repo)
+    python_runtime, ollama_runtime, model_store = _inputs(tmp_path)
+    output = repo / "dist" / "engine-bundles" / engine_bundle.platform_bundle_name()
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout="FastMCP\n", stderr="")
+
+    monkeypatch.setattr(assembler.subprocess, "run", fake_run)
+
+    bundle = assembler.assemble_bundle(
+        output,
+        python_runtime=python_runtime,
+        ollama_runtime=ollama_runtime,
+        model_store=model_store,
+        base_models=[("qwen2.5-coder:1.5b", 0)],
+        embedding_model="nomic-embed-text:latest",
+    )
+
+    assert bundle.root == output.absolute()
+    assert calls and calls[0][1:] == [
+        "-I",
+        "-c",
+        assembler._FASTMCP_IMPORT_PROBE,
+    ]
 
 
 def test_missing_model_fails_before_replacing_existing_output(monkeypatch, tmp_path):

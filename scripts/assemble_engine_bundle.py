@@ -43,6 +43,11 @@ _ALLOWED_OUTPUT_PARENTS = (
     Path("app/build/engine-bundles"),
     Path("dist/engine-bundles"),
 )
+_FASTMCP_IMPORT_PROBE = (
+    "from mcp.server.fastmcp import FastMCP; "
+    "from mcp.server.fastmcp.tools import ToolManager; "
+    "print(FastMCP.__name__, ToolManager.__name__)"
+)
 
 
 def _is_reparse(path: Path) -> bool:
@@ -173,6 +178,16 @@ def _remove_python_bytecode(root: Path) -> None:
             pass
 
 
+def _probe_fastmcp(python: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [str(python), "-I", "-c", _FASTMCP_IMPORT_PROBE],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+
+
 def build_windows_python_runtime(destination: Path) -> Path:
     if os.name != "nt":
         raise ValueError("automatic Python runtime assembly is Windows-only; pass --python-runtime")
@@ -211,16 +226,13 @@ def build_windows_python_runtime(destination: Path) -> Path:
     python = destination / "python.exe"
     if not python.is_file():
         raise ValueError("assembled Python runtime has no python.exe")
-    smoke = subprocess.run(
-        [str(python), "-I", "-c", "import mcp, pydantic_core; print(mcp.__name__)"],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
-    )
+    smoke = _probe_fastmcp(python)
     if smoke.returncode != 0:
         detail = (smoke.stderr or smoke.stdout).strip()
-        raise ValueError(f"assembled Python runtime failed isolated import: {detail}")
+        raise ValueError(
+            "assembled Python runtime failed isolated FastMCP compatibility "
+            f"import: {detail}"
+        )
     return python
 
 
@@ -347,15 +359,13 @@ def assemble_bundle(
             if python_executable is None:
                 raise ValueError("provided Python runtime has no canonical executable")
             if validate_runtime:
-                smoke = subprocess.run(
-                    [str(python_executable), "-I", "-c", "import mcp"],
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                    env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
-                )
+                smoke = _probe_fastmcp(python_executable)
                 if smoke.returncode != 0:
-                    raise ValueError("provided Python runtime cannot import mcp in isolated mode")
+                    detail = (smoke.stderr or smoke.stdout).strip()
+                    raise ValueError(
+                        "provided Python runtime cannot import the MCP FastMCP "
+                        f"compatibility API in isolated mode: {detail}"
+                    )
 
         _remove_python_bytecode(python_target)
 

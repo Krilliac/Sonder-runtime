@@ -68,6 +68,7 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     assert "ollama_endpoint.py" in entries
     assert "model_assets.py" in entries
     assert "ooxml_assets.py" in entries
+    assert "requirements-runtime.txt" in entries
     assert "BUNDLED_SYSTEM_README.txt" in entries
     assert {
         "sonder-headless.cmd",

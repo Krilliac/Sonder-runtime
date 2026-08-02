@@ -520,8 +520,6 @@ def _run_routing(entry, request) -> dict:
 
 
 def _real_embed(entry, texts) -> list:
-    import numpy  # vendor import: worker only
-
     manifest = entry["manifest"]
     session = entry["session"]
     tokenizer = entry["tokenizer"]
@@ -530,6 +528,27 @@ def _real_embed(entry, texts) -> list:
         raise ValueError("tokenizer truncated embedding input")
     if not encodings or any(not encoding.ids for encoding in encodings):
         raise ValueError("tokenizer returned empty embedding input")
+    input_metas = list(session.get_inputs())
+    input_names = {str(meta.name) for meta in input_metas}
+    unsupported = input_names - {
+        "input_ids", "attention_mask", "token_type_ids",
+    }
+    if unsupported:
+        raise ValueError(
+            "unsupported embedding model input %r" % sorted(unsupported)[0]
+        )
+    if "input_ids" not in input_names:
+        raise ValueError("embedding model omitted required input_ids")
+    if (
+        len({len(encoding.ids) for encoding in encodings}) > 1
+        and "attention_mask" not in input_names
+    ):
+        raise ValueError(
+            "variable-length embedding batch requires attention_mask input"
+        )
+
+    import numpy  # vendor import: worker only
+
     width = max(len(encoding.ids) for encoding in encodings)
     ids = numpy.zeros((len(texts), width), dtype=numpy.int64)
     mask = numpy.zeros((len(texts), width), dtype=numpy.int64)
@@ -543,15 +562,6 @@ def _real_embed(entry, texts) -> list:
         ids[index, :length] = encoding.ids
         mask[index, :length] = attention
         type_ids[index, :length] = token_types
-    input_metas = list(session.get_inputs())
-    input_names = {str(meta.name) for meta in input_metas}
-    if (
-        len({len(encoding.ids) for encoding in encodings}) > 1
-        and "attention_mask" not in input_names
-    ):
-        raise ValueError(
-            "variable-length embedding batch requires attention_mask input"
-        )
     feeds = {}
     for meta in input_metas:
         name = str(meta.name)
@@ -561,10 +571,6 @@ def _real_embed(entry, texts) -> list:
             feeds[meta.name] = mask
         elif name == "token_type_ids":
             feeds[name] = type_ids
-        else:
-            raise ValueError("unsupported embedding model input %r" % name)
-    if "input_ids" not in feeds:
-        raise ValueError("embedding model omitted required input_ids")
     hidden = numpy.asarray(session.run(None, feeds)[0], dtype=numpy.float64)
     pooling = manifest.get("pooling") or "mean"
     if hidden.ndim == 3:
