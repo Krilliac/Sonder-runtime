@@ -645,14 +645,38 @@ def test_agent_generate_enables_agent_transport_mode(monkeypatch):
     seen = {}
 
     def fake_make_generate(*args, **kwargs):
+        seen["args"] = args
         seen.update(kwargs)
         return lambda prompt, history=None: '{"final":"done"}'
 
     monkeypatch.setattr(server, "_make_generate", fake_make_generate)
 
     assert server._agent_impl("finish", max_steps=1) == "done"
+    assert seen["args"][3] == server._LOCAL_AGENT_NUM_PREDICT
     assert seen["accept_native_tool_calls"] is True
     assert seen["compact_cloud_reasoning"] is True
+
+
+def test_cloud_agent_budget_can_carry_bounded_file_write(monkeypatch):
+    seen = {}
+
+    monkeypatch.setattr(
+        server,
+        "_serve_target",
+        lambda *args, **kwargs: (
+            "kimi-k2.7-code:cloud", True, False, "cloud-code",
+        ),
+    )
+
+    def fake_make_generate(*args, **kwargs):
+        seen["args"] = args
+        return lambda prompt, history=None: '{"final":"done"}'
+
+    monkeypatch.setattr(server, "_make_generate", fake_make_generate)
+
+    assert server._agent_impl("write a complete file", max_steps=1) == "done"
+    assert seen["args"][3] == server._CLOUD_AGENT_NUM_PREDICT
+    assert server._CLOUD_AGENT_NUM_PREDICT == 16384
 
 
 def test_agent_does_not_repeat_identical_successful_inspection(monkeypatch):
