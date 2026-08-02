@@ -9922,6 +9922,12 @@ _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
 _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "workflow_run",
 })
+_LOCAL_AGENT_NUM_PREDICT = 1200
+# A hosted agent decision may contain a complete bounded file_write payload.
+# Keep this aligned with the 64 KiB native-argument cap; metered usage is based
+# on actual output, while the higher ceiling prevents valid code tools from
+# being truncated into malformed JSON.
+_CLOUD_AGENT_NUM_PREDICT = 16384
 
 
 def _start_agent_checklist(prompt: str, project: str, read_only: bool):
@@ -10014,8 +10020,11 @@ def _agent_impl(
         False,
         "",
     )
+    agent_num_predict = (
+        _CLOUD_AGENT_NUM_PREDICT if cloud else _LOCAL_AGENT_NUM_PREDICT
+    )
     gen = _make_generate(
-        model, system, 0.1, 1200, SESSION_NUM_CTX, cloud=cloud,
+        model, system, 0.1, agent_num_predict, SESSION_NUM_CTX, cloud=cloud,
         cancel_check=cancel_check,
         accept_native_tool_calls=True,
         compact_cloud_reasoning=True,
