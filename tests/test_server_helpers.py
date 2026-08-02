@@ -547,7 +547,7 @@ def test_agent_chat_rejects_recursively_nested_native_arguments(monkeypatch):
     ("model", "expected_think"),
     [
         ("kimi-k2.7-code:cloud", False),
-        ("glm-5.2:cloud", "low"),
+        ("glm-5.2:cloud", False),
     ],
 )
 def test_agent_generate_uses_compact_cloud_reasoning_and_native_tools(

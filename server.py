@@ -250,10 +250,11 @@ def _apply_cloud_thinking_policy(payload, model, *, compact=False):
         if not compact:
             _ensure_cloud_prediction_budget(payload)
     elif name.startswith("glm-5.2:"):
-        # GLM-5.2 exposes explicit reasoning effort levels.  High is the
-        # quality-oriented plan-covered setting and remains compatible with
-        # both coding and long-context review requests.
-        payload["think"] = "low" if compact else "high"
+        # GLM-5.2 accepts an explicit false value.  Even its "low" reasoning
+        # mode can consume the entire shared prediction budget without
+        # emitting the tiny JSON/native tool decision an agent turn needs.
+        # Ordinary offloads retain the quality-oriented high setting.
+        payload["think"] = False if compact else "high"
         if not compact:
             _ensure_cloud_prediction_budget(payload)
     elif name.startswith("kimi-k2.7-code:"):
@@ -8776,36 +8777,139 @@ def _agent_tool_help(read_only=False):
 
 
 def _repository_scope_path_error(tool_name, args, project_root):
-    """Reject a project agent path outside its one host-selected root.
+    """Reject a project-bound agent path outside its host-selected root.
 
     Generic guarded reads authorize both Sonder's workspace and configured
     extra roots.  Repository agents need a narrower contract: when a project is
     bound, even another normally authorized root (especially Sonder's own cwd)
     is out of scope.
     """
-    if not project_root or tool_name not in _PROJECT_SCOPED_PATH_TOOLS:
+    scoped_tools = _PROJECT_SCOPED_PATH_TOOLS | _PROJECT_SCOPED_EXECUTION_TOOLS
+    if not project_root or tool_name not in scoped_tools:
         return ""
     try:
         root = Path(str(project_root)).expanduser().resolve(strict=True)
         if not root.is_dir():
             raise ValueError("project root is not a directory")
-        key = "root" if tool_name in {"file_find", "text_search", "script_search"} else "path"
-        raw = str(args.get(key) or "").strip()
+        if tool_name == "workspace_run":
+            targets = [("working directory", args.get("cwd") or ".")]
+        elif tool_name == "script_run":
+            targets = [("script path", args.get("path") or "")]
+            if str(args.get("cwd") or "").strip():
+                targets.append(("working directory", args.get("cwd")))
+        else:
+            key = _project_scoped_path_key(tool_name)
+            targets = [("path", args.get(key) or ".")]
+        for label, raw_value in targets:
+            raw = str(raw_value or "").strip()
+            if not raw:
+                return "ERROR: agent project path rejected: %s is required" % label
+            target = Path(raw).expanduser()
+            if not target.is_absolute():
+                target = root / target
+            target = target.resolve(strict=False)
+            try:
+                target.relative_to(root)
+            except ValueError:
+                return (
+                    "ERROR: agent project path rejected: %s is outside the "
+                    "host-selected project root" % label
+                )
+    except (OSError, TypeError, ValueError) as exc:
+        return "ERROR: agent project scope is invalid: %s" % exc
+    return ""
+
+
+def _agent_project_execution_argument_error(tool_name, args, project_root):
+    """Reject explicit project-execution escape paths and inline interpreters.
+
+    This is a host argument guard, not an OS sandbox: an allowed project
+    program can still access resources available to the user account.  Keep
+    that limitation explicit while blocking the direct escape forms a model
+    can otherwise express in workspace/script argv.
+    """
+    if (
+        not project_root
+        or tool_name not in _PROJECT_SCOPED_EXECUTION_TOOLS
+        or not isinstance(args, dict)
+    ):
+        return ""
+    root = Path(str(project_root)).expanduser().resolve(strict=True)
+    argv = _agent_argv(args)
+    lowered = [item.casefold() for item in argv]
+    program = Path(str(args.get("program") or "")).name.casefold()
+    inline_flags = {
+        "python": {"-c"}, "python.exe": {"-c"},
+        "py": {"-c"}, "py.exe": {"-c"},
+        "node": {"-e", "--eval", "-p", "--print"},
+        "node.exe": {"-e", "--eval", "-p", "--print"},
+        "bash": {"-c"}, "bash.exe": {"-c"},
+        "sh": {"-c"}, "sh.exe": {"-c"},
+        "perl": {"-e"}, "perl.exe": {"-e"},
+        "ruby": {"-e"}, "ruby.exe": {"-e"},
+        "powershell": {"-command", "-c", "-encodedcommand", "-enc"},
+        "powershell.exe": {"-command", "-c", "-encodedcommand", "-enc"},
+        "pwsh": {"-command", "-c", "-encodedcommand", "-enc"},
+        "pwsh.exe": {"-command", "-c", "-encodedcommand", "-enc"},
+        "cmd": {"/c", "/k"}, "cmd.exe": {"/c", "/k"},
+    }
+    forbidden = inline_flags.get(program, set())
+    if forbidden.intersection(lowered):
+        return (
+            "ERROR: agent project execution rejected: inline interpreter "
+            "commands are outside the project path guard"
+        )
+    if program in inline_flags and str(args.get("stdin") or "") and "-" in argv:
+        return (
+            "ERROR: agent project execution rejected: interpreter code via "
+            "stdin is outside the project path guard"
+        )
+
+    base_value = args.get("cwd") or (
+        os.path.dirname(str(args.get("path") or "")) if tool_name == "script_run" else "."
+    )
+    base = Path(str(base_value)).expanduser().resolve(strict=False)
+    for raw_item in argv:
+        raw = str(raw_item or "").strip().strip('"\'')
         if not raw:
-            raw = "."
+            continue
+        if "=" in raw and raw.startswith(("-", "/")):
+            raw = raw.split("=", 1)[1].strip().strip('"\'')
+        raw = raw.lstrip("@")
+        drive_match = re.search(r"[A-Za-z]:[\\/]", raw)
+        unc_match = re.search(r"\\\\[^\\]+\\[^\\]+", raw)
+        if drive_match:
+            raw = raw[drive_match.start():]
+        elif unc_match:
+            raw = raw[unc_match.start():]
+        # On Windows, /Zi and /W4 are compiler switches, not POSIX paths.
+        if (
+            os.name == "nt"
+            and raw.startswith("/")
+            and "\\" not in raw
+            and raw.count("/") == 1
+        ):
+            continue
+        path_like = (
+            os.path.isabs(raw)
+            or raw.startswith((".", "~"))
+            or "/" in raw
+            or "\\" in raw
+            or bool(os.path.splitext(raw)[1])
+        )
+        if not path_like:
+            continue
         target = Path(raw).expanduser()
         if not target.is_absolute():
-            target = root / target
+            target = base / target
         target = target.resolve(strict=False)
         try:
             target.relative_to(root)
         except ValueError:
             return (
-                "ERROR: repository read-only path rejected: path is outside the "
-                "host-selected project root"
+                "ERROR: agent project execution rejected: argv path is outside "
+                "the host-selected project root"
             )
-    except (OSError, TypeError, ValueError) as exc:
-        return "ERROR: repository read-only project scope is invalid: %s" % exc
     return ""
 
 
@@ -8979,7 +9083,16 @@ def _agent_generate_decision(
 ):
     """Generate one structurally valid agent decision with bounded format repair."""
     repair_limit = max(0, min(4, int(repair_limit)))
-    raw = gen(step_prompt)
+    try:
+        raw = gen(step_prompt)
+    except ModelCallError as error:
+        # Cancellation is a control-flow signal used by fleet callers and must
+        # retain its stable exception identity.  Hosted/local transport
+        # failures, however, are ordinary agent outcomes: return them to the
+        # agent boundary instead of leaking an MCP traceback.
+        if error.kind == "cancelled":
+            raise
+        return None, "", error
     error = None
     for attempt in range(repair_limit + 1):
         try:
@@ -9013,7 +9126,12 @@ def _agent_generate_decision(
                 str(raw or "")[:1000],
             )
         )
-        raw = gen(repair_prompt)
+        try:
+            raw = gen(repair_prompt)
+        except ModelCallError as model_error:
+            if model_error.kind == "cancelled":
+                raise
+            return None, raw, model_error
     return None, raw, error
 
 
@@ -9121,7 +9239,17 @@ def _agent_negative_claim_review(
     correction = ""
     last_error = "invalid claim review"
     for _attempt in range(2):
-        raw = gen(review_prompt + correction)
+        try:
+            raw = gen(review_prompt + correction)
+        except ModelCallError as error:
+            if error.kind == "cancelled":
+                raise
+            return {
+                "decision": "error",
+                "reason": _format_model_call_error(error),
+                "tool": "",
+                "args": {},
+            }
         try:
             payload = _extract_agent_json(raw)
             if not isinstance(payload, dict):
@@ -9650,8 +9778,22 @@ def _agent_activity_command(tool_name, args):
 _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "file_read", "file_read_range", "image_inspect", "file_write", "file_edit",
     "file_delete", "directory_create", "workspace_inventory", "directory_tree",
-    "file_find", "text_search", "script_search",
+    "file_find", "text_search", "script_search", "artifact_verify",
+    "artifact_ground",
 })
+_PROJECT_SCOPED_EXECUTION_TOOLS = frozenset({"workspace_run", "script_run"})
+_PROJECT_UNSCOPED_PERSISTENT_TOOLS = frozenset({
+    "artifact_generate", "assetgen", "game_generate_and_test", "game_generate",
+    "game_generation_campaign", "game_campaign", "workflow_run",
+})
+
+
+def _project_scoped_path_key(tool_name):
+    if tool_name in {"file_find", "text_search", "script_search"}:
+        return "root"
+    if tool_name == "ground_artifact":
+        return "artifact"
+    return "path"
 
 
 def _project_scope_args(tool_name, args, project):
@@ -9666,14 +9808,43 @@ def _project_scope_args(tool_name, args, project):
     onto it. The guard (allowed_roots / resolve_*) still validates the final
     path, so this grants nothing outside the authorized project root.
     """
-    if not project or not isinstance(args, dict) or tool_name not in _PROJECT_SCOPED_PATH_TOOLS:
+    if (
+        not project
+        or not isinstance(args, dict)
+        or tool_name not in (
+            _PROJECT_SCOPED_PATH_TOOLS | _PROJECT_SCOPED_EXECUTION_TOOLS
+        )
+    ):
         return args
     scoped = dict(args)
     # Never compose a model-supplied root with the trusted host root.  The
     # project argument is the complete authorization boundary for this run.
     scoped["extra_roots"] = project
 
-    key = "root" if tool_name in {"file_find", "text_search", "script_search"} else "path"
+    if tool_name == "workspace_run":
+        raw_cwd = str(scoped.get("cwd") or ".").strip()
+        is_abs = os.path.isabs(raw_cwd) or bool(
+            re.match(r"^[A-Za-z]:[\\/]", raw_cwd)
+        )
+        scoped["cwd"] = raw_cwd if is_abs else os.path.join(project, raw_cwd)
+        return scoped
+
+    if tool_name == "script_run":
+        raw_path = str(scoped.get("path") or "").strip()
+        path_is_abs = os.path.isabs(raw_path) or bool(
+            re.match(r"^[A-Za-z]:[\\/]", raw_path)
+        )
+        if raw_path and not path_is_abs:
+            scoped["path"] = os.path.join(project, raw_path)
+        raw_cwd = str(scoped.get("cwd") or "").strip()
+        cwd_is_abs = os.path.isabs(raw_cwd) or bool(
+            re.match(r"^[A-Za-z]:[\\/]", raw_cwd)
+        )
+        if raw_cwd and not cwd_is_abs:
+            scoped["cwd"] = os.path.join(project, raw_cwd)
+        return scoped
+
+    key = _project_scoped_path_key(tool_name)
     raw = str(scoped.get(key) or "").strip()
     is_abs = os.path.isabs(raw) or bool(re.match(r"^[A-Za-z]:[\\/]", raw))
     if not raw or raw == ".":
@@ -9775,16 +9946,23 @@ def _agent_normalized_path(value):
 def _agent_call_signature(tool_name, args):
     """Return a stable signature for equivalent host-scoped tool calls."""
     canonical = dict(args) if isinstance(args, dict) else args
-    if isinstance(canonical, dict) and tool_name in _PROJECT_SCOPED_PATH_TOOLS:
-        key = "root" if tool_name in {"file_find", "text_search", "script_search"} else "path"
-        raw = canonical.get(key)
-        if raw:
-            try:
-                canonical[key] = os.path.normcase(
-                    os.path.realpath(os.path.normpath(str(raw)))
-                )
-            except (OSError, ValueError):
-                pass
+    if isinstance(canonical, dict):
+        path_keys = []
+        if tool_name in _PROJECT_SCOPED_PATH_TOOLS:
+            path_keys.append(_project_scoped_path_key(tool_name))
+        elif tool_name == "workspace_run":
+            path_keys.append("cwd")
+        elif tool_name == "script_run":
+            path_keys.extend(("path", "cwd"))
+        for key in path_keys:
+            raw = canonical.get(key)
+            if raw:
+                try:
+                    canonical[key] = os.path.normcase(
+                        os.path.realpath(os.path.normpath(str(raw)))
+                    )
+                except (OSError, ValueError):
+                    pass
     return (
         str(tool_name),
         json.dumps(canonical, sort_keys=True, ensure_ascii=False, default=str),
@@ -9806,6 +9984,56 @@ def _agent_mutation_record(tool_name, args):
     }
 
 
+def _agent_path_within(path, root):
+    path = _agent_normalized_path(path)
+    root = _agent_normalized_path(root)
+    if not path or not root:
+        return False
+    try:
+        return os.path.commonpath((path, root)) == root
+    except (OSError, ValueError):
+        return False
+
+
+def _agent_argv(args):
+    argv = args.get("args_json", args.get("args", []))
+    if isinstance(argv, str):
+        try:
+            argv = json.loads(argv)
+        except (TypeError, ValueError):
+            argv = [argv]
+    return [str(item) for item in (argv or [])]
+
+
+def _agent_explicit_command_paths(argv, cwd):
+    """Resolve path-looking argv entries against the validator working dir."""
+    resolved = []
+    for item in argv:
+        text = str(item or "").strip()
+        if not text or text.startswith("-"):
+            continue
+        looks_pathlike = (
+            os.path.isabs(text)
+            or bool(re.match(r"^[A-Za-z]:[\\/]", text))
+            or "/" in text
+            or "\\" in text
+            or text in {".", ".."}
+            or bool(os.path.splitext(text)[1])
+        )
+        if not looks_pathlike:
+            continue
+        candidate = text if os.path.isabs(text) else os.path.join(cwd, text)
+        resolved.append(_agent_normalized_path(candidate))
+    return [path for path in resolved if path]
+
+
+def _agent_paths_covered_by_targets(paths, targets):
+    return bool(paths and targets) and all(
+        any(path == target or _agent_path_within(path, target) for target in targets)
+        for path in paths
+    )
+
+
 def _agent_validation_covers(tool_name, args, mutations, observation=""):
     """Require validators to touch changed disk state, not equivalent draft code."""
     args = args if isinstance(args, dict) else {}
@@ -9818,7 +10046,9 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
     if tool_name in {
         "game_reference_suite", "game_generate_and_test", "game_generation_campaign",
     }:
-        return True
+        return all(record["tool"] in {
+            "game_generate_and_test", "game_generation_campaign",
+        } for record in records)
     if tool_name == "memory_quality_report":
         return all(
             record["tool"] == "memory_quality_repair" for record in records
@@ -9832,43 +10062,114 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
             "memory_embedding_backfill",
             "memory_interaction_embedding_backfill",
         } for record in records)
-    if tool_name in {"artifact_verify", "artifact_ground", "ground_artifact"}:
-        return any(
+    if tool_name in {"artifact_verify", "artifact_ground"}:
+        return all(
             record["tool"] == "artifact_generate"
-            and (not target or target.startswith(record.get("path", "")))
+            and bool(target)
+            and _agent_path_within(target, record.get("path", ""))
             for record in records
         )
     if tool_name == "script_run":
-        if target and target in paths:
+        if target and paths and all(path == target for path in paths):
             return True
         name = os.path.basename(target).lower()
-        return any(word in name for word in ("test", "check", "verify", "smoke", "build"))
+        if not any(
+            word in name for word in ("test", "check", "verify", "smoke", "build")
+        ):
+            return False
+        cwd = _agent_normalized_path(
+            args.get("cwd") or os.path.dirname(target)
+        )
+        return bool(cwd and paths) and all(
+            _agent_path_within(path, cwd) for path in paths
+        )
     if tool_name == "workspace_run":
         program = os.path.basename(str(args.get("program", ""))).lower()
-        argv = args.get("args_json", args.get("args", []))
-        if isinstance(argv, str):
-            try:
-                argv = json.loads(argv)
-            except (TypeError, ValueError):
-                argv = [argv]
-        argv_text = [str(item).lower() for item in (argv or [])]
-        for item in argv_text:
-            if _agent_normalized_path(item) in paths:
-                return True
-        command_text = " ".join([program, *argv_text])
-        known_validator = program in {
-            "pytest", "pytest.exe", "ctest", "ctest.exe", "cmake", "cmake.exe",
-            "ninja", "ninja.exe", "msbuild", "msbuild.exe", "flutter", "flutter.bat",
-            "dart", "dart.exe", "cargo", "cargo.exe", "dotnet", "dotnet.exe",
-            "npm", "npm.cmd", "gradle", "gradle.bat", "mvn", "mvn.cmd",
-            "python", "python.exe", "py", "py.exe", "node", "node.exe",
-            "cl", "cl.exe", "g++", "g++.exe", "clang++", "clang++.exe",
+        argv = _agent_argv(args)
+        argv_text = [item.casefold() for item in argv]
+        if set(argv_text).intersection({
+            "--help", "-h", "--version", "--collect-only", "--co",
+            "--list-tests", "--dry-run", "--fixtures", "--fixtures-per-test",
+        }):
+            return False
+        if program in {"ctest", "ctest.exe", "ninja", "ninja.exe"} and "-n" in argv_text:
+            return False
+        if "help" in argv_text and program in {
+            "cmake", "cmake.exe", "ninja", "ninja.exe", "gradle", "gradle.bat",
+            "mvn", "mvn.cmd", "npm", "npm.cmd", "cargo", "cargo.exe",
+        }:
+            return False
+        observation_lower = str(observation or "").casefold()
+        if any(marker in observation_lower for marker in (
+            "no tests ran", "collected 0 items", "total tests: 0",
+            "0 tests passed", "0 tests run",
+        )):
+            return False
+        cwd = _agent_normalized_path(args.get("cwd") or ".")
+        explicit_targets = _agent_explicit_command_paths(argv, cwd)
+        explicit_coverage = _agent_paths_covered_by_targets(
+            paths, explicit_targets,
+        )
+
+        python_programs = {"python", "python.exe", "py", "py.exe"}
+        node_programs = {"node", "node.exe"}
+        if program in python_programs and any(
+            flag in argv_text for flag in ("-c", "-command")
+        ):
+            return False
+        if program in node_programs and any(
+            flag in argv_text for flag in ("-e", "--eval", "-p", "--print")
+        ):
+            return False
+
+        broad = program in {
+            "pytest", "pytest.exe", "ctest", "ctest.exe", "ninja", "ninja.exe",
+            "msbuild", "msbuild.exe",
         }
-        return known_validator and any(word in command_text for word in (
-            "pytest", "unittest", "test", "check", "verify", "smoke", "build",
-            "compile", "analyze", "lint", "ctest", "cmake", "ninja", "msbuild",
-            "flutter", "dart", "cargo", "dotnet", "npm", "gradle", "mvn",
-        ))
+        if program in {"cmake", "cmake.exe"}:
+            broad = "--build" in argv_text
+        elif program in {"cargo", "cargo.exe"}:
+            broad = any(action in argv_text for action in ("test", "check", "build"))
+        elif program in {"dotnet", "dotnet.exe"}:
+            broad = any(action in argv_text for action in ("test", "build"))
+        elif program in {"npm", "npm.cmd"}:
+            broad = (
+                "test" in argv_text
+                or (
+                    "run" in argv_text
+                    and any(action in argv_text for action in ("build", "check", "lint"))
+                )
+            )
+        elif program in {"gradle", "gradle.bat", "mvn", "mvn.cmd"}:
+            broad = any(
+                action in argv_text
+                for action in ("test", "check", "build", "verify", "package")
+            )
+        elif program in {"flutter", "flutter.bat", "dart", "dart.exe"}:
+            broad = any(
+                action in argv_text
+                for action in ("test", "analyze", "build", "compile")
+            )
+        elif program in python_programs and "-m" in argv_text:
+            module_index = argv_text.index("-m") + 1
+            module = argv_text[module_index] if module_index < len(argv_text) else ""
+            broad = module in {"pytest", "unittest"}
+            if module in {"py_compile", "compileall"}:
+                return explicit_coverage
+        elif program in node_programs:
+            broad = "--test" in argv_text
+
+        if broad:
+            return bool(cwd and paths) and all(
+                _agent_path_within(path, cwd) for path in paths
+            )
+        if program in (
+            python_programs
+            | node_programs
+            | {"cl", "cl.exe", "g++", "g++.exe", "clang++", "clang++.exe"}
+        ):
+            return explicit_coverage
+        return False
     if tool_name == "image_inspect":
         return bool(
             target in paths
@@ -9928,6 +10229,34 @@ _LOCAL_AGENT_NUM_PREDICT = 1200
 # on actual output, while the higher ceiling prevents valid code tools from
 # being truncated into malformed JSON.
 _CLOUD_AGENT_NUM_PREDICT = 16384
+
+
+def _agent_project_scope(project):
+    """Resolve a project directory while preserving bare checklist namespaces."""
+    text = str(project or "").strip()
+    if not text:
+        return "", ""
+    try:
+        expanded = os.path.expanduser(text)
+        candidate = os.path.realpath(os.path.abspath(expanded))
+        if os.path.isdir(candidate):
+            return candidate, ""
+        path_like = (
+            os.path.isabs(expanded)
+            or bool(re.match(r"^[A-Za-z]:", expanded))
+            or expanded.startswith((".", "~"))
+            or "/" in expanded
+            or "\\" in expanded
+            or os.path.exists(candidate)
+        )
+        if path_like:
+            return "", (
+                "ERROR: invalid agent project root: path does not name an "
+                "existing directory: %s" % candidate
+            )
+    except (OSError, ValueError) as exc:
+        return "", "ERROR: invalid agent project root: %s" % exc
+    return "", ""
 
 
 def _start_agent_checklist(prompt: str, project: str, read_only: bool):
@@ -10005,6 +10334,14 @@ def _agent_impl(
         return "ERROR: unknown tier '%s'. Valid: sonder, %s." % (tier, _valid_tier_names())
     if model is None:
         return "ERROR: `sonder:latest` Ollama alias not found."
+    project_scope, project_error = _agent_project_scope(project)
+    if project_error:
+        if return_host_receipt:
+            return autopilot_controller.HostTaskResult(
+                output=project_error,
+                project_scope="",
+            )
+        return project_error
     system = _build_system(
         system or
         "You are a local tool-using coding agent. Inspect real workspace evidence before making claims. "
@@ -10052,18 +10389,10 @@ def _agent_impl(
         _start_agent_checklist(prompt, project, read_only)
         if auto_checklist else ("", {})
     )
-    # Filesystem scope: when `project` names a real directory, root the agent's
-    # file tools there (see _project_scope_args) so relative paths inspect the
-    # project rather than Sonder's own workspace. A non-directory project (a
-    # bare namespace label like "default") leaves file tools at the default.
-    project_scope = ""
-    if project:
-        try:
-            candidate = os.path.realpath(os.path.abspath(os.path.expanduser(str(project))))
-            if os.path.isdir(candidate):
-                project_scope = candidate
-        except (OSError, ValueError):
-            project_scope = ""
+    # Filesystem scope: a real directory roots file and execution tools there.
+    # A clear bare namespace label such as "default" remains checklist-only;
+    # path-like typos were rejected above rather than failing open to Sonder's
+    # own workspace.
     transcript = "Task:\n%s\n\n%s" % (prompt, _agent_tool_help(read_only=read_only))
     if project_scope:
         transcript += (
@@ -10217,6 +10546,13 @@ def _agent_impl(
         step_prompt += "\n\nChoose the next tool call or final answer."
         decision, raw, decision_error = _agent_generate_decision(gen, step_prompt)
         if decision is None:
+            if isinstance(decision_error, ModelCallError):
+                if auto_checklist:
+                    _agent_checklist_fail(
+                        checklist_id, checklist_states,
+                        "model request failed before a valid tool decision", 1,
+                    )
+                return _early_exit(_format_model_call_error(decision_error))
             if auto_checklist:
                 _agent_checklist_fail(
                     checklist_id, checklist_states,
@@ -10263,6 +10599,13 @@ def _agent_impl(
                     prompt, final, observations, model, cloud=cloud,
                     cancel_check=cancel_check,
                 )
+                if claim_review["decision"] == "error":
+                    if auto_checklist:
+                        _agent_checklist_fail(
+                            checklist_id, checklist_states,
+                            "negative-claim reviewer model request failed", 1,
+                        )
+                    return _early_exit(claim_review["reason"])
                 if claim_review["decision"] == "continue":
                     claim_review_requests += 1
                     if claim_review_requests <= 2:
@@ -10308,6 +10651,15 @@ def _agent_impl(
                 "ERROR: agent decision missing 'tool' or 'final': %s" % decision
             )
         tool_args = decision.get("args", {})
+        if not isinstance(tool_args, dict):
+            if auto_checklist:
+                _agent_checklist_fail(
+                    checklist_id, checklist_states,
+                    "model tool arguments were not a JSON object", 1,
+                )
+            return _early_exit(
+                "ERROR: agent tool arguments must be a JSON object"
+            )
         # Keep policy and dispatch on one canonical, host-confined view of a
         # repository tool call.  Previously the early read-only check saw raw
         # model paths while dispatch later rebased them under ``project_scope``.
@@ -10345,6 +10697,24 @@ def _agent_impl(
             )
         if not policy_error and tool_policy is not None:
             policy_error = str(tool_policy(tool_name, policy_tool_args) or "")
+        if not policy_error and project_scope:
+            policy_error = _repository_scope_path_error(
+                tool_name, policy_tool_args, project_scope,
+            )
+        if (
+            not policy_error
+            and project_scope
+            and tool_name in _PROJECT_UNSCOPED_PERSISTENT_TOOLS
+        ):
+            policy_error = (
+                "ERROR: HOST POLICY: tool '%s' has no project-rooted output "
+                "contract and is disabled for a project-bound agent."
+                % tool_name
+            )
+        if not policy_error and project_scope:
+            policy_error = _agent_project_execution_argument_error(
+                tool_name, policy_tool_args, project_scope,
+            )
         if not policy_error and read_only:
             policy_error = _repository_read_only_error(
                 tool_name,
@@ -10410,7 +10780,8 @@ def _agent_impl(
                 dispatch_options["allow_location"] = True
             tool_dispatched = True
             observation = _agent_dispatch_observed(
-                tool_name, tool_args, project=project_scope, **dispatch_options,
+                tool_name, policy_tool_args, project=project_scope,
+                **dispatch_options,
             )
         observation_text = str(observation)
         tool_ok = _agent_tool_observation_ok(tool_name, observation)
@@ -10471,18 +10842,39 @@ def _agent_impl(
                 and tool_args.get("apply") is not True
             )
         )
-        if mutation_happened:
+        mutation_attempt_may_have_changed = (
+            tool_dispatched
+            and tool_name in _WORK_MUTATION_TOOLS
+            and not (
+                tool_name == "file_delete"
+                and tool_args.get("dry_run") is not False
+            )
+            and not (
+                tool_name in {
+                    "memory_quality_repair", "memory_privacy_repair",
+                    "memory_embedding_backfill",
+                    "memory_interaction_embedding_backfill",
+                }
+                and tool_args.get("apply") is not True
+            )
+        )
+        if mutation_attempt_may_have_changed:
+            # A failed mutator can still leave directories or partial output.
+            # Treat the workspace as dirty until a grounded validator proves
+            # otherwise instead of reporting mutation_observed=False.
             mutated = True
         execution_may_have_changed = (
             tool_dispatched
             and tool_name in _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS
         )
-        if mutation_happened or execution_may_have_changed:
+        if mutation_attempt_may_have_changed or execution_may_have_changed:
             # A real mutation or an execution-capable tool can make prior
             # inspection results stale even when the command exits nonzero.
             # Dry-run mutation tools do not reach here.
             successful_inspection_results.clear()
             repeated_inspection_counts.clear()
+            validation_attempted = False
+            validation_ok = False
             if mutation_happened or tool_ok:
                 failed_call_counts.clear()
             else:
@@ -10492,10 +10884,8 @@ def _agent_impl(
                 failed_call_counts.clear()
                 if current_failure_count:
                     failed_call_counts[call_signature] = current_failure_count
-        if mutation_happened:
-            validation_attempted = False
-            validation_ok = False
-            record = _agent_mutation_record(tool_name, tool_args)
+        if mutation_attempt_may_have_changed:
+            record = _agent_mutation_record(tool_name, policy_tool_args)
             if record not in mutations:
                 mutations.append(record)
             if auto_checklist and mutated:
@@ -10508,7 +10898,7 @@ def _agent_impl(
         if tool_name in _WORK_VALIDATION_TOOLS:
             validation_attempted = True
             validation_covered = tool_ok and _agent_validation_covers(
-                tool_name, tool_args, mutations, observation_text,
+                tool_name, policy_tool_args, mutations, observation_text,
             )
             # The latest host-observed validator decides current validity. A
             # later failing/bad-coverage check must invalidate an earlier pass.
@@ -10554,6 +10944,15 @@ def _agent_impl(
             gen, final_prompt, require_final=True,
         )
         if final_decision is None:
+            if isinstance(final_error, ModelCallError):
+                if auto_checklist:
+                    active_item = 3 if validation_attempted else 2 if mutated else 1
+                    _agent_checklist_fail(
+                        checklist_id, checklist_states,
+                        "model request failed during final synthesis",
+                        active_item,
+                    )
+                return _early_exit(_format_model_call_error(final_error))
             if auto_checklist:
                 active_item = 3 if validation_attempted else 2 if mutated else 1
                 _agent_checklist_fail(
@@ -10573,6 +10972,14 @@ def _agent_impl(
             prompt, final, observations, model, cloud=cloud,
             cancel_check=cancel_check,
         )
+        if claim_review["decision"] == "error":
+            if auto_checklist:
+                _agent_checklist_fail(
+                    checklist_id, checklist_states,
+                    "negative-claim reviewer model request failed at finalization",
+                    1,
+                )
+            return _early_exit(claim_review["reason"])
         if claim_review["decision"] == "accept":
             break
         claim_review_requests += 1
