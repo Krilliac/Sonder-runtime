@@ -1,6 +1,69 @@
 import pytest
 
+import autopilot_controller
+import master_orchestrator
 import server
+
+
+def test_agent_impl_evidence_required_receipt_keeps_real_project_scope(
+    monkeypatch, tmp_path,
+):
+    """Regression for the master_orchestrate scope-mismatch bug.
+
+    Every _agent_impl exit path used to return a bare string unless it
+    reached finish_final -- so a plain, expected EVIDENCE_REQUIRED outcome
+    (no tool evidence collected) discarded the host-issued receipt entirely.
+    repository_worker_result then saw actual='' and raised a misleading
+    "scope mismatch" even though the real project scope was known and
+    correct throughout. Confirm the receipt now always carries it.
+    """
+    monkeypatch.setattr(
+        server, "_make_generate",
+        lambda *a, **k: (lambda prompt, history=None: '{"final":"nothing found"}'),
+    )
+
+    receipt = server._agent_impl(
+        "inspect the repository",
+        tier="code",
+        max_steps=1,
+        require_file_evidence=True,
+        read_only=True,
+        project=str(tmp_path),
+        return_host_receipt=True,
+    )
+
+    expected = str(tmp_path.resolve())
+    assert isinstance(receipt, autopilot_controller.HostTaskResult)
+    assert receipt.project_scope == expected
+    assert receipt.output.startswith(master_orchestrator.EVIDENCE_REQUIRED)
+
+    # It must still fail closed -- just with the real diagnosis (no evidence
+    # tool ran), never the misleading scope-mismatch message.
+    with pytest.raises(RuntimeError, match="no host-observed file evidence"):
+        master_orchestrator.repository_worker_result(receipt, expected)
+
+
+def test_repository_worker_result_still_fails_closed_on_real_scope_mismatch(
+    tmp_path,
+):
+    """Guard against weakening the fail-closed scope check itself.
+
+    A receipt that genuinely carries the wrong project (cross-repo leakage)
+    must still be rejected -- the fix above only stops a *correct* scope from
+    being discarded, it must not paper over an *actual* mismatch.
+    """
+    requested = tmp_path / "requested"
+    wrong = tmp_path / "wrong"
+    requested.mkdir()
+    wrong.mkdir()
+    receipt = autopilot_controller.HostTaskResult(
+        output="answer\n\n=== TOOL EVIDENCE ===\nstep 1 tool=file_read\nx",
+        tools=("file_read",),
+        project_scope=str(wrong),
+    )
+
+    with pytest.raises(RuntimeError, match="scope mismatch"):
+        master_orchestrator.repository_worker_result(receipt, str(requested))
 
 
 def test_host_receipt_uses_latest_validator_result(monkeypatch):

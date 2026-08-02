@@ -5,6 +5,7 @@ import time
 from types import SimpleNamespace
 
 import master_orchestrator
+import server
 
 
 def _repository_receipt(project, output="grounded result"):
@@ -323,6 +324,54 @@ def test_repository_fleet_rejects_scope_receipt_from_another_project(tmp_path):
     )
     assert child["status"] == "failed"
     assert "escaped its assigned project scope" in child["error"]
+
+
+def test_delegated_repository_worker_evidence_required_preserves_canonical_scope(
+    monkeypatch, tmp_path,
+):
+    """End-to-end regression for the master_orchestrate scope-mismatch bug.
+
+    Runs the real queue -> persistence -> worker dispatch chain used by
+    master_orchestrate('delegate'/'fleet', project=...): _new_agent persists
+    the canonical Windows project root, run_delegated hands it to the real
+    server._orchestrator_agent_worker closure, and that closure calls the
+    real _agent_impl. Before the fix, a legitimate EVIDENCE_REQUIRED result
+    (no tool evidence collected) lost its receipt's project_scope and the
+    worker reported a bogus "scope mismatch" instead of the true failure,
+    even though the master correctly persisted and dispatched the exact
+    canonical project throughout.
+    """
+    monkeypatch.setattr(master_orchestrator, "parallel_worker_slots", lambda count: 1)
+    monkeypatch.setattr(
+        server, "_make_generate",
+        lambda *a, **k: (lambda prompt, history=None: '{"final":"nothing found"}'),
+    )
+
+    project = tmp_path / "DuetOS"
+    project.mkdir()
+    worker = server._orchestrator_agent_worker("code", str(project), max_steps=1)
+
+    result = master_orchestrator.run_delegated(
+        "Audit current source files.",
+        worker_fn=worker,
+        audit_fn=lambda prompt: "must not run",
+        agents=1,
+        project=str(project),
+    )
+
+    expected = str(project.resolve())
+    snapshot = master_orchestrator.snapshot(limit=20)
+    child_rows = [
+        row for row in snapshot["agents"] if row["parent_id"] == result["master_id"]
+    ]
+
+    # The canonical Windows project root survived queueing (_new_agent),
+    # durable persistence (fleet_store), and real worker dispatch unchanged.
+    assert child_rows and {row["project"] for row in child_rows} == {expected}
+    child_errors = " ".join(row.get("error") or "" for row in child_rows)
+    assert "scope mismatch" not in child_errors
+    assert "no host-observed file evidence" in child_errors
+    assert result["output"] == master_orchestrator.EVIDENCE_REQUIRED
 
 
 def test_repository_scope_never_falls_back_to_process_cwd():

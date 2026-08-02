@@ -9991,6 +9991,26 @@ def _agent_impl(
             )
         return final
 
+    def _early_exit(text: str):
+        """Wrap a pre-finalization exit (parse failure, EVIDENCE_REQUIRED,
+        max_steps abort) so a promised host receipt still carries the real
+        project scope instead of silently defaulting to an empty one -- a bare
+        string here previously read as ``actual=''`` in the caller's scope
+        check, misreporting a normal evidence/parse failure as a scope
+        mismatch.
+        """
+        text = str(text or "")
+        if return_host_receipt:
+            return autopilot_controller.HostTaskResult(
+                output=text,
+                tools=tuple(sorted(used_tool_names)),
+                mutation_observed=mutated,
+                validation_attempted=validation_attempted,
+                validation_passed=validation_ok,
+                project_scope=project_scope,
+            )
+        return text
+
     def run_claim_review_action(review, review_number):
         nonlocal file_evidence, inspected, used_tool
         tool_name = str(review.get("tool") or "")
@@ -10066,8 +10086,10 @@ def _agent_impl(
                     checklist_id, checklist_states,
                     "model returned an invalid tool decision", 1,
                 )
-            return "ERROR: could not parse agent decision at step %d: %s\nraw=%s" % (
-                step, decision_error, raw[:1000])
+            return _early_exit(
+                "ERROR: could not parse agent decision at step %d: %s\nraw=%s" % (
+                    step, decision_error, raw[:1000])
+            )
         if "final" in decision:
             final = str(decision.get("final") or "")
             if required_tools and not (required_tools & used_tool_names):
@@ -10077,7 +10099,7 @@ def _agent_impl(
                         % ", ".join(sorted(required_tools))
                     )
                     continue
-                return (
+                return _early_exit(
                     "ERROR: agent reached max_steps=%d without using a required "
                     "web tool (%s)." % (
                         max_steps, ", ".join(sorted(required_tools)),
@@ -10125,11 +10147,11 @@ def _agent_impl(
                             "negative existence claim lacked exact evidence",
                             1,
                         )
-                    return "%s: %s\n\n%s" % (
+                    return _early_exit("%s: %s\n\n%s" % (
                         master_orchestrator.EVIDENCE_REQUIRED,
                         claim_review["reason"],
                         "\n\n".join(observations),
-                    )
+                    ))
             if require_file_evidence and not file_evidence:
                 if auto_checklist:
                     _agent_checklist_fail(
@@ -10137,7 +10159,7 @@ def _agent_impl(
                         "required workspace evidence was not collected", 1,
                     )
                 detail = "\n\n" + "\n\n".join(observations) if observations else ""
-                return master_orchestrator.EVIDENCE_REQUIRED + detail
+                return _early_exit(master_orchestrator.EVIDENCE_REQUIRED + detail)
             return finish_final(final)
         tool_name = decision.get("tool")
         if not tool_name:
@@ -10146,7 +10168,9 @@ def _agent_impl(
                     checklist_id, checklist_states,
                     "model decision omitted both tool and final", 1,
                 )
-            return "ERROR: agent decision missing 'tool' or 'final': %s" % decision
+            return _early_exit(
+                "ERROR: agent decision missing 'tool' or 'final': %s" % decision
+            )
         tool_args = decision.get("args", {})
         # Keep policy and dispatch on one canonical, host-confined view of a
         # repository tool call.  Previously the early read-only check saw raw
@@ -10167,7 +10191,7 @@ def _agent_impl(
                     checklist_id, checklist_states,
                     "model repeated an unchanged failing tool call", 2,
                 )
-            return (
+            return _early_exit(
                 "ERROR: agent repeated the same unsuccessful tool call %d times: %s. "
                 "Change the arguments, inspect the error, or choose a recovery tool.\n\n%s"
                 % (
@@ -10355,7 +10379,7 @@ def _agent_impl(
                     "agent could not synthesize a final answer after max_steps",
                     active_item,
                 )
-            return (
+            return _early_exit(
                 "ERROR: agent reached max_steps=%d and finalization failed: %s\n"
                 "raw=%s\n\n%s"
                 % (max_steps, final_error, raw[:1000], "\n\n".join(observations))
@@ -10386,13 +10410,13 @@ def _agent_impl(
                 "negative existence claim lacked exact evidence at finalization",
                 1,
             )
-        return "%s: %s\n\n%s" % (
+        return _early_exit("%s: %s\n\n%s" % (
             master_orchestrator.EVIDENCE_REQUIRED,
             claim_review["reason"],
             "\n\n".join(observations),
-        )
+        ))
     if required_tools and not (required_tools & used_tool_names):
-        return (
+        return _early_exit(
             "ERROR: agent reached max_steps=%d without using a required web tool (%s)."
             % (max_steps, ", ".join(sorted(required_tools)))
         )
@@ -10401,7 +10425,9 @@ def _agent_impl(
             checklist_id, checklist_states,
             "agent exhausted tool steps without successful evidence", 1,
         )
-        return "ERROR: agent reached max_steps=%d without successful tool evidence." % max_steps
+        return _early_exit(
+            "ERROR: agent reached max_steps=%d without successful tool evidence." % max_steps
+        )
     if require_file_evidence and not file_evidence:
         if auto_checklist:
             _agent_checklist_fail(
@@ -10409,7 +10435,7 @@ def _agent_impl(
                 "required workspace evidence was not collected", 1,
             )
         detail = "\n\n" + "\n\n".join(observations) if observations else ""
-        return master_orchestrator.EVIDENCE_REQUIRED + detail
+        return _early_exit(master_orchestrator.EVIDENCE_REQUIRED + detail)
     return finish_final(final)
 
 
