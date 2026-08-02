@@ -161,16 +161,31 @@ _EMBED_STATE = threading.local()
 
 
 def provenance(vector=None):
-    """Metadata stored beside vectors so model migrations are detectable."""
+    """Metadata stored beside vectors so model migrations are detectable.
+
+    ``provider``/``accelerated``/``simulated`` describe how the bound vector
+    was produced ("ollama" or "npu:<provider>"). A vector that is not the one
+    bound to this thread keeps the legacy identity fields and an unknown
+    provider — never a fabricated one.
+    """
     bound_revision = getattr(_EMBED_STATE, "revision", None)
     bound_model = getattr(_EMBED_STATE, "model", None)
+    bound_provider = getattr(_EMBED_STATE, "provider", "")
+    bound_accelerated = bool(getattr(_EMBED_STATE, "accelerated", False))
+    bound_simulated = bool(getattr(_EMBED_STATE, "simulated", False))
     if getattr(_EMBED_STATE, "vector", None) is not vector:
         bound_revision = EMBED_REVISION
         bound_model = EMBED_IDENTITY
+        bound_provider = ""
+        bound_accelerated = False
+        bound_simulated = False
     return {
         "model": bound_model,
         "revision": bound_revision,
         "dimension": len(vector) if vector else None,
+        "provider": bound_provider,
+        "accelerated": bound_accelerated,
+        "simulated": bound_simulated,
     }
 
 
@@ -218,10 +233,50 @@ def cosine(a, b):
     return dot / (na * nb)
 
 
+def _npu_service():
+    # Function-local so this module stays importable and hot-reload safe even
+    # if the accelerator stack is absent; returns the live module object.
+    import npu_service
+
+    return npu_service
+
+
+def _accelerated_embed(prompt, identity, revision):
+    """Try the NPU utility accelerator for the exact current vector space.
+
+    npu_service only answers when policy prefers embeddings AND the active
+    manifest pins this identity+revision (same weights/tokenizer/pooling/
+    normalization declaration). Anything else is None and the legacy path
+    runs unchanged — a different embedder is never silently substituted.
+    """
+    try:
+        return _npu_service().embed_for_space(prompt, identity, revision)
+    except Exception:
+        return None
+
+
+def _npu_prefer_active():
+    try:
+        return _npu_service().embeddings_active() == "prefer"
+    except Exception:
+        return False
+
+
+def _npu_shadow_embed(prompt, identity, revision):
+    try:
+        _npu_service().embed_shadow(prompt, identity, revision)
+    except Exception:
+        pass
+
+
 def embed(text, timeout=30, base=None, model=None):
     _EMBED_STATE.vector = None
     _EMBED_STATE.revision = None
     _EMBED_STATE.model = None
+    _EMBED_STATE.provider = ""
+    _EMBED_STATE.accelerated = False
+    _EMBED_STATE.simulated = False
+    _EMBED_STATE.fallback_reason = ""
     try:
         selected_base = ollama_endpoint.configured_origin(base or BASE)
     except ValueError:
@@ -236,6 +291,22 @@ def embed(text, timeout=30, base=None, model=None):
     # over-length input is an HTTP 500 that soft-fails to None (see
     # EMBED_MAX_CHARS) rather than a usable vector.
     prompt = text if text is None else str(text)[:EMBED_MAX_CHARS]
+    identity = canonical_model_name(selected_model)
+    if isinstance(prompt, str) and prompt:
+        accelerated = _accelerated_embed(prompt, identity, revision_before)
+        if accelerated is not None and valid_vector(accelerated.get("vector")):
+            vector = list(accelerated["vector"])
+            _EMBED_STATE.vector = vector
+            _EMBED_STATE.revision = revision_before
+            _EMBED_STATE.model = identity
+            _EMBED_STATE.provider = "npu:%s" % (
+                accelerated.get("provider") or "unknown"
+            )
+            _EMBED_STATE.accelerated = True
+            _EMBED_STATE.simulated = bool(accelerated.get("simulated"))
+            return vector
+        if _npu_prefer_active():
+            _EMBED_STATE.fallback_reason = "npu_unavailable"
     payload = json.dumps({"model": selected_model, "prompt": prompt}).encode("utf-8")
     req = urllib.request.Request(
         "%s/api/embeddings" % selected_base,
@@ -256,7 +327,28 @@ def embed(text, timeout=30, base=None, model=None):
                 return None
             _EMBED_STATE.vector = vector
             _EMBED_STATE.revision = revision_before
-            _EMBED_STATE.model = canonical_model_name(selected_model)
+            _EMBED_STATE.model = identity
+            _EMBED_STATE.provider = "ollama"
+            if isinstance(prompt, str) and prompt:
+                _npu_shadow_embed(prompt, identity, revision_before)
             return vector
     except (urllib.error.URLError, TimeoutError, ValueError, OSError):
         return None
+
+
+def embed_result(text, timeout=30, base=None, model=None):
+    """Typed embedding outcome: vector plus full provenance.
+
+    Returns None exactly when embed() would (preserving every fail-soft
+    consumer, including lexical fallback). ``fallback_reason`` is
+    "npu_unavailable" when acceleration was preferred but the legacy embedder
+    served the request — the fallback is explicit, never silent.
+    """
+    vector = embed(text, timeout=timeout, base=base, model=model)
+    if vector is None:
+        return None
+    return {
+        "vector": vector,
+        **provenance(vector),
+        "fallback_reason": str(getattr(_EMBED_STATE, "fallback_reason", "") or ""),
+    }

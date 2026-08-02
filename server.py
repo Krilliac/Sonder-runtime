@@ -75,6 +75,7 @@ import workbench
 import creative_router
 import intents
 import runtime_policy
+import npu_service
 import reloadable_mcp
 import autopilot_store
 import autopilot_controller
@@ -458,6 +459,13 @@ LIVE_RELOAD_MODULES = [
     "creative_router",
     "intents",
     "runtime_policy",
+    # NPU accelerator host modules reload in dependency order; the broker and
+    # service keep live worker/process state behind reload guards.
+    "npu_contract",
+    "npu_manifest",
+    "npu_providers",
+    "npu_broker",
+    "npu_service",
     # The controller is stateless and safe to refresh between callback calls.
     # autopilot_store intentionally stays loaded because it exclusively owns a
     # process-safe SQLite schema and may be serving background worker threads.
@@ -11994,25 +12002,47 @@ def route_work_request(prompt: str, project: str = "") -> str | None:
         fallback="code",
     )
     if mode == "decide":
+        # The NPU utility accelerator may pre-score only this ambiguous band.
+        # Deterministic host cues never reach it, its output is allowlist-
+        # validated inside npu_service, and any miss lands on the existing
+        # local router — an accelerator problem can never widen behavior.
+        npu_decision = None
         try:
-            routed = _execution_route_model(prompt, project=project)
-            mode = routed["mode"]
-            selected_tier = routed.get("tier") or runtime_policy.route_tier(
+            npu_decision = npu_service.route_decide(prompt)
+        except Exception:
+            npu_decision = None
+        if npu_decision:
+            mode = npu_decision["mode"]
+            selected_tier = npu_decision.get("tier") or runtime_policy.route_tier(
                 mode, _RUNTIME_POLICY, fallback="code",
             )
-            reason = routed["reason"]
-            confidence = routed["confidence"]
-            source = "bounded local mode model"
-        except (OSError, RuntimeError, ValueError) as exc:
-            mode = "autopilot"
-            selected_tier = runtime_policy.route_tier(
-                "autopilot", _RUNTIME_POLICY, fallback="code",
-            )
-            reason = (
-                "compound-work fallback after local mode selection was unavailable: %s"
-                % re.sub(r"\s+", " ", str(exc))[:240]
-            )
-            source = "host fallback"
+            reason = npu_decision["reason"]
+            confidence = npu_decision["confidence"]
+            source = npu_decision.get("source") or "npu accelerator"
+        else:
+            try:
+                routed = _execution_route_model(prompt, project=project)
+                mode = routed["mode"]
+                selected_tier = routed.get("tier") or runtime_policy.route_tier(
+                    mode, _RUNTIME_POLICY, fallback="code",
+                )
+                reason = routed["reason"]
+                confidence = routed["confidence"]
+                source = "bounded local mode model"
+            except (OSError, RuntimeError, ValueError) as exc:
+                mode = "autopilot"
+                selected_tier = runtime_policy.route_tier(
+                    "autopilot", _RUNTIME_POLICY, fallback="code",
+                )
+                reason = (
+                    "compound-work fallback after local mode selection was unavailable: %s"
+                    % re.sub(r"\s+", " ", str(exc))[:240]
+                )
+                source = "host fallback"
+            with contextlib.suppress(Exception):
+                npu_service.route_shadow(
+                    prompt, {"mode": mode, "tier": selected_tier},
+                )
 
     resolved_project = _resolve_project(project) or ""
     if mode == "fleet":
@@ -12130,6 +12160,20 @@ def runtime_policy_status() -> str:
     return output
 
 
+@mcp.tool()
+def npu_status(probe: bool = False) -> str:
+    """Show the NPU utility accelerator: detected vs runtime-ready vs enabled
+    vs healthy, provider capability, model bundle hashes, latency, fallback
+    counters, and circuit state.
+
+    The accelerator sits below the fast/code/general local tiers and is never
+    a model tier. probe=True additionally triggers a non-blocking worker
+    warmup when the runtime policy enables the accelerator.
+    """
+    _maybe_live_reload()
+    return npu_service.format_status(npu_service.status(probe=probe is True))
+
+
 def _runtime_update_object(value, label):
     if value in (None, ""):
         return {}
@@ -12149,13 +12193,19 @@ def _runtime_update_object(value, label):
 def runtime_policy_update(
     local_models_json: str = "",
     routing_json: str = "",
+    npu_json: str = "",
     reset: bool = False,
 ) -> str:
-    """Guarded-edit shared local mappings; cloud configuration is never accepted."""
+    """Guarded-edit shared local mappings; cloud configuration is never accepted.
+
+    npu_json may set only the accelerator behavior modes, e.g.
+    {"mode": "shadow", "routing": "prefer"} with modes off|shadow|prefer.
+    """
     _maybe_live_reload()
     try:
         local_models = _runtime_update_object(local_models_json, "local_models_json")
         routing = _runtime_update_object(routing_json, "routing_json")
+        npu = _runtime_update_object(npu_json, "npu_json")
         if local_models:
             installed = _runtime_installed_models()
             missing = [
@@ -12170,6 +12220,7 @@ def runtime_policy_update(
         runtime_policy.update(
             local_models=local_models,
             routing=routing,
+            npu=npu,
             reset=bool(reset),
             source="runtime_policy_update",
         )
@@ -12330,6 +12381,10 @@ def diagnostics() -> str:
     except Exception as e:
         lines.append("  autopilot: ERROR %s" % e)
     try:
+        lines.append("  npu accelerator: %s" % npu_service.diagnostics_line())
+    except Exception as e:
+        lines.append("  npu accelerator: ERROR %s" % e)
+    try:
         tags = _get("/api/tags").get("models", [])
         names = sorted(m.get("name", "?") for m in tags)
         # Show the count AND an enumeration consistent with it: truncating the
@@ -12397,6 +12452,10 @@ def status() -> str:
         )
     except Exception as exc:
         lines.append("autopilot: ERROR %s" % exc)
+    try:
+        lines.append("npu accelerator: %s" % npu_service.diagnostics_line())
+    except Exception as exc:
+        lines.append("npu accelerator: ERROR %s" % exc)
     return "\n".join(lines)
 
 
