@@ -173,6 +173,11 @@ class HardwareProfile:
     availability_live: bool = True
     system_ram_availability_live: bool = True
     vram_availability_live: bool = True
+    # NPU presence is detection-only here: whether the accelerator is actually
+    # runtime-callable is owned by the npu_service/broker capability probe.
+    npu_vendor: str = "none"
+    npu_name: str = ""
+    npu_detected: bool = False
 
     def to_dict(self):
         return asdict(self)
@@ -228,6 +233,93 @@ def _system_memory():
         except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
             pass
     return total, available, False
+
+
+# NPU hardware is static per boot; probe once per process. The guard keeps the
+# cache across helper live-reloads, matching the other stateful helpers.
+if "_NPU_PROBE" not in globals():
+    _NPU_PROBE = {"value": None}
+
+
+def _npu_vendor_from_name(name):
+    lowered = str(name or "").lower()
+    if "amd" in lowered or "ryzen" in lowered:
+        return "amd"
+    if "intel" in lowered or "ai boost" in lowered:
+        return "intel"
+    if "qualcomm" in lowered or "hexagon" in lowered:
+        return "qualcomm"
+    return "unknown"
+
+
+def _npu_probe():
+    """Best-effort NPU device detection: (vendor, name, detected)."""
+    cached = _NPU_PROBE["value"]
+    if cached is not None:
+        return cached
+    result = ("none", "", False)
+    if _env_bool("SONDER_NPU_PROBE", True):
+        if os.name == "nt":
+            script = (
+                "Get-CimInstance Win32_PnPEntity | Where-Object {"
+                " $_.Name -match 'NPU|AI Boost|Neural|Hexagon|VPU' } |"
+                " Select-Object -First 4 -ExpandProperty Name |"
+                " ConvertTo-Json -Compress"
+            )
+            try:
+                raw = subprocess.check_output(
+                    ["powershell", "-NoProfile", "-Command", script],
+                    text=True,
+                    timeout=10,
+                ).strip()
+                names = json.loads(raw) if raw else []
+                if isinstance(names, str):
+                    names = [names]
+                names = [str(item).strip() for item in names if str(item).strip()]
+                if names:
+                    result = (_npu_vendor_from_name(names[0]), names[0][:80], True)
+            except (OSError, subprocess.SubprocessError, ValueError):
+                pass
+        elif os.path.isdir("/sys/class/accel"):
+            try:
+                nodes = sorted(os.listdir("/sys/class/accel"))
+            except OSError:
+                nodes = []
+            if nodes:
+                vendor = "unknown"
+                try:
+                    with open(
+                        "/sys/class/accel/%s/device/vendor" % nodes[0],
+                        "r",
+                        encoding="ascii",
+                    ) as stream:
+                        vendor = {
+                            "0x1022": "amd",
+                            "0x8086": "intel",
+                            "0x17cb": "qualcomm",
+                        }.get(stream.read().strip().lower(), "unknown")
+                except (OSError, ValueError):
+                    pass
+                result = (vendor, nodes[0][:80], True)
+    _NPU_PROBE["value"] = result
+    return result
+
+
+def _npu_hardware(env=None):
+    """Resolve NPU fields with the same override style as GPU detection."""
+    env = os.environ if env is None else env
+    forced = str(env.get("SONDER_NPU_DETECTED", "") or "").strip()
+    if forced:
+        detected = _env_bool("SONDER_NPU_DETECTED", False)
+        if not detected:
+            return "none", "", False
+        vendor = str(env.get("SONDER_NPU_VENDOR", "") or "").strip().lower()
+        name = str(env.get("SONDER_NPU_NAME", "") or "").strip()
+        return vendor or "unknown", name[:80], True
+    vendor, name, detected = _npu_probe()
+    vendor = str(env.get("SONDER_NPU_VENDOR", vendor) or "").strip().lower() or vendor
+    name = str(env.get("SONDER_NPU_NAME", name) or "").strip()[:80]
+    return vendor, name, detected
 
 
 def _nvidia_profile(gpu_index=None):
@@ -333,6 +425,7 @@ def detect_hardware(gpu_index=None) -> HardwareProfile:
         vram_live = False
     cuda = _env_bool("SONDER_CUDA_AVAILABLE", bool(nvidia))
     rocm_available = _env_bool("SONDER_ROCM_AVAILABLE", bool(rocm))
+    npu_vendor, npu_name, npu_detected = _npu_hardware()
     os_name = platform.system() or os.name
     offload = bool((cuda or rocm_available) and os_name in {"Linux", "Windows"})
     return HardwareProfile(
@@ -353,4 +446,7 @@ def detect_hardware(gpu_index=None) -> HardwareProfile:
         availability_live=ram_live and (vram_live or not vram_total),
         system_ram_availability_live=ram_live,
         vram_availability_live=vram_live,
+        npu_vendor=npu_vendor,
+        npu_name=npu_name,
+        npu_detected=npu_detected,
     )

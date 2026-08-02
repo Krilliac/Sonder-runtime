@@ -41,6 +41,25 @@ model storage | RAM/VRAM residency | inference
 Base or personal model weights
 ```
 
+## NPU utility accelerator
+
+An optional local NPU path sits **below** the fast/code/general tiers as a
+utility accelerator — never a fourth generative tier. A stdlib-only broker in
+the server owns a restartable child worker; all vendor/onnxruntime imports and
+native DLLs live only in that worker, spoken to over bounded JSONL stdio.
+Capabilities are discovered per process (AMD VitisAI, Intel OpenVINO NPU,
+Qualcomm QNN, the onnxruntime CPU reference, and a deterministic CPU
+simulator; Windows ML is descriptor-only and DirectML is not claimed as an
+NPU). Model bundles are user-provisioned, hash-pinned manifests; the runtime
+downloads nothing.
+
+The shared runtime policy adds `npu: off | shadow | prefer` per capability
+(default off). Prefer may pre-score only the ambiguous execution-routing band
+with allowlist-validated scores and may serve embeddings only for the exact
+pinned vector space; every miss falls back to the existing local path.
+Accelerator failure can never reach cloud tiers or alter permissions, roots,
+credentials, or executable paths. See [NPU.md](NPU.md).
+
 ## Model and adapter lifecycle
 
 1. Sonder detects system RAM, GPU runtime, VRAM, and workload settings.

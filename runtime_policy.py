@@ -34,6 +34,12 @@ DEFAULT_ROUTING = {
     "fleet": "code",
     "review": "code",
 }
+# The NPU utility accelerator sits below the local tiers and never becomes a
+# generative tier. Policy only selects a behavior mode per capability; it can
+# never name models, paths, providers, or anything cloud-related.
+NPU_MODES = ("off", "shadow", "prefer")
+NPU_CAPABILITIES = ("routing", "embeddings")
+DEFAULT_NPU = {"mode": "off", "routing": "", "embeddings": ""}
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$")
 _LOCK = threading.RLock()
 
@@ -139,9 +145,39 @@ def default_policy(env=None) -> dict:
             tier: _seed_model(env, tier) for tier in LOCAL_TIERS
         },
         "routing": dict(DEFAULT_ROUTING),
+        "npu": dict(DEFAULT_NPU),
         "updated_ts": 0,
         "source": "environment seed",
     }
+
+
+def _normalize_npu(raw, base) -> dict:
+    if raw in (None, ""):
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ValueError("runtime policy npu must be an object")
+    defaults = base if isinstance(base, dict) else dict(DEFAULT_NPU)
+    mode = str(
+        raw.get("mode") if raw.get("mode") is not None
+        else defaults.get("mode") or "off"
+    ).strip().lower()
+    if mode not in NPU_MODES:
+        raise ValueError(
+            "runtime policy npu mode must be one of: %s" % ", ".join(NPU_MODES)
+        )
+    npu = {"mode": mode}
+    for capability in NPU_CAPABILITIES:
+        value = str(
+            raw.get(capability) if raw.get(capability) is not None
+            else defaults.get(capability) or ""
+        ).strip().lower()
+        if value and value not in NPU_MODES:
+            raise ValueError(
+                "runtime policy npu %s override must be one of: %s"
+                % (capability, ", ".join(NPU_MODES))
+            )
+        npu[capability] = value
+    return npu
 
 
 def normalize(payload, defaults=None) -> dict:
@@ -173,14 +209,30 @@ def normalize(payload, defaults=None) -> dict:
         "revision": max(0, int(payload.get("revision") or 0)),
         "local_models": local_models,
         "routing": routing,
+        "npu": _normalize_npu(payload.get("npu"), base.get("npu")),
         "updated_ts": max(0, int(payload.get("updated_ts") or 0)),
         "source": str(payload.get("source") or "runtime policy")[:120],
     }
 
 
+def npu_mode(capability, policy=None) -> str:
+    """Effective accelerator mode for one capability; unknown means off."""
+    capability = str(capability or "").strip().lower()
+    if capability not in NPU_CAPABILITIES:
+        return "off"
+    policy = load(create=False) if policy is None else policy
+    section = policy.get("npu") if isinstance(policy, dict) else None
+    if not isinstance(section, dict):
+        return "off"
+    override = str(section.get(capability) or "").strip().lower()
+    mode = override or str(section.get("mode") or "off").strip().lower()
+    return mode if mode in NPU_MODES else "off"
+
+
 def _disk_payload(policy: dict) -> dict:
     return {key: policy[key] for key in (
-        "version", "revision", "local_models", "routing", "updated_ts", "source"
+        "version", "revision", "local_models", "routing", "npu", "updated_ts",
+        "source",
     )}
 
 
@@ -299,8 +351,8 @@ def finish_transition(transition_id, token) -> bool:
 
 
 def update(
-    local_models=None, routing=None, reset=False, source="user update",
-    expected_revision=None, transition_token=None,
+    local_models=None, routing=None, npu=None, reset=False,
+    source="user update", expected_revision=None, transition_token=None,
 ) -> dict:
     path = policy_path().resolve()
     with _LOCK, _policy_file_lock(path=path):
@@ -341,6 +393,7 @@ def update(
             **base,
             "local_models": dict(base["local_models"]),
             "routing": dict(base["routing"]),
+            "npu": dict(base.get("npu") or DEFAULT_NPU),
         }
         if local_models:
             if not isinstance(local_models, dict):
@@ -366,6 +419,17 @@ def update(
             if unknown:
                 raise ValueError("unknown routing lane(s): %s" % ", ".join(sorted(unknown)))
             candidate["routing"].update(routing)
+        if npu:
+            if not isinstance(npu, dict):
+                raise ValueError("npu update must be a JSON object")
+            unknown = set(npu) - ({"mode"} | set(NPU_CAPABILITIES))
+            if unknown:
+                raise ValueError(
+                    "unknown npu key(s): %s" % ", ".join(sorted(unknown))
+                )
+            candidate["npu"] = _normalize_npu(
+                {**candidate["npu"], **npu}, candidate["npu"],
+            )
         candidate["revision"] = int(current.get("revision") or 0) + 1
         candidate["updated_ts"] = int(time.time())
         candidate["source"] = str(source or "user update")[:120]
@@ -401,5 +465,14 @@ def format_policy(policy=None) -> str:
         lines.append("    %s: %s -> %s" % (
             lane, tier, policy["local_models"][tier],
         ))
+    npu = policy.get("npu") or DEFAULT_NPU
+    lines.append(
+        "  npu accelerator: mode=%s (routing=%s, embeddings=%s)"
+        % (
+            npu.get("mode", "off"),
+            npu.get("routing") or "-",
+            npu.get("embeddings") or "-",
+        )
+    )
     lines.append("  cloud tiers remain separate explicit opt-in configuration")
     return "\n".join(lines)
