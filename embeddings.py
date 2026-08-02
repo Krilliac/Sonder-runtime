@@ -5,6 +5,7 @@ import json
 import math
 import os
 from pathlib import Path
+import stat
 import threading
 import urllib.error
 import urllib.request
@@ -46,6 +47,22 @@ EMBED_IDENTITY = canonical_model_name(EMBED_MODEL)
 _REVISION_PREFIX = "ollama-manifest-sha256:"
 
 
+def _bounded_manifest_digest(path, limit=8 * 1024 * 1024):
+    digest = hashlib.sha256()
+    total = 0
+    with Path(path).open("rb") as stream:
+        opened = os.fstat(stream.fileno())
+        if not stat.S_ISREG(opened.st_mode) or opened.st_size > limit:
+            return ""
+        while total <= limit:
+            chunk = stream.read(min(1024 * 1024, limit + 1 - total))
+            if not chunk:
+                break
+            digest.update(chunk)
+            total += len(chunk)
+    return "" if total > limit else digest.hexdigest()
+
+
 def local_manifest_revision(model=None, models_root=None):
     """Hash the local Ollama manifest so retagged models cannot mix spaces."""
     identity = canonical_model_name(model or EMBED_MODEL)
@@ -73,10 +90,10 @@ def local_manifest_revision(model=None, models_root=None):
             "manifests", "registry.ollama.ai", *parts, tag,
         )
         try:
-            if not manifest.is_file() or manifest.stat().st_size > 8 * 1024 * 1024:
-                continue
-            digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+            digest = _bounded_manifest_digest(manifest)
         except OSError:
+            continue
+        if not digest:
             continue
         return _REVISION_PREFIX + digest
     return ""
@@ -242,7 +259,7 @@ def _npu_service():
     return npu_service
 
 
-def _accelerated_embed(prompt, identity, revision):
+def _accelerated_embed(prompt, identity, revision, dimension):
     """Try the NPU utility accelerator for the exact current vector space.
 
     npu_service only answers when policy prefers embeddings AND the active
@@ -251,7 +268,9 @@ def _accelerated_embed(prompt, identity, revision):
     runs unchanged — a different embedder is never silently substituted.
     """
     try:
-        return _npu_service().embed_for_space(prompt, identity, revision)
+        return _npu_service().embed_for_space(
+            prompt, identity, revision, expected_dimension=dimension,
+        )
     except Exception:
         return None
 
@@ -293,28 +312,58 @@ def embed(text, timeout=30, base=None, model=None):
     # EMBED_MAX_CHARS) rather than a usable vector.
     prompt = text if text is None else str(text)[:EMBED_MAX_CHARS]
     identity = canonical_model_name(selected_model)
+    dimension = expected_dimension(selected_model)
     if isinstance(prompt, str) and prompt:
-        accelerated = _accelerated_embed(prompt, identity, revision_before)
-        if accelerated is not None and valid_vector(accelerated.get("vector")):
-            vector = list(accelerated["vector"])
-            provider = str(accelerated.get("provider") or "").strip().lower()
-            npu_accelerated = (
-                provider in {"vitisai", "openvino", "qnn"}
-                and bool(accelerated.get("accelerated", True))
+        accelerated = _accelerated_embed(
+            prompt, identity, revision_before, dimension,
+        )
+        provider = (
+            str(accelerated.get("provider") or "").strip().lower()
+            if isinstance(accelerated, dict) else ""
+        )
+        acceleration_flag = (
+            accelerated.get("accelerated")
+            if isinstance(accelerated, dict) else None
+        )
+        simulated_flag = (
+            accelerated.get("simulated")
+            if isinstance(accelerated, dict) else None
+        )
+        vector = accelerated.get("vector") if isinstance(accelerated, dict) else None
+        valid_accelerated = (
+            isinstance(dimension, int)
+            and not isinstance(dimension, bool)
+            and isinstance(acceleration_flag, bool)
+            and isinstance(simulated_flag, bool)
+            and not simulated_flag
+            and provider in {"openvino", "qnn", "cpu"}
+            and accelerated.get("model") == identity
+            and accelerated.get("revision") == revision_before
+            and accelerated.get("dimension") == dimension
+            and isinstance(vector, (list, tuple))
+            and len(vector) == dimension
+            and valid_vector(vector)
+            and acceleration_flag == (provider in {"openvino", "qnn"})
+        )
+        if valid_accelerated:
+            revision_after = (
+                current_revision(model=selected_model, base=selected_base)
+                if explicit_runtime else refresh_runtime_revision()
             )
+            if revision_after != revision_before:
+                _EMBED_STATE.fallback_reason = "revision_changed"
+                return None
+            vector = list(accelerated["vector"])
+            npu_accelerated = acceleration_flag
             _EMBED_STATE.vector = vector
             _EMBED_STATE.revision = revision_before
             _EMBED_STATE.model = identity
             if npu_accelerated:
                 _EMBED_STATE.provider = "npu:%s" % provider
-            elif provider == "cpu":
-                _EMBED_STATE.provider = "cpu-reference"
-            elif provider == "cpu-sim":
-                _EMBED_STATE.provider = "cpu-sim"
             else:
-                _EMBED_STATE.provider = "utility:%s" % (provider or "unknown")
+                _EMBED_STATE.provider = "cpu-reference"
             _EMBED_STATE.accelerated = npu_accelerated
-            _EMBED_STATE.simulated = bool(accelerated.get("simulated"))
+            _EMBED_STATE.simulated = simulated_flag
             return vector
         if _npu_prefer_active():
             _EMBED_STATE.fallback_reason = "npu_unavailable"

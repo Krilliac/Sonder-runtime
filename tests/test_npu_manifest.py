@@ -183,9 +183,167 @@ def test_space_declaration_is_normalized_for_embeddings(tmp_path):
             space={
                 "model": "NOMIC-EMBED-TEXT",
                 "revision": "ollama-manifest-sha256:" + "a" * 64,
+                "dimension": 8,
             },
         ),
         tmp_path,
     )
     assert manifest["space"]["model"] == "nomic-embed-text:latest"
     assert manifest["space"]["revision"].startswith("ollama-manifest-sha256:")
+    assert manifest["space"]["dimension"] == 8
+
+
+def test_space_dimension_is_required_and_must_match_output(tmp_path):
+    base = {
+        "model": "nomic-embed-text:latest",
+        "revision": "ollama-manifest-sha256:" + "a" * 64,
+    }
+    with pytest.raises(ValueError, match="space.dimension"):
+        m.normalize_manifest(_embedding_manifest(tmp_path, space=base), tmp_path)
+    with pytest.raises(ValueError, match="equal"):
+        m.normalize_manifest(
+            _embedding_manifest(tmp_path, space={**base, "dimension": 7}),
+            tmp_path,
+        )
+
+
+def test_provider_options_are_allowlisted_npu_only_and_hash_pinned(tmp_path):
+    with pytest.raises(ValueError, match="not in the provider allowlist"):
+        m.normalize_manifest(
+            _routing_manifest(
+                tmp_path,
+                provider_options={"openvino": {"device_type": "NPU"}},
+            ),
+            tmp_path,
+        )
+    with pytest.raises(ValueError, match="must be NPU"):
+        m.normalize_manifest(
+            _routing_manifest(
+                tmp_path,
+                providers=["openvino"],
+                provider_options={"openvino": {"device_type": "CPU"}},
+            ),
+            tmp_path,
+        )
+    htp = _write_model(tmp_path, "QnnHtp.dll", b"pinned-htp")
+    valid = m.normalize_manifest(
+        _routing_manifest(
+            tmp_path,
+            providers=["qnn"],
+            extra_files=[htp],
+            provider_options={"qnn": {"backend_path": "QnnHtp.dll"}},
+        ),
+        tmp_path,
+    )
+    assert valid["provider_options"]["qnn"]["backend_path"] == htp
+    for bad_backend in ("QnnCpu.dll", "QnnGpu.dll", "C:/QnnHtp.dll", "../QnnHtp.dll"):
+        with pytest.raises(ValueError):
+            m.normalize_manifest(
+                _routing_manifest(
+                    tmp_path,
+                    providers=["qnn"],
+                    extra_files=[htp],
+                    provider_options={"qnn": {"backend_path": bad_backend}},
+                ),
+                tmp_path,
+            )
+
+
+def test_vitis_config_must_reference_a_hash_pinned_extra_file(tmp_path):
+    config = _write_model(tmp_path, "vaip-config.json", b"{}")
+    manifest = m.normalize_manifest(
+        _routing_manifest(
+            tmp_path,
+            providers=["vitisai"],
+            extra_files=[config],
+            provider_options={"vitisai": {"config_file": "vaip-config.json"}},
+        ),
+        tmp_path,
+    )
+    assert manifest["provider_options"]["vitisai"]["config_file"] == config
+    with pytest.raises(ValueError, match="hash-pinned extra_file"):
+        m.normalize_manifest(
+            _routing_manifest(
+                tmp_path,
+                providers=["vitisai"],
+                provider_options={"vitisai": {"config_file": "../../outside.json"}},
+            ),
+            tmp_path,
+        )
+
+
+def test_manifest_rejects_oversized_files_and_bundle(tmp_path):
+    oversized = _routing_manifest(tmp_path)
+    oversized["model"]["bytes"] = npu_contract.MAX_MODEL_BYTES + 1
+    with pytest.raises(ValueError, match="bytes"):
+        m.normalize_manifest(oversized, tmp_path)
+
+    first = _write_model(tmp_path, "one.bin", b"1")
+    second = _write_model(tmp_path, "two.bin", b"2")
+    first["bytes"] = npu_contract.MAX_PINNED_FILE_BYTES
+    second["bytes"] = npu_contract.MAX_PINNED_FILE_BYTES
+    with pytest.raises(ValueError, match="bundle"):
+        m.normalize_manifest(
+            _routing_manifest(tmp_path, extra_files=[first, second]), tmp_path,
+        )
+
+
+def test_load_manifests_contains_deep_json_recursion(tmp_path):
+    depth = 2000
+    (tmp_path / "deep.json").write_text(
+        '{"x":' * depth + "0" + "}" * depth,
+        encoding="utf-8",
+    )
+    rows = m.load_manifests(tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["error"]
+
+
+def test_embedding_normalize_requires_literal_json_boolean(tmp_path):
+    payload = _embedding_manifest(tmp_path)
+    payload["normalize"] = "false"
+    with pytest.raises(ValueError, match="literal boolean"):
+        m.normalize_manifest(payload, tmp_path)
+
+
+def test_load_manifests_flags_exponent_overflow_instead_of_raising(tmp_path):
+    payload = _routing_manifest(tmp_path)
+    payload["limits"] = {"deadline_ms": "OVERFLOW"}
+    raw = json.dumps(payload).replace('"OVERFLOW"', "1e400")
+    (tmp_path / "overflow.json").write_text(raw, encoding="utf-8")
+    rows = m.load_manifests(tmp_path)
+    assert len(rows) == 1
+    assert "non-finite" in rows[0]["error"]
+
+
+def test_manifest_read_is_bounded_even_if_open_file_grows(
+        monkeypatch, tmp_path):
+    path = tmp_path / "grow.json"
+    path.write_text("{}", encoding="utf-8")
+    original_open = m.Path.open
+    requested = []
+
+    class GrowingStream:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.stream.close()
+
+        def fileno(self):
+            return self.stream.fileno()
+
+        def read(self, size):
+            requested.append(size)
+            return b"x" * size
+
+    def growing_open(target, *args, **kwargs):
+        return GrowingStream(original_open(target, *args, **kwargs))
+
+    monkeypatch.setattr(m.Path, "open", growing_open)
+    rows = m.load_manifests(tmp_path)
+    assert requested == [m.MAX_MANIFEST_BYTES + 1]
+    assert "exceeds" in rows[0]["error"]

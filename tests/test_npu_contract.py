@@ -52,6 +52,28 @@ def test_decode_line_rejects_nan_and_infinity_literals():
         c.decode_line(b'{"score": -Infinity}\n')
 
 
+def test_decode_line_rejects_exponent_overflow_float():
+    with pytest.raises(ValueError, match="non-finite"):
+        c.decode_line(b'{"rss_mb":1e400}\n')
+
+
+def test_wire_rejects_deep_or_excessive_json_without_recursion_escape():
+    payload = {}
+    cursor = payload
+    for _ in range(c.MAX_JSON_DEPTH + 2):
+        cursor["child"] = {}
+        cursor = cursor["child"]
+    with pytest.raises(ValueError, match="nesting"):
+        c.encode_line(payload)
+
+    raw = ('{"child":' * 2000 + "0" + "}" * 2000).encode("ascii")
+    with pytest.raises(ValueError, match="malformed|nesting"):
+        c.decode_line(raw)
+
+    with pytest.raises(ValueError, match="too many"):
+        c.encode_line({"items": [0] * (c.MAX_JSON_NODES + 1)})
+
+
 def test_validate_route_scores_accepts_allowlisted_payload():
     result = c.validate_route_scores({
         "scores": {"workbench": 0.7, "autopilot": 0.3},
@@ -121,6 +143,41 @@ def test_sha256_file_matches_hashlib(tmp_path):
     target = tmp_path / "model.onnx"
     target.write_bytes(b"weights-bytes")
     assert c.sha256_file(target) == hashlib.sha256(b"weights-bytes").hexdigest()
+
+
+def test_bounded_hash_fstats_open_handle_before_read(monkeypatch, tmp_path):
+    import builtins
+
+    target = tmp_path / "weights.bin"
+    target.write_bytes(b"weights")
+    expected = target.stat().st_size
+    real_open = builtins.open
+
+    class ReadGuard:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.stream.close()
+
+        def fileno(self):
+            return self.stream.fileno()
+
+        def read(self, *_args):
+            raise AssertionError("size drift must fail before hashing")
+
+    def drift_then_open(path, *args, **kwargs):
+        stream = real_open(path, *args, **kwargs)
+        with real_open(path, "ab") as writer:
+            writer.write(b"x")
+        return ReadGuard(stream)
+
+    monkeypatch.setattr(c, "open", drift_then_open, raising=False)
+    with pytest.raises(ValueError, match="size mismatch"):
+        c.sha256_file_bounded(target, expected, 1024)
 
 
 def test_clamp_deadline_bounds_route_and_embed():

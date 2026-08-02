@@ -49,6 +49,7 @@ def _reset_npu(monkeypatch, tmp_path):
     monkeypatch.setenv(
         "SONDER_RUNTIME_POLICY", str(tmp_path / "runtime_policy.json"),
     )
+    monkeypatch.setattr(e, "expected_dimension", lambda model=None: 3)
     npu_service.reset_for_tests()
 
 
@@ -67,12 +68,16 @@ def test_embed_prefer_uses_accelerator_and_binds_provenance(
 ):
     calls = []
 
-    def fake_accel(text, model_identity, revision):
-        calls.append((text, model_identity, revision))
+    def fake_accel(text, model_identity, revision, expected_dimension=None):
+        calls.append((text, model_identity, revision, expected_dimension))
         return {
             "vector": [0.6, 0.8, 0.0],
-            "provider": "vitisai",
-            "ep": "VitisAIExecutionProvider",
+            "provider": "openvino",
+            "ep": "OpenVINOExecutionProvider",
+            "model": model_identity,
+            "revision": revision,
+            "dimension": expected_dimension,
+            "accelerated": True,
             "simulated": False,
             "manifest_hash": "f" * 64,
         }
@@ -83,7 +88,7 @@ def test_embed_prefer_uses_accelerator_and_binds_provenance(
     meta = e.provenance(vector)
     assert meta["model"] == e.EMBED_IDENTITY
     assert meta["revision"] == "rev-current"
-    assert meta["provider"] == "npu:vitisai"
+    assert meta["provider"] == "npu:openvino"
     assert meta["accelerated"] is True
     assert calls[0][1] == e.EMBED_IDENTITY
     assert calls[0][2] == "rev-current"
@@ -97,10 +102,13 @@ def test_embed_cpu_reference_is_truthful_and_not_npu_accelerated(
     monkeypatch.setattr(
         npu_service,
         "embed_for_space",
-        lambda *_args: {
+        lambda *args, **kwargs: {
             "vector": [0.6, 0.8, 0.0],
             "provider": "cpu",
             "ep": "CPUExecutionProvider",
+            "model": args[1],
+            "revision": args[2],
+            "dimension": kwargs["expected_dimension"],
             "accelerated": False,
             "ep_fallback": True,
             "simulated": False,
@@ -113,6 +121,61 @@ def test_embed_cpu_reference_is_truthful_and_not_npu_accelerated(
     assert meta["accelerated"] is False
     assert meta["simulated"] is False
     assert not any(url.endswith("/api/embeddings") for url in legacy_http)
+
+
+def test_embed_rechecks_live_revision_after_accelerator_inference(
+        legacy_http, monkeypatch):
+    revisions = iter(["rev-before", "rev-after"])
+    monkeypatch.setattr(e, "refresh_runtime_revision", lambda **_k: next(revisions))
+    monkeypatch.setattr(
+        npu_service,
+        "embed_for_space",
+        lambda _text, model, revision, expected_dimension=None: {
+            "vector": [0.6, 0.8, 0.0],
+            "provider": "openvino",
+            "model": model,
+            "revision": revision,
+            "dimension": expected_dimension,
+            "accelerated": True,
+            "simulated": False,
+        },
+    )
+    assert e.embed("retag during inference") is None
+    assert not any(url.endswith("/api/embeddings") for url in legacy_http)
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"accelerated": None},
+        {"vector": [1.0, 0.0], "dimension": 2},
+        {"provider": "cpu-sim", "accelerated": False, "simulated": True},
+        {"provider": "vitisai", "accelerated": False},
+        {"model": "other:latest"},
+        {"revision": "other-revision"},
+    ],
+)
+def test_embed_rejects_untrusted_accelerator_provenance(
+    legacy_http, monkeypatch, patch,
+):
+    def fake(text, model, revision, expected_dimension=None):
+        result = {
+            "vector": [0.6, 0.8, 0.0],
+            "provider": "openvino",
+            "model": model,
+            "revision": revision,
+            "dimension": expected_dimension,
+            "accelerated": True,
+            "simulated": False,
+        }
+        result.update(patch)
+        return result
+
+    monkeypatch.setattr(npu_service, "embed_for_space", fake)
+    vector = e.embed("fail closed")
+    assert vector == pytest.approx([0.25, 0.5, 0.25])
+    assert e.provenance(vector)["provider"] == "ollama"
+    assert any(url.endswith("/api/embeddings") for url in legacy_http)
 
 
 def test_embed_prefer_miss_falls_back_to_legacy_and_is_explicit(

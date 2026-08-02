@@ -16,6 +16,7 @@ class FakeBroker:
         self.error = error
         self.calls = []
         self.warmed = []
+        self.model_manifest_hash = ""
 
     def call(self, manifest, payload, deadline_ms=None):
         self.calls.append({"manifest": manifest, "payload": payload})
@@ -36,6 +37,7 @@ class FakeBroker:
                 "ep_fallback",
                 provider != (manifest.get("providers") or [""])[0],
             )
+            response.setdefault("npu_attested", False)
         return response
 
     def ensure_warm(self, manifests):
@@ -53,14 +55,20 @@ class FakeBroker:
             "hello": {"ort_version": "", "python": "3.12.0", "platform": "win32",
                       "ort_error": "", "pid": 42},
             "providers": [
-                {"id": "cpu-sim", "detected": True, "runtime_ready": True,
+                {"id": "cpu-sim", "registered": True, "detected": False,
+                 "runtime_ready": True,
                  "ep": "CPUSimulator", "reason": "stdlib deterministic simulator",
                  "label": "sim"},
                 {"id": "vitisai", "detected": False, "runtime_ready": False,
                  "ep": "VitisAIExecutionProvider", "reason": "onnxruntime not installed",
                  "label": "AMD"},
             ],
-            "models": [],
+            "models": [{
+                "ok": True,
+                "provider": "cpu-sim",
+                "simulated": True,
+                "manifest_hash": self.model_manifest_hash,
+            }],
             "latency_ms": {"count": 1, "last": 3, "p50": 3, "p95": 3},
             "fallbacks": {},
             "last_error": "",
@@ -76,6 +84,11 @@ def npu_env(monkeypatch, tmp_path):
     monkeypatch.setenv("SONDER_NPU_MANIFEST_DIR", str(manifest_dir))
     policy_path = tmp_path / "runtime_policy.json"
     monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(policy_path))
+    monkeypatch.setattr(
+        npu_service.system_profile,
+        "detect_npu_hardware",
+        lambda: ("none", "", False),
+    )
     npu_service.reset_for_tests()
     return manifest_dir
 
@@ -129,7 +142,10 @@ def _install_embedding_manifest(manifest_dir, space=None, dimension=8):
         "limits": {"max_text_chars": 50},
     }
     if space is not None:
-        payload["space"] = space
+        payload["space"] = {
+            **space,
+            "dimension": space.get("dimension", dimension),
+        }
     (manifest_dir / "embed-tiny-v1.json").write_text(
         json.dumps(payload), encoding="utf-8",
     )
@@ -147,6 +163,30 @@ def test_route_features_are_versioned_bounded_and_deterministic():
         "Inspect the repo, then fix the API, and validate all tests."
     )
     assert features != npu_service.route_features("hi")
+
+
+@pytest.mark.parametrize("field", [
+    "simulated", "cpu_fallback_disabled", "ep_fallback",
+])
+@pytest.mark.parametrize("bad_value", [None, "false"])
+def test_execution_provenance_requires_literal_boolean_fields(
+        tmp_path, field, bad_value):
+    manifest = routing_manifest(tmp_path)
+    response = {
+        "provider": "cpu-sim",
+        "ep": "CPUSimulator",
+        "ep_chain": ["CPUSimulator"],
+        "simulated": True,
+        "cpu_fallback_disabled": False,
+        "ep_fallback": False,
+        "npu_attested": False,
+    }
+    if bad_value is None:
+        response.pop(field)
+    else:
+        response[field] = bad_value
+    with pytest.raises(ValueError, match="boolean"):
+        npu_service._execution_provenance(response, manifest)
 
 
 def test_route_decide_is_none_when_policy_off(npu_env, monkeypatch):
@@ -217,6 +257,26 @@ def test_route_decide_rejects_ambiguous_npu_cpu_chain(npu_env, monkeypatch):
         "ep_chain": ["VitisAIExecutionProvider", "CPUExecutionProvider"],
         "cpu_fallback_disabled": True,
         "ep_fallback": False,
+        "simulated": False,
+    })
+    monkeypatch.setattr(npu_service.npu_broker, "get_broker", lambda: fake)
+    assert npu_service.route_decide("inspect, fix, and validate everything") is None
+
+
+def test_route_decide_rejects_unsupported_vitis_npu_attestation(
+        npu_env, monkeypatch):
+    _install_routing_manifest(npu_env, providers=["vitisai"])
+    _set_mode("prefer")
+    fake = FakeBroker(response={
+        "scores": {"workbench": 0.1, "autopilot": 0.9},
+        "reason_code": "score_margin",
+        "provider": "vitisai",
+        "ep": "VitisAIExecutionProvider",
+        "ep_chain": ["VitisAIExecutionProvider"],
+        "cpu_fallback_disabled": True,
+        # VitisAI spans multiple target classes. Until its effective target can
+        # be proved, a worker claim that it ran on an NPU must be rejected.
+        "npu_attested": True,
         "simulated": False,
     })
     monkeypatch.setattr(npu_service.npu_broker, "get_broker", lambda: fake)
@@ -322,7 +382,7 @@ def test_route_shadow_does_nothing_in_prefer_mode(npu_env, monkeypatch):
     assert fake.calls == []
 
 
-def test_embed_for_space_requires_exact_space_match(npu_env, monkeypatch):
+def test_simulator_never_substitutes_for_a_production_space(npu_env, monkeypatch):
     _set_mode("prefer")
     _install_embedding_manifest(npu_env, space={
         "model": "nomic-embed-text:latest",
@@ -337,20 +397,20 @@ def test_embed_for_space_requires_exact_space_match(npu_env, monkeypatch):
     match = npu_service.embed_for_space(
         "hello", "nomic-embed-text:latest",
         "ollama-manifest-sha256:" + "a" * 64,
+        expected_dimension=8,
     )
-    assert match is not None
-    assert match["vector"][0] == pytest.approx(0.5)
-    assert match["provider"] == "cpu-sim"
-    assert match["simulated"] is True
+    assert match is None
 
     mismatch = npu_service.embed_for_space(
         "hello", "nomic-embed-text:latest",
         "ollama-manifest-sha256:" + "b" * 64,
+        expected_dimension=8,
     )
     assert mismatch is None
     other_model = npu_service.embed_for_space(
         "hello", "other-embedder:latest",
         "ollama-manifest-sha256:" + "a" * 64,
+        expected_dimension=8,
     )
     assert other_model is None
     # Only the exact-match call reached the accelerator.
@@ -366,7 +426,7 @@ def test_embed_for_space_none_without_space_declaration(npu_env, monkeypatch):
     assert fake.calls == []
 
 
-def test_embed_for_space_truncates_text_to_manifest_limit(npu_env, monkeypatch):
+def test_embed_for_space_falls_back_instead_of_truncating_text(npu_env, monkeypatch):
     _set_mode("prefer")
     _install_embedding_manifest(npu_env, space={
         "model": "nomic-embed-text:latest",
@@ -377,11 +437,40 @@ def test_embed_for_space_truncates_text_to_manifest_limit(npu_env, monkeypatch):
         "simulated": True,
     })
     monkeypatch.setattr(npu_service.npu_broker, "get_broker", lambda: fake)
-    npu_service.embed_for_space(
+    result = npu_service.embed_for_space(
         "X" * 500, "nomic-embed-text:latest",
         "ollama-manifest-sha256:" + "a" * 64,
+        expected_dimension=8,
     )
-    assert len(fake.calls[0]["payload"]["texts"][0]) == 50
+    assert result is None
+    assert fake.calls == []
+
+
+def test_embed_for_space_rejects_target_unattested_vitis_result(
+        npu_env, monkeypatch):
+    _set_mode("prefer")
+    payload = _install_embedding_manifest(npu_env, space={
+        "model": "nomic-embed-text:latest",
+        "revision": "ollama-manifest-sha256:" + "a" * 64,
+    })
+    payload["providers"] = ["vitisai"]
+    (npu_env / "embed-tiny-v1.json").write_text(
+        json.dumps(payload), encoding="utf-8",
+    )
+    fake = FakeBroker(response={
+        "vectors": [[0.1] * 8],
+        "provider": "vitisai",
+        "ep": "VitisAIExecutionProvider",
+        "simulated": False,
+        "npu_attested": False,
+    })
+    monkeypatch.setattr(npu_service.npu_broker, "get_broker", lambda: fake)
+    assert npu_service.embed_for_space(
+        "hello", "nomic-embed-text:latest",
+        "ollama-manifest-sha256:" + "a" * 64,
+        expected_dimension=8,
+    ) is None
+    assert len(fake.calls) == 1
 
 
 def test_embed_for_space_rejects_wrong_dimension(npu_env, monkeypatch):
@@ -397,6 +486,7 @@ def test_embed_for_space_rejects_wrong_dimension(npu_env, monkeypatch):
     assert npu_service.embed_for_space(
         "hello", "nomic-embed-text:latest",
         "ollama-manifest-sha256:" + "a" * 64,
+        expected_dimension=8,
     ) is None
 
 
@@ -418,12 +508,14 @@ def test_status_reports_state_axes_and_stays_redacted(npu_env, monkeypatch):
     _install_routing_manifest(npu_env)
     _install_embedding_manifest(npu_env)
     fake = FakeBroker()
+    fake.model_manifest_hash = npu_service._active("routing")["manifest_hash"]
     monkeypatch.setattr(npu_service.npu_broker, "get_broker", lambda: fake)
     status = npu_service.status()
     assert status["enabled"] is True
     assert status["modes"] == {"routing": "prefer", "embeddings": "shadow"}
     assert status["detected"] is False  # simulator is never claimed as silicon
-    assert status["runtime_ready"] is True  # cpu-sim satisfies the allowlist
+    assert status["utility_ready"] is True  # cpu-sim can run bounded utility work
+    assert status["runtime_ready"] is False  # but cannot make the NPU look ready
     assert status["healthy"] is True
     assert status["manifests"]["routing"]["name"] == "exec-route-v1"
     assert status["manifests"]["embedding"]["name"] == "embed-tiny-v1"
@@ -435,19 +527,132 @@ def test_status_reports_state_axes_and_stays_redacted(npu_env, monkeypatch):
     assert "prefer" in text
 
 
+def test_status_maps_provider_detection_only_from_host_npu_vendor(
+        npu_env, monkeypatch):
+    _install_routing_manifest(npu_env)
+    monkeypatch.setattr(
+        npu_service.system_profile,
+        "detect_npu_hardware",
+        lambda: ("amd", "AMD Ryzen AI", True),
+    )
+    monkeypatch.setattr(
+        npu_service.system_profile,
+        "detect_hardware",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("status must not run the full hardware probe")
+        ),
+    )
+    monkeypatch.setattr(
+        npu_service.npu_broker, "get_broker", lambda: FakeBroker(),
+    )
+    state = npu_service.status()
+    providers = {row["id"]: row for row in state["broker"]["providers"]}
+    assert state["detected"] is True
+    assert providers["vitisai"]["detected"] is True
+    assert providers["cpu-sim"]["detected"] is False
+
+
+def test_status_drops_unknown_duplicate_and_extra_provider_fields(
+        npu_env, monkeypatch):
+    class TaintedBroker(FakeBroker):
+        def status(self):
+            state = super().status()
+            state["providers"] = [
+                {
+                    "id": "cpu-sim", "registered": True,
+                    "runtime_ready": True, "reason": "ready",
+                    "secret": "x" * 10_000,
+                },
+                {"id": "cpu-sim", "registered": True, "duplicate": True},
+                {"id": "cloud", "registered": True, "token": "secret"},
+            ]
+            return state
+
+    monkeypatch.setattr(
+        npu_service.npu_broker, "get_broker", lambda: TaintedBroker(),
+    )
+    providers = npu_service.status()["broker"]["providers"]
+    assert len(providers) == 1
+    assert set(providers[0]) == {
+        "id", "label", "registered", "detected", "runtime_ready", "ep",
+        "reason",
+    }
+
+
+def test_status_contains_nonfinite_manifest_error_without_crashing(
+        npu_env, monkeypatch):
+    payload = routing_manifest(npu_env)
+    raw = {
+        "schema": payload["schema"],
+        "name": payload["name"],
+        "operation": payload["operation"],
+        "model": payload["model"],
+        "input": payload["input"],
+        "labels": payload["labels"],
+        "postprocess": payload["postprocess"],
+        "providers": payload["providers"],
+        "limits": {"deadline_ms": "OVERFLOW"},
+    }
+    serialized = json.dumps(raw).replace('"OVERFLOW"', "1e400")
+    (npu_env / "overflow.json").write_text(serialized, encoding="utf-8")
+    monkeypatch.setattr(
+        npu_service.npu_broker, "get_broker", lambda: FakeBroker(),
+    )
+    state = npu_service.status()
+    assert state["manifest_errors"] == 1
+    assert state["runtime_ready"] is False
+
+
+def test_status_ignores_loaded_model_after_manifest_replacement_or_removal(
+        npu_env, monkeypatch):
+    _install_routing_manifest(npu_env)
+    original = npu_service._active("routing")
+    fake = FakeBroker()
+    fake.model_manifest_hash = original["manifest_hash"]
+    monkeypatch.setattr(
+        npu_service.npu_broker, "get_broker", lambda: fake,
+    )
+
+    initial = npu_service.status()
+    assert initial["utility_ready"] is True
+    assert initial["broker"]["providers"][0]["runtime_ready"] is True
+
+    path = npu_env / "exec-route-v1.json"
+    replacement = json.loads(path.read_text(encoding="utf-8"))
+    # Change both content and size so even coarse filesystems invalidate the
+    # intentionally metadata-based manifest cache deterministically.
+    replacement["name"] = "exec-route-v2-replacement"
+    path.write_text(json.dumps(replacement), encoding="utf-8")
+    replaced = npu_service.status()
+    assert replaced["utility_ready"] is False
+    assert replaced["runtime_ready"] is False
+    assert replaced["broker"]["models"] == []
+    assert not any(
+        row["runtime_ready"] for row in replaced["broker"]["providers"]
+    )
+
+    path.unlink()
+    removed = npu_service.status()
+    assert removed["manifest_count"] == 0
+    assert removed["utility_ready"] is False
+    assert removed["runtime_ready"] is False
+
+
 def test_status_when_policy_off_and_never_probed(npu_env, monkeypatch):
     class ColdBroker(FakeBroker):
         def status(self):
             base = FakeBroker.status(self)
             base["worker"]["state"] = "cold"
             base["providers"] = []
+            base["models"] = []
             base["latency_ms"] = {"count": 0, "last": 0, "p50": 0, "p95": 0}
             return base
 
     monkeypatch.setattr(npu_service.npu_broker, "get_broker", lambda: ColdBroker())
     status = npu_service.status()
     assert status["enabled"] is False
-    assert status["detected"] is None
+    assert status["detected"] is False
+    assert status["utility_ready"] is None
     assert status["runtime_ready"] is None
     line = npu_service.diagnostics_line(status)
     assert "off" in line

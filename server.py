@@ -75,6 +75,7 @@ import workbench
 import creative_router
 import intents
 import runtime_policy
+import npu_contract
 import npu_service
 import reloadable_mcp
 import autopilot_store
@@ -12011,14 +12012,38 @@ def route_work_request(prompt: str, project: str = "") -> str | None:
             npu_decision = npu_service.route_decide(prompt)
         except Exception:
             npu_decision = None
-        if npu_decision:
-            mode = npu_decision["mode"]
-            selected_tier = npu_decision.get("tier") or runtime_policy.route_tier(
+        validated_npu = None
+        if isinstance(npu_decision, dict):
+            candidate_mode = str(
+                npu_decision.get("mode") or ""
+            ).strip().lower()
+            candidate_tier = str(
+                npu_decision.get("tier") or ""
+            ).strip().lower()
+            candidate_reason = npu_decision.get("reason")
+            candidate_confidence = npu_decision.get("confidence")
+            if (
+                candidate_mode in npu_contract.ROUTE_MODES
+                and candidate_tier in runtime_policy.LOCAL_TIERS
+                and isinstance(candidate_reason, str)
+                and bool(candidate_reason.strip())
+                and not isinstance(candidate_confidence, bool)
+                and isinstance(candidate_confidence, (int, float))
+                and 0.0 <= float(candidate_confidence) <= 1.0
+            ):
+                validated_npu = {
+                    "mode": candidate_mode,
+                    "reason": candidate_reason.strip()[:240],
+                    "confidence": float(candidate_confidence),
+                }
+        if validated_npu:
+            mode = validated_npu["mode"]
+            selected_tier = runtime_policy.route_tier(
                 mode, _RUNTIME_POLICY, fallback="code",
             )
-            reason = npu_decision["reason"]
-            confidence = npu_decision["confidence"]
-            source = npu_decision.get("source") or "npu accelerator"
+            reason = validated_npu["reason"]
+            confidence = validated_npu["confidence"]
+            source = "npu accelerator"
         else:
             try:
                 routed = _execution_route_model(prompt, project=project)

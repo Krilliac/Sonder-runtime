@@ -15,7 +15,10 @@ import math
 import hashlib
 import os
 from pathlib import Path
+import shutil
+import stat
 import sys
+import tempfile
 import time
 
 import npu_contract
@@ -25,6 +28,7 @@ import npu_providers
 
 _SESSIONS = {}
 _ORT_STATE = {"module": None, "error": "", "tried": False}
+_STAGING = {"root": None, "bundles": {}}
 
 
 def _test_hooks_enabled() -> bool:
@@ -86,8 +90,15 @@ def _rss_mb() -> int:
 
             counters = _Counters()
             counters.cb = ctypes.sizeof(_Counters)
-            handle = ctypes.windll.kernel32.GetCurrentProcess()
-            if ctypes.windll.psapi.GetProcessMemoryInfo(
+            kernel32 = ctypes.windll.kernel32
+            psapi = ctypes.windll.psapi
+            kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+            psapi.GetProcessMemoryInfo.argtypes = [
+                wintypes.HANDLE, ctypes.POINTER(_Counters), wintypes.DWORD,
+            ]
+            psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+            handle = kernel32.GetCurrentProcess()
+            if psapi.GetProcessMemoryInfo(
                 handle, ctypes.byref(counters), counters.cb
             ):
                 return int(counters.WorkingSetSize / (1024 * 1024))
@@ -151,19 +162,113 @@ def _sim_route_scores(features) -> dict:
     return {"workbench": round(1.0 - autopilot, 6), "autopilot": autopilot}
 
 
-def _read_pinned_bytes(manifest, entry, label) -> bytes:
-    """Read and hash the exact bytes a vendor runtime will receive."""
+def _pinned_target(manifest, entry, label) -> Path:
+    """Resolve and stat a pinned file before any whole-file allocation."""
     base = Path(manifest.get("dir") or "").resolve()
     target = (base / entry["path"]).resolve(strict=True)
     inside = os.path.normcase(os.path.commonpath([str(base), str(target)]))
     if inside != os.path.normcase(str(base)) or not target.is_file():
         raise ValueError("%s path escapes the manifest directory" % label)
-    payload = target.read_bytes()
-    if len(payload) != entry["bytes"]:
+    size = target.stat().st_size
+    if size != entry["bytes"]:
         raise ValueError("size mismatch for %s" % label)
-    if hashlib.sha256(payload).hexdigest() != entry["sha256"]:
+    if size > npu_contract.MAX_PINNED_FILE_BYTES:
+        raise ValueError("%s exceeds the pinned-file size limit" % label)
+    return target
+
+
+def _read_pinned_bytes(manifest, entry, label) -> bytes:
+    """Read one pinned snapshot through a single bounded open handle."""
+    target = _pinned_target(manifest, entry, label)
+    expected = int(entry["bytes"])
+    chunks = []
+    digest = hashlib.sha256()
+    total = 0
+    with target.open("rb") as stream:
+        opened = os.fstat(stream.fileno())
+        if not stat.S_ISREG(opened.st_mode) or opened.st_size != expected:
+            raise ValueError("size mismatch for %s" % label)
+        while total <= expected:
+            chunk = stream.read(min(1024 * 1024, expected + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            digest.update(chunk)
+            total += len(chunk)
+    if total != expected:
+        raise ValueError("size mismatch for %s" % label)
+    if digest.hexdigest() != entry["sha256"]:
         raise ValueError("hash drift for %s" % label)
-    return payload
+    return b"".join(chunks)
+
+
+def _staging_root() -> Path:
+    raw = os.environ.get("SONDER_NPU_STAGE_DIR", "").strip()
+    if not raw:
+        raise ValueError("broker did not provide a staging directory")
+    root = Path(raw).resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError("broker staging path is not a directory")
+    if _STAGING["root"] != root:
+        _STAGING["root"] = root
+        _STAGING["bundles"] = {}
+    return root
+
+
+def _stage_extra_files(manifest) -> Path:
+    """Create a private read-only snapshot for path-valued vendor options."""
+    manifest_hash = str(manifest.get("manifest_hash") or "")
+    cached = _STAGING["bundles"].get(manifest_hash)
+    if cached is not None:
+        return cached
+    root = _staging_root()
+    bundle = Path(tempfile.mkdtemp(prefix=manifest_hash[:12] + "-", dir=root))
+    try:
+        for entry in manifest.get("extra_files") or []:
+            payload = _read_pinned_bytes(
+                manifest, entry, "extra file %s" % entry["path"],
+            )
+            target = bundle / Path(entry["path"])
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("xb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(target, 0o400)
+        # Removing directory write permission prevents accidental mutation by
+        # vendor code. The randomized worker-private path is never disclosed.
+        directories = sorted(
+            (item for item in bundle.rglob("*") if item.is_dir()),
+            key=lambda item: len(item.parts),
+            reverse=True,
+        )
+        for directory in directories:
+            os.chmod(directory, 0o500)
+        os.chmod(bundle, 0o500)
+    except Exception:
+        try:
+            for item in bundle.rglob("*"):
+                if item.is_dir():
+                    os.chmod(item, 0o700)
+                else:
+                    os.chmod(item, 0o600)
+            os.chmod(bundle, 0o700)
+        except OSError:
+            pass
+        shutil.rmtree(bundle, ignore_errors=True)
+        raise
+    _STAGING["bundles"][manifest_hash] = bundle
+    return bundle
+
+
+def _pinned_runtime_path(manifest, entry, label) -> str:
+    """Return a vendor path into a private verified immutable snapshot."""
+    bundle = _stage_extra_files(manifest)
+    target = (bundle / Path(entry["path"])).resolve(strict=True)
+    inside = os.path.normcase(os.path.commonpath([str(bundle), str(target)]))
+    if inside != os.path.normcase(str(bundle)) or not target.is_file():
+        raise ValueError("%s staging path escaped its bundle" % label)
+    return str(target)
 
 
 def _load_tokenizer(manifest):
@@ -178,7 +283,12 @@ def _load_tokenizer(manifest):
         )
     try:
         payload = _read_pinned_bytes(manifest, entry, "tokenizer")
-        return Tokenizer.from_buffer(payload), ""
+        tokenizer = Tokenizer.from_buffer(payload)
+        if getattr(tokenizer, "truncation", None) not in (None, {}):
+            return None, "tokenizer-side truncation is not allowed"
+        if getattr(tokenizer, "padding", None) not in (None, {}):
+            return None, "tokenizer-side padding is not allowed"
+        return tokenizer, ""
     except Exception as exc:
         return None, "tokenizer load failed: %s" % npu_contract.sanitize_error(
             exc, 160,
@@ -190,7 +300,15 @@ def _create_real_session(manifest, provider_id):
     if ort is None:
         return None, "onnxruntime not installed: %s" % error
     ep_name = npu_providers.PROVIDER_EPS[provider_id]
-    options = (manifest.get("provider_options") or {}).get(provider_id) or {}
+    raw_options = (manifest.get("provider_options") or {}).get(provider_id) or {}
+    options = {}
+    for key, value in raw_options.items():
+        if isinstance(value, dict):
+            options[key] = _pinned_runtime_path(
+                manifest, value, "provider option %s.%s" % (provider_id, key),
+            )
+        else:
+            options[key] = value
     if provider_id == "openvino" and "device_type" not in options:
         options = {**options, "device_type": "NPU"}
     try:
@@ -218,6 +336,9 @@ def _create_real_session(manifest, provider_id):
 
 
 def _entry_for_provider(manifest, provider_id, primary_provider):
+    if provider_id == "cpu-sim" and not _test_hooks_enabled():
+        return None, "cpu-sim is disabled outside test hooks"
+    npu_attested = provider_id in {"openvino", "qnn"}
     entry = {
         "manifest": manifest,
         "provider": provider_id,
@@ -226,6 +347,10 @@ def _entry_for_provider(manifest, provider_id, primary_provider):
         "ep_fallback": provider_id != primary_provider,
         "cpu_fallback_disabled": provider_id in npu_contract.NPU_CLASS_PROVIDERS,
         "simulated": provider_id == "cpu-sim",
+        # OpenVINO is schema-constrained to device_type=NPU and QNN to a
+        # pinned HTP backend. VitisAI spans Ryzen, adaptable SoCs, and Alveo,
+        # so its EP name alone is not sufficient effective-device evidence.
+        "npu_attested": npu_attested,
         "session": None,
         "tokenizer": None,
     }
@@ -278,7 +403,9 @@ def _load(request) -> dict:
     drift = npu_manifest.verify_files(manifest)
     if drift:
         return _error(request, "load_failed", drift)
-    provider_rows = npu_providers.detect_providers(*_ort())
+    provider_rows = npu_providers.detect_providers(
+        *_ort(), test_hooks=_test_hooks_enabled(),
+    )
     candidates = npu_providers.provider_candidates(manifest, provider_rows)
     if not candidates:
         _provider, _fallback, error = npu_providers.resolve_provider(
@@ -318,6 +445,7 @@ def _load(request) -> dict:
         "ep_fallback": bool(entry["ep_fallback"]),
         "cpu_fallback_disabled": bool(entry["cpu_fallback_disabled"]),
         "simulated": bool(entry["simulated"]),
+        "npu_attested": bool(entry["npu_attested"]),
         "rss_mb": _rss_mb(),
     }
 
@@ -356,16 +484,22 @@ def _run_routing(entry, request) -> dict:
         outputs = session.run(None, {feed_name: row})
         flat = numpy.asarray(outputs[0], dtype=numpy.float64).reshape(-1)
         labels = manifest.get("labels") or list(npu_contract.ROUTE_MODES)
-        if flat.shape[0] < len(labels):
-            return _error(request, "bad_output", "model returned too few scores")
-        values = [float(value) for value in flat[: len(labels)]]
+        if flat.shape[0] != len(labels):
+            return _error(
+                request, "bad_output", "model returned the wrong score count",
+            )
+        values = [float(value) for value in flat]
+        if any(not math.isfinite(value) for value in values):
+            return _error(request, "bad_output", "non-finite score")
         if manifest.get("postprocess") == "softmax":
             values = _softmax(values)
+        elif any(not 0.0 <= value <= 1.0 for value in values):
+            return _error(
+                request, "bad_output", "unprocessed scores must be in [0,1]",
+            )
         scores = {}
         for label, value in zip(labels, values):
-            if not math.isfinite(value):
-                return _error(request, "bad_output", "non-finite score")
-            scores[label] = min(1.0, max(0.0, round(value, 6)))
+            scores[label] = round(value, 6)
     margin = abs(scores["autopilot"] - scores["workbench"])
     reason_code = "score_margin" if margin >= 0.2 else "low_confidence"
     return {
@@ -376,6 +510,8 @@ def _run_routing(entry, request) -> dict:
         "provider": entry["provider"],
         "ep": entry["ep"],
         "simulated": bool(entry["simulated"]),
+        "npu_attested": bool(entry["npu_attested"]),
+        "manifest_hash": str(manifest.get("manifest_hash") or ""),
         "ep_fallback": bool(entry["ep_fallback"]),
         "ep_chain": entry["ep_chain"],
         "cpu_fallback_disabled": bool(entry["cpu_fallback_disabled"]),
@@ -390,20 +526,45 @@ def _real_embed(entry, texts) -> list:
     session = entry["session"]
     tokenizer = entry["tokenizer"]
     encodings = [tokenizer.encode(text) for text in texts]
+    if any(getattr(encoding, "overflowing", None) for encoding in encodings):
+        raise ValueError("tokenizer truncated embedding input")
+    if not encodings or any(not encoding.ids for encoding in encodings):
+        raise ValueError("tokenizer returned empty embedding input")
     width = max(len(encoding.ids) for encoding in encodings)
     ids = numpy.zeros((len(texts), width), dtype=numpy.int64)
     mask = numpy.zeros((len(texts), width), dtype=numpy.int64)
+    type_ids = numpy.zeros((len(texts), width), dtype=numpy.int64)
     for index, encoding in enumerate(encodings):
-        ids[index, : len(encoding.ids)] = encoding.ids
-        mask[index, : len(encoding.ids)] = 1
+        length = len(encoding.ids)
+        attention = list(getattr(encoding, "attention_mask", []))
+        token_types = list(getattr(encoding, "type_ids", []))
+        if len(attention) != length or len(token_types) != length:
+            raise ValueError("tokenizer returned inconsistent embedding fields")
+        ids[index, :length] = encoding.ids
+        mask[index, :length] = attention
+        type_ids[index, :length] = token_types
+    input_metas = list(session.get_inputs())
+    input_names = {str(meta.name) for meta in input_metas}
+    if (
+        len({len(encoding.ids) for encoding in encodings}) > 1
+        and "attention_mask" not in input_names
+    ):
+        raise ValueError(
+            "variable-length embedding batch requires attention_mask input"
+        )
     feeds = {}
-    for meta in session.get_inputs():
-        if "mask" in meta.name:
+    for meta in input_metas:
+        name = str(meta.name)
+        if name == "input_ids":
+            feeds[name] = ids
+        elif name == "attention_mask":
             feeds[meta.name] = mask
-        elif "type" in meta.name:
-            feeds[meta.name] = numpy.zeros_like(ids)
+        elif name == "token_type_ids":
+            feeds[name] = type_ids
         else:
-            feeds[meta.name] = ids
+            raise ValueError("unsupported embedding model input %r" % name)
+    if "input_ids" not in feeds:
+        raise ValueError("embedding model omitted required input_ids")
     hidden = numpy.asarray(session.run(None, feeds)[0], dtype=numpy.float64)
     pooling = manifest.get("pooling") or "mean"
     if hidden.ndim == 3:
@@ -416,8 +577,10 @@ def _real_embed(entry, texts) -> list:
             )
         else:
             raise ValueError("unsupported embedding pooling %r" % pooling)
-    else:
+    elif hidden.ndim == 2:
         pooled = hidden
+    else:
+        raise ValueError("embedding output must be a 2-D or 3-D tensor")
     if manifest.get("normalize", True):
         norms = numpy.clip(
             numpy.linalg.norm(pooled, axis=1, keepdims=True), 1e-12, None,
@@ -457,6 +620,10 @@ def _run_embedding(entry, request) -> dict:
             vectors = _real_embed(entry, texts)
         except Exception as exc:
             return _error(request, "run_failed", exc)
+        if len(vectors) != len(texts):
+            return _error(
+                request, "bad_output", "model returned the wrong vector count",
+            )
         for vector in vectors:
             if len(vector) != dimension or any(
                 not math.isfinite(value) for value in vector
@@ -472,6 +639,8 @@ def _run_embedding(entry, request) -> dict:
         "provider": entry["provider"],
         "ep": entry["ep"],
         "simulated": bool(entry["simulated"]),
+        "npu_attested": bool(entry["npu_attested"]),
+        "manifest_hash": str(manifest.get("manifest_hash") or ""),
         "ep_fallback": bool(entry["ep_fallback"]),
         "ep_chain": entry["ep_chain"],
         "cpu_fallback_disabled": bool(entry["cpu_fallback_disabled"]),
@@ -513,7 +682,9 @@ def _handle(request) -> dict:
         return {
             "id": request.get("id"),
             "ok": True,
-            "providers": npu_providers.detect_providers(*_ort()),
+            "providers": npu_providers.detect_providers(
+                *_ort(), test_hooks=_test_hooks_enabled(),
+            ),
             "rss_mb": _rss_mb(),
         }
     if op == "load":
@@ -557,6 +728,7 @@ def main() -> int:
         "event": "ready",
         "protocol": npu_contract.PROTOCOL_VERSION,
         "pid": os.getpid(),
+        "rss_mb": _rss_mb(),
     })
     while True:
         line = stdin.readline(npu_contract.MAX_LINE_BYTES + 2)

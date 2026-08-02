@@ -24,7 +24,8 @@ Sonder server (stdlib-only host path)
         v
   npu_worker (restartable child process)
       all vendor imports live here: onnxruntime, tokenizers, numpy
-      providers: vitisai | openvino | qnn | winml | cpu | cpu-sim
+      providers: vitisai | openvino | qnn | winml | cpu
+      test-only provider: cpu-sim (requires SONDER_NPU_TEST_HOOKS=1)
 ```
 
 - The main server process never imports vendor runtimes for this path. The
@@ -38,29 +39,42 @@ Sonder server (stdlib-only host path)
   non-credential NPU-vendor runtime variables, and exact test-hook controls;
   prefix-matched vendor variables are not inherited. Ordinary cloud/API keys
   and unrelated `SONDER_*` settings are not inherited either.
-- Operational limits: one in-flight call; per-operation deadlines
+- Worker teardown contains descendants with a Windows kill-on-close Job Object
+  (exact-PID tree fallback when Job assignment is unavailable) or a POSIX
+  process group. It never targets unrelated processes.
+- Operational limits: one in-flight call; vendor-exchange deadlines
   (routing ≤ 2 s, embeddings ≤ 10 s, defaults 400 ms / 2 s); request lines
   ≤ 1 MiB; ≤ 16 texts × 8000 chars; vectors ≤ 4096 dims; available-RAM spawn
-  gate; worker RSS eviction cap; idle unload; restart-once then a circuit
-  breaker with cooldown and a half-open probe.
+  gate; pinned files ≤ 768 MiB and the combined loaded bundle ≤ 1 GiB; worker
+  RSS is checked at ready/hello/detect/load/error/success; idle unload;
+  restart-once then a circuit breaker with cooldown and a half-open probe.
+  Complete pinned-file hashing happens during session load. Inference uses a
+  cheap metadata-fingerprint check against the immutable loaded/staged session,
+  avoiding repeated bundle I/O on the CPU hot path.
 
 ## Providers (discovered, never assumed)
 
-Capability is discovered per process by the worker and reported honestly as
-`detected` (silicon/EP present) vs `runtime_ready` (a session can be created
-now). NPU sessions disable ONNX Runtime's implicit CPU EP fallback and must
+`detected` comes from a cached, NPU-only host hardware discovery probe, not an
+EP name or session claim. Provider-table detection is mapped from that host
+vendor fact; the worker cannot manufacture it.
+`registered` means only that the worker can see an execution provider;
+`utility_ready` is promoted after any compatible allowlisted model session has
+actually loaded. The global `runtime_ready` flag is narrower: it requires a
+successful session with explicit NPU-device attestation, so CPU, CPU simulator,
+and target-unverified VitisAI sessions cannot make the NPU status look ready.
+NPU sessions disable ONNX Runtime's implicit CPU EP fallback and must
 bind exclusively to the requested execution provider. Failed session creation
 or provider introspection tries the next allowlisted provider as a separate
 session; `ep_fallback` records that choice.
 
 | id        | Execution provider           | Notes |
 |-----------|------------------------------|-------|
-| `vitisai` | `VitisAIExecutionProvider`   | AMD Ryzen AI; requires AMD's onnxruntime build/SDK |
-| `openvino`| `OpenVINOExecutionProvider`  | Intel NPU via `device_type=NPU` (set automatically) |
-| `qnn`     | `QNNExecutionProvider`       | Qualcomm Hexagon; `provider_options.qnn.backend_path` may name the vendor backend |
-| `winml`   | —                            | Descriptor only: no supported Python runtime path today. DirectML is GPU-class and is deliberately **not** claimed as an NPU |
+| `vitisai` | `VitisAIExecutionProvider`   | AMD Vitis AI spans Ryzen AI, adaptable SoCs, and Alveo. An exclusive successful session is usable, but is reported as an unverified utility sidecar—not NPU-accelerated—until the runtime exposes effective-target attestation. An optional `config_file` must be a pinned `extra_file`. |
+| `openvino`| `OpenVINOExecutionProvider`  | Intel NPU only; `device_type` is fixed to `NPU` and CPU/GPU values are rejected. |
+| `qnn`     | `QNNExecutionProvider`       | Qualcomm HTP/NPU only; `backend_path` is required, must name a QNN HTP backend, and must reference a pinned `extra_file`. CPU/GPU QNN backends are rejected. |
+| `winml`   | —                            | Descriptor only: no supported Python runtime path today and never reported detected/ready. DirectML is GPU-class and is deliberately **not** claimed as an NPU. |
 | `cpu`     | `CPUExecutionProvider`       | onnxruntime CPU reference — the only allowed same-model fallback; never reported as NPU acceleration |
-| `cpu-sim` | stdlib simulator             | Deterministic, dependency-free; used by CI and explicit opt-in testing; always reported as `simulated` |
+| `cpu-sim` | stdlib simulator             | Deterministic CI/test provider. It is registered only under `SONDER_NPU_TEST_HOOKS=1`, always reports `simulated`, and can never replace a production embedding vector. |
 
 If an NPU session exposes CPU or any other extra provider, load is refused.
 An allowlisted `cpu` fallback is created independently and is therefore
@@ -72,12 +86,19 @@ Sonder never downloads or redistributes models or vendor SDKs. You provision
 files yourself and describe them with a JSON manifest in the manifest
 directory (`<sonder state home>/npu-manifests`, override with
 `SONDER_NPU_MANIFEST_DIR`). File paths are relative to that directory —
-manifests are portable and carry no absolute paths. Hash or size drift
+manifests are portable and carry no absolute paths. Vendor file options must
+reference entries in `extra_files`; they cannot introduce unpinned absolute or
+traversal paths. Hash or size drift
 disables a bundle instead of serving different weights.
 
 The worker hashes the exact model/tokenizer bytes it passes to the vendor
-runtime, and the broker re-hashes every pinned file before every inference.
-This intentionally favors fail-closed integrity over metadata-only caching.
+runtime, and file-valued vendor assets are copied into a private read-only
+per-worker snapshot. The broker records dev/inode/size/mtime fingerprints after
+that full load-time verification and compares them before inference. Ordinary
+source drift fails closed and requires a fresh load; a same-user
+metadata-preserving edit
+cannot alter the already loaded bytes and is re-hashed on the next load. This
+runtime is failure isolation, not a same-user security sandbox.
 ONNX models with externally stored tensor data are not supported in v1; use a
 self-contained ONNX file so the loaded bytes can be bound to the manifest.
 
@@ -110,7 +131,8 @@ self-contained ONNX file so the loaded bytes can be bound to the manifest.
   "postprocess": "l2norm",
   "providers": ["openvino", "cpu"],
   "space": {"model": "nomic-embed-text:latest",
-            "revision": "ollama-manifest-sha256:<64 hex>"},
+            "revision": "ollama-manifest-sha256:<64 hex>",
+            "dimension": 768},
   "limits": {"deadline_ms": 2000, "max_batch": 8, "max_text_chars": 4000}
 }
 ```
@@ -120,6 +142,24 @@ create the session, the worker tries the next runtime-ready allowlisted
 provider; any fallback is reported explicitly. `limits` are clamped to the
 global caps. One valid manifest per operation is active (lexicographically
 first by name).
+
+File-valued provider options use a relative reference to a hash-pinned
+`extra_files` entry, for example:
+
+```json
+{
+  "extra_files": [
+    {"path": "QnnHtp.dll", "sha256": "<64 hex>", "bytes": 123456}
+  ],
+  "provider_options": {"qnn": {"backend_path": "QnnHtp.dll"}}
+}
+```
+
+Embedding bundle ABI v1 requires an exact `input_ids` ONNX input and permits
+only optional `attention_mask` and `token_type_ids` inputs. Unknown inputs fail
+closed. The first output must be either a 2-D pooled tensor or a 3-D hidden-state
+tensor handled by the declared pooling mode. `tokenizer.json` must not enable
+automatic truncation or padding; runtime-detected overflow also fails closed.
 
 ## Policy: off, shadow, prefer
 
@@ -170,16 +210,26 @@ None and the callers' lexical fallback). New typed path:
   `accelerated=false`.
 - Acceleration happens only when policy prefers embeddings **and** the active
   embedding manifest declares `space` pinning the exact model identity and
-  serving revision the legacy embedder would use right now. That declaration
+  serving revision and expected dimension the legacy embedder would use right
+  now. The accelerator adds no further silent truncation: text above the
+  manifest limit falls back intact from the NPU path. The established legacy
+  `EMBED_MAX_CHARS` context cap still runs before either embedding path.
+  Simulated output never substitutes. That declaration
   asserts identical weights/tokenizer/pooling/normalization; the revision pin
   means a retagged Ollama model or drifted ONNX file disables acceleration.
 - Same-model CPU fallback (the `cpu` provider on the same pinned ONNX) is the
   only allowed in-worker fallback. Vector spaces never mix, and a different
   embedder is never silently substituted — a legacy fallback is visible in
-  `fallback_reason` and activity telemetry.
-- Every inference boundary performs complete size/SHA-256 revalidation of all
-  pinned files, even if paths, timestamps, and file identities are unchanged.
-  Drift marks the loaded manifest unhealthy and fails closed.
+  `fallback_reason` and activity telemetry. Target-unverified VitisAI results
+  may be observed in shadow/routing work but never substitute a production
+  embedding vector.
+- Every load performs complete bounded size/SHA-256 verification of all pinned
+  files. Each inference performs a cheap source fingerprint drift check against
+  the immutable loaded/staged session; drift marks the manifest unhealthy.
+- ONNX/tokenizer equivalence to the named Ollama revision remains an
+  operator-provisioned assertion in v1; Sonder verifies identity, dimension,
+  declared pipeline, and every supplied byte, but does not claim to derive the
+  ONNX conversion from Ollama automatically.
 
 ## Diagnostics and telemetry
 

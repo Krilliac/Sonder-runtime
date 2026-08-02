@@ -183,6 +183,37 @@ class HardwareProfile:
         return asdict(self)
 
 
+def _windows_system_memory():
+    """Fast stdlib-only Windows memory query; never spawns PowerShell."""
+    try:
+        import ctypes
+
+        class MemoryStatusEx(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = MemoryStatusEx()
+        status.dwLength = ctypes.sizeof(status)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return (
+                status.ullTotalPhys / 1024**3,
+                status.ullAvailPhys / 1024**3,
+                True,
+            )
+    except (AttributeError, OSError):
+        pass
+    return 0.0, 0.0, False
+
+
 def _system_memory():
     total = available = 0.0
     try:
@@ -205,19 +236,7 @@ def _system_memory():
         except (OSError, ValueError):
             pass
     if os.name == "nt":
-        script = (
-            "$o=Get-CimInstance Win32_OperatingSystem;"
-            "@{total=[double]$o.TotalVisibleMemorySize;free=[double]$o.FreePhysicalMemory}"
-            "|ConvertTo-Json -Compress"
-        )
-        try:
-            raw = subprocess.check_output(
-                ["powershell", "-NoProfile", "-Command", script], text=True, timeout=10
-            )
-            data = json.loads(raw)
-            return data["total"] / 1024**2, data["free"] / 1024**2, True
-        except (OSError, subprocess.SubprocessError, ValueError, KeyError):
-            pass
+        return _windows_system_memory()
     if platform.system() == "Darwin":
         try:
             total = int(subprocess.check_output(
@@ -253,7 +272,7 @@ def _npu_vendor_from_name(name):
 
 
 _NPU_NAME_RE = re.compile(
-    r"(?:\b(?:npu|ipu|vpu)\b|ai boost|ryzen\s*ai|neural|hexagon)",
+    r"(?:\bnpu\b|neural\s+processing\s+unit|ai boost|ryzen\s*ai)",
     re.IGNORECASE,
 )
 
@@ -269,6 +288,45 @@ def _npu_vendor_from_pnp_id(pnp_device_id):
     return "unknown"
 
 
+def _linux_accel_is_npu(vendor, driver):
+    """Accept only accelerator drivers tied to client NPU device classes."""
+    supported = {
+        "amd": {"amdxdna"},
+        "intel": {"intel_vpu", "ivpu"},
+    }
+    vendor_id = str(vendor or "").lower()
+    return str(driver or "").lower() in supported.get(vendor_id, set())
+
+
+def _linux_npu_from_nodes(nodes):
+    """Return the first strict NPU match from a bounded accel-node list."""
+    for node in list(nodes)[:16]:
+        vendor = "unknown"
+        driver = ""
+        try:
+            with open(
+                "/sys/class/accel/%s/device/vendor" % node,
+                "r",
+                encoding="ascii",
+            ) as stream:
+                vendor = {
+                    "0x1022": "amd",
+                    "0x8086": "intel",
+                    "0x17cb": "qualcomm",
+                }.get(stream.read().strip().lower(), "unknown")
+        except (OSError, ValueError):
+            pass
+        try:
+            driver = os.path.basename(os.path.realpath(
+                "/sys/class/accel/%s/device/driver" % node
+            )).lower()
+        except (OSError, ValueError):
+            driver = ""
+        if _linux_accel_is_npu(vendor, driver):
+            return vendor, str(node)[:80], True
+    return "none", "", False
+
+
 def _npu_probe():
     """Best-effort NPU device detection: (vendor, name, detected)."""
     cached = _NPU_PROBE["value"]
@@ -279,8 +337,8 @@ def _npu_probe():
         if os.name == "nt":
             script = (
                 "Get-CimInstance Win32_PnPEntity | Where-Object {"
-                " $_.Name -match '\\b(?:NPU|IPU|VPU)\\b|AI Boost|"
-                "Ryzen\\s*AI|Neural|Hexagon' } |"
+                " $_.Name -match '\\bNPU\\b|Neural\\s+Processing\\s+Unit|"
+                "AI Boost|Ryzen\\s*AI' } |"
                 " Select-Object -First 4 Name,PNPDeviceID |"
                 " ConvertTo-Json -Compress"
             )
@@ -318,21 +376,7 @@ def _npu_probe():
             except OSError:
                 nodes = []
             if nodes:
-                vendor = "unknown"
-                try:
-                    with open(
-                        "/sys/class/accel/%s/device/vendor" % nodes[0],
-                        "r",
-                        encoding="ascii",
-                    ) as stream:
-                        vendor = {
-                            "0x1022": "amd",
-                            "0x8086": "intel",
-                            "0x17cb": "qualcomm",
-                        }.get(stream.read().strip().lower(), "unknown")
-                except (OSError, ValueError):
-                    pass
-                result = (vendor, nodes[0][:80], True)
+                result = _linux_npu_from_nodes(nodes)
     _NPU_PROBE["value"] = result
     return result
 
@@ -352,6 +396,15 @@ def _npu_hardware(env=None):
     vendor = str(env.get("SONDER_NPU_VENDOR", vendor) or "").strip().lower() or vendor
     name = str(env.get("SONDER_NPU_NAME", name) or "").strip()[:80]
     return vendor, name, detected
+
+
+def detect_npu_hardware():
+    """Return cached NPU-only ``(vendor, name, detected)`` host state.
+
+    Unlike ``detect_hardware()``, this does not inspect RAM, CPU, or GPU state,
+    so frequent accelerator status rendering stays lightweight.
+    """
+    return _npu_hardware()
 
 
 def _nvidia_profile(gpu_index=None):

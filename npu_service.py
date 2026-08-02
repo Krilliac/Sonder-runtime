@@ -8,8 +8,8 @@ accelerator contract:
 - deterministic host-computed routing features (never raw prompt text) with a
   versioned identity the manifest must match;
 - allowlist validation of every accelerator response before use;
-- exact-identity gating for embedding acceleration so vector spaces can never
-  mix and a different embedder is never silently substituted;
+- exact model/revision/dimension gating for embedding acceleration so vector
+  spaces can never mix; simulated and truncated inputs never substitute;
 - bounded, redacted status/diagnostics/activity reporting (no prompt text, no
   vectors, no logits — counts, enums, and hashes only).
 
@@ -28,6 +28,7 @@ import npu_contract
 import npu_manifest
 import npu_providers
 import runtime_policy
+import system_profile
 
 
 FEATURES_ID = "exec-route-features-v1"
@@ -184,18 +185,31 @@ def _execution_provenance(response, manifest) -> dict:
         active_provider = npu_providers.provider_id_for_ep(active_ep)
         if not active_provider or active_provider not in allowlist:
             raise ValueError("response exposed an unallowlisted provider")
-    simulated = bool(response.get("simulated"))
+    if chain != [expected_ep]:
+        raise ValueError("response did not bind one exclusive provider")
+    simulated = response.get("simulated")
+    if not isinstance(simulated, bool):
+        raise ValueError("response omitted boolean simulator provenance")
     if simulated != (provider == "cpu-sim"):
         raise ValueError("response has inconsistent simulator provenance")
-    cpu_fallback_disabled = bool(response.get("cpu_fallback_disabled"))
-    accelerated = provider in npu_contract.NPU_CLASS_PROVIDERS
-    if accelerated and (
-        not cpu_fallback_disabled or any(item != expected_ep for item in chain)
+    cpu_fallback_disabled = response.get("cpu_fallback_disabled")
+    if not isinstance(cpu_fallback_disabled, bool):
+        raise ValueError("response omitted boolean CPU fallback provenance")
+    npu_attested = response.get("npu_attested")
+    if not isinstance(npu_attested, bool):
+        raise ValueError("response omitted NPU attestation")
+    if npu_attested and provider not in {"openvino", "qnn"}:
+        raise ValueError("response has unsupported NPU device attestation")
+    accelerated = npu_attested
+    if provider in npu_contract.NPU_CLASS_PROVIDERS and (
+        not cpu_fallback_disabled
     ):
         raise ValueError("NPU response permits ambiguous CPU fallback")
-    if not accelerated and cpu_fallback_disabled:
+    if provider in {"cpu", "cpu-sim"} and cpu_fallback_disabled:
         raise ValueError("CPU response has inconsistent fallback provenance")
-    ep_fallback = bool(response.get("ep_fallback"))
+    ep_fallback = response.get("ep_fallback")
+    if not isinstance(ep_fallback, bool):
+        raise ValueError("response omitted boolean EP fallback provenance")
     if ep_fallback != (provider != allowlist[0]):
         raise ValueError("response has inconsistent fallback provenance")
     return {
@@ -206,6 +220,7 @@ def _execution_provenance(response, manifest) -> dict:
         "ep_fallback": ep_fallback,
         "cpu_fallback_disabled": cpu_fallback_disabled,
         "simulated": simulated,
+        "npu_attested": npu_attested,
     }
 
 
@@ -335,8 +350,8 @@ def route_shadow(prompt, baseline):
 def _embedding_call(manifest, text):
     limit = int((manifest.get("limits") or {}).get("max_text_chars") or 0)
     prompt = str(text or "")
-    if limit > 0:
-        prompt = prompt[:limit]
+    if limit > 0 and len(prompt) > limit:
+        raise ValueError("embedding text exceeds the manifest limit")
     broker = npu_broker.get_broker()
     response = broker.call(manifest, {"kind": "embedding", "texts": [prompt]})
     vectors = response.get("vectors")
@@ -358,7 +373,7 @@ def embeddings_active() -> str:
     return _mode("embeddings")
 
 
-def embed_for_space(text, model_identity, revision):
+def embed_for_space(text, model_identity, revision, expected_dimension=None):
     """Accelerated embedding only for the exact declared vector space.
 
     The manifest must declare ``space`` pinning the same model identity and
@@ -373,6 +388,15 @@ def embed_for_space(text, model_identity, revision):
         return None
     space = manifest.get("space")
     if not space:
+        return None
+    if (
+        isinstance(expected_dimension, bool)
+        or not isinstance(expected_dimension, int)
+        or expected_dimension <= 0
+        or manifest.get("dimension") != expected_dimension
+        or space.get("dimension") != expected_dimension
+    ):
+        _event("npu_fallback", capability="embeddings", reason="dimension_mismatch")
         return None
     if (
         space.get("model") != str(model_identity or "")
@@ -391,6 +415,20 @@ def embed_for_space(text, model_identity, revision):
     except Exception:
         _event("npu_fallback", capability="embeddings", reason="internal")
         return None
+    if result.get("simulated"):
+        _event("npu_fallback", capability="embeddings", reason="simulated_provider")
+        return None
+    if result.get("provider") != "cpu" and not result.get("accelerated"):
+        # VitisAI spans NPU and non-NPU target classes. Until the effective
+        # device can be attested, it may participate in shadow/routing work but
+        # cannot substitute a production embedding vector.
+        _event("npu_fallback", capability="embeddings", reason="target_unattested")
+        return None
+    result.update(
+        model=space["model"],
+        revision=space["revision"],
+        dimension=space["dimension"],
+    )
     _event(
         "npu_embed",
         provider=result["provider"],
@@ -479,20 +517,51 @@ def status(probe=False) -> dict:
     )
     broker_status["hello"] = hello
     provider_rows = []
+    seen_provider_ids = set()
     for raw_row in broker_status.get("providers") or []:
         if not isinstance(raw_row, dict):
             continue
-        provider_row = dict(raw_row)
-        provider_row["reason"] = npu_contract.sanitize_error(
-            provider_row.get("reason") or "", 160,
-        )
+        provider_id = raw_row.get("id")
+        if (
+            not isinstance(provider_id, str)
+            or provider_id not in npu_contract.PROVIDER_IDS
+            or provider_id in seen_provider_ids
+        ):
+            continue
+        seen_provider_ids.add(provider_id)
+        provider_row = {
+            "id": provider_id,
+            "label": npu_providers.provider_label(provider_id),
+            "registered": raw_row.get("registered") is True,
+            "detected": False,
+            "runtime_ready": raw_row.get("runtime_ready") is True,
+            "ep": (
+                npu_providers.SIMULATOR_EP
+                if provider_id == "cpu-sim"
+                else npu_providers.PROVIDER_EPS.get(provider_id, "")
+            ),
+            "reason": npu_contract.sanitize_error(
+                raw_row.get("reason") or "", 160,
+            ),
+        }
         provider_rows.append(provider_row)
     broker_status["providers"] = provider_rows
+    active_hashes = {
+        str(manifest.get("manifest_hash") or "")
+        for manifest in active.values()
+        if manifest and manifest.get("manifest_hash")
+    }
     model_rows = []
     for raw_row in broker_status.get("models") or []:
         if not isinstance(raw_row, dict):
             continue
+        # Broker workers can outlive a manifest deletion/replacement until the
+        # idle reaper runs. Only sessions for the current active manifests may
+        # contribute to readiness (or appear as current model state).
+        if raw_row.get("manifest_hash") not in active_hashes:
+            continue
         model_row = dict(raw_row)
+        model_row.pop("manifest_hash", None)
         model_row["error"] = npu_contract.sanitize_error(
             model_row.get("error") or "", 200,
         )
@@ -502,22 +571,48 @@ def status(probe=False) -> dict:
         broker_status.get("last_error") or "", 200,
     )
     providers = broker_status.get("providers") or []
-    probed = bool(providers)
-    detected = None
-    runtime_ready = None
-    if probed:
-        ready_ids = {
-            row.get("id") for row in providers if row.get("runtime_ready")
-        }
-        detected = any(
-            row.get("detected")
-            and row.get("id") in npu_contract.NPU_CLASS_PROVIDERS
-            for row in providers
+    try:
+        npu_vendor, _npu_name, detected_raw = (
+            system_profile.detect_npu_hardware()
         )
-        runtime_ready = any(
-            manifest and set(manifest.get("providers") or []) & ready_ids
-            for manifest in active.values()
+        detected = bool(detected_raw)
+    except Exception:
+        npu_vendor = "unknown"
+        detected = None
+    provider_for_vendor = {
+        "amd": "vitisai",
+        "intel": "openvino",
+        "qualcomm": "qnn",
+    }.get(str(npu_vendor or "").lower(), "")
+    for provider_row in providers:
+        provider_row["detected"] = bool(
+            detected is True and provider_row.get("id") == provider_for_vendor
         )
+    model_rows = broker_status.get("models") or []
+    ready_provider_ids = {
+        row.get("provider")
+        for row in model_rows
+        if row.get("ok") is True and isinstance(row.get("provider"), str)
+    }
+    for provider_row in providers:
+        provider_row["runtime_ready"] = (
+            provider_row.get("id") in ready_provider_ids
+        )
+    invalid_only = bool(rows) and not any(
+        not row.get("error") for row in rows
+    )
+    # A valid but cold manifest has not been probed yet, so readiness remains
+    # unknown. An invalid-only configuration is conclusively not ready.
+    readiness_observed = bool(providers or model_rows or invalid_only)
+    utility_ready = (
+        any(row.get("ok") is True for row in model_rows)
+        if readiness_observed else None
+    )
+    runtime_ready = (
+        any(row.get("ok") is True and row.get("npu_attested") is True
+            for row in model_rows)
+        if readiness_observed else None
+    )
     circuit = broker_status.get("circuit") or {}
     healthy = (
         circuit.get("state") == "closed"
@@ -529,6 +624,7 @@ def status(probe=False) -> dict:
         "modes": modes,
         "enabled": enabled,
         "detected": detected,
+        "utility_ready": utility_ready,
         "runtime_ready": runtime_ready,
         "healthy": healthy,
         "features_id": FEATURES_ID,
@@ -560,12 +656,14 @@ def diagnostics_line(state=None) -> str:
         )
     broker_state = state["broker"]
     return (
-        "routing=%s embeddings=%s detected=%s runtime-ready=%s healthy=%s "
+        "routing=%s embeddings=%s detected=%s utility-ready=%s "
+        "npu-runtime-ready=%s healthy=%s "
         "worker=%s circuit=%s p95=%sms"
         % (
             modes.get("routing"),
             modes.get("embeddings"),
             _flag(state["detected"]),
+            _flag(state["utility_ready"]),
             _flag(state["runtime_ready"]),
             _flag(state["healthy"]),
             (broker_state.get("worker") or {}).get("state", "cold"),
@@ -590,8 +688,10 @@ def format_status(state=None) -> str:
         "  policy: routing=%s embeddings=%s" % (
             modes.get("routing"), modes.get("embeddings"),
         ),
-        "  state: detected=%s runtime-ready=%s enabled=%s healthy=%s" % (
-            _flag(state["detected"]), _flag(state["runtime_ready"]),
+        "  state: detected=%s utility-ready=%s npu-runtime-ready=%s "
+        "enabled=%s healthy=%s" % (
+            _flag(state["detected"]), _flag(state["utility_ready"]),
+            _flag(state["runtime_ready"]),
             "yes" if state["enabled"] else "no", _flag(state["healthy"]),
         ),
         "  worker: %s (spawns=%s idle-unloads=%s rss-evictions=%s rss=%sMB)" % (

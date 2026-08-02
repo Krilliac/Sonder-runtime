@@ -26,7 +26,7 @@ PROVIDER_EPS = {
 SIMULATOR_EP = "CPUSimulator"
 
 _VENDOR_LABELS = {
-    "vitisai": "AMD VitisAI / Ryzen AI",
+    "vitisai": "AMD VitisAI (effective target unverified)",
     "openvino": "Intel OpenVINO NPU",
     "qnn": "Qualcomm QNN",
     "winml": "Windows ML",
@@ -39,8 +39,13 @@ def provider_label(provider_id) -> str:
     return _VENDOR_LABELS.get(provider_id, provider_id)
 
 
-def detect_providers(ort_module, ort_error="") -> list:
-    """Describe every known provider honestly for this process."""
+def detect_providers(ort_module, ort_error="", test_hooks=False) -> list:
+    """Describe registration only; successful loads establish readiness.
+
+    An EP name does not prove hardware, device selection, or model
+    compatibility.  The broker promotes rows to runtime-ready only after an
+    exclusive compatible session has actually loaded.
+    """
     available = []
     if ort_module is not None:
         try:
@@ -52,6 +57,7 @@ def detect_providers(ort_module, ort_error="") -> list:
         row = {
             "id": provider_id,
             "label": provider_label(provider_id),
+            "registered": False,
             "detected": False,
             "runtime_ready": False,
             "ep": PROVIDER_EPS.get(provider_id, ""),
@@ -59,18 +65,19 @@ def detect_providers(ort_module, ort_error="") -> list:
         }
         if provider_id == "cpu-sim":
             row.update(
-                detected=True,
-                runtime_ready=True,
+                registered=bool(test_hooks),
                 ep=SIMULATOR_EP,
-                reason="stdlib deterministic simulator",
+                reason=(
+                    "test-only stdlib deterministic simulator"
+                    if test_hooks else "disabled outside SONDER_NPU_TEST_HOOKS"
+                ),
             )
         elif provider_id == "winml":
             row.update(
-                detected=sys.platform == "win32",
-                runtime_ready=False,
                 reason=(
-                    "no supported Python runtime path; DirectML is GPU-class "
+                    "%s; no supported Python runtime path; DirectML is GPU-class "
                     "and is not claimed as an NPU"
+                    % ("Windows descriptor" if sys.platform == "win32" else "not Windows")
                 ),
             )
         elif ort_module is None:
@@ -83,8 +90,7 @@ def detect_providers(ort_module, ort_error="") -> list:
             )
         elif row["ep"] in available:
             row.update(
-                detected=True,
-                runtime_ready=True,
+                registered=True,
                 reason="execution provider registered",
             )
         else:
@@ -100,27 +106,27 @@ def resolve_provider(manifest, provider_rows) -> tuple:
     the selected provider is not the manifest's first choice, so callers can
     report honest execution-provider fallback instead of implying NPU use.
     """
-    ready = {
-        row["id"] for row in provider_rows if row.get("runtime_ready")
+    registered = {
+        row["id"] for row in provider_rows if row.get("registered")
     }
     allowlist = list(manifest.get("providers") or [])
     for provider_id in allowlist:
-        if provider_id in ready:
+        if provider_id in registered:
             return provider_id, provider_id != allowlist[0], ""
     return "", False, (
-        "no allowlisted provider is runtime-ready (requested: %s)"
+        "no allowlisted provider is registered (requested: %s)"
         % ", ".join(allowlist)
     )
 
 
 def provider_candidates(manifest, provider_rows) -> list:
     """Priority-ordered, allowlisted providers that are runtime-registered."""
-    ready = {
-        row["id"] for row in provider_rows if row.get("runtime_ready")
+    registered = {
+        row["id"] for row in provider_rows if row.get("registered")
     }
     return [
         provider_id for provider_id in (manifest.get("providers") or [])
-        if provider_id in ready
+        if provider_id in registered
     ]
 
 

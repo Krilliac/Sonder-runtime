@@ -47,11 +47,17 @@ An optional local NPU path sits **below** the fast/code/general tiers as a
 utility accelerator — never a fourth generative tier. A stdlib-only broker in
 the server owns a restartable child worker; all vendor/onnxruntime imports and
 native DLLs live only in that worker, spoken to over bounded JSONL stdio.
-Capabilities are discovered per process (AMD VitisAI, Intel OpenVINO NPU,
-Qualcomm QNN, the onnxruntime CPU reference, and a deterministic CPU
-simulator; Windows ML is descriptor-only and DirectML is not claimed as an
-NPU). Model bundles are user-provisioned, hash-pinned manifests; the runtime
-downloads nothing.
+Execution-provider registration is discovered per process, but it is not
+called hardware readiness. `utility_ready` requires any successfully loaded
+compatible model session; the global `runtime_ready` flag additionally requires
+explicit NPU-device attestation, while hardware detection remains a separate
+host fact. Intel OpenVINO is constrained to `device_type=NPU`; Qualcomm QNN to
+a pinned HTP backend. AMD VitisAI execution remains target-unverified because
+that EP also serves non-Ryzen hardware and is not labeled NPU acceleration
+without effective-device evidence. Windows ML is descriptor-only and DirectML
+is not claimed as an NPU. The deterministic CPU simulator is test-hook-only.
+Model bundles and vendor file options are user-provisioned, relative,
+hash-pinned manifests; the runtime downloads nothing.
 
 The shared runtime policy adds `npu: off | shadow | prefer` per capability
 (default off). Prefer may pre-score only the ambiguous execution-routing band
@@ -59,9 +65,17 @@ with allowlist-validated scores and may serve embeddings only for the exact
 pinned vector space; every miss falls back to the existing local path.
 Accelerator failure never triggers a cloud fallback or changes host policy.
 The worker receives an exact-name environment allowlist, hashes the bytes
-loaded by vendor runtimes, and disables implicit CPU fallback for NPU sessions.
-It still runs as the same OS user and is failure isolation, not a security
-sandbox. See [NPU.md](NPU.md).
+loaded by vendor runtimes, snapshots path-valued assets into a broker-owned
+read-only stage, rejects oversized bundles before allocation, and
+disables implicit CPU fallback for NPU sessions. Every protocol response is
+RSS-checked, and teardown contains descendants with a Windows Job Object or
+POSIX process group. The worker still runs as the same OS user and is failure
+isolation, not a security sandbox. Embedding substitution additionally binds
+model, serving revision, and expected dimension; simulator output and
+accelerator-specific truncation cannot enter a production vector space; the
+legacy embedder's established context cap remains upstream. Full bounded hashes
+bind each loaded session, while cheap source fingerprints protect the inference
+hot path; restart or reload hashes all bytes again. See [NPU.md](NPU.md).
 
 ## Model and adapter lifecycle
 
