@@ -8854,12 +8854,30 @@ def _agent_project_execution_argument_error(tool_name, args, project_root):
         "cmd": {"/c", "/k"}, "cmd.exe": {"/c", "/k"},
     }
     forbidden = inline_flags.get(program, set())
+    if re.fullmatch(r"(?:pythonw?|pypy)(?:\d+(?:\.\d+)*)?(?:\.exe)?", program):
+        forbidden = {"-c"}
+    elif re.fullmatch(r"node(?:js)?(?:\d+(?:\.\d+)*)?(?:\.exe)?", program):
+        forbidden = {"-e", "--eval", "-p", "--print"}
     if forbidden.intersection(lowered):
         return (
             "ERROR: agent project execution rejected: inline interpreter "
             "commands are outside the project path guard"
         )
-    if program in inline_flags and str(args.get("stdin") or "") and "-" in argv:
+    # Catch common launchers such as `uv run python3 -c ...` as well as a
+    # directly selected interpreter.
+    for index, token in enumerate(lowered[:-1]):
+        child = Path(token).name
+        child_flags = set()
+        if re.fullmatch(r"(?:pythonw?|pypy)(?:\d+(?:\.\d+)*)?(?:\.exe)?", child):
+            child_flags = {"-c"}
+        elif re.fullmatch(r"node(?:js)?(?:\d+(?:\.\d+)*)?(?:\.exe)?", child):
+            child_flags = {"-e", "--eval", "-p", "--print"}
+        if any(item in child_flags for item in lowered[index + 1:]):
+            return (
+                "ERROR: agent project execution rejected: inline interpreter "
+                "commands are outside the project path guard"
+            )
+    if forbidden and str(args.get("stdin") or "") and "-" in argv:
         return (
             "ERROR: agent project execution rejected: interpreter code via "
             "stdin is outside the project path guard"
@@ -9782,17 +9800,43 @@ _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "artifact_ground",
 })
 _PROJECT_SCOPED_EXECUTION_TOOLS = frozenset({"workspace_run", "script_run"})
-_PROJECT_UNSCOPED_PERSISTENT_TOOLS = frozenset({
-    "artifact_generate", "assetgen", "game_generate_and_test", "game_generate",
-    "game_generation_campaign", "game_campaign", "workflow_run",
-})
+_AGENT_TOOL_ALIASES = {
+    "assetgen": "artifact_generate",
+    "game_generate": "game_generate_and_test",
+    "game_campaign": "game_generation_campaign",
+    "improvement_report": "system_improvement_report",
+    "agent_status": "master_status",
+    "agent_capacity": "master_capacity",
+    "agent_cancel": "master_cancel",
+    "agent_retry": "master_retry",
+    "master": "master_orchestrate",
+}
+_PROJECT_BOUND_AGENT_TOOLS = (
+    _PROJECT_SCOPED_PATH_TOOLS
+    | _PROJECT_SCOPED_EXECUTION_TOOLS
+    | frozenset({
+        "ground_artifact", "program_search", "web_search", "web_fetch",
+        "weather_lookup", "approximate_location_lookup", "memory_search",
+        "file_policy", "task_create", "task_list", "task_update", "task_show",
+        "checklist_create", "checklist_update", "checklist_show",
+        "command_registry_list", "tool_manifest", "activity_status",
+        "permission_policy", "context_compaction_plan", "diagnostics",
+        "context_health", "learning_health_status", "memory_quality_report",
+        "memory_privacy_review", "system_improvement_report", "master_status",
+        "master_capacity", "self_heal_check", "status", "system_profile_text",
+        "emotion_vector_status", "preferences_status", "context_policy_status",
+    })
+)
+
+
+def _canonical_agent_tool_name(tool_name):
+    name = str(tool_name or "")
+    return _AGENT_TOOL_ALIASES.get(name, name)
 
 
 def _project_scoped_path_key(tool_name):
     if tool_name in {"file_find", "text_search", "script_search"}:
         return "root"
-    if tool_name == "ground_artifact":
-        return "artifact"
     return "path"
 
 
@@ -9817,8 +9861,9 @@ def _project_scope_args(tool_name, args, project):
     ):
         return args
     scoped = dict(args)
-    # Never compose a model-supplied root with the trusted host root.  The
-    # project argument is the complete authorization boundary for this run.
+    # Never compose a model-supplied root with the trusted host root.  This is
+    # the host-resolved path boundary; child processes remain user-level code,
+    # not an operating-system sandbox.
     scoped["extra_roots"] = project
 
     if tool_name == "workspace_run":
@@ -10039,31 +10084,47 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
     args = args if isinstance(args, dict) else {}
     records = [record for record in mutations if record.get("tool")]
     if not records:
-        return True
+        if tool_name in {"artifact_verify", "artifact_ground"}:
+            return bool(str(args.get("path") or "").strip())
+        if tool_name == "ground_artifact":
+            checks = args.get("checks_json", args.get("checks", []))
+            return bool(str(args.get("artifact") or "") and checks)
+        if tool_name in {
+            "game_reference_suite", "self_heal_check", "memory_quality_report",
+            "memory_privacy_review", "learning_health_status",
+        }:
+            return True
     paths = [record["path"] for record in records if record.get("path")]
     target = _agent_normalized_path(args.get("path", args.get("artifact", "")))
 
     if tool_name in {
         "game_reference_suite", "game_generate_and_test", "game_generation_campaign",
     }:
-        return all(record["tool"] in {
-            "game_generate_and_test", "game_generation_campaign",
-        } for record in records)
+        game_path = _agent_normalized_path(
+            os.path.join("games", str(args.get("name", "generated-game")))
+        )
+        return bool(records) and all(
+            record["tool"] in {
+                "game_generate_and_test", "game_generation_campaign",
+            }
+            and record.get("path") == game_path
+            for record in records
+        )
     if tool_name == "memory_quality_report":
-        return all(
+        return bool(records) and all(
             record["tool"] == "memory_quality_repair" for record in records
         )
     if tool_name == "memory_privacy_review":
-        return all(
+        return bool(records) and all(
             record["tool"] == "memory_privacy_repair" for record in records
         )
     if tool_name == "learning_health_status":
-        return all(record["tool"] in {
+        return bool(records) and all(record["tool"] in {
             "memory_embedding_backfill",
             "memory_interaction_embedding_backfill",
         } for record in records)
     if tool_name in {"artifact_verify", "artifact_ground"}:
-        return all(
+        return bool(records) and all(
             record["tool"] == "artifact_generate"
             and bool(target)
             and _agent_path_within(target, record.get("path", ""))
@@ -10080,17 +10141,21 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
         cwd = _agent_normalized_path(
             args.get("cwd") or os.path.dirname(target)
         )
-        return bool(cwd and paths) and all(
+        if not paths:
+            return bool(cwd)
+        return bool(cwd) and all(
             _agent_path_within(path, cwd) for path in paths
         )
     if tool_name == "workspace_run":
         program = os.path.basename(str(args.get("program", ""))).lower()
         argv = _agent_argv(args)
         argv_text = [item.casefold() for item in argv]
-        if set(argv_text).intersection({
+        no_op_flags = {
             "--help", "-h", "--version", "--collect-only", "--co",
             "--list-tests", "--dry-run", "--fixtures", "--fixtures-per-test",
-        }):
+            "--show-only",
+        }
+        if any(item.split("=", 1)[0] in no_op_flags for item in argv_text):
             return False
         if program in {"ctest", "ctest.exe", "ninja", "ninja.exe"} and "-n" in argv_text:
             return False
@@ -10099,17 +10164,28 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
             "mvn", "mvn.cmd", "npm", "npm.cmd", "cargo", "cargo.exe",
         }:
             return False
+        clean_only = any(
+            item == "clean"
+            or item.endswith(":clean")
+            or item in {"/t:clean", "-t:clean"}
+            for item in argv_text
+        )
+        if clean_only:
+            return False
         observation_lower = str(observation or "").casefold()
-        if any(marker in observation_lower for marker in (
-            "no tests ran", "collected 0 items", "total tests: 0",
-            "0 tests passed", "0 tests run",
-        )):
+        if re.search(
+            r"(?:no tests ran|collected\s+0\s+items|total tests:\s*0|"
+            r"(?<!\d)0\s+tests\s+(?:passed|run)\b)",
+            observation_lower,
+        ):
             return False
         cwd = _agent_normalized_path(args.get("cwd") or ".")
         explicit_targets = _agent_explicit_command_paths(argv, cwd)
         explicit_coverage = _agent_paths_covered_by_targets(
             paths, explicit_targets,
         )
+        if not paths:
+            explicit_coverage = bool(explicit_targets)
 
         python_programs = {"python", "python.exe", "py", "py.exe"}
         node_programs = {"node", "node.exe"}
@@ -10160,8 +10236,9 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
             broad = "--test" in argv_text
 
         if broad:
-            return bool(cwd and paths) and all(
-                _agent_path_within(path, cwd) for path in paths
+            return bool(cwd) and (
+                not paths
+                or all(_agent_path_within(path, cwd) for path in paths)
             )
         if program in (
             python_programs
@@ -10374,10 +10451,14 @@ def _agent_impl(
     validation_attempted = False
     validation_ok = False
     mutations = []
-    required_tools = frozenset(str(name) for name in required_tool_names if name)
+    required_tools = frozenset(
+        _canonical_agent_tool_name(name) for name in required_tool_names if name
+    )
     allowed_tools = (
         None if tool_allowlist is None
-        else frozenset(str(name) for name in tool_allowlist if name)
+        else frozenset(
+            _canonical_agent_tool_name(name) for name in tool_allowlist if name
+        )
     )
     used_tool_names = set()
     successful_web_calls = set()
@@ -10640,7 +10721,7 @@ def _agent_impl(
                 detail = "\n\n" + "\n\n".join(observations) if observations else ""
                 return _early_exit(master_orchestrator.EVIDENCE_REQUIRED + detail)
             return finish_final(final)
-        tool_name = decision.get("tool")
+        tool_name = _canonical_agent_tool_name(decision.get("tool"))
         if not tool_name:
             if auto_checklist:
                 _agent_checklist_fail(
@@ -10701,13 +10782,9 @@ def _agent_impl(
             policy_error = _repository_scope_path_error(
                 tool_name, policy_tool_args, project_scope,
             )
-        if (
-            not policy_error
-            and project_scope
-            and tool_name in _PROJECT_UNSCOPED_PERSISTENT_TOOLS
-        ):
+        if not policy_error and project_scope and tool_name not in _PROJECT_BOUND_AGENT_TOOLS:
             policy_error = (
-                "ERROR: HOST POLICY: tool '%s' has no project-rooted output "
+                "ERROR: HOST POLICY: tool '%s' has no project-bound execution "
                 "contract and is disabled for a project-bound agent."
                 % tool_name
             )
