@@ -5,8 +5,9 @@ Sonder can use a local NPU as a **utility accelerator below** the existing
 tier: it only pre-scores the ambiguous execution-routing band and (optionally)
 serves embeddings for the exact configured vector space. Every accelerator
 failure falls back to the existing local behavior. Cloud is never a fallback,
-and the accelerator cannot see or change cloud access, permissions, roots,
-credentials, or executable paths.
+and the protocol has no operations for cloud access, permissions, roots, or
+credentials. The worker environment is explicitly allowlisted and excludes
+cloud/API credential namespaces and the parent Python import path.
 
 Default state is **off** and fully backward compatible: with no policy change
 and no manifests, nothing spawns and nothing behaves differently.
@@ -30,6 +31,13 @@ Sonder server (stdlib-only host path)
   worker re-points its real stdout at stderr at startup so a chatty vendor DLL
   can never corrupt the protocol stream; any malformed or oversized protocol
   line poisons the worker and the broker kills it.
+- The worker is failure isolation, **not an OS security sandbox**. It runs as
+  the same user and can access whatever that account can access. Vendor
+  runtimes and model bundles remain trusted local inputs. Its inherited
+  environment is reduced to OS/Python loader variables, explicitly named
+  non-credential NPU-vendor runtime variables, and exact test-hook controls;
+  prefix-matched vendor variables are not inherited. Ordinary cloud/API keys
+  and unrelated `SONDER_*` settings are not inherited either.
 - Operational limits: one in-flight call; per-operation deadlines
   (routing ≤ 2 s, embeddings ≤ 10 s, defaults 400 ms / 2 s); request lines
   ≤ 1 MiB; ≤ 16 texts × 8000 chars; vectors ≤ 4096 dims; available-RAM spawn
@@ -40,8 +48,10 @@ Sonder server (stdlib-only host path)
 
 Capability is discovered per process by the worker and reported honestly as
 `detected` (silicon/EP present) vs `runtime_ready` (a session can be created
-now). The runtime records the execution provider the session actually got and
-flags `ep_fallback` when it differs from the manifest's first choice.
+now). NPU sessions disable ONNX Runtime's implicit CPU EP fallback and must
+bind exclusively to the requested execution provider. Failed session creation
+or provider introspection tries the next allowlisted provider as a separate
+session; `ep_fallback` records that choice.
 
 | id        | Execution provider           | Notes |
 |-----------|------------------------------|-------|
@@ -49,11 +59,12 @@ flags `ep_fallback` when it differs from the manifest's first choice.
 | `openvino`| `OpenVINOExecutionProvider`  | Intel NPU via `device_type=NPU` (set automatically) |
 | `qnn`     | `QNNExecutionProvider`       | Qualcomm Hexagon; `provider_options.qnn.backend_path` may name the vendor backend |
 | `winml`   | —                            | Descriptor only: no supported Python runtime path today. DirectML is GPU-class and is deliberately **not** claimed as an NPU |
-| `cpu`     | `CPUExecutionProvider`       | onnxruntime CPU reference — the only allowed same-model fallback |
+| `cpu`     | `CPUExecutionProvider`       | onnxruntime CPU reference — the only allowed same-model fallback; never reported as NPU acceleration |
 | `cpu-sim` | stdlib simulator             | Deterministic, dependency-free; used by CI and explicit opt-in testing; always reported as `simulated` |
 
-If the runtime silently reassigns a session to CPU and the manifest does not
-allowlist `cpu`, the load is refused rather than misreported as NPU.
+If an NPU session exposes CPU or any other extra provider, load is refused.
+An allowlisted `cpu` fallback is created independently and is therefore
+reported as CPU reference execution, never as NPU acceleration.
 
 ## Model bundles (manifests)
 
@@ -63,6 +74,12 @@ directory (`<sonder state home>/npu-manifests`, override with
 `SONDER_NPU_MANIFEST_DIR`). File paths are relative to that directory —
 manifests are portable and carry no absolute paths. Hash or size drift
 disables a bundle instead of serving different weights.
+
+The worker hashes the exact model/tokenizer bytes it passes to the vendor
+runtime, and the broker re-hashes every pinned file before every inference.
+This intentionally favors fail-closed integrity over metadata-only caching.
+ONNX models with externally stored tensor data are not supported in v1; use a
+self-contained ONNX file so the loaded bytes can be bound to the manifest.
 
 ```json
 {
@@ -98,7 +115,9 @@ disables a bundle instead of serving different weights.
 }
 ```
 
-`providers` is a priority-ordered allowlist. `limits` are clamped to the
+`providers` is a priority-ordered allowlist. If a registered provider cannot
+create the session, the worker tries the next runtime-ready allowlisted
+provider; any fallback is reported explicitly. `limits` are clamped to the
 global caps. One valid manifest per operation is active (lexicographically
 first by name).
 
@@ -145,8 +164,10 @@ band consults it:
 None and the callers' lexical fallback). New typed path:
 
 - `embeddings.embed_result(text)` returns the vector plus provenance:
-  `model`, `revision`, `dimension`, `provider` (`ollama` or `npu:<id>`),
-  `accelerated`, `simulated`, `fallback_reason`.
+  `model`, `revision`, `dimension`, `provider` (`ollama`, `npu:<id>`,
+  `cpu-reference`, or `cpu-sim`), `accelerated`, `simulated`,
+  `fallback_reason`. CPU reference/simulator results always report
+  `accelerated=false`.
 - Acceleration happens only when policy prefers embeddings **and** the active
   embedding manifest declares `space` pinning the exact model identity and
   serving revision the legacy embedder would use right now. That declaration
@@ -156,6 +177,9 @@ None and the callers' lexical fallback). New typed path:
   only allowed in-worker fallback. Vector spaces never mix, and a different
   embedder is never silently substituted — a legacy fallback is visible in
   `fallback_reason` and activity telemetry.
+- Every inference boundary performs complete size/SHA-256 revalidation of all
+  pinned files, even if paths, timestamps, and file identities are unchanged.
+  Drift marks the loaded manifest unhealthy and fails closed.
 
 ## Diagnostics and telemetry
 

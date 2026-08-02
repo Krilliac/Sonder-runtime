@@ -91,6 +91,30 @@ def test_embed_prefer_uses_accelerator_and_binds_provenance(
     assert not any(url.endswith("/api/embeddings") for url in legacy_http)
 
 
+def test_embed_cpu_reference_is_truthful_and_not_npu_accelerated(
+    legacy_http, monkeypatch,
+):
+    monkeypatch.setattr(
+        npu_service,
+        "embed_for_space",
+        lambda *_args: {
+            "vector": [0.6, 0.8, 0.0],
+            "provider": "cpu",
+            "ep": "CPUExecutionProvider",
+            "accelerated": False,
+            "ep_fallback": True,
+            "simulated": False,
+            "manifest_hash": "f" * 64,
+        },
+    )
+    vector = e.embed("reference me")
+    meta = e.provenance(vector)
+    assert meta["provider"] == "cpu-reference"
+    assert meta["accelerated"] is False
+    assert meta["simulated"] is False
+    assert not any(url.endswith("/api/embeddings") for url in legacy_http)
+
+
 def test_embed_prefer_miss_falls_back_to_legacy_and_is_explicit(
     legacy_http, monkeypatch,
 ):

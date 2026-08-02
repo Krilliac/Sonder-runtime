@@ -1,5 +1,4 @@
 import json
-import math
 
 import pytest
 
@@ -130,3 +129,23 @@ def test_clamp_deadline_bounds_route_and_embed():
     assert c.clamp_deadline_ms(99999, "embedding") == c.MAX_EMBED_DEADLINE_MS
     assert c.clamp_deadline_ms(None, "routing") == c.DEFAULT_ROUTE_DEADLINE_MS
     assert c.clamp_deadline_ms(None, "embedding") == c.DEFAULT_EMBED_DEADLINE_MS
+
+
+def test_sanitize_error_redacts_paths_credentials_and_multiline_text():
+    detail = c.sanitize_error(
+        "load C:\\Users\\example\\models\\route.onnx failed\n"
+        'token="alpha beta gamma"; authorization: Basic top-secret-value; '
+        "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE; "
+        "/home/example/.cache/model file.bin \x1b[31mred\x1b[0m",
+        500,
+    )
+    assert "example" not in detail
+    assert "alpha" not in detail
+    assert "top-secret-value" not in detail
+    assert "AKIAIOSFODNN7EXAMPLE" not in detail
+    assert "/home/" not in detail
+    assert "<path>" in detail
+    assert "token=<redacted>" in detail
+    assert "\n" not in detail
+    assert "\x1b" not in detail
+    assert "[31m" not in detail

@@ -1,6 +1,7 @@
 """Broker/worker lifecycle tests against the real child process in simulator
 mode: bounded JSONL stdio, lazy start, deadlines, restart-once, circuit
 breaker, RSS eviction, idle unload, and honest provider fallback."""
+import os
 import time
 
 import pytest
@@ -225,6 +226,171 @@ def test_hash_drift_refuses_load_without_touching_worker(monkeypatch, tmp_path):
         assert broker.status()["fallbacks"].get("hash_drift", 0) >= 1
     finally:
         broker.shutdown()
+
+
+def test_post_warm_hash_drift_fails_closed_before_inference(
+    monkeypatch, tmp_path, route_features,
+):
+    broker = _fresh_broker(monkeypatch, tmp_path)
+    manifest = routing_manifest(tmp_path)
+    try:
+        _warm(broker, [manifest])
+        assert broker.call(
+            manifest, {"kind": "routing", "features": route_features},
+        )["ok"] is True
+        # Same size defeats a size-only check; mtime/file identity must force
+        # the complete pinned hash verification. Restore the exact timestamp
+        # too, proving metadata-preserving updates cannot bypass the boundary.
+        target = tmp_path / "route.onnx"
+        original = target.stat()
+        target.write_bytes(b"other-model")
+        os.utime(target, ns=(original.st_atime_ns, original.st_mtime_ns))
+        with pytest.raises(npu_broker.NpuUnavailable) as excinfo:
+            broker.call(
+                manifest, {"kind": "routing", "features": route_features},
+            )
+        assert excinfo.value.reason == "manifest_unhealthy"
+        status = broker.status()
+        assert status["fallbacks"]["hash_drift"] >= 1
+        assert status["models"][0]["ok"] is False
+    finally:
+        broker.shutdown()
+
+
+def test_worker_environment_is_explicit_and_scrubs_cloud_credentials(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    monkeypatch.setenv("SONDER_CLOUD_KEY", "cloud-secret")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
+    monkeypatch.setenv("QNN_AUTHORIZATION", "Bearer vendor-secret")
+    monkeypatch.setenv("OPENVINO_API_KEY", "cloud-secret")
+    monkeypatch.setenv("ORT_PASSWORD", "hunter2")
+    monkeypatch.setenv("PYTHONPATH", "C:/private/imports")
+    monkeypatch.setenv("SONDER_NPU_TEST_HOOKS", "1")
+    monkeypatch.setenv("QNN_SDK_ROOT", "C:/qnn")
+    environment = npu_broker._worker_environment()
+    assert "OPENAI_API_KEY" not in environment
+    assert "SONDER_CLOUD_KEY" not in environment
+    assert "AWS_SECRET_ACCESS_KEY" not in environment
+    assert "QNN_AUTHORIZATION" not in environment
+    assert "OPENVINO_API_KEY" not in environment
+    assert "ORT_PASSWORD" not in environment
+    assert "PYTHONPATH" not in environment
+    assert environment["SONDER_NPU_TEST_HOOKS"] == "1"
+    assert environment["QNN_SDK_ROOT"] == "C:/qnn"
+    assert environment["PYTHONNOUSERSITE"] == "1"
+
+
+def test_worker_tries_next_allowlisted_provider_after_session_failure(
+    monkeypatch, tmp_path,
+):
+    import npu_worker
+
+    class FakeOrt:
+        @staticmethod
+        def get_available_providers():
+            return ["VitisAIExecutionProvider", "CPUExecutionProvider"]
+
+    class FakeSession:
+        @staticmethod
+        def get_providers():
+            return ["CPUExecutionProvider"]
+
+    attempts = []
+
+    def fake_create(_manifest, provider_id):
+        attempts.append(provider_id)
+        if provider_id == "vitisai":
+            return None, "failed at C:\\Users\\example\\vendor\\config.json"
+        return FakeSession(), ""
+
+    manifest = routing_manifest(tmp_path, providers=["vitisai", "cpu"])
+    monkeypatch.setattr(npu_worker, "_ort", lambda: (FakeOrt(), ""))
+    monkeypatch.setattr(npu_worker, "_create_real_session", fake_create)
+    npu_worker._SESSIONS.clear()
+    response = npu_worker._load({"id": 7, "manifest": manifest})
+    assert response["ok"] is True
+    assert attempts == ["vitisai", "cpu"]
+    assert response["provider"] == "cpu"
+    assert response["ep"] == "CPUExecutionProvider"
+    assert response["ep_fallback"] is True
+
+
+def test_worker_rejects_failed_provider_introspection(monkeypatch, tmp_path):
+    import npu_worker
+
+    class BrokenSession:
+        @staticmethod
+        def get_providers():
+            raise RuntimeError("cannot inspect C:\\private\\provider.dll")
+
+    manifest = routing_manifest(tmp_path, providers=["vitisai"])
+    monkeypatch.setattr(
+        npu_worker, "_create_real_session", lambda *_args: (BrokenSession(), ""),
+    )
+    entry, error = npu_worker._entry_for_provider(
+        manifest, "vitisai", "vitisai",
+    )
+    assert entry is None
+    assert "introspection failed" in error
+    assert "private" not in error
+
+
+def test_worker_rejects_unallowlisted_cpu_ep_chain(monkeypatch, tmp_path):
+    import npu_worker
+
+    class AmbiguousSession:
+        @staticmethod
+        def get_providers():
+            return ["VitisAIExecutionProvider", "CPUExecutionProvider"]
+
+    manifest = routing_manifest(tmp_path, providers=["vitisai"])
+    monkeypatch.setattr(
+        npu_worker,
+        "_create_real_session",
+        lambda *_args: (AmbiguousSession(), ""),
+    )
+    entry, error = npu_worker._entry_for_provider(
+        manifest, "vitisai", "vitisai",
+    )
+    assert entry is None
+    assert "unallowlisted" in error
+
+
+def test_real_session_receives_pinned_bytes_and_disables_cpu_fallback(
+    monkeypatch, tmp_path,
+):
+    import npu_worker
+
+    captured = {}
+
+    class FakeOptions:
+        log_severity_level = 0
+
+        @staticmethod
+        def add_session_config_entry(name, value):
+            captured["config"] = (name, value)
+
+    class FakeOrt:
+        SessionOptions = FakeOptions
+
+        @staticmethod
+        def InferenceSession(model, options, providers, provider_options):
+            captured.update(
+                model=model,
+                options=options,
+                providers=providers,
+                provider_options=provider_options,
+            )
+            return object()
+
+    manifest = routing_manifest(tmp_path, providers=["vitisai"])
+    monkeypatch.setattr(npu_worker, "_ort", lambda: (FakeOrt(), ""))
+    session, error = npu_worker._create_real_session(manifest, "vitisai")
+    assert session is not None
+    assert error == ""
+    assert captured["model"] == b"route-model"
+    assert captured["providers"] == ["VitisAIExecutionProvider"]
+    assert captured["config"] == ("session.disable_cpu_ep_fallback", "1")
 
 
 def test_timeout_kills_worker_and_reports_timeout(monkeypatch, tmp_path):

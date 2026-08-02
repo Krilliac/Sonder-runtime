@@ -13,8 +13,9 @@ accelerator contract:
 - bounded, redacted status/diagnostics/activity reporting (no prompt text, no
   vectors, no logits — counts, enums, and hashes only).
 
-Unavailability always means "use the existing local behavior". Nothing here
-can reach cloud tiers, permissions, roots, credentials, or executable paths.
+Unavailability always means "use the existing local behavior". The protocol
+has no cloud/permission/credential operations; the worker is environment-
+scrubbed failure isolation, not an OS sandbox, and runs as the same user.
 """
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ import activity_tracker
 import npu_broker
 import npu_contract
 import npu_manifest
+import npu_providers
 import runtime_policy
 
 
@@ -155,6 +157,58 @@ def route_features(text) -> list:
     ]
 
 
+def _execution_provenance(response, manifest) -> dict:
+    """Validate that worker provider claims are internally consistent."""
+    provider = str(response.get("provider") or "").strip().lower()
+    allowlist = list(manifest.get("providers") or [])
+    if provider not in npu_contract.PROVIDER_IDS or provider not in allowlist:
+        raise ValueError("response has an unknown provider")
+    expected_ep = (
+        npu_providers.SIMULATOR_EP
+        if provider == "cpu-sim"
+        else npu_providers.PROVIDER_EPS.get(provider, "")
+    )
+    ep = str(response.get("ep") or "")
+    chain = response.get("ep_chain")
+    if (
+        not expected_ep
+        or ep != expected_ep
+        or not isinstance(chain, list)
+        or not chain
+        or len(chain) > 4
+        or any(not isinstance(item, str) for item in chain)
+        or chain[0] != expected_ep
+    ):
+        raise ValueError("response has inconsistent execution providers")
+    for active_ep in chain:
+        active_provider = npu_providers.provider_id_for_ep(active_ep)
+        if not active_provider or active_provider not in allowlist:
+            raise ValueError("response exposed an unallowlisted provider")
+    simulated = bool(response.get("simulated"))
+    if simulated != (provider == "cpu-sim"):
+        raise ValueError("response has inconsistent simulator provenance")
+    cpu_fallback_disabled = bool(response.get("cpu_fallback_disabled"))
+    accelerated = provider in npu_contract.NPU_CLASS_PROVIDERS
+    if accelerated and (
+        not cpu_fallback_disabled or any(item != expected_ep for item in chain)
+    ):
+        raise ValueError("NPU response permits ambiguous CPU fallback")
+    if not accelerated and cpu_fallback_disabled:
+        raise ValueError("CPU response has inconsistent fallback provenance")
+    ep_fallback = bool(response.get("ep_fallback"))
+    if ep_fallback != (provider != allowlist[0]):
+        raise ValueError("response has inconsistent fallback provenance")
+    return {
+        "provider": provider,
+        "ep": ep,
+        "ep_chain": list(chain),
+        "accelerated": accelerated,
+        "ep_fallback": ep_fallback,
+        "cpu_fallback_disabled": cpu_fallback_disabled,
+        "simulated": simulated,
+    }
+
+
 def _routing_call(prompt):
     """Shared prefer/shadow path: returns (decision, provider) or (None, why)."""
     manifest = _active("routing")
@@ -180,6 +234,10 @@ def _routing_call(prompt):
         validated = npu_contract.validate_route_scores(response)
     except ValueError:
         return None, "invalid"
+    try:
+        execution = _execution_provenance(response, manifest)
+    except ValueError:
+        return None, "invalid"
     scores = validated["scores"]
     winner = max(npu_contract.ROUTE_MODES, key=lambda mode: scores[mode])
     margin = abs(scores["autopilot"] - scores["workbench"])
@@ -187,8 +245,7 @@ def _routing_call(prompt):
         "scores": scores,
         "winner": winner,
         "margin": round(margin, 4),
-        "provider": str(response.get("provider") or "")[:24],
-        "simulated": bool(response.get("simulated")),
+        **execution,
         "reason_code": validated["reason_code"],
     }
     return decision, ""
@@ -220,19 +277,29 @@ def route_decide(prompt):
         "npu_route",
         mode=decision["winner"],
         provider=decision["provider"],
+        accelerated=decision["accelerated"],
+        ep_fallback=decision["ep_fallback"],
         simulated=decision["simulated"],
         margin=decision["margin"],
     )
+    if decision["accelerated"]:
+        source = "npu accelerator"
+    elif decision["provider"] == "cpu":
+        source = "cpu reference"
+    elif decision["provider"] == "cpu-sim":
+        source = "cpu simulator"
+    else:
+        source = "utility sidecar"
     return {
         "mode": decision["winner"],
         "tier": runtime_policy.route_tier(
             decision["winner"], policy, fallback="code",
         ),
-        "reason": "npu accelerator (%s): score margin %.2f" % (
-            decision["provider"] or "unknown", decision["margin"],
+        "reason": "%s (%s): score margin %.2f" % (
+            source, decision["provider"], decision["margin"],
         ),
         "confidence": round(score, 4),
-        "source": "npu accelerator",
+        "source": source,
     }
 
 
@@ -257,6 +324,8 @@ def route_shadow(prompt, baseline):
         npu_mode=decision["winner"],
         baseline_mode=baseline_mode,
         provider=decision["provider"],
+        accelerated=decision["accelerated"],
+        ep_fallback=decision["ep_fallback"],
         simulated=decision["simulated"],
         margin=decision["margin"],
     )
@@ -276,11 +345,10 @@ def _embedding_call(manifest, text):
     vector = npu_contract.validate_vector(
         vectors[0], int(manifest.get("dimension") or 0),
     )
+    execution = _execution_provenance(response, manifest)
     return {
         "vector": vector,
-        "provider": str(response.get("provider") or "")[:24],
-        "ep": str(response.get("ep") or "")[:48],
-        "simulated": bool(response.get("simulated")),
+        **execution,
         "manifest_hash": str(manifest.get("manifest_hash") or ""),
     }
 
@@ -326,6 +394,8 @@ def embed_for_space(text, model_identity, revision):
     _event(
         "npu_embed",
         provider=result["provider"],
+        accelerated=result["accelerated"],
+        ep_fallback=result["ep_fallback"],
         simulated=result["simulated"],
         dimension=len(result["vector"]),
     )
@@ -351,6 +421,8 @@ def embed_shadow(text, model_identity, revision):
         "npu_embed_shadow",
         ok=True,
         provider=result["provider"],
+        accelerated=result["accelerated"],
+        ep_fallback=result["ep_fallback"],
         simulated=result["simulated"],
     )
     return None
@@ -364,7 +436,9 @@ def _manifest_summary(manifest):
         "operation": str(manifest.get("operation") or ""),
         "hash8": str(manifest.get("manifest_hash") or "")[:8],
         "providers": list(manifest.get("providers") or []),
-        "error": str(manifest.get("error") or "")[:200],
+        "error": npu_contract.sanitize_error(
+            manifest.get("error") or "", 200,
+        ),
     }
     if manifest.get("operation") == "embedding":
         summary["dimension"] = manifest.get("dimension")
@@ -398,7 +472,35 @@ def status(probe=False) -> dict:
                 broker.ensure_warm(targets)
             except Exception:
                 pass
-    broker_status = broker.status()
+    broker_status = dict(broker.status())
+    hello = dict(broker_status.get("hello") or {})
+    hello["ort_error"] = npu_contract.sanitize_error(
+        hello.get("ort_error") or "", 160,
+    )
+    broker_status["hello"] = hello
+    provider_rows = []
+    for raw_row in broker_status.get("providers") or []:
+        if not isinstance(raw_row, dict):
+            continue
+        provider_row = dict(raw_row)
+        provider_row["reason"] = npu_contract.sanitize_error(
+            provider_row.get("reason") or "", 160,
+        )
+        provider_rows.append(provider_row)
+    broker_status["providers"] = provider_rows
+    model_rows = []
+    for raw_row in broker_status.get("models") or []:
+        if not isinstance(raw_row, dict):
+            continue
+        model_row = dict(raw_row)
+        model_row["error"] = npu_contract.sanitize_error(
+            model_row.get("error") or "", 200,
+        )
+        model_rows.append(model_row)
+    broker_status["models"] = model_rows
+    broker_status["last_error"] = npu_contract.sanitize_error(
+        broker_status.get("last_error") or "", 200,
+    )
     providers = broker_status.get("providers") or []
     probed = bool(providers)
     detected = None

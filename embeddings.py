@@ -164,9 +164,10 @@ def provenance(vector=None):
     """Metadata stored beside vectors so model migrations are detectable.
 
     ``provider``/``accelerated``/``simulated`` describe how the bound vector
-    was produced ("ollama" or "npu:<provider>"). A vector that is not the one
-    bound to this thread keeps the legacy identity fields and an unknown
-    provider — never a fabricated one.
+    was produced (``ollama``, ``npu:<provider>``, ``cpu-reference``, or
+    ``cpu-sim``). CPU reference/simulator results are never labeled as NPU
+    acceleration. A vector that is not the one bound to this thread keeps the
+    legacy identity fields and an unknown provider — never a fabricated one.
     """
     bound_revision = getattr(_EMBED_STATE, "revision", None)
     bound_model = getattr(_EMBED_STATE, "model", None)
@@ -296,13 +297,23 @@ def embed(text, timeout=30, base=None, model=None):
         accelerated = _accelerated_embed(prompt, identity, revision_before)
         if accelerated is not None and valid_vector(accelerated.get("vector")):
             vector = list(accelerated["vector"])
+            provider = str(accelerated.get("provider") or "").strip().lower()
+            npu_accelerated = (
+                provider in {"vitisai", "openvino", "qnn"}
+                and bool(accelerated.get("accelerated", True))
+            )
             _EMBED_STATE.vector = vector
             _EMBED_STATE.revision = revision_before
             _EMBED_STATE.model = identity
-            _EMBED_STATE.provider = "npu:%s" % (
-                accelerated.get("provider") or "unknown"
-            )
-            _EMBED_STATE.accelerated = True
+            if npu_accelerated:
+                _EMBED_STATE.provider = "npu:%s" % provider
+            elif provider == "cpu":
+                _EMBED_STATE.provider = "cpu-reference"
+            elif provider == "cpu-sim":
+                _EMBED_STATE.provider = "cpu-sim"
+            else:
+                _EMBED_STATE.provider = "utility:%s" % (provider or "unknown")
+            _EMBED_STATE.accelerated = npu_accelerated
             _EMBED_STATE.simulated = bool(accelerated.get("simulated"))
             return vector
         if _npu_prefer_active():

@@ -14,10 +14,12 @@ from __future__ import annotations
 import math
 import hashlib
 import os
+from pathlib import Path
 import sys
 import time
 
 import npu_contract
+import npu_manifest
 import npu_providers
 
 
@@ -52,7 +54,7 @@ def _ort():
             pass
         _ORT_STATE["module"] = onnxruntime
     except Exception as exc:
-        _ORT_STATE["error"] = str(exc)[:200]
+        _ORT_STATE["error"] = npu_contract.sanitize_error(exc, 200)
     return _ORT_STATE["module"], _ORT_STATE["error"]
 
 
@@ -149,6 +151,21 @@ def _sim_route_scores(features) -> dict:
     return {"workbench": round(1.0 - autopilot, 6), "autopilot": autopilot}
 
 
+def _read_pinned_bytes(manifest, entry, label) -> bytes:
+    """Read and hash the exact bytes a vendor runtime will receive."""
+    base = Path(manifest.get("dir") or "").resolve()
+    target = (base / entry["path"]).resolve(strict=True)
+    inside = os.path.normcase(os.path.commonpath([str(base), str(target)]))
+    if inside != os.path.normcase(str(base)) or not target.is_file():
+        raise ValueError("%s path escapes the manifest directory" % label)
+    payload = target.read_bytes()
+    if len(payload) != entry["bytes"]:
+        raise ValueError("size mismatch for %s" % label)
+    if hashlib.sha256(payload).hexdigest() != entry["sha256"]:
+        raise ValueError("hash drift for %s" % label)
+    return payload
+
+
 def _load_tokenizer(manifest):
     entry = manifest.get("tokenizer")
     if not entry:
@@ -157,13 +174,15 @@ def _load_tokenizer(manifest):
         from tokenizers import Tokenizer  # vendor import: worker only
     except Exception as exc:
         return None, "tokenizer runtime (tokenizers) not installed: %s" % (
-            str(exc)[:120],
+            npu_contract.sanitize_error(exc, 120),
         )
-    path = os.path.join(manifest.get("dir") or "", entry["path"])
     try:
-        return Tokenizer.from_file(path), ""
+        payload = _read_pinned_bytes(manifest, entry, "tokenizer")
+        return Tokenizer.from_buffer(payload), ""
     except Exception as exc:
-        return None, "tokenizer load failed: %s" % str(exc)[:160]
+        return None, "tokenizer load failed: %s" % npu_contract.sanitize_error(
+            exc, 160,
+        )
 
 
 def _create_real_session(manifest, provider_id):
@@ -174,19 +193,81 @@ def _create_real_session(manifest, provider_id):
     options = (manifest.get("provider_options") or {}).get(provider_id) or {}
     if provider_id == "openvino" and "device_type" not in options:
         options = {**options, "device_type": "NPU"}
-    model_path = os.path.join(manifest.get("dir") or "", manifest["model"]["path"])
     try:
+        model_bytes = _read_pinned_bytes(manifest, manifest["model"], "model")
         sess_options = ort.SessionOptions()
         sess_options.log_severity_level = 3
+        if provider_id in npu_contract.NPU_CLASS_PROVIDERS:
+            add_config = getattr(sess_options, "add_session_config_entry", None)
+            if not callable(add_config):
+                raise RuntimeError(
+                    "onnxruntime cannot disable CPU execution-provider fallback"
+                )
+            add_config("session.disable_cpu_ep_fallback", "1")
         session = ort.InferenceSession(
-            model_path,
+            model_bytes,
             sess_options,
             providers=[ep_name],
             provider_options=[options] if options else None,
         )
     except Exception as exc:
-        return None, "session load failed on %s: %s" % (ep_name, str(exc)[:200])
+        return None, "session load failed on %s: %s" % (
+            ep_name, npu_contract.sanitize_error(exc, 200),
+        )
     return session, ""
+
+
+def _entry_for_provider(manifest, provider_id, primary_provider):
+    entry = {
+        "manifest": manifest,
+        "provider": provider_id,
+        "ep": npu_providers.SIMULATOR_EP,
+        "ep_chain": [npu_providers.SIMULATOR_EP],
+        "ep_fallback": provider_id != primary_provider,
+        "cpu_fallback_disabled": provider_id in npu_contract.NPU_CLASS_PROVIDERS,
+        "simulated": provider_id == "cpu-sim",
+        "session": None,
+        "tokenizer": None,
+    }
+    if provider_id == "cpu-sim":
+        return entry, ""
+
+    session, error = _create_real_session(manifest, provider_id)
+    if session is None:
+        return None, error
+    try:
+        actual = list(session.get_providers())
+    except Exception as exc:
+        return None, "provider introspection failed: %s" % (
+            npu_contract.sanitize_error(exc, 160),
+        )
+    requested_ep = npu_providers.PROVIDER_EPS[provider_id]
+    if not actual:
+        return None, "provider introspection returned no execution providers"
+    if len(actual) > 4 or any(not isinstance(ep, str) for ep in actual):
+        return None, "provider introspection returned an invalid provider chain"
+    allowlist = set(manifest.get("providers") or [])
+    for actual_ep in actual:
+        actual_provider = npu_providers.provider_id_for_ep(actual_ep)
+        if not actual_provider or actual_provider not in allowlist:
+            return None, (
+                "runtime exposed unallowlisted execution provider %s"
+                % actual_ep
+            )
+    if actual[0] != requested_ep or any(ep != requested_ep for ep in actual):
+        return None, (
+            "runtime did not bind exclusively to requested provider %s"
+            % requested_ep
+        )
+    entry["ep_chain"] = actual
+    entry["ep"] = requested_ep
+    if manifest.get("operation") == "embedding":
+        tokenizer, error = _load_tokenizer(manifest)
+        if tokenizer is None:
+            return None, error
+        entry["tokenizer"] = tokenizer
+    entry["session"] = session
+    return entry, ""
 
 
 def _load(request) -> dict:
@@ -194,51 +275,38 @@ def _load(request) -> dict:
     if not isinstance(manifest, dict):
         return _error(request, "load_invalid", "load needs a manifest object")
     manifest_hash = str(manifest.get("manifest_hash") or "")
+    drift = npu_manifest.verify_files(manifest)
+    if drift:
+        return _error(request, "load_failed", drift)
     provider_rows = npu_providers.detect_providers(*_ort())
-    provider_id, ep_fallback, error = npu_providers.resolve_provider(
-        manifest, provider_rows,
-    )
-    if not provider_id:
+    candidates = npu_providers.provider_candidates(manifest, provider_rows)
+    if not candidates:
+        _provider, _fallback, error = npu_providers.resolve_provider(
+            manifest, provider_rows,
+        )
         return _error(request, "load_failed", error)
-    entry = {
-        "manifest": manifest,
-        "provider": provider_id,
-        "ep": npu_providers.SIMULATOR_EP,
-        "ep_chain": [npu_providers.SIMULATOR_EP],
-        "ep_fallback": ep_fallback,
-        "simulated": provider_id == "cpu-sim",
-        "session": None,
-        "tokenizer": None,
-    }
-    if provider_id != "cpu-sim":
-        session, error = _create_real_session(manifest, provider_id)
-        if session is None:
-            return _error(request, "load_failed", error)
-        try:
-            actual = list(session.get_providers())
-        except Exception:
-            actual = []
-        requested_ep = npu_providers.PROVIDER_EPS[provider_id]
-        entry["ep_chain"] = actual[:4]
-        entry["ep"] = actual[0] if actual else requested_ep
-        if actual and actual[0] != requested_ep:
-            # The runtime silently reassigned the session. Only accept that
-            # when the manifest explicitly allowlists the CPU reference path.
-            if "cpu" not in (manifest.get("providers") or []):
-                return _error(
-                    request,
-                    "load_failed",
-                    "runtime assigned %s instead of %s and the manifest does "
-                    "not allowlist cpu" % (actual[0], requested_ep),
-                )
-            entry["provider"] = "cpu"
-            entry["ep_fallback"] = True
-        if manifest.get("operation") == "embedding":
-            tokenizer, error = _load_tokenizer(manifest)
-            if tokenizer is None:
-                return _error(request, "load_failed", error)
-            entry["tokenizer"] = tokenizer
-        entry["session"] = session
+    primary_provider = (manifest.get("providers") or [""])[0]
+    entry = None
+    failures = []
+    for provider_id in candidates:
+        entry, error = _entry_for_provider(
+            manifest, provider_id, primary_provider,
+        )
+        if entry is not None:
+            break
+        failures.append(
+            "%s: %s" % (
+                provider_id, npu_contract.sanitize_error(error, 160),
+            )
+        )
+    if entry is None:
+        return _error(
+            request, "load_failed",
+            "allowlisted providers failed: %s" % "; ".join(failures),
+        )
+    drift = npu_manifest.verify_files(manifest)
+    if drift:
+        return _error(request, "load_failed", drift)
     _SESSIONS[manifest_hash] = entry
     return {
         "id": request.get("id"),
@@ -248,6 +316,7 @@ def _load(request) -> dict:
         "ep": entry["ep"],
         "ep_chain": entry["ep_chain"],
         "ep_fallback": bool(entry["ep_fallback"]),
+        "cpu_fallback_disabled": bool(entry["cpu_fallback_disabled"]),
         "simulated": bool(entry["simulated"]),
         "rss_mb": _rss_mb(),
     }
@@ -307,6 +376,9 @@ def _run_routing(entry, request) -> dict:
         "provider": entry["provider"],
         "ep": entry["ep"],
         "simulated": bool(entry["simulated"]),
+        "ep_fallback": bool(entry["ep_fallback"]),
+        "ep_chain": entry["ep_chain"],
+        "cpu_fallback_disabled": bool(entry["cpu_fallback_disabled"]),
         "rss_mb": _rss_mb(),
     }
 
@@ -337,11 +409,13 @@ def _real_embed(entry, texts) -> list:
     if hidden.ndim == 3:
         if pooling == "cls":
             pooled = hidden[:, 0, :]
-        else:
+        elif pooling == "mean":
             weights = mask[:, :, None].astype(numpy.float64)
             pooled = (hidden * weights).sum(axis=1) / numpy.clip(
                 weights.sum(axis=1), 1.0, None,
             )
+        else:
+            raise ValueError("unsupported embedding pooling %r" % pooling)
     else:
         pooled = hidden
     if manifest.get("normalize", True):
@@ -382,7 +456,7 @@ def _run_embedding(entry, request) -> dict:
         try:
             vectors = _real_embed(entry, texts)
         except Exception as exc:
-            return _error(request, "run_failed", str(exc)[:200])
+            return _error(request, "run_failed", exc)
         for vector in vectors:
             if len(vector) != dimension or any(
                 not math.isfinite(value) for value in vector
@@ -398,6 +472,9 @@ def _run_embedding(entry, request) -> dict:
         "provider": entry["provider"],
         "ep": entry["ep"],
         "simulated": bool(entry["simulated"]),
+        "ep_fallback": bool(entry["ep_fallback"]),
+        "ep_chain": entry["ep_chain"],
+        "cpu_fallback_disabled": bool(entry["cpu_fallback_disabled"]),
         "rss_mb": _rss_mb(),
     }
 
@@ -406,7 +483,10 @@ def _error(request, code, message) -> dict:
     return {
         "id": request.get("id") if isinstance(request, dict) else None,
         "ok": False,
-        "error": {"code": str(code), "message": str(message)[:300]},
+        "error": {
+            "code": str(code),
+            "message": npu_contract.sanitize_error(message, 300),
+        },
         "rss_mb": _rss_mb(),
     }
 

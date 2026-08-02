@@ -21,7 +21,22 @@ class FakeBroker:
         self.calls.append({"manifest": manifest, "payload": payload})
         if self.error is not None:
             raise self.error
-        return self.response
+        if not isinstance(self.response, dict):
+            return self.response
+        response = dict(self.response)
+        provider = str(response.get("provider") or "")
+        ep = str(response.get("ep") or "")
+        if provider and ep:
+            response.setdefault("ep_chain", [ep])
+            response.setdefault(
+                "cpu_fallback_disabled",
+                provider in {"vitisai", "openvino", "qnn"},
+            )
+            response.setdefault(
+                "ep_fallback",
+                provider != (manifest.get("providers") or [""])[0],
+            )
+        return response
 
     def ensure_warm(self, manifests):
         self.warmed.append(list(manifests))
@@ -71,8 +86,9 @@ def _set_mode(mode, **caps):
     runtime_policy.update(npu={"mode": mode, **caps})
 
 
-def _install_routing_manifest(manifest_dir):
-    manifest = routing_manifest(manifest_dir)
+def _install_routing_manifest(manifest_dir, providers=None):
+    providers = providers or ["cpu-sim"]
+    manifest = routing_manifest(manifest_dir, providers=providers)
     (manifest_dir / "exec-route-v1.json").write_text(
         json.dumps({
             "schema": 1,
@@ -86,7 +102,7 @@ def _install_routing_manifest(manifest_dir):
             "input": {"identity": "exec-route-features-v1", "dimension": 16},
             "labels": ["workbench", "autopilot"],
             "postprocess": "softmax",
-            "providers": ["cpu-sim"],
+            "providers": providers,
         }),
         encoding="utf-8",
     )
@@ -167,10 +183,44 @@ def test_route_decide_prefer_uses_validated_scores(npu_env, monkeypatch):
     assert decision["mode"] == "autopilot"
     assert decision["tier"] == "code"
     assert decision["confidence"] == pytest.approx(0.87)
-    assert decision["source"] == "npu accelerator"
+    assert decision["source"] == "cpu simulator"
     assert "cpu-sim" in decision["reason"]
     assert fake.calls[0]["payload"]["kind"] == "routing"
     assert len(fake.calls[0]["payload"]["features"]) == 16
+
+
+def test_route_decide_cpu_reference_is_not_labeled_npu(npu_env, monkeypatch):
+    _install_routing_manifest(npu_env, providers=["vitisai", "cpu"])
+    _set_mode("prefer")
+    fake = FakeBroker(response={
+        "scores": {"workbench": 0.1, "autopilot": 0.9},
+        "reason_code": "score_margin",
+        "provider": "cpu",
+        "ep": "CPUExecutionProvider",
+        "ep_fallback": True,
+        "simulated": False,
+    })
+    monkeypatch.setattr(npu_service.npu_broker, "get_broker", lambda: fake)
+    decision = npu_service.route_decide("inspect, fix, and validate everything")
+    assert decision["source"] == "cpu reference"
+    assert "npu accelerator" not in decision["reason"]
+
+
+def test_route_decide_rejects_ambiguous_npu_cpu_chain(npu_env, monkeypatch):
+    _install_routing_manifest(npu_env, providers=["vitisai", "cpu"])
+    _set_mode("prefer")
+    fake = FakeBroker(response={
+        "scores": {"workbench": 0.1, "autopilot": 0.9},
+        "reason_code": "score_margin",
+        "provider": "vitisai",
+        "ep": "VitisAIExecutionProvider",
+        "ep_chain": ["VitisAIExecutionProvider", "CPUExecutionProvider"],
+        "cpu_fallback_disabled": True,
+        "ep_fallback": False,
+        "simulated": False,
+    })
+    monkeypatch.setattr(npu_service.npu_broker, "get_broker", lambda: fake)
+    assert npu_service.route_decide("inspect, fix, and validate everything") is None
 
 
 def test_route_decide_falls_back_on_broker_unavailable(npu_env, monkeypatch):
@@ -242,6 +292,8 @@ def test_route_shadow_records_agreement_without_changing_anything(
         "scores": {"workbench": 0.9, "autopilot": 0.1},
         "reason_code": "score_margin",
         "provider": "cpu-sim",
+        "ep": "CPUSimulator",
+        "simulated": True,
     })
     monkeypatch.setattr(npu_service.npu_broker, "get_broker", lambda: fake)
     events = []
@@ -399,3 +451,26 @@ def test_status_when_policy_off_and_never_probed(npu_env, monkeypatch):
     assert status["runtime_ready"] is None
     line = npu_service.diagnostics_line(status)
     assert "off" in line
+
+
+def test_status_redacts_vendor_paths_and_credentials(npu_env, monkeypatch):
+    class LeakyBroker(FakeBroker):
+        def status(self):
+            state = super().status()
+            state["hello"]["ort_error"] = (
+                "failed C:\\Users\\example\\vendor.dll token=secret-value"
+            )
+            state["providers"][1]["reason"] = "/home/example/vendor/config.xml"
+            state["last_error"] = "api_key=another-secret"
+            return state
+
+    monkeypatch.setattr(
+        npu_service.npu_broker, "get_broker", lambda: LeakyBroker(),
+    )
+    state = npu_service.status()
+    rendered = json.dumps(state) + npu_service.format_status(state)
+    assert "example" not in rendered
+    assert "secret-value" not in rendered
+    assert "/home/example" not in rendered
+    assert "another-secret" not in rendered
+    assert "<redacted>" in rendered or "<path>" in rendered

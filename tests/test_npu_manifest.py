@@ -98,6 +98,10 @@ def test_normalize_rejects_bad_hash_and_dimension(tmp_path):
             ),
             tmp_path,
         )
+    with pytest.raises(ValueError, match="pooling"):
+        m.normalize_manifest(
+            _embedding_manifest(tmp_path, pooling="none"), tmp_path,
+        )
 
 
 def test_normalize_clamps_limits_to_contract_caps(tmp_path):
