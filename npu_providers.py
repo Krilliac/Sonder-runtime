@@ -46,7 +46,7 @@ def detect_providers(ort_module, ort_error="") -> list:
         try:
             available = list(ort_module.get_available_providers())
         except Exception as exc:  # vendor call; keep detection alive
-            ort_error = ort_error or str(exc)[:160]
+            ort_error = ort_error or npu_contract.sanitize_error(exc, 160)
     rows = []
     for provider_id in npu_contract.PROVIDER_IDS:
         row = {
@@ -76,7 +76,10 @@ def detect_providers(ort_module, ort_error="") -> list:
         elif ort_module is None:
             row["reason"] = (
                 "onnxruntime not installed%s"
-                % ((": %s" % ort_error[:160]) if ort_error else "")
+                % (
+                    (": %s" % npu_contract.sanitize_error(ort_error, 160))
+                    if ort_error else ""
+                )
             )
         elif row["ep"] in available:
             row.update(
@@ -108,3 +111,24 @@ def resolve_provider(manifest, provider_rows) -> tuple:
         "no allowlisted provider is runtime-ready (requested: %s)"
         % ", ".join(allowlist)
     )
+
+
+def provider_candidates(manifest, provider_rows) -> list:
+    """Priority-ordered, allowlisted providers that are runtime-registered."""
+    ready = {
+        row["id"] for row in provider_rows if row.get("runtime_ready")
+    }
+    return [
+        provider_id for provider_id in (manifest.get("providers") or [])
+        if provider_id in ready
+    ]
+
+
+def provider_id_for_ep(ep_name) -> str:
+    value = str(ep_name or "")
+    if value == SIMULATOR_EP:
+        return "cpu-sim"
+    for provider_id, registered_name in PROVIDER_EPS.items():
+        if value == registered_name:
+            return provider_id
+    return ""

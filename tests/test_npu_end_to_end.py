@@ -54,7 +54,7 @@ def test_route_decide_end_to_end_with_simulator(live_stack):
     decision = _wait_for(lambda: npu_service.route_decide(prompt))
     assert decision is not None
     assert decision["mode"] in ("workbench", "autopilot")
-    assert decision["source"] == "npu accelerator"
+    assert decision["source"] == "cpu simulator"
     assert "cpu-sim" in decision["reason"]
     assert 0.6 <= decision["confidence"] <= 1.0
     assert decision["tier"] in ("fast", "code", "general")

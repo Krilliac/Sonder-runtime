@@ -57,8 +57,11 @@ The shared runtime policy adds `npu: off | shadow | prefer` per capability
 (default off). Prefer may pre-score only the ambiguous execution-routing band
 with allowlist-validated scores and may serve embeddings only for the exact
 pinned vector space; every miss falls back to the existing local path.
-Accelerator failure can never reach cloud tiers or alter permissions, roots,
-credentials, or executable paths. See [NPU.md](NPU.md).
+Accelerator failure never triggers a cloud fallback or changes host policy.
+The worker receives an exact-name environment allowlist, hashes the bytes
+loaded by vendor runtimes, and disables implicit CPU fallback for NPU sessions.
+It still runs as the same OS user and is failure isolation, not a security
+sandbox. See [NPU.md](NPU.md).
 
 ## Model and adapter lifecycle
 

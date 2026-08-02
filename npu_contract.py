@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 
 
 PROTOCOL_VERSION = 1
@@ -57,6 +58,81 @@ PROVIDER_IDS = ("vitisai", "openvino", "qnn", "winml", "cpu", "cpu-sim")
 
 # Providers that actually claim NPU silicon when assigned by the runtime.
 NPU_CLASS_PROVIDERS = frozenset({"vitisai", "openvino", "qnn"})
+
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b("
+    r"authorization|proxy[-_]?authorization|password|passwd|pwd|"
+    r"(?:access|refresh|session)[-_]?token|token|secret|client[-_]?secret|"
+    r"api[-_]?key|credential|aws[-_]?(?:access[-_]?key[-_]?id|"
+    r"secret[-_]?access[-_]?key|session[-_]?token)"
+    r")\b(\s*[:=]\s*|\s+)"
+    r"(?:\"[^\"]*\"|'[^']*'|[^,;\r\n]+)"
+)
+_ENV_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b([a-z0-9_]*(?:api[-_]?key|access[-_]?key|authorization|"
+    r"password|passwd|token|secret|credential)[a-z0-9_]*)"
+    r"\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^,;\r\n]+)"
+)
+_BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]+=*")
+_KEY_SHAPE_RE = re.compile(
+    r"\b(?:(?:sk|gh[pousr])[-_][A-Za-z0-9_-]{12,}|"
+    r"(?:AKIA|ASIA|AIDA|AROA|AIPA|ANPA|ANVA|ASCA)[A-Z0-9]{16})\b"
+)
+_JWT_RE = re.compile(
+    r"\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
+)
+_URI_CREDENTIAL_RE = re.compile(
+    r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/@\s:]+:[^/@\s]+@"
+)
+_ANSI_ESCAPE_RE = re.compile(
+    r"(?:\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)|"
+    r"\x1b[@-_])"
+)
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_QUOTED_ABSOLUTE_PATH_RE = re.compile(
+    r"(?i)(?P<quote>['\"])(?:[a-z]:[\\/]|\\\\|/(?!/)).*?(?P=quote)"
+)
+_WINDOWS_ABSOLUTE_PATH_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(?:[a-z]:[\\/]|\\\\)[^,;\r\n]*"
+)
+_POSIX_ABSOLUTE_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9:/.])/(?!/)[^,;\r\n]*"
+)
+
+
+def sanitize_error(value, limit=200) -> str:
+    """Bound and redact exception text before it crosses/statuses the worker.
+
+    Vendor runtimes commonly echo model/DLL paths and occasionally repeat
+    environment assignments. Error details remain diagnostic, but local paths,
+    credential-shaped values, control characters, and multiline payloads do
+    not become a status or model-context disclosure surface.
+    """
+    try:
+        ceiling = max(0, min(1000, int(limit)))
+    except (TypeError, ValueError):
+        ceiling = 200
+    try:
+        text = str(value or "")
+    except Exception:
+        text = "unprintable error"
+    text = _ANSI_ESCAPE_RE.sub("", text)
+    text = _URI_CREDENTIAL_RE.sub(r"\1<redacted>@", text)
+    text = _QUOTED_ABSOLUTE_PATH_RE.sub("<path>", text)
+    text = _WINDOWS_ABSOLUTE_PATH_RE.sub("<path>", text)
+    text = _POSIX_ABSOLUTE_PATH_RE.sub("<path>", text)
+    text = _SECRET_ASSIGNMENT_RE.sub(
+        lambda match: "%s=<redacted>" % match.group(1), text,
+    )
+    text = _ENV_SECRET_ASSIGNMENT_RE.sub(
+        lambda match: "%s=<redacted>" % match.group(1), text,
+    )
+    text = _BEARER_RE.sub("Bearer <redacted>", text)
+    text = _KEY_SHAPE_RE.sub("<redacted-key>", text)
+    text = _JWT_RE.sub("<redacted-token>", text)
+    text = _CONTROL_RE.sub(" ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:ceiling]
 
 
 def encode_line(payload) -> bytes:

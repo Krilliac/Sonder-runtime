@@ -23,7 +23,7 @@ MAX_MANIFEST_BYTES = 256_000
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _IDENTITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._:/+-]{0,119}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_POOLINGS = ("mean", "cls", "none")
+_POOLINGS = ("mean", "cls")
 _ROUTE_POSTPROCESS = ("softmax", "none")
 # Vendor session options a manifest may set, per provider. Values are plain
 # bounded strings; the shared runtime policy can never reach these.
@@ -286,7 +286,7 @@ def _hash_payload(payload) -> str:
 
 def verify_files(manifest) -> str:
     """Re-verify every pinned file; '' when intact, else a bounded reason."""
-    base = Path(manifest.get("dir") or "")
+    base = Path(manifest.get("dir") or "").resolve()
     entries = [("model", manifest.get("model"))]
     entries.extend(
         ("extra file", item) for item in manifest.get("extra_files") or []
@@ -296,17 +296,23 @@ def verify_files(manifest) -> str:
     for label, entry in entries:
         if not entry:
             continue
-        target = base / entry["path"]
-        if not target.is_file():
-            return "missing %s: %s" % (label, entry["path"])
         try:
+            unresolved = base / entry["path"]
+            if not unresolved.exists():
+                return "missing %s: %s" % (label, entry["path"])
+            target = unresolved.resolve(strict=True)
+            inside = os.path.normcase(os.path.commonpath([str(base), str(target)]))
+            if inside != os.path.normcase(str(base)) or not target.is_file():
+                return "invalid %s path: %s" % (label, entry["path"])
             size = target.stat().st_size
             if size != entry["bytes"]:
                 return "size mismatch for %s: %s" % (label, entry["path"])
             if npu_contract.sha256_file(target) != entry["sha256"]:
                 return "hash drift for %s: %s" % (label, entry["path"])
-        except OSError as exc:
-            return "unreadable %s: %s" % (label, exc)
+        except (OSError, ValueError) as exc:
+            return "unreadable %s: %s" % (
+                label, npu_contract.sanitize_error(exc, 120),
+            )
     return ""
 
 

@@ -39,6 +39,49 @@ _CONSECUTIVE_FAILURE_LIMIT = 3
 _DEATH_LIMIT = 2
 _STDERR_RING = 40
 
+_WORKER_ENV_KEYS = frozenset({
+    # Process/bootstrap inputs.
+    "COMSPEC", "LANG", "LC_ALL", "LC_CTYPE", "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH", "OS", "PATH", "PATHEXT", "SYSTEMDRIVE",
+    "SYSTEMROOT", "TEMP", "TMP", "TMPDIR", "WINDIR",
+    # Exact, non-credential vendor runtime knobs. Keep this list explicit:
+    # prefix inheritance can accidentally pass API keys or auth tokens.
+    "ADSP_LIBRARY_PATH", "INTEL_OPENVINO_DIR", "KMP_AFFINITY",
+    "KMP_BLOCKTIME", "KMP_DUPLICATE_LIB_OK", "OMP_NUM_THREADS",
+    "OMP_WAIT_POLICY", "ONEAPI_ROOT", "OPENVINO_DIR",
+    "ORT_LOG_SEVERITY_LEVEL", "QNN_SDK_ROOT",
+    "RYZEN_AI_INSTALLATION_PATH", "VAIP_CONFIG_HOME",
+    "VITIS_AI_EP_VERBOSE", "XILINX_VART_FIRMWARE",
+    "XLNX_ENABLE_CACHE", "XLNX_ONNX_EP_VERBOSE",
+    "ZE_AFFINITY_MASK", "ZE_ENABLE_PCI_ID_DEVICE_ORDER",
+    "NUMBER_OF_DPU_RUNNERS", "NUM_OF_DPU_RUNNERS",
+    # Exact test hooks; all are inert unless SONDER_NPU_TEST_HOOKS=1.
+    "SONDER_NPU_FAKE_RSS_MB", "SONDER_NPU_FORCE_NO_ORT",
+    "SONDER_NPU_SIM_CRASH_ON_RUN", "SONDER_NPU_SIM_DELAY_MS",
+    "SONDER_NPU_SIM_GARBAGE_ON_RUN", "SONDER_NPU_TEST_HOOKS",
+})
+
+
+def _worker_environment(source=None) -> dict:
+    """Minimal explicit environment for Python and local vendor runtimes.
+
+    Cloud/API credential namespaces and the parent Python import path are never
+    inherited. Vendor-specific runtime variables are opt-in by exact name; the
+    worker still runs as the same OS account and is not an OS sandbox.
+    """
+    source = os.environ if source is None else source
+    environment = {}
+    for name, value in source.items():
+        upper = str(name).upper()
+        if upper in _WORKER_ENV_KEYS:
+            environment[str(name)] = str(value)
+    if not any(name.upper() == "PATH" for name in environment):
+        environment["PATH"] = os.defpath
+    environment["PYTHONIOENCODING"] = "utf-8"
+    environment["PYTHONUTF8"] = "1"
+    environment["PYTHONNOUSERSITE"] = "1"
+    return environment
+
 
 def _env_float(name, default):
     value = os.environ.get(name, "").strip()
@@ -244,7 +287,7 @@ class NpuBroker:
         with self._state_lock:
             self._count(reason)
             if error:
-                self._last_error = str(error)[:200]
+                self._last_error = npu_contract.sanitize_error(error, 200)
             if reason in _FAILURE_REASONS:
                 self._consecutive_failures += 1
                 if death:
@@ -298,6 +341,7 @@ class NpuBroker:
             stderr=subprocess.PIPE,
             cwd=str(self._worker_path.parent),
             creationflags=creationflags,
+            env=_worker_environment(),
         )
         with self._state_lock:
             self._spawns += 1
@@ -387,14 +431,16 @@ class NpuBroker:
                     "manifest_hash8": manifest_hash[:8],
                     "provider": "",
                     "ep": "",
+                    "ep_chain": [],
                     "ep_fallback": False,
+                    "cpu_fallback_disabled": False,
                     "simulated": False,
                     "ok": False,
                     "error": "",
                 }
                 drift = npu_manifest.verify_files(manifest)
                 if drift:
-                    row["error"] = drift[:200]
+                    row["error"] = npu_contract.sanitize_error(drift, 200)
                     self._count("hash_drift")
                 else:
                     response = self._exchange(
@@ -402,17 +448,33 @@ class NpuBroker:
                         {"op": "load", "manifest": manifest},
                         npu_contract.LOAD_TIMEOUT_MS / 1000.0,
                     )
-                    if response.get("ok"):
+                    # Verify again after the worker has loaded the exact pinned
+                    # model bytes. This catches ordinary concurrent updates;
+                    # the worker's own byte hashing binds what ORT received.
+                    post_load_drift = npu_manifest.verify_files(manifest)
+                    if response.get("ok") and not post_load_drift:
                         row.update(
                             ok=True,
                             provider=str(response.get("provider") or "")[:24],
                             ep=str(response.get("ep") or "")[:48],
+                            ep_chain=[
+                                str(ep)[:48]
+                                for ep in (response.get("ep_chain") or [])[:4]
+                            ],
                             ep_fallback=bool(response.get("ep_fallback")),
+                            cpu_fallback_disabled=bool(
+                                response.get("cpu_fallback_disabled")
+                            ),
                             simulated=bool(response.get("simulated")),
                         )
                     else:
-                        error = (response.get("error") or {}).get("message", "")
-                        row["error"] = str(error)[:200]
+                        error = post_load_drift or (
+                            (response.get("error") or {}).get("message", "")
+                        )
+                        if post_load_drift:
+                            self._count("hash_drift")
+                        if error:
+                            row["error"] = npu_contract.sanitize_error(error, 200)
                 models[manifest_hash] = row
         except _ExchangeError as exc:
             worker.destroy()
@@ -428,11 +490,22 @@ class NpuBroker:
                 return
             self._worker = worker
             self._models = models
-            self._providers = list(detect.get("providers") or [])[:16]
+            providers = []
+            for raw_row in list(detect.get("providers") or [])[:16]:
+                if not isinstance(raw_row, dict):
+                    continue
+                provider_row = dict(raw_row)
+                provider_row["reason"] = npu_contract.sanitize_error(
+                    provider_row.get("reason") or "", 160,
+                )
+                providers.append(provider_row)
+            self._providers = providers
             self._hello = {
                 "python": str(hello.get("python") or "")[:20],
                 "ort_version": str(hello.get("ort_version") or "")[:40],
-                "ort_error": str(hello.get("ort_error") or "")[:160],
+                "ort_error": npu_contract.sanitize_error(
+                    hello.get("ort_error") or "", 160,
+                ),
                 "platform": str(hello.get("platform") or "")[:20],
                 "pid": hello.get("pid") if isinstance(hello.get("pid"), int) else 0,
             }
@@ -487,7 +560,7 @@ class NpuBroker:
                 missing = [
                     manifest_hash
                     for manifest_hash in self._target_manifests
-                    if manifest_hash not in self._models
+                    if not self._models.get(manifest_hash, {}).get("ok")
                 ]
                 if not missing:
                     return True
@@ -585,6 +658,17 @@ class NpuBroker:
                 raise NpuUnavailable(
                     "manifest_unhealthy", (row or {}).get("error", ""),
                 )
+            # Hash every pinned file at each inference boundary. Metadata-only
+            # shortcuts are bypassable when an updater preserves timestamps.
+            drift = npu_manifest.verify_files(manifest)
+            if drift:
+                detail = npu_contract.sanitize_error(drift, 200)
+                with self._state_lock:
+                    row["ok"] = False
+                    row["error"] = detail
+                    self._last_error = detail
+                self._count("hash_drift")
+                raise NpuUnavailable("manifest_unhealthy", detail)
             request = {
                 "op": "run",
                 "manifest_hash": str(manifest.get("manifest_hash") or ""),
@@ -602,7 +686,9 @@ class NpuBroker:
             elapsed_ms = int((time.monotonic() - started) * 1000)
             if not response.get("ok"):
                 error = response.get("error") or {}
-                detail = str(error.get("message") or "")[:200]
+                detail = npu_contract.sanitize_error(
+                    error.get("message") or "", 200,
+                )
                 self._record_failure("worker_error", error=detail)
                 raise NpuUnavailable("worker_error", detail)
             self._record_success(elapsed_ms)
