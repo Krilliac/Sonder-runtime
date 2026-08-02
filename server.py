@@ -8633,16 +8633,20 @@ REPOSITORY_READ_ONLY_FORBIDDEN_ARGS = frozenset({
     "token", "approval", "extra_roots",
 })
 REPOSITORY_AGENT_TOOL_HELP = """Available tools:
+The JSON values below are schema placeholders, not suggested filenames or
+search terms. Replace every <...> value with an exact task-relevant path,
+symbol, filename, or glob. For a code/symbol audit, start with text_search for
+an exact symbol named by the task; do not default to Python or server.py.
 - file_policy: {}
 - workspace_inventory: {"path": ".", "max_entries": 20000, "timeout_seconds": 10, "top_n": 15}
 - directory_tree: {"path": ".", "depth": 2, "max_entries": 200}
-- file_find: {"query": "*.py", "root": ".", "max_results": 50}
-- file_read: {"path": "README.md", "max_bytes": 256000}
-- file_read_range: {"path": "server.py", "start_line": 1, "end_line": 200}
-- text_search: {"query": "TODO", "root": ".", "glob": "*.py", "max_results": 100}
-- script_search: {"query": "build", "root": ".", "max_results": 100}
-- program_search: {"query": "python", "max_results": 50}
-- image_inspect: {"path": "docs/example.png"}
+- file_find: {"query": "<task-relevant filename or glob>", "root": ".", "max_results": 50}
+- file_read: {"path": "<task-relevant relative path>", "max_bytes": 256000}
+- file_read_range: {"path": "<task-relevant relative path>", "start_line": 1, "end_line": 200}
+- text_search: {"query": "<exact task symbol or anchor>", "root": ".", "glob": "<task-relevant glob>", "max_results": 100}
+- script_search: {"query": "<task-relevant script name>", "root": ".", "max_results": 100}
+- program_search: {"query": "<required program name>", "max_results": 50}
+- image_inspect: {"path": "<task-relevant image path>"}
 - memory_search: {"query": "...", "limit": 10}
 - web_search: {"query": "...", "limit": 5}
 - web_fetch: {"url": "https://...", "max_chars": 8000}

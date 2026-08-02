@@ -5,6 +5,22 @@ import master_orchestrator
 import server
 
 
+def test_repository_agent_tool_help_is_task_anchored_not_language_biased():
+    """Small local models copy concrete schema examples as if they were tasks.
+
+    A repository audit that named C++ symbols previously searched ``*.py`` and
+    tried to read ``server.py`` because those were the only concrete examples
+    in the read-only tool menu. Keep the menu explicit about placeholders and
+    point symbol audits at exact task anchors.
+    """
+    help_text = server._agent_tool_help(read_only=True)
+
+    assert "exact symbol named by the task" in help_text
+    assert "<exact task symbol or anchor>" in help_text
+    assert '"query": "*.py"' not in help_text
+    assert '"path": "server.py"' not in help_text
+
+
 def test_agent_impl_evidence_required_receipt_keeps_real_project_scope(
     monkeypatch, tmp_path,
 ):
