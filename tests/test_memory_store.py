@@ -1398,3 +1398,22 @@ def test_preferences_upsert_and_disable():
     assert ms.set_preference_enabled(c, "concise", False) == 1
     assert ms.preferences_for_scope(c) == []
     assert ms.preferences_for_scope(c, include_disabled=True)[0]["enabled"] == 0
+
+
+def test_distillation_contradiction_is_negative_evidence_not_weak_positive():
+    """A contradiction cancels distillation only for genuinely negative or
+    corrupt evidence. A weak positive below the good threshold ("compiled" at
+    0.70 once GOOD_THRESHOLD rose to 0.71) is neither good enough to ground a
+    lesson nor evidence against one."""
+    conn = ms.connect(":memory:")
+    ms.log_interaction(conn, "weakpos", "t", "", "r", "code")
+    ms.record_outcome_row(conn, "weakpos", "compiled", 0.7)
+    ms.record_outcome_row(conn, "weakpos", "edited", 0.75)
+    good, contradiction = ms._distillation_evidence(conn, "weakpos")
+    assert good is True and contradiction is False
+
+    ms.log_interaction(conn, "disputed", "t", "", "r", "code")
+    ms.record_outcome_row(conn, "disputed", "tests_passed", 1.0)
+    ms.record_outcome_row(conn, "disputed", "failed", -1.0)
+    good, contradiction = ms._distillation_evidence(conn, "disputed")
+    assert good is True and contradiction is True
