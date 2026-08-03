@@ -4211,6 +4211,67 @@ _REPO_REPAIR_TASKS = [
      "    assert sort_ids(['10', '2', '1']) == ['1', '2', '10']\n\n\n"
      "def test_already_sorted():\n"
      "    assert sort_ids(['1', '2']) == ['1', '2']\n"),
+    # A second tier of bug classes. The first five became memorised - 10/10 on
+    # every nightly run, which measures recall rather than repair - so these
+    # cover failure modes the originals miss: aliasing a caller's object,
+    # integer division, short-circuit ordering against None, accumulating in
+    # the wrong scope, and an exclusive range boundary.
+    ("aliasing",
+     "def with_defaults(config):\n"
+     "    # must not disturb the caller's dict\n"
+     "    merged = config\n"
+     "    merged.setdefault('retries', 3)\n"
+     "    return merged\n",
+     "from module import with_defaults\n\n\n"
+     "def test_caller_dict_is_untouched():\n"
+     "    original = {'host': 'localhost'}\n"
+     "    result = with_defaults(original)\n"
+     "    assert result == {'host': 'localhost', 'retries': 3}\n"
+     "    assert original == {'host': 'localhost'}\n\n\n"
+     "def test_explicit_value_wins():\n"
+     "    assert with_defaults({'retries': 9})['retries'] == 9\n"),
+    ("intdivision",
+     "def average(values):\n"
+     "    return sum(values) // len(values)\n",
+     "from module import average\n\n\n"
+     "def test_average_is_not_truncated():\n"
+     "    assert average([1, 2]) == 1.5\n\n\n"
+     "def test_exact_average_stays_exact():\n"
+     "    assert average([2, 4]) == 3\n"),
+    ("noneguard",
+     "def name_length(user):\n"
+     "    # user may be None, or may have no name set\n"
+     "    return len(user['name']) if user['name'] else 0\n",
+     "from module import name_length\n\n\n"
+     "def test_missing_user_is_zero():\n"
+     "    assert name_length(None) == 0\n\n\n"
+     "def test_empty_name_is_zero():\n"
+     "    assert name_length({'name': ''}) == 0\n\n\n"
+     "def test_real_name_is_counted():\n"
+     "    assert name_length({'name': 'ada'}) == 3\n"),
+    ("wrongscope",
+     "def group_lengths(words):\n"
+     "    # one bucket per length\n"
+     "    buckets = {}\n"
+     "    found = []\n"
+     "    for word in words:\n"
+     "        found.append(word)\n"
+     "        buckets[len(word)] = found\n"
+     "    return buckets\n",
+     "from module import group_lengths\n\n\n"
+     "def test_each_bucket_holds_only_its_own_words():\n"
+     "    assert group_lengths(['a', 'bb', 'cc']) == {1: ['a'], 2: ['bb', 'cc']}\n\n\n"
+     "def test_empty_input():\n"
+     "    assert group_lengths([]) == {}\n"),
+    ("rangeend",
+     "def inclusive_range(start, end):\n"
+     "    # callers expect both endpoints included\n"
+     "    return list(range(start, end))\n",
+     "from module import inclusive_range\n\n\n"
+     "def test_end_is_included():\n"
+     "    assert inclusive_range(1, 4) == [1, 2, 3, 4]\n\n\n"
+     "def test_single_value_range():\n"
+     "    assert inclusive_range(2, 2) == [2]\n"),
 ]
 
 
