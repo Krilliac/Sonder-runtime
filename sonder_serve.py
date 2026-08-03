@@ -911,6 +911,8 @@ def _handle_slash(content, messages=None, state=None, project=""):
         return server.control_command(stripped, project=project)
     if cmd in ("/selfmod", "/selfmodify"):
         return server.control_command(stripped, project=project)
+    if cmd in ("/goal", "/goals"):
+        return server.control_command(stripped, project=project)
     if cmd in ("/mcp", "/convergence"):
         return server.control_command(stripped, project=project)
     if cmd in ("/learning", "/learnhealth", "/metrics"):

@@ -896,7 +896,15 @@ def _build_system(system, trace, persona):
         )
     profile = system_profile.system_prompt()
     emotions = emotion_vectors.system_prompt()
-    return _join_system_parts(profile, emotions, effective_system)
+    # An active goal is re-stated every turn so a long objective cannot erode
+    # into whatever fits the current turn. Fail-soft: goal bookkeeping must
+    # never be able to break a conversation.
+    try:
+        import goal_store
+        goal_block = goal_store.context_block()
+    except Exception:
+        goal_block = ""
+    return _join_system_parts(profile, emotions, goal_block, effective_system)
 
 
 def _resolve_model_and_system(system, trace, strict, persona):
@@ -1378,6 +1386,133 @@ def _execute_selfmod_run(run_id, explicit_tests=None):
             selfmod.release(run_id, owner)
 
 
+def refresh_goal_proposals(scope: str = "") -> dict:
+    """Turn host-observed improvement findings into *proposed* goals.
+
+    This is the only place Sonder originates an objective for itself, and it
+    is deliberately inert: a proposal is a queued suggestion, nothing more.
+    Only an explicit ``/goal adopt <id>`` promotes one, and goal_store
+    enforces that with a user-actor check. Nothing here starts autopilot,
+    edits anything, or reprioritizes existing work.
+
+    Low-severity findings are skipped so the queue stays worth reading.
+    """
+    import goal_store
+
+    try:
+        data = improvement_report_data()
+    except Exception:
+        return {"proposed": 0, "skipped": 0, "error": "report unavailable"}
+    proposed = skipped = 0
+    for issue in (data.get("issues") or []):
+        severity = str(issue.get("severity") or "").lower()
+        title = str(issue.get("title") or "").strip()
+        action = str(issue.get("action") or "").strip()
+        if severity == "low" or not title:
+            skipped += 1
+            continue
+        objective = "%s: %s" % (issue.get("area", "runtime"), title)
+        criteria = [action] if action else []
+        criteria.append("the same finding no longer appears in "
+                        "system_improvement_report")
+        if goal_store.propose(
+            objective, criteria, scope=scope, source="self-observed",
+        ):
+            proposed += 1
+        else:
+            skipped += 1
+    return {"proposed": proposed, "skipped": skipped, "error": ""}
+
+
+def _goal_command(arg: str) -> str:
+    """User-facing goal bookkeeping.
+
+    Slash commands originate only from the user's own chat input, so this
+    layer is authorized to pass actor="user"; goal_store independently
+    enforces that closure and adoption can never come from model output.
+    """
+    import goal_store
+
+    text = str(arg or "show").strip() or "show"
+    action, _, rest = text.partition(" ")
+    action = action.lower()
+    rest = rest.strip()
+
+    def _fmt(goal):
+        if not goal:
+            return "no active goal"
+        lines = ["%s [%s] %s" % (goal["id"], goal["status"], goal["objective"])]
+        for criterion in goal.get("criteria") or []:
+            lines.append("  criterion: %s" % criterion)
+        for note in (goal.get("notes") or [])[-5:]:
+            lines.append("  note: %s" % note.get("text", ""))
+        return "\n".join(lines)
+
+    try:
+        if action in ("show", "status"):
+            return _fmt(goal_store.get_active())
+        if action == "set":
+            objective, _, criteria = rest.partition("--criteria")
+            if not objective.strip():
+                return "usage: /goal set <objective> [--criteria a; b; c]"
+            goal = goal_store.set_goal(
+                objective.strip(), criteria.strip(), origin="user",
+            )
+            return "goal set\n" + _fmt(goal)
+        if action == "note":
+            if not rest:
+                return "usage: /goal note <progress note>"
+            return "noted\n" + _fmt(goal_store.add_note(rest))
+        if action in ("done", "complete"):
+            goal = goal_store.complete(rest, actor="user")
+            return "goal completed: %s" % goal["objective"]
+        if action in ("abandon", "drop"):
+            goal = goal_store.abandon(rest, actor="user")
+            return "goal abandoned: %s" % goal["objective"]
+        if action == "refresh":
+            result = refresh_goal_proposals()
+            if result.get("error"):
+                return "ERROR: %s" % result["error"]
+            return (
+                "goal proposals refreshed: %d new, %d skipped "
+                "(review with /goal proposals)"
+                % (result["proposed"], result["skipped"])
+            )
+        if action == "proposals":
+            rows = goal_store.proposals()
+            if not rows:
+                return "no pending goal proposals"
+            listing = "\n".join(
+                "%s  %s" % (row["id"], row["objective"][:120]) for row in rows
+            )
+            return listing + (
+                "\n(adopt with /goal adopt <id>; dismiss with "
+                "/goal decline <id>)"
+            )
+        if action == "adopt":
+            return "adopted\n" + _fmt(goal_store.adopt(rest, actor="user"))
+        if action == "decline":
+            goal = goal_store.decline(rest, actor="user")
+            return "declined proposal %s" % goal["id"]
+        if action == "history":
+            rows = goal_store.history()
+            if not rows:
+                return "no closed goals"
+            return "\n".join(
+                "%s [%s] %s" % (
+                    row["id"], row["status"], row["objective"][:100],
+                )
+                for row in rows
+            )
+        return (
+            "usage: /goal [show|set <objective> [--criteria a; b]|"
+            "note <text>|done [reason]|abandon [reason]|refresh|"
+            "proposals|adopt <id>|decline <id>|history]"
+        )
+    except goal_store.GoalError as exc:
+        return "ERROR: %s" % exc
+
+
 def _selfmod_command(arg: str, *, repository_root="") -> str:
     text = str(arg or "status").strip() or "status"
     action, _, rest = text.partition(" ")
@@ -1512,6 +1647,8 @@ def control_command(prompt: str, history=None, session="", project=""):
         return _training_command(arg)
     if cmd in ("/selfmod", "/selfmodify"):
         return _selfmod_command(arg)
+    if cmd in ("/goal", "/goals"):
+        return _goal_command(arg)
     if cmd in ("/mcp", "/convergence"):
         return _mcp_command(arg)
     if cmd in ("/learning", "/learnhealth", "/metrics"):

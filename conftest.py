@@ -80,5 +80,10 @@ def pytest_collection_modifyitems(config, items) -> None:
             continue
         skip = pytest.mark.skip(reason=f"requires explicit {option} opt-in")
         for item in items:
-            if marker in item.keywords:
+            # get_closest_marker, not `marker in item.keywords`: keywords also
+            # contain parametrize *values*, so a test parameterized with the
+            # literal string "model" or "network" was silently skipped even
+            # though it was never marked. A security assertion that skips
+            # itself reads exactly like a passing one.
+            if item.get_closest_marker(marker) is not None:
                 item.add_marker(skip)
