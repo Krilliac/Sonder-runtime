@@ -954,6 +954,22 @@ def format_status(state=None) -> str:
             "%s=%s" % (key, fallbacks[key]) for key in sorted(fallbacks)
         )
         lines.append("  fallbacks: %s" % rendered)
+        # A bare "ram_gate=357" reads as harmless bookkeeping. Each one is an
+        # embedding that went to the model server instead, and when the server
+        # is capped at one loaded model that evicts the generation model and
+        # reloads it afterwards - measured at ~7.5s per swap on this box. Say
+        # so, and name the knob, so the count is legible as a cost.
+        gated = int(fallbacks.get("ram_gate") or 0)
+        if gated and gated >= max(
+            int(count) for count in fallbacks.values()
+        ):
+            lines.append(
+                "  note: %d call(s) fell back for free RAM, each one an "
+                "embedding served by the model server instead; with a "
+                "one-model cap that evicts and reloads the generation model. "
+                "Tune SONDER_NPU_MIN_FREE_RAM_GB (default 2) or free RAM to "
+                "let the accelerator take them." % gated
+            )
     if broker_state.get("last_error"):
         lines.append("  last error: %s" % broker_state["last_error"])
     lines.append(
