@@ -152,15 +152,22 @@ def exact_text_exists(text, conn):
     return False
 
 
+# There is deliberately no "output NONE if this is environmental" escape.
+# Callers only pass model-attributable failures - infrastructure errors return
+# before an outcome is ever recorded - and the escape was being taken on
+# plainly-code errors, which cost every pitfall the first live wave should
+# have produced. A worked example replaces it: small models follow a
+# demonstrated shape far more reliably than a described one.
 PITFALL_SYSTEM = (
     "You extract ONE concrete, reusable pitfall from a coding attempt that "
-    "FAILED. Name the specific construct, API, or syntax that caused the "
-    "failure and the concrete thing to do instead. Write it as a single "
-    "imperative sentence a developer could apply to a different task, with "
-    "no preamble and no markdown.\n"
-    "Output the single word NONE if the error is environmental (a timeout, a "
-    "missing interpreter, a killed process) rather than something about the "
-    "code itself."
+    "FAILED. Name the specific construct, API, or syntax that broke and the "
+    "concrete thing to write instead.\n"
+    "Answer with ONE sentence on ONE line. No preamble, no code fences, no "
+    "before/after diff, no bullet list.\n"
+    "Example error: Cannot bind parameter 'RemainingScripts' from "
+    "$x | ForEach-Object { ... } -join ' '\n"
+    "Example answer: Parenthesise a pipeline before applying -join, because "
+    "-join otherwise binds as an argument to ForEach-Object."
 )
 
 
@@ -172,19 +179,37 @@ def distill_pitfall(task, response, error, offload_fn):
     prompt = (
         "A coding attempt FAILED. Extract ONE reusable pitfall.\n\n"
         "TASK:\n%s\n\nATTEMPTED SOLUTION:\n%s\n\nOBSERVED ERROR:\n%s\n\n"
-        "Name the exact construct that broke and what to write instead. It "
-        "must be actionable on a DIFFERENT future task. If the error is "
-        "environmental rather than about the code, output NONE."
+        "Name the exact construct that broke and what to write instead, as "
+        "one sentence on one line. It must be actionable on a DIFFERENT "
+        "future task."
         % (task, response, detail[:1200])
     )
     text = offload_fn(
         prompt=prompt, tier="code", system=PITFALL_SYSTEM,
         temperature=0.0, num_predict=70,
     )
-    return _one_sentence_lesson(text)
+    return _one_sentence_lesson(text, detail)
 
 
-def _one_sentence_lesson(text):
+def _shares_a_term_with(sentence, error):
+    """True if the lesson names something the error actually mentions.
+
+    The prompt carries a worked example, and a small model will sometimes
+    repeat that example's answer at an unrelated error. Requiring one
+    substantial shared term makes an echo land only where it happens to be
+    right, instead of storing confident guidance about a construct that never
+    appeared.
+    """
+    if not error:
+        return True
+    haystack = error.casefold()
+    for token in re.findall(r"[A-Za-z_][A-Za-z0-9_-]{3,}", sentence):
+        if token.casefold() in haystack:
+            return True
+    return False
+
+
+def _one_sentence_lesson(text, error=""):
     """Reduce model output to a single usable sentence, or ''.
 
     Small models answer this prompt with a fenced before/after diff, which is
@@ -199,9 +224,13 @@ def _one_sentence_lesson(text):
     if len(lines) != 1:
         return ""
     sentence = lines[0]
+    if sentence.strip(".").strip().casefold() in ("none", "n/a", "no lesson"):
+        return ""
     if len(sentence) < 20 or len(sentence.split()) < 5:
         return ""
     if _looks_vague(sentence):
+        return ""
+    if not _shares_a_term_with(sentence, error):
         return ""
     return sentence
 

@@ -346,3 +346,18 @@ def test_distill_pitfall_needs_an_error_and_a_usable_sentence():
         "t", "r", "Invalid return statement within void method.", fake_offload)
     assert "return type" in lesson
     assert len(calls) == 1
+
+
+def test_pitfall_refuses_an_echoed_example_at_an_unrelated_error():
+    """The prompt carries a worked example, and a small model will sometimes
+    repeat its answer verbatim. Requiring one substantial shared term keeps an
+    echo from becoming confident guidance about a construct that never
+    appeared in the failure."""
+    echoed = ("Parenthesise a pipeline before applying -join, because -join "
+              "otherwise binds as an argument to ForEach-Object.")
+    matching = "Cannot bind parameter 'RemainingScripts' from a -join call"
+    unrelated = "Variable reference is not valid. ':' was not followed by a name."
+    assert reflection._one_sentence_lesson(echoed, matching) == echoed
+    assert reflection._one_sentence_lesson(echoed, unrelated) == ""
+    # No error supplied keeps the older single-argument behaviour.
+    assert reflection._one_sentence_lesson(echoed) == echoed
