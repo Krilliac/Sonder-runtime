@@ -8,7 +8,10 @@ One bounded pass over everything Sonder's learning loop can do unattended:
 3. backfill  — refresh stale/missing lesson and interaction embeddings.
 4. prune     — delete near-duplicate lessons (keeps one representative).
 5. health    — learning health + accelerator one-liners for the log.
-6. winml     — recheck whether the Windows ML catalog now offers the AMD
+6. proposals — turn host-observed findings into *proposed* goals. Nothing
+               is started or adopted automatically; the queue waits for
+               an explicit ``/goal adopt``.
+7. winml     — recheck whether the Windows ML catalog now offers the AMD
                VitisAI execution provider for this NPU driver; a flip from
                absent to present is logged loudly (it means real NPU
                execution is one reconnect away).
@@ -144,6 +147,18 @@ def main() -> int:
             summary = server.learning_health_status()
         return _first_line(summary) or _first_line(buffer.getvalue())
     _stage(log, "learning-health", health)
+
+    def goal_proposals():
+        result = server.refresh_goal_proposals()
+        if result.get("error"):
+            return result["error"]
+        if result["proposed"]:
+            log("%d new goal proposal(s) queued - review with "
+                "/goal proposals (nothing runs until you adopt one)"
+                % result["proposed"])
+        return "proposed=%d skipped=%d" % (
+            result["proposed"], result["skipped"])
+    _stage(log, "goal-proposals", goal_proposals)
 
     _stage(log, "winml-vitisai-check", lambda: _winml_vitisai_check(log))
 

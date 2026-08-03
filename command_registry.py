@@ -80,6 +80,12 @@ COMMANDS = [
         "summary": "Plan, explicitly start, inspect, deploy, or roll back adaptive weight training.",
     },
     {
+        "name": "/goal",
+        "category": "system",
+        "risk": "safe",
+        "summary": "Set, inspect, note, or close the persistent goal; review and adopt self-proposed goals.",
+    },
+    {
         "name": "/selfmod",
         "category": "system",
         "risk": "ask",
