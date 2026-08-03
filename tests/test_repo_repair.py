@@ -106,3 +106,27 @@ def test_campaign_verdict_tokens_cannot_contain_each_other():
                     "verdict %r contains %r — wrong answers can false-pass"
                     % (b, a)
                 )
+
+
+@pytest.mark.parametrize("languages", [
+    ["powershell", "cpp", "csharp"],
+    ["python", "javascript"],
+    ["python", "javascript", "powershell", "cpp", "csharp"],
+    ["cpp"],
+])
+def test_campaign_covers_every_language_task_pair(languages):
+    """Language and task must not advance in lockstep. When their counts share
+    a factor, pairing both on the same index pins each language to one residue
+    class: 3 languages against 12 tasks gave each language only 4 tasks, and
+    PowerShell could never draw the three it fails."""
+    tasks = [name for name, _text in server._CAMPAIGN_TASKS]
+    total = len(languages) * len(tasks)
+    seen = {language: set() for language in languages}
+    for index in range(total):
+        language = languages[index % len(languages)]
+        name = tasks[(index // len(languages)) % len(tasks)]
+        seen[language].add(name)
+    for language, drawn in seen.items():
+        assert drawn == set(tasks), (
+            "%s never draws %s" % (language, sorted(set(tasks) - drawn))
+        )
