@@ -3732,12 +3732,18 @@ _CAMPAIGN_TASKS = [
      "the merged intervals on one line as start-end pairs separated by a "
      "single space, like 5-7 9-11"),
     ("balanced",
-     # The campaign pass check is a containment check, so wrong verdicts must
-     # not be able to contain the expected text as a substring: 'ok'/'bad'
-     # verdicts cannot embed each other the way 'valid'/'invalid' can.
-     "for each of the three strings ([]{}) then ([)] then ((( decide if "
-     "the brackets are balanced and print ok if balanced or bad if not, "
-     "one verdict per line"),
+     # Two harness lessons are baked into this wording. (1) The pass check is
+     # a containment check, so wrong verdicts must not contain the expected
+     # text as a substring: 'ok'/'bad' cannot embed each other the way
+     # 'valid'/'invalid' can. (2) Bracket literals must be quoted and
+     # numbered, never wrapped in bare parentheses — models read those outer
+     # parens as punctuation and silently drop them, then get marked wrong
+     # for answering a different question than the one intended.
+     "decide whether the brackets are balanced in each of these three "
+     "strings, given exactly between the quotes: "
+     "1) \"([]{})\"  2) \"([)]\"  3) \"(((\" . "
+     "Print ok if that string's brackets are balanced or bad if they are "
+     "not, one verdict per line, in that order"),
     ("wordfreq",
      "count word frequencies in the sentence 'the quick the lazy the end' "
      "and print the most frequent word and its count as word:count"),

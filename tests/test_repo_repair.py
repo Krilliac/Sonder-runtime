@@ -90,3 +90,19 @@ def test_collection_error_is_not_a_model_verdict(tmp_path):
     ok, _output, infra = server._repo_repair_pytest(project, timeout=60)
     assert not ok
     assert "without a test verdict" in infra
+
+
+def test_campaign_verdict_tokens_cannot_contain_each_other():
+    """The campaign pass check is a containment check, so a wrong verdict must
+    never contain the expected one as a substring. 'valid'/'invalid' broke
+    this and let wrong answers false-pass; ok/bad is the fix."""
+    expected = server._campaign_expected("balanced")
+    verdicts = sorted(set(expected.split()))
+    assert verdicts, "balanced task must declare verdict tokens"
+    for a in verdicts:
+        for b in verdicts:
+            if a != b:
+                assert a not in b, (
+                    "verdict %r contains %r — wrong answers can false-pass"
+                    % (b, a)
+                )
