@@ -2548,3 +2548,25 @@ def test_format_trace_roundtrip_with_footer_does_not_break_id_parsing():
     # Mirrors the real tool's ordering: answer, then trace block, then footer LAST.
     body = server.with_footer("answer" + trace_block, "abcd1234")
     assert server.parse_interaction_id(body) == "abcd1234"
+
+
+def test_campaign_output_match_requires_exact_not_substring():
+    """Substring containment let a chatty answer false-pass: "The result of 12
+    + 30 is 42." contains "42" and was recorded tests_passed even though the
+    task says print exactly 42. Short numeric expectations are the exploitable
+    case; the match is now line-exact after whitespace normalisation."""
+    match = server._campaign_output_matches
+    # Correct output passes, tolerating trailing whitespace and line endings.
+    assert match("42", "42")
+    assert match("42\n", "42")
+    assert match(" 42 \n", "42")
+    assert match("1\r\n2\r\n3\r\n", "1\n2\n3")
+    assert match("\nsonder-ok\n", "sonder-ok")
+    # Prose that merely embeds the value is rejected.
+    assert not match("The result of 12 + 30 is 42.", "42")
+    assert not match("answer: 20", "20")
+    assert not match("The order is d a b c", "d a b c")
+    # Extra lines around the expected output are rejected.
+    assert not match("0\n1\n2\n3", "1\n2\n3")
+    # The earlier valid/invalid collision stays dead under the new matcher.
+    assert not match("valid\ninvalid\ninvalid", "ok\nbad\nbad")
