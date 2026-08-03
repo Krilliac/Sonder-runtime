@@ -16,6 +16,17 @@ One bounded pass over everything Sonder's learning loop can do unattended:
                absent to present is logged loudly (it means real NPU
                execution is one reconnect away).
 
+``--rounds N`` repeats the exercise-and-groom cycle N times, which is how
+this is meant to run overnight: several waves with grooming between them
+rather than one wave and eight idle hours. A lock file makes overlapping
+invocations exit immediately, so extra scheduled triggers are a redundancy
+rather than a collision.
+
+Deliberately absent, because this runs with nobody watching: it never edits
+a source file, never commits or pushes, and never starts an autopilot run
+with workspace policy. It exercises the model, records outcomes, grooms the
+stores, and queues proposals for a human to read in the morning.
+
 Every stage is fail-soft and bounded; a down Ollama skips the model-bound
 stages and still grooms what it can. Output goes to stdout and to
 ``<state home>/nightly-logs/YYYY-MM-DD.log``.
@@ -35,6 +46,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import sys
 import time
 from contextlib import redirect_stdout
@@ -63,6 +75,32 @@ def _first_line(text):
     return str(text or "").strip().splitlines()[0] if text else ""
 
 
+def _claim_lock(path, log) -> bool:
+    """Exclusive-create a lock so overlapping triggers are a no-op.
+
+    A stale lock older than six hours is reclaimed: a killed run must not
+    silently disable every later night.
+    """
+    try:
+        if path.exists():
+            age = time.time() - path.stat().st_mtime
+            if age < 6 * 3600:
+                log("another nightly run holds the lock (%.0fm old); exiting"
+                    % (age / 60))
+                return False
+            log("reclaiming a stale lock (%.1fh old)" % (age / 3600))
+            path.unlink(missing_ok=True)
+        with path.open("x", encoding="utf-8") as handle:
+            handle.write(str(os.getpid()))
+        return True
+    except FileExistsError:
+        log("another nightly run claimed the lock first; exiting")
+        return False
+    except OSError as exc:
+        log("lock unavailable (%s); continuing without one" % str(exc)[:80])
+        return True
+
+
 def _winml_vitisai_check(log):
     """Report whether the Windows ML EP catalog offers VitisAI right now."""
     try:
@@ -87,6 +125,9 @@ def _winml_vitisai_check(log):
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--campaign-total", type=int, default=24)
+    parser.add_argument("--repair-total", type=int, default=10)
+    parser.add_argument("--rounds", type=int, default=1,
+                        help="repeat the exercise-and-groom cycle N times")
     parser.add_argument("--skip-campaign", action="store_true")
     args = parser.parse_args()
 
@@ -103,19 +144,37 @@ def main() -> int:
         sink.write(line + "\n")
         sink.flush()
 
+    lock = Path(sonder_paths.state_path("nightly.lock"))
+    if not _claim_lock(lock, log):
+        sink.close()
+        return 0
+
     log("=== nightly self-improvement start ===")
     import server
     import lesson_pruner
     import memory_store
 
-    if not args.skip_campaign:
-        def campaign():
-            out = server.campaign_generate_compile_execute_record(
-                total=max(1, args.campaign_total), repair_rounds=1,
-                timeout=12, record_failures=True,
-            )
-            return _first_line(out)
-        _stage(log, "campaign", campaign)
+    rounds = max(1, min(int(args.rounds or 1), 12))
+    for round_index in range(rounds):
+        if rounds > 1:
+            log("--- round %d/%d ---" % (round_index + 1, rounds))
+
+        if not args.skip_campaign:
+            def campaign():
+                out = server.campaign_generate_compile_execute_record(
+                    total=max(1, args.campaign_total), repair_rounds=1,
+                    timeout=12, record_failures=True,
+                )
+                return _first_line(out)
+            _stage(log, "campaign", campaign)
+
+            def repair():
+                out = server.campaign_repo_repair(
+                    total=max(1, args.repair_total), max_workers=2,
+                    repair_rounds=2, timeout=45,
+                )
+                return _first_line(out)
+            _stage(log, "repo-repair", repair)
 
     def drain():
         result = server._drain_deferred_distillations(limit=32)
@@ -163,6 +222,10 @@ def main() -> int:
     _stage(log, "winml-vitisai-check", lambda: _winml_vitisai_check(log))
 
     log("=== nightly self-improvement done ===")
+    try:
+        lock.unlink(missing_ok=True)
+    except OSError:
+        pass
     sink.close()
     return 0
 
