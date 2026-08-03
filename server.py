@@ -4002,19 +4002,40 @@ _REPO_REPAIR_TASKS = [
 
 
 def _repo_repair_pytest(workdir, timeout):
-    """Run pytest for one scratch project; (ok, bounded output)."""
+    """Run pytest for one scratch project; (ok, bounded output, infra_error).
+
+    ``infra_error`` is non-empty when the verdict says nothing about the
+    candidate code: a timeout, a missing interpreter, or pytest failing to
+    start at all. Recording those as model failures would poison the reward
+    store with negative signals the model did not earn (observed 2026-08-02:
+    a memory-starved 20-job run banked 20 bogus ``failed`` outcomes).
+    """
     import subprocess
 
     try:
         proc = subprocess.run(
             [sys.executable, "-m", "pytest", "-q", "--no-header", "-x"],
             cwd=str(workdir), capture_output=True, text=True,
+            # This server's own stdin is the MCP protocol pipe. A child that
+            # inherits it can block forever on a read nobody will answer —
+            # exactly how every job in a 20-job run timed out while the
+            # identical call from a child process took 0.8s.
+            stdin=subprocess.DEVNULL,
             timeout=max(5, timeout),
         )
     except subprocess.TimeoutExpired:
-        return False, "pytest timed out"
+        return False, "pytest timed out", "pytest timed out"
+    except OSError as exc:
+        return False, str(exc)[:200], "pytest could not start: %s" % (
+            type(exc).__name__,
+        )
     output = ((proc.stdout or "") + (proc.stderr or "")).strip()
-    return proc.returncode == 0, output[-1500:]
+    # pytest exits 0 pass / 1 test-failure; 2+ means usage, collection, or
+    # internal error — the candidate never got a real verdict.
+    infra = ""
+    if proc.returncode not in (0, 1):
+        infra = "pytest exited %d without a test verdict" % proc.returncode
+    return proc.returncode == 0, output[-1500:], infra
 
 
 @mcp.tool()
@@ -4053,12 +4074,13 @@ def campaign_repo_repair(
             (workdir / "module.py").write_text(module_src, encoding="utf-8")
             (workdir / "test_module.py").write_text(
                 test_src, encoding="utf-8")
-            ok, failure = _repo_repair_pytest(workdir, timeout)
-            if ok:
+            ok, failure, infra = _repo_repair_pytest(workdir, timeout)
+            if infra or ok:
                 return {
                     "index": index, "task": task_name, "ok": False,
                     "attempts": [], "iid": None,
-                    "error": "template did not fail before repair",
+                    "error": infra or "template did not fail before repair",
+                    "infra": bool(infra),
                 }
             current_module = module_src
             for attempt in range(repair_rounds + 1):
@@ -4077,14 +4099,24 @@ def campaign_repo_repair(
                     )
                 iid = parse_interaction_id(response)
                 code = grounding.extract_code_block(response, "python")
+                infra = ""
                 if code:
                     (workdir / "module.py").write_text(
                         code, encoding="utf-8")
                     current_module = code
-                    ok, failure = _repo_repair_pytest(workdir, timeout)
+                    ok, failure, infra = _repo_repair_pytest(
+                        workdir, timeout)
                 else:
                     ok, failure = False, "no python code block returned"
                 record_msg = ""
+                if infra:
+                    # No attributable verdict: leave the reward store alone.
+                    attempts.append({
+                        "attempt": attempt + 1, "ok": False, "iid": iid,
+                        "output": failure[-400:], "record": "",
+                        "infra": infra,
+                    })
+                    break
                 if ok and iid:
                     with _CAMPAIGN_LEARN_LOCK:
                         record_msg = record_outcome(iid, "tests_passed")
@@ -4096,6 +4128,7 @@ def campaign_repo_repair(
                 attempts.append({
                     "attempt": attempt + 1, "ok": ok, "iid": iid,
                     "output": failure[-400:], "record": record_msg,
+                    "infra": "",
                 })
                 if ok:
                     break
@@ -4103,7 +4136,9 @@ def campaign_repo_repair(
             return {
                 "index": index, "task": task_name,
                 "ok": bool(final["ok"]), "attempts": attempts,
-                "iid": final.get("iid"), "error": "",
+                "iid": final.get("iid"),
+                "error": final.get("infra") or "",
+                "infra": bool(final.get("infra")),
             }
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
@@ -4117,10 +4152,19 @@ def campaign_repo_repair(
             results[outcome["index"]] = outcome
     elapsed = round(time.time() - started, 3)
     passed = sum(1 for r in results if r and r.get("ok"))
+    infra_skipped = sum(1 for r in results if r and r.get("infra"))
     lines = [
-        "campaign repo-repair: %d/%d suites fixed in %.3fs"
-        % (passed, len(results), elapsed),
+        "campaign repo-repair: %d/%d suites fixed in %.3fs%s"
+        % (passed, len(results), elapsed,
+           (" (%d job(s) unattributable — no outcome recorded)"
+            % infra_skipped) if infra_skipped else ""),
     ]
+    if infra_skipped and infra_skipped >= max(1, len(results) // 2):
+        lines.append(
+            "WARNING: most jobs failed for infrastructure reasons (commonly "
+            "memory pressure with too many workers) — lower max_workers or "
+            "free memory; these jobs taught the model nothing.",
+        )
     drain = _drain_deferred_distillations(limit=max(16, len(results)))
     if drain["drained"]:
         lines.append(

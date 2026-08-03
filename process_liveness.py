@@ -247,6 +247,7 @@ def _linux_probe_process(pid: int):
 def _run_ps(pid: int):
     return subprocess.run(
         ["ps", "-o", "stat=", "-o", "lstart=", "-p", str(pid)],
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

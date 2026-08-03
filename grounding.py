@@ -312,6 +312,7 @@ def compile_code(code, timeout=8, interp=None):
         try:
             c = subprocess.run(
                 [interp, "-m", "py_compile", path],
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -335,7 +336,10 @@ def _missing(exe):
 
 def _run_cmd(cmd, timeout, cwd=None):
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd)
+        p = subprocess.run(
+            cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            timeout=timeout, cwd=cwd,
+        )
         return p.returncode == 0, _combine(p)
     except FileNotFoundError:
         return _missing(cmd[0])

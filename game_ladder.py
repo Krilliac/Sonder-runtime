@@ -110,6 +110,7 @@ def python_interpreter():
         try:
             p = subprocess.run(
                 [PY, "-c", "import sys"],
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 timeout=3,
             )
@@ -138,7 +139,7 @@ def detect_failure(stdout, stderr, returncode, timed_out=False, kind="pygame"):
         return False, "ran (loop active, no crash)"
 
     if has_traceback:
-        lines = [l for l in stderr.strip().splitlines() if l.strip()]
+        lines = [row for row in stderr.strip().splitlines() if row.strip()]
         last_line = lines[-1] if lines else ""
         exc_type = last_line.split(":", 1)[0].strip()
         expected = _CONSOLE_EXPECTED if kind == "console" else REAL_CRASH_EXCEPTIONS
@@ -223,7 +224,7 @@ def run_ladder(gen_fn, start=1, max_levels=99, save_dir="games", record=None):
     Stops (and returns) at the first level that fails, or after the last
     level in LEVELS / max_levels, whichever comes first.
     """
-    levels = [l for l in LEVELS if l["n"] >= start][:max_levels]
+    levels = [row for row in LEVELS if row["n"] >= start][:max_levels]
     last_n = start - 1
     for level in levels:
         n, name, kind, prompt = level["n"], level["name"], level["kind"], level["prompt"]
@@ -298,7 +299,7 @@ def run_ladder_repair(gen_fn, start=1, max_levels=99, save_dir="games",
     (generate -> ground -> feed the crash back) before it counts as a failure.
     Stops at the first level that fails even after repair.
     """
-    levels = [l for l in LEVELS if l["n"] >= start][:max_levels]
+    levels = [row for row in LEVELS if row["n"] >= start][:max_levels]
     last_n = start - 1
     for level in levels:
         n, name = level["n"], level["name"]

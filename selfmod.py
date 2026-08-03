@@ -208,6 +208,7 @@ def _run(command, cwd, timeout=30):
     try:
         result = subprocess.run(
             list(command), cwd=str(cwd), text=True, capture_output=True,
+            stdin=subprocess.DEVNULL,
             timeout=max(1, int(timeout)), check=False,
         )
         output = "\n".join(x.strip() for x in (result.stdout, result.stderr) if x and x.strip())
@@ -225,6 +226,7 @@ def _git(root: Path, *args, timeout=30):
             cwd=str(root),
             text=True,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             timeout=max(1, int(timeout)),
             check=False,
         )
