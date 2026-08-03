@@ -107,13 +107,30 @@ def test_infrastructure_timeout_is_not_a_model_verdict(tmp_path):
     assert "timed out" in output
 
 
-def test_collection_error_is_not_a_model_verdict(tmp_path):
-    """pytest exiting 2+ (usage/collection/internal) is not a test verdict."""
-    project = Path(tmp_path) / "broken"
+def test_candidate_that_cannot_import_is_the_models_fault(tmp_path):
+    """A module the model wrote with a SyntaxError aborts collection (exit 2),
+    and the error is reported against the test file that imported it. That is
+    the candidate's fault and must stay attributable - excusing it as
+    infrastructure is the mirror image of the bug the infra split fixed, and
+    it happened live when a generation leaked activity-log text into
+    module.py."""
+    project = Path(tmp_path) / "broken-candidate"
     project.mkdir()
-    (project / "test_broken.py").write_text(
-        "this is not python(\n", encoding="utf-8",
+    (project / "module.py").write_text("def f(:\n    pass\n", encoding="utf-8")
+    (project / "test_module.py").write_text(
+        "from module import f\n\n\ndef test_f():\n    assert f()\n",
+        encoding="utf-8",
     )
+    ok, _output, infra = server._repo_repair_pytest(project, timeout=60)
+    assert not ok
+    assert infra == "", "a candidate that cannot import is a model failure"
+
+
+def test_missing_tests_is_not_a_model_verdict(tmp_path):
+    """Exit 5 (no tests collected) means the template never arrived, which
+    says nothing about the candidate."""
+    project = Path(tmp_path) / "no-tests"
+    project.mkdir()
     ok, _output, infra = server._repo_repair_pytest(project, timeout=60)
     assert not ok
     assert "without a test verdict" in infra
