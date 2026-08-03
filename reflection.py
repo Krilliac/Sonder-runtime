@@ -152,6 +152,96 @@ def exact_text_exists(text, conn):
     return False
 
 
+PITFALL_SYSTEM = (
+    "You extract ONE concrete, reusable pitfall from a coding attempt that "
+    "FAILED. Name the specific construct, API, or syntax that caused the "
+    "failure and the concrete thing to do instead. Write it as a single "
+    "imperative sentence a developer could apply to a different task, with "
+    "no preamble and no markdown.\n"
+    "Output the single word NONE if the error is environmental (a timeout, a "
+    "missing interpreter, a killed process) rather than something about the "
+    "code itself."
+)
+
+
+def distill_pitfall(task, response, error, offload_fn):
+    """One durable 'avoid X, do Y' lesson from a failed attempt, or ''."""
+    detail = re.sub(r"\s+", " ", str(error or "")).strip()
+    if not detail:
+        return ""
+    prompt = (
+        "A coding attempt FAILED. Extract ONE reusable pitfall.\n\n"
+        "TASK:\n%s\n\nATTEMPTED SOLUTION:\n%s\n\nOBSERVED ERROR:\n%s\n\n"
+        "Name the exact construct that broke and what to write instead. It "
+        "must be actionable on a DIFFERENT future task. If the error is "
+        "environmental rather than about the code, output NONE."
+        % (task, response, detail[:1200])
+    )
+    text = offload_fn(
+        prompt=prompt, tier="code", system=PITFALL_SYSTEM,
+        temperature=0.0, num_predict=70,
+    )
+    return _one_sentence_lesson(text)
+
+
+def _one_sentence_lesson(text):
+    """Reduce model output to a single usable sentence, or ''.
+
+    Small models answer this prompt with a fenced before/after diff, which is
+    useless once retrieved into a different task's context: it names no rule,
+    only an edit to code the future task does not have. Fenced or multi-line
+    output is refused rather than stored.
+    """
+    value = (text or "").strip()
+    if not value or "```" in value:
+        return ""
+    lines = [line.strip() for line in value.splitlines() if line.strip()]
+    if len(lines) != 1:
+        return ""
+    sentence = lines[0]
+    if len(sentence) < 20 or len(sentence.split()) < 5:
+        return ""
+    if _looks_vague(sentence):
+        return ""
+    return sentence
+
+
+def prepare_pitfall_candidate(
+    task, response, error, offload_fn, embed_fn=None,
+    id_fn=memory_store.new_id,
+):
+    """Prepare a pitfall lesson using the same privacy/embedding path."""
+    text = distill_pitfall(task, response, error, offload_fn)
+    if not text:
+        return {"status": "no_lesson", "reason": "not_concrete"}
+    return _prepare_candidate_text(text, embed_fn, id_fn)
+
+
+def _prepare_candidate_text(text, embed_fn, id_fn):
+    runtime_default = embed_fn is None
+    embed_fn = embed_fn or embeddings.embed
+    if contribute.private_reasons(text):
+        return {"status": "no_lesson", "reason": "private"}
+    emb = embed_fn(text)
+    if not embeddings.valid_vector(emb):
+        emb = None
+    provenance = (
+        embeddings.provenance(emb)
+        if emb is not None and (runtime_default or embed_fn is embeddings.embed)
+        else {}
+    )
+    return {
+        "status": "candidate",
+        "lesson_id": id_fn(),
+        "text": text,
+        "embedding": emb,
+        "embedding_blob": embeddings.to_blob(emb) if emb else None,
+        "embedding_model": provenance.get("model"),
+        "embedding_revision": provenance.get("revision"),
+        "embedding_dim": provenance.get("dimension"),
+    }
+
+
 def prepare_lesson_candidate(
     task, response, signal, offload_fn, embed_fn=None,
     id_fn=memory_store.new_id,

@@ -18,7 +18,7 @@ def test_build_examples_returns_good_pairs_in_chat_shape():
     ms.log_interaction(c, "b", "task B", "", "resp B", "code")
     ms.log_interaction(c, "bad", "task bad", "", "resp bad", "code")
     ms.record_outcome_row(c, "a", "tests_passed", 1.0)
-    ms.record_outcome_row(c, "b", "compiled", 0.7)
+    ms.record_outcome_row(c, "b", "accepted", 0.8)
     ms.record_outcome_row(c, "bad", "failed", -1.0)
 
     examples = etd.build_examples(c)
@@ -74,7 +74,7 @@ def test_build_examples_normalizes_prompts_and_selects_strongest_then_newest():
     ms.log_interaction(c, "old-tie", "other task", "", "old tie", "code")
     ms.log_interaction(c, "new-tie", "OTHER   TASK", "", "new tie", "code")
     ms.record_outcome_row(c, "strong", "tests_passed", 1.0)
-    ms.record_outcome_row(c, "newer-weak", "compiled", 0.7)
+    ms.record_outcome_row(c, "newer-weak", "edited", 0.75)
     ms.record_outcome_row(c, "old-tie", "tests_passed", 1.0)
     ms.record_outcome_row(c, "new-tie", "tests_passed", 1.0)
 
@@ -175,7 +175,7 @@ def test_export_rejects_records_outside_shared_training_bounds(monkeypatch):
 def test_export_stream_fails_closed_at_outcome_evidence_limit(monkeypatch):
     conn = _conn()
     ms.log_interaction(conn, "one", "task", "", "response", "code")
-    ms.record_outcome_row(conn, "one", "compiled", 0.7)
+    ms.record_outcome_row(conn, "one", "accepted", 0.8)
     ms.record_outcome_row(conn, "one", "tests_passed", 1.0)
     monkeypatch.setattr(etd, "MAX_EXPORT_EVIDENCE_ROWS", 1)
 
@@ -187,7 +187,7 @@ def test_export_capacity_keeps_highest_quality_candidate(monkeypatch):
     conn = _conn()
     ms.log_interaction(conn, "weak", "weak task", "", "weak response", "code")
     ms.log_interaction(conn, "strong", "strong task", "", "strong response", "code")
-    ms.record_outcome_row(conn, "weak", "compiled", 0.7)
+    ms.record_outcome_row(conn, "weak", "edited", 0.75)
     ms.record_outcome_row(conn, "strong", "tests_passed", 1.0)
     monkeypatch.setattr(etd, "MAX_TRAINING_EXAMPLES", 1)
 

@@ -110,7 +110,7 @@ def test_clean_grounded_learning_store_is_healthy_and_formats(monkeypatch):
             revision=learning_health.embeddings.EMBED_REVISION,
             dimension=1,
         )
-        memory_store.record_outcome_row(conn, "i1", "compiled", 0.7)
+        memory_store.record_outcome_row(conn, "i1", "accepted", 0.8)
         memory_store.add_lesson(
             conn,
             "lesson-one",
@@ -131,7 +131,7 @@ def test_clean_grounded_learning_store_is_healthy_and_formats(monkeypatch):
     assert "sonder learning health" in text
     assert "outcome coverage: 100.0%" in text
     assert "interaction=1" in text
-    assert "compiled=1" in text
+    assert "accepted=1" in text
     assert "legacy=0" in text
 
 

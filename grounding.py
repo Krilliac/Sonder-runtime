@@ -398,7 +398,24 @@ def _run_powershell(code, extra, timeout, execute):
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(src)
         if not execute:
-            return True, "compiled"
+            # "compiled" previously meant only that the file was written, so a
+            # syntactically broken script reported success. Parse it for real:
+            # PSParser.Tokenize reports parse errors without running anything.
+            checker = (
+                "$errors = $null; "
+                "[void][System.Management.Automation.PSParser]::Tokenize("
+                "(Get-Content -Raw -LiteralPath '%s'), [ref]$errors); "
+                "if ($errors.Count -gt 0) { "
+                "$errors | ForEach-Object { Write-Output $_.Message }; exit 1 }"
+                % path.replace("'", "''")
+            )
+            ok, out = _run_cmd(
+                [exe, "-NoProfile", "-NonInteractive", "-Command", checker],
+                timeout,
+            )
+            if ok:
+                return True, "compiled"
+            return False, ("compile failed\n" + out).strip()
         return _run_cmd([exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path], timeout)
     finally:
         os.unlink(path)

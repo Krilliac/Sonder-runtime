@@ -2260,6 +2260,42 @@ def _drain_deferred_distillations(limit=16):
     return {"drained": len(pending), "stored": stored, "deferred": deferred}
 
 
+def _record_failure_pitfall(interaction_id, task, response, error):
+    """Turn a terminal failure into a durable pitfall lesson.
+
+    Successes distilled lessons; failures recorded a negative reward and were
+    then forgotten, so an identical parse error could recur every night
+    without the loop ever learning the guard. Pitfalls are additive and
+    deduplicated, so they do not touch the success-distillation claim state
+    machine. Environmental errors are filtered by the distiller itself and by
+    the callers, which only pass model-attributable failures.
+    """
+    interaction_id = str(interaction_id or "").strip()
+    if not interaction_id or not str(error or "").strip():
+        return ""
+    try:
+        candidate = reflection.prepare_pitfall_candidate(
+            str(task or "")[:4000], str(response or "")[:4000], error,
+            offload_fn=lambda prompt, **options: _generate_text(
+                prompt, timeout=_distillation_timeout_seconds(), **options
+            ),
+        )
+        if candidate.get("status") != "candidate":
+            return ""
+        conn = _open_db()
+        try:
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                stored = reflection.store_prepared_lesson(
+                    conn, interaction_id, candidate,
+                )
+        finally:
+            conn.close()
+        return str(stored.get("lesson_id") or "")
+    except Exception:
+        return ""
+
+
 def _record_code_gate_failure(interaction_id):
     """Record a negative 'failed' outcome for a reply whose code did not run.
 
@@ -4007,6 +4043,11 @@ def campaign_generate_compile_execute_record(
             elif attempt == repair_rounds and record_failures and iid:
                 with _CAMPAIGN_LEARN_LOCK:
                     record_msg = record_outcome(iid, "failed")
+                    # A failure that teaches nothing recurs forever; distill
+                    # the guard while the error is still in hand.
+                    pitfall = _record_failure_pitfall(iid, prompt, code, out)
+                if pitfall:
+                    record_msg += " Distilled pitfall %s." % pitfall
             attempts.append({
                 "attempt": attempt + 1,
                 "ok": ok,
@@ -4268,6 +4309,13 @@ def campaign_repo_repair(
                 ):
                     with _CAMPAIGN_LEARN_LOCK:
                         record_msg = record_outcome(iid, "failed")
+                        # infra failures already returned above, so this is
+                        # an attributable model failure worth learning from.
+                        pitfall = _record_failure_pitfall(
+                            iid, prompt, code or "", failure,
+                        )
+                    if pitfall:
+                        record_msg += " Distilled pitfall %s." % pitfall
                 attempts.append({
                     "attempt": attempt + 1, "ok": ok, "iid": iid,
                     "output": failure[-400:], "record": record_msg,

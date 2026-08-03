@@ -466,3 +466,54 @@ def test_prepare_lesson_candidate_bounded_matches_reflection_interface(
     assert seen["tier"] == "code"
     assert seen["system"]
     assert seen["timeout"] is not None
+
+
+def test_failure_distills_a_pitfall_lesson(monkeypatch, tmp_path):
+    """Failures used to teach nothing: 167 recorded failures had produced 0
+    lessons, so an identical parse error recurred every night."""
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
+    conn = server._open_db()
+    try:
+        memory_store.log_interaction(conn, "F1", "task", "", "answer", "code")
+    finally:
+        conn.close()
+    monkeypatch.setattr(
+        server, "_generate_text",
+        lambda prompt, **kw: "Use ${name}: to delimit a PowerShell variable "
+                             "before a colon, which otherwise parses as a drive.",
+    )
+    monkeypatch.setattr(server.embeddings, "embed", lambda *a, **k: None)
+
+    lesson_id = server._record_failure_pitfall(
+        "F1", "print a count", "Write-Output \"$word:$count\"",
+        "Variable reference is not valid. ':' was not followed by a valid "
+        "variable name character.",
+    )
+    assert lesson_id
+    conn = server._open_db()
+    try:
+        row = conn.execute(
+            "SELECT text, source_interaction FROM lessons WHERE id=?",
+            (lesson_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    assert "${" in row["text"]
+    assert row["source_interaction"] == "F1"
+
+
+def test_pitfall_requires_a_concrete_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
+    conn = server._open_db()
+    try:
+        memory_store.log_interaction(conn, "F2", "task", "", "answer", "code")
+    finally:
+        conn.close()
+    monkeypatch.setattr(server, "_generate_text", lambda prompt, **kw: "NONE")
+    monkeypatch.setattr(server.embeddings, "embed", lambda *a, **k: None)
+    # An empty error never reaches the model at all.
+    assert server._record_failure_pitfall("F2", "task", "code", "") == ""
+    # A vague/NONE answer is refused by the existing vagueness gate.
+    assert server._record_failure_pitfall(
+        "F2", "task", "code", "pytest timed out") == ""

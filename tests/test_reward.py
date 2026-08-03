@@ -15,8 +15,18 @@ def test_unknown_signal_is_zero():
 
 def test_is_good_threshold():
     assert reward.is_good("tests_passed") is True
-    assert reward.is_good("compiled") is True   # 0.7, at threshold
+    assert reward.is_good("edited") is True     # 0.75, above the bar
     assert reward.is_good("rejected") is False
+    assert reward.is_good("failed") is False
+
+
+def test_compiled_is_not_success():
+    """Compiling proves the code builds, not that it produced the right
+    answer. Crediting it would distill a lesson from - and export as
+    fine-tuning data - output that was never run."""
+    assert reward.score("compiled") == 0.7
+    assert reward.GOOD_THRESHOLD > reward.score("compiled")
+    assert reward.is_good("compiled") is False
 
 
 def test_valid_signals_set():
