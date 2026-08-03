@@ -74,7 +74,7 @@ def test_outcome_and_distillation_migration_is_deterministic_and_one_time(tmp_pa
             ("stored", "tests_passed", 0.9, "2021-01-01 00:00:00"),
             ("stored", None, 1.0, "2020-01-01 00:00:00"),
             ("stored", None, 1.0, "2021-01-01 00:00:00"),
-            ("without-lesson", "compiled", 0.7, "2020-01-01 00:00:00"),
+            ("without-lesson", "accepted", 0.8, "2020-01-01 00:00:00"),
             ("bad-only", "failed", -1.0, "2020-01-01 00:00:00"),
         ),
     )

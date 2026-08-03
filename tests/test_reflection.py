@@ -314,3 +314,35 @@ def test_maybe_add_lesson_rejects_privacy_flagged_distillation(private_lesson):
     assert embed_calls == []
     assert ms.all_lessons(c) == []
     assert c.execute("SELECT COUNT(*) FROM lessons_fts").fetchone()[0] == 0
+
+
+def test_pitfall_refuses_fenced_or_multiline_output():
+    """Small models answer the pitfall prompt with a before/after diff, which
+    is useless once retrieved into a different task: it names no rule, only an
+    edit to code the future task does not have."""
+    assert reflection._one_sentence_lesson(
+        "```powershell\nold\n```\nReplace with:\n```powershell\nnew\n```") == ""
+    assert reflection._one_sentence_lesson("Do this.\nThen that.") == ""
+    assert reflection._one_sentence_lesson("Use join.") == ""
+    assert reflection._one_sentence_lesson("") == ""
+    good = ("Wrap a pipeline in parentheses before applying -join, because "
+            "-join otherwise binds to ForEach-Object.")
+    assert reflection._one_sentence_lesson(good) == good
+
+
+def test_distill_pitfall_needs_an_error_and_a_usable_sentence():
+    calls = []
+
+    def fake_offload(prompt, **options):
+        calls.append(prompt)
+        return "Declare PowerShell class methods with a return type so return "\
+               "statements are allowed instead of failing as void."
+
+    # No error text: never reaches the model at all.
+    assert reflection.distill_pitfall("t", "r", "", fake_offload) == ""
+    assert not calls
+
+    lesson = reflection.distill_pitfall(
+        "t", "r", "Invalid return statement within void method.", fake_offload)
+    assert "return type" in lesson
+    assert len(calls) == 1
