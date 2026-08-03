@@ -4004,7 +4004,14 @@ def campaign_generate_compile_execute_record(
     jobs = []
     for i in range(total):
         lang = language_list[i % len(language_list)]
-        task_name, task_text = _CAMPAIGN_TASKS[i % len(_CAMPAIGN_TASKS)]
+        # Advance the task only after a full pass over the languages. Indexing
+        # both by i pairs them on a fixed residue whenever the two counts share
+        # a factor: 3 languages against 12 tasks gave each language just 4 of
+        # them, and PowerShell could never draw the three tasks it actually
+        # fails - so a 30/30 sweep proved nothing about the hard combinations.
+        task_name, task_text = _CAMPAIGN_TASKS[
+            (i // len(language_list)) % len(_CAMPAIGN_TASKS)
+        ]
         jobs.append((i, lang, task_name, task_text))
 
     def run_one(index, lang, task_name, task_text):
