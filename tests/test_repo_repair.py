@@ -35,6 +35,33 @@ _CANONICAL_FIXES = {
         "def sort_ids(ids):\n"
         "    return sorted(ids, key=int)\n"
     ),
+    "aliasing": (
+        "def with_defaults(config):\n"
+        "    merged = dict(config)\n"
+        "    merged.setdefault('retries', 3)\n"
+        "    return merged\n"
+    ),
+    "intdivision": (
+        "def average(values):\n"
+        "    return sum(values) / len(values)\n"
+    ),
+    "noneguard": (
+        "def name_length(user):\n"
+        "    if not user or not user.get('name'):\n"
+        "        return 0\n"
+        "    return len(user['name'])\n"
+    ),
+    "wrongscope": (
+        "def group_lengths(words):\n"
+        "    buckets = {}\n"
+        "    for word in words:\n"
+        "        buckets.setdefault(len(word), []).append(word)\n"
+        "    return buckets\n"
+    ),
+    "rangeend": (
+        "def inclusive_range(start, end):\n"
+        "    return list(range(start, end + 1))\n"
+    ),
 }
 
 
