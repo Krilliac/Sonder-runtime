@@ -427,3 +427,29 @@ def test_pitfall_refuses_a_circular_restatement_of_the_task():
     assert reflection._one_sentence_lesson(real, print_error, print_code) == real
     # And the guard alone keeps it regardless of relevance.
     assert reflection._is_non_implementation(real) is False
+
+
+def test_pitfall_refuses_a_lesson_that_quotes_the_instances_calls():
+    """A lesson spelling out the task's own call sequence - "call cache.get(1),
+    cache.get(2), cache.get(3)" - is an edit to that code, not a rule another
+    task can apply. It passes the anchor check precisely because those calls
+    are concrete. Measured over 1042 stored lessons, requiring two or more
+    literal integer arguments inside one backticked span matched exactly the
+    two non-transferable lessons and nothing else."""
+    error = "wrong output; expected exactly '10 -1 30', got '10\n-1\n30'"
+    code = "for r in [cache.get(1), cache.get(2)]:\n    print(r)\n"
+    instance_bound = (
+        "Use `print(' '.join(map(str, [cache.get(1), cache.get(2), "
+        "cache.get(3)])))` to fix this."
+    )
+    assert reflection._one_sentence_lesson(instance_bound, error, code) == ""
+
+    # Advice that names a technique rather than the instance survives, even
+    # when it is highly specific.
+    for general in (
+        "Use `collections.deque` for O(1) pops from both ends of a queue.",
+        "Join the values with a single space instead of printing each on its "
+        "own line.",
+        "Use `range(start, end + 1)` when callers expect an inclusive end.",
+    ):
+        assert reflection._quotes_the_instances_calls(general) is False, general
