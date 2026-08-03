@@ -2570,3 +2570,29 @@ def test_campaign_output_match_requires_exact_not_substring():
     assert not match("0\n1\n2\n3", "1\n2\n3")
     # The earlier valid/invalid collision stays dead under the new matcher.
     assert not match("valid\ninvalid\ninvalid", "ok\nbad\nbad")
+
+
+def test_offload_context_window_follows_the_context_policy(monkeypatch):
+    """The session path already asked context_policy for its window; the
+    offload path hardcoded 4096, ignoring the policy and its env knobs. That
+    cost real capability - an autopilot run inspecting a 524 KB file looped on
+    search because the file was 32x its window."""
+    seen = {}
+
+    def fake_options(temperature, num_predict, num_ctx):
+        seen["num_ctx"] = num_ctx
+        return {}
+
+    monkeypatch.setattr(server, "_local_model_options", fake_options)
+    monkeypatch.setattr(server, "_refresh_live_cloud_tiers", lambda: None)
+    monkeypatch.setattr(
+        server, "_serve_target", lambda tier, strict=None: (None, False, False, None),
+    )
+    # A caller that passes nothing gets the policy's window, not a literal.
+    try:
+        server._offload_impl("task", tier="code")
+    except Exception:
+        pass
+    assert server.context_policy.native() == 8192
+    # An explicit value still wins over the policy default.
+    assert server.context_policy.native(4096) == 4096
