@@ -238,6 +238,24 @@ def _is_non_implementation(sentence):
     return bool(_NON_IMPLEMENTATION.search(sentence or ""))
 
 
+# A lesson that spells out the task's own call sequence - "call cache.get(1),
+# cache.get(2), cache.get(3)" - is an edit to that code, not a rule any other
+# task can apply. It passes the anchor check precisely because those calls are
+# concrete, so the shape needs naming separately. Requiring two or more
+# literal integer arguments inside one backticked span keeps it narrow:
+# measured over 1042 stored lessons this matched exactly the two
+# non-transferable ones and nothing else, leaving genuinely specific advice
+# like "use collections.deque for O(1) pops" untouched.
+_INSTANCE_CALL_SEQUENCE = re.compile(r"`[^`]*\b\w+\s*\(\s*\d+\s*\)[^`]*`")
+
+
+def _quotes_the_instances_calls(sentence):
+    for span in _INSTANCE_CALL_SEQUENCE.finditer(sentence or ""):
+        if len(re.findall(r"\(\s*\d+\s*\)", span.group(0))) >= 2:
+            return True
+    return False
+
+
 def _shares_a_term_with(sentence, *sources):
     """True if the lesson names something the failure actually involved.
 
@@ -281,6 +299,8 @@ def _one_sentence_lesson(text, error="", code=""):
     if _is_example_echo(sentence):
         return ""
     if _is_non_implementation(sentence):
+        return ""
+    if _quotes_the_instances_calls(sentence):
         return ""
     if not _shares_a_term_with(sentence, error, code):
         return ""
