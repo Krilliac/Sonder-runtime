@@ -169,3 +169,26 @@ def test_format_code_jobs_renders_timeout_verdict():
     assert "[TIMEOUT 8s/phase] sleepy" in text
     assert "[PASS] fast" in text
     assert "[FAIL] broken" in text
+
+
+def test_generated_code_cannot_write_into_the_current_directory(tmp_path, monkeypatch):
+    """Generated code is untrusted model output and must not run with the
+    caller's cwd. An overnight PowerShell candidate wrote a stray file named
+    '2' into the repo root through a mis-typed redirect before this was
+    contained."""
+    import os
+
+    workdir = tmp_path / "pretend-repo"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    before = set(os.listdir(workdir))
+
+    ok, _out = grounding.run_language_code(
+        "with open('stray-artifact.txt', 'w') as handle:\n"
+        "    handle.write('escaped')\n",
+        language="python", timeout=20, execute=True,
+    )
+    assert ok, "the probe program itself should run"
+    assert set(os.listdir(workdir)) == before, (
+        "generated code wrote into the caller's working directory"
+    )

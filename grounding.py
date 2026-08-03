@@ -184,6 +184,18 @@ def clamp_timeout(timeout, default=DEFAULT_TIMEOUT, maximum=MAX_TIMEOUT):
     return max(1, min(value, maximum))
 
 
+def _scratch_cwd():
+    """A throwaway working directory for generated code.
+
+    Generated code is untrusted model output. With no explicit cwd the child
+    inherits this process's, which for the nightly job is the Sonder source
+    tree, so a relative-path write lands in the repository. Not hypothetical:
+    an overnight PowerShell candidate created a stray file named "2" in the
+    repo root through a mis-typed redirect.
+    """
+    return tempfile.mkdtemp(prefix="sonder-gen-")
+
+
 def run_code_detail(
     code,
     extra="",
@@ -214,13 +226,21 @@ def run_code_detail(
                         "timed_out": False,
                         "error": "",
                     }
-            p = subprocess.run(
-                [interp, path],
-                input=stdin or "",
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
+            # Generated code is untrusted model output: give it a throwaway
+            # cwd so a relative-path write cannot land wherever this process
+            # happens to be running (for the nightly job, the source tree).
+            scratch = _scratch_cwd()
+            try:
+                p = subprocess.run(
+                    [interp, path],
+                    input=stdin or "",
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    cwd=scratch,
+                )
+            finally:
+                shutil.rmtree(scratch, ignore_errors=True)
             return {
                 "ok": p.returncode == 0,
                 "returncode": p.returncode,
@@ -335,16 +355,20 @@ def _missing(exe):
 
 
 def _run_cmd(cmd, timeout, cwd=None):
+    disposable = _scratch_cwd() if cwd is None else ""
     try:
         p = subprocess.run(
             cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-            timeout=timeout, cwd=cwd,
+            timeout=timeout, cwd=cwd or disposable,
         )
         return p.returncode == 0, _combine(p)
     except FileNotFoundError:
         return _missing(cmd[0])
     except subprocess.TimeoutExpired:
         return False, "(timed out after %ss)" % timeout
+    finally:
+        if disposable:
+            shutil.rmtree(disposable, ignore_errors=True)
 
 
 def _run_javascript(code, extra, timeout, execute):
