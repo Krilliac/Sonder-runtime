@@ -757,18 +757,23 @@ def _distillation_evidence(conn, interaction_id):
         ).fetchone()
         return False, has_any is not None
     placeholders = ",".join("?" for _ in good_signals)
+    # A contradiction is a genuinely NEGATIVE outcome (reward < 0) or a
+    # corrupt row (null signal/reward) - real evidence the work was bad or
+    # untrustworthy. A weak positive below the good threshold, such as
+    # "compiled" (0.70) once GOOD_THRESHOLD rose to 0.71, is neither good
+    # enough to ground a lesson nor evidence against one, so it never cancels
+    # an otherwise-clean distillation.
     row = conn.execute(
         "SELECT EXISTS(SELECT 1 FROM outcomes good "
         "WHERE good.interaction_id=? AND good.signal IN (%s) "
         "AND good.reward >= ?) AS has_good, "
         "EXISTS(SELECT 1 FROM outcomes bad "
         "WHERE bad.interaction_id=? AND (bad.signal IS NULL "
-        "OR bad.signal NOT IN (%s) OR bad.reward IS NULL "
-        "OR bad.reward < ?)) AS has_contradiction"
-        % (placeholders, placeholders),
+        "OR bad.reward IS NULL OR bad.reward < 0)) AS has_contradiction"
+        % placeholders,
         (
             interaction_id, *good_signals, reward.GOOD_THRESHOLD,
-            interaction_id, *good_signals, reward.GOOD_THRESHOLD,
+            interaction_id,
         ),
     ).fetchone()
     return bool(row["has_good"]), bool(row["has_contradiction"])

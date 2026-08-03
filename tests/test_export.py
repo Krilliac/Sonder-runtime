@@ -259,3 +259,30 @@ def test_atomic_write_preserves_existing_output_when_replace_fails(monkeypatch, 
 
     assert destination.read_bytes() == b"trusted-old-data\n"
     assert list(tmp_path.glob("training.jsonl.tmp-*")) == []
+
+
+def test_weak_positive_does_not_poison_an_otherwise_good_interaction():
+    """A "compiled" outcome (0.70) alongside a good one used to exclude the
+    whole interaction as contradictory once GOOD_THRESHOLD rose to 0.71.
+    Compiling is a weak positive, not evidence the work was bad, so it must be
+    ignored rather than treated as a contradiction."""
+    c = _conn()
+    ms.log_interaction(c, "weakpos", "task", "", "response", "code")
+    ms.record_outcome_row(c, "weakpos", "compiled", 0.7)
+    ms.record_outcome_row(c, "weakpos", "edited", 0.75)
+    examples, stats = etd._select_examples(c)
+    assert stats["accepted"] == 1
+    assert stats["rejected_by_reason"].get("contradictory_outcome", 0) == 0
+
+
+def test_genuine_negative_still_excludes_a_contradicted_interaction():
+    """A negative outcome (failed) alongside a passing one is a real dispute
+    and must still exclude the interaction from training - this is what the
+    balanced-false-pass retro-corrections rely on."""
+    c = _conn()
+    ms.log_interaction(c, "disputed", "task", "", "response", "code")
+    ms.record_outcome_row(c, "disputed", "tests_passed", 1.0)
+    ms.record_outcome_row(c, "disputed", "failed", -1.0)
+    examples, stats = etd._select_examples(c)
+    assert stats["accepted"] == 0
+    assert stats["rejected_by_reason"].get("contradictory_outcome", 0) == 1

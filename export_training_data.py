@@ -164,7 +164,10 @@ def _select_examples(conn):
             and math.isfinite(stored_reward)
             and stored_reward == reward.score(signal)
         )
-        if canonical and reward.is_good(signal):
+        if not canonical:
+            # A corrupt reward row is untrustworthy evidence.
+            current["contradictory"] = True
+        elif reward.is_good(signal):
             if current["best"] is None or (
                 reward.score(signal), int(row.get("outcome_rowid") or 0)
             ) > (
@@ -172,7 +175,12 @@ def _select_examples(conn):
                 int(current["best"].get("outcome_rowid") or 0),
             ):
                 current["best"] = row
-        else:
+        elif reward.score(signal) < 0:
+            # Only a genuinely negative outcome disputes a good one. A weak
+            # positive below the good threshold - "compiled" (0.70) once
+            # GOOD_THRESHOLD rose to 0.71 - is not evidence against the work;
+            # it is merely not good enough to train on, so it is ignored
+            # rather than poisoning an otherwise-trainable interaction.
             current["contradictory"] = True
     if current is not None:
         interaction_count += 1
