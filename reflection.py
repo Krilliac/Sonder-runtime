@@ -217,6 +217,27 @@ def _is_example_echo(sentence):
     return sentence.strip().casefold().rstrip(".") == _EXAMPLE_ANSWER.rstrip(".")
 
 
+# When a program produces no output at all, the model narrates "the task was
+# not implemented; implement it" - a restatement of the failure whose fix is
+# the task itself. That is never transferable to a DIFFERENT task, yet it has
+# anchors and shares terms, so it passes every other gate. A real pitfall
+# names a construct that was MISUSED; these name one that was MISSING.
+_NON_IMPLEMENTATION = re.compile(
+    r"\b(?:"
+    r"not (?:be )?implement(?:ed)?|did ?n['o]?t implement|does ?n['o]?t "
+    r"(?:implement|perform|contain|do)|is empty and|no logic (?:for|to)|"
+    r"was never (?:implemented|defined|written)|missing (?:the )?"
+    r"implementation|contains? no|performs? no|no (?:actual )?"
+    r"(?:sorting|logic|implementation|code) (?:was|is)"
+    r")\b",
+    re.I,
+)
+
+
+def _is_non_implementation(sentence):
+    return bool(_NON_IMPLEMENTATION.search(sentence or ""))
+
+
 def _shares_a_term_with(sentence, *sources):
     """True if the lesson names something the failure actually involved.
 
@@ -258,6 +279,8 @@ def _one_sentence_lesson(text, error="", code=""):
     if _looks_vague(sentence):
         return ""
     if _is_example_echo(sentence):
+        return ""
+    if _is_non_implementation(sentence):
         return ""
     if not _shares_a_term_with(sentence, error, code):
         return ""
