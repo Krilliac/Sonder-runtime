@@ -396,3 +396,34 @@ def test_readable_error_keeps_the_difference_it_is_reporting():
     assert "\n" not in readable
     assert reflection._readable_error("  spaced   out  ") == "spaced out"
     assert reflection._readable_error("") == ""
+
+
+def test_pitfall_refuses_a_circular_restatement_of_the_task():
+    """When a program produces no output, the model narrates "the task was not
+    implemented; implement it" - a restatement whose fix is the task itself,
+    never transferable to a different task. It has anchors and shares terms so
+    every other gate passes it; this one catches the missing-vs-misused shape.
+    A real pitfall names a construct that was misused, not one that was
+    missing."""
+    error = "wrong output; expected to contain 'd a b c', got ''"
+    code = "int main() { return 0; }"
+    circular = [
+        "The attempt failed because it did not implement any logic for "
+        "topological sorting.",
+        "The function `main()` is empty and does not perform any operations, "
+        "leading to empty output.",
+        "The method for reversing a string was not implemented in the class.",
+        "The code contains no sorting logic, so add a topological sort routine.",
+    ]
+    for sentence in circular:
+        assert reflection._one_sentence_lesson(sentence, error, code) == "", sentence
+
+    # A real pitfall naming a misused construct survives the same guard - shown
+    # against a failure whose text it actually relates to.
+    real = ("The issue is with using `print` inside a loop, which emits each "
+            "item on its own line; join the values with spaces instead.")
+    print_error = "wrong output; expected '1 2 3', got '1\\n2\\n3'"
+    print_code = "for r in results:\n    print(r)\n"
+    assert reflection._one_sentence_lesson(real, print_error, print_code) == real
+    # And the guard alone keeps it regardless of relevance.
+    assert reflection._is_non_implementation(real) is False
