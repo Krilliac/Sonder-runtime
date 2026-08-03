@@ -248,6 +248,7 @@ def gpu_memory_bytes() -> tuple[int, int]:
                 "--query-gpu=memory.total,memory.free",
                 "--format=csv,noheader,nounits",
             ],
+            stdin=subprocess.DEVNULL,
             capture_output=True, text=True, timeout=5,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )

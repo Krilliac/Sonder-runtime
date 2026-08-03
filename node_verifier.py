@@ -32,7 +32,8 @@ _NOT_FOUND_MARKERS = (
 
 
 def _last_line(text):
-    lines = [l for l in (text or "").strip().splitlines() if l.strip()]
+    lines = [row for row in (text or "").strip().splitlines()
+             if row.strip()]
     return lines[-1] if lines else ""
 
 
@@ -41,7 +42,10 @@ def _run(cmd, cwd=None, timeout=15):
     thin, monkeypatchable seam (like verifiers._run) so tests never need a
     real `node` binary. May raise FileNotFoundError or
     subprocess.TimeoutExpired — node_run() translates both."""
-    p = subprocess.run(cmd, cwd=cwd, capture_output=True, timeout=timeout)
+    p = subprocess.run(
+        cmd, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True,
+        timeout=timeout,
+    )
     out = ((p.stdout or b"").decode("utf-8", "replace")
            + (p.stderr or b"").decode("utf-8", "replace"))
     return p.returncode, out

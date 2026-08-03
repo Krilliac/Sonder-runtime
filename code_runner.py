@@ -265,6 +265,7 @@ def _find_visual_studio_vcvars():
                     "-property",
                     "installationPath",
                 ],
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=5,

@@ -52,10 +52,41 @@ def test_planted_bug_fails_and_canonical_fix_passes(
     project = Path(tmp_path) / name
     project.mkdir()
     _write_project(project, module_src, test_src)
-    ok, output = server._repo_repair_pytest(project, timeout=60)
+    ok, output, infra = server._repo_repair_pytest(project, timeout=60)
+    assert not infra, "template %s must get a real verdict: %s" % (name, infra)
     assert not ok, "template %s must fail before repair: %s" % (name, output)
 
     fixed = _CANONICAL_FIXES[name]
     (project / "module.py").write_text(fixed, encoding="utf-8")
-    ok, output = server._repo_repair_pytest(project, timeout=60)
+    ok, output, infra = server._repo_repair_pytest(project, timeout=60)
+    assert not infra, "canonical fix for %s must get a verdict: %s" % (
+        name, infra)
     assert ok, "canonical fix for %s must pass: %s" % (name, output)
+
+
+def test_infrastructure_timeout_is_not_a_model_verdict(tmp_path):
+    """A pytest timeout says nothing about the candidate code, so it must be
+    reported as an infrastructure error — never recorded as a model failure.
+    A memory-starved run once banked 20 bogus 'failed' outcomes this way."""
+    project = Path(tmp_path) / "slow"
+    project.mkdir()
+    (project / "test_slow.py").write_text(
+        "import time\n\n\ndef test_slow():\n    time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    ok, output, infra = server._repo_repair_pytest(project, timeout=5)
+    assert not ok
+    assert "timed out" in infra
+    assert "timed out" in output
+
+
+def test_collection_error_is_not_a_model_verdict(tmp_path):
+    """pytest exiting 2+ (usage/collection/internal) is not a test verdict."""
+    project = Path(tmp_path) / "broken"
+    project.mkdir()
+    (project / "test_broken.py").write_text(
+        "this is not python(\n", encoding="utf-8",
+    )
+    ok, _output, infra = server._repo_repair_pytest(project, timeout=60)
+    assert not ok
+    assert "without a test verdict" in infra
