@@ -173,7 +173,7 @@ PITFALL_SYSTEM = (
 
 def distill_pitfall(task, response, error, offload_fn):
     """One durable 'avoid X, do Y' lesson from a failed attempt, or ''."""
-    detail = re.sub(r"\s+", " ", str(error or "")).strip()
+    detail = _readable_error(error)
     if not detail:
         return ""
     prompt = (
@@ -188,28 +188,55 @@ def distill_pitfall(task, response, error, offload_fn):
         prompt=prompt, tier="code", system=PITFALL_SYSTEM,
         temperature=0.0, num_predict=70,
     )
-    return _one_sentence_lesson(text, detail)
+    return _one_sentence_lesson(text, detail, response)
 
 
-def _shares_a_term_with(sentence, error):
-    """True if the lesson names something the error actually mentions.
+def _readable_error(error):
+    """Flatten an error to one line without erasing what it is reporting.
 
-    The prompt carries a worked example, and a small model will sometimes
-    repeat that example's answer at an unrelated error. Requiring one
-    substantial shared term makes an echo land only where it happens to be
-    right, instead of storing confident guidance about a construct that never
-    appeared.
+    Collapsing every run of whitespace turned "expected '10 -1 30', got
+    '10\\n-1\\n30'" into two identical strings, so the model was asked to
+    explain a difference the prompt had just destroyed and returned nothing.
+    Line breaks survive as visible escapes; only spaces and tabs collapse.
     """
-    if not error:
+    detail = str(error or "").replace("\r\n", "\n").replace("\r", "\n")
+    detail = detail.replace("\n", "\\n").replace("\t", " ")
+    return re.sub(r" {2,}", " ", detail).strip()
+
+
+# The worked example's answer, verbatim. A small model sometimes repeats it
+# instead of reading the failure, so it is refused by identity - a precise
+# check that costs no yield anywhere else.
+_EXAMPLE_ANSWER = (
+    "parenthesise a pipeline before applying -join, because -join otherwise "
+    "binds as an argument to foreach-object."
+)
+
+
+def _is_example_echo(sentence):
+    return sentence.strip().casefold().rstrip(".") == _EXAMPLE_ANSWER.rstrip(".")
+
+
+def _shares_a_term_with(sentence, *sources):
+    """True if the lesson names something the failure actually involved.
+
+    The haystack is the error text AND the attempted code. Matching the error
+    alone was too strict for wrong-output failures, whose text is a diff of
+    values rather than a description: a correct lesson about `print` in a loop
+    was refused because it said "outputs" while the error said "output;". The
+    code names the constructs the lesson is about, which is exactly the
+    relevance being tested.
+    """
+    haystack = " ".join(str(source or "") for source in sources).casefold()
+    if not haystack.strip():
         return True
-    haystack = error.casefold()
     for token in re.findall(r"[A-Za-z_][A-Za-z0-9_-]{3,}", sentence):
         if token.casefold() in haystack:
             return True
     return False
 
 
-def _one_sentence_lesson(text, error=""):
+def _one_sentence_lesson(text, error="", code=""):
     """Reduce model output to a single usable sentence, or ''.
 
     Small models answer this prompt with a fenced before/after diff, which is
@@ -230,7 +257,9 @@ def _one_sentence_lesson(text, error=""):
         return ""
     if _looks_vague(sentence):
         return ""
-    if not _shares_a_term_with(sentence, error):
+    if _is_example_echo(sentence):
+        return ""
+    if not _shares_a_term_with(sentence, error, code):
         return ""
     return sentence
 

@@ -348,16 +348,51 @@ def test_distill_pitfall_needs_an_error_and_a_usable_sentence():
     assert len(calls) == 1
 
 
-def test_pitfall_refuses_an_echoed_example_at_an_unrelated_error():
-    """The prompt carries a worked example, and a small model will sometimes
-    repeat its answer verbatim. Requiring one substantial shared term keeps an
-    echo from becoming confident guidance about a construct that never
-    appeared in the failure."""
+def test_pitfall_refuses_a_verbatim_echo_of_the_worked_example():
+    """The prompt carries a worked example and a small model will sometimes
+    repeat its answer instead of reading the failure. A verbatim echo is
+    refused outright: it carries no evidence the model looked at anything."""
     echoed = ("Parenthesise a pipeline before applying -join, because -join "
               "otherwise binds as an argument to ForEach-Object.")
     matching = "Cannot bind parameter 'RemainingScripts' from a -join call"
     unrelated = "Variable reference is not valid. ':' was not followed by a name."
-    assert reflection._one_sentence_lesson(echoed, matching) == echoed
+    assert reflection._one_sentence_lesson(echoed, matching) == ""
     assert reflection._one_sentence_lesson(echoed, unrelated) == ""
-    # No error supplied keeps the older single-argument behaviour.
-    assert reflection._one_sentence_lesson(echoed) == echoed
+    assert reflection._one_sentence_lesson(echoed) == ""
+
+
+def test_pitfall_keeps_a_paraphrase_that_names_the_real_failure():
+    """A lesson the model actually derived is kept when it names something the
+    failure involved."""
+    derived = ("Pipeline binding error with `-join`: wrap the pipeline in "
+               "parentheses before joining its results.")
+    matching = "Cannot bind parameter 'RemainingScripts' from a -join call"
+    unrelated = "Variable reference is not valid. ':' was not followed by a name."
+    assert reflection._one_sentence_lesson(derived, matching) == derived
+    assert reflection._one_sentence_lesson(derived, unrelated) == ""
+
+
+def test_pitfall_relevance_also_reads_the_attempted_code():
+    """Wrong-output failures report a diff of values, not a description, so
+    matching the error alone refused correct lessons: one about `print` in a
+    loop was rejected for saying "outputs" while the error said "output;".
+    The attempted code names the constructs the lesson is about."""
+    lesson = ("The issue is using `print` inside a loop, which emits each item "
+              "on its own line; join the values with spaces instead.")
+    error = "wrong output; expected to contain '10 -1 30', got '10\\n-1\\n30'"
+    code = "for r in results:\n    print(r)\n"
+    assert reflection._one_sentence_lesson(lesson, error) == ""
+    assert reflection._one_sentence_lesson(lesson, error, code) == lesson
+
+
+def test_readable_error_keeps_the_difference_it_is_reporting():
+    """Collapsing every whitespace run turned "expected '10 -1 30', got
+    '10\\n-1\\n30'" into two identical strings, so the model was asked to
+    explain a difference the prompt had already destroyed."""
+    readable = reflection._readable_error(
+        "wrong output; expected to contain '10 -1 30', got '10\n-1\n30'")
+    assert "\\n" in readable
+    assert readable.count("10 -1 30") == 1
+    assert "\n" not in readable
+    assert reflection._readable_error("  spaced   out  ") == "spaced out"
+    assert reflection._readable_error("") == ""
