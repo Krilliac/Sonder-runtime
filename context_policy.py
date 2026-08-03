@@ -8,7 +8,41 @@ import os
 import re
 
 
-DEFAULT_CONTEXT = 8192
+# How much context fits on a small card depends almost entirely on how the KV
+# cache is stored, so the default follows the serving config rather than
+# assuming one. Measured on a 6 GiB RTX 4050 with a 7B Q4_K_M model resident
+# and gpu_layers=999, VRAM used at 8192/16384/32768 tokens:
+#     fp16 KV : 5301 / 5881 / would not fit
+#     q8_0 KV : 4645 / 4891 / 5383
+# Quantised KV roughly halves the per-token cost, which is what lets 32k stay
+# fully GPU-resident with ~750 MiB spare.
+#
+# OLLAMA_KV_CACHE_TYPE configures the Ollama server, not this process, so
+# reading it here is a proxy: it is right whenever both processes inherit the
+# same user/system environment, which is the normal case, and it is read
+# rather than assumed so that turning quantised KV off drops the window back
+# to one that still fits. Both failure directions are survivable and the safe
+# one is the default - an absent variable yields the smaller window, while
+# over-requesting only makes Ollama offload layers to CPU (slower, not
+# broken). A process that started before the variable was set will read the
+# smaller value until it restarts. SONDER_CONTEXT_SIZE overrides all of this.
+_QUANTISED_KV = ("q8_0", "q4_0", "q4_1", "q5_0", "q5_1")
+DEFAULT_CONTEXT_QUANTISED_KV = 32768
+DEFAULT_CONTEXT_FP16_KV = 8192
+
+
+def _kv_cache_is_quantised() -> bool:
+    kind = str(os.environ.get("OLLAMA_KV_CACHE_TYPE", "")).strip().lower()
+    return kind in _QUANTISED_KV
+
+
+def default_context() -> int:
+    if _kv_cache_is_quantised():
+        return DEFAULT_CONTEXT_QUANTISED_KV
+    return DEFAULT_CONTEXT_FP16_KV
+
+
+DEFAULT_CONTEXT = default_context()
 DEFAULT_NATIVE_MAX = 262144
 DEFAULT_VIRTUAL_MAX = 1_000_000
 
@@ -75,10 +109,13 @@ def virtual_max():
 
 
 def default_requested():
+    # default_context() is read live rather than through the import-time
+    # DEFAULT_CONTEXT constant, so switching the KV cache type takes effect on
+    # the next request instead of requiring a restart to be believed.
     return parse_size(
         os.environ.get("SONDER_CONTEXT_SIZE")
         or os.environ.get("SONDER_SESSION_NUM_CTX"),
-        DEFAULT_CONTEXT,
+        default_context(),
     )
 
 
