@@ -2881,12 +2881,22 @@ def _offload_impl(
     system: str = "",
     temperature: float = 0.2,
     num_predict: int = 1024,
-    num_ctx: int = 4096,
+    num_ctx: int = 0,
     learn: bool = True,
     timeout: int = TIMEOUT,
     cancel_check=None,
 ) -> str:
     """Internal offload path; model failures stay typed for orchestrators."""
+    # 0 means "ask the context policy", which the session path already does.
+    # This path hardcoded 4096 and so ignored the policy and its env knobs,
+    # which cost real capability: an autopilot run inspecting a 524 KB source
+    # file looped on search because the file was 32x its window. Measured on a
+    # 6 GiB RTX 4050 with a 7B q4 model resident, VRAM at 4096/8192/12288/16384
+    # was 4849/5301/5753/5881 MiB, so the policy default of 8192 doubles the
+    # window and still leaves ~840 MiB for the display and other processes.
+    # Past that the card is tight enough that another GPU consumer pushes
+    # llama.cpp into CPU offload, which costs more than the context is worth.
+    num_ctx = num_ctx or context_policy.native()
     _refresh_live_cloud_tiers()
     request_timeout = _bounded_timeout(timeout)
     model = TIERS.get(tier)
@@ -3022,7 +3032,7 @@ def offload(
     system: str = "",
     temperature: float = 0.2,
     num_predict: int = 1024,
-    num_ctx: int = 4096,
+    num_ctx: int = 0,
     learn: bool = True,
     timeout: int = TIMEOUT,
 ) -> str:
