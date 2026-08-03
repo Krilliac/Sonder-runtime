@@ -748,3 +748,34 @@ def test_shadow_ledger_low_agreement_does_not_advise_prefer(
     assert advisory["window"] == 60
     assert advisory["prefer_supported"] is False
     assert "below" in advisory["advisory"]
+
+
+def test_ram_gate_fallbacks_are_reported_as_a_cost(npu_env, monkeypatch):
+    """A bare "ram_gate=357" reads as harmless bookkeeping. Each one is an
+    embedding the model server handled instead, and under a one-model cap that
+    evicts and reloads the generation model - measured at ~7.5s per swap. The
+    status must say so and name the knob."""
+    broker = FakeBroker()
+    base = broker.status()
+    base["fallbacks"] = {"ram_gate": 357, "warming": 2}
+    monkeypatch.setattr(broker, "status", lambda: base)
+    monkeypatch.setattr(npu_broker, "get_broker", lambda: broker)
+
+    text = npu_service.format_status()
+    assert "ram_gate=357" in text
+    assert "357 call(s) fell back for free RAM" in text
+    assert "SONDER_NPU_MIN_FREE_RAM_GB" in text
+
+
+def test_a_non_dominant_ram_gate_does_not_claim_the_cost(npu_env, monkeypatch):
+    """The note is only meaningful when the RAM gate is the main reason calls
+    fall back; a stray one alongside a dominant other cause should not."""
+    broker = FakeBroker()
+    base = broker.status()
+    base["fallbacks"] = {"ram_gate": 1, "invalid": 90}
+    monkeypatch.setattr(broker, "status", lambda: base)
+    monkeypatch.setattr(npu_broker, "get_broker", lambda: broker)
+
+    text = npu_service.format_status()
+    assert "ram_gate=1" in text
+    assert "fell back for free RAM" not in text
