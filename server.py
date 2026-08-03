@@ -3942,6 +3942,28 @@ def _campaign_expected(task_name):
     }.get(task_name, "")
 
 
+def _campaign_output_matches(output, expected):
+    """Whether executed output satisfies a task that says "print exactly".
+
+    Substring containment let a chatty answer false-pass: "The result of 12 +
+    30 is 42." contains "42" and was recorded as a success even though every
+    campaign task asks to print the value exactly. The comparison is now the
+    faithful one - each line stripped, blank leading/trailing lines dropped,
+    platform line-endings normalised, then equal - which tolerates trailing
+    whitespace and newlines while rejecting embedded prose and extra lines.
+    """
+    def _norm(text):
+        lines = str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        stripped = [line.strip() for line in lines]
+        while stripped and not stripped[0]:
+            stripped.pop(0)
+        while stripped and not stripped[-1]:
+            stripped.pop()
+        return "\n".join(stripped)
+
+    return _norm(output) == _norm(expected)
+
+
 def _campaign_prompt(language, task_name, task_text, repair_note=""):
     fence = grounding._LANG_FENCE.get(language, language)
     repair = ("\nPrevious attempt failed:\n%s\nFix it." % repair_note) if repair_note else ""
@@ -4040,9 +4062,9 @@ def campaign_generate_compile_execute_record(
                     execute=True,
                 )
                 expected = _campaign_expected(task_name)
-                if ok and expected and expected not in (out or ""):
+                if ok and expected and not _campaign_output_matches(out, expected):
                     ok = False
-                    out = "wrong output; expected to contain %r, got %r" % (expected, out)
+                    out = "wrong output; expected exactly %r, got %r" % (expected, out)
             record_msg = ""
             if ok and iid:
                 with _CAMPAIGN_LEARN_LOCK:
