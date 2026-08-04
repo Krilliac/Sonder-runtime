@@ -82,6 +82,7 @@ import autopilot_store
 import autopilot_controller
 from model_transport import ModelCallError
 import ollama_endpoint
+import sonder_speculation
 
 BASE = ollama_endpoint.normalize()
 OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
@@ -2877,6 +2878,53 @@ def _post(path: str, payload: dict, timeout: int | None = None) -> dict:
                 "Ollama response exceeded the 16 MiB safety limit",
             )
         return json.loads(raw.decode("utf-8"))
+
+
+_PREWARM_LOCK = threading.Lock()
+_PREWARM_INFLIGHT = set()
+
+
+def prewarm_model(tier: str = "") -> bool:
+    """Speculatively load the tier's local model while context is assembled.
+
+    Model cold-load dominates first-token latency (tens of seconds for a 7B
+    on CPU). Firing an empty keep-alive load concurrently with the host's
+    DB/recall/augmentation work overlaps that cost, like a CPU prefetching a
+    line it predicts the pipeline will need. Local tiers only, best-effort,
+    one in-flight load per model, and never fatal: a failed prewarm just
+    means the real call pays the normal cost.
+    """
+    if not sonder_speculation.speculation_enabled():
+        return False
+    try:
+        model, cloud, _augment, tier_label = _serve_target(tier or "sonder", None)
+    except Exception:
+        return False
+    if cloud or not model or tier_label in (None, "cloud-disabled"):
+        return False
+    with _PREWARM_LOCK:
+        if model in _PREWARM_INFLIGHT:
+            return False
+        _PREWARM_INFLIGHT.add(model)
+
+    def _load():
+        try:
+            # Empty prompt with keep_alive loads weights without generating.
+            _post(
+                "/api/generate",
+                {"model": model, "keep_alive": KEEP_ALIVE},
+                timeout=_OLLAMA_STARTUP_TIMEOUT if "_OLLAMA_STARTUP_TIMEOUT" in globals() else 60,
+            )
+        except Exception:
+            pass
+        finally:
+            with _PREWARM_LOCK:
+                _PREWARM_INFLIGHT.discard(model)
+
+    threading.Thread(
+        target=_load, daemon=True, name="sonder-prewarm"
+    ).start()
+    return True
 
 
 def _get(path: str) -> dict:
@@ -10754,6 +10802,14 @@ _WORK_MUTATION_TOOLS = frozenset({
     "memory_quality_repair", "memory_privacy_repair", "memory_embedding_backfill",
     "memory_interaction_embedding_backfill",
 })
+
+# Read-only tools whose default (empty-args) invocation is meaningful, so a
+# name-only branch prediction yields a deterministic call signature that can
+# be speculatively executed and reliably matched against the real decision.
+_SPECULATABLE_ARGFREE_TOOLS = frozenset({
+    "workspace_inventory", "directory_tree", "status", "activity_status",
+    "context_health", "command_registry_list",
+})
 _WORK_VALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_verify", "game_reference_suite", "game_generate_and_test",
@@ -11374,6 +11430,24 @@ def _agent_impl(
     repeated_inspection_counts = {}
     failed_call_counts = {}
     claim_review_requests = 0
+    # Branch prediction + speculative execution (advisory; a mispredict costs
+    # at most one wasted read-only call and never touches durable state).
+    _predictor = sonder_speculation.default_predictor()
+    _spec_enabled = (
+        sonder_speculation.speculation_enabled() and not cloud
+    )
+
+    def _spec_dispatch(tool_name, args):
+        observation = _agent_dispatch_observed(
+            tool_name, args, allow_web=False, read_only=True,
+            project=project_scope,
+        )
+        return observation, _agent_tool_observation_ok(tool_name, observation)
+
+    _spec_engine = sonder_speculation.SpeculationEngine(
+        _predictor, _spec_dispatch, enabled=_spec_enabled,
+    )
+    _last_tool_name = None
     checklist_id, checklist_states = (
         _start_agent_checklist(prompt, project, read_only)
         if auto_checklist else ("", {})
@@ -11404,7 +11478,17 @@ def _agent_impl(
                 cloud=cloud,
             )
 
+    def _teardown_speculation():
+        # Squash anything in flight and persist the learned predictor so it
+        # warms across runs. Never fatal to the agent result.
+        try:
+            _spec_engine.discard()
+            _predictor.save()
+        except Exception:
+            pass
+
     def finish_final(final):
+        _teardown_speculation()
         final = str(final or "")
         if auto_checklist:
             _agent_checklist_mark(
@@ -11453,6 +11537,7 @@ def _agent_impl(
         check, misreporting a normal evidence/parse failure as a scope
         mismatch.
         """
+        _teardown_speculation()
         text = str(text or "")
         if return_host_receipt:
             return autopilot_controller.HostTaskResult(
@@ -11529,10 +11614,36 @@ def _agent_impl(
         )
 
     for step in range(1, max_steps + 1):
+        # Squash any speculation left unretired by the previous step (the
+        # model went final, hit a cache, or committed to a different call).
+        _spec_engine.discard()
         step_prompt = transcript
         if observations:
             step_prompt += "\n\n" + _agent_observation_prompt(observations)
         step_prompt += "\n\nChoose the next tool call or final answer."
+        # Branch predict + speculatively execute a read-only call while the
+        # model generates its decision. Only argument-free read-only tools
+        # are speculated so the predicted call signature is deterministic;
+        # the buffered result is retired only if the model commits to the
+        # same call, otherwise it is squashed (see sonder_speculation).
+        _spec_state = sonder_speculation.BranchPredictor.loop_state(
+            tuple(used_tool_names), _last_tool_name, step,
+        )
+        _spec_prediction = _predictor.predict_next_tool(_spec_state)
+        if (
+            _spec_enabled
+            and _spec_prediction is not None
+            and _spec_prediction[0] in _SPECULATABLE_ARGFREE_TOOLS
+        ):
+            _predicted_tool = _spec_prediction[0]
+            _predicted_args = _project_scope_args(
+                _predicted_tool, {}, project_scope,
+            )
+            _spec_engine.begin(
+                _predicted_tool,
+                _agent_call_signature(_predicted_tool, _predicted_args),
+                _predicted_args,
+            )
         decision, raw, decision_error = _agent_generate_decision(gen, step_prompt)
         if decision is None:
             if isinstance(decision_error, ModelCallError):
@@ -11650,6 +11761,17 @@ def _agent_impl(
             return _early_exit(
                 "ERROR: agent tool arguments must be a JSON object"
             )
+        # Learn the branch: predictor conditions the next-tool table on the
+        # loop state that preceded this committed decision, and prediction
+        # accuracy is scored here at commit time — independent of whether a
+        # speculation was issued for it.
+        if _spec_prediction is not None:
+            if _spec_prediction[0] == tool_name:
+                _predictor.note_hit()
+            else:
+                _predictor.note_miss()
+        _predictor.record_transition(_spec_state, tool_name)
+        _last_tool_name = tool_name
         # Keep policy and dispatch on one canonical, host-confined view of a
         # repository tool call.  Previously the early read-only check saw raw
         # model paths while dispatch later rebased them under ``project_scope``.
@@ -11768,17 +11890,25 @@ def _agent_impl(
             observation = _agent_tool_help(read_only=True)
         else:
             ensure_not_cancelled()
-            dispatch_options = {
-                "allow_web": allow_web,
-                "read_only": read_only,
-            }
-            if allow_location:
-                dispatch_options["allow_location"] = True
-            tool_dispatched = True
-            observation = _agent_dispatch_observed(
-                tool_name, policy_tool_args, project=project_scope,
-                **dispatch_options,
-            )
+            # Retire a matching speculation: if the model committed to the
+            # exact read-only call the host already ran during generation,
+            # reuse its buffered observation instead of dispatching again.
+            _retired = _spec_engine.resolve(call_signature)
+            if _retired is not None:
+                tool_dispatched = True
+                observation = _retired.observation
+            else:
+                dispatch_options = {
+                    "allow_web": allow_web,
+                    "read_only": read_only,
+                }
+                if allow_location:
+                    dispatch_options["allow_location"] = True
+                tool_dispatched = True
+                observation = _agent_dispatch_observed(
+                    tool_name, policy_tool_args, project=project_scope,
+                    **dispatch_options,
+                )
         observation_text = str(observation)
         tool_ok = _agent_tool_observation_ok(tool_name, observation)
         if tool_ok:
@@ -13229,6 +13359,19 @@ def status() -> str:
         lines.append("npu accelerator: %s" % npu_service.diagnostics_line())
     except Exception as exc:
         lines.append("npu accelerator: ERROR %s" % exc)
+    try:
+        spec = sonder_speculation.default_predictor().stats()
+        lines.append(
+            "branch predictor: %d predictions, %.0f%% accurate; "
+            "speculation %d issued, %.0f%% retired (%d states)"
+            % (
+                spec["predictions"], spec["accuracy"] * 100,
+                spec["speculations"], spec["speculation_hit_rate"] * 100,
+                spec["transition_states"],
+            )
+        )
+    except Exception as exc:
+        lines.append("branch predictor: ERROR %s" % exc)
     return "\n".join(lines)
 
 
