@@ -46,6 +46,136 @@ class LegacyPolicyRepository:
         )
 
 
+class LegacyAutomationRepository:
+    """AutomationRepository over the root ``autopilot_store`` module.
+
+    The store owns its own SQLite connections and lease bookkeeping, so this
+    adapter holds no state and every call is a lazy-imported delegation —
+    building it drags in nothing and opens no database. ``lease_seconds=None``
+    means "use the store's own default lease".
+    """
+
+    def create_run(
+        self,
+        objective: str,
+        *,
+        project: str = "",
+        tier: str = "code",
+        policy: str = "workspace",
+        allow_web: bool = True,
+        max_failures: int = 3,
+        max_tasks: int = 12,
+        max_replans: int = 2,
+        adaptive: bool = True,
+    ) -> dict:
+        import autopilot_store
+
+        return autopilot_store.create_run(
+            objective,
+            project=project,
+            tier=tier,
+            policy=policy,
+            allow_web=allow_web,
+            max_failures=max_failures,
+            max_tasks=max_tasks,
+            max_replans=max_replans,
+            adaptive=adaptive,
+        )
+
+    def get_run(self, selector: str = "") -> dict | None:
+        import autopilot_store
+
+        return autopilot_store.get_run(selector)
+
+    def list_runs(
+        self, include_finished: bool = True, limit: int = 20
+    ) -> list:
+        import autopilot_store
+
+        return autopilot_store.list_runs(include_finished, limit)
+
+    def claim_run(
+        self,
+        selector: str,
+        owner_id: str,
+        *,
+        owner_pid: int,
+        lease_seconds: int | None = None,
+    ) -> dict | None:
+        import autopilot_store
+
+        if lease_seconds is None:
+            return autopilot_store.claim_run(selector, owner_id, owner_pid=owner_pid)
+        return autopilot_store.claim_run(
+            selector, owner_id, owner_pid=owner_pid, lease_seconds=lease_seconds
+        )
+
+    def save_progress(self, run_id: str, owner_id: str, **changes) -> dict | None:
+        import autopilot_store
+
+        return autopilot_store.save_progress(run_id, owner_id, **changes)
+
+    def heartbeat(
+        self, run_id: str, owner_id: str, lease_seconds: int | None = None
+    ) -> bool:
+        import autopilot_store
+
+        if lease_seconds is None:
+            return autopilot_store.heartbeat(run_id, owner_id)
+        return autopilot_store.heartbeat(run_id, owner_id, lease_seconds)
+
+    def request_pause(self, selector: str) -> dict | None:
+        import autopilot_store
+
+        return autopilot_store.request_pause(selector)
+
+    def request_cancel(self, selector: str) -> dict | None:
+        import autopilot_store
+
+        return autopilot_store.request_cancel(selector)
+
+    def control_flags(self, run_id: str, owner_id: str) -> dict:
+        import autopilot_store
+
+        return autopilot_store.control_flags(run_id, owner_id)
+
+    def finish_run(
+        self,
+        run_id: str,
+        owner_id: str,
+        status: str,
+        *,
+        summary: str = "",
+        final_report: str = "",
+        last_error: str = "",
+    ) -> dict | None:
+        import autopilot_store
+
+        return autopilot_store.finish_run(
+            run_id,
+            owner_id,
+            status,
+            summary=summary,
+            final_report=final_report,
+            last_error=last_error,
+        )
+
+    def reconcile_stale_runs(self, now: float | None = None) -> int:
+        import autopilot_store
+
+        return autopilot_store.reconcile_stale_runs(now)
+
+    def events(self, selector: str = "", limit: int = 20) -> list:
+        import autopilot_store
+
+        return autopilot_store.events(selector, limit)
+
+    def snapshot(self, include_finished: bool = True, limit: int = 20) -> dict:
+        import autopilot_store
+
+        return autopilot_store.snapshot(include_finished, limit)
+
+
 class LegacyModelGateway:
     """ModelGateway over the root server module's chat entry point."""
 

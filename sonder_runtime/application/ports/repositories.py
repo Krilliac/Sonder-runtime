@@ -20,13 +20,74 @@ class MemoryRepository(Protocol):
 
 
 class AutomationRepository(Protocol):
-    def claim_next_task(self, owner_id: str) -> dict | None: ...
+    """Persistence port for durable, restart-safe autopilot runs.
 
-    def transition_run(
-        self, run_id: str, *, expected: str, next_status: str, revision: int
+    The one owner of the ``autopilot.db`` run ledger. Ownership is leased:
+    a controller claims a run, heartbeats to keep the lease, and either
+    finishes it or has it reconciled when the owner dies. Methods mirror the
+    root ``autopilot_store`` surface so the strangler adapter is a faithful
+    wrap; ``lease_seconds=None`` defers to the store's own default.
+    """
+
+    def create_run(
+        self,
+        objective: str,
+        *,
+        project: str = "",
+        tier: str = "code",
+        policy: str = "workspace",
+        allow_web: bool = True,
+        max_failures: int = 3,
+        max_tasks: int = 12,
+        max_replans: int = 2,
+        adaptive: bool = True,
     ) -> dict: ...
 
-    def heartbeat(self, run_id: str, owner_id: str) -> None: ...
+    def get_run(self, selector: str = "") -> dict | None: ...
+
+    def list_runs(
+        self, include_finished: bool = True, limit: int = 20
+    ) -> list[dict]: ...
+
+    def claim_run(
+        self,
+        selector: str,
+        owner_id: str,
+        *,
+        owner_pid: int,
+        lease_seconds: int | None = None,
+    ) -> dict | None: ...
+
+    def save_progress(self, run_id: str, owner_id: str, **changes) -> dict | None: ...
+
+    def heartbeat(
+        self, run_id: str, owner_id: str, lease_seconds: int | None = None
+    ) -> bool: ...
+
+    def request_pause(self, selector: str) -> dict | None: ...
+
+    def request_cancel(self, selector: str) -> dict | None: ...
+
+    def control_flags(self, run_id: str, owner_id: str) -> dict: ...
+
+    def finish_run(
+        self,
+        run_id: str,
+        owner_id: str,
+        status: str,
+        *,
+        summary: str = "",
+        final_report: str = "",
+        last_error: str = "",
+    ) -> dict | None: ...
+
+    def reconcile_stale_runs(self, now: float | None = None) -> int: ...
+
+    def events(self, selector: str = "", limit: int = 20) -> list[dict]: ...
+
+    def snapshot(
+        self, include_finished: bool = True, limit: int = 20
+    ) -> dict: ...
 
 
 class PolicyRepository(Protocol):
