@@ -176,6 +176,119 @@ class LegacyAutomationRepository:
         return autopilot_store.snapshot(include_finished, limit)
 
 
+class LegacyMemoryRepository:
+    """MemoryRepository over the root ``memory_store`` / ``recall`` modules.
+
+    Bound to a live SQLite connection owned by the UnitOfWork — all methods
+    delegate against that one connection. Constructed by the UnitOfWork, not
+    standalone.
+    """
+
+    def __init__(self, conn) -> None:
+        self._conn = conn
+
+    def add_fact(self, fact_id: str, project: str, text: str, embedding=None) -> None:
+        import memory_store
+
+        memory_store.add_fact(self._conn, fact_id, project, text, embedding)
+
+    def facts_for_project(self, project: str) -> list:
+        import memory_store
+
+        return memory_store.facts_for_project(self._conn, project)
+
+    def count_facts(self, project: str) -> int:
+        import memory_store
+
+        return memory_store.count_facts(self._conn, project)
+
+    def log_interaction(
+        self,
+        interaction_id: str,
+        task: str,
+        retrieved_ctx,
+        response: str,
+        tier: str,
+        **fields,
+    ) -> None:
+        import memory_store
+
+        return memory_store.log_interaction(
+            self._conn, interaction_id, task, retrieved_ctx, response, tier, **fields
+        )
+
+    def get_interaction(self, interaction_id: str) -> dict | None:
+        import memory_store
+
+        return memory_store.get_interaction(self._conn, interaction_id)
+
+    def recall(self, task: str, *, k: int = 2, project: str | None = None, **options):
+        import recall as recall_module
+
+        return recall_module.recall(self._conn, task, k=k, project=project, **options)
+
+    def record_outcome(
+        self, interaction_id: str, signal: str, reward_value: float, **options
+    ):
+        import memory_store
+
+        return memory_store.record_outcome_and_claim_lesson_distillation(
+            self._conn, interaction_id, signal, reward_value, **options
+        )
+
+
+class LegacyUnitOfWork:
+    """UnitOfWork owning one memory-store connection for a transaction scope.
+
+    Opens the canonical memory database on ``__enter__`` and exposes the
+    memory repository bound to that connection; the automation and policy
+    repositories are connection-independent (they manage their own stores),
+    and events go to the SPEC-2 operations store.
+
+    Honest boundary note: several root ``memory_store`` operations (e.g.
+    ``add_fact``, ``log_interaction``) still self-commit, so ``rollback`` does
+    not yet undo them. The UnitOfWork owns the connection lifecycle today; the
+    transaction boundary tightens as those ops migrate off self-commit.
+    """
+
+    def __init__(self, db_path: str | None = None) -> None:
+        self._db_path = db_path
+        self._conn = None
+        self.memory = None
+        self.automation = LegacyAutomationRepository()
+        self.policy = LegacyPolicyRepository()
+        self.events = OperationsEventSink()
+
+    def __enter__(self) -> "LegacyUnitOfWork":
+        import memory_store
+        import sonder_paths
+
+        path = self._db_path or sonder_paths.memory_db_path()
+        self._conn = memory_store.connect(path)
+        self.memory = LegacyMemoryRepository(self._conn)
+        return self
+
+    def commit(self) -> None:
+        if self._conn is not None:
+            self._conn.commit()
+
+    def rollback(self) -> None:
+        if self._conn is not None:
+            self._conn.rollback()
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        try:
+            if exc_type is None:
+                self.commit()
+            else:
+                self.rollback()
+        finally:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
+                self.memory = None
+
+
 class LegacyModelGateway:
     """ModelGateway over the root server module's chat entry point."""
 
