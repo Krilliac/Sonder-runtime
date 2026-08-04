@@ -63,6 +63,31 @@ _PREDICTOR_VERSION = 1
 _MAX_TRANSITIONS = 4000
 _MIN_CONFIDENCE = 0.34  # below a two-way coin flip's edge -> do not speculate
 
+# Adaptive cost model.  Speculation only pays when the wall time it can hide
+# is worth the wasted read-only call a mispredict costs.  The hidden overlap
+# per correct speculation is the *shorter* of the model-decision latency and
+# the speculated tool's latency (you can hide at most the whole tool inside
+# the decision, or the whole decision behind the tool).  On a CPU serving a
+# small model the tools are milliseconds while decisions are seconds, so the
+# hideable overlap is ~0 and speculation stays dormant; on serious hardware
+# serving a large model with genuinely slow tools (big scans, remote reads)
+# both are substantial and it engages.  The predictor learns both latencies
+# on the machine it actually runs on and persists them, so the decision is
+# never a guess about the deployment.
+_SPEC_EWMA_ALPHA = 0.25            # weight on the newest latency sample
+_SPEC_WARMUP = 16                  # speculations allowed to measure before gating
+_DEFAULT_MIN_SAVING_MS = 40.0      # expected hidden wall time below this -> skip
+
+
+def min_saving_seconds() -> float:
+    """Floor on expected hidden wall time for a speculation to be worth it."""
+    raw = os.environ.get("SONDER_SPECULATION_MIN_SAVING_MS", "").strip()
+    try:
+        ms = float(raw) if raw else _DEFAULT_MIN_SAVING_MS
+    except ValueError:
+        ms = _DEFAULT_MIN_SAVING_MS
+    return max(0.0, ms) / 1000.0
+
 
 def predictor_path() -> Path:
     override = os.environ.get("SONDER_BRANCH_PREDICTOR", "").strip()
@@ -109,6 +134,10 @@ class BranchPredictor:
         self.misses = 0
         self.speculations = 0
         self.squashes = 0
+        # Cost model (learned per machine, persisted across runs).
+        self.ewma_decision_s = 0.0  # model time to decide the next tool
+        self.ewma_tool_s = 0.0      # wall time of a speculated read-only tool
+        self.saved_s = 0.0          # wall time actually hidden by retired specs
 
     # -- persistence -------------------------------------------------------
 
@@ -121,6 +150,15 @@ class BranchPredictor:
                 if raw.get("version") == _PREDICTOR_VERSION:
                     self._openers.counts = raw.get("openers", {})
                     self._transitions.counts = raw.get("transitions", {})
+                    cost = raw.get("cost", {})
+                    try:
+                        self.ewma_decision_s = max(
+                            0.0, float(cost.get("ewma_decision_s", 0.0)))
+                        self.ewma_tool_s = max(
+                            0.0, float(cost.get("ewma_tool_s", 0.0)))
+                    except (TypeError, ValueError):
+                        self.ewma_decision_s = 0.0
+                        self.ewma_tool_s = 0.0
             except (OSError, ValueError, TypeError):
                 pass
             self._loaded = True
@@ -133,6 +171,10 @@ class BranchPredictor:
                 "version": _PREDICTOR_VERSION,
                 "openers": self._openers.counts,
                 "transitions": self._transitions.counts,
+                "cost": {
+                    "ewma_decision_s": round(self.ewma_decision_s, 6),
+                    "ewma_tool_s": round(self.ewma_tool_s, 6),
+                },
             }
         try:
             tmp = self._path.with_name(
@@ -238,6 +280,64 @@ class BranchPredictor:
         with self._lock:
             self.squashes += 1
 
+    # -- cost model --------------------------------------------------------
+
+    @staticmethod
+    def _ewma(prev: float, sample: float) -> float:
+        if sample <= 0.0:
+            return prev
+        if prev <= 0.0:
+            return sample
+        return (1.0 - _SPEC_EWMA_ALPHA) * prev + _SPEC_EWMA_ALPHA * sample
+
+    def observe_decision_latency(self, seconds: float) -> None:
+        """Record how long the model took to decide the next tool."""
+        with self._lock:
+            self.ewma_decision_s = self._ewma(self.ewma_decision_s, seconds)
+
+    def observe_tool_latency(self, seconds: float) -> None:
+        """Record the wall time of a speculated read-only tool call."""
+        with self._lock:
+            self.ewma_tool_s = self._ewma(self.ewma_tool_s, seconds)
+
+    def note_saved(self, seconds: float) -> None:
+        """Accumulate wall time actually hidden by a retired speculation."""
+        if seconds <= 0.0:
+            return
+        with self._lock:
+            self.saved_s += seconds
+
+    def expected_saving_seconds(self, confidence: float) -> float:
+        """Expected wall time a correct speculation would hide this step.
+
+        The hideable overlap is the shorter of the decision and tool
+        latencies, discounted by how likely the prediction is to be the
+        branch actually taken.  Returns a negative sentinel while the cost
+        model is still cold (no measured latencies yet).
+        """
+        with self._lock:
+            dec = self.ewma_decision_s
+            tool = self.ewma_tool_s
+        if dec <= 0.0 or tool <= 0.0:
+            return -1.0
+        conf = max(0.0, min(1.0, confidence))
+        return min(dec, tool) * conf
+
+    def should_speculate(self, confidence: float) -> bool:
+        """Gate a speculation on its expected payoff on *this* machine.
+
+        A bounded warmup lets the predictor measure real latencies before it
+        starts refusing; after that, speculation runs only when the expected
+        hidden wall time clears the configured floor.  This is what keeps it
+        dormant on a CPU (millisecond tools) and active on serious hardware
+        (slow model + slow tools) without a deployment-specific setting.
+        """
+        expected = self.expected_saving_seconds(confidence)
+        if expected < 0.0:
+            with self._lock:
+                return self.speculations < _SPEC_WARMUP
+        return expected >= min_saving_seconds()
+
     def stats(self) -> dict:
         with self._lock:
             total = self.hits + self.misses
@@ -254,6 +354,9 @@ class BranchPredictor:
                 ),
                 "transition_states": len(self._transitions.counts),
                 "opener_kinds": len(self._openers.counts),
+                "ewma_decision_s": round(self.ewma_decision_s, 4),
+                "ewma_tool_s": round(self.ewma_tool_s, 4),
+                "saved_s": round(self.saved_s, 4),
             }
 
 

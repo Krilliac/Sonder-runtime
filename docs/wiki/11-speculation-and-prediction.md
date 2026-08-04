@@ -53,20 +53,49 @@ soon as the serve path resolves a tier, overlapping cold-load latency
 augmentation work — a prefetch of the weights the pipeline will need.
 Local tiers only, single-flight per model, best-effort.
 
-## When it pays (honest)
+## Adaptive cost model (self-tuning by hardware)
 
-Savings per step ≈ the time of the tool being overlapped. On the CPU
-sandbox, read-only tools cost milliseconds against multi-second decisions,
-so the measured end-to-end gain today is ~0%. The value scales with:
+The wall time a correct speculation hides is the **shorter** of the two
+latencies — you can hide at most the whole tool inside the decision, or the
+whole decision behind the tool:
 
-1. **slower tools** — large monorepos, network filesystems (searches in
-   seconds, not milliseconds);
-2. **faster models** — on GPU, decisions shrink so tool time is a larger
-   fraction to hide;
-3. **more predictable decisions** — a capable model raises predictor
-   accuracy and, if hosted, adds decision latency to hide behind.
+```
+hidden ≈ min(model_decision_time, tool_time) × prediction_confidence
+```
 
-`/status` exposes predictor accuracy, speculation issue/retire rates, and
-learned-state counts, so a deployment can see when it crosses into the
-paying regime. The honest CPU analogy: speculation never made a slow unit
-fast — it keeps fast units busy.
+The predictor measures both latencies *on the machine it actually runs on*
+(exponentially-weighted, persisted across runs) and only issues a
+speculation when the expected hidden time clears a floor
+(`SONDER_SPECULATION_MIN_SAVING_MS`, default 40 ms). A short warmup lets it
+take real samples before it starts gating. The result is one behavior that
+tunes itself to the deployment, with no per-machine setting:
+
+| Regime | Decision | Tool | `min(·)` | Behavior |
+|---|---|---|---|---|
+| Laptop CPU + small model | seconds | ~ms | ~ms | **dormant** — nothing worth hiding |
+| GPU + 7B | ~1 s | ~ms | ~ms | mostly dormant |
+| **Serious HW + large local model** (multi-B/T) + real tools | seconds | seconds | **seconds** | **engaged** — meaningful wall time hidden every step |
+| Hosted/cloud reasoning tier + big scans | seconds | seconds | seconds | engaged (though cloud tiers disable *tool* speculation for budget safety) |
+
+This is the honest answer to "does speculation help?": on a laptop, no, and
+it now correctly declines to waste work there; on serious hardware running a
+genuinely capable local model with genuinely slow tools — the regime Sonder
+is explicitly built to scale up into — it hides real seconds per step. The
+CPU analogy holds exactly: speculation never made a slow unit fast, it keeps
+fast units busy, and the win grows with the gap between a fast decision and
+a slow memory access.
+
+## Model prewarm on big models
+
+Prewarm matters *more* as models get bigger: a large local model can take
+tens of seconds to minutes to page into VRAM. `prewarm_model()` overlaps
+that cold-load with the host's history/recall/augmentation work so the first
+real token isn't waiting on the weights. On a keep-resident deployment
+(`OLLAMA_KEEP_ALIVE` set high) the heavy tier stays warm between requests.
+
+## What it exposes
+
+`/status` reports predictor accuracy, speculation issue/retire rates,
+learned-state counts, the **measured** decision/tool latencies, and the
+**cumulative wall time actually hidden** — so a deployment can see, with
+numbers rather than claims, whether it has crossed into the paying regime.

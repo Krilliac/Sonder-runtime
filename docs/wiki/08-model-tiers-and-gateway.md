@@ -59,6 +59,47 @@ The runtime layer is identical across all of them; **output quality
 scales with the model** and the agentic surfaces only become dependable
 once the model can hold the tool protocol.
 
+## Scaling up: large local models on serious hardware
+
+Sonder is deliberately built to scale *up* as well as down. The same
+runtime that imports a 4B off a USB will drive a large local model —
+70B/120B, a big MoE, a multi-hundred-B or trillion-parameter model — served
+by Ollama on a workstation or server with the VRAM to hold it. Nothing in
+the orchestration assumes a small or weak model; the "small local model
+only" gates apply specifically to the *automatic router's* self-selection,
+not to the tier you point a lane at.
+
+To make a big local model the primary reasoning tier:
+
+```bash
+# Point the heavy lanes at the large local model (developer/admin auth).
+/runtime set general=<big-local-model> workbench=general review=general
+# Keep the heavy model resident so its long load isn't paid per request.
+export OLLAMA_KEEP_ALIVE=2h
+# Give it the context its weights support (native, not just virtual).
+export SONDER_NATIVE_CONTEXT_MAX=131072   # or higher, to the model's limit
+```
+
+A large local model is still **local**: it does not trip the cloud consent
+gate. It is the intended way to get frontier-class reasoning while keeping
+prompts, code, and memory on hardware you own — the ownership thesis without
+the small-model capability tax.
+
+Two subsystems specifically pay off in this regime:
+
+- **Speculative execution** engages automatically here. Its adaptive cost
+  model hides `min(decision, tool)` wall time per step; on big-model +
+  slow-tool hardware that is real seconds, where on a laptop it correctly
+  stays dormant ([Speculation & Prediction](11-speculation-and-prediction.md)).
+- **Prewarm / keep-resident** matters more the larger the model, because
+  cold-load latency grows with size; prewarm overlaps it with host work and
+  `OLLAMA_KEEP_ALIVE` avoids re-paying it.
+
+A large local model can also serve as the grounded **teacher tier** whose
+good outcomes are distilled into lessons and fine-tuning data for a smaller,
+faster local model to retrieve later ([Memory & Learning](06-memory-and-learning.md),
+[Training](15-training.md)) — big iron trains the model you run everywhere else.
+
 ## Portable & offline models (facts. USB)
 
 Any open-weight `.gguf` works. Import one from a mounted USB or a file:
