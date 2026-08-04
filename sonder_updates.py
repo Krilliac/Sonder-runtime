@@ -359,6 +359,110 @@ def build_bundle(
 # Adversarially-safe extraction (SPEC-4 section 9)
 # ---------------------------------------------------------------------------
 
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _reject_nonpublic_source_fallback(url: str) -> None:
+    """Minimal public-host check used only when web_tools cannot be imported.
+
+    web_tools is stdlib-only and normally importable; this fail-closed
+    fallback keeps loopback/private update origins refused even if it is not.
+    """
+    import ipaddress
+    import socket
+    import urllib.parse
+
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise TrustError("update source must be an http(s) URL")
+    host = (parsed.hostname or "").strip().lower()
+    if not host or host in ("localhost", "localhost.localdomain"):
+        raise TrustError("update source host is not public")
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        raise TrustError("update source has an invalid port") from None
+    try:
+        candidates = [ipaddress.ip_address(host)]
+    except ValueError:
+        try:
+            rows = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except OSError:
+            raise TrustError(
+                "update source host could not be resolved"
+            ) from None
+        candidates = [
+            ipaddress.ip_address(str(row[4][0]).split("%", 1)[0])
+            for row in rows
+            if row[4]
+        ]
+    for ip in candidates or []:
+        mapped = getattr(ip, "ipv4_mapped", None) or ip
+        if not (
+            mapped.is_global and not mapped.is_private and not mapped.is_loopback
+            and not mapped.is_link_local and not mapped.is_reserved
+            and not mapped.is_unspecified and not mapped.is_multicast
+        ):
+            raise TrustError("update source resolves to a non-public address")
+
+
+def _assert_public_update_source(url: str):
+    """SSRF hardening (V2): refuse non-public/loopback update origins.
+
+    The update download URL is routed through the same public-address
+    validation web_tools uses for the agent's fetch path. Returns the tuple
+    of pre-validated pinned addresses (for the pinned opener) or ``None`` when
+    validation is skipped. An operator running an internal or air-gapped
+    mirror on a private address can opt out with
+    ``SONDER_UPDATE_ALLOW_INSECURE_SOURCE=1`` (mirroring the unsigned-bundle
+    escape hatch); the default fails closed. Downloaded bytes remain
+    length+SHA-256+TUF gated regardless.
+    """
+    if _env_flag("SONDER_UPDATE_ALLOW_INSECURE_SOURCE"):
+        return None
+    try:
+        import web_tools
+    except Exception:
+        web_tools = None
+    if web_tools is not None:
+        try:
+            _parsed, addresses = web_tools._validated_public_target(url)
+        except ValueError as exc:
+            raise TrustError(
+                f"refusing update download from non-public source: {exc}"
+            ) from None
+        return addresses
+    _reject_nonpublic_source_fallback(url)
+    return None
+
+
+def _default_opener(u, h):
+    """Open an update download URL after public-address validation/pinning.
+
+    Reuses web_tools' resolve-once-then-pin approach so the update fetch is
+    not a blind-SSRF primitive against internal hosts; falls back to a
+    validated plain urlopen when pinning is unavailable.
+    """
+    import urllib.request
+
+    addresses = _assert_public_update_source(u)
+    req = urllib.request.Request(u, headers=h)
+    if addresses:
+        try:
+            import web_tools
+
+            req._sonder_addresses = addresses
+            return web_tools._urlopen(req, timeout=120)
+        except TrustError:
+            raise
+        except Exception:
+            # web_tools became unavailable after validation; the origin was
+            # already confirmed public, so a plain (unpinned) open is safe.
+            pass
+    return urllib.request.urlopen(req, timeout=120)
+
+
 def resumable_download(
     url: str,
     destination: str | os.PathLike,
@@ -379,9 +483,9 @@ def resumable_download(
 
     ``opener`` is injected for testing; it takes (url, headers) and returns
     a context-manager response with ``.status``, ``.headers``, ``.read``.
+    The default opener validates the source is a public host and pins the
+    connection (V2 SSRF hardening).
     """
-    import urllib.request
-
     dest = Path(destination)
     dest.parent.mkdir(parents=True, exist_ok=True)
     partial = dest.with_name(dest.name + ".partial")
@@ -409,9 +513,6 @@ def resumable_download(
     headers = {}
     if resume and have:
         headers["Range"] = "bytes=%d-" % have
-
-    def _default_opener(u, h):
-        return urllib.request.urlopen(urllib.request.Request(u, headers=h), timeout=120)
 
     open_fn = opener or _default_opener
     resumed = False
@@ -687,6 +788,24 @@ def _verify_with_tuf(bundle_dir: Path, manifest: BundleManifest) -> str:
             if not local.is_file():
                 local = bundle_dir / target_name
             info.verify_length_and_hashes(local.read_bytes())
+            # V1: manifest.json drives install behavior (health_checks argv,
+            # entrypoints, resource budgets), so it must itself be a signed
+            # target. Verify the exact on-disk bytes that BundleManifest.load
+            # read (bundle_dir/manifest.json) against the signed metadata
+            # BEFORE any manifest field is consumed. A mirror that pairs a
+            # legitimately signed archive with a malicious manifest.json is
+            # refused here.
+            manifest_info = updater.get_targetinfo("manifest.json")
+            if manifest_info is None:
+                raise TrustError(
+                    "manifest.json is not a signed TUF target; refusing "
+                    "bundle (a signed archive with an unsigned manifest is a "
+                    "signature-bypass-to-execution path)"
+                )
+            manifest_local = bundle_dir / "manifest.json"
+            if not manifest_local.is_file():
+                raise TrustError("bundle is missing manifest.json")
+            manifest_info.verify_length_and_hashes(manifest_local.read_bytes())
         except TrustError:
             raise
         except Exception as exc:

@@ -185,6 +185,66 @@ def _require_mutation_access(path: Path, developer_authorized: bool) -> None:
         )
 
 
+def _is_personal_corpus(path: Path) -> bool:
+    """True for the local personal chat/training corpus.
+
+    ``combined_personal.jsonl`` (and a ``sonder-personal-lora`` adapter tree)
+    hold raw personal conversation/training data. They are not part of the
+    control-plane classifier that guards mutations, but for *reads* they are
+    first-class secrets: relaying their contents out is a confidentiality
+    breach, so the direct read tools must gate them like any other secret.
+    """
+    if path.name.lower() == "combined_personal.jsonl":
+        return True
+    return any(part.lower() == "sonder-personal-lora" for part in path.parts)
+
+
+def _is_protected_read_path(path: Path) -> bool:
+    """Paths whose CONTENTS are secret/control state and must not be read.
+
+    Mirrors the mutation classifier (``_is_protected_mutation_path`` --
+    secrets, control-plane config/state, and root-level Sonder modules) and
+    adds the personal corpus, which is read-sensitive even though writing it
+    is not itself control-plane-protected. Writes already refuse the mutation
+    set; reads previously refused none of it -- this closes that asymmetry.
+    """
+    path = _resolve_best_effort(path)
+    return _is_protected_mutation_path(path) or _is_personal_corpus(path)
+
+
+def _require_read_access(path: Path, authorized: bool) -> None:
+    """Refuse a non-authorized read of a secret/control-plane path.
+
+    ``authorized`` is the developer-token OR bypass signal (mirroring the
+    escape hatch the write guard honors for a developer token). Fails closed
+    with a clear error; an unclassified workspace file is never affected.
+    """
+    if _is_protected_read_path(path) and not authorized:
+        raise PermissionError(
+            "refusing to read protected Sonder secret/control-plane path "
+            "without an authenticated developer token or bypass: %s" % path
+        )
+
+
+def require_read_access(
+    path: str,
+    *,
+    extra_roots: str = "",
+    bypass: bool = False,
+    developer_authorized: bool = False,
+) -> Path:
+    """Resolve *path* and enforce the secret/control-plane read guard.
+
+    Public entry point for read tools whose bodies live outside this module
+    (line-range and image inspection in ``workbench``) so they get the same
+    fail-closed guard as ``read_file`` / ``inspect_data``. Returns the
+    resolved path when the read is permitted.
+    """
+    p = resolve_path(path, extra_roots=extra_roots, bypass=bypass)
+    _require_read_access(p, developer_authorized or bypass)
+    return p
+
+
 def _is_inside(path: Path, root: Path) -> bool:
     try:
         return os.path.commonpath([str(path), str(root)]) == str(root)
@@ -473,8 +533,16 @@ def find_files(
             "truncated": False, "limit": limit}
 
 
-def read_file(path: str, *, max_bytes: int = MAX_READ_BYTES, extra_roots: str = "", bypass: bool = False) -> dict:
+def read_file(
+    path: str,
+    *,
+    max_bytes: int = MAX_READ_BYTES,
+    extra_roots: str = "",
+    bypass: bool = False,
+    developer_authorized: bool = False,
+) -> dict:
     p = resolve_path(path, extra_roots=extra_roots, bypass=bypass)
+    _require_read_access(p, developer_authorized or bypass)
     if not p.exists():
         raise FileNotFoundError("file not found: %s" % p)
     if not p.is_file():
@@ -586,7 +654,12 @@ def edit_file(
     _require_mutation_access(p, developer_authorized)
     if old == "":
         raise ValueError("old text must not be empty")
-    current = read_file(path, extra_roots=extra_roots, bypass=bypass)
+    # The mutation guard above already cleared this path, so the same
+    # authorization satisfies the read guard for the read-modify-write cycle.
+    current = read_file(
+        path, extra_roots=extra_roots, bypass=bypass,
+        developer_authorized=developer_authorized,
+    )
     if current["truncated"]:
         raise ValueError("file too large for safe text edit")
     text = current["text"]
@@ -895,6 +968,7 @@ def inspect_data(
     max_bytes: int = MAX_READ_BYTES,
     extra_roots: str = "",
     bypass: bool = False,
+    developer_authorized: bool = False,
 ) -> dict:
     """Structured, read-only preview of a data file inside allowed roots.
 
@@ -903,6 +977,7 @@ def inspect_data(
     executes content and never returns more than a bounded preview.
     """
     p = resolve_path(path, extra_roots=extra_roots, bypass=bypass)
+    _require_read_access(p, developer_authorized or bypass)
     if not p.exists():
         raise ValueError("no such file: %s" % p)
     if p.is_dir():

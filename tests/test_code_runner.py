@@ -65,7 +65,7 @@ def test_relative_cwd_inside_workspace(monkeypatch, tmp_path):
     child = root / "child"
     child.mkdir(parents=True)
     monkeypatch.setattr(code_runner, "workspace_root", lambda: str(root))
-    assert code_runner.resolve_cwd("child") == os.path.abspath(str(child))
+    assert code_runner.resolve_cwd("child") == os.path.realpath(str(child))
 
 
 def test_timeout_is_reported():

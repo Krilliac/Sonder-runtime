@@ -719,6 +719,61 @@ def _terminate_process_tree(proc):
         proc.kill()
 
 
+# Inline-code flags per interpreter. run_program is argv-only, so an inline
+# code string (e.g. `bash -c ...`, `python -c ...`) is an ad-hoc script that
+# never passes through run_script's per-suffix validation. Refuse these
+# uniformly and route callers to script_run, mirroring the PowerShell/cmd
+# guard below. Keys are matched against the resolved executable's basename
+# (with any ".exe" suffix and python version suffix normalized away).
+_INLINE_CODE_FLAGS = {
+    "bash": ("-c",),
+    "sh": ("-c",),
+    "zsh": ("-c",),
+    "dash": ("-c",),
+    "python": ("-c",),
+    "node": ("-e", "--eval", "-p", "--print"),
+    "nodejs": ("-e", "--eval", "-p", "--print"),
+    "perl": ("-e", "-E"),
+    "ruby": ("-e",),
+    "php": ("-r",),
+}
+
+
+def _inline_interpreter_key(basename):
+    """Normalize a resolved executable basename to an _INLINE_CODE_FLAGS key.
+
+    Strips a trailing ".exe" and collapses versioned python names
+    (python3, python3.11) onto the bare "python" key. Returns None when the
+    basename is not a known inline-capable interpreter.
+    """
+    name = basename[:-4] if basename.endswith(".exe") else basename
+    if name.startswith("python"):
+        name = "python"
+    return name if name in _INLINE_CODE_FLAGS else None
+
+
+def _is_inline_code_arg(arg, flags):
+    """True if ``arg`` is one of ``flags`` including its value-glued forms.
+
+    An exact-match check alone is trivially evaded, because the interpreters
+    accept the code string glued onto the flag: ``python -cCODE``,
+    ``perl -eCODE``, ``node --eval=CODE``.  A short option (``-c``) may carry
+    the value directly appended; a long option (``--eval``) carries it after
+    ``=``.  Both forms run inline code and must be refused too.
+    """
+    for flag in flags:
+        if arg == flag:
+            return True
+        if flag.startswith("--"):
+            if arg.startswith(flag + "="):
+                return True
+        elif len(flag) == 2 and flag.startswith("-"):
+            # Short option: value appended directly, e.g. -cCODE / -eCODE.
+            if arg.startswith(flag):
+                return True
+    return False
+
+
 def run_program(
     program, *, args_json="[]", cwd=".", stdin="", timeout=30,
     max_output=MAX_EXEC_OUTPUT, extra_roots="", bypass=False,
@@ -736,6 +791,14 @@ def run_program(
         raise PermissionError("inline cmd execution is disabled; use script_run")
     if Path(executable).suffix.lower() in (".bat", ".cmd") and not _allow_cmd_script:
         raise PermissionError("batch files must be executed with script_run")
+    interp_key = _inline_interpreter_key(basename)
+    if interp_key is not None and any(
+        _is_inline_code_arg(arg, _INLINE_CODE_FLAGS[interp_key])
+        for arg in lowered_args
+    ):
+        raise PermissionError(
+            "inline %s code is disabled; use script_run" % interp_key
+        )
     working = _resolve(cwd, extra_roots=extra_roots, bypass=bypass)
     if not working.is_dir():
         raise ValueError("working directory is not a directory: %s" % working)
