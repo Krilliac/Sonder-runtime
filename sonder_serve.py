@@ -35,6 +35,8 @@ import feedback
 import live_reload
 import debug_dump
 import sonder_health
+import sonder_lifecycle
+import sonder_secrets
 
 DEFAULT_PORT = 11435
 
@@ -415,7 +417,12 @@ def _effective_auth_mode():
 
 def _auth_context(auth_header="", account_header=""):
     mode = _effective_auth_mode()
-    api_key_ok = bool(API_KEY) and check_auth(auth_header, API_KEY)
+    api_key_ok = bool(API_KEY) and (
+        check_auth(auth_header, API_KEY)
+        # Rotation overlap: the previous key's hash is accepted until its
+        # mandatory expiry (SPEC-2 section 5).
+        or sonder_secrets.previous_key_valid(_bearer_token(auth_header))
+    )
     account_source = account_header or ("" if api_key_ok else auth_header)
     account = _auth_account(account_source) if account_source else None
     authorized = {
@@ -447,6 +454,26 @@ def _developer_authorized(context):
     if context["mode"] == "both":
         return role_ok
     return bool(context.get("api_key")) or role_ok
+
+
+def _admin_authorized(context):
+    """Administrator authorization for privileged operations (SPEC-2).
+
+    In account-bearing modes the account must hold the admin role; in
+    api-key-only deployments the single owner key is the administrator
+    credential.
+    """
+    if context.get("mode") == "local-open":
+        return True
+    if not context.get("authorized"):
+        return False
+    account = context.get("account")
+    if account is not None:
+        ok, _ = admin_auth.require(account, "admin")
+        return ok
+    if context.get("mode") == "both":
+        return False
+    return bool(context.get("api_key"))
 
 
 def _is_loopback_host(host):
@@ -644,8 +671,10 @@ def _last_user_message(messages):
 
 def _history_from_messages(messages):
     """Prior user/assistant turns from the UI request, excluding the current (last
-    user) message. The chat UI owns conversation state here, so we thread exactly
-    what it sends rather than a DB session."""
+    user) message. A full chat UI owns conversation state here, so we thread
+    exactly what it sends rather than a DB session; thin clients that name a
+    session without resending a transcript fall back to
+    _server_side_history()."""
     msgs = messages or []
     last_user_idx = None
     for i in range(len(msgs) - 1, -1, -1):
@@ -660,6 +689,43 @@ def _history_from_messages(messages):
         content = m.get("content") or ""
         if role in ("user", "assistant") and content:
             history.append({"role": role, "content": content})
+    return history
+
+
+SERVER_SIDE_HISTORY_TURNS = 8
+
+
+def _server_side_history(storage_session, limit=SERVER_SIDE_HISTORY_TURNS):
+    """Rebuild prior turns from the stored session for thin clients.
+
+    The OpenAI-compatible contract is client-owned history, but a client
+    that names a `session` while sending only the current message clearly
+    expects the server to remember. Feed the stored turns back through the
+    same history channel so both contracts work; activity footers are
+    stripped so replayed context stays clean.
+    """
+    if not (storage_session or "").strip():
+        return []
+    try:
+        import memory_store
+
+        session_id = server._resolve_session(storage_session)
+        conn = server._open_db()
+        try:
+            turns = memory_store.session_turns(conn, session_id)
+        finally:
+            conn.close()
+    except Exception:
+        return []
+    history = []
+    for turn in turns[-max(1, int(limit)):]:
+        task = (turn.get("task") or "").strip()
+        response = (turn.get("response") or "").split("=== ACTIVITY")[0]
+        response = _strip_footer(response).strip()
+        if task:
+            history.append({"role": "user", "content": task})
+        if response:
+            history.append({"role": "assistant", "content": response})
     return history
 
 
@@ -1276,10 +1342,116 @@ class Handler(BaseHTTPRequestHandler):
             self.headers.get("X-Sonder-Account-Token", ""),
         )
 
-    def _send_auth_error(self):
+    def _peer(self):
+        return self.client_address[0] if self.client_address else ""
+
+    def _correlation(self):
+        if not getattr(self, "_correlation_id", ""):
+            self._correlation_id = sonder_lifecycle.new_correlation_id()
+        return self._correlation_id
+
+    def _send_auth_error(self, reason="invalid-credentials"):
+        sonder_lifecycle.get().record_auth_failure(self._peer(), reason)
         self._send_json_payload({
-            "error": {"message": "authentication required", "type": "auth"},
+            "error": {"message": "authentication required", "type": "auth",
+                      "code": "UNAUTHENTICATED",
+                      "correlation_id": self._correlation()},
         }, status=401)
+
+    def _auth_rate_limited(self):
+        """Token-bucket authentication-failure limiter (admission step 3)."""
+        if sonder_lifecycle.get().auth_attempt_allowed(self._peer()):
+            return False
+        self._send_json_payload(
+            sonder_lifecycle.error_envelope(
+                "AUTH_RATE_LIMITED",
+                "too many failed authentication attempts; retry later",
+                self._correlation(),
+                retryable=True,
+            ),
+            status=429,
+            headers={"Retry-After": "2"},
+        )
+        return True
+
+    def _peer_is_loopback(self):
+        return _is_loopback_host(self._peer())
+
+    def _handle_lifecycle_get(self, path):
+        """SPEC-2 WP3 endpoints. Returns True when the path was handled.
+
+        /live is unauthenticated and reveals only {status: alive}.  The
+        other lifecycle routes require authentication unless the peer is
+        loopback (the reverse proxy restricts them to loopback upstream).
+        """
+        lifecycle = sonder_lifecycle.get()
+        if path == "/live":
+            self._send_json_payload(lifecycle.live_payload())
+            return True
+        if path not in ("/ready", "/health", "/version", "/metrics"):
+            return False
+        if not self._peer_is_loopback():
+            if self._auth_rate_limited():
+                return True
+            if not self._request_auth_context()["authorized"]:
+                self._send_auth_error()
+                return True
+        if path == "/ready":
+            status, payload = lifecycle.ready_payload()
+            self._send_json_payload(payload, status=status)
+            return True
+        if path == "/health":
+            self._send_json_payload(lifecycle.health_payload())
+            return True
+        if path == "/version":
+            self._send_json_payload(lifecycle.version_payload())
+            return True
+        body = lifecycle.metrics.render()
+        self.send_response(200)
+        self._cors()
+        self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return True
+
+    def _handle_admin_drain(self):
+        """POST /v1/admin/drain — administrator-only, idempotent."""
+        if self._auth_rate_limited():
+            return
+        context = self._request_auth_context()
+        if not context["authorized"]:
+            self._send_auth_error()
+            return
+        if not _admin_authorized(context):
+            self._send_json_payload(
+                sonder_lifecycle.error_envelope(
+                    "FORBIDDEN",
+                    "administrator authorization is required",
+                    self._correlation(),
+                    retryable=False,
+                ),
+                status=403,
+            )
+            return
+        lifecycle = sonder_lifecycle.get()
+
+        def start_drain():
+            threading.Thread(
+                target=lifecycle.drain,
+                kwargs={"reason": "admin drain request"},
+                daemon=True,
+                name="sonder-admin-drain",
+            ).start()
+            return {
+                "draining": True,
+                "correlation_id": self._correlation(),
+            }
+
+        payload = lifecycle.idempotent(
+            self.headers.get("Idempotency-Key", ""), start_drain
+        )
+        self._send_json_payload(payload, status=202)
 
     def _send_not_found(self):
         self._send_json_payload(
@@ -1306,6 +1478,8 @@ class Handler(BaseHTTPRequestHandler):
         self._cors()
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        if getattr(self, "_correlation_id", ""):
+            self.send_header("X-Sonder-Correlation-Id", self._correlation_id)
         for name, value in (headers or {}).items():
             self.send_header(str(name), str(value))
         self.end_headers()
@@ -1340,6 +1514,8 @@ class Handler(BaseHTTPRequestHandler):
         if self._reject_disallowed_origin():
             return
         path = self.path.rstrip("/")
+        if self._handle_lifecycle_get(path):
+            return
         if sonder_health.request_path_matches(self.path):
             nonce = self._sonder_health_nonce()
             if not nonce:
@@ -1356,6 +1532,8 @@ class Handler(BaseHTTPRequestHandler):
                     role=RUNTIME_ROLE,
                 )
             )
+            return
+        if self._auth_rate_limited():
             return
         _maybe_live_reload()
         if path == "/v1/models":
@@ -1381,6 +1559,42 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+            return
+        if path == "/v1/admin/updates/status":
+            # Durable update state for the System page (SPEC-4 R-M19).
+            # Read-only; install/rollback stay on the admin CLI surface.
+            context = self._request_auth_context()
+            if not context["authorized"]:
+                self._send_auth_error()
+                return
+            if not _admin_authorized(context):
+                self._send_json_payload(
+                    sonder_lifecycle.error_envelope(
+                        "FORBIDDEN",
+                        "administrator authorization is required",
+                        self._correlation(),
+                        retryable=False,
+                    ),
+                    status=403,
+                )
+                return
+            try:
+                import sonder_update_engine
+
+                payload = sonder_update_engine.UpdateManager().status()
+            except Exception as error:
+                self.log_error("update status failed: %s", type(error).__name__)
+                self._send_json_payload(
+                    sonder_lifecycle.error_envelope(
+                        "INTERNAL",
+                        "update status is unavailable",
+                        self._correlation(),
+                        retryable=True,
+                    ),
+                    status=500,
+                )
+                return
+            self._send_json_payload(payload)
             return
         if path == "/v1/sonder/status":
             context = self._request_auth_context()
@@ -1433,6 +1647,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         _maybe_live_reload()
         path = self.path.rstrip("/")
+        self._correlation()
+        if path == "/v1/admin/drain":
+            self._handle_admin_drain()
+            return
+        if self._auth_rate_limited():
+            return
         try:
             req = self._read_json()
         except HTTPRequestError as error:
@@ -1550,6 +1770,13 @@ class Handler(BaseHTTPRequestHandler):
 
         stream = bool(req.get("stream", False))
         model = req.get("model", "sonder")
+        # Speculatively load the target model now, overlapping its cold-load
+        # cost with the history assembly, scope resolution, and memory work
+        # below. Best-effort and local-only (see server.prewarm_model).
+        try:
+            server.prewarm_model(_model_to_tier(model) or "")
+        except Exception:
+            pass
         context_size = req.get("context_size", "")
         location_consent = req.get("location_consent") is True
         location_hint = req.get("location_hint")
@@ -1576,6 +1803,9 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         history = _history_from_messages(messages)
+        if not history and storage_session:
+            # Thin client: named a session, resent no transcript.
+            history = _server_side_history(storage_session)
         account_header = self.headers.get("X-Sonder-Account-Token", "")
         auth_header = self.headers.get("Authorization", "")
         state = _http_conversation_state(
@@ -1590,8 +1820,12 @@ class Handler(BaseHTTPRequestHandler):
         turn = None
         response_iid = None
         activity_response = None
+        _lifecycle = sonder_lifecycle.get()
+        _request_started = time.monotonic()
         try:
-            with state.lock:
+            # SPEC-2 WP4 admission: bounded concurrency slot with queue
+            # depth, admission deadline, drain and maintenance awareness.
+            with _lifecycle.acquire_request_slot(mutating=True), state.lock:
                 _record_chat("user", prompt, state=state)
                 with server.activity_tracker.response_span(
                     "chat:%s" % (model or "sonder"),
@@ -1660,7 +1894,25 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                     state=state,
                 )
+        except sonder_lifecycle.AdmissionRejected as rejection:
+            _lifecycle.metrics.requests_total.labels(
+                route="/v1/chat/completions", result=rejection.code.lower()
+            ).inc()
+            self._send_json_payload(
+                sonder_lifecycle.error_envelope(
+                    rejection.code,
+                    str(rejection),
+                    self._correlation(),
+                    retryable=rejection.retryable,
+                ),
+                status=rejection.status,
+                headers={"Retry-After": "1"} if rejection.retryable else None,
+            )
+            return
         except server.ModelCallError as error:
+            _lifecycle.metrics.requests_total.labels(
+                route="/v1/chat/completions", result="model_error"
+            ).inc()
             status = error.status or (
                 502 if error.kind in ("protocol", "empty_response", "request")
                 else 504 if error.kind == "timeout"
@@ -1689,12 +1941,23 @@ class Handler(BaseHTTPRequestHandler):
             return
         except Exception as error:
             self.log_error("request failed: %s", type(error).__name__)
+            _lifecycle.metrics.requests_total.labels(
+                route="/v1/chat/completions", result="error"
+            ).inc()
             self._send_json_payload(
-                {"error": {"message": "internal server error", "type": "server_error"}},
+                {"error": {"message": "internal server error",
+                           "type": "server_error",
+                           "correlation_id": self._correlation()}},
                 status=500,
             )
             return
 
+        _lifecycle.metrics.requests_total.labels(
+            route="/v1/chat/completions", result="ok"
+        ).inc()
+        _lifecycle.metrics.request_duration_seconds.labels(
+            route="/v1/chat/completions"
+        ).observe(time.monotonic() - _request_started)
         if stream:
             self._send_stream(content, model, iid=response_iid)
         else:
@@ -1747,7 +2010,21 @@ def main():
         port = int(os.environ.get("SONDER_PORT", DEFAULT_PORT))
 
     _validate_bind_security(HOST)
+    lifecycle = sonder_lifecycle.get()
+    try:
+        # STARTING -> MIGRATING -> READY; no listener opens on failure.
+        lifecycle.startup()
+    except Exception as error:
+        print("startup failed before bind: %s" % error, file=sys.stderr)
+        raise SystemExit(1)
+    lifecycle.begin_ollama_probe()
     httpd = ThreadingHTTPServer((HOST, port), Handler)
+    # After a drain completes (signal or /v1/admin/drain), stop accepting.
+    lifecycle.coordinator.add_flush_hook(
+        lambda: threading.Thread(
+            target=httpd.shutdown, daemon=True, name="sonder-httpd-shutdown"
+        ).start()
+    )
     url = "http://%s:%d" % (HOST, port)
     print("sonder_serve listening on %s" % url)
     print("auth mode: %s" % _effective_auth_mode())
@@ -1757,6 +2034,8 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        if not lifecycle.coordinator.draining:
+            lifecycle.drain("server stopping")
         httpd.server_close()
 
 

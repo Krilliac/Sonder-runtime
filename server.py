@@ -82,6 +82,7 @@ import autopilot_store
 import autopilot_controller
 from model_transport import ModelCallError
 import ollama_endpoint
+import sonder_speculation
 
 BASE = ollama_endpoint.normalize()
 OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
@@ -719,6 +720,63 @@ def _generate_text(prompt, tier="fast", system="", temperature=0.2,
     return _make_generate(
         model, system, temperature, num_predict, num_ctx, timeout=timeout,
     )(prompt)
+
+
+_APP_GRAPH = None
+_APP_GRAPH_LOCK = threading.Lock()
+
+
+def _application():
+    """Lazily build the SPEC-3 composition-root graph (no import-time cost)."""
+    global _APP_GRAPH
+    with _APP_GRAPH_LOCK:
+        if _APP_GRAPH is None:
+            from sonder_runtime.bootstrap import app as _bootstrap_app
+            _APP_GRAPH = _bootstrap_app.build_application()
+        return _APP_GRAPH
+
+
+def _gateway_generate_text(prompt, tier="fast", system="", temperature=0.2,
+                           num_predict=256, num_ctx=2048, timeout=None):
+    """offload_fn routed through the SPEC-3 ChatService over the ModelGateway.
+
+    The port enforces the operation-context cloud-consent gate and returns
+    domain-typed errors; this edge translates them back to ModelCallError
+    (a urllib.error.URLError subclass) so existing callers that catch
+    URLError — session summarization/titling — keep their exact behavior.
+    """
+    del num_ctx  # the gateway resolves native context via _make_generate
+    from sonder_runtime.application.chat.handle_chat import ChatCommand
+    from sonder_runtime.application.context import local_owner_context
+    from sonder_runtime.domain.common import errors as _errors
+
+    context = local_owner_context(
+        correlation_id="offload-%s" % os.urandom(4).hex(),
+        source="system",
+        cloud_allowed=cloud_allowed(),
+        remote_ollama_allowed=not ollama_endpoint.is_loopback(BASE),
+        timeout_seconds=float(timeout) if timeout else None,
+    )
+    try:
+        result = _application().chat.complete(
+            ChatCommand(
+                content=prompt, tier=tier, system=system,
+                temperature=temperature, num_predict=num_predict,
+            ),
+            context,
+        )
+    except _errors.SonderError as exc:
+        # Translate the domain taxonomy back to the legacy transport error
+        # at the adapter edge so callers' URLError handling is unchanged.
+        kind = {
+            "DEADLINE_EXCEEDED": "timeout",
+            "CANCELLED": "cancelled",
+            "DEPENDENCY_UNAVAILABLE": "request",
+            "FORBIDDEN": "configuration",
+            "INVALID_INPUT": "configuration",
+        }.get(getattr(exc, "code", ""), "request")
+        raise ModelCallError(kind, str(exc)) from exc
+    return result.response_text
 
 
 def _internal_generate_for_route(model, cloud):
@@ -1833,8 +1891,11 @@ def _session_history_messages(
     best-effort: if it fails, we simply send the live turns.
     """
     scoped = project is not _ALL_PROJECTS
+    # SPEC-3: session summarization's model call routes through the
+    # ModelGateway port by default (consent gate + typed errors), with the
+    # legacy generator still injectable for cloud-route inheritance.
     generate_text = (
-        _generate_text if internal_generate is None else internal_generate
+        _gateway_generate_text if internal_generate is None else internal_generate
     )
     if scoped:
         turns = memory_store.session_turns_for_project(conn, session_id, project)
@@ -1887,7 +1948,7 @@ def _session_history_messages(
 def _maybe_title(conn, session_id, first_prompt, internal_generate=None):
     """Give a brand-new session a short title (best-effort, never fatal)."""
     generate_text = (
-        _generate_text if internal_generate is None else internal_generate
+        _gateway_generate_text if internal_generate is None else internal_generate
     )
     sess = memory_store.get_session(conn, session_id) or {}
     if sess.get("title"):
@@ -2899,6 +2960,53 @@ def _post(path: str, payload: dict, timeout: int | None = None) -> dict:
                 "Ollama response exceeded the 16 MiB safety limit",
             )
         return json.loads(raw.decode("utf-8"))
+
+
+_PREWARM_LOCK = threading.Lock()
+_PREWARM_INFLIGHT = set()
+
+
+def prewarm_model(tier: str = "") -> bool:
+    """Speculatively load the tier's local model while context is assembled.
+
+    Model cold-load dominates first-token latency (tens of seconds for a 7B
+    on CPU). Firing an empty keep-alive load concurrently with the host's
+    DB/recall/augmentation work overlaps that cost, like a CPU prefetching a
+    line it predicts the pipeline will need. Local tiers only, best-effort,
+    one in-flight load per model, and never fatal: a failed prewarm just
+    means the real call pays the normal cost.
+    """
+    if not sonder_speculation.speculation_enabled():
+        return False
+    try:
+        model, cloud, _augment, tier_label = _serve_target(tier or "sonder", None)
+    except Exception:
+        return False
+    if cloud or not model or tier_label in (None, "cloud-disabled"):
+        return False
+    with _PREWARM_LOCK:
+        if model in _PREWARM_INFLIGHT:
+            return False
+        _PREWARM_INFLIGHT.add(model)
+
+    def _load():
+        try:
+            # Empty prompt with keep_alive loads weights without generating.
+            _post(
+                "/api/generate",
+                {"model": model, "keep_alive": KEEP_ALIVE},
+                timeout=_OLLAMA_STARTUP_TIMEOUT if "_OLLAMA_STARTUP_TIMEOUT" in globals() else 60,
+            )
+        except Exception:
+            pass
+        finally:
+            with _PREWARM_LOCK:
+                _PREWARM_INFLIGHT.discard(model)
+
+    threading.Thread(
+        target=_load, daemon=True, name="sonder-prewarm"
+    ).start()
+    return True
 
 
 def _get(path: str) -> dict:
@@ -6689,6 +6797,46 @@ def file_read(path: str, max_bytes: int = 256000, token: str = "", approval: str
 
 
 @mcp.tool()
+def data_inspect(
+    path: str,
+    max_bytes: int = 256000,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Structured, read-only preview of a data file inside allowed roots.
+
+    Understands JSON, JSONL/NDJSON, TOML, YAML, CSV, TSV, SQLite databases,
+    ZIP/TAR archives, and INI/CFG by suffix; unknown types fall back to
+    text statistics or a binary signature. Never executes file contents and
+    returns only a bounded preview (keys, columns, table row counts,
+    archive members, sample rows).
+    """
+    _maybe_live_reload()
+    started = time.time()
+    try:
+        data = file_ops.inspect_data(
+            path,
+            max_bytes=max_bytes,
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as e:
+        _record_direct_tool("data_inspect", {"path": path}, ok=False, started=started, summary=str(e))
+        return "ERROR: %s" % e
+    _record_direct_tool(
+        "data_inspect", {"path": path}, ok=True, started=started,
+        summary="%s %s bytes" % (data.get("kind", "?"), data.get("bytes", 0)),
+    )
+    activity_tracker.record_event(
+        "data_inspect",
+        summary="%s (%s bytes)" % (data.get("kind", "?"), data.get("bytes", 0)),
+        path=data.get("path", ""),
+    )
+    return _format_file_result("data inspect", data)
+
+
+@mcp.tool()
 def file_write(
     path: str,
     content: str,
@@ -8114,6 +8262,14 @@ def _loop_dispatch(action):
             approval=action.get("approval", ""),
             extra_roots=action.get("extra_roots", ""),
         ))
+    if action_type == "data_inspect":
+        return _loop_text_result("data_inspect", data_inspect(
+            path=action.get("path", ""),
+            max_bytes=action.get("max_bytes", 256000),
+            token=action.get("token", ""),
+            approval=action.get("approval", ""),
+            extra_roots=action.get("extra_roots", ""),
+        ))
     if action_type == "checklist_create":
         items = action.get("items", action.get("items_json", []))
         return _loop_text_result("checklist_create", checklist_create(
@@ -9315,6 +9471,7 @@ def tool_manifest() -> str:
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
         "workspace_inventory/directory_tree/directory_create/text_search/file_read_range": "Budgeted guarded workspace inventory, folder discovery, creation, text search, and bounded line-range reads.",
         "file_policy/file_find/file_read/file_write/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete with approval bypass support.",
+        "data_inspect": "Read-only structured preview of JSON/JSONL/TOML/YAML/CSV/TSV/SQLite/ZIP/TAR/INI data files inside allowed roots.",
         "program_search/script_search/workspace_run/script_run/image_inspect": "Discover installed programs and workspace scripts, run bounded argv-only processes, and inspect image metadata.",
         "task_create/task_list/task_update/task_show/checklist_create/checklist_update/checklist_show": "Visible todo and ordered checklist state shared by console, app, agents, and MCP.",
         "workbench_agent": "Run an autonomous local tool loop with a guaranteed checklist, exact action transcript, validation gate, and end report.",
@@ -9322,7 +9479,7 @@ def tool_manifest() -> str:
         "activity_status": "Inspect active/latest response activity, tool calls, and file changes.",
         "permission_policy/permission_rule_set": "Inspect or guarded-edit local permission rules for tool actions.",
         "context_compaction_plan": "Preview when to summarize, split sessions, or reduce live context.",
-        "run_code": "Run a bounded Python/JS/PowerShell/C++/C# snippet.",
+        "run_code": "Run a bounded snippet: Python, JS/TypeScript, Bash, Ruby, Perl, PHP, Lua, R, Go, Java, Rust, PowerShell, C++, C#.",
         "ground_artifact": "Validate in-memory non-code content with exact/contains/regex/JSON checks.",
         "artifact_ground": "Validate files or bundles with inferred writing, data, editable Office/media/timelines, UI, image, audio, and static or animated humanoid model recipes.",
         "run_project": "Run a bounded temporary multi-file project with optional build commands.",
@@ -9379,6 +9536,7 @@ AGENT_TOOL_HELP = """Available tools:
 - workspace_run: {"program": "git", "args_json": ["status", "--short"], "cwd": ".", "timeout": 30}
 - script_run: {"path": "scripts/check.py", "args_json": [], "cwd": ".", "timeout": 30}
 - image_inspect: {"path": "artifacts/generated/demo/icon.png"}
+- data_inspect: {"path": "data/records.jsonl", "max_bytes": 256000}
 - task_create: {"title": "...", "detail": "...", "priority": 2, "project": "...", "owner": "..."}
 - task_list: {"status": "pending|in_progress|blocked|done|canceled", "project": "", "include_done": false, "limit": 50}
 - task_update: {"task_id": "...", "status": "in_progress|blocked|done", "note": "..."}
@@ -9432,6 +9590,7 @@ or
 
 REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range",
+    "data_inspect",
     "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
     "diagnostics", "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
@@ -9458,6 +9617,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - script_search: {"query": "<task-relevant script name>", "root": ".", "max_results": 100}
 - program_search: {"query": "<required program name>", "max_results": 50}
 - image_inspect: {"path": "<task-relevant image path>"}
+- data_inspect: {"path": "<task-relevant data file>", "max_bytes": 256000}
 - memory_search: {"query": "...", "limit": 10}
 - web_search: {"query": "...", "limit": 5}
 - web_fetch: {"url": "https://...", "max_chars": 8000}
@@ -9673,7 +9833,7 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
     if scope_error:
         return scope_error
     try:
-        if tool_name in {"file_read", "file_read_range", "image_inspect"}:
+        if tool_name in {"file_read", "file_read_range", "image_inspect", "data_inspect"}:
             file_ops.resolve_repository_read_path(
                 args.get("path", ""),
                 allow_workspace_root=False,
@@ -9693,15 +9853,57 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
 
 
 def _extract_agent_json(text):
+    """Parse an agent decision, tolerating markdown fences and prose framing.
+
+    Small local models wrap decisions in ```json fences or surround them
+    with commentary; a balanced-brace scan recovers the first complete JSON
+    object instead of failing on trailing text. Genuinely truncated JSON
+    still raises so the decision-repair loop can re-prompt.
+    """
     text = (text or "").strip()
+    if text.startswith("```"):
+        # Drop the opening fence line and any closing fence.
+        first_newline = text.find("\n")
+        if first_newline != -1:
+            text = text[first_newline + 1:]
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+        text = text.strip()
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            raise ValueError("agent response was not JSON: %s" % text[:300])
-        return json.loads(text[start:end + 1])
+        pass
+    start = text.find("{")
+    if start == -1:
+        raise ValueError("agent response was not JSON: %s" % text[:300])
+    # Balanced scan: find the first complete top-level object, ignoring
+    # braces inside JSON strings, so prose after the object cannot break
+    # parsing the way rfind("}") could.
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start:index + 1])
+                except json.JSONDecodeError:
+                    break
+    raise ValueError("agent response was not JSON: %s" % text[:300])
 
 
 _AGENT_OBSERVATION_PROMPT_CHARS = 9000
@@ -10710,6 +10912,14 @@ _WORK_MUTATION_TOOLS = frozenset({
     "memory_quality_repair", "memory_privacy_repair", "memory_embedding_backfill",
     "memory_interaction_embedding_backfill",
 })
+
+# Read-only tools whose default (empty-args) invocation is meaningful, so a
+# name-only branch prediction yields a deterministic call signature that can
+# be speculatively executed and reliably matched against the real decision.
+_SPECULATABLE_ARGFREE_TOOLS = frozenset({
+    "workspace_inventory", "directory_tree", "status", "activity_status",
+    "context_health", "command_registry_list",
+})
 _WORK_VALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_verify", "game_reference_suite", "game_generate_and_test",
@@ -11330,6 +11540,28 @@ def _agent_impl(
     repeated_inspection_counts = {}
     failed_call_counts = {}
     claim_review_requests = 0
+    # Branch prediction + speculative execution (advisory; a mispredict costs
+    # at most one wasted read-only call and never touches durable state).
+    _predictor = sonder_speculation.default_predictor()
+    _spec_enabled = (
+        sonder_speculation.speculation_enabled() and not cloud
+    )
+
+    def _spec_dispatch(tool_name, args):
+        observation = _agent_dispatch_observed(
+            tool_name, args, allow_web=False, read_only=True,
+            project=project_scope,
+        )
+        return observation, _agent_tool_observation_ok(tool_name, observation)
+
+    _spec_engine = sonder_speculation.SpeculationEngine(
+        _predictor, _spec_dispatch, enabled=_spec_enabled,
+    )
+    # Argument-level prediction: a stream prefetcher over observed listings
+    # lets the host speculate concrete file_read calls, not just arg-free
+    # inspections (see sonder_speculation.FilePrefetcher).
+    _spec_prefetcher = sonder_speculation.FilePrefetcher()
+    _last_tool_name = None
     checklist_id, checklist_states = (
         _start_agent_checklist(prompt, project, read_only)
         if auto_checklist else ("", {})
@@ -11360,7 +11592,17 @@ def _agent_impl(
                 cloud=cloud,
             )
 
+    def _teardown_speculation():
+        # Squash anything in flight and persist the learned predictor so it
+        # warms across runs. Never fatal to the agent result.
+        try:
+            _spec_engine.discard()
+            _predictor.save()
+        except Exception:
+            pass
+
     def finish_final(final):
+        _teardown_speculation()
         final = str(final or "")
         if auto_checklist:
             _agent_checklist_mark(
@@ -11409,6 +11651,7 @@ def _agent_impl(
         check, misreporting a normal evidence/parse failure as a scope
         mismatch.
         """
+        _teardown_speculation()
         text = str(text or "")
         if return_host_receipt:
             return autopilot_controller.HostTaskResult(
@@ -11485,10 +11728,51 @@ def _agent_impl(
         )
 
     for step in range(1, max_steps + 1):
+        # Squash any speculation left unretired by the previous step (the
+        # model went final, hit a cache, or committed to a different call).
+        _spec_engine.discard()
         step_prompt = transcript
         if observations:
             step_prompt += "\n\n" + _agent_observation_prompt(observations)
         step_prompt += "\n\nChoose the next tool call or final answer."
+        # Branch predict + speculatively execute a read-only call while the
+        # model generates its decision. Only argument-free read-only tools
+        # are speculated so the predicted call signature is deterministic;
+        # the buffered result is retired only if the model commits to the
+        # same call, otherwise it is squashed (see sonder_speculation).
+        _spec_state = sonder_speculation.BranchPredictor.loop_state(
+            tuple(used_tool_names), _last_tool_name, step,
+        )
+        _spec_prediction = _predictor.predict_next_tool(_spec_state)
+        _spec_issued = False
+        if (
+            _spec_enabled
+            and _spec_prediction is not None
+            and _spec_prediction[0] in _SPECULATABLE_ARGFREE_TOOLS
+        ):
+            _predicted_tool = _spec_prediction[0]
+            _predicted_args = _project_scope_args(
+                _predicted_tool, {}, project_scope,
+            )
+            _spec_issued = _spec_engine.begin(
+                _predicted_tool,
+                _agent_call_signature(_predicted_tool, _predicted_args),
+                _predicted_args,
+            )
+        if _spec_enabled and not _spec_issued:
+            # Fall back to the stream prefetcher: a concrete predicted
+            # file_read from the last observed listing (argument-level
+            # speculation, still strictly read-only).
+            _prefetch_args = _spec_prefetcher.predict_read()
+            if _prefetch_args is not None:
+                _prefetch_scoped = _project_scope_args(
+                    "file_read", _prefetch_args, project_scope,
+                )
+                _spec_engine.begin(
+                    "file_read",
+                    _agent_call_signature("file_read", _prefetch_scoped),
+                    _prefetch_scoped,
+                )
         decision, raw, decision_error = _agent_generate_decision(gen, step_prompt)
         if decision is None:
             if isinstance(decision_error, ModelCallError):
@@ -11606,6 +11890,17 @@ def _agent_impl(
             return _early_exit(
                 "ERROR: agent tool arguments must be a JSON object"
             )
+        # Learn the branch: predictor conditions the next-tool table on the
+        # loop state that preceded this committed decision, and prediction
+        # accuracy is scored here at commit time — independent of whether a
+        # speculation was issued for it.
+        if _spec_prediction is not None:
+            if _spec_prediction[0] == tool_name:
+                _predictor.note_hit()
+            else:
+                _predictor.note_miss()
+        _predictor.record_transition(_spec_state, tool_name)
+        _last_tool_name = tool_name
         # Keep policy and dispatch on one canonical, host-confined view of a
         # repository tool call.  Previously the early read-only check saw raw
         # model paths while dispatch later rebased them under ``project_scope``.
@@ -11724,17 +12019,25 @@ def _agent_impl(
             observation = _agent_tool_help(read_only=True)
         else:
             ensure_not_cancelled()
-            dispatch_options = {
-                "allow_web": allow_web,
-                "read_only": read_only,
-            }
-            if allow_location:
-                dispatch_options["allow_location"] = True
-            tool_dispatched = True
-            observation = _agent_dispatch_observed(
-                tool_name, policy_tool_args, project=project_scope,
-                **dispatch_options,
-            )
+            # Retire a matching speculation: if the model committed to the
+            # exact read-only call the host already ran during generation,
+            # reuse its buffered observation instead of dispatching again.
+            _retired = _spec_engine.resolve(call_signature)
+            if _retired is not None:
+                tool_dispatched = True
+                observation = _retired.observation
+            else:
+                dispatch_options = {
+                    "allow_web": allow_web,
+                    "read_only": read_only,
+                }
+                if allow_location:
+                    dispatch_options["allow_location"] = True
+                tool_dispatched = True
+                observation = _agent_dispatch_observed(
+                    tool_name, policy_tool_args, project=project_scope,
+                    **dispatch_options,
+                )
         observation_text = str(observation)
         tool_ok = _agent_tool_observation_ok(tool_name, observation)
         if tool_ok:
@@ -11752,6 +12055,12 @@ def _agent_impl(
                 )
             observation_text += "\n" + recovery
         used_tool = used_tool or tool_ok
+        # Train the stream prefetcher on what the model actually did (raw
+        # args: listing entries and model read paths share the same
+        # scope-relative form).
+        _spec_prefetcher.observe(
+            tool_name, tool_args, observation_text, ok=tool_ok,
+        )
         if tool_ok:
             used_tool_names.add(str(tool_name))
             if tool_name in {
@@ -13185,6 +13494,19 @@ def status() -> str:
         lines.append("npu accelerator: %s" % npu_service.diagnostics_line())
     except Exception as exc:
         lines.append("npu accelerator: ERROR %s" % exc)
+    try:
+        spec = sonder_speculation.default_predictor().stats()
+        lines.append(
+            "branch predictor: %d predictions, %.0f%% accurate; "
+            "speculation %d issued, %.0f%% retired (%d states)"
+            % (
+                spec["predictions"], spec["accuracy"] * 100,
+                spec["speculations"], spec["speculation_hit_rate"] * 100,
+                spec["transition_states"],
+            )
+        )
+    except Exception as exc:
+        lines.append("branch predictor: ERROR %s" % exc)
     return "\n".join(lines)
 
 

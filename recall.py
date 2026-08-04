@@ -9,10 +9,12 @@ import os
 
 import embeddings
 import memory_store
+from sonder_runtime.domain.memory import rules as _rules
 
 # Stricter than lessons' 0.65: a recall injects a whole task+solution, so we only
 # want genuinely close matches. Env-overridable like SONDER_MIN_SIM.
-DEFAULT_MIN_SIM = 0.72
+# SPEC-3 Phase 4: the floor default and threshold rule live in the domain layer.
+DEFAULT_MIN_SIM = _rules.DEFAULT_RECALL_MIN_SIM
 MAX_RESP_CHARS = 400
 
 
@@ -85,7 +87,7 @@ def recall(conn, task, k=2, embed_fn=None, min_sim=None,
         ):
             continue
         sim = embeddings.cosine(qv, stored)
-        if sim >= min_sim:
+        if _rules.passes_similarity(sim, min_sim):
             scored.append((sim, row))
     scored.sort(key=lambda t: -t[0])
     return [_format(r["task"], r["response"]) for _, r in scored[:k]]
