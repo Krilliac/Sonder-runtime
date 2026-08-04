@@ -20,5 +20,7 @@ jobs:
         run: >-
           python -c "from mcp.server.fastmcp import FastMCP;
           from mcp.server.fastmcp.tools import ToolManager"
+      - name: Enforce architecture boundaries (SPEC-3)
+        run: python scripts/check_architecture.py
       - name: Run test suite
         run: python -m pytest -q

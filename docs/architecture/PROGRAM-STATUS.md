@@ -1,0 +1,61 @@
+# Sonder Runtime Architecture Program — implementation status
+
+Tracks the implementation of the approved architecture program
+(SPEC-1 review → SPEC-2 production readiness → SPEC-3 refactoring →
+SPEC-4 signed distribution) in this repository. Updated with each
+program commit on this branch.
+
+## SPEC-2 — Production Readiness: implemented
+
+| Work package | Status | Where |
+|---|---|---|
+| WP1 production baseline | done | sonder_version/config/preflight/service_state/logging/metrics/operations_store/shutdown, `python -m sonder_runtime` |
+| WP2 configuration + secret safety | done | sonder_config (fail-closed, all-errors, secrets never in TOML), sonder_secrets rotation with overlap expiry, redacted `config`/`diagnostics` |
+| WP3 health + lifecycle | done | /live /ready /health /version /metrics, Ollama dependency probe, sd_notify, drain on SIGTERM and POST /v1/admin/drain |
+| WP4 admission + error contracts | done | sonder_lifecycle: concurrency slots, queue depth, admission deadline, drain/maintenance rejection, auth-failure limiter, error envelope + correlation IDs |
+| WP5 schema/migrations | done | checksummed ledgers, migration lock, future-schema + edited-history refusal; adoption baselines for memory/autopilot/fleet |
+| WP6 operations events + metrics | done | operations.db events (redacted), Prometheus metrics with no-op fallback |
+| WP7 backup/restore | done | online-backup snapshots, manifests, verify, GFS retention, restore smoke, systemd timers |
+| WP8 packaging | done | install_sonder.sh / uninstall_sonder.sh, versioned releases, hardened units, reverse-proxy reference |
+| WP9 upgrade/rollback | done (consolidated into SPEC-4 engine) | sonder_update_engine |
+| WP10 runbooks + acceptance | runbooks done; acceptance harness = tests/production (121 tests). A disposable-VM harness remains future work. |
+
+Known limits: request deadline/cancellation propagate to admission and
+drain but not yet into every model-call internals; the OpenAI-error
+shapes for chat remain legacy-compatible alongside the new envelope.
+
+## SPEC-3 — Refactoring Roadmap: foundation in place (Phases 0–2)
+
+| Phase | Status |
+|---|---|
+| 0 characterization | The 2,500-test suite is the behavioral baseline; goldens for chat/memory flows exist in tests/. |
+| 1 skeleton + composition root | done — sonder_runtime/{domain,application,adapters,platform,bootstrap}, `bootstrap/app.py` builds the Application graph lazily; no import-time side effects (CI-checked). |
+| 2 runtime-policy extraction | done — pure rules in domain/runtime_policy/rules.py, atomic JSON + file lock in adapters/filesystem/atomic_json.py, root runtime_policy.py delegates with identical names/behavior (102 policy tests unchanged). |
+| 3 model gateway | port defined + legacy adapter; endpoint consent/retry centralization pending. |
+| 4 memory | ports defined; extraction pending. |
+| 5 execution | ToolExecutor port defined; extraction pending. |
+| 6 automation | ports defined; state-machine extraction pending. |
+| 7 training | pending. |
+| 8 thin transports | pending (entry module counts as CLI adapter in the checker until then). |
+| 9 legacy import removal | pending. |
+| 10 enforcement | `scripts/check_architecture.py` blocking in CI for the package: layer edges, cycles, sqlite3/subprocess/network containment, no env reads in domain/application. |
+
+ADRs 001–008 in docs/architecture/adr/.
+
+## SPEC-4 — Signed Engine Distribution: Linux reference engine implemented
+
+Implemented: updates.db (plans, step journal, releases, trusted roots,
+channels), validated state machine with CAS revisions, bundle builder +
+manifest (per-file hashes), adversarial-safe extraction, compatibility
+refusal, confirmation nonces, maintenance-lock + backup + drain +
+target-release migration + health gates, atomic pointer switch, retained
+previous release, operator rollback with missing-release refusal,
+offline import, audit events, admin status route, CLI.
+
+Trust: python-tuf verification path is wired for bundles carrying TUF
+metadata; the unsigned path requires an explicit double gate
+(--allow-unverified + SONDER_UPDATE_ALLOW_UNSIGNED=1) and is documented
+as non-production. Remaining for full SPEC-4 sign-off: the publisher
+pipeline with threshold signing ceremony (WP7), resumable online
+downloads, Windows/macOS activation helpers (M6), and the Flutter System
+page UI (M5) — the status API it polls is in place.
