@@ -140,3 +140,110 @@ extension _FirstOrNull<T> on Iterable<T> {
     return iterator.current;
   }
 }
+
+
+/// Durable update state (SPEC-4 section 14) as returned by
+/// GET /v1/admin/updates/status. All fields are best-effort: the System
+/// page renders whatever the runtime reports.
+class UpdateRelease {
+  final String version;
+  final String releaseId;
+  final String platform;
+  final String architecture;
+
+  const UpdateRelease({
+    required this.version,
+    required this.releaseId,
+    required this.platform,
+    required this.architecture,
+  });
+
+  static UpdateRelease? fromJson(Map<String, dynamic>? json) {
+    if (json == null) return null;
+    return UpdateRelease(
+      version: (json['version'] ?? '').toString(),
+      releaseId: (json['release_id'] ?? '').toString(),
+      platform: (json['platform'] ?? '').toString(),
+      architecture: (json['architecture'] ?? '').toString(),
+    );
+  }
+}
+
+class UpdatePlan {
+  final String updateId;
+  final String status;
+  final String channel;
+  final String targetVersion;
+  final String createdAt;
+  final String? errorCode;
+  final String? confirmNonce;
+
+  const UpdatePlan({
+    required this.updateId,
+    required this.status,
+    required this.channel,
+    required this.targetVersion,
+    required this.createdAt,
+    this.errorCode,
+    this.confirmNonce,
+  });
+
+  factory UpdatePlan.fromJson(Map<String, dynamic> json) => UpdatePlan(
+        updateId: (json['update_id'] ?? '').toString(),
+        status: (json['status'] ?? '').toString(),
+        channel: (json['channel'] ?? '').toString(),
+        targetVersion: (json['target_version'] ?? '').toString(),
+        createdAt: (json['created_at_utc'] ?? '').toString(),
+        errorCode: json['error_code']?.toString(),
+        confirmNonce: json['confirm_nonce']?.toString(),
+      );
+
+  bool get isAvailable => status == 'available';
+  bool get isTerminal => const {
+        'committed',
+        'rolled_back',
+        'blocked',
+        'failed',
+        'cancelled',
+      }.contains(status);
+}
+
+class UpdateStatus {
+  final String runningVersion;
+  final String runningCommit;
+  final String platform;
+  final String architecture;
+  final String? currentTarget;
+  final UpdateRelease? activeRelease;
+  final UpdateRelease? previousRelease;
+  final List<UpdatePlan> plans;
+
+  const UpdateStatus({
+    required this.runningVersion,
+    required this.runningCommit,
+    required this.platform,
+    required this.architecture,
+    required this.currentTarget,
+    required this.activeRelease,
+    required this.previousRelease,
+    required this.plans,
+  });
+
+  factory UpdateStatus.fromJson(Map<String, dynamic> json) => UpdateStatus(
+        runningVersion: (json['running_version'] ?? '').toString(),
+        runningCommit: (json['running_commit'] ?? '').toString(),
+        platform: (json['platform'] ?? '').toString(),
+        architecture: (json['architecture'] ?? '').toString(),
+        currentTarget: json['current_target']?.toString(),
+        activeRelease: UpdateRelease.fromJson(
+            json['active_release'] as Map<String, dynamic>?),
+        previousRelease: UpdateRelease.fromJson(
+            json['previous_release'] as Map<String, dynamic>?),
+        plans: ((json['plans'] as List<dynamic>?) ?? [])
+            .whereType<Map<String, dynamic>>()
+            .map(UpdatePlan.fromJson)
+            .toList(),
+      );
+
+  bool get canRollback => previousRelease != null;
+}

@@ -18,6 +18,8 @@ lambda_mult=0.0  -> pure diversity (ignores the query after the first pick).
 """
 import embeddings
 
+from sonder_runtime.domain.memory import rules as _rules
+
 
 def mmr_rerank(query_vec, candidates, k=5, lambda_mult=0.5, sim_fn=embeddings.cosine):
     """Greedy MMR selection.
@@ -32,37 +34,14 @@ def mmr_rerank(query_vec, candidates, k=5, lambda_mult=0.5, sim_fn=embeddings.co
     Returns a list of candidate ids, length min(k, len(candidates)), in
     selection order (most relevant/diverse first). Order among exact score
     ties favors the earlier candidate in the input list (stable, deterministic).
+
+    SPEC-3 Phase 4: the pure selection lives in
+    ``sonder_runtime.domain.memory.rules.mmr_select``; this wrapper supplies
+    the embedding similarity default so callers are unchanged.
     """
-    if k <= 0 or not candidates:
-        return []
-
-    if not query_vec:
-        # No query signal to diversify against: fall back to input order.
-        return [cid for cid, _ in candidates[:k]]
-
-    lambda_mult = max(0.0, min(1.0, lambda_mult))
-
-    remaining = list(range(len(candidates)))
-    selected = []
-
-    while remaining and len(selected) < k:
-        best_idx = None
-        best_score = None
-        for i in remaining:
-            _, vec = candidates[i]
-            relevance = sim_fn(query_vec, vec)
-            if selected:
-                redundancy = max(sim_fn(vec, candidates[j][1]) for j in selected)
-            else:
-                redundancy = 0.0
-            score = lambda_mult * relevance - (1.0 - lambda_mult) * redundancy
-            if best_score is None or score > best_score:
-                best_score = score
-                best_idx = i
-        selected.append(best_idx)
-        remaining.remove(best_idx)
-
-    return [candidates[i][0] for i in selected]
+    return _rules.mmr_select(
+        query_vec, candidates, k=k, lambda_mult=lambda_mult, sim_fn=sim_fn,
+    )
 
 
 def mmr_from_blobs(query_vec, id_blob_pairs, k=5, lambda_mult=0.5,

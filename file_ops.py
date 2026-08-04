@@ -676,3 +676,279 @@ def delete_path(
         "action": "delete",
         "lines_deleted": line_count,
     }
+
+
+# --- structured data inspection ---------------------------------------------
+
+INSPECT_PREVIEW_ITEMS = 20
+INSPECT_PREVIEW_CHARS = 2000
+
+
+class _InspectSizeError(Exception):
+    """Raised when a file exceeds the inspection byte budget."""
+
+
+def _inspect_text_payload(p: Path, max_bytes: int) -> str:
+    size = p.stat().st_size
+    if size > max_bytes:
+        raise _InspectSizeError(size)
+    return p.read_text(encoding="utf-8", errors="replace")
+
+
+def _inspect_json(p: Path, max_bytes: int) -> dict:
+    import json
+
+    payload = json.loads(_inspect_text_payload(p, max_bytes))
+    out = {"kind": "json", "type": type(payload).__name__}
+    if isinstance(payload, dict):
+        keys = list(payload.keys())
+        out["keys"] = ", ".join(str(k) for k in keys[:INSPECT_PREVIEW_ITEMS])
+        out["key_count"] = len(keys)
+    elif isinstance(payload, list):
+        out["items"] = len(payload)
+        if payload and isinstance(payload[0], dict):
+            out["item_keys"] = ", ".join(
+                str(k) for k in list(payload[0].keys())[:INSPECT_PREVIEW_ITEMS]
+            )
+    preview = json.dumps(payload, ensure_ascii=False, indent=2)
+    out["text"] = preview[:INSPECT_PREVIEW_CHARS] + (
+        "\n… (truncated)" if len(preview) > INSPECT_PREVIEW_CHARS else ""
+    )
+    return out
+
+
+def _inspect_jsonl(p: Path, max_bytes: int) -> dict:
+    import json
+
+    text = _inspect_text_payload(p, max_bytes)
+    lines = [line for line in text.splitlines() if line.strip()]
+    out = {"kind": "jsonl", "records": len(lines)}
+    if lines:
+        try:
+            first = json.loads(lines[0])
+            if isinstance(first, dict):
+                out["record_keys"] = ", ".join(
+                    str(k) for k in list(first.keys())[:INSPECT_PREVIEW_ITEMS]
+                )
+        except ValueError:
+            out["note"] = "first line is not valid JSON"
+    return out
+
+
+def _inspect_toml(p: Path, max_bytes: int) -> dict:
+    import tomllib
+
+    with p.open("rb") as fh:
+        payload = tomllib.load(fh)
+    tables = list(payload.keys())
+    return {
+        "kind": "toml",
+        "tables": ", ".join(tables[:INSPECT_PREVIEW_ITEMS]),
+        "table_count": len(tables),
+    }
+
+
+def _inspect_yaml(p: Path, max_bytes: int) -> dict:
+    try:
+        import yaml  # optional dependency
+    except ImportError:
+        return {
+            "kind": "yaml",
+            "note": "PyYAML is not installed; showing raw head only",
+            "text": _inspect_text_payload(p, max_bytes)[:INSPECT_PREVIEW_CHARS],
+        }
+    payload = yaml.safe_load(_inspect_text_payload(p, max_bytes))
+    out = {"kind": "yaml", "type": type(payload).__name__}
+    if isinstance(payload, dict):
+        out["keys"] = ", ".join(
+            str(k) for k in list(payload.keys())[:INSPECT_PREVIEW_ITEMS]
+        )
+    elif isinstance(payload, list):
+        out["items"] = len(payload)
+    return out
+
+
+def _inspect_csv(p: Path, max_bytes: int, delimiter: str) -> dict:
+    import csv
+    import io
+
+    text = _inspect_text_payload(p, max_bytes)
+    reader = csv.reader(io.StringIO(text), delimiter=delimiter)
+    rows = list(reader)
+    out = {
+        "kind": "tsv" if delimiter == "\t" else "csv",
+        "rows": max(0, len(rows) - 1),
+    }
+    if rows:
+        out["columns"] = ", ".join(rows[0][:INSPECT_PREVIEW_ITEMS])
+        out["column_count"] = len(rows[0])
+        if len(rows) > 1:
+            sample = rows[1][:INSPECT_PREVIEW_ITEMS]
+            out["sample_row"] = ", ".join(
+                cell[:40] for cell in sample
+            )
+    return out
+
+
+def _inspect_sqlite(p: Path) -> dict:
+    import sqlite3
+
+    uri = "file:%s?mode=ro" % p.as_posix()
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        tables = [
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+                " AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            )
+        ]
+        counts = {}
+        for table in tables[:INSPECT_PREVIEW_ITEMS]:
+            try:
+                counts[table] = conn.execute(
+                    'SELECT COUNT(*) FROM "%s"' % table.replace('"', '""')
+                ).fetchone()[0]
+            except sqlite3.Error:
+                counts[table] = "?"
+    finally:
+        conn.close()
+    return {
+        "kind": "sqlite",
+        "tables": len(tables),
+        "text": "\n".join(
+            "%s: %s rows" % (name, counts[name]) for name in counts
+        ) or "(no tables)",
+    }
+
+
+def _inspect_zip(p: Path) -> dict:
+    import zipfile
+
+    with zipfile.ZipFile(p) as archive:
+        names = archive.namelist()
+        total = sum(info.file_size for info in archive.infolist())
+    listing = "\n".join(names[:INSPECT_PREVIEW_ITEMS])
+    if len(names) > INSPECT_PREVIEW_ITEMS:
+        listing += "\n… (%d more)" % (len(names) - INSPECT_PREVIEW_ITEMS)
+    return {
+        "kind": "zip",
+        "members": len(names),
+        "expanded_bytes": total,
+        "text": listing,
+    }
+
+
+def _inspect_tar(p: Path) -> dict:
+    import tarfile
+
+    with tarfile.open(p) as archive:
+        members = archive.getmembers()
+    names = [m.name for m in members]
+    listing = "\n".join(names[:INSPECT_PREVIEW_ITEMS])
+    if len(names) > INSPECT_PREVIEW_ITEMS:
+        listing += "\n… (%d more)" % (len(names) - INSPECT_PREVIEW_ITEMS)
+    return {
+        "kind": "tar",
+        "members": len(names),
+        "expanded_bytes": sum(m.size for m in members),
+        "text": listing,
+    }
+
+
+def _inspect_ini(p: Path, max_bytes: int) -> dict:
+    import configparser
+
+    parser = configparser.ConfigParser()
+    parser.read_string(_inspect_text_payload(p, max_bytes))
+    sections = parser.sections()
+    return {
+        "kind": "ini",
+        "sections": ", ".join(sections[:INSPECT_PREVIEW_ITEMS]),
+        "section_count": len(sections),
+    }
+
+
+_INSPECTORS = {
+    ".json": lambda p, m: _inspect_json(p, m),
+    ".jsonl": lambda p, m: _inspect_jsonl(p, m),
+    ".ndjson": lambda p, m: _inspect_jsonl(p, m),
+    ".toml": lambda p, m: _inspect_toml(p, m),
+    ".yaml": lambda p, m: _inspect_yaml(p, m),
+    ".yml": lambda p, m: _inspect_yaml(p, m),
+    ".csv": lambda p, m: _inspect_csv(p, m, ","),
+    ".tsv": lambda p, m: _inspect_csv(p, m, "\t"),
+    ".db": lambda p, m: _inspect_sqlite(p),
+    ".sqlite": lambda p, m: _inspect_sqlite(p),
+    ".sqlite3": lambda p, m: _inspect_sqlite(p),
+    ".zip": lambda p, m: _inspect_zip(p),
+    ".tar": lambda p, m: _inspect_tar(p),
+    ".tgz": lambda p, m: _inspect_tar(p),
+    ".ini": lambda p, m: _inspect_ini(p, m),
+    ".cfg": lambda p, m: _inspect_ini(p, m),
+}
+
+
+def inspect_data(
+    path: str,
+    *,
+    max_bytes: int = MAX_READ_BYTES,
+    extra_roots: str = "",
+    bypass: bool = False,
+) -> dict:
+    """Structured, read-only preview of a data file inside allowed roots.
+
+    Understands JSON/JSONL/TOML/YAML/CSV/TSV/SQLite/ZIP/TAR/INI by suffix
+    and falls back to text statistics or a binary signature preview. Never
+    executes content and never returns more than a bounded preview.
+    """
+    p = resolve_path(path, extra_roots=extra_roots, bypass=bypass)
+    if not p.exists():
+        raise ValueError("no such file: %s" % p)
+    if p.is_dir():
+        raise ValueError("%s is a directory; use directory_tree" % p)
+    size = p.stat().st_size
+    suffix = p.suffix.lower()
+    if suffix == ".gz" and p.name.lower().endswith(".tar.gz"):
+        suffix = ".tgz"
+    base = {"path": str(p), "bytes": size}
+    inspector = _INSPECTORS.get(suffix)
+    if inspector is not None:
+        try:
+            result = inspector(p, max_bytes)
+        except _InspectSizeError:
+            # Size-guard failures are caller errors: surface them, do not
+            # swallow into a soft result.
+            raise ValueError(
+                "file is %d bytes; inspection parses at most %d"
+                % (size, max_bytes)
+            )
+        except Exception as exc:
+            # Malformed content (bad JSON/TOML/CSV, corrupt archive) is a
+            # reportable finding, not a crash.
+            result = {
+                "kind": suffix.lstrip("."),
+                "error": "%s: %s" % (type(exc).__name__, str(exc)[:200]),
+            }
+        base.update(result)
+        return base
+    # Unknown suffix: text stats when it decodes, binary signature otherwise.
+    head = p.open("rb").read(min(size, 4096))
+    if b"\x00" in head:
+        base.update({
+            "kind": "binary",
+            "signature": head[:16].hex(" "),
+        })
+        return base
+    if size > max_bytes:
+        base.update({"kind": "text", "note": "too large to scan fully"})
+        return base
+    text = p.read_text(encoding="utf-8", errors="replace")
+    base.update({
+        "kind": "text",
+        "lines": _line_count(text),
+        "text": text[:INSPECT_PREVIEW_CHARS] + (
+            "\n… (truncated)" if len(text) > INSPECT_PREVIEW_CHARS else ""
+        ),
+    })
+    return base

@@ -23,12 +23,15 @@ from pathlib import Path
 
 import sonder_paths
 from process_liveness import pid_alive as _process_pid_alive
+from sonder_runtime.domain.automation import state_machine as _sm
 
 
-ACTIVE_STATUSES = ("planning", "running")
-RESUMABLE_STATUSES = ("ready", "paused", "blocked", "interrupted")
-TERMINAL_STATUSES = ("completed", "failed", "cancelled")
-ALL_STATUSES = ACTIVE_STATUSES + RESUMABLE_STATUSES + TERMINAL_STATUSES
+# SPEC-3 Phase 6: the canonical status classification lives in the domain
+# state machine; these names remain the module's public surface.
+ACTIVE_STATUSES = _sm.AUTOPILOT_ACTIVE
+RESUMABLE_STATUSES = _sm.AUTOPILOT_RESUMABLE
+TERMINAL_STATUSES = _sm.AUTOPILOT_TERMINAL
+ALL_STATUSES = _sm.AUTOPILOT_ALL
 MAX_OBJECTIVE_CHARS = 32_000
 MAX_PLAN_CHARS = 512_000
 MAX_REPORT_CHARS = 128_000

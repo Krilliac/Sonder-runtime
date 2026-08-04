@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly Sonder restore smoke test
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+RandomizedDelaySec=1h
+
+[Install]
+WantedBy=timers.target

@@ -569,6 +569,39 @@ class SonderApi {
     }
   }
 
+  /// Durable update state for the System page (SPEC-4 section 14).
+  ///
+  /// Admin-only on the server; a non-admin key gets 403 and the UI simply
+  /// hides the update section rather than treating it as an error.
+  Future<UpdateStatus?> fetchUpdateStatus() async {
+    late http.Response resp;
+    try {
+      resp = await http
+          .get(_uri('/v1/admin/updates/status'), headers: _headers())
+          .timeout(const Duration(seconds: 15));
+    } catch (e) {
+      throw SonderException('Cannot reach server: $e');
+    }
+    if (resp.statusCode == 403 || resp.statusCode == 404) {
+      // Not authorized for update control, or the route is unavailable on
+      // this build: no update section, not a failure.
+      return null;
+    }
+    if (resp.statusCode == 401) {
+      throw SonderException('Unauthorized - check the API key.');
+    }
+    if (resp.statusCode != 200) {
+      throw SonderException('Server returned HTTP ${resp.statusCode}.');
+    }
+    try {
+      final obj =
+          jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+      return UpdateStatus.fromJson(obj);
+    } catch (_) {
+      throw SonderException('Could not parse update status.');
+    }
+  }
+
   /// Send the full conversation and return the assistant's reply text.
   ///
   /// The serve layer threads history from the messages we send, and also

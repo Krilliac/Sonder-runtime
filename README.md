@@ -65,6 +65,72 @@ lifecycle boundary.
 
 ---
 
+## Documentation
+
+The full reference lives in two places:
+
+- **[Wiki](docs/wiki/README.md)** — conceptual, in-depth documentation of every
+  subsystem. Start here to understand *how* something works.
+- **[Runbooks](docs/runbooks/README.md)** — contractor-executable operational
+  procedures (install, backup/restore, upgrade/rollback, incident response).
+  Start here to *do* something on a live deployment.
+
+**Wiki map**
+
+| Page | What it covers |
+|---|---|
+| [01 · Architecture](docs/wiki/01-architecture.md) | Runtime-vs-model boundary, the request path, the learning loop |
+| [02 · Getting Started](docs/wiki/02-getting-started.md) | Prereqs, first run, importing a model (including a portable GGUF) |
+| [03 · Configuration](docs/wiki/03-configuration.md) | Typed fail-closed config, `SONDER_*` env, runtime policy |
+| [04 · CLI & Entry Point](docs/wiki/04-cli-and-entrypoint.md) | `sonder`, the REPL, slash commands, `setup_alias.py` |
+| [05 · HTTP API & Lifecycle](docs/wiki/05-http-api-and-lifecycle.md) | Admission, auth modes, preflight, drain, service states |
+| [06 · Memory & Learning](docs/wiki/06-memory-and-learning.md) | Lessons, recall, reward pricing, MMR, project scoping |
+| [07 · Agent, Autopilot & Fleet](docs/wiki/07-agent-autopilot-fleet.md) | The tool loop, durable goal runs, bounded fan-out |
+| [08 · Model Tiers & Gateway](docs/wiki/08-model-tiers-and-gateway.md) | Tiers, lanes, the ModelGateway port, cloud/remote gates |
+| [09 · Security Model](docs/wiki/09-security-model.md) | Host-enforced guardrails, consent gates, abliteration |
+| [10 · Tools & Languages](docs/wiki/10-tools-and-languages.md) | The 15-language `run_code`, `data_inspect`, guarded file ops |
+| [11 · Speculation & Prediction](docs/wiki/11-speculation-and-prediction.md) | Speculative execution and the branch predictor |
+| [12 · Backups & Recovery](docs/wiki/12-backups-and-recovery.md) | Consistent backups, restore, maintenance locks |
+| [13 · Update Manager](docs/wiki/13-update-manager.md) | Signed (TUF) engine distribution, staged install, rollback |
+| [14 · Package Architecture](docs/wiki/14-package-architecture.md) | The SPEC-3 layered modular monolith and its enforced edges |
+| [15 · Training](docs/wiki/15-training.md) | LoRA/QLoRA lifecycle, gated promotion, rollback |
+| [16 · Glossary](docs/wiki/16-glossary.md) | Every Sonder-specific term in one place |
+
+**Deep-dive design docs:** [ARCHITECTURE.md](ARCHITECTURE.md),
+[ADRs 001–008](docs/architecture/adr/), the live
+[PROGRAM-STATUS](docs/architecture/PROGRAM-STATUS.md),
+[TRAINING.md](TRAINING.md), [SELFMOD.md](SELFMOD.md), [NPU.md](NPU.md),
+[CLIENT.md](CLIENT.md), and [MOBILE_HOST_CONTROL.md](MOBILE_HOST_CONTROL.md).
+
+**Recently added capabilities**
+
+- **A wider language/file surface** — `run_code` runs 15 languages, and
+  `data_inspect` reads structured files (CSV/TSV/JSON/JSONL/NDJSON, YAML, TOML,
+  Parquet, SQLite) as guarded, read-only metadata/preview
+  ([Tools & Languages](docs/wiki/10-tools-and-languages.md)).
+- **Speculative execution & branch prediction** — a branch predictor learns
+  which read-only tool follows a loop state and speculatively runs it during
+  model generation, retiring it on a matching decision
+  ([Speculation & Prediction](docs/wiki/11-speculation-and-prediction.md)).
+- **Signed engine updates** — a TUF-backed update manager delivers staged,
+  rollback-capable engine installs; a compromised mirror cannot forge,
+  downgrade, or substitute a release
+  ([Update Manager](docs/wiki/13-update-manager.md)).
+- **Portable/offline model import (facts. USB & any GGUF)** — import a
+  portable GGUF as a Sonder tier with one command:
+
+  ```bash
+  python setup_alias.py --from-usb        # auto-discover a mounted facts. USB
+  python setup_alias.py --gguf /path/to/model.gguf
+  ```
+
+  Full procedure and guardrail notes:
+  [use-facts-model](docs/runbooks/use-facts-model.md). Abliteration removes a
+  *model's* refusals, not Sonder's host-enforced guardrails
+  ([Security Model](docs/wiki/09-security-model.md)).
+
+---
+
 ## How it works
 
 Sonder is a mostly Python orchestration runtime. Ollama is a separate local
