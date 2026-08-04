@@ -484,12 +484,13 @@ def test_failure_distills_a_pitfall_lesson(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(server.embeddings, "embed", lambda *a, **k: None)
 
-    lesson_id = server._record_failure_pitfall(
+    lesson_id, note = server._record_failure_pitfall(
         "F1", "print a count", "Write-Output \"$word:$count\"",
         "Variable reference is not valid. ':' was not followed by a valid "
         "variable name character.",
     )
     assert lesson_id
+    assert note == "", "a clean distillation must not report a diagnostic"
     conn = server._open_db()
     try:
         row = conn.execute(
@@ -513,7 +514,28 @@ def test_pitfall_requires_a_concrete_error(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_generate_text", lambda prompt, **kw: "NONE")
     monkeypatch.setattr(server.embeddings, "embed", lambda *a, **k: None)
     # An empty error never reaches the model at all.
-    assert server._record_failure_pitfall("F2", "task", "code", "") == ""
-    # A vague/NONE answer is refused by the existing vagueness gate.
+    assert server._record_failure_pitfall("F2", "task", "code", "") == ("", "")
+    # A vague/NONE answer is refused by the existing vagueness gate. A refusal
+    # is a completed run, so it reports no diagnostic - only a crash does.
     assert server._record_failure_pitfall(
-        "F2", "task", "code", "pytest timed out") == ""
+        "F2", "task", "code", "pytest timed out") == ("", "")
+
+
+def test_pitfall_crash_is_reported_not_swallowed(monkeypatch, tmp_path):
+    """A refusal and a crash both returned "", so a pitfall path that broke in
+    an unattended run was indistinguishable from one with nothing to learn.
+    The overnight run of 2026-08-03 recorded 28 failures and stored 0 lessons,
+    and telling those two apart took a manual replay. It must stay
+    best-effort - the campaign attempt that fed it may not fail."""
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("distiller offline")
+
+    monkeypatch.setattr(server.reflection, "prepare_pitfall_candidate", explode)
+
+    lesson_id, note = server._record_failure_pitfall(
+        "F3", "task", "code", "Variable reference is not valid.",
+    )
+    assert lesson_id == ""
+    assert "RuntimeError" in note and "distiller offline" in note
