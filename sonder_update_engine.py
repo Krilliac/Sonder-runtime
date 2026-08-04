@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 import sonder_migrations
+import sonder_updates
 import sonder_version
 from sonder_updates import (
     BundleManifest,
@@ -445,21 +446,13 @@ class UpdateManager:
         return plan
 
     def _switch_pointer(self, target: Path) -> str | None:
-        """Atomically point ``current`` at ``target``; return the old target."""
-        self.current_link.parent.mkdir(parents=True, exist_ok=True)
-        previous = None
-        if self.current_link.is_symlink():
-            previous = os.readlink(self.current_link)
-        temp_link = self.current_link.with_name(
-            self.current_link.name + f".new-{os.getpid()}"
-        )
-        try:
-            temp_link.unlink()
-        except FileNotFoundError:
-            pass
-        os.symlink(target, temp_link)
-        os.replace(temp_link, self.current_link)
-        return previous
+        """Atomically point ``current`` at ``target``; return the old target.
+
+        Delegates to the portable activation helper so unprivileged Windows
+        (no directory-symlink right) falls back to an atomic pointer file
+        (R-M10, R-M18 handoff safety).
+        """
+        return sonder_updates.switch_active_pointer(self.current_link, target)
 
     def _run_in_release(
         self, release_dir: Path, args: list[str], *, timeout: float
@@ -564,9 +557,8 @@ class UpdateManager:
 
     def status(self) -> dict:
         build = sonder_version.build_info()
-        current_target = None
-        if self.current_link.is_symlink():
-            current_target = os.readlink(self.current_link)
+        # Symlink or pointer-file fallback, whichever this platform used.
+        current_target = sonder_updates._read_pointer(self.current_link)
         plans = self.repository.list_plans(limit=10)
         return {
             "running_version": build.version,

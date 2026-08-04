@@ -3,27 +3,20 @@
 Rules are intentionally simple and auditable. They do not replace the OS,
 filesystem guardrails, or Codex approvals; they give Sonder a stable place to
 record local preferences such as "ask before file_delete" or "allow status".
+
+SPEC-3 Phase 5: the pure defaults, action validation, rule normalization,
+and glob evaluation live in ``sonder_runtime.domain.execution.policy``;
+this module keeps the filesystem load/save and delegates the logic, with
+identical behavior.
 """
 
-import fnmatch
 import json
 from pathlib import Path
 
-VALID_ACTIONS = {"allow", "ask", "deny"}
+from sonder_runtime.domain.execution import policy as _policy
 
-DEFAULT_RULES = [
-    {"pattern": "status", "action": "allow", "note": "read-only runtime status"},
-    {"pattern": "context_*", "action": "allow", "note": "read-only context/status tools"},
-    {"pattern": "tool_manifest", "action": "allow", "note": "read-only tool list"},
-    {"pattern": "file_read", "action": "ask", "note": "reads local files"},
-    {"pattern": "file_find", "action": "ask", "note": "enumerates local files"},
-    {"pattern": "file_write", "action": "ask", "note": "writes local files"},
-    {"pattern": "file_edit", "action": "ask", "note": "edits local files"},
-    {"pattern": "file_delete", "action": "deny", "note": "destructive by default"},
-    {"pattern": "run_*", "action": "ask", "note": "executes generated code"},
-    {"pattern": "web_*", "action": "ask", "note": "uses network access"},
-    {"pattern": "admin_private_chain_of_thought", "action": "deny", "note": "private chain-of-thought is never exposed"},
-]
+VALID_ACTIONS = set(_policy.VALID_ACTIONS)
+DEFAULT_RULES = _policy.DEFAULT_RULES
 
 
 def policy_path(home):
@@ -33,25 +26,13 @@ def policy_path(home):
 def load(home):
     path = policy_path(home)
     if not path.exists():
-        return [dict(rule) for rule in DEFAULT_RULES]
+        return _policy.default_rules()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        return [dict(rule) for rule in DEFAULT_RULES]
-    if not isinstance(data, list):
-        return [dict(rule) for rule in DEFAULT_RULES]
-    rules = []
-    for item in data:
-        if isinstance(item, dict):
-            action = str(item.get("action", "ask")).strip().lower()
-            pattern = str(item.get("pattern", "")).strip()
-            if pattern and action in VALID_ACTIONS:
-                rules.append({
-                    "pattern": pattern,
-                    "action": action,
-                    "note": str(item.get("note", "")),
-                })
-    return rules or [dict(rule) for rule in DEFAULT_RULES]
+        return _policy.default_rules()
+    rules = _policy.normalize_rules(data)
+    return rules or _policy.default_rules()
 
 
 def save(home, rules):
@@ -62,25 +43,13 @@ def save(home, rules):
 
 
 def add_rule(home, pattern, action, note=""):
-    pattern = (pattern or "").strip()
-    action = (action or "").strip().lower()
-    if not pattern:
-        raise ValueError("pattern is required")
-    if action not in VALID_ACTIONS:
-        raise ValueError("action must be one of: %s" % ", ".join(sorted(VALID_ACTIONS)))
-    rules = load(home)
-    rules = [rule for rule in rules if rule["pattern"] != pattern]
-    rules.insert(0, {"pattern": pattern, "action": action, "note": note or ""})
+    rules = _policy.upsert_rule(load(home), pattern, action, note)
     save(home, rules)
     return rules
 
 
 def check(home, tool_name):
-    name = (tool_name or "").strip()
-    for rule in load(home):
-        if fnmatch.fnmatchcase(name, rule["pattern"]):
-            return dict(rule)
-    return {"pattern": "*", "action": "ask", "note": "no matching rule"}
+    return _policy.evaluate(load(home), tool_name)
 
 
 def format_policy(home, tool_name=""):

@@ -33,8 +33,8 @@ shapes for chat remain legacy-compatible alongside the new envelope.
 | 2 runtime-policy extraction | done — pure rules in domain/runtime_policy/rules.py, atomic JSON + file lock in adapters/filesystem/atomic_json.py, root runtime_policy.py delegates with identical names/behavior (102 policy tests unchanged). |
 | 3 model gateway | done — adapters/ollama/gateway.py implements the ModelGateway port over the legacy transport: context-level cloud-consent gate (Forbidden without explicit consent), driver ModelCallError mapped into the domain taxonomy, bounded-retry/single-attempt semantics delegated to the transport that owns them. Wired as the composition root's gateway. Call-site migration off direct transport calls continues incrementally. |
 | 4 memory | ports defined; extraction pending. |
-| 5 execution | ToolExecutor port defined; extraction pending. |
-| 6 automation | ports defined; state-machine extraction pending. |
+| 5 execution | pure permission policy (defaults, action validation, glob evaluation, rule upsert) extracted to domain/execution/policy.py; permission_rules.py delegates unchanged. ToolExecutor port defined; filesystem/process behind ports pending. |
+| 6 automation | canonical autopilot/fleet status classification and pure transition validators extracted to domain/automation/state_machine.py; autopilot_store/fleet_store import their status tuples from it (behavior identical). Compare-and-set claim SQL remains the concurrency authority. |
 | 7 training | pending. |
 | 8 thin transports | pending (entry module counts as CLI adapter in the checker until then). |
 | 9 legacy import removal | pending. |
@@ -88,6 +88,22 @@ filesystem fetcher that maps missing files to 404 now drives the
 root-rotation walk correctly. Signing ceremony: docs/runbooks/
 publish-release.md. Optional deps pinned in requirements-update.txt.
 
-Remaining for full SPEC-4 sign-off: resumable online downloads,
-Windows/macOS activation helpers (M6), and the Flutter System page UI
-(M5) — the status API it polls is in place.
+Resumable downloads + activation (M2/M6): sonder_updates.resumable_download
+resumes an interrupted transfer via HTTP Range only when the server's
+validators still match the persisted partial (else it discards and
+restarts), verifying length+SHA-256 after assembly. switch_active_pointer
+does an atomic symlink swap on POSIX and falls back to an atomic pointer
+file where directory symlinks are unprivileged (Windows); the engine and
+status read whichever form is present.
+
+Flutter System page (M5): app/lib/system_screen.dart now polls
+/v1/admin/updates/status and renders running version/commit, active and
+previous releases, available/in-flight plans with verification state and
+confirm nonce, and impact-aware install/rollback affordances (the
+privileged operations stay on the admin CLI). Non-admin keys hide the
+section rather than error.
+
+Remaining for full SPEC-4 sign-off: Windows/macOS activation *helper
+process* (R-M18 self-replacement handoff — the pointer switch is portable
+but the updater-helper executable swap is still Linux-tested only) and
+platform package wrappers.
