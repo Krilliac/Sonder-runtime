@@ -2596,3 +2596,18 @@ def test_offload_context_window_follows_the_context_policy(monkeypatch):
     assert server.context_policy.native() == 8192
     # An explicit value still wins over the policy default.
     assert server.context_policy.native(4096) == 4096
+
+
+def test_campaign_environment_failure_is_not_a_model_failure():
+    # Host toolchain breakage (grounding._missing's sentinel) must not be
+    # recorded against the model.
+    assert server._campaign_environment_failure("missing runtime/compiler: node")
+    assert server._campaign_environment_failure("missing runtime/compiler: csc")
+    # Real model failures still count.
+    assert not server._campaign_environment_failure(
+        "wrong output; expected exactly '42', got '41'"
+    )
+    assert not server._campaign_environment_failure("no python code block returned")
+    assert not server._campaign_environment_failure("(timed out after 8s)")
+    assert not server._campaign_environment_failure("")
+    assert not server._campaign_environment_failure(None)

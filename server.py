@@ -4115,6 +4115,18 @@ def _campaign_output_matches(output, expected):
     return _norm(output) == _norm(expected)
 
 
+def _campaign_environment_failure(output):
+    """Whether a failed attempt broke on the host, not the model.
+
+    A missing interpreter/compiler fails every attempt in that language no
+    matter what the model wrote; recording it as 'failed' would penalize the
+    model for the host's toolchain - the same mis-attribution class as the
+    pytest timeouts campaign_repo_repair no longer records. A repair round
+    cannot install a toolchain either, so callers also stop retrying.
+    """
+    return str(output or "").startswith("missing runtime/compiler:")
+
+
 def _campaign_prompt(language, task_name, task_text, repair_note=""):
     fence = grounding._LANG_FENCE.get(language, language)
     repair = ("\nPrevious attempt failed:\n%s\nFix it." % repair_note) if repair_note else ""
@@ -4218,9 +4230,14 @@ def campaign_generate_compile_execute_record(
                     out = "wrong output; expected exactly %r, got %r" % (expected, out)
             record_msg = ""
             pitfall_note = ""
+            env_failure = (not ok) and _campaign_environment_failure(out)
             if ok and iid:
                 with _CAMPAIGN_LEARN_LOCK:
                     record_msg = record_outcome(iid, "tests_passed")
+            elif env_failure:
+                # Host toolchain breakage: the model was never judged, so no
+                # outcome and no pitfall are recorded against it.
+                pass
             elif attempt == repair_rounds and record_failures and iid:
                 with _CAMPAIGN_LEARN_LOCK:
                     record_msg = record_outcome(iid, "failed")
@@ -4240,8 +4257,9 @@ def campaign_generate_compile_execute_record(
                 "output": out,
                 "record": record_msg,
                 "pitfall_error": pitfall_note,
+                "env_skipped": env_failure,
             })
-            if ok:
+            if ok or env_failure:
                 break
             last_note = (out or "unknown failure")[:1200]
         final = attempts[-1]
@@ -4286,6 +4304,12 @@ def campaign_generate_compile_execute_record(
         for a in r.get("attempts", [])
         if a.get("pitfall_error")
     ]
+    env_skipped = sum(
+        1
+        for r in results
+        for a in r.get("attempts", [])
+        if a.get("env_skipped")
+    )
     by_lang = {}
     for r in results:
         lang = r["language"]
@@ -4303,6 +4327,11 @@ def campaign_generate_compile_execute_record(
     ]
     if pitfall_errors:
         lines.append("first pitfall error: %s" % pitfall_errors[0])
+    if env_skipped:
+        lines.append(
+            "environment failures skipped, not recorded against the model: %d"
+            % env_skipped,
+        )
     drain = _drain_deferred_distillations(limit=max(16, len(results)))
     if drain["drained"]:
         lines.append(
