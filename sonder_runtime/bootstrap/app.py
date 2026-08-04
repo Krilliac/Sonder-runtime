@@ -8,11 +8,13 @@ no hardware, and contacts no services; construction happens inside
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from ..adapters.legacy.services import (
     LegacyAutomationRepository,
     LegacyPolicyRepository,
+    LegacyUnitOfWork,
     OperationsEventSink,
     SystemClock,
 )
@@ -21,7 +23,7 @@ from ..application.chat.handle_chat import ChatService
 from ..application.ports.clock import Clock
 from ..application.ports.event_sink import EventSink
 from ..application.ports.model_gateway import ModelGateway
-from ..application.ports.repositories import AutomationRepository
+from ..application.ports.repositories import AutomationRepository, UnitOfWork
 from ..application.runtime_policy.use_cases import RuntimePolicyService
 
 PROFILES = ("workstation-local", "server-private")
@@ -34,6 +36,7 @@ class Application:
     model_gateway: ModelGateway
     chat: ChatService
     automation: AutomationRepository
+    unit_of_work: Callable[[], UnitOfWork]
     events: EventSink
     clock: Clock
 
@@ -57,6 +60,9 @@ def build_application(profile: str = "workstation-local") -> Application:
         model_gateway=gateway,
         chat=ChatService(gateway),
         automation=LegacyAutomationRepository(),
+        # A UnitOfWork is per-transaction, so the graph exposes a factory, not
+        # a singleton; each call opens and owns its own connection scope.
+        unit_of_work=LegacyUnitOfWork,
         events=OperationsEventSink(),
         clock=SystemClock(),
     )

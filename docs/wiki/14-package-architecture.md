@@ -77,14 +77,16 @@ actually catches violations.
 Done: composition root; runtime-policy, memory, execution, and automation
 pure-rule extraction; the Ollama ModelGateway adapter; the first chat
 call-site (summarization/titling) migrated onto the port; the
-**AutomationRepository** port made real and wired into the graph
-(`LegacyAutomationRepository` faithfully wrapping `autopilot_store`).
+**AutomationRepository** and **MemoryRepository** ports made real and wired
+into the graph (`LegacyAutomationRepository` over `autopilot_store`;
+`LegacyUnitOfWork` owning a memory-store connection with `LegacyMemoryRepository`
+over `memory_store`/`recall`, exposed as a per-transaction factory).
 
-Remaining: memory/execution *repositories* behind ports (the automation
-repository is the template), migrating autopilot call-sites onto the port,
-training extraction, thin-transport reduction of `server.py`/
-`sonder_serve.py`, and removal of internal legacy imports. Live status:
-[PROGRAM-STATUS](../architecture/PROGRAM-STATUS.md).
+Remaining: migrating live call-sites onto the repositories/UnitOfWork,
+tightening the transaction boundary as legacy ops move off self-commit, an
+execution repository, training extraction, thin-transport reduction of
+`server.py`/`sonder_serve.py`, and removal of internal legacy imports. Live
+status: [PROGRAM-STATUS](../architecture/PROGRAM-STATUS.md).
 
 ## Why this shape
 

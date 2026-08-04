@@ -12,11 +12,40 @@ from .event_sink import EventSink
 
 
 class MemoryRepository(Protocol):
-    def remember_fact(self, principal_id: str, fact: str, *, source: str) -> str: ...
+    """Persistence port for the memory store, bound to a UnitOfWork connection.
 
-    def recall(self, principal_id: str, query: str, *, limit: int = 8) -> list: ...
+    Methods mirror the root ``memory_store`` / ``recall`` surface so the
+    strangler adapter is a faithful wrap. Instances share the UnitOfWork's
+    connection and are created by it — not constructed standalone.
+    """
 
-    def record_outcome(self, interaction_id: str, outcome: str) -> None: ...
+    def add_fact(
+        self, fact_id: str, project: str, text: str, embedding=None
+    ) -> None: ...
+
+    def facts_for_project(self, project: str) -> list[dict]: ...
+
+    def count_facts(self, project: str) -> int: ...
+
+    def log_interaction(
+        self,
+        interaction_id: str,
+        task: str,
+        retrieved_ctx,
+        response: str,
+        tier: str,
+        **fields,
+    ) -> None: ...
+
+    def get_interaction(self, interaction_id: str) -> dict | None: ...
+
+    def recall(
+        self, task: str, *, k: int = 2, project: str | None = None, **options
+    ) -> list: ...
+
+    def record_outcome(
+        self, interaction_id: str, signal: str, reward_value: float, **options
+    ): ...
 
 
 class AutomationRepository(Protocol):
