@@ -81,13 +81,19 @@ class Migration:
         preflight = getattr(module, "preflight", None)
         if callable(preflight):
             preflight(conn)
-        conn.execute("BEGIN")
-        try:
+        # Adoption baselines that delegate to a legacy bootstrap manage
+        # their own transactions (the legacy code opens and commits its own
+        # connections); everything else runs inside one transaction.
+        if getattr(module, "manages_own_transaction", False):
             module.apply(conn)
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
+        else:
+            conn.execute("BEGIN")
+            try:
+                module.apply(conn)
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
         verify = getattr(module, "verify", None)
         if callable(verify):
             verify(conn)

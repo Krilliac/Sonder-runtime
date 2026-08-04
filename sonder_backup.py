@@ -329,6 +329,113 @@ def prune_backups(target: str | os.PathLike, *, keep: int) -> list[str]:
     return removed
 
 
+def prune_backups_tiered(
+    target: str | os.PathLike,
+    *,
+    daily: int = 7,
+    weekly: int = 4,
+    monthly: int = 6,
+) -> list[str]:
+    """Grandfather-father-son retention (SPEC-2 section 3 backup config).
+
+    Keeps the newest backup of each of the last ``daily`` days, the newest
+    of each of the last ``weekly`` ISO weeks, and the newest of each of the
+    last ``monthly`` months.  The newest verified backup is always kept.
+    """
+    if min(daily, weekly, monthly) < 1:
+        raise BackupError("every retention tier must keep at least one backup")
+    backups = list_backups(target)
+    if not backups:
+        return []
+
+    keep: set[str] = set()
+    newest_verified: str | None = None
+    for entry in backups:
+        if not verify_backup(entry["path"]):
+            newest_verified = entry["path"]
+            break
+    if newest_verified:
+        keep.add(newest_verified)
+
+    day_buckets: dict[str, str] = {}
+    week_buckets: dict[str, str] = {}
+    month_buckets: dict[str, str] = {}
+    for entry in backups:  # newest first
+        stamp = entry["created_at_utc"]
+        day = stamp[:10]
+        month = stamp[:7]
+        try:
+            import datetime
+
+            iso = datetime.date.fromisoformat(day).isocalendar()
+            week = f"{iso.year}-W{iso.week:02d}"
+        except ValueError:
+            week = day
+        day_buckets.setdefault(day, entry["path"])
+        week_buckets.setdefault(week, entry["path"])
+        month_buckets.setdefault(month, entry["path"])
+    keep.update(list(day_buckets.values())[:daily])
+    keep.update(list(week_buckets.values())[:weekly])
+    keep.update(list(month_buckets.values())[:monthly])
+
+    removed = []
+    for entry in backups:
+        if entry["path"] in keep:
+            continue
+        shutil.rmtree(entry["path"])
+        removed.append(entry["path"])
+    return removed
+
+
+def restore_smoke(backup_dir: str | os.PathLike) -> list[str]:
+    """Restore into a disposable directory and prove the state is usable.
+
+    Checks performed on the restored copy: manifest verification, SQLite
+    ``PRAGMA integrity_check`` and ``PRAGMA foreign_key_check`` on every
+    database, and migration-ledger health (no unknown or tampered
+    migrations).  Returns a list of problems; empty means the smoke passed.
+    """
+    import tempfile
+
+    problems = verify_backup(backup_dir)
+    if problems:
+        return [f"verification: {p}" for p in problems]
+    with tempfile.TemporaryDirectory(prefix="sonder-restore-smoke-") as tmp:
+        dest = Path(tmp) / "state"
+        try:
+            restore_to_empty(backup_dir, dest)
+        except BackupError as exc:
+            return [f"restore: {exc}"]
+        for db_file in sorted(dest.glob("*.db")):
+            conn = sqlite3.connect(str(db_file))
+            try:
+                row = conn.execute("PRAGMA integrity_check").fetchone()
+                if row is None or row[0] != "ok":
+                    problems.append(
+                        f"{db_file.name}: integrity_check {row[0] if row else 'empty'}"
+                    )
+                fk_rows = conn.execute("PRAGMA foreign_key_check").fetchall()
+                if fk_rows:
+                    problems.append(
+                        f"{db_file.name}: {len(fk_rows)} foreign key violations"
+                    )
+            finally:
+                conn.close()
+            store = db_file.stem
+            if store in sonder_migrations.store_db_paths():
+                status = sonder_migrations.status(store, str(db_file))
+                if status.unknown:
+                    problems.append(
+                        f"{db_file.name}: schema newer than this build "
+                        f"({list(status.unknown)})"
+                    )
+                if status.checksum_mismatches:
+                    problems.append(
+                        f"{db_file.name}: migration history modified"
+                    )
+    return problems
+
+
 def restore_to_empty(
     backup_dir: str | os.PathLike, destination: str | os.PathLike
 ) -> list[str]:

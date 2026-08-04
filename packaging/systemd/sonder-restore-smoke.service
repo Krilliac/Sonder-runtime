@@ -1,0 +1,26 @@
+# Weekly automated restore smoke test (SPEC-2 WP7).
+# Restores the newest backup into a disposable directory and verifies
+# integrity, foreign keys, and schema-ledger health.
+
+[Unit]
+Description=Sonder backup restore smoke test
+After=sonder.service
+
+[Service]
+Type=oneshot
+User=sonder
+Group=sonder
+WorkingDirectory=/opt/sonder/current
+EnvironmentFile=/etc/sonder/sonder.env
+ExecStart=/bin/sh -c 'set -e; \
+  latest=$(/opt/sonder/current/venv/bin/python -m sonder_runtime backup list \
+    --config /etc/sonder/sonder.toml --json \
+    | /opt/sonder/current/venv/bin/python -c "import json,sys; b=json.load(sys.stdin)[\"backups\"]; print(b[0][\"path\"] if b else \"\")"); \
+  test -n "$latest"; \
+  /opt/sonder/current/venv/bin/python -m sonder_runtime restore smoke "$latest"'
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/sonder /var/backups/sonder
