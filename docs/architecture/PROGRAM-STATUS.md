@@ -31,7 +31,7 @@ shapes for chat remain legacy-compatible alongside the new envelope.
 | 0 characterization | The 2,500-test suite is the behavioral baseline; goldens for chat/memory flows exist in tests/. |
 | 1 skeleton + composition root | done — sonder_runtime/{domain,application,adapters,platform,bootstrap}, `bootstrap/app.py` builds the Application graph lazily; no import-time side effects (CI-checked). |
 | 2 runtime-policy extraction | done — pure rules in domain/runtime_policy/rules.py, atomic JSON + file lock in adapters/filesystem/atomic_json.py, root runtime_policy.py delegates with identical names/behavior (102 policy tests unchanged). |
-| 3 model gateway | port defined + legacy adapter; endpoint consent/retry centralization pending. |
+| 3 model gateway | done — adapters/ollama/gateway.py implements the ModelGateway port over the legacy transport: context-level cloud-consent gate (Forbidden without explicit consent), driver ModelCallError mapped into the domain taxonomy, bounded-retry/single-attempt semantics delegated to the transport that owns them. Wired as the composition root's gateway. Call-site migration off direct transport calls continues incrementally. |
 | 4 memory | ports defined; extraction pending. |
 | 5 execution | ToolExecutor port defined; extraction pending. |
 | 6 automation | ports defined; state-machine extraction pending. |
@@ -41,6 +41,24 @@ shapes for chat remain legacy-compatible alongside the new envelope.
 | 10 enforcement | `scripts/check_architecture.py` blocking in CI for the package: layer edges, cycles, sqlite3/subprocess/network containment, no env reads in domain/application. |
 
 ADRs 001–008 in docs/architecture/adr/.
+
+## Post-program capability work (driven by live A/B runs)
+
+- Wider runner languages (15 total), `data_inspect` structured previews,
+  thin-client session-memory fallback, fence/prose-tolerant agent JSON
+  parsing — see the capability commits on this branch.
+- Speculative execution + branch prediction (sonder_speculation.py): a
+  history-indexed next-tool predictor (measured 100% accuracy on
+  repetitive agent workloads after one warm-up run), read-only-allowlist
+  speculative dispatch with retire/squash semantics, an argument-level
+  file stream-prefetcher (predicted file_read calls retire with each
+  file dispatched exactly once — proven by integration tests), and
+  speculative model prewarm overlapping cold load with host-side work.
+  Honest measured end-to-end gain on the CPU sandbox: ~0% (speculated
+  tools cost milliseconds against multi-second decisions); the win
+  scales with slower tools (big repos, network filesystems) and faster
+  models (GPU), with /status exposing accuracy and retire rates to show
+  when a deployment crosses into the paying regime.
 
 ## SPEC-4 — Signed Engine Distribution: Linux reference engine implemented
 

@@ -11,11 +11,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..adapters.legacy.services import (
-    LegacyModelGateway,
     LegacyPolicyRepository,
     OperationsEventSink,
     SystemClock,
 )
+from ..adapters.ollama.gateway import OllamaGateway
 from ..application.ports.clock import Clock
 from ..application.ports.event_sink import EventSink
 from ..application.ports.model_gateway import ModelGateway
@@ -45,7 +45,10 @@ def build_application(profile: str = "workstation-local") -> Application:
     return Application(
         profile=profile,
         runtime_policy=RuntimePolicyService(LegacyPolicyRepository()),
-        model_gateway=LegacyModelGateway(),
+        # SPEC-3 Phase 3: the real transport adapter behind the port —
+        # consent enforced against the OperationContext, driver errors
+        # mapped into the domain taxonomy.
+        model_gateway=OllamaGateway(),
         events=OperationsEventSink(),
         clock=SystemClock(),
     )

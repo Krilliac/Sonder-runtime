@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 from collections import Counter
@@ -369,6 +370,103 @@ class SpeculationEngine:
     def busy(self) -> bool:
         with self._lock:
             return self._thread is not None
+
+
+# ---------------------------------------------------------------------------
+# File prefetcher — argument-level prediction (hardware-prefetcher analog)
+# ---------------------------------------------------------------------------
+
+# Observation formats that reveal an ordered file listing.
+_LISTING_LINE_PATTERNS = (
+    re.compile(r"^\s*file\s+(?P<path>\S+)\s+\(\d+ bytes\)", re.MULTILINE),
+    re.compile(r"^\s*\[F\]\s+(?P<path>\S+)\s+\(\d+ bytes\)", re.MULTILINE),
+    re.compile(r"^\s{2,}\d+\s+(?P<path>\S+\.\w{1,8})\s*$", re.MULTILINE),
+)
+
+_LISTING_TOOLS = frozenset({
+    "file_find", "directory_tree", "workspace_inventory", "script_search",
+})
+_READ_TOOLS = frozenset({"file_read", "file_read_range"})
+_PREFETCH_MAX_PATHS = 64
+
+
+class FilePrefetcher:
+    """Predict the next file the agent will read, like a stream prefetcher.
+
+    A hardware prefetcher watches an access pattern (sequential cache lines)
+    and fetches ahead. Agents show the same pattern one level up: they list
+    files, then read them roughly in listing order. This tracker remembers
+    the most recent observed listing, watches which entries get read, and —
+    once at least one read has confirmed the stream — predicts the next
+    unread entry so the host can speculatively execute that ``file_read``
+    while the model is still deciding.
+
+    Purely advisory and read-only, exactly like the rest of the speculation
+    machinery: a wrong guess is a squashed read, never a behavior change.
+    """
+
+    def __init__(self, max_paths: int = _PREFETCH_MAX_PATHS) -> None:
+        self._max_paths = max_paths
+        self._listing: list[str] = []
+        self._consumed: set[str] = set()
+        self._stream_confirmed = False
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def extract_paths(observation: str) -> list[str]:
+        seen: list[str] = []
+        for pattern in _LISTING_LINE_PATTERNS:
+            for match in pattern.finditer(observation or ""):
+                path = match.group("path").strip()
+                if path and path not in seen:
+                    seen.append(path)
+        return seen
+
+    def observe(self, tool_name: str, args: dict, observation: str,
+                *, ok: bool = True) -> None:
+        if not ok:
+            return
+        if tool_name in _LISTING_TOOLS:
+            paths = self.extract_paths(observation)[: self._max_paths]
+            if paths:
+                with self._lock:
+                    self._listing = paths
+                    self._consumed = set()
+                    self._stream_confirmed = False
+            return
+        if tool_name in _READ_TOOLS:
+            path = str((args or {}).get("path", "")).strip()
+            if not path:
+                return
+            with self._lock:
+                for candidate in self._listing:
+                    if candidate == path or candidate.endswith("/" + path) \
+                            or path.endswith("/" + candidate):
+                        self._consumed.add(candidate)
+                        # One read from the listing confirms the stream.
+                        self._stream_confirmed = True
+                        break
+
+    def predict_read(self) -> dict | None:
+        """Next ``file_read`` args, or None when no stream is confirmed."""
+        with self._lock:
+            if not self._stream_confirmed:
+                return None
+            for candidate in self._listing:
+                if candidate not in self._consumed:
+                    # Claim it so the same path is not predicted twice while
+                    # its speculation is still in flight. Args mirror the
+                    # model's canonical minimal call ({"path": ...}) so the
+                    # call signatures can actually match at retirement.
+                    self._consumed.add(candidate)
+                    return {"path": candidate}
+        return None
+
+    def reset(self) -> None:
+        with self._lock:
+            self._listing = []
+            self._consumed = set()
+            self._stream_confirmed = False
 
 
 _default: BranchPredictor | None = None
