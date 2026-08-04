@@ -1,0 +1,41 @@
+# Hardened systemd unit for the Sonder runtime (SPEC-2 section 15).
+# Install to /etc/systemd/system/sonder.service after placing a release
+# under /opt/sonder and configuration under /etc/sonder.
+#
+# Sandbox directives must be validated against Ollama, GPU, NPU, training,
+# and workspace needs on the target host. Remove a hardening directive
+# only through a documented exception and test.
+
+[Unit]
+Description=Sonder Runtime
+After=network-online.target ollama.service
+Wants=network-online.target
+RequiresMountsFor=/var/lib/sonder
+
+[Service]
+Type=exec
+User=sonder
+Group=sonder
+WorkingDirectory=/opt/sonder/current
+EnvironmentFile=/etc/sonder/sonder.env
+ExecStartPre=/opt/sonder/current/venv/bin/python -m sonder_runtime preflight --config /etc/sonder/sonder.toml
+ExecStart=/opt/sonder/current/venv/bin/python -m sonder_runtime serve --config /etc/sonder/sonder.toml
+Restart=on-failure
+RestartSec=5
+# Stop timeout must exceed the runtime's drain deadline (default 25s).
+TimeoutStopSec=35
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/sonder /var/log/sonder /var/backups/sonder /srv/sonder/workspaces
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

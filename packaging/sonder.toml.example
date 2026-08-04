@@ -1,0 +1,62 @@
+# Sonder runtime production configuration (SPEC-2 section 3).
+# Install to /etc/sonder/sonder.toml. Secrets never go in this file —
+# they belong in /etc/sonder/sonder.env (mode 0600).
+
+schema_version = 1
+profile = "server-private"
+
+[server]
+host = "127.0.0.1"
+port = 11435
+auth_mode = "api-key"
+max_request_bytes = 1048576
+max_concurrent_requests = 4
+request_timeout_seconds = 300
+stream_idle_timeout_seconds = 60
+trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]
+# Set true only when a TLS-terminating proxy fronts a non-loopback bind.
+tls_terminated_by_proxy = false
+
+[state]
+home = "/var/lib/sonder"
+workspace_roots = ["/srv/sonder/workspaces"]
+minimum_free_disk_bytes = 5368709120
+sqlite_busy_timeout_ms = 5000
+
+[ollama]
+url = "http://127.0.0.1:11434"
+allow_remote = false
+startup_timeout_seconds = 60
+request_timeout_seconds = 300
+
+[features]
+cloud = false
+web = false
+live_reload = false
+source_modification = false
+host_control = false
+training = false
+npu = false
+
+[capacity]
+model_generations = 1
+http_requests = 4
+tool_processes = 2
+fleet_workers = 2
+autopilot_runs = 1
+training_jobs = 1
+queue_depth = 32
+
+[observability]
+log_format = "json"
+log_level = "INFO"
+metrics_enabled = true
+metrics_path = "/metrics"
+audit_retention_days = 90
+
+[backup]
+enabled = true
+target = "/var/backups/sonder"
+retention_daily = 7
+retention_weekly = 4
+retention_monthly = 6
