@@ -39,7 +39,7 @@ ROOT_LEGACY_MODULES = {
     "autopilot_store", "fleet_store", "sonder_operations_store",
     "sonder_migrations", "sonder_backup", "sonder_preflight",
     "sonder_lifecycle", "sonder_secrets", "sonder_serve", "sonder_repl",
-    "sonder_updates", "sonder_update_engine",
+    "sonder_updates", "sonder_update_engine", "model_transport",
 }
 
 LAYERS = ("domain", "application", "adapters", "platform", "bootstrap")

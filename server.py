@@ -11447,6 +11447,10 @@ def _agent_impl(
     _spec_engine = sonder_speculation.SpeculationEngine(
         _predictor, _spec_dispatch, enabled=_spec_enabled,
     )
+    # Argument-level prediction: a stream prefetcher over observed listings
+    # lets the host speculate concrete file_read calls, not just arg-free
+    # inspections (see sonder_speculation.FilePrefetcher).
+    _spec_prefetcher = sonder_speculation.FilePrefetcher()
     _last_tool_name = None
     checklist_id, checklist_states = (
         _start_agent_checklist(prompt, project, read_only)
@@ -11630,6 +11634,7 @@ def _agent_impl(
             tuple(used_tool_names), _last_tool_name, step,
         )
         _spec_prediction = _predictor.predict_next_tool(_spec_state)
+        _spec_issued = False
         if (
             _spec_enabled
             and _spec_prediction is not None
@@ -11639,11 +11644,25 @@ def _agent_impl(
             _predicted_args = _project_scope_args(
                 _predicted_tool, {}, project_scope,
             )
-            _spec_engine.begin(
+            _spec_issued = _spec_engine.begin(
                 _predicted_tool,
                 _agent_call_signature(_predicted_tool, _predicted_args),
                 _predicted_args,
             )
+        if _spec_enabled and not _spec_issued:
+            # Fall back to the stream prefetcher: a concrete predicted
+            # file_read from the last observed listing (argument-level
+            # speculation, still strictly read-only).
+            _prefetch_args = _spec_prefetcher.predict_read()
+            if _prefetch_args is not None:
+                _prefetch_scoped = _project_scope_args(
+                    "file_read", _prefetch_args, project_scope,
+                )
+                _spec_engine.begin(
+                    "file_read",
+                    _agent_call_signature("file_read", _prefetch_scoped),
+                    _prefetch_scoped,
+                )
         decision, raw, decision_error = _agent_generate_decision(gen, step_prompt)
         if decision is None:
             if isinstance(decision_error, ModelCallError):
@@ -11926,6 +11945,12 @@ def _agent_impl(
                 )
             observation_text += "\n" + recovery
         used_tool = used_tool or tool_ok
+        # Train the stream prefetcher on what the model actually did (raw
+        # args: listing entries and model read paths share the same
+        # scope-relative form).
+        _spec_prefetcher.observe(
+            tool_name, tool_args, observation_text, ok=tool_ok,
+        )
         if tool_ok:
             used_tool_names.add(str(tool_name))
             if tool_name in {
