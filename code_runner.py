@@ -45,6 +45,69 @@ SUPPORTED_LANGUAGES = {
         "suffix": ".cs",
         "missing": ".NET SDK or C# compiler not found on PATH (tried dotnet, csc)",
     },
+    "bash": {
+        "aliases": {"bash", "sh", "shell", "zsh"},
+        "suffix": ".sh",
+        "cmd": lambda path: [shutil.which("bash") or shutil.which("sh") or "bash", path],
+        "missing": "bash/sh executable not found on PATH",
+    },
+    "ruby": {
+        "aliases": {"ruby", "rb"},
+        "suffix": ".rb",
+        "cmd": lambda path: ["ruby", path],
+        "missing": "ruby executable not found on PATH",
+    },
+    "perl": {
+        "aliases": {"perl", "pl"},
+        "suffix": ".pl",
+        "cmd": lambda path: ["perl", path],
+        "missing": "perl executable not found on PATH",
+    },
+    "php": {
+        "aliases": {"php"},
+        "suffix": ".php",
+        "cmd": lambda path: ["php", path],
+        "missing": "php executable not found on PATH",
+    },
+    "lua": {
+        "aliases": {"lua"},
+        "suffix": ".lua",
+        "cmd": lambda path: [shutil.which("lua") or shutil.which("lua5.4") or shutil.which("lua5.3") or "lua", path],
+        "missing": "lua executable not found on PATH",
+    },
+    "r": {
+        "aliases": {"r", "rscript"},
+        "suffix": ".R",
+        "cmd": lambda path: ["Rscript", path],
+        "missing": "Rscript executable not found on PATH",
+    },
+    "go": {
+        "aliases": {"go", "golang"},
+        "suffix": ".go",
+        # `go run` compiles and executes in one bounded step.
+        "cmd": lambda path: ["go", "run", path],
+        "missing": "go toolchain not found on PATH",
+    },
+    "java": {
+        "aliases": {"java"},
+        "suffix": ".java",
+        # JDK 11+ single-file source launcher; no separate compile step.
+        "cmd": lambda path: ["java", path],
+        "missing": "java (JDK 11+) not found on PATH",
+    },
+    "typescript": {
+        "aliases": {"typescript", "ts"},
+        "suffix": ".ts",
+        # Node 22.6+ strips type annotations natively; older nodes report
+        # their own actionable error through stderr.
+        "cmd": lambda path: ["node", "--experimental-strip-types", path],
+        "missing": "node executable not found on PATH (TypeScript runs via node --experimental-strip-types)",
+    },
+    "rust": {
+        "aliases": {"rust", "rs"},
+        "suffix": ".rs",
+        "missing": "rustc not found on PATH",
+    },
 }
 
 DEFAULT_TIMEOUT = 10
@@ -359,6 +422,23 @@ def _compile_cpp_for_window(path, run_dir, timeout):
     return result, exe
 
 
+def _run_rust(path, tmp, stdin, timeout, cwd):
+    rustc = shutil.which("rustc")
+    if not rustc:
+        return _error_result(
+            "rust", cwd, timeout, SUPPORTED_LANGUAGES["rust"]["missing"]
+        )
+    exe = os.path.join(tmp, "snippet.exe" if os.name == "nt" else "snippet.bin")
+    compile_result = _run_process(
+        [rustc, "-O", "--edition", "2021", path, "-o", exe],
+        tmp, "", timeout, "rust",
+    )
+    if not compile_result["ok"]:
+        compile_result["error"] = compile_result.get("error") or "rust compilation failed"
+        return compile_result
+    return _run_process([exe], cwd, stdin, timeout, "rust")
+
+
 def _run_csharp(path, tmp, stdin, timeout, cwd):
     csc = shutil.which("csc")
     if csc:
@@ -454,6 +534,8 @@ def run_code(code, language="python", stdin="", timeout=DEFAULT_TIMEOUT, cwd=Non
             return _run_cpp(path, tmp, stdin, timeout, cwd)
         if language == "csharp":
             return _run_csharp(path, tmp, stdin, timeout, cwd)
+        if language == "rust":
+            return _run_rust(path, tmp, stdin, timeout, cwd)
         cmd = cfg["cmd"](path)
         return _run_process(cmd, cwd, stdin, timeout, language)
 

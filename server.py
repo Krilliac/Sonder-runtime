@@ -6639,6 +6639,46 @@ def file_read(path: str, max_bytes: int = 256000, token: str = "", approval: str
 
 
 @mcp.tool()
+def data_inspect(
+    path: str,
+    max_bytes: int = 256000,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Structured, read-only preview of a data file inside allowed roots.
+
+    Understands JSON, JSONL/NDJSON, TOML, YAML, CSV, TSV, SQLite databases,
+    ZIP/TAR archives, and INI/CFG by suffix; unknown types fall back to
+    text statistics or a binary signature. Never executes file contents and
+    returns only a bounded preview (keys, columns, table row counts,
+    archive members, sample rows).
+    """
+    _maybe_live_reload()
+    started = time.time()
+    try:
+        data = file_ops.inspect_data(
+            path,
+            max_bytes=max_bytes,
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as e:
+        _record_direct_tool("data_inspect", {"path": path}, ok=False, started=started, summary=str(e))
+        return "ERROR: %s" % e
+    _record_direct_tool(
+        "data_inspect", {"path": path}, ok=True, started=started,
+        summary="%s %s bytes" % (data.get("kind", "?"), data.get("bytes", 0)),
+    )
+    activity_tracker.record_event(
+        "data_inspect",
+        summary="%s (%s bytes)" % (data.get("kind", "?"), data.get("bytes", 0)),
+        path=data.get("path", ""),
+    )
+    return _format_file_result("data inspect", data)
+
+
+@mcp.tool()
 def file_write(
     path: str,
     content: str,
@@ -8064,6 +8104,14 @@ def _loop_dispatch(action):
             approval=action.get("approval", ""),
             extra_roots=action.get("extra_roots", ""),
         ))
+    if action_type == "data_inspect":
+        return _loop_text_result("data_inspect", data_inspect(
+            path=action.get("path", ""),
+            max_bytes=action.get("max_bytes", 256000),
+            token=action.get("token", ""),
+            approval=action.get("approval", ""),
+            extra_roots=action.get("extra_roots", ""),
+        ))
     if action_type == "checklist_create":
         items = action.get("items", action.get("items_json", []))
         return _loop_text_result("checklist_create", checklist_create(
@@ -9265,6 +9313,7 @@ def tool_manifest() -> str:
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
         "workspace_inventory/directory_tree/directory_create/text_search/file_read_range": "Budgeted guarded workspace inventory, folder discovery, creation, text search, and bounded line-range reads.",
         "file_policy/file_find/file_read/file_write/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete with approval bypass support.",
+        "data_inspect": "Read-only structured preview of JSON/JSONL/TOML/YAML/CSV/TSV/SQLite/ZIP/TAR/INI data files inside allowed roots.",
         "program_search/script_search/workspace_run/script_run/image_inspect": "Discover installed programs and workspace scripts, run bounded argv-only processes, and inspect image metadata.",
         "task_create/task_list/task_update/task_show/checklist_create/checklist_update/checklist_show": "Visible todo and ordered checklist state shared by console, app, agents, and MCP.",
         "workbench_agent": "Run an autonomous local tool loop with a guaranteed checklist, exact action transcript, validation gate, and end report.",
@@ -9272,7 +9321,7 @@ def tool_manifest() -> str:
         "activity_status": "Inspect active/latest response activity, tool calls, and file changes.",
         "permission_policy/permission_rule_set": "Inspect or guarded-edit local permission rules for tool actions.",
         "context_compaction_plan": "Preview when to summarize, split sessions, or reduce live context.",
-        "run_code": "Run a bounded Python/JS/PowerShell/C++/C# snippet.",
+        "run_code": "Run a bounded snippet: Python, JS/TypeScript, Bash, Ruby, Perl, PHP, Lua, R, Go, Java, Rust, PowerShell, C++, C#.",
         "ground_artifact": "Validate in-memory non-code content with exact/contains/regex/JSON checks.",
         "artifact_ground": "Validate files or bundles with inferred writing, data, editable Office/media/timelines, UI, image, audio, and static or animated humanoid model recipes.",
         "run_project": "Run a bounded temporary multi-file project with optional build commands.",
@@ -9329,6 +9378,7 @@ AGENT_TOOL_HELP = """Available tools:
 - workspace_run: {"program": "git", "args_json": ["status", "--short"], "cwd": ".", "timeout": 30}
 - script_run: {"path": "scripts/check.py", "args_json": [], "cwd": ".", "timeout": 30}
 - image_inspect: {"path": "artifacts/generated/demo/icon.png"}
+- data_inspect: {"path": "data/records.jsonl", "max_bytes": 256000}
 - task_create: {"title": "...", "detail": "...", "priority": 2, "project": "...", "owner": "..."}
 - task_list: {"status": "pending|in_progress|blocked|done|canceled", "project": "", "include_done": false, "limit": 50}
 - task_update: {"task_id": "...", "status": "in_progress|blocked|done", "note": "..."}
@@ -9382,6 +9432,7 @@ or
 
 REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range",
+    "data_inspect",
     "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
     "diagnostics", "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
@@ -9408,6 +9459,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - script_search: {"query": "<task-relevant script name>", "root": ".", "max_results": 100}
 - program_search: {"query": "<required program name>", "max_results": 50}
 - image_inspect: {"path": "<task-relevant image path>"}
+- data_inspect: {"path": "<task-relevant data file>", "max_bytes": 256000}
 - memory_search: {"query": "...", "limit": 10}
 - web_search: {"query": "...", "limit": 5}
 - web_fetch: {"url": "https://...", "max_chars": 8000}
@@ -9623,7 +9675,7 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
     if scope_error:
         return scope_error
     try:
-        if tool_name in {"file_read", "file_read_range", "image_inspect"}:
+        if tool_name in {"file_read", "file_read_range", "image_inspect", "data_inspect"}:
             file_ops.resolve_repository_read_path(
                 args.get("path", ""),
                 allow_workspace_root=False,
@@ -9643,15 +9695,57 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
 
 
 def _extract_agent_json(text):
+    """Parse an agent decision, tolerating markdown fences and prose framing.
+
+    Small local models wrap decisions in ```json fences or surround them
+    with commentary; a balanced-brace scan recovers the first complete JSON
+    object instead of failing on trailing text. Genuinely truncated JSON
+    still raises so the decision-repair loop can re-prompt.
+    """
     text = (text or "").strip()
+    if text.startswith("```"):
+        # Drop the opening fence line and any closing fence.
+        first_newline = text.find("\n")
+        if first_newline != -1:
+            text = text[first_newline + 1:]
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+        text = text.strip()
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            raise ValueError("agent response was not JSON: %s" % text[:300])
-        return json.loads(text[start:end + 1])
+        pass
+    start = text.find("{")
+    if start == -1:
+        raise ValueError("agent response was not JSON: %s" % text[:300])
+    # Balanced scan: find the first complete top-level object, ignoring
+    # braces inside JSON strings, so prose after the object cannot break
+    # parsing the way rfind("}") could.
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start:index + 1])
+                except json.JSONDecodeError:
+                    break
+    raise ValueError("agent response was not JSON: %s" % text[:300])
 
 
 _AGENT_OBSERVATION_PROMPT_CHARS = 9000
