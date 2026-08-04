@@ -76,9 +76,12 @@ actually catches violations.
 
 Done: composition root; runtime-policy, memory, execution, and automation
 pure-rule extraction; the Ollama ModelGateway adapter; the first chat
-call-site (summarization/titling) migrated onto the port.
+call-site (summarization/titling) migrated onto the port; the
+**AutomationRepository** port made real and wired into the graph
+(`LegacyAutomationRepository` faithfully wrapping `autopilot_store`).
 
-Remaining: memory/execution/automation *repositories* behind ports,
+Remaining: memory/execution *repositories* behind ports (the automation
+repository is the template), migrating autopilot call-sites onto the port,
 training extraction, thin-transport reduction of `server.py`/
 `sonder_serve.py`, and removal of internal legacy imports. Live status:
 [PROGRAM-STATUS](../architecture/PROGRAM-STATUS.md).
