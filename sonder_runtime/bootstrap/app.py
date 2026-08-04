@@ -47,6 +47,25 @@ class Application:
     clock: Clock
 
 
+def _build_model_gateway() -> ModelGateway:
+    """Select the model transport backend for this graph.
+
+    Ollama is the default. ``SONDER_MODEL_BACKEND=openai`` (aliases:
+    openai-compatible / llamacpp / vllm) selects the OpenAI-compatible gateway,
+    which talks to any /v1 server; its own consent gate still refuses a
+    non-loopback endpoint without cloud consent. Backend selection is a
+    composition concern, so the env read lives here, not in a port or adapter.
+    """
+    import os
+
+    backend = os.environ.get("SONDER_MODEL_BACKEND", "ollama").strip().lower()
+    if backend in ("openai", "openai-compatible", "llamacpp", "vllm"):
+        from ..adapters.openai_compat.gateway import OpenAICompatibleGateway
+
+        return OpenAICompatibleGateway()
+    return OllamaGateway()
+
+
 def build_application(profile: str = "workstation-local") -> Application:
     """Assemble one application graph for the selected profile.
 
@@ -58,8 +77,8 @@ def build_application(profile: str = "workstation-local") -> Application:
         raise ValueError(f"unknown profile {profile!r}; expected {PROFILES}")
     # SPEC-3 Phase 3: the real transport adapter behind the port — consent
     # enforced against the OperationContext, driver errors mapped into the
-    # domain taxonomy.
-    gateway = OllamaGateway()
+    # domain taxonomy. Backend is Ollama by default, selectable via env.
+    gateway = _build_model_gateway()
     return Application(
         profile=profile,
         runtime_policy=RuntimePolicyService(LegacyPolicyRepository()),
