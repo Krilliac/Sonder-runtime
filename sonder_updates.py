@@ -575,9 +575,26 @@ def switch_active_pointer(
         temp.unlink()
     except FileNotFoundError:
         pass
+    pointer = link.with_name(link.name + ".pointer")
     try:
         os.symlink(target, temp, target_is_directory=True)
-        os.replace(temp, link)
+        try:
+            os.replace(temp, link)
+        except OSError:
+            # Windows cannot rename over an existing directory symlink, so
+            # the second and every later switch would land in the pointer
+            # file while the stale symlink kept winning reads. Drop the old
+            # link and retry so the switch actually takes effect.
+            if not link.is_symlink():
+                raise
+            link.unlink()
+            os.replace(temp, link)
+        # The symlink now owns the switch; a pointer file left behind by an
+        # earlier unprivileged run must not shadow a future read.
+        try:
+            pointer.unlink()
+        except OSError:
+            pass
         return previous
     except (OSError, NotImplementedError):
         # Symlink unavailable/unprivileged: atomic pointer-file fallback.
@@ -585,17 +602,37 @@ def switch_active_pointer(
             temp.unlink()
         except FileNotFoundError:
             pass
-        pointer = link.with_name(link.name + ".pointer")
         temp_ptr = pointer.with_name(pointer.name + ".new-%d" % os.getpid())
         temp_ptr.write_text(str(target), encoding="utf-8")
         os.replace(temp_ptr, pointer)
+        # A stale symlink from a previously-privileged run must not shadow
+        # the fresh pointer file.
+        if link.is_symlink():
+            try:
+                link.unlink()
+            except OSError:
+                pass
         return previous
+
+
+def _strip_extended_prefix(path: str) -> str:
+    """Drop Windows' extended-length prefix from a readlink result.
+
+    os.readlink on Windows returns ``\\\\?\\C:\\...`` (or ``\\\\?\\UNC\\...``)
+    for directory symlinks; consumers compare against plain configured paths,
+    so the prefix must not leak out of the pointer reader.
+    """
+    if path.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + path[len("\\\\?\\UNC\\"):]
+    if path.startswith("\\\\?\\"):
+        return path[len("\\\\?\\"):]
+    return path
 
 
 def _read_pointer(link: Path) -> str | None:
     """Resolve the current target from either a symlink or a pointer file."""
     if link.is_symlink():
-        return os.readlink(link)
+        return _strip_extended_prefix(os.readlink(link))
     pointer = link.with_name(link.name + ".pointer")
     if pointer.is_file():
         return pointer.read_text(encoding="utf-8").strip() or None
