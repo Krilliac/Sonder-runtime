@@ -592,9 +592,34 @@ the machine instead of idling on conservative defaults:
   `SONDER_CODE_LOCAL`, and `SONDER_GENERAL` seed only its first creation.
 - `OLLAMA_FLASH_ATTENTION` - enabled as `1` by the launch scripts when they start
   Ollama.
+- `SONDER_SPECULATION` / `SONDER_SPECULATION_MIN_SAVING_MS` - speculative
+  execution and its adaptive cost-model floor (default `40` ms of expected
+  hidden wall time). Speculation self-tunes to the hardware: dormant on a
+  laptop where read-only tools are milliseconds, engaged on serious hardware
+  where a large local model and slow tools leave real seconds to hide. Set
+  `SONDER_SPECULATION=0` to disable it entirely.
 
 Check the active values with `diagnostics()` or REPL `/diagnostics`; check VRAM
 residency with `status()`.
+
+### Scaling up to large local models
+
+Sonder runs on a laptop, a USB-sized 4B, or a workstation/server hosting a
+large local model (70B/120B, a big MoE, multi-hundred-B/T parameters) — the
+same runtime, no small-model assumptions baked into the tiers. Point the heavy
+lanes at the big model, keep it resident, and give it its native context:
+
+```bash
+/runtime set general=<big-local-model> workbench=general review=general
+export OLLAMA_KEEP_ALIVE=2h
+export SONDER_NATIVE_CONTEXT_MAX=131072   # up to the model's limit
+```
+
+A large local model is still local — it does not trip the cloud consent gate —
+so you get frontier-class reasoning while prompts, code, and memory stay on
+hardware you own. Speculative execution and prewarm both pay off most in this
+regime. Details: [Model Tiers & Gateway](docs/wiki/08-model-tiers-and-gateway.md)
+and [Speculation & Prediction](docs/wiki/11-speculation-and-prediction.md).
 
 ---
 

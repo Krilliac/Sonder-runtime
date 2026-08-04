@@ -186,3 +186,72 @@ def test_stats_track_speculation_hit_rate(predictor):
     stats = predictor.stats()
     assert stats["speculations"] == 2
     assert stats["squashes"] == 1
+
+
+# -- adaptive cost model -----------------------------------------------------
+
+def test_cold_cost_model_allows_bounded_warmup(predictor):
+    # With no measured latencies yet, speculation runs so it can learn them,
+    # up to the warmup bound.
+    assert predictor.should_speculate(0.9) is True
+    predictor.speculations = sonder_speculation._SPEC_WARMUP
+    assert predictor.should_speculate(0.9) is False
+
+
+def test_fast_tool_slow_decision_stays_dormant(predictor):
+    # A CPU serving a small model: seconds to decide, milliseconds per tool.
+    # The hideable overlap is the tool latency (~ms), below the floor.
+    for _ in range(5):
+        predictor.observe_decision_latency(3.0)
+        predictor.observe_tool_latency(0.004)
+    assert predictor.expected_saving_seconds(0.9) < 0.04
+    assert predictor.should_speculate(0.9) is False
+
+
+def test_slow_model_and_slow_tool_engages(predictor):
+    # Serious hardware: a large model plus genuinely slow read-only tools.
+    for _ in range(5):
+        predictor.observe_decision_latency(2.0)
+        predictor.observe_tool_latency(1.5)
+    # Hideable overlap is min(decision, tool) weighted by confidence.
+    assert predictor.expected_saving_seconds(0.8) == pytest.approx(1.5 * 0.8, rel=0.2)
+    assert predictor.should_speculate(0.8) is True
+
+
+def test_expected_saving_uses_shorter_latency_and_confidence(predictor):
+    predictor.observe_decision_latency(0.5)
+    predictor.observe_tool_latency(4.0)
+    # min(0.5, 4.0) * confidence
+    assert predictor.expected_saving_seconds(1.0) == pytest.approx(0.5, rel=1e-6)
+    assert predictor.expected_saving_seconds(0.5) == pytest.approx(0.25, rel=1e-6)
+
+
+def test_min_saving_floor_is_env_tunable(predictor, monkeypatch):
+    for _ in range(5):
+        predictor.observe_decision_latency(1.0)
+        predictor.observe_tool_latency(0.1)  # 100ms hideable
+    monkeypatch.setenv("SONDER_SPECULATION_MIN_SAVING_MS", "50")
+    assert predictor.should_speculate(0.9) is True   # ~90ms > 50ms floor
+    monkeypatch.setenv("SONDER_SPECULATION_MIN_SAVING_MS", "500")
+    assert predictor.should_speculate(0.9) is False  # ~90ms < 500ms floor
+
+
+def test_note_saved_accumulates_hidden_wall_time(predictor):
+    predictor.note_saved(1.25)
+    predictor.note_saved(0.75)
+    predictor.note_saved(-1.0)  # ignored
+    assert predictor.stats()["saved_s"] == pytest.approx(2.0, rel=1e-6)
+
+
+def test_cost_model_persists_across_runs(tmp_path):
+    path = tmp_path / "predictor.json"
+    p1 = BranchPredictor(path)
+    for _ in range(5):
+        p1.observe_decision_latency(2.0)
+        p1.observe_tool_latency(1.0)
+    p1.save()
+    p2 = BranchPredictor(path).load()
+    # The learned latencies survive, so a slow machine engages immediately.
+    assert p2.ewma_decision_s > 0.5
+    assert p2.ewma_tool_s > 0.5
+    assert p2.should_speculate(0.8) is True

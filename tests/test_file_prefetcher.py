@@ -85,6 +85,9 @@ def test_reads_not_in_listing_do_not_confirm_stream():
 def isolated_predictor(tmp_path, monkeypatch):
     monkeypatch.setenv("SONDER_BRANCH_PREDICTOR", str(tmp_path / "bp.json"))
     monkeypatch.setenv("SONDER_SPECULATION", "1")
+    # Exercise the mechanism regardless of the adaptive cost model: with mock
+    # sub-millisecond tools the model would otherwise correctly go dormant.
+    monkeypatch.setenv("SONDER_SPECULATION_MIN_SAVING_MS", "0")
     sonder_speculation.reset_for_tests()
     yield
     sonder_speculation.reset_for_tests()

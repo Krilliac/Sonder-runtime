@@ -68,7 +68,10 @@ scoped by default.
 cannot widen network/filesystem/credential/cloud permissions.
 
 **Speculative execution** — running a predicted **read-only** tool during
-model generation and retiring it on a matching decision, else squashing.
+model generation and retiring it on a matching decision, else squashing. An
+adaptive cost model gates it on `min(decision, tool)` measured latency, so it
+is dormant on fast-tool laptops and engaged on large-model/slow-tool hardware
+([Speculation & Prediction](11-speculation-and-prediction.md)).
 
 **Tier** — a named model role (`fast`, `code`, `general`, `cloud-*`)
 resolving to an Ollama model.

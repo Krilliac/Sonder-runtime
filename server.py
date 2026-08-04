@@ -11745,10 +11745,14 @@ def _agent_impl(
         )
         _spec_prediction = _predictor.predict_next_tool(_spec_state)
         _spec_issued = False
+        # Cost-model gate: only speculate when the expected hidden wall time
+        # clears the floor on THIS machine (dormant on fast-tool CPUs, active
+        # on slow-model/slow-tool hardware). See sonder_speculation.
         if (
             _spec_enabled
             and _spec_prediction is not None
             and _spec_prediction[0] in _SPECULATABLE_ARGFREE_TOOLS
+            and _predictor.should_speculate(_spec_prediction[1])
         ):
             _predicted_tool = _spec_prediction[0]
             _predicted_args = _project_scope_args(
@@ -11759,7 +11763,7 @@ def _agent_impl(
                 _agent_call_signature(_predicted_tool, _predicted_args),
                 _predicted_args,
             )
-        if _spec_enabled and not _spec_issued:
+        if _spec_enabled and not _spec_issued and _predictor.should_speculate(0.5):
             # Fall back to the stream prefetcher: a concrete predicted
             # file_read from the last observed listing (argument-level
             # speculation, still strictly read-only).
@@ -11773,7 +11777,9 @@ def _agent_impl(
                     _agent_call_signature("file_read", _prefetch_scoped),
                     _prefetch_scoped,
                 )
+        _spec_decision_t0 = time.monotonic()
         decision, raw, decision_error = _agent_generate_decision(gen, step_prompt)
+        _predictor.observe_decision_latency(time.monotonic() - _spec_decision_t0)
         if decision is None:
             if isinstance(decision_error, ModelCallError):
                 if auto_checklist:
@@ -12026,6 +12032,13 @@ def _agent_impl(
             if _retired is not None:
                 tool_dispatched = True
                 observation = _retired.observation
+                # Feed the cost model: the tool's measured wall time, and the
+                # portion of it hidden behind this step's model decision.
+                _tool_wall = _retired.wall_seconds
+                _predictor.observe_tool_latency(_tool_wall)
+                _predictor.note_saved(
+                    min(_tool_wall, time.monotonic() - _spec_decision_t0)
+                )
             else:
                 dispatch_options = {
                     "allow_web": allow_web,
@@ -13498,11 +13511,13 @@ def status() -> str:
         spec = sonder_speculation.default_predictor().stats()
         lines.append(
             "branch predictor: %d predictions, %.0f%% accurate; "
-            "speculation %d issued, %.0f%% retired (%d states)"
+            "speculation %d issued, %.0f%% retired (%d states); "
+            "cost model decision~%.2fs tool~%.2fs, %.1fs hidden"
             % (
                 spec["predictions"], spec["accuracy"] * 100,
                 spec["speculations"], spec["speculation_hit_rate"] * 100,
                 spec["transition_states"],
+                spec["ewma_decision_s"], spec["ewma_tool_s"], spec["saved_s"],
             )
         )
     except Exception as exc:
