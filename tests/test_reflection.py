@@ -453,3 +453,25 @@ def test_pitfall_refuses_a_lesson_that_quotes_the_instances_calls():
         "Use `range(start, end + 1)` when callers expect an inclusive end.",
     ):
         assert reflection._quotes_the_instances_calls(general) is False, general
+
+
+def test_circular_guard_also_catches_the_present_tense_phrasing():
+    """A candidate whose module never defined its exported function produces
+    "the X function is not defined in module.py - define it", whose fix is the
+    task itself. That is the same missing-symbol shape as "was never defined",
+    and it reached the store once before the guard covered the present tense.
+    Measured over 1042 lessons the extension matched only that one."""
+    assert reflection._is_non_implementation(
+        "The `with_defaults` function is not defined in `module.py`. Define it "
+        "or remove its import from `test_module.py`.")
+    assert reflection._is_non_implementation(
+        "The required helpers are not defined in the module; add them.")
+
+    # Lessons that merely contain similar words stay, including one whose
+    # subject genuinely is validity rather than a missing symbol.
+    for keeper in (
+        "The ternary operator `? :` is not valid in PowerShell; use if/else.",
+        "Use `collections.deque` for O(1) pops from both ends of a queue.",
+        "Call `dict.copy()` before mutating so the caller's object is untouched.",
+    ):
+        assert reflection._is_non_implementation(keeper) is False, keeper

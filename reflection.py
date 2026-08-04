@@ -228,7 +228,11 @@ _NON_IMPLEMENTATION = re.compile(
     r"(?:implement|perform|contain|do)|is empty and|no logic (?:for|to)|"
     r"was never (?:implemented|defined|written)|missing (?:the )?"
     r"implementation|contains? no|performs? no|no (?:actual )?"
-    r"(?:sorting|logic|implementation|code) (?:was|is)"
+    r"(?:sorting|logic|implementation|code) (?:was|is)|"
+    # Same missing-symbol shape in the present tense. A candidate whose module
+    # never defined the function it exports produces "the X function is not
+    # defined in module.py - define it", whose fix is the task itself.
+    r"(?:is|are) not defined"
     r")\b",
     re.I,
 )
