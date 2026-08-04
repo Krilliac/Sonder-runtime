@@ -16,6 +16,8 @@ from ...application.ports.model_gateway import (
     ModelRequest,
     ModelResponse,
 )
+from ...application.ports.process_probe import ProbeResult, ProcessIdentity
+from ...application.ports.tool_executor import ToolCall, ToolResult
 
 
 class LegacyPolicyRepository:
@@ -356,3 +358,101 @@ class SystemClock:
 
     def monotonic(self) -> float:
         return time.monotonic()
+
+
+class LegacyProcessProbe:
+    """ProcessProbe over the root ``process_liveness`` module.
+
+    ``process_liveness`` encodes start-time / boot-id into one opaque identity
+    string rather than a separate float, so ``started_at`` stays 0.0 and the
+    fingerprint carries the real instance identity. Unknown liveness maps to
+    ``ProbeResult.UNKNOWN`` so it can never drive a split-brain ownership claim.
+    """
+
+    def identity(self, pid: int) -> ProcessIdentity | None:
+        import process_liveness
+
+        state, fingerprint = process_liveness.probe_process(pid)
+        if state == process_liveness.PROCESS_DEAD or not fingerprint:
+            return None
+        return ProcessIdentity(
+            pid=int(pid), started_at=0.0, fingerprint=str(fingerprint)
+        )
+
+    def is_same_live_process(self, identity: ProcessIdentity) -> ProbeResult:
+        import process_liveness
+
+        state, _observed = process_liveness.probe_process(
+            identity.pid, expected_identity=identity.fingerprint or None
+        )
+        if state == process_liveness.PROCESS_ALIVE:
+            return ProbeResult.ALIVE
+        if state == process_liveness.PROCESS_DEAD:
+            return ProbeResult.DEAD
+        return ProbeResult.UNKNOWN
+
+
+class LegacyToolExecutor:
+    """ToolExecutor over the guarded ``workbench`` / ``file_ops`` primitives.
+
+    Covers the core mutating/execution primitives (program/script execution and
+    guarded file operations); broader tool coverage arrives as server call-sites
+    migrate behind this port. The ``OperationContext`` is accepted for the seam;
+    ``workbench``/``file_ops`` still enforce their own containment/auth guards,
+    and a guard rejection surfaces as ``ok=False`` rather than an exception.
+    """
+
+    def execute(self, call: ToolCall, context: OperationContext) -> ToolResult:
+        args = dict(call.arguments or {})
+        try:
+            if call.tool == "run_program":
+                import workbench
+
+                res = workbench.run_program(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=str(res.get("stdout", "")),
+                    evidence=res,
+                )
+            if call.tool == "run_script":
+                import workbench
+
+                res = workbench.run_script(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=str(res.get("stdout", "")),
+                    evidence=res,
+                )
+            if call.tool == "read_file":
+                import file_ops
+
+                res = file_ops.read_file(**args)
+                return ToolResult(ok=True, output=str(res.get("text", "")), evidence=res)
+            if call.tool == "write_file":
+                import file_ops
+
+                res = file_ops.write_file(**args)
+                return ToolResult(
+                    ok=True, evidence=res if isinstance(res, dict) else {"result": res}
+                )
+            if call.tool == "edit_file":
+                import file_ops
+
+                res = file_ops.edit_file(**args)
+                return ToolResult(
+                    ok=True, evidence=res if isinstance(res, dict) else {"result": res}
+                )
+            if call.tool == "make_directory":
+                import file_ops
+
+                res = file_ops.make_directory(**args)
+                return ToolResult(ok=True, evidence=res)
+            return ToolResult(
+                ok=False,
+                error_code="unknown_tool",
+                output="unsupported tool: %s" % call.tool,
+            )
+        except (PermissionError, ValueError, OSError, KeyError, TypeError) as exc:
+            return ToolResult(
+                ok=False, error_code=type(exc).__name__, output=str(exc)
+            )

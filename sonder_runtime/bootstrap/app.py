@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from ..adapters.legacy.services import (
     LegacyAutomationRepository,
     LegacyPolicyRepository,
+    LegacyProcessProbe,
+    LegacyToolExecutor,
     LegacyUnitOfWork,
     OperationsEventSink,
     SystemClock,
@@ -23,7 +25,9 @@ from ..application.chat.handle_chat import ChatService
 from ..application.ports.clock import Clock
 from ..application.ports.event_sink import EventSink
 from ..application.ports.model_gateway import ModelGateway
+from ..application.ports.process_probe import ProcessProbe
 from ..application.ports.repositories import AutomationRepository, UnitOfWork
+from ..application.ports.tool_executor import ToolExecutor
 from ..application.runtime_policy.use_cases import RuntimePolicyService
 
 PROFILES = ("workstation-local", "server-private")
@@ -37,6 +41,8 @@ class Application:
     chat: ChatService
     automation: AutomationRepository
     unit_of_work: Callable[[], UnitOfWork]
+    tool_executor: ToolExecutor
+    process_probe: ProcessProbe
     events: EventSink
     clock: Clock
 
@@ -63,6 +69,8 @@ def build_application(profile: str = "workstation-local") -> Application:
         # A UnitOfWork is per-transaction, so the graph exposes a factory, not
         # a singleton; each call opens and owns its own connection scope.
         unit_of_work=LegacyUnitOfWork,
+        tool_executor=LegacyToolExecutor(),
+        process_probe=LegacyProcessProbe(),
         events=OperationsEventSink(),
         clock=SystemClock(),
     )
