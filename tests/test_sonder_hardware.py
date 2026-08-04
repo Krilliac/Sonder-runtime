@@ -31,7 +31,10 @@ def test_detect_hardware_never_spawns_subprocess_when_probes_injected(monkeypatc
         raise AssertionError("nvidia-smi must not be spawned in tests")
 
     monkeypatch.setattr(sonder_hardware.subprocess, "run", _boom)
-    monkeypatch.setattr(sonder_hardware.os, "sysconf", _boom)
+    # os.sysconf does not exist on Windows; raising=False keeps the
+    # never-spawn guard meaningful on POSIX without inverting the test
+    # into an AttributeError on hosts that lack the attribute.
+    monkeypatch.setattr(sonder_hardware.os, "sysconf", _boom, raising=False)
 
     hw = sonder_hardware.detect_hardware(
         probes={
