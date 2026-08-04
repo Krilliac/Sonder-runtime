@@ -253,13 +253,20 @@ def build_offline_bundle(
     repo = Path(repo_dir)
     built = Path(built_bundle_dir)
     out = Path(out_dir)
-    manifest = json.loads((built / "manifest.json").read_text(encoding="utf-8"))
+    manifest_src = built / "manifest.json"
+    manifest = json.loads(manifest_src.read_text(encoding="utf-8"))
     archive_name = manifest["archive"]["name"]
     archive_src = built / archive_name
     if not archive_src.is_file():
         raise FileNotFoundError(f"archive not found in build output: {archive_src}")
 
     published = publish_target(repo, archive_src, archive_name)
+    # V1: manifest.json drives install behavior (health_checks argv,
+    # entrypoints, resource budgets) and is consumed by the client, so it must
+    # be a signed TUF target alongside the archive — not merely copied beside
+    # it. The client (_verify_with_tuf) refuses a bundle whose manifest.json is
+    # absent from the signed metadata.
+    published_manifest = publish_target(repo, manifest_src, "manifest.json")
 
     out.mkdir(parents=True, exist_ok=True)
     (out / "metadata").mkdir(exist_ok=True)
@@ -268,12 +275,16 @@ def build_offline_bundle(
         shutil.copy2(repo / "metadata" / f"{name}.json",
                      out / "metadata" / f"{name}.json")
     shutil.copy2(repo / "targets" / archive_name, out / "targets" / archive_name)
-    shutil.copy2(built / "manifest.json", out / "manifest.json")
+    # The client loads and verifies bundle/manifest.json; publish the signed
+    # copy there (and mirror it into targets/ for layout parity with archive).
+    shutil.copy2(repo / "targets" / "manifest.json", out / "manifest.json")
+    shutil.copy2(repo / "targets" / "manifest.json", out / "targets" / "manifest.json")
     return {
         "offline_bundle": str(out),
         "target": archive_name,
         "sha256": published["sha256"],
-        "metadata_version": published["targets_version"],
+        "manifest_sha256": published_manifest["sha256"],
+        "metadata_version": published_manifest["targets_version"],
     }
 
 

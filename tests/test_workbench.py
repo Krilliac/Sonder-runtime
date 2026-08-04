@@ -176,17 +176,21 @@ def test_program_search_finds_path_executable(monkeypatch, tmp_path):
 
 def test_run_program_uses_argv_cwd_and_output_cap(monkeypatch, tmp_path):
     _guard_root(monkeypatch, tmp_path)
+    # Inline `python -c` is now refused (see C2 inline-shell hardening), so this
+    # test exercises argv/cwd/output-cap via a real script file instead.
+    script = tmp_path / "emit.py"
+    script.write_text("print('x' * 200)\n", encoding="utf-8")
 
     result = workbench.run_program(
         sys.executable,
-        args_json=["-c", "print('x' * 200)"],
+        args_json=[str(script)],
         cwd=".",
         max_output=32,
         timeout=10,
     )
 
     assert result["ok"]
-    assert result["command"][1] == "-c"
+    assert result["command"][1] == str(script)
     assert len(result["stdout"].encode("utf-8")) == 32
     assert result["stdout_truncated"] is True
 

@@ -46,6 +46,15 @@ _SECRET_TOML_KEYS = frozenset(
 
 MIN_API_KEY_LENGTH = 24
 
+# Auth modes that mint/verify account session tokens (as opposed to the plain
+# API-key or local-open profiles).  These key an HMAC with the auth secret.
+ACCOUNT_BEARING_AUTH_MODES = ("account", "both", "either")
+
+# The historical public development secret.  admin_auth no longer falls back to
+# it, but if an operator has pinned it explicitly we refuse to start any
+# account-bearing mode with it (belt-and-suspenders with the >=32-char rule).
+BUILTIN_DEV_AUTH_SECRET = "sonder-local-dev-secret"
+
 
 @dataclass(frozen=True)
 class ServerConfig:
@@ -403,6 +412,15 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
                 "profile server-private requires SONDER_API_KEY of at least "
                 f"{MIN_API_KEY_LENGTH} characters"
             )
+
+    if (
+        server.auth_mode in ACCOUNT_BEARING_AUTH_MODES
+        and config.secrets.auth_secret == BUILTIN_DEV_AUTH_SECRET
+    ):
+        errors.append(
+            f"[server].auth_mode {server.auth_mode!r} may not use the built-in "
+            "development auth secret; set SONDER_AUTH_SECRET to a private value"
+        )
 
     if config.state.minimum_free_disk_bytes < 0:
         errors.append("[state].minimum_free_disk_bytes must be >= 0")

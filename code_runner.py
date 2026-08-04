@@ -141,13 +141,20 @@ def normalize_language(language):
 
 
 def resolve_cwd(cwd=None):
-    root = workspace_root()
+    # Resolve symlinks on both the workspace root and the candidate cwd before
+    # the containment check (via os.path.realpath), mirroring file_ops.resolve_path
+    # which uses Path.resolve(). Without this, a symlink living inside the
+    # workspace but pointing outside it would pass an abspath+commonpath check and
+    # place the child process's cwd outside the tree. This is a tidiness boundary,
+    # not a sandbox (see module docstring); for non-symlinked paths the result is
+    # identical to the previous os.path.abspath behavior.
+    root = os.path.realpath(workspace_root())
     if not cwd:
         return root
     path = cwd
     if not os.path.isabs(path):
         path = os.path.join(root, path)
-    path = os.path.abspath(path)
+    path = os.path.realpath(path)
     try:
         inside = os.path.commonpath([root, path]) == root
     except ValueError:

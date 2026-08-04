@@ -14,6 +14,13 @@ result the next reviewer should not have to re-derive.
 Line numbers were accurate at review time against the working tree; they may
 drift as files change. Anchor on the named function, not just the integer.
 
+> **Remediation status (update):** all three CONFIRMED findings (C1, C2, C3)
+> and the three NEEDS-VERIFICATION items (V1, V2, V3) have since been fixed and
+> covered by tests. V1 was independently confirmed as a real
+> signature-bypass-to-execution before the fix. Each remediation narrows attack
+> surface and preserves the existing developer-token / explicit-gate escape
+> hatches. See the per-finding "Remediation" notes and the summary table.
+
 ---
 
 ## CONFIRMED
@@ -261,12 +268,12 @@ drift as files change. Anchor on the named function, not just the integer.
 
 | ID | Title | Severity | Status |
 |----|-------|----------|--------|
-| C1 | Secret/control files readable via direct read tools | medium | confirmed |
-| C2 | Inconsistent inline-shell hardening in `run_program` | low–med | confirmed |
-| C3 | Default public HMAC secret for account sessions | low | confirmed |
-| V1 | `manifest.json` outside the TUF-signed target set | med–high | needs-verification |
-| V2 | No SSRF pinning on update download URL | low | needs-verification |
-| V3 | `resolve_cwd` containment uses `abspath` not `realpath` | info | needs-verification |
+| C1 | Secret/control files readable via direct read tools | medium | confirmed → **fixed** |
+| C2 | Inconsistent inline-shell hardening in `run_program` | low–med | confirmed → **fixed** (incl. glued-flag bypass) |
+| C3 | Default public HMAC secret for account sessions | low | confirmed → **fixed** |
+| V1 | `manifest.json` outside the TUF-signed target set | med–high | confirmed → **fixed** |
+| V2 | No SSRF pinning on update download URL | low | **fixed** |
+| V3 | `resolve_cwd` containment uses `abspath` not `realpath` | info | **fixed** |
 | D1 | SSRF/DNS-rebinding defense | — | well-defended |
 | D2 | Layered consent gates | — | well-defended |
 | D3 | Secret rotation / redaction | — | well-defended |
@@ -274,6 +281,7 @@ drift as files change. Anchor on the named function, not just the integer.
 | D5 | Process-tree termination | — | well-defended |
 | D6 | HTTP admission / auth posture | — | well-defended |
 
-The highest-value fix is **C1** (apply the existing secret classifier to the
-first-party read path). The highest-value *verification* is **V1** (confirm
-whether an unsigned `manifest.json` can inject a `health_checks` argv).
+All findings above have been remediated. **V1** was the highest-value fix:
+`manifest.json` is now a signed TUF target, verified before any field is
+consumed, and `health_checks[].argv` is constrained to the release's own
+interpreter — closing the confirmed signature-bypass-to-execution path.

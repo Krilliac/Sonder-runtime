@@ -6,6 +6,10 @@ import hmac
 import os
 import sqlite3
 import time
+from pathlib import Path
+
+import sonder_paths
+import sonder_secrets
 
 
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 14
@@ -13,9 +17,45 @@ DEFAULT_RATE_LIMIT = 120
 RATE_WINDOW_SECONDS = 60
 BOOTSTRAP_SECRET_MIN_LENGTH = 16
 
+# Historical development default.  It is public, so it must never key real
+# session-token HMACs.  We keep the constant only to recognise and refuse it
+# (belt-and-suspenders with sonder_config validation); _secret() derives a
+# per-install random secret instead of ever returning this value.
+PUBLIC_DEV_SECRET = "sonder-local-dev-secret"
+
+
+def _auth_secret_file() -> Path:
+    """Per-install location of the derived account-session HMAC secret."""
+    return sonder_paths.ensure_home() / "secrets" / "auth_secret"
+
 
 def _secret() -> str:
-    return os.environ.get("SONDER_AUTH_SECRET") or "sonder-local-dev-secret"
+    """Return the account-session HMAC key, failing closed on a weak key.
+
+    An explicit ``SONDER_AUTH_SECRET`` always wins (the legitimate operator
+    escape hatch).  When it is unset we derive a per-install random secret and
+    persist it 0600 on first use, then reuse it on every later call — the
+    public dev constant is never used to hash a real token.
+    """
+    configured = os.environ.get("SONDER_AUTH_SECRET")
+    if configured:
+        return configured
+    path = _auth_secret_file()
+    try:
+        existing = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        existing = ""
+    if existing:
+        return existing
+    generated = sonder_secrets.generate_key()
+    sonder_secrets._write_private(path, generated)
+    # Re-read so a concurrent first-run writer's value wins for everyone,
+    # keeping the token->hash mapping stable across processes.
+    try:
+        persisted = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        persisted = ""
+    return persisted or generated
 
 
 def _bootstrap_secret() -> str:

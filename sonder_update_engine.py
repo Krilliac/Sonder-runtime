@@ -475,26 +475,34 @@ class UpdateManager:
         for check in manifest["health_checks"]:
             kind = check.get("kind")
             if kind == "command":
-                argv = [
-                    sys.executable if part == "{python}" else part
-                    for part in check.get("argv", [])
-                ]
-                if not argv:
+                raw_argv = check.get("argv", [])
+                if not raw_argv:
                     problems.append("health check with empty argv")
                     continue
+                # V1 defense-in-depth: even though manifest.json is now a
+                # signed TUF target, constrain argv[0] to the release's own
+                # interpreter placeholder ("{python}") so a compromised or
+                # mistaken manifest can never execute an arbitrary external
+                # program during health_check. The check always runs against
+                # the target release's code via _run_in_release.
+                if raw_argv[0] != "{python}":
+                    problems.append(
+                        f"health check argv[0] {raw_argv[0]!r} is not the "
+                        "release interpreter ('{python}'); refusing to "
+                        "execute an external program"
+                    )
+                    continue
+                argv = [
+                    sys.executable if part == "{python}" else part
+                    for part in raw_argv
+                ]
                 timeout = float(
                     check.get("timeout_seconds", self._health_timeout)
                 )
                 try:
-                    if argv[0] == sys.executable:
-                        result = self._run_in_release(
-                            release_dir, argv[1:], timeout=timeout
-                        )
-                    else:
-                        result = subprocess.run(
-                            argv, cwd=release_dir, capture_output=True,
-                            text=True, timeout=timeout,
-                        )
+                    result = self._run_in_release(
+                        release_dir, argv[1:], timeout=timeout
+                    )
                 except (OSError, subprocess.SubprocessError) as exc:
                     problems.append(f"{argv[0]}: {type(exc).__name__}")
                     continue

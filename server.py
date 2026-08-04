@@ -6780,6 +6780,7 @@ def file_read(path: str, max_bytes: int = 256000, token: str = "", approval: str
             max_bytes=max_bytes,
             extra_roots=extra_roots,
             bypass=_file_bypass_allowed(token, approval),
+            developer_authorized=_file_developer_allowed(token),
         )
     except Exception as e:
         _record_direct_tool("file_read", {"path": path}, ok=False, started=started, summary=str(e))
@@ -6820,6 +6821,7 @@ def data_inspect(
             max_bytes=max_bytes,
             extra_roots=extra_roots,
             bypass=_file_bypass_allowed(token, approval),
+            developer_authorized=_file_developer_allowed(token),
         )
     except Exception as e:
         _record_direct_tool("data_inspect", {"path": path}, ok=False, started=started, summary=str(e))
@@ -7117,6 +7119,13 @@ def file_read_range(
     started = time.time()
     args = {"path": path, "start_line": start_line, "end_line": end_line}
     try:
+        # read_line_range lives in workbench; apply the same secret/control-plane
+        # read guard the in-module read tools now enforce, before touching it.
+        file_ops.require_read_access(
+            path, extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+            developer_authorized=_file_developer_allowed(token),
+        )
         data = workbench.read_line_range(
             path, start_line=start_line, end_line=end_line,
             extra_roots=extra_roots, bypass=_file_bypass_allowed(token, approval),
@@ -7335,6 +7344,13 @@ def image_inspect(
     started = time.time()
     args = {"path": path}
     try:
+        # image_inspect lives in workbench; apply the same secret/control-plane
+        # read guard the in-module read tools now enforce, before touching it.
+        file_ops.require_read_access(
+            path, extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+            developer_authorized=_file_developer_allowed(token),
+        )
         data = workbench.image_inspect(
             path, extra_roots=extra_roots,
             bypass=_file_bypass_allowed(token, approval),
