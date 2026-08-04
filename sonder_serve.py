@@ -1521,6 +1521,42 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if path == "/v1/admin/updates/status":
+            # Durable update state for the System page (SPEC-4 R-M19).
+            # Read-only; install/rollback stay on the admin CLI surface.
+            context = self._request_auth_context()
+            if not context["authorized"]:
+                self._send_auth_error()
+                return
+            if not _admin_authorized(context):
+                self._send_json_payload(
+                    sonder_lifecycle.error_envelope(
+                        "FORBIDDEN",
+                        "administrator authorization is required",
+                        self._correlation(),
+                        retryable=False,
+                    ),
+                    status=403,
+                )
+                return
+            try:
+                import sonder_update_engine
+
+                payload = sonder_update_engine.UpdateManager().status()
+            except Exception as error:
+                self.log_error("update status failed: %s", type(error).__name__)
+                self._send_json_payload(
+                    sonder_lifecycle.error_envelope(
+                        "INTERNAL",
+                        "update status is unavailable",
+                        self._correlation(),
+                        retryable=True,
+                    ),
+                    status=500,
+                )
+                return
+            self._send_json_payload(payload)
+            return
         if path == "/v1/sonder/status":
             context = self._request_auth_context()
             if not context["authorized"]:

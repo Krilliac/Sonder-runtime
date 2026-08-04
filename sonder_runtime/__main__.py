@@ -409,6 +409,64 @@ def cmd_drain(args) -> int:
     return 0
 
 
+def cmd_update(args) -> int:
+    import sonder_update_engine
+    import sonder_updates
+
+    manager = sonder_update_engine.UpdateManager()
+    try:
+        if args.update_command == "status":
+            _emit(manager.status(), as_json=True)
+            return 0
+        if args.update_command == "build":
+            result = sonder_updates.build_bundle(
+                args.source, args.output,
+                version=args.bundle_version,
+                channel=args.channel,
+            )
+            _emit(result, as_json=args.json)
+            return 0
+        if args.update_command == "import":
+            plan = manager.import_offline(
+                args.path,
+                channel=args.channel,
+                allow_unverified=args.allow_unverified,
+                idempotency_key=args.idempotency_key,
+            )
+            payload = dict(plan)
+            if plan["status"] == "available":
+                payload["confirm_nonce"] = (
+                    sonder_update_engine.confirm_nonce_for(plan)
+                )
+            _emit(payload, as_json=args.json)
+            return 0 if plan["status"] == "available" else 1
+        if args.update_command == "install":
+            plan = manager.install(
+                args.update_id,
+                confirm=args.confirm or "",
+                allow_unverified=args.allow_unverified,
+                skip_backup=args.skip_backup,
+            )
+            _emit(dict(plan), as_json=args.json)
+            return 0 if plan["status"] == "committed" else 1
+        if args.update_command == "rollback":
+            active = manager.rollback(confirm=args.confirm or "")
+            _emit(dict(active), as_json=args.json)
+            print(
+                "Rollback complete. Restart the service to run the restored "
+                "release.",
+            )
+            return 0
+        if args.update_command == "cancel":
+            plan = manager.cancel(args.update_id)
+            _emit(dict(plan), as_json=args.json)
+            return 0
+        raise AssertionError(args.update_command)
+    except sonder_updates.UpdateError as exc:
+        print(f"update failed: {exc}", file=sys.stderr)
+        return 1
+
+
 def cmd_rotate_key(args) -> int:
     import sonder_secrets
 
@@ -534,6 +592,39 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("drain", help="request graceful drain")
     common(p)
     p.set_defaults(func=cmd_drain)
+
+    p = sub.add_parser("update", help="signed engine updates (SPEC-4)")
+    update_sub = p.add_subparsers(dest="update_command", required=True)
+    up = update_sub.add_parser("status")
+    up.add_argument("--json", action="store_true")
+    up = update_sub.add_parser("build", help="build a release bundle")
+    up.add_argument("source")
+    up.add_argument("output")
+    up.add_argument("--bundle-version", default=None)
+    up.add_argument("--channel", default="stable")
+    up.add_argument("--json", action="store_true")
+    up = update_sub.add_parser("import", help="import an offline bundle")
+    up.add_argument("path")
+    up.add_argument("--channel", default="stable")
+    up.add_argument("--allow-unverified", action="store_true",
+                    help="accept a bundle without TUF metadata (requires "
+                         "SONDER_UPDATE_ALLOW_UNSIGNED=1; never production)")
+    up.add_argument("--idempotency-key", default=None)
+    up.add_argument("--json", action="store_true")
+    up = update_sub.add_parser("install", help="install an imported update")
+    up.add_argument("update_id")
+    up.add_argument("--confirm", help="confirmation nonce from update status")
+    up.add_argument("--allow-unverified", action="store_true")
+    up.add_argument("--skip-backup", action="store_true",
+                    help="skip the pre-install backup (testing only)")
+    up.add_argument("--json", action="store_true")
+    up = update_sub.add_parser("rollback", help="roll back to the previous release")
+    up.add_argument("--confirm", help="last 8 chars of the previous release id")
+    up.add_argument("--json", action="store_true")
+    up = update_sub.add_parser("cancel")
+    up.add_argument("update_id")
+    up.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_update)
 
     p = sub.add_parser(
         "rotate-key", help="rotate SONDER_API_KEY with an overlap window"
