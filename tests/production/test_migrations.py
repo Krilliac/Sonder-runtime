@@ -94,11 +94,14 @@ def test_edited_migration_history_rejected(tmp_path):
         migrate_store("operations", db)
 
 
-def test_stores_without_migrations_report_empty_status():
+def test_all_registered_stores_report_status():
     statuses = sonder_migrations.status_all()
-    assert set(statuses) == {"memory", "autopilot", "fleet", "operations"}
-    for store in ("memory", "autopilot", "fleet"):
-        assert statuses[store].healthy  # no ledger yet, nothing unknown
+    assert set(statuses) == {
+        "memory", "autopilot", "fleet", "operations", "updates"
+    }
+    for status in statuses.values():
+        assert not status.unknown
+        assert not status.checksum_mismatches
 
 
 def test_failed_migration_rolls_back(tmp_path, monkeypatch):

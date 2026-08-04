@@ -134,6 +134,7 @@ def store_db_paths() -> dict[str, str]:
         "autopilot": autopilot_store.database_path(),
         "fleet": fleet_store.database_path(),
         "operations": _operations_db_path(),
+        "updates": sonder_paths.state_path("updates.db", "SONDER_UPDATES_DB"),
     }
 
 
