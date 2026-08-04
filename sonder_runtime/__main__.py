@@ -211,9 +211,22 @@ def cmd_backup(args) -> int:
               as_json=args.json)
         return 0
     if args.backup_command == "prune":
-        removed = sonder_backup.prune_backups(
-            _backup_target(args), keep=args.keep
-        )
+        if args.keep is not None:
+            removed = sonder_backup.prune_backups(
+                _backup_target(args), keep=args.keep
+            )
+        else:
+            try:
+                config = _load_config(args)
+                daily = config.backup.retention_daily
+                weekly = config.backup.retention_weekly
+                monthly = config.backup.retention_monthly
+            except sonder_config.ConfigError:
+                daily, weekly, monthly = 7, 4, 6
+            removed = sonder_backup.prune_backups_tiered(
+                _backup_target(args), daily=daily, weekly=weekly,
+                monthly=monthly,
+            )
         _emit({"removed": removed}, as_json=args.json)
         return 0
     raise AssertionError(args.backup_command)
@@ -229,6 +242,14 @@ def cmd_restore(args) -> int:
                 print(f"FAIL: {problem}", file=sys.stderr)
             return 1
         print("backup verified")
+        return 0
+    if args.restore_command == "smoke":
+        problems = sonder_backup.restore_smoke(args.path)
+        if problems:
+            for problem in problems:
+                print(f"FAIL: {problem}", file=sys.stderr)
+            return 1
+        print("restore smoke passed")
         return 0
     if args.restore_command == "apply":
         if not args.confirm or args.confirm != "restore":
@@ -359,14 +380,63 @@ def cmd_mcp(args) -> int:
 
 
 def cmd_drain(args) -> int:
-    del args
-    print(
-        "drain: the HTTP admin drain endpoint arrives with SPEC-2 WP3; "
-        "until then stop the service manager unit (systemctl stop sonder) "
-        "which delivers SIGTERM and triggers the in-process drain.",
-        file=sys.stderr,
-    )
-    return 2
+    """Request graceful drain via POST /v1/admin/drain."""
+    import urllib.error
+    import urllib.request
+    import uuid
+
+    try:
+        config = _load_config(args)
+    except sonder_config.ConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    url = f"http://127.0.0.1:{config.server.port}/v1/admin/drain"
+    request = urllib.request.Request(url, method="POST", data=b"")
+    if config.secrets.api_key:
+        request.add_header("Authorization", f"Bearer {config.secrets.api_key}")
+    request.add_header("Idempotency-Key", f"drain-{uuid.uuid4().hex}")
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        print(f"drain request rejected: HTTP {exc.code}", file=sys.stderr)
+        return 1
+    except (urllib.error.URLError, OSError) as exc:
+        print(f"cannot reach the runtime on port {config.server.port}: {exc}",
+              file=sys.stderr)
+        return 1
+    _emit(payload, as_json=args.json)
+    return 0
+
+
+def cmd_rotate_key(args) -> int:
+    import sonder_secrets
+
+    if not args.secrets:
+        print("rotate-key requires --secrets <path>", file=sys.stderr)
+        return 2
+    try:
+        report = sonder_secrets.rotate_api_key(
+            args.secrets, overlap_seconds=args.overlap_seconds
+        )
+    except sonder_secrets.RotationError as exc:
+        print(f"rotation failed: {exc}", file=sys.stderr)
+        return 1
+    from sonder_operations_store import OperationsStore
+
+    try:
+        OperationsStore().record_event(
+            component="secrets",
+            event_code="API_KEY_ROTATED",
+            summary="API key rotated",
+            detail={
+                "previous_accepted_until": report["previous_accepted_until"]
+            },
+        )
+    except Exception:
+        pass
+    _emit(report, as_json=args.json)
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -422,7 +492,10 @@ def build_parser() -> argparse.ArgumentParser:
         common(bp)
         bp.add_argument("--target", help="backup repository directory")
         if name == "prune":
-            bp.add_argument("--keep", type=int, default=7)
+            bp.add_argument(
+                "--keep", type=int, default=None,
+                help="simple keep-N; omit for tiered daily/weekly/monthly",
+            )
     bp = backup_sub.add_parser("verify")
     bp.add_argument("path")
     bp.add_argument("--json", action="store_true")
@@ -431,6 +504,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("restore", help="restore management")
     restore_sub = p.add_subparsers(dest="restore_command", required=True)
     rp = restore_sub.add_parser("verify")
+    rp.add_argument("path")
+    rp.add_argument("--json", action="store_true")
+    rp = restore_sub.add_parser("smoke")
     rp.add_argument("path")
     rp.add_argument("--json", action="store_true")
     rp = restore_sub.add_parser("apply")
@@ -458,6 +534,16 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("drain", help="request graceful drain")
     common(p)
     p.set_defaults(func=cmd_drain)
+
+    p = sub.add_parser(
+        "rotate-key", help="rotate SONDER_API_KEY with an overlap window"
+    )
+    common(p)
+    p.add_argument(
+        "--overlap-seconds", type=int, default=24 * 3600,
+        help="how long the previous key stays valid (default 24h)",
+    )
+    p.set_defaults(func=cmd_rotate_key)
 
     return parser
 
