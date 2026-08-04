@@ -466,11 +466,45 @@ def verify_bundle_trust(
     return "unsigned-explicitly-allowed"
 
 
+def _local_file_fetcher_class():
+    """Build a filesystem-backed TUF fetcher (import-guarded)."""
+    from tuf.api import exceptions as tuf_exceptions
+    from tuf.ngclient import FetcherInterface
+
+    class _LocalFileFetcher(FetcherInterface):
+        """Reads metadata/targets from local paths for offline bundles.
+
+        Maps a missing file to a 404 DownloadHTTPError so python-tuf's
+        root-rotation walk (which probes N+1.root.json) terminates cleanly
+        instead of raising an unhandled download error.
+        """
+
+        def _fetch(self, url):
+            # base_urls were passed as plain directory paths, so url is a
+            # filesystem path (with any file:// prefix stripped defensively).
+            path = url[7:] if url.startswith("file://") else url
+            candidate = Path(path)
+            if not candidate.is_file():
+                raise tuf_exceptions.DownloadHTTPError(
+                    f"not found: {path}", 404
+                )
+            data = candidate.read_bytes()
+
+            def _chunks():
+                yield data
+
+            return _chunks()
+
+    return _LocalFileFetcher
+
+
 def _verify_with_tuf(bundle_dir: Path, manifest: BundleManifest) -> str:
     """Full TUF verification of the archive target from local metadata."""
     import tempfile
 
     from tuf.ngclient import Updater
+
+    _LocalFileFetcher = _local_file_fetcher_class()
 
     root = bundle_dir / "metadata" / "root.json"
     if not root.is_file():
@@ -482,15 +516,24 @@ def _verify_with_tuf(bundle_dir: Path, manifest: BundleManifest) -> str:
     with tempfile.TemporaryDirectory(prefix="sonder-tuf-") as tmp:
         metadata_cache = Path(tmp) / "metadata"
         metadata_cache.mkdir()
-        shutil.copy2(root, metadata_cache / "root.json")
+        trusted_root = root.read_bytes()
         try:
+            targets_dir = (
+                bundle_dir / "targets"
+                if (bundle_dir / "targets").is_dir()
+                else bundle_dir
+            )
             updater = Updater(
                 metadata_dir=str(metadata_cache),
-                metadata_base_url=(bundle_dir / "metadata").as_uri() + "/",
+                metadata_base_url=str(bundle_dir / "metadata") + "/",
                 target_dir=str(Path(tmp) / "targets"),
-                target_base_url=(bundle_dir / "targets").as_uri() + "/"
-                if (bundle_dir / "targets").is_dir()
-                else bundle_dir.as_uri() + "/",
+                target_base_url=str(targets_dir) + "/",
+                # Offline bundles are local files; the default HTTP fetcher
+                # cannot read them and, crucially, the root-rotation walk
+                # needs a missing N.root.json to read as 404 so it
+                # terminates. _LocalFileFetcher provides both.
+                fetcher=_LocalFileFetcher(),
+                bootstrap=trusted_root,
             )
             updater.refresh()
             info = updater.get_targetinfo(target_name)

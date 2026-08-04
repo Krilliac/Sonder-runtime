@@ -722,6 +722,63 @@ def _generate_text(prompt, tier="fast", system="", temperature=0.2,
     )(prompt)
 
 
+_APP_GRAPH = None
+_APP_GRAPH_LOCK = threading.Lock()
+
+
+def _application():
+    """Lazily build the SPEC-3 composition-root graph (no import-time cost)."""
+    global _APP_GRAPH
+    with _APP_GRAPH_LOCK:
+        if _APP_GRAPH is None:
+            from sonder_runtime.bootstrap import app as _bootstrap_app
+            _APP_GRAPH = _bootstrap_app.build_application()
+        return _APP_GRAPH
+
+
+def _gateway_generate_text(prompt, tier="fast", system="", temperature=0.2,
+                           num_predict=256, num_ctx=2048, timeout=None):
+    """offload_fn routed through the SPEC-3 ChatService over the ModelGateway.
+
+    The port enforces the operation-context cloud-consent gate and returns
+    domain-typed errors; this edge translates them back to ModelCallError
+    (a urllib.error.URLError subclass) so existing callers that catch
+    URLError — session summarization/titling — keep their exact behavior.
+    """
+    del num_ctx  # the gateway resolves native context via _make_generate
+    from sonder_runtime.application.chat.handle_chat import ChatCommand
+    from sonder_runtime.application.context import local_owner_context
+    from sonder_runtime.domain.common import errors as _errors
+
+    context = local_owner_context(
+        correlation_id="offload-%s" % os.urandom(4).hex(),
+        source="system",
+        cloud_allowed=cloud_allowed(),
+        remote_ollama_allowed=not ollama_endpoint.is_loopback(BASE),
+        timeout_seconds=float(timeout) if timeout else None,
+    )
+    try:
+        result = _application().chat.complete(
+            ChatCommand(
+                content=prompt, tier=tier, system=system,
+                temperature=temperature, num_predict=num_predict,
+            ),
+            context,
+        )
+    except _errors.SonderError as exc:
+        # Translate the domain taxonomy back to the legacy transport error
+        # at the adapter edge so callers' URLError handling is unchanged.
+        kind = {
+            "DEADLINE_EXCEEDED": "timeout",
+            "CANCELLED": "cancelled",
+            "DEPENDENCY_UNAVAILABLE": "request",
+            "FORBIDDEN": "configuration",
+            "INVALID_INPUT": "configuration",
+        }.get(getattr(exc, "code", ""), "request")
+        raise ModelCallError(kind, str(exc)) from exc
+    return result.response_text
+
+
 def _internal_generate_for_route(model, cloud):
     """Return the generator subordinate steps must use for one request route.
 
@@ -1834,8 +1891,11 @@ def _session_history_messages(
     best-effort: if it fails, we simply send the live turns.
     """
     scoped = project is not _ALL_PROJECTS
+    # SPEC-3: session summarization's model call routes through the
+    # ModelGateway port by default (consent gate + typed errors), with the
+    # legacy generator still injectable for cloud-route inheritance.
     generate_text = (
-        _generate_text if internal_generate is None else internal_generate
+        _gateway_generate_text if internal_generate is None else internal_generate
     )
     if scoped:
         turns = memory_store.session_turns_for_project(conn, session_id, project)
@@ -1888,7 +1948,7 @@ def _session_history_messages(
 def _maybe_title(conn, session_id, first_prompt, internal_generate=None):
     """Give a brand-new session a short title (best-effort, never fatal)."""
     generate_text = (
-        _generate_text if internal_generate is None else internal_generate
+        _gateway_generate_text if internal_generate is None else internal_generate
     )
     sess = memory_store.get_session(conn, session_id) or {}
     if sess.get("title"):

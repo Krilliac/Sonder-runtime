@@ -1,0 +1,12 @@
+# Signed engine distribution / update manager (SPEC-4).
+#
+# The update client's TUF verification path (sonder_updates._verify_with_tuf)
+# and the publisher (tools/tuf_repo.py) use The Update Framework. These are
+# OPTIONAL at runtime: the update engine only imports them when a bundle
+# carries TUF metadata, and the rest of the runtime never touches them.
+#
+# Pin the exact tested releases for release builds; a bump requires re-running
+# the adversarial acceptance suite (tests/production/test_tuf_publisher.py and
+# the archive-safety / rollback / freeze tests) before shipping (SPEC-4 §16).
+tuf>=5,<7
+cryptography>=42
