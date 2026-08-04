@@ -359,6 +359,148 @@ def build_bundle(
 # Adversarially-safe extraction (SPEC-4 section 9)
 # ---------------------------------------------------------------------------
 
+def resumable_download(
+    url: str,
+    destination: str | os.PathLike,
+    *,
+    expected_length: int | None = None,
+    expected_sha256: str | None = None,
+    validators: dict | None = None,
+    chunk_size: int = 1 << 20,
+    opener=None,
+) -> dict:
+    """Download ``url`` to ``destination`` resuming a prior ``.partial`` file.
+
+    SPEC-4 section 9: HTTP Range is used only when the server's validators
+    (ETag / Last-Modified) match those persisted from the interrupted
+    attempt, so a changed upstream never resumes onto stale bytes — the
+    partial is discarded and the download restarts. Length and SHA-256 are
+    verified after assembly. Returns evidence describing the transfer.
+
+    ``opener`` is injected for testing; it takes (url, headers) and returns
+    a context-manager response with ``.status``, ``.headers``, ``.read``.
+    """
+    import urllib.request
+
+    dest = Path(destination)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    partial = dest.with_name(dest.name + ".partial")
+    sidecar = dest.with_name(dest.name + ".partial.validators.json")
+
+    prior_validators = {}
+    if sidecar.exists():
+        try:
+            prior_validators = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            prior_validators = {}
+
+    have = partial.stat().st_size if partial.exists() else 0
+    resume = False
+    if have and validators and prior_validators:
+        # Resume only when every recorded validator still matches.
+        resume = all(
+            prior_validators.get(k) == v for k, v in validators.items()
+        ) and prior_validators == dict(validators)
+    if not resume and have:
+        # Upstream changed (or no validators): discard the stale partial.
+        partial.unlink()
+        have = 0
+
+    headers = {}
+    if resume and have:
+        headers["Range"] = "bytes=%d-" % have
+
+    def _default_opener(u, h):
+        return urllib.request.urlopen(urllib.request.Request(u, headers=h), timeout=120)
+
+    open_fn = opener or _default_opener
+    resumed = False
+    with open_fn(url, headers) as response:
+        status = getattr(response, "status", 200)
+        if resume and have and status == 206:
+            resumed = True
+            mode = "ab"
+        else:
+            # 200 (server ignored Range or fresh start): overwrite.
+            mode = "wb"
+            have = 0
+        if validators:
+            sidecar.write_text(json.dumps(dict(validators)), encoding="utf-8")
+        with open(partial, mode) as sink:
+            while True:
+                chunk = response.read(chunk_size)
+                if not chunk:
+                    break
+                sink.write(chunk)
+
+    total = partial.stat().st_size
+    if expected_length is not None and total != expected_length:
+        raise UpdateError(
+            "downloaded length %d != expected %d" % (total, expected_length)
+        )
+    if expected_sha256 is not None:
+        actual = _sha256_file(partial)
+        if actual != expected_sha256:
+            raise TrustError("downloaded hash mismatch for %s" % dest.name)
+    os.replace(partial, dest)
+    if sidecar.exists():
+        sidecar.unlink()
+    return {
+        "path": str(dest),
+        "bytes": total,
+        "resumed": resumed,
+        "resumed_from": have if resumed else 0,
+    }
+
+
+def switch_active_pointer(
+    current_link: str | os.PathLike, target: str | os.PathLike
+) -> str | None:
+    """Atomically repoint ``current_link`` at ``target`` (R-M10).
+
+    POSIX and platforms with symlink privilege get an atomic symlink swap
+    via os.replace. Where a directory symlink cannot be created (typical
+    unprivileged Windows), fall back to writing the target path into a
+    ``<link>.pointer`` file and replacing atomically — the launcher reads
+    that pointer. Either way the switch is atomic and returns the prior
+    target (or None).
+    """
+    link = Path(current_link)
+    link.parent.mkdir(parents=True, exist_ok=True)
+    previous = _read_pointer(link)
+
+    temp = link.with_name(link.name + ".new-%d" % os.getpid())
+    try:
+        temp.unlink()
+    except FileNotFoundError:
+        pass
+    try:
+        os.symlink(target, temp, target_is_directory=True)
+        os.replace(temp, link)
+        return previous
+    except (OSError, NotImplementedError):
+        # Symlink unavailable/unprivileged: atomic pointer-file fallback.
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
+        pointer = link.with_name(link.name + ".pointer")
+        temp_ptr = pointer.with_name(pointer.name + ".new-%d" % os.getpid())
+        temp_ptr.write_text(str(target), encoding="utf-8")
+        os.replace(temp_ptr, pointer)
+        return previous
+
+
+def _read_pointer(link: Path) -> str | None:
+    """Resolve the current target from either a symlink or a pointer file."""
+    if link.is_symlink():
+        return os.readlink(link)
+    pointer = link.with_name(link.name + ".pointer")
+    if pointer.is_file():
+        return pointer.read_text(encoding="utf-8").strip() or None
+    return None
+
+
 def safe_extract(
     archive_path: str | os.PathLike,
     destination: str | os.PathLike,

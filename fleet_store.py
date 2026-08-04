@@ -22,10 +22,12 @@ import time
 from pathlib import Path
 
 import sonder_paths
+from sonder_runtime.domain.automation import state_machine as _sm
 
 
-ACTIVE_STATUSES = ("queued", "running")
-TERMINAL_STATUSES = ("done", "failed", "cancelled", "interrupted", "retried")
+# SPEC-3 Phase 6: canonical fleet status classification in the domain layer.
+ACTIVE_STATUSES = _sm.FLEET_ACTIVE
+TERMINAL_STATUSES = _sm.FLEET_TERMINAL
 DEFAULT_STALE_SECONDS = 60
 DEFAULT_STALE_GRACE_SECONDS = 10
 DEFAULT_FINISHED_RETENTION = 500
