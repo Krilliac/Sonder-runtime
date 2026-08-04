@@ -152,6 +152,24 @@ def test_campaign_verdict_tokens_cannot_contain_each_other():
                 )
 
 
+def test_pitfall_errors_reach_the_line_the_nightly_runner_keeps():
+    """scripts/nightly_self_improve.py logs only _first_line() of a tool
+    result, so a pitfall-distillation crash reported on any later line is
+    invisible in unattended runs. Two nights of logs carried no trace of a
+    crash that replay showed happening on 2 of 10 failures."""
+    noisy = server._campaign_headline(20, 24, 20, 4, 3, 12.5)
+    first_line = noisy.strip().splitlines()[0]
+    assert "3 pitfall-errors" in first_line
+
+    # A healthy run must stay byte-identical, or every existing log grep and
+    # eyeball comparison against past nights breaks.
+    healthy = server._campaign_headline(24, 24, 24, 0, 0, 12.5)
+    assert healthy == (
+        "campaign generate/compile/execute/record: "
+        "24/24 passed, 24 recorded, 0 failed-recorded in 12.500s"
+    )
+
+
 @pytest.mark.parametrize("languages", [
     ["powershell", "cpp", "csharp"],
     ["python", "javascript"],

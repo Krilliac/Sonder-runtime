@@ -2260,6 +2260,28 @@ def _drain_deferred_distillations(limit=16):
     return {"drained": len(pending), "stored": stored, "deferred": deferred}
 
 
+def _campaign_headline(
+    passed, total, recorded, failed_recorded, pitfall_errors, elapsed,
+):
+    """Build the campaign's first line - the only line an unattended run keeps.
+
+    scripts/nightly_self_improve.py records _first_line() of each tool result,
+    so anything a nightly review must be able to see has to appear here. A
+    pitfall-distillation crash reported only in a per-attempt record, or on a
+    later summary line, is invisible in exactly the run where nobody is
+    watching. The count is appended only when non-zero so a healthy run's
+    headline stays byte-identical to what it has always been.
+    """
+    headline = (
+        "campaign generate/compile/execute/record: "
+        "%d/%d passed, %d recorded, %d failed-recorded"
+        % (passed, total, recorded, failed_recorded)
+    )
+    if pitfall_errors:
+        headline += ", %d pitfall-errors" % pitfall_errors
+    return "%s in %.3fs" % (headline, elapsed)
+
+
 def _record_failure_pitfall(interaction_id, task, response, error):
     """Turn a terminal failure into a durable pitfall lesson.
 
@@ -4087,6 +4109,7 @@ def campaign_generate_compile_execute_record(
                     ok = False
                     out = "wrong output; expected exactly %r, got %r" % (expected, out)
             record_msg = ""
+            pitfall_note = ""
             if ok and iid:
                 with _CAMPAIGN_LEARN_LOCK:
                     record_msg = record_outcome(iid, "tests_passed")
@@ -4108,6 +4131,7 @@ def campaign_generate_compile_execute_record(
                 "iid": iid,
                 "output": out,
                 "record": record_msg,
+                "pitfall_error": pitfall_note,
             })
             if ok:
                 break
@@ -4144,19 +4168,33 @@ def campaign_generate_compile_execute_record(
         for a in r.get("attempts", [])
         if not a.get("ok") and a.get("record")
     )
+    # A failure whose pitfall distillation raised teaches nothing, and the
+    # unattended runner only ever logs these summary lines - so a note buried
+    # in a per-attempt record is invisible exactly when it matters most.
+    # Reported only when non-zero, to keep a healthy run quiet.
+    pitfall_errors = [
+        a.get("pitfall_error")
+        for r in results
+        for a in r.get("attempts", [])
+        if a.get("pitfall_error")
+    ]
     by_lang = {}
     for r in results:
         lang = r["language"]
         ok, total_lang = by_lang.get(lang, (0, 0))
         by_lang[lang] = (ok + (1 if r["ok"] else 0), total_lang + 1)
     lines = [
-        "campaign generate/compile/execute/record: %d/%d passed, %d recorded, %d failed-recorded in %.3fs"
-        % (passed, len(results), recorded, failed_recorded, elapsed),
+        _campaign_headline(
+            passed, len(results), recorded, failed_recorded,
+            len(pitfall_errors), elapsed,
+        ),
         "by language: %s" % ", ".join(
             "%s=%d/%d" % (lang, ok, total_lang)
             for lang, (ok, total_lang) in sorted(by_lang.items())
         ),
     ]
+    if pitfall_errors:
+        lines.append("first pitfall error: %s" % pitfall_errors[0])
     drain = _drain_deferred_distillations(limit=max(16, len(results)))
     if drain["drained"]:
         lines.append(
@@ -4421,12 +4459,13 @@ def campaign_repo_repair(
                 else:
                     ok, failure = False, "no python code block returned"
                 record_msg = ""
+                pitfall_note = ""
                 if infra:
                     # No attributable verdict: leave the reward store alone.
                     attempts.append({
                         "attempt": attempt + 1, "ok": False, "iid": iid,
                         "output": failure[-400:], "record": "",
-                        "infra": infra,
+                        "infra": infra, "pitfall_error": "",
                     })
                     break
                 if ok and iid:
@@ -4449,7 +4488,7 @@ def campaign_repo_repair(
                 attempts.append({
                     "attempt": attempt + 1, "ok": ok, "iid": iid,
                     "output": failure[-400:], "record": record_msg,
-                    "infra": "",
+                    "infra": "", "pitfall_error": pitfall_note,
                 })
                 if ok:
                     break
@@ -4474,11 +4513,22 @@ def campaign_repo_repair(
     elapsed = round(time.time() - started, 3)
     passed = sum(1 for r in results if r and r.get("ok"))
     infra_skipped = sum(1 for r in results if r and r.get("infra"))
+    # Same blindness as the campaign tier: only this first line survives into
+    # an unattended run's log, so a crashed pitfall distillation has to be
+    # counted here or it is never seen.
+    pitfall_errors = sum(
+        1
+        for r in results if r
+        for a in r.get("attempts", [])
+        if a.get("pitfall_error")
+    )
     lines = [
-        "campaign repo-repair: %d/%d suites fixed in %.3fs%s"
+        "campaign repo-repair: %d/%d suites fixed in %.3fs%s%s"
         % (passed, len(results), elapsed,
            (" (%d job(s) unattributable — no outcome recorded)"
-            % infra_skipped) if infra_skipped else ""),
+            % infra_skipped) if infra_skipped else "",
+           (" (%d pitfall-error(s))" % pitfall_errors)
+           if pitfall_errors else ""),
     ]
     if infra_skipped and infra_skipped >= max(1, len(results) // 2):
         lines.append(
