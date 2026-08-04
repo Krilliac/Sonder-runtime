@@ -1770,6 +1770,13 @@ class Handler(BaseHTTPRequestHandler):
 
         stream = bool(req.get("stream", False))
         model = req.get("model", "sonder")
+        # Speculatively load the target model now, overlapping its cold-load
+        # cost with the history assembly, scope resolution, and memory work
+        # below. Best-effort and local-only (see server.prewarm_model).
+        try:
+            server.prewarm_model(_model_to_tier(model) or "")
+        except Exception:
+            pass
         context_size = req.get("context_size", "")
         location_consent = req.get("location_consent") is True
         location_hint = req.get("location_hint")
