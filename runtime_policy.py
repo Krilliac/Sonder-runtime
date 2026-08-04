@@ -2,6 +2,12 @@
 
 Every Sonder Runtime surface uses the same per-user file. The policy intentionally
 cannot configure cloud models, permissions, roots, or credentials.
+
+SPEC-3 Phase 2: the pure validation/normalization rules moved to
+``sonder_runtime.domain.runtime_policy.rules`` and the atomic-write/lock
+primitives to ``sonder_runtime.adapters.filesystem.atomic_json``. This
+module stays the compatible surface for existing callers and owns the
+policy file's location, locking discipline, and load/update workflows.
 """
 from __future__ import annotations
 
@@ -9,38 +15,24 @@ import contextlib
 import hmac
 import json
 import os
-import re
 import threading
 import time
-import uuid
 from pathlib import Path
 
 import sonder_paths
+from sonder_runtime.adapters.filesystem import atomic_json as _atomic_json
+from sonder_runtime.domain.runtime_policy import rules as _rules
 
-
-VERSION = 1
-LOCAL_TIERS = ("fast", "code", "general")
-ROUTING_LANES = ("router", "workbench", "autopilot", "fleet", "review")
-DEFAULT_MODELS = {
-    "fast": "qwen2.5:3b",
-    "code": "sonder:latest",
-    "general": "sonder:latest",
-}
-RESERVED_PERSONAL_MODEL = "sonder-personal:latest"
-DEFAULT_ROUTING = {
-    "router": "fast",
-    "workbench": "code",
-    "autopilot": "code",
-    "fleet": "code",
-    "review": "code",
-}
-# The NPU utility accelerator sits below the local tiers and never becomes a
-# generative tier. Policy only selects a behavior mode per capability; it can
-# never name models, paths, providers, or anything cloud-related.
-NPU_MODES = ("off", "shadow", "prefer")
-NPU_CAPABILITIES = ("routing", "embeddings")
-DEFAULT_NPU = {"mode": "off", "routing": "", "embeddings": ""}
-_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$")
+VERSION = _rules.VERSION
+LOCAL_TIERS = _rules.LOCAL_TIERS
+ROUTING_LANES = _rules.ROUTING_LANES
+DEFAULT_MODELS = _rules.DEFAULT_MODELS
+RESERVED_PERSONAL_MODEL = _rules.RESERVED_PERSONAL_MODEL
+DEFAULT_ROUTING = _rules.DEFAULT_ROUTING
+NPU_MODES = _rules.NPU_MODES
+NPU_CAPABILITIES = _rules.NPU_CAPABILITIES
+DEFAULT_NPU = _rules.DEFAULT_NPU
+_MODEL_RE = _rules._MODEL_RE
 _LOCK = threading.RLock()
 
 
@@ -48,41 +40,15 @@ _LOCK = threading.RLock()
 def _policy_file_lock(timeout=10.0, path=None):
     """Serialize policy read/check/replace across independent processes."""
     policy = (policy_path() if path is None else Path(path)).resolve()
-    lock_path = policy.with_name(policy.name + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = lock_path.open("a+b")
     try:
-        if handle.seek(0, os.SEEK_END) == 0:
-            handle.write(b"\0")
-            handle.flush()
-        deadline = time.monotonic() + timeout
-        acquired = False
-        while not acquired:
-            try:
-                handle.seek(0)
-                if os.name == "nt":
-                    import msvcrt
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                else:
-                    import fcntl
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                acquired = True
-            except OSError as exc:
-                if time.monotonic() >= deadline:
-                    raise RuntimeError("timed out waiting for runtime policy lock") from exc
-                time.sleep(0.02)
-        try:
+        with _atomic_json.file_lock(policy, timeout=timeout):
             yield
-        finally:
-            handle.seek(0)
-            if os.name == "nt":
-                import msvcrt
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    finally:
-        handle.close()
+    except RuntimeError as exc:
+        if "timed out" in str(exc):
+            raise RuntimeError(
+                "timed out waiting for runtime policy lock"
+            ) from exc
+        raise
 
 
 def policy_path() -> Path:
@@ -98,158 +64,26 @@ def transition_path(path=None) -> Path:
     return path.with_name(path.name + ".transition.json")
 
 
-def _is_cloud_name(value: str) -> bool:
-    lowered = str(value or "").strip().lower()
-    return "-cloud" in lowered or lowered.endswith(":cloud")
-
-
-def _is_reserved_personal_alias(value) -> bool:
-    model = str(value or "").strip().casefold()
-    for prefix in ("registry.ollama.ai/library/", "library/"):
-        if model.startswith(prefix):
-            model = model[len(prefix):]
-            break
-    if ":" not in model:
-        model += ":latest"
-    return model == RESERVED_PERSONAL_MODEL.casefold()
-
-
-def _model(value, fallback: str) -> str:
-    model = str(value or fallback).strip()
-    if not _MODEL_RE.fullmatch(model):
-        raise ValueError("invalid local model name %r" % model)
-    if _is_cloud_name(model):
-        raise ValueError("runtime policy local tiers cannot reference cloud models")
-    if _is_reserved_personal_alias(model):
-        return RESERVED_PERSONAL_MODEL
-    return model
-
-
-def _seed_model(env, tier: str) -> str:
-    configured = str(env.get("SONDER_%s" % tier.upper(), "") or "").strip()
-    if tier == "code" and _is_cloud_name(configured):
-        configured = str(env.get("SONDER_CODE_LOCAL", "") or "").strip()
-    if _is_reserved_personal_alias(configured):
-        configured = ""
-    if configured and not _is_cloud_name(configured):
-        return _model(configured, DEFAULT_MODELS[tier])
-    return DEFAULT_MODELS[tier]
+# Pure rules delegate to the SPEC-3 domain module; names are preserved for
+# existing callers and tests.
+_is_cloud_name = _rules.is_cloud_name
+_is_reserved_personal_alias = _rules.is_reserved_personal_alias
+_model = _rules.validate_model
+_seed_model = _rules.seed_model
+_normalize_npu = _rules.normalize_npu
+normalize = _rules.normalize
+_disk_payload = _rules.disk_payload
+_write_json_atomic = _atomic_json.write_json_atomic
 
 
 def default_policy(env=None) -> dict:
-    env = os.environ if env is None else env
-    return {
-        "version": VERSION,
-        "revision": 0,
-        "local_models": {
-            tier: _seed_model(env, tier) for tier in LOCAL_TIERS
-        },
-        "routing": dict(DEFAULT_ROUTING),
-        "npu": dict(DEFAULT_NPU),
-        "updated_ts": 0,
-        "source": "environment seed",
-    }
-
-
-def _normalize_npu(raw, base) -> dict:
-    if raw in (None, ""):
-        raw = {}
-    if not isinstance(raw, dict):
-        raise ValueError("runtime policy npu must be an object")
-    defaults = base if isinstance(base, dict) else dict(DEFAULT_NPU)
-    mode = str(
-        raw.get("mode") if raw.get("mode") is not None
-        else defaults.get("mode") or "off"
-    ).strip().lower()
-    if mode not in NPU_MODES:
-        raise ValueError(
-            "runtime policy npu mode must be one of: %s" % ", ".join(NPU_MODES)
-        )
-    npu = {"mode": mode}
-    for capability in NPU_CAPABILITIES:
-        value = str(
-            raw.get(capability) if raw.get(capability) is not None
-            else defaults.get(capability) or ""
-        ).strip().lower()
-        if value and value not in NPU_MODES:
-            raise ValueError(
-                "runtime policy npu %s override must be one of: %s"
-                % (capability, ", ".join(NPU_MODES))
-            )
-        npu[capability] = value
-    return npu
-
-
-def normalize(payload, defaults=None) -> dict:
-    if not isinstance(payload, dict):
-        raise ValueError("runtime policy must be a JSON object")
-    # Environment variables seed a file only when it is first created. Once a
-    # shared policy exists, normalization and recovery use stable built-ins so
-    # separately launched surfaces cannot drift with their inherited env.
-    base = default_policy(env={}) if defaults is None else defaults
-    raw_models = payload.get("local_models") or {}
-    raw_routing = payload.get("routing") or {}
-    if not isinstance(raw_models, dict) or not isinstance(raw_routing, dict):
-        raise ValueError("runtime policy local_models and routing must be objects")
-    local_models = {
-        tier: _model(raw_models.get(tier), base["local_models"][tier])
-        for tier in LOCAL_TIERS
-    }
-    routing = {}
-    for lane in ROUTING_LANES:
-        tier = str(raw_routing.get(lane) or base["routing"][lane]).strip().lower()
-        if tier not in LOCAL_TIERS:
-            raise ValueError(
-                "runtime routing lane %s must use: %s"
-                % (lane, ", ".join(LOCAL_TIERS))
-            )
-        routing[lane] = tier
-    return {
-        "version": VERSION,
-        "revision": max(0, int(payload.get("revision") or 0)),
-        "local_models": local_models,
-        "routing": routing,
-        "npu": _normalize_npu(payload.get("npu"), base.get("npu")),
-        "updated_ts": max(0, int(payload.get("updated_ts") or 0)),
-        "source": str(payload.get("source") or "runtime policy")[:120],
-    }
+    return _rules.default_policy(os.environ if env is None else env)
 
 
 def npu_mode(capability, policy=None) -> str:
     """Effective accelerator mode for one capability; unknown means off."""
-    capability = str(capability or "").strip().lower()
-    if capability not in NPU_CAPABILITIES:
-        return "off"
     policy = load(create=False) if policy is None else policy
-    section = policy.get("npu") if isinstance(policy, dict) else None
-    if not isinstance(section, dict):
-        return "off"
-    override = str(section.get(capability) or "").strip().lower()
-    mode = override or str(section.get("mode") or "off").strip().lower()
-    return mode if mode in NPU_MODES else "off"
-
-
-def _disk_payload(policy: dict) -> dict:
-    return {key: policy[key] for key in (
-        "version", "revision", "local_models", "routing", "npu", "updated_ts",
-        "source",
-    )}
-
-
-def _write_json_atomic(path, payload) -> Path:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name("%s.tmp-%s" % (path.name, uuid.uuid4().hex))
-    try:
-        temporary.write_text(
-            json.dumps(payload, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        os.replace(temporary, path)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
-    return path
+    return _rules.npu_mode(capability, policy)
 
 
 def _write(policy: dict, path=None) -> Path:
