@@ -224,6 +224,17 @@ must resolve to the exact adapter directory bound to the current trusted
 training state. External import needs a separate audited workflow rather than
 rewritable metadata in an untrusted directory.
 
+Quantization interaction: deployment applies the F16 GGUF adapter over the
+Q4_K_M-quantized Ollama base, so adapter deltas land on already-quantized
+weights at serve time. This is the intended trade — it preserves the pinned
+base digest and avoids shipping a second multi-GB model — but it carries a
+small fidelity cost versus the reference path (merge the adapter into the F16
+base weights, then quantize the merged model once to Q4_K_M). If a candidate
+that passed training-side evaluation shows quality regressions at serve time
+that the training data does not explain, suspect this gap before suspecting
+the adapter. Never stack the losses: do not fine-tune on top of
+already-quantized weights, and do not quantize a model twice.
+
 ## Rollback
 
 Run:
