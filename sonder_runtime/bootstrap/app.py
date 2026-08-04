@@ -16,6 +16,7 @@ from ..adapters.legacy.services import (
     SystemClock,
 )
 from ..adapters.ollama.gateway import OllamaGateway
+from ..application.chat.handle_chat import ChatService
 from ..application.ports.clock import Clock
 from ..application.ports.event_sink import EventSink
 from ..application.ports.model_gateway import ModelGateway
@@ -29,6 +30,7 @@ class Application:
     profile: str
     runtime_policy: RuntimePolicyService
     model_gateway: ModelGateway
+    chat: ChatService
     events: EventSink
     clock: Clock
 
@@ -42,13 +44,15 @@ def build_application(profile: str = "workstation-local") -> Application:
     """
     if profile not in PROFILES:
         raise ValueError(f"unknown profile {profile!r}; expected {PROFILES}")
+    # SPEC-3 Phase 3: the real transport adapter behind the port — consent
+    # enforced against the OperationContext, driver errors mapped into the
+    # domain taxonomy.
+    gateway = OllamaGateway()
     return Application(
         profile=profile,
         runtime_policy=RuntimePolicyService(LegacyPolicyRepository()),
-        # SPEC-3 Phase 3: the real transport adapter behind the port —
-        # consent enforced against the OperationContext, driver errors
-        # mapped into the domain taxonomy.
-        model_gateway=OllamaGateway(),
+        model_gateway=gateway,
+        chat=ChatService(gateway),
         events=OperationsEventSink(),
         clock=SystemClock(),
     )

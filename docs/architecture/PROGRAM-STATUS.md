@@ -73,7 +73,21 @@ offline import, audit events, admin status route, CLI.
 Trust: python-tuf verification path is wired for bundles carrying TUF
 metadata; the unsigned path requires an explicit double gate
 (--allow-unverified + SONDER_UPDATE_ALLOW_UNSIGNED=1) and is documented
-as non-production. Remaining for full SPEC-4 sign-off: the publisher
-pipeline with threshold signing ceremony (WP7), resumable online
-downloads, Windows/macOS activation helpers (M6), and the Flutter System
-page UI (M5) — the status API it polls is in place.
+as non-production.
+
+Publisher pipeline (WP7): `tools/tuf_repo.py` initializes a TUF repo with
+the SPEC-4 role thresholds (root/targets 2-of-3, snapshot/timestamp
+1-of-1), signs a built bundle's archive as a target, and assembles an
+offline bundle the client verifies through its own trust chain. Proven
+end to end: a signed bundle imports through the real update engine with
+NO unsigned gate; tampered targets, below-threshold and fully-forged
+metadata, and unsigned targets are all rejected. Building the publisher
+also fixed a latent client bug — the TUF verify path used python-tuf's
+HTTP-only fetcher and so never worked for offline file:// bundles; a
+filesystem fetcher that maps missing files to 404 now drives the
+root-rotation walk correctly. Signing ceremony: docs/runbooks/
+publish-release.md. Optional deps pinned in requirements-update.txt.
+
+Remaining for full SPEC-4 sign-off: resumable online downloads,
+Windows/macOS activation helpers (M6), and the Flutter System page UI
+(M5) — the status API it polls is in place.
