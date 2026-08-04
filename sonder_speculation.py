@@ -78,6 +78,15 @@ _SPEC_EWMA_ALPHA = 0.25            # weight on the newest latency sample
 _SPEC_WARMUP = 16                  # speculations allowed to measure before gating
 _DEFAULT_MIN_SAVING_MS = 40.0      # expected hidden wall time below this -> skip
 
+# Reorder buffer sizing.  A CPU commits speculative loads out of a small
+# buffer; the analog here is a handful of read-only tool calls in flight at
+# once.  The default is a single slot so behavior is byte-for-byte identical
+# to the original single-in-flight engine unless the operator opts in, and it
+# is clamped to a small maximum because each slot is a real worker thread and
+# a wasted read-only call on a mispredict.
+_DEFAULT_SLOTS = 1
+_MAX_SLOTS = 4
+
 
 def min_saving_seconds() -> float:
     """Floor on expected hidden wall time for a speculation to be worth it."""
@@ -87,6 +96,22 @@ def min_saving_seconds() -> float:
     except ValueError:
         ms = _DEFAULT_MIN_SAVING_MS
     return max(0.0, ms) / 1000.0
+
+
+def speculation_slots() -> int:
+    """How many read-only speculations may be in flight at once.
+
+    Read from ``SONDER_SPECULATION_SLOTS`` at call time (never at import).
+    Defaults to a single slot so the engine preserves its original
+    single-in-flight semantics, and is clamped to ``[1, _MAX_SLOTS]`` so a
+    bad or over-eager value can never spawn an unbounded fan of workers.
+    """
+    raw = os.environ.get("SONDER_SPECULATION_SLOTS", "").strip()
+    try:
+        n = int(raw) if raw else _DEFAULT_SLOTS
+    except ValueError:
+        n = _DEFAULT_SLOTS
+    return max(1, min(_MAX_SLOTS, n))
 
 
 def predictor_path() -> Path:
@@ -137,6 +162,12 @@ class BranchPredictor:
         # Cost model (learned per machine, persisted across runs).
         self.ewma_decision_s = 0.0  # model time to decide the next tool
         self.ewma_tool_s = 0.0      # wall time of a speculated read-only tool
+        # Per-tool latency table: some read-only tools (a wide recursive scan)
+        # are seconds while others (a status probe) are microseconds, so a
+        # single global figure under- or over-values speculation depending on
+        # which tool is predicted.  Keyed by tool name, learned alongside the
+        # global figure, and used by expected_saving_seconds when available.
+        self.ewma_tool_by_name: dict[str, float] = {}
         self.saved_s = 0.0          # wall time actually hidden by retired specs
 
     # -- persistence -------------------------------------------------------
@@ -159,6 +190,19 @@ class BranchPredictor:
                     except (TypeError, ValueError):
                         self.ewma_decision_s = 0.0
                         self.ewma_tool_s = 0.0
+                    # Per-tool table is optional so files written before this
+                    # existed load cleanly; drop any malformed entry silently.
+                    per_tool = cost.get("ewma_tool_by_name", {})
+                    table: dict[str, float] = {}
+                    if isinstance(per_tool, dict):
+                        for name, value in per_tool.items():
+                            try:
+                                seconds = float(value)
+                            except (TypeError, ValueError):
+                                continue
+                            if isinstance(name, str) and seconds > 0.0:
+                                table[name] = seconds
+                    self.ewma_tool_by_name = table
             except (OSError, ValueError, TypeError):
                 pass
             self._loaded = True
@@ -174,6 +218,10 @@ class BranchPredictor:
                 "cost": {
                     "ewma_decision_s": round(self.ewma_decision_s, 6),
                     "ewma_tool_s": round(self.ewma_tool_s, 6),
+                    "ewma_tool_by_name": {
+                        name: round(value, 6)
+                        for name, value in self.ewma_tool_by_name.items()
+                    },
                 },
             }
         try:
@@ -295,10 +343,22 @@ class BranchPredictor:
         with self._lock:
             self.ewma_decision_s = self._ewma(self.ewma_decision_s, seconds)
 
-    def observe_tool_latency(self, seconds: float) -> None:
-        """Record the wall time of a speculated read-only tool call."""
+    def observe_tool_latency(
+        self, seconds: float, tool_name: str | None = None
+    ) -> None:
+        """Record the wall time of a speculated read-only tool call.
+
+        Always folds into the global figure; when ``tool_name`` is given it
+        also folds into that tool's own EWMA so per-tool latencies diverge
+        from the global average as evidence accumulates.  ``tool_name`` is
+        optional so existing callers that pass only a duration keep working.
+        """
         with self._lock:
             self.ewma_tool_s = self._ewma(self.ewma_tool_s, seconds)
+            if tool_name:
+                self.ewma_tool_by_name[tool_name] = self._ewma(
+                    self.ewma_tool_by_name.get(tool_name, 0.0), seconds
+                )
 
     def note_saved(self, seconds: float) -> None:
         """Accumulate wall time actually hidden by a retired speculation."""
@@ -307,23 +367,38 @@ class BranchPredictor:
         with self._lock:
             self.saved_s += seconds
 
-    def expected_saving_seconds(self, confidence: float) -> float:
+    def expected_saving_seconds(
+        self, confidence: float, tool_name: str | None = None
+    ) -> float:
         """Expected wall time a correct speculation would hide this step.
 
         The hideable overlap is the shorter of the decision and tool
         latencies, discounted by how likely the prediction is to be the
         branch actually taken.  Returns a negative sentinel while the cost
         model is still cold (no measured latencies yet).
+
+        When ``tool_name`` names a tool with its own measured latency, that
+        per-tool figure is used in place of the global average — a slow scan
+        is judged worth hiding even when the average tool is instant, and a
+        fast probe is judged not worth it even when the average is slow.
+        Falls back to the global figure for unknown tools, so the original
+        single-argument call is unchanged.
         """
         with self._lock:
             dec = self.ewma_decision_s
             tool = self.ewma_tool_s
+            if tool_name:
+                per_tool = self.ewma_tool_by_name.get(tool_name, 0.0)
+                if per_tool > 0.0:
+                    tool = per_tool
         if dec <= 0.0 or tool <= 0.0:
             return -1.0
         conf = max(0.0, min(1.0, confidence))
         return min(dec, tool) * conf
 
-    def should_speculate(self, confidence: float) -> bool:
+    def should_speculate(
+        self, confidence: float, tool_name: str | None = None
+    ) -> bool:
         """Gate a speculation on its expected payoff on *this* machine.
 
         A bounded warmup lets the predictor measure real latencies before it
@@ -332,7 +407,7 @@ class BranchPredictor:
         dormant on a CPU (millisecond tools) and active on serious hardware
         (slow model + slow tools) without a deployment-specific setting.
         """
-        expected = self.expected_saving_seconds(confidence)
+        expected = self.expected_saving_seconds(confidence, tool_name)
         if expected < 0.0:
             with self._lock:
                 return self.speculations < _SPEC_WARMUP
@@ -356,6 +431,7 @@ class BranchPredictor:
                 "opener_kinds": len(self._openers.counts),
                 "ewma_decision_s": round(self.ewma_decision_s, 4),
                 "ewma_tool_s": round(self.ewma_tool_s, 4),
+                "tool_latency_tools": len(self.ewma_tool_by_name),
                 "saved_s": round(self.saved_s, 4),
             }
 
@@ -375,36 +451,60 @@ class SpeculativeResult:
 
 
 class SpeculationEngine:
-    """Runs a predicted read-only tool call in a worker while the model
-    generates, and retires or squashes it once the real decision lands.
+    """Runs predicted read-only tool calls in workers while the model
+    generates, and retires or squashes them once the real decision lands.
 
-    Analogous to a CPU issuing a speculative load past an unresolved
-    branch: the result sits in a buffer and is only committed (used) if the
-    branch resolves the way it was predicted; otherwise it is squashed.
+    Analogous to a CPU issuing speculative loads past an unresolved branch
+    into a small reorder buffer: each result sits in its own slot and is only
+    committed (used) if the branch resolves the way that slot predicted;
+    otherwise it is squashed.
+
+    The buffer holds up to N slots (``SONDER_SPECULATION_SLOTS``, clamped to
+    ``[1, _MAX_SLOTS]``, default 1).  With a single slot the engine is
+    byte-for-byte equivalent to the original single-in-flight design: one
+    speculation at a time, ``resolve`` retires it on a signature match and
+    squashes it on a miss, ``discard`` flushes it.  With more slots several
+    independent read-only speculations run at once and ``resolve`` retires
+    whichever slot matches the committed branch, leaving the others in flight.
     """
 
-    def __init__(self, predictor: BranchPredictor, dispatch, *, enabled=True):
+    def __init__(self, predictor: BranchPredictor, dispatch, *, enabled=True,
+                 slots: int | None = None):
         self._predictor = predictor
         self._dispatch = dispatch  # (tool_name, args) -> (observation, ok)
         self._enabled = enabled
-        self._pending: dict = {}
-        self._thread: threading.Thread | None = None
+        # Resolve the slot count once, at construction, so a live env change
+        # can never resize the buffer under an in-flight step.  A single slot
+        # preserves the original semantics exactly.
+        if slots is None:
+            self._max_slots = speculation_slots()
+        else:
+            self._max_slots = max(1, min(_MAX_SLOTS, int(slots)))
+        # Each slot is a dict {tool_name, call_signature, result, thread}.
+        # A list preserves issue order so a mispredict squashes the stalest.
+        self._slots: list[dict] = []
         self._lock = threading.Lock()
 
     def begin(self, tool_name: str, call_signature: str, args: dict) -> bool:
-        """Launch a speculative read-only call. Returns True if issued."""
+        """Launch a speculative read-only call. Returns True if issued.
+
+        Issues while a free slot exists; refuses (returns False) when the
+        buffer is full, when the engine is disabled, or when the tool is not
+        on the read-only allowlist (mutating tools are never speculated).
+        """
         if not self._enabled or not self._predictor.speculatable(tool_name):
             return False
         with self._lock:
-            if self._thread is not None:
-                return False  # one in flight at a time, like a small buffer
-            self._pending = {
+            if len(self._slots) >= self._max_slots:
+                return False  # buffer full; back-pressure like a full ROB
+            slot: dict = {
                 "tool_name": tool_name,
                 "call_signature": call_signature,
                 "result": None,
+                "thread": None,
             }
 
-            def _work():
+            def _work(slot=slot):
                 started = time.monotonic()
                 try:
                     observation, ok = self._dispatch(tool_name, args)
@@ -412,67 +512,94 @@ class SpeculationEngine:
                     observation, ok = ("speculation error: %s" % exc), False
                 finished = time.monotonic()
                 with self._lock:
-                    if self._pending:
-                        self._pending["result"] = SpeculativeResult(
-                            tool_name=tool_name,
-                            call_signature=call_signature,
-                            observation=str(observation),
-                            ok=bool(ok),
-                            started=started,
-                            finished=finished,
-                        )
+                    slot["result"] = SpeculativeResult(
+                        tool_name=tool_name,
+                        call_signature=call_signature,
+                        observation=str(observation),
+                        ok=bool(ok),
+                        started=started,
+                        finished=finished,
+                    )
 
-            self._thread = threading.Thread(
+            thread = threading.Thread(
                 target=_work, daemon=True, name="sonder-speculation"
             )
+            slot["thread"] = thread
+            self._slots.append(slot)
         self._predictor.note_speculation()
-        self._thread.start()
+        thread.start()
         return True
 
     def resolve(self, real_signature: str) -> SpeculativeResult | None:
-        """Retire the speculation if it matches the committed branch.
+        """Retire the buffered result whose slot matches the committed branch.
 
-        A match returns the buffered result (latency hidden); a mismatch
-        squashes it.  Either way the engine is left idle for the next step.
+        Scans the buffer for a slot whose call signature equals the real one.
+        On a match that slot is joined and its result returned (latency
+        hidden), leaving any other slots untouched and still in flight.  On a
+        miss the stalest outstanding slot is squashed (only that one, unlike
+        :meth:`discard` which flushes all) so a repeatedly mispredicting
+        buffer cannot grow unbounded.  With a single slot this is exactly the
+        original retire-on-match / squash-on-miss behavior.
         """
         with self._lock:
-            pending = self._pending
-            thread = self._thread
-        if thread is None or not pending:
-            return None
-        thread.join(timeout=30)
-        with self._lock:
-            result = self._pending.get("result")
-            hit = bool(result) and pending.get("call_signature") == real_signature
-            self._pending = {}
-            self._thread = None
+            match = None
+            for slot in self._slots:
+                if slot.get("call_signature") == real_signature:
+                    match = slot
+                    break
+            if match is not None:
+                self._slots.remove(match)
+                target, hit = match, True
+            elif self._slots:
+                target, hit = self._slots.pop(0), False
+            else:
+                return None  # nothing in flight: idle, nothing to squash
+        thread = target.get("thread")
+        if thread is not None:
+            thread.join(timeout=30)
         if hit:
-            return result
+            with self._lock:
+                result = target.get("result")
+            if result is not None:
+                return result
+            # Signature matched but the worker never produced a result (e.g.
+            # a join timeout): treat it as a squash rather than a retirement.
         self._predictor.note_squash()
         return None
 
     def discard(self) -> None:
-        """Squash any outstanding speculation without retiring it.
+        """Squash every outstanding speculation without retiring any.
 
         Called when a step resolves down a path that never consumes the
-        speculative buffer (the model returned final, hit a cache, or chose
-        a different tool). Joins the worker so no orphan thread survives.
+        speculative buffer (the model returned final, hit a cache, or chose a
+        tool no slot predicted). Joins each worker so no orphan thread
+        survives, and squashes once per slot that was in flight.
         """
         with self._lock:
-            thread = self._thread
-            had_pending = bool(self._pending)
-        if thread is not None:
-            thread.join(timeout=30)
-        with self._lock:
-            self._pending = {}
-            self._thread = None
-        if had_pending:
+            slots = self._slots
+            self._slots = []
+        for slot in slots:
+            thread = slot.get("thread")
+            if thread is not None:
+                thread.join(timeout=30)
+        for _ in slots:
             self._predictor.note_squash()
 
     @property
     def busy(self) -> bool:
         with self._lock:
-            return self._thread is not None
+            return len(self._slots) > 0
+
+    @property
+    def inflight(self) -> int:
+        """Number of speculations currently buffered (0..N)."""
+        with self._lock:
+            return len(self._slots)
+
+    @property
+    def max_slots(self) -> int:
+        """The reorder-buffer capacity this engine was constructed with."""
+        return self._max_slots
 
 
 # ---------------------------------------------------------------------------
