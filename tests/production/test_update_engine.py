@@ -87,9 +87,13 @@ def test_import_blocks_wrong_platform(env):
     manager = _manager(env)
     source = _mini_source(env, "wrongplat-src")
     bundle = env / "wrongplat-bundle"
+    # "windows" was hardcoded as the wrong platform, which inverted the
+    # test's meaning on a Windows host; pick one that is wrong for
+    # whichever host actually runs the suite.
+    wrong = "windows" if sonder_updates.current_platform() != "windows" else "linux"
     build_bundle(
         source, bundle, version="1.0.2",
-        platform_name="windows", architecture="x86_64",
+        platform_name=wrong, architecture="x86_64",
     )
     plan = manager.import_offline(bundle, allow_unverified=True)
     assert plan["status"] == "blocked"
