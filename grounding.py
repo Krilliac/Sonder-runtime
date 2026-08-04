@@ -38,6 +38,25 @@ RUNNABLE_FENCE_LANGS = {
     "csharp": "csharp",
     "cs": "csharp",
     "c#": "csharp",
+    "bash": "bash",
+    "sh": "bash",
+    "shell": "bash",
+    "zsh": "bash",
+    "ruby": "ruby",
+    "rb": "ruby",
+    "perl": "perl",
+    "pl": "perl",
+    "php": "php",
+    "lua": "lua",
+    "r": "r",
+    "rscript": "r",
+    "go": "go",
+    "golang": "go",
+    "java": "java",
+    "typescript": "typescript",
+    "ts": "typescript",
+    "rust": "rust",
+    "rs": "rust",
 }
 
 
@@ -52,6 +71,16 @@ _LANG_FENCE = {
     "powershell": "powershell",
     "cpp": "cpp",
     "csharp": "csharp",
+    "bash": "bash",
+    "ruby": "ruby",
+    "perl": "perl",
+    "php": "php",
+    "lua": "lua",
+    "r": "r",
+    "go": "go",
+    "java": "java",
+    "typescript": "typescript",
+    "rust": "rust",
 }
 
 

@@ -671,8 +671,10 @@ def _last_user_message(messages):
 
 def _history_from_messages(messages):
     """Prior user/assistant turns from the UI request, excluding the current (last
-    user) message. The chat UI owns conversation state here, so we thread exactly
-    what it sends rather than a DB session."""
+    user) message. A full chat UI owns conversation state here, so we thread
+    exactly what it sends rather than a DB session; thin clients that name a
+    session without resending a transcript fall back to
+    _server_side_history()."""
     msgs = messages or []
     last_user_idx = None
     for i in range(len(msgs) - 1, -1, -1):
@@ -687,6 +689,43 @@ def _history_from_messages(messages):
         content = m.get("content") or ""
         if role in ("user", "assistant") and content:
             history.append({"role": role, "content": content})
+    return history
+
+
+SERVER_SIDE_HISTORY_TURNS = 8
+
+
+def _server_side_history(storage_session, limit=SERVER_SIDE_HISTORY_TURNS):
+    """Rebuild prior turns from the stored session for thin clients.
+
+    The OpenAI-compatible contract is client-owned history, but a client
+    that names a `session` while sending only the current message clearly
+    expects the server to remember. Feed the stored turns back through the
+    same history channel so both contracts work; activity footers are
+    stripped so replayed context stays clean.
+    """
+    if not (storage_session or "").strip():
+        return []
+    try:
+        import memory_store
+
+        session_id = server._resolve_session(storage_session)
+        conn = server._open_db()
+        try:
+            turns = memory_store.session_turns(conn, session_id)
+        finally:
+            conn.close()
+    except Exception:
+        return []
+    history = []
+    for turn in turns[-max(1, int(limit)):]:
+        task = (turn.get("task") or "").strip()
+        response = (turn.get("response") or "").split("=== ACTIVITY")[0]
+        response = _strip_footer(response).strip()
+        if task:
+            history.append({"role": "user", "content": task})
+        if response:
+            history.append({"role": "assistant", "content": response})
     return history
 
 
@@ -1757,6 +1796,9 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         history = _history_from_messages(messages)
+        if not history and storage_session:
+            # Thin client: named a session, resent no transcript.
+            history = _server_side_history(storage_session)
         account_header = self.headers.get("X-Sonder-Account-Token", "")
         auth_header = self.headers.get("Authorization", "")
         state = _http_conversation_state(

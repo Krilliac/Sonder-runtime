@@ -37,7 +37,17 @@ def test_language_aliases_normalize():
 
 def test_unknown_language_is_rejected():
     with pytest.raises(ValueError):
-        code_runner.normalize_language("ruby")
+        code_runner.normalize_language("brainfuck")
+
+
+def test_extended_languages_are_supported():
+    # Languages added after the live 7B runs; normalization must resolve
+    # each canonical name and common alias.
+    for alias, canonical in (
+        ("rb", "ruby"), ("golang", "go"), ("ts", "typescript"),
+        ("rs", "rust"), ("sh", "bash"), ("pl", "perl"),
+    ):
+        assert code_runner.normalize_language(alias) == canonical
 
 
 def test_cwd_must_stay_inside_workspace(monkeypatch, tmp_path):
