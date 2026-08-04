@@ -30,10 +30,22 @@ backups, and a signed update path. It is not a foundation model.
 | 14 | [Package Architecture](14-package-architecture.md) | The domain/application/adapters/platform layering & enforcement |
 | 15 | [Training](15-training.md) | Adapter training, evaluation, gated promotion, rollback |
 | 16 | [Glossary](16-glossary.md) | Terms, aliases, and identifiers |
+| 17 | [Benchmarking](17-benchmarking.md) | Measuring the runtime's lift over a bare model (prove the moat) |
+
+## Operational tools
+
+- `python sonder_doctor.py` — one consolidated read-only health report
+  (config, self-heal, memory quality, runtime policy, Ollama reachability).
+- `python sonder_hardware.py [workload]` — detect CPU/RAM/GPU/VRAM and get a
+  model-band / context / keep-alive recommendation, including whether the
+  adaptive speculation cost model is likely to engage on this box.
+- `python scripts/benchmark_moat.py` — run the moat benchmark and emit a
+  scorecard ([Benchmarking](17-benchmarking.md)).
 
 ## Companion docs
 
 - [Runbooks](../runbooks/README.md) — contractor-executable operational procedures.
+- [Security review](../security/README.md) — read-only audit of the sensitive surfaces.
 - [Architecture decisions](../architecture/adr/) — ADR-001..008.
 - [Program status](../architecture/PROGRAM-STATUS.md) — per-spec, per-phase implementation map.
 - Root guides: [ARCHITECTURE.md](../../ARCHITECTURE.md), [TRAINING.md](../../TRAINING.md),
