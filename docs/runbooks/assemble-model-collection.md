@@ -1,9 +1,10 @@
 # Runbook — assemble a routed model collection
 
 Stand up a collection of specialist models and bind Sonder's tiers/lanes to them,
-so the capability router sends each request to the best-suited model. Sized for a
-**16 GB VRAM** GPU (e.g. RTX 5070 Ti); adjust per the
-[Model Catalog](../wiki/18-model-catalog.md).
+so the capability router sends each request to the best-suited model. Model sizes
+are chosen from your hardware's band — see the
+[Model Catalog](../wiki/18-model-catalog.md) for the band table and the model
+families that fill each role.
 
 ## Prerequisites
 
@@ -11,78 +12,91 @@ so the capability router sends each request to the best-suited model. Sized for 
   ([install-workstation-local](install-workstation-local.md)).
 - Developer/admin auth for `/runtime` edits (a bare local-open loopback session
   is developer-authorized by default).
-- Disk for the GGUFs (~30–40 GB for the set below) and the stated VRAM.
+- Disk for the model files and enough VRAM (or unified/system memory) for the
+  band you are targeting.
 
-## 1. Pull the collection
+## 1. Size the collection to the machine
 
 ```bash
-ollama pull qwen2.5:3b               # fast  — router/titling/simple
-ollama pull qwen2.5-coder:7b         # code  — agent-loop driver
-ollama pull qwen2.5:14b              # general
-ollama pull deepseek-r1:14b          # reasoning (fits 16 GB)
-ollama pull qwen2.5vl:7b             # vision
-ollama pull nomic-embed-text         # embedding (required for memory)
+python sonder_hardware.py          # reports CPU/RAM/GPU/VRAM + a recommended band
 ```
 
-Portable/offline instead? Import a GGUF straight off a USB with
+Use the reported band with the [Model Catalog](../wiki/18-model-catalog.md)
+tables to choose one model per role. A minimal viable collection is **three**
+models: a `fast` router model, one `code`/`general` workhorse, and an
+**embedding** model (required for memory/recall). Add `reasoning` and `vision`
+only if the band supports keeping or swapping them.
+
+## 2. Pull the collection
+
+```bash
+ollama pull <fast-model>          # small general instruct  -> fast
+ollama pull <coder-model>         # code-specialized        -> code
+ollama pull <general-model>       # mid-size general        -> general
+ollama pull <embedding-model>     # embeddings (required)
+# optional, band permitting:
+ollama pull <reasoning-model>     # reasoning/"thinking"    -> reasoning
+ollama pull <vision-model>        # vision-language         -> vision
+```
+
+Portable/offline instead? Import a GGUF directly (including from a USB) with
 [use-facts-model](use-facts-model.md) (`setup_alias.py --from-usb`).
 
-## 2. Bind tiers → models and lanes → tiers
+## 3. Bind tiers → models and lanes → tiers
 
 ```bash
 # tiers -> concrete models
-/runtime set fast=qwen2.5:3b code=qwen2.5-coder:7b general=qwen2.5:14b
+/runtime set fast=<fast-model> code=<coder-model> general=<general-model>
 # lanes -> tiers
 /runtime set router=fast workbench=code autopilot=code fleet=code review=general
 ```
 
 `reasoning`, `vision`, and `oracle` are optional tiers: add them to policy only
-once the models are pulled. Until then the router degrades to `general`/`code`
+once those models are pulled. Until then the router degrades to `general`/`code`
 automatically — nothing breaks. Inspect the live mapping with `/runtime` or
 `runtime_policy_status()`.
 
-## 3. Set residency (16 GB can't hold everything at once)
+## 4. Set residency
 
-Keep the cheap interactive tiers warm and let the 14B specialists swap in:
+Keep the small, constantly-used tiers warm and let the large specialists swap in:
 
 ```bash
-export OLLAMA_KEEP_ALIVE=30m          # hold warm models for 30 min
-# optional: allow a couple of small models resident together
-export OLLAMA_MAX_LOADED_MODELS=2
+export OLLAMA_KEEP_ALIVE=30m          # hold warm models longer
+export OLLAMA_MAX_LOADED_MODELS=2     # if memory allows more than one resident
 ```
 
-Rule of thumb: `fast`(2.5) + `code`-7B(5.5) + `embed`(0.3) ≈ 8.5 GB stays
-resident; the 14B `general`/`reasoning` and 7B `vision` load on demand.
+Rule of thumb: `fast` + `embed` + your most-used heavy tier stay resident; the
+rest load on demand. On a multi-GPU machine you can instead pin one model per
+card (e.g. `CUDA_VISIBLE_DEVICES`) to eliminate swapping entirely — see
+"Scaling up: multi-GPU" in the [Model Catalog](../wiki/18-model-catalog.md).
 
-## 4. Verify
+## 5. Verify
 
 ```bash
-python sonder_hardware.py             # confirms VRAM/band + whether speculation engages
+python sonder_hardware.py             # band + whether speculation is likely to engage
 python sonder_doctor.py               # config, policy, Ollama reachability, memory health
 ollama ps                             # which models are currently resident
 ```
 
-Then send one request of each kind and confirm the mode/tier line in the
-response reports the expected tier:
+Then send one request of each kind and confirm the reported mode/tier:
 
 - "hi" → `fast`
 - "implement quicksort in Python" → `code`
 - "prove step by step why merge sort is O(n log n)" → `reasoning` (or `general`
-  if the reasoning tier isn't configured)
-- "what's the latest news on X" → `fast` + web (if web tools enabled)
+  if no reasoning tier is configured)
+- "what's the latest news on X" → `fast` + web (if web tools are enabled)
 
-## 5. The oracle / escalation tier (optional, the hard 5%)
+## 6. The oracle / escalation tier (optional)
 
-Pick one, honestly:
+For the genuinely hard minority, pick one:
 
-- **Big local** — a 32B (Q3 or CPU-offload on 16 GB; fully resident only at ≥24 GB
-  VRAM) as a slow, private backstop: `/runtime set general=<32b-model>` for the
-  heavy lane, `OLLAMA_KEEP_ALIVE=2h` to avoid re-paying its load.
-- **Consented cloud** — set `SONDER_ALLOW_CLOUD=1` and route the `cloud-*` tier
-  for the genuinely hard minority. Prompts leave the machine on that tier only;
-  every other tier stays local.
+- **Large local model** — only if the memory band supports it (a 70B at Q4 needs
+  roughly 48 GB). Point the heavy lane at it and raise `OLLAMA_KEEP_ALIVE` so its
+  long load is not re-paid. Private, slow.
+- **Consented cloud** — set `SONDER_ALLOW_CLOUD=1` and route the `cloud-*` tier.
+  Prompts leave the machine on that tier only; every other tier stays local.
 
-The router only reaches `oracle` on an explicit escalation signal (a failed run,
+The router reaches `oracle` only on an explicit escalation signal (a failed run,
 an empty/low-confidence answer, or "think hard"), so the expensive path stays
 rare.
 
@@ -93,8 +107,8 @@ remain in Ollama's store; remove any with `ollama rm <model>`.
 
 ## Notes
 
-- The policy can never enable cloud, widen permissions/roots, or store
-  credentials ([Security Model](../wiki/09-security-model.md)) — it only selects
-  local aliases and lanes. Cloud stays a separate host-owned consent gate.
-- A larger GPU changes only the model sizes, not this procedure; see the upgrade
-  table in the [Model Catalog](../wiki/18-model-catalog.md).
+- Policy can never enable cloud, widen permissions/roots, or store credentials
+  ([Security Model](../wiki/09-security-model.md)) — it only selects local
+  aliases and lanes. Cloud remains a separate host-owned consent gate.
+- Changing hardware changes only the model sizes, not this procedure; re-run
+  `sonder_hardware.py` and re-pick from the band table.
