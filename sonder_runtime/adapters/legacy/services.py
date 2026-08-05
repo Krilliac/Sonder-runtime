@@ -94,7 +94,9 @@ class LegacyAutomationRepository:
     ) -> list:
         import autopilot_store
 
-        return autopilot_store.list_runs(include_finished, limit)
+        return autopilot_store.list_runs(
+            include_finished=include_finished, limit=limit
+        )
 
     def claim_run(
         self,
@@ -170,12 +172,14 @@ class LegacyAutomationRepository:
     def events(self, selector: str = "", limit: int = 20) -> list:
         import autopilot_store
 
-        return autopilot_store.events(selector, limit)
+        return autopilot_store.events(selector, limit=limit)
 
     def snapshot(self, include_finished: bool = True, limit: int = 20) -> dict:
         import autopilot_store
 
-        return autopilot_store.snapshot(include_finished, limit)
+        return autopilot_store.snapshot(
+            include_finished=include_finished, limit=limit
+        )
 
 
 class LegacyMemoryRepository:
