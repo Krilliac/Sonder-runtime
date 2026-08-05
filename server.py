@@ -5698,7 +5698,7 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
     acceptance = learning_state["positive_percent"] / 100.0
     issues = []
     try:
-        autopilot = autopilot_store.snapshot(include_finished=False, limit=100)
+        autopilot = _application().automation.snapshot(include_finished=False, limit=100)
     except Exception:
         autopilot = {
             "active_runs": 0,
@@ -12810,7 +12810,7 @@ def _execute_autopilot(run_id: str, *, max_cycles=12, plan_only=False) -> dict:
 
 
 def _autopilot_thread_main(run_id: str, max_cycles: int, plan_only: bool) -> None:
-    run = autopilot_store.get_run(run_id) or {}
+    run = _application().automation.get_run(run_id) or {}
     try:
         with activity_tracker.response_span(
             "autopilot:%s" % run_id,
@@ -12911,7 +12911,7 @@ def autopilot_resume(
 ) -> str:
     """Explicitly resume a paused, blocked, ready, or interrupted run."""
     _maybe_live_reload()
-    run = autopilot_store.get_run(run_id)
+    run = _application().automation.get_run(run_id)
     if not run:
         return "ERROR: no unambiguous autopilot run matches '%s'." % run_id
     if run.get("status") not in autopilot_store.RESUMABLE_STATUSES:
@@ -12957,7 +12957,7 @@ def autopilot_status(run_id: str = "", include_finished: bool = True) -> str:
     """Inspect one persistent autonomous run or the controller ledger."""
     _maybe_live_reload()
     if run_id.strip():
-        return autopilot_controller.format_run(autopilot_store.get_run(run_id))
+        return autopilot_controller.format_run(_application().automation.get_run(run_id))
     return autopilot_controller.format_snapshot(
         autopilot_controller.snapshot(include_finished=include_finished),
     )
@@ -13170,7 +13170,7 @@ def route_work_request(prompt: str, project: str = "") -> str | None:
     else:
         active = []
         with contextlib.suppress(Exception):
-            snapshot = autopilot_store.snapshot(include_finished=False, limit=20)
+            snapshot = _application().automation.snapshot(include_finished=False, limit=20)
             active = [
                 row for row in snapshot.get("runs", [])
                 if row.get("status") in autopilot_store.ACTIVE_STATUSES
@@ -13474,7 +13474,7 @@ def diagnostics() -> str:
     except Exception as e:
         lines.append("  self heal: ERROR %s" % e)
     try:
-        auto = autopilot_store.snapshot(include_finished=False, limit=20)
+        auto = _application().automation.snapshot(include_finished=False, limit=20)
         lines.append(
             "  autopilot: ok (%s active, %s resumable; %s)"
             % (
@@ -13550,7 +13550,7 @@ def status() -> str:
         ),
     ]
     try:
-        auto = autopilot_store.snapshot(include_finished=False, limit=20)
+        auto = _application().automation.snapshot(include_finished=False, limit=20)
         lines.append(
             "autopilot: %s active, %s resumable"
             % (auto.get("active_runs", 0), auto.get("resumable_runs", 0))
