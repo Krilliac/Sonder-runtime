@@ -73,6 +73,8 @@ session; `ep_fallback` records that choice.
 | `openvino`| `OpenVINOExecutionProvider`  | Intel NPU only; `device_type` is fixed to `NPU` and CPU/GPU values are rejected. |
 | `qnn`     | `QNNExecutionProvider`       | Qualcomm HTP/NPU only; `backend_path` is required, must name a QNN HTP backend, and must reference a pinned `extra_file`. CPU/GPU QNN backends are rejected. |
 | `winml`   | —                            | Descriptor only: no supported Python runtime path today and never reported detected/ready. DirectML is GPU-class and is deliberately **not** claimed as an NPU. |
+| `edgetpu` | —                            | **TPU-class**, descriptor only. Google Coral (M.2/USB) executes TFLite INT8 graphs through `libedgetpu`/`pycoral`, which is not an onnxruntime execution provider; its small on-chip SRAM also cannot hold a transformer embedding model. Never detected/ready. |
+| `hailo`   | —                            | **TPU-class**, descriptor only. Hailo-8/8L (M.2) executes HEF graphs compiled by the Hailo SDK through HailoRT, which is not an onnxruntime execution provider. Never detected/ready. |
 | `cpu`     | `CPUExecutionProvider`       | onnxruntime CPU reference — the only allowed same-model fallback; never reported as NPU acceleration |
 | `cpu-sim` | stdlib simulator             | Deterministic CI/test provider. It is registered only under `SONDER_NPU_TEST_HOOKS=1`, always reports `simulated`, and can never replace a production embedding vector. |
 

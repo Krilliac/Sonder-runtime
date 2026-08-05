@@ -76,6 +76,40 @@ for a slow-but-usable local `oracle` (good for overnight/batch distillation, per
 the teacher→student loop in [Training](15-training.md)) — while the GPU keeps the
 interactive tiers fast.
 
+## Accelerators: NPUs and TPUs (what they can and cannot do)
+
+**Neither an M.2 NPU nor an M.2 TPU can run an LLM.** They have no usable
+memory for multi-GB weights and their instruction sets target small quantized
+CNNs. Any tier in the table above runs on the **GPU** (or CPU) — never on one of
+these sticks. What they *can* do is Sonder's **utility path**: the bounded
+routing and embedding work that sits *below* the model tiers
+([NPU.md](../../NPU.md)).
+
+| Class | Examples | Runtime | Usable by Sonder today |
+|---|---|---|---|
+| **NPU** (integrated) | AMD XDNA (Ryzen AI), Intel NPU, Qualcomm HTP | onnxruntime EPs (`vitisai`/`openvino`/`qnn`) | **Yes** — routing + embeddings |
+| **TPU** (M.2/USB) | Google Coral, Hailo-8/8L | libedgetpu/TFLite, HailoRT/HEF | **No** — descriptor-only, see below |
+
+TPU-class devices are declared and reported honestly (`edgetpu`, `hailo`) but
+are **descriptor-only**: neither ships an onnxruntime execution provider, so the
+resolver can never select one and the utility path stays on its existing local
+fallback. Coral additionally cannot hold a transformer embedding model in its
+on-chip SRAM. Detection tells you this instead of staying silent.
+
+### Recommendation for a 5070 Ti build: **buy neither**
+
+With a 16 GB discrete GPU, an add-in NPU/TPU is **redundant** — the GPU already
+runs embeddings orders of magnitude faster than a 4–26 TOPS INT8 stick, and the
+router model is a 3B that answers in milliseconds. Also note a desktop
+**Ryzen 9000 (e.g. 9900X3D) has no integrated NPU** — XDNA ships in Ryzen AI
+mobile/APU parts, so the `vitisai` path does not apply to that CPU either.
+
+These accelerators earn their place in exactly one scenario: a **low-power,
+always-on box with no capable GPU**, where you want routing/embeddings without
+waking a big card. That is a different machine from a gaming/workstation build.
+Spend the money on VRAM instead — the [upgrade table](#when-you-upgrade-vram-later)
+above buys real capability; a TOPS stick does not.
+
 ## How the router chooses (the brain)
 
 `capability_router` classifies each request into a task class and picks the tier,

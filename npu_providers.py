@@ -30,8 +30,26 @@ _VENDOR_LABELS = {
     "openvino": "Intel OpenVINO NPU",
     "qnn": "Qualcomm QNN",
     "winml": "Windows ML",
+    "edgetpu": "Google Coral Edge TPU (TPU-class)",
+    "hailo": "Hailo-8/8L (TPU-class)",
     "cpu": "onnxruntime CPU reference",
     "cpu-sim": "deterministic CPU simulator",
+}
+
+# TPU-class descriptors: why each is present but not runtime-callable here.
+# Neither vendor ships an onnxruntime execution provider, so the existing
+# resolver can never select them; detection reports the honest reason.
+_TPU_REASONS = {
+    "edgetpu": (
+        "TPU-class M.2/USB accelerator; runs TFLite INT8 graphs via "
+        "libedgetpu/pycoral, not an onnxruntime execution provider. Its small "
+        "on-chip SRAM also cannot hold a transformer embedding model, so it is "
+        "not a target for this utility path"
+    ),
+    "hailo": (
+        "TPU-class M.2 accelerator; runs HEF graphs compiled by the Hailo SDK "
+        "and executed through HailoRT, not an onnxruntime execution provider"
+    ),
 }
 
 
@@ -72,6 +90,11 @@ def detect_providers(ort_module, ort_error="", test_hooks=False) -> list:
                     if test_hooks else "disabled outside SONDER_NPU_TEST_HOOKS"
                 ),
             )
+        elif provider_id in _TPU_REASONS:
+            # Never registered/runtime-ready: no onnxruntime EP exists, so the
+            # resolver cannot select it and the utility path stays on its
+            # existing local fallback.
+            row["reason"] = _TPU_REASONS[provider_id]
         elif provider_id == "winml":
             row.update(
                 reason=(

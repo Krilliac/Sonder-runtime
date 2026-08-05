@@ -13149,6 +13149,29 @@ def route_work_request(prompt: str, project: str = "") -> str | None:
                     prompt, {"mode": mode, "tier": selected_tier},
                 )
 
+    # Capability-aware tier refinement (SPEC-3 domain/routing). The mode
+    # decision above is untouched, and the operator's lane -> tier mapping still
+    # wins for ordinary work: this only *upgrades* to a specialist tier the
+    # operator has actually configured (e.g. a reasoning model for a proof, a
+    # vision model for an image task). With only the base tiers configured it is
+    # a deliberate no-op. Advisory and fail-safe — any error keeps the
+    # lane-selected tier, and it can only pick an already-configured local tier
+    # (never cloud, never a new permission).
+    try:
+        from sonder_runtime.domain.routing import capability_router as _caprouter
+
+        _available = tuple(
+            (_RUNTIME_POLICY.get("local_models") or {}).keys()
+        ) or runtime_policy.LOCAL_TIERS
+        _specialists = {"reasoning", "vision"} & set(_available)
+        if _specialists:
+            _route = _caprouter.route(prompt, _available)
+            if _route.tier in _specialists and _route.tier != selected_tier:
+                selected_tier = _route.tier
+                reason = "%s; capability route: %s" % (reason, _route.task)
+    except Exception:
+        pass
+
     resolved_project = _resolve_project(project) or ""
     if mode == "fleet":
         master_kwargs = {
