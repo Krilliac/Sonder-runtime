@@ -225,7 +225,7 @@ def test_record_outcome_uses_short_shared_distillation_budget(monkeypatch, tmp_p
         embed_fn("candidate text")
         return {"status": "no_lesson", "reason": "test"}
 
-    monkeypatch.setattr(server, "_generate_text", generate)
+    monkeypatch.setattr(server, "_gateway_generate_text", generate)
     monkeypatch.setattr(server.embeddings, "embed", embed)
     monkeypatch.setattr(server.reflection, "prepare_lesson_candidate", prepare)
 
@@ -450,7 +450,7 @@ def test_prepare_lesson_candidate_bounded_matches_reflection_interface(
                     timeout=timeout)
         return "Use pathlib.Path for path joins."
 
-    monkeypatch.setattr(server, "_generate_text", fake_generate_text)
+    monkeypatch.setattr(server, "_gateway_generate_text", fake_generate_text)
     monkeypatch.setattr(server.embeddings, "embed", lambda *a, **k: None)
 
     interaction = {
@@ -478,7 +478,7 @@ def test_failure_distills_a_pitfall_lesson(monkeypatch, tmp_path):
     finally:
         conn.close()
     monkeypatch.setattr(
-        server, "_generate_text",
+        server, "_gateway_generate_text",
         lambda prompt, **kw: "Use ${name}: to delimit a PowerShell variable "
                              "before a colon, which otherwise parses as a drive.",
     )
@@ -511,7 +511,7 @@ def test_pitfall_requires_a_concrete_error(monkeypatch, tmp_path):
         memory_store.log_interaction(conn, "F2", "task", "", "answer", "code")
     finally:
         conn.close()
-    monkeypatch.setattr(server, "_generate_text", lambda prompt, **kw: "NONE")
+    monkeypatch.setattr(server, "_gateway_generate_text", lambda prompt, **kw: "NONE")
     monkeypatch.setattr(server.embeddings, "embed", lambda *a, **k: None)
     # An empty error never reaches the model at all.
     assert server._record_failure_pitfall("F2", "task", "code", "") == ("", "")

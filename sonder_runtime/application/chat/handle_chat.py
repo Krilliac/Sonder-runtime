@@ -23,6 +23,7 @@ class ChatCommand:
     history: tuple = ()
     temperature: float | None = None
     num_predict: int | None = None
+    num_ctx: int | None = None
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,8 @@ class ChatService:
             options["temperature"] = command.temperature
         if command.num_predict is not None:
             options["num_predict"] = command.num_predict
+        if command.num_ctx is not None:
+            options["num_ctx"] = command.num_ctx
         request = ModelRequest(
             prompt=command.content,
             tier=command.tier,
