@@ -7445,17 +7445,17 @@ def sonder_remember_fact(text: str, project: str = "") -> str:
     if not text:
         return "ERROR: empty fact."
     project_id = _resolve_project(project) or DEFAULT_PROJECT
-    conn = _open_db()
-    try:
-        emb = embeddings.embed(text)
-        if not embeddings.valid_vector(emb):
-            emb = None
-        blob = embeddings.to_blob(emb) if emb else None
-        fact_id = memory_store.new_id()
-        memory_store.add_fact(conn, fact_id, project_id, text, blob)
-        n = memory_store.count_facts(conn, project_id)
-    finally:
-        conn.close()
+    emb = embeddings.embed(text)
+    if not embeddings.valid_vector(emb):
+        emb = None
+    blob = embeddings.to_blob(emb) if emb else None
+    fact_id = memory_store.new_id()
+    # SPEC-3: fact persistence routes through the UnitOfWork-owned
+    # MemoryRepository; passing _DB_PATH keeps the tool on the server's
+    # database (tests repoint it), with the same connection semantics.
+    with _application().unit_of_work(db_path=_DB_PATH) as uow:
+        uow.memory.add_fact(fact_id, project_id, text, blob)
+        n = uow.memory.count_facts(project_id)
     return "Remembered fact for project '%s' (%d total). id=%s" % (project_id, n, fact_id)
 
 
