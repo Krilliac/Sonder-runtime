@@ -9392,23 +9392,22 @@ def learn_from_example(task: str, solution: str, signal: str = "accepted") -> st
             signal, ", ".join(sorted(reward.VALID_SIGNALS)))
     if not (task or "").strip() or not (solution or "").strip():
         return "ERROR: task and solution are required."
-    conn = _open_db()
-    try:
-        interaction_id = memory_store.new_id()
-        emb = embeddings.embed(task)
-        if not embeddings.valid_vector(emb):
-            emb = None
-        blob = embeddings.to_blob(emb) if emb else None
-        provenance = embeddings.provenance(emb) if emb else {}
-        memory_store.log_interaction(
-            conn, interaction_id, task, "", solution, "example",
+    interaction_id = memory_store.new_id()
+    emb = embeddings.embed(task)
+    if not embeddings.valid_vector(emb):
+        emb = None
+    blob = embeddings.to_blob(emb) if emb else None
+    provenance = embeddings.provenance(emb) if emb else {}
+    # SPEC-3: the example interaction is written through the UnitOfWork-owned
+    # MemoryRepository; _DB_PATH keeps the tool on the server's database.
+    with _application().unit_of_work(db_path=_DB_PATH) as uow:
+        uow.memory.log_interaction(
+            interaction_id, task, "", solution, "example",
             task_embedding=blob,
             task_embedding_model=provenance.get("model"),
             task_embedding_revision=provenance.get("revision"),
             task_embedding_dim=provenance.get("dimension"),
         )
-    finally:
-        conn.close()
     result = _record_outcome_and_maybe_distill(interaction_id, signal)
     if result["lesson_id"]:
         return "Learned lesson %s from example interaction %s." % (
