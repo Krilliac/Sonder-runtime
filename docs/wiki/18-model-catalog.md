@@ -4,116 +4,170 @@ A "collection of specialists" that Sonder routes between, so each request goes t
 the best-suited model. The tiers here are exactly the ones the
 [capability router](../../sonder_runtime/domain/routing/capability_router.py)
 targets: `fast`, `code`, `general`, `reasoning`, `vision`, and (optional)
-`oracle`. Sizes are approximate **VRAM** at Q4_K_M including a working context —
-plan against VRAM, not system RAM ([Model Tiers & Gateway](08-model-tiers-and-gateway.md)).
+`oracle`.
+
+Sizes throughout are approximate **VRAM at Q4_K_M including working context**.
+Plan against **VRAM**, not system RAM — that is the number that decides what you
+can run ([Model Tiers & Gateway](08-model-tiers-and-gateway.md)). CPU-only and
+unified-memory machines are covered at the end.
 
 > **Honest ceiling.** Routing sends each job to the right *local* specialist; it
 > does not manufacture frontier capability. The smartest answer you get is only
 > as smart as the strongest model in the collection. For the genuinely hard
-> minority, the `oracle` tier is a big local model (needs the VRAM) or a
-> **consented** cloud call — that is the realistic path to broad, Claude-like
-> coverage, not a small model pretending.
+> minority, the `oracle` tier is a large local model (needs the VRAM) or a
+> **consented** cloud call — that is the realistic path to broad coverage, not a
+> small model pretending.
 
-## The 16 GB build (RTX 5070 Ti — the sweet spot)
+## 1. Find your band
 
-At 16 GB VRAM you run **anything up to ~14B fully on the GPU**; 32B needs Q3 or
-CPU offload (slower). Recommended collection:
+| VRAM | Largest comfortable model | What the collection looks like |
+|---|---|---|
+| **8 GB** | 7–8B at Q4 | one general/coder model + embeddings; tiers share it |
+| **12 GB** | 12–14B at Q4 | small `fast` + a 7B `code`, 14B swaps in |
+| **16 GB** | 14B at Q4 fully | full base collection; 32B only at Q3/offload |
+| **24 GB** | **32B at Q4** | adds a real `reasoning` tier — the biggest single jump |
+| **32 GB** | 32B at Q6–Q8 | comfortable 32B + a second model resident |
+| **48 GB** | **70B at Q4** | a genuine local `oracle` tier |
+| **64 GB+** unified/multi-GPU | 70B+ / large MoE | oracle plus everything else warm |
 
-| Tier | Job | Recommended model | ~VRAM | Why |
-|---|---|---|---|---|
-| `fast` | router, titling, simple Q&A | **Qwen2.5-3B-Instruct** | ~2.5 GB | instant; keeps the router itself cheap |
-| `code` | workbench, autopilot, code gen | **Qwen2.5-Coder-7B-Instruct** (or `-14B`) | ~5.5 / ~10 GB | the driver of the agent loop; 7B holds the tool protocol, 14B is stronger |
-| `general` | general chat, planning | **Qwen2.5-14B-Instruct** | ~10 GB | strongest all-rounder that still fits fully |
-| `reasoning` | hard multi-step, math, design | **DeepSeek-R1-Distill-Qwen-14B** | ~10 GB | real reasoning-model behavior that *fits 16 GB* (QwQ-32B needs Q3/offload) |
-| `vision` | image/screenshot/diagram input | **Qwen2.5-VL-7B-Instruct** | ~6.5 GB | reads images alongside text |
-| *(embed)* | memory & recall (**required**) | **nomic-embed-text** (or `bge-m3`) | ~0.3 GB | powers semantic recall; not a chat model |
-| *(rerank, optional)* | retrieval quality | **bge-reranker-v2-m3** | ~0.6 GB | second-pass filter for recall |
-| `oracle` (optional) | the hard 5% | 32B @ Q3/CPU-offload, **or** consented cloud | see note | escalation backstop |
+Everything below is expressed per-band, so pick your row and read across.
 
-### Residency: you can't hold them all at once
-16 GB won't keep three 14B models resident. The practical pattern:
+## 2. The collection by role
 
-- **Keep resident** (~8.5 GB, always warm): `fast` (2.5) + `code`-7B (5.5) + `embed` (0.3).
-- **Swap on demand**: the 14B `general`/`reasoning` and the 7B `vision` (Ollama
-  unloads the coder to make room). Tune with `OLLAMA_KEEP_ALIVE`; the
-  [prewarm](11-speculation-and-prediction.md) path hides some of the reload.
-- Coding all day? Instead keep **Coder-14B** resident and let the rest swap.
+| Tier | Job | 8–12 GB | 16 GB | 24–32 GB | 48 GB+ |
+|---|---|---|---|---|---|
+| `fast` | router, titling, simple Q&A | 1.5–3B | 3B | 3–4B | 4–8B |
+| `code` | workbench, autopilot, code gen | 7B coder | 7B coder | **14–32B coder** | 32B coder |
+| `general` | general chat, planning | 7–8B | 14B | 14–32B | 70B |
+| `reasoning` | hard multi-step, math, design | *(fold into general)* | 14B reasoning | **32B reasoning** | 70B reasoning |
+| `vision` | image / screenshot input | 3B VL | 7B VL | 7–8B VL | 8B+ VL |
+| *(embed)* | memory & recall (**required**) | small embed | small embed | small embed | small embed |
+| `oracle` | the hard 5% | consented cloud | consented cloud | 70B @ Q3 / cloud | **70B local** |
 
-The router's job is to make those swaps *worth it* — a small `fast` model answers
-trivia without ever waking a 14B, and only a real reasoning task pays the reload.
+**Model families that fill these roles well** (any Ollama-available equivalent
+works — Sonder is model-agnostic):
 
-## Wiring it into Sonder
+- **fast / router** — small general instruct models (Qwen2.5 3B, Llama 3.2 3B, Gemma 3 4B).
+- **code** — code-specialized instruct models (Qwen2.5-Coder, DeepSeek-Coder, Codestral).
+- **general** — mid-size general instruct models (Qwen2.5, Llama 3.x, Mistral Small, Gemma 3).
+- **reasoning** — reasoning/"thinking" models (DeepSeek-R1 distills, QwQ). They emit
+  long internal chains — slower, much better on multi-step work.
+- **vision** — vision-language models (Qwen2.5-VL, Llama Vision, Gemma 3 multimodal).
+- **embed** — embedding models (nomic-embed-text, BGE, E5, mxbai). **Required** for
+  memory/recall; not a chat model.
+- **rerank** *(optional)* — reranker models (bge-reranker) to sharpen retrieval.
 
-Pull the collection, then bind lanes to tiers (developer/admin auth):
+Abliterated variants of any of the above trade the model's built-in refusals for
+fewer false-refusals on legitimate dual-use work; Sonder's host guardrails are
+enforced independently of the model ([Security Model](09-security-model.md)).
+
+## 3. Residency: you usually cannot hold them all
+
+Ollama keeps a limited set of models resident and swaps the rest on demand, so
+routing between tiers can cost a reload. The pattern that works at any size:
+
+- **Keep resident:** `fast` + `embed` + whichever heavy tier you use most
+  (usually `code`). These are small and answer constantly.
+- **Swap on demand:** the larger `general`/`reasoning` and `vision` models.
+- Tune with `OLLAMA_KEEP_ALIVE` (hold warm longer) and `OLLAMA_MAX_LOADED_MODELS`.
+  The [prewarm path](11-speculation-and-prediction.md) hides part of the reload.
+
+The router's job is to make swaps *worth it*: a small `fast` model answers trivia
+without ever waking a large model, and only a genuinely hard task pays the cost.
+
+## 4. Wiring it into Sonder
 
 ```bash
-ollama pull qwen2.5:3b
-ollama pull qwen2.5-coder:7b
-ollama pull qwen2.5:14b
-ollama pull deepseek-r1:14b
-ollama pull qwen2.5vl:7b
-ollama pull nomic-embed-text
-# bind tiers -> models and lanes -> tiers
-/runtime set fast=qwen2.5:3b code=qwen2.5-coder:7b general=qwen2.5:14b
-/runtime set workbench=code autopilot=code review=general
+ollama pull <fast-model>
+ollama pull <coder-model>
+ollama pull <general-model>
+ollama pull <embedding-model>
+# bind tiers -> models, lanes -> tiers (developer/admin auth)
+/runtime set fast=<fast-model> code=<coder-model> general=<general-model>
+/runtime set router=fast workbench=code autopilot=code review=general
 ```
 
-`reasoning`/`vision`/`oracle` become live tiers once the operator adds them to
-policy; until then the router degrades to `general`/`code` automatically. Full
-procedure: [assemble-model-collection](../runbooks/assemble-model-collection.md).
+`reasoning`, `vision`, and `oracle` become live tiers once the operator adds
+them; until then the router degrades to `general`/`code` automatically — nothing
+breaks on a smaller collection. Full procedure:
+[assemble-model-collection](../runbooks/assemble-model-collection.md).
 
-## When you upgrade VRAM later
+## 5. Scaling up: multi-GPU
 
-| VRAM | Unlocks |
-|---|---:|
-| 16 GB (5070 Ti) | up to 14B fully; 32B via Q3/offload |
-| 24 GB (3090/4090/5080-class) | **32B fully** (QwQ-32B, Coder-32B) — the reasoning/coding jump |
-| 48 GB (2×24 / RTX 6000) | **70B** — a real local `oracle` tier |
-| 64–128 GB unified (Mac/DGX) | 70B+ / big MoE |
+Multi-GPU LLM inference does **not** use SLI or NVLink — those are irrelevant
+here. Frameworks split the model by **layers** across cards and pass a small
+activation tensor over ordinary PCIe, so a modest slot (x4/x8) is fine; PCIe
+bandwidth mostly affects load time, not per-token speed.
 
-Your **9900X3D + 32 GB DDR5-6000** also lets a 32B spill partially to system RAM
-for a slow-but-usable local `oracle` (good for overnight/batch distillation, per
-the teacher→student loop in [Training](15-training.md)) — while the GPU keeps the
-interactive tiers fast.
+**Two rules decide whether a pairing works:**
 
-## Accelerators: NPUs and TPUs (what they can and cannot do)
+1. **Do not mix vendors for one model.** CUDA and oneAPI/SYCL (and ROCm) are
+   separate backends; a single model cannot be split across an NVIDIA and an
+   Intel/AMD card. A mixed pair realistically means two *independent* model
+   servers, not pooled VRAM.
+2. **Bandwidth sets token speed.** Generation is memory-bandwidth-bound, so a
+   card's GB/s matters as much as its capacity. A high-capacity but low-bandwidth
+   card generates proportionally slower.
 
-**Neither an M.2 NPU nor an M.2 TPU can run an LLM.** They have no usable
-memory for multi-GB weights and their instruction sets target small quantized
-CNNs. Any tier in the table above runs on the **GPU** (or CPU) — never on one of
-these sticks. What they *can* do is Sonder's **utility path**: the bounded
-routing and embedding work that sits *below* the model tiers
-([NPU.md](../../NPU.md)).
+Mixing *generations* from the **same** vendor is fine — layers split across
+different-sized cards proportionally.
 
-| Class | Examples | Runtime | Usable by Sonder today |
+**Two ways to use a second card**, and the second is often the better daily win:
+
+- **Pool** — split one large model across both for a bigger `oracle`/`reasoning`
+  tier.
+- **Pin one model per card** (e.g. `CUDA_VISIBLE_DEVICES`) — keep the coder warm
+  on one and the reasoning model warm on the other. **Zero swap latency**, which
+  suits a routed collection of specialists better than one giant model.
+
+Practical checks before buying: PSU headroom for two cards, case clearance and
+airflow, and enough PCIe slots. Aim at a **capacity target**, not a card count —
+reaching 48 GB (for a 70B `oracle`) means two 24 GB cards, which is worth knowing
+before buying a second smaller one.
+
+## 6. Accelerators: NPUs and TPUs
+
+**Neither an M.2/USB NPU nor a TPU can run an LLM.** They have no usable memory
+for multi-GB weights and target small quantized CNNs. Every tier above runs on
+GPU or CPU. What they *can* serve is Sonder's **utility path** — the bounded
+routing and embedding work that sits *below* the model tiers ([NPU.md](../../NPU.md)).
+
+| Class | Examples | Runtime | Usable today |
 |---|---|---|---|
 | **NPU** (integrated) | AMD XDNA (Ryzen AI), Intel NPU, Qualcomm HTP | onnxruntime EPs (`vitisai`/`openvino`/`qnn`) | **Yes** — routing + embeddings |
-| **TPU** (M.2/USB) | Google Coral, Hailo-8/8L | libedgetpu/TFLite, HailoRT/HEF | **No** — descriptor-only, see below |
+| **TPU** (M.2/USB) | Google Coral, Hailo-8/8L | libedgetpu/TFLite, HailoRT/HEF | **No** — descriptor-only |
 
-TPU-class devices are declared and reported honestly (`edgetpu`, `hailo`) but
-are **descriptor-only**: neither ships an onnxruntime execution provider, so the
-resolver can never select one and the utility path stays on its existing local
-fallback. Coral additionally cannot hold a transformer embedding model in its
-on-chip SRAM. Detection tells you this instead of staying silent.
+TPU-class devices are declared and reported honestly (`edgetpu`, `hailo`) but are
+**descriptor-only**: neither ships an onnxruntime execution provider, so the
+resolver can never select one and the utility path stays on its local fallback.
+Coral additionally cannot hold a transformer embedding model in its on-chip SRAM.
+Detection states this rather than staying silent.
 
-### Recommendation for a 5070 Ti build: **buy neither**
+**When an accelerator is worth it:** a low-power, always-on machine with **no
+capable GPU**, where routing/embeddings should run without waking a big card. If
+the machine already has a discrete GPU, an add-in NPU/TPU is redundant — the GPU
+runs embeddings far faster than a few-TOPS INT8 device, and the router model is
+small enough to be nearly free. Note also that integrated NPUs ship mainly in
+laptop/APU parts; most desktop CPUs have none, so those provider paths simply do
+not apply there.
 
-With a 16 GB discrete GPU, an add-in NPU/TPU is **redundant** — the GPU already
-runs embeddings orders of magnitude faster than a 4–26 TOPS INT8 stick, and the
-router model is a 3B that answers in milliseconds. Also note a desktop
-**Ryzen 9000 (e.g. 9900X3D) has no integrated NPU** — XDNA ships in Ryzen AI
-mobile/APU parts, so the `vitisai` path does not apply to that CPU either.
+## 7. No discrete GPU?
 
-These accelerators earn their place in exactly one scenario: a **low-power,
-always-on box with no capable GPU**, where you want routing/embeddings without
-waking a big card. That is a different machine from a gaming/workstation build.
-Spend the money on VRAM instead — the [upgrade table](#when-you-upgrade-vram-later)
-above buys real capability; a TOPS stick does not.
+- **CPU-only** — workable with 3–8B models; expect seconds-per-response. Keep the
+  collection small (one general/coder model + embeddings) and prefer the
+  foreground workbench over long autopilot runs.
+- **Unified memory (Apple Silicon and similar)** — the whole memory pool is
+  usable, so large models run well; size by total unified RAM using the band
+  table above.
+- **System-RAM offload** — a model larger than VRAM can spill to system RAM at a
+  large speed penalty. Useful for a slow, private `oracle` used for
+  overnight/batch work (see the teacher→student loop in [Training](15-training.md)),
+  not for interactive use.
 
-## How the router chooses (the brain)
+## 8. How the router chooses
 
-`capability_router` classifies each request into a task class and picks the tier,
-with an escalation ladder for when the first choice isn't enough:
+`capability_router` classifies each request and picks a tier, with an escalation
+ladder for when the first choice is not enough:
 
 | Task class | First tier | Escalation ladder (→ oracle if consented) |
 |---|---|---|
@@ -124,7 +178,9 @@ with an escalation ladder for when the first choice isn't enough:
 | vision | `vision` | vision → general |
 | long-context (large payload) | `general` | general → reasoning → *oracle* |
 
-Escalation fires only on a real signal — a failed run, an empty/low-confidence
-answer, or an explicit "think hard" — so a satisfied cheap answer never wastes a
-14B. See [Agent, Autopilot & Fleet](07-agent-autopilot-fleet.md) for how the loop
-consumes these decisions.
+The operator's lane→tier mapping wins for ordinary work; the router only upgrades
+to a **specialist** tier that has actually been configured. Escalation fires only
+on a real signal — a failed run, an empty/low-confidence answer, or an explicit
+"think hard" — so a satisfied cheap answer never wastes a large model. See
+[Agent, Autopilot & Fleet](07-agent-autopilot-fleet.md) for how the loop consumes
+these decisions.
