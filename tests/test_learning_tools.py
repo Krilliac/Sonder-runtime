@@ -571,3 +571,35 @@ def test_record_outcome_routes_through_unit_of_work(monkeypatch, tmp_path):
     out = server.record_outcome("U1", "tests_passed")
     assert out.startswith("Recorded 'tests_passed'")
     assert seen["db_path"] == server._DB_PATH
+
+
+def test_learn_from_example_routes_through_unit_of_work(monkeypatch, tmp_path):
+    """SPEC-3: the example interaction write goes through the UnitOfWork
+    port, bound to the server's database path."""
+    from sonder_runtime.adapters.legacy.services import LegacyUnitOfWork
+
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
+    monkeypatch.setattr(server.embeddings, "embed", lambda *a, **k: None)
+
+    seen = {}
+
+    class _RecordingUow(LegacyUnitOfWork):
+        def __init__(self, db_path=None):
+            seen.setdefault("db_paths", []).append(db_path)
+            super().__init__(db_path)
+
+    class _App:
+        unit_of_work = _RecordingUow
+
+    monkeypatch.setattr(server, "_application", lambda: _App())
+    monkeypatch.setattr(
+        server, "_prepare_lesson_candidate_bounded",
+        lambda interaction, signal: {"status": "no_lesson", "reason": "test"},
+    )
+    out = server.learn_from_example("join paths", "use pathlib", "accepted")
+    assert not out.startswith("ERROR")
+    # Both the interaction write and the outcome flow used the port,
+    # each bound to the server's path.
+    assert seen["db_paths"] and all(
+        p == server._DB_PATH for p in seen["db_paths"]
+    )
