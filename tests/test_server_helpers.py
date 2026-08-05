@@ -2593,7 +2593,14 @@ def test_offload_context_window_follows_the_context_policy(monkeypatch):
         server._offload_impl("task", tier="code")
     except Exception:
         pass
-    assert server.context_policy.native() == 8192
+    # This is the whole point of the test: the window handed to the model is
+    # the one the policy computed. Asserting a fixed number instead only pins
+    # whatever this host happens to be tuned to -- and did. The literal here
+    # was 8192, which stopped being the default once the window started being
+    # sized from the KV cache type, so the test failed on every machine
+    # running a quantised KV cache and passed everywhere else.
+    assert "num_ctx" in seen, "offload never consulted _local_model_options"
+    assert seen["num_ctx"] == server.context_policy.native()
     # An explicit value still wins over the policy default.
     assert server.context_policy.native(4096) == 4096
 
