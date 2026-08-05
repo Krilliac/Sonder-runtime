@@ -67,7 +67,19 @@ ROUTE_REASON_CODES = ("score_margin", "low_confidence", "degenerate")
 # intentionally not claimed as an NPU provider. "cpu" is the onnxruntime CPU
 # reference provider (same weights, same identity). "cpu-sim" is the stdlib
 # deterministic simulator used for portable CI and explicit opt-in testing.
-PROVIDER_IDS = ("vitisai", "openvino", "qnn", "winml", "cpu", "cpu-sim")
+# "edgetpu" (Google Coral) and "hailo" (Hailo-8/8L) are TPU-class M.2/USB
+# accelerators. They are descriptor-only for the same reason as "winml": neither
+# is an onnxruntime execution provider — Coral runs TFLite INT8 through
+# libedgetpu/pycoral and Hailo runs HEF graphs through HailoRT. Detection
+# reports them honestly (present, why unusable) instead of staying silent, and
+# they can never be selected as a runtime provider by the existing resolver.
+PROVIDER_IDS = (
+    "vitisai", "openvino", "qnn", "winml", "edgetpu", "hailo", "cpu", "cpu-sim",
+)
+
+# Provider ids that are TPU-class rather than NPU-class. Kept separate so
+# status output can label the hardware class honestly.
+TPU_PROVIDER_IDS = ("edgetpu", "hailo")
 
 # Provider families that require exclusive no-CPU-fallback sessions. The EP id
 # alone is not acceleration proof; worker-side effective-device attestation is
