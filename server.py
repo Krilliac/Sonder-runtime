@@ -2191,15 +2191,17 @@ def _record_outcome_and_maybe_distill(interaction_id, signal):
     result = None
     claim_may_exist = False
     try:
-        conn = _open_db()
-        try:
-            inter = memory_store.get_interaction(conn, interaction_id)
+        # SPEC-3: the outcome write + distillation claim go through the
+        # UnitOfWork-owned MemoryRepository; _DB_PATH keeps the flow on the
+        # server's database (tests repoint it) with identical connection
+        # semantics.
+        with _application().unit_of_work(db_path=_DB_PATH) as uow:
+            inter = uow.memory.get_interaction(interaction_id)
             if inter is None:
                 return {"found": False}
             score = reward.score(signal)
             claim_may_exist = True
-            recorded = memory_store.record_outcome_and_claim_lesson_distillation(
-                conn,
+            recorded = uow.memory.record_outcome(
                 interaction_id,
                 signal,
                 score,
@@ -2209,8 +2211,6 @@ def _record_outcome_and_maybe_distill(interaction_id, signal):
             )
             if not recorded["claimed"]:
                 claim_may_exist = False
-        finally:
-            conn.close()
 
         result = {
             "found": True,
