@@ -141,3 +141,24 @@ def test_long_thread_summarizes_overflow(stub, monkeypatch):
         conn.close()
     assert sess["summary"]
     assert sess["summarized_through"]
+
+
+def test_remember_fact_routes_through_unit_of_work(stub, monkeypatch):
+    """SPEC-3: fact persistence goes through the UnitOfWork port, bound to
+    the server's database path (which tests repoint)."""
+    from sonder_runtime.adapters.legacy.services import LegacyUnitOfWork
+
+    seen = {}
+
+    class _RecordingUow(LegacyUnitOfWork):
+        def __init__(self, db_path=None):
+            seen["db_path"] = db_path
+            super().__init__(db_path)
+
+    class _App:
+        unit_of_work = _RecordingUow
+
+    monkeypatch.setattr(server, "_application", lambda: _App())
+    out = server.sonder_remember_fact("uses ninja", project="proj")
+    assert out.startswith("Remembered fact")
+    assert seen["db_path"] == server._DB_PATH
