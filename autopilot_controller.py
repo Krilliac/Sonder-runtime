@@ -412,10 +412,17 @@ def format_run(run: dict | None, include_report: bool = True) -> str:
 
 
 def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
-    data = autopilot_store.snapshot(include_finished=include_finished, limit=limit)
+    # SPEC-3: first live call-site migrated onto the AutomationRepository port.
+    # The composition root's automation repository wraps autopilot_store, so the
+    # observable result is identical; the direct root-module dependency is gone.
+    # Imported lazily to keep this module import-cheap and avoid any cycle.
+    from sonder_runtime.bootstrap.app import default_app
+
+    automation = default_app().automation
+    data = automation.snapshot(include_finished=include_finished, limit=limit)
     latest = data.get("latest")
     data["events"] = (
-        autopilot_store.events(latest["id"], limit=12) if latest else []
+        automation.events(latest["id"], limit=12) if latest else []
     )
     return data
 
