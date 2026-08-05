@@ -7,6 +7,7 @@ proxy for remote access) unless it says otherwise.
 - [install-server-private.md](install-server-private.md)
 - [install-workstation-local.md](install-workstation-local.md)
 - [use-facts-model.md](use-facts-model.md) — import a portable GGUF (facts. USB)
+- [assemble-model-collection.md](assemble-model-collection.md) — a routed collection of specialist models
 - [secure-remote-access.md](secure-remote-access.md)
 - [start-stop-drain.md](start-stop-drain.md)
 - [rotate-credentials.md](rotate-credentials.md)
