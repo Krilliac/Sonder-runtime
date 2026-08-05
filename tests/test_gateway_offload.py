@@ -111,3 +111,87 @@ def test_bootstrap_graph_exposes_chat_over_gateway():
     assert application.chat is not None
     assert isinstance(application.model_gateway, OllamaGateway)
     bootstrap_app.reset_for_tests()
+
+
+def test_gateway_edge_forwards_explicit_num_ctx(monkeypatch):
+    fake = _FakeChat(ChatResult("t", "m", "code"))
+    _install_chat(monkeypatch, fake)
+    server._gateway_generate_text("p", tier="code", num_ctx=2048)
+    command = fake.calls[0][0]
+    assert command.num_ctx == 2048
+    # Omitted num_ctx stays None so the gateway resolves the native window.
+    fake.calls.clear()
+    server._gateway_generate_text("p", tier="code")
+    assert fake.calls[0][0].num_ctx is None
+
+
+def test_chat_service_forwards_num_ctx_into_request_options():
+    from sonder_runtime.application.chat.handle_chat import (
+        ChatCommand, ChatService,
+    )
+    from sonder_runtime.application.context import local_owner_context
+
+    seen = {}
+
+    class _Gateway:
+        def generate(self, request, context):
+            seen["options"] = dict(request.options)
+
+            class _R:
+                text, model, tier = "x", "m", "code"
+                duration_ms, tokens_in, tokens_out = 0, None, None
+
+            return _R()
+
+    service = ChatService(_Gateway())
+    service.complete(
+        ChatCommand(content="p", tier="code", num_ctx=2048),
+        local_owner_context(correlation_id="t", source="test"),
+    )
+    assert seen["options"]["num_ctx"] == 2048
+
+
+def test_lesson_distillation_routes_through_gateway(monkeypatch):
+    import reflection
+
+    fake = _FakeChat(ChatResult("lesson text", "m", "code"))
+    _install_chat(monkeypatch, fake)
+
+    def fake_prepare(task, response, signal, offload_fn, embed_fn):
+        offload_fn(
+            prompt="distill", tier="code", system="S",
+            temperature=0.1, num_predict=120,
+        )
+        return {"status": "skipped"}
+
+    monkeypatch.setattr(reflection, "prepare_lesson_candidate", fake_prepare)
+    server._prepare_lesson_candidate_bounded(
+        {"task": "t", "response": "r"}, "tests_passed",
+    )
+    command = fake.calls[0][0]
+    assert command.tier == "code"
+    # Distillation pins the small context it has always used.
+    assert command.num_ctx == 2048
+
+
+def test_pitfall_distillation_routes_through_gateway(monkeypatch):
+    import reflection
+
+    fake = _FakeChat(ChatResult("pitfall text", "m", "code"))
+    _install_chat(monkeypatch, fake)
+
+    def fake_prepare(task, response, error, offload_fn):
+        offload_fn(
+            prompt="pitfall", tier="code", system="S",
+            temperature=0.1, num_predict=120,
+        )
+        return {"status": "not-a-candidate"}
+
+    monkeypatch.setattr(reflection, "prepare_pitfall_candidate", fake_prepare)
+    lesson_id, note = server._record_failure_pitfall(
+        "iid-1", "task", "resp", "boom",
+    )
+    assert (lesson_id, note) == ("", "")
+    command = fake.calls[0][0]
+    assert command.tier == "code"
+    assert command.num_ctx == 2048

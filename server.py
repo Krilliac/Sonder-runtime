@@ -737,15 +737,16 @@ def _application():
 
 
 def _gateway_generate_text(prompt, tier="fast", system="", temperature=0.2,
-                           num_predict=256, num_ctx=2048, timeout=None):
+                           num_predict=256, num_ctx=None, timeout=None):
     """offload_fn routed through the SPEC-3 ChatService over the ModelGateway.
 
     The port enforces the operation-context cloud-consent gate and returns
     domain-typed errors; this edge translates them back to ModelCallError
     (a urllib.error.URLError subclass) so existing callers that catch
     URLError — session summarization/titling — keep their exact behavior.
+    An explicit num_ctx is forwarded through the port; when omitted the
+    gateway resolves the native session context via _make_generate.
     """
-    del num_ctx  # the gateway resolves native context via _make_generate
     from sonder_runtime.application.chat.handle_chat import ChatCommand
     from sonder_runtime.application.context import local_owner_context
     from sonder_runtime.domain.common import errors as _errors
@@ -762,6 +763,7 @@ def _gateway_generate_text(prompt, tier="fast", system="", temperature=0.2,
             ChatCommand(
                 content=prompt, tier=tier, system=system,
                 temperature=temperature, num_predict=num_predict,
+                num_ctx=num_ctx,
             ),
             context,
         )
@@ -2155,8 +2157,13 @@ def _prepare_lesson_candidate_bounded(interaction, signal):
     def generate(prompt, **options):
         # reflection.distill passes tier/system/temperature/num_predict;
         # forward them, but this budget's deadline always owns the timeout.
+        # SPEC-3: routed through the ModelGateway port; num_ctx pins the
+        # small context distillation has always used.
         options.pop("timeout", None)
-        return _generate_text(prompt, timeout=remaining_seconds(), **options)
+        options.setdefault("num_ctx", 2048)
+        return _gateway_generate_text(
+            prompt, timeout=remaining_seconds(), **options
+        )
 
     def embed(text):
         if time.monotonic() >= deadline:
@@ -2368,8 +2375,11 @@ def _record_failure_pitfall(interaction_id, task, response, error):
     try:
         candidate = reflection.prepare_pitfall_candidate(
             str(task or "")[:4000], str(response or "")[:4000], error,
-            offload_fn=lambda prompt, **options: _generate_text(
-                prompt, timeout=_distillation_timeout_seconds(), **options
+            # SPEC-3: routed through the ModelGateway port; num_ctx pins the
+            # small context distillation has always used.
+            offload_fn=lambda prompt, **options: _gateway_generate_text(
+                prompt, timeout=_distillation_timeout_seconds(),
+                num_ctx=options.pop("num_ctx", 2048), **options
             ),
         )
         if candidate.get("status") != "candidate":
