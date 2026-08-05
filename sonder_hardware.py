@@ -124,23 +124,41 @@ def _probe_total_ram_gb() -> float | None:
 def _probe_gpu() -> tuple[bool, float | None]:
     """Return ``(gpu_present, vram_gb)`` by shelling out to ``nvidia-smi``.
 
-    Kept behind a short timeout and a blanket ``except`` so a missing binary,
-    a hung driver, or a machine without an NVIDIA card all resolve to
-    ``(False, None)`` instead of raising. Non-NVIDIA accelerators are simply
-    not detected here; callers can inject a probe that knows about them.
+    Kept behind a timeout and a blanket ``except`` so a missing binary, a hung
+    driver, or a machine without an NVIDIA card all resolve to ``(False, None)``
+    instead of raising. Non-NVIDIA accelerators are simply not detected here;
+    callers can inject a probe that knows about them.
+
+    The timeout is generous and one retry follows a timeout. On a laptop with
+    switchable graphics the discrete GPU idles powered down, and the first
+    ``nvidia-smi`` after an idle stretch blocks while the driver wakes it --
+    measured well over 2s on an RTX 4050 Laptop, with the very next call
+    returning in milliseconds. A tight timeout therefore fails exactly when
+    the GPU is cold, which is precisely when nothing else has warmed it: the
+    host then reports "no GPU", sizes the band for CPU inference, and advises
+    a short keep_alive with speculation dormant -- all on a machine with a
+    working CUDA device. Retrying once converts that intermittent miss into a
+    hit, because the timed-out probe is itself the wake-up call.
     """
-    try:
-        out = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=memory.total",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=2.0,
-        )
-    except Exception:
+    out = None
+    for timeout_s in (8.0, 8.0):
+        try:
+            out = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=memory.total",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+            )
+            break
+        except subprocess.TimeoutExpired:
+            continue  # cold GPU; the probe that just timed out did the waking
+        except Exception:
+            return (False, None)
+    if out is None:
         return (False, None)
     if out.returncode != 0:
         return (False, None)

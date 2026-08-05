@@ -216,3 +216,55 @@ def test_render_handles_unknown_fields():
     assert "cpu cores  : unknown" in text
     assert "system ram : unknown" in text
     assert "gpu        : none detected" in text
+
+
+# --- cold discrete GPU ---------------------------------------------------------
+
+def test_probe_gpu_retries_a_cold_switchable_gpu(monkeypatch):
+    """A laptop's discrete GPU idles powered down, so the first nvidia-smi after
+    an idle stretch blocks while the driver wakes it and the next one returns at
+    once. The old 2s single-shot timed out exactly then and reported "no GPU",
+    which sized the band for CPU inference on a working CUDA box."""
+    calls = []
+
+    class _Result:
+        returncode = 0
+        stdout = "6141\n"
+
+    def _fake_run(cmd, **kwargs):
+        calls.append(kwargs.get("timeout"))
+        if len(calls) == 1:
+            raise sonder_hardware.subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+        return _Result()
+
+    monkeypatch.setattr(sonder_hardware.subprocess, "run", _fake_run)
+    assert sonder_hardware._probe_gpu() == (True, 6.0)
+    assert len(calls) == 2, "a timed-out cold probe must be retried once"
+    assert all(t and t > 2.0 for t in calls), "2s is shorter than a cold wake"
+
+
+def test_probe_gpu_gives_up_when_every_attempt_times_out(monkeypatch):
+    """A genuinely hung driver must still resolve to "no GPU" rather than hang
+    the caller or raise through it."""
+    calls = []
+
+    def _always_timeout(cmd, **kwargs):
+        calls.append(1)
+        raise sonder_hardware.subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+    monkeypatch.setattr(sonder_hardware.subprocess, "run", _always_timeout)
+    assert sonder_hardware._probe_gpu() == (False, None)
+    assert len(calls) == 2, "bounded retries: must not loop forever"
+
+
+def test_probe_gpu_missing_binary_is_not_retried(monkeypatch):
+    """No nvidia-smi at all is a settled answer, not a cold GPU - one look."""
+    calls = []
+
+    def _missing(cmd, **kwargs):
+        calls.append(1)
+        raise FileNotFoundError("nvidia-smi")
+
+    monkeypatch.setattr(sonder_hardware.subprocess, "run", _missing)
+    assert sonder_hardware._probe_gpu() == (False, None)
+    assert len(calls) == 1, "a missing binary must not be retried"
