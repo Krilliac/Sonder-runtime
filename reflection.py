@@ -77,7 +77,13 @@ def distill(task, response, signal, offload_fn):
         "TASK:\n%s\n\nSOLUTION:\n%s\n\n"
         "Extract ONE concrete, reusable lesson (max 25 words) that names the "
         "specific technique, API, data structure, algorithm, or pitfall that made "
-        "this solution work. It must be actionable on a DIFFERENT future task. "
+        "this solution work. It must be actionable on a DIFFERENT future task.\n"
+        "Do NOT restate a rule the TASK itself already imposed - a constraint the "
+        "caller supplied is not something learned from the solution.\n"
+        "Do NOT state a rule that only holds for this task's platform, word size, "
+        "language version, or file as if it held everywhere. If the insight is "
+        "conditional, say the condition; if it cannot be stated without the "
+        "condition, output NONE.\n"
         "If no such specific insight exists, output NONE. No preamble."
         % (signal, task, response)
     )
