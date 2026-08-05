@@ -41,6 +41,17 @@ def _lesson_sources(conn) -> tuple[dict[str, int], int]:
     return dict(sorted(sources.items())), grounded
 
 
+# Signals a machine produced by running the code, versus signals something
+# with judgement recorded after looking at the answer. They measure different
+# things and must not be averaged into one number: the autograded population is
+# self-generated curriculum/ladder work (curriculum_run.py, game_ladder.py)
+# that the runtime both sets and marks, and it outnumbers reviewed outcomes by
+# more than an order of magnitude. A blended "positive percent" therefore
+# reports how often the runtime passes its own exams, while reading like how
+# often the model is right on a caller's real task.
+_AUTOGRADED_SIGNALS = frozenset({"tests_passed", "failed", "compiled"})
+
+
 def _outcome_metrics(conn) -> dict:
     rows = conn.execute(
         "SELECT signal, COUNT(*) AS count, AVG(reward) AS average_reward "
@@ -49,10 +60,20 @@ def _outcome_metrics(conn) -> dict:
     signals = []
     outcomes = 0
     good_outcomes = 0
+    autograded = 0
+    autograded_good = 0
+    reviewed = 0
+    reviewed_good = 0
     for row in rows:
         signal = str(row["signal"])
         count = int(row["count"] or 0)
         good = reward.is_good(signal)
+        if signal in _AUTOGRADED_SIGNALS:
+            autograded += count
+            autograded_good += count if good else 0
+        else:
+            reviewed += count
+            reviewed_good += count if good else 0
         signals.append(
             {
                 "signal": signal,
@@ -88,6 +109,13 @@ def _outcome_metrics(conn) -> dict:
         "bad_outcomes": outcomes - good_outcomes,
         "good_outcome_interactions": good_interactions,
         "positive_percent": _percent(good_outcomes, outcomes),
+        # Split so the blended number cannot hide the one that matters. See
+        # _AUTOGRADED_SIGNALS: reviewed_positive_percent is the model's hit rate
+        # on work a caller actually delegated and then judged.
+        "autograded_outcomes": autograded,
+        "autograded_positive_percent": _percent(autograded_good, autograded),
+        "reviewed_outcomes": reviewed,
+        "reviewed_positive_percent": _percent(reviewed_good, reviewed),
         "signals": signals,
     }
 
@@ -292,6 +320,16 @@ def format_report(report: dict) -> str:
             report.get("outcomes", 0),
             report.get("positive_percent", 0),
             report.get("bad_outcomes", 0),
+        ),
+        "    reviewed (judged by a caller): %s | positive: %s%%"
+        % (
+            report.get("reviewed_outcomes", 0),
+            report.get("reviewed_positive_percent", 0),
+        ),
+        "    autograded (runtime marking its own curriculum): %s | positive: %s%%"
+        % (
+            report.get("autograded_outcomes", 0),
+            report.get("autograded_positive_percent", 0),
         ),
         "  lessons: %s | interaction-grounded: %s | synthetic: %s"
         % (

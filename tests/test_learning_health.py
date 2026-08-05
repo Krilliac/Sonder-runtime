@@ -282,3 +282,39 @@ def test_learning_health_reports_quarantined_lessons_as_watch():
     assert "automatically re-enter probation" in report["quarantine_review"]
     assert "quarantined=1" in text
     assert "quarantine harmful: losses=6" in text
+
+
+def test_autograded_curriculum_outcomes_do_not_mask_the_reviewed_hit_rate():
+    """A blended positive_percent reads like "how often the model is right on my
+    task", but is dominated by curriculum/ladder runs the runtime both sets and
+    marks. Here 9 self-graded passes sit next to 1 accepted and 3 rejected: the
+    blend says 77% while the model actually satisfied a caller 1 time in 4."""
+    conn = _conn()
+    try:
+        ids = []
+        for n in range(13):
+            interaction_id = "i%d" % n
+            _interaction(conn, interaction_id)
+            ids.append(interaction_id)
+        for interaction_id in ids[:9]:
+            memory_store.record_outcome_row(conn, interaction_id, "tests_passed", 1.0)
+        memory_store.record_outcome_row(conn, ids[9], "accepted", 0.8)
+        for interaction_id in ids[10:]:
+            memory_store.record_outcome_row(conn, interaction_id, "rejected", -0.5)
+        report = learning_health.build_report(conn)
+    finally:
+        conn.close()
+
+    assert report["outcomes"] == 13
+    assert report["positive_percent"] == 76.9
+
+    # The two populations are reported apart, so the flattering blend cannot
+    # hide that reviewed work succeeded only a quarter of the time.
+    assert report["autograded_outcomes"] == 9
+    assert report["autograded_positive_percent"] == 100.0
+    assert report["reviewed_outcomes"] == 4
+    assert report["reviewed_positive_percent"] == 25.0
+
+    text = learning_health.format_report(report)
+    assert "reviewed (judged by a caller): 4 | positive: 25.0%" in text
+    assert "autograded (runtime marking its own curriculum): 9 | positive: 100.0%" in text
