@@ -161,3 +161,141 @@ def test_describe_total_flags_an_untrustworthy_count():
     assert "UNRELIABLE" not in cg.describe_total(
         ["a.cs(1,1): error CS0246: The type or namespace name 'X' could not be found"]
     )
+
+
+def test_a_duplicate_member_is_a_masking_error():
+    """The measured one: a build reported '1 error' when the truth was 109. The
+    single line was CS0111 -- the type parsed but could not be DECLARED, so the
+    compiler never bound a method body and no dependent's errors were printed."""
+    dup = ["Board.cs(31,17): error CS0111: Type 'Board' already defines a member "
+           "called 'Reset' with the same parameter types"]
+    assert cg.definition_blocked(dup) == 1
+    assert cg.count_unreliable(dup) == 1
+    assert "UNRELIABLE" in cg.describe_total(dup)
+
+
+def test_a_type_or_namespace_redeclaration_is_masking():
+    """CS0101/CS0102 are the same declare-phase failure one level up: two files
+    both defining Board leaves no usable symbol for either, so the 109 that a
+    duplicate member hid hides exactly the same way here."""
+    assert cg.definition_blocked(
+        ["Game.cs(3,18): error CS0101: The namespace 'Game' already contains a "
+         "definition for 'Board'"]
+    ) == 1
+    assert cg.definition_blocked(
+        ["Board.cs(9,16): error CS0102: The type 'Board' already contains a "
+         "definition for 'cells'"]
+    ) == 1
+
+
+def test_masking_shapes_generalise_across_toolchains():
+    """Shape, not code range -- the reason CS8180 was caught in the parse guard.
+    Every one of these is a declaration the compiler could not install, and the
+    C/C++ case is the worst of them: a redefinition in a header takes out every
+    translation unit that includes it while reporting one line."""
+    for line in [
+        "board.h:12:8: error: redefinition of 'struct Board'",
+        "board.c:20:5: error: conflicting types for 'reset'",
+        "src/board.rs:14:1: error[E0428]: the name `reset` is defined multiple times",
+        "ld: error: duplicate symbol: _reset",
+        "Board.java:9: error: duplicate class: game.Board",
+        "Board.java:14: error: method reset() is already defined in class Board",
+        "src/board.ts(4,7): error TS2300: Duplicate identifier 'Board'.",
+    ]:
+        assert cg.definition_blocked([line]) == 1, line
+
+
+def test_a_missing_member_is_not_a_masking_error():
+    """The trap this guard has to avoid. CS0117/CS1061 read almost identically
+    to CS0102 -- 'contain a definition for' appears in both -- but they mean the
+    binder RAN and a call site is wrong. They are the loop's normal progress
+    signal; flagging them would mark nearly every mid-run build unreliable."""
+    for line in [
+        "Game.cs(7,15): error CS0117: 'Board' does not contain a definition for 'Reset'",
+        "Game.cs(8,15): error CS1061: 'Board' does not contain a definition for "
+        "'Reset' and no accessible extension method 'Reset' could be found",
+        "game.cpp:12:9: error: no member named 'reset' in 'Board'",
+    ]:
+        assert cg.definition_blocked([line]) == 0, line
+        assert cg.count_unreliable([line]) == 0, line
+
+
+def test_a_duplicate_local_is_not_a_masking_error():
+    """CS0128 is a method-BODY error: the type declared fine, the binder was
+    already running, and every other file's errors were reported. Its wording
+    ('already defined in this scope') is one word away from javac's genuinely
+    masking 'already defined in class Foo', which is why the guard requires the
+    containing declaration kind rather than a bare 'already defined'."""
+    assert cg.definition_blocked(
+        ["Board.cs(22,17): error CS0128: A local variable or function named 'i' "
+         "is already defined in this scope"]
+    ) == 0
+
+
+def test_a_missing_type_is_not_a_masking_error():
+    """Deliberately undetected. A type that is invisible to its dependents is
+    reported with the same 'could not be found' line as a type that was never
+    written, and it INFLATES the count (one error per use site) rather than
+    masking it. Matching it would flatten the score tier the loop converges on
+    to catch a failure that does not under-report."""
+    for line in [
+        "Game.cs(3,13): error CS0246: The type or namespace name 'Board' could "
+        "not be found (are you missing a using directive?)",
+        "Game.cs(1,7): error CS0234: The type or namespace name 'Pieces' does "
+        "not exist in the namespace 'Game'",
+    ]:
+        assert cg.count_unreliable([line]) == 0, line
+
+
+def test_a_definition_broken_candidate_loses_to_a_bigger_honest_one():
+    """The measured comparison, with the numbers from the run: 1 masked error
+    must rank worse than 109 real ones, or the loop keeps the version that
+    silenced the compiler."""
+    masked = ["Board.cs(31,17): error CS0111: Type 'Board' already defines a "
+              "member called 'Reset' with the same parameter types"]
+    honest = ["Game.cs(%d,1): error CS0246: missing type" % i for i in range(109)]
+    assert cg.score(honest) < cg.score(masked)
+
+
+def test_the_parse_guard_is_unchanged_by_the_definition_guard():
+    """Regression fence: generalising 'parse-blocked' to 'unreliable' must not
+    have cost the original guard. A parse-broken 2 still loses to a clean 50."""
+    broken = ["a.cs(1,1): error CS8180: { or ; or => expected",
+              "a.cs(2,1): error CS1002: ; expected"]
+    clean = ["a.cs(%d,1): error CS0246: missing type" % i for i in range(50)]
+    assert cg.score(clean) < cg.score(broken)
+    assert cg.parse_blocked(broken) == 2
+
+
+def test_describe_total_names_both_masking_kinds():
+    """A run can be blocked in both phases at once; the report has to say which,
+    because 'fix the syntax' and 'delete the duplicate member' are different
+    repairs and neither number is readable until both are gone."""
+    both = ["a.cs(1,1): error CS1002: ; expected",
+            "b.cs(9,16): error CS0111: Type 'B' already defines a member called 'X'"]
+    text = cg.describe_total(both)
+    assert "UNRELIABLE" in text
+    assert "1 parse error(s)" in text
+    assert "1 failed definition(s)" in text
+
+
+def test_count_unreliable_counts_each_line_once():
+    """It feeds a truthiness test in score() and a human-facing count in the
+    report; a line matching both phases must not be double-billed."""
+    line = "a.cs(1,1): error CS1519: redefinition of 'X' -- } expected"
+    assert cg.parse_blocked([line]) == 1
+    assert cg.definition_blocked([line]) == 1
+    assert cg.count_unreliable([line]) == 1
+
+
+def test_report_says_the_failure_count_is_a_floor_when_it_is_masked():
+    """'BUILD FAILED: 1 distinct error line' was literally true and completely
+    misleading on the run where the truth was 109. The final report is what a
+    human reads, so it carries the warning too."""
+    masked = cg.format_report(
+        [], ["Board.cs(31,17): error CS0111: Type 'Board' already defines a "
+             "member called 'Reset' with the same parameter types"], ok=False)
+    assert "FLOOR" in masked
+
+    honest = cg.format_report([], ["a.cs(1,1): error CS0246: missing type"], ok=False)
+    assert "FLOOR" not in honest
