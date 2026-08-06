@@ -541,6 +541,20 @@ are unaffected. This is separate from `/cot`, which stays denied: it refuses
 arbitrary inspection of hidden reasoning, whereas this surfaces only the
 reasoning a model emitted for the turn the caller just asked for.
 
+**Asking several models at once:** `/ensemble <question>` (or the
+`ensemble_answer` tool) puts the same question to every bound local tier, then
+has one model compound the answers — agreements stated once, disagreements
+named rather than quietly resolved. `/ensemble tiers=fast,reasoning <question>`
+picks the panel explicitly.
+
+It is sequential on purpose. Only one model fits on a 6 GB card, so each is
+unloaded before the next loads, and the cost is one full load+generate cycle per
+model — expect tens of seconds, not one. Tiers are deduplicated by *resolved
+model*, so pointing two tiers at the same model does not ask it twice; cloud
+tiers are excluded so an ensemble cannot silently ship the prompt off-box; and
+the vision tier is skipped because a VLM handed a text-only prompt returns
+nothing. A model that fails is reported and the rest still answer.
+
 Browser origins are denied unless they exactly match a comma-separated entry in
 `SONDER_CORS_ORIGINS`; `*` is intentionally ignored. HTTP POST bodies must
 have `Content-Type: application/json` and an explicit `Content-Length`.

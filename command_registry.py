@@ -62,6 +62,12 @@ COMMANDS = [
         "summary": "Run a persistent local goal with evidence-aware checkpoints, bounded replans, host gates, pause, resume, and cancel.",
     },
     {
+        "name": "/ensemble",
+        "category": "agents",
+        "risk": "ask",
+        "summary": "Ask several local models the same question, then compound their answers into one, naming any disagreement.",
+    },
+    {
         "name": "/runtime",
         "category": "system",
         "risk": "ask",

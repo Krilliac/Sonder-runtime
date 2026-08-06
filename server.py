@@ -263,38 +263,12 @@ def reasoning_exposure_enabled() -> bool:
     )
 
 
+# Which local models are known to reason. Learned from responses that carry
+# message.thinking -- never from a speculative /api/show probe, which would put
+# an extra round trip on every model's first request. See
+# _remember_thinking_model / _known_thinking_model.
 _THINKING_CAPABILITY_CACHE = {}
 _THINKING_CAPABILITY_LOCK = threading.Lock()
-
-
-def _model_supports_thinking(model: str) -> bool:
-    """Ask Ollama whether this model has a reasoning channel.
-
-    /api/show reports a ``capabilities`` list and ``"thinking"`` is the reliable
-    signal. Inferring from the name is not: on this host qwen3:8b and
-    deepseek-r1:7b report it while qwen2.5-coder:14b and the default
-    sonder:latest do not, and sending ``think`` to a model without the
-    capability is rejected. Cached because it costs a round trip per model and
-    a model cannot gain the capability while the process runs.
-    """
-    name = str(model or "").strip()
-    if not name:
-        return False
-    with _THINKING_CAPABILITY_LOCK:
-        if name in _THINKING_CAPABILITY_CACHE:
-            return _THINKING_CAPABILITY_CACHE[name]
-    try:
-        info = _post("/api/show", {"model": name}, timeout=10)
-    except Exception:
-        # Endpoint down or model unknown. Stay off, and do not cache -- a
-        # transient outage must not pin this model to "no reasoning" for the
-        # life of the process.
-        return False
-    capabilities = info.get("capabilities")
-    supported = isinstance(capabilities, (list, tuple)) and "thinking" in capabilities
-    with _THINKING_CAPABILITY_LOCK:
-        _THINKING_CAPABILITY_CACHE[name] = supported
-    return supported
 
 
 def _apply_cloud_thinking_policy(payload, model, *, compact=False):
@@ -343,6 +317,57 @@ def _ensure_cloud_prediction_budget(payload, minimum=4096):
         options = dict(options)
         options["num_predict"] = minimum
         payload["options"] = options
+
+
+LOCAL_THINKING_MIN_NUM_PREDICT = 2048
+
+
+def _remember_thinking_model(model):
+    """Record, from a response that carried thinking, that this model reasons."""
+    name = str(model or "").strip()
+    if not name:
+        return
+    with _THINKING_CAPABILITY_LOCK:
+        _THINKING_CAPABILITY_CACHE[name] = True
+
+
+def _known_thinking_model(model) -> bool:
+    """Whether we already know this model reasons. Never performs I/O."""
+    with _THINKING_CAPABILITY_LOCK:
+        return _THINKING_CAPABILITY_CACHE.get(str(model or "").strip(), False)
+
+
+def _thinking_exhausted_budget(out, message) -> bool:
+    """Did the model spend its whole output budget thinking, leaving no answer?
+
+    The signature is exact: thinking present, content absent, and Ollama
+    reporting it stopped on length rather than finishing.
+    """
+    if not isinstance(message, dict):
+        return False
+    thinking = message.get("thinking")
+    if not isinstance(thinking, str) or not thinking.strip():
+        return False
+    done_reason = out.get("done_reason") if isinstance(out, dict) else None
+    return str(done_reason or "").strip().casefold() == "length"
+
+
+def _with_local_thinking_budget(payload, minimum=LOCAL_THINKING_MIN_NUM_PREDICT):
+    """Return ``payload`` with room for a local model's thinking plus its answer.
+
+    The local mirror of _ensure_cloud_prediction_budget. Returns a copy so a
+    caller's dict is never mutated; an unset or already-generous num_predict is
+    left alone, and 0/-1 (unlimited) is not a small budget.
+    """
+    options = payload.get("options")
+    if not isinstance(options, dict):
+        return dict(payload)
+    requested = options.get("num_predict")
+    if not isinstance(requested, int) or requested <= 0 or requested >= minimum:
+        return dict(payload)
+    payload = dict(payload)
+    payload["options"] = dict(options, num_predict=minimum)
+    return payload
 
 
 def _cloud_extra_usage_fallback(model, error):
@@ -2936,13 +2961,18 @@ def _chat_request(
     timeout: int | None = None,
     cancel_check=None,
     accept_native_tool_calls: bool = False,
+    _budget_retried: bool = False,
 ) -> tuple[dict, str]:
-    # Cloud tiers already set `think` via _apply_cloud_thinking_policy; never
-    # override an explicit choice, and only probe capability for local models
-    # (the /api/show probe goes to the local endpoint).
-    if reasoning_exposure_enabled() and "think" not in payload and not cloud:
-        if _model_supports_thinking(model):
-            payload = dict(payload)
+    if not cloud and _known_thinking_model(model):
+        # A reasoning model spends num_predict on thought BEFORE writing any
+        # content, so a tight cap hits done_reason "length" having emitted
+        # nothing. Give thinking headroom, as the cloud path does. Cache-only:
+        # this must not add a speculative round trip to the hot path.
+        payload = _with_local_thinking_budget(payload)
+        # Never override an explicit choice; the cloud policy sets `think`
+        # itself. Ollama returns message.thinking for these models regardless,
+        # so this is belt-and-braces rather than the mechanism.
+        if reasoning_exposure_enabled() and "think" not in payload:
             payload["think"] = True
     out, attempts = _post_model(
         "/api/chat",
@@ -2963,16 +2993,33 @@ def _chat_request(
             attempts=attempts, cloud=cloud,
         )
     message = out.get("message")
-    if reasoning_exposure_enabled() and isinstance(message, dict):
+    if isinstance(message, dict):
         thinking = message.get("thinking")
         if isinstance(thinking, str) and thinking.strip():
-            activity_tracker.record_reasoning(thinking, model=model)
+            # Free knowledge: the response itself proves this model reasons, so
+            # the budget guard above needs no speculative /api/show probe.
+            _remember_thinking_model(model)
+            if reasoning_exposure_enabled():
+                activity_tracker.record_reasoning(thinking, model=model)
     content = message.get("content") if isinstance(message, dict) else None
     if not isinstance(content, str) or not content.strip():
         if accept_native_tool_calls:
             native_decision = _native_tool_call_decision(message)
             if native_decision is not None:
                 return out, native_decision
+        if not cloud and not _budget_retried and _thinking_exhausted_budget(out, message):
+            # The model reasoned right up to the cap and never got to an answer.
+            # Now that the response has identified it, retry once with the
+            # headroom it needed rather than reporting an empty response.
+            return _chat_request(
+                _with_local_thinking_budget(payload),
+                model=model,
+                cloud=cloud,
+                timeout=timeout,
+                cancel_check=cancel_check,
+                accept_native_tool_calls=accept_native_tool_calls,
+                _budget_retried=True,
+            )
         raise ModelCallError(
             "empty_response",
             _empty_model_response_detail(out, message),
@@ -13718,6 +13765,171 @@ def status() -> str:
     except Exception as exc:
         lines.append("branch predictor: ERROR %s" % exc)
     return "\n".join(lines)
+
+
+# Ensemble ("ask several models, compound one answer") -------------------------
+#
+# Sequential by construction. On a 6 GB card only one model is resident at a
+# time, so polling N models costs N load+generate cycles; running them
+# concurrently would just thrash. Each model is unloaded after it answers so the
+# next one has room.
+ENSEMBLE_MAX_MODELS = 4
+# Vision needs an image channel this path does not have, and a VLM handed a
+# text-only prompt answers with an immediate end-of-sequence.
+ENSEMBLE_SKIP_TIERS = ("vision",)
+
+
+def _ensemble_targets(tiers: str = ""):
+    """Resolve the tiers to poll into a deduped [(tier, model)] list.
+
+    Deduplicated by *resolved model*, not by tier name: several tiers routinely
+    point at the same Ollama model (out of the box `code` and `general` are both
+    `sonder:latest`), and asking one model the same question twice costs a full
+    generation to learn nothing.
+    """
+    requested = [t.strip().lower() for t in (tiers or "").split(",") if t.strip()]
+    if not requested:
+        requested = [
+            t for t in _configured_local_tiers() if t not in ENSEMBLE_SKIP_TIERS
+        ]
+    targets, seen_models, unknown = [], set(), []
+    for tier in requested:
+        if _is_cloud_tier(tier):
+            # Local-only: an ensemble must not silently ship the prompt off-box.
+            continue
+        model, _cloud, _augment, label = _serve_target(tier, False)
+        if not model or label is None:
+            unknown.append(tier)
+            continue
+        if model in seen_models:
+            continue
+        seen_models.add(model)
+        targets.append((tier, model))
+    return targets[:ENSEMBLE_MAX_MODELS], unknown
+
+
+def _ensemble_synthesis_prompt(question, answers):
+    numbered = "\n\n".join(
+        "--- Answer %d (from the %s tier, model %s) ---\n%s"
+        % (i, row["tier"], row["model"], row["answer"])
+        for i, row in enumerate(answers, 1)
+    )
+    return (
+        "Several local models were asked the same question independently. "
+        "Compound their answers into one better answer.\n\n"
+        "Rules:\n"
+        "- Use only what the answers below contain. Do not introduce new facts.\n"
+        "- Where they agree, state it once, plainly.\n"
+        "- Where they disagree, say so explicitly and name which answer said "
+        "what. Do not silently pick a side.\n"
+        "- If one answer is clearly more complete, prefer it, but keep any "
+        "correct detail the others add.\n"
+        "- Answer the question directly. Do not describe this process.\n\n"
+        "QUESTION:\n%s\n\n%s\n\nCOMPOUNDED ANSWER:" % (question, numbered)
+    )
+
+
+@mcp.tool()
+def ensemble_answer(
+    prompt: str,
+    tiers: str = "",
+    synth_tier: str = "",
+    num_predict: int = 700,
+) -> str:
+    """Ask several local models the same question, then compound one answer.
+
+    Each model answers independently, then one model merges the answers --
+    agreeing points stated once, disagreements named rather than hidden.
+
+    Args:
+        prompt: the question to put to every model.
+        tiers: comma-separated tiers to poll. Default: every bound local text
+            tier. Deduplicated by resolved model, capped at 4.
+        synth_tier: tier that writes the compounded answer. Default: the last
+            tier that answered successfully.
+        num_predict: output cap per model.
+    """
+    _maybe_live_reload()
+    question = (prompt or "").strip()
+    if not question:
+        return "ERROR: ensemble_answer needs a prompt."
+
+    targets, unknown = _ensemble_targets(tiers)
+    if not targets:
+        return "ERROR: no bound local tiers to poll%s." % (
+            " (unknown: %s)" % ", ".join(unknown) if unknown else ""
+        )
+
+    answers, failures = [], []
+    for tier, model in targets:
+        started = time.monotonic()
+        try:
+            gen = _make_generate(model, "", 0.2, max(64, int(num_predict)), 4096)
+            text = (gen(question) or "").strip()
+        except ModelCallError as error:
+            if error.kind == "cancelled":
+                raise
+            failures.append((tier, model, _format_model_call_error(error)))
+            continue
+        except Exception as exc:  # a bad tier must not sink the whole ensemble
+            failures.append((tier, model, str(exc)))
+            continue
+        finally:
+            # Free the card before loading the next one. Best effort: a failed
+            # unload costs VRAM, not correctness.
+            try:
+                _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
+            except Exception:
+                pass
+        if text:
+            answers.append({
+                "tier": tier,
+                "model": model,
+                "answer": text,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            })
+        else:
+            failures.append((tier, model, "empty response"))
+
+    if not answers:
+        return "ERROR: no model produced an answer.\n%s" % "\n".join(
+            "  %s (%s): %s" % row for row in failures
+        )
+
+    footer_rows = [
+        "  %s (%s) in %dms" % (r["tier"], r["model"], r["elapsed_ms"])
+        for r in answers
+    ]
+    footer_rows += ["  %s (%s): FAILED - %s" % row for row in failures]
+    footer = "\n=== ENSEMBLE (%d model%s answered) ===\n%s" % (
+        len(answers), "" if len(answers) == 1 else "s", "\n".join(footer_rows)
+    )
+
+    if len(answers) == 1:
+        # Nothing to compound. Returning the single answer is honest; running a
+        # synthesis pass over one input would only launder it.
+        return answers[0]["answer"] + footer
+
+    synth = (synth_tier or "").strip().lower() or answers[-1]["tier"]
+    synth_model, _cloud, _augment, synth_label = _serve_target(synth, False)
+    if not synth_model or synth_label is None:
+        synth_model = answers[-1]["model"]
+        synth = answers[-1]["tier"]
+    try:
+        gen = _make_generate(synth_model, "", 0.2, max(256, int(num_predict)), 8192)
+        merged = (gen(_ensemble_synthesis_prompt(question, answers)) or "").strip()
+    except Exception as exc:
+        # Synthesis is the only step that can fail after real work is done, so
+        # hand back the raw answers rather than losing them.
+        raw = "\n\n".join(
+            "--- %s (%s) ---\n%s" % (r["tier"], r["model"], r["answer"])
+            for r in answers
+        )
+        return "%s\n\n(synthesis failed: %s)%s" % (raw, exc, footer)
+
+    if not merged:
+        return answers[-1]["answer"] + footer
+    return "%s\n%s  synthesized by %s (%s)" % (merged, footer, synth, synth_model)
 
 
 @mcp.tool()
