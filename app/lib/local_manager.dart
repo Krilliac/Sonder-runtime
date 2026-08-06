@@ -1,10 +1,26 @@
+import 'dart:convert';
 import 'dart:io';
 
 class LocalActionResult {
   final bool ok;
   final String message;
 
-  const LocalActionResult(this.ok, this.message);
+  /// Absolute path of the startup log that explains a failed launch, or an
+  /// empty string when the action has no log to point at.
+  final String logPath;
+
+  /// Captured launcher output and/or the tail of [logPath]. Empty when there
+  /// was nothing to read.
+  final String logTail;
+
+  const LocalActionResult(
+    this.ok,
+    this.message, {
+    this.logPath = '',
+    this.logTail = '',
+  });
+
+  bool get hasLogDetail => logPath.isNotEmpty || logTail.isNotEmpty;
 }
 
 class LocalInstallInfo {
@@ -39,8 +55,13 @@ class LocalInstallInfo {
 
 class LocalManager {
   static const _repoUrl = 'https://github.com/Krilliac/Sonder-runtime.git';
+  static const _serverLogName = 'sonder_serve.log';
+  static const _logTailBytes = 64 * 1024;
+  static const _managedOutputLineLimit = 60;
+  static const _serverReadyTimeout = Duration(seconds: 25);
   static Process? _managedServer;
   static int? _managedServerPid;
+  static final List<String> _managedServerOutput = <String>[];
 
   static bool get canRunLocalTools =>
       Platform.isWindows || Platform.isLinux || Platform.isMacOS;
@@ -96,6 +117,57 @@ class LocalManager {
         '${Platform.pathSeparator}sonder';
   }
 
+  /// Mirror of `sonder_paths.default_home() / "run"` on the Python side.
+  /// `sonder_headless.py` writes its supervised child logs here.
+  static String runDirectoryPath() {
+    return '${sharedHomePath()}${Platform.pathSeparator}run';
+  }
+
+  /// Absolute path of the API server startup log. This is where a launcher
+  /// that dies before the API binds records the real cause, so every failed
+  /// start must point the operator at it.
+  static String serverLogPath() {
+    return '${runDirectoryPath()}${Platform.pathSeparator}$_serverLogName';
+  }
+
+  /// Last [maxLines] non-blank lines of the server startup log, or an empty
+  /// string when the log is missing, empty, or unreadable.
+  static Future<String> readServerLogTail({int maxLines = 40}) {
+    return readLogTail(serverLogPath(), maxLines: maxLines);
+  }
+
+  static Future<String> readLogTail(String path, {int maxLines = 40}) async {
+    try {
+      final file = File(path);
+      if (!await file.exists()) return '';
+      final length = await file.length();
+      final start = length > _logTailBytes ? length - _logTailBytes : 0;
+      final bytes = <int>[];
+      // The log is opened in binary append mode by the supervisor, so decode
+      // leniently rather than throwing on a torn multi-byte sequence.
+      await for (final chunk in file.openRead(start)) {
+        bytes.addAll(chunk);
+      }
+      final lines = const LineSplitter()
+          .convert(utf8.decode(bytes, allowMalformed: true))
+          .map((line) => line.trimRight())
+          .where((line) => line.trim().isNotEmpty)
+          .toList();
+      if (lines.isEmpty) return '';
+      final tail = lines.length > maxLines
+          ? lines.sublist(lines.length - maxLines)
+          : lines;
+      return tail.join('\n');
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /// Recent stdout/stderr of the app-managed launcher process. The direct
+  /// (non-headless) launch path never reaches the supervisor's log file, so
+  /// this is the only place its errors appear.
+  static String managedServerOutputTail() => _managedServerOutput.join('\n');
+
   static Map<String, String> processEnvironment({
     bool allowHosted = false,
     String contextSize = '8192',
@@ -120,6 +192,21 @@ class LocalManager {
       return true;
     } catch (_) {
       return false;
+    }
+  }
+
+  /// Poll the API port until it accepts a connection or [timeout] elapses.
+  /// Starting a launcher process only proves the process spawned, so a start
+  /// is not reported as successful until the port answers.
+  static Future<bool> waitForServer({
+    Duration timeout = _serverReadyTimeout,
+    Duration interval = const Duration(milliseconds: 400),
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    while (true) {
+      if (await defaultServerReachable()) return true;
+      if (!DateTime.now().isBefore(deadline)) return false;
+      await Future<void>.delayed(interval);
     }
   }
 
@@ -236,6 +323,7 @@ class LocalManager {
     bool allowHosted = false,
     String contextSize = '8192',
     bool persistOnAppClose = false,
+    Duration readyTimeout = _serverReadyTimeout,
   }) async {
     if (!canRunLocalTools) {
       return LocalActionResult(
@@ -256,6 +344,7 @@ class LocalManager {
         'No bundled local-system folder found next to the app.',
       );
     }
+    _managedServerOutput.clear();
     try {
       if (Platform.isWindows) {
         final script = File(
@@ -267,6 +356,7 @@ class LocalManager {
               system,
               allowHosted: allowHosted,
               contextSize: contextSize,
+              readyTimeout: readyTimeout,
             );
           }
           final process = await Process.start(
@@ -279,9 +369,9 @@ class LocalManager {
             ),
           );
           _trackManagedServer(process);
-          return LocalActionResult(
-            true,
+          return _awaitServerReady(
             'Server startup requested. Managed PID ${process.pid}.',
+            readyTimeout,
           );
         }
       }
@@ -290,6 +380,7 @@ class LocalManager {
           system,
           allowHosted: allowHosted,
           contextSize: contextSize,
+          readyTimeout: readyTimeout,
         );
       }
       final script = File(
@@ -308,19 +399,65 @@ class LocalManager {
         ),
       );
       _trackManagedServer(process);
-      return LocalActionResult(
-        true,
+      return _awaitServerReady(
         'Server startup requested. Managed PID ${process.pid}.',
+        readyTimeout,
       );
     } catch (e) {
-      return LocalActionResult(false, 'Could not start server: $e');
+      return _serverStartFailure('Could not start server: $e');
     }
+  }
+
+  /// Wait for the launched server to answer on its port and turn the outcome
+  /// into a result the UI can act on. A launcher that spawned but never bound
+  /// the port is a failure, not a success.
+  static Future<LocalActionResult> _awaitServerReady(
+    String startedMessage,
+    Duration timeout,
+  ) async {
+    if (await waitForServer(timeout: timeout)) {
+      return LocalActionResult(
+        true,
+        '$startedMessage\nServer is reachable on 127.0.0.1:11435.',
+      );
+    }
+    return _serverStartFailure(
+      '$startedMessage\nThe server did not become reachable on '
+      '127.0.0.1:11435 within ${timeout.inSeconds}s.',
+    );
+  }
+
+  /// Build a failing result that carries the evidence: the launcher's own
+  /// output (direct launch) and the tail of the supervisor log (headless
+  /// launch). Either one is where a packaging or interpreter fault shows up.
+  static Future<LocalActionResult> _serverStartFailure(String summary) async {
+    final logPath = serverLogPath();
+    final logTail = await readServerLogTail();
+    final processTail = managedServerOutputTail();
+    final details = <String>[
+      if (processTail.isNotEmpty) 'Launcher output:\n$processTail',
+      if (logTail.isNotEmpty) 'Last lines of $logPath:\n$logTail',
+    ];
+    final blocks = <String>[
+      summary,
+      'Startup log: $logPath',
+      if (details.isEmpty)
+        'The launcher printed nothing and the startup log is missing or '
+            'empty. Open the path above after the next attempt.',
+    ];
+    return LocalActionResult(
+      false,
+      blocks.join('\n\n'),
+      logPath: logPath,
+      logTail: details.join('\n\n'),
+    );
   }
 
   static Future<LocalActionResult> _startHeadlessServer(
     Directory system, {
     required bool allowHosted,
     required String contextSize,
+    required Duration readyTimeout,
   }) async {
     final args = <String>[
       'start',
@@ -364,23 +501,43 @@ class LocalManager {
         mode: ProcessStartMode.detached,
       );
     }
-    return const LocalActionResult(
-      true,
+    return _awaitServerReady(
       'Server startup requested in managed background mode.',
+      readyTimeout,
     );
   }
 
   static void _trackManagedServer(Process process) {
     _managedServer = process;
     _managedServerPid = process.pid;
-    process.stdout.listen((_) {}, onError: (_) {});
-    process.stderr.listen((_) {}, onError: (_) {});
-    process.exitCode.then((_) {
+    _captureManagedOutput(process.stdout);
+    _captureManagedOutput(process.stderr);
+    process.exitCode.then((code) {
       if (_managedServerPid == process.pid) {
         _managedServer = null;
         _managedServerPid = null;
+        _recordManagedOutput('[launcher exited with code $code]');
       }
     });
+  }
+
+  static void _captureManagedOutput(Stream<List<int>> stream) {
+    stream
+        .transform(const Utf8Decoder(allowMalformed: true))
+        .transform(const LineSplitter())
+        .listen(_recordManagedOutput, onError: (_) {});
+  }
+
+  static void _recordManagedOutput(String line) {
+    final text = line.trim();
+    if (text.isEmpty) return;
+    _managedServerOutput.add(text);
+    if (_managedServerOutput.length > _managedOutputLineLimit) {
+      _managedServerOutput.removeRange(
+        0,
+        _managedServerOutput.length - _managedOutputLineLimit,
+      );
+    }
   }
 
   static void stopManagedServerNow() {
