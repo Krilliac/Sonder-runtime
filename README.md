@@ -57,6 +57,17 @@ lifecycle boundary.
 - **Not a frontier model.** A local 7B served through the runtime is genuinely
   *weaker* than a hosted giant. If you just want the smartest possible answer
   with zero setup, use ChatGPT/Claude — honestly.
+- **Right about half the time on real delegated work.** `learning_health_status`
+  reports two hit rates and deliberately keeps them apart. On self-generated
+  curriculum, where the runtime both sets and marks the exam, it scores in the
+  high nineties; on work a caller actually delegated and then judged, this
+  maintainer's store sits near **53%**. The second number is the one that
+  matters, and it is not a defect being hidden — it is why the loop exists. The
+  local model is strong at *transformation* (restate this table, mirror this
+  struct, port this helper) and weak at *recall* (the exact value of a constant,
+  what an API returns). Put the facts in the prompt, review what comes back, and
+  record the outcome; a lesson only enters memory once a real result says it
+  worked.
 - **Not "for literally everyone" yet.** Today it needs a decent machine and some setup. See the [Roadmap](#roadmap-toward-for-everyone) for how that changes.
 
 **Who it's for:** privacy-conscious people, offline/field use, tinkerers and the on-device AI crowd, and organizations that need a private assistant on their *own* data (a clinic, a firm, a studio) — anyone who values *owning* their AI over squeezing out the last IQ point.
@@ -818,3 +829,15 @@ disable all web and location access.
 - Tests run in CI on every push. Local-first throughout; your private data stays yours.
 - `python scripts/ci_watch.py` shows the latest GitHub Actions runs through the
   GitHub CLI, which makes failed build/debug loops faster from a local checkout.
+
+## Licence and security
+
+Licensed under the [Apache License 2.0](LICENSE) — permissive, with an
+explicit patent grant. Contributions are accepted under the same terms; see
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
+Sonder executes code, reads and writes files, and can be hosted as a public
+API. Read [SECURITY.md](SECURITY.md) before serving it to a network: it
+describes the trust boundary, what the default loopback posture protects, and
+why `--serve` needs TLS in front of it. Report vulnerabilities privately
+through the repository's Security tab rather than a public issue.
