@@ -17,7 +17,7 @@ def test_merge_applies_quality_pipeline():
     records = [
         {"lesson": "Use collections.Counter(x).most_common(1) to get the mode.", "source": "seed:curriculum:dicts:basic"},
         {"lesson": "Use appropriate data structures efficiently.", "source": "seed:curriculum:dicts:basic"},   # vague
-        {"lesson": "Config lives at C:\\Users\\natew\\secret.env", "source": "seed:realwork:x"},               # private path
+        {"lesson": "Config lives at C:\\Users\\example\\secret.env", "source": "seed:realwork:x"},               # private path
         {"lesson": "Guard binary_search with lo<=hi and mid=(lo+hi)//2.", "source": "seed:curriculum:search:basic"},
     ]
     stats = seed_merge.merge_records(c, records, embed_fn=_emb)
