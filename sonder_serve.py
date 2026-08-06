@@ -90,6 +90,7 @@ LAUNCHER_HEALTH_TOKEN = os.environ.get(sonder_health.TOKEN_ENV, "")
 RUNTIME_ROLE = os.environ.get(sonder_health.ROLE_ENV, "")
 
 # Server state (module globals, single-user local — mirrors sonder_repl.py).
+BOUND_PORT = None  # set by main() once the listener is actually bound
 TRACE = False
 STRICT = None  # None = env default (server._STRICT_DEFAULT)
 LAST_IID = None
@@ -361,7 +362,8 @@ HELP_TEXT = """commands:
   /setaccount ...    admin account edits: user role= tier= dev_flags= banned=
   /debug             inspect safe debug state
   /cot               denied: hidden private chain-of-thought is not exposed
-  /permissions [tool] show local permission rules or one matched rule
+  /permissions [tool] show local permission rules, or one matched rule, plus
+                     the auth mode and command gating this deployment enforces
   /filepolicy        show file access roots and bypass controls
   /files [query]     find files under guarded roots
   /read <path>       read a guarded file
@@ -550,6 +552,57 @@ def _dangerous_http_slash(content):
         action = pieces[1].lower() if len(pieces) > 1 else "status"
         return action not in ("status", "show", "list", "history", "inspect", "diff", "tests", "backups", "verify-backup", "opportunities", "help", "?")
     return command in DANGEROUS_HTTP_SLASH_COMMANDS
+
+
+# Slash names gated by action rather than by membership in the frozenset above.
+_CONDITIONALLY_GATED_SLASH = frozenset({
+    "/autopilot", "/auto", "/runtime", "/models", "/selfmod", "/selfmodify",
+})
+
+# Who clears _developer_authorized() in each mode. Keep in step with it.
+_DEVELOPER_AUTHORITY_BY_MODE = {
+    "local-open": "every caller (unauthenticated)",
+    "api-key": "the owner API key, or a developer/admin account",
+    "account": "an authenticated account, and it must hold developer or admin",
+    "both": "the owner API key AND an account holding developer or admin",
+    "either": "the owner API key, or an account holding developer or admin",
+}
+
+
+def _deployment_gating_summary():
+    """Report which HTTP permission tier this deployment is actually running in.
+
+    The tiers themselves are enforced by _dangerous_http_slash() and
+    _developer_authorized(); this only makes the effective mode visible, which
+    is otherwise only observable by getting refused.
+    """
+    mode = _effective_auth_mode()
+    gated = DANGEROUS_HTTP_SLASH_COMMANDS | _CONDITIONALLY_GATED_SLASH
+    lines = [
+        "Deployment gating (HTTP surface)",
+        "  effective auth mode : %s" % mode,
+        "  developer authority : %s" % _DEVELOPER_AUTHORITY_BY_MODE.get(mode, "unknown"),
+        "  gated slash names   : %d (aliases included)" % len(gated),
+        "  bind                : %s:%s%s" % (
+            HOST,
+            DEFAULT_PORT if BOUND_PORT is None else BOUND_PORT,
+            "" if _is_loopback_host(HOST) else "  (non-loopback)",
+        ),
+    ]
+    if mode == "local-open":
+        lines.append(
+            "  note                : anyone who can reach this port holds developer\n"
+            "                        authority. That is the intended local default, and a\n"
+            "                        non-loopback bind is refused outright in this mode.\n"
+            "                        To restrict: set SONDER_API_KEY, or SONDER_REQUIRE_ACCOUNT=1\n"
+            "                        and grant developer/admin per account."
+        )
+    else:
+        lines.append(
+            "  note                : callers without developer authority are refused the\n"
+            "                        gated names above; everything else stays available."
+        )
+    return "\n".join(lines)
 
 
 class HTTPRequestError(Exception):
@@ -921,7 +974,8 @@ def _handle_slash(content, messages=None, state=None, project=""):
     if cmd in ("/commands", "/cmds"):
         return server.command_registry_list(arg.strip())
     if cmd in ("/permissions", "/perms"):
-        return server.permission_policy(arg.strip())
+        policy = server.permission_policy(arg.strip())
+        return "%s\n\n%s" % (policy, _deployment_gating_summary())
     if cmd in ("/todo", "/task", "/tasks"):
         text = arg.strip()
         if not text or text.lower() in ("list", "ls"):
@@ -2025,6 +2079,8 @@ def main():
             target=httpd.shutdown, daemon=True, name="sonder-httpd-shutdown"
         ).start()
     )
+    global BOUND_PORT
+    BOUND_PORT = port
     url = "http://%s:%d" % (HOST, port)
     print("sonder_serve listening on %s" % url)
     print("auth mode: %s" % _effective_auth_mode())
