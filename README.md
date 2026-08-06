@@ -526,6 +526,21 @@ session token; `/accounts` and `/setaccount` manage roles, tiers, dev flags and
 bans. `/debug` exposes only safe inspectable state. `/cot` remains denied; use
 `/trace`, `/debug`, `/agents`, retrieved lessons, tool calls and status logs.
 
+`/permissions` reports the auth mode actually in force, who clears developer
+authority in that mode, how many slash names are gated, and the bind address —
+so an operator does not have to discover the tier by getting refused.
+
+**Model reasoning:** `SONDER_EXPOSE_REASONING=1` lets reasoning models return
+their thought alongside the answer, which the app renders as a collapsed
+"Model reasoning" block. It is off by default, and while it is off the server
+does not even ask the model for it. `SONDER_REASONING_AUDIENCE` accepts
+`developer` (the default) or `all`, deciding who receives it once exposure is
+on — so enabling it on a shared deployment does not hand reasoning to every
+caller. Only models Ollama reports as `thinking`-capable are asked; the rest
+are unaffected. This is separate from `/cot`, which stays denied: it refuses
+arbitrary inspection of hidden reasoning, whereas this surfaces only the
+reasoning a model emitted for the turn the caller just asked for.
+
 Browser origins are denied unless they exactly match a comma-separated entry in
 `SONDER_CORS_ORIGINS`; `*` is intentionally ignored. HTTP POST bodies must
 have `Content-Type: application/json` and an explicit `Content-Length`.
