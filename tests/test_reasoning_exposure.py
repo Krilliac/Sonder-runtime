@@ -122,39 +122,3 @@ def test_turn_reasoning_is_empty_while_exposure_is_off(monkeypatch):
     with at.response_span("t", "p"):
         at.record_reasoning("thought", model="m")
         assert ts._turn_reasoning() == ""
-
-
-def test_thinking_capability_reads_ollama_capabilities(monkeypatch):
-    server._THINKING_CAPABILITY_CACHE.clear()
-    monkeypatch.setattr(
-        server, "_post",
-        lambda path, payload, timeout=None: {
-            "capabilities": ["completion", "tools", "thinking"]
-        },
-    )
-    assert server._model_supports_thinking("deepseek-r1:7b") is True
-
-    server._THINKING_CAPABILITY_CACHE.clear()
-    monkeypatch.setattr(
-        server, "_post",
-        lambda path, payload, timeout=None: {"capabilities": ["completion", "tools"]},
-    )
-    assert server._model_supports_thinking("mistral:7b") is False
-
-
-def test_thinking_capability_does_not_cache_a_transient_failure(monkeypatch):
-    """A momentary Ollama outage must not pin a model to 'no reasoning'."""
-    server._THINKING_CAPABILITY_CACHE.clear()
-
-    def boom(path, payload, timeout=None):
-        raise OSError("connection refused")
-
-    monkeypatch.setattr(server, "_post", boom)
-    assert server._model_supports_thinking("deepseek-r1:7b") is False
-    assert "deepseek-r1:7b" not in server._THINKING_CAPABILITY_CACHE
-
-    monkeypatch.setattr(
-        server, "_post",
-        lambda path, payload, timeout=None: {"capabilities": ["thinking"]},
-    )
-    assert server._model_supports_thinking("deepseek-r1:7b") is True

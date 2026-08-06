@@ -365,6 +365,8 @@ HELP_TEXT = """commands:
   /setaccount ...    admin account edits: user role= tier= dev_flags= banned=
   /debug             inspect safe debug state
   /cot               denied: hidden private chain-of-thought is not exposed
+  /ensemble [tiers=a,b] <q>  ask several local models the same question, then
+                     compound one answer (sequential; one model fits at a time)
   /permissions [tool] show local permission rules, or one matched rule, plus
                      the auth mode and command gating this deployment enforces
   /filepolicy        show file access roots and bypass controls
@@ -536,6 +538,8 @@ DANGEROUS_HTTP_SLASH_COMMANDS = frozenset({
     "/agentretry", "/retryagent",
     "/runtime", "/models",
     "/selfmod", "/selfmodify",
+    # Spends several full model load+generate cycles per call.
+    "/ensemble", "/council",
 })
 
 
@@ -981,6 +985,23 @@ def _handle_slash(content, messages=None, state=None, project=""):
         return server.context_compaction_plan()
     if cmd in ("/commands", "/cmds"):
         return server.command_registry_list(arg.strip())
+    if cmd in ("/ensemble", "/council"):
+        text = arg.strip()
+        if not text:
+            return (
+                "usage: /ensemble <question>\n"
+                "       /ensemble [tiers=a,b] <question>\n"
+                "Asks each bound local model the question, then compounds one\n"
+                "answer. Sequential by design -- only one model fits on the card."
+            )
+        tiers = ""
+        if text.lower().startswith("tiers="):
+            head, _, rest = text.partition(" ")
+            tiers = head.split("=", 1)[1]
+            text = rest.strip()
+        if not text:
+            return "usage: /ensemble [tiers=a,b] <question>"
+        return server.ensemble_answer(text, tiers=tiers)
     if cmd in ("/permissions", "/perms"):
         policy = server.permission_policy(arg.strip())
         return "%s\n\n%s" % (policy, _deployment_gating_summary())
