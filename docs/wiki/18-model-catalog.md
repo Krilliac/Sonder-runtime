@@ -87,9 +87,11 @@ ollama pull <embedding-model>
 /runtime set router=fast workbench=code autopilot=code review=general
 ```
 
-`reasoning`, `vision`, and `oracle` become live tiers once the operator adds
-them; until then the router degrades to `general`/`code` automatically — nothing
-breaks on a smaller collection. Full procedure:
+`reasoning` and `vision` are live policy tiers, bound by default and
+repointable with `/runtime set reasoning=<model> vision=<model>`; assign an
+empty value to leave one unset on a smaller collection, and the router degrades
+to `general`/`code` automatically — nothing breaks. `oracle` remains
+consent-gated escalation, not a policy tier. Full procedure:
 [assemble-model-collection](../runbooks/assemble-model-collection.md).
 
 ## 5. Scaling up: multi-GPU

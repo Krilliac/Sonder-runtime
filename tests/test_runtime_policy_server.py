@@ -105,7 +105,11 @@ def test_runtime_policy_data_reports_missing_models(
     isolated_runtime_policy, monkeypatch,
 ):
     runtime_policy.load(create=True)
-    runtime_policy.update(local_models={"general": "missing-general:latest"})
+    # The optional specialist tiers are left unset here, which also pins that an
+    # unbound tier has no model and so can never be reported as missing.
+    runtime_policy.update(local_models={
+        "general": "missing-general:latest", "reasoning": "", "vision": "",
+    })
     monkeypatch.setattr(
         server,
         "_runtime_installed_models",
@@ -116,6 +120,7 @@ def test_runtime_policy_data_reports_missing_models(
 
     assert data["error"] == ""
     assert data["missing_models"] == ["missing-general:latest"]
+    assert "" not in data["missing_models"]
     assert data["path"] == str(isolated_runtime_policy)
 
 

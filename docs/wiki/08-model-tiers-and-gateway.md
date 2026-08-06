@@ -11,19 +11,40 @@ quality/speed/privacy knobs.
 | `fast` | small (3–4B) | router, titling, summaries, mechanical work |
 | `code` | coder 7B | workbench, autopilot, code generation |
 | `general` | 7B instruct | general chat |
+| `reasoning` | `deepseek-r1:7b` | proofs, derivations, "think carefully" work |
+| `vision` | `moondream` | images, screenshots, diagrams, OCR |
 | `cloud-*` | Ollama-hosted | metered, leaves the machine (consent-gated) |
 
-Set with `SONDER_FAST` / `SONDER_CODE` / `SONDER_GENERAL`, or point the
+Set with `SONDER_FAST` / `SONDER_CODE` / `SONDER_GENERAL` /
+`SONDER_REASONING` / `SONDER_VISION`, or point the
 `sonder:latest` alias at your chosen model. The local `code` tier is
 memory-augmented (facts + lessons); cloud tiers answer without
 augmentation but are still captured for learning.
+
+`fast`, `code`, and `general` are **base tiers** — always bound, and the
+fallback floor for everything else. `reasoning` and `vision` are **specialist
+tiers**: bound by default, but an operator may leave either unset
+(`SONDER_VISION=none`, or `/runtime set vision=` with an empty value). An
+unset tier is not offered at all — it disappears from `/v1/models` and from
+`_serve_target`, and the capability router degrades that work to a base tier.
+
+## Capability routing
+
+The pure rules in `sonder_runtime/domain/routing/capability_router.py`
+classify each request (`simple`, `search`, `code`, `reasoning`, `vision`,
+`long_context`) and prefer a tier per class. This only ever *upgrades* a
+lane-selected tier to a specialist tier the operator has actually bound; it
+never selects cloud and never widens a permission. With only the base tiers
+bound it is a deliberate no-op.
 
 ## Routing lanes (runtime policy)
 
 The hot-reloadable `runtime_policy.json` maps **lanes** to tiers:
 `router`, `workbench`, `autopilot`, `fleet`, `review`. This lets one model
 serve chat while another drives the agent loop — e.g. a 4B on `router`,
-a coder-7B on `workbench`/`review`. Policy can select aliases, lanes, and
+a coder-7B on `workbench`/`review`. Lanes pin to **base tiers only**, so a
+lane always resolves to a bound model; specialist tiers are chosen per
+request by the capability router. Policy can select aliases, lanes, and
 NPU modes but **cannot** widen network/filesystem/credential/cloud
 permissions ([Security Model](09-security-model.md)).
 

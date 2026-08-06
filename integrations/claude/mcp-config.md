@@ -52,7 +52,8 @@ None of these are required; the defaults are safe and local.
 |---|---|
 | `SONDER_ALLOW_CLOUD` | `1` permits the metered `cloud-*` tiers. Leave unset or `0` to keep everything on your machine. |
 | `SONDER_LEARN_TIERS` | Which tiers participate in the lesson loop, e.g. `fast,code,general`. |
-| `SONDER_FAST` / `SONDER_CODE` / `SONDER_GENERAL` | Pin a tier to a specific Ollama model. |
+| `SONDER_FAST` / `SONDER_CODE` / `SONDER_GENERAL` | Pin a base tier to a specific Ollama model. |
+| `SONDER_REASONING` / `SONDER_VISION` | Pin the specialist tiers the capability router prefers for proofs and image work. `none` leaves one unbound, and that work falls back to a base tier. |
 | `SONDER_NUM_GPU` | Layers to offload to GPU. **`999` means "all of them"** and is what you want if the model fits in VRAM — see the note below. |
 | `SONDER_KEEP_ALIVE` | How long a model stays resident, e.g. `30m` on a GPU box, shorter if RAM-tight. |
 

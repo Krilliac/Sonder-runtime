@@ -111,8 +111,11 @@ Consent gates: `SONDER_ALLOW_CLOUD`, `SONDER_WEB_TOOLS`,
 `SONDER_ALLOW_REMOTE_OLLAMA`, `SONDER_FILE_ROOTS`, `SONDER_LOCATION_CONSENT`.
 
 Models/tiers: `SONDER_FAST`, `SONDER_CODE`, `SONDER_GENERAL`,
-`SONDER_BASE_MODEL`, `SONDER_EMBED_MODEL`, `SONDER_CONTEXT_SIZE`,
-`SONDER_LEARN_TIERS`.
+`SONDER_REASONING`, `SONDER_VISION`, `SONDER_BASE_MODEL`,
+`SONDER_EMBED_MODEL`, `SONDER_CONTEXT_SIZE`, `SONDER_LEARN_TIERS`.
+`SONDER_REASONING` / `SONDER_VISION` also accept `none` (or `off`) to leave
+that specialist tier unbound, in which case reasoning/vision work falls back
+to a base tier.
 
 Behavior toggles: `SONDER_SPECULATION` (0 disables speculative execution),
 `SONDER_METRICS`, `OLLAMA_HOST`.

@@ -13,11 +13,16 @@ from dataclasses import dataclass
 from typing import Callable
 
 import autopilot_store
+from sonder_runtime.domain.runtime_policy import rules as _policy_rules
 
 
 TASK_KINDS = ("inspect", "research", "implement", "validate", "report")
 POLICIES = ("observe", "workspace")
-LOCAL_TIERS = ("fast", "code", "general")
+# One source of truth for the local tier vocabulary. The guard here is "local,
+# never cloud" -- a specialist local tier the operator configured is as legal
+# as a base tier, and the host still refuses to start a run whose resolved tier
+# has no available model.
+LOCAL_TIERS = _policy_rules.LOCAL_TIERS
 MAX_TOTAL_CYCLES = 50
 MAX_ADAPTIVE_CHECKPOINTS = 6
 MAX_TASK_OUTPUT = 32_000
