@@ -27,6 +27,13 @@ ALLOWED_DIRS = {
     "proposals",
     "scripts",
     "seed",
+    # The SPEC-3 layered package. Leaving it out produced a bundle whose flat
+    # modules were all present and whose server still died on its first
+    # import: reward.py, recall.py, runtime_policy.py and 8 others import
+    # sonder_runtime.*, so sonder_serve raised ModuleNotFoundError before it
+    # ever bound a port. The app surfaced only "cannot reach server", because
+    # the crash happens in a detached process whose log the GUI never reads.
+    "sonder_runtime",
 }
 ALLOWED_SUFFIXES = {
     ".cmd",
@@ -251,13 +258,25 @@ def _privacy_scan_binary(path: Path) -> None:
 
 
 def _privacy_scan(path: Path, *, allow_binary: bool = False) -> None:
-    data = path.read_bytes() if path.stat().st_size <= 16 * 1024 * 1024 else b""
-    if not data or b"\0" in data:
+    # An empty file and a file too large to read both produce b"" here, but
+    # they are opposite situations: the oversized one was never inspected, the
+    # empty one has nothing to inspect and is trivially clean. Collapsing them
+    # rejected every zero-byte __init__.py -- the ordinary Python package
+    # marker -- with "too large to inspect safely", which is the reverse of
+    # what was wrong and sent anyone reading it hunting for a huge file.
+    oversized = path.stat().st_size > 16 * 1024 * 1024
+    if oversized:
         if allow_binary:
             _privacy_scan_binary(path)
             return
-        if not data:
-            raise ValueError(f"payload text is too large to inspect safely: {path.name}")
+        raise ValueError(f"payload text is too large to inspect safely: {path.name}")
+    data = path.read_bytes()
+    if not data:
+        return  # empty file: nothing to leak
+    if b"\0" in data:
+        if allow_binary:
+            _privacy_scan_binary(path)
+            return
         raise ValueError(f"payload text contains NUL bytes: {path.name}")
     try:
         text = data.decode("utf-8")

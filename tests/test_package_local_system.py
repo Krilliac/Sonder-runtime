@@ -260,3 +260,44 @@ def test_rejects_nested_reparse_in_existing_package(monkeypatch, tmp_path):
     with pytest.raises(ValueError):
         package.copy_payload(dest)
     assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+def test_empty_package_marker_is_scannable_not_oversized(tmp_path):
+    """An empty file and a >16MB file both read as b"", but they are opposite
+    problems. Collapsing them rejected every zero-byte __init__.py -- the
+    ordinary Python package marker -- claiming it was "too large to inspect
+    safely", which is the reverse of what was true."""
+    empty = tmp_path / "__init__.py"
+    empty.write_bytes(b"")
+    package._privacy_scan(empty)  # must not raise: nothing in it to leak
+
+    oversized = tmp_path / "huge.txt"
+    with open(oversized, "wb") as handle:
+        handle.seek(16 * 1024 * 1024)
+        handle.write(b"x")
+    with pytest.raises(ValueError, match="too large to inspect safely"):
+        package._privacy_scan(oversized)
+
+
+def test_layered_package_ships_so_the_served_app_can_actually_start():
+    """The flat modules alone are not a runnable server. reward.py, recall.py,
+    runtime_policy.py and others import sonder_runtime.*, so omitting that
+    directory produced bundles whose server died on first import with
+    ModuleNotFoundError before binding a port -- and the desktop app showed
+    only "cannot reach server", because the crash lands in a detached
+    process whose log the GUI never reads."""
+    assert "sonder_runtime" in package.ALLOWED_DIRS
+
+    repo = Path(package.__file__).resolve().parents[1]
+    layered = repo / "sonder_runtime"
+    assert layered.is_dir(), "sonder_runtime package missing from the repo"
+
+    # Every flat module the packager ships that imports the layered package
+    # is a module that would crash a bundle built without it.
+    importers = [
+        path.name
+        for path in sorted(repo.glob("*.py"))
+        if path.name in package.REQUIRED_FILES
+        and "sonder_runtime" in path.read_text(encoding="utf-8", errors="ignore")
+    ]
+    assert importers, "expected shipped modules importing sonder_runtime"
