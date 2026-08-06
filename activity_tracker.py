@@ -33,6 +33,15 @@ if "_LATEST" not in globals():
     _LATEST = None
 if "_TOTAL_TOOL_CALLS" not in globals():
     _TOTAL_TOOL_CALLS = 0
+# Model reasoning is kept OUT of the response span on purpose. Spans flow into
+# snapshot() and from there into the sonder_activity field every client
+# receives; reasoning is gated separately and must not ride along.
+if "_REASONING" not in globals():
+    _REASONING = {}
+if "_LATEST_REASONING" not in globals():
+    _LATEST_REASONING = None
+
+MAX_REASONING_CHARS = 20000
 
 
 def _now():
@@ -263,9 +272,13 @@ def response_span(label, prompt="", *, surface="", model="", session="", project
         if response["status"] == "complete":
             record_event("response_complete", summary="%d tool call(s)" % response["tool_calls"])
         with _LOCK:
-            global _LATEST
+            global _LATEST, _LATEST_REASONING
             _ACTIVE.pop(response_id, None)
             _LATEST = deepcopy(response)
+            # Promote alongside _LATEST so the pair always describes the same
+            # turn, then drop the per-span buffer.
+            _LATEST_REASONING = _collect_reasoning(response_id)
+            _REASONING.pop(response_id, None)
         _LOCAL.response_id = None
 
 
@@ -275,6 +288,67 @@ def record_event(kind, **fields):
         return None
     with _LOCK:
         return deepcopy(_event(response, kind, **fields))
+
+
+def record_reasoning(text, *, model=""):
+    """Attach one model reasoning segment to the current response.
+
+    A turn can make several model calls, so segments accumulate in order. Stored
+    outside the response span so it never reaches snapshot(); read it back with
+    latest_reasoning(), which the HTTP layer gates before emitting.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return
+    response_id = getattr(_LOCAL, "response_id", None)
+    if not response_id:
+        return
+    with _LOCK:
+        segments = _REASONING.setdefault(response_id, [])
+        segments.append({"model": _short(model, 80), "text": text.strip()})
+
+
+def _collect_reasoning(response_id):
+    """Join a response's reasoning segments into one bounded record."""
+    segments = _REASONING.get(response_id) or []
+    if not segments:
+        return None
+    if len(segments) == 1:
+        text = segments[0]["text"]
+    else:
+        text = "\n\n".join(
+            "[%d/%d] %s" % (i, len(segments), seg["text"])
+            for i, seg in enumerate(segments, 1)
+        )
+    truncated = len(text) > MAX_REASONING_CHARS
+    if truncated:
+        text = text[:MAX_REASONING_CHARS] + "\n... (reasoning truncated)"
+    return {
+        "text": text,
+        "model": segments[-1]["model"],
+        "segments": len(segments),
+        "truncated": truncated,
+    }
+
+
+def latest_reasoning():
+    """Reasoning from the most recently completed response, or None."""
+    with _LOCK:
+        return deepcopy(_LATEST_REASONING)
+
+
+def current_reasoning():
+    """Reasoning recorded so far for the span this thread is inside, or None.
+
+    Callers that run inside their own span (the HTTP chat path does) must use
+    this rather than latest_reasoning(): _LATEST_REASONING still describes the
+    PREVIOUS turn until this span closes, so reading it here would attach one
+    caller's reasoning to another caller's answer.
+    """
+    response_id = getattr(_LOCAL, "response_id", None)
+    if not response_id:
+        return None
+    with _LOCK:
+        return deepcopy(_collect_reasoning(response_id))
 
 
 def record_model_call(
@@ -584,8 +658,10 @@ def format_response(response=None):
 
 def reset_for_tests():
     with _LOCK:
-        global _LATEST, _TOTAL_TOOL_CALLS
+        global _LATEST, _TOTAL_TOOL_CALLS, _LATEST_REASONING
         _ACTIVE.clear()
         _LATEST = None
         _TOTAL_TOOL_CALLS = 0
+        _REASONING.clear()
+        _LATEST_REASONING = None
     _LOCAL.response_id = None

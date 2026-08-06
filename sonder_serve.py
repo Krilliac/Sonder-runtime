@@ -121,6 +121,9 @@ class TurnResult:
     content: str
     iid: str | None
     run_source: str
+    # Model reasoning for this turn, when the deployment exposes it. Empty
+    # otherwise, which is the default.
+    thinking: str = ""
 
 
 class _LegacyConversationState:
@@ -583,6 +586,11 @@ def _deployment_gating_summary():
         "  effective auth mode : %s" % mode,
         "  developer authority : %s" % _DEVELOPER_AUTHORITY_BY_MODE.get(mode, "unknown"),
         "  gated slash names   : %d (aliases included)" % len(gated),
+        "  model reasoning     : %s" % (
+            "exposed to %s" % _reasoning_audience()
+            if server.reasoning_exposure_enabled()
+            else "not exposed (SONDER_EXPOSE_REASONING is off)"
+        ),
         "  bind                : %s:%s%s" % (
             HOST,
             DEFAULT_PORT if BOUND_PORT is None else BOUND_PORT,
@@ -1303,6 +1311,35 @@ def _model_to_tier(model):
     return None
 
 
+def _reasoning_audience():
+    """Who may receive model reasoning over HTTP: 'developer' or 'all'.
+
+    Only consulted when server.reasoning_exposure_enabled() is on. Defaults to
+    the narrower of the two, so turning exposure on does not by itself hand
+    reasoning to every caller of a shared deployment.
+    """
+    value = os.environ.get("SONDER_REASONING_AUDIENCE", "").strip().lower()
+    return "all" if value == "all" else "developer"
+
+
+def _reasoning_visible_to(context):
+    if not server.reasoning_exposure_enabled():
+        return False
+    if _reasoning_audience() == "all":
+        return True
+    return _developer_authorized(context)
+
+
+def _turn_reasoning():
+    """Reasoning recorded by the span this request is running inside."""
+    if not server.reasoning_exposure_enabled():
+        return ""
+    record = server.activity_tracker.current_reasoning()
+    if not record:
+        return ""
+    return record.get("text") or ""
+
+
 def _run_prompt(
     prompt, history=None, tier=None, context_size="", session="", project="",
     state=None, return_result=False,
@@ -1323,13 +1360,13 @@ def _run_prompt(
     state.last_iid = iid
     state.last_response = out
     state.last_run_source = run_source
-    result = TurnResult(_strip_footer(out), iid, run_source)
+    result = TurnResult(_strip_footer(out), iid, run_source, _turn_reasoning())
     return result if return_result else result.content
 
 
-def _chat_completion_object(content, model="sonder", iid=None):
+def _chat_completion_object(content, model="sonder", iid=None, reasoning=""):
     iid = iid or uuid.uuid4().hex[:12]
-    return {
+    obj = {
         "id": "chatcmpl-%s" % iid,
         "object": "chat.completion",
         "created": int(time.time()),
@@ -1342,6 +1379,11 @@ def _chat_completion_object(content, model="sonder", iid=None):
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         "sonder_activity": server.activity_tracker.snapshot().get("latest"),
     }
+    # Mirrors sonder_activity: present only when there is something to show, so
+    # clients can treat absence as "this deployment does not expose reasoning".
+    if reasoning:
+        obj["sonder_reasoning"] = reasoning
+    return obj
 
 
 def _chunk(iid, model, delta, finish_reason=None):
@@ -1873,6 +1915,7 @@ class Handler(BaseHTTPRequestHandler):
         execution_routed = False
         turn = None
         response_iid = None
+        response_reasoning = ""
         activity_response = None
         _lifecycle = sonder_lifecycle.get()
         _request_started = time.monotonic()
@@ -1935,6 +1978,7 @@ class Handler(BaseHTTPRequestHandler):
                         )
                         content = turn.content
                         response_iid = turn.iid
+                        response_reasoning = turn.thinking
                 content = server._append_activity(
                     content, response=activity_response, replace=True,
                 )
@@ -2012,11 +2056,16 @@ class Handler(BaseHTTPRequestHandler):
         _lifecycle.metrics.request_duration_seconds.labels(
             route="/v1/chat/completions"
         ).observe(time.monotonic() - _request_started)
+        if not _reasoning_visible_to(context):
+            response_reasoning = ""
         if stream:
             self._send_stream(content, model, iid=response_iid)
         else:
             self._send_json(
-                _chat_completion_object(content, model, iid=response_iid)
+                _chat_completion_object(
+                    content, model, iid=response_iid,
+                    reasoning=response_reasoning,
+                )
             )
 
     def _send_error_completion(self, text, stream):
