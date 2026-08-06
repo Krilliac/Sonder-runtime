@@ -229,7 +229,17 @@ def _loss_only_reference(scored: dict[str, dict], loss_only_ids: set) -> dict:
 
 
 def _lesson_outcome_metrics(conn) -> dict:
-    stats = memory_store.lesson_usage_stats(conn)
+    # Enrich with per-interaction blame before asking about quarantine. A bare
+    # usage-stats row says a lesson lost N times but not whether those failures
+    # were its own: 493 loss rows on the live store trace to 144 distinct
+    # failing interactions, 3.42 lessons blamed each. Without this, retriever
+    # falls back to the undiscounted upper bound and this report says 6
+    # quarantined while retrieval actually excludes 0 -- a monitoring surface
+    # disagreeing with the behaviour it exists to monitor.
+    try:
+        stats = retriever.usage_stats_with_attribution(conn)
+    except Exception:
+        stats = memory_store.lesson_usage_stats(conn)
     scored = _scored_retrievals(conn)
     evaluated = 0
     with_losses = 0
