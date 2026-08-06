@@ -14103,7 +14103,8 @@ def codegen_build_loop(
             rows.append({"name": name, "note": "already clean, not regenerated"})
             continue
 
-        best_code, best_total = (existing or None), (len(errors) if existing else None)
+        best_code = existing or None
+        best_total = codegen_loop.score(errors) if existing else None
         note = "unchanged"
         siblings = {n: read(n) for n, _ in wanted if n != name}
         siblings = {n: t for n, t in siblings.items() if t.strip()}
@@ -14126,13 +14127,15 @@ def codegen_build_loop(
             except Exception as exc:
                 return "ERROR: could not write %s: %s" % (name, exc)
 
-            total = len(run_build())
-            if best_total is None or total < best_total:
-                best_code, best_total = code, total
-                note = "attempt %d kept (%d total error(s)%s)" % (
-                    attempt, total, ", %d slip(s) rewritten" % hits if hits else "",
+            attempt_errors = run_build()
+            attempt_score = codegen_loop.score(attempt_errors)
+            if best_total is None or attempt_score < best_total:
+                best_code, best_total = code, attempt_score
+                note = "attempt %d kept (%s%s)" % (
+                    attempt, codegen_loop.describe_total(attempt_errors),
+                    ", %d slip(s) rewritten" % hits if hits else "",
                 )
-            if total == 0:
+            if not attempt_errors:
                 break
 
         if best_code is not None:

@@ -124,3 +124,40 @@ def test_report_lists_failures():
     report = cg.format_report([], ["a.cs(1,1): error CS1: boom"], ok=False)
     assert "BUILD FAILED" in report
     assert "boom" in report
+
+
+def test_parse_errors_are_detected_by_message_shape():
+    """Code ranges leak: C# syntax errors are mostly CS1xxx, but CS8180 and
+    CS8124 are the parser too. Missing one is how a masked count reads as
+    near-success."""
+    assert cg.parse_blocked(["a.cs(1,1): error CS8180: { or ; or => expected"]) == 1
+    assert cg.parse_blocked(["a.cs(1,1): error CS1002: ; expected"]) == 1
+    assert cg.parse_blocked(["a.cs(1,1): error CS8124: Tuple must contain at least two"]) == 1
+    assert cg.parse_blocked(["a.rs:1: error: unexpected token `)`"]) == 1
+
+
+def test_semantic_errors_are_not_counted_as_parse_errors():
+    semantic = ["a.cs(1,1): error CS0246: The type or namespace name 'X' could not be found"]
+    assert cg.parse_blocked(semantic) == 0
+
+
+def test_a_parse_clean_candidate_beats_a_parse_broken_one():
+    """The whole point: a build that cannot parse stops before binding, so its
+    small total is fiction. Measured -- a run reading '2 errors' was really 99."""
+    broken = ["a.cs(1,1): error CS8180: { or ; or => expected",
+              "a.cs(2,1): error CS1002: ; expected"]
+    clean = ["a.cs(%d,1): error CS0246: missing type" % i for i in range(50)]
+    assert cg.score(clean) < cg.score(broken)
+
+
+def test_fewer_errors_wins_when_both_parse():
+    a = ["a.cs(1,1): error CS0246: missing type"]
+    b = ["a.cs(%d,1): error CS0246: missing type" % i for i in range(5)]
+    assert cg.score(a) < cg.score(b)
+
+
+def test_describe_total_flags_an_untrustworthy_count():
+    assert "UNRELIABLE" in cg.describe_total(["a.cs(1,1): error CS1002: ; expected"])
+    assert "UNRELIABLE" not in cg.describe_total(
+        ["a.cs(1,1): error CS0246: The type or namespace name 'X' could not be found"]
+    )
