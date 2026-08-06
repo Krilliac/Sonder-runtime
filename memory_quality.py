@@ -15,7 +15,14 @@ _VAGUE_MARKERS = re.compile(
 _CONCRETE_ANCHOR = re.compile(
     r"`[^`]+`|\b\w+\.\w+|\b\w+_\w+|[A-Za-z]+[A-Z][a-z]|O\([^)]*\)"
 )
-_INTERACTION_ID = re.compile(r"^[0-9a-f]{16}$", re.I)
+INTERACTION_ID_RE = re.compile(r"^[0-9a-f]{16}$", re.I)
+# Sorts below every real reward (the worst signal prices at -1.0). Exact
+# duplicates share their text, so the copy carrying outcome history is the one
+# worth keeping even when that history is bad: deleting it would launder a
+# lesson the store has already measured as harmful. This constant exists so
+# that "never evaluated" is expressed explicitly rather than through a falsy
+# default, which silently swallowed a measured average of exactly 0.0.
+_NO_EVIDENCE_RANK = -2.0
 
 
 def normalize_lesson_text(text):
@@ -29,11 +36,28 @@ def _has_anchor(text):
 
 def _all_lessons(conn):
     rows = conn.execute(
-        "SELECT id, text, source_interaction, ts, length(coalesce(text,'')) AS n, "
-        "embedding IS NOT NULL AS has_embedding "
-        "FROM lessons ORDER BY ts ASC, rowid ASC"
+        "SELECT l.id, l.text, l.source_interaction, l.ts, "
+        "length(coalesce(l.text,'')) AS n, "
+        "l.embedding IS NOT NULL AS has_embedding, "
+        "CASE WHEN i.id IS NULL THEN 0 ELSE 1 END AS grounded "
+        "FROM lessons l LEFT JOIN interactions i ON i.id=l.source_interaction "
+        "ORDER BY l.ts ASC, l.rowid ASC"
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def _graded_lesson_ids(conn):
+    """IDs of lessons that have at least one retrieval with a scored outcome.
+
+    A lesson can be retrieved and never graded (the caller never recorded an
+    outcome), so this is deliberately narrower than "appears in lesson_usage".
+    """
+    return {
+        row[0]
+        for row in conn.execute(
+            "SELECT DISTINCT lesson_id FROM lesson_usage WHERE reward IS NOT NULL"
+        ).fetchall()
+    }
 
 
 def _usage_stats(conn):
@@ -46,12 +70,22 @@ def choose_exact_duplicate_keeper(group, stats=None):
     Prefer proven lessons first, then more-used lessons, then longer/more detailed
     text, then the oldest row. Exact duplicates have the same text, but this
     keeps the rule robust if whitespace/case differ.
+
+    ``avg_reward`` is read through an explicit ``None`` check. Reading it as
+    ``avg_reward or _NO_EVIDENCE_RANK`` collapsed a measured average of exactly
+    0.0 onto the never-evaluated rank, so a lesson the store had graded neutral
+    sorted below one it had graded -1.0.
     """
     stats = stats or {}
+
+    def evidence_rank(row):
+        average = stats.get(row["id"], {}).get("avg_reward")
+        return _NO_EVIDENCE_RANK if average is None else float(average)
+
     return sorted(
         group,
         key=lambda row: (
-            -float(stats.get(row["id"], {}).get("avg_reward") or -2.0),
+            -evidence_rank(row),
             -int(stats.get(row["id"], {}).get("wins") or 0),
             -int(stats.get(row["id"], {}).get("uses") or 0),
             -len(row.get("text") or ""),
@@ -137,13 +171,29 @@ def audit(conn):
     source_missing = [
         r for r in lessons
         if r.get("source_interaction")
-        and _INTERACTION_ID.match(str(r["source_interaction"]))
+        and INTERACTION_ID_RE.match(str(r["source_interaction"]))
         and not conn.execute(
             "SELECT 1 FROM interactions WHERE id=?", (r["source_interaction"],)
         ).fetchone()
     ]
+    # A lesson can be wrong in two ways this audit could not previously see:
+    # it was never grounded in a real interaction (seeded text nobody earned),
+    # or it was never retrieved on a task that produced a scored outcome. Both
+    # populations are invisible in every text-hygiene counter above -- a seed
+    # lesson with a code anchor and a terminal period looks perfect. On the
+    # live store that is 528 ungrounded and 715 never-graded of 1061 lessons,
+    # so a clean hygiene report was describing a third of the corpus.
+    graded_ids = _graded_lesson_ids(conn)
+    grounded = [r for r in lessons if r.get("grounded")]
+    synthetic = [r for r in lessons if not r.get("grounded")]
+    unvalidated = [r for r in lessons if r["id"] not in graded_ids]
+    synthetic_unvalidated = [r for r in synthetic if r["id"] not in graded_ids]
     return {
         "total_lessons": len(lessons),
+        "grounded_lessons": len(grounded),
+        "synthetic_lessons": len(synthetic),
+        "unvalidated_lessons": len(unvalidated),
+        "synthetic_unvalidated_lessons": len(synthetic_unvalidated),
         "exact_duplicate_groups": len(exact_plan),
         "exact_duplicate_prunable": sum(len(e["prune_ids"]) for e in exact_plan),
         "no_embedding": len(no_embedding),
@@ -174,6 +224,14 @@ def format_audit(report, sample_limit=5):
     lines = [
         "memory quality report",
         "  lessons: %(total_lessons)s" % report,
+        "  grounded in an interaction: %s | synthetic (seeded, never earned): %s"
+        % (report.get("grounded_lessons", 0), report.get("synthetic_lessons", 0)),
+        "  never validated by an outcome: %s (of which synthetic: %s) "
+        "-- text hygiene below says nothing about these"
+        % (
+            report.get("unvalidated_lessons", 0),
+            report.get("synthetic_unvalidated_lessons", 0),
+        ),
         "  exact duplicates: %(exact_duplicate_groups)s group(s), "
         "%(exact_duplicate_prunable)s prunable row(s)" % report,
         "  no embeddings: %(no_embedding)s" % report,
