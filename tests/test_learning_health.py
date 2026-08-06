@@ -449,13 +449,17 @@ def test_a_lesson_that_keeps_losing_alone_still_stands_out():
     assert report["loss_only_expected_from_task_difficulty"] < 1.0
 
 
-def test_one_failure_cluster_can_quarantine_several_co_retrieved_lessons():
+def test_one_failure_cluster_no_longer_quarantines_its_whole_cohort():
     """record_lesson_usage_outcome writes a task's reward onto every lesson
     retrieved for it, so co-retrieved lessons share a verdict. Four of the six
     lessons quarantined on the live store crossed the five-loss threshold on the
     identical five interactions: one cluster counted four times as independent
-    evidence. The report now shows how many distinct failures are behind the
-    quarantine set so five never reads as twenty."""
+    evidence.
+
+    Blame is now split across the cohort, so five failures shared by four
+    lessons give each 1.25 attributable losses -- under the 2.0 threshold, and
+    none is quarantined. The shared-blame counters still report the cluster, so
+    the evidence stays visible without being multiplied."""
     conn = _conn()
     try:
         cohort = ["co%d" % n for n in range(4)]
@@ -469,11 +473,35 @@ def test_one_failure_cluster_can_quarantine_several_co_retrieved_lessons():
     finally:
         conn.close()
 
-    assert report["quarantined_lessons"] == 4
-    assert report["quarantine_distinct_failed_interactions"] == 5
+    # Five failures shared four ways is 1.25 attributable losses each.
+    assert report["quarantined_lessons"] == 0
     assert report["failed_interactions"] == 5
     assert report["lessons_marked_per_failed_interaction"] == 4.0
-    assert "quarantine: 5 task(s)" in learning_health.format_report(report)
+    # The cluster is still reported, just not counted four times.
+    assert report["lessons_with_losses"] == 4
+
+
+def test_a_lesson_failing_alone_is_still_quarantined():
+    """Splitting blame must not make the criterion toothless. A lesson that is
+    the ONLY one retrieved for each of its failures owns that evidence
+    outright, so its attributable losses equal its raw losses and it still
+    crosses the threshold -- unlike the shared cluster above, which does not.
+
+    This is the distinction the raw-count criterion could not draw: on the live
+    store every one of the six quarantined lessons had a peer covering 100% of
+    its failing interactions, while 18 failing interactions blame exactly one
+    lesson."""
+    conn = _conn()
+    try:
+        memory_store.add_lesson(conn, "solo", "Advice solo.", None, "seed")
+        for n in range(5):
+            _graded(conn, "solo-failure-%d" % n, ["solo"], "distinct task %d" % n, -1.0)
+        report = learning_health.build_report(conn)
+    finally:
+        conn.close()
+
+    assert report["quarantined_lessons"] == 1
+    assert report["lessons_marked_per_failed_interaction"] == 1.0
 
 
 def test_a_lesson_whose_interaction_is_gone_is_orphaned_not_synthetic():
