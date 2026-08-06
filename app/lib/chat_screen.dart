@@ -36,6 +36,13 @@ class _ChatScreenState extends State<ChatScreen> {
   // contains a slash never opens it.
   List<MapEntry<String, String>> _paletteMatches = const [];
   int _paletteSelected = 0;
+
+  /// Append the original exception to error bubbles. Off by default: the
+  /// friendly message is what a person needs, the raw one is what a
+  /// maintainer needs. Handled client-side because the errors most worth
+  /// reading raw are transport failures, and during one of those the server
+  /// cannot answer a command at all.
+  bool _verboseErrors = false;
   List<ChatThread> _threads = const [];
   String _currentThreadId = '';
   String _project = 'default';
@@ -323,9 +330,61 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
+  /// Client-side settings that must work while the server is unreachable.
+  ///
+  /// Anything routed to the server is useless during a transport failure,
+  /// which is exactly when someone reaches for raw error detail. Returns the
+  /// reply to show, or null to let the message go to the server as normal.
+  /// Plain-English phrasings are accepted alongside the slash form so the
+  /// toggle can be reached by asking rather than by remembering syntax.
+  String? _localToggle(String text) {
+    final t = text.trim().toLowerCase();
+
+    bool wantsOn(String s) =>
+        s.contains(' on') || s.contains('enable') || s.contains('show') ||
+        s.contains('turn on');
+    bool wantsOff(String s) =>
+        s.contains(' off') || s.contains('disable') || s.contains('hide') ||
+        s.contains('turn off');
+
+    final isVerboseTopic = t.startsWith('/verbose') ||
+        t.startsWith('/errors') ||
+        (RegExp(r'\b(raw|verbose|full|detailed)\b').hasMatch(t) &&
+            RegExp(r'\b(error|errors|exception|exceptions|traceback)\b')
+                .hasMatch(t));
+    if (!isVerboseTopic) return null;
+
+    if (wantsOff(t)) {
+      setState(() => _verboseErrors = false);
+      return 'Verbose errors are **off**. Error messages will show the plain '
+          'explanation only.';
+    }
+    if (wantsOn(t) || t == '/verbose' || t == '/errors') {
+      setState(() => _verboseErrors = true);
+      return 'Verbose errors are **on**. Failures will show the original '
+          'exception under the explanation.\n\nTurn it off with `/verbose off` '
+          '(or just ask).';
+    }
+    return 'Verbose errors are currently **${_verboseErrors ? "on" : "off"}**. '
+        'Say `/verbose on` or `/verbose off` — plain English works too.';
+  }
+
   Future<void> _send([String? preset]) async {
     final text = (preset ?? _input.text).trim();
     if (text.isEmpty || _sending) return;
+
+    final localReply = _localToggle(text);
+    if (localReply != null) {
+      setState(() {
+        _messages.add(ChatMessage(role: Role.user, content: text));
+        _messages.add(
+            ChatMessage(role: Role.assistant, content: localReply));
+        if (preset == null) _input.clear();
+      });
+      _scrollToEnd();
+      unawaited(_saveCurrentThread());
+      return;
+    }
 
     setState(() {
       _messages.add(ChatMessage(role: Role.user, content: text));
@@ -357,7 +416,13 @@ class _ChatScreenState extends State<ChatScreen> {
       setState(() {
         _messages[_messages.length - 1] = ChatMessage(
           role: Role.assistant,
-          content: e.message,
+          // Verbose mode appends the original exception. It lives client-side
+          // on purpose: the errors worth reading raw are transport failures,
+          // and during one of those a server-side toggle is exactly the thing
+          // you cannot reach.
+          content: _verboseErrors && e.cause != null
+              ? '${e.message}\n\n---\n```\n${e.cause}\n```'
+              : e.message,
           error: true,
         );
       });
