@@ -124,14 +124,37 @@ def test_cloud_training_uses_supervised_controller_launch():
     assert 'state.get("adapter_dir")' in script
 
 
-def test_checked_in_peft_cards_identify_adapter_runtime_boundary():
+def test_peft_cards_identify_adapter_runtime_boundary():
+    """The adapter cards must not claim to be Sonder Runtime -- when present.
+
+    sonder-personal-lora/ is deliberately untracked: the adapter blobs are not
+    part of the public repo. On a clean checkout there are no cards to read,
+    which is why this failed on CI while passing locally, where the directory
+    still sits on disk.
+
+    The invariant worth enforcing now is that the directory stays untracked.
+    The wording guard is kept for anyone holding a local copy, and re-engages
+    on its own if the cards ever come back.
+    """
+    tracked = {os.fsdecode(relative) for relative in _tracked_paths()}
+    republished = sorted(
+        path for path in tracked if path.startswith("sonder-personal-lora/")
+    )
+    assert not republished, (
+        "sonder-personal-lora/ is intentionally untracked; re-tracking it would "
+        "publish adapter blobs: %s" % republished
+    )
+
     cards = (
         "sonder-personal-lora/README.md",
         "sonder-personal-lora/checkpoints/checkpoint-58/README.md",
         "sonder-personal-lora/checkpoints/checkpoint-116/README.md",
     )
     for relative in cards:
-        text = (ROOT / relative).read_text(encoding="utf-8")
+        path = ROOT / relative
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
         assert "It is **not Sonder Runtime**, a standalone" in text
         assert "Qwen/Qwen2.5-Coder-1.5B-Instruct" in text
         assert "The matching base weights remain separate" in text
