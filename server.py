@@ -13808,6 +13808,34 @@ def _ensemble_targets(tiers: str = ""):
     return targets[:ENSEMBLE_MAX_MODELS], unknown
 
 
+def _ensemble_code_synthesis_prompt(question, answers):
+    """Synthesis contract for code, where prose merging is actively harmful.
+
+    Blending two source files line by line produces something that resembles
+    both and compiles as neither, so this asks for a *pick and patch*: choose
+    the more complete candidate as the base and take from the others only where
+    the base is clearly missing or wrong.
+    """
+    numbered = "\n\n".join(
+        "===== CANDIDATE %d (from the %s tier, model %s) =====\n%s"
+        % (i, row["tier"], row["model"], row["answer"])
+        for i, row in enumerate(answers, 1)
+    )
+    return (
+        "Several models independently wrote the same source file. Produce the "
+        "single best version.\n\n"
+        "Rules:\n"
+        "- Pick the most complete, most nearly correct candidate as your base.\n"
+        "- Take a piece from another candidate ONLY where the base is missing it "
+        "or is clearly wrong. Do not interleave them line by line.\n"
+        "- The result must be ONE complete, self-contained, compilable file.\n"
+        "- Output ONLY code. No prose, no markdown fences, no commentary, and no "
+        "notes about which candidate you chose.\n"
+        "- Do not leave TODOs, placeholders, or elided bodies.\n\n"
+        "ORIGINAL REQUEST:\n%s\n\n%s\n\nFINAL FILE:" % (question, numbered)
+    )
+
+
 def _ensemble_synthesis_prompt(question, answers):
     numbered = "\n\n".join(
         "--- Answer %d (from the %s tier, model %s) ---\n%s"
@@ -13835,6 +13863,7 @@ def ensemble_answer(
     tiers: str = "",
     synth_tier: str = "",
     num_predict: int = 700,
+    mode: str = "prose",
 ) -> str:
     """Ask several local models the same question, then compound one answer.
 
@@ -13848,6 +13877,12 @@ def ensemble_answer(
         synth_tier: tier that writes the compounded answer. Default: the last
             tier that answered successfully.
         num_predict: output cap per model.
+        mode: "prose" (default) merges the answers into one explanation.
+            "code" switches to a pick-and-patch contract and returns a bare
+            source file -- blending two implementations line by line yields
+            something that resembles both and compiles as neither, and the
+            prose contract's "name the disagreements" rule would emit
+            commentary where a file is wanted.
     """
     _maybe_live_reload()
     question = (prompt or "").strip()
@@ -13905,6 +13940,18 @@ def ensemble_answer(
         len(answers), "" if len(answers) == 1 else "s", "\n".join(footer_rows)
     )
 
+    # In code mode the return value is a source file, so the provenance footer
+    # would be pasted straight into it. Report to the log instead.
+    code_mode = str(mode or "").strip().lower() == "code"
+    if code_mode:
+        activity_tracker.record_event(
+            "ensemble",
+            summary="%d model(s) answered: %s" % (
+                len(answers), ", ".join(r["tier"] for r in answers)
+            ),
+        )
+        footer = ""
+
     if len(answers) == 1:
         # Nothing to compound. Returning the single answer is honest; running a
         # synthesis pass over one input would only launder it.
@@ -13915,12 +13962,21 @@ def ensemble_answer(
     if not synth_model or synth_label is None:
         synth_model = answers[-1]["model"]
         synth = answers[-1]["tier"]
+    build_prompt = (
+        _ensemble_code_synthesis_prompt if code_mode else _ensemble_synthesis_prompt
+    )
     try:
         gen = _make_generate(synth_model, "", 0.2, max(256, int(num_predict)), 8192)
-        merged = (gen(_ensemble_synthesis_prompt(question, answers)) or "").strip()
+        merged = (gen(build_prompt(question, answers)) or "").strip()
     except Exception as exc:
         # Synthesis is the only step that can fail after real work is done, so
-        # hand back the raw answers rather than losing them.
+        # hand back the strongest single answer rather than losing everything.
+        if code_mode:
+            activity_tracker.record_event(
+                "ensemble",
+                summary="synthesis failed (%s); using the longest candidate" % exc,
+            )
+            return max(answers, key=lambda r: len(r["answer"]))["answer"]
         raw = "\n\n".join(
             "--- %s (%s) ---\n%s" % (r["tier"], r["model"], r["answer"])
             for r in answers
@@ -13929,6 +13985,8 @@ def ensemble_answer(
 
     if not merged:
         return answers[-1]["answer"] + footer
+    if code_mode:
+        return merged
     return "%s\n%s  synthesized by %s (%s)" % (merged, footer, synth, synth_model)
 
 
