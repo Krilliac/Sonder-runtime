@@ -30,6 +30,12 @@ class _ChatScreenState extends State<ChatScreen> {
   final _input = TextEditingController();
   final _scroll = ScrollController();
   final _inputFocus = FocusNode();
+
+  // Slash-command palette. Non-empty only while the composer holds a single
+  // "/word" token with no space yet, so typing a normal message that merely
+  // contains a slash never opens it.
+  List<MapEntry<String, String>> _paletteMatches = const [];
+  int _paletteSelected = 0;
   List<ChatThread> _threads = const [];
   String _currentThreadId = '';
   String _project = 'default';
@@ -105,6 +111,88 @@ class _ChatScreenState extends State<ChatScreen> {
       const Duration(seconds: 1),
       (_) => _refreshStatus(),
     );
+    _input.addListener(_updatePalette);
+  }
+
+  /// Recompute the slash-command matches for whatever is in the composer.
+  ///
+  /// Opens only for a lone leading "/token": once a space is typed the user
+  /// is writing arguments (or prose that happens to contain a slash), so the
+  /// palette gets out of the way rather than hovering over the conversation.
+  void _updatePalette() {
+    final text = _input.text;
+    List<MapEntry<String, String>> matches = const [];
+    if (text.startsWith('/') && !text.contains(RegExp(r'[\s\n]'))) {
+      final query = text.toLowerCase();
+      matches = _quickCommands.entries
+          .where((e) => e.key.toLowerCase().startsWith(query))
+          .toList();
+      // Nothing starts with it -- fall back to matching the description too,
+      // so "/memory" still finds the quality and privacy audits.
+      if (matches.isEmpty && query.length > 1) {
+        final needle = query.substring(1);
+        matches = _quickCommands.entries
+            .where((e) =>
+                e.key.toLowerCase().contains(needle) ||
+                e.value.toLowerCase().contains(needle))
+            .toList();
+      }
+    }
+    if (matches.length == _paletteMatches.length &&
+        (matches.isEmpty ||
+            matches.first.key == _paletteMatches.first.key)) {
+      return; // nothing visible changed; skip the rebuild
+    }
+    setState(() {
+      _paletteMatches = matches;
+      _paletteSelected = 0;
+    });
+  }
+
+  void _pickCommand(String command) {
+    // Commands whose key carries an example payload are inserted whole and
+    // left for the user to edit; bare commands get a trailing space so
+    // arguments can be typed straight away.
+    final insert = command.contains(' ') ? command : '$command ';
+    _input.value = TextEditingValue(
+      text: insert,
+      selection: TextSelection.collapsed(offset: insert.length),
+    );
+    setState(() {
+      _paletteMatches = const [];
+      _paletteSelected = 0;
+    });
+    _inputFocus.requestFocus();
+  }
+
+  /// Arrow keys, Tab/Enter and Escape drive the palette while it is open.
+  /// Every other key, and every key at all when it is closed, falls through
+  /// to the TextField untouched.
+  KeyEventResult _onComposerKey(KeyEvent event) {
+    if (_paletteMatches.isEmpty || event is! KeyDownEvent) {
+      return KeyEventResult.ignored;
+    }
+    final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.arrowDown) {
+      setState(() => _paletteSelected =
+          (_paletteSelected + 1) % _paletteMatches.length);
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowUp) {
+      setState(() => _paletteSelected =
+          (_paletteSelected - 1 + _paletteMatches.length) %
+              _paletteMatches.length);
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.tab) {
+      _pickCommand(_paletteMatches[_paletteSelected].key);
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.escape) {
+      setState(() => _paletteMatches = const []);
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
   }
 
   ChatThread get _currentThread {
@@ -216,6 +304,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void dispose() {
     _statusTimer?.cancel();
+    _input.removeListener(_updatePalette);
     _input.dispose();
     _scroll.dispose();
     _inputFocus.dispose();
@@ -509,6 +598,10 @@ class _ChatScreenState extends State<ChatScreen> {
             focusNode: _inputFocus,
             sending: _sending,
             onSend: () => _send(),
+            paletteMatches: _paletteMatches,
+            paletteSelected: _paletteSelected,
+            onPalettePick: _pickCommand,
+            onKey: _onComposerKey,
           ),
           _LiveStatusBar(info: _systemInfo, model: _model, project: _project),
         ],
@@ -1174,17 +1267,102 @@ class _TypingDotsState extends State<_TypingDots>
   }
 }
 
+/// Command palette that opens when the composer starts with "/".
+///
+/// The commands were already listed in `_quickCommands`, but only reachable
+/// by typing one exactly from memory or finding it on the System page. This
+/// surfaces them where they are used, filtered as you type, the same way the
+/// slash menu works in the terminal REPL.
+class _CommandPalette extends StatelessWidget {
+  final List<MapEntry<String, String>> matches;
+  final int selected;
+  final ValueChanged<String> onPick;
+
+  const _CommandPalette({
+    required this.matches,
+    required this.selected,
+    required this.onPick,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      constraints: const BoxConstraints(maxHeight: 280),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: cs.outlineVariant),
+      ),
+      child: ListView.builder(
+        shrinkWrap: true,
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        itemCount: matches.length,
+        itemBuilder: (context, i) {
+          final entry = matches[i];
+          final isSelected = i == selected;
+          // The asset commands carry a whole example payload as their key;
+          // showing the first token keeps every row readable.
+          final name = entry.key.split(' ').first;
+          return InkWell(
+            onTap: () => onPick(entry.key),
+            child: Container(
+              color: isSelected ? cs.primary.withValues(alpha: 0.16) : null,
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 150,
+                    child: Text(
+                      name,
+                      style: TextStyle(
+                        fontFamily: 'monospace',
+                        fontWeight:
+                            isSelected ? FontWeight.w700 : FontWeight.w500,
+                        color: cs.primary,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      entry.value,
+                      style: TextStyle(color: cs.onSurfaceVariant),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
 class _InputBar extends StatelessWidget {
   final TextEditingController controller;
   final FocusNode focusNode;
   final bool sending;
   final VoidCallback onSend;
+  final List<MapEntry<String, String>> paletteMatches;
+  final int paletteSelected;
+  final ValueChanged<String> onPalettePick;
+  final KeyEventResult Function(KeyEvent) onKey;
 
   const _InputBar({
     required this.controller,
     required this.focusNode,
     required this.sending,
     required this.onSend,
+    required this.paletteMatches,
+    required this.paletteSelected,
+    required this.onPalettePick,
+    required this.onKey,
   });
 
   @override
@@ -1201,41 +1379,56 @@ class _InputBar extends StatelessWidget {
         child: Center(
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 1080),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.end,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
               children: [
-                Expanded(
-                  child: TextField(
-                    controller: controller,
-                    focusNode: focusNode,
-                    minLines: 1,
-                    maxLines: 6,
-                    textInputAction: TextInputAction.send,
-                    onSubmitted: (_) => onSend(),
-                    decoration: InputDecoration(
-                      hintText: 'Message Sonder Runtime…',
-                      filled: true,
-                      fillColor: cs.surfaceContainerHighest,
-                      contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 16, vertical: 12),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(24),
-                        borderSide: BorderSide.none,
+                if (paletteMatches.isNotEmpty)
+                  _CommandPalette(
+                    matches: paletteMatches,
+                    selected: paletteSelected,
+                    onPick: onPalettePick,
+                  ),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Expanded(
+                      child: Focus(
+                        onKeyEvent: (node, event) => onKey(event),
+                        child: TextField(
+                          controller: controller,
+                          focusNode: focusNode,
+                          minLines: 1,
+                          maxLines: 6,
+                          textInputAction: TextInputAction.send,
+                          onSubmitted: (_) => onSend(),
+                          decoration: InputDecoration(
+                            hintText: 'Message Sonder Runtime…',
+                            filled: true,
+                            fillColor: cs.surfaceContainerHighest,
+                            contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 16, vertical: 12),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(24),
+                              borderSide: BorderSide.none,
+                            ),
+                          ),
+                        ),
                       ),
                     ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                FloatingActionButton.small(
-                  onPressed: sending ? null : onSend,
-                  elevation: 0,
-                  child: sending
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.arrow_upward),
+                    const SizedBox(width: 8),
+                    FloatingActionButton.small(
+                      onPressed: sending ? null : onSend,
+                      elevation: 0,
+                      child: sending
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child:
+                                  CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.arrow_upward),
+                    ),
+                  ],
                 ),
               ],
             ),
