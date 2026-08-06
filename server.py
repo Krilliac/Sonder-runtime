@@ -13851,6 +13851,38 @@ def _ensemble_targets(tiers: str = ""):
     return targets[:ENSEMBLE_MAX_MODELS], unknown
 
 
+def _project_facts_text(project: str) -> str:
+    """Durable facts for a project, as a constraints block.
+
+    The ensemble builds its prompts directly rather than going through the
+    learning orchestrator, so it never saw the facts sonder_remember_fact
+    stores -- which is precisely where they are most useful, since the failure
+    modes worth recording (wrong-library calls, generics written with
+    parentheses, deleting code to silence a compiler) are all code-generation
+    failures.
+    """
+    name = (project or "").strip()
+    if not name or name.lower() == "none":
+        return ""
+    conn = _open_db()
+    try:
+        rows = memory_store.facts_for_project(conn, name)
+    except Exception:
+        return ""
+    finally:
+        conn.close()
+    facts = [str(r.get("text", "")).strip() for r in rows or []]
+    facts = [f for f in facts if f]
+    if not facts:
+        return ""
+    return (
+        "HARD CONSTRAINTS for this project. These are recorded from measured "
+        "past failures; violating one is a known way this goes wrong:\n"
+        + "\n".join("- " + f for f in facts)
+        + "\n\n"
+    )
+
+
 def _ensemble_code_synthesis_prompt(question, answers):
     """Synthesis contract for code, where prose merging is actively harmful.
 
@@ -13907,6 +13939,7 @@ def ensemble_answer(
     synth_tier: str = "",
     num_predict: int = 700,
     mode: str = "prose",
+    project: str = "",
 ) -> str:
     """Ask several local models the same question, then compound one answer.
 
@@ -13926,11 +13959,20 @@ def ensemble_answer(
             something that resembles both and compiles as neither, and the
             prose contract's "name the disagreements" rule would emit
             commentary where a file is wanted.
+        project: prepend that project's durable facts (sonder_remember_fact) to
+            every model's prompt as hard constraints. The ensemble builds its
+            prompts directly rather than through the learning orchestrator, so
+            without this it never sees them -- and code generation is exactly
+            where recorded failure modes pay off.
     """
     _maybe_live_reload()
     question = (prompt or "").strip()
     if not question:
         return "ERROR: ensemble_answer needs a prompt."
+    # Prepend the project's durable facts. Every model in the ensemble sees
+    # them, and so does the synthesis pass, since a merge that reintroduces a
+    # constraint violation is as broken as generating one.
+    question = _project_facts_text(project) + question
 
     targets, unknown = _ensemble_targets(tiers)
     if not targets:

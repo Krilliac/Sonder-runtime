@@ -122,3 +122,54 @@ def test_turn_reasoning_is_empty_while_exposure_is_off(monkeypatch):
     with at.response_span("t", "p"):
         at.record_reasoning("thought", model="m")
         assert ts._turn_reasoning() == ""
+
+
+def test_project_facts_reach_the_ensemble_prompt(monkeypatch):
+    """The ensemble builds prompts directly instead of going through the
+    learning orchestrator, so project facts were unreachable from it -- the one
+    path where recorded code-generation failure modes would pay off."""
+    monkeypatch.setattr(
+        server, "_project_facts_text",
+        lambda project: "HARD CONSTRAINTS:\n- never use Color.FromArgb\n\n"
+        if project == "codegen" else "",
+    )
+    seen = []
+    monkeypatch.setattr(
+        server, "_ensemble_targets", lambda tiers: ([("code", "m")], []),
+    )
+
+    def fake_make_generate(model, *a, **k):
+        def gen(prompt, history=None):
+            seen.append(prompt)
+            return "int x = 1;"
+        return gen
+
+    monkeypatch.setattr(server, "_make_generate", fake_make_generate)
+    monkeypatch.setattr(server, "_post", lambda *a, **k: {})
+
+    server.ensemble_answer("write a class", tiers="code", mode="code", project="codegen")
+    assert seen, "the model was never called"
+    assert "never use Color.FromArgb" in seen[0]
+    assert "write a class" in seen[0]
+
+
+def test_ensemble_without_a_project_is_unchanged(monkeypatch):
+    monkeypatch.setattr(server, "_ensemble_targets", lambda tiers: ([("code", "m")], []))
+    seen = []
+
+    def fake_make_generate(model, *a, **k):
+        def gen(prompt, history=None):
+            seen.append(prompt)
+            return "int x = 1;"
+        return gen
+
+    monkeypatch.setattr(server, "_make_generate", fake_make_generate)
+    monkeypatch.setattr(server, "_post", lambda *a, **k: {})
+
+    server.ensemble_answer("write a class", tiers="code", mode="code")
+    assert seen[0].strip() == "write a class"
+
+
+def test_project_facts_text_is_empty_for_unknown_or_none():
+    assert server._project_facts_text("") == ""
+    assert server._project_facts_text("none") == ""
