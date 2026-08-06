@@ -1,0 +1,41 @@
+# Sonder Runtime as a Codex MCP server.
+#
+# Append to ~/.codex/config.toml and replace <SONDER_DIR> with the absolute
+# path to your checkout. On Windows the interpreter is
+# <SONDER_DIR>\venv\Scripts\python.exe; on Linux/macOS it is
+# <SONDER_DIR>/venv/bin/python. Use the venv interpreter, not a system python.
+
+[mcp_servers.sonder]
+command = '<SONDER_DIR>/venv/bin/python'
+args = ['<SONDER_DIR>/server.py']
+# First start may pull an embedding model, so allow generous startup.
+startup_timeout_sec = 120.0
+
+[mcp_servers.sonder.env]
+# --- tier -> model. Point these at models you have actually pulled. ---
+SONDER_FAST = "qwen2.5:3b"
+SONDER_CODE = "qwen2.5-coder:7b"
+SONDER_GENERAL = "qwen2.5:7b-instruct"
+
+# --- serving ---
+# 999 = offload every layer to the GPU. Ollama's default heuristic is
+# conservative and will silently leave part of a 7B on the CPU, costing
+# roughly a third of throughput. If the model does not fit, Ollama falls
+# back, so this is a safe default.
+SONDER_NUM_GPU = "999"
+# Match your core count.
+SONDER_NUM_THREAD = "8"
+SONDER_NUM_BATCH = "512"
+# Longer keeps models resident between turns; shorten it if RAM is tight.
+SONDER_KEEP_ALIVE = "5m"
+
+# --- learning loop ---
+# Tiers whose interactions are captured and can distil into lessons.
+SONDER_LEARN_TIERS = "fast,code,general"
+
+# --- cloud tiers: OFF unless you opt in ---
+# Uncommenting these sends prompts off your machine and is metered. Leave
+# them commented to keep everything local.
+# SONDER_ALLOW_CLOUD = "1"
+# SONDER_CLOUD_CODE = "<a cloud model you have configured>"
+# SONDER_CLOUD_GENERAL = "<a cloud model you have configured>"
