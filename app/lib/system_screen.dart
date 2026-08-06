@@ -41,6 +41,15 @@ class _SystemScreenState extends State<SystemScreen>
   String? _message;
   bool _loading = false;
   bool _working = false;
+
+  /// Label of the runtime action currently in flight, or '' when idle. Drives
+  /// the in-place busy state on the button that was pressed.
+  String _busyAction = '';
+
+  /// Last failed runtime action, kept on screen after its dialog is dismissed
+  /// so the startup-log evidence stays reachable.
+  LocalActionResult? _runtimeFailure;
+  String _runtimeFailureLabel = '';
   bool _polling = false;
   bool _waitingForLauncherOperation = false;
   bool _stopLauncherWait = false;
@@ -354,21 +363,91 @@ class _SystemScreenState extends State<SystemScreen>
 
   Future<LocalActionResult> _restartServer() => _launcherAction('restart');
 
-  Future<void> _run(Future<LocalActionResult> Function() action) async {
+  Future<void> _run(
+    Future<LocalActionResult> Function() action, {
+    String label = '',
+  }) async {
     setState(() {
       _working = true;
+      _busyAction = label;
       _message = null;
+      _runtimeFailure = null;
+      _runtimeFailureLabel = '';
     });
     final result = await action();
     if (!mounted) return;
     setState(() {
       _working = false;
+      _busyAction = '';
       _message = result.message;
+      _runtimeFailure = result.ok ? null : result;
+      _runtimeFailureLabel = result.ok ? '' : label;
     });
-    if (result.ok) {
-      await Future<void>.delayed(const Duration(seconds: 1));
-      if (mounted) _refresh();
+    if (!result.ok) {
+      // A failed launcher used to leave the page unchanged: the button
+      // re-enabled, the status still read "Not detected", and the reason sat
+      // in a log nothing read. Make the failure modal so it cannot be missed.
+      await _showActionFailure(label, result);
+      return;
     }
+    await Future<void>.delayed(const Duration(seconds: 1));
+    if (mounted) _refresh();
+  }
+
+  Future<void> _showActionFailure(
+    String label,
+    LocalActionResult result,
+  ) async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(label.isEmpty ? 'Action failed' : '$label failed'),
+        content: SizedBox(
+          width: 520,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SelectableText(result.message),
+                if (result.logTail.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    'Startup log',
+                    style: Theme.of(ctx).textTheme.labelLarge,
+                  ),
+                  const SizedBox(height: 6),
+                  _OutputCard(text: result.logTail),
+                ],
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          if (result.logPath.isNotEmpty)
+            TextButton.icon(
+              onPressed: () => _copyLogPath(ctx, result.logPath),
+              icon: const Icon(Icons.copy, size: 18),
+              label: const Text('Copy log path'),
+            ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Dismiss'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Copy the startup-log path without clobbering [_message], which is still
+  /// holding the failure text the operator is reading.
+  Future<void> _copyLogPath(BuildContext dialogContext, String path) async {
+    await Clipboard.setData(ClipboardData(text: path));
+    if (!dialogContext.mounted) return;
+    ScaffoldMessenger.of(dialogContext).showSnackBar(
+      const SnackBar(content: Text('Startup log path copied.')),
+    );
   }
 
   Future<void> _sendCommand(String command) async {
@@ -513,6 +592,17 @@ class _SystemScreenState extends State<SystemScreen>
     return '/train $count';
   }
 
+  /// Swap a button's leading icon for a spinner while that specific action is
+  /// running, so the press has visible feedback at the button itself.
+  Widget _busyIcon(String label, Widget idleIcon) {
+    if (_busyAction != label) return idleIcon;
+    return const SizedBox(
+      width: 18,
+      height: 18,
+      child: CircularProgressIndicator(strokeWidth: 2),
+    );
+  }
+
   Future<void> _copy(String text) async {
     await Clipboard.setData(ClipboardData(text: text));
     if (!mounted) return;
@@ -549,13 +639,15 @@ class _SystemScreenState extends State<SystemScreen>
         ),
         title: const Text('System'),
         actions: [
-          Tooltip(
-            message: 'Return to main chat',
-            child: TextButton.icon(
-              onPressed: () => Navigator.of(context).maybePop(),
-              icon: const Icon(Icons.chat_bubble_outline, size: 18),
-              label: const Text('Chat'),
-            ),
+          // No Tooltip wrapper here. The button already carries a visible
+          // "Chat" label, so a hover tooltip only added a floating box in the
+          // top-right corner, where it collided with the window's own Close
+          // tooltip. The destination stays discoverable through the leading
+          // back button's tooltip.
+          TextButton.icon(
+            onPressed: () => Navigator.of(context).maybePop(),
+            icon: const Icon(Icons.chat_bubble_outline, size: 18),
+            label: const Text('Chat'),
           ),
           IconButton(
             tooltip: 'Refresh',
@@ -708,29 +800,43 @@ class _SystemScreenState extends State<SystemScreen>
                     FilledButton.icon(
                       onPressed: _working || !localRuntimeControls
                           ? null
-                          : () => _run(() => LocalManager.setupEngine(
-                                allowHosted: widget.settings.allowHosted,
-                                contextSize: widget.settings.contextSize,
-                              )),
+                          : () => _run(
+                                () => LocalManager.setupEngine(
+                                  allowHosted: widget.settings.allowHosted,
+                                  contextSize: widget.settings.contextSize,
+                                ),
+                                label: 'Setup host runtime',
+                              ),
                       icon: const Icon(Icons.auto_fix_high_outlined),
                       label: const Text('Setup host runtime'),
                     ),
                     FilledButton.icon(
+                      key: const Key('start-server'),
                       onPressed: _working ||
                               hostOperationActive ||
                               !canControlServer
                           ? null
-                          : () => _run(_startServer),
-                      icon: const Icon(Icons.play_arrow_outlined),
-                      label: const Text('Start server'),
+                          : () => _run(_startServer, label: 'Start server'),
+                      icon: _busyIcon(
+                        'Start server',
+                        const Icon(Icons.play_arrow_outlined),
+                      ),
+                      label: Text(
+                        _busyAction == 'Start server'
+                            ? 'Starting server...'
+                            : 'Start server',
+                      ),
                     ),
                     FilledButton.tonalIcon(
                       onPressed: _working ||
                               hostOperationActive ||
                               !canControlServer
                           ? null
-                          : () => _run(_stopServer),
-                      icon: const Icon(Icons.stop_circle_outlined),
+                          : () => _run(_stopServer, label: 'Stop server'),
+                      icon: _busyIcon(
+                        'Stop server',
+                        const Icon(Icons.stop_circle_outlined),
+                      ),
                       label: const Text('Stop server'),
                     ),
                     FilledButton.tonalIcon(
@@ -738,8 +844,14 @@ class _SystemScreenState extends State<SystemScreen>
                               hostOperationActive ||
                               !widget.settings.usesHostLauncher
                           ? null
-                          : () => _run(_restartServer),
-                      icon: const Icon(Icons.restart_alt),
+                          : () => _run(
+                                _restartServer,
+                                label: 'Restart server',
+                              ),
+                      icon: _busyIcon(
+                        'Restart server',
+                        const Icon(Icons.restart_alt),
+                      ),
                       label: const Text('Restart server'),
                     ),
                     if (_waitingForLauncherOperation)
@@ -752,19 +864,55 @@ class _SystemScreenState extends State<SystemScreen>
                     FilledButton.tonalIcon(
                       onPressed: _working || !localRuntimeControls
                           ? null
-                          : () => _run(LocalManager.startEndlessTraining),
+                          : () => _run(
+                                LocalManager.startEndlessTraining,
+                                label: 'Grounded practice',
+                              ),
                       icon: const Icon(Icons.all_inclusive),
                       label: const Text('Grounded practice'),
                     ),
                     OutlinedButton.icon(
                       onPressed: _working || !localRuntimeControls
                           ? null
-                          : () => _run(LocalManager.updateFromGit),
+                          : () => _run(
+                                LocalManager.updateFromGit,
+                                label: 'Update from Git',
+                              ),
                       icon: const Icon(Icons.system_update_alt),
                       label: const Text('Update from Git'),
                     ),
                   ],
                 ),
+                if (_busyAction.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Row(
+                    key: const Key('runtime-busy'),
+                    children: [
+                      const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text('$_busyAction in progress...'),
+                      ),
+                    ],
+                  ),
+                ],
+                if (_runtimeFailure != null) ...[
+                  const SizedBox(height: 12),
+                  _RuntimeFailureCard(
+                    label: _runtimeFailureLabel,
+                    result: _runtimeFailure!,
+                    onShowLog: () => unawaited(
+                      _showActionFailure(
+                        _runtimeFailureLabel,
+                        _runtimeFailure!,
+                      ),
+                    ),
+                  ),
+                ],
                 if (!localRuntimeControls) ...[
                   const SizedBox(height: 10),
                   Text(
@@ -2449,6 +2597,76 @@ class _OutputCard extends StatelessWidget {
           if (action != null) ...[
             const SizedBox(height: 8),
             Align(alignment: Alignment.centerRight, child: action!),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// Persistent, above-the-fold report for a failed runtime action. The message
+/// already names what failed and where the startup log is; the button reopens
+/// the log tail after the modal has been dismissed.
+class _RuntimeFailureCard extends StatelessWidget {
+  final String label;
+  final LocalActionResult result;
+  final VoidCallback onShowLog;
+
+  const _RuntimeFailureCard({
+    required this.label,
+    required this.result,
+    required this.onShowLog,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      key: const Key('runtime-failure'),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: cs.errorContainer,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: cs.error),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(Icons.error_outline, size: 18, color: cs.onErrorContainer),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  label.isEmpty ? 'Action failed' : '$label failed',
+                  style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                        color: cs.onErrorContainer,
+                      ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          SelectableText(
+            result.message,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: cs.onErrorContainer,
+                  fontFamily: 'monospace',
+                  height: 1.3,
+                ),
+          ),
+          if (result.hasLogDetail) ...[
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                key: const Key('runtime-failure-log'),
+                onPressed: onShowLog,
+                icon: const Icon(Icons.description_outlined, size: 18),
+                label: const Text('View startup log'),
+              ),
+            ),
           ],
         ],
       ),

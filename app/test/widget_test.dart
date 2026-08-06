@@ -600,4 +600,50 @@ void main() {
     expect(find.text('2/2'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('System keeps one return affordance and no stacked tooltip',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(900, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SystemScreen(settings: Settings(), liveUpdates: false),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byTooltip('Back to chat'), findsOneWidget);
+    expect(find.text('Chat'), findsOneWidget);
+    // The action button's own hover tooltip used to float over the top-right
+    // corner and collide with the window's Close tooltip. The visible "Chat"
+    // label carries the affordance instead.
+    expect(find.byTooltip('Return to main chat'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('System start control is idle until an action runs',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(900, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SystemScreen(settings: Settings(), liveUpdates: false),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('start-server')),
+      240,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Start server'), findsOneWidget);
+    expect(find.text('Starting server...'), findsNothing);
+    expect(find.byKey(const Key('runtime-busy')), findsNothing);
+    expect(find.byKey(const Key('runtime-failure')), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
 }
