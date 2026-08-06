@@ -97,4 +97,44 @@ void main() {
     expect(status.activeRelease, isNull);
     expect(status.plans, isEmpty);
   });
+
+  test('reasoning never rides the wire back to the model', () {
+    const m = ChatMessage(
+      role: Role.assistant,
+      content: 'the answer',
+      reasoning: 'private deliberation',
+    );
+    expect(m.toWire(), {'role': 'assistant', 'content': 'the answer'});
+    expect(m.toWire().containsKey('reasoning'), isFalse);
+    expect(m.toWire().values.join(), isNot(contains('deliberation')));
+  });
+
+  test('reasoning survives a save/load round trip', () {
+    const m = ChatMessage(
+      role: Role.assistant,
+      content: 'the answer',
+      reasoning: 'step one',
+    );
+    final back = ChatMessage.fromJson(m.toJson());
+    expect(back.reasoning, 'step one');
+    expect(back.content, 'the answer');
+  });
+
+  test('reasoning defaults to empty for older stored messages', () {
+    final back = ChatMessage.fromJson({
+      'role': 'assistant',
+      'content': 'the answer',
+    });
+    expect(back.reasoning, '');
+  });
+
+  test('copyWith preserves reasoning when not overridden', () {
+    const m = ChatMessage(
+      role: Role.assistant,
+      content: 'a',
+      reasoning: 'thought',
+    );
+    expect(m.copyWith(content: 'b').reasoning, 'thought');
+    expect(m.copyWith(reasoning: '').reasoning, '');
+  });
 }

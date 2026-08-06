@@ -705,4 +705,80 @@ void main() {
     expect(health.quality.issueCount, 0);
     expect(health.hasWarning, isFalse);
   });
+
+  test('chatDetailed surfaces sonder_reasoning when the server sends it',
+      () async {
+    final client = MockClient((request) async {
+      return http.Response(
+          jsonEncode({
+            'choices': [
+              {
+                'message': {'role': 'assistant', 'content': 'the answer'}
+              }
+            ],
+            'sonder_reasoning': 'step one, step two',
+          }),
+          200);
+    });
+
+    final reply = await http.runWithClient(
+      () => const SonderApi(baseUrl: 'http://sonder.test').chatDetailed(
+        const [ChatMessage(role: Role.user, content: 'hi')],
+      ),
+      () => client,
+    );
+
+    expect(reply.text, 'the answer');
+    expect(reply.reasoning, 'step one, step two');
+    expect(reply.hasReasoning, isTrue);
+  });
+
+  test('chatDetailed reports no reasoning when the server omits it', () async {
+    final client = MockClient((request) async {
+      return http.Response(
+          jsonEncode({
+            'choices': [
+              {
+                'message': {'role': 'assistant', 'content': 'the answer'}
+              }
+            ],
+          }),
+          200);
+    });
+
+    final reply = await http.runWithClient(
+      () => const SonderApi(baseUrl: 'http://sonder.test').chatDetailed(
+        const [ChatMessage(role: Role.user, content: 'hi')],
+      ),
+      () => client,
+    );
+
+    expect(reply.text, 'the answer');
+    expect(reply.reasoning, '');
+    expect(reply.hasReasoning, isFalse);
+  });
+
+  test('chat still returns the answer text only', () async {
+    final client = MockClient((request) async {
+      return http.Response(
+          jsonEncode({
+            'choices': [
+              {
+                'message': {'role': 'assistant', 'content': 'the answer'}
+              }
+            ],
+            'sonder_reasoning': 'private deliberation',
+          }),
+          200);
+    });
+
+    final output = await http.runWithClient(
+      () => const SonderApi(baseUrl: 'http://sonder.test').chat(
+        const [ChatMessage(role: Role.user, content: 'hi')],
+      ),
+      () => client,
+    );
+
+    expect(output, 'the answer');
+  });
 }

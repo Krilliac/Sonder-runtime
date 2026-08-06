@@ -7,23 +7,41 @@ class ChatMessage {
   final bool pending; // true while the assistant reply is in-flight
   final bool error;
 
+  /// The model's reasoning for this turn, when the server exposes it.
+  ///
+  /// Deliberately a field rather than a marker inside [content]: the activity
+  /// block rides in the content and so is replayed to the model as history,
+  /// which is fine for a short evidence summary but wasteful for reasoning.
+  /// Keeping it out of [content] keeps it out of [toWire] for free.
+  final String reasoning;
+
   const ChatMessage({
     required this.role,
     required this.content,
     this.pending = false,
     this.error = false,
+    this.reasoning = '',
   });
 
-  ChatMessage copyWith({String? content, bool? pending, bool? error}) {
+  ChatMessage copyWith({
+    String? content,
+    bool? pending,
+    bool? error,
+    String? reasoning,
+  }) {
     return ChatMessage(
       role: role,
       content: content ?? this.content,
       pending: pending ?? this.pending,
       error: error ?? this.error,
+      reasoning: reasoning ?? this.reasoning,
     );
   }
 
   /// Wire format for the OpenAI-compatible /v1/chat/completions endpoint.
+  ///
+  /// Intentionally omits [reasoning]: replaying a model's own thoughts back to
+  /// it as history is not something the server asked for.
   Map<String, String> toWire() => {
         'role': role.name,
         'content': content,
@@ -34,6 +52,7 @@ class ChatMessage {
         'content': content,
         'pending': pending,
         'error': error,
+        'reasoning': reasoning,
       };
 
   factory ChatMessage.fromJson(Map<String, dynamic> json) {
@@ -46,6 +65,7 @@ class ChatMessage {
       content: json['content']?.toString() ?? '',
       pending: json['pending'] == true,
       error: json['error'] == true,
+      reasoning: json['reasoning']?.toString() ?? '',
     );
   }
 }
