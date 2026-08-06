@@ -1,5 +1,6 @@
 """Hybrid lexical+semantic retrieval over distilled lessons. RRF fusion."""
 from datetime import datetime, timedelta, timezone
+import hashlib
 import os
 import re
 
@@ -23,11 +24,89 @@ DEFAULT_MIN_SIM = 0.62
 # clear 0.70 (still below the prior positive median of 0.728).
 DEFAULT_UNCORROBORATED_MIN_SIM = 0.70
 MIN_LEXICAL_ANCHORS = 2
+
+# --- Quarantine evidence gates -------------------------------------------
+#
+# Raw floor (unchanged, retained as a conservative sample-size guard).
 QUARANTINE_MIN_LOSSES = 5
 QUARANTINE_REPEAT_TASK_MIN_LOSSES = 6
 QUARANTINE_MIN_DISTINCT_TASKS = 2
 QUARANTINE_MAX_AVG_REWARD = -0.5
 QUARANTINE_COOLDOWN_HOURS = 24 * 7
+
+# A failing task writes its reward onto EVERY lesson retrieved for it
+# (memory_store.record_lesson_usage_outcome updates by interaction_id, not by
+# lesson), so N loss rows are not N independent failures. Measured 2026-08-06
+# on the live store: 493 loss rows trace to only 144 distinct failing
+# interactions -- a mean cohort of 3.424 lessons blamed per failure, with 55 of
+# those 144 interactions blaming five lessons at once. Blame is therefore split
+# evenly across the cohort (the symmetric, no-extra-information attribution):
+# one lesson's share of one failure is 1/cohort_size, and the quarantine gate
+# counts those shares rather than rows.
+#
+# 2.0 shares means "two failures this lesson is individually answerable for":
+# two solo failures, or ~7 failures at the measured mean cohort. It is the
+# floor that binds for frequently-retrieved lessons, where the band test below
+# would otherwise fire on a single loss. It is reachable -- 18 of the 144
+# failing interactions blamed exactly one lesson, and one lesson has 5 solo
+# lifetime failures -- but no lesson in the live corpus currently reaches 2.0
+# within its since-last-win epoch (the maximum is 1.67).
+QUARANTINE_MIN_ATTRIBUTABLE_LOSSES = 2.0
+
+# Loss rate is dominated by retrieval frequency, not lesson quality. Retrieval
+# is similarity-driven, so a rarely-retrieved lesson is by construction the one
+# pulled in for an unusual task, and unusual tasks fail. Measured 2026-08-06
+# over 9256 scored retrievals across 346 lessons (corpus-wide rate 5.33%):
+#
+#   scored retrievals   lessons   retrievals   losses   loss rate
+#   1                        81           81       41      50.62%
+#   2-4                      54          149       62      41.61%
+#   5-9                      98          562       77      13.70%
+#   10-24                    48          698       53       7.59%
+#   25-49                    22          788       72       9.14%
+#   50-99                    25         1722      123       7.14%
+#   100+                     18         5256       65       1.24%
+#
+# Judging every lesson against the 5.33% corpus rate therefore quarantines
+# lessons for being unusual. Each lesson is instead judged against its own
+# band. Re-measure after large corpus changes.
+QUARANTINE_FREQUENCY_BANDS = (
+    (1, 0.5062),
+    (4, 0.4161),
+    (9, 0.1370),
+    (24, 0.0759),
+    (49, 0.0914),
+    (99, 0.0714),
+    (None, 0.0124),
+)
+# losses_since_win is a run of consecutive non-wins, so the band base rate is
+# the per-retrieval probability of each link in that run. Quarantine requires
+# the run to be improbable for the lesson's OWN band at p <= 0.01, which is
+# what "a 5-loss lesson retrieved 5 times is unremarkable, a 5-loss lesson
+# retrieved 500 times is not" actually cashes out to. Required attributable
+# losses by band: 6.76 (scored 1), 5.25 (2-4), 2.32 (5-9), then below the 2.0
+# floor for every band from 10 retrievals up.
+QUARANTINE_BAND_ALPHA = 0.01
+
+# Quarantine excludes a lesson from retrieval, so the win that would clear it
+# is unreachable and only the cooldown timer can lift it -- one live
+# quarantined lesson has 18 lifetime wins and no way to earn a 19th. After a
+# day, a quarantined lesson is admitted on a deterministic ~1-in-20 sample of
+# tasks so it can earn its way out on production traffic. Deterministic in
+# (lesson, task) so a repeated task always makes the same call. 5% bounds the
+# exposure to a genuinely harmful lesson far below the status quo, where the
+# timer restores it to 100% of traffic after a week regardless of evidence.
+QUARANTINE_PROBATION_AFTER_HOURS = 24
+QUARANTINE_PROBATION_ONE_IN = 20
+
+# Confidence in a lesson's historical reward comes from SCORED outcomes, not
+# from having been retrieved. Measured 2026-08-06: 715 of 1061 lessons have
+# never been retrieved on a scored task, 39 lessons have retrievals but zero
+# scored outcomes, and 63 lessons had their _usage_boost confidence weight
+# inflated by unscored retrievals. Shrinking toward the neutral prior with
+# pseudo-count 10 (the old saturation point) keeps a single lucky outcome from
+# earning the same tiebreak as a hundred graded ones.
+USAGE_BOOST_PRIOR_SCORED_USES = 10
 
 _LEXICAL_STOP_WORDS = {
     "a", "an", "and", "are", "as", "at", "be", "before", "by", "do",
@@ -161,11 +240,7 @@ def semantic_search(conn, task, embed_fn=None, limit=10):
         qv = None
     if qv is None:
         return []
-    usage_stats = memory_store.lesson_usage_stats(conn)
-    quarantined = {
-        lesson_id for lesson_id, stats in usage_stats.items()
-        if _lesson_quarantined(stats)
-    }
+    quarantined = quarantined_lessons(usage_stats_with_attribution(conn), task)
     query_provenance = embeddings.provenance(qv)
     model = query_provenance.get("model") if (
         runtime_default or embed_fn is embeddings.embed
@@ -236,30 +311,138 @@ def retrieve(conn, task, k=5, embed_fn=None, min_sim=None):
     return [r["text"] for r in rows]
 
 
+def band_loss_rate(scored_retrievals):
+    """Base loss rate for the reference class a lesson's retrieval count puts it in."""
+    count = max(0, int(scored_retrievals or 0))
+    for upper, rate in QUARANTINE_FREQUENCY_BANDS:
+        if upper is None or count <= upper:
+            return rate
+    return QUARANTINE_FREQUENCY_BANDS[-1][1]
+
+
+def attributable_losses(conn):
+    """Per-lesson blame-adjusted loss count for the epoch since its last win.
+
+    A failing task's reward lands on every lesson retrieved for it, so the raw
+    loss count double-counts one failure across its whole cohort. Each loss row
+    is worth 1/(lessons blamed for that interaction); summing the shares gives
+    the number of failures a lesson is individually answerable for.
+
+    Epoch boundaries mirror memory_store.lesson_usage_stats: a positive reward
+    starts a fresh epoch. The per-interaction cohort sizes that make the
+    discount possible are not exposed by that API, which is why the walk is
+    repeated here rather than read off the stats rows.
+    """
+    cohort = {
+        row["interaction_id"]: int(row["blamed"])
+        for row in conn.execute(
+            "SELECT interaction_id, COUNT(DISTINCT lesson_id) AS blamed "
+            "FROM lesson_usage WHERE reward IS NOT NULL AND reward < 0 "
+            "AND interaction_id IS NOT NULL GROUP BY interaction_id"
+        ).fetchall()
+    }
+    shares = {}
+    current_id = None
+    total = 0.0
+    for row in conn.execute(
+        "SELECT lesson_id, interaction_id, reward, "
+        "COALESCE(outcome_ts, ts) AS evidence_ts "
+        "FROM lesson_usage WHERE reward IS NOT NULL "
+        "ORDER BY lesson_id, datetime(evidence_ts), rowid"
+    ).fetchall():
+        if row["lesson_id"] != current_id:
+            if current_id is not None:
+                shares[current_id] = total
+            current_id = row["lesson_id"]
+            total = 0.0
+        value = float(row["reward"])
+        if value > 0:
+            total = 0.0
+        elif value < 0:
+            blamed = cohort.get(row["interaction_id"], 1) or 1
+            total += 1.0 / blamed
+    if current_id is not None:
+        shares[current_id] = total
+    return shares
+
+
+def usage_stats_with_attribution(conn):
+    """lesson_usage_stats enriched with the blame-adjusted loss evidence."""
+    stats = memory_store.lesson_usage_stats(conn)
+    for lesson_id, share in attributable_losses(conn).items():
+        if lesson_id in stats:
+            stats[lesson_id]["attributable_losses_since_win"] = share
+    return stats
+
+
+def _attribution(stats):
+    """Attributable losses for this epoch, and whether blame could be split.
+
+    A stats row alone does not say which lessons shared each failure, so a
+    caller that has not enriched it gets the undiscounted count. That is a
+    deliberate upper bound: the alternative -- assuming the corpus mean cohort
+    of 3.424 -- would divide the evidence of a lesson that fails *alone* by
+    3.4, and a lesson failing alone is both the most identifiable and the most
+    likely to be genuinely harmful. Over-reporting on a monitoring surface is
+    recoverable; silently discounting the one unambiguous signal is not.
+    Callers holding a connection should use usage_stats_with_attribution.
+    """
+    measured = stats.get("attributable_losses_since_win")
+    if measured is not None:
+        return float(measured), "measured"
+    return float(int(stats.get("losses_since_win") or 0)), "unattributed"
+
+
 def lesson_quarantine(stats, now=None):
     """Return the active quarantine decision and its auditable evidence.
 
     Evidence is scoped to the epoch since the last grounded success so a lesson
-    can recover and can also relapse. Five losses must span at least two task
-    formulations; six identical-task failures are also accepted as strong
-    repeat evidence. Quarantine expires into automatic probation after a week,
-    giving the lesson a production path to earn a new positive outcome.
+    can recover and can also relapse, and three gates must all agree:
+
+    * a raw floor -- five losses spanning two task formulations, or six
+      identical-task failures, with a mean reward at or below -0.5;
+    * blame-adjusted volume -- at least ``QUARANTINE_MIN_ATTRIBUTABLE_LOSSES``
+      failures this lesson is individually answerable for, so a cluster of
+      lessons that always fail together cannot each claim the same failures as
+      independent evidence;
+    * reference class -- the run of losses must be improbable for the base loss
+      rate of the lesson's own retrieval-frequency band, so a rarely-retrieved
+      lesson is not punished for the unusual tasks that retrieval sends it.
+
+    After ``QUARANTINE_PROBATION_AFTER_HOURS`` the lesson becomes eligible for
+    sampled probation retrieval, giving it a production path to a win; the
+    cooldown then lifts quarantine entirely.
     """
     if not stats:
         return {"active": False}
     losses = int(stats.get("losses_since_win") or 0)
     distinct_tasks = int(stats.get("distinct_loss_tasks_since_win") or 0)
     avg = stats.get("avg_reward_since_win")
+    attributable, attribution_source = _attribution(stats)
+    scored = int(stats.get("wins") or 0) + int(stats.get("losses") or 0)
+    base_rate = band_loss_rate(scored)
     enough_evidence = losses >= QUARANTINE_MIN_LOSSES and (
         distinct_tasks >= QUARANTINE_MIN_DISTINCT_TASKS
         or losses >= QUARANTINE_REPEAT_TASK_MIN_LOSSES
     )
+    # Blame shares are an accumulated sum of 1/cohort, so a lesson that is
+    # exactly at the threshold can land just under it: six failures at a cohort
+    # of three sum to 1.9999999999999998, not 2.0. Compare with a tolerance so
+    # the gate turns on the evidence rather than on binary representation.
+    attributable_met = (
+        attributable >= QUARANTINE_MIN_ATTRIBUTABLE_LOSSES - 1e-9
+    )
+    run_probability = base_rate ** attributable if attributable > 0 else 1.0
+    band_anomalous = run_probability <= QUARANTINE_BAND_ALPHA
     threshold_met = bool(
         enough_evidence
+        and attributable_met
+        and band_anomalous
         and avg is not None
         and float(avg) <= QUARANTINE_MAX_AVG_REWARD
     )
     retry_after = None
+    probation_eligible = False
     last_failure = stats.get("last_failure_ts")
     if threshold_met and last_failure:
         try:
@@ -272,16 +455,25 @@ def lesson_quarantine(stats, now=None):
             if current.tzinfo is None:
                 current = current.replace(tzinfo=timezone.utc)
             threshold_met = current < retry_at
+            probation_eligible = threshold_met and current >= (
+                failed_at + timedelta(hours=QUARANTINE_PROBATION_AFTER_HOURS)
+            )
         except (TypeError, ValueError):
             # Malformed evidence timestamps fail safe and stay visible in health.
             retry_after = None
     return {
         "active": threshold_met,
         "losses_since_win": losses,
+        "attributable_losses_since_win": attributable,
+        "attribution_source": attribution_source,
         "distinct_loss_tasks_since_win": distinct_tasks,
+        "scored_retrievals": scored,
+        "band_loss_rate": base_rate,
+        "loss_run_probability": run_probability,
         "avg_reward_since_win": avg,
         "last_failure_ts": last_failure,
         "retry_after": retry_after,
+        "probation_eligible": probation_eligible,
     }
 
 
@@ -289,15 +481,51 @@ def _lesson_quarantined(stats, now=None):
     return bool(lesson_quarantine(stats, now=now).get("active"))
 
 
+def _probation_admits(lesson_id, task):
+    """Deterministically admit a probationary lesson on ~1 task in N.
+
+    Keyed on (lesson, task) so a repeated task always makes the same call --
+    retrieval stays reproducible, while a quarantined lesson still meets enough
+    distinct tasks over the cooldown week to earn a grounded win.
+    """
+    if QUARANTINE_PROBATION_ONE_IN <= 1:
+        return True
+    digest = hashlib.blake2b(
+        ("%s\x00%s" % (lesson_id, task)).encode("utf-8", "replace"), digest_size=8
+    ).digest()
+    return int.from_bytes(digest, "big") % QUARANTINE_PROBATION_ONE_IN == 0
+
+
+def quarantined_lessons(usage_stats, task, now=None):
+    """Lesson IDs retrieval must skip for ``task``, after probation sampling."""
+    excluded = set()
+    for lesson_id, stats in usage_stats.items():
+        decision = lesson_quarantine(stats, now=now)
+        if not decision.get("active"):
+            continue
+        if decision.get("probation_eligible") and _probation_admits(lesson_id, task):
+            continue
+        excluded.add(lesson_id)
+    return excluded
+
+
 def _usage_boost(stats):
     if not stats:
         return 0.0
-    uses = stats.get("uses") or 0
     avg = stats.get("avg_reward")
     if avg is None:
         return 0.0
+    # Confidence is earned by graded outcomes, not by being retrieved: `uses`
+    # counts unscored retrievals too, which handed 63 lessons more tiebreak
+    # weight than their evidence supports. Shrink toward the neutral prior so a
+    # synthetic lesson with no scored history stays at 0.0, and an earned one
+    # approaches the cap only as its graded evidence accumulates.
+    scored = int(stats.get("wins") or 0) + int(stats.get("losses") or 0)
+    if scored <= 0:
+        return 0.0
+    confidence = scored / float(scored + USAGE_BOOST_PRIOR_SCORED_USES)
     # Keep historical outcome as a gentle tiebreaker, not a relevance override.
-    return max(-0.01, min(0.01, float(avg) * min(uses, 10) / 1000.0))
+    return max(-0.01, min(0.01, float(avg) * confidence * 0.01))
 
 
 def _mmr_lambda():
@@ -319,11 +547,8 @@ def retrieve_with_ids(
     if min_sim is None:
         min_sim = float(os.environ.get("SONDER_MIN_SIM", str(DEFAULT_MIN_SIM)))
 
-    usage_stats = memory_store.lesson_usage_stats(conn)
-    quarantined = {
-        lesson_id for lesson_id, stats in usage_stats.items()
-        if _lesson_quarantined(stats)
-    }
+    usage_stats = usage_stats_with_attribution(conn)
+    quarantined = quarantined_lessons(usage_stats, task)
     candidate_limit = max(10, int(k) * 4)
     # Over-fetch enough lexical hits that filtering cannot starve valid matches
     # behind quarantined results ranked ahead of them by FTS.
