@@ -619,7 +619,11 @@ the machine instead of idling on conservative defaults:
 - `SONDER_RUNTIME_POLICY` - optional path to the shared JSON policy for local
   aliases and execution lanes. By default it is
   `SONDER_HOME/runtime_policy.json`. `SONDER_FAST`, `SONDER_CODE`,
-  `SONDER_CODE_LOCAL`, and `SONDER_GENERAL` seed only its first creation.
+  `SONDER_CODE_LOCAL`, `SONDER_GENERAL`, `SONDER_REASONING`, and
+  `SONDER_VISION` seed only its first creation. `reasoning` and `vision` are
+  optional specialist tiers the capability router prefers for proofs and image
+  work; set either to `none` to leave it unbound, and that work falls back to
+  a base tier.
 - `OLLAMA_FLASH_ATTENTION` - enabled as `1` by the launch scripts when they start
   Ollama.
 - `SONDER_SPECULATION` / `SONDER_SPECULATION_MIN_SAVING_MS` - speculative

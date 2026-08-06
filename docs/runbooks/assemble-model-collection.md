@@ -51,9 +51,13 @@ Portable/offline instead? Import a GGUF directly (including from a USB) with
 /runtime set router=fast workbench=code autopilot=code fleet=code review=general
 ```
 
-`reasoning`, `vision`, and `oracle` are optional tiers: add them to policy only
-once those models are pulled. Until then the router degrades to `general`/`code`
-automatically — nothing breaks. Inspect the live mapping with `/runtime` or
+`reasoning` and `vision` are first-class optional tiers in the policy. They are
+bound by default (`deepseek-r1:7b` / `moondream`); repoint them with
+`/runtime set reasoning=<model> vision=<model>`, or leave one **unset** with an
+empty value (`/runtime set vision=`) if you have not pulled that model. An
+unset tier is not offered at all and the router degrades to `general`/`code`
+automatically — nothing breaks. `oracle` is still consent-gated escalation
+only, not a policy tier. Inspect the live mapping with `/runtime` or
 `runtime_policy_status()`.
 
 ## 4. Set residency

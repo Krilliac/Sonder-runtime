@@ -1677,8 +1677,14 @@ def _reconcile_pending_deployment(*, ollama="", runner=subprocess.run):
         not isinstance(prior_models_value, dict)
         or set(prior_models_value) != set(runtime_policy.LOCAL_TIERS)
         or any(
-            not isinstance(model, str) or not runtime_policy._MODEL_RE.fullmatch(model)
-            for model in prior_models_value.values()
+            not isinstance(model, str)
+            or not (
+                # An optional tier the operator left unset is recorded as the
+                # empty string; every bound tier must be a valid model name.
+                (model == "" and tier in runtime_policy.OPTIONAL_LOCAL_TIERS)
+                or runtime_policy._MODEL_RE.fullmatch(model)
+            )
+            for tier, model in prior_models_value.items()
         )
     ):
         return False, "pending deployment journal has invalid prior models"

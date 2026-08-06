@@ -25,6 +25,8 @@ from sonder_runtime.domain.runtime_policy import rules as _rules
 
 VERSION = _rules.VERSION
 LOCAL_TIERS = _rules.LOCAL_TIERS
+BASE_LOCAL_TIERS = _rules.BASE_LOCAL_TIERS
+OPTIONAL_LOCAL_TIERS = _rules.OPTIONAL_LOCAL_TIERS
 ROUTING_LANES = _rules.ROUTING_LANES
 DEFAULT_MODELS = _rules.DEFAULT_MODELS
 RESERVED_PERSONAL_MODEL = _rules.RESERVED_PERSONAL_MODEL
@@ -72,6 +74,7 @@ _model = _rules.validate_model
 _seed_model = _rules.seed_model
 _normalize_npu = _rules.normalize_npu
 normalize = _rules.normalize
+bound_tiers = _rules.bound_tiers
 _disk_payload = _rules.disk_payload
 _write_json_atomic = _atomic_json.write_json_atomic
 
@@ -276,7 +279,7 @@ def route_tier(lane: str, policy=None, fallback="code") -> str:
     lane = str(lane or "").strip().lower()
     policy = load(create=True) if policy is None else policy
     tier = str((policy.get("routing") or {}).get(lane) or fallback).strip().lower()
-    return tier if tier in LOCAL_TIERS else fallback
+    return tier if tier in BASE_LOCAL_TIERS else fallback
 
 
 def format_policy(policy=None) -> str:
@@ -292,7 +295,14 @@ def format_policy(policy=None) -> str:
         lines.append("  ERROR: %s (safe defaults active)" % policy["error"])
     lines.append("  local models:")
     for tier in LOCAL_TIERS:
-        lines.append("    %s: %s" % (tier, policy["local_models"][tier]))
+        model = policy["local_models"].get(tier) or ""
+        if not model:
+            lines.append(
+                "    %s: (unset - capability routing falls back to a base tier)"
+                % tier
+            )
+            continue
+        lines.append("    %s: %s" % (tier, model))
     lines.append("  execution lanes:")
     for lane in ROUTING_LANES:
         tier = policy["routing"][lane]

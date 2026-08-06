@@ -9,10 +9,14 @@ Design goals:
   * Zero third-party HTTP deps (stdlib urllib) -> only `mcp` is required.
 
 Tiers (escalation ladder, cheapest first):
-  LOCAL  (private, free, offline, runs on the 6 GB 4050):
+  LOCAL BASE (private, free, offline, runs on the 6 GB 4050; always bound):
     fast        -> qwen2.5:3b            (~2 GB, fully GPU-resident, snappy)
     code        -> qwen2.5-coder:7b      (~4.7 GB Q4, strong coding model)
     general     -> qwen2.5:7b-instruct   (~4.7 GB Q4, general text grunt-work)
+  LOCAL SPECIALIST (capability-routed; either may be left unset by the operator,
+                    in which case that work degrades to a base tier):
+    reasoning   -> deepseek-r1:7b        (~4.7 GB Q4, proofs/derivations/planning)
+    vision      -> moondream             (~1.7 GB, images/screenshots/OCR)
   CLOUD  (Ollama-hosted, huge, metered; prompt leaves this machine):
     cloud-code  -> kimi-k2.7-code:cloud   (plan-covered coding, no local VRAM cost)
     cloud-general -> glm-5.2:cloud        (long-context reasoning, no local VRAM cost)
@@ -177,6 +181,12 @@ TIERS = {
     "fast": os.environ.get("SONDER_FAST", "qwen2.5:3b"),
     "code": os.environ.get("SONDER_CODE", "qwen2.5-coder:7b"),
     "general": os.environ.get("SONDER_GENERAL", "qwen2.5:7b-instruct"),
+    # Specialist local tiers the capability router prefers for reasoning and
+    # vision work. `_refresh_runtime_policy` drops either one when the shared
+    # policy leaves it unbound, so an unset tier is simply not offered and
+    # routing degrades to a base tier exactly as it did before they existed.
+    "reasoning": os.environ.get("SONDER_REASONING", "deepseek-r1:7b"),
+    "vision": os.environ.get("SONDER_VISION", "moondream"),
     "cloud-code": _live_cloud_model(
         os.environ.get("SONDER_CLOUD_CODE"), DEFAULT_CLOUD_CODE_MODEL
     ),
@@ -402,9 +412,25 @@ def _refresh_runtime_policy(create=True):
     global _RUNTIME_POLICY
     policy = runtime_policy.load(create=create)
     for tier in runtime_policy.LOCAL_TIERS:
-        TIERS[tier] = policy["local_models"][tier]
+        model = str(policy["local_models"].get(tier) or "").strip()
+        if model:
+            TIERS[tier] = model
+        else:
+            # An optional tier the operator left unset must not be offered at
+            # all: dropping it keeps `_serve_target`, `available_tiers()` and
+            # `/v1/models` honest, and the capability router sees it as
+            # unavailable and degrades to a base tier.
+            TIERS.pop(tier, None)
     _RUNTIME_POLICY = policy
     return policy
+
+
+def _configured_local_tiers():
+    """Local tiers the shared policy currently binds to a model."""
+    bound = runtime_policy.bound_tiers(
+        _RUNTIME_POLICY or _refresh_runtime_policy(create=True)
+    )
+    return tuple(tier for tier in bound if tier in TIERS)
 
 
 _refresh_runtime_policy(create=True)
@@ -1289,7 +1315,8 @@ def _runtime_command(arg: str) -> str:
                 return "ERROR: unknown runtime policy key '%s'." % key
         if not local_models and not routing:
             return (
-                "usage: /runtime set code=<local-model> workbench=<fast|code|general>"
+                "usage: /runtime set code=<local-model> reasoning=<local-model> "
+                "workbench=<fast|code|general>"
             )
         return runtime_policy_update(
             local_models_json=json.dumps(local_models),
@@ -1300,10 +1327,13 @@ def _runtime_command(arg: str) -> str:
             "runtime policy commands:\n"
             "  /runtime status\n"
             "  /runtime set fast=<model> code=<model> general=<model>\n"
+            "  /runtime set reasoning=<model> vision=<model>   (specialist "
+            "tiers; assign an empty value to leave one unset)\n"
             "  /runtime set router=<tier> workbench=<tier> autopilot=<tier> "
             "fleet=<tier> review=<tier>\n"
             "  /runtime reset\n"
-            "Only installed local models and fast/code/general route tiers are accepted."
+            "Only installed local models are accepted, and execution lanes route "
+            "to fast/code/general only."
         )
     return "ERROR: unknown runtime action '%s'; try /runtime help." % action
 
@@ -3252,9 +3282,10 @@ def offload(
 ) -> str:
     """Offload a self-contained subtask to a local-GPU or Ollama-cloud model.
 
-    Local aliases (fast/code/general) run privately on the loopback 6 GB 4050 by
+    Local aliases (fast/code/general, plus reasoning/vision when the operator
+    binds them) run privately on the loopback 6 GB 4050 by
     default; an explicitly opted-in remote OLLAMA_HOST leaves this machine. The learning tiers
-    (SONDER_LEARN_TIERS, default fast/code/general) participate in the
+    (SONDER_LEARN_TIERS, default: every configured local tier) participate in the
     lesson loop: with learn=True (default) the call is captured and the response ends
     with a '[interaction_id: <id>]' footer you can pass to record_outcome once you know
     whether it compiled / passed tests, so a good outcome distills a lesson. The local
@@ -8564,7 +8595,7 @@ def loop(
       - {"type":"game_reference_suite","name":"reference-suite"}
       - {"type":"game_generate_and_test","name":"arena","concept":"isometric action RPG","language":"cpp","dimension":"2.5d"}
       - {"type":"game_generation_campaign","name":"game-fleet","concept":"action roguelite","total":6,"language":"cpp","dimension":"2.5d","max_workers":2}
-      - {"type":"offload","prompt":"...","tier":"fast|code|general|cloud-code|cloud-general"}
+      - {"type":"offload","prompt":"...","tier":"fast|code|general|reasoning|vision|cloud-code|cloud-general"}
       - {"type":"sonder","prompt":"...","session":"none"}
       - {"type":"sonder","prompt":"...","context_size":"1m"}
       - {"type":"master_orchestrate","task":"...","mode":"inline|delegate|fleet","agents":3,"project":"D:\\repo"}
@@ -9696,7 +9727,7 @@ AGENT_TOOL_HELP = """Available tools:
 - learn_preference: {"text": "User prefers concise status updates.", "scope": "global"}
 - preferences_status: {"include_disabled": false, "limit": 20}
 - tool_manifest: {}
-- offload: {"prompt": "...", "tier": "fast|code|general|cloud-code|cloud-general"}
+- offload: {"prompt": "...", "tier": "fast|code|general|reasoning|vision|cloud-code|cloud-general"}
 
 Reply with exactly one JSON object and no markdown:
 {"tool": "tool_name", "args": {...}, "reason": "short reason"}
@@ -13078,7 +13109,10 @@ def _execution_route_model(
             if mode not in {"workbench", "autopilot"}:
                 raise ValueError("route mode must be workbench or autopilot")
             selected_tier = str(payload.get("tier") or "").strip().lower()
-            if selected_tier not in runtime_policy.LOCAL_TIERS:
+            # The mode router only ever offers the base tiers (see the prompt
+            # above); specialist tiers are chosen afterwards by the capability
+            # router, from the tiers the policy actually binds.
+            if selected_tier not in runtime_policy.BASE_LOCAL_TIERS:
                 raise ValueError("route tier must be fast, code, or general")
             confidence = float(payload.get("confidence", 0.5))
             if not 0.0 <= confidence <= 1.0:
@@ -13130,6 +13164,44 @@ def _execution_route_header(
     return "\n".join(lines)
 
 
+def _capability_refined_tier(
+    prompt: str, selected_tier: str, reason: str, *, has_image: bool = False,
+):
+    """Upgrade a lane-selected tier to a configured specialist tier.
+
+    Capability-aware tier refinement (SPEC-3 domain/routing). The execution
+    mode decision is untouched, and the operator's lane -> tier mapping still
+    wins for ordinary work: this only *upgrades* to a specialist tier the
+    operator has actually bound (e.g. a reasoning model for a proof, a vision
+    model for an image task). With only the base tiers bound it is a deliberate
+    no-op. Advisory and fail-safe -- any error keeps the lane-selected tier, and
+    it can only pick an already-configured local tier (never cloud, never a new
+    permission).
+
+    The vision tier additionally requires a real image signal. Keyword-only
+    vision guesses are common in ordinary text work ("summarize what this chart
+    shows"), and a vision-language model answers a text-only prompt with an
+    immediate end-of-sequence -- so a keyword false positive would hand the
+    whole run to a model that returns nothing.
+
+    Returns ``(tier, reason)``.
+    """
+    try:
+        from sonder_runtime.domain.routing import capability_router as _caprouter
+
+        available = _configured_local_tiers() or runtime_policy.BASE_LOCAL_TIERS
+        specialists = set(runtime_policy.OPTIONAL_LOCAL_TIERS) & set(available)
+        if specialists:
+            route = _caprouter.route(prompt, available, has_image=has_image)
+            if route.tier == "vision" and not has_image:
+                return selected_tier, reason
+            if route.tier in specialists and route.tier != selected_tier:
+                return route.tier, "%s; capability route: %s" % (reason, route.task)
+    except Exception:
+        pass
+    return selected_tier, reason
+
+
 def route_work_request(prompt: str, project: str = "") -> str | None:
     """Transparently route eligible natural work to a bounded execution lane."""
     _maybe_live_reload()
@@ -13167,7 +13239,9 @@ def route_work_request(prompt: str, project: str = "") -> str | None:
             candidate_confidence = npu_decision.get("confidence")
             if (
                 candidate_mode in npu_contract.ROUTE_MODES
-                and candidate_tier in runtime_policy.LOCAL_TIERS
+                # The accelerator pre-scores the same lane decision the mode
+                # router makes, so it is held to the same base-tier allowlist.
+                and candidate_tier in runtime_policy.BASE_LOCAL_TIERS
                 and isinstance(candidate_reason, str)
                 and bool(candidate_reason.strip())
                 and not isinstance(candidate_confidence, bool)
@@ -13212,28 +13286,7 @@ def route_work_request(prompt: str, project: str = "") -> str | None:
                     prompt, {"mode": mode, "tier": selected_tier},
                 )
 
-    # Capability-aware tier refinement (SPEC-3 domain/routing). The mode
-    # decision above is untouched, and the operator's lane -> tier mapping still
-    # wins for ordinary work: this only *upgrades* to a specialist tier the
-    # operator has actually configured (e.g. a reasoning model for a proof, a
-    # vision model for an image task). With only the base tiers configured it is
-    # a deliberate no-op. Advisory and fail-safe — any error keeps the
-    # lane-selected tier, and it can only pick an already-configured local tier
-    # (never cloud, never a new permission).
-    try:
-        from sonder_runtime.domain.routing import capability_router as _caprouter
-
-        _available = tuple(
-            (_RUNTIME_POLICY.get("local_models") or {}).keys()
-        ) or runtime_policy.LOCAL_TIERS
-        _specialists = {"reasoning", "vision"} & set(_available)
-        if _specialists:
-            _route = _caprouter.route(prompt, _available)
-            if _route.tier in _specialists and _route.tier != selected_tier:
-                selected_tier = _route.tier
-                reason = "%s; capability route: %s" % (reason, _route.task)
-    except Exception:
-        pass
+    selected_tier, reason = _capability_refined_tier(prompt, selected_tier, reason)
 
     resolved_project = _resolve_project(project) or ""
     if mode == "fleet":
@@ -13329,7 +13382,9 @@ def runtime_policy_data() -> dict:
         installed = _runtime_installed_models()
         data["missing_models"] = list(dict.fromkeys(
             model for model in data["local_models"].values()
-            if not _runtime_model_is_installed(model, installed)
+            # An optional tier left unset has no model, so it cannot be missing.
+            if str(model or "").strip()
+            and not _runtime_model_is_installed(model, installed)
         ))
     except Exception as exc:
         data["inventory_error"] = "%s: %s" % (type(exc).__name__, exc)
@@ -13357,8 +13412,8 @@ def npu_status(probe: bool = False) -> str:
     vs healthy, provider capability, model bundle hashes, latency, fallback
     counters, and circuit state.
 
-    The accelerator sits below the fast/code/general local tiers and is never
-    a model tier. probe=True additionally triggers a non-blocking worker
+    The accelerator sits below every local model tier and is never
+    a model tier itself. probe=True additionally triggers a non-blocking worker
     warmup when the runtime policy enables the accelerator.
     """
     _maybe_live_reload()
@@ -13670,7 +13725,8 @@ def unload(tier: str = "all") -> str:
     """Immediately free GPU VRAM by unloading a model (or all of them).
 
     Args:
-        tier: "all" (default), or one of "fast", "code", "general".
+        tier: "all" (default), or any configured local tier ("fast", "code",
+            "general", and "reasoning"/"vision" when bound).
     """
     _maybe_live_reload()
     if tier == "all":

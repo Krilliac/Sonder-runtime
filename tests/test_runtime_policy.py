@@ -26,6 +26,8 @@ def test_default_policy_prefers_shared_sonder_alias():
         "fast": "qwen2.5:3b",
         "code": "sonder:latest",
         "general": "sonder:latest",
+        "reasoning": "deepseek-r1:7b",
+        "vision": "moondream",
     }
     assert policy["routing"]["router"] == "fast"
     assert policy["routing"]["autopilot"] == "code"
@@ -44,6 +46,8 @@ def test_environment_seeds_first_policy_without_allowing_cloud(policy_file, monk
         "fast": "qwen3:4b",
         "code": "sonder-tuned:latest",
         "general": "qwen2.5:7b-instruct",
+        "reasoning": "deepseek-r1:7b",
+        "vision": "moondream",
     }
 
 
