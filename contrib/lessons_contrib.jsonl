@@ -188,6 +188,7 @@
 {"id": "lesson-2ed5faaed9560cc19e32b4b4", "text": "Mouse-capture delta math must use one consistent coordinate space (client vs screen); mixing them produces a huge fake delta that instantly saturates camera pitch/yaw clamps."}
 {"id": "lesson-2f6d8d4b3c57ccb30f0aed61", "text": "Give a pytest yield-fixture scope='module' to share one setup/teardown across every test in the file instead of re-running it per test."}
 {"id": "lesson-2fa1ceba43aefaef61602504", "text": "Ensure script tags are placed correctly before any JavaScript code that uses them."}
+{"id": "lesson-2fd2ef4fcd2fe384989c1332", "text": "Benchmark an inference server with the caller's own options, not the API defaults: measuring Ollama without num_gpu shows a conservative auto-offload and a phantom context cliff that the real caller never hits."}
 {"id": "lesson-2fe27056bac7dffc5ad9f25d", "text": "**Check index validity against current PackageMap before using it.**"}
 {"id": "lesson-300ba8e0580a4d7821ee67df", "text": "Split \"key=value;...\" with str.partition('=') per segment, not str.split('='), so values may contain extra '=' signs."}
 {"id": "lesson-3037d6b3ebce10dc4246444e", "text": "Use `-join` and `iex` to evaluate expressions in PowerShell strings."}
@@ -312,7 +313,6 @@
 {"id": "lesson-4d128af1671d988927658f55", "text": "Use (?P<name>...) named groups and match.groupdict() to pull fields out by label instead of brittle numeric group(1), group(2) indices."}
 {"id": "lesson-4e0b48f7db37d0555377cb45", "text": "Use `foreach` loop for iterating arrays in C#."}
 {"id": "lesson-4e1beaf02ba8d1dc596dbb54", "text": "Structure each test as Arrange (build state), Act (one call), Assert (check outcomes only) so failures show a single cause."}
-{"id": "lesson-4e2f5a511557beaecc1db518", "text": "On a fixed-VRAM GPU, decode throughput is flat at every context that fits and falls off a cliff once layers spill to CPU; tune context to stay under the residency limit."}
 {"id": "lesson-4e7b7d9bb1eec9e7e290d17d", "text": "Catch use-after-free and double-free with AddressSanitizer's poisoned redzones and quarantine: freed memory is marked unaddressable and delayed from reuse so an errant access faults immediately at the culprit line."}
 {"id": "lesson-4eb530cbccac99c8ccec8211", "text": "Clamp frameTime before using it in calculations to prevent negative values and ensure consistent behavior."}
 {"id": "lesson-4f529bdcb10a40ea7f60e904", "text": "To find all occurrences of a pattern in text with the Z-algorithm, concatenate pattern + sentinel + text (sentinel absent from both) and scan for z[i] >= len(pattern), avoiding false matches that could span the join."}
