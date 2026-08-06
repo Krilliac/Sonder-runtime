@@ -64,6 +64,7 @@ import domain_grounding
 import master_orchestrator
 import ollama_lifecycle
 import admin_auth
+import codegen_loop
 import file_ops
 import context_policy
 import command_registry
@@ -13988,6 +13989,161 @@ def ensemble_answer(
     if code_mode:
         return merged
     return "%s\n%s  synthesized by %s (%s)" % (merged, footer, synth, synth_model)
+
+
+def _codegen_build(program, args_json, cwd, timeout, token, approval, extra_roots):
+    """Run the project's own build and return its combined output."""
+    try:
+        data = workbench.run_program(
+            program,
+            args_json=args_json,
+            cwd=cwd,
+            timeout=timeout,
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as exc:
+        return "error: build could not run: %s" % exc
+    if not isinstance(data, dict):
+        return str(data)
+    return "%s\n%s" % (data.get("stdout", ""), data.get("stderr", ""))
+
+
+@mcp.tool()
+def codegen_build_loop(
+    project_dir: str,
+    files_json: str,
+    build_program: str,
+    build_args_json: str = "[]",
+    tiers: str = "",
+    attempts: int = 2,
+    num_predict: int = 3000,
+    error_regex: str = "",
+    slips_json: str = "",
+    timeout: int = 900,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Write code, compile it, and repair it against the real compiler.
+
+    Generates one file at a time from a per-file spec, runs the project's own
+    build after each, and keeps whichever version leaves the WHOLE project with
+    the fewest errors. Later files are shown the API extracted from the files
+    already written, not an idealised contract, because a local model cannot
+    hold an agreement spanning files even when told it every time.
+
+    Guards that are not optional (each one is here because the unguarded loop
+    was measured doing the opposite):
+      - a replacement that shrinks a file below 75% is rejected as deletion
+        rather than repair;
+      - a file that already builds clean is never regenerated;
+      - versions are scored on total project errors, not the file's own;
+      - known wrong-library calls are rewritten mechanically, not by asking.
+
+    A green build here is NOT proof the program works: a declared-but-never
+    assigned field is not a compile error. Run the project's tests too.
+
+    Args:
+        project_dir: directory holding the project. Must be inside an allowed root.
+        files_json: {"name.ext": "what this file must contain"} in dependency
+            order, earliest first, or a list of {"name", "spec"} objects.
+        build_program: the build executable, e.g. "dotnet", "cargo", "make".
+        build_args_json: argv for it as JSON, e.g. ["build", "-c", "Release"].
+        tiers: comma-separated model tiers to ensemble. Default: all bound local tiers.
+        attempts: tries per file; the best-scoring one is kept.
+        error_regex: how to recognise an error line in build output. Defaults to
+            a generic error/fatal match; pass a stricter one for a noisy build.
+        slips_json: [[regex, replacement], ...] rewrites applied to generated
+            code, for wrong-library calls the model repeats.
+    """
+    _maybe_live_reload()
+    try:
+        wanted = codegen_loop.parse_files(files_json)
+        slips = codegen_loop.parse_slips(slips_json)
+    except ValueError as exc:
+        return "ERROR: %s" % exc
+    if not wanted:
+        return "ERROR: files_json listed no files."
+    error_regex = error_regex or codegen_loop.DEFAULT_ERROR_RE
+    try:
+        re.compile(error_regex)
+    except re.error as exc:
+        return "ERROR: bad error_regex: %s" % exc
+
+    def run_build():
+        out = _codegen_build(build_program, build_args_json, project_dir,
+                             timeout, token, approval, extra_roots)
+        return codegen_loop.count_errors(out, error_regex)
+
+    def read(name):
+        try:
+            data = file_ops.read_file(
+                os.path.join(project_dir, name), extra_roots=extra_roots,
+                bypass=_file_bypass_allowed(token, approval),
+            )
+            return data.get("content", "") if isinstance(data, dict) else str(data)
+        except Exception:
+            return ""
+
+    def write(name, content):
+        return file_ops.write_file(
+            os.path.join(project_dir, name), content, mode="overwrite",
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+            developer_authorized=_file_developer_allowed(token),
+        )
+
+    rows = []
+    for name, spec in wanted:
+        existing = read(name)
+        errors = run_build()
+        mine = [e for e in errors if name in e]
+        if existing and not mine:
+            rows.append({"name": name, "note": "already clean, not regenerated"})
+            continue
+
+        best_code, best_total = (existing or None), (len(errors) if existing else None)
+        note = "unchanged"
+        siblings = {n: read(n) for n, _ in wanted if n != name}
+        siblings = {n: t for n, t in siblings.items() if t.strip()}
+
+        for attempt in range(1, max(1, int(attempts)) + 1):
+            prompt = "%s\n%s\nOutput only the contents of %s. Code only." % (
+                codegen_loop.dependency_brief(siblings), spec, name,
+            )
+            reply = ensemble_answer(prompt, tiers=tiers, num_predict=num_predict, mode="code")
+            code = codegen_loop.strip_code(reply)
+            code, hits = codegen_loop.apply_slips(code, slips)
+
+            if codegen_loop.shrink_rejected(existing, code):
+                note = "attempt %d rejected: shrank to %d%% of the original" % (
+                    attempt, 100 * len(code) // max(1, len(existing)),
+                )
+                continue
+            try:
+                write(name, code)
+            except Exception as exc:
+                return "ERROR: could not write %s: %s" % (name, exc)
+
+            total = len(run_build())
+            if best_total is None or total < best_total:
+                best_code, best_total = code, total
+                note = "attempt %d kept (%d total error(s)%s)" % (
+                    attempt, total, ", %d slip(s) rewritten" % hits if hits else "",
+                )
+            if total == 0:
+                break
+
+        if best_code is not None:
+            try:
+                write(name, best_code)
+            except Exception as exc:
+                return "ERROR: could not restore %s: %s" % (name, exc)
+        rows.append({"name": name, "note": note})
+
+    final = run_build()
+    return codegen_loop.format_report(rows, final, ok=not final)
 
 
 @mcp.tool()
