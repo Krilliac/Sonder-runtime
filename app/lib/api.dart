@@ -647,10 +647,10 @@ class SonderApi {
               .timeout(const Duration(minutes: 5));
           warning = _fallbackWarning('chat', e);
         } catch (_) {
-          throw SonderException('Request failed: $e');
+          throw SonderException.transport(e, baseUrl);
         }
       } else {
-        throw SonderException('Request failed: $e');
+        throw SonderException.transport(e, baseUrl);
       }
     }
 
@@ -729,7 +729,49 @@ class SonderApi {
 
 class SonderException implements Exception {
   final String message;
-  SonderException(this.message);
+
+  /// The underlying error, kept so a details view can show it without the
+  /// chat bubble having to lead with it.
+  final Object? cause;
+
+  SonderException(this.message, {this.cause});
+
+  /// Turn a transport failure into something a person can act on.
+  ///
+  /// These used to reach the chat bubble verbatim, so the first thing a new
+  /// user saw was "ClientException with SocketException: The remote computer
+  /// refused the network connection (OS Error: ..., errno = 1225), address =
+  /// 127.0.0.1, port = 56249". Every part of that is either noise (an
+  /// ephemeral local port number) or jargon (errno 1225), and none of it
+  /// says the one thing that matters: the server is not running.
+  factory SonderException.transport(Object error, String baseUrl) {
+    final text = error.toString();
+    final refused = text.contains('refused') ||
+        text.contains('errno = 1225') ||
+        text.contains('errno = 111') ||
+        text.contains('Connection closed before full header');
+    final timedOut =
+        text.contains('TimeoutException') || text.contains('timed out');
+
+    if (refused) {
+      return SonderException(
+        'Cannot reach the Sonder server at $baseUrl.\n\n'
+        "It does not look like it is running. Open the System page and use "
+        'Start server, or check the server URL in Settings.',
+        cause: error,
+      );
+    }
+    if (timedOut) {
+      return SonderException(
+        'The Sonder server at $baseUrl did not respond in time.\n\n'
+        'A model loading for the first time can take a while — the System '
+        'page shows whether the server is up.',
+        cause: error,
+      );
+    }
+    return SonderException('Could not reach $baseUrl.', cause: error);
+  }
+
   @override
   String toString() => message;
 }
