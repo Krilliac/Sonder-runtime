@@ -34,6 +34,13 @@ local ensemble to write an 8-file C# game (2026-08-06):
     in every prompt. -> dependents are handed the API *extracted from the
     generated source*, not the API someone intended.
 
+  * A build reported "1 error" when the true count was 109. The one error was a
+    duplicate member (C# CS0111): the type parsed fine but could not be
+    declared, so the compiler never bound a single method body and every
+    downstream error stayed invisible. A falling total read as near-success.
+    -> an error count is only trusted when nothing in it stopped the compiler
+    short of binding; see count_unreliable().
+
 The loop is language-agnostic: it takes a build argv and a regex for error
 lines. Writes go through file_ops and the build goes through workbench, so the
 host's file-root and approval gates apply exactly as they do elsewhere.
@@ -47,18 +54,74 @@ import re
 SHRINK_FLOOR = 0.75
 DEFAULT_ERROR_RE = r"(?i)\b(?:error|fatal)\b"
 
-# A compiler that cannot PARSE a file stops before BINDING, so every semantic
-# error behind it goes unreported: a file with two syntax errors can be masking
-# ninety. A falling total is therefore not progress while any parse error
-# remains -- measured, a run that read as "2 errors" was really 99 once it
-# parsed. Matched on message shape rather than error-code range because ranges
-# leak (C# syntax errors are mostly CS1xxx, but CS8180 and CS8124 are the parser
-# too), and shape generalises across toolchains.
+# --- Masking errors: the ones that make the error COUNT itself a lie ----------
+#
+# A compiler runs in phases -- parse, declare, bind bodies -- and an error in an
+# early phase stops it before the later ones report anything. The total it
+# prints is then not "how broken the project is", it is "how far it got". Two
+# such phases have been measured masking a real count here; both are matched on
+# message SHAPE rather than error-code range, because ranges leak across
+# toolchains (C# syntax errors are mostly CS1xxx, but CS8180 and CS8124 are the
+# parser too) while shapes generalise.
+
+# Phase 1, PARSE. A file the compiler cannot read stops before binding, so every
+# semantic error behind it goes unreported: a file with two syntax errors can be
+# masking ninety. Measured -- a run that read as "2 errors" was really 99 once
+# it parsed.
 DEFAULT_PARSE_ERROR_RE = (
     r"(?i)(?:expected|unexpected token|invalid expression|invalid token|"
     r"unterminated|parse error|syntax error|unexpected end of|"
     r"tuple must contain|unclosed|missing closing)"
 )
+
+# Phase 2, DECLARE. A type that parses but cannot be *defined* -- a duplicate
+# member, a redefinition, a conflicting declaration -- leaves the compiler with
+# no usable symbol for it, so it stops before binding method bodies and every
+# dependent file's errors go unreported. Measured -- a build reported "1 error"
+# (CS0111, a duplicated member) when the true count was 109.
+#
+# Every alternative below names the DECLARATION being duplicated, which is what
+# keeps this from swallowing ordinary semantic errors:
+#   * "already defines a member"      C# CS0111
+#   * "already contains a definition" C# CS0101 (namespace) / CS0102 (type)
+#   * "already defined in <kind>"     javac "m() is already defined in class F"
+#     -- the trailing kind word is load-bearing: C# CS0128 says "already defined
+#     in this scope" for a duplicate LOCAL, which is a method-body error that
+#     masks nothing, and must not match.
+#   * "defined multiple times"        Rust E0428
+#   * "redefinition of"               clang / gcc
+#   * "duplicate <decl kind>"         javac "duplicate class", TS2300
+#     "Duplicate identifier", linker "duplicate symbol"
+#   * "conflicting types/declaration" gcc
+#
+# Deliberately NOT here: "does not contain a definition for" (C# CS0117/CS1061)
+# and "could not be found" (CS0246). Those are the loop's normal progress
+# signal -- they mean a call site is wrong, the binder ran fine, and the count
+# is honest. See the module notes on why a namespace mismatch is not detectable
+# from message shape.
+DEFAULT_DEFINITION_ERROR_RE = (
+    r"(?i)(?:already defines a member|already contains a definition|"
+    r"already defined in (?:class|struct|interface|enum|namespace|module|"
+    r"package|type|record|trait|object)\b|"
+    r"defined multiple times|redefinition of|"
+    r"duplicate (?:definition|declaration|symbol|member|identifier|class|"
+    r"type|method|field)|"
+    r"conflicting (?:declaration|declarations|definition|types))"
+)
+
+# NOT guarded, on purpose: a namespace mismatch -- a type that is defined but
+# invisible to its dependents. It has no shape of its own. The compiler reports
+# it as the same "could not be found" / "does not exist in the namespace" line
+# it emits when the type was simply never written, which is the loop's single
+# most common HONEST error and the one whose falling count is real progress.
+# Matching it would mark almost every mid-run build unreliable and flatten the
+# score tier that makes the loop converge, to catch a failure that does not even
+# under-report: a type the dependents cannot see produces one error per use
+# site, so a namespace mismatch INFLATES the count rather than masking it.
+# (The one variant that would genuinely mask -- an unresolvable name in a base
+# type list, which fails in the declare phase -- is spelled identically to the
+# same name failing inside a method body, so message shape cannot separate them.
+# Detecting it needs the symbol table, not the log.)
 
 # Declaration-ish lines worth showing a dependent file. Deliberately shallow:
 # the input is often not parseable (that is why it is in this loop), so a real
@@ -133,22 +196,62 @@ def parse_blocked(errors: list, parse_regex: str = DEFAULT_PARSE_ERROR_RE) -> in
     return sum(1 for e in errors if pattern.search(e))
 
 
-def score(errors: list, parse_regex: str = DEFAULT_PARSE_ERROR_RE) -> tuple:
-    """Rank a candidate. Lower is better; parse-clean always beats parse-broken.
+def definition_blocked(
+    errors: list, definition_regex: str = DEFAULT_DEFINITION_ERROR_RE
+) -> int:
+    """How many errors are a type that parsed but could not be declared."""
+    pattern = re.compile(definition_regex)
+    return sum(1 for e in errors if pattern.search(e))
 
-    A parse-clean version with 50 errors is strictly better than a parse-broken
-    one showing 2, because the 2 is fiction -- the binder never ran.
+
+def count_unreliable(
+    errors: list,
+    parse_regex: str = DEFAULT_PARSE_ERROR_RE,
+    definition_regex: str = DEFAULT_DEFINITION_ERROR_RE,
+) -> int:
+    """How many errors stop the compiler before it reports the rest.
+
+    While any of these stand, len(errors) is a floor, not a total: it says how
+    far the compiler got, not how broken the project is.
     """
-    return (1 if parse_blocked(errors, parse_regex) else 0, len(errors))
+    parse = re.compile(parse_regex)
+    define = re.compile(definition_regex)
+    return sum(1 for e in errors if parse.search(e) or define.search(e))
 
 
-def describe_total(errors: list, parse_regex: str = DEFAULT_PARSE_ERROR_RE) -> str:
-    """Report a total, flagging when it cannot be trusted."""
+def score(
+    errors: list,
+    parse_regex: str = DEFAULT_PARSE_ERROR_RE,
+    definition_regex: str = DEFAULT_DEFINITION_ERROR_RE,
+) -> tuple:
+    """Rank a candidate. Lower is better; a trustworthy count always wins.
+
+    A version with 50 real errors is strictly better than one showing 2 that
+    the compiler never got past parsing or declaring, because the 2 is fiction.
+    Both masking phases share one tier: neither count can be compared against
+    anything, so there is nothing to order them by.
+    """
+    return (1 if count_unreliable(errors, parse_regex, definition_regex) else 0,
+            len(errors))
+
+
+def describe_total(
+    errors: list,
+    parse_regex: str = DEFAULT_PARSE_ERROR_RE,
+    definition_regex: str = DEFAULT_DEFINITION_ERROR_RE,
+) -> str:
+    """Report a total, flagging when it cannot be trusted, and why."""
+    reasons = []
     blocked = parse_blocked(errors, parse_regex)
     if blocked:
-        return ("%d total (UNRELIABLE: %d parse error(s) are masking the "
-                "semantic count)" % (len(errors), blocked))
-    return "%d total" % len(errors)
+        reasons.append("%d parse error(s)" % blocked)
+    undeclared = definition_blocked(errors, definition_regex)
+    if undeclared:
+        reasons.append("%d failed definition(s)" % undeclared)
+    if not reasons:
+        return "%d total" % len(errors)
+    return ("%d total (UNRELIABLE: %s are masking the semantic count)"
+            % (len(errors), " and ".join(reasons)))
 
 
 def apply_slips(text: str, slips) -> tuple:
@@ -222,6 +325,14 @@ def format_report(rows: list, final_errors: list, ok: bool) -> str:
         )
     else:
         lines.append("BUILD FAILED: %d distinct error line(s)" % len(final_errors))
+        masked = count_unreliable(final_errors)
+        if masked:
+            lines.append(
+                "WARNING: %d of these stop the compiler before it binds the rest "
+                "of the project, so the count above is a FLOOR, not a total -- "
+                "measured, a build reporting 1 really had 109. Fix these first "
+                "and re-run before reading any other number here." % masked
+            )
         for e in final_errors[:15]:
             lines.append("  " + e[:200])
         if len(final_errors) > 15:
