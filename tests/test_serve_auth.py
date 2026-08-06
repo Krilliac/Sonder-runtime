@@ -685,3 +685,46 @@ def test_durable_session_and_project_ids_are_principal_scoped(monkeypatch):
     assert forwarded[0] != forwarded[1]
     assert all(session != "common-session" for session, _ in forwarded)
     assert all(project != "common-project" for _, project in forwarded)
+
+
+def test_deployment_gating_summary_covers_every_auth_mode(monkeypatch):
+    """Every mode _effective_auth_mode() can return must have an authority line.
+
+    This is the guard against _DEVELOPER_AUTHORITY_BY_MODE drifting out of step
+    with _developer_authorized(): a new mode would otherwise render "unknown".
+    """
+    for mode in ("local-open", "api-key", "account", "both", "either"):
+        monkeypatch.setattr(ts, "AUTH_MODE", mode)
+        monkeypatch.setattr(ts, "API_KEY", "" if mode == "local-open" else "k" * 32)
+        monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+        summary = ts._deployment_gating_summary()
+        assert "effective auth mode : %s" % mode in summary
+        assert "unknown" not in summary
+
+
+def test_deployment_gating_summary_counts_conditionally_gated_names(monkeypatch):
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "API_KEY", "")
+    summary = ts._deployment_gating_summary()
+    # /autopilot and /auto are gated by action, not by set membership, so the
+    # reported count must exceed the frozenset's size.
+    expected = len(ts.DANGEROUS_HTTP_SLASH_COMMANDS | ts._CONDITIONALLY_GATED_SLASH)
+    assert expected > len(ts.DANGEROUS_HTTP_SLASH_COMMANDS)
+    assert "gated slash names   : %d" % expected in summary
+
+
+def test_deployment_gating_summary_reports_the_bound_port(monkeypatch):
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "BOUND_PORT", 11439)
+    assert "11439" in ts._deployment_gating_summary()
+
+
+def test_deployment_gating_summary_warns_only_when_open(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    assert "holds developer" in ts._deployment_gating_summary()
+
+    monkeypatch.setattr(ts, "API_KEY", "k" * 32)
+    monkeypatch.setattr(ts, "AUTH_MODE", "api-key")
+    assert "holds developer" not in ts._deployment_gating_summary()

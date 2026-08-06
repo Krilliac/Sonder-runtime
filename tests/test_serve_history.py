@@ -319,7 +319,12 @@ def test_claude_like_slash_controls_route(monkeypatch):
 
     assert ts._handle_slash("/compact") == "compact"
     assert ts._handle_slash("/commands risk") == "commands risk"
-    assert ts._handle_slash("/permissions file_delete") == "perms file_delete"
+    # /permissions routes to the policy, then appends the deployment gating
+    # section so an operator can see which auth mode is actually in force.
+    perms = ts._handle_slash("/permissions file_delete")
+    assert perms.startswith("perms file_delete")
+    assert "Deployment gating (HTTP surface)" in perms
+    assert "effective auth mode :" in perms
     assert ts._handle_slash("/todo") == "tasks"
     assert ts._handle_slash("/todo add ship it") == "create ship it"
     assert ts._handle_slash("/todo start abc") == "update abc in_progress"
