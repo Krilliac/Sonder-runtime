@@ -608,7 +608,35 @@ class SonderApi {
   /// handles slash-commands (/stats, /train, /pass, …), passive feedback,
   /// and natural-language control — so we simply forward whatever the user
   /// typed as the last user message.
+  ///
+  /// Callers that want the model's reasoning alongside the answer should use
+  /// [chatDetailed]; this returns the answer only.
   Future<String> chat(
+    List<ChatMessage> messages, {
+    String model = 'sonder',
+    String contextSize = '8192',
+    String sessionId = '',
+    String project = '',
+    bool allowApproximateLocation = false,
+  }) async {
+    final reply = await chatDetailed(
+      messages,
+      model: model,
+      contextSize: contextSize,
+      sessionId: sessionId,
+      project: project,
+      allowApproximateLocation: allowApproximateLocation,
+    );
+    return reply.text;
+  }
+
+  /// Send the conversation and return the reply plus any model reasoning.
+  ///
+  /// `sonder_reasoning` is present only when the server has been configured to
+  /// expose it (SONDER_EXPOSE_REASONING, and the caller clears
+  /// SONDER_REASONING_AUDIENCE). Absence is the normal case, and means this
+  /// deployment does not expose reasoning — not that the model had none.
+  Future<ChatReply> chatDetailed(
     List<ChatMessage> messages, {
     String model = 'sonder',
     String contextSize = '8192',
@@ -672,7 +700,11 @@ class SonderApi {
           as Map<String, dynamic>?;
       final content = msg?['content']?.toString() ?? '';
       final reply = content.trimRight();
-      return warning.isEmpty ? reply : '$warning\n\n$reply';
+      final reasoning = obj['sonder_reasoning']?.toString().trim() ?? '';
+      return ChatReply(
+        text: warning.isEmpty ? reply : '$warning\n\n$reply',
+        reasoning: reasoning,
+      );
     } on SonderException {
       rethrow;
     } catch (_) {
@@ -1354,6 +1386,17 @@ class AutopilotEvent {
       message: json['message']?.toString() ?? '',
     );
   }
+}
+
+/// One assistant turn: the answer, plus the model's reasoning when the
+/// deployment exposes it. [reasoning] is empty in the normal case.
+class ChatReply {
+  final String text;
+  final String reasoning;
+
+  const ChatReply({required this.text, this.reasoning = ''});
+
+  bool get hasReasoning => reasoning.trim().isNotEmpty;
 }
 
 class ActivityStatus {

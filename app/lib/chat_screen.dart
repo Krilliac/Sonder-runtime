@@ -398,7 +398,7 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       // Send everything except the trailing pending placeholder.
       final history = _messages.sublist(0, _messages.length - 1);
-      final reply = await _api.chat(
+      final reply = await _api.chatDetailed(
         history,
         model: _model,
         contextSize: widget.settings.contextSize,
@@ -409,7 +409,8 @@ class _ChatScreenState extends State<ChatScreen> {
       setState(() {
         _messages[_messages.length - 1] = ChatMessage(
           role: Role.assistant,
-          content: reply.isEmpty ? '(empty response)' : reply,
+          content: reply.text.isEmpty ? '(empty response)' : reply.text,
+          reasoning: reply.reasoning,
         );
       });
     } on SonderException catch (e) {
@@ -1061,7 +1062,11 @@ class _Bubble extends StatelessWidget {
               message.content,
               style: TextStyle(color: fg, height: 1.4),
             )
-          : _AssistantContent(content: message.content, color: fg);
+          : _AssistantContent(
+              content: message.content,
+              color: fg,
+              reasoning: message.reasoning,
+            );
     }
 
     return Align(
@@ -1142,36 +1147,44 @@ class _Bubble extends StatelessWidget {
                         ],
                       ),
                     ),
-                    InkWell(
-                      onTap: () => onPassive?.call('/accept'),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.check_circle_outline,
-                              size: 14, color: fg.withValues(alpha: 0.6)),
-                          const SizedBox(width: 4),
-                          Text('useful',
-                              style: TextStyle(
-                                  fontSize: 11,
-                                  color: fg.withValues(alpha: 0.6))),
-                        ],
+                    // Quality feedback trains the learning loop on the last
+                    // answer. An error bubble is a transport or server
+                    // failure, not an answer, so rating it would teach the
+                    // loop about a turn the model never produced. Copy stays:
+                    // copying the failure text is exactly what you want to do
+                    // with it.
+                    if (!message.error) ...[
+                      InkWell(
+                        onTap: () => onPassive?.call('/accept'),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.check_circle_outline,
+                                size: 14, color: fg.withValues(alpha: 0.6)),
+                            const SizedBox(width: 4),
+                            Text('useful',
+                                style: TextStyle(
+                                    fontSize: 11,
+                                    color: fg.withValues(alpha: 0.6))),
+                          ],
+                        ),
                       ),
-                    ),
-                    InkWell(
-                      onTap: () => onPassive?.call('/edited'),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.edit_outlined,
-                              size: 14, color: fg.withValues(alpha: 0.6)),
-                          const SizedBox(width: 4),
-                          Text('edited',
-                              style: TextStyle(
-                                  fontSize: 11,
-                                  color: fg.withValues(alpha: 0.6))),
-                        ],
+                      InkWell(
+                        onTap: () => onPassive?.call('/edited'),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.edit_outlined,
+                                size: 14, color: fg.withValues(alpha: 0.6)),
+                            const SizedBox(width: 4),
+                            Text('edited',
+                                style: TextStyle(
+                                    fontSize: 11,
+                                    color: fg.withValues(alpha: 0.6))),
+                          ],
+                        ),
                       ),
-                    ),
+                    ],
                   ],
                 ),
               ),
@@ -1187,8 +1200,13 @@ class _AssistantContent extends StatelessWidget {
 
   final String content;
   final Color color;
+  final String reasoning;
 
-  const _AssistantContent({required this.content, required this.color});
+  const _AssistantContent({
+    required this.content,
+    required this.color,
+    this.reasoning = '',
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1243,51 +1261,83 @@ class _AssistantContent extends StatelessWidget {
           softLineBreak: true,
           styleSheet: markdownStyle,
         ),
+        if (reasoning.trim().isNotEmpty) ...[
+          const SizedBox(height: 8),
+          _CollapsedDetail(
+            icon: Icons.psychology_outlined,
+            label: 'Model reasoning',
+            body: reasoning.trim(),
+          ),
+        ],
         if (activity.isNotEmpty) ...[
           const SizedBox(height: 8),
-          Material(
-            color: Colors.transparent,
-            child: Theme(
-              data:
-                  Theme.of(context).copyWith(dividerColor: Colors.transparent),
-              child: ExpansionTile(
-                dense: true,
-                visualDensity: VisualDensity.compact,
-                tilePadding: EdgeInsets.zero,
-                childrenPadding: EdgeInsets.zero,
-                leading: Icon(Icons.monitor_heart_outlined,
-                    size: 17, color: cs.primary),
-                title: Text(
-                  'Activity evidence',
-                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                        color: cs.onSurfaceVariant,
-                        fontWeight: FontWeight.w700,
-                      ),
-                ),
-                children: [
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: cs.surfaceContainerHighest.withValues(alpha: 0.7),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: SelectableText(
-                      activity,
-                      style: TextStyle(
-                        color: cs.onSurfaceVariant,
-                        fontFamily: 'Consolas',
-                        fontSize: 11,
-                        height: 1.4,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+          _CollapsedDetail(
+            icon: Icons.monitor_heart_outlined,
+            label: 'Activity evidence',
+            body: activity,
           ),
         ],
       ],
+    );
+  }
+}
+
+/// A collapsed, monospaced detail block under an answer.
+///
+/// Shared by the reasoning and activity sections so they stay visually
+/// identical as either one changes.
+class _CollapsedDetail extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String body;
+
+  const _CollapsedDetail({
+    required this.icon,
+    required this.label,
+    required this.body,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Material(
+      color: Colors.transparent,
+      child: Theme(
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          dense: true,
+          visualDensity: VisualDensity.compact,
+          tilePadding: EdgeInsets.zero,
+          childrenPadding: EdgeInsets.zero,
+          leading: Icon(icon, size: 17, color: cs.primary),
+          title: Text(
+            label,
+            style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                  color: cs.onSurfaceVariant,
+                  fontWeight: FontWeight.w700,
+                ),
+          ),
+          children: [
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: cs.surfaceContainerHighest.withValues(alpha: 0.7),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: SelectableText(
+                body,
+                style: TextStyle(
+                  color: cs.onSurfaceVariant,
+                  fontFamily: 'Consolas',
+                  fontSize: 11,
+                  height: 1.4,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
