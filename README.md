@@ -85,6 +85,10 @@ The full reference lives in two places:
 - **[Runbooks](docs/runbooks/README.md)** — contractor-executable operational
   procedures (install, backup/restore, upgrade/rollback, incident response).
   Start here to *do* something on a live deployment.
+- **[Integrations](integrations/README.md)** — wiring Sonder into Claude Code
+  or Codex, and (the part that took measuring) *which work to actually send
+  it*. Paste [IMPORT_PROMPT.md](integrations/IMPORT_PROMPT.md) at your agent
+  and it sets itself up.
 
 **Wiki map**
 
