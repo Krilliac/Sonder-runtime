@@ -183,8 +183,17 @@ CREATE TABLE IF NOT EXISTS preferences (
 def connect(path=":memory:", check_same_thread=True):
     conn = sqlite3.connect(path, check_same_thread=check_same_thread)
     conn.row_factory = sqlite3.Row
+    # busy_timeout must be the FIRST statement executed. Setting journal_mode
+    # takes a brief exclusive lock, and init_db opens with BEGIN IMMEDIATE --
+    # both contend whenever a second Sonder process is live, which is an
+    # ordinary setup: the MCP server and sonder_serve.py share one memory.db
+    # exactly as the README describes. Ordered the other way round, those two
+    # statements ran under SQLite's default of not waiting at all, so the
+    # loser failed instantly with "database is locked" instead of waiting its
+    # turn. It surfaced in the desktop app as "Connection closed before full
+    # header was received", with the OperationalError only in the server log.
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
     init_db(conn)
     return conn
 
