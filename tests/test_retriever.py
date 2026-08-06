@@ -477,3 +477,233 @@ def test_retrieve_mmr_diversifies_near_duplicates(monkeypatch):
         c, "query", k=2, embed_fn=lambda t: [1.0, 0.0, 0.0], min_sim=0.1,
     )
     assert [row["id"] for row in rows] == ["dup1", "dup2"]
+
+
+# --- Quarantine evidence: shared blame, reference class, and the exit ------
+
+
+def _graded(conn, interaction_id, lesson_ids, task, reward):
+    ms.log_lesson_usage(conn, lesson_ids, interaction_id, task)
+    ms.record_lesson_usage_outcome(
+        conn, interaction_id, "tests_passed" if reward > 0 else "failed", reward,
+    )
+
+
+def test_shared_blame_does_not_count_as_independent_evidence():
+    """record_lesson_usage_outcome writes one task's reward onto EVERY lesson
+    retrieved for it, so loss rows are not independent failures. Measured on the
+    live store 2026-08-06: 493 loss rows trace to only 144 distinct failing
+    interactions (mean cohort 3.424), and four of the six quarantined lessons
+    crossed the five-loss threshold on the IDENTICAL five interactions -- one
+    cluster counted four times. Blame is split across the cohort, so four
+    co-retrieved lessons sharing six failures hold 1.5 attributable losses each
+    and stay retrievable, while a lesson that fails alone the same number of
+    times holds 6.0 and is still caught."""
+    conn = ms.connect(":memory:")
+    cohort = ["co%d" % index for index in range(4)]
+    for lesson_id in cohort + ["solo"]:
+        ms.add_lesson(conn, lesson_id, "threading lock advice %s" % lesson_id,
+                      None, "seed")
+    for index in range(6):
+        _graded(conn, "shared-%d" % index, cohort, "task %d" % index, -1.0)
+        _graded(conn, "solo-%d" % index, ["solo"], "task %d" % index, -1.0)
+
+    stats = r.usage_stats_with_attribution(conn)
+    shared = r.lesson_quarantine(stats["co0"])
+    solo = r.lesson_quarantine(stats["solo"])
+
+    assert shared["losses_since_win"] == solo["losses_since_win"] == 6
+    assert shared["attributable_losses_since_win"] == 1.5
+    assert solo["attributable_losses_since_win"] == 6.0
+    assert shared["active"] is False
+    assert solo["active"] is True
+
+
+def test_quarantine_judges_a_lesson_against_its_own_frequency_band():
+    """Loss rate is set by retrieval frequency, not lesson quality: measured over
+    9256 scored retrievals, lessons retrieved once lose 50.62% of the time and
+    lessons retrieved 100+ times lose 1.24%, against a 5.33% corpus rate. A
+    corpus-wide threshold therefore quarantines lessons for being unusual. These
+    two lessons carry IDENTICAL epoch evidence -- six failures at a cohort of
+    three, 2.0 attributable losses each -- and differ only in lifetime retrieval
+    count. Six losses is an unremarkable run at the 13.70% base rate of the 5-9
+    band (p=0.019) and a real anomaly at the 7.59% rate of the 10-24 band
+    (p=0.006), so only the frequently-retrieved one is quarantined."""
+    conn = ms.connect(":memory:")
+    for lesson_id in ["rare", "common", "filler"]:
+        ms.add_lesson(conn, lesson_id, "threading lock advice %s" % lesson_id,
+                      None, "seed")
+    # "common" banks six wins first, lifting it into the next frequency band.
+    # A win also resets the epoch, so both lessons enter the losses identically.
+    for index in range(6):
+        _graded(conn, "win-%d" % index, ["common"], "good task %d" % index, 1.0)
+    for index in range(6):
+        _graded(conn, "fail-%d" % index, ["rare", "common", "filler"],
+                "bad task %d" % index, -1.0)
+
+    stats = r.usage_stats_with_attribution(conn)
+    rare = r.lesson_quarantine(stats["rare"])
+    common = r.lesson_quarantine(stats["common"])
+
+    assert rare["losses_since_win"] == common["losses_since_win"] == 6
+    assert round(rare["attributable_losses_since_win"], 6) == 2.0
+    assert round(common["attributable_losses_since_win"], 6) == 2.0
+    assert rare["scored_retrievals"] == 6
+    assert common["scored_retrievals"] == 12
+    assert rare["band_loss_rate"] == 0.1370
+    assert common["band_loss_rate"] == 0.0759
+    assert rare["active"] is False
+    assert common["active"] is True
+
+
+def test_quarantine_still_fires_on_an_unambiguously_harmful_lesson():
+    """The discount must not make quarantine unfireable. A lesson that fails
+    alone -- the fully identifiable case, 18 of the 144 live failing interactions
+    blamed exactly one lesson -- still crosses every gate, and retrieval drops it
+    while an untested peer with the same text is returned."""
+    conn = ms.connect(":memory:")
+    ms.add_lesson(conn, "harmful", "threading lock release advice", None, "seed")
+    ms.add_lesson(conn, "peer", "threading lock release guidance", None, "seed")
+    for index in range(6):
+        _graded(conn, "harmful-%d" % index, ["harmful"],
+                "threading lock task %d" % index, -1.0)
+
+    decision = r.lesson_quarantine(r.usage_stats_with_attribution(conn)["harmful"])
+    rows = r.retrieve_with_ids(
+        conn, "threading lock release", k=2, embed_fn=lambda _text: None,
+    )
+
+    assert decision["active"] is True
+    assert decision["attribution_source"] == "measured"
+    assert [row["id"] for row in rows] == ["peer"]
+
+
+def test_quarantine_reaches_probation_and_a_win_is_the_exit():
+    """Quarantine excluded a lesson from retrieval, so the win that would clear
+    it was unreachable and only the seven-day timer could lift it -- one live
+    quarantined lesson has 18 lifetime wins and no way to earn a 19th. A
+    quarantined lesson is now hard-excluded for the first day, then admitted on a
+    deterministic ~1-in-20 sample of tasks, and a grounded win on one of those
+    probation retrievals ends the quarantine on evidence rather than on a clock."""
+    conn = ms.connect(":memory:")
+    ms.add_lesson(conn, "lesson", "threading lock release lesson", None, "seed")
+    for index in range(6):
+        _graded(conn, "fail-%d" % index, ["lesson"],
+                "threading lock task %d" % index, -1.0)
+
+    admitted = next(
+        task for task in ("threading lock release %d" % n for n in range(200))
+        if r._probation_admits("lesson", task)
+    )
+    # Fresh quarantine: excluded even for a task probation would sample.
+    assert r.retrieve_with_ids(
+        conn, admitted, embed_fn=lambda _text: None,
+    ) == []
+
+    conn.execute(
+        "UPDATE lesson_usage SET ts=datetime('now', '-2 days'), "
+        "outcome_ts=datetime('now', '-2 days') WHERE lesson_id='lesson'"
+    )
+    conn.commit()
+    stats = r.usage_stats_with_attribution(conn)
+    assert r.lesson_quarantine(stats["lesson"])["active"] is True
+    assert r.lesson_quarantine(stats["lesson"])["probation_eligible"] is True
+
+    # Still quarantined, but reachable on the sampled slice of traffic.
+    refused = next(
+        task for task in ("threading lock release %d" % n for n in range(200))
+        if not r._probation_admits("lesson", task)
+    )
+    assert r.retrieve_with_ids(conn, refused, embed_fn=lambda _text: None) == []
+    probation = r.retrieve_with_ids(conn, admitted, embed_fn=lambda _text: None)
+    assert [row["id"] for row in probation] == ["lesson"]
+
+    _graded(conn, "probation-win", ["lesson"], admitted, 1.0)
+
+    assert r.lesson_quarantine(
+        r.usage_stats_with_attribution(conn)["lesson"]
+    )["active"] is False
+    assert [row["id"] for row in r.retrieve_with_ids(
+        conn, refused, embed_fn=lambda _text: None,
+    )] == ["lesson"]
+
+
+def test_probation_sampling_is_deterministic_and_bounded():
+    """Probation has to be reproducible -- the same task must always make the
+    same call, or an A/B of retrieval becomes unreplayable -- and it has to stay
+    a slice, since the lesson may genuinely be harmful. ~1-in-20 bounds exposure
+    far below the status quo, where the cooldown restored a lesson to 100% of
+    traffic after a week on no evidence at all."""
+    tasks = ["threading lock task %d" % index for index in range(2000)]
+
+    assert all(
+        r._probation_admits("lesson", task) == r._probation_admits("lesson", task)
+        for task in tasks[:50]
+    )
+    # Different lessons draw independently on the same task.
+    assert any(
+        r._probation_admits("a", task) != r._probation_admits("b", task)
+        for task in tasks[:50]
+    )
+    rate = sum(r._probation_admits("lesson", task) for task in tasks) / len(tasks)
+    assert 0.02 < rate < 0.10
+
+
+def test_unenriched_stats_report_an_undiscounted_upper_bound():
+    """lesson_quarantine takes a stats row, and a row does not say which lessons
+    shared each failure, so callers that cannot enrich it (learning_health passes
+    memory_store.lesson_usage_stats rows straight through) get the raw count. The
+    fallback is deliberately the UPPER bound rather than the measured mean cohort
+    of 3.424: assuming the mean would divide a solo failure's evidence by 3.4,
+    and a lesson failing alone is the most identifiable and most likely genuinely
+    harmful. Retrieval, which holds the connection, applies the real discount."""
+    conn = ms.connect(":memory:")
+    cohort = ["co%d" % index for index in range(4)]
+    for lesson_id in cohort:
+        ms.add_lesson(conn, lesson_id, "threading lock advice %s" % lesson_id,
+                      None, "seed")
+    for index in range(6):
+        _graded(conn, "shared-%d" % index, cohort, "task %d" % index, -1.0)
+
+    unenriched = r.lesson_quarantine(ms.lesson_usage_stats(conn)["co0"])
+    enriched = r.lesson_quarantine(r.usage_stats_with_attribution(conn)["co0"])
+
+    assert unenriched["attribution_source"] == "unattributed"
+    assert unenriched["attributable_losses_since_win"] == 6.0
+    assert unenriched["active"] is True
+    assert enriched["attribution_source"] == "measured"
+    assert enriched["attributable_losses_since_win"] == 1.5
+    assert enriched["active"] is False
+    # Retrieval is the decision surface and uses the discounted view.
+    assert len(r.retrieve_with_ids(
+        conn, "threading lock advice", k=4, embed_fn=lambda _text: None,
+    )) == 4
+
+
+def test_usage_boost_confidence_comes_from_scored_outcomes_not_retrievals():
+    """_usage_boost weighted its tiebreak by `uses`, which counts retrievals that
+    were never graded. Measured 2026-08-06: 157 of 385 retrieved lessons have
+    uses != scored, 39 have retrievals but zero scored outcomes, and 63 had their
+    weight inflated by ungraded retrievals -- one lesson with a single win and
+    100 retrievals drew the same full confidence as a lesson with 100 graded
+    wins. Weight now shrinks toward the neutral prior on SCORED evidence, so an
+    asserted-but-never-validated lesson sits at 0.0, below any earned record."""
+    earned = r._usage_boost({"uses": 50, "wins": 50, "losses": 0, "avg_reward": 1.0})
+    thin = r._usage_boost({"uses": 100, "wins": 1, "losses": 0, "avg_reward": 1.0})
+    synthetic = r._usage_boost(None)
+    never_scored = r._usage_boost({"uses": 100, "wins": 0, "losses": 0,
+                                   "avg_reward": None})
+
+    assert synthetic == 0.0
+    assert never_scored == 0.0
+    # 100 ungraded retrievals no longer buy the confidence of one graded win.
+    assert thin < earned
+    assert round(thin, 6) == round(1.0 * (1 / 11.0) * 0.01, 6)
+    assert round(earned, 6) == round(1.0 * (50 / 60.0) * 0.01, 6)
+    # Still a gentle tiebreaker, never a relevance override.
+    assert -0.01 <= thin <= 0.01 and -0.01 <= earned <= 0.01
+    # An earned positive record outranks an unvalidated lesson; an earned
+    # negative one ranks below it.
+    assert earned > synthetic > r._usage_boost(
+        {"uses": 50, "wins": 0, "losses": 50, "avg_reward": -1.0}
+    )
