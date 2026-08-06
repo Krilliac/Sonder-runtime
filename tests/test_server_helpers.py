@@ -2618,3 +2618,86 @@ def test_campaign_environment_failure_is_not_a_model_failure():
     assert not server._campaign_environment_failure("(timed out after 8s)")
     assert not server._campaign_environment_failure("")
     assert not server._campaign_environment_failure(None)
+
+
+def _improvement_report_text(**overrides):
+    base = {
+        "score": 100, "interactions": 7865, "outcomes": 6831,
+        "reviewed_positive_percent": 52.7, "reviewed_outcomes": 186,
+        "autograded_outcomes": 6645, "acceptance_percent": 96.1,
+        "learning_health": {
+            "outcome_coverage_percent": 86.8,
+            "autograded_positive_percent": 97.3,
+        },
+        "memory_quality": {}, "autopilot": {}, "mcp_runtime": {}, "issues": [],
+    }
+    base.update(overrides)
+    return server.format_improvement_report(base)
+
+
+def test_improvement_report_never_shows_the_blended_rate_alone():
+    """The blended positive rate is dominated by the runtime marking its own
+    curriculum. Shown by itself it reads as a quality score, which it is not:
+    this report displayed 96.1% positive and 100/100 readiness while
+    caller-judged work sat at 52.7% and learning_health said "watch"."""
+    text = _improvement_report_text()
+    assert "caller-judged: 52.7% of 186 reviewed" in text
+    assert "autograded: 97.3% of 6645" in text
+    # The blended number may appear, but only alongside its two components.
+    blended_line = [l for l in text.split("\n") if "96.1" in l]
+    assert blended_line, "blended rate should still be reported"
+    assert "caller-judged" in blended_line[0]
+
+
+def test_improvement_report_flags_a_low_caller_judged_rate(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
+    monkeypatch.setattr(
+        server.learning_health, "build_report",
+        lambda conn: {
+            "quality": {}, "interactions": 500, "outcomes": 400,
+            "lessons": 50, "facts": 5, "positive_percent": 96.1,
+            "outcome_coverage_percent": 80.0,
+            "reviewed_outcomes": 186, "reviewed_positive_percent": 52.7,
+            "autograded_outcomes": 214, "autograded_positive_percent": 97.3,
+        },
+    )
+    report = server.improvement_report_data()
+    titles = " ".join(i["title"] for i in report["issues"])
+    assert "Caller-judged work succeeds 52.7%" in titles
+    # A 52.7% hit rate must cost readiness rather than scoring a clean 100.
+    assert report["score"] < 100
+
+
+def test_improvement_report_flags_when_nothing_has_been_judged(monkeypatch, tmp_path):
+    """Autograded outcomes cannot say whether delegated work is any good."""
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
+    monkeypatch.setattr(
+        server.learning_health, "build_report",
+        lambda conn: {
+            "quality": {}, "interactions": 500, "outcomes": 400,
+            "lessons": 50, "facts": 5, "positive_percent": 99.0,
+            "outcome_coverage_percent": 80.0,
+            "reviewed_outcomes": 2, "reviewed_positive_percent": 100.0,
+            "autograded_outcomes": 398, "autograded_positive_percent": 99.0,
+        },
+    )
+    report = server.improvement_report_data()
+    titles = " ".join(i["title"] for i in report["issues"])
+    assert "judged by a caller" in titles
+
+
+def test_improvement_report_stays_quiet_when_review_is_healthy(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
+    monkeypatch.setattr(
+        server.learning_health, "build_report",
+        lambda conn: {
+            "quality": {}, "interactions": 500, "outcomes": 400,
+            "lessons": 50, "facts": 5, "positive_percent": 92.0,
+            "outcome_coverage_percent": 80.0,
+            "reviewed_outcomes": 200, "reviewed_positive_percent": 88.0,
+            "autograded_outcomes": 200, "autograded_positive_percent": 96.0,
+        },
+    )
+    report = server.improvement_report_data()
+    titles = " ".join(i["title"] for i in report["issues"])
+    assert "Caller-judged work succeeds" not in titles

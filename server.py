@@ -5985,6 +5985,36 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
             "General or format-specific artifact grounding is not advertised.",
             "Expose ground_artifact and artifact_ground so both in-memory content and real files can be validated.",
         )
+    # The blended positive rate is dominated by autograded outcomes -- the
+    # runtime setting and marking its own curriculum -- and hides the number an
+    # operator actually needs: how often work a caller delegated was judged
+    # good. learning_health_status separates these; this report used to blend
+    # them, so it could show 96% positive and 100/100 readiness while
+    # caller-judged work sat near 53% and the health view said "watch".
+    reviewed = learning_state.get("reviewed_outcomes", 0)
+    reviewed_positive = learning_state.get("reviewed_positive_percent", 0.0)
+    if reviewed >= 30 and reviewed_positive < 60.0:
+        add(
+            "learning",
+            "medium",
+            "Caller-judged work succeeds %.1f%% of the time (%d reviewed outcome(s))."
+            % (reviewed_positive, reviewed),
+            "This is the honest hit rate; the blended figure is inflated by "
+            "autograded self-marking. Review roughly half of delegated output, "
+            "and record negatives -- record_outcome with a failing signal is "
+            "what the store is starved of.",
+        )
+    elif reviewed < 30 and outcomes >= 200:
+        add(
+            "learning",
+            "low",
+            "Almost no outcomes have been judged by a caller (%d of %d)."
+            % (reviewed, outcomes),
+            "Autograded outcomes cannot tell you whether delegated work is any "
+            "good. Use record_outcome after real use so the reviewed rate means "
+            "something.",
+        )
+
     if not issues:
         add(
             "system",
@@ -6005,6 +6035,9 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
         "interactions": interactions,
         "outcomes": outcomes,
         "acceptance_percent": round(acceptance * 100.0, 1),
+        "reviewed_outcomes": learning_state.get("reviewed_outcomes", 0),
+        "reviewed_positive_percent": learning_state.get("reviewed_positive_percent", 0.0),
+        "autograded_outcomes": learning_state.get("autograded_outcomes", 0),
         "lessons": lesson_count,
         "facts": fact_count,
         "cloud_allowed": cloud_allowed(),
@@ -6031,10 +6064,19 @@ def format_improvement_report(report: dict) -> str:
     lines = [
         "sonder improvement report",
         "  readiness score: %s/100" % report.get("score", 0),
-        "  learning: %s interactions, %s outcomes, %s%% covered, %s%% positive" % (
+        "  learning: %s interactions, %s outcomes, %s%% covered" % (
             report.get("interactions", 0),
             report.get("outcomes", 0),
             report.get("learning_health", {}).get("outcome_coverage_percent", 0),
+        ),
+        # Never show the blended rate alone: it is dominated by the runtime
+        # marking its own curriculum, and reads as a quality score when it
+        # is not one.
+        "    caller-judged: %s%% of %s reviewed | autograded: %s%% of %s | blended: %s%%" % (
+            report.get("reviewed_positive_percent", 0),
+            report.get("reviewed_outcomes", 0),
+            report.get("learning_health", {}).get("autograded_positive_percent", 0),
+            report.get("autograded_outcomes", 0),
             report.get("acceptance_percent", 0),
         ),
         "  memory: %s lessons, %s facts, duplicate rows=%s, vague=%s, missing embeddings=%s" % (
