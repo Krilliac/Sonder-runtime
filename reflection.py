@@ -328,6 +328,32 @@ def prepare_pitfall_candidate(
     return _prepare_candidate_text(text, embed_fn, id_fn)
 
 
+def _candidate_provenance(emb, embed_fn, runtime_default):
+    """Provenance for *emb*, or ``{}`` when it cannot be attributed honestly.
+
+    Dedup is fail-closed on provenance: ``is_duplicate`` refuses to compare a
+    vector whose model/revision/dimension are unknown. So dropping provenance
+    does not merely lose metadata — it disables the semantic dedup gate for
+    that candidate entirely.
+
+    Trusting only ``embed_fn is embeddings.embed`` was too narrow. The server
+    always wraps the embedder in a closure to impose the distillation deadline
+    (``server._prepare_lesson_candidate_bounded``), so on the *live* path the
+    identity check never held and every distilled candidate was stored with no
+    provenance and no dedup. ``embeddings.provenance`` already answers the real
+    question: it reports the bound identity only for the vector the runtime
+    embedder just produced on this thread, and marks anything else with an
+    empty ``provider`` rather than fabricating one. A delegating wrapper
+    returns exactly that bound vector, an injected test double does not.
+    """
+    if emb is None:
+        return {}
+    provenance = embeddings.provenance(emb)
+    if runtime_default or embed_fn is embeddings.embed:
+        return provenance
+    return provenance if provenance.get("provider") else {}
+
+
 def _prepare_candidate_text(text, embed_fn, id_fn):
     runtime_default = embed_fn is None
     embed_fn = embed_fn or embeddings.embed
@@ -336,11 +362,7 @@ def _prepare_candidate_text(text, embed_fn, id_fn):
     emb = embed_fn(text)
     if not embeddings.valid_vector(emb):
         emb = None
-    provenance = (
-        embeddings.provenance(emb)
-        if emb is not None and (runtime_default or embed_fn is embeddings.embed)
-        else {}
-    )
+    provenance = _candidate_provenance(emb, embed_fn, runtime_default)
     return {
         "status": "candidate",
         "lesson_id": id_fn(),
@@ -358,34 +380,14 @@ def prepare_lesson_candidate(
     id_fn=memory_store.new_id,
 ):
     """Generate and embed a candidate without reading or mutating SQLite."""
-    runtime_default = embed_fn is None
-    embed_fn = embed_fn or embeddings.embed
     text = distill(task, response, signal, offload_fn)
     if not text:
         return {"status": "no_lesson", "reason": "not_concrete"}
-    # Keep secret- and path-like material out of both the lesson row and its
-    # FTS mirror. The classifier returns stable reason names only; never retain
-    # or surface the matched text in status metadata.
-    if contribute.private_reasons(text):
-        return {"status": "no_lesson", "reason": "private"}
-    emb = embed_fn(text)
-    if not embeddings.valid_vector(emb):
-        emb = None
-    provenance = (
-        embeddings.provenance(emb)
-        if emb is not None and (runtime_default or embed_fn is embeddings.embed)
-        else {}
-    )
-    return {
-        "status": "candidate",
-        "lesson_id": id_fn(),
-        "text": text,
-        "embedding": emb,
-        "embedding_blob": embeddings.to_blob(emb) if emb else None,
-        "embedding_model": provenance.get("model"),
-        "embedding_revision": provenance.get("revision"),
-        "embedding_dim": provenance.get("dimension"),
-    }
+    # _prepare_candidate_text keeps secret- and path-like material out of both
+    # the lesson row and its FTS mirror, and resolves embedding provenance.
+    # The classifier returns stable reason names only; never retain or surface
+    # the matched text in status metadata.
+    return _prepare_candidate_text(text, embed_fn, id_fn)
 
 
 def store_prepared_lesson(conn, interaction_id, candidate):
