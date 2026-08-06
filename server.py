@@ -235,6 +235,58 @@ def _is_cloud_model_name(model):
     return "-cloud" in name or name.endswith(":cloud")
 
 
+def reasoning_exposure_enabled() -> bool:
+    """Whether this deployment surfaces model reasoning to callers.
+
+    Off by default. Ollama returns a reasoning model's thought in
+    ``message.thinking``, separate from the answer, but only when the request
+    asks for it -- so leaving this off means we never even request it.
+
+    This does not weaken ``admin_private_chain_of_thought``: that refuses
+    arbitrary inspection of hidden reasoning, which stays refused. This exposes
+    only the reasoning a model emitted for the turn the caller just asked for,
+    through a channel the model emits deliberately and separately from its
+    answer, and only where the operator has turned it on.
+    """
+    return os.environ.get("SONDER_EXPOSE_REASONING", "").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+
+
+_THINKING_CAPABILITY_CACHE = {}
+_THINKING_CAPABILITY_LOCK = threading.Lock()
+
+
+def _model_supports_thinking(model: str) -> bool:
+    """Ask Ollama whether this model has a reasoning channel.
+
+    /api/show reports a ``capabilities`` list and ``"thinking"`` is the reliable
+    signal. Inferring from the name is not: on this host qwen3:8b and
+    deepseek-r1:7b report it while qwen2.5-coder:14b and the default
+    sonder:latest do not, and sending ``think`` to a model without the
+    capability is rejected. Cached because it costs a round trip per model and
+    a model cannot gain the capability while the process runs.
+    """
+    name = str(model or "").strip()
+    if not name:
+        return False
+    with _THINKING_CAPABILITY_LOCK:
+        if name in _THINKING_CAPABILITY_CACHE:
+            return _THINKING_CAPABILITY_CACHE[name]
+    try:
+        info = _post("/api/show", {"model": name}, timeout=10)
+    except Exception:
+        # Endpoint down or model unknown. Stay off, and do not cache -- a
+        # transient outage must not pin this model to "no reasoning" for the
+        # life of the process.
+        return False
+    capabilities = info.get("capabilities")
+    supported = isinstance(capabilities, (list, tuple)) and "thinking" in capabilities
+    with _THINKING_CAPABILITY_LOCK:
+        _THINKING_CAPABILITY_CACHE[name] = supported
+    return supported
+
+
 def _apply_cloud_thinking_policy(payload, model, *, compact=False):
     """Apply hosted-model thinking controls without changing custom models.
 
@@ -2855,6 +2907,13 @@ def _chat_request(
     cancel_check=None,
     accept_native_tool_calls: bool = False,
 ) -> tuple[dict, str]:
+    # Cloud tiers already set `think` via _apply_cloud_thinking_policy; never
+    # override an explicit choice, and only probe capability for local models
+    # (the /api/show probe goes to the local endpoint).
+    if reasoning_exposure_enabled() and "think" not in payload and not cloud:
+        if _model_supports_thinking(model):
+            payload = dict(payload)
+            payload["think"] = True
     out, attempts = _post_model(
         "/api/chat",
         payload,
@@ -2874,6 +2933,10 @@ def _chat_request(
             attempts=attempts, cloud=cloud,
         )
     message = out.get("message")
+    if reasoning_exposure_enabled() and isinstance(message, dict):
+        thinking = message.get("thinking")
+        if isinstance(thinking, str) and thinking.strip():
+            activity_tracker.record_reasoning(thinking, model=model)
     content = message.get("content") if isinstance(message, dict) else None
     if not isinstance(content, str) or not content.strip():
         if accept_native_tool_calls:
