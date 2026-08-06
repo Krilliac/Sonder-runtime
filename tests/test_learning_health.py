@@ -279,9 +279,14 @@ def test_learning_health_reports_quarantined_lessons_as_watch():
     assert report["quarantined_lesson_details"][0]["lesson_id"] == "harmful"
     assert report["quarantined_lesson_details"][0]["losses_since_win"] == 6
     assert report["quarantined_lesson_details"][0]["retry_after"]
-    assert "automatically re-enter probation" in report["quarantine_review"]
+    # Quarantine has no evidence-driven exit. A quarantined lesson is excluded
+    # from retrieval, so the win that would clear it is unreachable until the
+    # cooldown elapses; the report must not imply the store keeps re-testing it.
+    assert "not on evidence" in report["quarantine_review"]
+    assert "excluded from retrieval" in report["quarantine_review"]
     assert "quarantined=1" in text
     assert "quarantine harmful: losses=6" in text
+    assert "not on evidence" in text
 
 
 def test_autograded_curriculum_outcomes_do_not_mask_the_reviewed_hit_rate():
@@ -318,3 +323,205 @@ def test_autograded_curriculum_outcomes_do_not_mask_the_reviewed_hit_rate():
     text = learning_health.format_report(report)
     assert "reviewed (judged by a caller): 4 | positive: 25.0%" in text
     assert "autograded (runtime marking its own curriculum): 9 | positive: 100.0%" in text
+
+
+def _graded(conn, interaction_id, lesson_ids, task, reward):
+    memory_store.log_lesson_usage(conn, lesson_ids, interaction_id, task)
+    memory_store.record_lesson_usage_outcome(
+        conn, interaction_id, "tests_passed" if reward > 0 else "failed", reward,
+    )
+
+
+def test_status_gates_on_the_caller_judged_rate_not_the_blend():
+    """The blend was fixed in the *display* and left in the *gate*. The live
+    store reported positive 96.1% while caller-judged work sat at 52.7% over 186
+    reviewed outcomes, and _status compared 96.1 against its 60/80 thresholds --
+    so a store failing half the work a caller delegated read as "watch". The
+    thresholds now apply to the reviewed rate once the sample can carry them."""
+    conn = _conn()
+    try:
+        for n in range(500):
+            memory_store.record_outcome_row(conn, "auto%d" % n, "tests_passed", 1.0)
+        for n in range(30):
+            memory_store.record_outcome_row(conn, "ok%d" % n, "accepted", 0.8)
+        for n in range(30):
+            memory_store.record_outcome_row(conn, "no%d" % n, "rejected", -0.5)
+        report = learning_health.build_report(conn)
+    finally:
+        conn.close()
+
+    assert report["reviewed_outcomes"] == 60
+    assert report["reviewed_positive_percent"] == 50.0
+    # The blend clears both thresholds on its own; only the reviewed rate does not.
+    assert report["positive_percent"] == 94.6
+    assert report["status"] == "attention"
+    assert "blended, not an accuracy figure" in learning_health.format_report(report)
+
+
+def test_a_reviewed_sample_too_small_to_gate_on_falls_back_to_the_blend():
+    """Four judgements cannot carry a 60%/80% threshold; flipping to
+    "attention" on a single rejection would make the status meaningless. Below
+    _MIN_REVIEWED_SAMPLE the gate stays on the blend and the split stays
+    visible in the text, which is where the honest number lives."""
+    conn = _conn()
+    try:
+        for n in range(9):
+            memory_store.record_outcome_row(conn, "auto%d" % n, "tests_passed", 1.0)
+        memory_store.record_outcome_row(conn, "ok", "accepted", 0.8)
+        for n in range(3):
+            memory_store.record_outcome_row(conn, "no%d" % n, "rejected", -0.5)
+        report = learning_health.build_report(conn)
+    finally:
+        conn.close()
+
+    assert report["reviewed_outcomes"] == 4
+    assert report["reviewed_positive_percent"] == 25.0
+    assert report["status"] != "attention"
+    assert learning_health._gating_positive_percent(report)[1] == "blended"
+
+
+def test_loss_only_is_measured_against_its_own_reference_class():
+    """Losing is correlational. On the live store the loss rate collapses with
+    retrieval count -- 50.6% for lessons retrieved once, 1.2% for lessons
+    retrieved 100+ times -- because retrieval is similarity-driven, so a rare
+    lesson is the one pulled in for an unusual task, and unusual tasks fail.
+    Reporting loss-only=52 against an implicit zero (or against the corpus-wide
+    5.3%) reads as 52 bad lessons; 47.1 of them are what task difficulty alone
+    predicts. This fixture reproduces the gradient in miniature: ten single-
+    retrieval losers, all of them ordinary for their band."""
+    conn = _conn()
+    try:
+        memory_store.add_lesson(conn, "popular", "Popular lesson.", None, "seed")
+        for n in range(40):
+            _graded(conn, "pop%d" % n, ["popular"], "routine task %d" % n, 1.0)
+        for n in range(10):
+            memory_store.add_lesson(
+                conn, "rare-win%d" % n, "Rare win %d." % n, None, "seed",
+            )
+            _graded(conn, "rw%d" % n, ["rare-win%d" % n], "odd task w%d" % n, 1.0)
+        for n in range(10):
+            memory_store.add_lesson(
+                conn, "rare-loss%d" % n, "Rare loss %d." % n, None, "seed",
+            )
+            _graded(conn, "rl%d" % n, ["rare-loss%d" % n], "odd task l%d" % n, -1.0)
+        report = learning_health.build_report(conn)
+    finally:
+        conn.close()
+
+    assert report["loss_only_lessons"] == 10
+    assert report["loss_only_single_retrieval_lessons"] == 10
+    # Corpus-wide the store lost 10 of 60 scored retrievals (16.7%), which would
+    # predict fewer than 4 loss-only lessons. Their own band lost half of its
+    # retrievals, and predicts all 10.
+    assert report["scored_retrieval_loss_percent"] == 16.7
+    assert 9.0 <= report["loss_only_expected_from_task_difficulty"] <= 11.0
+    assert report["loss_only_beyond_reference_class"] == 0
+    assert "not per-lesson evidence" in report["loss_attribution_note"]
+    assert "expected from task difficulty alone" in learning_health.format_report(report)
+
+
+def test_a_lesson_that_keeps_losing_alone_still_stands_out():
+    """The reference class must not excuse everything, or the metric is inert.
+    A lesson that lost every one of six retrievals in a band that mostly wins is
+    a 1-in-a-million event for that band, and is reported as beyond it -- the
+    five live lessons with four-plus consecutive losses are the only part of
+    loss-only=52 the data can call suspect."""
+    conn = _conn()
+    try:
+        for n in range(10):
+            memory_store.add_lesson(
+                conn, "ok%d" % n, "Fine lesson %d." % n, None, "seed",
+            )
+            for use in range(6):
+                _graded(
+                    conn, "ok%d-%d" % (n, use), ["ok%d" % n],
+                    "task %d %d" % (n, use), 1.0,
+                )
+        memory_store.add_lesson(conn, "bad", "Consistently harmful advice.", None, "seed")
+        for use in range(6):
+            _graded(conn, "bad-%d" % use, ["bad"], "distinct task %d" % use, -1.0)
+        report = learning_health.build_report(conn)
+    finally:
+        conn.close()
+
+    assert report["loss_only_lessons"] == 1
+    assert report["loss_only_beyond_reference_class"] == 1
+    assert report["loss_only_expected_from_task_difficulty"] < 1.0
+
+
+def test_one_failure_cluster_can_quarantine_several_co_retrieved_lessons():
+    """record_lesson_usage_outcome writes a task's reward onto every lesson
+    retrieved for it, so co-retrieved lessons share a verdict. Four of the six
+    lessons quarantined on the live store crossed the five-loss threshold on the
+    identical five interactions: one cluster counted four times as independent
+    evidence. The report now shows how many distinct failures are behind the
+    quarantine set so five never reads as twenty."""
+    conn = _conn()
+    try:
+        cohort = ["co%d" % n for n in range(4)]
+        for lesson_id in cohort:
+            memory_store.add_lesson(
+                conn, lesson_id, "Advice %s." % lesson_id, None, "seed",
+            )
+        for n in range(5):
+            _graded(conn, "shared-failure-%d" % n, cohort, "distinct task %d" % n, -1.0)
+        report = learning_health.build_report(conn)
+    finally:
+        conn.close()
+
+    assert report["quarantined_lessons"] == 4
+    assert report["quarantine_distinct_failed_interactions"] == 5
+    assert report["failed_interactions"] == 5
+    assert report["lessons_marked_per_failed_interaction"] == 4.0
+    assert "quarantine: 5 task(s)" in learning_health.format_report(report)
+
+
+def test_a_lesson_whose_interaction_is_gone_is_orphaned_not_synthetic():
+    """_lesson_source bucketed an unresolvable source by ``split(":")[0]``, so a
+    lesson naming a pruned interaction became its own lesson_sources bucket and
+    was counted as synthetic. It is the opposite: it was earned from a real
+    outcome and then lost the evidence, and 533 of the live store's 1061 lessons
+    are one interaction-prune away from being miscounted that way."""
+    conn = _conn()
+    try:
+        memory_store.add_lesson(
+            conn, "orphan", "Earned but unbacked.", None, "0123456789abcdef",
+        )
+        memory_store.add_lesson(conn, "seeded", "Seeded text.", None, "seed:algo")
+        report = learning_health.build_report(conn)
+    finally:
+        conn.close()
+
+    assert report["lesson_sources"] == {"orphaned": 1, "seed": 1}
+    assert report["orphaned_lessons"] == 1
+    assert report["synthetic_lessons"] == 1
+    assert report["grounded_lessons"] == 0
+    assert "orphaned: 1" in learning_health.format_report(report)
+
+
+def test_never_validated_lessons_are_surfaced_next_to_the_synthetic_count():
+    """Synthetic is not the whole unvalidated population: a grounded lesson that
+    has never been retrieved on a scored task has also never been checked
+    against reality. The live store is 528 synthetic but 715 never validated, so
+    reading only the synthetic count understates the unproven corpus by 187
+    lessons."""
+    conn = _conn()
+    try:
+        _interaction(conn, "i1")
+        memory_store.add_lesson(
+            conn, "earned-untested", "Earned, never retrieved.", None, "i1",
+        )
+        memory_store.add_lesson(conn, "seeded", "Seeded, never retrieved.", None, "seed")
+        memory_store.add_lesson(conn, "proven", "Proven in production.", None, "seed")
+        _graded(conn, "u1", ["proven"], "task", 1.0)
+        report = learning_health.build_report(conn)
+    finally:
+        conn.close()
+
+    assert report["grounded_lessons"] == 1
+    assert report["synthetic_lessons"] == 2
+    assert report["unvalidated_lessons"] == 2
+    assert report["synthetic_unvalidated_lessons"] == 1
+    assert "never validated by an outcome: 2 (synthetic: 1)" in (
+        learning_health.format_report(report)
+    )
