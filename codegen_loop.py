@@ -47,6 +47,19 @@ import re
 SHRINK_FLOOR = 0.75
 DEFAULT_ERROR_RE = r"(?i)\b(?:error|fatal)\b"
 
+# A compiler that cannot PARSE a file stops before BINDING, so every semantic
+# error behind it goes unreported: a file with two syntax errors can be masking
+# ninety. A falling total is therefore not progress while any parse error
+# remains -- measured, a run that read as "2 errors" was really 99 once it
+# parsed. Matched on message shape rather than error-code range because ranges
+# leak (C# syntax errors are mostly CS1xxx, but CS8180 and CS8124 are the parser
+# too), and shape generalises across toolchains.
+DEFAULT_PARSE_ERROR_RE = (
+    r"(?i)(?:expected|unexpected token|invalid expression|invalid token|"
+    r"unterminated|parse error|syntax error|unexpected end of|"
+    r"tuple must contain|unclosed|missing closing)"
+)
+
 # Declaration-ish lines worth showing a dependent file. Deliberately shallow:
 # the input is often not parseable (that is why it is in this loop), so a real
 # parser would refuse it exactly when a signature is most needed.
@@ -112,6 +125,30 @@ def count_errors(output: str, error_regex: str = DEFAULT_ERROR_RE) -> list:
             seen.add(line)
             out.append(line)
     return out
+
+
+def parse_blocked(errors: list, parse_regex: str = DEFAULT_PARSE_ERROR_RE) -> int:
+    """How many errors are the parser refusing to read the source."""
+    pattern = re.compile(parse_regex)
+    return sum(1 for e in errors if pattern.search(e))
+
+
+def score(errors: list, parse_regex: str = DEFAULT_PARSE_ERROR_RE) -> tuple:
+    """Rank a candidate. Lower is better; parse-clean always beats parse-broken.
+
+    A parse-clean version with 50 errors is strictly better than a parse-broken
+    one showing 2, because the 2 is fiction -- the binder never ran.
+    """
+    return (1 if parse_blocked(errors, parse_regex) else 0, len(errors))
+
+
+def describe_total(errors: list, parse_regex: str = DEFAULT_PARSE_ERROR_RE) -> str:
+    """Report a total, flagging when it cannot be trusted."""
+    blocked = parse_blocked(errors, parse_regex)
+    if blocked:
+        return ("%d total (UNRELIABLE: %d parse error(s) are masking the "
+                "semantic count)" % (len(errors), blocked))
+    return "%d total" % len(errors)
 
 
 def apply_slips(text: str, slips) -> tuple:
