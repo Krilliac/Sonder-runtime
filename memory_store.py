@@ -1,5 +1,6 @@
 """SQLite-backed memory for the sonder learning loop. Stdlib only."""
 import array
+import hashlib
 import math
 import os
 import re
@@ -335,7 +336,41 @@ def _migrate(conn):
         )
 
 
+# Bump when _migrate() gains a step that _SCHEMA's own text does not change.
+# Schema-text edits are picked up automatically -- see _schema_stamp().
+_MIGRATION_REVISION = 1
+
+
+def _schema_stamp():
+    """A 31-bit stamp identifying this build's schema + migration revision.
+
+    Stored in PRAGMA user_version so a connection can tell, with a pure read
+    and no lock, whether the database it just opened is already current.
+    Derived from the schema text so editing _SCHEMA invalidates it on its own;
+    _MIGRATION_REVISION covers migration-only changes.
+    """
+    digest = hashlib.sha256(
+        (_SCHEMA + "\x00" + str(_MIGRATION_REVISION)).encode("utf-8")
+    ).digest()
+    return int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
+
+
 def init_db(conn):
+    # Fast path: every connection used to open a write transaction and replay
+    # the whole schema plus a dozen CREATE INDEX statements, even when there
+    # was nothing to do. _open_db() runs per HTTP request, so a second live
+    # Sonder process -- the MCP server alongside sonder_serve.py, the setup
+    # the README describes -- meant every request fought for the write lock
+    # and lost with "database is locked". busy_timeout alone does not fix
+    # that: it only decides how long each request waits before failing.
+    # Reading user_version takes no lock at all.
+    stamp = _schema_stamp()
+    try:
+        if conn.execute("PRAGMA user_version").fetchone()[0] == stamp:
+            return
+    except sqlite3.DatabaseError:
+        pass  # unreadable pragma: fall through and do the full init
+
     try:
         # executescript commits any existing transaction first, so begin the
         # write lock inside the script before any schema snapshot/migration.
@@ -388,6 +423,11 @@ def init_db(conn):
             "CREATE INDEX IF NOT EXISTS idx_preferences_scope_enabled "
             "ON preferences(scope, enabled, updated_ts)"
         )
+        # Stamp last, inside the same transaction, so the fast path is only
+        # armed once every statement above has actually landed. A crash
+        # part-way through leaves the old stamp and the next connection
+        # redoes the work.
+        conn.execute("PRAGMA user_version=%d" % stamp)
         conn.commit()
     except Exception:
         conn.rollback()
