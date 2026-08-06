@@ -918,8 +918,11 @@ class _LiveStatusBar extends StatelessWidget {
     }
     final parts = [
       'ctx ${(contextInfo?.contextPercent ?? 0).toStringAsFixed(1)}%',
-      'native ${contextInfo?.nativeContextLimit ?? 0}',
-      contextInfo?.contextMode ?? 'native',
+      // These two used to render as "native 0 | native" -- the same word
+      // twice, meaning a token limit and then a mode. Label each for what
+      // it is.
+      'native ${contextInfo?.nativeContextLimit ?? 0} tok',
+      'mode ${contextInfo?.contextMode ?? "native"}',
       'agents ${agentInfo?.activeAgents ?? 0}',
       'responses ${activityInfo?.activeCount ?? 0}',
       'tools ${responseInfo?.toolCalls ?? 0}/${activityInfo?.totalToolCalls ?? 0}',
