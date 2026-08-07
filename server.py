@@ -1043,8 +1043,71 @@ def _resolve_project(project):
     return p
 
 
+# The model resolved for the request currently being prepared. Set by
+# _resolve_model_and_system so the identity block can name the model that
+# is actually answering rather than offer a table of tiers to pick from.
+_ACTIVE_MODEL_HINT = ""
+
+
 def _join_system_parts(*parts):
     return "\n\n".join(p for p in parts if p)
+
+
+def _runtime_identity_block() -> str:
+    """Authoritative facts about what is actually serving this request.
+
+    Asked what model it was, the runtime answered from the weights -- and a
+    local 7B reported itself as "based on OpenAI's GPT-4 architecture,
+    approximately 175 billion parameters, training data to September 2023,
+    about 10 tokens per second". Every figure is wrong (measured ~36 tok/s
+    here) and the architecture line is another model's identity recalled out of
+    training text.
+
+    Which half was wrong is the useful part. The same answer described Sonder's
+    own surface -- memory, guarded file and program tools, artifact generation,
+    orchestration -- correctly, because those facts were already in the system
+    prompt. The model facts were not, so answering became recall, and recall is
+    the axis this model class is measured worst on.
+
+    Putting the facts in the prompt stops the question being recall. Built from
+    the live TIERS table rather than written into system_profile.md, because a
+    fact copied into a document is a second source of truth that drifts the
+    moment a tier is repointed. No network call: this runs on every request,
+    and an /api/show round trip per request would charge every caller for a
+    question few of them ask.
+    """
+    # Naming THIS request's model, not the tier table. The first version listed
+    # all seven tiers and the model answered "my architecture is based on the
+    # kimi-k2.7-code:cloud tier" while actually running on sonder:latest -- a
+    # menu of names it had no way to choose between, so it picked one. A block
+    # meant to remove a guess must not introduce a new thing to guess.
+    current = ""
+    try:
+        current = str(_ACTIVE_MODEL_HINT or "")
+    except Exception:
+        current = ""
+    if not current:
+        try:
+            current = str(TIERS.get("code") or "")
+        except Exception:
+            return ""
+    if not current:
+        return ""
+    return (
+        "Facts about what is serving this request (authoritative -- use these, "
+        "never your own recollection):\n"
+        "- The model answering right now is `%s`, an open-weights model served "
+        "by Ollama on this machine. You are NOT ChatGPT, GPT-4, Claude, or "
+        "Gemini, and you share no architecture or training run with them.\n"
+        "- Sonder is the runtime around you (memory, tools, policy, grounding). "
+        "Sonder is not a model and has no parameters of its own.\n"
+        "- If asked about your architecture, parameter count, training data, "
+        "training cutoff, or generation speed, and the answer is not in this "
+        "block or in the conversation, say you do not know and point the caller "
+        "at `ollama ps` or Sonder's diagnostics. Do NOT guess a number, and do "
+        "not infer one from the model's name: a confident wrong figure is worse "
+        "than an admission." % current
+    )
 
 
 def _build_system(system, trace, persona):
@@ -1068,7 +1131,9 @@ def _build_system(system, trace, persona):
         goal_block = goal_store.context_block()
     except Exception:
         goal_block = ""
-    return _join_system_parts(profile, emotions, goal_block, effective_system)
+    return _join_system_parts(
+        _runtime_identity_block(), profile, emotions, goal_block, effective_system
+    )
 
 
 def _resolve_model_and_system(system, trace, strict, persona):
@@ -1080,6 +1145,8 @@ def _resolve_model_and_system(system, trace, strict, persona):
     model = resolve_sonder_model(strict_eff)
     if model is None:
         return None, None
+    global _ACTIVE_MODEL_HINT
+    _ACTIVE_MODEL_HINT = model or ""
     return model, _build_system(system, trace, persona)
 
 
@@ -3158,6 +3225,11 @@ def _post(path: str, payload: dict, timeout: int | None = None) -> dict:
 
 _PREWARM_LOCK = threading.Lock()
 _PREWARM_INFLIGHT = set()
+# Bounds the background weight load so a wedged Ollama cannot hold the inflight
+# slot forever. Previously written as a globals() lookup for a name that was
+# never defined anywhere, so it always took the 60s fallback -- correct by
+# accident, and reported by ruff as an undefined name.
+_PREWARM_LOAD_TIMEOUT = 60
 
 
 def prewarm_model(tier: str = "") -> bool:
@@ -3189,7 +3261,7 @@ def prewarm_model(tier: str = "") -> bool:
             _post(
                 "/api/generate",
                 {"model": model, "keep_alive": KEEP_ALIVE},
-                timeout=_OLLAMA_STARTUP_TIMEOUT if "_OLLAMA_STARTUP_TIMEOUT" in globals() else 60,
+                timeout=_PREWARM_LOAD_TIMEOUT,
             )
         except Exception:
             pass
