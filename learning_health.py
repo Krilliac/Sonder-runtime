@@ -128,8 +128,55 @@ def _outcome_metrics(conn) -> dict:
         "autograded_positive_percent": _percent(autograded_good, autograded),
         "reviewed_outcomes": reviewed,
         "reviewed_positive_percent": _percent(reviewed_good, reviewed),
+        "reviewed_by_tier": _reviewed_by_tier(conn),
         "signals": signals,
     }
+
+
+# The tier an outcome is attributed to, when its interaction row is gone. Kept
+# in the breakdown rather than dropped: a per-tier table whose rows do not add
+# up to reviewed_outcomes is the same "count that is really a floor" bug this
+# module already carries scars from.
+_UNATTRIBUTED_TIER = "(unattributed)"
+
+
+def _reviewed_by_tier(conn) -> list[dict]:
+    """Caller-judged outcomes split by the tier that produced the work.
+
+    The aggregate reviewed rate says how often delegated work is rejected but
+    not by what. Without the split the obvious reading is "the local model is
+    too small, route to a bigger one" -- and measured on the live store that
+    reading is wrong: the local `code` tier and the `cloud-code` tier land
+    within a few points of each other, far inside the noise on the cloud tier's
+    sample. The split is what makes that visible, so it ships next to the
+    number it qualifies.
+    """
+    rows = conn.execute(
+        "SELECT i.tier AS tier, o.signal AS signal, COUNT(*) AS count "
+        "FROM outcomes o LEFT JOIN interactions i ON i.id = o.interaction_id "
+        "GROUP BY i.tier, o.signal"
+    ).fetchall()
+    totals: dict[str, list[int]] = {}
+    for row in rows:
+        signal = str(row["signal"])
+        if signal in _AUTOGRADED_SIGNALS:
+            continue
+        tier = str(row["tier"] or _UNATTRIBUTED_TIER)
+        count = int(row["count"] or 0)
+        bucket = totals.setdefault(tier, [0, 0])
+        bucket[0] += count
+        if reward.is_good(signal):
+            bucket[1] += count
+    return [
+        {
+            "tier": tier,
+            "outcomes": total,
+            "positive_percent": _percent(good, total),
+        }
+        for tier, (total, good) in sorted(
+            totals.items(), key=lambda item: (-item[1][0], item[0])
+        )
+    ]
 
 
 # Reference classes for interpreting a lesson's loss record, keyed by how many
@@ -412,6 +459,30 @@ def _distillation_reason_metrics(conn) -> dict:
     }
 
 
+# Below this many caller-judged outcomes a tier's rate is quoted with its
+# sample size doing the arguing. Four rejections out of five reads as 20% and
+# means nothing; the reader needs n in the same breath as the percentage.
+_TIER_SAMPLE_NOTE = 20
+
+
+def _reviewed_by_tier_lines(report: dict) -> list[str]:
+    """Render the caller-judged split, or nothing when there is no split to show."""
+    tiers = report.get("reviewed_by_tier") or []
+    if len(tiers) < 2:
+        # One tier (or none) is not a comparison, and printing a single row
+        # restating the aggregate is noise.
+        return []
+    lines = ["      by tier (which work is being rejected, not just how much):"]
+    for entry in tiers:
+        total = int(entry.get("outcomes", 0))
+        note = "" if total >= _TIER_SAMPLE_NOTE else "  <- small sample"
+        lines.append(
+            "        %-16s n=%-5d %s%% positive%s"
+            % (entry.get("tier", "?"), total, entry.get("positive_percent", 0), note)
+        )
+    return lines
+
+
 def _distillation_reason_lines(report: dict) -> list[str]:
     """Render the breakdown with recorded and unrecorded rows kept apart.
 
@@ -649,6 +720,7 @@ def format_report(report: dict) -> str:
             report.get("autograded_outcomes", 0),
             report.get("autograded_positive_percent", 0),
         ),
+        *_reviewed_by_tier_lines(report),
         # State the method's limit next to the number it produces. The split is
         # inferred from the SIGNAL NAME -- there is no recorded source -- so a
         # caller who ran the tests and recorded tests_passed lands in the

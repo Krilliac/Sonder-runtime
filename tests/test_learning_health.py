@@ -668,3 +668,50 @@ def test_in_flight_claims_are_not_counted_as_missing_reasons():
     assert report["distillation_reason_unrecorded"] == 0
     assert report["distillation_reason_recorded_percent"] == 100.0
     assert [row["state"] for row in report["distillation_reasons"]] == ["no_lesson"]
+
+
+def test_caller_judged_outcomes_are_attributed_to_the_tier_that_produced_them():
+    """The aggregate reviewed rate does not say which tier is being rejected.
+
+    Also pins the orphan rule: an outcome whose interaction row is gone stays
+    in the breakdown under its own label. An inner join would drop it, and a
+    per-tier table that does not add up to reviewed_outcomes is the same
+    "count is really a floor" defect this module already carries scars from.
+    """
+    conn = _conn()
+    try:
+        for interaction_id, tier in (
+            ("c1", "code"), ("c2", "code"), ("c3", "code"),
+            ("g1", "cloud-code"),
+        ):
+            memory_store.log_interaction(
+                conn, interaction_id, "task", "", "answer", tier
+            )
+        memory_store.record_outcome_row(conn, "c1", "accepted", 0.8)
+        memory_store.record_outcome_row(conn, "c2", "rejected", -0.5)
+        memory_store.record_outcome_row(conn, "c3", "rejected", -0.5)
+        memory_store.record_outcome_row(conn, "g1", "accepted", 0.8)
+        # No interaction row was ever logged for this one.
+        memory_store.record_outcome_row(conn, "vanished", "accepted", 0.8)
+        # Autograded: must not appear in a caller-judged breakdown at all.
+        memory_store.record_outcome_row(conn, "c1", "tests_passed", 1.0)
+
+        report = learning_health.build_report(conn)
+        rendered = learning_health.format_report(report)
+    finally:
+        conn.close()
+
+    # The invariant that makes the table trustworthy, asserted first so a
+    # regression reports the shortfall rather than a KeyError on whichever
+    # tier happened to go missing.
+    assert sum(row["outcomes"] for row in report["reviewed_by_tier"]) == report[
+        "reviewed_outcomes"
+    ]
+
+    by_tier = {row["tier"]: row for row in report["reviewed_by_tier"]}
+    assert by_tier["code"]["outcomes"] == 3
+    assert by_tier["code"]["positive_percent"] == 33.3
+    assert by_tier["cloud-code"]["outcomes"] == 1
+    assert by_tier["(unattributed)"]["outcomes"] == 1
+    assert "by tier" in rendered
+    assert "small sample" in rendered
