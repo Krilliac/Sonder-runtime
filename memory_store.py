@@ -1121,6 +1121,22 @@ def list_retryable_distillations(conn, limit=32):
     return [(str(row[0]), str(row[1] or "")) for row in rows]
 
 
+def count_retryable_distillations(conn) -> int:
+    """How many distillations are deferred in total, ignoring any batch limit.
+
+    ``list_retryable_distillations`` returns a LIMIT-bounded window, so counting
+    what stayed deferred within that window answers "how much of this batch
+    failed", not "how big is the backlog". A caller that drains 16 of 500 and
+    reports the window count prints "still deferred 0" with 484 outstanding.
+    """
+    return int(
+        conn.execute(
+            "SELECT COUNT(*) FROM lesson_distillations WHERE state=?",
+            (DISTILLATION_RETRYABLE,),
+        ).fetchone()[0]
+    )
+
+
 def mark_lesson_distillation_retryable(
     conn, interaction_id, claim_token, error="",
 ):

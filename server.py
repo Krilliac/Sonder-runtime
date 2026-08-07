@@ -2442,7 +2442,25 @@ def _drain_deferred_distillations(limit=16):
             stored += 1
         elif result.get("distillation_deferred"):
             deferred += 1
-    return {"drained": len(pending), "stored": stored, "deferred": deferred}
+    # `deferred` counts only what stayed deferred inside this LIMIT-bounded
+    # batch, which answers "how much of this batch failed" -- not "how big is
+    # the backlog". Draining 16 of 500 successfully reported "still deferred 0"
+    # with 484 outstanding. Report the real remainder alongside it.
+    backlog = deferred
+    try:
+        conn = _open_db()
+        try:
+            backlog = memory_store.count_retryable_distillations(conn)
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return {
+        "drained": len(pending),
+        "stored": stored,
+        "deferred": deferred,
+        "backlog": backlog,
+    }
 
 
 def _campaign_headline(
@@ -4530,8 +4548,12 @@ def campaign_generate_compile_execute_record(
     drain = _drain_deferred_distillations(limit=max(16, len(results)))
     if drain["drained"]:
         lines.append(
-            "deferred distillations drained: %d (lessons stored %d, still deferred %d)"
-            % (drain["drained"], drain["stored"], drain["deferred"]),
+            "deferred distillations drained: %d (lessons stored %d, "
+            "still deferred in batch %d, backlog remaining %d)"
+            % (
+                drain["drained"], drain["stored"], drain["deferred"],
+                drain.get("backlog", drain["deferred"]),
+            ),
         )
     for r in results:
         status = "PASS" if r["ok"] else "FAIL"
@@ -4871,8 +4893,12 @@ def campaign_repo_repair(
     drain = _drain_deferred_distillations(limit=max(16, len(results)))
     if drain["drained"]:
         lines.append(
-            "deferred distillations drained: %d (lessons stored %d, still deferred %d)"
-            % (drain["drained"], drain["stored"], drain["deferred"]),
+            "deferred distillations drained: %d (lessons stored %d, "
+            "still deferred in batch %d, backlog remaining %d)"
+            % (
+                drain["drained"], drain["stored"], drain["deferred"],
+                drain.get("backlog", drain["deferred"]),
+            ),
         )
     for r in results:
         status = "PASS" if r["ok"] else "FAIL"
