@@ -91,7 +91,7 @@ def allowed_roots(extra_roots: str = "") -> list[Path]:
         try:
             resolved = root.resolve()
         except OSError:
-            resolved = root.absolute()
+            resolved = _normalized_absolute(root)
         if resolved not in out:
             out.append(resolved)
     return out
@@ -103,11 +103,32 @@ def bypass_enabled() -> bool:
     )
 
 
+def _normalized_absolute(path: Path) -> Path:
+    """Absolute form of *path* with ``.``/``..`` collapsed lexically.
+
+    This is the fallback every ``resolve()`` call in this module degrades to,
+    and it exists because a bare ``Path.absolute()`` fallback makes containment
+    *more permissive* than the ``resolve()`` it replaces. ``absolute()`` does
+    not normalize ``..``, and ``_is_inside`` compares raw strings through
+    ``os.path.commonpath``, which treats ``..`` as an ordinary path component --
+    so ``<root>/../../../Windows/System32/config/SAM`` reads as *inside*
+    ``<root>`` when ``resolve()`` would have placed it firmly outside.
+
+    Lexical collapse is not symlink-aware, but on this branch ``resolve()`` has
+    already failed so no symlink information is available at all. Collapsing can
+    only move a path OUT of a root (``a/link/../..`` shortens), never into one,
+    so the degraded branch is never weaker than the normal one. ``normpath``
+    also clamps ``..`` at a drive or UNC share root exactly as ``resolve()``
+    does, so the two agree on the escaping cases that matter here.
+    """
+    return Path(os.path.normpath(path.absolute()))
+
+
 def _resolve_best_effort(path: Path) -> Path:
     try:
         return path.expanduser().resolve()
     except OSError:
-        return path.expanduser().absolute()
+        return _normalized_absolute(path.expanduser())
 
 
 def _workspace_config_path(env_name: str, default_name: str) -> Path:
@@ -246,8 +267,20 @@ def require_read_access(
 
 
 def _is_inside(path: Path, root: Path) -> bool:
+    """True when *path* is contained in *root*.
+
+    Both operands are normalized first. ``os.path.commonpath`` is purely
+    lexical and treats ``..`` as an ordinary component, so an un-normalized
+    argument makes containment answer YES for a path that escapes -- see
+    ``_normalized_absolute``. Callers normally pass resolved paths (for which
+    ``normpath`` is a no-op), but this is the single primitive every containment
+    decision in the module funnels through, so it must not depend on every
+    caller having normalized correctly.
+    """
+    path_text = os.path.normpath(str(path))
+    root_text = os.path.normpath(str(root))
     try:
-        return os.path.commonpath([str(path), str(root)]) == str(root)
+        return os.path.commonpath([path_text, root_text]) == root_text
     except ValueError:
         return False
 
@@ -464,7 +497,7 @@ def resolve_path(path: str, *, extra_roots: str = "", bypass: bool = False) -> P
     try:
         resolved = candidate.resolve()
     except OSError:
-        resolved = candidate.absolute()
+        resolved = _normalized_absolute(candidate)
     roots = allowed_roots(extra_roots if bypass else "")
     if bypass:
         return resolved

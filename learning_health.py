@@ -351,6 +351,102 @@ def _shared_blame_metrics(conn, loss_only_ids, quarantined_ids) -> dict:
     }
 
 
+# The four states a distillation row can finish in.
+# ``memory_store.distillation_reason_counts`` takes a state filter and applies
+# none by default, so an in-flight claimed or retryable row would otherwise land
+# in the unrecorded bucket. That row has no reason YET, which is a different
+# thing from having finished without one, and folding the two together would
+# make the recorded-coverage figure drift with queue depth.
+_TERMINAL_DISTILLATION_STATES = (
+    memory_store.DISTILLATION_STORED,
+    memory_store.DISTILLATION_NO_LESSON,
+    memory_store.DISTILLATION_LEGACY_NO_LESSON,
+    memory_store.DISTILLATION_CANCELLED,
+)
+
+# What a NULL ``result_reason`` is called when the breakdown is rendered for a
+# human. It is never written into the structured rows: those keep ``None``, so
+# no consumer can mistake the label for a reason the finalizer actually emitted.
+_UNRECORDED_REASON_LABEL = "(not recorded)"
+
+
+def _distillation_reason_metrics(conn) -> dict:
+    """Where distillation yield is lost, grouped by terminal state and reason.
+
+    ``distillation_yield`` says how much yield survived; nothing said where the
+    rest went. Answering that meant replaying historical interactions through a
+    live model, and the replay is what caught the semantic dedup gate being
+    dead in production -- a fault that reads off this breakdown immediately as
+    zero ``semantic_duplicate`` rows corpus-wide.
+
+    Rows whose reason is NULL stay ``None`` here and are counted in their own
+    bucket. They are the overwhelming majority of the live ledger -- 6712 of
+    6981 terminal rows, 96.1%, when this was written -- so reporting them as
+    zero, or naming them, would turn "we did not record this" into a confident
+    wrong answer about which gate fired.
+    """
+    rows = memory_store.distillation_reason_counts(
+        conn, states=_TERMINAL_DISTILLATION_STATES,
+    )
+    total = sum(int(row["count"] or 0) for row in rows)
+    recorded = sum(
+        int(row["count"] or 0) for row in rows if row.get("reason") is not None
+    )
+    return {
+        "distillation_reasons": rows,
+        "distillation_reason_rows": total,
+        "distillation_reason_recorded": recorded,
+        "distillation_reason_unrecorded": total - recorded,
+        "distillation_reason_recorded_percent": _percent(recorded, total),
+        "distillation_reason_note": (
+            "A reason names why one interaction's candidate ended where it "
+            "did. It can show which gate refuses the most candidates, and a "
+            "gate sitting at zero while its peers are non-zero is evidence "
+            "that gate never fires. It cannot speak for the rows reported as "
+            "not recorded: those predate the result_reason column or came "
+            "from a path that writes none (a cancelled row keeps its "
+            "explanation in last_error), so they are unknown, not unrefused. "
+            "Counts are one row per interaction, not one per attempt, and a "
+            "reason describes only the attempt that made the row terminal."
+        ),
+    }
+
+
+def _distillation_reason_lines(report: dict) -> list[str]:
+    """Render the breakdown with recorded and unrecorded rows kept apart.
+
+    Listing them together would put ``(not recorded)`` in the same list as
+    ``semantic_duplicate``, where it reads as one more rejection reason instead
+    of as the absence of an answer.
+    """
+    rows = report.get("distillation_reasons") or []
+    recorded = [row for row in rows if row.get("reason") is not None]
+    unrecorded = [row for row in rows if row.get("reason") is None]
+    return [
+        "  distillation reasons: %s of %s terminal row(s) carry one (%s%%)"
+        % (
+            report.get("distillation_reason_recorded", 0),
+            report.get("distillation_reason_rows", 0),
+            report.get("distillation_reason_recorded_percent", 0.0),
+        ),
+        "    recorded: %s"
+        % (
+            ", ".join(
+                "%s/%s=%s" % (row["state"], row["reason"], row["count"])
+                for row in recorded
+            )
+            or "(none yet)"
+        ),
+        "    %s: %s"
+        % (
+            _UNRECORDED_REASON_LABEL,
+            ", ".join("%s=%s" % (row["state"], row["count"]) for row in unrecorded)
+            or "none",
+        ),
+        "    %s" % report.get("distillation_reason_note", ""),
+    ]
+
+
 # Below this many caller-judged outcomes the reviewed rate is too noisy to gate
 # on, and the blended rate is the only thing left to look at.
 _MIN_REVIEWED_SAMPLE = 20
@@ -427,6 +523,7 @@ def build_report(conn) -> dict:
     sources, grounded_lessons, orphaned_lessons = _lesson_sources(conn)
     outcomes = _outcome_metrics(conn)
     lesson_outcomes = _lesson_outcome_metrics(conn)
+    distillation_reasons = _distillation_reason_metrics(conn)
     audit = memory_quality.audit(conn)
     embedding_state = memory_store.embedding_provenance_stats(
         conn,
@@ -508,6 +605,8 @@ def build_report(conn) -> dict:
         "distillation_yield": round(grounded_lessons / good_interactions, 3)
         if good_interactions
         else None,
+        # Yield says how much survived; this says where the rest went.
+        **distillation_reasons,
         "quality": quality,
         "embedding_model": embeddings.EMBED_IDENTITY,
         "embedding_revision": embeddings.EMBED_REVISION or None,
@@ -588,6 +687,7 @@ def format_report(report: dict) -> str:
         "    %s" % report.get("loss_attribution_note", ""),
         "  distillation yield: %s grounded lesson(s) per positive interaction"
         % ("n/a" if yield_value is None else yield_value),
+        *_distillation_reason_lines(report),
         "  embeddings: %s%% | duplicate rows: %s | vague: %s | privacy flags: %s"
         % (
             quality.get("embedding_percent", 0),

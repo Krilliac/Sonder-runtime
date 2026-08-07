@@ -207,8 +207,46 @@ def verify(name, artifact, spec=None):
 
 
 # External verifier backends promoted from the improvement fleet. Registered
-# defensively — a missing/broken ext module never breaks the core registry. Each
-# is Verdict-compatible (they import Verdict/VerifierUnavailable, defined above).
+# defensively — a missing/broken ext module never breaks the core registry.
+#
+# Their Verdict compatibility is STRUCTURAL, not by shared class: node_verifier
+# does `from verifiers import Verdict, VerifierUnavailable`, but sql_verifier and
+# json_schema_verifier each define their own Verdict namedtuple, so
+# `isinstance(v, verifiers.Verdict)` is False for those two. That is fine — the
+# only Verdict surface solver/ladder/reward touch is the .passed/.reason/.detail
+# fields, which every backend has.
+#
+# The exception class is NOT interchangeable that way. A backend that signals
+# "could not judge" MUST raise THIS module's VerifierUnavailable, or an
+# `except verifiers.VerifierUnavailable` around verify() silently misses it —
+# a same-named local subclass of RuntimeError is a different type. sql_verifier
+# and json_schema_verifier have no external tool and never raise it at all.
+# test_verifiers.py pins that rule for every promoted backend.
+def _register_ext(mod_name, fn_name):
+    """Resolve a promoted backend's entry point, tolerating the circular-import
+    window. A backend that imports from `verifiers` at module scope (node_verifier
+    does) is only half-initialized while THIS module executes, so `fn_name` may
+    not be bound on it yet and an eager getattr silently drops the backend —
+    `import node_verifier` before `import verifiers` used to leave "node_run"
+    missing from REGISTRY entirely. Bind a late-resolving shim in exactly that
+    window; a genuinely absent or broken module still raises out and stays
+    unregistered, so the core registry is unaffected either way."""
+    mod = __import__(mod_name)
+    fn = getattr(mod, fn_name, None)
+    if fn is not None:
+        return fn
+    if not getattr(getattr(mod, "__spec__", None), "_initializing", False):
+        raise AttributeError("module %r has no %r" % (mod_name, fn_name))
+
+    def _late(artifact, spec=None):
+        return getattr(sys.modules[mod_name], fn_name)(artifact, spec)
+
+    _late.__name__ = fn_name
+    _late.__doc__ = "late-bound %s.%s (mid circular import; resolved on first call)" % (
+        mod_name, fn_name)
+    return _late
+
+
 for _key, _mod, _fn in (
     ("node_run", "node_verifier", "node_run"),
     ("sql_valid", "sql_verifier", "sql_valid"),
@@ -216,6 +254,6 @@ for _key, _mod, _fn in (
     ("ruff_check", "ruff_verifier", "ruff_check"),
 ):
     try:
-        REGISTRY[_key] = getattr(__import__(_mod), _fn)
+        REGISTRY[_key] = _register_ext(_mod, _fn)
     except Exception:
         pass
