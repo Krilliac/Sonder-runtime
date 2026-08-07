@@ -408,3 +408,94 @@ def format_report(rows: list, final_errors: list, ok: bool, ran: bool = True) ->
         if len(final_errors) > 15:
             lines.append("  ... and %d more" % (len(final_errors) - 15))
     return "\n".join(lines)
+
+
+# --- Skeleton fill: the harness owns the declarations ------------------------
+#
+# The whole-file loop above asks a model to write a file, which means writing
+# its public surface. Measured over an 8-file C# project, that is the thing a
+# 7B-class model cannot do: the final error mix was CS1061 member-not-found
+# (28), CS0103 name-not-found (21), CS0272 assign-to-readonly (16), CS0117
+# no-such-definition (15), CS1503 argument-mismatch (13) -- every dominant
+# class two files disagreeing about an API rather than bad code inside a
+# method. Handing each file the REAL extracted signatures of its dependencies
+# did not fix it; one file was given another's actual surface and still called
+# four members that existed in neither the contract nor the extraction.
+#
+# So this mode stops asking. The caller supplies a skeleton whose declarations
+# are already correct, marked with body slots, and the model is asked for one
+# body at a time. Three things change:
+#
+#   * The project compiles to ZERO errors before any model output exists, so
+#     the baseline is trustworthy and every later error belongs to exactly one
+#     body.
+#   * A bad body reverts to its placeholder instead of poisoning the file. The
+#     whole-file mode's dominant failure -- 7 of 12 regenerations rejected as
+#     parse-broken, each reporting a LOWER masked count than the incumbent --
+#     cannot occur, because the model never writes the structure.
+#   * The metric stops being an error count, which would sit near zero by
+#     construction and say nothing, and becomes "bodies implemented / N".
+#
+# Deliberately language-agnostic: a slot is a comment marker naming the slot
+# followed by exactly one placeholder line. That shape holds for `// BODY:x` +
+# `throw new NotImplementedException();` in C-family languages and `# BODY:x` +
+# `raise NotImplementedError` in Python, which is why the marker is matched on
+# comment syntax rather than on any one language's grammar.
+BODY_MARKER = re.compile(
+    r"[ \t]*(?://|#|--|;)[ \t]*BODY:(?P<name>\w+)[ \t]*\n(?P<placeholder>[ \t]*\S[^\n]*)"
+)
+
+
+def body_slots(text: str) -> list:
+    """Every body slot in a skeleton, in source order."""
+    return [match.group("name") for match in BODY_MARKER.finditer(text or "")]
+
+
+def splice_body(text: str, name: str, body: str) -> str:
+    """Replace one slot's marker+placeholder with generated code.
+
+    Returns the text UNCHANGED when the slot is absent, so a caller cannot
+    silently believe it installed a body it did not -- compare the result
+    against the input to detect that.
+    """
+    def replace(match):
+        if match.group("name") != name:
+            return match.group(0)
+        indent = re.match(r"[ \t]*", match.group("placeholder")).group(0)
+        lines = [line.rstrip() for line in (body or "").strip().splitlines()]
+        if not lines:
+            return match.group(0)
+        return "\n".join(indent + line if line else "" for line in lines)
+
+    return BODY_MARKER.sub(replace, text or "")
+
+
+def body_signature(text: str, name: str) -> str:
+    """The declaration line owning a slot, for the prompt.
+
+    Walks back over blank and brace-only lines so the caller gets the
+    signature rather than the `{` that follows it.
+    """
+    lines = (text or "").splitlines()
+    for index, line in enumerate(lines):
+        if ("BODY:" + name) in line:
+            for back in range(index - 1, max(-1, index - 8), -1):
+                candidate = lines[back].strip()
+                if candidate and candidate not in ("{", "}", "(", ")"):
+                    return candidate
+            break
+    return name
+
+
+def collapse_bodies(text: str, filler: str = "...") -> str:
+    """The skeleton with every body collapsed -- a dependency brief.
+
+    This is the same text that compiles, so a brief handed to a dependent
+    cannot drift from the declarations it describes. That drift is what the
+    prose contract in the whole-file mode suffered from.
+    """
+    def replace(match):
+        indent = re.match(r"[ \t]*", match.group("placeholder")).group(0)
+        return indent + filler
+
+    return BODY_MARKER.sub(replace, text or "")

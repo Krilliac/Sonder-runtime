@@ -387,3 +387,62 @@ def test_fewer_real_errors_still_wins_when_nothing_is_masked():
     assert cg.score(["a.cs(1,1): error CS0246: x"]) < cg.score(
         ["a.cs(%d,1): error CS0246: x" % i for i in range(5)]
     )
+
+
+CS_SKELETON = """\
+public sealed class GameMap
+{
+    public int Width;
+
+    public bool IsWallCell(int x, int z)
+    {
+        // BODY:IsWallCell
+        throw new NotImplementedException();
+    }
+
+    public float RayWallDistance(Vector3 o, Vector3 d)
+    {
+        // BODY:RayWallDistance
+        throw new NotImplementedException();
+    }
+}
+"""
+
+PY_SKELETON = """\
+def hit(x):
+    # BODY:hit
+    raise NotImplementedError
+"""
+
+
+def test_body_slots_and_signatures_are_language_agnostic():
+    """A slot is a comment marker plus one placeholder line, not C# grammar."""
+    assert cg.body_slots(CS_SKELETON) == ["IsWallCell", "RayWallDistance"]
+    assert cg.body_slots(PY_SKELETON) == ["hit"]
+    assert cg.body_signature(CS_SKELETON, "IsWallCell") == (
+        "public bool IsWallCell(int x, int z)"
+    )
+    # Walks back past the brace rather than returning it.
+    assert cg.body_signature(PY_SKELETON, "hit") == "def hit(x):"
+
+
+def test_splice_replaces_only_the_named_slot_and_keeps_indentation():
+    out = cg.splice_body(CS_SKELETON, "IsWallCell", "return x >= 0;")
+    assert "        return x >= 0;" in out
+    # The other slot is untouched -- one bad body cannot disturb its neighbours.
+    assert "// BODY:RayWallDistance" in out
+    assert cg.body_slots(out) == ["RayWallDistance"]
+
+
+def test_splice_of_a_missing_or_empty_body_is_a_no_op():
+    """The caller detects failure by identity, so a silent partial write is not
+    allowed to look like a success."""
+    assert cg.splice_body(CS_SKELETON, "NoSuchSlot", "x = 1;") == CS_SKELETON
+    assert cg.splice_body(CS_SKELETON, "IsWallCell", "   \n  ") == CS_SKELETON
+
+
+def test_collapse_bodies_yields_a_brief_that_cannot_drift():
+    brief = cg.collapse_bodies(CS_SKELETON)
+    assert "public bool IsWallCell(int x, int z)" in brief
+    assert "NotImplementedException" not in brief
+    assert cg.body_slots(brief) == []
