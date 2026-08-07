@@ -3902,10 +3902,28 @@ def record_outcome(interaction_id: str, signal: str) -> str:
     """Feed a real-world outcome back into sonder's learning loop.
 
     Call this after a sonder/offload response once you know how it went.
-    signal is one of: tests_passed, used, copied, edited, accepted, compiled,
-    rejected, failed.
-    A good outcome triggers a distilled 'lesson' that future prompts will retrieve.
     Pass the id from the '[interaction_id: <id>]' footer of the response.
+    A good outcome triggers a distilled 'lesson' that future prompts retrieve.
+
+    Signals split into two populations that health reporting keeps apart,
+    because averaging them produces a number that reads like accuracy and is
+    not one:
+
+      JUDGED BY YOU -- used, copied, edited, accepted, rejected.
+        Prefer these. This is the population `reviewed_positive_percent`
+        measures: how often work a caller delegated turned out to be good.
+
+      MACHINE-GRADED -- tests_passed, failed, compiled.
+        Reserved for a runner reporting what the code did. The self-generated
+        curriculum floods these (7000+ rows against ~190 judged), so anything
+        recorded here is effectively invisible in the reviewed rate.
+
+    So if YOU ran the tests and are reporting your own verdict, prefer
+    `accepted` or `rejected` over `tests_passed`/`failed` -- otherwise a real
+    caller judgement lands in the self-marked bucket and stops counting toward
+    the only quality figure anyone should trust. The split is inferred from the
+    signal name; there is no recorded source, so this is a convention the caller
+    has to honour rather than something the runtime can enforce.
     """
     _maybe_live_reload()
     if signal not in reward.VALID_SIGNALS:
