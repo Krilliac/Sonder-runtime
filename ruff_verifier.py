@@ -19,14 +19,15 @@ This is deliberately a *style* gate, not a correctness oracle — it composes
 with python_exec/pytest_run rather than replacing them (e.g. run ruff_check
 first as a cheap pre-filter, then the expensive real-execution verifier).
 """
-import collections
 import subprocess
 
-Verdict = collections.namedtuple("Verdict", ["passed", "reason", "detail"])
-
-
-class VerifierUnavailable(RuntimeError):
-    """ruff isn't runnable here — 'could not judge', not 'artifact failed'."""
+# Reuse the registry's OWN Verdict/VerifierUnavailable rather than declaring
+# same-named local copies. A local `class VerifierUnavailable(RuntimeError)` is a
+# DIFFERENT type from verifiers.VerifierUnavailable, so an
+# `except verifiers.VerifierUnavailable` around verifiers.verify("ruff_check", ...)
+# would not catch a missing-ruff signal — it would escape as a bare RuntimeError.
+# node_verifier already imports the shared names; this matches it.
+from verifiers import Verdict, VerifierUnavailable  # noqa: F401  (Verdict re-exported)
 
 
 def _last_line(text):

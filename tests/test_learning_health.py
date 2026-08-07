@@ -553,3 +553,118 @@ def test_never_validated_lessons_are_surfaced_next_to_the_synthetic_count():
     assert "never validated by an outcome: 2 (synthetic: 1)" in (
         learning_health.format_report(report)
     )
+
+
+def _distillation_row(conn, interaction_id, state, reason):
+    conn.execute(
+        "INSERT INTO lesson_distillations(interaction_id, state, result_reason) "
+        "VALUES(?, ?, ?)",
+        (interaction_id, state, reason),
+    )
+    conn.commit()
+
+
+def test_distillation_reason_breakdown_says_where_yield_was_lost():
+    """distillation_yield reported how much yield survived and nothing reported
+    where the rest went, so answering "which gate refuses candidates?" meant
+    replaying 80 historical interactions through a live model -- the database
+    could not answer it. That replay is what caught the semantic dedup gate
+    being dead in production, a fault that reads straight off this breakdown as
+    zero semantic_duplicate rows corpus-wide.
+
+    The breakdown must therefore reach the report and the rendered view, and it
+    must group by state as well as reason: 'stored' and 'no_lesson' are
+    different outcomes and a bare reason column cannot tell them apart."""
+    conn = _conn()
+    try:
+        _distillation_row(conn, "d1", "no_lesson", "semantic_duplicate")
+        _distillation_row(conn, "d2", "no_lesson", "semantic_duplicate")
+        _distillation_row(conn, "d3", "no_lesson", "exact_duplicate")
+        _distillation_row(conn, "d4", "stored", "stored")
+        report = learning_health.build_report(conn)
+    finally:
+        conn.close()
+
+    assert report["distillation_reasons"] == [
+        {"state": "no_lesson", "reason": "semantic_duplicate", "count": 2},
+        {"state": "no_lesson", "reason": "exact_duplicate", "count": 1},
+        {"state": "stored", "reason": "stored", "count": 1},
+    ]
+    assert report["distillation_reason_rows"] == 4
+    assert report["distillation_reason_recorded"] == 4
+    assert report["distillation_reason_unrecorded"] == 0
+    assert report["distillation_reason_recorded_percent"] == 100.0
+    rendered = learning_health.format_report(report)
+    assert "distillation reasons: 4 of 4 terminal row(s) carry one (100.0%)" in rendered
+    assert "recorded: no_lesson/semantic_duplicate=2" in rendered
+
+
+def test_rows_predating_the_reason_column_are_a_bucket_not_a_zero():
+    """result_reason is NULL on every row written before the column existed,
+    and that is 6712 of the live ledger's 6981 terminal rows (2026-08-07) --
+    96.1%. Reporting those as zero, or naming them, would turn "we never
+    recorded this" into a confident wrong answer about which gate fired, which
+    is exactly the mistake this breakdown exists to prevent.
+
+    So: the unrecorded rows keep reason=None in the structured report (never an
+    invented string), they are counted in their own bucket, and the rendered
+    view lists them apart from the recorded reasons so '(not recorded)' cannot
+    read as one more rejection reason with a name."""
+    conn = _conn()
+    try:
+        _distillation_row(conn, "legacy1", "legacy_no_lesson", None)
+        _distillation_row(conn, "legacy2", "legacy_no_lesson", None)
+        _distillation_row(conn, "legacy3", "stored", None)
+        _distillation_row(conn, "cancelled1", "cancelled", None)
+        _distillation_row(conn, "recent", "no_lesson", "not_concrete")
+        report = learning_health.build_report(conn)
+    finally:
+        conn.close()
+
+    assert {"state": "legacy_no_lesson", "reason": None, "count": 2} in (
+        report["distillation_reasons"]
+    )
+    assert report["distillation_reason_rows"] == 5
+    assert report["distillation_reason_recorded"] == 1
+    assert report["distillation_reason_unrecorded"] == 4
+    assert report["distillation_reason_recorded_percent"] == 20.0
+    # No row anywhere in the structured breakdown invents a name for NULL.
+    assert not [
+        row
+        for row in report["distillation_reasons"]
+        if row["reason"] == learning_health._UNRECORDED_REASON_LABEL
+    ]
+    rendered = learning_health.format_report(report)
+    assert "distillation reasons: 1 of 5 terminal row(s) carry one (20.0%)" in rendered
+    assert "recorded: no_lesson/not_concrete=1" in rendered
+    assert "(not recorded): legacy_no_lesson=2, cancelled=1, stored=1" in rendered
+    assert "unknown, not unrefused" in rendered
+
+
+def test_in_flight_claims_are_not_counted_as_missing_reasons():
+    """memory_store.distillation_reason_counts applies no state filter by
+    default, so a claimed or retryable row -- which cannot have a reason yet,
+    because nothing has decided its outcome -- would be counted alongside rows
+    that finished without one. That would make the recorded-coverage figure
+    move with queue depth instead of with recording, and would report an
+    in-flight interaction as a distillation whose reason went unrecorded.
+
+    Only the four terminal states are counted."""
+    conn = _conn()
+    try:
+        _distillation_row(conn, "done", "no_lesson", "not_concrete")
+        _distillation_row(conn, "retrying", "retryable", None)
+        conn.execute(
+            "INSERT INTO lesson_distillations(interaction_id, state, "
+            "claim_token, owner_pid, owner_identity, claimed_at) "
+            "VALUES('inflight', 'claimed', 'tok', 1, 'owner', 1.0)"
+        )
+        conn.commit()
+        report = learning_health.build_report(conn)
+    finally:
+        conn.close()
+
+    assert report["distillation_reason_rows"] == 1
+    assert report["distillation_reason_unrecorded"] == 0
+    assert report["distillation_reason_recorded_percent"] == 100.0
+    assert [row["state"] for row in report["distillation_reasons"]] == ["no_lesson"]

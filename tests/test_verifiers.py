@@ -114,3 +114,68 @@ def test_registry_covers_all_documented_backends():
     for name in ("python_exec", "program_run", "pytest_run", "typecheck",
                  "cpp_compile", "llm_judge"):
         assert name in V.REGISTRY
+
+
+# --- promoted ext backends: the shared-exception contract ------------------
+# The registration block claimed every promoted backend used verifiers' own
+# VerifierUnavailable. ruff_verifier.py declared its OWN
+# `class VerifierUnavailable(RuntimeError)` instead, a different type, so
+# `except verifiers.VerifierUnavailable` around verifiers.verify("ruff_check", ...)
+# did not catch a missing-ruff signal — it escaped as a bare RuntimeError and the
+# caller could not tell "could not judge" from a crash. These pin the rule for
+# every promoted backend, not just the one that broke it.
+_PROMOTED_EXT_MODULES = ("node_verifier", "sql_verifier", "json_schema_verifier",
+                         "ruff_verifier")
+
+
+def test_ext_backends_reuse_the_shared_unavailable_class():
+    """A promoted backend that declares a VerifierUnavailable must reuse THIS
+    module's class. A same-named local subclass of RuntimeError is a distinct
+    type that `except verifiers.VerifierUnavailable` misses (ruff_verifier had
+    exactly that). Backends with no external tool (sql/json) declare none, which
+    is fine — the rule is 'if you declare it, it is the shared one'."""
+    for mod_name in _PROMOTED_EXT_MODULES:
+        mod = __import__(mod_name)
+        local = getattr(mod, "VerifierUnavailable", None)
+        if local is not None:
+            assert local is V.VerifierUnavailable, (
+                "%s.VerifierUnavailable is a private class; "
+                "except verifiers.VerifierUnavailable would not catch it" % mod_name)
+
+
+def test_ruff_missing_binary_is_caught_by_shared_unavailable():
+    """The concrete failure the private class caused: a caller guarding
+    verifiers.verify() with the registry's own exception type. With a private
+    class this raised out uncaught, so this exercises the real (unmonkeypatched)
+    FileNotFoundError path through the registry seam."""
+    assert "ruff_check" in V.REGISTRY
+    with pytest.raises(V.VerifierUnavailable):
+        V.verify("ruff_check", "x = 1\n",
+                 {"ruff": "definitely-not-a-real-ruff-binary-zzz"})
+
+
+def test_promoted_backends_register_regardless_of_import_order():
+    """node_verifier does `from verifiers import ...` at module scope, so when it
+    is imported FIRST it is still half-initialized while verifiers' registration
+    loop runs; the loop's eager getattr then found no `node_run`, swallowed the
+    AttributeError, and left "node_run" permanently missing from REGISTRY. Whether
+    a backend exists must not depend on which module the process imported first,
+    so this asserts the same key set from both orders in fresh interpreters."""
+    import subprocess
+    import sys as _sys
+
+    root = os.path.dirname(os.path.abspath(V.__file__))
+
+    def keys_for(first_import):
+        code = ("import %s\nimport verifiers\n"
+                "print(','.join(sorted(verifiers.REGISTRY)))" % first_import)
+        p = subprocess.run([_sys.executable, "-c", code], cwd=root,
+                           capture_output=True, timeout=120)
+        assert p.returncode == 0, p.stderr.decode("utf-8", "replace")
+        return p.stdout.decode("utf-8", "replace").strip().splitlines()[-1]
+
+    baseline = keys_for("verifiers")
+    assert "node_run" in baseline and "ruff_check" in baseline
+    for backend in ("node_verifier", "ruff_verifier"):
+        assert keys_for(backend) == baseline, (
+            "importing %s first changed the registry" % backend)
