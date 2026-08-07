@@ -1241,6 +1241,42 @@ def heartbeat(run_id, owner_id, lease_seconds=LEASE_SECONDS):
     return cursor.rowcount > 0
 
 
+def prune_workspaces(retention_days=None):
+    """Remove scratch workspaces for runs that have finished.
+
+    Backups were pruned on a retention policy from the day this shipped;
+    workspaces never were, so they grew without bound -- measured, 508 MB from
+    five runs, roughly 100 MB of full source copy each.
+
+    Only terminal runs are touched. A workspace is the scratch copy where edits
+    happened; rollback restores from the BACKUP, which has its own retention and
+    is untouched here, so discarding a finished run's workspace loses no
+    recovery path. An unknown run id is left alone rather than assumed dead.
+    """
+    root = workspaces_root()
+    if not root.exists():
+        return []
+    days = int(
+        retention_days if retention_days is not None else settings()["retention_days"]
+    )
+    cutoff = time.time() - max(1, days) * 86400
+    phases = {run["id"]: run["phase"] for run in list_runs(500)}
+    removed = []
+    for path in root.glob("selfmod-*"):
+        phase = phases.get(path.name)
+        if phase is None or phase in ACTIVE_PHASES:
+            continue
+        try:
+            if path.stat().st_mtime >= cutoff:
+                continue
+        except OSError:
+            continue
+        with contextlib.suppress(OSError):
+            shutil.rmtree(path)
+            removed.append(path.name)
+    return removed
+
+
 def prune_backups(retention_days=None, retention_bytes=None):
     config = settings()
     days = int(retention_days if retention_days is not None else config["retention_days"])
