@@ -74,6 +74,29 @@ DEFAULT_PARSE_ERROR_RE = (
     r"tuple must contain|unclosed|missing closing)"
 )
 
+# Phase 0, and the one this harness itself got wrong. Two ways a build reports a
+# number that is not a count of anything:
+#
+#   * The compiler gave up at its own error ceiling. clang stops at 20 BY
+#     DEFAULT; MSVC at 100. The remainder is never emitted, so the total is a
+#     cap. The marker line itself matches DEFAULT_ERROR_RE, so it read as one
+#     more ordinary error -- the same 1-vs-109 failure as the parse and declare
+#     phases, one notch further along, and missed when those were added.
+#
+#   * The build never ran, or was killed. This harness's own
+#     "error: build could not run: ..." string matches DEFAULT_ERROR_RE and
+#     counts as exactly ONE error in the TRUSTWORTHY tier -- so a candidate
+#     whose build never launched outscored an honest one with thirty real
+#     errors, and every later attempt was compared against that fiction. A build
+#     killed by a timeout before printing any error line counted as ZERO, which
+#     format_report renders as BUILD SUCCEEDED.
+DEFAULT_TRUNCATED_ERROR_RE = (
+    r"(?i)(?:too many errors|error count exceeds|maximum number of errors|"
+    r"stopping compilation|-ferror-limit|"
+    r"build could not run|build timed out|timed out after|"
+    r"build did not run)"
+)
+
 # Phase 2, DECLARE. A type that parses but cannot be *defined* -- a duplicate
 # member, a redefinition, a conflicting declaration -- leaves the compiler with
 # no usable symbol for it, so it stops before binding method bodies and every
@@ -208,15 +231,26 @@ def count_unreliable(
     errors: list,
     parse_regex: str = DEFAULT_PARSE_ERROR_RE,
     definition_regex: str = DEFAULT_DEFINITION_ERROR_RE,
+    truncated_regex: str = DEFAULT_TRUNCATED_ERROR_RE,
 ) -> int:
     """How many errors stop the compiler before it reports the rest.
 
     While any of these stand, len(errors) is a floor, not a total: it says how
     far the compiler got, not how broken the project is.
     """
-    parse = re.compile(parse_regex)
-    define = re.compile(definition_regex)
-    return sum(1 for e in errors if parse.search(e) or define.search(e))
+    patterns = [re.compile(r) for r in (parse_regex, definition_regex, truncated_regex)]
+    return sum(1 for e in errors if any(p.search(e) for p in patterns))
+
+
+def build_ran(output: str, truncated_regex: str = DEFAULT_TRUNCATED_ERROR_RE) -> bool:
+    """Whether the build actually executed and reported on the code.
+
+    A build that could not launch, or was killed, tells you nothing about the
+    source -- and an empty error list from one is NOT a pass. Callers must check
+    this before reading success from a zero count, because zero errors from a
+    build that never ran renders as BUILD SUCCEEDED.
+    """
+    return not re.search(truncated_regex, output or "")
 
 
 def score(
@@ -235,10 +269,17 @@ def score(
             len(errors))
 
 
+def truncated_blocked(errors: list, truncated_regex: str = DEFAULT_TRUNCATED_ERROR_RE) -> int:
+    """How many errors say the report itself was capped, or never produced."""
+    pattern = re.compile(truncated_regex)
+    return sum(1 for e in errors if pattern.search(e))
+
+
 def describe_total(
     errors: list,
     parse_regex: str = DEFAULT_PARSE_ERROR_RE,
     definition_regex: str = DEFAULT_DEFINITION_ERROR_RE,
+    truncated_regex: str = DEFAULT_TRUNCATED_ERROR_RE,
 ) -> str:
     """Report a total, flagging when it cannot be trusted, and why."""
     reasons = []
@@ -248,6 +289,9 @@ def describe_total(
     undeclared = definition_blocked(errors, definition_regex)
     if undeclared:
         reasons.append("%d failed definition(s)" % undeclared)
+    capped = truncated_blocked(errors, truncated_regex)
+    if capped:
+        reasons.append("%d capped-or-unrun build(s)" % capped)
     if not reasons:
         return "%d total" % len(errors)
     return ("%d total (UNRELIABLE: %s are masking the semantic count)"
@@ -308,14 +352,30 @@ def shrink_rejected(previous: str, candidate: str, floor: float = SHRINK_FLOOR) 
     return (len(candidate) / max(1, len(previous))) < floor
 
 
-def format_report(rows: list, final_errors: list, ok: bool) -> str:
-    """Human-readable outcome. Honest about what is unproven."""
+def format_report(rows: list, final_errors: list, ok: bool, ran: bool = True) -> str:
+    """Human-readable outcome. Honest about what is unproven.
+
+    ``ran`` says the build actually executed. It defaults True for callers that
+    cannot tell, but passing it matters: a build killed by a timeout before it
+    printed an error line yields an EMPTY error list, and an empty list is
+    indistinguishable from a clean compile unless someone says so.
+    """
     lines = ["=== codegen build loop ==="]
     for row in rows:
         lines.append(
             "  %-24s %s" % (row["name"], row["note"])
         )
     lines.append("")
+    if not ran:
+        lines.append("BUILD DID NOT RUN")
+        lines.append(
+            "The build could not be launched or was killed, so nothing here "
+            "says anything about the code. This is NOT a pass, and an empty "
+            "error list from an unrun build is not a clean compile."
+        )
+        for e in final_errors[:5]:
+            lines.append("  " + e[:200])
+        return "\n".join(lines)
     if ok:
         lines.append("BUILD SUCCEEDED")
         lines.append(

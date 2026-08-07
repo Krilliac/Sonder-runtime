@@ -14085,7 +14085,15 @@ def ensemble_answer(
 
 
 def _codegen_build(program, args_json, cwd, timeout, token, approval, extra_roots):
-    """Run the project's own build and return its combined output."""
+    """Run the project's own build and return its combined output.
+
+    Every branch that did not actually compile the code says so in words
+    codegen_loop.build_ran() recognises. Without that, an infrastructure
+    failure was scored as a candidate: "error: build could not run: ..."
+    matches the error regex, counted as exactly ONE error in the trustworthy
+    tier, and beat an honest candidate with thirty real errors -- so a build
+    that never launched won, and every later attempt was compared against it.
+    """
     try:
         data = workbench.run_program(
             program,
@@ -14099,7 +14107,23 @@ def _codegen_build(program, args_json, cwd, timeout, token, approval, extra_root
         return "error: build could not run: %s" % exc
     if not isinstance(data, dict):
         return str(data)
-    return "%s\n%s" % (data.get("stdout", ""), data.get("stderr", ""))
+    stdout = data.get("stdout", "") or ""
+    stderr = data.get("stderr", "") or ""
+    parts = []
+    # A killed build reports whatever it managed to print, which can be nothing
+    # at all -- and an empty error list reads as a clean compile. Say it
+    # explicitly rather than let silence mean success. workbench clamps the
+    # requested timeout to its own maximum, so this fires on ordinary builds,
+    # not just pathological ones.
+    if data.get("timed_out"):
+        parts.append("error: build timed out after %ss" % data.get("timeout", timeout))
+    if data.get("stdout_truncated") or data.get("stderr_truncated"):
+        # The captured window keeps the head, and MSBuild prints its error
+        # summary at the tail, so the errors are exactly what gets dropped.
+        parts.append("error: build output was truncated; the error summary may be missing")
+    parts.append(stdout)
+    parts.append(stderr)
+    return "\n".join(p for p in parts if p)
 
 
 @mcp.tool()
@@ -14164,9 +14188,15 @@ def codegen_build_loop(
     except re.error as exc:
         return "ERROR: bad error_regex: %s" % exc
 
+    # Set when a build fails to launch or is killed. Such a build says nothing
+    # about the code, so its error list must never be scored against a real
+    # candidate and must never be read as a pass.
+    build_state = {"ran": True}
+
     def run_build():
         out = _codegen_build(build_program, build_args_json, project_dir,
                              timeout, token, approval, extra_roots)
+        build_state["ran"] = codegen_loop.build_ran(out)
         return codegen_loop.count_errors(out, error_regex)
 
     def read(name):
@@ -14221,6 +14251,12 @@ def codegen_build_loop(
                 return "ERROR: could not write %s: %s" % (name, exc)
 
             attempt_errors = run_build()
+            if not build_state["ran"]:
+                # Nothing was compiled, so this attempt is not evidence about
+                # the code and must not be scored. Stop rather than keep
+                # generating against a build that cannot run.
+                note = "attempt %d abandoned: the build did not run" % attempt
+                break
             attempt_score = codegen_loop.score(attempt_errors)
             if best_total is None or attempt_score < best_total:
                 best_code, best_total = code, attempt_score
@@ -14239,7 +14275,9 @@ def codegen_build_loop(
         rows.append({"name": name, "note": note})
 
     final = run_build()
-    return codegen_loop.format_report(rows, final, ok=not final)
+    return codegen_loop.format_report(
+        rows, final, ok=not final and build_state["ran"], ran=build_state["ran"],
+    )
 
 
 @mcp.tool()
