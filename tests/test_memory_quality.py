@@ -174,3 +174,44 @@ def test_orphan_fts_is_zero_on_a_clean_store(tmp_path):
         assert memory_quality.audit(conn)["orphan_fts"] == 0
     finally:
         conn.close()
+
+
+def test_retryable_backlog_is_not_capped_by_the_drain_window():
+    """list_retryable_distillations returns a LIMIT-bounded window, so counting
+    what stayed deferred inside it answers "how much of this batch failed", not
+    "how big is the backlog". Draining 16 of 500 successfully reported
+    "still deferred 0" with 484 outstanding."""
+    import sqlite3
+
+    import memory_store as ms
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    ms.init_db(conn)
+    try:
+        for i in range(500):
+            conn.execute(
+                "INSERT INTO lesson_distillations("
+                "interaction_id, state, signal, attempts, created_ts, updated_ts)"
+                " VALUES (?,?,?,?,?,?)",
+                ("i%d" % i, ms.DISTILLATION_RETRYABLE, "tests_passed", 1, 1, 1),
+            )
+        conn.commit()
+        assert len(ms.list_retryable_distillations(conn, 16)) == 16
+        assert ms.count_retryable_distillations(conn) == 500
+    finally:
+        conn.close()
+
+
+def test_retryable_backlog_is_zero_on_a_clean_store():
+    import sqlite3
+
+    import memory_store as ms
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    ms.init_db(conn)
+    try:
+        assert ms.count_retryable_distillations(conn) == 0
+    finally:
+        conn.close()
