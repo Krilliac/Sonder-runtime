@@ -1042,7 +1042,16 @@ class LearningHealthInfo {
   final int goodOutcomes;
   final int badOutcomes;
   final double outcomeCoveragePercent;
+
+  /// Blended positive rate. Dominated by autograded outcomes -- the runtime
+  /// marking its own curriculum -- so it is NOT an accuracy figure and must
+  /// never be shown on its own. Use [reviewedPositivePercent] for the number
+  /// that says whether delegated work was any good.
   final double positivePercent;
+  final double reviewedPositivePercent;
+  final int reviewedOutcomes;
+  final double autogradedPositivePercent;
+  final int autogradedOutcomes;
   final int lessons;
   final int facts;
   final int groundedLessons;
@@ -1062,6 +1071,10 @@ class LearningHealthInfo {
     required this.badOutcomes,
     required this.outcomeCoveragePercent,
     required this.positivePercent,
+    required this.reviewedPositivePercent,
+    required this.reviewedOutcomes,
+    required this.autogradedPositivePercent,
+    required this.autogradedOutcomes,
     required this.lessons,
     required this.facts,
     required this.groundedLessons,
@@ -1083,6 +1096,10 @@ class LearningHealthInfo {
       badOutcomes: _asInt(json['bad_outcomes']),
       outcomeCoveragePercent: _asDouble(json['outcome_coverage_percent']),
       positivePercent: _asDouble(json['positive_percent']),
+      reviewedPositivePercent: _asDouble(json['reviewed_positive_percent']),
+      reviewedOutcomes: _asInt(json['reviewed_outcomes']),
+      autogradedPositivePercent: _asDouble(json['autograded_positive_percent']),
+      autogradedOutcomes: _asInt(json['autograded_outcomes']),
       lessons: _asInt(json['lessons']),
       facts: _asInt(json['facts']),
       groundedLessons: _asInt(json['grounded_lessons']),

@@ -1674,11 +1674,18 @@ class _LearningHealthPanel extends StatelessWidget {
           color: statusColor,
         ),
         const SizedBox(height: 10),
+        // Shows CALLER-JUDGED work, not the blended rate. The blend is
+        // dominated by autograded outcomes -- the runtime marking its own
+        // curriculum -- so on this store it reads 96% where delegated work
+        // succeeds 53% of the time. A near-full green bar beside an
+        // "attention" status is the most misleading thing this screen could
+        // show, and this is the surface a non-CLI user actually looks at.
         _MeterBar(
-          label: 'Positive',
-          percent: health.positivePercent,
-          detail:
-              '${health.goodOutcomes} positive, ${health.badOutcomes} negative signals',
+          label: 'Caller-judged',
+          percent: health.reviewedPositivePercent,
+          detail: '${health.reviewedOutcomes} judged by a caller  |  '
+              'autograded ${health.autogradedPositivePercent.toStringAsFixed(1)}% '
+              'of ${health.autogradedOutcomes} (self-marked)',
         ),
         const SizedBox(height: 10),
         _MeterBar(
