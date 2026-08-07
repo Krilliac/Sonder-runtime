@@ -547,3 +547,49 @@ def test_manual_rollback_preserves_post_deployment_recreated_file(isolated):
         selfmod.rollback(run["id"])
 
     assert (root / "obsolete.txt").read_bytes() == replacement
+
+
+def test_status_counts_every_run_not_just_the_recent_window(isolated):
+    """The counts were computed from list_runs(20) -- ORDER BY created_ts DESC
+    LIMIT 20 -- and nothing ever deletes from selfmod_runs. So a run parked in
+    `reviewing` or `approved`, exactly where one waits for a human, fell out of
+    the count after 20 newer runs and the operator surface read `active: 0`.
+
+    The asymmetry that marks it a bug: reconcile_interrupted and
+    reconcile_stale_deployment already query every row. Only the human-facing
+    number was windowed.
+    """
+    def _insert(conn, run_id, phase, created, manifest=None):
+        conn.execute(
+            "INSERT INTO selfmod_runs("
+            "id, objective, problem, evidence_json, files_json, criteria_json,"
+            "risk, expected_benefit, rollback_plan, repository_root, phase, mode,"
+            "git_status_start, source_fingerprint, backup_manifest,"
+            "created_ts, updated_ts, budgets_json)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (run_id, "objective", "problem", "[]", "[]", "[]", "medium",
+             "benefit", "rollback", "/repo", phase, "propose", "", "fp",
+             manifest, created, created, "{}"),
+        )
+
+    with selfmod._tx() as conn:
+        # One old run awaiting a human, then 25 newer ones to bury it.
+        _insert(conn, "parked", "reviewing", 1, manifest="manifest.json")
+        for i in range(25):
+            _insert(conn, "newer%02d" % i, "restored", 100 + i)
+
+    # Assert through status_data first: it exists in both the old and new code,
+    # so a regression fails on the COUNT rather than on a missing helper.
+    data = selfmod.status_data()
+    assert data["active"] == 1, "a parked run must not vanish behind newer ones"
+    assert data["rollback_points"] == 1, "its backup manifest is still on disk"
+    assert data["runs_shown"] == 20, "the LIST stays windowed"
+
+    totals = selfmod.run_totals()
+    assert totals["active"] == 1
+    assert totals["total_runs"] == 26
+
+    text = selfmod.format_status(data)
+    assert "active: 1" in text
+    # The window must be declared, or three visible rows read as all of them.
+    assert "showing" in text and "of 26" in text

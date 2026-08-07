@@ -1273,15 +1273,50 @@ def prune_backups(retention_days=None, retention_bytes=None):
     return removed
 
 
+def run_totals():
+    """Counts over EVERY run, not just the most recent window.
+
+    These were computed from list_runs(20) -- ORDER BY created_ts DESC LIMIT 20
+    -- and nothing ever deletes from selfmod_runs. So a run parked in
+    `reviewing` or `approved`, exactly where one waits for a human, fell out of
+    the count after 20 newer runs and the operator surface read `active: 0`.
+    `rollback points: 0` read as "nothing to roll back" while backup manifests
+    were still on disk.
+
+    The asymmetry is what marks this a bug rather than a choice: the safety
+    machinery (reconcile_interrupted, reconcile_stale_deployment) already
+    queries every row. Only the human-facing number was windowed.
+    """
+    placeholders = ",".join("?" * len(ACTIVE_PHASES))
+    with _connect() as conn:
+        active = conn.execute(
+            "SELECT COUNT(*) FROM selfmod_runs WHERE phase IN (%s)" % placeholders,
+            tuple(sorted(ACTIVE_PHASES)),
+        ).fetchone()[0]
+        deployed = conn.execute(
+            "SELECT COUNT(*) FROM selfmod_runs WHERE phase='deployed'"
+        ).fetchone()[0]
+        rollback_points = conn.execute(
+            "SELECT COUNT(*) FROM selfmod_runs "
+            "WHERE backup_manifest IS NOT NULL AND backup_manifest != ''"
+        ).fetchone()[0]
+        total = conn.execute("SELECT COUNT(*) FROM selfmod_runs").fetchone()[0]
+    return {
+        "active": active,
+        "deployed": deployed,
+        "rollback_points": rollback_points,
+        "total_runs": total,
+    }
+
+
 def status_data():
     reconcile_interrupted()
     reconcile_stale_deployment()
     runs = list_runs(20)
     return {
         **settings(), "database": str(database_path()), "backup_root": str(backups_root()),
-        "active": sum(1 for run in runs if run["phase"] in ACTIVE_PHASES),
-        "deployed": sum(1 for run in runs if run["phase"] == "deployed"),
-        "rollback_points": sum(1 for run in runs if run.get("backup_manifest")),
+        **run_totals(),
+        "runs_shown": len(runs),
         "runs": [{k: run.get(k) for k in ("id", "objective", "phase", "risk", "approval_required", "updated_ts", "deployed_commit")} for run in runs],
     }
 
@@ -1294,8 +1329,16 @@ def format_status(data=None):
         "  active: %d | deployed: %d | rollback points: %d" % (data["active"], data["deployed"], data["rollback_points"]),
         "  backup root: %s" % data["backup_root"],
     ]
-    for run in data["runs"][:10]:
+    shown = data["runs"][:10]
+    for run in shown:
         lines.append("  %s  %-18s %-8s %s" % (run["id"], run["phase"], run["risk"], run["objective"][:80]))
+    # Say that the list is a window. The counts above are over every run, so
+    # without this an operator reading "active: 3" against three visible rows
+    # would conclude they are looking at all of them.
+    total = data.get("total_runs", len(shown))
+    if total > len(shown):
+        lines.append("  (showing %d of %d run(s); counts above are over all)"
+                     % (len(shown), total))
     return "\n".join(lines)
 
 
