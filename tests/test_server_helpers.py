@@ -2644,7 +2644,7 @@ def test_improvement_report_never_shows_the_blended_rate_alone():
     assert "caller-judged: 52.7% of 186 reviewed" in text
     assert "autograded: 97.3% of 6645" in text
     # The blended number may appear, but only alongside its two components.
-    blended_line = [l for l in text.split("\n") if "96.1" in l]
+    blended_line = [ln for ln in text.split("\n") if "96.1" in ln]
     assert blended_line, "blended rate should still be reported"
     assert "caller-judged" in blended_line[0]
 
@@ -2701,3 +2701,51 @@ def test_improvement_report_stays_quiet_when_review_is_healthy(monkeypatch, tmp_
     report = server.improvement_report_data()
     titles = " ".join(i["title"] for i in report["issues"])
     assert "Caller-judged work succeeds" not in titles
+
+
+def test_runtime_identity_names_the_serving_model_only(monkeypatch):
+    """Asked what it was, a local 7B answered "based on OpenAI's GPT-4
+    architecture, approximately 175 billion parameters". Those facts were not in
+    the prompt, so answering was recall -- the axis this model class is worst on.
+
+    Pins BOTH the fix and its first bad version: listing every tier gave the
+    model a menu and it picked `kimi-k2.7-code:cloud` while actually running on
+    `sonder:latest`. A block written to remove a guess must not add a new one.
+    """
+    monkeypatch.setattr(server, "TIERS", {
+        "code": "sonder:latest",
+        "reasoning": "deepseek-r1:7b",
+        "cloud-code": "kimi-k2.7-code:cloud",
+    }, raising=False)
+    monkeypatch.setattr(server, "_ACTIVE_MODEL_HINT", "sonder:latest", raising=False)
+
+    block = server._runtime_identity_block()
+
+    assert "sonder:latest" in block
+    # The regression: no other tier's model may appear, or the model chooses.
+    assert "kimi-k2.7-code:cloud" not in block
+    assert "deepseek-r1:7b" not in block
+    assert "GPT-4" in block and "NOT" in block
+    # It must license "I don't know" rather than invite a plausible number.
+    assert "parameter count" in block
+    assert "do not know" in block.lower()
+
+
+def test_runtime_identity_falls_back_and_never_raises(monkeypatch):
+    """This runs on every request, so it must degrade rather than break one."""
+    monkeypatch.setattr(server, "_ACTIVE_MODEL_HINT", "", raising=False)
+    monkeypatch.setattr(server, "TIERS", {"code": "sonder:latest"}, raising=False)
+    assert "sonder:latest" in server._runtime_identity_block()
+
+    # No usable name anywhere: emit nothing rather than a half-stated fact.
+    monkeypatch.setattr(server, "TIERS", {}, raising=False)
+    assert server._runtime_identity_block() == ""
+
+
+def test_build_system_puts_the_identity_facts_first(monkeypatch):
+    """Wiring test. The block existing is not the same as it being sent --
+    the first version of this change was verified by reading the block and
+    still shipped a model that named the wrong tier."""
+    monkeypatch.setattr(server, "_ACTIVE_MODEL_HINT", "sonder:latest", raising=False)
+    built = server._build_system("", False, "")
+    assert built.startswith("Facts about what is serving this request")
