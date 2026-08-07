@@ -7391,7 +7391,23 @@ def text_search(
     approval: str = "",
     extra_roots: str = "",
 ) -> str:
-    """Search text inside guarded workspace files with line evidence."""
+    """Search text inside guarded workspace files with line evidence.
+
+    `query` is matched LITERALLY against file contents -- a substring, or a
+    regular expression when regex=True. It is NOT a description of what you are
+    looking for. Search for the identifier or the exact code you expect to find
+    ("normalize_rules", "class VerifierUnavailable"), never for a phrase about
+    it ("normalize_rules implementation", "where rules are validated"): a phrase
+    that does not appear verbatim in any file matches nothing.
+
+    An empty result is an answer. It means that text is not present, so the next
+    step is a DIFFERENT pattern -- a shorter one, a different identifier, or
+    file_find/file_read_range to look directly. Repeating a query that returned
+    nothing returns nothing again; two self-modification runs died that way, each
+    reissuing one malformed natural-language query three times until the
+    repetition guard stopped them, after an earlier search had already returned
+    the evidence they needed.
+    """
     _maybe_live_reload()
     started = time.time()
     args = {
