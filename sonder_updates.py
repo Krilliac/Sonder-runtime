@@ -880,14 +880,39 @@ def check_compatibility(
     state_schema = manifest["state_schema"]
     for store in ("memory", "autopilot", "fleet", "operations", "updates"):
         try:
-            applied = len(sonder_migrations.status(store).applied)
-        except Exception:
-            continue
-        target = int(state_schema.get(f"{store}_target", 0))
-        if applied > target:
+            status = sonder_migrations.status(store)
+        except Exception as exc:
+            # Fail CLOSED. `continue` skipped the only downgrade guard in the
+            # update path, and the engine reads an empty `problems` list as
+            # "compatible" and advances the plan to install. A store that
+            # cannot be read during an update is exactly when this check
+            # matters most. The disk check below already fails closed
+            # (`except OSError: free = 0`), and sonder_preflight calls this
+            # same API with "a broken store must fail preflight, not crash it".
             problems.append(
-                f"store {store} schema ({applied}) is newer than the bundle "
-                f"supports ({target}); forward recovery required"
+                f"store {store} schema could not be read ({exc}); refusing to "
+                f"assume it is compatible"
+            )
+            continue
+        # `unknown` is the real future-schema signal: migrations the ledger has
+        # applied that this build does not ship. A count comparison misses it --
+        # after a partial rollback `applied` can SHRINK below target while
+        # unknown is non-empty, so the count passes and the downgrade proceeds.
+        if status.unknown:
+            problems.append(
+                f"store {store} has migrations this bundle does not ship "
+                f"({list(status.unknown)}); forward recovery required"
+            )
+        if status.checksum_mismatches:
+            problems.append(
+                f"store {store} migration history was modified "
+                f"({list(status.checksum_mismatches)}); refusing to update"
+            )
+        target = int(state_schema.get(f"{store}_target", 0))
+        if len(status.applied) > target:
+            problems.append(
+                f"store {store} schema ({len(status.applied)}) is newer than "
+                f"the bundle supports ({target}); forward recovery required"
             )
     minimum_free = int(manifest["resources"].get("minimum_free_bytes", 0))
     try:
