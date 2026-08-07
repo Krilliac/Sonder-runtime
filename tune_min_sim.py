@@ -99,8 +99,8 @@ def top1_scores(conn, queries, embed_fn=None):
                 "cannot calibrate: current embedding model returned no valid vector"
             )
         query_vectors.append(vector)
-        if runtime_default or embed_fn is embeddings.embed:
-            provenance = embeddings.provenance(vector)
+        provenance = embeddings.trusted_provenance(vector, embed_fn, runtime_default)
+        if provenance:
             query_spaces.add((
                 provenance.get("model"), provenance.get("revision"), len(vector),
             ))

@@ -82,9 +82,8 @@ def merge_records(conn, records, embed_fn=None, dry_run=False):
         if not embeddings.valid_vector(emb):
             emb = None
         provenance = (
-            embeddings.provenance(emb)
-            if emb is not None and (runtime_default or embed_fn is embeddings.embed)
-            else {}
+            embeddings.trusted_provenance(emb, embed_fn, runtime_default)
+            if emb is not None else {}
         )
         if emb is not None and reflection.is_duplicate(
             emb,

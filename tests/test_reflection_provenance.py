@@ -204,3 +204,55 @@ def test_pitfall_path_shares_the_same_provenance_resolution(monkeypatch):
     assert candidate["status"] == "candidate"
     assert candidate["embedding_model"] == e.EMBED_IDENTITY
     assert candidate["embedding_dim"] == 2
+
+
+def test_trusted_provenance_has_one_home(monkeypatch):
+    """The identity check `embed_fn is embeddings.embed` existed in six files.
+    Fixing reflection.py left five copies, and their fallbacks pointed opposite
+    ways -- in retriever a missing model DISABLED cross-model filtering
+    (permissive), in seed_merge it disabled dedup (restrictive). One
+    implementation removes that divergence.
+
+    Hermetic on purpose: provenance() is stubbed so this tests the trust
+    routing, not whether an embedding server happens to be reachable.
+    """
+    import embeddings as emb
+    import inspect
+
+    bound = {"model": "m", "revision": "r", "dimension": 3, "provider": "ollama"}
+    foreign = {"model": "m", "revision": "r", "dimension": 3, "provider": ""}
+
+    def wrapper(text, **kw):
+        return [0.1, 0.2, 0.3]
+
+    # A closure that delegates yields the thread-bound vector, so provider is set.
+    monkeypatch.setattr(emb, "provenance", lambda v=None: bound)
+    assert emb.trusted_provenance([0.1, 0.2, 0.3], wrapper).get("provider") == "ollama"
+    assert emb.trusted_provenance([0.1, 0.2, 0.3], None).get("model") == "m"
+
+    # A vector the real embedder never produced has a blank provider, and an
+    # injected double must not inherit this runtime's identity.
+    monkeypatch.setattr(emb, "provenance", lambda v=None: foreign)
+    assert emb.trusted_provenance([0.1, 0.2, 0.3], wrapper) == {}
+    # ...but the runtime-default path is trusted by construction.
+    assert emb.trusted_provenance([0.1, 0.2, 0.3], None).get("model") == "m"
+
+
+def test_no_module_reintroduces_the_identity_check():
+    """Five copies survived the first fix. This fails if a sixth appears."""
+    import inspect
+
+    for module in ("recall", "retriever", "seed_merge", "tune_min_sim",
+                   "pull_community", "reflection"):
+        src = inspect.getsource(__import__(module))
+        offending = [
+            line for line in src.splitlines()
+            if "embed_fn is embeddings.embed" in line
+            and not line.strip().startswith("#")
+            and "if " in line
+        ]
+        # Docstrings may describe the old check; executable code may not use it.
+        assert not offending, (
+            "%s reintroduced the identity check; call "
+            "embeddings.trusted_provenance instead" % module
+        )

@@ -348,10 +348,7 @@ def _candidate_provenance(emb, embed_fn, runtime_default):
     """
     if emb is None:
         return {}
-    provenance = embeddings.provenance(emb)
-    if runtime_default or embed_fn is embeddings.embed:
-        return provenance
-    return provenance if provenance.get("provider") else {}
+    return embeddings.trusted_provenance(emb, embed_fn, runtime_default)
 
 
 def _prepare_candidate_text(text, embed_fn, id_fn):

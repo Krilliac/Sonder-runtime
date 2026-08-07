@@ -46,10 +46,10 @@ def recall(conn, task, k=2, embed_fn=None, min_sim=None,
         qv = embed_fn(task)
     if qv is None or not embeddings.valid_vector(qv):
         return []
-    query_provenance = embeddings.provenance(qv)
-    if embedding_model is None and (runtime_default or embed_fn is embeddings.embed):
+    query_provenance = embeddings.trusted_provenance(qv, embed_fn, runtime_default)
+    if embedding_model is None:
         embedding_model = query_provenance.get("model")
-    if embedding_revision is None and (runtime_default or embed_fn is embeddings.embed):
+    if embedding_revision is None:
         embedding_revision = query_provenance.get("revision")
 
     scored = []

@@ -241,13 +241,9 @@ def semantic_search(conn, task, embed_fn=None, limit=10):
     if qv is None:
         return []
     quarantined = quarantined_lessons(usage_stats_with_attribution(conn), task)
-    query_provenance = embeddings.provenance(qv)
-    model = query_provenance.get("model") if (
-        runtime_default or embed_fn is embeddings.embed
-    ) else None
-    revision = query_provenance.get("revision") if (
-        runtime_default or embed_fn is embeddings.embed
-    ) else None
+    query_provenance = embeddings.trusted_provenance(qv, embed_fn, runtime_default)
+    model = query_provenance.get("model")
+    revision = query_provenance.get("revision")
     return _semantic_rank(
         conn, qv, limit=limit, exclude_ids=quarantined,
         embedding_model=model, embedding_revision=revision,
@@ -563,10 +559,13 @@ def retrieve_with_ids(
     runtime_default = embed_fn is None
     embed_fn = embed_fn or embeddings.embed
     qv = embed_fn(task)
-    query_provenance = embeddings.provenance(qv) if qv is not None else {}
-    if embedding_model is None and (runtime_default or embed_fn is embeddings.embed):
+    query_provenance = (
+        embeddings.trusted_provenance(qv, embed_fn, runtime_default)
+        if qv is not None else {}
+    )
+    if embedding_model is None:
         embedding_model = query_provenance.get("model")
-    if embedding_revision is None and (runtime_default or embed_fn is embeddings.embed):
+    if embedding_revision is None:
         embedding_revision = query_provenance.get("revision")
 
     semantic = []

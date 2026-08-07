@@ -208,6 +208,32 @@ def provenance(vector=None):
     }
 
 
+def trusted_provenance(vector, embed_fn=None, runtime_default=False):
+    """Provenance for *vector*, but only when its embedder can be trusted.
+
+    Callers that accept an injected ``embed_fn`` must not attach this runtime's
+    model identity to a vector some other embedder produced: a stale or foreign
+    vector labelled current would be compared against stored ones as if it were
+    compatible.
+
+    The obvious test, ``embed_fn is embed``, is too narrow, and that was a real
+    defect rather than a hypothetical one. A caller that wraps the embedder in a
+    closure -- to impose a deadline, to count calls -- fails the identity check
+    while still delegating here. In production that dropped provenance from
+    EVERY lesson candidate, and because dedup is fail-closed on unknown
+    provenance, the semantic duplicate gate silently never ran at all.
+
+    So the trust signal is ``provider``, which provenance() populates only for
+    the vector currently bound to this thread and blanks for any other. A
+    delegating wrapper inherits it; an injected double that fabricates a vector
+    cannot, and still gets nothing.
+    """
+    prov = provenance(vector)
+    if runtime_default or embed_fn is None or embed_fn is embed:
+        return prov
+    return prov if prov.get("provider") else {}
+
+
 def valid_vector(vector):
     if not isinstance(vector, (list, tuple)) or not vector:
         return False
