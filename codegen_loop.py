@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 import re
+import textwrap
 
 SHRINK_FLOOR = 0.75
 DEFAULT_ERROR_RE = r"(?i)\b(?:error|fatal)\b"
@@ -450,6 +451,35 @@ def body_slots(text: str) -> list:
     return [match.group("name") for match in BODY_MARKER.finditer(text or "")]
 
 
+def _normalise_indent(body: str) -> list:
+    """Strip a generated body's own indentation so the slot's can be applied.
+
+    Models emit ragged indentation -- routinely a first line flush left with
+    the rest indented, because they are continuing a block they imagined.
+    Adding the slot indent to every line as-is preserves that raggedness.
+    Measured on a real fill: a three-line body came back with the first line at
+    column 0 and the next two at column 4, and landed in the file as a staircase.
+
+    In a brace language that is merely ugly. In Python it does not parse, and
+    these primitives are language-agnostic on purpose, so it is a correctness
+    bug rather than a cosmetic one.
+
+    The first line is padded up to the block's own common indent before
+    dedenting, which turns the ragged case uniform and leaves an
+    already-consistent body untouched.
+    """
+    text = (body or "").strip("\n")
+    if not text.strip():
+        return []
+    lines = [line.rstrip() for line in text.splitlines()]
+    rest = [line for line in lines[1:] if line.strip()]
+    if rest and lines[0][:1] not in (" ", "\t"):
+        common = min(len(line) - len(line.lstrip()) for line in rest)
+        if common:
+            lines[0] = " " * common + lines[0]
+    return textwrap.dedent("\n".join(lines)).splitlines()
+
+
 def splice_body(text: str, name: str, body: str) -> str:
     """Replace one slot's marker+placeholder with generated code.
 
@@ -461,7 +491,7 @@ def splice_body(text: str, name: str, body: str) -> str:
         if match.group("name") != name:
             return match.group(0)
         indent = re.match(r"[ \t]*", match.group("placeholder")).group(0)
-        lines = [line.rstrip() for line in (body or "").strip().splitlines()]
+        lines = _normalise_indent(body)
         if not lines:
             return match.group(0)
         return "\n".join(indent + line if line else "" for line in lines)

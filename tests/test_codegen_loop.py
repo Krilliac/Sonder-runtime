@@ -446,3 +446,25 @@ def test_collapse_bodies_yields_a_brief_that_cannot_drift():
     assert "public bool IsWallCell(int x, int z)" in brief
     assert "NotImplementedException" not in brief
     assert cg.body_slots(brief) == []
+
+
+def test_splice_normalises_a_ragged_generated_body():
+    """Models emit a flush-left first line with the rest indented.
+
+    Pinned because these primitives are language-agnostic: in a brace language
+    the staircase is ugly, but in Python it does not parse.
+    """
+    py_slot = "    def f(self):\n        # BODY:f\n        raise NotImplementedError"
+    ragged = "x = 1\n    if x:\n        y = 2"
+    out = cg.splice_body(py_slot, "f", ragged)
+    assert out.splitlines()[1:] == [
+        "        x = 1",
+        "        if x:",
+        "            y = 2",
+    ]
+    # An already-consistent body is left alone.
+    tidy = "a = 1\nb = 2"
+    assert cg.splice_body(py_slot, "f", tidy).splitlines()[1:] == [
+        "        a = 1",
+        "        b = 2",
+    ]
