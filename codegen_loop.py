@@ -258,15 +258,25 @@ def score(
     parse_regex: str = DEFAULT_PARSE_ERROR_RE,
     definition_regex: str = DEFAULT_DEFINITION_ERROR_RE,
 ) -> tuple:
-    """Rank a candidate. Lower is better; a trustworthy count always wins.
+    """Rank a candidate as (masked?, blockers, total). Lower is better.
 
     A version with 50 real errors is strictly better than one showing 2 that
     the compiler never got past parsing or declaring, because the 2 is fiction.
-    Both masking phases share one tier: neither count can be compared against
-    anything, so there is nothing to order them by.
+
+    Within the masked tier, ordering is by how many blockers remain, NOT by
+    total: a masked total is a floor, and a file that collapses earlier reports
+    a smaller one, so ranking by total actively prefers the more broken file.
     """
-    return (1 if count_unreliable(errors, parse_regex, definition_regex) else 0,
-            len(errors))
+    masked = count_unreliable(errors, parse_regex, definition_regex)
+    if not masked:
+        return (0, 0, len(errors))
+    # Both candidates masked: their totals are FLOORS, and a file that fails
+    # EARLIER produces a SMALLER one. Ordering by total therefore prefers the
+    # more broken file -- measured, a candidate with 43 errors (35 masking) beat
+    # the incumbent's 109 (36 masking) purely by collapsing sooner. Rank by how
+    # much masking is left instead: fewer blockers is genuinely closer to a
+    # build that can be read at all. Total is only a tie-break.
+    return (1, masked, len(errors))
 
 
 def truncated_blocked(errors: list, truncated_regex: str = DEFAULT_TRUNCATED_ERROR_RE) -> int:

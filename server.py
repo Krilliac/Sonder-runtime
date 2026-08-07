@@ -14247,7 +14247,13 @@ def codegen_build_loop(
         existing = read(name)
         errors = run_build()
         mine = [e for e in errors if name in e]
-        if existing and not mine:
+        # "No errors named this file" only means "clean" if the compiler
+        # actually reached this file. Under a masked build it reached nothing,
+        # so EVERY file looks clean: measured, one parse error in one file made
+        # the loop skip all six remaining files and report FINAL: 1 error --
+        # a no-op run that read as near-success.
+        masked = codegen_loop.count_unreliable(errors)
+        if existing and not mine and not masked:
             rows.append({"name": name, "note": "already clean, not regenerated"})
             continue
 
