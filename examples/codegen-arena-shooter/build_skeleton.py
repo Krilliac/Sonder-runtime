@@ -37,7 +37,10 @@ import subprocess
 import sys
 import time
 
-SONDER = os.environ.get("SONDER_RUNTIME", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+SONDER = os.environ.get(
+    "SONDER_RUNTIME",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."),
+)
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT = os.path.join(HERE, "FpsGame_Skeleton")
 
@@ -124,6 +127,9 @@ def main():
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--tiers", default="code,reasoning")
     parser.add_argument("--num-predict", type=int, default=1400)
+    parser.add_argument("--attempts", type=int, default=2,
+                        help="tries per body; a failed one is shown its own "
+                             "compiler errors before the next try")
     parser.add_argument("--reset", action="store_true",
                         help="rewrite every skeleton before filling")
     args = parser.parse_args()
@@ -156,8 +162,15 @@ def main():
     for name, skel in skeleton.FILES:
         if args.only and name != args.only:
             continue
+        # Only slots still OPEN in the file on disk. Without this a resume
+        # spends its budget re-attempting bodies that are already implemented:
+        # the splice refuses (their marker is gone), every one counts as a
+        # failure, and the resumed run reports a WORSE result than the run it
+        # resumed from.
+        open_slots = set(skeleton.body_names(current[name]))
         for body in skeleton.body_names(skel):
-            slots.append((name, body))
+            if body in open_slots:
+                slots.append((name, body))
     if args.limit:
         slots = slots[:args.limit]
 
@@ -170,7 +183,7 @@ def main():
         before = current[name]
 
         done = [skeleton.declarations(s) for n, s in skeleton.FILES if n != name]
-        prompt = "\n\n".join([
+        base_prompt = "\n\n".join([
             specs.API_BRIEF,
             dependency_brief(done),
             "THIS IS THE FILE YOU ARE WRITING INTO. Every declaration below "
@@ -182,35 +195,65 @@ def main():
             "usings, no explanation. Statements only." % signature,
         ])
 
-        reply = server.ensemble_answer(
-            prompt, tiers=args.tiers, num_predict=args.num_predict, mode="code")
-        body = extract_body(reply, signature)
+        # Same-model self-repair, because it is the one strategy that measured a
+        # gain here: over 6 execution-graded tasks it converted 5/6 against 4/6
+        # for a single shot, while rotating models or adding a critic bought
+        # nothing. The first version of this driver threw the compiler errors
+        # away after a failed body, which discarded exactly that signal.
+        status, feedback = "no attempt made", ""
+        for attempt in range(1, max(1, int(args.attempts)) + 1):
+            prompt = base_prompt + feedback
+            reply = server.ensemble_answer(
+                prompt, tiers=args.tiers, num_predict=args.num_predict, mode="code")
+            body = extract_body(reply, signature)
+            if not body:
+                status = "attempt %d: empty reply" % attempt
+                continue
 
-        status = "empty reply"
-        if body:
             candidate = skeleton.splice(before, body_name, body)
             if candidate == before:
-                status = "slot not found (splice refused)"
-            else:
+                status = "attempt %d: splice refused" % attempt
+                continue
+
+            with io.open(path, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(candidate)
+            errors, ran = build_errors()
+
+            if not ran:
+                # An infrastructure failure is not evidence about the body, so
+                # retrying would just burn attempts against a build that cannot
+                # answer. Put the file back and move on.
                 with io.open(path, "w", encoding="utf-8", newline="\n") as handle:
-                    handle.write(candidate)
-                errors, ran = build_errors()
-                masked = codegen_loop.count_unreliable(errors)
-                if not ran:
-                    status = "build did not run"
-                elif masked:
-                    status = "reverted: %d masking error(s)" % masked
-                elif len(errors) > baseline:
-                    status = "reverted: +%d error(s)" % (len(errors) - baseline)
-                else:
-                    current[name] = candidate
-                    kept += 1
-                    status = "KEPT"
-                if status != "KEPT":
-                    with io.open(path, "w", encoding="utf-8", newline="\n") as handle:
-                        handle.write(before)
-                    reverted += 1
-        else:
+                    handle.write(before)
+                status = "build did not run"
+                break
+
+            masked = codegen_loop.count_unreliable(errors)
+            if masked:
+                status = "attempt %d rejected: %d masking error(s)" % (attempt, masked)
+            elif len(errors) > baseline:
+                status = "attempt %d rejected: +%d error(s)" % (
+                    attempt, len(errors) - baseline)
+            else:
+                current[name] = candidate
+                kept += 1
+                status = "KEPT (attempt %d)" % attempt
+                break
+
+            with io.open(path, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(before)
+            # Prefer the errors naming this file; a masked build often names
+            # none, and showing an empty list would read as "it compiled".
+            mine = [e for e in errors if name in e] or errors
+            feedback = (
+                "\n\nYOUR PREVIOUS ATTEMPT DID NOT COMPILE. It was:\n\n%s\n\n"
+                "The compiler reported:\n%s\n\n"
+                "Rewrite the body so those errors do not occur. Same rules: "
+                "statements only." % ("\n".join(body.splitlines()[:40]),
+                                      "\n".join(e[:200] for e in mine[:6]))
+            )
+
+        if not status.startswith("KEPT"):
             reverted += 1
 
         results.append((name, body_name, status))

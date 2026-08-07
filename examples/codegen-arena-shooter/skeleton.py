@@ -45,7 +45,10 @@ import sys
 # the untouched skeleton is a clean compile rather than a pile of CS0161/CS0177.
 PLACEHOLDER = "throw new NotImplementedException();"
 
-sys.path.insert(0, os.environ.get("SONDER_RUNTIME", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")))
+sys.path.insert(0, os.environ.get(
+    "SONDER_RUNTIME",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."),
+))
 
 import codegen_loop  # noqa: E402
 
