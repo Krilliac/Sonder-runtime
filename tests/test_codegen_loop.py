@@ -299,3 +299,60 @@ def test_report_says_the_failure_count_is_a_floor_when_it_is_masked():
 
     honest = cg.format_report([], ["a.cs(1,1): error CS0246: missing type"], ok=False)
     assert "FLOOR" not in honest
+
+
+def test_a_build_that_never_ran_loses_to_one_with_real_errors():
+    """The harness's own "error: build could not run: ..." string matches the
+    error regex, so it counted as exactly ONE error in the trustworthy tier --
+    and a candidate whose build never launched outscored an honest one with
+    thirty real errors, with every later attempt compared against that fiction."""
+    infra = cg.count_errors("error: build could not run: program not found")
+    honest = cg.count_errors(
+        "\n".join("a.cs(%d,1): error CS0246: missing type" % i for i in range(30))
+    )
+    assert len(infra) == 1 and len(honest) == 30
+    assert cg.score(honest) < cg.score(infra), "a real build must beat an unrun one"
+
+
+def test_build_ran_detects_infrastructure_failure():
+    assert cg.build_ran("a.cs(1,1): error CS0246: missing type") is True
+    assert cg.build_ran("error: build could not run: bad cwd") is False
+    assert cg.build_ran("error: build timed out after 120s") is False
+
+
+def test_an_unrun_build_is_never_reported_as_success():
+    """A build killed by a timeout before printing any error line yields an
+    EMPTY error list, which is indistinguishable from a clean compile unless
+    the report is told the build did not run."""
+    report = cg.format_report([], [], ok=True, ran=False)
+    assert "BUILD SUCCEEDED" not in report
+    assert "BUILD DID NOT RUN" in report
+    assert "NOT a pass" in report
+
+
+def test_compiler_error_limit_marks_the_count_untrustworthy():
+    """clang stops at 20 errors BY DEFAULT and MSVC at 100; the remainder is
+    never emitted, so the total is a cap. The marker line itself matches the
+    error regex, so it previously read as one more ordinary error -- the same
+    1-vs-109 failure one notch past the parse and declare phases."""
+    clang = cg.count_errors(
+        "clang: fatal error: too many errors emitted, stopping now [-ferror-limit=]"
+    )
+    msvc = cg.count_errors(
+        "fatal error C1003: error count exceeds 100; stopping compilation"
+    )
+    assert cg.count_unreliable(clang) == 1
+    assert cg.count_unreliable(msvc) == 1
+    assert "UNRELIABLE" in cg.describe_total(clang)
+    assert "UNRELIABLE" in cg.describe_total(msvc)
+
+
+def test_ordinary_errors_are_still_trusted_after_the_new_class():
+    """The new shapes must not swallow honest errors -- that would flatten the
+    tier the loop converges on."""
+    honest = cg.count_errors(
+        "a.cs(1,1): error CS0246: The type or namespace name 'X' could not be found"
+    )
+    assert cg.count_unreliable(honest) == 0
+    assert cg.score(honest)[0] == 0
+    assert "UNRELIABLE" not in cg.describe_total(honest)
