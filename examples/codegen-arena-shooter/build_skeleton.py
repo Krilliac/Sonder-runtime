@@ -132,7 +132,18 @@ def main():
                              "compiler errors before the next try")
     parser.add_argument("--reset", action="store_true",
                         help="rewrite every skeleton before filling")
+    parser.add_argument("--model", default="",
+                        help="override the ollama model behind --tiers, so two "
+                             "models can be compared on identical slots")
     args = parser.parse_args()
+
+    if args.model:
+        # A/B on the SAME slots is the only comparison worth making here: the
+        # remaining bodies are the ones a smaller model already failed, so
+        # scoring a different model on a different set would measure the set.
+        for tier in [t.strip() for t in args.tiers.split(",") if t.strip()]:
+            server.TIERS[tier] = args.model
+        print("model override: %s -> %s" % (args.tiers, args.model), flush=True)
 
     os.makedirs(PROJECT, exist_ok=True)
     # v1 per-file contracts are deliberately NOT used: they describe a design
