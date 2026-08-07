@@ -356,3 +356,34 @@ def test_ordinary_errors_are_still_trusted_after_the_new_class():
     assert cg.count_unreliable(honest) == 0
     assert cg.score(honest)[0] == 0
     assert "UNRELIABLE" not in cg.describe_total(honest)
+
+
+def test_a_file_that_collapses_sooner_does_not_win_on_its_smaller_floor():
+    """A masked total is a FLOOR, so a file that fails to parse EARLIER reports
+    a SMALLER one. Ranking the masked tier by total therefore prefers the more
+    broken file -- measured, a candidate at 43 errors (35 masking) beat the
+    incumbent's 109 (36 masking) purely by collapsing sooner."""
+    collapses_early = (
+        ["a.cs(%d,1): error CS1002: ; expected" % i for i in range(35)]
+        + ["a.cs(%d,1): error CS0246: missing" % i for i in range(8)]
+    )
+    nearly_parses = (
+        ["a.cs(1,1): error CS1002: ; expected"]
+        + ["a.cs(%d,1): error CS0246: missing" % i for i in range(200)]
+    )
+    assert len(collapses_early) < len(nearly_parses), "the trap: smaller total"
+    assert cg.score(nearly_parses) < cg.score(collapses_early), (
+        "one blocker away from readable must beat thirty-five, whatever the totals"
+    )
+
+
+def test_an_unmasked_count_still_beats_every_masked_one():
+    masked = ["a.cs(1,1): error CS1002: ; expected"]
+    honest = ["a.cs(%d,1): error CS0246: missing" % i for i in range(500)]
+    assert cg.score(honest) < cg.score(masked)
+
+
+def test_fewer_real_errors_still_wins_when_nothing_is_masked():
+    assert cg.score(["a.cs(1,1): error CS0246: x"]) < cg.score(
+        ["a.cs(%d,1): error CS0246: x" % i for i in range(5)]
+    )
