@@ -139,6 +139,14 @@ def audit(conn):
             "SELECT 1 FROM lessons_fts WHERE lesson_id=?", (row["id"],)
         ).fetchone():
             missing_fts.append(row)
+    # Count and sample separately. len() of a LIMIT-20 slice was published as
+    # the orphan counter, on the same output line as missing_fts, which is an
+    # uncapped full scan -- so a store with 5000 dangling FTS rows reported
+    # "orphan=20" beside an honest number and read as a small bounded problem.
+    orphan_fts_total = conn.execute(
+        "SELECT COUNT(*) FROM lessons_fts "
+        "WHERE lesson_id NOT IN (SELECT id FROM lessons)"
+    ).fetchone()[0]
     orphan_fts = [dict(r) for r in conn.execute(
         "SELECT lesson_id, text FROM lessons_fts "
         "WHERE lesson_id NOT IN (SELECT id FROM lessons) LIMIT 20"
@@ -203,7 +211,8 @@ def audit(conn):
         "no_terminal_punctuation": len(no_punctuation),
         "missing_source_interaction": len(source_missing),
         "missing_fts": len(missing_fts),
-        "orphan_fts": len(orphan_fts),
+        "orphan_fts": orphan_fts_total,
+        "orphan_fts_sampled": len(orphan_fts),
         "samples": {
             "duplicates": exact_plan[:5],
             "long": long_rows[:5],

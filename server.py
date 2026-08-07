@@ -13688,12 +13688,21 @@ def diagnostics() -> str:
     try:
         health = learning_health_data()
         quality = health["quality"]
+        # Never the blended rate alone. It is dominated by the runtime marking
+        # its own curriculum, so on this store it reads 96% beside a "watch"
+        # status -- which parses as "healthy, minor hygiene" when caller-judged
+        # work is at 53%. Third consumer of this report; the other two were
+        # fixed first and this one was missed.
         lines.append(
-            "  learning health: %s (%s%% outcome coverage, %s%% positive, yield=%s)"
+            "  learning health: %s (%s%% outcome coverage, "
+            "caller-judged %s%% of %s, autograded %s%% of %s, yield=%s)"
             % (
                 health["status"],
                 health["outcome_coverage_percent"],
-                health["positive_percent"],
+                health.get("reviewed_positive_percent", 0),
+                health.get("reviewed_outcomes", 0),
+                health.get("autograded_positive_percent", 0),
+                health.get("autograded_outcomes", 0),
                 health["distillation_yield"]
                 if health["distillation_yield"] is not None
                 else "n/a",
