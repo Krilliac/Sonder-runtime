@@ -173,3 +173,39 @@ def test_ensemble_without_a_project_is_unchanged(monkeypatch):
 def test_project_facts_text_is_empty_for_unknown_or_none():
     assert server._project_facts_text("") == ""
     assert server._project_facts_text("none") == ""
+
+
+def test_a_lost_auto_negative_is_recorded_not_swallowed(monkeypatch):
+    """This is the only outcome the runtime records on its own. Positives all
+    arrive through explicit record_outcome calls that surface their errors, so
+    a swallowed exception here drops a NEGATIVE and nothing else -- re-inflating
+    the ~97%-positive skew this function exists to correct, invisibly and in the
+    flattering direction."""
+    import activity_tracker
+
+    activity_tracker.reset_for_tests()
+    monkeypatch.setattr(
+        server, "_record_outcome_and_maybe_distill",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("database is locked")),
+    )
+    with activity_tracker.response_span("t", "p"):
+        # Must not raise: this runs inside a reply path, and losing the user's
+        # answer to record a statistic would be the worse trade.
+        server._record_code_gate_failure("iid-123")
+
+    events = (activity_tracker.snapshot().get("latest") or {}).get("events", [])
+    lost = [e for e in events if e.get("kind") == "outcome_record_failed"]
+    assert lost, "a lost auto-negative must leave a trace"
+    assert "iid-123" in lost[0]["summary"]
+    assert "database is locked" in lost[0]["summary"]
+    activity_tracker.reset_for_tests()
+
+
+def test_auto_negative_is_skipped_without_an_interaction_id(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        server, "_record_outcome_and_maybe_distill",
+        lambda *a, **k: calls.append(a),
+    )
+    server._record_code_gate_failure("")
+    assert calls == []
