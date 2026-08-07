@@ -195,11 +195,23 @@ def main():
             "usings, no explanation. Statements only." % signature,
         ])
 
-        # Same-model self-repair, because it is the one strategy that measured a
-        # gain here: over 6 execution-graded tasks it converted 5/6 against 4/6
-        # for a single shot, while rotating models or adding a critic bought
-        # nothing. The first version of this driver threw the compiler errors
-        # away after a failed body, which discarded exactly that signal.
+        # Retry a failed body, showing it its own compiler errors.
+        #
+        # Measured attribution, because the obvious credit is the wrong one.
+        # Over 21 previously-failed bodies with --attempts 2:
+        #
+        #     KEPT on attempt 1 (a fresh sample)      8
+        #     KEPT on attempt 2 (the error feedback)  1
+        #
+        # So nearly all of the gain is RE-SAMPLING, not repair. That also
+        # retires the justification this was added under: an earlier eval
+        # scored "self-repair x3" at 5/6 against "pass@1" at 4/6 and was read
+        # as repair working, but three attempts with feedback versus one
+        # attempt without conflates two variables. The control for repair is
+        # N samples WITHOUT feedback, which was never run.
+        #
+        # Keep the retry -- it converted 9 of 21 either way. Do not claim the
+        # feedback is what does it.
         status, feedback = "no attempt made", ""
         for attempt in range(1, max(1, int(args.attempts)) + 1):
             prompt = base_prompt + feedback
