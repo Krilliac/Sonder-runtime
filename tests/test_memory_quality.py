@@ -131,3 +131,46 @@ def test_audit_separates_ungrounded_and_never_validated_lessons():
     assert report["vague_without_anchor"] == 0
     assert "never validated by an outcome: 1 (of which synthetic: 1)" in text
     conn.close()
+
+
+def test_orphan_fts_counter_is_not_capped_by_its_sample(tmp_path):
+    """len() of a LIMIT-20 slice was published as the orphan counter, on the
+    same output line as missing_fts, which is an uncapped full scan. A store
+    with 5000 dangling FTS rows therefore reported "orphan=20" beside an honest
+    number and read as a small, bounded problem."""
+    import sqlite3
+
+    import memory_quality
+    import memory_store
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    memory_store.init_db(conn)
+    try:
+        for i in range(25):
+            conn.execute(
+                "INSERT INTO lessons_fts(lesson_id, text) VALUES (?,?)",
+                ("ghost%d" % i, "orphaned"),
+            )
+        conn.commit()
+        report = memory_quality.audit(conn)
+        assert report["orphan_fts"] == 25, "the counter must not stop at the cap"
+        assert report["orphan_fts_sampled"] == 20, "the sample stays bounded"
+        assert len(report["samples"]["orphan_fts"]) == 5
+    finally:
+        conn.close()
+
+
+def test_orphan_fts_is_zero_on_a_clean_store(tmp_path):
+    import sqlite3
+
+    import memory_quality
+    import memory_store
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    memory_store.init_db(conn)
+    try:
+        assert memory_quality.audit(conn)["orphan_fts"] == 0
+    finally:
+        conn.close()
