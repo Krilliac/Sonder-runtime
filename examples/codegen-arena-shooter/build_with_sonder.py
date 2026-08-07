@@ -23,7 +23,7 @@ import subprocess
 import sys
 import time
 
-SONDER = r"C:\Users\natew\.claude\mcp-servers\sonder-runtime"
+SONDER = os.environ.get("SONDER_RUNTIME", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 PROJECT = r"D:\Sonder Games\FpsGame_Sonder"
 
 # A repair that returns less than this fraction of the original file is treated
@@ -231,7 +231,7 @@ def align_namespaces() -> list[str]:
                 del out[i]
                 break
         # Dedent one level so the file reads normally.
-        body = "\n".join(l[4:] if l.startswith("    ") else l for l in out)
+        body = "\n".join(ln[4:] if ln.startswith("    ") else ln for ln in out)
         with open(path, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(body.rstrip() + "\n")
         changed.append(f"{name} (-namespace {ns})")

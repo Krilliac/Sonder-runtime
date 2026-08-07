@@ -125,3 +125,79 @@ the prompt).
 extracted API of its dependencies did not fix that — `Combatant.cs` was handed
 `GameMap`'s actual signatures and still called four members that exist in
 neither the contract nor the extraction.
+
+---
+
+# v2: the harness owns the declarations
+
+Everything above is the whole-file loop. Its final error mix said what to do
+next: CS1061 (28), CS0103 (21), CS0272 (16), CS0117 (15), CS1503 (13) — **every
+dominant class is two files disagreeing about an API**, not bad code inside a
+method. Handing each file the *real extracted* surface of its dependencies did
+not fix it. That is a capability limit, not a prompting one, so v2 stops asking.
+
+`skeleton.py` owns every declaration. `bodynotes.py` holds one algorithm note
+per body. `build_skeleton.py` fills one body at a time. Three consequences:
+
+* **The baseline is 0 errors, not 85.** The skeleton compiles before any model
+  output exists, so every later error belongs to exactly one body.
+* **The v1 failure mode is structurally impossible.** 7 of 12 regenerations
+  were rejected as parse-broken there; here the model never writes the
+  structure, and a bad body reverts to its placeholder alone.
+* **The metric stops being an error count**, which would sit near zero by
+  construction and say nothing, and becomes *bodies implemented / N*.
+
+## Result: 17 of 38 bodies, build clean
+
+86 minutes, `code=sonder:latest` + `reasoning=deepseek-r1:7b`. Verified
+independently against `dotnet build`: **Build succeeded, 21 `NotImplementedException`
+stubs remaining.**
+
+| File | Bodies kept |
+|---|---|
+| `ClassKit.cs` | 0 / 1 |
+| `GameMap.cs` | 5 / 6 |
+| `Combatant.cs` | 3 / 3 |
+| `NetProtocol.cs` | 2 / 4 |
+| `MatchState.cs` | 2 / 5 |
+| `LobbyNet.cs` | 1 / 5 |
+| `Screens.cs` | 1 / 7 |
+| `Program.cs` | 3 / 7 |
+
+Of the 21 reverts, 15 raised the error count and 6 produced *masking* errors —
+so even confined to a single body, output that breaks the parser is still a
+sixth of attempts.
+
+**This is not "85 errors → 0".** Those are different metrics and comparing them
+would be the same mistake this directory exists to document. The honest claim:
+v1 never produced a compiling project at all, and could not say how much of it
+the model actually got right; v2 produces one that compiles and states exactly
+how much is real — 17 bodies — and exactly how much is a stub.
+
+## The finding: 89% vs 17%, split by what the body needs
+
+| Body kind | Files | Kept |
+|---|---|---|
+| **Pure algorithm** — every fact in the prompt | `GameMap`, `Combatant` | **8 / 9 (89%)** |
+| **Library API** — must recall a real API correctly | `Screens` (Raylib), `LobbyNet` (UdpClient) | **2 / 12 (17%)** |
+
+A **5.2x** gap on one run, and it is the transformation-versus-recall line drawn
+exactly. `MoveWithSlide`'s axis-at-a-time resolution, the ray march, the
+Yaw/Pitch forward vector — all correct. Anything needing `Raylib.DrawRectangle`
+or `UdpClient.Receive` used the way those libraries actually work — mostly not.
+
+The practical rule: **give a local model bodies whose every fact is in the
+prompt, and write the API-bound ones yourself.** Splitting a project along that
+line is worth more than any amount of extra prompting.
+
+## Compiling is still not correct
+
+`GameMap.IsWallAt` was kept — it compiles. It was told to convert the point to
+cell indices and call `IsWallCell`. Instead it re-derived the wall test by
+copying the constructor's border/pillar arithmetic, ignoring the `_walls` array
+entirely. Same answer for this map; silently wrong the moment the map changes,
+and now a second source of truth.
+
+That is [SpecBench](https://arxiv.org/abs/2605.21384)'s gap in miniature —
+passing the visible check while deviating from the specification — and it is
+why *bodies kept* is a measure of what compiled, not of what is right.

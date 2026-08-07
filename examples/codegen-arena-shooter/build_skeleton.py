@@ -1,0 +1,233 @@
+"""Fill harness-owned C# skeletons one method body at a time.
+
+The v1 harness (`build_with_sonder.py`) asked the model for whole files and
+measured 85 errors, of which every dominant class -- CS1061, CS0103, CS0272,
+CS0117, CS1503 -- was two files disagreeing about an API. That is the failure a
+7B-class model cannot be prompted out of: it writes correct functions and
+cannot hold a system. See `skeleton.py` for the measurements.
+
+So this driver never asks for a system. `skeleton.py` owns every declaration,
+so the project compiles to ZERO errors before any model output exists, and the
+model is asked only for one method body at a time with every fact it needs in
+the prompt -- the transformation shape it is good at.
+
+Two consequences worth stating, because they change what the number means:
+
+  * A body that breaks the build is reverted to its placeholder and the run
+    continues. One bad body can no longer poison a file, and the v1 failure
+    mode where 7 of 12 regenerations were rejected as parse-broken cannot
+    happen: the model does not write the structure.
+  * The headline metric is therefore NOT an error count. It is "how many of
+    the N bodies were implemented without breaking the build". An error count
+    would sit near zero by construction and would say nothing.
+
+Usage:
+    python build_skeleton.py                      # all bodies
+    python build_skeleton.py --only GameMap.cs    # one file
+    python build_skeleton.py --limit 5            # first 5 bodies (smoke)
+"""
+
+from __future__ import annotations
+
+import argparse
+import io
+import os
+import re
+import subprocess
+import sys
+import time
+
+SONDER = os.environ.get("SONDER_RUNTIME", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+HERE = os.path.dirname(os.path.abspath(__file__))
+PROJECT = os.path.join(HERE, "FpsGame_Skeleton")
+
+sys.path.insert(0, SONDER)
+sys.path.insert(0, HERE)
+
+import skeleton  # noqa: E402
+import specs  # noqa: E402
+import bodynotes  # noqa: E402
+import codegen_loop  # noqa: E402
+import server  # noqa: E402
+
+FENCE = re.compile(r"^\s*```[a-zA-Z0-9_+-]*\s*$", re.M)
+
+
+def build_errors():
+    """Distinct compiler error lines, and whether the build actually ran.
+
+    Both are needed: a build that never launched prints no errors, which reads
+    as success. codegen_loop.build_ran exists because that exact confusion
+    scored a candidate whose build was killed as the best in a run.
+    """
+    try:
+        proc = subprocess.run(
+            ["dotnet", "build", "-c", "Release", "--nologo"],
+            cwd=PROJECT, capture_output=True, text=True, timeout=600,
+        )
+        out = (proc.stdout or "") + (proc.stderr or "")
+    except Exception as exc:
+        return ["error: build could not run: %s" % exc], False
+    errors = sorted({ln.strip() for ln in out.splitlines() if "error CS" in ln})
+    return errors, codegen_loop.build_ran(out)
+
+
+def strip_fences(text: str) -> str:
+    return FENCE.sub("", text or "").strip()
+
+
+def extract_body(text: str, signature: str) -> str:
+    """Pull just the statements out of whatever shape the model returned.
+
+    It is asked for a bare body and frequently returns the whole method, or the
+    whole class, anyway. Taking the outermost balanced brace block turns those
+    into the body instead of discarding an otherwise usable answer -- and a
+    body spliced into a skeleton that already has the braces would be a
+    guaranteed syntax error if left alone.
+    """
+    text = strip_fences(text)
+    if not text:
+        return ""
+    head = signature.split("(")[0].strip().split()
+    name = head[-1] if head else ""
+    looks_wrapped = name and name in text.split("{")[0]
+    if not looks_wrapped:
+        return text
+    start = text.find("{")
+    if start < 0:
+        return text
+    depth = 0
+    for index in range(start, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                inner = text[start + 1:index].strip()
+                return inner or text
+    return text
+
+
+def dependency_brief(done: list) -> str:
+    if not done:
+        return ""
+    return (
+        "THESE TYPES ALREADY EXIST WITH EXACTLY THIS SURFACE. Use them as "
+        "written; never redefine or invent members:\n\n"
+        + "\n\n".join(done)
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--only", default="")
+    parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--tiers", default="code,reasoning")
+    parser.add_argument("--num-predict", type=int, default=1400)
+    parser.add_argument("--reset", action="store_true",
+                        help="rewrite every skeleton before filling")
+    args = parser.parse_args()
+
+    os.makedirs(PROJECT, exist_ok=True)
+    # v1 per-file contracts are deliberately NOT used: they describe a design
+    # this skeleton replaced, and carrying both put two contradictory contracts
+    # in one prompt. bodynotes.py is the single source now.
+    current = {}
+
+    for name, skel in skeleton.FILES:
+        path = os.path.join(PROJECT, name)
+        if args.reset or not os.path.exists(path):
+            with io.open(path, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(skel)
+            current[name] = skel
+        else:
+            with io.open(path, "r", encoding="utf-8") as handle:
+                current[name] = handle.read()
+
+    errors, ran = build_errors()
+    if not ran:
+        print("ABORT: the baseline build did not run. Nothing measured.")
+        return 1
+    print("baseline: %d error(s) across %d skeleton file(s)\n"
+          % (len(errors), len(skeleton.FILES)))
+    baseline = len(errors)
+
+    slots = []
+    for name, skel in skeleton.FILES:
+        if args.only and name != args.only:
+            continue
+        for body in skeleton.body_names(skel):
+            slots.append((name, body))
+    if args.limit:
+        slots = slots[:args.limit]
+
+    kept, reverted, results = 0, 0, []
+    started = time.time()
+
+    for index, (name, body_name) in enumerate(slots, 1):
+        path = os.path.join(PROJECT, name)
+        signature = skeleton.signature_of(skeleton.by_name(name), body_name)
+        before = current[name]
+
+        done = [skeleton.declarations(s) for n, s in skeleton.FILES if n != name]
+        prompt = "\n\n".join([
+            specs.API_BRIEF,
+            dependency_brief(done),
+            "THIS IS THE FILE YOU ARE WRITING INTO. Every declaration below "
+            "already exists exactly as shown:\n\n" + skeleton.declarations(
+                skeleton.by_name(name)),
+            bodynotes.note(name, body_name),
+            "Write ONLY the statements inside the body of:\n    %s\n\n"
+            "No signature, no braces around the whole thing, no class, no "
+            "usings, no explanation. Statements only." % signature,
+        ])
+
+        reply = server.ensemble_answer(
+            prompt, tiers=args.tiers, num_predict=args.num_predict, mode="code")
+        body = extract_body(reply, signature)
+
+        status = "empty reply"
+        if body:
+            candidate = skeleton.splice(before, body_name, body)
+            if candidate == before:
+                status = "slot not found (splice refused)"
+            else:
+                with io.open(path, "w", encoding="utf-8", newline="\n") as handle:
+                    handle.write(candidate)
+                errors, ran = build_errors()
+                masked = codegen_loop.count_unreliable(errors)
+                if not ran:
+                    status = "build did not run"
+                elif masked:
+                    status = "reverted: %d masking error(s)" % masked
+                elif len(errors) > baseline:
+                    status = "reverted: +%d error(s)" % (len(errors) - baseline)
+                else:
+                    current[name] = candidate
+                    kept += 1
+                    status = "KEPT"
+                if status != "KEPT":
+                    with io.open(path, "w", encoding="utf-8", newline="\n") as handle:
+                        handle.write(before)
+                    reverted += 1
+        else:
+            reverted += 1
+
+        results.append((name, body_name, status))
+        print("[%2d/%2d] %-16s %-16s %s" % (index, len(slots), name, body_name, status),
+              flush=True)  # a 45-minute run must be watchable; block buffering hid it
+
+    errors, ran = build_errors()
+    print("\n%s" % ("-" * 60))
+    print("bodies implemented : %d / %d" % (kept, len(slots)))
+    print("reverted           : %d" % reverted)
+    print("final errors       : %s" % (codegen_loop.describe_total(errors) if ran
+                                       else "BUILD DID NOT RUN"))
+    print("elapsed            : %.1f min" % ((time.time() - started) / 60.0))
+    print("\nNOTE: a green build is not proof the game works. Every unfilled "
+          "body still throws NotImplementedException at runtime.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
