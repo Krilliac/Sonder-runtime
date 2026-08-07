@@ -480,6 +480,16 @@ def _reviewed_by_tier_lines(report: dict) -> list[str]:
             "        %-16s n=%-5d %s%% positive%s"
             % (entry.get("tier", "?"), total, entry.get("positive_percent", 0), note)
         )
+    # Without this the table reads as a capability ranking and a local tier
+    # scoring near a cloud tier reads as parity. It is not one: routing is not
+    # random, so the tiers are not solving the same work, and the rate measures
+    # the whole pipeline -- what got delegated, how it was asked, and the
+    # reviewer's bar -- not the model. A tier drawing the harder tasks and
+    # matching on rate is doing BETTER, not the same.
+    lines.append(
+        "        (not a model ranking: routing is not random, so tiers are not "
+        "solving comparable work)"
+    )
     return lines
 
 
