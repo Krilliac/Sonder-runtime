@@ -1260,19 +1260,35 @@ def prune_workspaces(retention_days=None):
         retention_days if retention_days is not None else settings()["retention_days"]
     )
     cutoff = time.time() - max(1, days) * 86400
-    phases = {run["id"]: run["phase"] for run in list_runs(500)}
+    runs = {run["id"]: run for run in list_runs(500)}
     removed = []
     for path in root.glob("selfmod-*"):
-        phase = phases.get(path.name)
-        if phase is None or phase in ACTIVE_PHASES:
+        run = runs.get(path.name)
+        if run is None or run["phase"] in ACTIVE_PHASES:
             continue
         try:
             if path.stat().st_mtime >= cutoff:
                 continue
         except OSError:
             continue
-        with contextlib.suppress(OSError):
-            shutil.rmtree(path)
+        repo = run.get("repository_root") or ""
+        # A workspace is usually a Git WORKTREE, not a plain directory. rmtree
+        # alone leaves git's metadata pointing at a path that no longer exists
+        # ("prunable" in `git worktree list`) and orphans the selfmod/<id>
+        # branch. Tear it down the way it was built.
+        if repo and Path(repo).exists():
+            code, _ = _git(Path(repo), "worktree", "remove", "--force", str(path))
+            if code:
+                with contextlib.suppress(OSError):
+                    shutil.rmtree(path)
+            _git(Path(repo), "worktree", "prune")
+            branch = run.get("branch_name") or ""
+            if branch:
+                _git(Path(repo), "branch", "-D", branch)
+        else:
+            with contextlib.suppress(OSError):
+                shutil.rmtree(path)
+        if not path.exists():
             removed.append(path.name)
     return removed
 

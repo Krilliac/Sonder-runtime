@@ -654,3 +654,51 @@ def test_recent_workspaces_survive_the_retention_window(isolated):
     (root / "selfmod-fresh").mkdir(parents=True, exist_ok=True)
     assert selfmod.prune_workspaces(retention_days=30) == []
     assert (root / "selfmod-fresh").exists()
+
+
+def test_pruning_a_worktree_workspace_leaves_no_git_debris(isolated, tmp_path):
+    """A workspace is usually a Git WORKTREE. rmtree alone leaves git's metadata
+    pointing at a path that no longer exists -- "prunable" in `git worktree
+    list` -- and orphans the selfmod/<id> branch. Both were left behind on the
+    first version of this prune, found only by running `git worktree list`
+    after it."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+    for cmd in (("init",), ("add", "-A"), ("-c", "user.email=t@t", "-c", "user.name=t",
+                                           "commit", "-m", "init")):
+        subprocess.run(["git", *cmd], cwd=repo, capture_output=True, check=True)
+
+    root = selfmod.workspaces_root()
+    root.mkdir(parents=True, exist_ok=True)
+    ws = root / "selfmod-wt"
+    subprocess.run(["git", "worktree", "add", "--detach", str(ws), "HEAD"],
+                   cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "switch", "-c", "selfmod/selfmod-wt"],
+                   cwd=ws, capture_output=True, check=True)
+
+    with selfmod._tx() as conn:
+        conn.execute(
+            "INSERT INTO selfmod_runs("
+            "id, objective, problem, evidence_json, files_json, criteria_json,"
+            "risk, expected_benefit, rollback_plan, repository_root, phase, mode,"
+            "git_status_start, source_fingerprint, branch_name,"
+            "created_ts, updated_ts, budgets_json)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("selfmod-wt", "o", "p", "[]", "[]", "[]", "low", "b", "r", str(repo),
+             "restored", "propose", "", "fp", "selfmod/selfmod-wt", 1, 1, "{}"),
+        )
+    old = time.time() - 90 * 86400
+    os.utime(ws, (old, old))
+
+    assert selfmod.prune_workspaces(retention_days=1) == ["selfmod-wt"]
+    assert not ws.exists()
+
+    listing = subprocess.run(["git", "worktree", "list"], cwd=repo,
+                             capture_output=True, text=True).stdout
+    assert "selfmod-wt" not in listing, "dangling worktree metadata left behind"
+    assert "prunable" not in listing
+
+    branches = subprocess.run(["git", "branch", "--list", "selfmod/*"], cwd=repo,
+                              capture_output=True, text=True).stdout
+    assert branches.strip() == "", "orphaned selfmod branch left behind"
