@@ -133,6 +133,11 @@ CREATE TABLE IF NOT EXISTS lesson_distillations (
     claimed_at REAL,
     attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
     last_error TEXT,
+    -- Why the terminal state came out the way it did ('stored',
+    -- 'not_concrete', 'exact_duplicate', 'semantic_duplicate', ...). NULL on
+    -- rows written before the column existed and on rows whose finalizer
+    -- returned no reason; every reader must tolerate NULL.
+    result_reason TEXT,
     created_ts TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_ts TEXT DEFAULT CURRENT_TIMESTAMP,
     completed_ts TEXT,
@@ -321,6 +326,14 @@ def _migrate(conn):
     usage_cols = _column_names(conn, "lesson_usage")
     if "outcome_ts" not in usage_cols:
         conn.execute("ALTER TABLE lesson_usage ADD COLUMN outcome_ts TEXT")
+    distillation_cols = _column_names(conn, "lesson_distillations")
+    if "result_reason" not in distillation_cols:
+        # Nullable and unbackfilled on purpose: the reason for a historical
+        # terminal state was never recorded, so any value written here would be
+        # invented. NULL is the honest "we did not observe this".
+        conn.execute(
+            "ALTER TABLE lesson_distillations ADD COLUMN result_reason TEXT"
+        )
     _dedupe_outcomes_for_unique_index(conn)
     _backfill_lesson_distillations_once(conn)
     claim_cols = _column_names(conn, "session_turn_claims")
@@ -1191,6 +1204,57 @@ def cancel_lesson_distillation(
     return cur.rowcount == 1
 
 
+# Reasons are short stable names ('semantic_duplicate' is the longest today).
+# The cap stops a finalizer that returns free text from turning the ledger into
+# a log; anything longer than this is not a reason worth grouping by.
+DISTILLATION_REASON_MAX = 64
+
+
+def normalize_distillation_reason(value):
+    """Reduce a finalizer's ``result`` metadata to a groupable reason name.
+
+    Only a non-empty string is a reason. Finalizers are allowed to return
+    richer ``result`` payloads (a mapping, or nothing at all), and those carry
+    no single value the ledger can group by, so they persist as NULL rather
+    than as a stringified dict that no SQL breakdown could ever aggregate.
+    """
+    if not isinstance(value, str):
+        return None
+    reason = value.strip()
+    if not reason:
+        return None
+    return reason[:DISTILLATION_REASON_MAX]
+
+
+def distillation_reason_counts(conn, states=None):
+    """Count terminal distillation rows grouped by state and result reason.
+
+    This is the query that answers "where is distillation yield lost?".
+    Answering it before the reason was persisted meant replaying historical
+    interactions through a live model, because the database held only the
+    terminal state. Rows written before the column existed report
+    ``reason=None``; that is a real, distinguishable answer ("not recorded"),
+    not a bug, and callers must not read it as a rejection reason.
+    """
+    query = (
+        "SELECT state, result_reason AS reason, COUNT(*) AS count "
+        "FROM lesson_distillations"
+    )
+    params = []
+    if states:
+        wanted = [str(state) for state in states]
+        query += " WHERE state IN (%s)" % ",".join("?" for _ in wanted)
+        params.extend(wanted)
+    query += (
+        " GROUP BY state, result_reason "
+        "ORDER BY count DESC, state ASC, reason IS NULL, reason ASC"
+    )
+    return [
+        {"state": row["state"], "reason": row["reason"], "count": row["count"]}
+        for row in conn.execute(query, params).fetchall()
+    ]
+
+
 def finalize_lesson_distillation(
     conn, interaction_id, claim_token, transaction_body=None,
 ):
@@ -1276,14 +1340,19 @@ def finalize_lesson_distillation(
         # Report persisted provenance, never unverified callback metadata.
         lesson_id = lesson_row["id"] if lesson_row is not None else None
 
+        # Persisted in the same UPDATE as the terminal state so a reason can
+        # never disagree with the state it explains, and so no reader can see
+        # a terminal row whose reason has not landed yet.
+        result_reason = normalize_distillation_reason(body_result.get("result"))
         cur = conn.execute(
-            "UPDATE lesson_distillations SET state=?, claim_token=NULL, "
+            "UPDATE lesson_distillations SET state=?, result_reason=?, "
+            "claim_token=NULL, "
             "owner_pid=NULL, owner_identity=NULL, claimed_at=NULL, last_error=NULL, "
             "updated_ts=CURRENT_TIMESTAMP, completed_ts=CURRENT_TIMESTAMP "
             "WHERE interaction_id=? AND state=? AND claim_token=?",
             (
-                terminal_state, interaction_id, DISTILLATION_CLAIMED,
-                claim_token,
+                terminal_state, result_reason, interaction_id,
+                DISTILLATION_CLAIMED, claim_token,
             ),
         )
         if cur.rowcount != 1:

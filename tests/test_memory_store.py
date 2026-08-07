@@ -1417,3 +1417,221 @@ def test_distillation_contradiction_is_negative_evidence_not_weak_positive():
     ms.record_outcome_row(conn, "disputed", "failed", -1.0)
     good, contradiction = ms._distillation_evidence(conn, "disputed")
     assert good is True and contradiction is True
+
+
+def test_finalization_persists_the_reason_it_used_to_discard():
+    """The ledger must record WHY a claim went terminal, not only that it did.
+
+    Measured cost of not having this: answering "where is distillation yield
+    lost?" required replaying 80 historical interactions through a live local
+    model, because 'stored' / 'no_lesson' was the entire recorded history. That
+    same replay exposed a real bug -- the semantic dedupe gate had been dead in
+    production for every candidate -- which a reason breakdown would have shown
+    instantly as zero semantic_duplicate rows across the whole corpus. This test
+    pins the reason to the same row and the same UPDATE as the state, so the two
+    can never disagree.
+    """
+    conn = _conn()
+    ms.log_interaction(conn, "job", "task", "", "response", "code")
+    assert _claim_good_outcome(conn)["claimed"] is True
+
+    result = ms.finalize_lesson_distillation(
+        conn,
+        "job",
+        "claim-1",
+        lambda tx: {
+            "terminal_state": ms.DISTILLATION_NO_LESSON,
+            "result": "semantic_duplicate",
+        },
+    )
+    assert result["distillation_state"] == ms.DISTILLATION_NO_LESSON
+    row = conn.execute(
+        "SELECT state, result_reason FROM lesson_distillations "
+        "WHERE interaction_id='job'"
+    ).fetchone()
+    assert row["state"] == ms.DISTILLATION_NO_LESSON
+    assert row["result_reason"] == "semantic_duplicate"
+
+
+def test_finalization_persists_the_reason_a_stored_lesson_took():
+    """Stored rows carry a reason too, or the breakdown has no denominator.
+
+    A yield question is a ratio: refusals only mean something measured against
+    the candidates that made it through. Recording reasons for refusals alone
+    would leave the same corpus-replay workaround as the only way to recover
+    the other half of the ratio.
+    """
+    conn = _conn()
+    ms.log_interaction(conn, "job", "task", "", "response", "code")
+    assert _claim_good_outcome(conn)["claimed"] is True
+
+    def store(tx):
+        ms.insert_lesson_in_transaction(
+            tx, "lesson-1", "Reasons belong on the ledger.", None, "job",
+        )
+        return {
+            "terminal_state": ms.DISTILLATION_STORED,
+            "lesson_id": "lesson-1",
+            "result": "stored",
+        }
+
+    assert ms.finalize_lesson_distillation(
+        conn, "job", "claim-1", store,
+    )["distillation_state"] == ms.DISTILLATION_STORED
+    assert conn.execute(
+        "SELECT result_reason FROM lesson_distillations WHERE interaction_id='job'"
+    ).fetchone()["result_reason"] == "stored"
+
+
+def test_non_string_finalizer_metadata_persists_as_null_not_stringified():
+    """A structured result payload is not a groupable reason.
+
+    Finalizers may return richer metadata -- an existing test returns
+    {"dedupe": "unique"} -- and coercing that to text would put values in the
+    reason column that no GROUP BY could aggregate, quietly re-creating the
+    unanswerable-database problem this column exists to fix. NULL is the honest
+    record of "no single reason was reported".
+    """
+    conn = _conn()
+    ms.log_interaction(conn, "job", "task", "", "response", "code")
+    assert _claim_good_outcome(conn)["claimed"] is True
+
+    ms.finalize_lesson_distillation(
+        conn,
+        "job",
+        "claim-1",
+        lambda tx: {
+            "terminal_state": ms.DISTILLATION_NO_LESSON,
+            "result": {"dedupe": "exact"},
+        },
+    )
+    assert conn.execute(
+        "SELECT result_reason FROM lesson_distillations WHERE interaction_id='job'"
+    ).fetchone()["result_reason"] is None
+
+    assert ms.normalize_distillation_reason(None) is None
+    assert ms.normalize_distillation_reason("   ") is None
+    assert ms.normalize_distillation_reason("  private  ") == "private"
+    # A finalizer that returns free text must not turn the ledger into a log.
+    assert len(ms.normalize_distillation_reason("x" * 500)) == (
+        ms.DISTILLATION_REASON_MAX
+    )
+
+
+def test_reason_counts_answer_the_yield_question_in_one_query():
+    """The whole point of the column: one SQL call replaces a model replay.
+
+    This asserts the shape a yield investigation actually needs -- counts split
+    by terminal state AND reason -- including rows whose reason was never
+    recorded, which must report as None rather than vanish or crash. Had this
+    breakdown existed, the dead semantic-dedupe gate would have surfaced as a
+    missing semantic_duplicate row instead of costing a corpus replay to find.
+    """
+    conn = _conn()
+    rows = (
+        ("a", ms.DISTILLATION_NO_LESSON, "not_concrete"),
+        ("b", ms.DISTILLATION_NO_LESSON, "not_concrete"),
+        ("c", ms.DISTILLATION_NO_LESSON, "exact_duplicate"),
+        ("d", ms.DISTILLATION_STORED, "stored"),
+        ("e", ms.DISTILLATION_LEGACY_NO_LESSON, None),
+    )
+    for interaction_id, state, reason in rows:
+        conn.execute(
+            "INSERT INTO lesson_distillations("
+            "interaction_id, state, result_reason) VALUES(?, ?, ?)",
+            (interaction_id, state, reason),
+        )
+    conn.commit()
+
+    assert ms.distillation_reason_counts(conn) == [
+        {"state": ms.DISTILLATION_NO_LESSON, "reason": "not_concrete", "count": 2},
+        {"state": ms.DISTILLATION_LEGACY_NO_LESSON, "reason": None, "count": 1},
+        {"state": ms.DISTILLATION_NO_LESSON, "reason": "exact_duplicate", "count": 1},
+        {"state": ms.DISTILLATION_STORED, "reason": "stored", "count": 1},
+    ]
+    assert ms.distillation_reason_counts(
+        conn, states=[ms.DISTILLATION_NO_LESSON],
+    ) == [
+        {"state": ms.DISTILLATION_NO_LESSON, "reason": "not_concrete", "count": 2},
+        {"state": ms.DISTILLATION_NO_LESSON, "reason": "exact_duplicate", "count": 1},
+    ]
+
+
+def test_pre_reason_ledger_opens_reads_and_writes_after_migration(tmp_path):
+    """A database created BEFORE this column must keep working untouched.
+
+    The live memory.db predates the column and holds the entire learning
+    history; a migration that dropped, rewrote, or invented values for those
+    rows would destroy the only record of past distillation. Old rows must
+    survive with reason NULL (never a fabricated value), readers must tolerate
+    that NULL, and new finalizations against the same file must write reasons.
+    """
+    path = tmp_path / "pre-reason-memory.db"
+    legacy = sqlite3.connect(path)
+    legacy.executescript(
+        "CREATE TABLE lesson_distillations ("
+        "interaction_id TEXT PRIMARY KEY, "
+        "state TEXT NOT NULL CHECK(state IN ("
+        "'claimed', 'retryable', 'stored', 'no_lesson', "
+        "'legacy_no_lesson', 'cancelled')), "
+        "signal TEXT, claim_token TEXT, owner_pid INTEGER, "
+        "owner_identity TEXT, claimed_at REAL, "
+        "attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0), "
+        "last_error TEXT, "
+        "created_ts TEXT DEFAULT CURRENT_TIMESTAMP, "
+        "updated_ts TEXT DEFAULT CURRENT_TIMESTAMP, "
+        "completed_ts TEXT);"
+    )
+    legacy.executemany(
+        "INSERT INTO lesson_distillations(interaction_id, state, signal) "
+        "VALUES(?, ?, ?)",
+        (
+            ("old-stored", "stored", "tests_passed"),
+            ("old-refused", "no_lesson", "accepted"),
+        ),
+    )
+    legacy.commit()
+    legacy.close()
+
+    conn = ms.connect(path)
+    try:
+        columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(lesson_distillations)")
+        }
+        assert "result_reason" in columns
+        # History is preserved verbatim; no reason is invented for old rows.
+        assert {
+            row["interaction_id"]: (row["state"], row["result_reason"])
+            for row in conn.execute(
+                "SELECT interaction_id, state, result_reason "
+                "FROM lesson_distillations"
+            )
+        } == {
+            "old-stored": ("stored", None),
+            "old-refused": ("no_lesson", None),
+        }
+        # A NULL reason must not crash the reader.
+        assert ms.distillation_reason_counts(conn) == [
+            {"state": "no_lesson", "reason": None, "count": 1},
+            {"state": "stored", "reason": None, "count": 1},
+        ]
+
+        # ...and the migrated file still accepts a full claim -> finalize cycle.
+        ms.log_interaction(conn, "job", "task", "", "response", "code")
+        assert _claim_good_outcome(conn)["claimed"] is True
+        ms.finalize_lesson_distillation(
+            conn,
+            "job",
+            "claim-1",
+            lambda tx: {
+                "terminal_state": ms.DISTILLATION_NO_LESSON,
+                "result": "not_concrete",
+            },
+        )
+        assert conn.execute(
+            "SELECT result_reason FROM lesson_distillations "
+            "WHERE interaction_id='job'"
+        ).fetchone()["result_reason"] == "not_concrete"
+    finally:
+        conn.close()

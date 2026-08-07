@@ -603,3 +603,84 @@ def test_learn_from_example_routes_through_unit_of_work(monkeypatch, tmp_path):
     assert seen["db_paths"] and all(
         p == server._DB_PATH for p in seen["db_paths"]
     )
+
+
+def test_record_outcome_persists_the_refusal_reason_reflection_computed(
+    monkeypatch, tmp_path,
+):
+    """server.py must stop discarding the reason the distiller already knows.
+
+    reflection.store_prepared_lesson computes the exact reason a candidate was
+    refused, finalize_lesson_distillation returns it, and server.py dropped it
+    on the floor. The measured cost: answering "where is distillation yield
+    lost?" meant replaying 80 historical interactions through a live local
+    model, because the ledger recorded only 'stored' / 'no_lesson'. This test
+    drives the real record_outcome path -- real reflection, real finalizer --
+    and requires the reason to reach both the ledger row and the caller.
+    """
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
+    conn = server._open_db()
+    try:
+        memory_store.log_interaction(conn, "I1", "task", "", "answer", "code")
+    finally:
+        conn.close()
+    # What the real distiller returns when the model produced nothing concrete.
+    monkeypatch.setattr(
+        server.reflection,
+        "prepare_lesson_candidate",
+        lambda *args, **kwargs: {"status": "no_lesson", "reason": "not_concrete"},
+    )
+
+    result = server._record_outcome_and_maybe_distill("I1", "tests_passed")
+
+    assert result["distillation_state"] == memory_store.DISTILLATION_NO_LESSON
+    assert result["distillation_reason"] == "not_concrete"
+    conn = server._open_db()
+    try:
+        assert conn.execute(
+            "SELECT result_reason FROM lesson_distillations "
+            "WHERE interaction_id='I1'"
+        ).fetchone()["result_reason"] == "not_concrete"
+    finally:
+        conn.close()
+
+
+def test_record_outcome_persists_a_real_dedupe_refusal_reason(monkeypatch, tmp_path):
+    """A dedupe refusal must be distinguishable from a weak-candidate refusal.
+
+    Both collapse to 'no_lesson' on the ledger, yet they mean opposite things:
+    one says the distiller produced nothing, the other says the corpus already
+    knows it. Conflating them is what made a dead semantic-dedupe gate invisible
+    in production -- a reason breakdown would have shown zero semantic_duplicate
+    rows across the entire corpus. Here the reason comes from the real dedupe
+    code, not a stubbed return value.
+    """
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
+    text = "Use pathlib.Path for path joins."
+    conn = server._open_db()
+    try:
+        memory_store.add_lesson(conn, "LOLD", text, None, "seed")
+        memory_store.log_interaction(conn, "I1", "task", "", "answer", "code")
+    finally:
+        conn.close()
+    monkeypatch.setattr(
+        server.reflection,
+        "prepare_lesson_candidate",
+        lambda *args, **kwargs: _prepared_candidate(text=text),
+    )
+
+    result = server._record_outcome_and_maybe_distill("I1", "tests_passed")
+
+    assert result["distillation_state"] == memory_store.DISTILLATION_NO_LESSON
+    assert result["distillation_reason"] == "exact_duplicate"
+    conn = server._open_db()
+    try:
+        assert memory_store.distillation_reason_counts(conn) == [
+            {
+                "state": memory_store.DISTILLATION_NO_LESSON,
+                "reason": "exact_duplicate",
+                "count": 1,
+            },
+        ]
+    finally:
+        conn.close()
