@@ -48,7 +48,6 @@ host's file-root and approval gates apply exactly as they do elsewhere.
 from __future__ import annotations
 
 import json
-import os
 import re
 
 SHRINK_FLOOR = 0.75
