@@ -2522,13 +2522,29 @@ def _record_code_gate_failure(interaction_id):
 
     Best-effort: the auto-negative both keeps broken code out of lesson
     distillation and corrects the outcome-signal skew (previously ~97%
-    positive because failures were simply never recorded)."""
+    positive because failures were simply never recorded).
+
+    It still must not raise -- this runs inside a reply path, and losing the
+    user's answer to record a statistic would be a worse trade. But it may not
+    fail SILENTLY either, and that asymmetry is the point: positives arrive
+    through explicit record_outcome calls that surface their errors to the
+    caller, while this is the only outcome the runtime records on its own. A
+    swallowed exception here therefore drops a negative and nothing else,
+    re-inflating the very skew this function exists to correct -- invisibly,
+    and in the flattering direction. So the failure is recorded as an activity
+    event instead of vanishing."""
     if not interaction_id:
         return
     try:
         _record_outcome_and_maybe_distill(interaction_id, "failed")
-    except Exception:
-        pass
+    except Exception as exc:
+        with contextlib.suppress(Exception):
+            activity_tracker.record_event(
+                "outcome_record_failed",
+                summary="auto-negative for %s was lost: %s" % (
+                    str(interaction_id)[:40], str(exc)[:160],
+                ),
+            )
 
 
 def _persist_verified_code_repair(
