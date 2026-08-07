@@ -2326,6 +2326,7 @@ def _record_outcome_and_maybe_distill(interaction_id, signal):
             "outcome_inserted": recorded["outcome_inserted"],
             "distillation_state": recorded["distillation_state"],
             "lesson_id": None,
+            "distillation_reason": None,
             "distillation_deferred": (
                 recorded["distillation_state"]
                 == memory_store.DISTILLATION_RETRYABLE
@@ -2365,6 +2366,13 @@ def _record_outcome_and_maybe_distill(interaction_id, signal):
             conn.close()
 
         result["distillation_state"] = finalized["distillation_state"]
+        # The finalizer's reason is the only account of WHY a candidate was
+        # refused; dropping it here is what forced a model replay to answer
+        # "where is yield lost?". memory_store persists the same normalized
+        # value on the ledger row, so the two can never disagree.
+        result["distillation_reason"] = memory_store.normalize_distillation_reason(
+            finalized["result"]
+        )
         result["distillation_deferred"] = False
         if (
             finalized["finalized"]
@@ -2394,6 +2402,7 @@ def _record_outcome_and_maybe_distill(interaction_id, signal):
                 "outcome_inserted": recorded["outcome_inserted"],
                 "distillation_state": recorded["distillation_state"],
                 "lesson_id": None,
+                "distillation_reason": None,
                 "distillation_deferred": False,
             }
         result["distillation_deferred"] = released
