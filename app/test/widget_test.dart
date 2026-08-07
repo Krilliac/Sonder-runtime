@@ -258,6 +258,78 @@ void main() {
     }
   });
 
+  testWidgets('System shows caller-judged work, never the blended rate alone',
+      (tester) async {
+    // The blend is dominated by autograded outcomes -- the runtime marking its
+    // own curriculum. On the real store it reads 96% where caller-judged work
+    // succeeds 53% of the time, and this screen is what a non-CLI user looks
+    // at, so a near-full green "Positive" bar was the most misleading thing it
+    // could show.
+    await tester.binding.setSurfaceSize(const Size(900, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final info = SystemInfo.fromJson({
+      'status': 'ready',
+      'learning_health': {
+        'status': 'attention',
+        'interactions': 7865,
+        'outcomes': 6831,
+        'outcome_interactions': 6826,
+        'good_outcomes': 6562,
+        'bad_outcomes': 269,
+        'outcome_coverage_percent': 86.8,
+        'positive_percent': 96.1,
+        'reviewed_positive_percent': 52.7,
+        'reviewed_outcomes': 186,
+        'autograded_positive_percent': 97.3,
+        'autograded_outcomes': 6645,
+        'lessons': 1061,
+        'grounded_lessons': 533,
+        'synthetic_lessons': 528,
+        'lesson_sources': {'interaction': 533, 'seed': 528},
+        'signals': const [],
+        'quality': {
+          'exact_duplicate_groups': 0,
+          'exact_duplicate_prunable': 0,
+          'no_embedding': 0,
+          'vague_without_anchor': 0,
+          'path_or_secret_like': 0,
+          'missing_source_interaction': 0,
+          'missing_fts': 0,
+          'orphan_fts': 0,
+          'embedding_percent': 100.0,
+        },
+      },
+      'models': const [],
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: SystemScreen(
+          settings: Settings(),
+          initialInfo: info,
+          liveUpdates: false,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('learning-health-panel')),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+
+    // The honest number is the one on the meter.
+    expect(find.text('Caller-judged'), findsOneWidget);
+    expect(find.textContaining('186 judged by a caller'), findsOneWidget);
+    // Autograded is shown, but labelled as self-marked rather than as quality.
+    expect(find.textContaining('self-marked'), findsOneWidget);
+    // The old label must not come back.
+    expect(find.text('Positive'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('System learning quality surfaces hygiene warnings',
       (tester) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
