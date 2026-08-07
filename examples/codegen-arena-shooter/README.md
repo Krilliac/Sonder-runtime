@@ -201,3 +201,50 @@ and now a second source of truth.
 That is [SpecBench](https://arxiv.org/abs/2605.21384)'s gap in miniature —
 passing the visible check while deviating from the specification — and it is
 why *bodies kept* is a measure of what compiled, not of what is right.
+
+## Second pass: 26 / 38, and what actually caused the gain
+
+Re-running the 21 failed slots with `--attempts 2` took the project from 17 to
+**26 of 38 bodies**, build still clean, 50 minutes. Per file:
+
+| File | Bodies kept |
+|---|---|
+| `GameMap.cs` | **6 / 6** |
+| `Combatant.cs` | **3 / 3** |
+| `NetProtocol.cs` | **4 / 4** |
+| `Program.cs` | 5 / 7 |
+| `MatchState.cs` | 4 / 5 |
+| `LobbyNet.cs` | 2 / 5 |
+| `Screens.cs` | 2 / 7 |
+| `ClassKit.cs` | 0 / 1 |
+
+The algorithm/API split held and sharpened: **pure algorithm 9/9 (100%)**,
+**library API 4/12 (33%)**.
+
+### The retry works. The repair prompt does not.
+
+`--attempts 2` was added on the strength of an earlier eval where "self-repair
+x3" scored 5/6 against "pass@1" at 4/6. Splitting the outcome by which attempt
+succeeded shows that reasoning was wrong:
+
+| mechanism | converted |
+|---|---|
+| re-sampling — kept on attempt 1 | **8 / 21** |
+| error feedback — kept on attempt 2 | **1 / 21** (`Screens.Button`) |
+
+**Retrying is worth ~38%; showing the model its own compiler errors is worth
+~5%.** The original eval compared three attempts *with* feedback against one
+attempt *without* — two variables at once, and no run of N samples with no
+feedback to separate them. A one-task gain over six tasks is comfortably inside
+what re-sampling alone explains.
+
+Keep the retry; it earned 9 bodies. Do not credit the feedback for them. And
+when measuring a mechanism, vary one thing: this is the second time in this
+directory that a number meant something other than what it appeared to.
+
+### What is left is what the split predicts
+
+`ClassKit.Get` (a 24-value stat table — pure recall even with the values in the
+prompt) failed all four attempts across both runs. Five of the seven remaining
+gaps are `Screens` and `LobbyNet` — Raylib layout and `UdpClient` lifecycle,
+the bodies that need a real API used the way that library actually works.
