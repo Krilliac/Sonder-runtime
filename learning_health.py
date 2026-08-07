@@ -649,6 +649,16 @@ def format_report(report: dict) -> str:
             report.get("autograded_outcomes", 0),
             report.get("autograded_positive_percent", 0),
         ),
+        # State the method's limit next to the number it produces. The split is
+        # inferred from the SIGNAL NAME -- there is no recorded source -- so a
+        # caller who ran the tests and recorded tests_passed lands in the
+        # autograded bucket and drops out of the reviewed rate entirely.
+        # Measured: 63 autograded outcomes carry a real chat session_id, under
+        # 1% of that population, so the reviewed rate is not materially skewed
+        # today. The mechanism is unbounded, though, so it is worth watching.
+        "    (split inferred from signal name, not a recorded source: "
+        "record_outcome callers who use tests_passed/failed/compiled land in "
+        "the autograded bucket)",
         "  lessons: %s | interaction-grounded: %s | synthetic: %s | orphaned: %s"
         % (
             report.get("lessons", 0),
