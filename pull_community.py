@@ -49,8 +49,8 @@ def merge_lessons(conn, lessons, embed_fn=None):
             vector = result
             embedding = embeddings.to_blob(vector)
         provenance = (
-            embeddings.provenance(vector)
-            if vector is not None and embed_fn is embeddings.embed else {}
+            embeddings.trusted_provenance(vector, embed_fn)
+            if vector is not None else {}
         )
         memory_store.add_lesson(
             conn, memory_store.new_id(), text, embedding, "community",
