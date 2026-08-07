@@ -593,3 +593,64 @@ def test_status_counts_every_run_not_just_the_recent_window(isolated):
     assert "active: 1" in text
     # The window must be declared, or three visible rows read as all of them.
     assert "showing" in text and "of 26" in text
+
+
+def test_workspaces_are_pruned_only_when_the_run_has_finished(isolated, tmp_path):
+    """Backups were pruned on a retention policy from day one; workspaces never
+    were, so they grew without bound -- 508 MB from five runs, roughly 100 MB of
+    full source copy each. Rollback restores from the BACKUP, so a finished
+    run's workspace holds no recovery path."""
+    root = selfmod.workspaces_root()
+    root.mkdir(parents=True, exist_ok=True)
+
+    def _insert(conn, run_id, phase):
+        conn.execute(
+            "INSERT INTO selfmod_runs("
+            "id, objective, problem, evidence_json, files_json, criteria_json,"
+            "risk, expected_benefit, rollback_plan, repository_root, phase, mode,"
+            "git_status_start, source_fingerprint, created_ts, updated_ts, budgets_json)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (run_id, "o", "p", "[]", "[]", "[]", "medium", "b", "r", "/repo",
+             phase, "propose", "", "fp", 1, 1, "{}"),
+        )
+
+    with selfmod._tx() as conn:
+        _insert(conn, "selfmod-done", "restored")
+        _insert(conn, "selfmod-live", "editing")
+
+    old = time.time() - 90 * 86400
+    for name in ("selfmod-done", "selfmod-live", "selfmod-unknown"):
+        d = root / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "file.py").write_text("x", encoding="utf-8")
+        os.utime(d, (old, old))
+
+    removed = selfmod.prune_workspaces(retention_days=1)
+
+    assert "selfmod-done" in removed, "a finished run's workspace is disposable"
+    assert not (root / "selfmod-done").exists()
+    # An in-flight run must never lose the tree it is editing.
+    assert "selfmod-live" not in removed
+    assert (root / "selfmod-live").exists()
+    # An unknown id is left alone rather than assumed dead.
+    assert "selfmod-unknown" not in removed
+    assert (root / "selfmod-unknown").exists()
+
+
+def test_recent_workspaces_survive_the_retention_window(isolated):
+    """A workspace inside the retention window stays, even when terminal."""
+    root = selfmod.workspaces_root()
+    root.mkdir(parents=True, exist_ok=True)
+    with selfmod._tx() as conn:
+        conn.execute(
+            "INSERT INTO selfmod_runs("
+            "id, objective, problem, evidence_json, files_json, criteria_json,"
+            "risk, expected_benefit, rollback_plan, repository_root, phase, mode,"
+            "git_status_start, source_fingerprint, created_ts, updated_ts, budgets_json)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("selfmod-fresh", "o", "p", "[]", "[]", "[]", "low", "b", "r", "/repo",
+             "restored", "propose", "", "fp", 1, 1, "{}"),
+        )
+    (root / "selfmod-fresh").mkdir(parents=True, exist_ok=True)
+    assert selfmod.prune_workspaces(retention_days=30) == []
+    assert (root / "selfmod-fresh").exists()
