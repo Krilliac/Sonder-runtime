@@ -15,6 +15,7 @@ Commands:
     restore       verify / apply a backup into an empty directory
     drain         request graceful drain of a running server
     smoke         minimal end-to-end check without a real model
+    eval-history  inspect or explicitly record precomputed evaluation evidence
 """
 from __future__ import annotations
 
@@ -569,6 +570,44 @@ def cmd_rotate_key(args) -> int:
     return 0
 
 
+def cmd_eval_history(args) -> int:
+    """Inspect history or explicitly append already-computed evidence.
+
+    This command never runs an evaluation and never calls a model.
+    """
+    import eval_history
+
+    try:
+        if args.eval_history_command == "status":
+            payload = eval_history.history_status(
+                args.history,
+                model=args.model,
+                model_digest=args.model_digest,
+                suite=args.suite,
+                suite_version=args.suite_version,
+                suite_digest=args.suite_digest,
+                tolerance=args.tolerance,
+            )
+        else:
+            payload = eval_history.record_result(
+                args.history,
+                model=args.model,
+                model_digest=args.model_digest,
+                suite=args.suite,
+                suite_version=args.suite_version,
+                suite_digest=args.suite_digest,
+                passed=args.passed,
+                total=args.total,
+                recorded_at=args.recorded_at,
+                source=args.source,
+            )
+    except (eval_history.HistoryError, OSError, TimeoutError) as exc:
+        print("evaluation history error: %s" % exc, file=sys.stderr)
+        return 2
+    _emit(payload, as_json=args.json)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m sonder_runtime",
@@ -715,6 +754,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="how long the previous key stays valid (default 24h)",
     )
     p.set_defaults(func=cmd_rotate_key)
+
+    p = sub.add_parser(
+        "eval-history",
+        help="inspect or explicitly record precomputed evaluation evidence",
+    )
+    history_sub = p.add_subparsers(
+        dest="eval_history_command", required=True,
+    )
+    hp = history_sub.add_parser("status", help="read identity-separated trends")
+    hp.add_argument("--history", help="history JSONL path")
+    hp.add_argument("--model", default="")
+    hp.add_argument("--model-digest", default="")
+    hp.add_argument("--suite", default="")
+    hp.add_argument("--suite-version", default="")
+    hp.add_argument("--suite-digest", default="")
+    hp.add_argument("--tolerance", type=float, default=0.0)
+    hp.add_argument("--json", action="store_true")
+    hp.set_defaults(func=cmd_eval_history)
+    hp = history_sub.add_parser(
+        "record", help="append one precomputed aggregate result (never runs a model)"
+    )
+    hp.add_argument("--history", help="history JSONL path")
+    hp.add_argument("--model", required=True)
+    hp.add_argument("--model-digest", required=True)
+    hp.add_argument("--suite", required=True)
+    hp.add_argument("--suite-version", required=True)
+    hp.add_argument("--suite-digest", required=True)
+    hp.add_argument("--passed", type=int, required=True)
+    hp.add_argument("--total", type=int, required=True)
+    hp.add_argument("--recorded-at", type=float, default=None)
+    hp.add_argument("--source", default="manual")
+    hp.add_argument("--json", action="store_true")
+    hp.set_defaults(func=cmd_eval_history)
 
     return parser
 
