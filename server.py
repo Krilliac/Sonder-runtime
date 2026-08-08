@@ -10179,6 +10179,7 @@ AGENT_TOOL_HELP = """Available tools:
 - self_heal_repair: {"apply": false}
 - status: {}
 - system_profile_text: {}
+- environment_status: {}
 - emotion_vector_status: {}
 - update_emotion_vectors: {"vectors_json": {"warmth": 0.5, "brevity": 0.2}, "mode": "merge|replace|clear|reset"}
 - tune_emotion_vectors: {"feedback_text": "be warmer but more concise", "step": 0.1}
@@ -10247,6 +10248,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - status: {}
 - environment_status: {}
 - system_profile_text: {}
+- environment_status: {}
 - emotion_vector_status: {}
 - preferences_status: {"include_disabled": false, "limit": 20}
 - tool_manifest: {}
