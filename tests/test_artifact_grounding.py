@@ -487,7 +487,7 @@ def test_media_recipes_reject_malformed_content(
 
 def test_bundle_rejects_manifest_path_escape(tmp_path):
     root = tmp_path / "bundle"
-    root.mkdir()
+    root.mkdir(parents=True)
     outside = tmp_path / "outside-artifact.txt"
     outside.write_text("outside", encoding="utf-8")
     manifest = {
@@ -526,3 +526,54 @@ def test_missing_path_and_invalid_requirements_fail_closed(tmp_path):
         assert "required_fields" in str(exc)
     else:
         raise AssertionError("invalid requirements should fail closed")
+
+
+def _bundle_with_extras(tmp_path, extras):
+    """A bundle whose manifest is honest about one file and silent about the rest."""
+    import hashlib
+    import json
+
+    root = tmp_path / "bundle"
+    root.mkdir(parents=True)
+    report = root / "report.md"
+    report.write_text("# hello\n", encoding="utf-8")
+    (root / "manifest.json").write_text(
+        json.dumps({
+            "files": [{
+                "path": "report.md",
+                "bytes": report.stat().st_size,
+                "sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
+            }],
+            "kinds": ["report"],
+        }),
+        encoding="utf-8",
+    )
+    for index in range(extras):
+        (root / ("stow_%02d.bin" % index)).write_bytes(b"\x00" * 1024)
+    return root
+
+
+def test_manifest_bundle_is_validated_against_the_directory_not_itself(tmp_path):
+    """With a manifest present, validation walked only the manifest's own rows
+    and never enumerated the directory.
+
+    So a bundle could declare one small correct file and ship any number of
+    undeclared ones beside it: the extras were not counted toward
+    bundle-file-limit, not added to bundle-total-size, and never hashed. The
+    limits were measuring the manifest's honesty about itself.
+    """
+    clean = artifact_grounding._validate_directory(
+        _bundle_with_extras(tmp_path / "a", 0), "bundle", {}
+    )
+    assert clean["ok"] is True
+
+    smuggled = artifact_grounding._validate_directory(
+        _bundle_with_extras(tmp_path / "b", 12), "bundle", {}
+    )
+    assert smuggled["ok"] is False
+    named = {
+        check.get("name"): check.get("ok")
+        for check in smuggled.get("checks", [])
+        if isinstance(check, dict)
+    }
+    assert named.get("bundle-no-undeclared-files") is False

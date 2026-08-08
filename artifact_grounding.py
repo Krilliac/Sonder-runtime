@@ -3512,7 +3512,32 @@ def _validate_directory(path: Path, recipe: str, requirements: dict) -> dict:
                 _check(checks, "bundle-size", size == row.get("bytes"), "%s: %d bytes" % (relative, size))
                 digest = hashlib.sha256(_read_bytes(candidate)).hexdigest()
                 _check(checks, "bundle-sha256", digest == row.get("sha256"), relative)
-        _check(checks, "bundle-file-limit", len(files) <= MAX_BUNDLE_FILES, "at most %d files" % MAX_BUNDLE_FILES)
+        # Enumerate what is ON DISK, not just what the manifest admits to.
+        # Every check above walks the manifest's own rows, so a bundle that
+        # declares one small correct file and ships nine hundred undeclared
+        # ones beside it passed: the extras were never counted toward the file
+        # limit, never added to the byte total, and never hashed. The limits
+        # were measuring the manifest's honesty about itself.
+        actual = []
+        for item in path.rglob("*"):
+            if item.is_file() and not item.is_symlink():
+                actual.append(item)
+                if len(actual) > MAX_BUNDLE_FILES:
+                    break
+        _check(checks, "bundle-file-limit", len(actual) <= MAX_BUNDLE_FILES,
+               "%d files on disk (at most %d)" % (len(actual), MAX_BUNDLE_FILES))
+        declared_paths = {candidate.resolve() for _name, candidate in declared}
+        manifest_path = (path / "manifest.json").resolve()
+        undeclared = sorted(
+            item.relative_to(path).as_posix()
+            for item in actual
+            if item.resolve() not in declared_paths and item.resolve() != manifest_path
+        )
+        _check(
+            checks, "bundle-no-undeclared-files", not undeclared,
+            ("%d undeclared: %s" % (len(undeclared), ", ".join(undeclared[:5])))
+            if undeclared else "none",
+        )
         kinds = set(str(item) for item in manifest.get("kinds", []) if item)
         for kind in _string_list(requirements, "required_kinds"):
             _check(checks, "bundle-required-kind", kind in kinds, "kind %r" % kind)
