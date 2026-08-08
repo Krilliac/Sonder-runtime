@@ -12,6 +12,12 @@ GOOD_THRESHOLD = _rules.GOOD_THRESHOLD
 
 
 def score(signal):
+    """The scalar reward for an outcome signal, from the shared rules table.
+
+    Delegates to the single source of truth in domain.memory.rules so scores
+    stay identical wherever they are read; an unknown signal is handled there,
+    not here.
+    """
     return _rules.reward_score(signal)
 
 

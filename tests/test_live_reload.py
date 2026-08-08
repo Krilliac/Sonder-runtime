@@ -41,7 +41,7 @@ def test_prime_closes_first_request_after_edit_window(monkeypatch, tmp_path):
     module_path.write_text("VALUE = 1\n", encoding="utf-8")
     monkeypatch.syspath_prepend(str(tmp_path))
     try:
-        mod = importlib.import_module(module_name)
+        importlib.import_module(module_name)
         live_reload.prime_modules([module_name])
 
         module_path.write_text("VALUE = 222\n", encoding="utf-8")
@@ -155,3 +155,30 @@ def test_repl_rebinds_reloaded_personas(monkeypatch):
         assert repl.personas is replacement
     finally:
         repl.personas = original
+
+
+def test_unchanged_module_is_not_reported_as_changed(monkeypatch, tmp_path):
+    """reload_changed_modules must return only names that actually reloaded.
+
+    The `signature == old_signature` branch used to add the module to the
+    result even though nothing changed, so every caller rebound every watched
+    module on every request. Harmless (rebinding to itself) but the returned
+    set contradicted the function's name and docstring.
+    """
+    module_name = "live_reload_unchanged_mod"
+    module_path = tmp_path / (module_name + ".py")
+    module_path.write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    try:
+        importlib.import_module(module_name)
+        # First call primes the signature; second call, with no source edit,
+        # must report nothing.
+        live_reload.reload_changed_modules([module_name])
+        second = live_reload.reload_changed_modules([module_name])
+        assert module_name not in second, (
+            "an unchanged module was reported as reloaded"
+        )
+    finally:
+        sys.modules.pop(module_name, None)
+        live_reload._MTIMES.pop(module_name, None)
+        live_reload._SIGNATURES.pop(module_name, None)
