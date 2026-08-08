@@ -12,6 +12,7 @@ compatibility surfaces and delegate here.
 | `mcp` | Run the MCP adapter (tool surface for MCP clients). |
 | `repl` | Interactive REPL with slash commands. |
 | `preflight` | Run startup checks and report; opens no listener. |
+| `doctor` | Consolidated read-only health report for config, self-heal, memory quality, runtime policy, and Ollama reachability. |
 | `status` | Local build / config / schema status. |
 | `diagnostics` | Redacted diagnostic bundle (config, schemas, preflight). |
 | `config` | Print the effective, redacted configuration. |
@@ -37,6 +38,8 @@ python -m sonder_runtime serve    --config /etc/sonder/sonder.toml
 
 # Operate
 python -m sonder_runtime status --json
+python -m sonder_runtime doctor --json
+python -m sonder_runtime doctor --skip-ollama  # fully local checks only
 python -m sonder_runtime backup create --json
 python -m sonder_runtime restore smoke /var/backups/sonder/<dir>
 python -m sonder_runtime rotate-key --secrets /etc/sonder/sonder.env --overlap-seconds 86400

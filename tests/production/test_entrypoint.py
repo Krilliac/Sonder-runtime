@@ -89,6 +89,46 @@ def test_preflight_reports_json(isolated_home, capsys):
     assert {"state_home_writable", "disk_space", "runtime_policy"} <= names
 
 
+def test_doctor_json_skips_ollama(monkeypatch, capsys):
+    import sonder_doctor
+
+    called = []
+
+    def check(name):
+        return lambda: called.append(name) or ("ok", f"{name} checked")
+
+    monkeypatch.setattr(
+        sonder_doctor,
+        "default_checks",
+        lambda: [("config", check("config")), ("ollama", check("ollama"))],
+    )
+
+    assert main(["doctor", "--json", "--skip-ollama"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "overall": "ok",
+        "checks": [
+            {"name": "config", "status": "ok", "detail": "config checked"}
+        ],
+    }
+    assert called == ["config"]
+
+
+def test_doctor_text_failure_sets_exit_code(monkeypatch, capsys):
+    import sonder_doctor
+
+    monkeypatch.setattr(
+        sonder_doctor,
+        "default_checks",
+        lambda: [("config", lambda: ("fail", "invalid"))],
+    )
+
+    assert main(["doctor"]) == 1
+    assert capsys.readouterr().out == (
+        "sonder doctor: FAIL\n  [FAIL] config  invalid\n"
+    )
+
+
 def test_diagnostics_redacts_all_known_secrets(isolated_home, capsys, monkeypatch):
     secret = "diagnostic-secret-abcdef-9988"
     monkeypatch.setenv("SONDER_API_KEY", secret)
