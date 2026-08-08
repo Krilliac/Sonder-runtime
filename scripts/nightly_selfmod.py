@@ -237,29 +237,55 @@ def _objective_key(text) -> str:
     return " ".join(re.sub(r"[^a-z0-9 ]+", " ", head.lower()).split())
 
 
+# Words shared by so many objectives that overlap on them alone means nothing.
+# Two proposals that both "add a guard to catch and report exceptions" are the
+# same SHAPE, not the same work -- what distinguishes them is the identifier
+# they name. Comparing on distinctive tokens stops the guard collapsing every
+# exception-guard objective into one and skipping real work on files it has not
+# touched.
+_OBJECTIVE_STOPWORDS = frozenset("""
+a an the to in of on for and or that this it its is are be add ensure handle
+check guard catch report raise return value function method case where when
+does not no non empty string text input correctly properly current
+implementation code line so which can could lead unexpected behaviour behavior
+""".split())
+
+
+def _distinctive(text) -> set:
+    return {w for w in _objective_key(text).split()
+            if w not in _OBJECTIVE_STOPWORDS and len(w) > 2}
+
+
 def _too_similar(objective, previous) -> bool:
-    """Whether this objective restates one already attempted."""
+    """Whether this objective restates one already attempted.
+
+    Compares on DISTINCTIVE tokens (identifiers, not boilerplate). An objective
+    that shares no distinctive token with any prior one is new work even if its
+    verb phrase is identical -- "guard exceptions in check_bad_embeddings" and
+    "guard exceptions in run_ruff" are different, and an earlier version wrongly
+    merged them because the shared "add a guard to catch and report exceptions
+    in" dominated a raw token overlap.
+    """
     import difflib
 
     candidate = _objective_key(objective)
     if not candidate:
         return False
+    cand_tokens = _distinctive(objective)
     for earlier in previous:
         key = _objective_key(earlier)
         if not key:
             continue
-        # Containment catches a restatement that only adds or drops a
-        # qualifier.
+        # A near-identical string is a repeat regardless of tokens.
         if candidate in key or key in candidate:
             return True
-        if difflib.SequenceMatcher(None, candidate, key).ratio() >= 0.80:
+        if difflib.SequenceMatcher(None, candidate, key).ratio() >= 0.85:
             return True
-        # Token overlap catches a reword, which a sequence ratio does not: the
-        # same objective phrased with different filler words scored 0.75 and
-        # passed, while sharing nine of fourteen distinct tokens.
-        left, right = set(candidate.split()), set(key.split())
-        if left and right:
-            overlap = len(left & right) / float(len(left | right))
+        # Otherwise it is a repeat only when the DISTINCTIVE tokens overlap --
+        # same identifiers, not merely the same boilerplate verb.
+        prev_tokens = _distinctive(earlier)
+        if cand_tokens and prev_tokens:
+            overlap = len(cand_tokens & prev_tokens) / float(len(cand_tokens | prev_tokens))
             if overlap >= 0.60:
                 return True
     return False
