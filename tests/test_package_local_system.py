@@ -59,6 +59,10 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     entries = {item["path"]: item for item in manifest["files"]}
     assert package.REQUIRED_FILES <= set(entries)
     assert "LICENSE" in entries
+    assert "sonder_build.json" in entries
+    build = json.loads((dest / "sonder_build.json").read_text(encoding="utf-8"))
+    assert build["version"]
+    assert build["commit_sha"] == "unknown" or len(build["commit_sha"]) == 40
     assert "runtime_policy.py" in entries
     assert "learning_health.py" in entries
     assert "sonder_health.py" in entries
@@ -129,6 +133,34 @@ def test_zip_is_deterministic_and_contains_manifest(monkeypatch, tmp_path):
         assert not any(name.endswith("unlisted-local-state.txt") for name in zf.namelist())
         shell = zf.getinfo("local-system/bootstrap-engine.sh")
         assert (shell.external_attr >> 16) & 0o777 == 0o755
+
+
+def test_payload_stamps_explicit_runtime_build_identity(monkeypatch, tmp_path):
+    root = _fake_repo(tmp_path, monkeypatch)
+    dest = root / "dist" / "local-system"
+    revision = "a" * 40
+    package.copy_payload(
+        dest,
+        build_version="1.2.3",
+        build_revision=revision,
+    )
+    assert json.loads((dest / "sonder_build.json").read_text(encoding="utf-8")) == {
+        "commit_sha": revision,
+        "version": "1.2.3",
+    }
+
+
+def test_payload_rejects_ambiguous_revision_before_replacing_output(
+    monkeypatch, tmp_path
+):
+    root = _fake_repo(tmp_path, monkeypatch)
+    dest = root / "dist" / "local-system"
+    dest.mkdir(parents=True)
+    sentinel = dest / "sentinel.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    with pytest.raises(ValueError, match="full 40-character"):
+        package.copy_payload(dest, build_revision="short-sha")
+    assert sentinel.read_text(encoding="utf-8") == "keep"
 
 
 def test_optional_engine_bundle_is_binary_safe_sealed_and_executable(
