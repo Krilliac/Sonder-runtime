@@ -5,6 +5,7 @@ drops you into an interactive session. Slash-commands control trace/strict mode,
 teach outcomes back, and surface stats/lessons. Stdlib only + server/memory_store.
 """
 import os
+import re
 import sys
 
 import server
@@ -60,15 +61,160 @@ def _rule(char="─", width=56):
 def _result_tag(ok):
     return _paint("PASS" if ok else "FAIL", _Ansi.green if ok else _Ansi.red, _Ansi.bold)
 
-BANNER = """{teal}Sonder Runtime{reset}  {muted}private AI runtime + orchestrator{reset}
-{muted}type /help for commands, or start typing to ask Sonder Runtime something.{reset}
-""".format(teal=_Ansi.teal if _Ansi.enabled else "", reset=_Ansi.reset if _Ansi.enabled else "", muted=_Ansi.muted if _Ansi.enabled else "")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _visible_len(text):
+    """Printed width, ignoring colour escapes.
+
+    Padding a boxed line by len() counts the escape bytes, so the right edge
+    frays the moment any field inside is coloured -- and it shows only in a
+    real terminal, never in piped output.
+    """
+    return len(_ANSI_RE.sub("", str(text)))
+
+
+def _box_chars():
+    """Box glyphs, degrading to ASCII rather than raising.
+
+    A Windows console on a legacy code page cannot encode U+256D, and an
+    unhandled UnicodeEncodeError here would take the whole REPL launch down
+    with it. A decorative header must never be able to do that.
+    """
+    glyphs = {"tl": "╭", "tr": "╮", "bl": "╰", "br": "╯",
+              "h": "─", "v": "│", "dot": "◈"}
+    encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+    try:
+        "".join(glyphs.values()).encode(encoding)
+    except (UnicodeEncodeError, LookupError, TypeError):
+        return {"tl": "+", "tr": "+", "bl": "+", "br": "+",
+                "h": "-", "v": "|", "dot": "*"}
+    return glyphs
+
+
+def _banner(rows, title="Sonder Runtime", subtitle="private AI runtime + orchestrator"):
+    """A bordered header, sized to its content.
+
+    `rows` is a list of (label, value, styles); the caller decides what is
+    worth showing rather than this function knowing about the runtime.
+    """
+    box = _box_chars()
+    label_width = max((len(label) for label, _value, _styles in rows), default=0)
+    body = []
+    for label, value, styles in rows:
+        body.append((
+            _paint((label + ":").ljust(label_width + 1), _Ansi.muted),
+            _paint(value, *styles) if styles else str(value),
+        ))
+    head = "%s %s  %s" % (
+        _paint(box["dot"], _Ansi.teal),
+        _paint(title, _Ansi.teal, _Ansi.bold),
+        _paint(subtitle, _Ansi.muted),
+    )
+    widest = max([_visible_len(head)]
+                 + [_visible_len(a) + 1 + _visible_len(b) for a, b in body])
+    inner = widest + 3
+
+    def row(text):
+        return "%s %s%s%s" % (
+            _paint(box["v"], _Ansi.muted),
+            text,
+            " " * (inner - 2 - _visible_len(text)),
+            _paint(box["v"], _Ansi.muted),
+        )
+
+    lines = [_paint(box["tl"] + box["h"] * (inner - 1) + box["tr"], _Ansi.muted)]
+    lines.append(row(head))
+    lines.append(row(""))
+    for label, value in body:
+        lines.append(row("%s %s" % (label, value)))
+    lines.append(_paint(box["bl"] + box["h"] * (inner - 1) + box["br"], _Ansi.muted))
+    return "\n".join(lines)
+
+
+def _installed_models():
+    """(name, size) for every model Ollama has locally, newest API shape first.
+
+    Returns an empty list when Ollama is unreachable so callers can say so
+    rather than printing an empty list that reads as "none installed".
+    """
+    try:
+        payload = server._get("/api/tags")
+    except Exception:
+        return []
+    models = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(models, list):
+        return []
+    out = []
+    for model in models:
+        if not isinstance(model, dict):
+            continue
+        name = str(model.get("name") or model.get("model") or "").strip()
+        if not name:
+            continue
+        size = model.get("size")
+        try:
+            pretty = "%.1f GB" % (float(size) / (1024 ** 3)) if size else ""
+        except (TypeError, ValueError):
+            pretty = ""
+        out.append((name, pretty))
+    return sorted(out)
+
+
+def _home_relative(path):
+    """Show ~ instead of the home prefix, the way a shell prompt does."""
+    try:
+        return "~" + os.sep + os.path.relpath(path, os.path.expanduser("~"))
+    except (ValueError, OSError):
+        return str(path)
+
+
+def _startup_banner(strict, persona, project, tier=None):
+    """The header shown on launch.
+
+    Every value is read from the runtime rather than written here: the model
+    comes from the live tier table and the endpoint from the listener, so the
+    banner cannot claim a setup the process is not actually in. Each lookup is
+    guarded, because a cosmetic header must never be the reason a REPL fails
+    to start.
+    """
+    tier = tier or "code"
+    try:
+        model = str(server.TIERS.get(tier) or "unknown")
+    except Exception:
+        model = "unknown"
+    try:
+        import sonder_headless
+        host, port = sonder_headless.DEFAULT_HOST, sonder_headless.DEFAULT_PORT
+        live = sonder_headless.port_open(host, port)
+        endpoint = "http://%s:%s" % (host, port)
+    except Exception:
+        endpoint, live = os.environ.get("SONDER_API", "http://127.0.0.1:11435"), False
+
+    rows = [
+        ("model", "%s  %s" % (model, _paint("(%s tier)" % tier, _Ansi.muted)),
+         (_Ansi.cyan,)),
+        ("endpoint", endpoint if live else
+         "%s  %s" % (endpoint, _paint("(not listening)", _Ansi.amber)),
+         (_Ansi.green,) if live else (_Ansi.muted,)),
+        ("directory", _home_relative(os.getcwd()), ()),
+        ("persona", str(persona), (_Ansi.cyan,)),
+        ("project", str(project or "(none)"), ()),
+    ]
+    if strict:
+        rows.append(("strict", "on  pinned to the sonder alias", (_Ansi.amber,)))
+    hint = "%s  %s" % (
+        _paint("type /help for commands", _Ansi.muted),
+        _paint("or just start typing.", _Ansi.muted),
+    )
+    return "%s\n\n  %s\n" % (_banner(rows), hint)
 
 HELP = """commands:
   /help              show this help
   /trace [on|off]    toggle trace mode (bare = on); shows retrieval + prompt
   /strict [on|off]   toggle strict mode (bare = on); pins to the sonder alias
   /persona [name]    show/set active persona (coder/explainer/reviewer/teacher)
+  /model [name|tier] list installed models and tiers; switch either one
   /location [on|off] allow approximate IP location for "my area" weather answers
   /stats             show Sonder Runtime's learning stats
   /context           show context, session, and memory health meters
@@ -329,6 +475,8 @@ def main():
     # A fresh conversation thread per REPL launch; /new rerolls it, /resume switches it.
     session_id = memory_store.new_id()
     project = server.DEFAULT_PROJECT
+    # None = whatever the runtime resolves by default; /model pins one.
+    active_tier = None
 
     def apply_trace(val):
         nonlocal trace
@@ -348,6 +496,63 @@ def main():
             return
         persona = arg.lower()
         print("persona: %s" % persona)
+
+    def do_model(arg):
+        """Show what is installed and switch the model for the rest of the session.
+
+        Switching rebinds the ACTIVE TIER's entry in server.TIERS rather than
+        threading a model name through every call: the tier table is the single
+        place the runtime resolves a model from, so a rebind is picked up by
+        anything that asks -- including the identity block that tells the model
+        what it is running as. Changing only this REPL's calls would leave that
+        block naming the old model.
+        """
+        nonlocal active_tier
+        arg = (arg or "").strip()
+        tier = active_tier or "code"
+        installed = _installed_models()
+
+        if not arg:
+            current = str(server.TIERS.get(tier) or "?")
+            print("active tier: %s  ->  %s" % (
+                _paint(tier, _Ansi.cyan), _paint(current, _Ansi.cyan, _Ansi.bold)))
+            print()
+            print(_paint("tiers", _Ansi.muted))
+            for name in sorted(server.TIERS):
+                mark = "*" if name == tier else " "
+                print("  %s %-14s %s" % (mark, name, server.TIERS[name]))
+            print()
+            if installed:
+                print(_paint("installed models (ollama)", _Ansi.muted))
+                for name, size in installed:
+                    mark = "*" if name == server.TIERS.get(tier) else " "
+                    print("  %s %-40s %s" % (mark, name, size))
+            else:
+                print(_paint("installed models: (ollama did not answer)", _Ansi.amber))
+            print()
+            print(_paint("usage: /model <model-name>  |  /model <tier>", _Ansi.muted))
+            return
+
+        if arg in server.TIERS:
+            active_tier = arg
+            print("active tier: %s  ->  %s" % (arg, server.TIERS.get(arg)))
+            return
+
+        names = [name for name, _size in installed]
+        if installed and arg not in names:
+            # Refuse rather than rebind to something that will fail on the next
+            # turn with an opaque ollama error. Suggest, because a near miss is
+            # usually a tag typo (":7b" vs ":latest").
+            near = [name for name in names if arg.split(":")[0] in name]
+            print(_paint("no installed model named %r" % arg, _Ansi.red))
+            if near:
+                print("did you mean: %s" % ", ".join(near[:5]))
+            else:
+                print("run /model with no argument to list what is installed")
+            return
+
+        server.TIERS[tier] = arg
+        print("%s tier -> %s" % (tier, _paint(arg, _Ansi.cyan, _Ansi.bold)))
 
     def do_run(timeout=grounding.DEFAULT_TIMEOUT):
         block = grounding.extract_runnable_code_block(last_run_source or last_response)
@@ -420,7 +625,7 @@ def main():
         )
         print("dumped chat/debug log to %s" % path)
 
-    print(BANNER)
+    print(_startup_banner(strict, persona, project, active_tier))
 
     while True:
         try:
@@ -450,6 +655,8 @@ def main():
                 apply_strict(_on_off(arg, strict))
             elif cmd == "/persona":
                 do_persona(arg)
+            elif cmd == "/model":
+                do_model(arg)
             elif cmd == "/location":
                 a = (arg or "").strip().lower()
                 if a in ("on", "off"):
@@ -841,6 +1048,7 @@ def main():
 
         out = server.sonder(line, trace=trace, strict=strict, persona=persona,
                             session=session_id, project=project,
+                            tier=active_tier or "",
                             location_consent=location_consent)
         if out.startswith("ERROR"):
             print(out)

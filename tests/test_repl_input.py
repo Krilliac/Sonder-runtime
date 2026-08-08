@@ -15,3 +15,50 @@ def test_help_exposes_runtime_policy_and_live_mcp_convergence():
     assert "/mcp" in sonder_repl.HELP
     assert "/learning" in sonder_repl.HELP
     assert "/artifactcheck" in sonder_repl.HELP
+
+
+def _strip(text):
+    return sonder_repl._ANSI_RE.sub("", text)
+
+
+def test_banner_rows_stay_aligned_when_values_are_coloured(monkeypatch):
+    """The box is padded to a computed width, so any padding that counts ANSI
+    escape bytes frays the right edge as soon as a field is coloured -- and it
+    only shows in a real terminal, never in piped test output."""
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", True)
+    rows = [
+        ("model", sonder_repl._paint("sonder:latest", sonder_repl._Ansi.cyan), ()),
+        ("endpoint", "http://127.0.0.1:11435", (sonder_repl._Ansi.green,)),
+        ("a-much-longer-label", "x", ()),
+    ]
+    lines = _strip(sonder_repl._banner(rows)).splitlines()
+    widths = {len(line) for line in lines}
+    assert len(widths) == 1, "every banner line must print the same width: %r" % (
+        sorted(widths),
+    )
+    assert lines[0].startswith(("╭", "+")) and lines[-1].startswith(("╰", "+"))
+
+
+def test_banner_falls_back_to_ascii_when_the_console_cannot_encode_it(monkeypatch):
+    """A legacy Windows code page cannot encode U+256D. A decorative header
+    must not be able to take the REPL launch down with a UnicodeEncodeError."""
+    class _Cp437:
+        encoding = "cp437"
+
+    monkeypatch.setattr(sonder_repl.sys, "stdout", _Cp437())
+    glyphs = sonder_repl._box_chars()
+    assert glyphs["tl"] == "+" and glyphs["h"] == "-"
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    text = sonder_repl._banner([("model", "x", ())])
+    text.encode("cp437")  # must not raise
+
+
+def test_startup_banner_reads_the_live_runtime_not_a_literal(monkeypatch):
+    """The banner must not be able to claim a setup the process is not in."""
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "some-model:13b"},
+                        raising=False)
+    text = sonder_repl._startup_banner(None, "coder", "duetos")
+    assert "some-model:13b" in text
+    assert "coder" in text and "duetos" in text
+    assert "/help" in text
