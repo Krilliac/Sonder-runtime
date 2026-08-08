@@ -63,6 +63,7 @@ PRIVATE_FILES = {
     "workflows.json",
 }
 REQUIRED_FILES = {
+    "LICENSE",
     "autopilot_controller.py",
     "autopilot_store.py",
     "artifact_grounding.py",
@@ -214,6 +215,8 @@ def _included(rel: Path) -> bool:
         return False
     if name.endswith((".db", ".db-wal", ".db-shm", ".local", ".json", ".jsonl")):
         return False
+    if len(parts) == 1 and name == "license":
+        return True
     if rel.suffix.lower() not in ALLOWED_SUFFIXES:
         return False
     return len(parts) == 1 or parts[0] in ALLOWED_DIRS
