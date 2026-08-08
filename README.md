@@ -260,7 +260,13 @@ The learning loop above is *cross-task* memory. On top of it Sonder also has:
 ## Four ways to run it
 
 1. **Local, in your terminal** — `sonder` (like launching `claude`). Interactive REPL routed through the full loop, with `/work`, `/report`, `/checklist`, `/inventory`, `/tree`, `/search`, `/programs`, `/scripts`, `/image`, `/mkdir`, `/runprogram`, `/runscript`, `/trace`, `/strict`, `/run`, `/train`, `/master`, `/agents`, `/capacity`, `/agentcancel`, `/agentretry`, `/asset`, `/artifactcheck`, `/forge`, `/game`, `/gamefleet`, `/todo`, `/commands`, `/activity`, `/runtime`, `/mcp`, `/learning`, `/dump`, `/permissions`, `/compact`, `/debug`, `/pass`, `/fail`, `/stats`, `/context`, `/quality`, `/privacy`, `/embeddings`, `/emotion`, and `/improve`, plus conversation commands `/new`, `/sessions`, `/resume`, `/project`, `/fact`, `/facts`. Concrete natural-language workspace requests route to the same guarded workbench. Each REPL launch is its own remembered thread.
-2. **Hosted on your own server + a thin client anywhere** — run `deploy_sonder.sh --serve` on your box (systemd service, API key), then any machine runs the single-file `sonder_client.py` pointed at it. The serve layer threads the chat UI's own conversation history.
+2. **Hosted on your own server + a thin client anywhere** — build the audited
+   package and install the
+   [server-private profile](docs/runbooks/install-server-private.md), then put
+   the [TLS reverse proxy](docs/runbooks/secure-remote-access.md) in front of
+   its loopback listener. Any machine can then run the single-file
+   `sonder_client.py` against the HTTPS endpoint. The serve layer threads the
+   chat UI's own conversation history.
 3. **Integrated with Claude/Codex** — the MCP `sonder-runtime` tools include `workbench_agent`, `npu_status`, budgeted workspace inventory, guarded tree/range/text/script/program/image inspection, argv-only program/script execution, persistent checklists, exact activity reports, agent/master orchestration, universal artifact generation, grounded game generation, bounded code/project runners, workflows, web tools, self-healing, privacy-safe memory review, local embedding backfill, and the remaining learning/memory surfaces. `master_orchestrate` can delegate to parallel subagents and audit their outputs; artifact and game tools create persistent assets/projects and accept only grounded checks. Local tiers remain the default for private workspace code.
 4. **Mobile & desktop app (GUI)** — a cross-platform [Flutter client](app/) with a shared Windows/Android/Linux/macOS System experience. Android and other client-only builds can start, stop, and restart the configured computer through a bounded authenticated host launcher; long first-run starts continue as persistent, resumable host operations and never expose a remote shell. See [app/README.md](app/README.md) and [mobile host control](MOBILE_HOST_CONTROL.md).
 
@@ -439,8 +445,14 @@ explicit approval.
 ```bash
 git clone https://github.com/Krilliac/Sonder-runtime.git && cd Sonder-runtime
 bash deploy_sonder.sh            # installs Ollama, picks a model that fits your RAM, creates the alias
-# or:  bash deploy_sonder.sh --serve   # also host it as a public API service (prints URL + API key)
+# Optional local-only service (never opens a public listener):
+bash deploy_sonder.sh --serve
 ```
+
+For remote clients, do not expose or port-forward port 11435. Build the
+manifest-verified package, install the
+[server-private profile](docs/runbooks/install-server-private.md), and use the
+[TLS reverse proxy](docs/runbooks/secure-remote-access.md).
 
 **Local dev:**
 ```bash
@@ -886,8 +898,8 @@ Licensed under the [Apache License 2.0](LICENSE) — permissive, with an
 explicit patent grant. Contributions are accepted under the same terms; see
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Sonder executes code, reads and writes files, and can be hosted as a public
-API. Read [SECURITY.md](SECURITY.md) before serving it to a network: it
-describes the trust boundary, what the default loopback posture protects, and
-why `--serve` needs TLS in front of it. Report vulnerabilities privately
-through the repository's Security tab rather than a public issue.
+Sonder executes code and reads and writes files. Remote access therefore uses
+the server-private profile behind TLS; the convenience `--serve` path stays on
+loopback and must not be port-forwarded. Read [SECURITY.md](SECURITY.md) before
+serving it to a network. Report vulnerabilities privately through the
+repository's Security tab rather than a public issue.
