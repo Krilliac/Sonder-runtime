@@ -28,3 +28,24 @@ def _cleanup_test_fleet_root():
 # Do not restore SONDER_FLEET_DB inside this process: a later atexit callback or
 # daemon thread must never fall back to the operator's live database.
 atexit.register(_cleanup_test_fleet_root)
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolate_fleet_ledger():
+    """Clear the shared fleet ledger before each test.
+
+    fleet_store is a process-shared sqlite ledger, and a test that leaves
+    active agents behind pollutes any later test that reads fleet state. This
+    surfaced when a test left an in-model-call agent and unrelated learning
+    tests then saw active_model_call_count() > 0 and deferred distillation.
+    Clearing before each test keeps the suite order-independent.
+    """
+    try:
+        import fleet_store
+        fleet_store.clear_all()
+    except Exception:
+        pass
+    yield

@@ -845,11 +845,13 @@ def active_model_call_count() -> int:
         data = fleet_store.snapshot(
             include_finished=False, limit=ABSOLUTE_MAX_AGENTS + 1,
         )
-        return sum(
-            1 for row in (data.get("agents") or [])
-            if row.get("status") in ("queued", "running")
-            and bool(row.get("in_model_call"))
-        )
+        # Use the full-table aggregate, NOT a sum over data["agents"]. That list
+        # is paginated (ORDER BY updated_ts DESC LIMIT ~65), so once more than
+        # ~65 fleet rows are active an earlier fleet's in-model-call rows sort
+        # out of the window and the sum drops to 0 while calls are in flight --
+        # and every caller reads 0 as "GPU quiet" and evicts the model or fires
+        # contending work mid-generation.
+        return int(data.get("active_model_calls") or 0)
     except Exception as exc:
         # Resource mutation must fail closed if the durable ledger is unreadable.
         _remember_store_error(exc)

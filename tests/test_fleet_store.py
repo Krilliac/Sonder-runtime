@@ -263,3 +263,42 @@ def test_successful_retry_marks_source_as_retried(monkeypatch, tmp_path):
     assert finished["status"] == "done"
     assert source["status"] == "retried"
     assert source["retried_by"] == "master-new"
+
+
+def test_active_model_calls_counts_the_whole_table_not_the_page(monkeypatch):
+    """A model-call count summed over the paginated agents list drops to 0 once
+    active rows exceed the page size, and every GPU-contention guard reads 0 as
+    'quiet'. The full-table aggregate must stay accurate.
+    """
+    import master_orchestrator as mo
+
+    fleet_store.register_owner("owner-page", 900, 100.0)
+    # One agent genuinely inside a model call, registered FIRST (older).
+    fleet_store.create_agent(_row("in-call"), "owner-page", 900)
+    # queued -> running, then into a model call (begin_model_call requires running).
+    fleet_store.start_agent("in-call", "owner-page", "starting")
+    fleet_store.begin_model_call("in-call", "owner-page", "generating", tool_calls=0)
+    # begin_model_call stamps updated_ts=now, but in production the call started
+    # earlier and a long generation is still in flight; backdate it so the
+    # flooding rows genuinely sort ahead, as they do live.
+    conn = fleet_store._connect()
+    conn.execute("UPDATE fleet_agents SET updated_ts=1.0 WHERE id='in-call'")
+    conn.commit()
+    conn.close()
+
+    # Then flood with more than the snapshot page of fresher active rows, none
+    # in a model call, so they crowd the in-call row out of the page.
+    page = mo.ABSOLUTE_MAX_AGENTS + 1
+    for i in range(page + 5):
+        fleet_store.create_agent(_row("fresh-%03d" % i), "owner-page", 900)
+
+    snap = fleet_store.snapshot(include_finished=False, limit=page)
+    # The paginated list would miss the older in-call row...
+    page_sum = sum(
+        1 for r in snap["agents"]
+        if r.get("status") in ("queued", "running") and r.get("in_model_call")
+    )
+    assert page_sum == 0, "precondition: the in-call row is off the page"
+    # ...but the full-table aggregate and the guard must still see it.
+    assert snap["active_model_calls"] == 1
+    assert mo.active_model_call_count() == 1
