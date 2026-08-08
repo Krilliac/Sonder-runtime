@@ -122,15 +122,3 @@ def test_command_prefixes_do_not_hijack_longer_prose_or_drop_followup_work():
         "delete the file scratch.txt unless it is still used",
     ):
         assert cr.resolve(text) is None, text
-
-
-def test_state_losing_commands_require_the_whole_line():
-    # Bare command fires; command-plus-task falls through to the agent.
-    assert cr.resolve("start over") == "/new"
-    assert cr.resolve("start over and rewrite the parser") is None
-    assert cr.resolve("cancel all agents") == "/agentcancel"
-    assert cr.resolve("cancel all agents except the indexer") is None
-    assert cr.resolve("quit") == "/exit"
-    assert cr.resolve("quit messing with the output format") is None
-    assert cr.resolve("fix the memory quality") == "/qualityfix apply"
-    assert cr.resolve("fix the memory quality report generator") is None

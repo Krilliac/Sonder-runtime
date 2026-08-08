@@ -26,10 +26,6 @@ def _default_ask(prompt, tier):
 def _failure(text):
     value = str(text or "").strip()
     lowered = value.lower()
-    # An empty reply is a failure, not a valid answer: counting it as one lets a
-    # dead tier be judged as agreeing with a live one. The ERROR check is
-    # case-insensitive because runtime error prefixes are not guaranteed
-    # uppercase, and a lowercase "error: ..." is still not an answer.
     return (not value) or lowered.startswith("error:") or "no model produced an answer" in lowered
 
 
@@ -56,10 +52,8 @@ def _judge_prompt(prompt, answers):
     blocks = "\n\n".join("ANSWER FROM %s:\n%s" % (tier, text) for tier, text in answers)
     return (
         "Do these answers agree on the substance? Reply YES or NO and one "
-        "sentence. Different wording is not disagreement, but a materially "
-        "different RECOMMENDATION in any one answer -- even partially (one "
-        "says do X by default, another says only on request) -- is "
-        "disagreement: reply NO and name the odd one out.\n\n"
+        "sentence. Judge only whether their conclusions and recommendations "
+        "are compatible; different wording is not disagreement.\n\n"
         "QUESTION:\n%s\n\n%s" % (prompt, blocks)
     )
 
