@@ -123,6 +123,28 @@ def _splice_function(original: str, reply: str):
     return "".join(lines[:first]) + body + "\n" + "".join(lines[last:])
 
 
+def _discard_workspace(run_id) -> None:
+    """Remove a rejected run's worktree and branch.
+
+    Neither cancel() nor reject() reclaims them, and prune_workspaces() is
+    retention-based (30 days by default) -- fine for a handful of human-driven
+    runs, useless for a loop that starts one every ninety seconds. Measured:
+    two killed loops left 26 worktrees and 26 branches behind, 237 MB, and a
+    branch list that no longer fit on a screen.
+
+    Only ever called for a run that did NOT produce a keeper. Best-effort by
+    design: failing to reclaim a workspace must not fail the pass.
+    """
+    try:
+        workspace = selfmod.candidate_path(run_id)
+        if workspace.exists():
+            selfmod._git(REPO, "worktree", "remove", "--force", str(workspace))
+        selfmod._git(REPO, "worktree", "prune")
+        selfmod._git(REPO, "branch", "-D", "selfmod/%s" % run_id)
+    except Exception:
+        pass
+
+
 def propose_objective(server, log) -> tuple[str, str] | None:
     """Ask the local model for ONE small, concrete improvement.
 
@@ -254,6 +276,7 @@ def run(server, log, *, test_timeout=1800, branch=True):
     edited = _splice_function(original, edited)
     if edited is None:
         selfmod.cancel(run_id)
+        _discard_workspace(run_id)
         return "candidate rejected: reply was not a single replaceable function"
 
     # The shrink floor still applies to the SPLICED file, not the reply. A
@@ -261,6 +284,7 @@ def run(server, log, *, test_timeout=1800, branch=True):
     # something it was not asked to touch.
     if len(edited) < 0.75 * len(original):
         selfmod.cancel(run_id)
+        _discard_workspace(run_id)
         return ("candidate rejected: returned %d%% of the original file "
                 "(deletion guard)" % (100 * len(edited) // max(1, len(original))))
 
@@ -268,6 +292,7 @@ def run(server, log, *, test_timeout=1800, branch=True):
     diff = selfmod.inspect_diff(run_id)
     if not diff.get("changed_files"):
         selfmod.cancel(run_id)
+        _discard_workspace(run_id)
         return "candidate made no change"
 
     selfmod.begin_testing(run_id)
@@ -296,6 +321,7 @@ def run(server, log, *, test_timeout=1800, branch=True):
         log("  %s: %s" % (kind, "pass" if passed else "FAIL"))
         if not passed:
             selfmod.reject(run_id, reason="%s failed" % kind)
+            _discard_workspace(run_id)
             return "candidate rejected: %s failed (run %s kept for inspection)" % (kind, run_id)
 
     # Only the kinds this stage actually records; the default set includes
