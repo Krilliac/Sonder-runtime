@@ -123,6 +123,7 @@ def _winml_vitisai_check(log):
 
 
 def main() -> int:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--campaign-total", type=int, default=24)
     parser.add_argument("--repair-total", type=int, default=10)
@@ -218,6 +219,17 @@ def main() -> int:
         return "proposed=%d skipped=%d" % (
             result["proposed"], result["skipped"])
     _stage(log, "goal-proposals", goal_proposals)
+
+    # The only stage that changes Sonder's own source. It honours the
+    # configured selfmod mode: under the default "propose" it stops at a
+    # reviewable candidate and waits for /selfmod approve. It refuses to
+    # start on a dirty tree, because selfmod declines to COMMIT a run that
+    # began with uncommitted changes -- such a run could only mutate source
+    # with nothing to review or revert to.
+    def selfmod_cycle():
+        import nightly_selfmod
+        return nightly_selfmod.run(server, log)
+    _stage(log, "selfmod", selfmod_cycle)
 
     _stage(log, "winml-vitisai-check", lambda: _winml_vitisai_check(log))
 
