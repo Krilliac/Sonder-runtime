@@ -14,7 +14,7 @@ production install in detail.
   [facts. runbook](../runbooks/use-facts-model.md)).
 - RAM: 8 GB minimum for a 4B model; more for 7B+.
 
-## Workstation quickstart
+## Workstation quickstart (Linux/macOS)
 
 ```bash
 git clone <your-fork> Sonder-runtime && cd Sonder-runtime
@@ -35,7 +35,13 @@ python3 -m venv venv
 ```
 
 Point any OpenAI-compatible chat UI at `http://127.0.0.1:11435/v1`. State
-lives under `~/.local/share/sonder` (override with `SONDER_HOME`).
+lives under `$XDG_DATA_HOME/sonder` or `~/.local/share/sonder` on Linux and
+`~/Library/Application Support/sonder` on macOS (override with `SONDER_HOME`).
+
+On Windows PowerShell, use the same commands with
+`venv\Scripts\python.exe` / `venv\Scripts\pip.exe`. State normally lives at
+`%LOCALAPPDATA%\sonder`; minimal service environments fall back through
+`%USERPROFILE%`, then `%SystemDrive%\Sonder`.
 
 ## Server-private (production)
 
