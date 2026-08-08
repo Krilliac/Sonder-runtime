@@ -301,3 +301,17 @@ def test_layered_package_ships_so_the_served_app_can_actually_start():
         and "sonder_runtime" in path.read_text(encoding="utf-8", errors="ignore")
     ]
     assert importers, "expected shipped modules importing sonder_runtime"
+
+
+def test_store_migrations_are_required_in_desktop_payload():
+    """A bundle without these baselines cannot create fresh runtime stores."""
+    required = {
+        "migrations/autopilot/0001_baseline.py",
+        "migrations/fleet/0001_baseline.py",
+        "migrations/memory/0001_baseline.py",
+        "migrations/operations/0001_baseline.py",
+        "migrations/updates/0001_baseline.py",
+    }
+    assert "migrations" in package.ALLOWED_DIRS
+    assert required <= package.REQUIRED_FILES
+    assert all(package._included(Path(item)) for item in required)

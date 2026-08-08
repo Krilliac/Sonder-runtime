@@ -75,29 +75,40 @@ class Migration:
                 )
         return module
 
-    def run(self, conn: sqlite3.Connection) -> int:
+    def run(self, conn: sqlite3.Connection, record_applied=None) -> int:
         module = self._load()
         started = time.monotonic()
         preflight = getattr(module, "preflight", None)
         if callable(preflight):
             preflight(conn)
-        # Adoption baselines that delegate to a legacy bootstrap manage
-        # their own transactions (the legacy code opens and commits its own
-        # connections); everything else runs inside one transaction.
+        # Adoption baselines delegate to idempotent legacy bootstraps that own
+        # their transactions. Normal migrations keep their schema change and
+        # ledger row in one transaction; separating them can strand a
+        # non-idempotent baseline after a crash or locked ledger insert.
         if getattr(module, "manages_own_transaction", False):
             module.apply(conn)
+            verify = getattr(module, "verify", None)
+            if callable(verify):
+                verify(conn)
+            duration_ms = int((time.monotonic() - started) * 1000)
+            if record_applied is not None:
+                record_applied(duration_ms)
+            return duration_ms
         else:
             conn.execute("BEGIN")
             try:
                 module.apply(conn)
+                verify = getattr(module, "verify", None)
+                if callable(verify):
+                    verify(conn)
+                duration_ms = int((time.monotonic() - started) * 1000)
+                if record_applied is not None:
+                    record_applied(duration_ms)
                 conn.execute("COMMIT")
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
-        verify = getattr(module, "verify", None)
-        if callable(verify):
-            verify(conn)
-        return int((time.monotonic() - started) * 1000)
+        return duration_ms
 
 
 @dataclass(frozen=True)
@@ -282,19 +293,22 @@ def migrate_store(
             for migration in migrations:
                 if migration.migration_id in recorded:
                     continue
-                duration_ms = migration.run(conn)
-                conn.execute(
-                    "INSERT INTO schema_migrations (migration_id, applied_at_utc,"
-                    " application_version, checksum_sha256, duration_ms)"
-                    " VALUES (?, ?, ?, ?, ?)",
-                    (
-                        migration.migration_id,
-                        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                        version,
-                        migration.checksum,
-                        duration_ms,
-                    ),
-                )
+
+                def record_applied(duration_ms, migration=migration):
+                    conn.execute(
+                        "INSERT INTO schema_migrations (migration_id, applied_at_utc,"
+                        " application_version, checksum_sha256, duration_ms)"
+                        " VALUES (?, ?, ?, ?, ?)",
+                        (
+                            migration.migration_id,
+                            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            version,
+                            migration.checksum,
+                            duration_ms,
+                        ),
+                    )
+
+                migration.run(conn, record_applied=record_applied)
         finally:
             conn.close()
     return status(store, path)

@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 
 import pytest
 
@@ -13,6 +14,62 @@ def test_python_run_success():
     assert out["returncode"] == 0
     assert "hello from runner" in out["stdout"]
     assert out["language"] == "python"
+
+
+def test_default_run_uses_ephemeral_cwd_not_runtime_workspace(monkeypatch, tmp_path):
+    root = tmp_path / "runtime"
+    root.mkdir()
+    monkeypatch.setattr(code_runner, "workspace_root", lambda: str(root))
+
+    out = code_runner.run_code(
+        "from pathlib import Path\nPath('model-write.txt').write_text('x')"
+    )
+
+    assert out["ok"] is True
+    assert os.path.commonpath([str(root), out["cwd"]]) != str(root)
+    assert not (root / "model-write.txt").exists()
+    assert not os.path.exists(out["cwd"])
+
+
+def test_run_process_scrubs_control_plane_secrets(monkeypatch, tmp_path):
+    monkeypatch.setenv("SONDER_FILE_APPROVAL_CODE", "approval-fixture")
+    monkeypatch.setenv("SONDER_API_KEY", "api-fixture")
+    monkeypatch.setenv("SONDER_OPENAI_API_KEY", "openai-fixture")
+
+    out = code_runner._run_process(
+        [
+            sys.executable,
+            "-c",
+            "import os; print('|'.join(os.environ.get(k, '') for k in "
+            "('SONDER_FILE_APPROVAL_CODE','SONDER_API_KEY','SONDER_OPENAI_API_KEY')))",
+        ],
+        str(tmp_path),
+        "",
+        10,
+        "python",
+    )
+
+    assert out["ok"] is True
+    assert out["stdout"].strip() == "||"
+
+
+def test_detached_console_receives_scrubbed_environment(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setattr(code_runner.os, "name", "nt", raising=False)
+    monkeypatch.setenv("SONDER_AUTH_SECRET", "auth-fixture")
+
+    class Proc:
+        pid = 42
+
+    def fake_popen(*args, **kwargs):
+        seen.update(kwargs)
+        return Proc()
+
+    monkeypatch.setattr(code_runner.subprocess, "Popen", fake_popen)
+    out = code_runner._launch_console("launch.bat", str(tmp_path), "python", 10)
+
+    assert out["ok"] is True
+    assert "SONDER_AUTH_SECRET" not in seen["env"]
 
 
 def test_python_run_failure_captures_stderr():
@@ -157,10 +214,11 @@ def test_run_code_window_launches_python_console(monkeypatch, tmp_path):
     class FakeProc:
         pid = 4321
 
-    def fake_popen(cmd, cwd, creationflags=0):
+    def fake_popen(cmd, cwd, creationflags=0, env=None):
         seen["cmd"] = cmd
         seen["cwd"] = cwd
         seen["creationflags"] = creationflags
+        seen["env"] = env
         return FakeProc()
 
     monkeypatch.setattr(code_runner.os, "name", "nt", raising=False)

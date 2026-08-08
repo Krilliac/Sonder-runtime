@@ -15,6 +15,8 @@ import sys
 import tempfile
 import time
 
+import sonder_logging
+
 
 SUPPORTED_LANGUAGES = {
     "python": {
@@ -119,6 +121,14 @@ MAX_LOOP_DELAY_SECONDS = 10.0
 MAX_PROJECT_FILES = 80
 MAX_PROJECT_BYTES = 750000
 RUN_WINDOW_DIR_ENV = "SONDER_RUN_WINDOW_DIR"
+
+
+def _child_environment():
+    # Model-authored children used to inherit bypass/API credentials and could
+    # print them into tool output, granting themselves control-plane authority.
+    secret_names = set(sonder_logging.SECRET_ENV_VARS)
+    secret_names.add("SONDER_OPENAI_API_KEY")
+    return {key: value for key, value in os.environ.items() if key not in secret_names}
 
 
 def _powershell_exe():
@@ -229,6 +239,7 @@ def _run_process(cmd, cwd, stdin, timeout, language):
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=_child_environment(),
         )
     except FileNotFoundError:
         missing = SUPPORTED_LANGUAGES.get(language, {}).get(
@@ -276,6 +287,7 @@ def _launch_console(launcher, cwd, language, timeout):
             ["cmd", "/k", launcher],
             cwd=cwd,
             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+            env=_child_environment(),
         )
     except FileNotFoundError:
         return _error_result(language, cwd, timeout, "cmd.exe not found")
@@ -339,6 +351,7 @@ def _find_visual_studio_vcvars():
                 capture_output=True,
                 text=True,
                 timeout=5,
+                env=_child_environment(),
             )
             install = (proc.stdout or "").strip().splitlines()
             if install:
@@ -530,10 +543,12 @@ def run_code(code, language="python", stdin="", timeout=DEFAULT_TIMEOUT, cwd=Non
         raise ValueError("code is empty")
     language = normalize_language(language)
     timeout = _clamp_timeout(timeout)
-    cwd = resolve_cwd(cwd)
     cfg = SUPPORTED_LANGUAGES[language]
 
     with tempfile.TemporaryDirectory(prefix="sonder-run-") as tmp:
+        # The ungated default previously executed beside the runtime's own
+        # control-plane modules, making a relative write a live self-modification.
+        cwd = resolve_cwd(cwd) if cwd else os.path.realpath(tmp)
         path = os.path.join(tmp, "snippet" + cfg["suffix"])
         with open(path, "w", encoding="utf-8") as f:
             f.write(code)
@@ -557,12 +572,13 @@ def run_code_window(code, language="python", timeout=DEFAULT_TIMEOUT, cwd=None):
         raise ValueError("code is empty")
     language = normalize_language(language)
     timeout = _clamp_timeout(timeout)
-    cwd = resolve_cwd(cwd)
     if os.name != "nt":
+        cwd = resolve_cwd(cwd) if cwd else os.path.realpath(tempfile.gettempdir())
         return _error_result(language, cwd, timeout, "/runwindow is only available on Windows consoles")
 
     cfg = SUPPORTED_LANGUAGES[language]
     run_dir = _persistent_run_dir()
+    cwd = resolve_cwd(cwd) if cwd else os.path.realpath(run_dir)
     path = os.path.join(run_dir, "snippet" + cfg["suffix"])
     with open(path, "w", encoding="utf-8") as f:
         f.write(code)

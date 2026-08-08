@@ -140,3 +140,44 @@ def test_media_writers_replace_outputs_atomically_without_temp_files(tmp_path):
         writer(target)
         assert target.read_bytes() != b"old"
         assert not Path(str(target) + ".tmp").exists()
+
+
+def test_atomic_media_write_retries_transient_windows_replace(monkeypatch, tmp_path):
+    target = tmp_path / "asset.bin"
+    real_replace = media_assets.os.replace
+    attempts = []
+
+    def flaky_replace(source, destination):
+        attempts.append(Path(source))
+        if len(attempts) < 3:
+            raise PermissionError("destination briefly held open")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(media_assets.os, "replace", flaky_replace)
+    monkeypatch.setattr(media_assets.time, "sleep", lambda _seconds: None)
+
+    media_assets._atomic_write_bytes(target, b"new")
+
+    assert target.read_bytes() == b"new"
+    assert len(attempts) == 3
+    assert len(set(attempts)) == 1
+    assert attempts[0].name != target.name + ".tmp"
+
+
+def test_atomic_media_writers_get_unique_temporary_paths(monkeypatch, tmp_path):
+    real_mkstemp = media_assets.tempfile.mkstemp
+    temporary_paths = []
+
+    def recording_mkstemp(*args, **kwargs):
+        descriptor, name = real_mkstemp(*args, **kwargs)
+        temporary_paths.append(name)
+        return descriptor, name
+
+    monkeypatch.setattr(media_assets.tempfile, "mkstemp", recording_mkstemp)
+    target = tmp_path / "shared.bin"
+    media_assets._atomic_write_bytes(target, b"first")
+    media_assets._atomic_write_bytes(target, b"second")
+
+    assert target.read_bytes() == b"second"
+    assert len(temporary_paths) == 2
+    assert len(set(temporary_paths)) == 2

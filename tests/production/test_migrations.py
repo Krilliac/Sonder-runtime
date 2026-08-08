@@ -99,16 +99,16 @@ def test_all_registered_stores_report_status():
     assert set(statuses) == {
         "memory", "autopilot", "fleet", "operations", "updates"
     }
-    for status in statuses.values():
-        assert not status.unknown
-        assert not status.checksum_mismatches
+    for store_status in statuses.values():
+        assert not store_status.unknown
+        assert not store_status.checksum_mismatches
 
 
 def test_failed_migration_rolls_back(tmp_path, monkeypatch):
     db = str(tmp_path / "operations.db")
 
     class BoomMigration(sonder_migrations.Migration):
-        def run(self, conn):
+        def run(self, conn, record_applied=None):
             conn.execute("BEGIN")
             conn.execute("CREATE TABLE half_done (x INTEGER)")
             conn.execute("ROLLBACK")
@@ -144,3 +144,31 @@ def test_failed_migration_rolls_back(tmp_path, monkeypatch):
         conn.close()
     assert applied == ["0001_baseline"]  # baseline committed, boom did not
     assert "half_done" not in tables
+
+
+def test_schema_and_ledger_insert_are_one_transaction(tmp_path):
+    db = str(tmp_path / "updates.db")
+    conn = sonder_migrations.open_connection(db)
+    try:
+        sonder_migrations._ledger_rows(conn)
+        conn.execute(
+            "CREATE TRIGGER reject_migration_ledger BEFORE INSERT ON schema_migrations "
+            "BEGIN SELECT RAISE(ABORT, 'ledger denied'); END"
+        )
+    finally:
+        conn.close()
+
+    with pytest.raises(sqlite3.IntegrityError, match="ledger denied"):
+        migrate_store("updates", db)
+
+    conn = sqlite3.connect(db)
+    try:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    finally:
+        conn.close()
+    assert "installed_release" not in tables

@@ -411,13 +411,16 @@ def stop_pid(name: str, host=DEFAULT_HOST, port=DEFAULT_PORT) -> str:
     try:
         for pid in pids:
             if os.name == "nt":
-                subprocess.run(
+                proc = subprocess.run(
                     ["taskkill", "/PID", str(pid), "/T", "/F"],
                     capture_output=True,
                     text=True,
                     timeout=10,
                     env=_child_environment(),
                 )
+                if proc.returncode != 0:
+                    detail = (proc.stderr or proc.stdout or "taskkill failed").strip()
+                    raise OSError(detail)
             else:
                 os.kill(pid, 15)
         try:
@@ -429,6 +432,19 @@ def stop_pid(name: str, host=DEFAULT_HOST, port=DEFAULT_PORT) -> str:
         return "%s: stop failed for pid=%s: %s" % (
             name, ",".join(str(pid) for pid in pids), exc,
         )
+
+
+def _stop_succeeded(message: str) -> bool:
+    return ": stop failed for pid=" not in message
+
+
+def _start_succeeded(message: str) -> bool:
+    # A false zero makes direct launchers and the desktop UI report a live
+    # service even when no managed Sonder process owns the listening port.
+    return message.startswith("sonder: started pid=") or (
+        message.startswith("sonder: already listening")
+        and "(unmanaged listener)" not in message
+    )
 
 
 def status(host=DEFAULT_HOST, port=DEFAULT_PORT) -> str:
@@ -488,12 +504,17 @@ def main(argv=None) -> int:
         print(status(args.host, args.port))
         return 0
     if args.command == "stop":
-        print(stop_pid("sonder_serve", args.host, args.port))
+        messages = [stop_pid("sonder_serve", args.host, args.port)]
+        print(messages[0])
         if args.stop_ollama:
-            print(stop_pid("ollama"))
-        return 0
+            messages.append(stop_pid("ollama"))
+            print(messages[-1])
+        return 0 if all(_stop_succeeded(message) for message in messages) else 1
     if args.command == "restart":
-        print(stop_pid("sonder_serve", args.host, args.port))
+        stopped = stop_pid("sonder_serve", args.host, args.port)
+        print(stopped)
+        if not _stop_succeeded(stopped):
+            return 1
     print(start_ollama())
     alias_ok, alias_message = ensure_sonder_alias()
     print(alias_message)
@@ -501,9 +522,10 @@ def main(argv=None) -> int:
         return 2
     if args.command == "engine":
         return 0
-    print(start_sonder(args.host, args.port, env=env))
+    started = start_sonder(args.host, args.port, env=env)
+    print(started)
     print(status(args.host, args.port))
-    return 0
+    return 0 if _start_succeeded(started) else 1
 
 
 if __name__ == "__main__":

@@ -175,6 +175,23 @@ def test_stop_pid_uses_taskkill_on_windows(monkeypatch, tmp_path):
     assert seen["cmd"][:2] == ["taskkill", "/PID"]
 
 
+def test_stop_pid_reports_taskkill_failure_and_keeps_pidfile(monkeypatch, tmp_path):
+    monkeypatch.setattr(H, "run_dir", lambda: tmp_path)
+    monkeypatch.setattr(H, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(H.os, "name", "nt", raising=False)
+    H.pid_file("svc").write_text("123", encoding="ascii")
+    monkeypatch.setattr(
+        H.subprocess,
+        "run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 5, "", "denied"),
+    )
+
+    out = H.stop_pid("svc")
+
+    assert "stop failed for pid=123" in out
+    assert H.pid_file("svc").read_text(encoding="ascii") == "123"
+
+
 def test_listener_pid_parses_windows_netstat(monkeypatch):
     output = """
   Proto  Local Address          Foreign Address        State           PID
@@ -316,3 +333,40 @@ def test_engine_command_never_starts_api_server(monkeypatch):
     )
 
     assert H.main(["engine"]) == 0
+
+
+def test_main_stop_returns_failure_exit_code(monkeypatch):
+    monkeypatch.delenv(H.CONTROL_GATE_ENV, raising=False)
+    monkeypatch.setattr(H, "stop_pid", lambda *args: "sonder_serve: stop failed for pid=7: denied")
+
+    assert H.main(["stop"]) == 1
+
+
+def test_main_start_returns_failure_until_managed_server_is_reachable(monkeypatch):
+    monkeypatch.delenv(H.CONTROL_GATE_ENV, raising=False)
+    monkeypatch.setattr(H, "start_ollama", lambda: "ollama: already reachable")
+    monkeypatch.setattr(H, "ensure_sonder_alias", lambda: (True, "engine: alias ready"))
+    monkeypatch.setattr(
+        H,
+        "start_sonder",
+        lambda *args, **kwargs: "sonder: start requested pid=7, not reachable yet",
+    )
+    monkeypatch.setattr(H, "status", lambda *args: "not listening")
+
+    assert H.main(["start"]) == 1
+
+
+def test_main_start_rejects_unmanaged_listener(monkeypatch):
+    monkeypatch.delenv(H.CONTROL_GATE_ENV, raising=False)
+    monkeypatch.setattr(H, "start_ollama", lambda: "ollama: already reachable")
+    monkeypatch.setattr(H, "ensure_sonder_alias", lambda: (True, "engine: alias ready"))
+    monkeypatch.setattr(
+        H,
+        "start_sonder",
+        lambda *args, **kwargs: (
+            "sonder: already listening on http://127.0.0.1:11435 (unmanaged listener)"
+        ),
+    )
+    monkeypatch.setattr(H, "status", lambda *args: "listening")
+
+    assert H.main(["start"]) == 1

@@ -7,6 +7,8 @@ import os
 import random
 import re
 import struct
+import tempfile
+import time
 from pathlib import Path
 
 
@@ -28,12 +30,27 @@ def _clean(value, limit=240):
 def _atomic_write_bytes(path, data):
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(destination.name + ".tmp")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=destination.name + ".",
+        suffix=".tmp",
+        dir=destination.parent,
+    )
+    temporary = Path(temporary_name)
     try:
-        if temporary.exists():
-            temporary.unlink()
-        temporary.write_bytes(data)
-        os.replace(temporary, destination)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        # Concurrent writers must not share a fixed temp name, and a transient
+        # Windows destination handle must not discard a completed media render.
+        for attempt in range(12):
+            try:
+                os.replace(temporary, destination)
+                break
+            except PermissionError:
+                if attempt == 11:
+                    raise
+                time.sleep(0.005 * (attempt + 1))
     finally:
         if temporary.exists():
             temporary.unlink()
