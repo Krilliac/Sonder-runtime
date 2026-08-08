@@ -43,9 +43,20 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--hours", type=float, default=4.0)
     parser.add_argument("--test-timeout", type=int, default=1800)
+    parser.add_argument("--model", default="qwen2.5-coder:14b",
+                        help="model behind the code tier for this run")
     args = parser.parse_args()
 
     import server
+
+    # The default 'code' tier is a 7B, and a whole-file rewrite of a large
+    # module is exactly where it was measured to fail: the first run's six
+    # rejections were three lint failures and one candidate returning 22%
+    # of the original file. A 14B fits this box's 6 GB of VRAM with the
+    # remainder in system RAM and converted 6 of 12 bodies the 7B could not
+    # in a separate measurement.
+    if args.model:
+        server.TIERS['code'] = args.model
 
     def log(message):
         print("%s %s" % (time.strftime("%H:%M:%S"), message), flush=True)
@@ -53,8 +64,8 @@ def main() -> int:
     deadline = time.time() + args.hours * 3600.0
     committed, barren, passes = [], 0, 0
 
-    log("=== selfmod continuous start: %.1fh, mode=%s, branch-commit ==="
-        % (args.hours, selfmod.settings().get("mode")))
+    log("=== selfmod continuous start: %.1fh, mode=%s, model=%s, branch-commit ==="
+        % (args.hours, selfmod.settings().get("mode"), args.model))
 
     while time.time() < deadline and barren < MAX_BARREN:
         passes += 1
