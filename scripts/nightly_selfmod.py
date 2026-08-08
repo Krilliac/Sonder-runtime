@@ -210,9 +210,15 @@ def run(server, log, *, test_timeout=1800, branch=True):
     selfmod.begin_testing(run_id)
     py = str(REPO / "venv" / "Scripts" / "python.exe")
     results = []
+    # The kind NAMES matter: review() checks recorded kinds against a required
+    # set ("reproducer_before", "syntax", "targeted", "regression", "smoke"),
+    # so recording a passing test under an unrecognised name leaves the
+    # requirement unmet and review fails on a candidate that did everything
+    # asked of it. "lint"/"unit" did exactly that -- the loop could not have
+    # produced a commit even from a perfect candidate.
     for kind, command in (
-        ("lint", [py, "-m", "ruff", "check", target]),
-        ("unit", [py, "-m", "pytest", "-q"]),
+        ("syntax", [py, "-m", "ruff", "check", target]),
+        ("regression", [py, "-m", "pytest", "-q"]),
     ):
         outcome = selfmod.record_test(
             run_id, kind, command, cwd=str(workspace), timeout=test_timeout)
@@ -223,7 +229,9 @@ def run(server, log, *, test_timeout=1800, branch=True):
             selfmod.reject(run_id, reason="%s failed" % kind)
             return "candidate rejected: %s failed (run %s kept for inspection)" % (kind, run_id)
 
-    selfmod.review(run_id)
+    # Only the kinds this stage actually records; the default set includes
+    # reproducer/targeted/smoke phases that belong to a human-driven run.
+    selfmod.review(run_id, require_kinds={"syntax", "regression"})
 
     if branch:
         # Commit INSIDE the worktree, onto its own branch. Strictly safer than
