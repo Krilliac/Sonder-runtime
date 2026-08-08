@@ -28,9 +28,9 @@ WHAT IT WILL NOT DO
   - It never touches a protected path, never merges, and never pushes.
 
 WHY THE TEST COMMAND IS THE WHOLE SUITE
-  Tonight's evidence: an agent lane produced four plausible fixes whose tests
-  had never been executed, and running them revealed one broke an architecture
-  rule. A candidate that changes source unattended has to clear the same bar
+  Measured 2026-08-08: an agent lane produced four plausible fixes whose tests
+  had never been executed, and running them revealed that one broke an
+  architecture rule. A candidate that changes source unattended has to clear the same bar
   the humans do, and a targeted subset cannot show what a change broke
   elsewhere.
 """

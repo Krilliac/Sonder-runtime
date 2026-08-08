@@ -308,7 +308,7 @@ def ollama_parallel_limit() -> int:
     against the resident model. It is the hard ceiling on real concurrency:
     Sonder can hand N requests to Ollama, but if Ollama's parallelism is 1
     they queue and every extra worker slot buys exactly nothing (measured on
-    this box 2026-07-13: with it unset, 2 concurrent requests took 2.07x a
+    the development host, 2026-07-13: with it unset, 2 concurrent requests took 2.07x a
     single one, and 4 took 4.18x -- perfectly serial).
 
     0 means "unset": Ollama auto-selects, which on a VRAM-tight box silently
