@@ -8,7 +8,7 @@ lessons not already present into your local store, tagged with
 source_interaction='community' so you can tell them apart from lessons you
 grounded yourself.
 
-Run: ./venv/Scripts/python.exe pull_community.py [src] [db]
+Run: python pull_community.py [src] [db]
 """
 import io
 import json
