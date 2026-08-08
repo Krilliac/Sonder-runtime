@@ -774,6 +774,22 @@ def _is_inline_code_arg(arg, flags):
     return False
 
 
+def _is_inline_powershell_arg(arg):
+    """Match PowerShell's executable-level abbreviations for inline code."""
+    switch = arg.split("=", 1)[0]
+    # powershell.exe accepts every Command prefix (including -co/-com), every
+    # EncodedCommand prefix, and the non-prefix -ec alias. Missing one lets an
+    # argv-only runner execute arbitrary script while claiming inline refusal.
+    return (
+        len(switch) >= 2
+        and (
+            "-command".startswith(switch)
+            or "-encodedcommand".startswith(switch)
+            or switch == "-ec"
+        )
+    )
+
+
 def run_program(
     program, *, args_json="[]", cwd=".", stdin="", timeout=30,
     max_output=MAX_EXEC_OUTPUT, extra_roots="", bypass=False,
@@ -784,7 +800,7 @@ def run_program(
     basename = Path(executable).name.lower()
     lowered_args = [arg.lower() for arg in args]
     if basename in ("powershell", "powershell.exe", "pwsh", "pwsh.exe") and any(
-        arg in ("-command", "-c", "-encodedcommand", "-enc") for arg in lowered_args
+        _is_inline_powershell_arg(arg) for arg in lowered_args
     ):
         raise PermissionError("inline PowerShell commands are disabled; use script_run")
     if basename in ("cmd", "cmd.exe") and not _allow_cmd_script:

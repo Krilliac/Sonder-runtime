@@ -124,6 +124,20 @@ def test_run_program_still_refuses_powershell(monkeypatch, tmp_path):
         workbench.run_program("powershell", args_json=["-Command", "echo unsafe"])
 
 
+@pytest.mark.parametrize("flag", ["-co", "-com", "-e", "-ec", "-en"])
+def test_run_program_refuses_powershell_inline_abbreviations(
+    monkeypatch, tmp_path, flag,
+):
+    _guard_root(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        workbench.shutil,
+        "which",
+        lambda name: "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
+    )
+    with pytest.raises(PermissionError, match="script_run"):
+        workbench.run_program("powershell", args_json=[flag, "payload"])
+
+
 def test_run_program_still_refuses_cmd(monkeypatch, tmp_path):
     _guard_root(monkeypatch, tmp_path)
     monkeypatch.setattr(

@@ -104,7 +104,8 @@ def test_prune_never_removes_newest_verified(isolated_state):
     removed = sonder_backup.prune_backups(target, keep=1)
     remaining = {e["backup_id"] for e in sonder_backup.list_backups(target)}
     assert second.backup_id in remaining
-    # keep=1 with two backups: exactly the older one may be removed.
-    assert str(first.path) in removed or first.backup_id in remaining
+    # A no-op retention bug grows full state copies until the target disk fills.
+    assert removed == [str(first.path)]
+    assert first.backup_id not in remaining
     with pytest.raises(sonder_backup.BackupError):
         sonder_backup.prune_backups(target, keep=0)

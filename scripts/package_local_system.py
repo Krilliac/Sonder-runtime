@@ -24,6 +24,9 @@ ALLOWED_DIRS = {
     "contrib",
     "docs",
     "games",
+    # Without migration code, fresh desktop stores have no operations/update
+    # tables and audit writes disappear while update status fails outright.
+    "migrations",
     "proposals",
     "scripts",
     "seed",
@@ -100,6 +103,12 @@ REQUIRED_FILES = {
     "sonder-serve.cmd",
     "sonder-serve.sh",
     "sonder_serve.py",
+    "migrations/README.md",
+    "migrations/autopilot/0001_baseline.py",
+    "migrations/fleet/0001_baseline.py",
+    "migrations/memory/0001_baseline.py",
+    "migrations/operations/0001_baseline.py",
+    "migrations/updates/0001_baseline.py",
 }
 EXACT_OUTPUTS = (
     Path("app/build/local-system"),
