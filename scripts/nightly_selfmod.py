@@ -75,6 +75,54 @@ def _ask(server, prompt, num_predict=1200):
     return _FENCE.sub("", text).strip()
 
 
+def _splice_function(original: str, reply: str):
+    """Replace one top-level function in `original` with the model's version.
+
+    Returns the new module text, or None when the reply is not a single
+    function that already exists at module level -- a reply naming a function
+    the file does not have is an invention, and inserting it would add code
+    nobody asked for rather than change the code that was targeted.
+
+    Indentation-based rather than AST-based on purpose: the reply frequently
+    does not parse on its own (a method body arrives dedented, a decorator is
+    dropped), and this only needs to find where the old block ends.
+    """
+    match = re.search(r"^(\s*)def\s+(\w+)\s*\(", reply, re.M)
+    if not match:
+        return None
+    name = match.group(2)
+    body = reply[match.start():].rstrip() + "\n"
+
+    lines = original.splitlines(keepends=True)
+    first = None
+    for index, line in enumerate(lines):
+        if re.match(r"^def\s+%s\s*\(" % re.escape(name), line):
+            first = index
+            break
+    if first is None:
+        return None
+
+    # Consume the signature before looking for the end of the block. A
+    # multi-line signature closes with `):` at COLUMN 0, so a naive "first
+    # later line at column 0" scan stops on the signature's own closing paren
+    # and leaves half a def behind -- which then does not parse. Balance the
+    # parentheses first, then look for the next top-level line.
+    depth, index = 0, first
+    while index < len(lines):
+        depth += lines[index].count("(") - lines[index].count(")")
+        index += 1
+        if depth <= 0:
+            break
+
+    last = len(lines)
+    for probe in range(index, len(lines)):
+        line = lines[probe]
+        if line.strip() and not line[:1].isspace():
+            last = probe
+            break
+    return "".join(lines[:first]) + body + "\n" + "".join(lines[last:])
+
+
 def propose_objective(server, log) -> tuple[str, str] | None:
     """Ask the local model for ONE small, concrete improvement.
 
@@ -182,20 +230,35 @@ def run(server, log, *, test_timeout=1800, branch=True):
     original = (workspace / target).read_text(encoding="utf-8", errors="replace")
 
     edited = _ask(server, (
-        "Rewrite this Python module to accomplish exactly this objective, and\n"
-        "nothing else:\n\n    %s\n\n"
+        "Rewrite ONE function from this Python module so that it accomplishes\n"
+        "exactly this objective, and nothing else:\n\n    %s\n\n"
         "Rules:\n"
-        "- Output the COMPLETE file. No markdown fence, no commentary.\n"
-        "- Change as little as possible. Do not reformat untouched code.\n"
-        "- Keep every public name and signature.\n"
+        "- Output ONLY that single function, complete, from its `def` line to\n"
+        "  its last line. Nothing before it, nothing after it, no fence.\n"
+        "- Keep its name, signature and indentation exactly as they are.\n"
         "- Add a brief comment where you changed something, saying WHY.\n\n"
         "=== %s ===\n%s" % (objective, target, original)
-    ), num_predict=8000)
+    ), num_predict=2000)
 
-    # The shrink floor, for the same reason it exists in codegen_loop: an
-    # unguarded repair converges on deletion, because removing the offending
-    # code is always a valid way to satisfy a checker. Measured elsewhere in
-    # this repo at 44% and 13% of a file returned to fix two typos.
+    # Splice one function back rather than accepting a whole-file rewrite.
+    #
+    # Asking for the whole module converges on deletion: the model reproduces
+    # the parts it is thinking about and drops the rest. Measured on this loop
+    # at 49% and 50% of the original file returned on consecutive passes with a
+    # 14B, and previously at 44% and 13% with a 7B -- the deletion guard caught
+    # every one, which means every pass was wasted.
+    #
+    # The fix is the one the codegen work arrived at independently: never ask a
+    # model to reproduce structure it does not need to touch. It writes one
+    # function; the harness owns the file.
+    edited = _splice_function(original, edited)
+    if edited is None:
+        selfmod.cancel(run_id)
+        return "candidate rejected: reply was not a single replaceable function"
+
+    # The shrink floor still applies to the SPLICED file, not the reply. A
+    # function-level edit that shrinks the module by a quarter has deleted
+    # something it was not asked to touch.
     if len(edited) < 0.75 * len(original):
         selfmod.cancel(run_id)
         return ("candidate rejected: returned %d%% of the original file "
