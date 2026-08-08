@@ -13,8 +13,8 @@ full quality pipeline before a lesson is stored:
 Lessons are stored with their batch `source` tag (e.g. seed:curriculum:strings:basic,
 seed:realwork:mangos) so they are distinguishable from grounded interaction lessons.
 
-Run: ./venv/Scripts/python.exe seed_merge.py            # merge seed/**/*.jsonl -> memory.db
-     ./venv/Scripts/python.exe seed_merge.py --dry-run  # report only, write nothing
+Run: python seed_merge.py            # merge seed/**/*.jsonl -> memory.db
+     python seed_merge.py --dry-run  # report only, write nothing
 """
 import glob
 import io

@@ -10,7 +10,7 @@ This sweeps thresholds against two probe sets and reports, per threshold:
 Pick the highest recall while keeping noise-rate ~0. Embeddings only -> no GPU
 generation, fast.
 
-Run: ./venv/Scripts/python.exe tune_min_sim.py
+Run: python tune_min_sim.py
 """
 import os
 import sys

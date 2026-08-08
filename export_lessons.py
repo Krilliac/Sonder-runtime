@@ -3,7 +3,7 @@
 The raw memory.db is a binary SQLite file (churns every interaction, and will
 eventually hold interactions with private code) so it stays gitignored. This
 exports just the distilled *lessons* (id + text) as diffable, shareable JSONL
-that CAN live in the repo. Run: ./venv/Scripts/python.exe export_lessons.py
+that CAN live in the repo. Run: python export_lessons.py
 """
 import io
 import json

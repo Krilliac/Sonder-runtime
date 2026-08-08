@@ -73,7 +73,7 @@ it is derived from your own coding interactions). Get it onto this GPU box, e.g.
 from your local machine:
 
   # regenerate it locally first if needed:
-  ./venv/Scripts/python.exe export_training_data.py
+  python export_training_data.py
   # then upload it to this box:
   scp training_data.jsonl user@THIS_BOX_IP:PATH/Sonder-runtime/
 
