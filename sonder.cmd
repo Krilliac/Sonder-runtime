@@ -14,18 +14,37 @@ if not defined SONDER_PYTHON (
   endlocal & exit /b 3
 )
 
+rem Bootstrap is quiet on success and loud on failure. Both steps below print
+rem the same "ollama reachable / alias ready" pair, so the old unconditional
+rem echo showed every launch the same eight lines twice, above a status block
+rem the REPL banner now covers. Nothing is lost: on failure the captured log is
+rem printed in full, which is strictly more than the old output showed, and
+rem SONDER_TERMINAL_VERBOSE=1 restores the running commentary.
+set "SONDER_BOOT_LOG=%TEMP%\sonder-bootstrap.log"
+
 if /I not "%SONDER_TERMINAL_BOOTSTRAP%"=="0" (
-  echo [sonder] ensuring endpoint-gated local engine...
-  "%SONDER_PYTHON%" "%REPO%sonder_headless.py" engine
+  if /I "%SONDER_TERMINAL_VERBOSE%"=="1" (
+    "%SONDER_PYTHON%" "%REPO%sonder_headless.py" engine
+  ) else (
+    "%SONDER_PYTHON%" "%REPO%sonder_headless.py" engine >"%SONDER_BOOT_LOG%" 2>&1
+  )
   if errorlevel 1 (
     echo [sonder] ERROR: local engine is unavailable or blocked by endpoint policy.
+    if exist "%SONDER_BOOT_LOG%" type "%SONDER_BOOT_LOG%"
     endlocal & exit /b 2
   )
 )
 
 if /I not "%SONDER_TERMINAL_START_SERVER%"=="0" (
-  echo [sonder] ensuring local API server is running...
-  "%SONDER_PYTHON%" "%REPO%sonder_headless.py" start --host "%SONDER_HOST%" --port "%SONDER_PORT%" --context-size "%SONDER_CONTEXT_SIZE%"
+  if /I "%SONDER_TERMINAL_VERBOSE%"=="1" (
+    "%SONDER_PYTHON%" "%REPO%sonder_headless.py" start --host "%SONDER_HOST%" --port "%SONDER_PORT%" --context-size "%SONDER_CONTEXT_SIZE%"
+  ) else (
+    "%SONDER_PYTHON%" "%REPO%sonder_headless.py" start --host "%SONDER_HOST%" --port "%SONDER_PORT%" --context-size "%SONDER_CONTEXT_SIZE%" >"%SONDER_BOOT_LOG%" 2>&1
+    if errorlevel 1 (
+      echo [sonder] WARNING: local API server did not start cleanly.
+      if exist "%SONDER_BOOT_LOG%" type "%SONDER_BOOT_LOG%"
+    )
+  )
 )
 
 if defined SONDER_SERVER (
