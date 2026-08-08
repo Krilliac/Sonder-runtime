@@ -8,14 +8,19 @@
 #   - keeps secrets and state outside the release tree,
 #   - installs a dedicated OS identity and hardened systemd units.
 #
-# Usage: sudo packaging/install_sonder.sh [--source <checkout>] [--version-tag <tag>]
+# Build the audited payload as an unprivileged user first:
+#   python3 scripts/package_local_system.py --out dist/local-system
+# Then install only that manifest-verified payload:
+#   sudo packaging/install_sonder.sh --package-source dist/local-system \
+#       [--version-tag <tag>]
 set -euo pipefail
 
-SOURCE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PACKAGE_SOURCE="$SCRIPT_DIR/../dist/local-system"
 VERSION_TAG=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --source) SOURCE_DIR="$2"; shift 2 ;;
+    --package-source|--source) PACKAGE_SOURCE="$2"; shift 2 ;;
     --version-tag) VERSION_TAG="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -25,11 +30,40 @@ if [ "$(id -u)" -ne 0 ]; then
   echo "this installer must run as root" >&2
   exit 1
 fi
+PACKAGE_SOURCE="$(cd "$PACKAGE_SOURCE" 2>/dev/null && pwd)" || {
+  echo "package source does not exist: $PACKAGE_SOURCE" >&2
+  echo "build it first: python3 scripts/package_local_system.py --out dist/local-system" >&2
+  exit 1
+}
+if [ ! -f "$PACKAGE_SOURCE/PACKAGE-MANIFEST.json" ] || \
+   [ ! -f "$PACKAGE_SOURCE/scripts/package_local_system.py" ]; then
+  echo "--package-source must name an audited local-system package, not a checkout" >&2
+  echo "build it first: python3 scripts/package_local_system.py --out dist/local-system" >&2
+  exit 1
+fi
 if [ -z "$VERSION_TAG" ]; then
-  VERSION_TAG="$(git -C "$SOURCE_DIR" describe --always 2>/dev/null || date -u +%Y%m%dT%H%M%SZ)"
+  VERSION_TAG="$(date -u +%Y%m%dT%H%M%SZ)"
+fi
+case "$VERSION_TAG" in
+  [A-Za-z0-9]*) ;;
+  *)
+    echo "invalid --version-tag: use 1-64 letters, digits, dots, underscores, or hyphens" >&2
+    exit 2
+    ;;
+esac
+case "$VERSION_TAG" in
+  *[!A-Za-z0-9._-]*)
+    echo "invalid --version-tag: use 1-64 letters, digits, dots, underscores, or hyphens" >&2
+    exit 2
+    ;;
+esac
+if [ "${#VERSION_TAG}" -gt 64 ]; then
+  echo "invalid --version-tag: use 1-64 letters, digits, dots, underscores, or hyphens" >&2
+  exit 2
 fi
 
 RELEASE_DIR="/opt/sonder/releases/$VERSION_TAG"
+STAGING="$RELEASE_DIR.staging"
 echo "installing release $VERSION_TAG"
 
 # 1. Service identity and directories.
@@ -43,10 +77,23 @@ if [ -e "$RELEASE_DIR" ]; then
   echo "release $RELEASE_DIR already exists; refusing to overwrite in place" >&2
   exit 1
 fi
-STAGING="$RELEASE_DIR.staging"
-rm -rf "$STAGING"
+if [ -e "$STAGING" ]; then
+  echo "staging path $STAGING already exists; inspect and remove it explicitly" >&2
+  exit 1
+fi
 mkdir -p "$STAGING"
-rsync -a --exclude .git --exclude '__pycache__' --exclude '*.db' "$SOURCE_DIR/" "$STAGING/"
+
+# Import the verifier from the audited package and copy only files listed in
+# PACKAGE-MANIFEST.json.  Ignored/untracked checkout state and unlisted files
+# can never enter the privileged release directory through this path.
+PYTHONPATH="$PACKAGE_SOURCE" python3 - "$PACKAGE_SOURCE" "$STAGING" <<'PY'
+import sys
+from pathlib import Path
+
+from scripts import package_local_system
+
+package_local_system.copy_verified_payload(Path(sys.argv[1]), Path(sys.argv[2]))
+PY
 python3 -m venv "$STAGING/venv"
 "$STAGING/venv/bin/pip" install --quiet --upgrade pip
 "$STAGING/venv/bin/pip" install --quiet -r "$STAGING/requirements-runtime.txt"

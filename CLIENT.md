@@ -2,9 +2,10 @@
 
 `sonder_client.py` is a **standalone** thin remote client: stdlib-only
 Python, no repo checkout, no Ollama, no `mcp` package. Drop the one file on
-any PC and point it at a Sonder Runtime host elsewhere (a VPS running
-`sonder_serve.py` as a systemd service — see the hosting section of
-`deploy_sonder.sh`).
+any PC and point it at a Sonder Runtime host elsewhere. Remote hosts use the
+[server-private installer](docs/runbooks/install-server-private.md) and a
+[TLS reverse proxy](docs/runbooks/secure-remote-access.md); the runtime listener
+itself stays on loopback.
 
 Sonder Runtime is orchestration software, not a full or base model. A local
 host normally runs Ollama separately to store/load model weights and perform
@@ -16,7 +17,7 @@ weights because those stay on the host.
 
 1. **Hosted server + thin client (this doc).** Someone else (or your own
    VPS) runs Sonder's full orchestration loop and its configured inference
-   host; you talk to it over HTTP from any PC with just Python. No local GPU,
+   host; you talk to it over HTTPS from any PC with just Python. No local GPU,
    no Ollama, no repo needed on the client side.
 2. **Fully local.** Clone the repo and run Sonder Runtime on your own
    machine — the `sonder` REPL / `sonder.cmd` (Windows). See
@@ -53,7 +54,7 @@ variables, then run the client:
 **macOS / Linux:**
 
 ```bash
-export SONDER_SERVER=http://your-vps:11435
+export SONDER_SERVER=https://sonder.example.com
 export SONDER_API_KEY=s3cret
 python3 sonder_client.py
 ```
@@ -61,7 +62,7 @@ python3 sonder_client.py
 **Windows (cmd):**
 
 ```bat
-set SONDER_SERVER=http://your-vps:11435
+set SONDER_SERVER=https://sonder.example.com
 set SONDER_API_KEY=s3cret
 python sonder_client.py
 ```
@@ -79,7 +80,7 @@ account bans, do not fall back.
 `--server`/`--key` argv flags also work and override the env vars:
 
 ```bash
-python3 sonder_client.py --server http://your-vps:11435 --key s3cret
+python3 sonder_client.py --server https://sonder.example.com --key s3cret
 ```
 
 ## One-liner install (macOS / Linux) — get a `sonder` command
@@ -102,23 +103,20 @@ Make sure `~/.local/bin` is on your `PATH` (add `export
 PATH="$HOME/.local/bin:$PATH"` to your shell rc if it isn't), then:
 
 ```bash
-export SONDER_SERVER=http://your-vps:11435
+export SONDER_SERVER=https://sonder.example.com
 export SONDER_API_KEY=s3cret
 sonder
 ```
 
 ## Security note
 
-**The API key is the only thing protecting a publicly hosted server.**
-Anyone who has it (and the URL) can send requests to the hosted Sonder Runtime
-and consume its inference host and VPS compute. Treat it like a password:
+Access to a hosted Sonder endpoint is equivalent to shell access to its allowed
+workspaces. Anyone who has its API key and URL can invoke the configured tool
+surface and consume host resources. Treat the key like a privileged password:
 
 - Keep it out of shell history / dotfiles committed to git.
-- Rotate it (re-run `deploy_sonder.sh --serve` with a fresh
-  `SONDER_API_KEY`, or edit `/etc/systemd/system/sonder.service` and
-  `systemctl daemon-reload && systemctl restart sonder`) if it leaks.
-- The proxy speaks plain HTTP by default — fine for casual/personal use,
-  but for anything more, put it behind a reverse proxy (nginx/Caddy) with
-  HTTPS (Let's Encrypt) so the key and traffic aren't sent in the clear,
-  and consider restricting the port to specific source IPs at the
-  firewall/security-group level instead of the whole internet.
+- Rotate it in `/etc/sonder/sonder.env` and restart `sonder` if it leaks.
+- Never send the key over plaintext HTTP except to a loopback address. Remote
+  clients must use HTTPS through the documented reverse proxy.
+- Never expose or port-forward the runtime's loopback port. Restrict the TLS
+  endpoint at the firewall or security-group layer as well.
