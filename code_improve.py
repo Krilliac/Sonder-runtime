@@ -16,8 +16,8 @@ model, and returns a result dict for the caller to apply or reject.
 """
 from __future__ import annotations
 
-import difflib
 import ast
+import difflib
 import io
 import re
 import tokenize
