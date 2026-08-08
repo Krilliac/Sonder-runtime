@@ -151,7 +151,8 @@ class _SystemScreenState extends State<SystemScreen>
     try {
       final result = await _launcherApi.waitForOperation(
         operation.id,
-        isCancelled: () => !mounted ||
+        isCancelled: () =>
+            !mounted ||
             !_appActive ||
             actionEpoch != _launcherActionEpoch ||
             _stopLauncherWait,
@@ -167,8 +168,7 @@ class _SystemScreenState extends State<SystemScreen>
       if (mounted && actionEpoch == _launcherActionEpoch) {
         setState(() {
           _recordLauncherStatus(result);
-          _message = result.currentOperation?.displayMessage ??
-              result.message;
+          _message = result.currentOperation?.displayMessage ?? result.message;
         });
       }
     } on SonderException catch (error) {
@@ -291,7 +291,8 @@ class _SystemScreenState extends State<SystemScreen>
       final result = await _launcherApi.action(
         action,
         contextSize: widget.settings.contextSize,
-        isCancelled: () => !mounted ||
+        isCancelled: () =>
+            !mounted ||
             !_appActive ||
             actionEpoch != _launcherActionEpoch ||
             _stopLauncherWait,
@@ -774,14 +775,16 @@ class _SystemScreenState extends State<SystemScreen>
                   const SizedBox(height: 8),
                   Text(
                     _launcherError,
-                    style: TextStyle(color: Theme.of(context).colorScheme.error),
+                    style:
+                        TextStyle(color: Theme.of(context).colorScheme.error),
                   ),
                 ],
                 if (widget.settings.launcherConfigurationError != null) ...[
                   const SizedBox(height: 8),
                   Text(
                     widget.settings.launcherConfigurationError!,
-                    style: TextStyle(color: Theme.of(context).colorScheme.error),
+                    style:
+                        TextStyle(color: Theme.of(context).colorScheme.error),
                   ),
                 ],
               ],
@@ -812,11 +815,10 @@ class _SystemScreenState extends State<SystemScreen>
                     ),
                     FilledButton.icon(
                       key: const Key('start-server'),
-                      onPressed: _working ||
-                              hostOperationActive ||
-                              !canControlServer
-                          ? null
-                          : () => _run(_startServer, label: 'Start server'),
+                      onPressed:
+                          _working || hostOperationActive || !canControlServer
+                              ? null
+                              : () => _run(_startServer, label: 'Start server'),
                       icon: _busyIcon(
                         'Start server',
                         const Icon(Icons.play_arrow_outlined),
@@ -828,11 +830,10 @@ class _SystemScreenState extends State<SystemScreen>
                       ),
                     ),
                     FilledButton.tonalIcon(
-                      onPressed: _working ||
-                              hostOperationActive ||
-                              !canControlServer
-                          ? null
-                          : () => _run(_stopServer, label: 'Stop server'),
+                      onPressed:
+                          _working || hostOperationActive || !canControlServer
+                              ? null
+                              : () => _run(_stopServer, label: 'Stop server'),
                       icon: _busyIcon(
                         'Stop server',
                         const Icon(Icons.stop_circle_outlined),
@@ -1691,8 +1692,10 @@ class _LearningHealthPanel extends StatelessWidget {
         _MeterBar(
           label: 'Embedded',
           percent: health.quality.embeddingPercent,
-          detail:
-              '${health.lessons - health.quality.missingEmbeddings}/${health.lessons} lessons searchable semantically',
+          // Blob presence overstated coverage when corrupt or degenerate
+          // vectors existed, so the caption now uses the bar's valid set.
+          detail: '${health.quality.embeddingPercent.toStringAsFixed(1)}% of '
+              '${health.lessons} lessons have valid embeddings',
         ),
         const SizedBox(height: 12),
         Text('Lesson provenance',
@@ -1797,6 +1800,8 @@ class _LearningHealthPanel extends StatelessWidget {
       if (q.missingSources > 0) '${q.missingSources} missing sources',
       if (q.missingFts + q.orphanFts > 0)
         '${q.missingFts + q.orphanFts} search-index defects',
+      if (q.embeddingDefects > 0)
+        '${q.embeddingDefects} invalid or mismatched embeddings',
     ];
     return 'Memory hygiene needs review: ${parts.join(', ')}.';
   }
@@ -2698,7 +2703,6 @@ class _OutputText extends StatelessWidget {
   }
 }
 
-
 /// Update section for the System page (SPEC-4 section 14): installed
 /// version/channel, active/previous releases, available updates with
 /// verification state, and a rollback affordance. Install/rollback are
@@ -2714,9 +2718,8 @@ class _UpdateSection extends StatelessWidget {
     final active = status.activeRelease;
     final previous = status.previousRelease;
     final available = status.plans.where((p) => p.isAvailable).toList();
-    final inFlight = status.plans
-        .where((p) => !p.isAvailable && !p.isTerminal)
-        .toList();
+    final inFlight =
+        status.plans.where((p) => !p.isAvailable && !p.isTerminal).toList();
 
     return _Section(
       title: 'Updates',

@@ -91,8 +91,7 @@ class LauncherStatus {
         action: json['operation_action']?.toString() ??
             json['last_action']?.toString() ??
             '',
-        phase:
-            json['operation_phase']?.toString().trim().toLowerCase() ?? '',
+        phase: json['operation_phase']?.toString().trim().toLowerCase() ?? '',
         message: json['operation_message']?.toString() ??
             json['message']?.toString() ??
             '',
@@ -143,8 +142,7 @@ class SonderLauncherApi {
 
   Map<String, String> _headers() => {
         'Accept': 'application/json',
-        if (token.trim().isNotEmpty)
-          'Authorization': 'Bearer ${token.trim()}',
+        if (token.trim().isNotEmpty) 'Authorization': 'Bearer ${token.trim()}',
       };
 
   static String _newIdempotencyKey() {
@@ -161,8 +159,8 @@ class SonderLauncherApi {
   LauncherStatus _decode(http.Response response) {
     Map<String, dynamic> body;
     try {
-      body = jsonDecode(utf8.decode(response.bodyBytes))
-          as Map<String, dynamic>;
+      body =
+          jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
     } catch (_) {
       throw SonderException('Could not parse host launcher response.');
     }
@@ -280,9 +278,8 @@ class SonderLauncherApi {
         );
       }
       if (stopwatch.elapsed >= boundedWait) {
-        final detail = lastPollError.isEmpty
-            ? ''
-            : ' Last status error: $lastPollError.';
+        final detail =
+            lastPollError.isEmpty ? '' : ' Last status error: $lastPollError.';
         throw SonderException(
           'Timed out waiting for host operation $operationId. It may still be '
           'running; refresh Host Launcher status before retrying.$detail',
@@ -315,9 +312,8 @@ class SonderLauncherApi {
       } catch (error) {
         if (error is SonderException) rethrow;
         final detail = error.toString();
-        lastPollError = detail.length > 240
-            ? '${detail.substring(0, 240)}…'
-            : detail;
+        lastPollError =
+            detail.length > 240 ? '${detail.substring(0, 240)}…' : detail;
         continue;
       }
       if (response.statusCode >= 500) {
@@ -504,17 +500,9 @@ class SonderApi {
           .get(_uri('/v1/models'), headers: _headers())
           .timeout(const Duration(seconds: 15));
     } catch (e) {
-      if (_canFallback) {
-        try {
-          resp = await http
-              .get(_uri('/v1/models', localFallbackUrl), headers: _headers(''))
-              .timeout(const Duration(seconds: 15));
-        } catch (_) {
-          throw SonderException('Cannot reach server: $e');
-        }
-      } else {
-        throw SonderException('Cannot reach server: $e');
-      }
+      // A silent local retry made connection tests authenticate a different
+      // machine, turning bad URLs and API keys into false green results.
+      throw SonderException('Cannot reach server: $e');
     }
     if (resp.statusCode == 401) {
       throw SonderException('Unauthorized — check the API key.');
@@ -541,18 +529,9 @@ class SonderApi {
           .get(_uri('/v1/sonder/status'), headers: _headers())
           .timeout(const Duration(seconds: 20));
     } catch (e) {
-      if (_canFallback) {
-        try {
-          resp = await http
-              .get(_uri('/v1/sonder/status', localFallbackUrl),
-                  headers: _headers(''))
-              .timeout(const Duration(seconds: 20));
-        } catch (_) {
-          throw SonderException('Cannot reach server: $e');
-        }
-      } else {
-        throw SonderException('Cannot reach server: $e');
-      }
+      // Status must stay bound to the configured host; otherwise polling can
+      // silently replace a remote machine's diagnostics with this laptop's.
+      throw SonderException('Cannot reach server: $e');
     }
     if (resp.statusCode == 401) {
       throw SonderException('Unauthorized - check the API key.');
@@ -1156,6 +1135,7 @@ class LearningQualityInfo {
   final int missingSources;
   final int missingFts;
   final int orphanFts;
+  final int embeddingDefects;
   final double embeddingPercent;
 
   const LearningQualityInfo({
@@ -1167,6 +1147,7 @@ class LearningQualityInfo {
     required this.missingSources,
     required this.missingFts,
     required this.orphanFts,
+    required this.embeddingDefects,
     required this.embeddingPercent,
   });
 
@@ -1179,6 +1160,7 @@ class LearningQualityInfo {
         missingSources = 0,
         missingFts = 0,
         orphanFts = 0,
+        embeddingDefects = 0,
         embeddingPercent = 0;
 
   factory LearningQualityInfo.fromJson(Map<String, dynamic> json) {
@@ -1191,6 +1173,16 @@ class LearningQualityInfo {
       missingSources: _asInt(json['missing_source_interaction']),
       missingFts: _asInt(json['missing_fts']),
       orphanFts: _asInt(json['orphan_fts']),
+      // Ignoring invalid/provenance-mismatched vectors let the UI declare
+      // hygiene clean while semantic search had known embedding defects.
+      embeddingDefects: _asInt(json['embedding_legacy']) +
+          _asInt(json['embedding_model_mismatch']) +
+          _asInt(json['embedding_revision_mismatch']) +
+          _asInt(json['embedding_dimension_missing']) +
+          _asInt(json['embedding_dimension_invalid']) +
+          _asInt(json['embedding_dimension_mismatch']) +
+          _asInt(json['embedding_vector_invalid']) +
+          (_asBool(json['embedding_mixed_dimensions']) ? 1 : 0),
       embeddingPercent: _asDouble(json['embedding_percent']),
     );
   }
@@ -1202,7 +1194,8 @@ class LearningQualityInfo {
       privacyFlags +
       missingSources +
       missingFts +
-      orphanFts;
+      orphanFts +
+      embeddingDefects;
 }
 
 class AutopilotStatus {
