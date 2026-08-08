@@ -39,7 +39,7 @@ Mitigations that are already in place and worth knowing about:
   a developer-authorization check.
 - File operations are constrained to configured roots; escaping them takes an
   explicit `extra_roots` or a bypass token.
-- Git history inspection (`repo_log`, `repo_show`) is read-only, project-bound,
+- Git history inspection (`repo_log`, `repo_show`, `repo_blame`) is read-only, project-bound,
   argv-only, and bounded; it disables parent-repository discovery, pagers,
   external diffs, and text-conversion helpers.
 - Cloud tiers are **opt-in**. Local tiers run against loopback Ollama, and a

@@ -14,6 +14,9 @@ import file_ops
 
 MAX_LOG_COUNT = 100
 DEFAULT_LOG_COUNT = 20
+DEFAULT_BLAME_LINES = 100
+MAX_BLAME_LINES = 500
+MAX_BLAME_LINE_NUMBER = 10_000_000
 MAX_OUTPUT_BYTES = 512_000
 DEFAULT_OUTPUT_BYTES = 256_000
 MAX_STDERR_BYTES = 16_384
@@ -109,6 +112,39 @@ def resolve_path_filter(root: Path, value="") -> str:
     if relative == Path("."):
         raise GitHistoryError("path filter must name a path below the repository root")
     return relative.as_posix()
+
+
+def resolve_blame_target(root: Path, value) -> str:
+    """Resolve one existing regular worktree file for bounded blame."""
+    raw = str(value or "").strip()
+    if not raw:
+        raise GitHistoryError("blame file_path is required")
+    relative = resolve_path_filter(root, raw)
+    target = root / Path(relative)
+    if not target.exists() or not target.is_file():
+        raise GitHistoryError("blame target must be an existing regular file")
+    if file_ops._is_reparse_point(target):
+        raise GitHistoryError("blame target must not be a symlink or junction")
+    return relative
+
+
+def normalize_blame_range(start_line=1, end_line=0) -> tuple[int, int]:
+    """Return an explicit, strictly bounded inclusive line range."""
+    if isinstance(start_line, bool) or not isinstance(start_line, int):
+        raise GitHistoryError("blame start_line must be an integer")
+    if start_line < 1 or start_line > MAX_BLAME_LINE_NUMBER:
+        raise GitHistoryError("blame start_line is outside the supported range")
+    if end_line in (None, 0):
+        end_line = start_line + DEFAULT_BLAME_LINES - 1
+    elif isinstance(end_line, bool) or not isinstance(end_line, int):
+        raise GitHistoryError("blame end_line must be an integer")
+    if end_line < start_line or end_line > MAX_BLAME_LINE_NUMBER:
+        raise GitHistoryError("blame end_line is outside the supported range")
+    if end_line - start_line + 1 > MAX_BLAME_LINES:
+        raise GitHistoryError(
+            "blame range exceeds the %d-line ceiling" % MAX_BLAME_LINES
+        )
+    return start_line, end_line
 
 
 def _git_executable() -> str:
@@ -327,4 +363,106 @@ def repo_show(
         "subject": decoded[5],
         "message": decoded[6],
         "patch": patch,
+    }
+
+
+_BLAME_HEADER_RE = re.compile(
+    rb"(?P<commit>[0-9a-f]{40}|[0-9a-f]{64}) "
+    rb"(?P<original>[0-9]+) (?P<final>[0-9]+)(?: [0-9]+)?\Z"
+)
+
+
+def _parse_blame_porcelain(payload: bytes, *, output_truncated=False):
+    records = []
+    header = None
+    metadata = {}
+    incomplete = False
+    for raw_line in payload.splitlines():
+        if header is None:
+            match = _BLAME_HEADER_RE.fullmatch(raw_line)
+            if not match:
+                if output_truncated:
+                    incomplete = True
+                    break
+                raise GitHistoryError("git blame output contained a malformed header")
+            header = match.groupdict()
+            metadata = {}
+            continue
+        if raw_line.startswith(b"\t"):
+            previous = metadata.get("previous", "")
+            previous_record = None
+            if previous:
+                prior_commit, separator, prior_path = previous.partition(" ")
+                previous_record = {
+                    "commit": prior_commit,
+                    "filename": prior_path if separator else "",
+                }
+            author_email = metadata.get("author-mail", "")
+            if author_email.startswith("<") and author_email.endswith(">"):
+                author_email = author_email[1:-1]
+            records.append({
+                "commit": header["commit"].decode("ascii"),
+                "original_line": int(header["original"]),
+                "final_line": int(header["final"]),
+                "author": {
+                    "name": metadata.get("author", ""),
+                    "email": author_email,
+                },
+                "author_time": int(metadata.get("author-time", "0")),
+                "author_tz": metadata.get("author-tz", ""),
+                "summary": metadata.get("summary", ""),
+                "filename": metadata.get("filename", ""),
+                "previous": previous_record,
+                "boundary": "boundary" in metadata,
+                "text": raw_line[1:].decode("utf-8", errors="replace"),
+            })
+            header = None
+            metadata = {}
+            continue
+        key, separator, value = raw_line.partition(b" ")
+        decoded_key = key.decode("ascii", errors="replace")
+        metadata[decoded_key] = (
+            value.decode("utf-8", errors="replace") if separator else ""
+        )
+    if header is not None:
+        if not output_truncated:
+            raise GitHistoryError("git blame output ended before a source line")
+        incomplete = True
+    return records, incomplete
+
+
+def repo_blame(
+    path=".", *, file_path, revision="HEAD", start_line=1, end_line=0,
+    timeout=DEFAULT_TIMEOUT_SECONDS, max_bytes=DEFAULT_OUTPUT_BYTES,
+    extra_roots="",
+) -> dict:
+    """Read structured blame records for one explicit bounded file range."""
+    root = resolve_repo_root(path, extra_roots=extra_roots)
+    revision = validate_revision(revision)
+    file_path = resolve_blame_target(root, file_path)
+    start_line, end_line = normalize_blame_range(start_line, end_line)
+    result = _run_git(
+        root,
+        [
+            "blame", "--line-porcelain", "--no-progress", "--no-textconv",
+            "-L", "%d,%d" % (start_line, end_line), revision, "--", file_path,
+        ],
+        timeout=timeout,
+        max_bytes=max_bytes,
+    )
+    records, incomplete = _parse_blame_porcelain(
+        result["stdout"], output_truncated=result["truncated"],
+    )
+    return {
+        "ok": True,
+        "repository": str(root),
+        "revision": revision,
+        "path": file_path,
+        "start_line": start_line,
+        "end_line": end_line,
+        "count": len(records),
+        "limit": end_line - start_line + 1,
+        "truncated": bool(result["truncated"] or incomplete),
+        "output_bytes": len(result["stdout"]),
+        "lines": records,
     }
