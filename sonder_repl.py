@@ -863,6 +863,7 @@ def main():
                 "/hardware", "/training", "/weighttraining",
                 "/selfmod", "/selfmodify",
                 "/learning", "/learnhealth", "/metrics",
+                "/goal", "/goals", "/ensemble",
             ):
                 print(server.control_command(
                     line, session=session_id, project=project,
