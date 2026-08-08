@@ -119,8 +119,15 @@ def propose_objective(server, log) -> tuple[str, str] | None:
     return None
 
 
-def run(server, log, *, test_timeout=1800):
-    """Drive one selfmod lifecycle. Returns a short status string."""
+def run(server, log, *, test_timeout=1800, branch=True):
+    """Drive one selfmod lifecycle.
+
+    branch=True commits a verified candidate to its own selfmod/<run-id>
+    branch from inside the worktree and never writes the main tree; that
+    is the continuous-run mode. branch=False follows the configured
+    selfmod mode instead, which under auto-low-risk deploys into the
+    working tree.
+    """
     settings = selfmod.settings()
     if not settings.get("enabled"):
         return "selfmod disabled in settings"
@@ -203,6 +210,28 @@ def run(server, log, *, test_timeout=1800):
             return "candidate rejected: %s failed (run %s kept for inspection)" % (kind, run_id)
 
     selfmod.review(run_id)
+
+    if branch:
+        # Commit INSIDE the worktree, onto its own branch. Strictly safer than
+        # deploying: the main working tree is never written, so a live session
+        # keeps its checkout and its uncommitted work, and every candidate is
+        # an independent branch off HEAD that can be read, cherry-picked or
+        # deleted without touching anything. `deploy` remains the path that
+        # actually installs a change; this path only makes one reviewable.
+        name = "selfmod/%s" % run_id
+        code, out = selfmod._git(workspace, "checkout", "-B", name)
+        if code:
+            return "candidate tested but branch checkout failed: %s" % out[:160]
+        code, out = selfmod._git(workspace, "add", "--", *diff["changed_files"])
+        if code:
+            return "candidate tested but staging failed: %s" % out[:160]
+        code, out = selfmod._git(
+            workspace, "commit", "-m", "selfmod: %s" % objective[:100])
+        if code:
+            return "candidate tested but commit failed: %s" % out[:160]
+        _, sha = selfmod._git(workspace, "rev-parse", "--short", "HEAD")
+        return "COMMITTED %s to %s (%s) -- review: git log -p %s" % (
+            sha.strip(), name, target, name)
 
     if mode != "auto-low-risk":
         return ("candidate READY for review: %s -- %s | approve with "
