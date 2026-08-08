@@ -537,6 +537,49 @@ def _verified_manifest_files(src: Path) -> tuple[bytes, list[tuple[Path, Path, i
     return manifest_bytes, verified
 
 
+def copy_verified_payload(src: Path, dest: Path) -> None:
+    """Copy only manifest-listed files from an existing package into *dest*.
+
+    Production installation must not fall back to copying an entire checkout:
+    a developer tree can contain ignored credentials, model state, personal
+    datasets, and unrelated build artifacts.  The package manifest is the
+    audited allowlist.  Verify every listed byte first, reject reparse points,
+    and copy nothing that is not in that manifest.
+
+    ``dest`` must be a new or empty staging directory.  The caller owns the
+    final atomic rename into its release location.
+    """
+    src = Path(src).resolve(strict=True)
+    dest = Path(dest)
+    if not src.is_dir():
+        raise ValueError("package source must be an existing directory")
+    _assert_no_reparse_tree(src, "package source")
+
+    if dest.exists():
+        if not dest.is_dir() or _is_reparse(dest):
+            raise ValueError("package destination must be a safe directory")
+        if any(dest.iterdir()):
+            raise ValueError("package destination must be empty")
+    else:
+        dest.mkdir(parents=True)
+    _assert_no_reparse_tree(dest, "package destination")
+
+    dest_root = dest.resolve(strict=True)
+    if dest_root == src or src in dest_root.parents:
+        raise ValueError("package destination must be outside the package source")
+
+    manifest_bytes, verified = _verified_manifest_files(src)
+    for rel, source, mode in verified:
+        target = dest / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target_root = target.resolve(strict=False)
+        if dest_root not in target_root.parents:
+            raise ValueError(f"package destination escapes staging root: {rel.as_posix()}")
+        shutil.copyfile(source, target)
+        os.chmod(target, mode)
+    (dest / "PACKAGE-MANIFEST.json").write_bytes(manifest_bytes)
+
+
 def zip_payload(src: Path, zip_path: Path) -> None:
     src = validate_output_path(src)
     if not src.is_dir():
