@@ -68,6 +68,12 @@ def main() -> int:
     log("=== selfmod continuous start: %.1fh, mode=%s, model=%s, branch-commit ==="
         % (args.hours, selfmod.settings().get("mode"), args.model))
 
+    # Every run of this loop so far has ended by being killed mid-pass, which
+    # leaves an ownerless active-phase run and its worktree behind that no
+    # cleanup path reclaims. Sweep those before starting; only one loop runs at
+    # a time, so any active run with no owner is a corpse.
+    nightly_selfmod.reclaim_orphans(log)
+
     while time.time() < deadline and barren < MAX_BARREN:
         passes += 1
         log("--- pass %d (%.1fh left) ---" % (passes, (deadline - time.time()) / 3600.0))

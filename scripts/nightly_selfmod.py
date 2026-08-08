@@ -291,6 +291,42 @@ def _too_similar(objective, previous) -> bool:
     return False
 
 
+def reclaim_orphans(log) -> int:
+    """Reclaim runs stuck in an active phase by a previously killed loop.
+
+    A run this loop starts is never claim()ed, so its owner_id is NULL, and
+    selfmod.reconcile_interrupted only touches rows WHERE owner_id IS NOT NULL;
+    prune_workspaces skips active phases entirely. So a loop killed mid-pass --
+    which is how every run of this loop has ended so far -- leaves its run in
+    editing/testing, its ~100 MB worktree, and its branch behind forever,
+    invisible to both cleanup paths and inflating the 'active' count.
+
+    Called once at loop start: any active-phase run with no owner predates this
+    process and cannot belong to a live loop (only one runs at a time), so it
+    is safe to cancel and discard.
+    """
+    reclaimed = 0
+    try:
+        runs = selfmod.list_runs(200) or []
+    except Exception:
+        return 0
+    for run in runs:
+        if run.get("phase") not in ("editing", "testing", "backed_up", "proposed"):
+            continue
+        if run.get("owner_id"):
+            continue
+        rid = run.get("id")
+        try:
+            selfmod.cancel(rid)
+        except Exception:
+            pass
+        _discard_workspace(rid)
+        reclaimed += 1
+    if reclaimed:
+        log("  reclaimed %d orphaned run(s) from a previous killed loop" % reclaimed)
+    return reclaimed
+
+
 def _discard_workspace(run_id) -> None:
     """Remove a rejected run's worktree and branch.
 
