@@ -2040,7 +2040,7 @@ def test_master_orchestrate_uses_tool_agent_for_repo_inspection(monkeypatch, tmp
     monkeypatch.setattr(server, "_offload_impl", lambda prompt, **kwargs: "audited merge")
 
     # A real, existing repository root keeps the fail-closed resolver satisfied
-    # on every host; the retired D:\SparkEngine literal only resolved on the
+    # on every host; the old machine-specific absolute literal only resolved on the
     # author's Windows box and errored the delegated lane on Linux CI.
     out = server.master_orchestrate(
         "Repository: %s. Review current uncommitted files using local file-reading tools." % tmp_path,

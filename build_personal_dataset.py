@@ -12,7 +12,7 @@ cloud-tier model. `main()` prints a loud reminder every run, and the
 default output filename is expected to be gitignored by the caller's repo.
 
 Usage:
-    ./venv/Scripts/python.exe build_personal_dataset.py <root> [--lang auto|cpp|cs|py]
+    python build_personal_dataset.py <root> [--lang auto|cpp|cs|py]
         [--max-commits 1500] [--max-files 400] [--out personal_dataset.jsonl]
         [--project NAME]
 """
