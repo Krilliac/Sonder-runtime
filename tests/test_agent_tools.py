@@ -1754,3 +1754,69 @@ def test_clean_or_list_only_command_is_not_validation(
         mutation,
         "workspace run\n  ok: true",
     )
+
+
+def test_stdin_program_is_rejected_without_an_explicit_dash(tmp_path):
+    """An interpreter runs the program on its stdin whenever argv names no
+    script -- `-` says so explicitly but is not the only way.
+
+    The guard used to require `"-" in argv`, so `python` with EMPTY argv plus a
+    stdin payload walked around every inline-code control in this function.
+    Found by an adversarial sweep, 2026-08-07.
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    payload = "import os; os.system('id')"
+
+    for argv in ([], ["-u"], ["-"], ["-I", "-u"]):
+        scoped = server._project_scope_args(
+            "workspace_run",
+            {"program": "python", "args": list(argv), "stdin": payload, "cwd": "."},
+            str(project),
+        )
+        assert "stdin" in server._agent_project_execution_argument_error(
+            "workspace_run", scoped, str(project),
+        ), "argv %r should be treated as stdin-is-the-program" % (argv,)
+
+    # bash/sh/node read stdin the same way; the dash was never required there.
+    for program in ("bash", "sh", "node"):
+        scoped = server._project_scope_args(
+            "workspace_run",
+            {"program": program, "args": [], "stdin": payload, "cwd": "."},
+            str(project),
+        )
+        assert "stdin" in server._agent_project_execution_argument_error(
+            "workspace_run", scoped, str(project),
+        ), "%s with empty argv should be rejected" % program
+
+
+def test_stdin_as_data_to_a_named_script_stays_allowed(tmp_path):
+    """The over-block this fix had to avoid.
+
+    `python script.py < data` is a program reading DATA, not code arriving as
+    stdin. Rejecting every stdin payload to an interpreter -- the obvious
+    reading of the bug -- would break ordinary piping.
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    script = project / "run.py"
+    script.write_text("import sys; sys.stdin.read()\n", encoding="utf-8")
+
+    scoped = server._project_scope_args(
+        "workspace_run",
+        {"program": "python", "args": [str(script)], "stdin": "some data", "cwd": "."},
+        str(project),
+    )
+    assert server._agent_project_execution_argument_error(
+        "workspace_run", scoped, str(project),
+    ) == ""
+
+    # -m module likewise names what to run; stdin is data.
+    scoped_m = server._project_scope_args(
+        "workspace_run",
+        {"program": "python", "args": ["-m", "json.tool"], "stdin": "{}", "cwd": "."},
+        str(project),
+    )
+    assert server._agent_project_execution_argument_error(
+        "workspace_run", scoped_m, str(project),
+    ) == ""
