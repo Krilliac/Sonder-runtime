@@ -60,7 +60,7 @@ ALLOWED_ROOT_IMPORTS = {
     "platform": ROOT_PLATFORM_MODULES,
     "bootstrap": ROOT_LEGACY_MODULES | ROOT_PLATFORM_MODULES,
     "entry": ROOT_LEGACY_MODULES | ROOT_PLATFORM_MODULES | {
-        "sonder_runtime",
+        "sonder_runtime", "sonder_doctor",
     },
 }
 
