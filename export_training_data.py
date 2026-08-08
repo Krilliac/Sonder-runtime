@@ -1,6 +1,6 @@
 """Export proven, privacy-safe interactions as fine-tuning JSONL.
 
-Usage: ./venv/Scripts/python.exe export_training_data.py [out_path]
+Usage: python export_training_data.py [out_path]
 Default out_path: training_data.jsonl (gitignored).
 """
 import collections

@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 import sonder_migrations
+import sonder_paths
 import sonder_updates
 import sonder_version
 from sonder_updates import (
@@ -35,12 +36,12 @@ from sonder_updates import (
 
 def default_releases_dir() -> Path:
     override = os.environ.get("SONDER_RELEASES_DIR", "").strip()
-    return Path(override) if override else Path("/opt/sonder/releases")
+    return Path(override).expanduser() if override else sonder_paths.default_machine_home() / "releases"
 
 
 def default_current_link() -> Path:
     override = os.environ.get("SONDER_CURRENT_LINK", "").strip()
-    return Path(override) if override else Path("/opt/sonder/current")
+    return Path(override).expanduser() if override else sonder_paths.default_machine_home() / "current"
 
 
 def confirm_nonce_for(plan: dict) -> str:

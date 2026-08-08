@@ -6,7 +6,7 @@ instead of raw Ollama, including the REPL's slash-command powers (/stats, /pass,
 matching the rest of this project.
 
 Run:
-    ./venv/Scripts/python.exe sonder_serve.py [port]
+    python sonder_serve.py [port]
     (or set env SONDER_PORT; default 11435)
 
 Point your chat UI's OpenAI API base at http://127.0.0.1:<port>/v1 (any api key).

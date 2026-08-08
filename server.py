@@ -9167,7 +9167,7 @@ def loop(
       - {"type":"offload","prompt":"...","tier":"fast|code|general|reasoning|vision|cloud-code|cloud-general"}
       - {"type":"sonder","prompt":"...","session":"none"}
       - {"type":"sonder","prompt":"...","context_size":"1m"}
-      - {"type":"master_orchestrate","task":"...","mode":"inline|delegate|fleet","agents":3,"project":"D:\\repo"}
+      - {"type":"master_orchestrate","task":"...","mode":"inline|delegate|fleet","agents":3,"project":"C:\\repo"}
       - {"type":"master_status"}
       - {"type":"master_capacity","requested_agents":32}
       - {"type":"master_cancel","agent_id":"master-id|prefix|all"}
@@ -10333,7 +10333,7 @@ AGENT_TOOL_HELP = """Available tools:
 - memory_embedding_backfill: {"limit": 25, "apply": false}
 - memory_interaction_embedding_backfill: {"limit": 25, "apply": false}
 - system_improvement_report: {}
-- master_orchestrate: {"task": "...", "mode": "ask|inline|delegate|fleet", "agents": 3, "tier": "code", "project": "D:\\repo"}
+- master_orchestrate: {"task": "...", "mode": "ask|inline|delegate|fleet", "agents": 3, "tier": "code", "project": "C:\\repo"}
 - master_status: {}
 - master_capacity: {"requested_agents": 0}
 - master_cancel: {"agent_id": "master-id|prefix|all"}

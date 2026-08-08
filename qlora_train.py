@@ -19,7 +19,7 @@ invocation is rejected before heavyweight imports and there is never a silent
 CPU-training fallback.
 
 Supported launch (after `pip install -r requirements-train.txt`):
-    ./venv/Scripts/python.exe adaptive_training.py start --confirm --model auto
+    python adaptive_training.py start --confirm --model auto
 
 This file must remain importable/py_compile-able WITHOUT torch/transformers/
 peft/bitsandbytes installed — all heavy imports are deferred into main().
@@ -338,7 +338,7 @@ def main():
 
     if not os.path.exists(DATA_PATH):
         print(f"ERROR: training data not found at {DATA_PATH}")
-        print("Run: ./venv/Scripts/python.exe export_training_data.py")
+        print("Run: python export_training_data.py")
         sys.exit(1)
 
     examples = load_examples(DATA_PATH, launch_manifest["data_sha256"])
@@ -370,7 +370,7 @@ def main():
         print("ERROR: training dependencies are not installed.")
         print(f"  ({e})")
         print("Install them with:")
-        print("    ./venv/Scripts/python.exe -m pip install -r requirements-train.txt")
+        print("    python -m pip install -r requirements-train.txt")
         print("See TRAINING.md for the full setup + feasibility notes (bitsandbytes")
         print("on native Windows is finicky; WSL2 is the smoother path).")
         sys.exit(1)
