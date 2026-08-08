@@ -131,6 +131,42 @@ def test_zip_is_deterministic_and_contains_manifest(monkeypatch, tmp_path):
         assert (shell.external_attr >> 16) & 0o777 == 0o755
 
 
+def test_verified_install_copies_only_manifested_files(monkeypatch, tmp_path):
+    root = _fake_repo(tmp_path, monkeypatch)
+    package_dir = root / "dist" / "local-system"
+    package.copy_payload(package_dir)
+    (package_dir / "unlisted-private-state.txt").write_text(
+        "must not be installed", encoding="utf-8"
+    )
+
+    installed = tmp_path / "release-staging"
+    package.copy_verified_payload(package_dir, installed)
+
+    assert (installed / "PACKAGE-MANIFEST.json").is_file()
+    assert (installed / "README.md").read_text(encoding="utf-8").startswith(
+        "safe content"
+    )
+    assert not (installed / "unlisted-private-state.txt").exists()
+
+
+def test_verified_install_rejects_tampering_and_nonempty_destination(
+    monkeypatch, tmp_path
+):
+    root = _fake_repo(tmp_path, monkeypatch)
+    package_dir = root / "dist" / "local-system"
+    package.copy_payload(package_dir)
+
+    nonempty = tmp_path / "nonempty"
+    nonempty.mkdir()
+    (nonempty / "sentinel").write_text("keep", encoding="utf-8")
+    with pytest.raises(ValueError, match="must be empty"):
+        package.copy_verified_payload(package_dir, nonempty)
+
+    (package_dir / "README.md").write_text("tampered\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="manifest (size|hash) mismatch"):
+        package.copy_verified_payload(package_dir, tmp_path / "tampered-install")
+
+
 def test_optional_engine_bundle_is_binary_safe_sealed_and_executable(
     monkeypatch,
     tmp_path,
