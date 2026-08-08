@@ -25,8 +25,24 @@ Stdlib only.
 import re
 
 import intents
+import project_scaffold
 
 _TIER_COMMANDS = {"consult", "route", "refactor"}
+
+
+def _scaffold_action(match):
+    """"create a new rust project named foo" -> /scaffold rust foo.
+
+    Only fires when the whole line is the scaffold ask (the pattern is
+    anchored to the end): a request that continues past the name ("...of the
+    fibonacci sequence") is real implementation work and falls through to the
+    agent, which owns the scaffold tool alongside its file tools.
+    """
+    kind = project_scaffold.normalize_kind(match.group("kind"))
+    if not kind:
+        return None
+    name = (match.group("name") or "").strip() or "NewProject"
+    return "/scaffold %s %s" % (kind, name)
 
 
 def _fixed(slash):
@@ -142,6 +158,10 @@ _RULES = [
     _rule(r"^run\s+the\s+project\b", _fixed("/runproject")),
 
     # --- generation ---
+    _rule(r"^(?:create|make|start|scaffold|generate)\s+(?:a\s+|an\s+)?(?:new\s+)?"
+          r"(?P<kind>[\w+#.-]+)\s+(?:console\s+)?project"
+          r"(?:\s+(?:named|called)\s+(?P<name>[\w.-]+))?\s*$",
+          _scaffold_action),
     _rule(r"^(?:generate|make|create|build)\s+a\s+game\b(?:\s+(?P<arg>.+))?",
           lambda m: ("/game %s" % (m.group("arg") or "")).strip()),
     _rule(r"^(?:game\s+)?(?:forge|reference\s+suite|game\s+suite)\b(?:\s+(?P<arg>.+))?",

@@ -88,3 +88,18 @@ def test_plain_questions_and_tasks_fall_through():
 def test_slash_lines_are_left_alone():
     assert cr.resolve("/stats") is None
     assert cr.resolve("/read foo.py") is None
+
+
+def test_scaffold_phrasings_resolve_when_the_line_is_only_a_scaffold_ask():
+    assert cr.resolve("create a new rust project named forge") == \
+        "/scaffold rust forge"
+    assert cr.resolve("create a c# project called Billing") == \
+        "/scaffold csharp Billing"
+    assert cr.resolve("make a python project") == "/scaffold python NewProject"
+    # A request that continues past the name is implementation work, not a
+    # bare scaffold -- it must fall through to the agent (which owns the
+    # scaffold tool alongside its file tools).
+    assert cr.resolve(
+        "create a full C++ MSVC project of the fibonacci sequence") is None
+    # An unsupported kind falls through instead of guessing.
+    assert cr.resolve("create a cobol project named legacy") is None

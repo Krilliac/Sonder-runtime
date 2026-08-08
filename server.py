@@ -91,6 +91,7 @@ import sonder_speculation
 import consult as consult_flow
 import code_improve
 import tier_router
+import project_scaffold
 
 BASE = ollama_endpoint.normalize()
 OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
@@ -9890,6 +9891,7 @@ def tool_manifest() -> str:
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
         "workspace_inventory/directory_tree/directory_create/text_search/file_read_range": "Budgeted guarded workspace inventory, folder discovery, creation, text search, and bounded line-range reads.",
         "file_policy/file_find/file_read/file_write/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete with approval bypass support.",
+        "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, go, java-maven) -- never hand-write solution/build plumbing.",
         "data_inspect": "Read-only structured preview of JSON/JSONL/TOML/YAML/CSV/TSV/SQLite/ZIP/TAR/INI data files inside allowed roots.",
         "program_search/script_search/workspace_run/script_run/image_inspect": "Discover installed programs and workspace scripts, run bounded argv-only processes, and inspect image metadata.",
         "task_create/task_list/task_update/task_show/checklist_create/checklist_update/checklist_show": "Visible todo and ordered checklist state shared by console, app, agents, and MCP.",
@@ -9950,6 +9952,7 @@ AGENT_TOOL_HELP = """Available tools:
 - file_write: {"path": "notes.txt", "content": "...", "mode": "create|overwrite|append"}
 - file_edit: {"path": "notes.txt", "old": "before", "new": "after", "count": 1}
 - file_delete: {"path": "notes.txt", "dry_run": true}
+- scaffold_project: {"kind": "cpp-msvc|cpp-cmake|csharp|rust|python|node|go|java-maven", "name": "MyApp", "root": "MyApp"} -- writes the full skeleton (.sln/.vcxproj/Cargo.toml/...); use this instead of hand-writing build/solution files
 - script_search: {"query": "build", "root": ".", "max_results": 100}
 - program_search: {"query": "python", "max_results": 50}
 - workspace_run: {"program": "git", "args_json": ["status", "--short"], "cwd": ".", "timeout": 30}
@@ -10925,6 +10928,13 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "scaffold_project":
+        return scaffold_project(
+            kind=args.get("kind", ""),
+            name=args.get("name", ""),
+            root=args.get("root", ""),
+            apply=bool(args.get("apply", True)),
+        )
     if tool_name == "file_edit":
         return file_edit(
             path=args.get("path", ""),
@@ -11202,7 +11212,7 @@ _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "file_read", "file_read_range", "image_inspect", "file_write", "file_edit",
     "file_delete", "directory_create", "workspace_inventory", "directory_tree",
     "file_find", "text_search", "script_search", "artifact_verify",
-    "artifact_ground",
+    "artifact_ground", "scaffold_project",
 })
 _PROJECT_SCOPED_EXECUTION_TOOLS = frozenset({"workspace_run", "script_run"})
 _AGENT_TOOL_ALIASES = {
@@ -11244,7 +11254,7 @@ def _canonical_agent_tool_name(tool_name):
 
 
 def _project_scoped_path_key(tool_name):
-    if tool_name in {"file_find", "text_search", "script_search"}:
+    if tool_name in {"file_find", "text_search", "script_search", "scaffold_project"}:
         return "root"
     return "path"
 
@@ -11344,6 +11354,7 @@ def _agent_dispatch_observed(
 
 _WORK_MUTATION_TOOLS = frozenset({
     "directory_create", "file_write", "file_edit", "file_delete",
+    "scaffold_project",
     "artifact_generate", "game_generate_and_test", "game_generation_campaign",
     "memory_quality_repair", "memory_privacy_repair", "memory_embedding_backfill",
     "memory_interaction_embedding_backfill",
@@ -14437,6 +14448,67 @@ def improve_function(
     ok = write.get("ok", True) if isinstance(write, dict) else True
     return "%s\nAPPLIED to %s (%s)\n\n%s" % (
         header, path, "ok" if ok else "write reported a problem", result["diff"])
+
+
+@mcp.tool()
+def scaffold_project(
+    kind: str,
+    name: str,
+    root: str = "",
+    apply: bool = False,
+) -> str:
+    """Emit a complete, deterministic project skeleton for one language.
+
+    Solution/build-file plumbing (.sln GUID blocks, .vcxproj configuration,
+    pyproject/Cargo/pom boilerplate) is pure recall and the measured worst
+    case for a local model -- asked for "a full MSVC project" it produced good
+    code and no .sln at all. This tool owns those formats as templates, so a
+    model (or a user) only supplies the two facts that matter: the kind and
+    the name. No model call is involved.
+
+    Kinds: cpp-msvc, cpp-cmake, csharp, rust, python, node, go, java-maven
+    (aliases like c++, c#, js, py, cmake work too).
+
+    With apply=False (default) it returns the full file listing as a preview.
+    With apply=True it writes each file under `root` through the same guarded
+    file path as every other write (mode=create -- an existing file is an
+    error, a scaffold never clobbers), so filesystem roots and approval gates
+    apply. `root` is required to apply.
+    """
+    _maybe_live_reload()
+    try:
+        files = project_scaffold.render(kind, name)
+    except ValueError as exc:
+        return "ERROR: %s" % exc
+
+    canonical = project_scaffold.normalize_kind(kind)
+    if not apply:
+        sections = ["scaffold preview: kind=%s name=%s (%d files)"
+                    % (canonical, name, len(files))]
+        for rel in sorted(files):
+            sections.append("--- %s ---\n%s" % (rel, files[rel] or "(empty)"))
+        sections.append("apply with scaffold_project(..., root=<dir>, apply=True)")
+        return "\n\n".join(sections)
+
+    if not str(root or "").strip():
+        return "ERROR: root is required to apply a scaffold"
+    written, failures = [], []
+    for rel in sorted(files):
+        target = os.path.join(str(root).strip(), rel.replace("/", os.sep))
+        try:
+            file_ops.write_file(target, files[rel], mode="create")
+            written.append(target)
+        except Exception as exc:
+            failures.append("%s: %s" % (target, exc))
+    lines = ["scaffold: kind=%s name=%s" % (canonical, name)]
+    lines += ["  wrote %s" % path for path in written]
+    lines += ["  FAILED %s" % failure for failure in failures]
+    if failures:
+        lines.append("result: incomplete -- %d of %d files failed"
+                     % (len(failures), len(files)))
+    else:
+        lines.append("result: complete (%d files)" % len(written))
+    return "\n".join(lines)
 
 
 def _codegen_build(program, args_json, cwd, timeout, token, approval, extra_roots):
