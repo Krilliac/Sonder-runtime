@@ -6,6 +6,7 @@ Commands:
     mcp           run the MCP adapter
     repl          run the interactive REPL
     preflight     run startup checks and report without binding
+    doctor        consolidated read-only runtime health report
     status        local runtime/build/schema status
     diagnostics   privacy-safe diagnostic bundle (redacted)
     config        show the effective redacted configuration
@@ -79,6 +80,21 @@ def cmd_preflight(args) -> int:
     )
     _emit(report.as_dict(), as_json=args.json)
     return 0 if report.ok else 1
+
+
+def cmd_doctor(args) -> int:
+    """Run the consolidated read-only health report."""
+    import sonder_doctor
+
+    checks = sonder_doctor.default_checks()
+    if args.skip_ollama:
+        checks = [(name, check) for name, check in checks if name != "ollama"]
+    report = sonder_doctor.run_doctor(checks)
+    if args.json:
+        _emit(report, as_json=True)
+    else:
+        print(sonder_doctor.render_report(report))
+    return 1 if report.get("overall") == sonder_doctor.STATUS_FAIL else 0
 
 
 def cmd_status(args) -> int:
@@ -620,6 +636,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("preflight", help="run startup checks, do not bind")
     common(p, ollama_flag=True)
     p.set_defaults(func=cmd_preflight)
+
+    p = sub.add_parser("doctor", help="consolidated read-only health report")
+    p.add_argument("--json", action="store_true", help="JSON output")
+    p.add_argument(
+        "--skip-ollama", action="store_true",
+        help="do not probe the Ollama endpoint",
+    )
+    p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("status", help="local build/config/schema status")
     common(p)
