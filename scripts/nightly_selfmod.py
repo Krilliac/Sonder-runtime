@@ -242,6 +242,25 @@ def _diff_objection(original: str, edited: str):
             return ("rewrites an existing `%s` -- that is a contract change, "
                     "not a check" % line.split()[0])
 
+    # An ADDED raise whose condition tests a hardcoded numeric range is an
+    # invented restriction, not a check. Two candidates added
+    # `if not (0.01 <= abs(step) <= 0.25): raise` and `if assert_count < 2:
+    # raise`, both restricting previously-valid inputs to a threshold with no
+    # basis in the code. The existing return/raise guard misses these because
+    # the raise is ADDED, not a rewrite. A raise on truthiness (`if not x:`)
+    # is spared -- that is ordinary None/empty defence -- but a raise gated by
+    # a numeric comparison against a literal is rejected.
+    _NUMERIC_GATE = re.compile(r"[<>]=?\s*-?\d|\d\s*[<>]=?")
+    added_raise = any(re.match(r"^raise\b", ln) for ln in added)
+    if added_raise:
+        gated_by_number = any(
+            _NUMERIC_GATE.search(ln) and re.search(r"\b(if|while|assert)\b", ln)
+            for ln in added
+        )
+        if gated_by_number:
+            return ("adds a raise gated by a hardcoded numeric threshold -- "
+                    "an invented restriction on previously-valid input, not a check")
+
     # A defaulted lookup turned strict is the SAME class as a rewritten return,
     # just spelled differently, and it slipped past the check above. A run
     # rewrote `schema.get("type", "any")` -- a documented permissive default --
