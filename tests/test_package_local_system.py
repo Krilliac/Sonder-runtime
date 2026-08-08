@@ -58,6 +58,7 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     manifest = json.loads((dest / "PACKAGE-MANIFEST.json").read_text(encoding="utf-8"))
     entries = {item["path"]: item for item in manifest["files"]}
     assert package.REQUIRED_FILES <= set(entries)
+    assert "LICENSE" in entries
     assert "runtime_policy.py" in entries
     assert "learning_health.py" in entries
     assert "sonder_health.py" in entries
@@ -102,6 +103,16 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
         assert item["size"] == len(data)
         assert item["sha256"] == hashlib.sha256(data).hexdigest()
     assert not (dest / "dist" / "pkg").exists()
+
+
+def test_repository_does_not_track_private_training_artifacts():
+    tracked = {path.name.lower() for path in package._tracked_files()}
+    forbidden = {
+        "combined_personal.jsonl",
+        "personal_dataset.jsonl",
+        "modelfile.personal",
+    }
+    assert tracked.isdisjoint(forbidden)
 
 
 def test_zip_is_deterministic_and_contains_manifest(monkeypatch, tmp_path):
