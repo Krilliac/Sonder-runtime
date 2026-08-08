@@ -197,10 +197,32 @@ def _diff_objection(original: str, edited: str):
             continue
         if line.startswith("-"):
             removed.append(line[1:].strip())
+    added = []
+    for line in difflib.unified_diff(before, after, lineterm="", n=0):
+        if line.startswith("+++"):
+            continue
+        if line.startswith("+"):
+            added.append(line[1:].strip())
+
     for line in removed:
         if re.match(r"^(return|raise)\b", line):
             return ("rewrites an existing `%s` -- that is a contract change, "
                     "not a check" % line.split()[0])
+
+    # A defaulted lookup turned strict is the SAME class as a rewritten return,
+    # just spelled differently, and it slipped past the check above. A run
+    # rewrote `schema.get("type", "any")` -- a documented permissive default --
+    # into `if "type" not in schema: error; schema["type"]`, changing a
+    # type-less schema from "accept anything" to a hard failure. Tests passed.
+    # If a removed line accessed a key WITH a default and no added line keeps a
+    # defaulted access, the permissive path was deleted; reject it. Over-
+    # rejecting a legitimate refactor is the tolerable direction here.
+    _DEFAULTED_GET = re.compile(r"\.get\(\s*[^,()]+,\s*[^)]+\)")
+    if any(_DEFAULTED_GET.search(line) for line in removed):
+        if not any(_DEFAULTED_GET.search(line) for line in added):
+            return ("removes a defaulted lookup (.get(k, default)) -- that "
+                    "turns a permissive default into a strict path, a contract "
+                    "change, not a check")
     return None
 
 
