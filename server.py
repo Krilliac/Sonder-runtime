@@ -92,6 +92,7 @@ import consult as consult_flow
 import code_improve
 import tier_router
 import project_scaffold
+import environment_probe
 
 BASE = ollama_endpoint.normalize()
 OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
@@ -9891,7 +9892,8 @@ def tool_manifest() -> str:
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
         "workspace_inventory/directory_tree/directory_create/text_search/file_read_range": "Budgeted guarded workspace inventory, folder discovery, creation, text search, and bounded line-range reads.",
         "file_policy/file_find/file_read/file_write/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete with approval bypass support.",
-        "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, go, java-maven) -- never hand-write solution/build plumbing.",
+        "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
+        "environment_status": "Report the host OS, available shells (PowerShell/cmd/bash/wsl), and installed toolchains -- check before choosing a command shape or assuming a tool exists.",
         "data_inspect": "Read-only structured preview of JSON/JSONL/TOML/YAML/CSV/TSV/SQLite/ZIP/TAR/INI data files inside allowed roots.",
         "program_search/script_search/workspace_run/script_run/image_inspect": "Discover installed programs and workspace scripts, run bounded argv-only processes, and inspect image metadata.",
         "task_create/task_list/task_update/task_show/checklist_create/checklist_update/checklist_show": "Visible todo and ordered checklist state shared by console, app, agents, and MCP.",
@@ -9952,7 +9954,8 @@ AGENT_TOOL_HELP = """Available tools:
 - file_write: {"path": "notes.txt", "content": "...", "mode": "create|overwrite|append"}
 - file_edit: {"path": "notes.txt", "old": "before", "new": "after", "count": 1}
 - file_delete: {"path": "notes.txt", "dry_run": true}
-- scaffold_project: {"kind": "cpp-msvc|cpp-cmake|csharp|rust|python|node|go|java-maven", "name": "MyApp", "root": "MyApp"} -- writes the full skeleton (.sln/.vcxproj/Cargo.toml/...); use this instead of hand-writing build/solution files
+- scaffold_project: {"kind": "cpp-msvc|cpp-cmake|csharp|rust|python|node|typescript|go|java-maven", "name": "MyApp", "root": "MyApp"} -- writes the full skeleton (.sln/.vcxproj/Cargo.toml/...); use this instead of hand-writing build/solution files
+- environment_status: {} -- host OS, shells, installed toolchains; check before choosing command shapes
 - script_search: {"query": "build", "root": ".", "max_results": 100}
 - program_search: {"query": "python", "max_results": 50}
 - workspace_run: {"program": "git", "args_json": ["status", "--short"], "cwd": ".", "timeout": 30}
@@ -10017,7 +10020,7 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "activity_status", "permission_policy", "context_compaction_plan",
     "diagnostics", "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
     "memory_quality_report", "memory_privacy_review", "system_improvement_report", "master_status", "master_capacity",
-    "self_heal_check", "status", "system_profile_text",
+    "self_heal_check", "status", "system_profile_text", "environment_status",
     "emotion_vector_status", "preferences_status", "tool_manifest",
     "memory_search", "web_search", "web_fetch", "weather_lookup",
 })
@@ -10935,6 +10938,8 @@ def _agent_dispatch(
             root=args.get("root", ""),
             apply=bool(args.get("apply", True)),
         )
+    if tool_name == "environment_status":
+        return environment_status(refresh=bool(args.get("refresh", False)))
     if tool_name == "file_edit":
         return file_edit(
             path=args.get("path", ""),
@@ -11240,6 +11245,7 @@ _PROJECT_BOUND_AGENT_TOOLS = (
         "memory_privacy_review", "system_improvement_report", "master_status",
         "master_capacity", "self_heal_check", "status", "system_profile_text",
         "emotion_vector_status", "preferences_status", "context_policy_status",
+        "environment_status",
     })
 )
 _CLOUD_AGENT_NESTED_MODEL_TOOLS = frozenset({
@@ -11734,7 +11740,7 @@ _WORK_INSPECTION_TOOLS = frozenset({
 _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find",
     "file_read", "file_read_range", "text_search", "script_search",
-    "program_search", "image_inspect",
+    "program_search", "image_inspect", "environment_status",
 })
 _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "workflow_run",
@@ -11951,7 +11957,11 @@ def _agent_impl(
         "with script_run; an equivalent run_code snippet does not validate the on-disk file. "
         "Never invent tool results. "
         "Use web tools for current external information and cite fetched URLs in the final answer. "
-        "Your final answer must lead with the outcome, mention changed paths and checks, and disclose failures.",
+        "Your final answer must lead with the outcome, mention changed paths and checks, and disclose failures. "
+        # One deterministic line about the host, so the model picks the right
+        # command shape (Windows vs POSIX, which build tool exists) instead of
+        # guessing and burning steps on `ls` under cmd or a missing toolchain.
+        + environment_probe.agent_brief(),
         False,
         "",
     )
@@ -14099,6 +14109,7 @@ def _ensemble_targets(tiers: str = ""):
     generation to learn nothing.
     """
     requested = [t.strip().lower() for t in (tiers or "").split(",") if t.strip()]
+    explicit = bool(requested)
     if not requested:
         requested = [
             t for t in _configured_local_tiers() if t not in ENSEMBLE_SKIP_TIERS
@@ -14106,8 +14117,16 @@ def _ensemble_targets(tiers: str = ""):
     targets, seen_models, unknown = [], set(), []
     for tier in requested:
         if _is_cloud_tier(tier):
-            # Local-only: an ensemble must not silently ship the prompt off-box.
-            continue
+            # The implicit default must never silently ship the prompt
+            # off-box. A cloud tier the caller NAMED, with cloud enabled, is
+            # not silent -- that is consult's cloud leg and the /model
+            # cloud-* routes, so include it. Named-but-disabled is reported,
+            # not swallowed: the caller should see why the tier is absent.
+            if not explicit:
+                continue
+            if not cloud_allowed():
+                unknown.append("%s (cloud disabled; set SONDER_ALLOW_CLOUD=1)" % tier)
+                continue
         model, _cloud, _augment, label = _serve_target(tier, False)
         if not model or label is None:
             unknown.append(tier)
@@ -14217,7 +14236,9 @@ def ensemble_answer(
     Args:
         prompt: the question to put to every model.
         tiers: comma-separated tiers to poll. Default: every bound local text
-            tier. Deduplicated by resolved model, capped at 4.
+            tier. Deduplicated by resolved model, capped at 4. A cloud tier
+            named here joins the poll when SONDER_ALLOW_CLOUD=1; the implicit
+            default never leaves the box.
         synth_tier: tier that writes the compounded answer. Default: the last
             tier that answered successfully.
         num_predict: output cap per model.
@@ -14264,11 +14285,13 @@ def ensemble_answer(
             continue
         finally:
             # Free the card before loading the next one. Best effort: a failed
-            # unload costs VRAM, not correctness.
-            try:
-                _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
-            except Exception:
-                pass
+            # unload costs VRAM, not correctness. Cloud models hold no local
+            # VRAM, so there is nothing to free.
+            if not _is_cloud_tier(tier, model):
+                try:
+                    _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
+                except Exception:
+                    pass
         if text:
             answers.append({
                 "tier": tier,
@@ -14448,6 +14471,21 @@ def improve_function(
     ok = write.get("ok", True) if isinstance(write, dict) else True
     return "%s\nAPPLIED to %s (%s)\n\n%s" % (
         header, path, "ok" if ok else "write reported a problem", result["diff"])
+
+
+@mcp.tool()
+def environment_status(refresh: bool = False) -> str:
+    """Report the host environment: OS, shells, and installed toolchains.
+
+    Deterministic discovery (shutil.which/platform -- no subprocesses), so an
+    agent or user can see which platform this runtime is on, which shell to
+    prefer (PowerShell on Windows, bash elsewhere), and which interpreters and
+    build tools actually exist before choosing a command shape. The workbench
+    agent already receives a one-line brief of this on every run; this tool is
+    the full listing. refresh=True re-probes after installing something.
+    """
+    _maybe_live_reload()
+    return environment_probe.format_profile(refresh=refresh)
 
 
 @mcp.tool()

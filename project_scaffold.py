@@ -35,6 +35,8 @@ ALIASES = {
     "dotnet": "csharp",
     "js": "node",
     "javascript": "node",
+    "ts": "typescript",
+    "ts-node": "typescript",
     "py": "python",
     "golang": "go",
     "java": "java-maven",
@@ -243,6 +245,39 @@ _PACKAGE_JSON = """{
 _INDEX_JS = """console.log("@LOWER@ up and running");
 """
 
+_TS_PACKAGE_JSON = """{
+  "name": "@LOWER@",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "devDependencies": {
+    "typescript": "^5"
+  }
+}
+"""
+
+_TSCONFIG = """{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  }
+}
+"""
+
+_INDEX_TS = """console.log("@LOWER@ up and running");
+"""
+
 _GO_MOD = """module @LOWER@
 
 go 1.22
@@ -316,6 +351,12 @@ _TEMPLATES = {
         "package.json": _PACKAGE_JSON,
         "index.js": _INDEX_JS,
         ".gitignore": _GITIGNORE_NODE,
+    },
+    "typescript": {
+        "package.json": _TS_PACKAGE_JSON,
+        "tsconfig.json": _TSCONFIG,
+        "src/index.ts": _INDEX_TS,
+        ".gitignore": _GITIGNORE_NODE + "dist/\n",
     },
     "go": {
         "go.mod": _GO_MOD,

@@ -93,3 +93,16 @@ def test_fresh_guid_is_generated_when_not_injected():
                       files["G.vcxproj"])
     assert match, "vcxproj must carry an uppercase GUID"
     assert match.group(1) in files["G.sln"]
+
+
+def test_typescript_scaffold_json_files_parse_and_pin_nodenext():
+    files = ps.render("typescript", "WebTool")
+    pkg = json.loads(files["package.json"])
+    assert pkg["name"] == "webtool"
+    assert pkg["scripts"]["build"] == "tsc"
+    tsconfig = json.loads(files["tsconfig.json"])
+    opts = tsconfig["compilerOptions"]
+    assert opts["module"] == "NodeNext" and opts["moduleResolution"] == "NodeNext"
+    assert opts["strict"] is True
+    assert "src/index.ts" in files
+    assert ps.normalize_kind("ts") == "typescript"

@@ -132,6 +132,14 @@ _RULES = [
     _rule(r"^(?:weather|forecast)\b(?:\s+(?:for|in)\s+(?P<arg>.+))?",
           lambda m: ("/weather %s" % (m.group("arg") or "")).strip()),
 
+    # --- environment ---
+    _rule(r"^(?:show\s+(?:the\s+)?|what\s+)?(?:host\s+)?environment\b(?:\s+are\s+you\s+(?:on|in))?\s*\??$",
+          _fixed("/env")),
+    _rule(r"^what\s+(?:os|platform|system)\s+(?:are\s+you|is\s+this)\s+(?:on|running(?:\s+on)?)\s*\??$",
+          _fixed("/env")),
+    _rule(r"^(?:which|what)\s+(?:tools?|toolchains?|shells?|compilers?)\s+"
+          r"(?:are|do\s+you\s+have)\s+(?:installed|available)\s*\??$", _fixed("/env")),
+
     # --- introspection ---
     _rule(r"^(?:chain\s+of\s+thought|your\s+thoughts|private\s+thoughts|"
           r"show\s+your\s+thoughts)\b", _fixed("/cot")),

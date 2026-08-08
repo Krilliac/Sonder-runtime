@@ -103,3 +103,10 @@ def test_scaffold_phrasings_resolve_when_the_line_is_only_a_scaffold_ask():
         "create a full C++ MSVC project of the fibonacci sequence") is None
     # An unsupported kind falls through instead of guessing.
     assert cr.resolve("create a cobol project named legacy") is None
+
+
+def test_environment_phrasings_resolve_to_env():
+    assert cr.resolve("what environment are you on") == "/env"
+    assert cr.resolve("show the environment") == "/env"
+    assert cr.resolve("what os are you running on?") == "/env"
+    assert cr.resolve("which toolchains are installed") == "/env"
