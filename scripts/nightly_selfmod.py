@@ -505,7 +505,26 @@ def run(server, log, *, test_timeout=1800, branch=True):
 
     # Only the kinds this stage actually records; the default set includes
     # reproducer/targeted/smoke phases that belong to a human-driven run.
-    selfmod.review(run_id, require_kinds={"syntax", "regression"})
+    #
+    # HONOUR THE VERDICT. review() reports rejection by moving the run to
+    # `rejected` and returning that row -- it does not raise. The first version
+    # discarded the return and committed regardless, so every branch was
+    # advertised "COMMITTED ... -- review: git log -p" while its ledger row read
+    # phase=rejected: the scope-escape, protected-file and weakened-tests checks
+    # were dead code for the branch deliverable. (They fired on nothing real
+    # only because two of review's checks were also structurally unsatisfiable,
+    # both fixed in selfmod.py alongside this.)
+    reviewed = selfmod.review(run_id, require_kinds={"syntax", "regression"})
+    # A PASS lands on reviewing and may auto-advance to approved under
+    # auto-low-risk; a FAIL lands on rejected/restored with last_error set.
+    # Key on the failure states, not one success phase -- an earlier version
+    # checked `phase == "reviewing"` and would have discarded a passing run
+    # that auto-advanced.
+    phase = reviewed.get("phase") if isinstance(reviewed, dict) else None
+    if phase in (None, "rejected", "restored"):
+        reason = (reviewed or {}).get("last_error") if isinstance(reviewed, dict) else None
+        _discard_workspace(run_id)
+        return "candidate rejected by review: %s" % (reason or "unspecified")[:160]
 
     if branch:
         # Commit INSIDE the worktree, onto its own branch. Strictly safer than
