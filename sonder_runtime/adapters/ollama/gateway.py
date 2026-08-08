@@ -16,7 +16,9 @@ Acceptance properties (SPEC-3 Phase 3):
 """
 from __future__ import annotations
 
+import ipaddress
 import time
+import urllib.parse
 from typing import Sequence
 
 from ...application.context import OperationContext
@@ -33,6 +35,47 @@ from ...domain.common.errors import (
     InternalFailure,
     InvalidInput,
 )
+
+
+def _check_liveness(context: OperationContext) -> float | None:
+    if context.expired:
+        # Zero remaining time previously became timeout=None, turning an expired
+        # request into an unbounded model call.
+        raise DeadlineExceeded("operation deadline exceeded before model call")
+    if context.cancellation is not None and context.cancellation.cancelled:
+        raise Cancelled("operation cancelled before model call")
+    return context.remaining_seconds
+
+
+def _is_loopback(value: str) -> bool:
+    """Whether an endpoint points at this machine.
+
+    Deliberately duplicated from ``ollama_endpoint.is_loopback`` rather than
+    imported. The architecture check forbids the adapters layer importing root
+    modules, and it separately confines ``urllib`` to adapters -- so this cannot
+    be shared via domain or platform either, and two copies are the only shape
+    the layering permits. Kept behaviourally identical on purpose: if one
+    changes, change both.
+    """
+    try:
+        host = urllib.parse.urlparse(value or "").hostname
+        if not host:
+            return False
+        if host.casefold().rstrip(".") == "localhost":
+            return True
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _enforce_local_endpoint(base: str, context: OperationContext) -> None:
+    if not _is_loopback(base) and not context.remote_ollama_allowed:
+        # The adapter used to enforce hosted-tier consent but silently sent local-
+        # tier prompts to a remotely configured Ollama endpoint without consent.
+        raise Forbidden(
+            "Ollama endpoint is non-loopback but this operation context does "
+            "not allow remote Ollama"
+        )
 
 
 def _map_model_error(exc) -> Exception:
@@ -71,6 +114,7 @@ class OllamaGateway:
             raise DependencyUnavailable(
                 "the sonder:latest alias is not available; run setup_alias.py"
             )
+        _enforce_local_endpoint(server.BASE, context)
         # The port-level consent gate: an explicitly cloud-classified tier
         # needs the caller's context to allow it — regardless of how the
         # request reached this lane (R: consent cannot be bypassed).
@@ -81,7 +125,7 @@ class OllamaGateway:
             )
 
         options = dict(request.options or {})
-        timeout = context.remaining_seconds
+        timeout = _check_liveness(context)
         gen = server._make_generate(
             model,
             request.system or server._build_system("", False, ""),
@@ -115,9 +159,10 @@ class OllamaGateway:
     ) -> Sequence[Embedding]:
         import embeddings
 
-        del context  # local-only embedding path; no consent surface
+        _enforce_local_endpoint(embeddings.BASE, context)
         results = []
         for text in texts:
+            _check_liveness(context)
             vector = embeddings.embed(text)
             if not vector:
                 raise DependencyUnavailable(

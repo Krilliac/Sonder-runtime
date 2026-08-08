@@ -1,6 +1,8 @@
 """SPEC-3 M1/M2: composition root, operation context, policy use cases."""
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from sonder_runtime.application.context import (
@@ -123,3 +125,38 @@ def test_default_cancellation_wait_honours_positive_timeout(monkeypatch):
     assert context.cancellation.wait(0.5) is False
 
     assert sleeps == [0.5]
+
+
+def test_default_app_build_is_atomic(monkeypatch):
+    bootstrap_app.reset_for_tests()
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_built = threading.Event()
+    calls = []
+
+    def build():
+        instance = object()
+        calls.append(instance)
+        if len(calls) == 1:
+            first_started.set()
+            assert release_first.wait(2)
+        else:
+            second_built.set()
+        return instance
+
+    monkeypatch.setattr(bootstrap_app, "build_application", build)
+    results = []
+    first = threading.Thread(target=lambda: results.append(bootstrap_app.default_app()))
+    second = threading.Thread(target=lambda: results.append(bootstrap_app.default_app()))
+    first.start()
+    assert first_started.wait(2)
+    second.start()
+    second_built.wait(0.2)
+    release_first.set()
+    first.join(2)
+    second.join(2)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert len(calls) == 1
+    assert results[0] is results[1]
+    bootstrap_app.reset_for_tests()

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import threading
 
 from ..adapters.legacy.services import (
     LegacyAutomationRepository,
@@ -96,14 +97,18 @@ def build_application(profile: str = "workstation-local") -> Application:
 
 
 _default: Application | None = None
+_default_lock = threading.Lock()
 
 
 def default_app() -> Application:
     """Process-wide default graph for compatibility shims."""
     global _default
-    if _default is None:
-        _default = build_application()
-    return _default
+    with _default_lock:
+        if _default is None:
+            # Two first callers previously built different process-wide graphs,
+            # splitting stateful adapters between requests during startup.
+            _default = build_application()
+        return _default
 
 
 def reset_for_tests() -> None:

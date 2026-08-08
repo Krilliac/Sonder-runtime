@@ -24,6 +24,13 @@ def _ctx():
     return local_owner_context(correlation_id="req_tool")
 
 
+class _Cancelled:
+    cancelled = True
+
+    def wait(self, timeout=None):
+        return True
+
+
 def test_unknown_tool_fails_closed(executor):
     result = executor.execute(ToolCall("nope", {}), _ctx())
     assert result.ok is False
@@ -54,6 +61,19 @@ def test_guard_rejection_surfaces_as_not_ok(executor):
     )
     assert result.ok is False
     assert result.error_code  # a captured error type, not an exception
+
+
+def test_cancelled_context_cannot_mutate_files(executor, tmp_path):
+    context = local_owner_context(
+        correlation_id="req_cancelled", cancellation=_Cancelled()
+    )
+    result = executor.execute(
+        ToolCall("write_file", {"path": "cancelled.txt", "content": "no"}),
+        context,
+    )
+    assert result.ok is False
+    assert result.error_code == "Cancelled"
+    assert not (tmp_path / "cancelled.txt").exists()
 
 
 def test_run_program_executes_argv(executor):

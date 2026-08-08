@@ -12,8 +12,9 @@ def new_id(prefix: str) -> str:
 
 
 def is_id(value: str, prefix: str) -> bool:
-    return (
-        isinstance(value, str)
-        and value.startswith(prefix + "_")
-        and len(value) == len(prefix) + 33
-    )
+    if not isinstance(value, str) or not value.startswith(prefix + "_"):
+        return False
+    suffix = value[len(prefix) + 1:]
+    # Length-only validation accepted arbitrary punctuation as an opaque ID,
+    # allowing malformed selectors to cross domain boundaries as valid IDs.
+    return len(suffix) == 32 and all(char in "0123456789abcdef" for char in suffix)

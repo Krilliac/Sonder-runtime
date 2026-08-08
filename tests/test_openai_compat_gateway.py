@@ -147,6 +147,20 @@ def test_embed_round_trip_and_count_mismatch():
         gw2.embed(["a", "b"], _ctx())
 
 
+def test_embed_restores_input_order_from_response_indexes():
+    def transport(url, payload, headers, timeout):
+        return {
+            "data": [
+                {"index": 1, "embedding": [2.0]},
+                {"index": 0, "embedding": [1.0]},
+            ]
+        }
+
+    gateway = OpenAICompatibleGateway(_local_cfg(embed_model="emb"), transport=transport)
+    result = gateway.embed(["first", "second"], _ctx())
+    assert [item.vector for item in result] == [(1.0,), (2.0,)]
+
+
 def test_graph_selects_backend_by_env(tmp_path, monkeypatch):
     monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(tmp_path / "policy.json"))
     # Default: Ollama.

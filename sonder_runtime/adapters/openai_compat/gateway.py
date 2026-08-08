@@ -165,6 +165,14 @@ class OpenAICompatibleGateway:
                 "endpoint returned %d embeddings for %d inputs"
                 % (len(rows), len(items))
             )
+        indexes = [row.get("index") for row in rows]
+        if all(isinstance(index, int) for index in indexes):
+            if set(indexes) != set(range(len(items))):
+                raise DependencyUnavailable("endpoint returned invalid embedding indexes")
+            # OpenAI-compatible servers identify input alignment by index; using
+            # response order attached vectors to the wrong texts when rows arrived
+            # out of order.
+            rows = sorted(rows, key=lambda row: row["index"])
         results = []
         for row in rows:
             vector = row.get("embedding") or ()

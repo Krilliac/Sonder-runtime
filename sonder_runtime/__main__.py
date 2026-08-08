@@ -89,6 +89,7 @@ def cmd_status(args) -> int:
         config = _load_config(args)
         payload["profile"] = config.profile
         payload["config_sources"] = list(config.sources)
+        _export_runtime_environment(config)
     except sonder_config.ConfigError as exc:
         payload["config_errors"] = list(exc.errors)
     try:
@@ -117,6 +118,7 @@ def cmd_diagnostics(args) -> int:
         payload["preflight"] = sonder_preflight.run_preflight(
             config, check_ollama=not args.skip_ollama
         ).as_dict()
+        _export_runtime_environment(config)
     except sonder_config.ConfigError as exc:
         payload["config_errors"] = list(exc.errors)
     try:
@@ -148,6 +150,10 @@ def cmd_migrate(args) -> int:
     import sonder_migrations
 
     try:
+        config = _load_config(args)
+        # Migration paths are environment-backed compatibility adapters; without
+        # this export --config/--set selected one home but migrated another.
+        _export_runtime_environment(config)
         if args.store:
             results = {
                 args.store: sonder_migrations.migrate_store(args.store)
@@ -169,13 +175,10 @@ def cmd_migrate(args) -> int:
     return 0
 
 
-def _backup_target(args) -> str:
+def _backup_target(args, config=None) -> str:
     if args.target:
         return args.target
-    try:
-        config = _load_config(args)
-    except sonder_config.ConfigError:
-        config = None
+    config = config or _load_config(args)
     if config and config.backup.target:
         return config.backup.target
     import sonder_paths
@@ -210,8 +213,13 @@ def _report_problems(
 def cmd_backup(args) -> int:
     import sonder_backup
 
+    if args.backup_command != "verify":
+        config = _load_config(args)
+        # Backup source discovery reads SONDER_HOME; exporting only the validated
+        # target backed up unrelated state while reporting success.
+        _export_runtime_environment(config)
     if args.backup_command == "create":
-        result = sonder_backup.create_backup(_backup_target(args))
+        result = sonder_backup.create_backup(_backup_target(args, config))
         _emit(
             {
                 "backup_id": result.backup_id,
@@ -228,24 +236,20 @@ def cmd_backup(args) -> int:
             path=args.path, as_json=args.json,
         )
     if args.backup_command == "list":
-        _emit({"backups": sonder_backup.list_backups(_backup_target(args))},
+        _emit({"backups": sonder_backup.list_backups(_backup_target(args, config))},
               as_json=args.json)
         return 0
     if args.backup_command == "prune":
         if args.keep is not None:
             removed = sonder_backup.prune_backups(
-                _backup_target(args), keep=args.keep
+                _backup_target(args, config), keep=args.keep
             )
         else:
-            try:
-                config = _load_config(args)
-                daily = config.backup.retention_daily
-                weekly = config.backup.retention_weekly
-                monthly = config.backup.retention_monthly
-            except sonder_config.ConfigError:
-                daily, weekly, monthly = 7, 4, 6
+            daily = config.backup.retention_daily
+            weekly = config.backup.retention_weekly
+            monthly = config.backup.retention_monthly
             removed = sonder_backup.prune_backups_tiered(
-                _backup_target(args), daily=daily, weekly=weekly,
+                _backup_target(args, config), daily=daily, weekly=weekly,
                 monthly=monthly,
             )
         _emit({"removed": removed}, as_json=args.json)
@@ -304,6 +308,9 @@ def cmd_smoke(args) -> int:
             for c in report.checks
             if c.required and not c.ok
         )
+    # Smoke must exercise the state directory it just preflighted, not whatever
+    # SONDER_HOME happened to be inherited by the process.
+    _export_runtime_environment(config)
     try:
         sonder_migrations.migrate_store("operations")
         store = OperationsStore()

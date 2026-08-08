@@ -9,7 +9,7 @@ directly.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from ..context import OperationContext
 from ..ports.model_gateway import ModelGateway, ModelRequest

@@ -20,7 +20,6 @@ Design notes:
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 
 TASK_CLASSES = ("simple", "search", "code", "reasoning", "vision", "long_context")
