@@ -123,6 +123,97 @@ def _splice_function(original: str, reply: str):
     return "".join(lines[:first]) + body + "\n" + "".join(lines[last:])
 
 
+def _diff_objection(original: str, edited: str):
+    """Why this candidate should be thrown away, or None to keep it.
+
+    Judged on the DIFF rather than the objective, because the objective is the
+    model's own words and it grades itself generously against them. Measured
+    over the first 13 committed candidates, only 2 were worth keeping.
+
+    Two rules, both from a specific failure in that batch:
+
+    1. A change that only adds comments did not do the work. Three candidates
+       appended a trailing comment to a line that already existed and stopped
+       there -- and one of those comments was wrong, claiming to check `value`
+       on a line testing `text`.
+
+    2. A change that REWRITES an existing return or raise is a contract change,
+       not a check. Two candidates turned `return int(default)` into
+       `return None` and into `raise ValueError(...)`, either of which breaks
+       every caller expecting an int. Both passed the full regression suite,
+       so the tests cannot be relied on to catch this class; adding a guard is
+       welcome, altering what a function already promised is not.
+    """
+    import difflib
+
+    def code_only(text):
+        """Statements with comments and blank lines removed.
+
+        Docstrings survive, deliberately: a docstring is the function's stated
+        contract and improving one is real work, while `# Added check` appended
+        to a line that already existed is not.
+        """
+        out = []
+        for line in text.splitlines():
+            body = line.split("#", 1)[0].rstrip()
+            if body.strip():
+                out.append(body)
+        return out
+
+    before, after = code_only(original), code_only(edited)
+    if before == after:
+        # Asking "was any statement added" is not enough: three candidates
+        # appended a trailing comment to a line that already existed, so the
+        # added line still CONTAINED a statement -- the same one. Comparing the
+        # comment-stripped files is what actually detects "nothing happened".
+        return "comment-only change (the code is unchanged)"
+
+    # Strip the diff marker BEFORE stripping whitespace: a removed line arrives
+    # as "-        return int(default)", so matching on the raw string never
+    # sees `return` at the start and the check silently passes everything.
+    removed = []
+    for line in difflib.unified_diff(before, after, lineterm="", n=0):
+        if line.startswith("---"):
+            continue
+        if line.startswith("-"):
+            removed.append(line[1:].strip())
+    for line in removed:
+        if re.match(r"^(return|raise)\b", line):
+            return ("rewrites an existing `%s` -- that is a contract change, "
+                    "not a check" % line.split()[0])
+    return None
+
+
+def _recent_objectives(limit=40):
+    """Objectives from recent runs, for de-duplication.
+
+    The proposer re-derives the same handful every pass because nothing tells
+    it what has already been tried: of 13 commits, three attacked
+    `exact_duplicate_plan`, four the same empty-string check and two the same
+    docstring.
+    """
+    out = []
+    try:
+        for run in (selfmod.list_runs(limit) or []):
+            text = (run.get("objective") or "").strip().lower()
+            if text:
+                out.append(text)
+    except Exception:
+        pass
+    return out
+
+
+def _too_similar(objective, previous) -> bool:
+    """Whether this objective restates one already attempted."""
+    import difflib
+
+    candidate = objective.strip().lower()
+    for earlier in previous:
+        if difflib.SequenceMatcher(None, candidate, earlier).ratio() >= 0.80:
+            return True
+    return False
+
+
 def _discard_workspace(run_id) -> None:
     """Remove a rejected run's worktree and branch.
 
@@ -156,6 +247,8 @@ def propose_objective(server, log) -> tuple[str, str] | None:
     """
     import random
 
+    seen_before = _recent_objectives()
+
     for name in random.sample(CANDIDATE_FILES, k=len(CANDIDATE_FILES)):
         path = REPO / name
         if not path.is_file():
@@ -185,6 +278,9 @@ def propose_objective(server, log) -> tuple[str, str] | None:
             elif line.upper().startswith("WHY:"):
                 why = line.split(":", 1)[1].strip()
         if objective:
+            if _too_similar(objective, seen_before):
+                log("  %s: objective restates a previous run, skipping" % name)
+                continue
             return name, "%s (%s)" % (objective, why or "no rationale given")
     return None
 
@@ -287,6 +383,12 @@ def run(server, log, *, test_timeout=1800, branch=True):
         _discard_workspace(run_id)
         return ("candidate rejected: returned %d%% of the original file "
                 "(deletion guard)" % (100 * len(edited) // max(1, len(original))))
+
+    objection = _diff_objection(original, edited)
+    if objection:
+        selfmod.cancel(run_id)
+        _discard_workspace(run_id)
+        return "candidate rejected: %s" % objection
 
     selfmod.apply_candidate_changes(run_id, {target: edited})
     diff = selfmod.inspect_diff(run_id)
