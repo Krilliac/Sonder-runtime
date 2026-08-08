@@ -29,6 +29,53 @@ _TRAIN_DEFAULT_RE = re.compile(
 
 TRAIN_DEFAULT_N = 3
 
+# Natural-language forms of the /consult, /route and /refactor commands, so the
+# system reaches those capabilities whether the user types the slash or just
+# asks for the thing. Each captures the payload the command needs.
+
+# consult: "get a second opinion on X", "do the models agree about X",
+# "ask another model whether X", "consult the models on X".
+_CONSULT_RE = re.compile(
+    r"^(?:can you\s+|please\s+|could you\s+)?"
+    r"(?:get|give me|i want|i'd like)?\s*"
+    r"(?:a\s+)?(?:second|another)\s+opinion\s+(?:on|about|for)\s+(?P<arg>.+)$",
+    re.I,
+)
+_CONSULT_ALT_RE = re.compile(
+    r"^(?:can you\s+|please\s+|could you\s+)?"
+    r"(?:consult\s+(?:the\s+)?(?:models?|tiers?)|"
+    r"ask\s+(?:another|a\s+second|other)\s+model|"
+    r"do\s+the\s+models?\s+agree|"
+    r"have\s+the\s+models?\s+weigh\s+in)"
+    r"\s*(?:on|about|whether|that|if)?\s*(?P<arg>.+)$",
+    re.I,
+)
+
+# route: "which tier/model should handle X", "which model is best for X",
+# "what tier for X", "route this: X".
+_ROUTE_RE = re.compile(
+    r"^(?:which|what)\s+(?:tier|model)\s+"
+    r"(?:should\s+(?:i\s+use\s+for|handle|do)|is\s+best\s+for|for|fits)\s+"
+    r"(?P<arg>.+)$",
+    re.I,
+)
+_ROUTE_ALT_RE = re.compile(
+    r"^route\s+(?:this|it|the\s+request)?\s*[:\-]?\s*(?P<arg>.+)$",
+    re.I,
+)
+
+# refactor one named function in a named .py file: "improve the parse function
+# in foo.py", "refactor handle in a/b.py to drop the retry". Captures file,
+# function and an optional trailing objective.
+_REFACTOR_RE = re.compile(
+    r"^(?:can you\s+|please\s+|could you\s+)?"
+    r"(?:improve|refactor|clean\s*up|harden|tighten|fix)\s+"
+    r"(?:the\s+)?(?:function\s+)?(?P<fn>[A-Za-z_]\w*)\s+"
+    r"(?:function\s+)?in\s+(?P<file>\S+\.py)"
+    r"(?:\s+(?:to|so\s+that|by|and)?\s*(?P<obj>.+))?$",
+    re.I,
+)
+
 
 _WORK_QUESTION_RE = re.compile(
     r"^(how|what|why|who|when|where|which|explain|tell me about|show me how)\b"
@@ -131,6 +178,41 @@ def classify(text):
         out["train"] = TRAIN_DEFAULT_N
 
     return out
+
+
+def classify_command(text):
+    """Map a natural-language turn to one of the tier-aware commands, or None.
+
+    Returns {"command": "consult"|"route"|"refactor", "arg": str}. This is what
+    lets "get a second opinion on X" reach /consult, "which model should handle
+    Y" reach /route and "improve foo in bar.py" reach the guarded /refactor,
+    without the user having to remember the slash. Conservative on purpose: each
+    pattern needs an explicit trigger phrase, so a plain coding question is never
+    hijacked. The slash commands remain the exact, unambiguous form.
+    """
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not value or value.startswith("/"):
+        return None
+
+    # refactor is checked first: it needs a file AND a function, so a match is a
+    # strong, specific signal that should win over the looser consult/route cues.
+    m = _REFACTOR_RE.match(value)
+    if m:
+        obj = (m.group("obj") or "").strip()
+        arg = "%s %s%s" % (m.group("file"), m.group("fn"), (" " + obj) if obj else "")
+        return {"command": "refactor", "arg": arg}
+
+    for pattern in (_CONSULT_RE, _CONSULT_ALT_RE):
+        m = pattern.match(value)
+        if m and m.group("arg").strip():
+            return {"command": "consult", "arg": m.group("arg").strip()}
+
+    for pattern in (_ROUTE_RE, _ROUTE_ALT_RE):
+        m = pattern.match(value)
+        if m and m.group("arg").strip():
+            return {"command": "route", "arg": m.group("arg").strip()}
+
+    return None
 
 
 def classify_work(text):

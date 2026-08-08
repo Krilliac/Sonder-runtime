@@ -115,3 +115,48 @@ def test_execution_intent_keeps_questions_and_no_tool_requests_in_chat():
     assert intents.classify_execution("How do I build a Flutter app?") is None
     assert intents.classify_execution("Explain only how to fix this app") is None
     assert intents.classify_execution("Write me a short poem") is None
+
+
+# --- classify_command: natural-language forms of /consult, /route, /refactor ---
+
+
+def test_consult_phrasings_map_to_consult():
+    for text, arg in (
+        ("get a second opinion on whether to cache the parse",
+         "whether to cache the parse"),
+        ("second opinion about the lock ordering", "the lock ordering"),
+        ("do the models agree on using a bounded queue", "using a bounded queue"),
+        ("ask another model whether this is thread-safe",
+         "this is thread-safe"),
+    ):
+        out = intents.classify_command(text)
+        assert out == {"command": "consult", "arg": arg}, text
+
+
+def test_route_phrasings_map_to_route():
+    for text, arg in (
+        ("which model should handle a lookup table", "a lookup table"),
+        ("which tier is best for refactoring this loop",
+         "refactoring this loop"),
+        ("route this: rewrite the enum as a switch",
+         "rewrite the enum as a switch"),
+    ):
+        out = intents.classify_command(text)
+        assert out == {"command": "route", "arg": arg}, text
+
+
+def test_refactor_phrasing_extracts_file_and_function():
+    out = intents.classify_command("improve the parse function in foo/bar.py")
+    assert out == {"command": "refactor", "arg": "foo/bar.py parse"}
+
+    out = intents.classify_command(
+        "refactor handle in net.py to drop the retry loop")
+    assert out == {"command": "refactor",
+                   "arg": "net.py handle drop the retry loop"}
+
+
+def test_command_classifier_ignores_plain_questions_and_slashes():
+    assert intents.classify_command("how do I cache a parse result") is None
+    assert intents.classify_command("write me a poem about queues") is None
+    assert intents.classify_command("/consult already a slash") is None
+    assert intents.classify_command("refactor the whole project") is None
