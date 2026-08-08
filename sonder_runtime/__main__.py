@@ -6,6 +6,7 @@ Commands:
     mcp           run the MCP adapter
     repl          run the interactive REPL
     preflight     run startup checks and report without binding
+    doctor        consolidated read-only runtime health report
     status        local runtime/build/schema status
     diagnostics   privacy-safe diagnostic bundle (redacted)
     config        show the effective redacted configuration
@@ -14,6 +15,7 @@ Commands:
     restore       verify / apply a backup into an empty directory
     drain         request graceful drain of a running server
     smoke         minimal end-to-end check without a real model
+    eval-history  inspect or explicitly record precomputed evaluation evidence
 """
 from __future__ import annotations
 
@@ -78,6 +80,21 @@ def cmd_preflight(args) -> int:
     )
     _emit(report.as_dict(), as_json=args.json)
     return 0 if report.ok else 1
+
+
+def cmd_doctor(args) -> int:
+    """Run the consolidated read-only health report."""
+    import sonder_doctor
+
+    checks = sonder_doctor.default_checks()
+    if args.skip_ollama:
+        checks = [(name, check) for name, check in checks if name != "ollama"]
+    report = sonder_doctor.run_doctor(checks)
+    if args.json:
+        _emit(report, as_json=True)
+    else:
+        print(sonder_doctor.render_report(report))
+    return 1 if report.get("overall") == sonder_doctor.STATUS_FAIL else 0
 
 
 def cmd_status(args) -> int:
@@ -553,6 +570,44 @@ def cmd_rotate_key(args) -> int:
     return 0
 
 
+def cmd_eval_history(args) -> int:
+    """Inspect history or explicitly append already-computed evidence.
+
+    This command never runs an evaluation and never calls a model.
+    """
+    import eval_history
+
+    try:
+        if args.eval_history_command == "status":
+            payload = eval_history.history_status(
+                args.history,
+                model=args.model,
+                model_digest=args.model_digest,
+                suite=args.suite,
+                suite_version=args.suite_version,
+                suite_digest=args.suite_digest,
+                tolerance=args.tolerance,
+            )
+        else:
+            payload = eval_history.record_result(
+                args.history,
+                model=args.model,
+                model_digest=args.model_digest,
+                suite=args.suite,
+                suite_version=args.suite_version,
+                suite_digest=args.suite_digest,
+                passed=args.passed,
+                total=args.total,
+                recorded_at=args.recorded_at,
+                source=args.source,
+            )
+    except (eval_history.HistoryError, OSError, TimeoutError) as exc:
+        print("evaluation history error: %s" % exc, file=sys.stderr)
+        return 2
+    _emit(payload, as_json=args.json)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m sonder_runtime",
@@ -581,6 +636,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("preflight", help="run startup checks, do not bind")
     common(p, ollama_flag=True)
     p.set_defaults(func=cmd_preflight)
+
+    p = sub.add_parser("doctor", help="consolidated read-only health report")
+    p.add_argument("--json", action="store_true", help="JSON output")
+    p.add_argument(
+        "--skip-ollama", action="store_true",
+        help="do not probe the Ollama endpoint",
+    )
+    p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("status", help="local build/config/schema status")
     common(p)
@@ -691,6 +754,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="how long the previous key stays valid (default 24h)",
     )
     p.set_defaults(func=cmd_rotate_key)
+
+    p = sub.add_parser(
+        "eval-history",
+        help="inspect or explicitly record precomputed evaluation evidence",
+    )
+    history_sub = p.add_subparsers(
+        dest="eval_history_command", required=True,
+    )
+    hp = history_sub.add_parser("status", help="read identity-separated trends")
+    hp.add_argument("--history", help="history JSONL path")
+    hp.add_argument("--model", default="")
+    hp.add_argument("--model-digest", default="")
+    hp.add_argument("--suite", default="")
+    hp.add_argument("--suite-version", default="")
+    hp.add_argument("--suite-digest", default="")
+    hp.add_argument("--tolerance", type=float, default=0.0)
+    hp.add_argument("--json", action="store_true")
+    hp.set_defaults(func=cmd_eval_history)
+    hp = history_sub.add_parser(
+        "record", help="append one precomputed aggregate result (never runs a model)"
+    )
+    hp.add_argument("--history", help="history JSONL path")
+    hp.add_argument("--model", required=True)
+    hp.add_argument("--model-digest", required=True)
+    hp.add_argument("--suite", required=True)
+    hp.add_argument("--suite-version", required=True)
+    hp.add_argument("--suite-digest", required=True)
+    hp.add_argument("--passed", type=int, required=True)
+    hp.add_argument("--total", type=int, required=True)
+    hp.add_argument("--recorded-at", type=float, default=None)
+    hp.add_argument("--source", default="manual")
+    hp.add_argument("--json", action="store_true")
+    hp.set_defaults(func=cmd_eval_history)
 
     return parser
 

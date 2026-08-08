@@ -7,8 +7,60 @@ unless explicitly overridden.
 from __future__ import annotations
 
 import os
+import ntpath
+import re
 import shutil
 from pathlib import Path
+
+
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:$")
+
+
+def windows_system_drive(env=None) -> str:
+    """Return the active Windows system drive, falling back only to ``C:``.
+
+    ``SystemDrive`` is authoritative.  Some stripped-down process environments
+    omit it but retain ``SystemRoot``; derive the drive from that before using
+    the Windows platform default.  Never guess a data drive such as ``D:``.
+    """
+    values = os.environ if env is None else env
+    drive = str(values.get("SystemDrive", "")).strip()
+    if _WINDOWS_DRIVE_RE.fullmatch(drive):
+        return drive.upper()
+    root_drive = ntpath.splitdrive(str(values.get("SystemRoot", "")))[0]
+    if _WINDOWS_DRIVE_RE.fullmatch(root_drive):
+        return root_drive.upper()
+    return "C:"
+
+
+def windows_program_files(*, x86=False, env=None) -> str:
+    """Resolve Program Files without embedding a particular machine's drive."""
+    values = os.environ if env is None else env
+    key = "ProgramFiles(x86)" if x86 else "ProgramFiles"
+    configured = str(values.get(key, "")).strip()
+    if configured:
+        return configured
+    leaf = "Program Files (x86)" if x86 else "Program Files"
+    return ntpath.join(windows_system_drive(values), "\\", leaf)
+
+
+def default_machine_home(*, env=None, platform_name=None) -> Path:
+    """Return the machine-wide Sonder root for the current operating system."""
+    values = os.environ if env is None else env
+    override = str(values.get("SONDER_MACHINE_HOME", "")).strip()
+    if override:
+        return Path(override).expanduser()
+    if (os.name if platform_name is None else platform_name) == "nt":
+        common = (
+            str(values.get("PROGRAMDATA", "")).strip()
+            or str(values.get("ALLUSERSPROFILE", "")).strip()
+        )
+        if common:
+            return Path(common) / "Sonder"
+        return Path(
+            ntpath.join(windows_system_drive(values), "\\", "ProgramData", "Sonder")
+        )
+    return Path("/opt/sonder")
 
 
 def default_home() -> Path:
