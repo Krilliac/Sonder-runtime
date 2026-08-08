@@ -98,7 +98,7 @@ _RULES = [
     _rule(r"^(?:show\s+)?(?:context\s+)?compaction(?:\s+plan)?\b|"
           r"^compact\s+(?:the\s+)?context\b", _fixed("/compact")),
     _rule(r"^(?:list\s+)?(?:all\s+)?commands\b|^command\s+registry\b|"
-          r"^what\s+commands\b", _fixed("/commands")),
+          r"^what\s+commands(?:\s+are\s+there)?\b", _fixed("/commands")),
     _rule(r"^(?:show\s+)?permissions?\b|^permission\s+policy\b", _fixed("/permissions")),
     _rule(r"^(?:dump|save)\s+(?:the\s+)?(?:chat|debug)(?:\s+log|\s+dump)?\b"
           r"(?:\s+(?P<arg>\S+))?", lambda m: ("/dump %s" % (m.group("arg") or "")).strip()),
@@ -207,7 +207,11 @@ def resolve(text):
         return ("/%s %s" % (tier["command"], tier["arg"])).strip()
 
     for pattern, action in _RULES:
-        match = pattern.match(value)
+        # A natural-language command must consume the whole turn. Prefix
+        # matches turned prose such as "reset the session token when it
+        # expires" into destructive lifecycle commands and silently discarded
+        # everything after a file path.
+        match = pattern.fullmatch(value)
         if match:
             result = action(match)
             if result:

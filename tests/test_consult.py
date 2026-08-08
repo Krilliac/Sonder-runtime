@@ -150,3 +150,25 @@ def test_duplicate_tiers_are_collapsed():
     )
     # "code" asked once, not twice: a tier cannot lend independence to itself.
     assert calls == ["code", "reasoning"]
+
+
+def test_empty_and_case_insensitive_error_answers_are_failures():
+    for failed in ("", "error: timeout", "ErRoR: unavailable"):
+        result = consult_module.consult("q", _LOCAL_PAIR,
+                                        ask_fn=lambda _prompt, _tier: failed)
+        assert result["agree"] is None
+        assert result["confidence"] == "unknown"
+
+
+def test_contradictory_judge_is_malformed_and_unicode_overlap_survives():
+    calls = {"count": 0}
+
+    def ask(prompt, _tier):
+        if prompt.startswith("Do these answers agree"):
+            return "YES. They agree. NO. Actually they conflict."
+        calls["count"] += 1
+        return "使用缓存"
+
+    result = consult_module.consult("q", _LOCAL_PAIR, ask_fn=ask)
+    assert result["agree"] is True
+    assert result["confidence"] == "unknown"
