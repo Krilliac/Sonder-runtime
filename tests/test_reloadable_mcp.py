@@ -263,3 +263,36 @@ def test_real_stdio_session_hot_adds_updates_removes_and_fails_closed(
     asyncio.run(exercise())
 
     assert notifications == ["tools/list_changed", "tools/list_changed"]
+
+
+def test_disabled_reload_with_pending_edit_is_not_reported_as_refresh_pending(
+    monkeypatch, tmp_path,
+):
+    """When live reload is OFF, an on-disk edit will never be applied, so the
+    status must say disabled -- not "refresh pending", which tells an operator
+    a refresh is imminent when the registry will stay frozen forever."""
+    monkeypatch.setenv("SONDER_LIVE_RELOAD", "1")
+    module_name = "reloadable_mcp_disabled_sample"
+    module_path = tmp_path / (module_name + ".py")
+    module_path.write_text(_module_source("v1"), encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    try:
+        module = importlib.import_module(module_name)
+        mcp = module.mcp
+        assert mcp.runtime_snapshot()["status"] == "current"
+
+        # Now disable reload, then edit the source: source_changed becomes True
+        # but no refresh will ever run.
+        monkeypatch.setenv("SONDER_LIVE_RELOAD", "0")
+        _write_new_source(module_path, _module_source("v2", include_beta=True))
+        # refresh_if_changed short-circuits while disabled -> registry frozen.
+        assert mcp.refresh_if_changed().get("reloaded") is False
+
+        status = mcp.runtime_snapshot()["status"]
+        assert status.startswith("disabled"), (
+            "a frozen registry with a pending edit must not read as refresh pending: %r"
+            % status
+        )
+        assert "pending edit ignored" in status
+    finally:
+        sys.modules.pop(module_name, None)
