@@ -282,3 +282,36 @@ only the error says whether the prompt was complete. Three of these five
 an error count being misread applies to a failure count.
 
 Still open: `LobbyNet.Poll`, `Screens.Lobby`, `Screens.Scoreboard`.
+
+## 36 / 38, and the pattern held every time
+
+`LobbyNet.Poll` landed once two exact forms were stated: the port constant is
+`NetProtocol.Port` (it kept writing a bare `Port`, which this class does not
+declare), and `IPEndPoint` also has a `(long, int)` overload, so the address
+has to be passed as `new IPEndPoint(IPAddress.Any, 0)` or it is a type error.
+
+**Four of the last five gains came from fixing the prompt, not the model.**
+
+| Body | What was actually missing |
+|---|---|
+| `ClassSelect` | `ClassKit.All` is `ClassId[]`, not `ClassKit[]` |
+| `Hud` | `Combatant.Kit` is a `ClassId`; Raylib 2D calls take `int` |
+| `Scoreboard` (partial) | every Raylib call needs the `Raylib.` qualifier |
+| `Poll` | `NetProtocol.Port`; the `IPEndPoint` overload |
+
+Each looked like a capability ceiling — these bodies had failed roughly eleven
+attempts across four model configurations before anyone read the errors rather
+than the counts.
+
+### One of the "ceilings" was variance
+
+Probing `Screens.Lobby` in isolation produced **zero errors** — it would have
+been kept. It had failed several runs purely by sampling. So the remaining
+failures were three different things wearing the same face: a missing fact, a
+missing qualifier, and ordinary variance. A failure *count* distinguishes none
+of them; only the compiler output does.
+
+The transferable rule, which cost several wrong conclusions to learn: **an
+error count and a failure count are the same kind of lie.** Neither says why.
+Before concluding a model cannot do something, read what the compiler actually
+said — and run the case in isolation to separate a real limit from a bad draw.

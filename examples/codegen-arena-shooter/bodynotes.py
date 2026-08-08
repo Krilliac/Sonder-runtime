@@ -37,6 +37,11 @@ TWO TYPE TRAPS IN THIS FILE, both of which have broken this body before:
    Any computed position or size is a float and MUST be cast: (int)(w * 0.25f).
    DrawCircle is the exception; its radius is a float.
 
+3. EVERY Raylib call must be qualified with `Raylib.` -- there is no `using
+   static Raylib_cs.Raylib` in this file. Write `Raylib.DrawText(...)` and
+   `Raylib.MeasureText(...)`, never a bare `DrawText(...)`. The only names
+   usable unqualified are this file's own: Button and Title.
+
 """
 
 NOTES = {
@@ -164,7 +169,16 @@ Status rather than throwing.""",
 Collect every datagram available right now into a new List<string>. Loop while
 _socket is not null and _socket.Available > 0, receiving with a ref IPEndPoint
 and decoding UTF-8. When IsHost and that endpoint is not already in _clients,
-add it. Wrap in try/catch and return whatever was collected.""",
+add it. Wrap in try/catch and return whatever was collected.
+
+TWO EXACT FORMS, both of which have broken this body before:
+  - The port constant lives on the other class: write NetProtocol.Port, never
+    a bare `Port` (this class does not declare one).
+  - UdpClient.Receive needs a ref to a throwaway endpoint, constructed from an
+    IPAddress and an int port -- IPEndPoint also has a (long, int) overload, so
+    passing the address positionally in the wrong slot is a type error:
+        IPEndPoint from = new IPEndPoint(IPAddress.Any, 0);
+        byte[] data = _socket.Receive(ref from);""",
 
     "LobbyNet.cs:Shutdown": """\
 Close the socket inside try/catch, then set Connected = false, IsHost = false,
