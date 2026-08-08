@@ -18,6 +18,10 @@ import feedback
 import personas
 import live_reload
 import debug_dump
+import consult as consult_flow
+import tier_router
+import code_improve
+import command_router
 
 CURRENT_TOKEN = ""
 
@@ -209,12 +213,16 @@ def _startup_banner(strict, persona, project, tier=None):
     )
     return "%s\n\n  %s\n" % (_banner(rows), hint)
 
-HELP = """commands:
+HELP = """commands (slash forms are optional -- plain language works too, e.g.
+"show me your stats", "which model should handle X", "read file foo.py"):
   /help              show this help
   /trace [on|off]    toggle trace mode (bare = on); shows retrieval + prompt
   /strict [on|off]   toggle strict mode (bare = on); pins to the sonder alias
   /persona [name]    show/set active persona (coder/explainer/reviewer/teacher)
   /model [name|tier] list installed models and tiers; switch either one
+  /consult <question> ask 2 local tiers (+cloud when enabled) and compare answers
+  /route <request>   suggest the tier best suited to a request, and why
+  /refactor <file> <fn> [goal]  propose a guarded improvement to one function
   /location [on|off] allow approximate IP location for "my area" weather answers
   /stats             show Sonder Runtime's learning stats
   /context           show context, session, and memory health meters
@@ -625,6 +633,73 @@ def main():
         )
         print("dumped chat/debug log to %s" % path)
 
+    # The next three helpers back both the slash commands (/consult, /route,
+    # /refactor) AND their natural-language forms, so a request reaches the same
+    # capability whether the user types the slash or just asks for it.
+    def do_consult(question):
+        question = (question or "").strip()
+        if not question:
+            print("usage: /consult <question>")
+            return
+        # Two local models plus a cloud model when cloud is enabled; the active
+        # /model tier (if any) leads and judges. de-dup is handled inside
+        # consult, so prepending a tier already in the default is safe.
+        tiers = consult_flow.default_tiers()
+        if active_tier and active_tier not in tiers:
+            tiers = [active_tier] + tiers
+        result = consult_flow.consult(question, tiers)
+        for answer in result["answers"]:
+            print("\n=== %s ===\n%s" % (answer["tier"], answer["text"]))
+        verdict = consult_flow.verdict_line(result)
+        colour = _Ansi.green if result["agree"] is True else _Ansi.amber
+        print("\n" + _paint(verdict, colour, _Ansi.bold))
+
+    def do_route(question):
+        question = (question or "").strip()
+        if not question:
+            print("usage: /route <request>")
+            return
+        decision = tier_router.route(question, available_tiers=set(server.TIERS))
+        print("kind:   %s" % _paint(decision["kind"], _Ansi.cyan))
+        print("tier:   %s" % _paint(decision["tier"], _Ansi.cyan, _Ansi.bold))
+        print("reason: %s" % _paint(decision["reason"], _Ansi.muted))
+
+    def do_refactor(arg):
+        parts = (arg or "").split(None, 2)
+        if len(parts) < 2:
+            print("usage: /refactor <file> <function> [objective]")
+            return
+        fpath, fname = parts[0], parts[1]
+        objective = parts[2] if len(parts) > 2 else ""
+        try:
+            src = server.file_ops.read_file(fpath)
+            src = src.get("text", "") if isinstance(src, dict) else str(src)
+        except Exception as exc:
+            print("could not read %s: %s" % (fpath, exc))
+            return
+        chosen = active_tier or tier_router.route(
+            objective or "improve %s" % fname,
+            available_tiers=set(server.TIERS))["tier"]
+        print(_paint("asking %s to improve %s ..." % (chosen, fname), _Ansi.muted))
+        res = code_improve.improve_function(
+            src, fname,
+            lambda p, t: server.ensemble_answer(p, tiers=t, mode="code"),
+            tier=chosen, objective=objective)
+        if not res["ok"]:
+            print(_paint("no change: %s" % res["reason"], _Ansi.amber))
+            return
+        print(res["diff"] or "(no diff)")
+        print(_paint("apply this change? [y/N] ", _Ansi.amber), end="")
+        try:
+            ans = _normalize_input_line(input()).lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = ""
+        if ans in ("y", "yes"):
+            server.file_ops.write_file(fpath, res["edited"], mode="overwrite")
+            print(_paint("applied to %s" % fpath, _Ansi.green))
+        else:
+            print(_paint("discarded", _Ansi.muted))
+
     print(_startup_banner(strict, persona, project, active_tier))
 
     while True:
@@ -642,6 +717,18 @@ def main():
             continue
         _maybe_live_reload()
 
+        # Natural-language command resolution: "show me your stats" -> /stats,
+        # "which model should handle X" -> /route X, "read file foo.py" ->
+        # /read foo.py. The resolved slash line flows into the ordinary
+        # dispatch below, so every command has exactly one implementation and
+        # the slash form stays the precise way to invoke it. Unmatched turns
+        # fall through untouched to feedback/intent/work/chat handling.
+        if not line.startswith("/"):
+            resolved = command_router.resolve(line)
+            if resolved:
+                print(_paint("(interpreted as: %s)" % resolved, _Ansi.muted))
+                line = resolved
+
         if line.startswith("/"):
             parts = line.split(None, 1)
             cmd = parts[0].lower()
@@ -657,6 +744,12 @@ def main():
                 do_persona(arg)
             elif cmd == "/model":
                 do_model(arg)
+            elif cmd == "/consult":
+                do_consult(arg)
+            elif cmd == "/route":
+                do_route(arg)
+            elif cmd == "/refactor":
+                do_refactor(arg)
             elif cmd == "/location":
                 a = (arg or "").strip().lower()
                 if a in ("on", "off"):

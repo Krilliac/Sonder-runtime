@@ -88,6 +88,9 @@ import autopilot_controller
 from model_transport import ModelCallError
 import ollama_endpoint
 import sonder_speculation
+import consult as consult_flow
+import code_improve
+import tier_router
 
 BASE = ollama_endpoint.normalize()
 OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
@@ -14277,6 +14280,113 @@ def ensemble_answer(
     if code_mode:
         return merged
     return "%s\n%s  synthesized by %s (%s)" % (merged, footer, synth, synth_model)
+
+
+@mcp.tool()
+def consult(
+    prompt: str,
+    tiers: str = "",
+) -> str:
+    """Ask several tiers independently and expose agreement as a confidence signal.
+
+    This deliberately returns every answer and an agree/disagree verdict. It
+    never synthesizes them or chooses a winner: measured ensembles did not
+    improve accuracy, while divergence is useful evidence that a caller should
+    verify the answer. Two good answers still yield a verdict even if a third
+    tier fails; if the judge fails, a token-overlap fallback is labeled
+    unknown-confidence.
+
+    By default it contrasts two LOCAL models (code=sonder:latest,
+    reasoning=deepseek-r1:7b) AND joins a cloud model (cloud-general) whenever
+    cloud is enabled (SONDER_ALLOW_CLOUD=1) -- so the cloud is used when
+    available but a disabled cloud never blocks the second opinion.
+
+    Args:
+        prompt: the identical question to ask every tier.
+        tiers: optional comma-separated tier override (e.g. "code,reasoning");
+            empty uses the adaptive local+local+cloud default.
+    """
+    _maybe_live_reload()
+    chosen = [t.strip() for t in tiers.split(",") if t.strip()] or None
+    result = consult_flow.consult(prompt, chosen)
+    return consult_flow.format_result(result)
+
+
+@mcp.tool()
+def route_request(prompt: str) -> str:
+    """Suggest the tier best suited to a request, and say why.
+
+    The one durable model finding here: a local model is strong when the facts
+    are in the prompt (transformation) and weak when it must remember one
+    (recall -- an API signature, a lookup table). This classifies the request
+    on that axis and names the tier measured best for it, so the routing choice
+    is legible rather than magic. It is a suggestion; the caller may override.
+    """
+    _maybe_live_reload()
+    decision = tier_router.route(prompt, available_tiers=set(TIERS))
+    return (
+        "kind: %s\ntier: %s\nreason: %s"
+        % (decision["kind"], decision["tier"], decision["reason"])
+    )
+
+
+@mcp.tool()
+def improve_function(
+    path: str,
+    function: str,
+    objective: str = "",
+    tier: str = "",
+    apply: bool = False,
+) -> str:
+    """Propose a guarded improvement to ONE function, shown as a diff.
+
+    Asks the model for exactly one function -- the transformation shape it is
+    reliable at -- and splices only that function back. The change is then run
+    through the guards this project measured catching plausible-but-wrong edits
+    that passed a green test suite: a comment-only diff, a rewritten
+    return/raise (a contract change), an invented numeric restriction, a
+    defaulted lookup turned strict, a net-new print, and a deletion below 75%
+    of the original. A candidate that trips any guard is rejected with the
+    reason, not applied.
+
+    Returns the unified diff and the verdict. With apply=False (the default)
+    nothing is written -- read the diff and decide. With apply=True the file is
+    written through the same guarded file path as every other write, so root
+    and approval gates apply. Auto-routes the tier by request kind when tier is
+    empty.
+    """
+    _maybe_live_reload()
+    try:
+        data = file_ops.read_file(path)
+        source = data.get("text", "") if isinstance(data, dict) else str(data)
+    except Exception as exc:
+        return "ERROR: could not read %s: %s" % (path, exc)
+    if not source.strip():
+        return "ERROR: %s is empty or unreadable" % path
+
+    chosen = tier or tier_router.route(
+        objective or "improve the %s function" % function,
+        available_tiers=set(TIERS),
+    )["tier"]
+
+    def ask(prompt_text, model_tier):
+        return ensemble_answer(prompt_text, tiers=model_tier, mode="code")
+
+    result = code_improve.improve_function(
+        source, function, ask, tier=chosen, objective=objective)
+    if not result["ok"]:
+        return "no change: %s (tier=%s)" % (result["reason"], chosen)
+
+    header = "function: %s\ntier: %s\nobjective: %s\n" % (
+        function, chosen, objective or "(model chose)")
+    if not apply:
+        return "%s\n%s\napply with improve_function(..., apply=True)" % (
+            header, result["diff"])
+
+    write = file_ops.write_file(path, result["edited"], mode="overwrite")
+    ok = write.get("ok", True) if isinstance(write, dict) else True
+    return "%s\nAPPLIED to %s (%s)\n\n%s" % (
+        header, path, "ok" if ok else "write reported a problem", result["diff"])
 
 
 def _codegen_build(program, args_json, cwd, timeout, token, approval, extra_roots):

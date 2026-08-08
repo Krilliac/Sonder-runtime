@@ -15,6 +15,7 @@ def test_help_exposes_runtime_policy_and_live_mcp_convergence():
     assert "/mcp" in sonder_repl.HELP
     assert "/learning" in sonder_repl.HELP
     assert "/artifactcheck" in sonder_repl.HELP
+    assert "/consult" in sonder_repl.HELP
 
 
 def _strip(text):
