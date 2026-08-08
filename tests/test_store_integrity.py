@@ -247,3 +247,21 @@ def test_corrupted_store_reports_all_issue_kinds_and_report_text():
     assert "missing_fts=1" in report
     assert "empty_text=1" in report
     assert "bad_embedding=1" in report
+
+
+def test_integrity_check_that_raises_is_recorded_not_propagated(monkeypatch):
+    """A blob so corrupt the integrity check itself raises is the exact bad
+    embedding this audit looks for, so it must be reported, not allowed to
+    abort the whole scan."""
+    conn = _conn()
+    _seed_raw_embedding(conn, "boom", "text", b"\x01\x02\x03\x04")
+
+    def _raise(_blob):
+        raise ValueError("blob decode blew up")
+
+    monkeypatch.setattr(ms, "_embedding_blob_integrity", _raise)
+    # Must not raise; the corrupt row must surface as a bad_embedding issue.
+    issues = si.check_bad_embeddings(conn)
+    kinds = [i.code for i in issues]
+    assert "bad_embedding" in kinds
+    assert any("integrity check raised" in i.detail for i in issues)

@@ -74,7 +74,10 @@ def sql_valid(artifact, spec=None):
     mode = spec.get("mode", "auto")
     dry_run = spec.get("dry_run", False)
     fetch = spec.get("fetch", True)
-    fetch_limit = spec.get("fetch_limit", 5)
+    # Clamp to non-negative: fetch_limit is a preview-row count passed to
+    # _preview_rows, and a negative value there fetches nothing or slices from
+    # the wrong end. A negative preview limit is never meaningful.
+    fetch_limit = max(0, spec.get("fetch_limit", 5))
 
     conn = sqlite3.connect(":memory:")
     try:
