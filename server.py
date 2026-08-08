@@ -10150,11 +10150,28 @@ def _agent_project_execution_argument_error(tool_name, args, project_root):
                 "ERROR: agent project execution rejected: inline interpreter "
                 "commands are outside the project path guard"
             )
-    if forbidden and str(args.get("stdin") or "") and "-" in argv:
-        return (
-            "ERROR: agent project execution rejected: interpreter code via "
-            "stdin is outside the project path guard"
+    # An interpreter runs the program on its STDIN whenever argv names no
+    # script to run. `-` says so explicitly, but it is not the only way and was
+    # the only one checked here: `python`, `bash`, `sh` and `node` with EMPTY
+    # argv all read a program from stdin and execute it, so requiring "-" in
+    # argv let every inline-code control in this guard be walked around by
+    # simply omitting the dash.
+    #
+    # The operand test is what keeps this from over-blocking. `python script.py`
+    # with stdin attached is a program reading DATA, which is legitimate and
+    # must stay allowed; only an invocation with no operand -- bare, or
+    # flags-only like `python -u`, or an explicit `-` -- makes stdin the code.
+    # A token starting with "-" is a flag (or the dash itself), never an
+    # operand.
+    if forbidden and str(args.get("stdin") or ""):
+        has_script_operand = any(
+            token and not token.startswith("-") for token in lowered
         )
+        if not has_script_operand:
+            return (
+                "ERROR: agent project execution rejected: interpreter code via "
+                "stdin is outside the project path guard"
+            )
 
     base_value = args.get("cwd") or (
         os.path.dirname(str(args.get("path") or "")) if tool_name == "script_run" else "."
