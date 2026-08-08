@@ -3,7 +3,7 @@
 # this Ubuntu box and optionally host the OpenAI-compatible runtime service.
 #
 # Inference alias only (default):  bash deploy_sonder.sh
-# Alias + runtime service:         bash deploy_sonder.sh --serve
+# Alias + loopback runtime service: bash deploy_sonder.sh --serve
 # Runtime service only (repo already cloned + alias already provisioned):
 #                             bash deploy_sonder.sh --serve-only
 #
@@ -12,7 +12,7 @@
 # systemd unit next to it) — clone the repo first if you haven't:
 #   git clone https://github.com/Krilliac/Sonder-runtime.git && cd Sonder-runtime
 #
-# Env vars for the hosting section:
+# Env vars for the local-service section:
 #   SONDER_API_KEY   API key clients must send (auto-generated if unset)
 #   SONDER_PORT      port to bind (default 11435)
 # Performance knobs used by local Ollama requests:
@@ -91,8 +91,9 @@ echo ""
 if [ "$SERVE" -eq 0 ]; then
   echo "NEXT (Sonder Runtime): copy the repository here and run its"
   echo "server/REPL/proxy — the runtime adds retrieval, capture, /train, trace, and the"
-  echo "OpenAI-compatible proxy. Re-run this script with --serve to host it as a"
-  echo "public systemd service, or ask Claude to help set up the code transfer."
+  echo "OpenAI-compatible proxy. Re-run this script with --serve to install a"
+  echo "loopback-only development service. For remote access, use the hardened"
+  echo "packaging/install_sonder.sh path plus a TLS reverse proxy."
 fi
 
 fi  # MODEL_STEP
@@ -100,7 +101,7 @@ fi  # MODEL_STEP
 if [ "$SERVE" -eq 1 ]; then
 
 echo ""
-echo "== hosting: Sonder Runtime as a public systemd service =="
+echo "== hosting: Sonder Runtime as a loopback-only development service =="
 
 # This script must live inside the cloned repo (it references sibling files
 # like sonder_serve.py). Resolve that directory so the service works
@@ -140,6 +141,20 @@ echo "-- resolving API key --"
 KEY="${SONDER_API_KEY:-$(head -c 24 /dev/urandom | base64 | tr -d '/+=' | head -c 32)}"
 PORT="${SONDER_PORT:-11435}"
 
+# Keep the bearer secret out of the world-readable systemd unit. This legacy
+# convenience path remains root-run, but it is now loopback-only; production
+# remote installs belong on packaging/install_sonder.sh and the TLS proxy.
+install -d -m 0755 /etc/sonder
+umask 077
+cat > /etc/sonder/sonder-local.env <<EOF
+SONDER_API_KEY=$KEY
+SONDER_NUM_THREAD=$SONDER_NUM_THREAD
+SONDER_NUM_GPU=$SONDER_NUM_GPU
+SONDER_NUM_BATCH=$SONDER_NUM_BATCH
+OLLAMA_FLASH_ATTENTION=$OLLAMA_FLASH_ATTENTION
+EOF
+chmod 0600 /etc/sonder/sonder-local.env
+
 echo "-- writing systemd unit /etc/systemd/system/sonder.service --"
 cat > /etc/systemd/system/sonder.service <<EOF
 [Unit]
@@ -150,15 +165,13 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=$CLONE_DIR
-Environment=SONDER_HOST=0.0.0.0
-Environment=SONDER_API_KEY=$KEY
-Environment=SONDER_NUM_THREAD=$SONDER_NUM_THREAD
-Environment=SONDER_NUM_GPU=$SONDER_NUM_GPU
-Environment=SONDER_NUM_BATCH=$SONDER_NUM_BATCH
-Environment=OLLAMA_FLASH_ATTENTION=$OLLAMA_FLASH_ATTENTION
+Environment=SONDER_HOST=127.0.0.1
+EnvironmentFile=/etc/sonder/sonder-local.env
 ExecStart=$VENV_PY $CLONE_DIR/sonder_serve.py $PORT
 Restart=on-failure
 RestartSec=3
+UMask=0077
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target
@@ -167,17 +180,15 @@ EOF
 systemctl daemon-reload
 systemctl enable --now sonder
 
-SERVER_IP="$(curl -fsSL -4 ifconfig.me 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}' || echo "<server-ip>")"
-
 echo ""
-echo "DONE. Sonder Runtime is hosted as a public systemd service."
-echo "  Public URL:  http://${SERVER_IP}:${PORT}/v1"
+echo "DONE. Sonder Runtime is running on loopback only."
+echo "  Local URL:   http://127.0.0.1:${PORT}/v1"
 echo "  API key:     ${KEY}"
 echo ""
-echo "  Give clients the URL + key above (see CLIENT.md)."
-echo "  REMINDER: open the firewall / cloud security-group for port ${PORT},"
-echo "  and keep that API key secret — it is the ONLY thing protecting this"
-echo "  server from anyone on the internet who finds the port."
+echo "  Do not open or port-forward ${PORT}. For remote clients, install the"
+echo "  server-private profile and terminate TLS at the reference reverse proxy:"
+echo "  docs/runbooks/install-server-private.md"
+echo "  docs/runbooks/secure-remote-access.md"
 echo ""
 echo "  Manage:  systemctl status sonder | journalctl -u sonder -f"
 
