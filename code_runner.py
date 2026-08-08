@@ -126,9 +126,10 @@ RUN_WINDOW_DIR_ENV = "SONDER_RUN_WINDOW_DIR"
 def _child_environment():
     # Model-authored children used to inherit bypass/API credentials and could
     # print them into tool output, granting themselves control-plane authority.
-    secret_names = set(sonder_logging.SECRET_ENV_VARS)
-    secret_names.add("SONDER_OPENAI_API_KEY")
-    return {key: value for key, value in os.environ.items() if key not in secret_names}
+    # The stripping rule now lives in sonder_logging so this lane and
+    # workbench's run_program cannot diverge -- they did, and workbench leaked
+    # the whole environment to the same class of model-authored child.
+    return sonder_logging.child_environment()
 
 
 def _powershell_exe():
