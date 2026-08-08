@@ -4,7 +4,7 @@ rem
 rem Exists because the venv interpreter was invoked three different ways across
 rem this project's tooling and one of them failed with:
 rem
-rem     No Python at '"C:\Users\...\Python312\python.exe'
+rem     No Python at '"<base-python-path>'
 rem
 rem Note the stray double-quote inside the path. That is a QUOTING failure as a
 rem command crosses a shell boundary (bash -> cmd -> the venv redirector, which
@@ -21,13 +21,14 @@ rem   scripts\run-tests.cmd tests\test_foo.py   one file
 rem   scripts\run-tests.cmd -q -k pattern       any pytest args
 setlocal
 set "REPO=%~dp0.."
-set "PY=%REPO%\venv\Scripts\python.exe"
+set "PY=%SONDER_PYTHON%"
+if not defined PY set "PY=%REPO%\venv\Scripts\python.exe"
 
-if not exist "%PY%" (
+if not defined SONDER_PYTHON if not exist "%PY%" (
   echo ERROR: no interpreter at "%PY%"
   echo The venv is missing or incomplete. Recreate it with:
   echo     python -m venv "%REPO%\venv"
-  echo     "%PY%" -m pip install -r "%REPO%\requirements.txt"
+  echo     "%PY%" -m pip install -r "%REPO%\requirements-dev.txt"
   exit /b 3
 )
 
