@@ -7,7 +7,7 @@ compares raw strings with ``os.path.commonpath``, which treats ``..`` as an
 ordinary path component. Measured on Python 3.12.10 / Windows against the real
 workspace root::
 
-    resolve()  -> C:\\Users\\natew\\Windows\\System32\\config\\SAM   is_inside=False
+    resolve()  -> C:\\Users\\<user>\\Windows\\System32\\config\\SAM   is_inside=False
     absolute() -> <root>\\..\\..\\..\\Windows\\System32\\config\\SAM is_inside=True
 
 i.e. the error path ACCEPTED an escaping path the success path REFUSED. A

@@ -372,8 +372,8 @@ def repair_lines(server, name: str, parsed, tiers: str) -> bool:
 # then threw away a candidate that had genuinely fixed the parse error.
 #
 # codegen_loop.py already matched on shape for precisely this reason. Fixing it
-# there and leaving the range version here is the same one-site fix that keeps
-# recurring tonight.
+# there and leaving the range version here would be the same single-site fix
+# whose recurrence this comment exists to stop.
 PARSE_ERROR_RE = re.compile(
     r"(?i)(?:expected|unexpected token|invalid expression|invalid token|"
     r"unterminated|parse error|syntax error|unexpected end of|"

@@ -9,7 +9,8 @@ you can read, cherry-pick, or delete.
     python scripts/selfmod_forever.py --hours 4
 
 Bounded on purpose. An unbounded self-modifying loop has no natural stopping
-point and this one shares a 16 GB box with everything else; --hours is the
+point and this one shares a memory-constrained host with everything else;
+--hours is the
 contract, and it is checked before each pass rather than mid-pass so a run is
 never abandoned half-tested.
 
@@ -52,7 +53,7 @@ def main() -> int:
     # The default 'code' tier is a 7B, and a whole-file rewrite of a large
     # module is exactly where it was measured to fail: the first run's six
     # rejections were three lint failures and one candidate returning 22%
-    # of the original file. A 14B fits this box's 6 GB of VRAM with the
+    # of the original file. A 14B fits the host's 6 GB of VRAM with the
     # remainder in system RAM and converted 6 of 12 bodies the 7B could not
     # in a separate measurement.
     if args.model:

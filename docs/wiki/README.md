@@ -39,7 +39,7 @@ backups, and a signed update path. It is not a foundation model.
   (config, self-heal, memory quality, runtime policy, Ollama reachability).
 - `python sonder_hardware.py [workload]` — detect CPU/RAM/GPU/VRAM and get a
   model-band / context / keep-alive recommendation, including whether the
-  adaptive speculation cost model is likely to engage on this box.
+  adaptive speculation cost model is likely to engage on the current host.
 - `python scripts/benchmark_moat.py` — run the moat benchmark and emit a
   scorecard ([Benchmarking](17-benchmarking.md)).
 

@@ -3493,7 +3493,7 @@ def _env_location_consent() -> bool:
 
     Off by default to preserve the privacy contract. Set
     SONDER_LOCATION_CONSENT=1 to allow server-side approximate location lookup
-    on this machine's own chat surfaces.
+    on this host's own chat surfaces.
     """
     return os.environ.get("SONDER_LOCATION_CONSENT", "").strip().lower() in (
         "1", "true", "yes", "on",
