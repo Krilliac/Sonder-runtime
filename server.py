@@ -66,6 +66,7 @@ import ollama_lifecycle
 import admin_auth
 import codegen_loop
 import file_ops
+import project_detect as project_detector
 import context_policy
 import command_registry
 import adaptive_training
@@ -557,6 +558,7 @@ LIVE_RELOAD_MODULES = [
     "ollama_lifecycle",
     "admin_auth",
     "file_ops",
+    "project_detect",
     "context_policy",
     "command_registry",
     "permission_rules",
@@ -7360,6 +7362,59 @@ def context_pack(
 
 
 @mcp.tool()
+def project_detect(
+    path: str = ".",
+    max_depth: int = 8,
+    max_files: int = 200,
+    max_total_bytes: int = 2_000_000,
+    max_file_bytes: int = 256_000,
+    max_results: int = 500,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Inventory guarded project manifests and evidence-backed command candidates.
+
+    Returns deterministic JSON describing languages, declared frameworks, and
+    build/test/runtime argv candidates. Repository content is never executed;
+    the detector does not invoke shells, toolchains, package managers, or the
+    network and does not invent undeclared dependencies.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "path": path, "max_depth": max_depth, "max_files": max_files,
+        "max_total_bytes": max_total_bytes, "max_file_bytes": max_file_bytes,
+        "max_results": max_results,
+    }
+    try:
+        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
+        data = project_detector.detect_project(
+            path=path, max_depth=max_depth, max_files=max_files,
+            max_total_bytes=max_total_bytes, max_file_bytes=max_file_bytes,
+            max_results=max_results, extra_roots=trusted_roots,
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "project_detect", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    summary = "%d manifest(s), %d command candidate(s)%s" % (
+        len(data["manifests"]), len(data["commands"]),
+        ", truncated" if data["truncated"] else "",
+    )
+    output = project_detector.format_detection(data)
+    _record_direct_tool(
+        "project_detect", args, ok=not data["errors"], started=started,
+        summary=summary, output=output,
+    )
+    activity_tracker.record_event(
+        "project_detect", summary=summary, path=data["root"],
+    )
+    return output
+
+
+@mcp.tool()
 def data_inspect(
     path: str,
     max_bytes: int = 256000,
@@ -10115,6 +10170,7 @@ def tool_manifest() -> str:
         "offload": "Route a self-contained task to a configured local/cloud tier.",
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
         "workspace_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace inventory, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
+        "project_detect": "Inventory guarded build/test/runtime manifests and return deterministic evidence-backed language, framework, and cross-platform argv candidates without executing them.",
         "file_policy/file_find/file_read/file_write/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete with approval bypass support.",
         "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
         "environment_status": "Report the host OS, available shells (PowerShell/cmd/bash/wsl), and installed toolchains -- check before choosing a command shape or assuming a tool exists.",
@@ -10170,6 +10226,7 @@ AGENT_TOOL_HELP = """Available tools:
 - approximate_location_lookup: {"consent": true} (only after the user explicitly enables or requests IP location)
 - file_policy: {}
 - workspace_inventory: {"path": ".", "max_entries": 20000, "timeout_seconds": 10, "top_n": 15}
+- project_detect: {"path": ".", "max_depth": 8, "max_files": 200, "max_total_bytes": 2000000, "max_file_bytes": 256000, "max_results": 500}
 - directory_tree: {"path": ".", "depth": 2, "max_entries": 200}
 - directory_create: {"path": "output/reports", "parents": true}
 - file_find: {"query": "*.py", "root": ".", "max_results": 50}
@@ -10242,7 +10299,7 @@ or
 
 
 REPOSITORY_READ_ONLY_TOOLS = frozenset({
-    "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range", "context_pack",
+    "file_policy", "workspace_inventory", "project_detect", "directory_tree", "file_find", "file_read", "file_read_range", "context_pack",
     "data_inspect",
     "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
@@ -10263,6 +10320,7 @@ symbol, filename, or glob. For a code/symbol audit, start with text_search for
 an exact symbol named by the task; do not default to Python or server.py.
 - file_policy: {}
 - workspace_inventory: {"path": ".", "max_entries": 20000, "timeout_seconds": 10, "top_n": 15}
+- project_detect: {"path": ".", "max_depth": 8, "max_files": 200, "max_total_bytes": 2000000, "max_file_bytes": 256000, "max_results": 500}
 - directory_tree: {"path": ".", "depth": 2, "max_entries": 200}
 - file_find: {"query": "<task-relevant filename or glob>", "root": ".", "max_results": 50}
 - file_read: {"path": "<task-relevant relative path>", "max_bytes": 256000}
@@ -10531,7 +10589,7 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
                     reject_sensitive=True,
                     extra_roots=trusted_extra_roots,
                 )
-        elif tool_name in {"workspace_inventory", "directory_tree", "file_find", "text_search", "script_search"}:
+        elif tool_name in {"workspace_inventory", "project_detect", "directory_tree", "file_find", "text_search", "script_search"}:
             file_ops.resolve_repository_read_path(
                 args.get("path", "") or args.get("root", "") or ".",
                 allow_workspace_root=True,
@@ -10619,7 +10677,7 @@ _AGENT_NEGATIVE_CLAIM_RE = re.compile(
     re.IGNORECASE,
 )
 _AGENT_CLAIM_REVIEW_TOOLS = frozenset({
-    "text_search", "file_read_range", "file_find",
+    "text_search", "file_read_range", "file_find", "project_detect",
 })
 _AGENT_QUOTED_ANCHOR_RE = re.compile(
     r"`([^`\r\n]{2,120})`|\"([^\"\r\n]{2,120})\"|\'([^\'\r\n]{2,120})\'"
@@ -11111,6 +11169,18 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "project_detect":
+        return project_detect(
+            path=args.get("path", args.get("root", ".")),
+            max_depth=args.get("max_depth", 8),
+            max_files=args.get("max_files", 200),
+            max_total_bytes=args.get("max_total_bytes", 2_000_000),
+            max_file_bytes=args.get("max_file_bytes", 256_000),
+            max_results=args.get("max_results", 500),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "directory_tree":
         return directory_tree(
             path=args.get("path", args.get("root", ".")),
@@ -11484,7 +11554,7 @@ def _agent_activity_command(tool_name, args):
 
 _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "file_read", "file_read_range", "context_pack", "image_inspect", "file_write", "file_edit",
-    "file_delete", "directory_create", "workspace_inventory", "directory_tree",
+    "file_delete", "directory_create", "workspace_inventory", "project_detect", "directory_tree",
     "file_find", "text_search", "script_search", "artifact_verify",
     "artifact_ground", "scaffold_project",
 })
@@ -11667,7 +11737,7 @@ _WORK_VALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_verify", "game_reference_suite", "game_generate_and_test",
     "game_generation_campaign", "self_heal_check", "workspace_inventory", "directory_tree", "file_find",
-    "file_read", "file_read_range", "text_search", "image_inspect",
+    "project_detect", "file_read", "file_read_range", "text_search", "image_inspect",
     "memory_quality_report", "memory_privacy_review", "learning_health_status",
 })
 
@@ -12021,7 +12091,7 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
     # persistent files just edited. self_heal_check is likewise unrelated.
     return False
 _WORK_INSPECTION_TOOLS = frozenset({
-    "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range", "context_pack",
+    "file_policy", "workspace_inventory", "project_detect", "directory_tree", "file_find", "file_read", "file_read_range", "context_pack",
     "text_search", "script_search", "program_search", "image_inspect",
     "memory_search", "learning_health_status", "evaluation_history_status",
     "memory_quality_report", "memory_privacy_review", "artifact_ground",
@@ -12029,7 +12099,7 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "status", "diagnostics",
 })
 _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
-    "file_policy", "workspace_inventory", "directory_tree", "file_find",
+    "file_policy", "workspace_inventory", "project_detect", "directory_tree", "file_find",
     "file_read", "file_read_range", "context_pack", "text_search", "script_search",
     "program_search", "image_inspect", "environment_status",
 })
@@ -13164,7 +13234,7 @@ def workbench_agent(
 
 
 _AUTOPILOT_OBSERVE_TOOLS = frozenset({
-    "file_policy", "workspace_inventory", "directory_tree", "file_find",
+    "file_policy", "workspace_inventory", "project_detect", "directory_tree", "file_find",
     "file_read", "file_read_range", "text_search", "script_search",
     "program_search", "image_inspect", "memory_search", "web_search",
     "web_fetch", "weather_lookup", "status", "diagnostics",
