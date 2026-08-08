@@ -82,6 +82,86 @@ def test_repo_show_returns_metadata_message_and_bounded_patch(repository):
     assert "+two" in prior["patch"]
 
 
+def test_repo_blame_returns_structured_bounded_lines(repository):
+    report = git_history.repo_blame(
+        repository, file_path="a.txt", start_line=1, end_line=2,
+    )
+    assert report["ok"] is True
+    assert report["path"] == "a.txt"
+    assert report["limit"] == 2
+    assert report["count"] == 2
+    assert report["truncated"] is False
+    assert [row["final_line"] for row in report["lines"]] == [1, 2]
+    assert [row["text"] for row in report["lines"]] == ["one", "three"]
+    assert all(row["author"] == {
+        "name": "Test Author", "email": "author@example.test",
+    } for row in report["lines"])
+    assert all(len(row["commit"]) == 40 for row in report["lines"])
+
+
+def test_repo_blame_always_passes_explicit_range_and_safety_flags(
+    monkeypatch, repository,
+):
+    captured = {}
+    commit = "a" * 40
+    porcelain = (
+        "%s 1 1 1\nauthor Test Author\nauthor-mail <author@example.test>\n"
+        "author-time 1\nauthor-tz +0000\nsummary first\nfilename a.txt\n\tone\n"
+    ) % commit
+
+    def fake_run(root, arguments, **kwargs):
+        captured["root"] = root
+        captured["arguments"] = arguments
+        return {
+            "stdout": porcelain.encode(), "stderr": b"", "truncated": False,
+        }
+
+    monkeypatch.setattr(git_history, "_run_git", fake_run)
+    report = git_history.repo_blame(repository, file_path="a.txt")
+    arguments = captured["arguments"]
+    assert arguments[:4] == [
+        "blame", "--line-porcelain", "--no-progress", "--no-textconv",
+    ]
+    assert arguments[arguments.index("-L") + 1] == "1,100"
+    assert arguments[-3:] == ["HEAD", "--", "a.txt"]
+    assert report["limit"] == git_history.DEFAULT_BLAME_LINES
+
+
+@pytest.mark.parametrize(
+    "start_line,end_line",
+    [
+        (True, 2), ("1", 2), (0, 1), (-1, 1),
+        (2, 1), (1, True), (1, "2"), (1, 501),
+        (git_history.MAX_BLAME_LINE_NUMBER + 1, 0),
+    ],
+)
+def test_repo_blame_rejects_invalid_or_unbounded_ranges(
+    repository, start_line, end_line,
+):
+    with pytest.raises(git_history.GitHistoryError, match="blame"):
+        git_history.repo_blame(
+            repository, file_path="a.txt",
+            start_line=start_line, end_line=end_line,
+        )
+
+
+@pytest.mark.parametrize("file_path", ["", "missing.txt", ".", "src"])
+def test_repo_blame_requires_one_existing_regular_file(repository, file_path):
+    if file_path == "src":
+        (repository / "src").mkdir()
+    with pytest.raises(git_history.GitHistoryError, match="blame|path filter"):
+        git_history.repo_blame(repository, file_path=file_path)
+
+
+def test_repo_blame_reuses_revision_and_path_injection_guards(repository):
+    with pytest.raises(git_history.GitHistoryError, match="unsafe syntax"):
+        git_history.repo_blame(
+            repository, file_path="a.txt", revision="--contents=outside",
+        )
+    with pytest.raises(git_history.GitHistoryError, match="path filter rejected"):
+        git_history.repo_blame(repository, file_path="../outside.txt")
+
+
 @pytest.mark.parametrize(
     "revision",
     [
@@ -129,6 +209,8 @@ def test_path_filter_rejects_symlink_escape(repository, tmp_path):
         pytest.skip("symlink creation unavailable: %s" % exc)
     with pytest.raises(git_history.GitHistoryError, match="path filter rejected"):
         git_history.repo_show(repository, file_path="linked.txt")
+    with pytest.raises(git_history.GitHistoryError, match="path filter rejected"):
+        git_history.repo_blame(repository, file_path="linked.txt")
 
 
 def test_repo_show_hard_output_ceiling_returns_parseable_truncation(repository):
@@ -140,6 +222,23 @@ def test_repo_show_hard_output_ceiling_returns_parseable_truncation(repository):
     assert report["truncated"] is True
     assert report["output_bytes"] <= 1024
     assert report["subject"] == "large patch"
+
+
+def test_repo_blame_hard_output_ceiling_keeps_only_complete_records(repository):
+    large = repository / "large.txt"
+    large.write_text("line %d\n" % 0 + "".join(
+        "line %d\n" % number for number in range(1, 200)
+    ), encoding="utf-8")
+    _git(repository, "add", "large.txt")
+    _git(repository, "commit", "--quiet", "-m", "large blame")
+    report = git_history.repo_blame(
+        repository, file_path="large.txt", start_line=1, end_line=200,
+        max_bytes=1024,
+    )
+    assert report["truncated"] is True
+    assert report["output_bytes"] <= 1024
+    assert 0 <= report["count"] < 200
+    assert all(row["text"].startswith("line ") for row in report["lines"])
 
 
 def test_invalid_but_safe_revision_reports_bounded_git_error(repository):
@@ -228,15 +327,26 @@ def test_server_registration_read_only_dispatch_project_scope_and_dedup(
         repository_extra_roots=str(repository),
     )
     assert json.loads(output)["count"] == 1
-    assert "repo_log/repo_show" in server.tool_manifest()
+    blame_output = server._agent_dispatch(
+        "repo_blame",
+        {"path": str(repository), "file_path": "a.txt", "end_line": 2},
+        read_only=True,
+        repository_extra_roots=str(repository),
+    )
+    assert json.loads(blame_output)["count"] == 2
+    assert "repo_log/repo_show/repo_blame" in server.tool_manifest()
     help_text = server._agent_tool_help(read_only=True)
-    assert "- repo_log:" in help_text and "- repo_show:" in help_text
-    assert {"repo_log", "repo_show"}.issubset(server.REPOSITORY_READ_ONLY_TOOLS)
-    assert {"repo_log", "repo_show"}.issubset(server._PROJECT_SCOPED_PATH_TOOLS)
-    assert {"repo_log", "repo_show"}.issubset(server._WORK_INSPECTION_TOOLS)
-    assert {"repo_log", "repo_show"}.issubset(
+    assert all("- %s:" % name in help_text for name in (
+        "repo_log", "repo_show", "repo_blame",
+    ))
+    git_tools = {"repo_log", "repo_show", "repo_blame"}
+    assert git_tools.issubset(server.REPOSITORY_READ_ONLY_TOOLS)
+    assert git_tools.issubset(server._PROJECT_SCOPED_PATH_TOOLS)
+    assert git_tools.issubset(server._WORK_INSPECTION_TOOLS)
+    assert git_tools.issubset(
         server._AGENT_DEDUPLICATED_INSPECTION_TOOLS
     )
+    assert git_tools.issubset(server._AUTOPILOT_OBSERVE_TOOLS)
     scoped = server._project_scope_args(
         "repo_show", {"path": ".", "revision": "HEAD"}, str(repository),
     )
@@ -255,4 +365,10 @@ def test_server_activity_records_direct_git_tool(monkeypatch, repository):
     output = server.repo_show(str(repository), max_bytes=4096)
     assert json.loads(output)["subject"] == "third commit"
     assert calls[-1][0] == "repo_show"
+    assert calls[-1][1]["ok"] is True
+    output = server.repo_blame(
+        str(repository), file_path="a.txt", end_line=2, max_bytes=4096,
+    )
+    assert json.loads(output)["count"] == 2
+    assert calls[-1][0] == "repo_blame"
     assert calls[-1][1]["ok"] is True
