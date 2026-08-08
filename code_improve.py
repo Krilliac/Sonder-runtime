@@ -17,7 +17,10 @@ model, and returns a result dict for the caller to apply or reject.
 from __future__ import annotations
 
 import difflib
+import ast
+import io
 import re
+import tokenize
 
 # A rewrite that returns less than this fraction of the original is treated as a
 # deletion, not an edit. An unguarded repair converges on deletion because
@@ -33,8 +36,12 @@ _FENCE_RE = re.compile(r"^\s*```[a-zA-Z0-9_+-]*\s*$", re.M)
 
 def list_functions(source: str) -> list[str]:
     """Top-level (column-0) function names in source order."""
-    return [m.group("name") for m in _DEF_RE.finditer(source or "")
-            if m.group("indent") == ""]
+    try:
+        tree = ast.parse(source or "")
+    except SyntaxError:
+        return []
+    return [node.name for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
 
 
 def _block_bounds(lines: list, name: str):
@@ -45,25 +52,15 @@ def _block_bounds(lines: list, name: str):
     closes with `):` at column 0 and a naive scan would stop there and leave
     half a def behind (which then does not parse).
     """
-    first = None
-    for index, line in enumerate(lines):
-        if re.match(r"^def\s+%s\s*\(" % re.escape(name), line):
-            first = index
-            break
-    if first is None:
+    try:
+        tree = ast.parse("".join(lines))
+    except SyntaxError:
         return None
-    depth, index = 0, first
-    while index < len(lines):
-        depth += lines[index].count("(") - lines[index].count(")")
-        index += 1
-        if depth <= 0:
-            break
-    last = len(lines)
-    for probe in range(index, len(lines)):
-        if lines[probe].strip() and not lines[probe][:1].isspace():
-            last = probe
-            break
-    return first, last
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            starts = [node.lineno] + [item.lineno for item in node.decorator_list]
+            return min(starts) - 1, node.end_lineno
+    return None
 
 
 def extract_function(source: str, name: str) -> str | None:
@@ -78,7 +75,11 @@ def extract_function(source: str, name: str) -> str | None:
 
 def strip_fences(text: str) -> str:
     """Drop markdown code fences a model wraps its reply in."""
-    return _FENCE_RE.sub("", text or "").strip()
+    value = (text or "").strip()
+    lines = value.splitlines()
+    if len(lines) >= 2 and _FENCE_RE.fullmatch(lines[0]) and _FENCE_RE.fullmatch(lines[-1]):
+        return "\n".join(lines[1:-1]).strip()
+    return value
 
 
 def splice_function(original: str, reply: str) -> str | None:
@@ -90,18 +91,49 @@ def splice_function(original: str, reply: str) -> str | None:
     for rather than change the code that was targeted.
     """
     text = strip_fences(reply)
-    match = re.search(r"^(\s*)def\s+(\w+)\s*\(", text, re.M)
-    if not match:
+    try:
+        reply_tree = ast.parse(text)
+    except SyntaxError:
         return None
-    name = match.group(2)
-    body = text[match.start():].rstrip() + "\n"
+    if len(reply_tree.body) != 1 or not isinstance(
+        reply_tree.body[0], (ast.FunctionDef, ast.AsyncFunctionDef)
+    ):
+        return None
+    replacement = reply_tree.body[0]
+    name = replacement.name
 
     lines = original.splitlines(keepends=True)
     bounds = _block_bounds(lines, name)
     if bounds is None:
         return None
     first, last = bounds
-    return "".join(lines[:first]) + body + "\n" + "".join(lines[last:])
+    try:
+        original_tree = ast.parse(original)
+    except SyntaxError:
+        return None
+    current = next(
+        (node for node in original_tree.body
+         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name),
+        None,
+    )
+    if current is None or type(current) is not type(replacement):
+        return None
+    if ast.dump(current.args, include_attributes=False) != ast.dump(
+        replacement.args, include_attributes=False
+    ):
+        return None
+    if [ast.dump(item, include_attributes=False) for item in current.decorator_list] != [
+        ast.dump(item, include_attributes=False) for item in replacement.decorator_list
+    ]:
+        return None
+    newline = "\r\n" if "\r\n" in original else "\n"
+    body = text.rstrip().replace("\r\n", "\n").replace("\n", newline) + newline
+    candidate = "".join(lines[:first]) + body + newline + "".join(lines[last:])
+    try:
+        ast.parse(candidate)
+    except SyntaxError:
+        return None
+    return candidate
 
 
 def shrink_rejected(previous: str, candidate: str, floor: float = SHRINK_FLOOR) -> bool:
@@ -118,12 +150,13 @@ def _code_only(text: str) -> list:
     and improving one is real work, while `# added check` appended to a line
     that already existed is not.
     """
-    out = []
-    for line in (text or "").splitlines():
-        body = line.split("#", 1)[0].rstrip()
-        if body.strip():
-            out.append(body)
-    return out
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(text or "").readline)
+        kept = [tok for tok in tokens if tok.type != tokenize.COMMENT]
+        value = tokenize.untokenize(kept)
+    except (tokenize.TokenError, IndentationError):
+        value = text or ""
+    return [line.rstrip() for line in value.splitlines() if line.strip()]
 
 
 def diff_objection(original: str, edited: str) -> str | None:
