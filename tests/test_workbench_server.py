@@ -257,3 +257,91 @@ def test_agent_observation_records_nested_run_code_once():
     assert "ONCE" in result
     assert len(actions) == 1
     assert actions[0]["tool"] == "run_code"
+
+
+def test_recreating_a_run_created_file_is_promoted_to_overwrite(monkeypatch, tmp_path):
+    """A mode=create write to a path this run already created is promoted to
+    mode=overwrite by the host, instead of failing with "file exists" until the
+    no-progress guard kills the run (measured: 5 of 12 steps lost that way)."""
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "agent.db"))
+    decisions = [
+        '{"tool":"directory_tree","args":{"path":"."}}',
+        '{"tool":"file_write","args":{"path":"demo.py","content":"print(1)"}}',
+        '{"tool":"file_write","args":{"path":"demo.py","content":"print(2)"}}',
+        '{"tool":"script_run","args":{"path":"demo.py"}}',
+        '{"final":"rewrote demo.py and validated it"}',
+    ]
+
+    def fake_generate(prompt, history=None):
+        return decisions.pop(0)
+
+    writes = []
+
+    def fake_dispatch(tool, args, allow_web=True, read_only=False, project="",
+                      allow_location=False):
+        if tool == "directory_tree":
+            return "directory tree: workspace"
+        if tool == "file_write":
+            writes.append(dict(args))
+            return "file write\n  action: created"
+        return "script run\n  ok: True\n  returncode: 0"
+
+    monkeypatch.setattr(server, "_make_generate", lambda *a, **k: fake_generate)
+    monkeypatch.setattr(server, "_agent_dispatch_observed", fake_dispatch)
+
+    result = server._agent_impl(
+        "create then rewrite demo.py",
+        max_steps=6,
+        auto_checklist=True,
+        project="sonder",
+    )
+
+    assert result == "rewrote demo.py and validated it"
+    assert len(writes) == 2
+    # First write is an ordinary create; the retry is host-promoted.
+    assert str(writes[0].get("mode") or "create") == "create"
+    assert writes[1]["mode"] == "overwrite"
+
+
+def test_file_exists_failure_hint_names_overwrite(monkeypatch, tmp_path):
+    """When a create hits a PRE-EXISTING file (not created by this run), the
+    host does not auto-overwrite -- but the recovery hint tells the model the
+    exact retry, so it does not have to guess."""
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "agent.db"))
+    decisions = [
+        '{"tool":"directory_tree","args":{"path":"."}}',
+        '{"tool":"file_write","args":{"path":"existing.py","content":"x"}}',
+        '{"tool":"file_write","args":{"path":"existing.py","content":"x","mode":"overwrite"}}',
+        '{"tool":"script_run","args":{"path":"existing.py"}}',
+        '{"final":"replaced existing.py"}',
+    ]
+    prompts = []
+
+    def fake_generate(prompt, history=None):
+        prompts.append(prompt)
+        return decisions.pop(0)
+
+    def fake_dispatch(tool, args, allow_web=True, read_only=False, project="",
+                      allow_location=False):
+        if tool == "directory_tree":
+            return "directory tree: workspace"
+        if tool == "file_write":
+            if str(args.get("mode") or "create") == "create":
+                return ("ERROR: file exists (use mode=overwrite to replace): "
+                        "existing.py")
+            return "file write\n  action: overwrite"
+        return "script run\n  ok: True\n  returncode: 0"
+
+    monkeypatch.setattr(server, "_make_generate", lambda *a, **k: fake_generate)
+    monkeypatch.setattr(server, "_agent_dispatch_observed", fake_dispatch)
+
+    result = server._agent_impl(
+        "replace existing.py",
+        max_steps=6,
+        auto_checklist=True,
+        project="sonder",
+    )
+
+    assert result == "replaced existing.py"
+    joined = "\n".join(prompts)
+    assert "repeat the call with mode=overwrite" in joined

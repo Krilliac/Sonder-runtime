@@ -11405,6 +11405,17 @@ def _agent_normalized_path(value):
         return os.path.normcase(os.path.abspath(text))
 
 
+def _agent_created_path_key(path):
+    """One canonical key per on-disk target for the run-created-paths ledger.
+
+    Case-folded and separator-normalized so "src\\a.h", "src/a.h" and
+    "SRC/a.h" all name the same file on Windows. Not resolved against the
+    CWD: the host-confined view from _project_scope_args is already the
+    consistent form both the create and the retry present.
+    """
+    return os.path.normcase(os.path.normpath(str(path or "")))
+
+
 def _agent_call_signature(tool_name, args):
     """Return a stable signature for equivalent host-scoped tool calls."""
     canonical = dict(args) if isinstance(args, dict) else args
@@ -11975,6 +11986,12 @@ def _agent_impl(
     successful_inspection_results = {}
     repeated_inspection_counts = {}
     failed_call_counts = {}
+    # Paths this run itself created via file_write mode=create. Re-creating one
+    # of them is unambiguous intent to replace the run's own file, so the host
+    # promotes the retry to mode=overwrite deterministically instead of letting
+    # the model burn steps on the "file exists" error (measured: 5 of 12 steps
+    # lost to that loop). Pre-existing files are never auto-overwritten.
+    run_created_paths = set()
     claim_review_requests = 0
     # Branch prediction + speculative execution (advisory; a mispredict costs
     # at most one wasted read-only call and never touches durable state).
@@ -12351,6 +12368,20 @@ def _agent_impl(
         policy_tool_args = _project_scope_args(
             tool_name, tool_args, project_scope,
         )
+        # HOST AUTO-PROMOTE: a mode=create write to a path this run already
+        # created is unambiguous intent to replace the run's own file. Promote
+        # it to overwrite deterministically -- the model otherwise loops on
+        # "file exists" errors until the no-progress guard kills the run.
+        auto_promoted_overwrite = False
+        if (
+            tool_name == "file_write"
+            and str(policy_tool_args.get("mode") or "create").lower() == "create"
+            and _agent_created_path_key(policy_tool_args.get("path"))
+            in run_created_paths
+        ):
+            policy_tool_args = dict(policy_tool_args)
+            policy_tool_args["mode"] = "overwrite"
+            auto_promoted_overwrite = True
         call_signature = _agent_call_signature(tool_name, policy_tool_args)
         cached_inspection = (
             tool_name in _AGENT_DEDUPLICATED_INSPECTION_TOOLS
@@ -12491,6 +12522,15 @@ def _agent_impl(
         tool_ok = _agent_tool_observation_ok(tool_name, observation)
         if tool_ok:
             failed_call_counts.pop(call_signature, None)
+            if tool_name == "file_write":
+                run_created_paths.add(
+                    _agent_created_path_key(policy_tool_args.get("path"))
+                )
+                if auto_promoted_overwrite:
+                    observation_text += (
+                        "\nHOST AUTO-PROMOTE: mode=create was replaced with "
+                        "mode=overwrite because this run created the file."
+                    )
         else:
             failed_call_counts[call_signature] = prior_identical_failures + 1
             recovery = (
@@ -12501,6 +12541,16 @@ def _agent_impl(
                 recovery += (
                     " Use script_search/file_find to locate a real script, or use "
                     "workspace_run with an approved interpreter and explicit argv."
+                )
+            elif tool_name == "file_write" and "file exists" in observation_text.lower():
+                recovery += (
+                    " To replace the existing file, repeat the call with "
+                    "mode=overwrite."
+                )
+            elif tool_name == "file_edit" and "old text must not be empty" in observation_text.lower():
+                recovery += (
+                    " file_edit replaces a non-empty old text; read the file "
+                    "first, or use file_write with mode=overwrite to rewrite it."
                 )
             observation_text += "\n" + recovery
         used_tool = used_tool or tool_ok
