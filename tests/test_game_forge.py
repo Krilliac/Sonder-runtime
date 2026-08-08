@@ -111,8 +111,6 @@ def test_cpp_autofix_ignores_static_assert_and_present_headers():
 def test_run_project_recovers_from_missing_header_compile_error(monkeypatch, tmp_path):
     _local_roots(monkeypatch, tmp_path)
     project = game_forge.prepare_project("headerfix", "cpp", "2.5d")
-    with open(project["frame"], "wb") as handle:
-        handle.write(b"P6\n8 8\n255\n" + b"\x00" * 2048)
     calls = []
 
     def fake_run_code(code, language=None, timeout=None, cwd=None):
@@ -123,6 +121,12 @@ def test_run_project_recovers_from_missing_header_compile_error(monkeypatch, tmp
                 "stdout": "",
                 "stderr": "game.cpp:3:5: error: 'assert' was not declared in this scope",
             }
+        # A successful run RENDERS a frame this pass. _run_project_once now
+        # deletes any stale frame first, so the frame must be written here or
+        # the (correct) render check fails -- the test used to lean on a
+        # pre-written frame surviving, which was the stale-frame bug itself.
+        with open(project["frame"], "wb") as handle:
+            handle.write(b"P6\n8 8\n255\n" + b"\x00" * 2048)
         return {"ok": True, "stdout": "GAME_OK language=cpp dimension=2.5d", "stderr": ""}
 
     monkeypatch.setattr(code_runner, "run_code", fake_run_code)
@@ -234,3 +238,25 @@ def test_cpp_isometric_reference_has_requested_dimension_and_portable_root():
     assert "executable" in source
     assert "enemies" in source
     assert "diamond" in source
+
+
+def test_stale_frame_does_not_pass_a_run_that_renders_nothing(monkeypatch, tmp_path):
+    """The render check must reflect THIS run, not a leftover frame.
+
+    A program that prints GAME_OK and exits 0 but writes no frame (crash after
+    the print, or frame sent to stdout) must fail. Before the fix it passed on
+    a stale frame from a prior attempt and banked a false tests_passed.
+    """
+    _local_roots(monkeypatch, tmp_path)
+    project = game_forge.prepare_project("stale", "cpp", "2.5d")
+    # A valid frame left behind by an earlier attempt.
+    with open(project["frame"], "wb") as handle:
+        handle.write(b"P6\n8 8\n255\n" + b"\x00" * 2048)
+
+    def fake_run_code(code, language=None, timeout=None, cwd=None):
+        # Exits clean, prints the success banner, writes NO frame this run.
+        return {"ok": True, "stdout": "GAME_OK language=cpp dimension=2.5d", "stderr": ""}
+
+    monkeypatch.setattr(code_runner, "run_code", fake_run_code)
+    run = game_forge.run_project(project, "int main(){return 0;}", timeout=5)
+    assert not run["ok"], "a run that rendered no frame was graded pass on a stale one"
