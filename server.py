@@ -93,6 +93,7 @@ import code_improve
 import tier_router
 import project_scaffold
 import environment_probe
+import eval_history
 
 BASE = ollama_endpoint.normalize()
 OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
@@ -550,6 +551,7 @@ LIVE_RELOAD_MODULES = [
     "self_heal",
     "memory_quality",
     "learning_health",
+    "eval_history",
     "domain_grounding",
     "master_orchestrator",
     "ollama_lifecycle",
@@ -10061,6 +10063,48 @@ def session_export(session: str = "", limit: int = 50) -> str:
 
 
 @mcp.tool()
+def evaluation_history_status(
+    model: str = "",
+    model_digest: str = "",
+    suite: str = "",
+    suite_version: str = "",
+    suite_digest: str = "",
+    tolerance: float = 0.0,
+    max_records: int = 10000,
+) -> str:
+    """Read identity-separated evaluation trends; never runs or promotes a model."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "model": model, "model_digest": model_digest, "suite": suite,
+        "suite_version": suite_version, "suite_digest": suite_digest,
+        "tolerance": tolerance, "max_records": max_records,
+    }
+    try:
+        data = eval_history.history_status(
+            model=model,
+            model_digest=model_digest,
+            suite=suite,
+            suite_version=suite_version,
+            suite_digest=suite_digest,
+            tolerance=tolerance,
+            max_records=max_records,
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "evaluation_history_status", args, ok=False, started=started,
+            summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = json.dumps(data, indent=2, sort_keys=True)
+    _record_direct_tool(
+        "evaluation_history_status", args, ok=True, started=started,
+        summary="%d identity group(s)" % len(data["groups"]), output=output,
+    )
+    return output
+
+
+@mcp.tool()
 def tool_manifest() -> str:
     """List the sonder-runtime MCP tools and what they are for."""
     tools = {
@@ -10099,6 +10143,7 @@ def tool_manifest() -> str:
         "learn_preference/preferences_status": "Read or teach durable user behavior/workflow preferences.",
         "memory_search/memory_export/session_export": "Inspect local memory.",
         "learning_health_status": "Inspect grounded outcome coverage, signal quality, lesson provenance, distillation yield, and memory hygiene.",
+        "evaluation_history_status": "Read explicit evaluation trends separated by exact model digest and suite version/digest; it never runs or promotes a model.",
         "memory_quality_report/memory_quality_repair": "Audit and dry-run/prune exact duplicate lessons.",
         "memory_privacy_review/memory_privacy_repair": "Review redacted privacy findings and explicitly dry-run/remove selected flagged lessons.",
         "memory_embedding_backfill": "Dry-run or refresh stale/missing semantic vectors with the local embedding model.",
@@ -10165,6 +10210,7 @@ AGENT_TOOL_HELP = """Available tools:
 - diagnostics: {}
 - context_health: {}
 - learning_health_status: {}
+- evaluation_history_status: {"model": "", "model_digest": "", "suite": "", "suite_version": "", "suite_digest": "", "tolerance": 0.0, "max_records": 10000}
 - context_policy_status: {"context_size": "1m"}
 - set_context_size: {"context_size": "256k"}
 - memory_quality_report: {"sample_limit": 5}
@@ -10205,6 +10251,7 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
     "diagnostics", "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
+    "evaluation_history_status",
     "memory_quality_report", "memory_privacy_review", "system_improvement_report", "master_status", "master_capacity",
     "self_heal_check", "status", "system_profile_text", "environment_status",
     "emotion_vector_status", "preferences_status", "tool_manifest",
@@ -10236,11 +10283,13 @@ an exact symbol named by the task; do not default to Python or server.py.
 - weather_lookup: {"location": "Chicago, IL|60601", "forecast_days": 3, "units": "auto|metric|imperial"}
 - command_registry_list: {"filter_text": "filesystem|context|status"}
 - activity_status: {}
+- environment_status: {"refresh": false}
 - permission_policy: {"tool_name": "file_read"}
 - context_compaction_plan: {"session": "", "project": ""}
 - diagnostics: {}
 - context_health: {"session": "", "project": ""}
 - learning_health_status: {}
+- evaluation_history_status: {"model": "", "model_digest": "", "suite": "", "suite_version": "", "suite_digest": "", "tolerance": 0.0, "max_records": 10000}
 - artifact_ground: {"path": "artifacts/generated/report", "recipe": "auto", "requirements_json": {}}
 - context_policy_status: {"context_size": "32k"}
 - memory_quality_report: {"sample_limit": 5}
@@ -11306,6 +11355,16 @@ def _agent_dispatch(
         )
     if tool_name == "learning_health_status":
         return learning_health_status()
+    if tool_name == "evaluation_history_status":
+        return evaluation_history_status(
+            model=args.get("model", ""),
+            model_digest=args.get("model_digest", ""),
+            suite=args.get("suite", ""),
+            suite_version=args.get("suite_version", ""),
+            suite_digest=args.get("suite_digest", ""),
+            tolerance=args.get("tolerance", 0.0),
+            max_records=args.get("max_records", 10000),
+        )
     if tool_name == "context_policy_status":
         return context_policy_status(args.get("context_size", ""))
     if tool_name == "set_context_size":
@@ -11456,7 +11515,8 @@ _PROJECT_BOUND_AGENT_TOOLS = (
         "command_registry_list", "tool_manifest", "activity_status",
         "permission_policy", "context_compaction_plan", "diagnostics",
         "context_health", "learning_health_status", "memory_quality_report",
-        "memory_privacy_review", "system_improvement_report", "master_status",
+        "memory_privacy_review", "evaluation_history_status",
+        "system_improvement_report", "master_status",
         "master_capacity", "self_heal_check", "status", "system_profile_text",
         "emotion_vector_status", "preferences_status", "context_policy_status",
         "environment_status",
@@ -11967,7 +12027,8 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
 _WORK_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range", "context_pack",
     "text_search", "script_search", "program_search", "image_inspect",
-    "memory_search", "learning_health_status", "memory_quality_report", "memory_privacy_review", "artifact_ground",
+    "memory_search", "learning_health_status", "evaluation_history_status",
+    "memory_quality_report", "memory_privacy_review", "artifact_ground",
     "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",
     "status", "diagnostics",
 })
