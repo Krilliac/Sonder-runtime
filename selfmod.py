@@ -286,11 +286,32 @@ def _dirty_paths(status):
     return paths
 
 
+# Directories whose test_*.py files are not this project's test surface. Without
+# them, _test_inventory over the repo root picked up 2,349 test files inside
+# venv/ (measured) -- so the review baseline, taken from the root, was never a
+# subset of a candidate's venv-less Git worktree, and "test inventory was
+# weakened" fired on every git-mode review. That made review structurally
+# unsatisfiable for ALL callers: 0 of 78 runs ever reached the reviewing phase.
+_INVENTORY_EXCLUDED = frozenset({
+    ".git", "venv", ".venv", "__pycache__", ".pytest_cache", ".mypy_cache",
+    ".ruff_cache", "node_modules", "build", "dist", ".tooling", "workspaces",
+    "site-packages",
+})
+
+
 def _test_inventory(root: Path):
     inventory = []
     for path in root.rglob("test_*.py"):
-        if ".git" not in path.parts and path.is_file():
-            inventory.append(path.relative_to(root).as_posix())
+        if not path.is_file():
+            continue
+        # Exclude on the path RELATIVE to root, never the absolute parts: a
+        # candidate worktree itself lives under a "workspaces/" directory, so
+        # matching absolute parts against the exclusion set emptied every
+        # worktree inventory (0 files) and made the subset check fail the
+        # opposite way.
+        rel = path.relative_to(root)
+        if not _INVENTORY_EXCLUDED.intersection(rel.parts):
+            inventory.append(rel.as_posix())
     return sorted(inventory)
 
 
@@ -776,9 +797,18 @@ def review(run_id, *, require_kinds=None):
         failures.append("missing passing checks: %s" % ", ".join(sorted(required - seen)))
     if any(not row["passed"] for row in results):
         failures.append("one or more recorded checks failed")
-    baseline = [row for row in results if row["kind"] == "reproducer_before"]
-    if not baseline or not any(row["exit_code"] not in (None, 0) and row["passed"] for row in baseline):
-        failures.append("original failure was not demonstrated before editing")
+    # Only demand a demonstrated pre-existing failure when the caller's
+    # require_kinds actually asks for one. This check sat OUTSIDE the
+    # `required` filter, so passing require_kinds could not waive it -- which
+    # defeated the point of require_kinds and made review impossible for a
+    # caller (like the nightly improvement loop) whose changes are additions,
+    # not bug fixes with a failing test to reproduce first.
+    if "reproducer_before" in required:
+        baseline = [row for row in results if row["kind"] == "reproducer_before"]
+        if not baseline or not any(
+            row["exit_code"] not in (None, 0) and row["passed"] for row in baseline
+        ):
+            failures.append("original failure was not demonstrated before editing")
     if not diff["changed_files"]:
         failures.append("candidate produced no scoped diff")
     if any(_protected(path) for path in diff["changed_files"]) and not run["maintenance_authorized"]:
