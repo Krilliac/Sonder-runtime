@@ -1116,7 +1116,7 @@ def test_agent_requires_successful_file_evidence(monkeypatch):
     )
 
     out = server._agent_impl(
-        "Review Repository: D:\\SparkEngine",
+        "Review Repository: C:\\example\\repo",
         tier="code",
         max_steps=1,
         require_file_evidence=True,
