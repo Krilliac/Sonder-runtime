@@ -7,6 +7,7 @@ unless explicitly overridden.
 from __future__ import annotations
 
 import os
+import platform
 import shutil
 from pathlib import Path
 
@@ -15,10 +16,21 @@ def default_home() -> Path:
     override = os.environ.get("SONDER_HOME", "").strip()
     if override:
         return Path(override).expanduser()
-    if os.name == "nt":
+    system = platform.system()
+    if system == "Windows" or (not system and os.name == "nt"):
         root = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
         if root:
             return Path(root) / "sonder"
+        profile = os.environ.get("USERPROFILE", "").strip()
+        if profile:
+            return Path(profile) / "AppData" / "Local" / "sonder"
+        # Service/minimal Windows environments may have no user-profile
+        # variables. Honor SystemDrive and use C: only as the final fallback.
+        drive = os.environ.get("SystemDrive", "").strip() or "C:"
+        suffix = "" if drive.endswith(("\\", "/")) else os.sep
+        return Path(drive + suffix) / "Sonder"
+    if system == "Darwin":
+        return Path.home() / "Library" / "Application Support" / "sonder"
     xdg = os.environ.get("XDG_DATA_HOME", "").strip()
     if xdg:
         return Path(xdg).expanduser() / "sonder"

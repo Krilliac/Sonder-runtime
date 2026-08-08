@@ -186,7 +186,7 @@ def test_resolve_sonder_rejects_non_latest_sonder_tag(monkeypatch):
     assert server.resolve_sonder_model(strict=False) == server.LOCAL_CODE_MODEL
 
 
-def test_resolve_sonder_policy_alias_cannot_shadow_base_fallback(monkeypatch):
+def test_resolve_sonder_missing_alias_returns_stable_setup_target(monkeypatch):
     monkeypatch.setitem(server.TIERS, "code", server.SONDER_STABLE_ALIAS)
     monkeypatch.setattr(
         server,
@@ -195,7 +195,7 @@ def test_resolve_sonder_policy_alias_cannot_shadow_base_fallback(monkeypatch):
     )
 
     assert server.resolve_sonder_model(strict=False) == server.LOCAL_CODE_MODEL
-    assert server.resolve_sonder_model(strict=False) != server.TIERS["code"]
+    assert server.resolve_sonder_model(strict=False) == server.TIERS["code"]
 
 
 def test_resolve_sonder_accepts_exact_alias_from_model_field(monkeypatch):
@@ -284,6 +284,14 @@ def test_local_model_options_clamps_native_context(monkeypatch):
     opts = server._local_model_options(0.2, 10, 1000000)
 
     assert opts["num_ctx"] == 256000
+
+
+def test_local_model_options_leave_accelerator_placement_to_ollama(monkeypatch):
+    monkeypatch.delenv("SONDER_NUM_GPU", raising=False)
+
+    opts = server._local_model_options(0.2, 10, 4096)
+
+    assert "num_gpu" not in opts
 
 
 def test_make_generate_cloud_omits_local_runtime_options(monkeypatch):
