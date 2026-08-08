@@ -16,6 +16,7 @@ import tempfile
 import time
 
 import sonder_logging
+import sonder_paths
 
 
 SUPPORTED_LANGUAGES = {
@@ -328,7 +329,7 @@ def _find_visual_studio_vcvars():
     vswhere = shutil.which("vswhere")
     if not vswhere:
         candidate = os.path.join(
-            os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+            sonder_paths.windows_program_files(x86=True),
             "Microsoft Visual Studio",
             "Installer",
             "vswhere.exe",
@@ -364,8 +365,8 @@ def _find_visual_studio_vcvars():
             pass
 
     roots = [
-        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Microsoft Visual Studio", "*", "*"),
-        os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Microsoft Visual Studio", "*", "*"),
+        os.path.join(sonder_paths.windows_program_files(), "Microsoft Visual Studio", "*", "*"),
+        os.path.join(sonder_paths.windows_program_files(x86=True), "Microsoft Visual Studio", "*", "*"),
     ]
     for root in roots:
         matches = sorted(
