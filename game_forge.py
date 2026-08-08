@@ -444,6 +444,17 @@ _CPP_COMPILE_ERROR_RE = re.compile(r"\berror\s*:|\berror C\d{4}\b|\bfatal error\
 
 def _run_project_once(project: dict, code: str, timeout: int) -> dict:
     save_source(project, code)
+    # Delete any frame left by a previous attempt, an earlier campaign, or the
+    # reference fallback -- the project root and frame path are deterministic
+    # and reused. Without this, _valid_frame below tests "does SOME frame
+    # exist", not "did THIS run render one": a program that prints GAME_OK and
+    # exits 0 but crashes before writing (or writes the frame to stdout, which
+    # the prompt forbids) reads the stale frame, is graded PASS, and banks a
+    # false tests_passed outcome.
+    try:
+        os.unlink(project["frame"])
+    except OSError:
+        pass
     result = code_runner.run_code(
         code,
         language=project["language"],
