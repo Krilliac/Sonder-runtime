@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import engine_bundle  # noqa: E402
+import sonder_version  # noqa: E402
 
 ALLOWED_DIRS = {
     "contrib",
@@ -64,6 +65,7 @@ PRIVATE_FILES = {
 }
 REQUIRED_FILES = {
     "LICENSE",
+    "sonder_build.json",
     "autopilot_controller.py",
     "autopilot_store.py",
     "artifact_grounding.py",
@@ -352,6 +354,31 @@ def _write_manifest(stage: Path) -> None:
     )
 
 
+def _safe_build_field(value: str, label: str, *, maximum: int = 128) -> str:
+    value = str(value).strip()
+    if not value or len(value) > maximum or any(ord(char) < 32 for char in value):
+        raise ValueError(f"{label} is empty, too long, or contains control characters")
+    return value
+
+
+def _build_identity(
+    version: str | None = None,
+    revision: str | None = None,
+) -> dict[str, str]:
+    info = sonder_version.build_info()
+    build_version = _safe_build_field(
+        version or os.environ.get("SONDER_BUILD_VERSION") or info.version,
+        "build version",
+    )
+    build_revision = _safe_build_field(
+        revision or os.environ.get("SONDER_BUILD_REVISION") or info.commit_sha,
+        "build revision",
+    )
+    if build_revision != "unknown" and not re.fullmatch(r"[0-9a-fA-F]{40}", build_revision):
+        raise ValueError("build revision must be a full 40-character Git commit SHA")
+    return {"version": build_version, "commit_sha": build_revision.lower()}
+
+
 def _copy_engine_bundle(source: Path, stage: Path) -> None:
     bundle = engine_bundle.load_engine_bundle(source, verify_hashes=True)
     target_root = stage / "engine" / bundle.identity
@@ -364,7 +391,13 @@ def _copy_engine_bundle(source: Path, stage: Path) -> None:
         shutil.copy2(source_path, target)
 
 
-def copy_payload(dest: Path, engine_bundle_source: Path | None = None) -> None:
+def copy_payload(
+    dest: Path,
+    engine_bundle_source: Path | None = None,
+    *,
+    build_version: str | None = None,
+    build_revision: str | None = None,
+) -> None:
     dest = validate_output_path(dest)
     if dest.exists():
         if not dest.is_dir():
@@ -407,6 +440,14 @@ def copy_payload(dest: Path, engine_bundle_source: Path | None = None) -> None:
             "If engine/<platform>-<architecture>/ exists, setup verifies and uses its sealed\n"
             "Python, Ollama, and model payload without network access. Code-only packages use\n"
             "host runtimes and may install mcp or pull missing models on first setup.\n",
+            encoding="utf-8",
+        )
+        (stage / "sonder_build.json").write_text(
+            json.dumps(
+                _build_identity(build_version, build_revision),
+                indent=2,
+                sort_keys=True,
+            ) + "\n",
             encoding="utf-8",
         )
         missing = sorted(name for name in REQUIRED_FILES if not (stage / name).is_file())
@@ -582,6 +623,16 @@ def main() -> int:
         default=os.environ.get("SONDER_ENGINE_BUNDLE_SOURCE", ""),
         help="optional sealed platform engine bundle to include",
     )
+    parser.add_argument(
+        "--build-version",
+        default=os.environ.get("SONDER_BUILD_VERSION", ""),
+        help="runtime version to stamp (defaults to sonder_version.VERSION)",
+    )
+    parser.add_argument(
+        "--build-revision",
+        default=os.environ.get("SONDER_BUILD_REVISION", ""),
+        help="full Git commit SHA to stamp (defaults to the checkout HEAD)",
+    )
     args = parser.parse_args()
 
     if Path(args.out).is_absolute():
@@ -589,7 +640,12 @@ def main() -> int:
     try:
         out = validate_output_path(ROOT / args.out)
         bundle_source = Path(args.engine_bundle).expanduser() if args.engine_bundle else None
-        copy_payload(out, bundle_source)
+        copy_payload(
+            out,
+            bundle_source,
+            build_version=args.build_version or None,
+            build_revision=args.build_revision or None,
+        )
     except (RuntimeError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
     if args.zip:
