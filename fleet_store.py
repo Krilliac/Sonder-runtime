@@ -720,6 +720,12 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
             SELECT
                 COUNT(*) AS total_agents,
                 SUM(CASE WHEN status IN ('queued','running') THEN 1 ELSE 0 END) AS active_agents,
+                -- Full-table count of agents currently inside a model call, so a
+                -- caller gating on GPU contention sees the whole population and
+                -- not the top-N by updated_ts that the paginated agents list
+                -- carries.
+                SUM(CASE WHEN status IN ('queued','running') AND in_model_call=1
+                    THEN 1 ELSE 0 END) AS active_model_calls,
                 SUM(CASE WHEN status='running' AND cancel_requested=1 THEN 1 ELSE 0 END) AS cancel_pending,
                 SUM(CASE WHEN status='interrupted' THEN 1 ELSE 0 END) AS interrupted_agents,
                 COALESCE(SUM(tokens_in), 0) AS tokens_in,
@@ -742,6 +748,7 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
         ).fetchall()
         return {
             "active_agents": int(totals["active_agents"] or 0),
+            "active_model_calls": int(totals["active_model_calls"] or 0),
             "cancel_pending": int(totals["cancel_pending"] or 0),
             "interrupted_agents": int(totals["interrupted_agents"] or 0),
             "total_agents": int(totals["total_agents"] or 0),
