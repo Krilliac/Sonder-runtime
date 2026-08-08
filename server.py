@@ -66,6 +66,7 @@ import ollama_lifecycle
 import admin_auth
 import codegen_loop
 import file_ops
+import content_digest
 import context_policy
 import command_registry
 import adaptive_training
@@ -557,6 +558,7 @@ LIVE_RELOAD_MODULES = [
     "ollama_lifecycle",
     "admin_auth",
     "file_ops",
+    "content_digest",
     "context_policy",
     "command_registry",
     "permission_rules",
@@ -7364,6 +7366,94 @@ def context_pack(
 
 
 @mcp.tool()
+def file_digest(
+    path: str,
+    max_bytes: int = 32_000_000,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Stream a guarded regular file into a fixed SHA-256 content digest."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"path": path, "max_bytes": max_bytes}
+    try:
+        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
+        data = content_digest.digest_file(
+            path, max_bytes=max_bytes, extra_roots=trusted_roots,
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "file_digest", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    summary = "%d byte(s)%s" % (
+        data["bytes"], ", incomplete" if data["sha256"] is None else "",
+    )
+    output = content_digest.format_digest(data)
+    _record_direct_tool(
+        "file_digest", args, ok=data["sha256"] is not None,
+        started=started, summary=summary, output=output,
+    )
+    activity_tracker.record_event(
+        "file_digest", summary=summary, path=data["path"],
+    )
+    return output
+
+
+@mcp.tool()
+def directory_digest(
+    path: str = ".",
+    max_depth: int = 12,
+    max_files: int = 2_000,
+    max_total_bytes: int = 32_000_000,
+    max_file_bytes: int = 32_000_000,
+    max_results: int = 2_500,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Build a guarded deterministic SHA-256 file manifest and tree Merkle.
+
+    A complete merkle_sha256 is returned only when every eligible file was
+    hashed. Partial, capped, sensitive, symlinked, unreadable, or changing
+    trees expose only partial_merkle_sha256 plus explicit reasons/errors.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "path": path, "max_depth": max_depth, "max_files": max_files,
+        "max_total_bytes": max_total_bytes, "max_file_bytes": max_file_bytes,
+        "max_results": max_results,
+    }
+    try:
+        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
+        data = content_digest.digest_directory(
+            path, max_depth=max_depth, max_files=max_files,
+            max_total_bytes=max_total_bytes, max_file_bytes=max_file_bytes,
+            max_results=max_results, extra_roots=trusted_roots,
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "directory_digest", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    summary = "%d file(s), %d byte(s)%s" % (
+        len(data["manifest"]), data["bytes"],
+        " complete" if data["complete"] else " incomplete",
+    )
+    output = content_digest.format_digest(data)
+    _record_direct_tool(
+        "directory_digest", args, ok=data["complete"], started=started,
+        summary=summary, output=output,
+    )
+    activity_tracker.record_event(
+        "directory_digest", summary=summary, path=data["root"],
+    )
+    return output
+
+
+@mcp.tool()
 def data_inspect(
     path: str,
     max_bytes: int = 256000,
@@ -10119,6 +10209,7 @@ def tool_manifest() -> str:
         "offload": "Route a self-contained task to a configured local/cloud tier.",
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
         "workspace_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace inventory, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
+        "file_digest/directory_digest": "Stream guarded files into SHA-256 and build deterministic relative-path manifests with fail-closed complete or explicitly partial directory Merkle roots.",
         "file_policy/file_find/file_read/file_write/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete with approval bypass support.",
         "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
         "environment_status": "Report the host OS, available shells (PowerShell/cmd/bash/wsl), and installed toolchains -- check before choosing a command shape or assuming a tool exists.",
@@ -10178,6 +10269,8 @@ AGENT_TOOL_HELP = """Available tools:
 - directory_create: {"path": "output/reports", "parents": true}
 - file_find: {"query": "*.py", "root": ".", "max_results": 50}
 - file_read: {"path": "README.md"}
+- file_digest: {"path": "artifact.bin", "max_bytes": 32000000}
+- directory_digest: {"path": ".", "max_depth": 12, "max_files": 2000, "max_total_bytes": 32000000, "max_file_bytes": 32000000, "max_results": 2500}
 - file_read_range: {"path": "server.py", "start_line": 1, "end_line": 200}
 - context_pack: {"paths_json": ["README.md", "src/main.py"], "max_files": 12, "max_total_bytes": 256000, "max_bytes_per_file": 64000}
 - text_search: {"query": "TODO", "root": ".", "glob": "*.py", "regex": false, "max_results": 100}
@@ -10246,7 +10339,7 @@ or
 
 
 REPOSITORY_READ_ONLY_TOOLS = frozenset({
-    "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range", "context_pack",
+    "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_digest", "directory_digest", "file_read_range", "context_pack",
     "data_inspect",
     "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
@@ -10270,6 +10363,8 @@ an exact symbol named by the task; do not default to Python or server.py.
 - directory_tree: {"path": ".", "depth": 2, "max_entries": 200}
 - file_find: {"query": "<task-relevant filename or glob>", "root": ".", "max_results": 50}
 - file_read: {"path": "<task-relevant relative path>", "max_bytes": 256000}
+- file_digest: {"path": "<task-relevant relative file>", "max_bytes": 32000000}
+- directory_digest: {"path": ".", "max_depth": 12, "max_files": 2000, "max_total_bytes": 32000000, "max_file_bytes": 32000000, "max_results": 2500}
 - file_read_range: {"path": "<task-relevant relative path>", "start_line": 1, "end_line": 200}
 - context_pack: {"paths_json": ["<task-relevant relative path>", "<another task-relevant relative path>"], "max_files": 12, "max_total_bytes": 256000, "max_bytes_per_file": 64000}
 - text_search: {"query": "<exact task symbol or anchor>", "root": ".", "glob": "<task-relevant glob>", "max_results": 100}
@@ -10520,7 +10615,7 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
     if scope_error:
         return scope_error
     try:
-        if tool_name in {"file_read", "file_read_range", "image_inspect", "data_inspect"}:
+        if tool_name in {"file_read", "file_digest", "file_read_range", "image_inspect", "data_inspect"}:
             file_ops.resolve_repository_read_path(
                 args.get("path", ""),
                 allow_workspace_root=False,
@@ -10535,7 +10630,7 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
                     reject_sensitive=True,
                     extra_roots=trusted_extra_roots,
                 )
-        elif tool_name in {"workspace_inventory", "directory_tree", "file_find", "text_search", "script_search"}:
+        elif tool_name in {"workspace_inventory", "directory_digest", "directory_tree", "file_find", "text_search", "script_search"}:
             file_ops.resolve_repository_read_path(
                 args.get("path", "") or args.get("root", "") or ".",
                 allow_workspace_root=True,
@@ -11185,6 +11280,26 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "file_digest":
+        return file_digest(
+            path=args.get("path", ""),
+            max_bytes=args.get("max_bytes", 32_000_000),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "directory_digest":
+        return directory_digest(
+            path=args.get("path", args.get("root", ".")),
+            max_depth=args.get("max_depth", 12),
+            max_files=args.get("max_files", 2_000),
+            max_total_bytes=args.get("max_total_bytes", 32_000_000),
+            max_file_bytes=args.get("max_file_bytes", 32_000_000),
+            max_results=args.get("max_results", 2_500),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "file_write":
         return file_write(
             path=args.get("path", ""),
@@ -11487,7 +11602,7 @@ def _agent_activity_command(tool_name, args):
 
 
 _PROJECT_SCOPED_PATH_TOOLS = frozenset({
-    "file_read", "file_read_range", "context_pack", "image_inspect", "file_write", "file_edit",
+    "file_read", "file_digest", "directory_digest", "file_read_range", "context_pack", "image_inspect", "file_write", "file_edit",
     "file_delete", "directory_create", "workspace_inventory", "directory_tree",
     "file_find", "text_search", "script_search", "artifact_verify",
     "artifact_ground", "scaffold_project",
@@ -12025,7 +12140,7 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
     # persistent files just edited. self_heal_check is likewise unrelated.
     return False
 _WORK_INSPECTION_TOOLS = frozenset({
-    "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range", "context_pack",
+    "file_policy", "workspace_inventory", "directory_tree", "directory_digest", "file_find", "file_read", "file_digest", "file_read_range", "context_pack",
     "text_search", "script_search", "program_search", "image_inspect",
     "memory_search", "learning_health_status", "evaluation_history_status",
     "memory_quality_report", "memory_privacy_review", "artifact_ground",
@@ -12033,8 +12148,8 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "status", "diagnostics",
 })
 _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
-    "file_policy", "workspace_inventory", "directory_tree", "file_find",
-    "file_read", "file_read_range", "context_pack", "text_search", "script_search",
+    "file_policy", "workspace_inventory", "directory_tree", "directory_digest", "file_find",
+    "file_read", "file_digest", "file_read_range", "context_pack", "text_search", "script_search",
     "program_search", "image_inspect", "environment_status",
 })
 _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
@@ -13168,8 +13283,8 @@ def workbench_agent(
 
 
 _AUTOPILOT_OBSERVE_TOOLS = frozenset({
-    "file_policy", "workspace_inventory", "directory_tree", "file_find",
-    "file_read", "file_read_range", "text_search", "script_search",
+    "file_policy", "workspace_inventory", "directory_tree", "directory_digest", "file_find",
+    "file_read", "file_digest", "file_read_range", "text_search", "script_search",
     "program_search", "image_inspect", "memory_search", "web_search",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
