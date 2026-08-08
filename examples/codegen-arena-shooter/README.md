@@ -248,3 +248,37 @@ directory that a number meant something other than what it appeared to.
 prompt) failed all four attempts across both runs. Five of the seven remaining
 gaps are `Screens` and `LobbyNet` — Raylib layout and `UdpClient` lifecycle,
 the bodies that need a real API used the way that library actually works.
+
+## 35 / 38 — and the last three gains were fixes to the PROMPT
+
+A 14B (`qwen2.5-coder:14b`, ~9 GB against 6.1 GB of VRAM, the remainder in
+system RAM) converted 6 of the 12 bodies the 7B had failed 2–4 times each,
+including `ClassKit.Get` — the 24-value stat table that is pure recall and had
+failed every prior attempt.
+
+Then the interesting part. Four `Screens` bodies plus `LobbyNet.Poll` had now
+failed roughly **eleven attempts across four model configurations** (7B
+ensemble ×2, 7B single, 14B ×2). That reads as a capability ceiling. It was
+not. Capturing the actual compiler errors instead of the counts showed the same
+two mistakes every time:
+
+| Error | Cause |
+|---|---|
+| `'ClassId' does not contain a definition for 'Name'/'MaxHealth'/'Damage'` | `ClassKit.All` is `ClassId[]` and `Combatant.Kit` is a `ClassId` — enums, not kits |
+| `cannot convert from 'float' to 'int'` ×4 | Raylib's 2D draw calls take int pixels; computed positions are floats |
+
+Both are **facts the prompt did not carry**. The `ClassId` one is the sharper
+lesson: the note said *"one button per `ClassKit.All` entry, each showing that
+kit's Name"*, which reads as though an entry **is** a kit. The model did exactly
+what the prose said.
+
+Stating the types explicitly landed `ClassSelect` immediately, and adding a
+shared traps preamble landed `Hud`. **33 → 34 → 35, with no model change.**
+
+The rule this run earns: **when a body fails repeatedly, read the compiler
+errors before concluding the model cannot do it.** A count tells you it failed;
+only the error says whether the prompt was complete. Three of these five
+"ceiling" bodies were the contract's fault, and the same discipline that stops
+an error count being misread applies to a failure count.
+
+Still open: `LobbyNet.Poll`, `Screens.Lobby`, `Screens.Scoreboard`.

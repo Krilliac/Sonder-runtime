@@ -111,6 +111,32 @@ def extract_body(text: str, signature: str) -> str:
     return text
 
 
+def reply_failed(reply: str) -> str:
+    """The runtime's error string, when the call did not produce an answer.
+
+    ensemble_answer reports failure by RETURNING prose, not by raising. The
+    first version of this driver passed that prose to extract_body, spliced the
+    English into the C# file, and scored the resulting syntax errors as if the
+    model had written bad code.
+
+    Measured: with Ollama down, a full 38-slot run reported "0 / 38 bodies
+    implemented" and exited 0. Every slot showed the SAME 8 masking errors,
+    because every slot was compiling the same error message. Nothing about the
+    model was measured, and the report did not say so -- it looked exactly like
+    a capability result.
+
+    A constant error count across different inputs is the tell. Treat it as an
+    aborting condition rather than a body: continuing produces a number that
+    means nothing, which is worse than stopping.
+    """
+    head = (reply or "").strip()[:200]
+    if head.startswith("ERROR:") or "no model produced an answer" in head:
+        return head
+    if not head:
+        return "empty reply from the runtime"
+    return ""
+
+
 def dependency_brief(done: list) -> str:
     if not done:
         return ""
@@ -228,6 +254,15 @@ def main():
             prompt = base_prompt + feedback
             reply = server.ensemble_answer(
                 prompt, tiers=args.tiers, num_predict=args.num_predict, mode="code")
+            failure = reply_failed(reply)
+            if failure:
+                # Not a body. Stop the whole run: every remaining slot would
+                # compile the same error text and the tally would read as a
+                # capability result.
+                print("\nABORT: the runtime returned an error, not code:\n  %s"
+                      % failure, flush=True)
+                print("Nothing was measured. Fix the runtime and re-run.", flush=True)
+                return 2
             body = extract_body(reply, signature)
             if not body:
                 status = "attempt %d: empty reply" % attempt
