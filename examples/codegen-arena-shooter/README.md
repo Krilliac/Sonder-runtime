@@ -315,3 +315,53 @@ The transferable rule, which cost several wrong conclusions to learn: **an
 error count and a failure count are the same kind of lie.** Neither says why.
 Before concluding a model cannot do something, read what the compiler actually
 said — and run the case in isolation to separate a real limit from a bad draw.
+
+## The held-out check: 33 passed, and the one failure was invisible to the compiler
+
+A green build proves nothing about behaviour, so `Verify/` loads the generated
+assembly by reflection and exercises it. It could never run against v1 — that
+tree never compiled, so it produced no assembly. v2 does, which makes the check
+finally meaningful.
+
+This is [SpecBench](https://arxiv.org/abs/2605.21384)'s Δ measured locally:
+the **visible** check is `dotnet build`, the **held-out** check is whether the
+code does what the contract said.
+
+First run: **31 passed, 1 failed.**
+
+```
+PASS  EncodeInput produces a payload  -- I7.1.5000.2.2500.-3.7500.0.5000.-0.2500.1
+FAIL  DecodeInput accepts what EncodeInput produced
+```
+
+Two generated bodies that each compile perfectly and **disagree with each
+other** — the encoder joined fields with `.`, which collides with the decimal
+point and makes the payload unparseable. No compiler can see this.
+
+### Both causes were the contract, again
+
+**1. A separator described in prose.** The note said *"joined by the bar
+character"* rather than showing `|`. The model chose `.`. Fixed by writing the
+literal character and an example payload — after which the encoder was correct
+and the **decoder** became the failure, splitting on `,` and expecting 5 fields.
+
+**2. A sibling reference used as a contract.** The decoder's note said only
+*"Parse what EncodeInput produced"*. That asks the model to hold **two bodies
+in agreement**, which is precisely what it cannot do — it never sees its
+sibling. Restating the wire format in full, in the decoder's own note, closed
+the round trip: **33 passed, 0 failed.**
+
+> "Same format as X" is not a contract. Restate it, do not reference it.
+
+That is the whole cross-file failure of v1 in miniature — and the fix is not a
+better model, it is refusing to make one body depend on another being guessed
+correctly.
+
+### What the check covers
+
+`ClassKit`, `GameMap`, `Combatant`, `NetProtocol`, `MatchState` — everything
+testable without a window. It confirms the map has real walls (v1's very first
+generation declared `MapData` and never assigned it, which is not a compile
+error), that walking into a wall never ends inside one, that lethal damage
+clamps, that a kill scores for the killer's team only, and that a suicide
+scores for nobody. `Screens` and `Program` need a display and are not covered.

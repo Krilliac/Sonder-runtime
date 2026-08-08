@@ -98,26 +98,39 @@ Deaths here -- MatchState.RegisterKill owns scoring.""",
 
     "NetProtocol.cs:EncodeState": """\
 Build a payload whose first line is "S" then a bar then matchTime, followed by
-one line per player. Separate fields with the bar character and lines with a
+one line per player. Separate fields with a literal | (U+007C, the pipe) and lines with a
 newline. Per player, in this exact order: Id, Name, Team, (int)Kit, Position.X,
 Position.Y, Position.Z, Yaw, Health, Kills, Deaths. Format every float with
 CultureInfo.InvariantCulture. Use a StringBuilder.""",
 
     "NetProtocol.cs:ApplyState": """\
 The exact reverse of EncodeState. Split the payload into lines, skip the
-leading "S" line, and for each remaining line split on the bar character, parse
+leading "S" line, and for each remaining line split on the literal | character, parse
 the Id, find the Combatant in players with that Id, and if found copy
 Position, Yaw, Health, Kills and Deaths onto it. Ignore any malformed line
 instead of throwing. Parse with CultureInfo.InvariantCulture.""",
 
     "NetProtocol.cs:EncodeInput": """\
-Return "I", id, pos.X, pos.Y, pos.Z, yaw, pitch and firing joined by the bar
-character, floats in CultureInfo.InvariantCulture and firing as "1" or "0".""",
+Return "I", id, pos.X, pos.Y, pos.Z, yaw, pitch joined by a literal |
+(U+007C, the pipe) -- NOT a dot, which would collide with the decimal point
+and make the payload unparseable. Floats in CultureInfo.InvariantCulture,
+firing as "1" or "0". Example shape: I|7|1.5|2.25|-3.75|0.5|-0.25|1""",
 
     "NetProtocol.cs:DecodeInput": """\
-Parse what EncodeInput produced. Return null when the payload is null or empty,
-does not start with "I", has the wrong field count, or any field fails to
-parse. Never throw.""",
+Parse what EncodeInput produced. Do NOT infer its format -- it is restated
+here in full, because a body cannot see its sibling and "the same format as X"
+is not a contract this model can hold:
+
+    I|7|1.5|2.25|-3.75|0.5|-0.25|1
+    ^  ^  ^^^^^^^^^^^^^^^^^^^^^^  ^^^  ^^^^^  ^
+    |  id  pos.X  pos.Y  pos.Z    yaw  pitch  firing (1 or 0)
+
+So: split on the literal | (U+007C, the pipe) -- NOT a comma --
+and expect EXACTLY 8 fields, the first of which is the literal "I".
+Parse with CultureInfo.InvariantCulture.
+
+Return null when the payload is null or empty, does not start with "I", does
+not have 8 fields, or any field fails to parse. Never throw.""",
 
     "MatchState.cs:Update": """\
 Return immediately unless Phase is MatchPhase.Live. Subtract dt from
