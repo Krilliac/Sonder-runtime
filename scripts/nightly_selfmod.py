@@ -283,8 +283,14 @@ def run(server, log, *, test_timeout=1800, branch=True):
         ("syntax", [py, "-m", "ruff", "check", target]),
         ("regression", [py, "-m", "pytest", "-q"]),
     ):
+        # cwd is deliberately NOT passed. record_test computes
+        # `(workspace / _rel(workspace, cwd)).parent` for an explicit cwd,
+        # which for the workspace itself resolves to its PARENT -- so every
+        # command ran one directory above the checkout and ruff reported
+        # E902 file-not-found, which read as a lint failure of the
+        # candidate. The default already is the workspace.
         outcome = selfmod.record_test(
-            run_id, kind, command, cwd=str(workspace), timeout=test_timeout)
+            run_id, kind, command, timeout=test_timeout)
         passed = bool(outcome.get("passed")) if isinstance(outcome, dict) else bool(outcome)
         results.append((kind, passed))
         log("  %s: %s" % (kind, "pass" if passed else "FAIL"))
