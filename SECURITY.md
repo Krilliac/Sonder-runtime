@@ -52,44 +52,25 @@ Mitigations that are already in place and worth knowing about:
 The default posture binds Ollama to `127.0.0.1` and keeps the runtime local.
 Nothing is exposed to the network. If you are evaluating Sonder, stay here.
 
-### Served (`deploy_sonder.sh --serve`)
+### Local development service (`deploy_sonder.sh --serve`)
 
-This mode is genuinely public. It installs a systemd unit with
-`SONDER_HOST=0.0.0.0`, generates a random `SONDER_API_KEY`, and prints a
-`http://<ip>:<port>/v1` URL. Understand three things before you run it:
+This convenience mode installs a loopback-only systemd service. It generates a
+random `SONDER_API_KEY`, stores it in `/etc/sonder/sonder-local.env` with mode
+0600, and prints a `http://127.0.0.1:<port>/v1` URL for local clients. It does
+not provide a supported remote deployment and must not be port-forwarded.
 
-1. **The API key is the only authentication.** Anyone who finds the port and
-   has the key gets the full tool surface described above.
-2. **It speaks plain HTTP.** The key travels in cleartext, so anyone on the
-   path — shared wifi, a hop upstream, a compromised router — can capture it
-   and replay it. Do not use this mode across an untrusted network as shipped.
-3. **The firewall is yours to configure.** The script reminds you; it cannot
-   do it for you.
+Older revisions of this script bound `0.0.0.0` and advertised a plaintext
+public URL. Upgrade before using it, remove any firewall rule that exposed port
+11435, and rotate the API key if it ever crossed a network in cleartext.
 
-For anything beyond a private LAN, terminate TLS in front of it and never
-expose the runtime port directly:
+### Remote access
 
-```nginx
-server {
-    listen 443 ssl;
-    server_name sonder.example.com;
-
-    ssl_certificate     /etc/letsencrypt/live/sonder.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/sonder.example.com/privkey.pem;
-
-    location /v1/ {
-        proxy_pass http://127.0.0.1:11435/v1/;
-        proxy_set_header Host $host;
-        proxy_read_timeout 600s;   # generation can be slow
-    }
-}
-```
-
-Then bind the runtime itself to loopback (`SONDER_HOST=127.0.0.1` in the unit
-file) so the only route in is through the proxy, and restrict the port at the
-firewall or cloud security group.
-
-Rotate `SONDER_API_KEY` if it has ever crossed a network in cleartext.
+Install the [server-private profile](docs/runbooks/install-server-private.md),
+keep its runtime listener on `127.0.0.1`, and follow the
+[secure remote access runbook](docs/runbooks/secure-remote-access.md). The
+reference nginx configuration terminates TLS, limits requests, and forwards to
+the loopback listener. Never expose the runtime port directly: possession of a
+valid credential grants access to the runtime's powerful tool surface.
 
 ## Supported versions
 
