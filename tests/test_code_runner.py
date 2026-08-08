@@ -168,6 +168,26 @@ def test_cpp_compiler_finds_visual_studio_vcvars_from_vswhere(monkeypatch):
     assert path.endswith(r"VC\Auxiliary\Build\vcvars64.bat")
 
 
+def test_vcvars_fallback_uses_current_system_drive_not_a_data_drive(monkeypatch):
+    roots = []
+    monkeypatch.delenv("SONDER_VCVARS64", raising=False)
+    monkeypatch.delenv("ProgramFiles", raising=False)
+    monkeypatch.delenv("ProgramFiles(x86)", raising=False)
+    monkeypatch.setenv("SystemDrive", "E:")
+    monkeypatch.setattr(code_runner.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(code_runner.os.path, "isfile", lambda _path: False)
+    monkeypatch.setattr(
+        code_runner.glob,
+        "glob",
+        lambda root: roots.append(root) or [],
+    )
+
+    assert code_runner._find_visual_studio_vcvars() is None
+    assert roots
+    assert all(root.startswith("E:") for root in roots)
+    assert not any(root.startswith("D:") for root in roots)
+
+
 def test_run_cpp_uses_msvc_batch_when_vcvars_available(monkeypatch, tmp_path):
     source = tmp_path / "snippet.cpp"
     source.write_text("int main(){return 0;}", encoding="utf-8")

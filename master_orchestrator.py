@@ -104,7 +104,7 @@ _EMBEDDED_EVIDENCE = re.compile(
 )
 # An ABSOLUTE path to a concrete source/text file names existing repository
 # state to inspect, whatever the verb. Without this, "generate a summary of the
-# file D:\repo\X.cpp" missed the repository lane (its verb is not read/inspect/
+# file C:\repo\X.cpp" missed the repository lane (its verb is not read/inspect/
 # ...) and routed to an ungrounded generation path that fabricated the file's
 # contents. Relative paths (output.txt, models/foo.glb) are NOT matched, so
 # greenfield "write to <relative>" tasks stay creative.
@@ -490,7 +490,7 @@ def repository_project_root(task: str) -> str:
                 raw = raw[1:close]
 
         # A label is often followed by another sentence on the same line
-        # ("Repository: D:\\repo. Read-only review..."). Try progressively
+        # ("Repository: C:\\repo. Read-only review..."). Try progressively
         # shorter word prefixes, stripping sentence punctuation each time.
         words = raw.split()
         candidates = [raw]

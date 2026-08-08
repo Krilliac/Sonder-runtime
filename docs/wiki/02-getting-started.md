@@ -50,7 +50,9 @@ immutable versioned release under `/opt/sonder`, writes `0600` secrets
 (never printing the key), and installs hardened systemd units:
 
 ```bash
-sudo packaging/install_sonder.sh
+python3 scripts/package_local_system.py --out dist/local-system
+sudo packaging/install_sonder.sh --package-source dist/local-system \
+  --version-tag "$(git describe --always)"
 sudo systemctl enable --now sonder
 ```
 
@@ -71,8 +73,8 @@ runtime recovers on its own (it probes every 15s), no restart needed.
 
 ## Clients
 
-- **OpenAI-compatible UIs** — base URL `http://<host>:11435/v1`, any bearer
-  key when `SONDER_API_KEY` is set.
+- **OpenAI-compatible UIs** — use `http://127.0.0.1:11435/v1` locally or the
+  configured `https://` reverse-proxy URL remotely, with the bearer key.
 - **REPL** — `python -m sonder_runtime repl`; slash commands like `/stats`,
   `/run`, `/permissions`, `/autopilot`.
 - **MCP** — `python -m sonder_runtime mcp` exposes the tool surface to MCP
