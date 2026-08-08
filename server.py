@@ -8100,48 +8100,6 @@ def run_code(
 
 
 @mcp.tool()
-def shell_run(
-    command: str,
-    shell: str = "auto",
-    cwd: str = "",
-    timeout: int = 30,
-) -> str:
-    """Run one shell command line in the host's preferred shell.
-
-    The environment-reactive front door for command lines like
-    `Get-ChildItem -LiteralPath "D:\\" -File | Select-Object Name` or
-    `grep -rn TODO src | head`: shell="auto" picks what this host actually
-    has (PowerShell on Windows, bash elsewhere -- see environment_status),
-    so callers do not guess the platform. Accepts full pipelines, variables,
-    and multi-statement lines.
-
-    Runs through the same hardened lane as run_code (the command becomes a
-    temp script: control-plane secrets are stripped from the child
-    environment, output is trimmed, the timeout is bounded), so this is a
-    convenience shape, not a new privilege level.
-    """
-    _maybe_live_reload()
-    line = (command or "").strip()
-    if not line:
-        return "ERROR: shell_run needs a command."
-    choice = (shell or "auto").strip().lower()
-    if choice in ("auto", ""):
-        env = environment_probe.probe()
-        preferred = env["preferred_shell"]
-        if not preferred:
-            return "ERROR: no shell found on PATH (looked for powershell/pwsh/cmd/bash/sh)."
-        choice = preferred
-    language = {
-        "powershell": "powershell", "pwsh": "powershell", "ps1": "powershell",
-        "bash": "bash", "sh": "bash", "zsh": "bash", "shell": "bash",
-    }.get(choice)
-    if language is None:
-        return ("ERROR: unsupported shell %r; use powershell, bash, or auto "
-                "(cmd batch lines are not supported -- use PowerShell)" % choice)
-    return run_code(code=line, language=language, timeout=timeout, cwd=cwd)
-
-
-@mcp.tool()
 def run_project(
     files_json: str,
     commands_json: str = "",
@@ -10170,7 +10128,6 @@ def tool_manifest() -> str:
         "permission_policy/permission_rule_set": "Inspect or guarded-edit local permission rules for tool actions.",
         "context_compaction_plan": "Preview when to summarize, split sessions, or reduce live context.",
         "run_code": "Run a bounded snippet: Python, JS/TypeScript, Bash, Ruby, Perl, PHP, Lua, R, Go, Java, Rust, PowerShell, C++, C#.",
-        "shell_run": "Run one shell command line (pipelines OK) in this host's preferred shell -- auto-picks PowerShell on Windows, bash elsewhere.",
         "ground_artifact": "Validate in-memory non-code content with exact/contains/regex/JSON checks.",
         "artifact_ground": "Validate files or bundles with inferred writing, data, editable Office/media/timelines, UI, image, audio, and static or animated humanoid model recipes.",
         "run_project": "Run a bounded temporary multi-file project with optional build commands.",
@@ -11054,13 +11011,6 @@ def _agent_dispatch(
             stdin=args.get("stdin", ""),
             timeout=args.get("timeout", 10),
         )
-    if tool_name == "shell_run":
-        return shell_run(
-            command=args.get("command", ""),
-            shell=args.get("shell", "auto"),
-            cwd=args.get("cwd", ""),
-            timeout=args.get("timeout", 30),
-        )
     if tool_name == "run_project":
         return run_project(
             files_json=args.get("files_json", args.get("files", [])),
@@ -11262,7 +11212,6 @@ def _agent_dispatch(
             name=args.get("name", ""),
             root=args.get("root", ""),
             apply=bool(args.get("apply", True)),
-            with_tests=bool(args.get("with_tests", False)),
         )
     if tool_name == "environment_status":
         return environment_status(refresh=bool(args.get("refresh", False)))
@@ -11758,7 +11707,7 @@ _SPECULATABLE_ARGFREE_TOOLS = frozenset({
     "context_health", "command_registry_list",
 })
 _WORK_VALIDATION_TOOLS = frozenset({
-    "workspace_run", "script_run", "run_code", "shell_run", "run_project", "ground_artifact", "artifact_ground",
+    "workspace_run", "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_verify", "game_reference_suite", "game_generate_and_test",
     "game_generation_campaign", "self_heal_check", "workspace_inventory", "directory_tree", "file_find",
     "file_read", "file_read_range", "text_search", "image_inspect",
@@ -12139,7 +12088,7 @@ _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "program_search", "image_inspect", "environment_status",
 })
 _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
-    "workspace_run", "script_run", "run_code", "shell_run", "run_project", "workflow_run",
+    "workspace_run", "script_run", "run_code", "run_project", "workflow_run",
 })
 _LOCAL_AGENT_NUM_PREDICT = 1200
 # A hosted agent decision may contain a complete bounded file_write payload.
@@ -13286,7 +13235,7 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
 })
 _AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
     "directory_create", "file_write", "file_batch_write", "file_edit", "workspace_run",
-    "script_run", "run_code", "shell_run", "run_project", "ground_artifact", "artifact_ground",
+    "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_generate", "artifact_verify", "game_reference_suite",
     "game_generate_and_test",
 })
@@ -14899,7 +14848,6 @@ def scaffold_project(
     name: str,
     root: str = "",
     apply: bool = False,
-    with_tests: bool = False,
 ) -> str:
     """Emit a complete, deterministic project skeleton for one language.
 
@@ -14917,13 +14865,11 @@ def scaffold_project(
     With apply=True it writes each file under `root` through the same guarded
     file path as every other write (mode=create -- an existing file is an
     error, a scaffold never clobbers), so filesystem roots and approval gates
-    apply. `root` is required to apply. with_tests=True adds a unit-test
-    skeleton for the kinds that have one (python/rust/go/node/typescript);
-    the default stays minimal by design.
+    apply. `root` is required to apply.
     """
     _maybe_live_reload()
     try:
-        files = project_scaffold.render(kind, name, with_tests=with_tests)
+        files = project_scaffold.render(kind, name)
     except ValueError as exc:
         return "ERROR: %s" % exc
 

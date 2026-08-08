@@ -161,9 +161,12 @@ def test_empty_and_case_insensitive_error_answers_are_failures():
 
 
 def test_contradictory_judge_is_malformed_and_unicode_overlap_survives():
+    calls = {"count": 0}
+
     def ask(prompt, _tier):
         if prompt.startswith("Do these answers agree"):
             return "YES. They agree. NO. Actually they conflict."
+        calls["count"] += 1
         return "使用缓存"
 
     result = consult_module.consult("q", _LOCAL_PAIR, ask_fn=ask)
