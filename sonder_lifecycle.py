@@ -20,7 +20,6 @@ adopts the production behavior on first use.
 """
 from __future__ import annotations
 
-import json
 import os
 import socket
 import threading
@@ -136,6 +135,7 @@ class RuntimeLifecycle:
         self._maintenance_cache: tuple[float, tuple[str, ...]] = (0.0, ())
 
         self._idempotency: dict[str, dict] = {}
+        self._idempotency_inflight: dict[str, threading.Event] = {}
         self._idempotency_lock = threading.Lock()
 
         self._probe_thread: threading.Thread | None = None
@@ -383,15 +383,29 @@ class RuntimeLifecycle:
         """Return the recorded response for ``key`` or compute and record."""
         if not key:
             return factory()
-        with self._idempotency_lock:
-            if key in self._idempotency:
-                return self._idempotency[key]
-        result = factory()
+        while True:
+            with self._idempotency_lock:
+                if key in self._idempotency:
+                    return self._idempotency[key]
+                pending = self._idempotency_inflight.get(key)
+                if pending is None:
+                    pending = threading.Event()
+                    self._idempotency_inflight[key] = pending
+                    break
+            # Only the first request executes the side effect for this key.
+            pending.wait()
+        try:
+            result = factory()
+        except BaseException:
+            with self._idempotency_lock:
+                self._idempotency_inflight.pop(key).set()
+            raise
         with self._idempotency_lock:
             if len(self._idempotency) > 1024:
                 self._idempotency.clear()
-            self._idempotency.setdefault(key, result)
-            return self._idempotency[key]
+            self._idempotency[key] = result
+            self._idempotency_inflight.pop(key).set()
+            return result
 
     # -- endpoint payloads -------------------------------------------------
 

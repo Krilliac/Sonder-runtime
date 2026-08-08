@@ -116,9 +116,12 @@ class ShutdownCoordinator:
 
     def drain(self, *, reason: str = "shutdown requested") -> bool:
         """Run the full drain sequence; True when it completed cleanly."""
-        if self._draining.is_set():
-            return True
-        self._draining.set()
+        # Admission and the re-entry decision share this lock, making the
+        # Event's otherwise separate check/set operations atomic.
+        with self._lock:
+            if self._draining.is_set():
+                return True
+            self._draining.set()
         try:
             self._tracker.transition(ProcessState.DRAINING, reason)
         except Exception:

@@ -117,6 +117,14 @@ def test_run_code_jobs_compile_only():
     assert results[0]["output"] == "compiled"
 
 
+def test_compile_code_removes_compiled_bytecode(tmp_path, monkeypatch):
+    monkeypatch.setattr(grounding.tempfile, "tempdir", str(tmp_path))
+
+    assert grounding.compile_code("pass") == (True, "compiled")
+
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_run_code_jobs_records_language(monkeypatch):
     monkeypatch.setattr(
         grounding,

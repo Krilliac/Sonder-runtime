@@ -111,3 +111,15 @@ def test_operation_context_deadline_and_identity():
         correlation_id="req_y", timeout_seconds=0.0
     )
     assert expired.expired
+
+
+def test_default_cancellation_wait_honours_positive_timeout(monkeypatch):
+    sleeps = []
+    context = _context()
+    monkeypatch.setattr(
+        "sonder_runtime.application.context.time.sleep", sleeps.append
+    )
+
+    assert context.cancellation.wait(0.5) is False
+
+    assert sleeps == [0.5]

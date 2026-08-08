@@ -355,12 +355,23 @@ def compile_code(code, timeout=8, interp=None):
     """Syntax-compile Python code without executing it."""
     interp = interp or sys.executable
     fd, path = tempfile.mkstemp(suffix=".py")
+    bytecode_path = path + "c"
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(code)
         try:
             c = subprocess.run(
-                [interp, "-m", "py_compile", path],
+                [
+                    interp,
+                    "-c",
+                    (
+                        "import py_compile,sys; "
+                        "py_compile.compile(sys.argv[1], cfile=sys.argv[2], "
+                        "doraise=True)"
+                    ),
+                    path,
+                    bytecode_path,
+                ],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
@@ -372,7 +383,12 @@ def compile_code(code, timeout=8, interp=None):
         except subprocess.TimeoutExpired:
             return False, "(timed out after %ss)" % timeout
     finally:
-        os.unlink(path)
+        # py_compile otherwise leaves a unique .pyc in the shared temp cache.
+        for temporary_path in (path, bytecode_path):
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
 
 
 def _combine(proc):
