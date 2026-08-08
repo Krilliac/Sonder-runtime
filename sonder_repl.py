@@ -225,6 +225,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /route <request>   suggest the tier best suited to a request, and why
   /refactor <file> <fn> [goal]  propose a guarded improvement to one function
   /scaffold <kind> <name> [root]  write a full project skeleton (cpp-msvc, csharp, rust, ...)
+  /env [refresh]     show the host OS, shells, and installed toolchains
   /location [on|off] allow approximate IP location for "my area" weather answers
   /stats             show Sonder Runtime's learning stats
   /context           show context, session, and memory health meters
@@ -752,6 +753,9 @@ def main():
                 do_route(arg)
             elif cmd == "/refactor":
                 do_refactor(arg)
+            elif cmd in ("/env", "/environment"):
+                print(server.environment_status(
+                    refresh=(arg or "").strip().lower() == "refresh"))
             elif cmd == "/scaffold":
                 parts = arg.split()
                 if len(parts) < 2:

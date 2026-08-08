@@ -57,10 +57,28 @@ def test_targets_dedupe_by_resolved_model(monkeypatch):
     assert unknown == []
 
 
-def test_targets_skip_cloud_tiers():
-    """An ensemble must not silently ship the prompt off-box."""
-    targets, _ = server._ensemble_targets("cloud-code,cloud-general")
+def test_named_cloud_tiers_join_only_when_cloud_is_enabled(monkeypatch):
+    """A cloud tier the caller NAMED is not silent -- it joins when enabled.
+
+    Disabled cloud is reported in `unknown`, not swallowed: consult's cloud
+    leg must see WHY its tier is absent instead of a generic empty poll.
+    """
+    monkeypatch.setattr(server, "cloud_allowed", lambda: False)
+    targets, unknown = server._ensemble_targets("cloud-code,cloud-general")
     assert targets == []
+    assert unknown and all("cloud disabled" in item for item in unknown)
+
+    monkeypatch.setattr(server, "cloud_allowed", lambda: True)
+    targets, unknown = server._ensemble_targets("cloud-general")
+    assert [tier for tier, _model in targets] == ["cloud-general"]
+    assert unknown == []
+
+
+def test_implicit_default_never_includes_cloud(monkeypatch):
+    """Only NAMED cloud tiers may leave the box; the default poll never does."""
+    monkeypatch.setattr(server, "cloud_allowed", lambda: True)
+    targets, _ = server._ensemble_targets("")
+    assert all(not server._is_cloud_tier(tier, model) for tier, model in targets)
 
 
 def test_targets_report_unknown_tiers(monkeypatch):
