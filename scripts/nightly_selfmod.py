@@ -228,6 +228,15 @@ def _diff_objection(original: str, edited: str):
         if line.startswith("+"):
             added.append(line[1:].strip())
 
+    # A net-new print() is rejected. This is server/library code with a real
+    # logging path; a print goes nowhere useful and in an MCP server can corrupt
+    # a stdio protocol stream. It is also the tell for the fail-open handler
+    # that slipped through once: a candidate wrapped a DB call in
+    # `try/except Exception as e: print(...); return []`, swallowing a real
+    # error and reporting nothing. Rejecting the print rejects that whole shape.
+    if any("print(" in ln for ln in added) and not any("print(" in ln for ln in removed):
+        return "adds a print() -- library code logs, it does not print"
+
     for line in removed:
         if re.match(r"^(return|raise)\b", line):
             return ("rewrites an existing `%s` -- that is a contract change, "
