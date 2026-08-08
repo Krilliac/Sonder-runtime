@@ -66,6 +66,7 @@ import ollama_lifecycle
 import admin_auth
 import codegen_loop
 import file_ops
+import git_history
 import context_policy
 import command_registry
 import adaptive_training
@@ -555,6 +556,7 @@ LIVE_RELOAD_MODULES = [
     "ollama_lifecycle",
     "admin_auth",
     "file_ops",
+    "git_history",
     "context_policy",
     "command_registry",
     "permission_rules",
@@ -10057,6 +10059,92 @@ def session_export(session: str = "", limit: int = 50) -> str:
 
 
 @mcp.tool()
+def repo_log(
+    path: str = ".",
+    revision: str = "HEAD",
+    file_path: str = "",
+    count: int = 20,
+    timeout: float = 5.0,
+    max_bytes: int = 256000,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Read bounded structured commit history from an exact repository root."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "path": path, "revision": revision, "file_path": file_path,
+        "count": count, "timeout": timeout, "max_bytes": max_bytes,
+    }
+    try:
+        data = git_history.repo_log(
+            path,
+            revision=revision,
+            file_path=file_path,
+            count=count,
+            timeout=timeout,
+            max_bytes=max_bytes,
+            extra_roots=(
+                extra_roots if _file_bypass_allowed(token, approval) else ""
+            ),
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "repo_log", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = json.dumps(data, indent=2, sort_keys=True)
+    _record_direct_tool(
+        "repo_log", args, ok=True, started=started,
+        summary="%d commit(s)" % data["count"], output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def repo_show(
+    path: str = ".",
+    revision: str = "HEAD",
+    file_path: str = "",
+    timeout: float = 5.0,
+    max_bytes: int = 256000,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Read one bounded structured commit and patch from an exact repository root."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "path": path, "revision": revision, "file_path": file_path,
+        "timeout": timeout, "max_bytes": max_bytes,
+    }
+    try:
+        data = git_history.repo_show(
+            path,
+            revision=revision,
+            file_path=file_path,
+            timeout=timeout,
+            max_bytes=max_bytes,
+            extra_roots=(
+                extra_roots if _file_bypass_allowed(token, approval) else ""
+            ),
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "repo_show", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = json.dumps(data, indent=2, sort_keys=True)
+    _record_direct_tool(
+        "repo_show", args, ok=True, started=started,
+        summary=data["commit"][:12], output=output,
+    )
+    return output
+
+
+@mcp.tool()
 def tool_manifest() -> str:
     """List the sonder-runtime MCP tools and what they are for."""
     tools = {
@@ -10072,6 +10160,7 @@ def tool_manifest() -> str:
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
         "workspace_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace inventory, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
         "file_policy/file_find/file_read/file_write/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete with approval bypass support.",
+        "repo_log/repo_show": "Read bounded structured Git history and patches from an exact project repository without shell execution or upward discovery.",
         "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
         "environment_status": "Report the host OS, available shells (PowerShell/cmd/bash/wsl), and installed toolchains -- check before choosing a command shape or assuming a tool exists.",
         "data_inspect": "Read-only structured preview of JSON/JSONL/TOML/YAML/CSV/TSV/SQLite/ZIP/TAR/INI data files inside allowed roots.",
@@ -10131,6 +10220,8 @@ AGENT_TOOL_HELP = """Available tools:
 - file_read: {"path": "README.md"}
 - file_read_range: {"path": "server.py", "start_line": 1, "end_line": 200}
 - context_pack: {"paths_json": ["README.md", "src/main.py"], "max_files": 12, "max_total_bytes": 256000, "max_bytes_per_file": 64000}
+- repo_log: {"path": ".", "revision": "HEAD", "file_path": "", "count": 20, "timeout": 5, "max_bytes": 256000}
+- repo_show: {"path": ".", "revision": "HEAD", "file_path": "", "timeout": 5, "max_bytes": 256000}
 - text_search: {"query": "TODO", "root": ".", "glob": "*.py", "regex": false, "max_results": 100}
 - file_write: {"path": "notes.txt", "content": "...", "mode": "create|overwrite|append"}
 - file_edit: {"path": "notes.txt", "old": "before", "new": "after", "count": 1}
@@ -10197,6 +10288,7 @@ or
 
 REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range", "context_pack",
+    "repo_log", "repo_show",
     "data_inspect",
     "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
@@ -10221,6 +10313,8 @@ an exact symbol named by the task; do not default to Python or server.py.
 - file_read: {"path": "<task-relevant relative path>", "max_bytes": 256000}
 - file_read_range: {"path": "<task-relevant relative path>", "start_line": 1, "end_line": 200}
 - context_pack: {"paths_json": ["<task-relevant relative path>", "<another task-relevant relative path>"], "max_files": 12, "max_total_bytes": 256000, "max_bytes_per_file": 64000}
+- repo_log: {"path": ".", "revision": "HEAD", "file_path": "<optional contained relative path>", "count": 20, "timeout": 5, "max_bytes": 256000}
+- repo_show: {"path": ".", "revision": "HEAD", "file_path": "<optional contained relative path>", "timeout": 5, "max_bytes": 256000}
 - text_search: {"query": "<exact task symbol or anchor>", "root": ".", "glob": "<task-relevant glob>", "max_results": 100}
 - script_search: {"query": "<task-relevant script name>", "root": ".", "max_results": 100}
 - program_search: {"query": "<required program name>", "max_results": 50}
@@ -10482,6 +10576,12 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
                     reject_sensitive=True,
                     extra_roots=trusted_extra_roots,
                 )
+        elif tool_name in {"repo_log", "repo_show"}:
+            root = git_history.resolve_repo_root(
+                args.get("path", "."), extra_roots=trusted_extra_roots,
+            )
+            git_history.validate_revision(args.get("revision", "HEAD"))
+            git_history.resolve_path_filter(root, args.get("file_path", ""))
         elif tool_name in {"workspace_inventory", "directory_tree", "file_find", "text_search", "script_search"}:
             file_ops.resolve_repository_read_path(
                 args.get("path", "") or args.get("root", "") or ".",
@@ -10489,7 +10589,7 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
                 reject_sensitive=True,
                 extra_roots=trusted_extra_roots,
             )
-    except (PermissionError, ValueError) as exc:
+    except (OSError, PermissionError, RuntimeError, ValueError) as exc:
         return "ERROR: repository read-only path rejected: %s" % exc
     return ""
 
@@ -11108,6 +11208,29 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "repo_log":
+        return repo_log(
+            path=args.get("path", "."),
+            revision=args.get("revision", "HEAD"),
+            file_path=args.get("file_path", ""),
+            count=args.get("count", 20),
+            timeout=args.get("timeout", 5.0),
+            max_bytes=args.get("max_bytes", 256000),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "repo_show":
+        return repo_show(
+            path=args.get("path", "."),
+            revision=args.get("revision", "HEAD"),
+            file_path=args.get("file_path", ""),
+            timeout=args.get("timeout", 5.0),
+            max_bytes=args.get("max_bytes", 256000),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "text_search":
         return text_search(
             query=args.get("query", args.get("pattern", "")),
@@ -11424,7 +11547,8 @@ def _agent_activity_command(tool_name, args):
 
 
 _PROJECT_SCOPED_PATH_TOOLS = frozenset({
-    "file_read", "file_read_range", "context_pack", "image_inspect", "file_write", "file_edit",
+    "file_read", "file_read_range", "context_pack", "repo_log", "repo_show",
+    "image_inspect", "file_write", "file_edit",
     "file_delete", "directory_create", "workspace_inventory", "directory_tree",
     "file_find", "text_search", "script_search", "artifact_verify",
     "artifact_ground", "scaffold_project",
@@ -11962,6 +12086,7 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
     return False
 _WORK_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range", "context_pack",
+    "repo_log", "repo_show",
     "text_search", "script_search", "program_search", "image_inspect",
     "memory_search", "learning_health_status", "memory_quality_report", "memory_privacy_review", "artifact_ground",
     "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",
@@ -11969,7 +12094,8 @@ _WORK_INSPECTION_TOOLS = frozenset({
 })
 _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find",
-    "file_read", "file_read_range", "context_pack", "text_search", "script_search",
+    "file_read", "file_read_range", "context_pack", "repo_log", "repo_show",
+    "text_search", "script_search",
     "program_search", "image_inspect", "environment_status",
 })
 _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
@@ -12826,7 +12952,8 @@ def _agent_impl(
                 repeated_inspection_counts.pop(call_signature, None)
         if tool_name in {
             "workspace_inventory", "directory_tree", "file_read", "file_read_range", "file_find",
-            "text_search", "script_search", "image_inspect",
+            "context_pack", "repo_log", "repo_show", "text_search",
+            "script_search", "image_inspect",
         } and tool_ok:
             file_evidence = True
         if auto_checklist and tool_name in _WORK_INSPECTION_TOOLS and tool_ok:
@@ -13104,7 +13231,8 @@ def workbench_agent(
 
 _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find",
-    "file_read", "file_read_range", "text_search", "script_search",
+    "file_read", "file_read_range", "repo_log", "repo_show",
+    "text_search", "script_search",
     "program_search", "image_inspect", "memory_search", "web_search",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
