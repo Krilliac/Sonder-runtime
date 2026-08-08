@@ -132,3 +132,25 @@ def test_improve_reports_a_missing_function():
     res = ci.improve_function(_MODULE, "missing", _ask("whatever"))
     assert not res["ok"]
     assert "no top-level function" in res["reason"]
+
+
+def test_splice_rejects_multiple_top_level_definitions_and_invalid_syntax():
+    planted = "def alpha(x):\n    return x + 1\n\n\ndef planted():\n    pass\n"
+    assert ci.splice_function(_MODULE, planted) is None
+    assert ci.splice_function(_MODULE, "def alpha(x)\n    return x\n") is None
+
+
+def test_signature_parenthesis_in_string_does_not_delete_neighbour():
+    module = 'def f(x="("):\n    return x\n\n\ndef g():\n    return 2\n'
+    reply = 'def f(x="("):\n    if x is None:\n        x = ""\n    return x\n'
+    out = ci.splice_function(module, reply)
+    assert out is not None
+    ast.parse(out)
+    assert "def g():" in out
+
+
+def test_internal_fence_line_is_not_removed_and_hash_strings_are_code():
+    fenced = 'def f():\n    return """alpha\n```\nomega"""\n'
+    assert "```" in ci.strip_fences(fenced)
+    assert ci.diff_objection('def f():\n    return "#old"\n',
+                             'def f():\n    return "#new"\n') != "comment-only change (the code is unchanged)"

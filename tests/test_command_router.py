@@ -110,3 +110,15 @@ def test_environment_phrasings_resolve_to_env():
     assert cr.resolve("show the environment") == "/env"
     assert cr.resolve("what os are you running on?") == "/env"
     assert cr.resolve("which toolchains are installed") == "/env"
+
+
+def test_command_prefixes_do_not_hijack_longer_prose_or_drop_followup_work():
+    for text in (
+        "reset the session token when it expires",
+        "exit handler should flush the queue",
+        "fix the memory quality if the report shows duplicates",
+        "cancel all agents only if they are stuck",
+        "read the file notes.txt and summarize it",
+        "delete the file scratch.txt unless it is still used",
+    ):
+        assert cr.resolve(text) is None, text
