@@ -283,9 +283,18 @@ def _lesson_outcome_metrics(conn) -> dict:
     # falls back to the undiscounted upper bound and this report says 6
     # quarantined while retrieval actually excludes 0 -- a monitoring surface
     # disagreeing with the behaviour it exists to monitor.
+    # The fallback below is NOT free, so it is recorded rather than swallowed.
+    # It produces exactly the disagreement the paragraph above describes -- the
+    # report claiming lessons are quarantined that retrieval still serves --
+    # and the trigger is ordinary: two full-table scans of lesson_usage, so a
+    # transient "database is locked" from any concurrent writer lands here. A
+    # silent downgrade turns the monitor into a source of wrong numbers with no
+    # sign that anything happened.
+    attribution_error = ""
     try:
         stats = retriever.usage_stats_with_attribution(conn)
-    except Exception:
+    except Exception as exc:
+        attribution_error = "%s: %s" % (type(exc).__name__, exc)
         stats = memory_store.lesson_usage_stats(conn)
     scored = _scored_retrievals(conn)
     evaluated = 0
@@ -347,6 +356,10 @@ def _lesson_outcome_metrics(conn) -> dict:
     }
     metrics.update(reference)
     metrics.update(_shared_blame_metrics(conn, loss_only_ids, quarantined_ids))
+    # Empty when attribution ran. Non-empty means every loss and quarantine
+    # count above is the undiscounted UPPER BOUND -- shared blame not divided
+    # out -- so the report overstates what retrieval actually excludes.
+    metrics["lesson_attribution_error"] = attribution_error
     return metrics
 
 
@@ -395,6 +408,9 @@ def _shared_blame_metrics(conn, loss_only_ids, quarantined_ids) -> dict:
         "quarantine_distinct_failed_interactions": _distinct_failed_interactions(
             conn, quarantined_ids
         ),
+        # Empty when attribution ran. Non-empty means every loss count above is
+        # the undiscounted UPPER BOUND -- shared blame not divided out -- so the
+        # quarantine figure overstates what retrieval actually excludes.
     }
 
 
@@ -754,12 +770,18 @@ def format_report(report: dict) -> str:
             report.get("unvalidated_lessons", 0),
             report.get("synthetic_unvalidated_lessons", 0),
         ),
-        "  lesson feedback: evaluated=%s | with losses=%s | loss-only=%s | quarantined=%s"
+        "  lesson feedback: evaluated=%s | with losses=%s | loss-only=%s | quarantined=%s%s"
         % (
             report.get("evaluated_lessons", 0),
             report.get("lessons_with_losses", 0),
             report.get("loss_only_lessons", 0),
             report.get("quarantined_lessons", 0),
+            # Say it on the line carrying the numbers it invalidates, not in a
+            # footnote further down that a reader quoting the figure will miss.
+            "   <- UPPER BOUND: blame attribution failed (%s), so these counts "
+            "are not what retrieval excludes"
+            % report["lesson_attribution_error"]
+            if report.get("lesson_attribution_error") else "",
         ),
         "    loss-only expected from task difficulty alone: %s "
         "| beyond that reference class: %s | on a single retrieval: %s"

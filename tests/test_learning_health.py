@@ -715,3 +715,42 @@ def test_caller_judged_outcomes_are_attributed_to_the_tier_that_produced_them():
     assert by_tier["(unattributed)"]["outcomes"] == 1
     assert "by tier" in rendered
     assert "small sample" in rendered
+
+
+def test_failed_blame_attribution_is_reported_not_swallowed(monkeypatch):
+    """A bare except downgraded the loss stats to the undiscounted upper bound
+    and said nothing, so the report claimed lessons were quarantined that
+    retrieval still served -- a monitoring surface disagreeing with the
+    behaviour it exists to monitor.
+
+    The trigger is ordinary: attribution runs two full-table scans, so any
+    concurrent writer can raise "database is locked" here.
+    """
+    import retriever
+
+    conn = _conn()
+    try:
+        for interaction_id in ("i1", "i2"):
+            _interaction(conn, interaction_id)
+        memory_store.record_outcome_row(conn, "i1", "accepted", 0.8)
+        memory_store.record_outcome_row(conn, "i2", "rejected", -0.5)
+
+        clean = learning_health.build_report(conn)
+        assert clean["lesson_attribution_error"] == ""
+        assert "UPPER BOUND" not in learning_health.format_report(clean)
+
+        def boom(_conn):
+            raise Exception("database is locked")
+
+        monkeypatch.setattr(retriever, "usage_stats_with_attribution", boom)
+        degraded = learning_health.build_report(conn)
+    finally:
+        conn.close()
+
+    assert "database is locked" in degraded["lesson_attribution_error"]
+    rendered = learning_health.format_report(degraded)
+    feedback = [ln for ln in rendered.splitlines() if "lesson feedback" in ln]
+    assert feedback, "the lesson feedback line should still render"
+    # The caveat rides on the line carrying the numbers it invalidates, not in
+    # a footnote a reader quoting the quarantine count would skip.
+    assert "UPPER BOUND" in feedback[0]
