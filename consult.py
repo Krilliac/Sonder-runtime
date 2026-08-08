@@ -10,7 +10,7 @@ import re
 import sys
 
 
-_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
 _JUDGE_RE = re.compile(r"^\s*(YES|NO)\b", re.IGNORECASE)
 _HEURISTIC_AGREEMENT_THRESHOLD = 0.5
 
@@ -26,7 +26,17 @@ def _default_ask(prompt, tier):
 def _failure(text):
     value = str(text or "").strip()
     lowered = value.lower()
-    return value.startswith("ERROR:") or "no model produced an answer" in lowered
+    return (not value) or lowered.startswith("error:") or "no model produced an answer" in lowered
+
+
+def _judge_verdict(text):
+    """Return YES/NO only for one-line, internally consistent judge output."""
+    value = str(text or "").strip()
+    match = re.fullmatch(r"(YES|NO)\b[^\r\n]*", value, re.IGNORECASE)
+    if match is None:
+        return None
+    verdicts = re.findall(r"\b(?:YES|NO)\b", value, re.IGNORECASE)
+    return match.group(1).upper() if len(verdicts) == 1 else None
 
 
 def _ask(ask_fn, prompt, tier):
@@ -137,8 +147,8 @@ def consult(prompt, tiers=None, *, ask_fn=None, cloud_ok=None):
         }
 
     judge, judge_failed = _ask(ask, _judge_prompt(question, ok), ok[0][0])
-    match = None if judge_failed else _JUDGE_RE.match(judge)
-    if match is None:
+    verdict = None if judge_failed else _judge_verdict(judge)
+    if verdict is None:
         agree = _all_overlap([text for _tier, text in ok])
         note = "Judge failed; token-overlap heuristic says the tiers %s.%s" % (
             "agree" if agree else "disagree",
@@ -146,7 +156,7 @@ def consult(prompt, tiers=None, *, ask_fn=None, cloud_ok=None):
         )
         confidence = "unknown"
     else:
-        agree = match.group(1).upper() == "YES"
+        agree = verdict == "YES"
         confidence = "high" if agree else "low"
         note = ("All tiers agree on the substance." if agree else "Tiers disagree.") + tail
 
