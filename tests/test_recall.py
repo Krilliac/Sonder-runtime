@@ -203,3 +203,34 @@ def test_recall_unversioned_runtime_rejects_hashed_revision():
         c, "task", qv=[1.0, 0.0], min_sim=0.5,
         embedding_model="embed-v2", embedding_revision="",
     ) == []
+
+
+def test_recall_closes_code_fence_opened_by_truncation():
+    """An unterminated ``` would swallow the "# Task:" header that follows."""
+    c = _conn()
+    long_resp = "Here is the fix:\n\n```cpp\n" + "int x = 0;\n" * 60 + "```\n"
+    _store_good(c, "i1", "task", long_resp, [1.0, 0.0])
+    out = recall.recall(c, "q", embed_fn=lambda t: [1.0, 0.0], min_sim=0.5)
+    fences = [line for line in out[0].splitlines() if line.lstrip().startswith("```")]
+    assert len(fences) % 2 == 0, out[0][-120:]
+    assert out[0].rstrip().endswith("```")
+
+
+def test_recall_truncation_leaves_fence_free_text_alone():
+    c = _conn()
+    _store_good(c, "i1", "task", "y" * 1000, [1.0, 0.0])
+    out = recall.recall(c, "q", embed_fn=lambda t: [1.0, 0.0], min_sim=0.5)
+    assert "```" not in out[0]
+    assert out[0].endswith("…")
+
+
+def test_recall_does_not_open_a_fence_the_prefix_already_neutralized():
+    """A ``` on the response's FIRST line lands after "task -> " and so opens
+    nothing; appending a closer there would open a block instead of closing
+    one. 63% of live truncate-length responses start with a fence."""
+    c = _conn()
+    _store_good(c, "i1", "task", "```py\n" + "z = 1\n" * 100, [1.0, 0.0])
+    out = recall.recall(c, "q", embed_fn=lambda t: [1.0, 0.0], min_sim=0.5)
+    assert not out[0].rstrip().endswith("```")
+    fences = [line for line in out[0].splitlines() if line.lstrip().startswith("```")]
+    assert fences == []

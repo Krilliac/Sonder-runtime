@@ -2,11 +2,13 @@ from contextlib import contextmanager
 import http.client
 import json
 import os
+import socket
 import threading
 
 import pytest
 
 import sonder_serve as ts
+import sonder_config
 import sonder_health
 
 
@@ -728,3 +730,52 @@ def test_deployment_gating_summary_warns_only_when_open(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "k" * 32)
     monkeypatch.setattr(ts, "AUTH_MODE", "api-key")
     assert "holds developer" not in ts._deployment_gating_summary()
+
+
+def test_bind_gate_tracks_the_named_minimum_key_length(monkeypatch):
+    """The bind-time gate must read MIN_API_KEY_LENGTH, not a copy of its value.
+
+    It was a bare literal 24, so raising the named constant would have hardened
+    sonder_config.validate and left this gate -- the one that actually decides
+    whether a non-loopback listener opens -- at the old minimum.
+    """
+    monkeypatch.setattr(sonder_config, "MIN_API_KEY_LENGTH", 40)
+
+    with pytest.raises(RuntimeError):
+        ts._validate_bind_security(
+            "0.0.0.0", api_key="k" * 30, auth_mode="api-key", auth_secret=""
+        )
+    ts._validate_bind_security(
+        "0.0.0.0", api_key="k" * 40, auth_mode="api-key", auth_secret=""
+    )
+
+
+def test_handler_declares_a_bounded_connection_timeout():
+    """Handler declared no timeout, so StreamRequestHandler never set one and a
+    stalled connection held its thread forever -- before any auth ran."""
+    assert isinstance(ts.Handler.timeout, (int, float))
+    assert 0 < ts.Handler.timeout <= 300
+
+
+def test_stalled_connection_is_dropped_rather_than_holding_its_thread(monkeypatch):
+    """Proves the mechanism the attribute above relies on: socketserver applies
+    Handler.timeout to the connection and the stalled read closes it."""
+    stalling = type("StallTimeoutHandler", (ts.Handler,), {"timeout": 0.5})
+    monkeypatch.setattr(ts, "_maybe_live_reload", lambda: None)
+    httpd = ts.ThreadingHTTPServer(("127.0.0.1", 0), stalling)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        sock = socket.create_connection(("127.0.0.1", httpd.server_address[1]), timeout=10)
+        try:
+            # A request line with no terminating blank line: the server parks in
+            # rfile.readline() waiting for headers that never come.
+            sock.sendall(b"GET /v1/models HTTP/1.1\r\n")
+            sock.settimeout(10)
+            assert sock.recv(4096) == b"", "connection should be closed, not held open"
+        finally:
+            sock.close()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)

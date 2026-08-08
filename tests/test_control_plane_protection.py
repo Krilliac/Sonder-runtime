@@ -174,3 +174,40 @@ def test_developer_can_recursively_delete_tree_with_protected_descendant(
 
     assert result["deleted"] is True
     assert not target.exists()
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "sonder_runtime/__init__.py",
+        "sonder_runtime/domain/execution/policy.py",
+        "sonder_runtime/bootstrap/__init__.py",
+    ],
+)
+def test_runtime_package_python_requires_developer(monkeypatch, tmp_path, relative):
+    # Regression: the mutation guard recognized Sonder's own modules only by
+    # `parent == root`, so the whole sonder_runtime package -- which
+    # permission_rules imports at module load -- was writable with no
+    # developer token while <root>/server.py was refused.
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: tmp_path)
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("before", encoding="utf-8")
+
+    with pytest.raises(PermissionError, match="authenticated developer token"):
+        file_ops.edit_file(str(target), "before", "after")
+    with pytest.raises(PermissionError, match="authenticated developer token"):
+        file_ops.write_file(str(target), "after", mode="overwrite")
+
+    assert target.read_text(encoding="utf-8") == "before"
+
+
+def test_runtime_package_python_editable_with_developer(monkeypatch, tmp_path):
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: tmp_path)
+    target = tmp_path / "sonder_runtime" / "domain" / "execution" / "policy.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("before", encoding="utf-8")
+
+    file_ops.edit_file(str(target), "before", "after", developer_authorized=True)
+
+    assert target.read_text(encoding="utf-8") == "after"

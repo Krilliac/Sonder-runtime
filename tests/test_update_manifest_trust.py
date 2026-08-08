@@ -300,6 +300,35 @@ def test_insecure_source_escape_hatch_allows_internal_mirror(monkeypatch):
     assert sonder_updates._assert_public_update_source("http://127.0.0.1/x") is None
 
 
+def test_pinned_connect_failure_never_falls_back_to_unpinned_open(monkeypatch):
+    """A failed pinned connect must not retry through the unpinned opener.
+
+    The plain urlopen re-resolves DNS and follows redirects with no address
+    check, so falling back on a pinned-connect failure hands a hostile origin
+    a second, unvalidated resolution just by refusing the first connection.
+    """
+    import urllib.error
+    import urllib.request
+
+    import web_tools
+
+    def _pinned_boom(req, timeout=None):
+        raise urllib.error.URLError("no validated address was reachable")
+
+    unpinned_calls = []
+
+    def _unpinned(req, timeout=None):
+        unpinned_calls.append(getattr(req, "full_url", req))
+        raise AssertionError("the unpinned opener must never be reached")
+
+    monkeypatch.setattr(web_tools, "_urlopen", _pinned_boom)
+    monkeypatch.setattr(urllib.request, "urlopen", _unpinned)
+
+    with pytest.raises(urllib.error.URLError):
+        sonder_updates._default_opener("http://8.8.8.8/engine.tar.gz", {})
+    assert unpinned_calls == []
+
+
 def test_opener_rejects_non_http_scheme(tmp_path):
     with pytest.raises(TrustError):
         sonder_updates._assert_public_update_source("ftp://example.com/x")

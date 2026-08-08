@@ -23,12 +23,11 @@ import os
 import platform as _platform
 import shutil
 import sqlite3
-import subprocess
 import sys
 import tarfile
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import sonder_migrations
@@ -449,17 +448,19 @@ def _default_opener(u, h):
     addresses = _assert_public_update_source(u)
     req = urllib.request.Request(u, headers=h)
     if addresses:
-        try:
-            import web_tools
+        # Once we hold pinned addresses the pinned open is the ONLY open.  A
+        # blanket `except Exception: pass` here used to fall through to the
+        # plain urlopen below, which re-resolves DNS and follows redirects
+        # unchecked: an origin that answered validation from a public address
+        # and then refused the pinned connection got the guard dropped and a
+        # second, unvalidated resolution — the exact SSRF primitive the
+        # resolve-once-then-pin path exists to deny.  Only a missing web_tools
+        # (validation never pinned anything, addresses is None) may use the
+        # plain path.
+        import web_tools
 
-            req._sonder_addresses = addresses
-            return web_tools._urlopen(req, timeout=120)
-        except TrustError:
-            raise
-        except Exception:
-            # web_tools became unavailable after validation; the origin was
-            # already confirmed public, so a plain (unpinned) open is safe.
-            pass
+        req._sonder_addresses = addresses
+        return web_tools._urlopen(req, timeout=120)
     return urllib.request.urlopen(req, timeout=120)
 
 

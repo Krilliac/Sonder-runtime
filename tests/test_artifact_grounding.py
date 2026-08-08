@@ -1,5 +1,6 @@
 import hashlib
 import json
+import struct
 import zipfile
 from pathlib import Path
 
@@ -38,6 +39,22 @@ def _rewrite_zip_entry(path: Path, entry_name: str, transform):
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as destination:
         for info, data in entries:
             destination.writestr(info, data)
+
+
+def _rewrite_glb_document(path: Path, transform):
+    """Apply `transform` to a GLB's JSON chunk and rebuild the container."""
+    payload = bytearray(path.read_bytes())
+    json_length = struct.unpack_from("<I", payload, 12)[0]
+    document = json.loads(payload[20:20 + json_length].decode("utf-8").rstrip())
+    transform(document)
+    encoded = json.dumps(document, separators=(",", ":")).encode("utf-8")
+    encoded += b" " * (-len(encoded) % 4)
+    rebuilt = bytearray(payload[:12])
+    rebuilt += struct.pack("<I", len(encoded)) + b"JSON"
+    rebuilt += encoded
+    rebuilt += payload[20 + json_length:]
+    struct.pack_into("<I", rebuilt, 8, len(rebuilt))
+    path.write_bytes(bytes(rebuilt))
 
 
 def test_text_markdown_json_and_csv_recipes(tmp_path):
@@ -577,3 +594,135 @@ def test_manifest_bundle_is_validated_against_the_directory_not_itself(tmp_path)
         if isinstance(check, dict)
     }
     assert named.get("bundle-no-undeclared-files") is False
+
+
+def test_bundle_glb_grounding_propagates_no_external_dependencies(
+    monkeypatch, tmp_path
+):
+    """glb was missing from the bundle->child propagation set, so
+    glb-no-external-dependencies was never emitted for a .glb inside a bundle.
+
+    A model whose glb pulled its textures over the network therefore passed a
+    bundle validated with no_external_dependencies=true, while a sibling
+    index.html with the same defect correctly failed. An absent check reads as
+    a pass, so the caller saw PASS with no signal that enforcement was partial.
+    """
+    monkeypatch.setattr(assetgen, "workspace_root", lambda: str(tmp_path))
+    pack = assetgen.generate_artifacts(
+        "textured-rig", "textured PBR rigged GLB character", kinds="rigged_model"
+    )
+    root = Path(pack["root"])
+
+    def _detach_texture(document):
+        image = document["images"][0]
+        image.pop("bufferView", None)
+        image.pop("mimeType", None)
+        image["uri"] = "https://cdn.example.invalid/skin.png"
+
+    _rewrite_glb_document(root / "rigged.glb", _detach_texture)
+    _update_manifest_hash(root, "rigged.glb")
+
+    result = artifact_grounding.validate(
+        root,
+        "bundle",
+        {"require_manifest": True, "no_external_dependencies": True},
+    )
+
+    emitted = {
+        item["name"]
+        for child in result["children"]
+        for item in child["checks"]
+    }
+    assert "glb-no-external-dependencies" in emitted
+    assert not result["ok"]
+    assert any(
+        item["name"] == "glb-no-external-dependencies"
+        for item in _failures(result)
+    )
+    assert not any(item["name"] == "bundle-sha256" for item in _failures(result))
+
+
+def test_html_no_external_dependencies_sees_beyond_href_and_src(tmp_path):
+    """The guard only inspected href/src, so every other way an HTML page
+    reaches the network passed as self-contained.
+
+    A @import in a <style> block, a background url() in an inline style, a
+    srcset candidate, a <video poster> and an <object data> all fetch remote
+    bytes; the page could not render offline while grounding reported
+    "external references: none".
+    """
+    page = tmp_path / "index.html"
+    page.write_text(
+        "<!doctype html><html><head>"
+        '<style>@import url("https://fonts.example.invalid/inter.css");</style>'
+        "</head><body>"
+        '<div style="background:url(https://cdn.example.invalid/hero.jpg)">x</div>'
+        '<img srcset="local.png 1x, https://cdn.example.invalid/hero@2x.png 2x">'
+        '<video poster="https://cdn.example.invalid/poster.jpg"></video>'
+        '<object data="https://cdn.example.invalid/widget.svg"></object>'
+        "</body></html>",
+        encoding="utf-8",
+    )
+
+    result = artifact_grounding.validate(
+        page, "html", {"no_external_dependencies": True}
+    )
+
+    external = next(
+        item for item in result["checks"]
+        if item["name"] == "html-no-external-dependencies"
+    )
+    assert not external["ok"]
+    for host_path in ("inter.css", "hero.jpg", "hero@2x.png", "poster.jpg", "widget.svg"):
+        assert host_path in external["detail"]
+
+
+def test_html_no_external_dependencies_allows_relative_css_and_srcset(tmp_path):
+    """The widened scan must not start rejecting local references: a relative
+    url() or srcset candidate is exactly what a self-contained page uses."""
+    (tmp_path / "hero.jpg").write_bytes(b"jpeg")
+    (tmp_path / "hero@2x.png").write_bytes(b"png")
+    page = tmp_path / "index.html"
+    page.write_text(
+        "<!doctype html><html><head>"
+        '<style>body { background: url("hero.jpg"); }</style>'
+        "</head><body>"
+        '<div style="color:#fff;background:url(hero.jpg)">x</div>'
+        '<img srcset="hero.jpg 1x, hero@2x.png 2x">'
+        "</body></html>",
+        encoding="utf-8",
+    )
+
+    result = artifact_grounding.validate(
+        page, "html", {"no_external_dependencies": True}
+    )
+
+    external = next(
+        item for item in result["checks"]
+        if item["name"] == "html-no-external-dependencies"
+    )
+    assert external["ok"], external["detail"]
+
+
+def test_ui_recipe_reports_the_files_it_actually_checked(tmp_path):
+    """checked_files reported len(declared) while the ui recipe validates only
+    .html/.htm/.svg/.json siblings.
+
+    A directory of four files rendered as "files: 4 | 0 failed" when only
+    index.html was opened, so a zero-byte logo.png in the same bundle read as
+    four files grounded.
+    """
+    (tmp_path / "app.js").write_text("var ready = 1;\n", encoding="utf-8")
+    (tmp_path / "style.css").write_text("body { margin: 0; }\n", encoding="utf-8")
+    (tmp_path / "logo.png").write_bytes(b"")
+    (tmp_path / "index.html").write_text(
+        "<!doctype html><html><body><main>Ready</main></body></html>",
+        encoding="utf-8",
+    )
+
+    result = artifact_grounding.validate(tmp_path, "ui")
+
+    assert result["ok"]
+    assert len(result["children"]) == 1
+    assert result["checked_files"] == 1
+    assert "files: 1" in artifact_grounding.format_result(result)

@@ -18,6 +18,9 @@ import sonder_paths
 MAX_READ_BYTES = 256_000
 MAX_WRITE_BYTES = 1_000_000
 MAX_FIND_RESULTS = 200
+# Ceiling on the pre-write/pre-delete snapshot decode (see _read_text_if_file).
+MAX_SNAPSHOT_BYTES = MAX_WRITE_BYTES
+SNAPSHOT_CHUNK_BYTES = 1 << 16
 DEFAULT_ROOTS_FILE = "file_roots.local"
 CONTROL_CONFIG_FILES = {
     "file_roots.local", "permissions.json", "workflows.json",
@@ -29,6 +32,16 @@ SECRET_FILES = {
 }
 SECRET_SUFFIXES = {".key", ".p12", ".pem", ".pfx"}
 SENSITIVE_READ_DIRECTORIES = {".git", ".ssh", ".aws", ".azure", ".kube"}
+# Sonder's own first-party package below the install root. The mutation guard
+# used to recognize Sonder modules only by ``parent == root``, which was true
+# when every module sat directly in the install directory. The SPEC-3 Phase 5
+# extraction moved live control logic into this package -- permission_rules
+# imports ``sonder_runtime.domain.execution.policy`` at module load -- so all
+# 46 of its modules were writable with no developer token while the byte-
+# identical edit to <root>/server.py was refused. That is unauthenticated code
+# execution in the runtime process at the next start, which is exactly what the
+# root-level clause exists to prevent.
+RUNTIME_PACKAGE_DIRS = ("sonder_runtime",)
 
 
 def _line_count(text: str) -> int:
@@ -37,13 +50,61 @@ def _line_count(text: str) -> int:
     return len(text.splitlines()) or 1
 
 
-def _read_text_if_file(path: Path) -> str:
+def _read_text_if_file(path: Path) -> str | None:
+    """Decoded contents of *path*, or ``None`` when it is too large to snapshot.
+
+    This snapshot is line-delta bookkeeping, not data the caller asked for, so
+    it must never cost more memory than the operation it annotates. It used to
+    decode the whole existing file with no cap at all, on a path reachable with
+    no credentials and no destructive intent: ``file_delete`` defaults to
+    ``dry_run=True`` and still ran the snapshot before returning, and
+    ``workspace_root()`` (which holds a 478 MB CUDA DLL under ``venv/``) is an
+    unconditional allowed root. ``errors="replace"`` turns each invalid byte
+    into U+FFFD, which forces CPython off its Latin-1 string representation, so
+    478 MB of binary decoded to ~956 MB of UCS-2 held alongside the 478 MB
+    source -- and ``_line_count`` then split it on every \\n, \\r, \\x0b, \\x0c,
+    \\x85, U+2028 and U+2029 in that binary into a list of millions of strs. A
+    few concurrent previews were enough to swap or OOM the server. The cap is
+    ``MAX_WRITE_BYTES`` rather than something smaller so the equality and
+    concatenation the callers do with this value stay exact for every input a
+    write could actually produce.
+    """
     if not path.exists() or not path.is_file():
         return ""
     try:
+        if path.stat().st_size > MAX_SNAPSHOT_BYTES:
+            return None
         return path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
+
+
+def _line_count_on_disk(path: Path) -> int:
+    """Exact line count for *path* without holding the file in memory.
+
+    Streams the bytes so an oversized file (the case where
+    ``_read_text_if_file`` declines to decode) still reports a real count
+    instead of a zero that reads like an empty file.
+    """
+    if not path.exists() or not path.is_file():
+        return 0
+    count = 0
+    tail = b""
+    try:
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(SNAPSHOT_CHUNK_BYTES)
+                if not chunk:
+                    break
+                count += chunk.count(b"\n")
+                tail = chunk[-1:]
+    except OSError:
+        return 0
+    # A final line with no terminating newline still counts, matching
+    # ``str.splitlines``.
+    if tail and tail != b"\n":
+        count += 1
+    return count
 
 
 def workspace_root() -> Path:
@@ -194,8 +255,17 @@ def _is_protected_mutation_path(path: Path) -> bool:
     path = _resolve_best_effort(path)
     if _is_sensitive_control_path(path):
         return True
+    if path.suffix.lower() != ".py":
+        return False
     root = _resolve_best_effort(workspace_root())
-    return path.suffix.lower() == ".py" and path.parent == root
+    # Sonder's own modules: directly in the install root, or anywhere inside
+    # its first-party package (see RUNTIME_PACKAGE_DIRS). A *nested user
+    # project* under the root stays editable -- only the package Sonder itself
+    # imports is added, so this closes the hole without widening the guard over
+    # ordinary workspace code.
+    if path.parent == root:
+        return True
+    return any(_is_inside(path, root / name) for name in RUNTIME_PACKAGE_DIRS)
 
 
 def _require_mutation_access(path: Path, developer_authorized: bool) -> None:
@@ -276,9 +346,17 @@ def _is_inside(path: Path, root: Path) -> bool:
     ``normpath`` is a no-op), but this is the single primitive every containment
     decision in the module funnels through, so it must not depend on every
     caller having normalized correctly.
+
+    ``normcase`` is part of that normalization on Windows, where the filesystem
+    is case-insensitive but ``commonpath`` is not: ``commonpath`` of
+    ``C:\\WORK\\sub`` and ``C:\\work`` returns ``C:\\WORK``, which does not equal
+    the root, so a genuinely contained path was refused with no explanation.
+    It fails closed, so it never allowed an escape -- but a guard that denies
+    legitimate reads based on how the caller happened to spell a drive letter is
+    still wrong. On POSIX ``normcase`` is the identity, so nothing changes there.
     """
-    path_text = os.path.normpath(str(path))
-    root_text = os.path.normpath(str(root))
+    path_text = os.path.normcase(os.path.normpath(str(path)))
+    root_text = os.path.normcase(os.path.normpath(str(root)))
     try:
         return os.path.commonpath([path_text, root_text]) == root_text
     except ValueError:
@@ -626,7 +704,7 @@ def write_file(
     p = resolve_path(path, extra_roots=extra_roots, bypass=bypass)
     _require_mutation_access(p, developer_authorized)
     before = _read_text_if_file(p)
-    before_lines = _line_count(before)
+    before_lines = _line_count(before) if before is not None else _line_count_on_disk(p)
     data = (content or "").encode("utf-8")
     if len(data) > MAX_WRITE_BYTES:
         raise ValueError("content exceeds max write bytes")
@@ -648,7 +726,13 @@ def write_file(
             f.write(content or "")
     else:
         p.write_text(content or "", encoding="utf-8", newline="")
-    after_lines = _line_count(before + (content or "")) if mode == "append" else _line_count(content or "")
+    if mode != "append":
+        after_lines = _line_count(content or "")
+    elif before is not None:
+        after_lines = _line_count(before + (content or ""))
+    else:
+        # Oversized existing file: never concatenate it just to count lines.
+        after_lines = before_lines + _line_count(content or "")
     if mode in {"create", "append"}:
         lines_added = _line_count(content or "")
         lines_deleted = 0
@@ -740,7 +824,7 @@ def delete_path(
             developer_authorized=developer_authorized,
         )
     exists = p.exists()
-    line_count = _line_count(_read_text_if_file(p))
+    line_count = _line_count_on_disk(p)
     required = "DELETE %s" % p
     if dry_run or confirm != required:
         return {

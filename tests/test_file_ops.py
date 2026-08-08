@@ -229,10 +229,83 @@ def test_repository_read_rejects_posix_absolute_root_form_off_native_host(
 def test_file_ops_errors_carry_a_reason(monkeypatch, tmp_path):
     # Regression (audit): read/write returned a bare "ERROR: <path>" with no
     # cause. The raised exceptions must state the reason.
-    import file_ops, pytest
+    import file_ops
+    import pytest
     monkeypatch.setattr(file_ops, "workspace_root", lambda: tmp_path)
     with pytest.raises(FileNotFoundError, match="file not found"):
         file_ops.read_file("nope.txt")
     file_ops.write_file("exists.txt", "x")
     with pytest.raises(FileExistsError, match="file exists"):
         file_ops.write_file("exists.txt", "y", mode="create")
+
+
+def _spy_on_read_text(monkeypatch, watched):
+    """Record every full-file decode file_ops performs on *watched*."""
+    decoded = []
+    original = file_ops.Path.read_text
+
+    def _spy(self, *args, **kwargs):
+        if os.path.normcase(str(self)) == os.path.normcase(str(watched)):
+            decoded.append(str(self))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(file_ops.Path, "read_text", _spy)
+    return decoded
+
+
+def test_delete_preview_does_not_decode_the_file(monkeypatch, tmp_path):
+    # Regression: delete_path ran its line-count snapshot BEFORE the dry-run
+    # return, decoding the whole target. file_delete defaults to dry_run=True,
+    # so previewing a 478 MB DLL inside the always-allowed install root cost
+    # ~1.4 GB of peak memory for a call that deletes nothing.
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: tmp_path)
+    target = tmp_path / "big.bin"
+    target.write_bytes(b"\x00" * (file_ops.MAX_SNAPSHOT_BYTES + 1024) + b"\n")
+    decoded = _spy_on_read_text(monkeypatch, target)
+
+    preview = file_ops.delete_path("big.bin")
+
+    assert decoded == []
+    assert preview["deleted"] is False
+    assert preview["would_delete_lines"] == 1
+
+
+def test_overwrite_of_oversized_file_does_not_decode_it(monkeypatch, tmp_path):
+    # Same snapshot, reached through write_file: MAX_WRITE_BYTES bounds the
+    # INCOMING content and never bounded the outgoing read of what was there.
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: tmp_path)
+    target = tmp_path / "big.bin"
+    target.write_bytes((b"x" * 63 + b"\n") * 20_000)
+    assert target.stat().st_size > file_ops.MAX_SNAPSHOT_BYTES
+    decoded = _spy_on_read_text(monkeypatch, target)
+
+    result = file_ops.write_file("big.bin", "small", mode="overwrite")
+
+    assert decoded == []
+    assert result["lines_before"] == 20_000
+    assert result["lines_after"] == 1
+
+
+def test_snapshot_line_count_matches_splitlines_for_ordinary_text(monkeypatch, tmp_path):
+    # The streaming counter replaced len(text.splitlines()); it must agree with
+    # it on the inputs a text file actually produces.
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: tmp_path)
+    for body in ["", "a", "a\n", "a\nb", "a\nb\n", "\n", "a\r\nb\r\n"]:
+        target = tmp_path / "sample.txt"
+        target.write_text(body, encoding="utf-8", newline="")
+        assert file_ops._line_count_on_disk(target) == file_ops._line_count(body), body
+
+
+def test_is_inside_ignores_case_where_the_filesystem_does(tmp_path):
+    # Regression: _is_inside normpath'd but did not normcase, and commonpath is
+    # case-sensitive, so on Windows a contained path spelled with a different
+    # drive/letter case was refused as an escape.
+    root = tmp_path / "Work"
+    root.mkdir()
+    inside = root / "sub" / "file.txt"
+
+    assert file_ops._is_inside(inside, root)
+    assert file_ops._is_inside(
+        file_ops.Path(str(inside).upper()), file_ops.Path(str(root).lower())
+    ) is (os.path.normcase("A") == os.path.normcase("a"))
+    assert not file_ops._is_inside(tmp_path / "Other" / "file.txt", root)

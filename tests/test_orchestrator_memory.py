@@ -19,6 +19,26 @@ def test_build_prompt_only_recalls():
     assert o.MEMORY_HEADER not in p  # no lessons block when lessons empty
 
 
+def test_each_recall_is_fenced_even_when_its_body_has_bullets():
+    # recall._format returns a multi-line "task -> response" blob and the
+    # response can carry its own "- " bullets. The rendered block must mark
+    # exactly one boundary per recall, or the model cannot tell how many prior
+    # solutions it was shown, or which lines belong to which task.
+    first = "build a tokenizer -> steps:\n- read chars\n- emit tokens"
+    second = "sort a list -> use sorted(xs)"
+    p = o.build_prompt("do X", [], recalls=[first, second])
+    section = p.split(o.RECALL_HEADER, 1)[1].split("# Task:", 1)[0]
+
+    fences = [ln for ln in section.splitlines() if ln.startswith(o.RECALL_ITEM_HEADER)]
+    assert len(fences) == 2
+    assert "%s 1 of 2" % o.RECALL_ITEM_HEADER in section
+    assert "%s 2 of 2" % o.RECALL_ITEM_HEADER in section
+    # the fence must not be confusable with a bullet a recall body could contain
+    assert not o.RECALL_ITEM_HEADER.startswith("- ")
+    # and the recalls' own bullets must not read as recall boundaries
+    assert section.count("- read chars") == 1
+
+
 def test_history_is_passed_to_generate_fn():
     c = ms.connect(":memory:")
     seen = {}

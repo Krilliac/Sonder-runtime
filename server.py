@@ -2513,7 +2513,12 @@ def _drain_deferred_distillations(limit=16):
     # batch, which answers "how much of this batch failed" -- not "how big is
     # the backlog". Draining 16 of 500 successfully reported "still deferred 0"
     # with 484 outstanding. Report the real remainder alongside it.
-    backlog = deferred
+    # Seeding this with `deferred` reinstated the very bug above when the count
+    # query lost the race with the campaign's own writers ("database is
+    # locked"): the batch number was printed as the backlog, so 484 outstanding
+    # jobs reported "backlog remaining 0". An unknown remainder is reported as
+    # unknown -- None, never a number that happens to be in scope.
+    backlog = None
     try:
         conn = _open_db()
         try:
@@ -2528,6 +2533,12 @@ def _drain_deferred_distillations(limit=16):
         "deferred": deferred,
         "backlog": backlog,
     }
+
+
+def _drain_backlog_text(drain):
+    """Render the drain's remaining backlog, or say it could not be read."""
+    backlog = drain.get("backlog")
+    return "unknown (count query failed)" if backlog is None else str(backlog)
 
 
 def _campaign_headline(
@@ -4621,10 +4632,10 @@ def campaign_generate_compile_execute_record(
     if drain["drained"]:
         lines.append(
             "deferred distillations drained: %d (lessons stored %d, "
-            "still deferred in batch %d, backlog remaining %d)"
+            "still deferred in batch %d, backlog remaining %s)"
             % (
                 drain["drained"], drain["stored"], drain["deferred"],
-                drain.get("backlog", drain["deferred"]),
+                _drain_backlog_text(drain),
             ),
         )
     for r in results:
@@ -4966,10 +4977,10 @@ def campaign_repo_repair(
     if drain["drained"]:
         lines.append(
             "deferred distillations drained: %d (lessons stored %d, "
-            "still deferred in batch %d, backlog remaining %d)"
+            "still deferred in batch %d, backlog remaining %s)"
             % (
                 drain["drained"], drain["stored"], drain["deferred"],
-                drain.get("backlog", drain["deferred"]),
+                _drain_backlog_text(drain),
             ),
         )
     for r in results:
@@ -7636,6 +7647,16 @@ def program_search(query: str = "*", max_results: int = 100) -> str:
     lines.extend("  %(name)s  [%(source)s]  %(path)s" % row for row in data["results"])
     if not data["results"]:
         lines.append("  (no programs found)")
+    if data.get("truncated"):
+        # workbench stops scanning PATH at its candidate cap and cuts at
+        # max_results BEFORE sorting, so the alphabetised rows below are a
+        # PATH-order slice, not the machine's program list. Dropping this flag
+        # made "not in the list" read as "not installed" -- every sibling
+        # search handler surfaces it.
+        lines.append(
+            "  ... truncated: cut at %d result(s) -- more may match; narrow "
+            "the query or raise max_results" % len(data["results"])
+        )
     output = "\n".join(lines)
     _record_direct_tool(
         "program_search", args, ok=True, started=started,
@@ -14259,7 +14280,7 @@ def ensemble_answer(
 
 
 def _codegen_build(program, args_json, cwd, timeout, token, approval, extra_roots):
-    """Run the project's own build and return its combined output.
+    """Run the project's own build; return (combined output, exited cleanly).
 
     Every branch that did not actually compile the code says so in words
     codegen_loop.build_ran() recognises. Without that, an infrastructure
@@ -14267,6 +14288,12 @@ def _codegen_build(program, args_json, cwd, timeout, token, approval, extra_root
     matches the error regex, counted as exactly ONE error in the trustworthy
     tier, and beat an honest candidate with thirty real errors -- so a build
     that never launched won, and every later attempt was compared against it.
+
+    The second element is the build process's own verdict, which used to be
+    dropped here. Success was then derived purely from "no line matched
+    error_regex", so a `dotnet build` that exited 1 on `error NU1101` under a
+    stricter CS\\d{4} regex -- or any toolchain whose failure text the regex does
+    not know -- reported BUILD SUCCEEDED for a project that never compiled.
     """
     try:
         data = workbench.run_program(
@@ -14278,9 +14305,9 @@ def _codegen_build(program, args_json, cwd, timeout, token, approval, extra_root
             bypass=_file_bypass_allowed(token, approval),
         )
     except Exception as exc:
-        return "error: build could not run: %s" % exc
+        return "error: build could not run: %s" % exc, False
     if not isinstance(data, dict):
-        return str(data)
+        return str(data), False
     stdout = data.get("stdout", "") or ""
     stderr = data.get("stderr", "") or ""
     parts = []
@@ -14297,7 +14324,7 @@ def _codegen_build(program, args_json, cwd, timeout, token, approval, extra_root
         parts.append("error: build output was truncated; the error summary may be missing")
     parts.append(stdout)
     parts.append(stderr)
-    return "\n".join(p for p in parts if p)
+    return "\n".join(p for p in parts if p), bool(data.get("ok"))
 
 
 @mcp.tool()
@@ -14364,14 +14391,27 @@ def codegen_build_loop(
 
     # Set when a build fails to launch or is killed. Such a build says nothing
     # about the code, so its error list must never be scored against a real
-    # candidate and must never be read as a pass.
-    build_state = {"ran": True}
+    # candidate and must never be read as a pass. `exit_ok` is the build's own
+    # verdict: a build that ran and failed is not a pass either, however few of
+    # its lines the error regex happened to recognise.
+    build_state = {"ran": True, "exit_ok": True}
 
     def run_build():
-        out = _codegen_build(build_program, build_args_json, project_dir,
-                             timeout, token, approval, extra_roots)
+        out, exit_ok = _codegen_build(build_program, build_args_json, project_dir,
+                                      timeout, token, approval, extra_roots)
         build_state["ran"] = codegen_loop.build_ran(out)
-        return codegen_loop.count_errors(out, error_regex)
+        build_state["exit_ok"] = exit_ok
+        errors = codegen_loop.count_errors(out, error_regex)
+        if not exit_ok and not errors:
+            # The compiler said no and the regex heard nothing -- a restore
+            # failure under a CS-only regex, a non-English toolchain, a Gradle
+            # "FAILURE:" banner. An empty list here read as a clean compile, so
+            # say what the process actually reported instead of inventing a pass.
+            errors = [
+                "error: the build exited with a failure status but no output "
+                "line matched error_regex"
+            ]
+        return errors
 
     def read(name):
         try:
@@ -14379,7 +14419,14 @@ def codegen_build_loop(
                 os.path.join(project_dir, name), extra_roots=extra_roots,
                 bypass=_file_bypass_allowed(token, approval),
             )
-            return data.get("content", "") if isinstance(data, dict) else str(data)
+            # read_file returns {"path","bytes","truncated","text"} -- there is no
+            # "content" key, so reading one made `existing` unconditionally empty
+            # and silently disabled every guard that depends on knowing what is
+            # already on disk: the shrink floor could not fire (shrink_rejected
+            # returns False with no incumbent), a clean file was regenerated
+            # every run, the first attempt was accepted unscored, and siblings
+            # carried no API for the next file.
+            return data.get("text", "") if isinstance(data, dict) else str(data)
         except Exception:
             return ""
 
@@ -14402,7 +14449,10 @@ def codegen_build_loop(
         # the loop skip all six remaining files and report FINAL: 1 error --
         # a no-op run that read as near-success.
         masked = codegen_loop.count_unreliable(errors)
-        if existing and not mine and not masked:
+        # ...and only if the build itself succeeded: a failing build whose
+        # errors name some other file (or no file the regex recognises) is not
+        # evidence that this one is clean.
+        if existing and not mine and not masked and build_state["exit_ok"]:
             rows.append({"name": name, "note": "already clean, not regenerated"})
             continue
 
@@ -14456,7 +14506,9 @@ def codegen_build_loop(
 
     final = run_build()
     return codegen_loop.format_report(
-        rows, final, ok=not final and build_state["ran"], ran=build_state["ran"],
+        rows, final,
+        ok=not final and build_state["ran"] and build_state["exit_ok"],
+        ran=build_state["ran"],
     )
 
 

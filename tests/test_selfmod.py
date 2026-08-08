@@ -702,3 +702,36 @@ def test_pruning_a_worktree_workspace_leaves_no_git_debris(isolated, tmp_path):
     branches = subprocess.run(["git", "branch", "--list", "selfmod/*"], cwd=repo,
                               capture_output=True, text=True).stdout
     assert branches.strip() == "", "orphaned selfmod branch left behind"
+
+
+def test_prune_reaches_runs_older_than_the_list_runs_window(isolated):
+    """The pruner must see the whole ledger, not the 200 most recent runs.
+
+    prune_workspaces asked list_runs(500), but list_runs clamps its limit to
+    200 and nothing ever deletes from selfmod_runs. Past 200 runs the oldest
+    terminal run was unknown to the pruner, took the "unknown id, leave it
+    alone" path, and its ~100 MB worktree was never reclaimed again.
+    """
+    root = selfmod.workspaces_root()
+    root.mkdir(parents=True, exist_ok=True)
+    with selfmod._tx() as conn:
+        for index in range(250):  # more than list_runs' hard clamp of 200
+            conn.execute(
+                "INSERT INTO selfmod_runs("
+                "id, objective, problem, evidence_json, files_json, criteria_json,"
+                "risk, expected_benefit, rollback_plan, repository_root, phase, mode,"
+                "git_status_start, source_fingerprint, created_ts, updated_ts, budgets_json)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ("selfmod-%03d" % index, "o", "p", "[]", "[]", "[]", "low", "b", "r",
+                 "/repo", "restored", "propose", "", "fp", float(index), float(index), "{}"),
+            )
+
+    # selfmod-000 is the OLDEST by created_ts, so it falls outside the window.
+    assert "selfmod-000" not in {run["id"] for run in selfmod.list_runs(500)}
+    stale = root / "selfmod-000"
+    stale.mkdir(parents=True, exist_ok=True)
+    old = time.time() - 90 * 86400
+    os.utime(stale, (old, old))
+
+    assert selfmod.prune_workspaces(retention_days=1) == ["selfmod-000"]
+    assert not stale.exists()

@@ -1260,7 +1260,16 @@ def prune_workspaces(retention_days=None):
         retention_days if retention_days is not None else settings()["retention_days"]
     )
     cutoff = time.time() - max(1, days) * 86400
-    runs = {run["id"]: run for run in list_runs(500)}
+    # Read the whole ledger, not a window. This asked list_runs for 500 rows,
+    # but list_runs hard-clamps its limit to 200, and nothing ever deletes from
+    # selfmod_runs -- so once the ledger passed 200 runs an older terminal run
+    # was simply absent from this dict, hit the `run is None` skip below, and
+    # its ~100 MB worktree was never reclaimed on that prune or any later one.
+    # The literal 500 already said "whole population"; run_totals was corrected
+    # off the same windowed accessor for the same reason.
+    with _connect() as conn:
+        rows = conn.execute("SELECT * FROM selfmod_runs").fetchall()
+    runs = {row["id"]: _decode_run(row) for row in rows}
     removed = []
     for path in root.glob("selfmod-*"):
         run = runs.get(path.name)

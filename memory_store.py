@@ -520,7 +520,24 @@ def delete_interaction(conn, interaction_id):
     """Remove a captured interaction and its learning traces.
 
     Used to purge replies that must never influence learning (e.g. a model
-    refusal that wrongly denied web access while web tools were enabled)."""
+    refusal that wrongly denied web access while web tools were enabled).
+
+    The lessons distilled FROM the interaction go with it. Deleting only the
+    ledger row left the lesson itself in `lessons`/`lessons_fts`, where it kept
+    being retrieved and injected into later prompts -- the one trace that
+    actually reaches the model survived the purge that exists to stop it, and
+    `lesson_exists_for_interaction` still answered True for a row that was
+    gone. lessons_fts is a plain fts5 table with no delete triggers, so its
+    mirror row has to be removed explicitly (see delete_lesson)."""
+    distilled = [
+        row["id"]
+        for row in conn.execute(
+            "SELECT id FROM lessons WHERE source_interaction=?",
+            (interaction_id,),
+        ).fetchall()
+    ]
+    for lesson_id in distilled:
+        _delete_lesson_rows(conn, lesson_id)
     conn.execute(
         "DELETE FROM outcomes WHERE interaction_id=?", (interaction_id,)
     )
@@ -1920,17 +1937,27 @@ def get_lesson_text(conn, lesson_id):
     return row[0] if row else None
 
 
+def _delete_lesson_rows(conn, lesson_id):
+    """Every table a lesson lives in, without committing.
+
+    Shared with delete_interaction so a purge cannot delete a lesson from
+    `lessons` and leave it searchable in the FTS mirror.
+    """
+    cur = conn.execute("DELETE FROM lessons WHERE id=?", (lesson_id,))
+    conn.execute("DELETE FROM lessons_fts WHERE lesson_id=?", (lesson_id,))
+    conn.execute("DELETE FROM lesson_usage WHERE lesson_id=?", (lesson_id,))
+    return cur.rowcount > 0
+
+
 def delete_lesson(conn, lesson_id):
     """Remove a lesson from both the lessons table and its manual FTS mirror.
 
     Returns True if a row was deleted. lessons_fts is a plain (non-content) fts5
     table with no delete triggers, so its row must be removed explicitly.
     """
-    cur = conn.execute("DELETE FROM lessons WHERE id=?", (lesson_id,))
-    conn.execute("DELETE FROM lessons_fts WHERE lesson_id=?", (lesson_id,))
-    conn.execute("DELETE FROM lesson_usage WHERE lesson_id=?", (lesson_id,))
+    deleted = _delete_lesson_rows(conn, lesson_id)
     conn.commit()
-    return cur.rowcount > 0
+    return deleted
 
 
 def log_lesson_usage(conn, lesson_ids, interaction_id, task):
@@ -1952,7 +1979,32 @@ def record_lesson_usage_outcome(conn, interaction_id, signal, reward):
     conn.commit()
 
 
-def lesson_usage_stats(conn):
+def lesson_usage_history(conn):
+    """Ordered outcome evidence for every scored retrieval, one row per use.
+
+    The epoch reducer below and retriever.attributable_losses walk this exact
+    sequence. They used to issue the query separately -- byte-identical SQL,
+    same rows, same order -- so one retrieval sorted the whole lesson_usage
+    table twice before the model was ever called (measured 52 ms per scan over
+    11k live rows, on the blocking pre-generation path). Owning the query here
+    lets a caller that needs both pay for the scan once, and keeps the two
+    epoch definitions from drifting apart.
+    """
+    return conn.execute(
+        "SELECT lesson_id, interaction_id, task, reward, "
+        "COALESCE(outcome_ts, ts) AS evidence_ts "
+        "FROM lesson_usage WHERE reward IS NOT NULL "
+        "ORDER BY lesson_id, datetime(evidence_ts), rowid"
+    ).fetchall()
+
+
+def lesson_usage_stats(conn, history=None):
+    """Lifetime counters plus the current evidence epoch, per lesson.
+
+    ``history`` accepts a pre-fetched lesson_usage_history() result so a caller
+    that also needs the raw evidence (retriever.usage_stats_with_attribution)
+    scans lesson_usage once rather than once per consumer.
+    """
     rows = conn.execute(
         "SELECT lesson_id, COUNT(*) AS uses, "
         "SUM(CASE WHEN reward > 0 THEN 1 ELSE 0 END) AS wins, "
@@ -1965,11 +2017,7 @@ def lesson_usage_stats(conn):
     # Keep ordered evidence alongside the lifetime counters. Retrieval policy
     # needs to distinguish a lesson that recovered from one that relapsed after
     # an old success; all-history aggregates cannot express that distinction.
-    histories = conn.execute(
-        "SELECT lesson_id, task, reward, COALESCE(outcome_ts, ts) AS evidence_ts "
-        "FROM lesson_usage WHERE reward IS NOT NULL "
-        "ORDER BY lesson_id, datetime(evidence_ts), rowid"
-    ).fetchall()
+    histories = lesson_usage_history(conn) if history is None else history
     current_id = None
     losses_since_win = 0
     loss_tasks = set()

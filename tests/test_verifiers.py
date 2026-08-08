@@ -1,4 +1,5 @@
 import os
+import subprocess
 import tempfile
 
 import pytest
@@ -75,6 +76,68 @@ def test_cpp_compile_reports_errors(monkeypatch):
     v = V.cpp_compile("int main(", {"vcvars": V.__file__})
     assert v.passed is False
     assert "C2143" in v.detail
+
+
+def test_cpp_compile_unavailable_when_cl_is_missing(monkeypatch):
+    # vcvars64.bat exists (the isfile guard passes) but no x64 toolset sits
+    # behind it: cmd exits 9009 having printed only its own not-found message.
+    # That is "could not judge", not "the artifact failed" — reporting it as a
+    # Verdict(False) fails correct C++ and sends it to the repair loop.
+    monkeypatch.setattr(V, "_run", lambda *a, **k: (
+        9009,
+        "'cl' is not recognized as an internal or external command,\n"
+        "operable program or batch file.\n",
+    ))
+    with pytest.raises(V.VerifierUnavailable):
+        V.cpp_compile("int main(){ return 0; }", {"vcvars": V.__file__})
+
+
+def test_cpp_compile_still_reports_a_real_diagnostic_over_a_missing_tool(monkeypatch):
+    # Guard the fix against over-blocking: when MSVC actually spoke, a stray
+    # not-found line elsewhere in the log must not turn a real compile failure
+    # into "could not judge".
+    monkeypatch.setattr(V, "_run", lambda *a, **k: (
+        2,
+        "'vswhere' is not recognized as an internal or external command\n"
+        "tu.cpp(1): error C2143: syntax error\n",
+    ))
+    v = V.cpp_compile("int main(", {"vcvars": V.__file__})
+    assert v.passed is False
+    assert "C2143" in v.reason
+
+
+def _spy_on_mkdtemp(monkeypatch):
+    made = []
+    real = tempfile.mkdtemp
+
+    def spy(*a, **k):
+        path = real(*a, **k)
+        made.append(path)
+        return path
+
+    monkeypatch.setattr(V.tempfile, "mkdtemp", spy)
+    return made
+
+
+def test_cpp_compile_removes_its_temp_dir_on_success(monkeypatch):
+    made = _spy_on_mkdtemp(monkeypatch)
+    monkeypatch.setattr(V, "_run", lambda *a, **k: (0, ""))
+    assert V.cpp_compile("int main(){ return 0; }", {"vcvars": V.__file__}).passed is True
+    assert made and not os.path.exists(made[0])
+
+
+def test_cpp_compile_removes_its_temp_dir_when_the_build_is_killed(monkeypatch):
+    # _run propagates TimeoutExpired; the tu.cpp/build.bat directory must not
+    # outlive it. %TEMP% had accumulated 192 of these from the test suite alone.
+    made = _spy_on_mkdtemp(monkeypatch)
+
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired("cmd", 180)
+
+    monkeypatch.setattr(V, "_run", boom)
+    with pytest.raises(subprocess.TimeoutExpired):
+        V.cpp_compile("int main(){ return 0; }", {"vcvars": V.__file__})
+    assert made and not os.path.exists(made[0])
 
 
 # --- llm_judge — injected judge_fn, no GPU --------------------------------

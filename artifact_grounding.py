@@ -84,6 +84,13 @@ OOXML_ACTIVE_SUFFIXES = {
     ".scr", ".vbe", ".vbs",
 }
 
+# Recipes whose validator implements a "<recipe>-no-external-dependencies"
+# check. _validate_directory propagates the bundle-level flag to exactly these
+# children; a recipe missing from the set is enforced nowhere inside a bundle.
+_NO_EXTERNAL_DEPENDENCY_RECIPES = {
+    "docx", "edl", "glb", "html", "ooxml", "pptx", "svg", "xlsx",
+}
+
 EXTENSION_RECIPES = {
     ".avi": "avi",
     ".csv": "csv",
@@ -346,18 +353,49 @@ def _validate_csv(path: Path, requirements: dict, checks: list):
         _check(checks, "csv-required-column", column in header, "column %r" % column)
 
 
+# Attributes other than href/src whose value is a resource URL. They are kept
+# apart from `refs` because `refs` also drives the local-reference existence
+# check, which cannot resolve a srcset descriptor list or a CSS url() fragment.
+_HTML_RESOURCE_ATTRS = ("srcset", "poster", "data", "action", "formaction", "background")
+# Only "//"-prefixed matches are collected, so a relative url(fonts/x.woff2) or
+# a same-directory srcset entry is never mistaken for a network fetch.
+_ABSOLUTE_URL_RE = re.compile(r"(?:https?:)?//[^\s'\"()<>]+", re.IGNORECASE)
+_CSS_EXTERNAL_URL_RE = re.compile(
+    r"""(?:url\(\s*['"]?|@import\s+['"])\s*((?:https?:)?//[^)'"\s]+)""",
+    re.IGNORECASE,
+)
+
+
 class _HTMLAudit(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.tags = []
         self.refs = []
+        self.resource_refs = []
+        self._in_style = False
 
     def handle_starttag(self, tag, attrs):
-        self.tags.append(tag.lower())
+        name = tag.lower()
+        self.tags.append(name)
         attrs = dict(attrs)
         for key in ("href", "src"):
             if attrs.get(key):
                 self.refs.append(str(attrs[key]))
+        for key in _HTML_RESOURCE_ATTRS:
+            if attrs.get(key):
+                self.resource_refs.extend(_ABSOLUTE_URL_RE.findall(str(attrs[key])))
+        if attrs.get("style"):
+            self.resource_refs.extend(_CSS_EXTERNAL_URL_RE.findall(str(attrs["style"])))
+        if name == "style":
+            self._in_style = True
+
+    def handle_endtag(self, tag):
+        if tag.lower() == "style":
+            self._in_style = False
+
+    def handle_data(self, data):
+        if self._in_style:
+            self.resource_refs.extend(_CSS_EXTERNAL_URL_RE.findall(data))
 
 
 def _is_external_ref(value: str) -> bool:
@@ -379,7 +417,15 @@ def _validate_html(path: Path, requirements: dict, checks: list):
     for tag in required:
         _check(checks, "html-required-tag", tag.lower() in parser.tags, "tag <%s>" % tag)
     if requirements.get("no_external_dependencies"):
+        # href/src alone is not the page's network surface: a @import in a
+        # <style> block, a background url() in an inline style, a srcset
+        # candidate, a <video poster>, an <object data> or a <form action> all
+        # reach the network and all used to pass, so a page that could not
+        # render offline was reported self-contained. The SVG validator below
+        # already scans every attribute for url(...) — this is the same
+        # contract applied to HTML.
         external = [ref for ref in parser.refs if _is_external_ref(ref)]
+        external.extend(parser.resource_refs)
         _check(
             checks,
             "html-no-external-dependencies",
@@ -3594,9 +3640,13 @@ def _validate_directory(path: Path, recipe: str, requirements: dict) -> dict:
             continue
         child_recipe = _resolve_recipe(candidate, "auto")
         child_requirements = _child_requirements(requirements, child_recipe)
-        if child_recipe in {
-            "html", "svg", "docx", "xlsx", "pptx", "ooxml", "edl",
-        } and "no_external_dependencies" in requirements:
+        # Every recipe that implements a *-no-external-dependencies check must
+        # appear here or the check is silently never emitted for that file kind
+        # inside a bundle, and a missing check reads as a pass. "glb" was
+        # omitted, so a model whose .glb pulled its textures over the network
+        # passed a bundle validated with no_external_dependencies=true while a
+        # sibling index.html with the same defect correctly failed.
+        if child_recipe in _NO_EXTERNAL_DEPENDENCY_RECIPES and "no_external_dependencies" in requirements:
             child_requirements.setdefault(
                 "no_external_dependencies",
                 bool(requirements.get("no_external_dependencies")),
@@ -3608,7 +3658,12 @@ def _validate_directory(path: Path, recipe: str, requirements: dict) -> dict:
         "recipe": recipe,
         "checks": checks,
         "children": children,
-        "checked_files": len(declared),
+        # Count the files that actually produced a child result, not the files
+        # that were declared. The ui recipe skips every non-.html/.svg/.json
+        # sibling, so reporting len(declared) rendered as "files: 4" while only
+        # index.html was validated — a zero-byte logo.png in the same directory
+        # was never opened and the caller read the count as four files grounded.
+        "checked_files": len(children),
     }
 
 

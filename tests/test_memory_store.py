@@ -539,6 +539,32 @@ def test_delete_interaction_removes_distillation_trace():
     ).fetchone() is None
 
 
+def test_delete_interaction_removes_lessons_distilled_from_it():
+    """The lesson is the trace that actually reaches the next prompt."""
+    conn = _conn()
+    ms.log_interaction(conn, "job", "task", "", "response", "code")
+    assert _claim_good_outcome(conn)["claimed"] is True
+    ms.add_lesson(
+        conn, "L1", "Use collections.deque for O(1) pops.",
+        _e.to_blob([1.0, 0.0]), "job",
+    )
+    ms.add_lesson(
+        conn, "L2", "Memoize with functools.lru_cache.",
+        _e.to_blob([0.0, 1.0]), "other",
+    )
+    ms.log_lesson_usage(conn, ["L1"], "later-interaction", "task")
+
+    ms.delete_interaction(conn, "job")
+
+    assert ms.get_lesson_text(conn, "L1") is None
+    assert [lesson["id"] for lesson in ms.all_lessons(conn)] == ["L2"]
+    assert "L1" not in ms.fts_search(conn, "deque pops")
+    assert "L1" not in ms.lesson_usage_stats(conn)
+    assert ms.lesson_exists_for_interaction(conn, "job") is False
+    # a lesson distilled from a different interaction is untouched
+    assert ms.get_lesson_text(conn, "L2") is not None
+
+
 def test_record_outcome_row():
     c = _conn()
     ms.log_interaction(c, "abc", "t", "", "r", "code")

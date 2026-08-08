@@ -9,6 +9,9 @@ import retriever
 
 MEMORY_HEADER = "# Relevant lessons from past work (may help):"
 RECALL_HEADER = "# Similar things solved before (for reference):"
+# Per-recall fence. A recall body is multi-line and may contain its own bullets,
+# so the boundary between two recalls has to be something a bullet is not.
+RECALL_ITEM_HEADER = "## Recall"
 FACTS_HEADER = "# Project facts (always true here):"
 RUN_COMPAT_HEADER = "# /run compatibility requirements:"
 
@@ -118,7 +121,24 @@ def build_prompt(task, lessons, recalls=None, facts=None):
             APPLICATION_HEADER
         )
     if recalls:
-        blocks.append("%s\n%s" % (RECALL_HEADER, "\n".join("- %s" % r for r in recalls)))
+        # Unlike a lesson, a recall is not a one-liner: recall._format builds
+        # "<task> -> <response>" and cuts the response at 400 chars, not at a
+        # line break, so 498 of 500 live recalls are multi-line. Joined as bare
+        # "- " bullets on single newlines, the block had no boundaries -- lines
+        # 2..N of recall #1 read as ordinary prompt prose, and a bulleted line
+        # inside a recalled answer read as the start of recall #2. The model
+        # could not tell how many prior solutions it was shown or which code
+        # belonged to which task, so it could attribute one recall's code to
+        # another's problem. Fence and number them instead.
+        blocks.append(
+            "%s\n%s" % (
+                RECALL_HEADER,
+                "\n\n".join(
+                    "%s %d of %d\n%s" % (RECALL_ITEM_HEADER, index, len(recalls), text)
+                    for index, text in enumerate(recalls, 1)
+                ),
+            )
+        )
     if not blocks:
         return task
     return "%s\n\n# Task:\n%s" % ("\n\n".join(blocks), task)

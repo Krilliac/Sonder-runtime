@@ -707,3 +707,31 @@ def test_usage_boost_confidence_comes_from_scored_outcomes_not_retrievals():
     assert earned > synthetic > r._usage_boost(
         {"uses": 50, "wins": 0, "losses": 50, "avg_reward": -1.0}
     )
+
+
+def test_attribution_scans_the_usage_history_once_per_call():
+    """retrieve_with_ids calls this before every generation, and the epoch
+    reducer and the blame reducer used to issue byte-identical ordered scans of
+    lesson_usage -- the whole table sorted twice per turn (52 ms per scan over
+    the live 11k rows) for one row sequence. The shares themselves must not
+    move: the cohort is now counted from those same rows instead of a second
+    GROUP BY."""
+    conn = ms.connect(":memory:")
+    cohort = ["co%d" % index for index in range(4)]
+    for lesson_id in cohort + ["solo"]:
+        ms.add_lesson(conn, lesson_id, "advice %s" % lesson_id, None, "seed")
+    for index in range(6):
+        _graded(conn, "shared-%d" % index, cohort, "task %d" % index, -1.0)
+        _graded(conn, "solo-%d" % index, ["solo"], "task %d" % index, -1.0)
+
+    scans = []
+    conn.set_trace_callback(lambda sql: scans.append(" ".join(sql.split())))
+    stats = r.usage_stats_with_attribution(conn)
+    conn.set_trace_callback(None)
+
+    ordered = [sql for sql in scans if "ORDER BY lesson_id" in sql]
+    grouped = [sql for sql in scans if "GROUP BY" in sql]
+    assert len(ordered) == 1, ordered
+    assert len(grouped) == 1, grouped
+    assert stats["co0"]["attributable_losses_since_win"] == 1.5
+    assert stats["solo"]["attributable_losses_since_win"] == 6.0
