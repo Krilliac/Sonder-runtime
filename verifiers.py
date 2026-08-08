@@ -26,6 +26,7 @@ import sys
 import tempfile
 
 import grounding
+import code_runner
 
 Verdict = collections.namedtuple("Verdict", ["passed", "reason", "detail"])
 
@@ -35,8 +36,6 @@ PLANNED = {
     "benchmark_perf": "run + time the artifact; passed iff within a perf threshold",
 }
 
-_VCVARS = (r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC"
-           r"\Auxiliary\Build\vcvars64.bat")
 # cpp_compile interpolates these into an executed .bat, so they are validated:
 _ALLOWED_CPP_STD = {"c++11", "c++14", "c++17", "c++20", "c++23", "c++latest"}
 _BAT_META = set('&|<>^"%\r\n')
@@ -143,7 +142,10 @@ def cpp_compile(artifact, spec=None):
     """spec={'vcvars': path?, 'std': 'c++17'?}. Compile-only (/c) via vcvars;
     VerifierUnavailable if vcvars64.bat is missing."""
     spec = spec or {}
-    vcvars = spec.get("vcvars", _VCVARS)
+    vcvars = spec.get("vcvars") or code_runner._find_visual_studio_vcvars()
+    if not vcvars:
+        raise VerifierUnavailable("vcvars64.bat was not discovered")
+    vcvars = os.fspath(vcvars)
     # vcvars is interpolated into a batch `call`; require a real file with no shell
     # metacharacters to block command injection via a crafted spec['vcvars'].
     if not os.path.isfile(vcvars) or (_BAT_META & set(vcvars)):

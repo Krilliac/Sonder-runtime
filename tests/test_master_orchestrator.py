@@ -24,7 +24,7 @@ def setup_function():
 
 
 def test_evidence_gate_rejects_repo_inspection_when_tools_unavailable():
-    task = "Repository: D:\\SparkEngine. Review current uncommitted files using local file-reading tools."
+    task = "Repository: C:\\example\\repo. Review current uncommitted files using local file-reading tools."
 
     assert master_orchestrator.evidence_gate(task, tools_available=False) == master_orchestrator.EVIDENCE_REQUIRED
     assert master_orchestrator.evidence_gate(task, tools_available=True) == ""
@@ -52,7 +52,7 @@ def test_delegated_prompts_disclose_no_tool_access_and_demand_evidence():
 
 def test_repository_prompts_require_guarded_read_tools():
     prompt = master_orchestrator._subtask_prompts(
-        "Repository: D:\\SparkEngine. Inspect current files.",
+        "Repository: C:\\example\\repo. Inspect current files.",
         1,
         tool_access=True,
     )[0]
@@ -179,8 +179,8 @@ def test_status_labels_prior_result_while_an_unrelated_fleet_is_active():
     data["agents"] = [{
         "id": "master-new",
         "status": "running",
-        "activity": "auditing D:\\smellslikenapalm",
-        "task": "Project: D:\\smellslikenapalm",
+        "activity": "auditing C:\\example\\workspace",
+        "task": "Project: C:\\example\\workspace",
     }]
     formatted = master_orchestrator.format_snapshot(data)
 
@@ -246,7 +246,7 @@ def test_repository_delegation_refuses_outputs_without_tool_ledger(tmp_path):
     audited = []
 
     # Use a real, existing repository root so the fail-closed resolver accepts
-    # it on every host (the retired D:\SparkEngine literal only existed on the
+    # it on every host (the old machine-specific literal only existed on the
     # author's Windows box and made this refusal test error out on Linux CI).
     result = master_orchestrator.run_delegated(
         "Repository: %s. Inspect current files." % tmp_path,
@@ -792,7 +792,7 @@ def test_requires_repository_tools_detects_explicit_file_paths():
     # ungrounded generation path that fabricated file contents. An absolute path
     # to a concrete source/text file names repository state regardless of verb.
     assert master_orchestrator.requires_repository_tools(
-        r"generate a summary of the file D:\SparkEngine\Tests\TestFontSystem.cpp")
+        r"generate a summary of the file C:\example\repo\Tests\TestFontSystem.cpp")
     assert master_orchestrator.requires_repository_tools(
         "summarize /home/u/app/main.py and list its classes")
     # Relative paths and greenfield tasks must NOT be pulled into the repo lane.
