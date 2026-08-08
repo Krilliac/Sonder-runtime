@@ -89,7 +89,15 @@ def check_bad_embeddings(conn, decode_fn=_embeddings.from_blob):
     ).fetchall()
     issues = []
     for lid, blob in rows:
-        _dimension, integrity_error = memory_store._embedding_blob_integrity(blob)
+        # A blob so corrupt that the integrity check itself raises is exactly
+        # the kind of bad embedding this audit exists to find -- so record it as
+        # one rather than letting it abort the whole scan.
+        try:
+            _dimension, integrity_error = memory_store._embedding_blob_integrity(blob)
+        except Exception as exc:
+            issues.append(Issue("bad_embedding", lid,
+                                "integrity check raised: %r" % (exc,)))
+            continue
         if integrity_error is not None:
             detail = {
                 "invalid_type": "embedding has an invalid storage type",
