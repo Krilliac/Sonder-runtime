@@ -17,6 +17,7 @@ proxy for remote access) unless it says otherwise.
 - [ollama-outage.md](ollama-outage.md)
 - [database-lock-or-corruption.md](database-lock-or-corruption.md)
 - [autopilot-interruption.md](autopilot-interruption.md)
+- [merged-branch-cleanup.md](merged-branch-cleanup.md) — dry-run-first merged worktree cleanup
 - [disk-exhaustion.md](disk-exhaustion.md)
 - [training-failure.md](training-failure.md)
 - [suspected-secret-exposure.md](suspected-secret-exposure.md)
