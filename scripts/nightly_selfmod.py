@@ -102,6 +102,18 @@ CANDIDATE_FILES = (
     "game_forge.py",
     "pull_community.py",
     "tune_min_sim.py",
+    "ooxml_assets.py",
+    "qlora_train.py",
+    "retriever.py",
+    "runtime_policy.py",
+    "safe_update.py",
+    "self_heal.py",
+    "solver.py",
+    "sonder_doctor.py",
+    "system_profile.py",
+    "training_data.py",
+    "training_tasks.py",
+    "verifiers.py",
 )
 
 _FENCE = re.compile(r"^\s*```[a-zA-Z0-9_+-]*\s*$", re.M)
