@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -184,6 +185,78 @@ def test_serve_exports_feature_gates_closed_by_default(
     capsys.readouterr()
     assert seen["web"] == "0"
     assert seen["live_reload"] == "0"
+
+
+def test_migrate_exports_configured_home(isolated_home, tmp_path, monkeypatch):
+    import sonder_migrations
+
+    configured_home = tmp_path / "migration-home"
+    seen = {}
+
+    def migrate_all():
+        seen["home"] = os.environ.get("SONDER_HOME")
+        return {}
+
+    monkeypatch.setattr(sonder_migrations, "migrate_all", migrate_all)
+    assert main(["migrate", "--set", f"state.home={configured_home}"]) == 0
+    assert seen["home"] == str(configured_home)
+
+
+def test_backup_fails_closed_on_invalid_config(isolated_home, monkeypatch, capsys):
+    import sonder_backup
+
+    called = []
+    monkeypatch.setattr(sonder_backup, "list_backups", lambda target: called.append(target) or [])
+    assert main(["backup", "list", "--set", "server.port=not-a-port"]) == 2
+    capsys.readouterr()
+    assert called == []
+
+
+def test_backup_exports_configured_source_home(
+    isolated_home, tmp_path, monkeypatch, capsys
+):
+    import sonder_backup
+
+    configured_home = tmp_path / "backup-home"
+    target = tmp_path / "target"
+    seen = {}
+
+    def create_backup(path):
+        seen["home"] = os.environ.get("SONDER_HOME")
+        return SimpleNamespace(
+            backup_id="backup-test", path=target / "backup-test",
+            file_count=0, total_bytes=0,
+        )
+
+    monkeypatch.setattr(sonder_backup, "create_backup", create_backup)
+    assert main([
+        "backup", "create", "--target", str(target),
+        "--set", f"state.home={configured_home}", "--json",
+    ]) == 0
+    capsys.readouterr()
+    assert seen["home"] == str(configured_home)
+
+
+def test_smoke_exports_the_home_it_preflighted(
+    isolated_home, tmp_path, monkeypatch, capsys
+):
+    import sonder_migrations
+
+    configured_home = tmp_path / "smoke-home"
+    seen = {}
+
+    def migrate_store(name):
+        seen["home"] = os.environ.get("SONDER_HOME")
+        raise RuntimeError("stop after path capture")
+
+    monkeypatch.setattr(sonder_migrations, "migrate_store", migrate_store)
+    assert main([
+        "smoke", "--skip-ollama",
+        "--set", "state.minimum_free_disk_bytes=0",
+        "--set", f"state.home={configured_home}",
+    ]) == 1
+    capsys.readouterr()
+    assert seen["home"] == str(configured_home)
 
 
 def test_backup_verify_json_flag_emits_json(isolated_home, tmp_path, capsys):

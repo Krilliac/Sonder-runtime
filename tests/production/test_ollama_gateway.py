@@ -124,6 +124,32 @@ def test_no_driver_exception_escapes(monkeypatch):
         pass
 
 
+def test_expired_context_stops_before_model_call(monkeypatch):
+    _fake_target(monkeypatch)
+    _fake_gen(monkeypatch)
+
+    with pytest.raises(DeadlineExceeded, match="before model call"):
+        OllamaGateway().generate(
+            ModelRequest(prompt="x", tier="code"),
+            _context(timeout_seconds=0.0),
+        )
+
+
+def test_remote_ollama_requires_context_consent(monkeypatch):
+    _fake_target(monkeypatch)
+    _fake_gen(monkeypatch)
+    monkeypatch.setattr(server, "BASE", "http://192.0.2.10:11434")
+
+    with pytest.raises(Forbidden, match="remote Ollama"):
+        OllamaGateway().generate(ModelRequest(prompt="x", tier="code"), _context())
+
+    response = OllamaGateway().generate(
+        ModelRequest(prompt="x", tier="code"),
+        _context(remote_ollama_allowed=True),
+    )
+    assert response.text == "generated text"
+
+
 def test_embed_maps_empty_vector_to_dependency_error(monkeypatch):
     import embeddings
 
@@ -139,6 +165,16 @@ def test_embed_returns_typed_embeddings(monkeypatch):
     out = OllamaGateway().embed(["a", "b"], _context())
     assert len(out) == 2
     assert out[0].vector == (0.1, 0.2, 0.3)
+
+
+def test_embed_honours_expired_context(monkeypatch):
+    import embeddings
+
+    called = []
+    monkeypatch.setattr(embeddings, "embed", lambda text: called.append(text) or [0.1])
+    with pytest.raises(DeadlineExceeded):
+        OllamaGateway().embed(["never sent"], _context(timeout_seconds=0.0))
+    assert called == []
 
 
 def test_bootstrap_uses_the_gateway():

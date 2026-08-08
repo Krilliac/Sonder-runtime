@@ -18,6 +18,14 @@ from ...application.ports.model_gateway import (
 )
 from ...application.ports.process_probe import ProbeResult, ProcessIdentity
 from ...application.ports.tool_executor import ToolCall, ToolResult
+from ...domain.common.errors import Cancelled, DeadlineExceeded
+
+
+def _check_context_liveness(context: OperationContext) -> None:
+    if context.expired:
+        raise DeadlineExceeded("operation deadline exceeded before adapter call")
+    if context.cancellation is not None and context.cancellation.cancelled:
+        raise Cancelled("operation cancelled before adapter call")
 
 
 class LegacyPolicyRepository:
@@ -303,6 +311,7 @@ class LegacyModelGateway:
     ) -> ModelResponse:
         import server
 
+        _check_context_liveness(context)
         started = time.monotonic()
         text = server.sonder(
             request.prompt,
@@ -319,10 +328,15 @@ class LegacyModelGateway:
     def embed(self, texts, context: OperationContext):
         import embeddings
 
-        return [
-            Embedding(vector=tuple(embeddings.embed(text) or ()), model="local")
-            for text in texts
-        ]
+        results = []
+        for text in texts:
+            # Cancellation used to be ignored, so adapter swaps could keep doing
+            # model work after the application had abandoned the operation.
+            _check_context_liveness(context)
+            results.append(
+                Embedding(vector=tuple(embeddings.embed(text) or ()), model="local")
+            )
+        return results
 
 
 class OperationsEventSink:
@@ -341,19 +355,24 @@ class OperationsEventSink:
         correlation_id: str | None = None,
         operation_id: str | None = None,
     ) -> None:
-        if self._store is None:
-            from sonder_operations_store import OperationsStore
+        try:
+            if self._store is None:
+                from sonder_operations_store import OperationsStore
 
-            self._store = OperationsStore()
-        self._store.record_event(
-            component="application",
-            event_code=event_code,
-            severity=severity,
-            summary=summary,
-            detail=detail,
-            correlation_id=correlation_id,
-            operation_id=operation_id,
-        )
+                self._store = OperationsStore()
+            self._store.record_event(
+                component="application",
+                event_code=event_code,
+                severity=severity,
+                summary=summary,
+                detail=detail,
+                correlation_id=correlation_id,
+                operation_id=operation_id,
+            )
+        except Exception:
+            # Observability is explicitly non-authoritative; a locked or damaged
+            # operations DB used to turn successful business work into a failure.
+            return
 
 
 class SystemClock:
@@ -408,6 +427,13 @@ class LegacyToolExecutor:
 
     def execute(self, call: ToolCall, context: OperationContext) -> ToolResult:
         args = dict(call.arguments or {})
+        if context.expired:
+            # A pre-expired request previously reached mutating file tools.
+            return ToolResult(ok=False, error_code="DeadlineExceeded",
+                              output="operation deadline exceeded")
+        if context.cancellation is not None and context.cancellation.cancelled:
+            return ToolResult(ok=False, error_code="Cancelled",
+                              output="operation cancelled")
         try:
             if call.tool == "run_program":
                 import workbench
