@@ -154,6 +154,16 @@ def run(server, log, *, test_timeout=1800, branch=True):
     run_id = selfmod.create_plan(
         objective, str(REPO),
         problem=objective,
+        # create_plan refuses a proposal with no evidence, and rightly:
+        # an objective with nothing behind it is exactly the plausible-
+        # sounding invention this model class produces when asked to
+        # improve code from memory. The evidence is the model's own
+        # rationale plus the file it was actually shown.
+        evidence=[
+            objective,
+            "proposed by the local model against the current contents of %s"
+            % target,
+        ],
         files=[target],
         criteria=["the full test suite passes", "ruff is clean"],
         risk="low",
@@ -163,6 +173,10 @@ def run(server, log, *, test_timeout=1800, branch=True):
     run_id = run_id["id"] if isinstance(run_id, dict) else run_id
     log("  run: %s  target: %s" % (run_id, target))
 
+    # The lifecycle refuses a workspace without a verified backup, which is
+    # the whole basis of rollback: no restore point, no isolated edit.
+    selfmod.create_backup(run_id)
+    selfmod.verify_backup(run_id)
     selfmod.prepare_workspace(run_id)
     workspace = selfmod.candidate_path(run_id)
     original = (workspace / target).read_text(encoding="utf-8", errors="replace")
