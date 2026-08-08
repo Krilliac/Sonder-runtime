@@ -106,7 +106,12 @@ def reload_changed_modules(module_names):
                 changed[name] = module
                 continue
             if signature == old_signature:
-                changed[name] = module
+                # Unchanged: do NOT report it as changed. This branch used to
+                # add the module to `changed`, contradicting the function's name
+                # and its docstring ("names that were imported/reloaded") and
+                # making every caller rebind every watched module on every
+                # request. Rebinding an unchanged module to itself is harmless,
+                # so the bug was latent, but the returned set was wrong.
                 continue
             try:
                 module = importlib.reload(module)
