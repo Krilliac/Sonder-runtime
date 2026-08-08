@@ -203,14 +203,45 @@ def _recent_objectives(limit=40):
     return out
 
 
+def _objective_key(text) -> str:
+    """The comparable part of an objective.
+
+    Stored objectives carry the model's rationale appended as "OBJ (WHY...)",
+    while a fresh proposal is compared before that suffix exists. Left
+    unnormalised, SequenceMatcher divides by TOTAL length, so an exact restated
+    objective scored about 0.59 against its own stored form and every duplicate
+    sailed through -- the loop committed the same change twice in consecutive
+    passes with the guard active.
+    """
+    head = str(text or "").split(" (", 1)[0]
+    return " ".join(re.sub(r"[^a-z0-9 ]+", " ", head.lower()).split())
+
+
 def _too_similar(objective, previous) -> bool:
     """Whether this objective restates one already attempted."""
     import difflib
 
-    candidate = objective.strip().lower()
+    candidate = _objective_key(objective)
+    if not candidate:
+        return False
     for earlier in previous:
-        if difflib.SequenceMatcher(None, candidate, earlier).ratio() >= 0.80:
+        key = _objective_key(earlier)
+        if not key:
+            continue
+        # Containment catches a restatement that only adds or drops a
+        # qualifier.
+        if candidate in key or key in candidate:
             return True
+        if difflib.SequenceMatcher(None, candidate, key).ratio() >= 0.80:
+            return True
+        # Token overlap catches a reword, which a sequence ratio does not: the
+        # same objective phrased with different filler words scored 0.75 and
+        # passed, while sharing nine of fourteen distinct tokens.
+        left, right = set(candidate.split()), set(key.split())
+        if left and right:
+            overlap = len(left & right) / float(len(left | right))
+            if overlap >= 0.60:
+                return True
     return False
 
 
