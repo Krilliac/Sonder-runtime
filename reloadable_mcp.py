@@ -267,12 +267,18 @@ class ReloadableFastMCP(FastMCP):
             and self._loaded_digest
             and current_digest != self._loaded_digest
         )
+        # Disabled must win over source_changed. When live reload is off the
+        # registry is frozen no matter what the file on disk says, so an on-disk
+        # edit will NEVER be applied -- reporting "refresh pending" there tells
+        # an operator auditing convergence that a refresh is imminent when in
+        # fact none will ever occur. A pending edit that is being ignored is
+        # worth naming, so it gets its own explicit status.
         if self._last_error:
             status = "error"
+        elif not _enabled():
+            status = "disabled (pending edit ignored)" if source_changed else "disabled"
         elif source_changed:
             status = "refresh pending"
-        elif not _enabled():
-            status = "disabled"
         else:
             status = "current"
         return {
