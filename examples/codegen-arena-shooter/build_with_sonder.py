@@ -10,7 +10,7 @@ API and algorithm the model needs is in the prompt) rather than *recall* prompts
 because that is measurably where a 7B-class local model performs.
 
 Usage:
-    python build_with_sonder.py [--tiers code,reasoning] [--repair-rounds 6]
+    python build_with_sonder.py [--project PATH] [--tiers code,reasoning]
     python build_with_sonder.py --only Program.cs      # regenerate one file
     python build_with_sonder.py --repair-only          # skip generation, just repair
 """
@@ -24,7 +24,14 @@ import sys
 import time
 
 SONDER = os.environ.get("SONDER_RUNTIME", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-PROJECT = r"D:\Sonder Games\FpsGame_Sonder"
+PROJECT = os.path.abspath(
+    os.path.expanduser(
+        os.environ.get(
+            "SONDER_GAME_PROJECT",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "FpsGame_Sonder"),
+        )
+    )
+)
 
 # A repair that returns less than this fraction of the original file is treated
 # as a deletion, not a fix. Measured need: asked to fix four syntax errors, the
@@ -569,7 +576,13 @@ def run_sequential(server, args) -> int:
 
 
 def main() -> int:
+    global PROJECT
     ap = argparse.ArgumentParser()
+    ap.add_argument(
+        "--project",
+        default=PROJECT,
+        help="output project directory (default: SONDER_GAME_PROJECT or a sibling directory)",
+    )
     ap.add_argument("--tiers", default="code,reasoning")
     ap.add_argument("--repair-rounds", type=int, default=6)
     ap.add_argument("--num-predict", type=int, default=3000)
@@ -588,6 +601,7 @@ def main() -> int:
              "file, so an interrupted run should not start over)",
     )
     args = ap.parse_args()
+    PROJECT = os.path.abspath(os.path.expanduser(args.project))
 
     import server  # late import so the sys.path insert applies
 
