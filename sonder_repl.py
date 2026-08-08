@@ -758,14 +758,17 @@ def main():
                     refresh=(arg or "").strip().lower() == "refresh"))
             elif cmd == "/scaffold":
                 parts = arg.split()
+                want_tests = "--tests" in parts
+                parts = [p for p in parts if p != "--tests"]
                 if len(parts) < 2:
-                    print("usage: /scaffold <kind> <name> [root]   kinds: %s"
+                    print("usage: /scaffold <kind> <name> [root] [--tests]   kinds: %s"
                           % ", ".join(project_scaffold.kinds()))
                 else:
                     kind, name = parts[0], parts[1]
                     root = parts[2] if len(parts) > 2 else name
                     print(server.scaffold_project(
-                        kind=kind, name=name, root=root, apply=True))
+                        kind=kind, name=name, root=root, apply=True,
+                        with_tests=want_tests))
             elif cmd == "/location":
                 a = (arg or "").strip().lower()
                 if a in ("on", "off"):

@@ -68,15 +68,18 @@ def _rule(pattern, action):
 # is anchored with ^ so it only fires when the turn OPENS with the trigger.
 _RULES = [
     # --- lifecycle / session ---
+    # State-losing commands are anchored to the WHOLE line ($): "start over" is
+    # /new, but "start over and rewrite parse()" is a coding task and must fall
+    # through. A prefix match here would silently discard the user's real work.
     _rule(r"^(?:new session|start over|reset(?: the)? session|fresh session|"
-          r"clear(?: the)? session|new thread)\b", _fixed("/new")),
-    _rule(r"^(?:list|show|my)\s+sessions\b", _fixed("/sessions")),
+          r"clear(?: the)? session|new thread)\s*$", _fixed("/new")),
+    _rule(r"^(?:list|show|my)\s+sessions\s*$", _fixed("/sessions")),
     _rule(r"^resume(?:\s+session)?\s+(?P<arg>.+)$", _with_arg("/resume")),
     _rule(r"^(?:switch(?:\s+to)?|set|use|change(?:\s+to)?)\s+(?:the\s+)?project"
           r"(?:\s+to)?\s+(?P<arg>.+)$", _with_arg("/project")),
-    _rule(r"^(?:current project|what(?:'s| is)\s+(?:the\s+)?(?:current\s+)?project)\b",
+    _rule(r"^(?:current project|what(?:'s| is)\s+(?:the\s+)?(?:current\s+)?project)\s*\??$",
           _fixed("/project")),
-    _rule(r"^(?:exit|quit|goodbye|bye|leave)\b", _fixed("/exit")),
+    _rule(r"^(?:exit|quit|goodbye|bye)\s*$", _fixed("/exit")),
 
     # --- identity / admin ---
     _rule(r"^who\s+am\s+i\b", _fixed("/whoami")),
@@ -104,7 +107,7 @@ _RULES = [
           r"(?:\s+(?P<arg>\S+))?", lambda m: ("/dump %s" % (m.group("arg") or "")).strip()),
 
     # --- quality / privacy / emotion / prefs / improvement ---
-    _rule(r"^(?:fix|repair)\s+(?:the\s+)?(?:memory\s+)?quality\b", _fixed("/qualityfix apply")),
+    _rule(r"^(?:fix|repair)\s+(?:the\s+)?(?:memory\s+)?quality\s*$", _fixed("/qualityfix apply")),
     _rule(r"^(?:show\s+)?(?:memory\s+)?quality(?:\s+report)?\b", _fixed("/quality")),
     _rule(r"^(?:fix|repair)\s+privacy\b", _fixed("/privacyfix")),
     _rule(r"^(?:privacy\s+review|review\s+privacy)\b", _fixed("/privacyreview")),
@@ -119,7 +122,7 @@ _RULES = [
     _rule(r"^(?:show\s+)?agents?\s+status\b|^master\s+status\b|^(?:show\s+)?agents\b",
           _fixed("/agents")),
     _rule(r"^agent\s+capacity\b|^how\s+much\s+agent\s+capacity\b", _fixed("/capacity")),
-    _rule(r"^cancel\s+(?:all\s+)?agents\b", _fixed("/agentcancel")),
+    _rule(r"^cancel\s+(?:all\s+)?agents\s*$", _fixed("/agentcancel")),
     _rule(r"^retry\s+(?:the\s+)?agent\b(?:\s+(?P<arg>.+))?",
           lambda m: ("/agentretry %s" % (m.group("arg") or "")).strip()),
     _rule(r"^(?:tool\s+)?activity\b|^recent\s+tools?\b|^what\s+tools\s+ran\b",

@@ -7177,6 +7177,186 @@ def file_read(path: str, max_bytes: int = 256000, token: str = "", approval: str
     return _format_file_result("file read", data)
 
 
+_CONTEXT_PACK_MAX_FILES = 64
+_CONTEXT_PACK_MAX_TOTAL_BYTES = 1_000_000
+
+
+def _context_pack_paths(paths_json) -> list[str]:
+    """Normalize the public JSON/list shape without resolving any paths."""
+    try:
+        value = json.loads(paths_json) if isinstance(paths_json, str) else paths_json
+    except (TypeError, ValueError) as exc:
+        raise ValueError("paths_json must be a JSON array of file paths") from exc
+    if not isinstance(value, list):
+        raise ValueError("paths_json must be a JSON array of file paths")
+    if not value:
+        raise ValueError("paths_json must contain at least one file path")
+    paths = []
+    for index, item in enumerate(value):
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("paths_json item %d must be a non-empty string" % (index + 1))
+        if "\x00" in item:
+            raise ValueError("paths_json item %d contains a NUL byte" % (index + 1))
+        paths.append(item.strip())
+    return paths
+
+
+def _context_pack_int(value, default: int, ceiling: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(1, min(ceiling, number))
+
+
+def _context_pack_utf8_prefix(text: str, max_bytes: int) -> tuple[str, int, bool]:
+    raw = str(text or "").encode("utf-8")
+    if len(raw) <= max_bytes:
+        return str(text or ""), len(raw), False
+    prefix = raw[:max_bytes]
+    # Do not emit half of a multibyte codepoint. The body can therefore be a
+    # few bytes below the cap, but never above it.
+    decoded = prefix.decode("utf-8", errors="ignore")
+    return decoded, len(decoded.encode("utf-8")), True
+
+
+@mcp.tool()
+def context_pack(
+    paths_json: str,
+    max_files: int = 12,
+    max_total_bytes: int = 256000,
+    max_bytes_per_file: int = 64000,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Read several guarded text files into one deterministic bounded pack.
+
+    paths_json is a JSON array of explicit file paths. Each path independently
+    passes the same containment, symlink, sensitive-file, and approval policy
+    as file_read. File-body UTF-8 bytes count against max_total_bytes; headers
+    do not. Errors are reported per file and do not abort later reads.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "max_files": max_files,
+        "max_total_bytes": max_total_bytes,
+        "max_bytes_per_file": max_bytes_per_file,
+    }
+    try:
+        paths = _context_pack_paths(paths_json)
+    except ValueError as exc:
+        _record_direct_tool("context_pack", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+
+    file_limit = _context_pack_int(max_files, 12, _CONTEXT_PACK_MAX_FILES)
+    total_limit = _context_pack_int(
+        max_total_bytes, 256000, _CONTEXT_PACK_MAX_TOTAL_BYTES,
+    )
+    per_file_limit = _context_pack_int(
+        max_bytes_per_file, 64000, file_ops.MAX_READ_BYTES,
+    )
+    selected = paths[:file_limit]
+    omitted = max(0, len(paths) - len(selected))
+    remaining = total_limit
+    emitted = 0
+    errors = 0
+    truncated_files = 0
+    sections = []
+    bypass = _file_bypass_allowed(token, approval)
+    developer_authorized = _file_developer_allowed(token)
+
+    for index, requested in enumerate(selected, 1):
+        display = requested.replace("\r", "\\r").replace("\n", "\\n")
+        header = "===== CONTEXT FILE %d/%d: %s =====" % (
+            index, len(selected), display,
+        )
+        if remaining <= 0:
+            truncated_files += 1
+            sections.append("\n".join([
+                header,
+                "status: skipped",
+                "included-bytes: 0",
+                "truncated: true (total byte budget exhausted)",
+            ]))
+            continue
+        read_limit = min(per_file_limit, remaining)
+        try:
+            data = file_ops.read_file(
+                requested,
+                max_bytes=read_limit,
+                extra_roots=extra_roots,
+                bypass=bypass,
+                developer_authorized=developer_authorized,
+            )
+            body, body_bytes, decode_truncated = _context_pack_utf8_prefix(
+                data.get("text", ""), read_limit,
+            )
+            source_bytes = int(data.get("bytes", 0))
+            was_truncated = bool(data.get("truncated")) or decode_truncated
+            reason = ""
+            if was_truncated:
+                truncated_files += 1
+                reason = (
+                    "total byte budget"
+                    if read_limit < per_file_limit
+                    else "per-file byte cap"
+                )
+            emitted += body_bytes
+            remaining -= body_bytes
+            lines = [
+                header,
+                "status: ok",
+                "source-bytes: %d" % source_bytes,
+                "included-bytes: %d" % body_bytes,
+                "truncated: %s%s" % (
+                    "true" if was_truncated else "false",
+                    " (%s)" % reason if reason else "",
+                ),
+                "",
+                body,
+            ]
+            sections.append("\n".join(lines))
+        except Exception as exc:
+            errors += 1
+            sections.append("\n".join([
+                header,
+                "status: error",
+                "included-bytes: 0",
+                "truncated: false",
+                "error: %s: %s" % (type(exc).__name__, exc),
+            ]))
+
+    pack_truncated = bool(omitted or truncated_files)
+    summary = (
+        "context pack: requested=%d selected=%d emitted-bytes=%d "
+        "max-files=%d max-total-bytes=%d max-bytes-per-file=%d errors=%d"
+        % (
+            len(paths), len(selected), emitted, file_limit, total_limit,
+            per_file_limit, errors,
+        )
+    )
+    truncation = "pack-truncated: %s" % ("true" if pack_truncated else "false")
+    if omitted:
+        truncation += " (%d file(s) omitted by max-files)" % omitted
+    output = "\n\n".join([summary, truncation] + sections)
+    _record_direct_tool(
+        "context_pack", args, ok=(errors == 0), started=started,
+        summary="%d file(s), %d body byte(s), %d error(s)" % (
+            len(selected), emitted, errors,
+        ),
+        output=output,
+    )
+    activity_tracker.record_event(
+        "context_pack",
+        summary="%d file(s), %d body byte(s)%s" % (
+            len(selected), emitted, " truncated" if pack_truncated else "",
+        ),
+    )
+    return output
+
+
 @mcp.tool()
 def data_inspect(
     path: str,
@@ -7872,6 +8052,48 @@ def run_code(
         output=output,
     )
     return output
+
+
+@mcp.tool()
+def shell_run(
+    command: str,
+    shell: str = "auto",
+    cwd: str = "",
+    timeout: int = 30,
+) -> str:
+    """Run one shell command line in the host's preferred shell.
+
+    The environment-reactive front door for command lines like
+    `Get-ChildItem -LiteralPath "D:\\" -File | Select-Object Name` or
+    `grep -rn TODO src | head`: shell="auto" picks what this host actually
+    has (PowerShell on Windows, bash elsewhere -- see environment_status),
+    so callers do not guess the platform. Accepts full pipelines, variables,
+    and multi-statement lines.
+
+    Runs through the same hardened lane as run_code (the command becomes a
+    temp script: control-plane secrets are stripped from the child
+    environment, output is trimmed, the timeout is bounded), so this is a
+    convenience shape, not a new privilege level.
+    """
+    _maybe_live_reload()
+    line = (command or "").strip()
+    if not line:
+        return "ERROR: shell_run needs a command."
+    choice = (shell or "auto").strip().lower()
+    if choice in ("auto", ""):
+        env = environment_probe.probe()
+        preferred = env["preferred_shell"]
+        if not preferred:
+            return "ERROR: no shell found on PATH (looked for powershell/pwsh/cmd/bash/sh)."
+        choice = preferred
+    language = {
+        "powershell": "powershell", "pwsh": "powershell", "ps1": "powershell",
+        "bash": "bash", "sh": "bash", "zsh": "bash", "shell": "bash",
+    }.get(choice)
+    if language is None:
+        return ("ERROR: unsupported shell %r; use powershell, bash, or auto "
+                "(cmd batch lines are not supported -- use PowerShell)" % choice)
+    return run_code(code=line, language=language, timeout=timeout, cwd=cwd)
 
 
 @mcp.tool()
@@ -9890,7 +10112,7 @@ def tool_manifest() -> str:
         "sonder": "Ask through Sonder Runtime's local learning loop.",
         "offload": "Route a self-contained task to a configured local/cloud tier.",
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
-        "workspace_inventory/directory_tree/directory_create/text_search/file_read_range": "Budgeted guarded workspace inventory, folder discovery, creation, text search, and bounded line-range reads.",
+        "workspace_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace inventory, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
         "file_policy/file_find/file_read/file_write/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete with approval bypass support.",
         "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
         "environment_status": "Report the host OS, available shells (PowerShell/cmd/bash/wsl), and installed toolchains -- check before choosing a command shape or assuming a tool exists.",
@@ -9903,6 +10125,7 @@ def tool_manifest() -> str:
         "permission_policy/permission_rule_set": "Inspect or guarded-edit local permission rules for tool actions.",
         "context_compaction_plan": "Preview when to summarize, split sessions, or reduce live context.",
         "run_code": "Run a bounded snippet: Python, JS/TypeScript, Bash, Ruby, Perl, PHP, Lua, R, Go, Java, Rust, PowerShell, C++, C#.",
+        "shell_run": "Run one shell command line (pipelines OK) in this host's preferred shell -- auto-picks PowerShell on Windows, bash elsewhere.",
         "ground_artifact": "Validate in-memory non-code content with exact/contains/regex/JSON checks.",
         "artifact_ground": "Validate files or bundles with inferred writing, data, editable Office/media/timelines, UI, image, audio, and static or animated humanoid model recipes.",
         "run_project": "Run a bounded temporary multi-file project with optional build commands.",
@@ -9950,6 +10173,7 @@ AGENT_TOOL_HELP = """Available tools:
 - file_find: {"query": "*.py", "root": ".", "max_results": 50}
 - file_read: {"path": "README.md"}
 - file_read_range: {"path": "server.py", "start_line": 1, "end_line": 200}
+- context_pack: {"paths_json": ["README.md", "src/main.py"], "max_files": 12, "max_total_bytes": 256000, "max_bytes_per_file": 64000}
 - text_search: {"query": "TODO", "root": ".", "glob": "*.py", "regex": false, "max_results": 100}
 - file_write: {"path": "notes.txt", "content": "...", "mode": "create|overwrite|append"}
 - file_edit: {"path": "notes.txt", "old": "before", "new": "after", "count": 1}
@@ -10015,7 +10239,7 @@ or
 
 
 REPOSITORY_READ_ONLY_TOOLS = frozenset({
-    "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range",
+    "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range", "context_pack",
     "data_inspect",
     "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
@@ -10039,6 +10263,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - file_find: {"query": "<task-relevant filename or glob>", "root": ".", "max_results": 50}
 - file_read: {"path": "<task-relevant relative path>", "max_bytes": 256000}
 - file_read_range: {"path": "<task-relevant relative path>", "start_line": 1, "end_line": 200}
+- context_pack: {"paths_json": ["<task-relevant relative path>", "<another task-relevant relative path>"], "max_files": 12, "max_total_bytes": 256000, "max_bytes_per_file": 64000}
 - text_search: {"query": "<exact task symbol or anchor>", "root": ".", "glob": "<task-relevant glob>", "max_results": 100}
 - script_search: {"query": "<task-relevant script name>", "root": ".", "max_results": 100}
 - program_search: {"query": "<required program name>", "max_results": 50}
@@ -10064,6 +10289,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - master_capacity: {"requested_agents": 0}
 - self_heal_check: {}
 - status: {}
+- environment_status: {}
 - system_profile_text: {}
 - environment_status: {}
 - emotion_vector_status: {}
@@ -10102,6 +10328,13 @@ def _repository_scope_path_error(tool_name, args, project_root):
             targets = [("script path", args.get("path") or "")]
             if str(args.get("cwd") or "").strip():
                 targets.append(("working directory", args.get("cwd")))
+        elif tool_name == "context_pack":
+            targets = [
+                ("path", path)
+                for path in _context_pack_paths(
+                    args.get("paths_json", args.get("paths", []))
+                )
+            ]
         else:
             key = _project_scoped_path_key(tool_name)
             targets = [("path", args.get(key) or ".")]
@@ -10284,6 +10517,14 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
                 reject_sensitive=True,
                 extra_roots=trusted_extra_roots,
             )
+        elif tool_name == "context_pack":
+            for path in _context_pack_paths(args.get("paths_json", args.get("paths", []))):
+                file_ops.resolve_repository_read_path(
+                    path,
+                    allow_workspace_root=False,
+                    reject_sensitive=True,
+                    extra_roots=trusted_extra_roots,
+                )
         elif tool_name in {"workspace_inventory", "directory_tree", "file_find", "text_search", "script_search"}:
             file_ops.resolve_repository_read_path(
                 args.get("path", "") or args.get("root", "") or ".",
@@ -10758,6 +10999,13 @@ def _agent_dispatch(
             stdin=args.get("stdin", ""),
             timeout=args.get("timeout", 10),
         )
+    if tool_name == "shell_run":
+        return shell_run(
+            command=args.get("command", ""),
+            shell=args.get("shell", "auto"),
+            cwd=args.get("cwd", ""),
+            timeout=args.get("timeout", 30),
+        )
     if tool_name == "run_project":
         return run_project(
             files_json=args.get("files_json", args.get("files", [])),
@@ -10900,6 +11148,16 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "context_pack":
+        return context_pack(
+            paths_json=args.get("paths_json", args.get("paths", [])),
+            max_files=args.get("max_files", 12),
+            max_total_bytes=args.get("max_total_bytes", 256000),
+            max_bytes_per_file=args.get("max_bytes_per_file", 64000),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "text_search":
         return text_search(
             query=args.get("query", args.get("pattern", "")),
@@ -10939,6 +11197,7 @@ def _agent_dispatch(
             name=args.get("name", ""),
             root=args.get("root", ""),
             apply=bool(args.get("apply", True)),
+            with_tests=bool(args.get("with_tests", False)),
         )
     if tool_name == "environment_status":
         return environment_status(refresh=bool(args.get("refresh", False)))
@@ -11216,7 +11475,7 @@ def _agent_activity_command(tool_name, args):
 
 
 _PROJECT_SCOPED_PATH_TOOLS = frozenset({
-    "file_read", "file_read_range", "image_inspect", "file_write", "file_edit",
+    "file_read", "file_read_range", "context_pack", "image_inspect", "file_write", "file_edit",
     "file_delete", "directory_create", "workspace_inventory", "directory_tree",
     "file_find", "text_search", "script_search", "artifact_verify",
     "artifact_ground", "scaffold_project",
@@ -11292,6 +11551,26 @@ def _project_scope_args(tool_name, args, project):
     # the host-resolved path boundary; child processes remain user-level code,
     # not an operating-system sandbox.
     scoped["extra_roots"] = project
+
+    if tool_name == "context_pack":
+        try:
+            paths = _context_pack_paths(
+                scoped.get("paths_json", scoped.get("paths", []))
+            )
+        except ValueError:
+            # Let the repository policy produce the normal structured error;
+            # project rebasing must not turn malformed model output into an
+            # uncaught agent-loop exception.
+            return scoped
+        rebased = []
+        for raw_path in paths:
+            is_abs = os.path.isabs(raw_path) or bool(
+                re.match(r"^[A-Za-z]:[\\/]", raw_path)
+            )
+            rebased.append(raw_path if is_abs else os.path.join(project, raw_path))
+        scoped["paths_json"] = rebased
+        scoped.pop("paths", None)
+        return scoped
 
     if tool_name == "workspace_run":
         raw_cwd = str(scoped.get("cwd") or ".").strip()
@@ -11376,7 +11655,7 @@ _SPECULATABLE_ARGFREE_TOOLS = frozenset({
     "context_health", "command_registry_list",
 })
 _WORK_VALIDATION_TOOLS = frozenset({
-    "workspace_run", "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
+    "workspace_run", "script_run", "run_code", "shell_run", "run_project", "ground_artifact", "artifact_ground",
     "artifact_verify", "game_reference_suite", "game_generate_and_test",
     "game_generation_campaign", "self_heal_check", "workspace_inventory", "directory_tree", "file_find",
     "file_read", "file_read_range", "text_search", "image_inspect",
@@ -11733,7 +12012,7 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
     # persistent files just edited. self_heal_check is likewise unrelated.
     return False
 _WORK_INSPECTION_TOOLS = frozenset({
-    "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range",
+    "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range", "context_pack",
     "text_search", "script_search", "program_search", "image_inspect",
     "memory_search", "learning_health_status", "memory_quality_report", "memory_privacy_review", "artifact_ground",
     "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",
@@ -11741,11 +12020,11 @@ _WORK_INSPECTION_TOOLS = frozenset({
 })
 _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find",
-    "file_read", "file_read_range", "text_search", "script_search",
+    "file_read", "file_read_range", "context_pack", "text_search", "script_search",
     "program_search", "image_inspect", "environment_status",
 })
 _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
-    "workspace_run", "script_run", "run_code", "run_project", "workflow_run",
+    "workspace_run", "script_run", "run_code", "shell_run", "run_project", "workflow_run",
 })
 _LOCAL_AGENT_NUM_PREDICT = 1200
 # A hosted agent decision may contain a complete bounded file_write payload.
@@ -12883,7 +13162,7 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
 })
 _AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
     "directory_create", "file_write", "file_edit", "workspace_run",
-    "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
+    "script_run", "run_code", "shell_run", "run_project", "ground_artifact", "artifact_ground",
     "artifact_generate", "artifact_verify", "game_reference_suite",
     "game_generate_and_test",
 })
@@ -14496,6 +14775,7 @@ def scaffold_project(
     name: str,
     root: str = "",
     apply: bool = False,
+    with_tests: bool = False,
 ) -> str:
     """Emit a complete, deterministic project skeleton for one language.
 
@@ -14513,11 +14793,13 @@ def scaffold_project(
     With apply=True it writes each file under `root` through the same guarded
     file path as every other write (mode=create -- an existing file is an
     error, a scaffold never clobbers), so filesystem roots and approval gates
-    apply. `root` is required to apply.
+    apply. `root` is required to apply. with_tests=True adds a unit-test
+    skeleton for the kinds that have one (python/rust/go/node/typescript);
+    the default stays minimal by design.
     """
     _maybe_live_reload()
     try:
-        files = project_scaffold.render(kind, name)
+        files = project_scaffold.render(kind, name, with_tests=with_tests)
     except ValueError as exc:
         return "ERROR: %s" % exc
 
