@@ -47,10 +47,16 @@ if str(REPO) not in sys.path:
 
 import selfmod  # noqa: E402
 
-# Files the nightly stage is allowed to propose changes to. Deliberately narrow
-# and deliberately NOT server.py: a 14k-line module that every lane touches is
-# the worst possible place for an unattended edit, and the point of the first
-# night is to prove the loop works, not to maximise its reach.
+# Files the nightly stage may propose changes to. Every entry is a module
+# with its own test file, small enough that one function is a meaningful
+# fraction of it, and none is a hot path every lane touches -- server.py is
+# deliberately absent for that reason.
+#
+# The list grew from six after the duplicate-objective guard started working:
+# with repeats blocked, the model ran out of distinct proposals for six files
+# in five passes and every later pass reported "no objective proposed". That
+# is the correct outcome for an exhausted file set, and the answer is more
+# material rather than a laxer guard.
 CANDIDATE_FILES = (
     "reflection.py",
     "memory_quality.py",
@@ -58,6 +64,20 @@ CANDIDATE_FILES = (
     "promotion_eval.py",
     "context_policy.py",
     "summarizer.py",
+    "ruff_verifier.py",
+    "node_verifier.py",
+    "json_schema_verifier.py",
+    "sql_verifier.py",
+    "domain_grounding.py",
+    "preference_learning.py",
+    "recall.py",
+    "seed_merge.py",
+    "store_integrity.py",
+    "creative_router.py",
+    "embed_cache.py",
+    "ollama_endpoint.py",
+    "live_reload.py",
+    "self_curriculum.py",
 )
 
 _FENCE = re.compile(r"^\s*```[a-zA-Z0-9_+-]*\s*$", re.M)
