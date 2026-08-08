@@ -8,7 +8,7 @@ itself. Lessons that look like they might leak private information (a
 filesystem path, a secret-looking token, an email address) or that are not
 a short generic sentence are excluded.
 
-Run: ./venv/Scripts/python.exe contribute.py
+Run: python contribute.py
 """
 import io
 import hashlib

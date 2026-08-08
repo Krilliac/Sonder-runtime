@@ -32,8 +32,9 @@ if [ -z "$SONDER_ENGINE_ROOT" ] && [ -f "$SONDER_RUNTIME_ROOT/engine/ENGINE-BUND
   SONDER_ENGINE_ROOT="$SONDER_RUNTIME_ROOT/engine"
 fi
 
-SONDER_PYTHON=
-if [ -n "$SONDER_ENGINE_ROOT" ]; then
+sonder_configured_python=${SONDER_PYTHON:-}
+SONDER_PYTHON=$sonder_configured_python
+if [ -z "$SONDER_PYTHON" ] && [ -n "$SONDER_ENGINE_ROOT" ]; then
   for candidate in \
     "$SONDER_ENGINE_ROOT/runtime/python/bin/python3" \
     "$SONDER_ENGINE_ROOT/runtime/python/python3" \
@@ -42,8 +43,12 @@ if [ -n "$SONDER_ENGINE_ROOT" ]; then
     if [ -x "$candidate" ]; then SONDER_PYTHON=$candidate; break; fi
   done
 fi
-if [ -z "$SONDER_PYTHON" ] && [ -x "$SONDER_RUNTIME_ROOT/venv/bin/python3" ]; then
-  SONDER_PYTHON="$SONDER_RUNTIME_ROOT/venv/bin/python3"
+if [ -z "$SONDER_PYTHON" ]; then
+  for candidate in \
+    "$SONDER_RUNTIME_ROOT/venv/bin/python3" \
+    "$SONDER_RUNTIME_ROOT/venv/bin/python"; do
+    if [ -x "$candidate" ]; then SONDER_PYTHON=$candidate; break; fi
+  done
 fi
 if [ -z "$SONDER_PYTHON" ]; then
   SONDER_PYTHON=$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)
@@ -60,4 +65,4 @@ fi
 
 export SONDER_RUNTIME_ROOT SONDER_HOME SONDER_ENGINE_ROOT
 export SONDER_PYTHON SONDER_OLLAMA_EXE OLLAMA_MODELS OLLAMA_NO_CLOUD PATH
-unset sonder_platform sonder_arch sonder_identity candidate
+unset sonder_platform sonder_arch sonder_identity sonder_configured_python candidate

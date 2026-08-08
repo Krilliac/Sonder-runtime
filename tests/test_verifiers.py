@@ -71,6 +71,22 @@ def test_cpp_compile_pass(monkeypatch):
     assert v.reason == "compiled"
 
 
+def test_cpp_compile_discovers_vcvars_when_not_explicit(monkeypatch):
+    monkeypatch.setattr(
+        V.code_runner, "_find_visual_studio_vcvars", lambda: V.__file__
+    )
+    monkeypatch.setattr(V, "_run", lambda *a, **kw: (0, "compiled"))
+
+    assert V.cpp_compile("int main(){ return 0; }").passed is True
+
+
+def test_cpp_compile_reports_unavailable_when_discovery_finds_nothing(monkeypatch):
+    monkeypatch.setattr(V.code_runner, "_find_visual_studio_vcvars", lambda: None)
+
+    with pytest.raises(V.VerifierUnavailable, match="not discovered"):
+        V.cpp_compile("int main(){ return 0; }")
+
+
 def test_cpp_compile_reports_errors(monkeypatch):
     monkeypatch.setattr(V, "_run", lambda *a, **k: (2, "tu.cpp(1): error C2143: syntax error"))
     v = V.cpp_compile("int main(", {"vcvars": V.__file__})
