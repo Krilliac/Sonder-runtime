@@ -22,6 +22,7 @@ import consult as consult_flow
 import tier_router
 import code_improve
 import command_router
+import project_scaffold
 
 CURRENT_TOKEN = ""
 
@@ -223,6 +224,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /consult <question> ask 2 local tiers (+cloud when enabled) and compare answers
   /route <request>   suggest the tier best suited to a request, and why
   /refactor <file> <fn> [goal]  propose a guarded improvement to one function
+  /scaffold <kind> <name> [root]  write a full project skeleton (cpp-msvc, csharp, rust, ...)
   /location [on|off] allow approximate IP location for "my area" weather answers
   /stats             show Sonder Runtime's learning stats
   /context           show context, session, and memory health meters
@@ -750,6 +752,16 @@ def main():
                 do_route(arg)
             elif cmd == "/refactor":
                 do_refactor(arg)
+            elif cmd == "/scaffold":
+                parts = arg.split()
+                if len(parts) < 2:
+                    print("usage: /scaffold <kind> <name> [root]   kinds: %s"
+                          % ", ".join(project_scaffold.kinds()))
+                else:
+                    kind, name = parts[0], parts[1]
+                    root = parts[2] if len(parts) > 2 else name
+                    print(server.scaffold_project(
+                        kind=kind, name=name, root=root, apply=True))
             elif cmd == "/location":
                 a = (arg or "").strip().lower()
                 if a in ("on", "off"):
