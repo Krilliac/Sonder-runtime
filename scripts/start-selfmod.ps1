@@ -24,14 +24,27 @@
 param(
   [double] $Hours = 4.0,
   [string] $Model = 'qwen2.5-coder:14b',
+  [string] $Python = '',
   [switch] $Stop,
   [switch] $Status
 )
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
-$py   = Join-Path $repo 'venv\Scripts\python.exe'
-$log  = Join-Path $env:LOCALAPPDATA 'sonder\selfmod-continuous.log'
+$py = $Python
+if ([string]::IsNullOrWhiteSpace($py)) { $py = $env:SONDER_PYTHON }
+if ([string]::IsNullOrWhiteSpace($py)) {
+  $localPython = Join-Path $repo 'venv\Scripts\python.exe'
+  if (Test-Path -LiteralPath $localPython -PathType Leaf) { $py = $localPython }
+}
+if ([string]::IsNullOrWhiteSpace($py)) {
+  $py = (Get-Command python -ErrorAction SilentlyContinue).Source
+}
+$stateRoot = $env:LOCALAPPDATA
+if ([string]::IsNullOrWhiteSpace($stateRoot)) {
+  $stateRoot = [IO.Path]::GetTempPath()
+}
+$log = Join-Path $stateRoot 'sonder\selfmod-continuous.log'
 
 function Get-LoopProcesses {
   Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
@@ -60,7 +73,10 @@ if (Get-LoopProcesses) {
   exit 1
 }
 
-if (-not (Test-Path $py)) { Write-Error "no interpreter at $py"; exit 3 }
+if ([string]::IsNullOrWhiteSpace($py) -or -not (Test-Path -LiteralPath $py -PathType Leaf)) {
+  Write-Error 'no Python interpreter found; pass -Python or set SONDER_PYTHON'
+  exit 3
+}
 
 # A run that starts on a dirty tree cannot be committed, so the loop would
 # refuse every pass anyway. Say so here rather than after a launch that does

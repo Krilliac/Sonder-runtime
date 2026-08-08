@@ -18,8 +18,9 @@ if not defined SONDER_ENGINE_ROOT if exist "%SONDER_RUNTIME_ROOT%engine\%SONDER_
 if not defined SONDER_ENGINE_ROOT if exist "%SONDER_RUNTIME_ROOT%engine\ENGINE-BUNDLE.json" set "SONDER_ENGINE_ROOT=%SONDER_RUNTIME_ROOT%engine"
 if defined SONDER_ENGINE_ROOT for %%I in ("%SONDER_ENGINE_ROOT%") do if /I "%%~nxI"=="ENGINE-BUNDLE.json" set "SONDER_ENGINE_ROOT=%%~dpI"
 
-set "SONDER_PYTHON="
-if defined SONDER_ENGINE_ROOT if exist "%SONDER_ENGINE_ROOT%\runtime\python\python.exe" set "SONDER_PYTHON=%SONDER_ENGINE_ROOT%\runtime\python\python.exe"
+set "SONDER_CONFIGURED_PYTHON=%SONDER_PYTHON%"
+set "SONDER_PYTHON=%SONDER_CONFIGURED_PYTHON%"
+if not defined SONDER_PYTHON if defined SONDER_ENGINE_ROOT if exist "%SONDER_ENGINE_ROOT%\runtime\python\python.exe" set "SONDER_PYTHON=%SONDER_ENGINE_ROOT%\runtime\python\python.exe"
 if not defined SONDER_PYTHON if exist "%SONDER_RUNTIME_ROOT%venv\Scripts\python.exe" set "SONDER_PYTHON=%SONDER_RUNTIME_ROOT%venv\Scripts\python.exe"
 if not defined SONDER_PYTHON for %%P in (python.exe py.exe) do if not defined SONDER_PYTHON (
   where %%P >nul 2>&1
@@ -33,4 +34,5 @@ if defined SONDER_ENGINE_ROOT if exist "%SONDER_ENGINE_ROOT%\runtime\ollama\olla
   set "OLLAMA_NO_CLOUD=1"
 )
 if not defined SONDER_OLLAMA_EXE set "SONDER_OLLAMA_EXE=ollama"
+set "SONDER_CONFIGURED_PYTHON="
 exit /b 0
