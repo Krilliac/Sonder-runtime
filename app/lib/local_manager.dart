@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'launcher_health.dart';
+
 class LocalActionResult {
   final bool ok;
   final String message;
@@ -130,6 +132,11 @@ class LocalManager {
     return '${runDirectoryPath()}${Platform.pathSeparator}$_serverLogName';
   }
 
+  static String launcherHealthTokenPath() {
+    return '${runDirectoryPath()}${Platform.pathSeparator}'
+        'sonder-launcher-health.token';
+  }
+
   /// Last [maxLines] non-blank lines of the server startup log, or an empty
   /// string when the log is missing, empty, or unreadable.
   static Future<String> readServerLogTail({int maxLines = 40}) {
@@ -182,22 +189,46 @@ class LocalManager {
   }
 
   static Future<bool> defaultServerReachable() async {
+    final token = await _readLauncherHealthToken();
+    if (token.length < 32) return false;
+    final nonce = newLauncherHealthNonce();
+    final client = HttpClient()..findProxy = (_) => 'DIRECT';
+    client.connectionTimeout = const Duration(milliseconds: 350);
     try {
-      final socket = await Socket.connect(
-        InternetAddress.loopbackIPv4,
-        11435,
-        timeout: const Duration(milliseconds: 350),
+      final request = await client
+          .getUrl(Uri.parse('http://127.0.0.1:11435$launcherHealthPath'))
+          .timeout(const Duration(milliseconds: 800));
+      request.headers.set(launcherHealthNonceHeader, nonce);
+      final response = await request.close().timeout(
+            const Duration(milliseconds: 800),
+          );
+      if (response.statusCode != HttpStatus.ok) return false;
+      final bytes = <int>[];
+      await for (final chunk in response.timeout(
+        const Duration(milliseconds: 800),
+      )) {
+        bytes.addAll(chunk);
+        if (bytes.length > 4096) return false;
+      }
+      final payload = jsonDecode(utf8.decode(bytes));
+      // A TCP accept let unrelated or wedged listeners block startup and made
+      // the UI promise a healthy server; require the launcher's signed identity.
+      return launcherHealthPayloadMatches(
+        payload,
+        token: token,
+        nonce: nonce,
+        port: 11435,
       );
-      socket.destroy();
-      return true;
     } catch (_) {
       return false;
+    } finally {
+      client.close(force: true);
     }
   }
 
-  /// Poll the API port until it accepts a connection or [timeout] elapses.
+  /// Poll until the managed API proves its identity or [timeout] elapses.
   /// Starting a launcher process only proves the process spawned, so a start
-  /// is not reported as successful until the port answers.
+  /// is not reported as successful until the signed health probe passes.
   static Future<bool> waitForServer({
     Duration timeout = _serverReadyTimeout,
     Duration interval = const Duration(milliseconds: 400),
@@ -346,6 +377,10 @@ class LocalManager {
     }
     _managedServerOutput.clear();
     try {
+      final serverEnvironment = await _managedServerEnvironment(
+        allowHosted: allowHosted,
+        contextSize: contextSize,
+      );
       if (Platform.isWindows) {
         final script = File(
           '${system.path}${Platform.pathSeparator}sonder-serve.cmd',
@@ -363,10 +398,7 @@ class LocalManager {
             'cmd.exe',
             ['/c', script.path],
             workingDirectory: system.path,
-            environment: processEnvironment(
-              allowHosted: allowHosted,
-              contextSize: contextSize,
-            ),
+            environment: serverEnvironment,
           );
           _trackManagedServer(process);
           return _awaitServerReady(
@@ -393,10 +425,7 @@ class LocalManager {
         '/bin/sh',
         [script.path],
         workingDirectory: system.path,
-        environment: processEnvironment(
-          allowHosted: allowHosted,
-          contextSize: contextSize,
-        ),
+        environment: serverEnvironment,
       );
       _trackManagedServer(process);
       return _awaitServerReady(
@@ -459,6 +488,10 @@ class LocalManager {
     required String contextSize,
     required Duration readyTimeout,
   }) async {
+    final serverEnvironment = await _managedServerEnvironment(
+      allowHosted: allowHosted,
+      contextSize: contextSize,
+    );
     final args = <String>[
       'start',
       '--context-size',
@@ -476,10 +509,7 @@ class LocalManager {
         'cmd.exe',
         ['/c', 'start', '', '/min', script.path, ...args],
         workingDirectory: system.path,
-        environment: processEnvironment(
-          allowHosted: allowHosted,
-          contextSize: contextSize,
-        ),
+        environment: serverEnvironment,
         runInShell: true,
       );
     } else {
@@ -494,10 +524,7 @@ class LocalManager {
         '/bin/sh',
         [script.path, ...args],
         workingDirectory: system.path,
-        environment: processEnvironment(
-          allowHosted: allowHosted,
-          contextSize: contextSize,
-        ),
+        environment: serverEnvironment,
         mode: ProcessStartMode.detached,
       );
     }
@@ -505,6 +532,65 @@ class LocalManager {
       'Server startup requested in managed background mode.',
       readyTimeout,
     );
+  }
+
+  static Future<Map<String, String>> _managedServerEnvironment({
+    required bool allowHosted,
+    required String contextSize,
+  }) async {
+    final token = await _ensureLauncherHealthToken();
+    return {
+      ...processEnvironment(
+        allowHosted: allowHosted,
+        contextSize: contextSize,
+      ),
+      launcherHealthTokenEnvironment: token,
+      launcherHealthRoleEnvironment: launcherHealthManagedRole,
+    };
+  }
+
+  static Future<String> _readLauncherHealthToken() async {
+    final configured =
+        Platform.environment[launcherHealthTokenEnvironment]?.trim() ?? '';
+    if (configured.length >= 32) return configured;
+    try {
+      final token =
+          (await File(launcherHealthTokenPath()).readAsString()).trim();
+      return token.length >= 32 ? token : '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  static Future<String> _ensureLauncherHealthToken() async {
+    final existing = await _readLauncherHealthToken();
+    if (existing.isNotEmpty) return existing;
+    final target = File(launcherHealthTokenPath());
+    await target.parent.create(recursive: true);
+    final temporary = File(
+      '${target.path}.$pid.${DateTime.now().microsecondsSinceEpoch}.tmp',
+    );
+    final token = newLauncherHealthToken();
+    try {
+      await temporary.writeAsString(token, flush: true);
+      if (!Platform.isWindows) {
+        final chmod = await Process.run('chmod', ['600', temporary.path]);
+        if (chmod.exitCode != 0) {
+          throw FileSystemException(
+            'Could not protect launcher health token',
+            temporary.path,
+          );
+        }
+      }
+      final raced = await _readLauncherHealthToken();
+      if (raced.isNotEmpty) return raced;
+      await temporary.rename(target.path);
+      return token;
+    } finally {
+      try {
+        if (await temporary.exists()) await temporary.delete();
+      } catch (_) {}
+    }
   }
 
   static void _trackManagedServer(Process process) {
@@ -685,8 +771,8 @@ class LocalManager {
       }
       final safeUpdater =
           File('${system.path}${Platform.pathSeparator}safe_update.py');
-      final safeUpdaterCmd = File(
-          '${system.path}${Platform.pathSeparator}sonder-safe-update.cmd');
+      final safeUpdaterCmd =
+          File('${system.path}${Platform.pathSeparator}sonder-safe-update.cmd');
       if (Platform.isWindows && await safeUpdaterCmd.exists()) {
         final safe = await Process.run(
           'cmd.exe',
