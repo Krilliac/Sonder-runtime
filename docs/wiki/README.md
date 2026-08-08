@@ -35,7 +35,7 @@ backups, and a signed update path. It is not a foundation model.
 
 ## Operational tools
 
-- `python sonder_doctor.py` — one consolidated read-only health report
+- `python -m sonder_runtime doctor` — one consolidated read-only health report
   (config, self-heal, memory quality, runtime policy, Ollama reachability).
 - `python sonder_hardware.py [workload]` — detect CPU/RAM/GPU/VRAM and get a
   model-band / context / keep-alive recommendation, including whether the
