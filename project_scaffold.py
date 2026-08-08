@@ -230,6 +230,14 @@ if __name__ == "__main__":
     main()
 """
 
+_PY_TEST = """from @LOWER@.__main__ import main
+
+
+def test_main_runs(capsys):
+    main()
+    assert "up and running" in capsys.readouterr().out
+"""
+
 _PACKAGE_JSON = """{
   "name": "@LOWER@",
   "version": "0.1.0",
@@ -243,6 +251,14 @@ _PACKAGE_JSON = """{
 """
 
 _INDEX_JS = """console.log("@LOWER@ up and running");
+"""
+
+_INDEX_JS_TEST = """import { test } from 'node:test';
+import assert from 'node:assert';
+
+test('smoke', () => {
+  assert.equal(2 + 2, 4);
+});
 """
 
 _TS_PACKAGE_JSON = """{
@@ -278,6 +294,14 @@ _TSCONFIG = """{
 _INDEX_TS = """console.log("@LOWER@ up and running");
 """
 
+_INDEX_TS_TEST = """import { test } from 'node:test';
+import assert from 'node:assert';
+
+test('smoke', () => {
+  assert.equal(2 + 2, 4);
+});
+"""
+
 _GO_MOD = """module @LOWER@
 
 go 1.22
@@ -289,6 +313,27 @@ import "fmt"
 
 func main() {
 \tfmt.Println("@LOWER@ up and running")
+}
+"""
+
+_MAIN_GO_TEST = """package main
+
+import "testing"
+
+func TestSmoke(t *testing.T) {
+	if 2+2 != 4 {
+		t.Fatal("unexpected arithmetic result")
+	}
+}
+"""
+
+_MAIN_RS_WITH_TESTS = _MAIN_RS + """
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn smoke() {
+        assert_eq!(2 + 2, 4);
+    }
 }
 """
 
@@ -368,8 +413,26 @@ _TEMPLATES = {
     },
 }
 
+_TEST_TEMPLATES = {
+    "python": {
+        "tests/test_@LOWER@.py": _PY_TEST,
+    },
+    "rust": {
+        "src/main.rs": _MAIN_RS_WITH_TESTS,
+    },
+    "go": {
+        "main_test.go": _MAIN_GO_TEST,
+    },
+    "node": {
+        "test/index.test.js": _INDEX_JS_TEST,
+    },
+    "typescript": {
+        "src/index.test.ts": _INDEX_TS_TEST,
+    },
+}
 
-def render(kind, name, guid=None):
+
+def render(kind, name, guid=None, *, with_tests=False):
     """Return {relative_path: content} for one project skeleton.
 
     Raises ValueError on an unsupported kind or an empty name. `guid` is an
@@ -395,4 +458,7 @@ def render(kind, name, guid=None):
     def fill(text):
         return _TOKEN.sub(lambda m: values[m.group(1)], text)
 
-    return {fill(path): fill(content) for path, content in _TEMPLATES[canonical].items()}
+    templates = dict(_TEMPLATES[canonical])
+    if with_tests:
+        templates.update(_TEST_TEMPLATES.get(canonical, {}))
+    return {fill(path): fill(content) for path, content in templates.items()}
