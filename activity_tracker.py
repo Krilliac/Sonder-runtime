@@ -58,18 +58,56 @@ def _block(value, limit=MAX_EVENT_BLOCK):
     return text[:limit] + "\n... (truncated)" if len(text) > limit else text
 
 
+# These rules and npu_contract's (npu_contract.py:89-113) do the same job on the
+# same shapes, and drifted: _BEARER_RE was added here first, then npu_contract
+# alone was hardened. Measured against eight credential shapes this copy caught
+# ZERO of them, and one of the eight came out looking sanitized while leaking:
+# `token = "value with spaces"` became `token=<redacted> with spaces"`, because
+# the value pattern stopped at the first space and never considered quotes.
+#
+# The AWS miss was the sharpest: '_' is a word character, so `\bsecret\b` has no
+# boundary to match on either side of AWS_SECRET_ACCESS_KEY and the most standard
+# secret environment variable there is passed through untouched. Wrapping the
+# keyword in [a-z0-9_]* -- the way npu_contract does -- is what fixes that.
+#
+# Deliberately NARROWER than npu_contract in three places, because that module
+# bounds a 200-char error string while this one carries the activity ledger's
+# real command lines and stdout, which a caller reads to see what happened:
+#   * an unquoted value ends at whitespace rather than at end-of-line, so
+#     `--token abc --verbose` keeps its remaining flags;
+#   * the separator is [ \t] only, so a bare `pwd` at end of line cannot swallow
+#     the first word of the NEXT line;
+#   * the JWT rule is anchored on the "ey" header ('{"' in base64url) so a dotted
+#     identifier such as tests.test_activity.test_case is not read as a token.
+# Accepted cost of the wider keyword: a tool that prints "tokens: 512" in its
+# stdout has that count redacted, because "tokens" contains "token". Exempting
+# numeric values would fix that and would equally un-redact "password: 1234", so
+# it stays redacted. The ledger's OWN token counters are structured ints
+# (format_transcript reads them from the span) and never pass through here.
 _SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(password|passwd|token|secret|api[-_]?key)\b"
-    r"(\s*[:=]\s*|\s+)([^\s,;]+)"
+    r"(?i)\b([a-z0-9_]*(?:password|passwd|pwd|token|secret|api[-_]?key|"
+    r"access[-_]?key|authorization|credential)[a-z0-9_]*)"
+    r"(?:[ \t]*[:=][ \t]*|[ \t]+)"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
 )
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]+=*")
-_KEY_SHAPE_RE = re.compile(r"\b(?:sk|gh[pousr])[-_][A-Za-z0-9_-]{12,}\b")
+_KEY_SHAPE_RE = re.compile(
+    r"\b(?:(?:sk|gh[pousr])[-_][A-Za-z0-9_-]{12,}|"
+    r"(?:AKIA|ASIA|AIDA|AROA|AIPA|ANPA|ANVA|ASCA)[A-Z0-9]{16})\b"
+)
+_JWT_RE = re.compile(r"\bey[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\b")
+_URI_CREDENTIAL_RE = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/@\s:]+:[^/@\s]+@")
 
 
 def _redact_text(value):
     text = str(value or "")
-    text = _SECRET_ASSIGNMENT_RE.sub(lambda match: "%s=<redacted>" % match.group(1), text)
+    # Bearer first: the assignment rule now matches `Authorization:` too, and it
+    # consumes only up to the next space -- so running it first would eat the
+    # word "Bearer" and leave the token itself behind, unmatchable.
     text = _BEARER_RE.sub("Bearer <redacted>", text)
+    text = _URI_CREDENTIAL_RE.sub(r"\1<redacted>@", text)
+    text = _SECRET_ASSIGNMENT_RE.sub(lambda match: "%s=<redacted>" % match.group(1), text)
+    text = _JWT_RE.sub("<redacted-token>", text)
     return _KEY_SHAPE_RE.sub("<redacted-key>", text)
 
 

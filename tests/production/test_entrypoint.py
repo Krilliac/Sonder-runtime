@@ -111,6 +111,99 @@ def test_module_executes_as_subprocess(isolated_home):
     assert "sonder-runtime" in result.stdout
 
 
+def test_serve_exports_validated_config_before_migrations(
+    isolated_home, tmp_path, monkeypatch, capsys
+):
+    """Preflighted settings must reach the runtime, and reach it in time.
+
+    state.home/workspace_roots/ollama.url and the [features] gates were
+    validated and then dropped, so the runtime used unrelated defaults; the
+    home in particular must be exported before migrations open a database.
+    """
+    import sonder_migrations
+
+    configured_home = tmp_path / "configured-home"
+    workspace = tmp_path / "workspaces"
+    workspace.mkdir()
+    for name in (
+        "SONDER_FILE_ROOTS", "OLLAMA_HOST", "SONDER_ALLOW_REMOTE_OLLAMA",
+        "SONDER_WEB_TOOLS", "SONDER_LIVE_RELOAD", "SONDER_HOST", "SONDER_PORT",
+    ):
+        monkeypatch.setenv(name, os.environ.get(name, ""))
+
+    seen: dict[str, str] = {}
+
+    def _capture(*args, **kwargs):
+        seen.update(
+            home=os.environ.get("SONDER_HOME", ""),
+            roots=os.environ.get("SONDER_FILE_ROOTS", ""),
+            ollama=os.environ.get("OLLAMA_HOST", ""),
+            web=os.environ.get("SONDER_WEB_TOOLS", ""),
+        )
+        raise sonder_migrations.MigrationError("stop before binding")
+
+    monkeypatch.setattr(sonder_migrations, "migrate_all", _capture)
+    rc = main(
+        [
+            "serve", "--skip-preflight",
+            "--set", f"state.home={configured_home}",
+            "--set", f"state.workspace_roots={workspace}",
+            "--set", "ollama.url=http://127.0.0.1:11500",
+            "--set", "features.web=true",
+        ]
+    )
+    capsys.readouterr()
+    assert rc == 1  # the stubbed migration aborts before any listener opens
+    assert seen["home"] == str(configured_home)
+    assert str(workspace) in seen["roots"]
+    assert seen["ollama"] == "http://127.0.0.1:11500"
+    assert seen["web"] == "1"
+
+
+def test_serve_exports_feature_gates_closed_by_default(
+    isolated_home, tmp_path, monkeypatch, capsys
+):
+    """[features].web=false must actually close the web-egress gate."""
+    import sonder_migrations
+
+    for name in ("SONDER_WEB_TOOLS", "SONDER_LIVE_RELOAD", "SONDER_HOST",
+                 "SONDER_PORT", "OLLAMA_HOST", "SONDER_ALLOW_REMOTE_OLLAMA"):
+        monkeypatch.delenv(name, raising=False)
+
+    seen: dict[str, str] = {}
+
+    def _capture(*args, **kwargs):
+        seen.update(
+            web=os.environ.get("SONDER_WEB_TOOLS", ""),
+            live_reload=os.environ.get("SONDER_LIVE_RELOAD", ""),
+        )
+        raise sonder_migrations.MigrationError("stop before binding")
+
+    monkeypatch.setattr(sonder_migrations, "migrate_all", _capture)
+    assert main(["serve", "--skip-preflight"]) == 1
+    capsys.readouterr()
+    assert seen["web"] == "0"
+    assert seen["live_reload"] == "0"
+
+
+def test_backup_verify_json_flag_emits_json(isolated_home, tmp_path, capsys):
+    assert main(["migrate", "--store", "operations"]) == 0
+    capsys.readouterr()
+    target = tmp_path / "backups"
+    assert main(["backup", "create", "--target", str(target), "--json"]) == 0
+    backup_dir = json.loads(capsys.readouterr().out)["path"]
+
+    assert main(["backup", "verify", backup_dir, "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True and payload["problems"] == []
+
+    assert main(["restore", "verify", backup_dir, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+
+    assert main(["restore", "smoke", backup_dir, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
 def test_backup_and_restore_via_cli(isolated_home, tmp_path, capsys):
     assert main(["migrate", "--store", "operations"]) == 0
     capsys.readouterr()

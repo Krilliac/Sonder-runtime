@@ -27,6 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import server
 import admin_auth
+import sonder_config
 import grounding
 import code_runner
 import training_tasks
@@ -86,6 +87,20 @@ ALLOW_REGISTRATION = _env_flag("SONDER_ALLOW_REGISTRATION")
 MAX_REQUEST_BYTES = max(1, min(16 * 1024 * 1024, _env_int(
     "SONDER_MAX_REQUEST_BYTES", 1024 * 1024
 )))
+# Per-connection socket timeout. StreamRequestHandler applies one only when the
+# handler declares it, and Handler declared none: every read blocked forever, so
+# a client that connected and never finished its request line parked in
+# rfile.readline() for good. ThreadingHTTPServer had already given it a dedicated
+# thread, and every real defence -- origin check, auth rate limit, the 413 body
+# cap, the bounded-concurrency admission slot -- sits DOWNSTREAM of the headers
+# that never arrived, so no credential was needed to hold a thread. This bounds
+# the wait; it does not fire during generation, because a long model call
+# performs no socket operation while it runs.
+REQUEST_TIMEOUT_SECONDS = max(5, _env_int("SONDER_REQUEST_TIMEOUT_SECONDS", 60))
+# Account-secret counterpart to sonder_config.MIN_API_KEY_LENGTH. That side of
+# the same non-loopback bind policy has no constant anywhere, so name it here
+# rather than leave a second bare literal next to the one being removed.
+MIN_ACCOUNT_SECRET_LENGTH = 32
 LAUNCHER_HEALTH_TOKEN = os.environ.get(sonder_health.TOKEN_ENV, "")
 RUNTIME_ROLE = os.environ.get(sonder_health.ROLE_ENV, "")
 
@@ -503,8 +518,12 @@ def _validate_bind_security(host, api_key=None, auth_mode=None, auth_secret=None
         raise RuntimeError("both auth mode requires API key and account auth secret")
     if _is_loopback_host(host):
         return
-    strong_api = len(api_key) >= 24
-    strong_account = len(auth_secret) >= 32
+    # The same policy sonder_config.validate enforces, read from the same
+    # constant. It was restated here as a bare 24, so raising the named
+    # MIN_API_KEY_LENGTH -- the obvious single-point edit -- would have
+    # hardened the config validator and left the actual bind-time gate behind.
+    strong_api = len(api_key) >= sonder_config.MIN_API_KEY_LENGTH
+    strong_account = len(auth_secret) >= MIN_ACCOUNT_SECRET_LENGTH
     secure = {
         "api-key": strong_api,
         "account": strong_account,
@@ -1420,6 +1439,9 @@ def _chunk(iid, model, delta, finish_reason=None):
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "sonder-serve/1.0"
+    # socketserver reads this in setup() and calls connection.settimeout(); a
+    # timed-out read raises in handle_one_request, which closes the connection.
+    timeout = REQUEST_TIMEOUT_SECONDS
 
     def _cors(self):
         origin = self.headers.get("Origin")

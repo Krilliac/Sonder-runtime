@@ -20,6 +20,7 @@ absent — that is "could not judge", distinct from a Verdict(False) "artifact f
 """
 import collections
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -45,8 +46,18 @@ class VerifierUnavailable(RuntimeError):
     """The verifier's external tool isn't present — 'could not judge', not 'failed'."""
 
 
+# What the OS/shell prints when it cannot find the executable at all, as opposed
+# to the executable running and rejecting the artifact. Same list node_verifier
+# uses (node_verifier.py:27) — the two backends face the same distinction.
+_TOOL_MISSING_MARKERS = (
+    "is not recognized as an internal or external command",  # Windows cmd
+    "No such file or directory",  # POSIX
+    "command not found",
+)
+
+
 def _last_line(text):
-    lines = [l for l in (text or "").strip().splitlines() if l.strip()]
+    lines = [row for row in (text or "").strip().splitlines() if row.strip()]
     return lines[-1] if lines else ""
 
 
@@ -142,23 +153,43 @@ def cpp_compile(artifact, spec=None):
     if std not in _ALLOWED_CPP_STD:
         raise ValueError("unsupported /std %r (allowed: %s)" % (std, sorted(_ALLOWED_CPP_STD)))
     d = tempfile.mkdtemp()
-    src = os.path.join(d, "tu.cpp")  # our own mkdtemp path — not caller-controlled
-    with open(src, "w", encoding="utf-8") as f:
-        f.write(artifact)
-    # Run through a .bat: `cmd /c "call \"path with spaces\" && cl ..."` gets its
-    # outer quotes stripped by cmd and mangles the vcvars path — a wrapper file dodges it.
-    bat = os.path.join(d, "build.bat")
-    with open(bat, "w", encoding="utf-8") as f:
-        f.write('@echo off\r\ncall "%s" >nul\r\ncl /nologo /EHsc /std:%s /c "%s"\r\n'
-                % (vcvars, std, src))
-    rc, out = _run(["cmd", "/c", bat], cwd=d, timeout=spec.get("timeout", 180))
-    if rc == 0:
-        reason = "compiled"
-    else:
-        # prefer the real MSVC diagnostic over trailing vcvars noise (vswhere, etc.)
-        errs = [l.strip() for l in out.splitlines() if "): error" in l or "error C" in l]
-        reason = errs[0] if errs else (_last_line(out) or "compile error")
-    return Verdict(rc == 0, reason, out[-4000:])
+    try:
+        src = os.path.join(d, "tu.cpp")  # our own mkdtemp path — not caller-controlled
+        with open(src, "w", encoding="utf-8") as f:
+            f.write(artifact)
+        # Run through a .bat: `cmd /c "call \"path with spaces\" && cl ..."` gets its
+        # outer quotes stripped by cmd and mangles the vcvars path — a wrapper file dodges it.
+        bat = os.path.join(d, "build.bat")
+        with open(bat, "w", encoding="utf-8") as f:
+            f.write('@echo off\r\ncall "%s" >nul\r\ncl /nologo /EHsc /std:%s /c "%s"\r\n'
+                    % (vcvars, std, src))
+        rc, out = _run(["cmd", "/c", bat], cwd=d, timeout=spec.get("timeout", 180))
+        if rc == 0:
+            reason = "compiled"
+        else:
+            # prefer the real MSVC diagnostic over trailing vcvars noise (vswhere, etc.)
+            errs = [row.strip() for row in out.splitlines()
+                    if "): error" in row or "error C" in row]
+            if not errs and any(m in out for m in _TOOL_MISSING_MARKERS):
+                # vcvars64.bat exists but there is no x64 toolset behind it (the
+                # VC.CoreBuildTools case), or vcvars aborted and its diagnostic
+                # went to the `>nul` above: cmd exits 9009 having printed only
+                # its own not-found message. With no MSVC diagnostic to quote,
+                # this returned Verdict(False, "operable program or batch file.")
+                # — "could not judge" reported as "the artifact FAILED", so every
+                # C++ artifact including correct ones was judged failed and fed
+                # to solver's repair loop, burning the repair budget and writing
+                # false-negative reward rows. The isfile() guard above only
+                # covers the "no Visual Studio at all" case.
+                raise VerifierUnavailable(
+                    "MSVC cl.exe not usable via %r: %s" % (vcvars, _last_line(out)))
+            reason = errs[0] if errs else (_last_line(out) or "compile error")
+        return Verdict(rc == 0, reason, out[-4000:])
+    finally:
+        # Nothing removed this directory on ANY path — success, compile failure,
+        # or the TimeoutExpired _run propagates — and it holds tu.cpp, build.bat
+        # and any .obj. The test suite alone had left 192 of them in %TEMP%.
+        shutil.rmtree(d, ignore_errors=True)
 
 
 # --- llm_judge: model-graded rubric for non-executable outputs -------------

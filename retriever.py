@@ -316,7 +316,7 @@ def band_loss_rate(scored_retrievals):
     return QUARANTINE_FREQUENCY_BANDS[-1][1]
 
 
-def attributable_losses(conn):
+def attributable_losses(conn, history=None):
     """Per-lesson blame-adjusted loss count for the epoch since its last win.
 
     A failing task's reward lands on every lesson retrieved for it, so the raw
@@ -325,27 +325,20 @@ def attributable_losses(conn):
     the number of failures a lesson is individually answerable for.
 
     Epoch boundaries mirror memory_store.lesson_usage_stats: a positive reward
-    starts a fresh epoch. The per-interaction cohort sizes that make the
-    discount possible are not exposed by that API, which is why the walk is
-    repeated here rather than read off the stats rows.
+    starts a fresh epoch. Both walk memory_store.lesson_usage_history(), so
+    ``history`` lets a caller needing both (usage_stats_with_attribution) fetch
+    that ordered scan once. The cohort sizes are derived from the same rows
+    rather than a second GROUP BY of the table.
     """
-    cohort = {
-        row["interaction_id"]: int(row["blamed"])
-        for row in conn.execute(
-            "SELECT interaction_id, COUNT(DISTINCT lesson_id) AS blamed "
-            "FROM lesson_usage WHERE reward IS NOT NULL AND reward < 0 "
-            "AND interaction_id IS NOT NULL GROUP BY interaction_id"
-        ).fetchall()
-    }
+    rows = memory_store.lesson_usage_history(conn) if history is None else history
+    cohort = {}
+    for row in rows:
+        if float(row["reward"]) < 0 and row["interaction_id"] is not None:
+            cohort.setdefault(row["interaction_id"], set()).add(row["lesson_id"])
     shares = {}
     current_id = None
     total = 0.0
-    for row in conn.execute(
-        "SELECT lesson_id, interaction_id, reward, "
-        "COALESCE(outcome_ts, ts) AS evidence_ts "
-        "FROM lesson_usage WHERE reward IS NOT NULL "
-        "ORDER BY lesson_id, datetime(evidence_ts), rowid"
-    ).fetchall():
+    for row in rows:
         if row["lesson_id"] != current_id:
             if current_id is not None:
                 shares[current_id] = total
@@ -355,7 +348,7 @@ def attributable_losses(conn):
         if value > 0:
             total = 0.0
         elif value < 0:
-            blamed = cohort.get(row["interaction_id"], 1) or 1
+            blamed = len(cohort.get(row["interaction_id"]) or ()) or 1
             total += 1.0 / blamed
     if current_id is not None:
         shares[current_id] = total
@@ -363,9 +356,15 @@ def attributable_losses(conn):
 
 
 def usage_stats_with_attribution(conn):
-    """lesson_usage_stats enriched with the blame-adjusted loss evidence."""
-    stats = memory_store.lesson_usage_stats(conn)
-    for lesson_id, share in attributable_losses(conn).items():
+    """lesson_usage_stats enriched with the blame-adjusted loss evidence.
+
+    retrieve_with_ids calls this before every generation, so the ordered
+    lesson_usage scan the two reducers share is fetched once here rather than
+    once each.
+    """
+    history = memory_store.lesson_usage_history(conn)
+    stats = memory_store.lesson_usage_stats(conn, history=history)
+    for lesson_id, share in attributable_losses(conn, history=history).items():
         if lesson_id in stats:
             stats[lesson_id]["attributable_losses_since_win"] = share
     return stats

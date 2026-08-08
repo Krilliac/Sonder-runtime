@@ -461,7 +461,16 @@ def _run_cpp(code, extra, timeout, execute):
         with open(source, "w", encoding="utf-8") as f:
             f.write(src)
         if os.path.basename(compiler).lower() == "cl.exe":
-            ok, out = _run_cmd([compiler, "/nologo", "/EHsc", source, "/Fe:" + exe], timeout, cwd=td)
+            # /std:c++17 has to be explicit: MSVC still defaults to C++14, so
+            # without it a snippet that compiled through code_runner.run_code
+            # (which passes the flag) failed here with a C++14 diagnostic and
+            # no hint that a sibling path would have built it. The g++/clang++
+            # branch below has always pinned the same standard.
+            ok, out = _run_cmd(
+                [compiler, "/nologo", "/EHsc", "/std:c++17", source, "/Fe:" + exe],
+                timeout,
+                cwd=td,
+            )
         else:
             ok, out = _run_cmd([compiler, "-std=c++17", source, "-o", exe], timeout, cwd=td)
         if not ok or not execute:

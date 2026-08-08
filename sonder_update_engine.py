@@ -358,7 +358,10 @@ class UpdateManager:
 
             # Health checks from the manifest, run against the new release.
             step += 1
-            health_problems = self._run_health_checks(manifest, final_dir)
+            skipped_checks: list[str] = []
+            health_problems = self._run_health_checks(
+                manifest, final_dir, skipped=skipped_checks
+            )
             if health_problems:
                 self.repository.record_step(
                     update_id, step, "health-check", "failed",
@@ -368,7 +371,24 @@ class UpdateManager:
                 return self._roll_back_activation(
                     plan, final_dir, step, error_code="HEALTH_FAILED",
                 )
-            self.repository.record_step(update_id, step, "health-check", "ok")
+            executed = len(manifest["health_checks"]) - len(skipped_checks)
+            if executed > 0:
+                self.repository.record_step(
+                    update_id, step, "health-check", "ok",
+                    evidence={"executed": executed, "skipped": skipped_checks},
+                )
+            else:
+                # No check actually ran, so an empty problem list is not a
+                # pass: a manifest carrying only http checks (skipped because
+                # the offline install runs stopped) used to journal
+                # health-check "ok" and activate a release nothing verified.
+                self.repository.record_step(
+                    update_id, step, "health-check", "skipped",
+                    evidence={
+                        "reason": "manifest declares no runnable health check",
+                        "skipped": skipped_checks,
+                    },
+                )
 
             # Atomic pointer switch (R-M10).
             step += 1
@@ -469,8 +489,17 @@ class UpdateManager:
         )
 
     def _run_health_checks(
-        self, manifest: BundleManifest, release_dir: Path
+        self,
+        manifest: BundleManifest,
+        release_dir: Path,
+        *,
+        skipped: list[str] | None = None,
     ) -> list[str]:
+        """Run the manifest's health checks; append skipped ones to ``skipped``.
+
+        An empty problem list alone cannot tell the caller whether every check
+        passed or no check ran, so the skips are reported out of band.
+        """
         problems: list[str] = []
         for check in manifest["health_checks"]:
             kind = check.get("kind")
@@ -514,6 +543,8 @@ class UpdateManager:
                 # HTTP checks need the service running on the verification
                 # port; the offline CLI install runs stopped, so record the
                 # skip rather than fake a pass.
+                if skipped is not None:
+                    skipped.append(str(check.get("url") or "http"))
                 continue
             else:
                 problems.append(f"unknown health check kind {kind!r}")

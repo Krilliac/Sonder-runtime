@@ -72,6 +72,30 @@ def test_api_extraction_reports_declarations_not_bodies():
     assert "local" not in api
 
 
+def test_extract_api_marks_a_cut_list_and_says_how_much_it_dropped():
+    # dependency_brief tells the model "do not call a member that is not
+    # listed", so a silently truncated list does not read as "there is more" --
+    # it reads as "these members do not exist", which is the cross-file
+    # member-not-found drift the brief exists to prevent.
+    src = "".join("public int F%d;\n" % index for index in range(75))
+    api = cg.extract_api(src)
+    assert "public int F59" in api
+    assert "public int F60" not in api  # still cut at max_lines
+    assert "15 more declaration(s) NOT shown" in api
+    assert "INCOMPLETE" in api
+    # and the marker rides into the brief the model actually reads
+    assert "INCOMPLETE" in cg.dependency_brief({"a.cs": src})
+
+
+def test_extract_api_does_not_mark_a_list_that_is_complete():
+    # exactly max_lines declarations plus trailing non-declaration lines: the
+    # list is whole, so claiming it was cut would be its own lie.
+    src = "".join("public int F%d;\n" % index for index in range(60)) + "}\n\n"
+    api = cg.extract_api(src)
+    assert "NOT shown" not in api
+    assert len(api.splitlines()) == 60
+
+
 def test_dependency_brief_states_the_api_is_real():
     brief = cg.dependency_brief({"a.cs": "public class A\n    public int X;\n"})
     assert "ALREADY EXIST" in brief

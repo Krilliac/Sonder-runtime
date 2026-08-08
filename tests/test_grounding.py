@@ -192,3 +192,54 @@ def test_generated_code_cannot_write_into_the_current_directory(tmp_path, monkey
     assert set(os.listdir(workdir)) == before, (
         "generated code wrote into the caller's working directory"
     )
+
+
+def test_cpp_msvc_compile_pins_the_same_standard_as_the_gnu_branch(monkeypatch):
+    """grounding's cl.exe command line omitted /std:c++17 while its own
+    g++ branch pinned -std=c++17 and code_runner's cl branch passed the flag.
+
+    MSVC defaults to C++14, so the same C++17 snippet built through run_code
+    and failed through run_language_code with a bare C++14 diagnostic.
+    """
+    import os
+
+    calls = []
+    monkeypatch.setattr(
+        grounding.shutil,
+        "which",
+        lambda name: os.path.join("C:\\", "msvc", "cl.exe") if name == "cl" else None,
+    )
+    monkeypatch.setattr(
+        grounding,
+        "_run_cmd",
+        lambda cmd, timeout, cwd=None: (calls.append(list(cmd)), (True, ""))[1],
+    )
+
+    ok, _out = grounding.run_language_code(
+        "#include <optional>\nint main() { return 0; }\n",
+        language="cpp",
+        execute=False,
+    )
+
+    assert ok
+    assert calls, "the compiler was never invoked"
+    assert "/std:c++17" in calls[0]
+
+
+def test_runnable_fence_langs_matches_code_runner_aliases():
+    """The fence-tag -> language table is restated in full in grounding and in
+    code_runner with no import between them.
+
+    They agree today; divergence is silent in both directions (a fence
+    grounding does not recognise falls through /run, and a language grounding
+    claims is runnable raises "unsupported language" in run_code), so pin the
+    invariant rather than rely on someone remembering the second file exists.
+    """
+    import code_runner
+
+    theirs = {
+        alias: name
+        for name, spec in code_runner.SUPPORTED_LANGUAGES.items()
+        for alias in spec.get("aliases", ())
+    }
+    assert grounding.RUNNABLE_FENCE_LANGS == theirs

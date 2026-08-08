@@ -11,18 +11,39 @@ import embeddings
 import memory_store
 from sonder_runtime.domain.memory import rules as _rules
 
-# Stricter than lessons' 0.65: a recall injects a whole task+solution, so we only
-# want genuinely close matches. Env-overridable like SONDER_MIN_SIM.
+# Stricter than lessons' 0.62 (retriever.DEFAULT_MIN_SIM, recalibrated
+# 2026-07-06): a recall injects a whole task+solution, so we only want
+# genuinely close matches. This comment used to cite the lesson floor as 0.65 —
+# the value that recalibration measured as WRONG — so anyone re-tuning this
+# floor reasoned from a baseline 0.03 off. Env-overridable like SONDER_MIN_SIM.
 # SPEC-3 Phase 4: the floor default and threshold rule live in the domain layer.
 DEFAULT_MIN_SIM = _rules.DEFAULT_RECALL_MIN_SIM
 MAX_RESP_CHARS = 400
 
 
+def _fence_count(text):
+    return sum(1 for line in text.splitlines() if line.lstrip().startswith("```"))
+
+
 def _format(task, response, max_len=MAX_RESP_CHARS):
     resp = response or ""
-    if len(resp) > max_len:
+    truncated = len(resp) > max_len
+    if truncated:
         resp = resp[:max_len].rstrip() + " …"
-    return "%s -> %s" % (task, resp)
+    line = "%s -> %s" % (task, resp)
+    # The cut often lands inside a code block: of the 1682 responses in the
+    # live store long enough to truncate, 473 (28%) ended with an unbalanced
+    # fence once assembled. A recall is the LAST block build_prompt emits
+    # before "# Task:", so an unterminated ``` swallowed the header, the user's
+    # real question and the model's own reply into a code block -- the
+    # instruction stopped reading as an instruction.
+    # Balance is judged on the assembled line, not on the response alone: 63%
+    # of those responses open with a fence on their FIRST line, which lands
+    # after the "task -> " prefix and so opens nothing -- closing it there
+    # would open a block rather than close one.
+    if truncated and _fence_count(line) % 2:
+        line += "\n```"
+    return line
 
 
 def recall(conn, task, k=2, embed_fn=None, min_sim=None,

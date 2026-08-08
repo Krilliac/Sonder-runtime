@@ -1,16 +1,14 @@
 """SPEC-4: end-to-end staged install, activation, rollback, and journal."""
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 
 import pytest
 
-import sonder_update_engine
 import sonder_updates
 from sonder_update_engine import UpdateManager, confirm_nonce_for
-from sonder_updates import BundleManifest, UpdateRepository, build_bundle
+from sonder_updates import UpdateRepository, build_bundle
 
 pytestmark = pytest.mark.integration
 
@@ -206,6 +204,40 @@ def test_health_failure_rolls_back(env):
     assert not (env / "current").exists() or "4.0.0" not in os.readlink(
         env / "current"
     )
+
+
+def test_http_only_health_checks_journal_a_skip_not_a_pass(env):
+    """An http-only manifest verifies nothing, so the journal must say so.
+
+    http checks need the service listening and the offline install runs
+    stopped, so they are skipped; the step used to be journaled "ok" because
+    an empty problem list was read as "everything passed".
+    """
+    manager = _manager(env)
+    source = _mini_source(env, "http-only-src")
+    bundle = env / "http-only-bundle"
+    build_bundle(
+        source, bundle, version="4.5.0",
+        health_checks=[{
+            "kind": "http",
+            "url": "http://127.0.0.1:11435/v1/sonder/status",
+            "expect_status": 200,
+        }],
+    )
+    plan = manager.import_offline(bundle, allow_unverified=True)
+    done = manager.install(
+        plan["update_id"], confirm=confirm_nonce_for(plan),
+        allow_unverified=True,
+    )
+    assert done["status"] == "committed"
+    step = next(
+        s for s in manager.repository.steps(plan["update_id"])
+        if s["step_name"] == "health-check"
+    )
+    assert step["status"] == "skipped"
+    assert step["evidence"]["skipped"] == [
+        "http://127.0.0.1:11435/v1/sonder/status"
+    ]
 
 
 def test_operator_rollback_switches_to_previous(env):

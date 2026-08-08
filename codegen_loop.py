@@ -155,15 +155,25 @@ _DECL_RE = re.compile(
 
 
 def extract_api(text: str, max_lines: int = 60) -> str:
-    """Pull declaration-looking lines out of a source file."""
+    """Pull declaration-looking lines out of a source file.
+
+    A cut list carries a trailing marker naming how many declarations were
+    dropped, because dependency_brief presents this as the file's complete API.
+    """
     out = []
+    dropped = 0
     for line in text.split("\n"):
-        if len(out) >= max_lines:
-            break
         stripped = line.strip()
         if not stripped or stripped.startswith(("//", "#", "*", "/*")):
             continue
         if not _DECL_RE.match(line):
+            continue
+        if len(out) >= max_lines:
+            # Counting the rest instead of breaking is what makes the marker
+            # below an exact number rather than another floor -- and it is the
+            # only way to tell "exactly max_lines declarations" (complete) from
+            # "max_lines and then some" (cut).
+            dropped += 1
             continue
         # Cut bodies and initialisers; keep the signature.
         for token in ("=>", " {", " ="):
@@ -171,6 +181,19 @@ def extract_api(text: str, max_lines: int = 60) -> str:
                 stripped = stripped.split(token, 1)[0]
                 break
         out.append("    " + stripped.rstrip("{ ").rstrip())
+    if dropped:
+        # dependency_brief wraps this in "Their real API is below ... do not call
+        # a member that is not listed", so an unmarked cut does not read as
+        # "there is more" -- it reads as "these members do not exist", and the
+        # dependent file is generated avoiding or redeclaring things that are
+        # already there. That is CS1061/CS0117 member-not-found, the dominant
+        # error class this brief exists to prevent. Every other bound in this
+        # module is captioned as a floor; this list was the one that was not.
+        out.append(
+            "    // ... and %d more declaration(s) NOT shown (list cut at %d): this "
+            "API listing is INCOMPLETE -- absence here does not mean the member "
+            "does not exist." % (dropped, max_lines)
+        )
     return "\n".join(out)
 
 

@@ -183,6 +183,30 @@ def _backup_target(args) -> str:
     return str(sonder_paths.default_home() / "backups")
 
 
+def _report_problems(
+    ok_message: str, problems: list, *, path: str, as_json: bool
+) -> int:
+    """Emit a verification verdict, honouring ``--json``.
+
+    The verify/smoke branches used to print a bare sentence on every path.
+    ``--json`` was declared on their parsers but never read, so the runbook's
+    own verification gate (``backup verify <dir> --json``) was accepted and
+    then answered with prose a caller's ``json.loads`` could not parse.
+    """
+    if as_json:
+        _emit(
+            {"path": path, "ok": not problems, "problems": list(problems)},
+            as_json=True,
+        )
+        return 1 if problems else 0
+    if problems:
+        for problem in problems:
+            print(f"FAIL: {problem}", file=sys.stderr)
+        return 1
+    print(ok_message)
+    return 0
+
+
 def cmd_backup(args) -> int:
     import sonder_backup
 
@@ -199,13 +223,10 @@ def cmd_backup(args) -> int:
         )
         return 0
     if args.backup_command == "verify":
-        problems = sonder_backup.verify_backup(args.path)
-        if problems:
-            for problem in problems:
-                print(f"FAIL: {problem}", file=sys.stderr)
-            return 1
-        print("backup verified")
-        return 0
+        return _report_problems(
+            "backup verified", sonder_backup.verify_backup(args.path),
+            path=args.path, as_json=args.json,
+        )
     if args.backup_command == "list":
         _emit({"backups": sonder_backup.list_backups(_backup_target(args))},
               as_json=args.json)
@@ -236,21 +257,15 @@ def cmd_restore(args) -> int:
     import sonder_backup
 
     if args.restore_command == "verify":
-        problems = sonder_backup.verify_backup(args.path)
-        if problems:
-            for problem in problems:
-                print(f"FAIL: {problem}", file=sys.stderr)
-            return 1
-        print("backup verified")
-        return 0
+        return _report_problems(
+            "backup verified", sonder_backup.verify_backup(args.path),
+            path=args.path, as_json=args.json,
+        )
     if args.restore_command == "smoke":
-        problems = sonder_backup.restore_smoke(args.path)
-        if problems:
-            for problem in problems:
-                print(f"FAIL: {problem}", file=sys.stderr)
-            return 1
-        print("restore smoke passed")
-        return 0
+        return _report_problems(
+            "restore smoke passed", sonder_backup.restore_smoke(args.path),
+            path=args.path, as_json=args.json,
+        )
     if args.restore_command == "apply":
         if not args.confirm or args.confirm != "restore":
             print(
@@ -313,6 +328,44 @@ def cmd_smoke(args) -> int:
     return 0
 
 
+def _export_runtime_environment(config) -> None:
+    """Publish the validated configuration through the compatibility vars.
+
+    The stdlib HTTP adapter and the shared helper modules still read their
+    environment, so anything not exported here is a validated setting the
+    runtime never sees.  Four keys used to be preflighted and then dropped:
+    ``state.home`` was created, write-probed and disk-checked while the
+    runtime wrote to ``sonder_paths.default_home()`` instead;
+    ``state.workspace_roots`` was a required startup check that granted the
+    file tools no access; ``ollama.url`` was probed for reachability while
+    the gateway dialled ``OLLAMA_HOST``; and the ``[features]`` consent
+    gates read ``false`` in ``config`` output while web egress and live
+    reload defaulted to on in the code that decides.
+    """
+    # sonder_paths resolves every state file through SONDER_HOME at call
+    # time, so the home must be exported before anything opens a database.
+    if config.state.home:
+        os.environ["SONDER_HOME"] = config.state.home
+    if config.state.workspace_roots:
+        os.environ["SONDER_FILE_ROOTS"] = os.pathsep.join(
+            config.state.workspace_roots
+        )
+    os.environ["SONDER_HOST"] = config.server.host
+    os.environ["SONDER_PORT"] = str(config.server.port)
+    os.environ["SONDER_AUTH_MODE"] = config.server.auth_mode
+    os.environ["SONDER_MAX_REQUEST_BYTES"] = str(config.server.max_request_bytes)
+    os.environ["OLLAMA_HOST"] = config.ollama.url
+    os.environ["SONDER_ALLOW_REMOTE_OLLAMA"] = (
+        "1" if config.ollama.allow_remote else "0"
+    )
+    os.environ["SONDER_WEB_TOOLS"] = "1" if config.features.web else "0"
+    os.environ["SONDER_LIVE_RELOAD"] = "1" if config.features.live_reload else "0"
+    if config.secrets.api_key:
+        os.environ["SONDER_API_KEY"] = config.secrets.api_key
+    if config.secrets.auth_secret:
+        os.environ["SONDER_AUTH_SECRET"] = config.secrets.auth_secret
+
+
 def cmd_serve(args) -> int:
     import sonder_preflight
 
@@ -334,6 +387,13 @@ def cmd_serve(args) -> int:
                   "(use --skip-preflight only for recovery work)",
                   file=sys.stderr)
             return 1
+    # The stdlib HTTP adapter still reads its environment at import; feed
+    # the validated configuration through the compatibility variables until
+    # SPEC-3 gives it a constructor.  This runs before the migration phase:
+    # migrations resolve their database paths through SONDER_HOME, so an
+    # export after them would migrate the wrong state directory.
+    _export_runtime_environment(config)
+
     # MIGRATING phase: no listener opens until migrations complete.
     import sonder_migrations
 
@@ -344,17 +404,6 @@ def cmd_serve(args) -> int:
     except sonder_migrations.MigrationError as exc:
         print(f"migration failed, refusing to bind: {exc}", file=sys.stderr)
         return 1
-    # The stdlib HTTP adapter still reads its environment at import; feed
-    # the validated configuration through the compatibility variables until
-    # SPEC-3 gives it a constructor.
-    os.environ["SONDER_HOST"] = config.server.host
-    os.environ["SONDER_PORT"] = str(config.server.port)
-    os.environ["SONDER_AUTH_MODE"] = config.server.auth_mode
-    os.environ["SONDER_MAX_REQUEST_BYTES"] = str(config.server.max_request_bytes)
-    if config.secrets.api_key:
-        os.environ["SONDER_API_KEY"] = config.secrets.api_key
-    if config.secrets.auth_secret:
-        os.environ["SONDER_AUTH_SECRET"] = config.secrets.auth_secret
 
     import sonder_serve
 
