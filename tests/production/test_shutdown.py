@@ -69,3 +69,38 @@ def test_drain_is_idempotent():
     coordinator = ShutdownCoordinator(tracker, drain_deadline_seconds=1)
     assert coordinator.drain() is True
     assert coordinator.drain() is True
+
+
+def test_concurrent_drain_runs_hooks_once():
+    tracker = _ready_tracker()
+    coordinator = ShutdownCoordinator(tracker, drain_deadline_seconds=1)
+    real_event = coordinator._draining
+    simultaneous_reads = threading.Barrier(2)
+
+    class RaceWindowEvent:
+        def is_set(self):
+            # Without the coordinator lock, force both check-then-act callers
+            # to observe the old value before either can set it.
+            if not coordinator._lock.locked():
+                simultaneous_reads.wait(1)
+            return real_event.is_set()
+
+        def set(self):
+            real_event.set()
+
+    coordinator._draining = RaceWindowEvent()
+    flushed = []
+    coordinator.add_flush_hook(lambda: flushed.append(1))
+    results = []
+    threads = [
+        threading.Thread(target=lambda: results.append(coordinator.drain()))
+        for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(2)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert results == [True, True]
+    assert flushed == [1]

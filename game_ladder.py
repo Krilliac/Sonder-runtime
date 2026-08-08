@@ -161,13 +161,16 @@ def _ground_capture(code, kind, timeout=12):
     File/line frames to localize the bug — the last line alone is too weak a signal).
     """
     fd, path = tempfile.mkstemp(suffix=".py")
+    bytecode_path = path + "c"
     os.close(fd)
     try:
         with open(path, "w", encoding="utf-8") as f:
             f.write(code)
 
         try:
-            py_compile.compile(path, doraise=True)
+            # An explicit target keeps py_compile from orphaning a uniquely
+            # named file under the shared temp directory's __pycache__.
+            py_compile.compile(path, cfile=bytecode_path, doraise=True)
         except (py_compile.PyCompileError, SyntaxError) as e:
             msg = str(e).strip()
             last_line = msg.splitlines()[-1] if msg else "syntax error"
@@ -202,10 +205,11 @@ def _ground_capture(code, kind, timeout=12):
         failed, reason = detect_failure(out_text, err_text, p.returncode, timed_out=False, kind=kind)
         return (not failed), reason, err_text
     finally:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+        for temporary_path in (path, bytecode_path):
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
 
 
 def ground(code, kind, timeout=12):

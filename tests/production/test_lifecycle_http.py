@@ -143,6 +143,43 @@ def test_admin_drain_is_idempotent_and_blocks_new_chat(http_server):
     assert envelope["correlation_id"].startswith("req_")
 
 
+def test_idempotent_serializes_concurrent_requests_for_same_key():
+    lifecycle = sonder_lifecycle.RuntimeLifecycle()
+    first_factory_entered = threading.Event()
+    duplicate_factory_entered = threading.Event()
+    release_factory = threading.Event()
+    calls = []
+
+    def factory():
+        calls.append(1)
+        if len(calls) == 1:
+            first_factory_entered.set()
+        else:
+            duplicate_factory_entered.set()
+        release_factory.wait(2)
+        return {"call": len(calls)}
+
+    results = []
+    first = threading.Thread(
+        target=lambda: results.append(lifecycle.idempotent("same", factory))
+    )
+    second = threading.Thread(
+        target=lambda: results.append(lifecycle.idempotent("same", factory))
+    )
+    first.start()
+    assert first_factory_entered.wait(1)
+    second.start()
+    try:
+        assert not duplicate_factory_entered.wait(0.2)
+    finally:
+        release_factory.set()
+        first.join(2)
+        second.join(2)
+
+    assert calls == [1]
+    assert results == [{"call": 1}, {"call": 1}]
+
+
 def test_auth_failure_limiter_and_events(http_server, monkeypatch):
     monkeypatch.setattr(sonder_serve, "API_KEY", "k" * 32)
     saw_429 = False

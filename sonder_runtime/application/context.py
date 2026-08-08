@@ -9,7 +9,7 @@ REPL calls imply.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -30,7 +30,8 @@ class _NeverCancelled:
 
     def wait(self, timeout: float | None = None) -> bool:
         if timeout:
-            time.sleep(min(timeout, 0.0))
+            # Match Event.wait: positive timeouts wait; negative ones return.
+            time.sleep(max(timeout, 0.0))
         return False
 
 

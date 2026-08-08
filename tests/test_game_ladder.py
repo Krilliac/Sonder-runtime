@@ -169,6 +169,15 @@ def test_ground_capture_returns_full_traceback_for_repair():
     assert "ValueError" in reason  # short reason still classifies
 
 
+def test_ground_capture_removes_compiled_bytecode(tmp_path, monkeypatch):
+    monkeypatch.setattr(game_ladder.tempfile, "tempdir", str(tmp_path))
+
+    passed, _, _ = game_ladder._ground_capture("pass", "console")
+
+    assert passed is True
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_build_level_with_repair_autofixes_missing_import(monkeypatch):
     # a game that forgets `import random` should be recovered mechanically on the
     # first attempt, with NO model repair round-trip.
@@ -203,8 +212,8 @@ def _tmp_dir():
 def test_levels_outline():
     levels = game_ladder.LEVELS
     assert len(levels) == 12
-    assert [l["n"] for l in levels] == list(range(1, 13))
-    for l in levels:
-        assert l["name"]
-        assert l["kind"] in ("console", "pygame")
-        assert l["prompt"]
+    assert [level["n"] for level in levels] == list(range(1, 13))
+    for level in levels:
+        assert level["name"]
+        assert level["kind"] in ("console", "pygame")
+        assert level["prompt"]
