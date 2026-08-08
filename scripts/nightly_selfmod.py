@@ -114,6 +114,12 @@ CANDIDATE_FILES = (
     "training_data.py",
     "training_tasks.py",
     "verifiers.py",
+    # 2026-08-08 widen: the tier-routing / consultation / guarded-improvement /
+    # NL-command modules landed this week and have never been through a pass.
+    "code_improve.py",
+    "tier_router.py",
+    "consult.py",
+    "command_router.py",
 )
 
 _FENCE = re.compile(r"^\s*```[a-zA-Z0-9_+-]*\s*$", re.M)
