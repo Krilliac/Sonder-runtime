@@ -26,7 +26,27 @@ SECRET_ENV_VARS = (
     "SONDER_FILE_APPROVAL_CODE",
     "SONDER_CODE_GATE",
     "SONDER_LAUNCHER_CONTROL_GATE",
+    "SONDER_OPENAI_API_KEY",
 )
+
+
+def child_environment(base=None):
+    """A copy of the environment with control-plane secrets removed.
+
+    The single home for this rule so the two subprocess lanes cannot drift:
+    code_runner already stripped these before spawning model-authored children
+    ("used to inherit bypass/API credentials and could print them into tool
+    output, granting themselves control-plane authority"), but workbench's
+    run_program did not, so the same model code run through workspace_run or
+    script_run inherited SONDER_API_KEY and the approval/bypass gates in full.
+    A child that can base64-dump os.environ then reads them straight back out
+    of the tool result, which redaction cannot catch once encoded.
+    """
+    import os
+
+    source = os.environ if base is None else base
+    secret = set(SECRET_ENV_VARS)
+    return {key: value for key, value in source.items() if key not in secret}
 
 _PATTERNS: tuple[re.Pattern, ...] = (
     # Authorization headers and bearer-style tokens.

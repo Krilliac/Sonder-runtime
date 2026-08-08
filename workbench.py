@@ -17,6 +17,7 @@ import signal
 import shutil
 import struct
 import subprocess
+import sonder_logging
 import sys
 import threading
 import time
@@ -841,6 +842,12 @@ def run_program(
         shell=False,
         creationflags=creationflags,
         start_new_session=os.name != "nt",
+        # Strip control-plane secrets before handing the environment to a
+        # model-directed child. Without this, a .py run through script_run or
+        # workspace_run could base64-dump os.environ and read back
+        # SONDER_API_KEY and the approval/bypass gates -- exactly what the
+        # code_runner lane was hardened against and this lane was not.
+        env=sonder_logging.child_environment(),
     )
     stdout_bytes = bytearray()
     stderr_bytes = bytearray()
