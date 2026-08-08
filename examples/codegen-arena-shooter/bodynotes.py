@@ -15,6 +15,30 @@ where this model class was measured wrong 3 times out of 3. The class stat
 table below is the clearest case: it looks mechanical and is pure recall.
 """
 
+# Prepended to the Screens bodies. Both traps were MEASURED, repeatedly: those
+# bodies failed roughly eleven attempts across four model configurations, and
+# every failure was one of these two. Neither is a model limit -- both are facts
+# the prompt did not carry, which is the distinction this file exists to
+# respect. The ClassId one is the sharper lesson: the note used to say "one
+# button per ClassKit.All entry, each showing that kit's Name", which reads as
+# though an entry IS a kit. The model did exactly what the prose said.
+_SCREENS_TRAPS = """\
+TWO TYPE TRAPS IN THIS FILE, both of which have broken this body before:
+
+1. A Combatant's `Kit` field is a ClassId (an ENUM), not a ClassKit. ClassId
+   has no Name/MaxHealth/Damage/Tint members. Look the kit up first:
+       ClassKit kit = ClassKit.Get(someCombatant.Kit);
+       int max = kit.MaxHealth;   // now these exist
+   The same applies to entries of ClassKit.All, which is ClassId[].
+
+2. Raylib 2D drawing takes INT pixel coordinates:
+   DrawRectangle(int,int,int,int,Color), DrawRectangleLines(int,int,int,int,Color),
+   DrawLine(int,int,int,int,Color), DrawText(string,int,int,int,Color).
+   Any computed position or size is a float and MUST be cast: (int)(w * 0.25f).
+   DrawCircle is the exception; its radius is a float.
+
+"""
+
 NOTES = {
     "ClassKit.cs:Get": """\
 Return a new ClassKit with exactly these values (transcribe them, do not invent):
@@ -164,24 +188,37 @@ wide and 56 tall with 24 between them, centred on w / 2: "HOST GAME" sets host,
 
     "Screens.cs:ClassSelect": """\
 Assign chosen = current and confirm = false first. Title("CHOOSE YOUR CLASS",
-w, 80, 44, Color.White). Lay out one button per ClassKit.All entry
-horizontally, each showing that kit's Name with its MaxHealth and Damage;
-clicking one assigns chosen. A "CONFIRM" button at the bottom sets confirm.""",
+w, 80, 44, Color.White).
 
-    "Screens.cs:Lobby": """\
+NOTE THE TYPES, they are easy to get wrong here: ClassKit.All is a
+ClassId[] -- an array of ENUM VALUES, not of ClassKit objects. So iterating it
+gives you a ClassId, which has no Name/MaxHealth/Damage members. To read those
+you must look the kit up first:
+
+    foreach (ClassId id in ClassKit.All)
+    {
+        ClassKit kit = ClassKit.Get(id);   // now kit.Name, kit.MaxHealth, kit.Damage
+        ...
+    }
+
+Lay out one button per entry horizontally, each showing kit.Name with its
+kit.MaxHealth and kit.Damage; clicking one assigns chosen = id. A "CONFIRM"
+button at the bottom sets confirm.""",
+
+    "Screens.cs:Lobby": _SCREENS_TRAPS + """\
 Assign start and back to false first. Title("LOBBY", w, 60, 44, Color.White).
 Draw status at x = 40, y = 120. List each player as their Name, then TEAM and
 their Team, then ClassKit.Get(p.Kit).Name -- at x = w / 2 - 200, y = 180 + i *
 28, size 20, coloured by team. Show a "START MATCH" button only when isHost;
 always show "BACK".""",
 
-    "Screens.cs:Hud": """\
+    "Screens.cs:Hud": _SCREENS_TRAPS + """\
 Return if me is null. Draw a health bar bottom-left with the numbers for
 Health and Ammo beside it. Draw match.TeamScore top-centre and
 match.TimeRemaining as minutes and seconds. Draw a small crosshair at the
 screen centre with two DrawLine calls.""",
 
-    "Screens.cs:Scoreboard": """\
+    "Screens.cs:Scoreboard": _SCREENS_TRAPS + """\
 Assign back = false first. Title("SCOREBOARD", w, 60, 44, Color.White). Order
 match.Players by Kills descending and draw a row per player with Name, Kills
 and Deaths from y = 160, size 22, team-coloured. A "BACK TO MENU" button sets
