@@ -4,41 +4,42 @@ Target: self-hosted Linux server, single private owner, systemd.
 Sonder binds loopback only; remote access goes through the TLS reverse
 proxy (see `packaging/reverse-proxy/nginx-sonder.conf`).
 
-## 1. Create the service identity and directories
+## 1. Build the audited package
 
 ```bash
-sudo useradd --system --home /var/lib/sonder --shell /usr/sbin/nologin sonder
-sudo install -d -o sonder -g sonder -m 0700 /var/lib/sonder /var/log/sonder /var/backups/sonder
-sudo install -d -o sonder -g sonder -m 0750 /srv/sonder/workspaces
-sudo install -d -m 0755 /etc/sonder /opt/sonder/releases
+git clone https://github.com/Krilliac/Sonder-runtime.git
+cd Sonder-runtime
+git checkout <reviewed-tag-or-sha>
+python3 scripts/package_local_system.py --out dist/local-system
 ```
 
-## 2. Install a release
+Build as the unprivileged checkout owner. The packager includes only tracked,
+allowlisted runtime files, privacy-scans them, and writes their sizes and
+SHA-256 hashes to `PACKAGE-MANIFEST.json`.
 
-Until the SPEC-4 signed distribution exists, install from a checked-out
-tag into a versioned directory — never run production from a mutable
-checkout:
+## 2. Install the verified release
+
+Until the SPEC-4 signed distribution exists, install from a checked-out tag
+through the manifest-verified package path — never copy or run production from
+a mutable developer checkout:
 
 ```bash
-VERSION_DIR=/opt/sonder/releases/$(git -C Sonder-runtime describe --always)
-sudo rsync -a --exclude .git Sonder-runtime/ "$VERSION_DIR/"
-sudo python3 -m venv "$VERSION_DIR/venv"
-sudo "$VERSION_DIR/venv/bin/pip" install -r "$VERSION_DIR/requirements-runtime.txt"
-sudo ln -sfn "$VERSION_DIR" /opt/sonder/current
+VERSION_TAG=$(git describe --always)
+sudo packaging/install_sonder.sh \
+  --package-source dist/local-system \
+  --version-tag "$VERSION_TAG"
 ```
+
+The installer validates the version tag before constructing root-owned paths,
+verifies every manifest entry before copying it, ignores every unlisted file,
+and refuses to overwrite an existing release or staging directory.
 
 ## 3. Configuration and secrets
 
-```bash
-sudo cp /opt/sonder/current/packaging/sonder.toml.example /etc/sonder/sonder.toml
-sudo cp /opt/sonder/current/packaging/sonder.env.example /etc/sonder/sonder.env
-sudo chmod 0600 /etc/sonder/sonder.env
-python3 -c "import secrets; print('SONDER_API_KEY=' + secrets.token_urlsafe(32))" | sudo tee -a /etc/sonder/sonder.env >/dev/null
-```
-
-Edit `/etc/sonder/sonder.toml` for the host. The API key is never
-printed by any install step; read it from the secrets file when
-configuring a client.
+The installer creates the service identity and directories, writes the default
+loopback configuration if absent, and generates `/etc/sonder/sonder.env` with
+mode 0600. Edit `/etc/sonder/sonder.toml` for the host. The API key is never
+printed; read it from the secrets file when configuring a client.
 
 ## 4. Validate before first start
 
