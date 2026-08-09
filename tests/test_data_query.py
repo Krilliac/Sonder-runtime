@@ -117,6 +117,25 @@ def test_sqlite_column_limit_and_duplicate_names_rejected(database):
         data_query.query_data(database, sql="SELECT id, id FROM records")
 
 
+def test_sqlite_result_column_limit_does_not_reject_wide_schema(roots):
+    path = roots / "wide.db"
+    columns = ["c%d" % index for index in range(80)]
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE wide (%s)" % ", ".join(columns))
+    conn.execute(
+        "INSERT INTO wide VALUES (%s)" % ", ".join("?" for _ in columns),
+        list(range(len(columns))),
+    )
+    conn.commit()
+    conn.close()
+
+    result = data_query.query_data(path, sql="SELECT c0 FROM wide", max_columns=1)
+    assert result["columns"] == ["c0"]
+    assert result["rows"] == [{"c0": 0}]
+    with pytest.raises(data_query.DataQueryError, match="column ceiling"):
+        data_query.query_data(path, sql="SELECT * FROM wide", max_columns=50)
+
+
 def test_sqlite_progress_deadline_interrupts_huge_recursive_query(database):
     started = time.monotonic()
     with pytest.raises(data_query.DataQueryError, match="interrupted|rejected"):
@@ -161,6 +180,22 @@ def test_json_projection_pointer_and_exact_typed_filter(roots):
         "id": 1, "/nested/name": "alpha", "/missing": None,
     }]
     assert result["columns"] == ["id", "/nested/name", "/missing"]
+
+
+def test_json_loading_is_included_in_timeout(roots, monkeypatch):
+    path = roots / "records.json"
+    path.write_text('[{"id":1}]', encoding="utf-8")
+    original_load = data_query.json.load
+
+    def slow_load(*args, **kwargs):
+        result = original_load(*args, **kwargs)
+        # Keep enough margin for coarse Windows timer scheduling.
+        time.sleep(0.12)
+        return result
+
+    monkeypatch.setattr(data_query.json, "load", slow_load)
+    with pytest.raises(data_query.DataQueryError, match="timeout ceiling"):
+        data_query.query_data(path, timeout=0.05)
 
 
 def test_structured_records_and_column_ceiling_are_enforced(roots):
