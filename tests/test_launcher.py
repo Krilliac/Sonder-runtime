@@ -570,6 +570,24 @@ def test_nonloopback_binding_requires_strong_token_and_tls():
     sonder_launcher.validate_configuration("::1", "")
 
 
+def test_loopback_validation_does_not_trust_dns_resolution(monkeypatch):
+    resolutions = []
+
+    def resolve(host):
+        resolutions.append(host)
+        return "127.0.0.1"
+
+    monkeypatch.setattr(sonder_launcher.socket, "gethostbyname", resolve)
+
+    with pytest.raises(ValueError, match="requires TLS"):
+        sonder_launcher.validate_configuration(
+            "attacker-controlled.example", "x" * 24
+        )
+    assert resolutions == []
+    sonder_launcher.validate_configuration("127.0.0.2", "")
+    sonder_launcher.validate_configuration("[::1]", "")
+
+
 def test_invalid_remote_transport_is_rejected_before_socket_construction(monkeypatch):
     constructed = []
     monkeypatch.setattr(

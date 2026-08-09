@@ -11,6 +11,7 @@ from decimal import Decimal, InvalidOperation
 import errno
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -134,11 +135,11 @@ class ControlTreeNotStopped(RuntimeError):
 
 def _loopback(host):
     value = str(host or "").strip().strip("[]").lower()
-    if value in {"localhost", "::1"}:
+    if value == "localhost":
         return True
     try:
-        return socket.gethostbyname(value).startswith("127.") or value == "::1"
-    except OSError:
+        return ipaddress.ip_address(value).is_loopback
+    except ValueError:
         return False
 
 
