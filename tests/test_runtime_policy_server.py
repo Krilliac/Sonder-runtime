@@ -63,11 +63,10 @@ def test_guarded_update_requires_installed_local_model(
     cloud = server.runtime_policy_update(
         local_models_json='{"code":"qwen3-coder:480b-cloud"}',
     )
-    monkeypatch.setattr(
-        server,
-        "_runtime_installed_models",
-        lambda: pytest.fail("optional-tier unbinding must not query Ollama"),
-    )
+    def offline_inventory():
+        raise OSError("Ollama is offline")
+
+    monkeypatch.setattr(server, "_runtime_installed_models", offline_inventory)
     optional_unset = server.runtime_policy_update(
         local_models_json='{"reasoning":""}',
     )
@@ -77,6 +76,7 @@ def test_guarded_update_requires_installed_local_model(
     assert missing == "ERROR: local model(s) are not installed: missing-local:latest"
     assert cloud.startswith("ERROR:")
     assert "reasoning: (unset" in optional_unset
+    assert "WARNING model inventory unavailable" in optional_unset
     assert runtime_policy.load()["local_models"]["reasoning"] == ""
 
 
