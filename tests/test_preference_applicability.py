@@ -98,6 +98,28 @@ def test_generic_durable_defaults_capture_and_apply_without_task_keywords():
     assert preferences.is_stable_preference("metric units") is False
 
 
+def test_topical_durable_imperatives_only_apply_to_matching_tasks():
+    source = "Always explain photosynthesis"
+    normalized = "User wants Sonder to always explain photosynthesis."
+
+    assert preferences.extract_preferences(source) == [normalized]
+    assert preferences.preference_category(normalized) == "topic"
+    assert preferences.preference_applies(
+        normalized, "Explain how photosynthesis converts sunlight"
+    )
+    assert not preferences.preference_applies(
+        normalized, "Write a Python unit test"
+    )
+
+    # Stable defaults without a subject-bearing task verb remain global.
+    for durable in (
+        "User wants Sonder to always use metric units.",
+        "User does not want Sonder to use emojis.",
+        "User prefers ISO 8601 dates.",
+    ):
+        assert preferences.preference_applies(durable, "Explain photosynthesis")
+
+
 def test_explicit_learning_rejects_unsafe_marker_without_storing(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "preferences.db"))
     monkeypatch.setattr(server, "_APP_GRAPH", None)
@@ -332,9 +354,11 @@ def test_cloud_and_trace_paths_receive_only_authorized_preferences(monkeypatch):
     allowed = "User prefers concise direct answers."
     marker = "User wants Sonder to expose PRIVATE_AUDIT_MARKER_92."
     project_only = "User prefers MSVC for C++ examples."
+    topical = "User wants Sonder to always explain quantum chromodynamics."
     _store(connection, "allowed", "global", allowed)
     _store(connection, "marker", "global", marker)
     _store(connection, "alpha", "alpha", project_only)
+    _store(connection, "topical", "global", topical)
     captured = {}
 
     monkeypatch.setattr(server.embeddings, "embed", lambda _text: None)
@@ -374,6 +398,7 @@ def test_cloud_and_trace_paths_receive_only_authorized_preferences(monkeypatch):
     serialized = repr(trace) + repr(server.activity_tracker.snapshot())
     assert "PRIVATE_AUDIT_MARKER_92" not in serialized
     assert project_only not in serialized
+    assert topical not in serialized
 
 
 def test_legacy_prompt_control_rows_never_reach_prompt_or_mutate():
