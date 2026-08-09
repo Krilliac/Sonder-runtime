@@ -7722,6 +7722,55 @@ def data_convert(
     return output
 
 
+def _run_read_only_inspection(
+    name: str, arguments: dict, *, token: str = "", approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Bridge one MCP inspection call through the typed application facade."""
+    from sonder_runtime.application.context import local_owner_context
+
+    started = time.time()
+    developer = _file_developer_allowed(token)
+    authorized = _file_bypass_allowed(token, approval)
+    roots = tuple(
+        Path(item.strip()).expanduser()
+        for item in (extra_roots or "").split(os.pathsep)
+        if item.strip()
+    ) if authorized else ()
+    context = local_owner_context(
+        correlation_id="inspection-%s" % os.urandom(4).hex(),
+        source="mcp",
+        auth_level="developer" if developer else "user" if authorized else "local",
+        workspace_roots=roots,
+    )
+    call_args = dict(arguments)
+    call_args["extra_roots"] = extra_roots
+    result = _application().inspections.inspect(name, call_args, context)
+    evidence = result.evidence or {}
+    _record_direct_tool(
+        name,
+        evidence.get("audit_args", arguments),
+        ok=result.ok,
+        started=started,
+        summary=evidence.get("summary", result.output),
+        output=(
+            result.output
+            if not result.error_code and evidence.get("record_output", True)
+            else ""
+        ),
+    )
+    if result.error_code:
+        return "ERROR: %s" % result.output
+    activity = evidence.get("activity") or {}
+    if activity:
+        activity_tracker.record_event(
+            name,
+            summary=activity.get("summary", ""),
+            path=activity.get("path", ""),
+        )
+    return result.output
+
+
 @mcp.tool()
 def log_inspect(
     path: str,
@@ -7740,7 +7789,6 @@ def log_inspect(
 ) -> str:
     """Inspect one guarded text log without execution or caller expressions."""
     _maybe_live_reload()
-    started = time.time()
     args = {
         "path": path, "tail_lines": tail_lines, "context_lines": context_lines,
         "max_file_bytes": max_file_bytes, "max_scan_bytes": max_scan_bytes,
@@ -7748,35 +7796,10 @@ def log_inspect(
         "max_results": max_results, "max_output_bytes": max_output_bytes,
         "timeout": timeout,
     }
-    try:
-        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
-        report = log_inspect_module.inspect_log(
-            path, tail_lines=tail_lines, context_lines=context_lines,
-            max_file_bytes=max_file_bytes, max_scan_bytes=max_scan_bytes,
-            max_lines=max_lines, max_line_bytes=max_line_bytes,
-            max_results=max_results, max_output_bytes=max_output_bytes,
-            timeout=timeout, extra_roots=trusted_roots,
-        )
-    except Exception as exc:
-        _record_direct_tool(
-            "log_inspect", args, ok=False, started=started, summary=str(exc),
-        )
-        return "ERROR: %s" % exc
-    output = log_inspect_module.encode_result(report)
-    summary = report["summary"]
-    activity_summary = "%d line(s), %d error(s), %d warning(s)%s" % (
-        summary["lines_inspected"], summary["error_lines"],
-        summary["warning_lines"],
-        ", truncated" if report["scan_truncated"] or report["details_truncated"] else "",
+    return _run_read_only_inspection(
+        "log_inspect", args, token=token, approval=approval,
+        extra_roots=extra_roots,
     )
-    _record_direct_tool(
-        "log_inspect", args, ok=True, started=started,
-        summary=activity_summary, output=output,
-    )
-    activity_tracker.record_event(
-        "log_inspect", summary=activity_summary, path=report["path"],
-    )
-    return output
 
 
 @mcp.tool()
@@ -7795,51 +7818,16 @@ def workspace_compare(
 ) -> str:
     """Compare two guarded files/directories by path, type, size, and SHA-256."""
     _maybe_live_reload()
-    started = time.time()
     args = {
         "left": left, "right": right, "max_entries": max_entries,
         "max_file_bytes": max_file_bytes, "max_total_bytes": max_total_bytes,
         "max_details": max_details, "max_output_bytes": max_output_bytes,
         "timeout": timeout,
     }
-    try:
-        report = workspace_compare_module.compare_workspaces(
-            left, right,
-            max_entries=max_entries,
-            max_file_bytes=max_file_bytes,
-            max_total_bytes=max_total_bytes,
-            max_details=max_details,
-            max_output_bytes=max_output_bytes,
-            timeout=timeout,
-            extra_roots=extra_roots,
-            bypass=_file_bypass_allowed(token, approval),
-            developer_authorized=_file_developer_allowed(token),
-        )
-    except Exception as exc:
-        _record_direct_tool(
-            "workspace_compare", args, ok=False, started=started,
-            summary=str(exc),
-        )
-        return "ERROR: %s" % exc
-    output = workspace_compare_module.encode_result(report)
-    summary = report["summary"]
-    _record_direct_tool(
-        "workspace_compare", args, ok=True, started=started,
-        summary="added=%d removed=%d changed=%d same=%d" % (
-            summary["added"], summary["removed"],
-            summary["changed"], summary["same"],
-        ),
-        output=output,
+    return _run_read_only_inspection(
+        "workspace_compare", args, token=token, approval=approval,
+        extra_roots=extra_roots,
     )
-    activity_tracker.record_event(
-        "workspace_compare",
-        summary="%d difference(s), %d same" % (
-            summary["added"] + summary["removed"] + summary["changed"],
-            summary["same"],
-        ),
-        path="%s | %s" % (report["left"]["root"], report["right"]["root"]),
-    )
-    return output
 
 
 @mcp.tool()
@@ -7856,31 +7844,15 @@ def project_detect(
 ) -> str:
     """Inventory guarded project manifests and evidence-backed command candidates."""
     _maybe_live_reload()
-    started = time.time()
     args = {
         "path": path, "max_depth": max_depth, "max_files": max_files,
         "max_total_bytes": max_total_bytes, "max_file_bytes": max_file_bytes,
         "max_results": max_results,
     }
-    try:
-        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
-        data = project_detector.detect_project(
-            path=path, max_depth=max_depth, max_files=max_files,
-            max_total_bytes=max_total_bytes, max_file_bytes=max_file_bytes,
-            max_results=max_results, extra_roots=trusted_roots,
-        )
-    except Exception as exc:
-        _record_direct_tool("project_detect", args, ok=False, started=started, summary=str(exc))
-        return "ERROR: %s" % exc
-    summary = "%d manifest(s), %d command candidate(s)%s" % (
-        len(data["manifests"]), len(data["commands"]),
-        ", truncated" if data["truncated"] else "",
+    return _run_read_only_inspection(
+        "project_detect", args, token=token, approval=approval,
+        extra_roots=extra_roots,
     )
-    output = project_detector.format_detection(data)
-    _record_direct_tool("project_detect", args, ok=not data["errors"], started=started,
-                        summary=summary, output=output)
-    activity_tracker.record_event("project_detect", summary=summary, path=data["root"])
-    return output
 
 
 @mcp.tool()
@@ -7888,20 +7860,11 @@ def file_digest(path: str, max_bytes: int = 32_000_000, token: str = "",
                 approval: str = "", extra_roots: str = "") -> str:
     """Stream a guarded regular file into a fixed SHA-256 content digest."""
     _maybe_live_reload()
-    started = time.time()
     args = {"path": path, "max_bytes": max_bytes}
-    try:
-        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
-        data = content_digest.digest_file(path, max_bytes=max_bytes, extra_roots=trusted_roots)
-    except Exception as exc:
-        _record_direct_tool("file_digest", args, ok=False, started=started, summary=str(exc))
-        return "ERROR: %s" % exc
-    summary = "%d byte(s)%s" % (data["bytes"], ", incomplete" if data["sha256"] is None else "")
-    output = content_digest.format_digest(data)
-    _record_direct_tool("file_digest", args, ok=data["sha256"] is not None,
-                        started=started, summary=summary, output=output)
-    activity_tracker.record_event("file_digest", summary=summary, path=data["path"])
-    return output
+    return _run_read_only_inspection(
+        "file_digest", args, token=token, approval=approval,
+        extra_roots=extra_roots,
+    )
 
 
 @mcp.tool()
@@ -7913,30 +7876,15 @@ def directory_digest(
 ) -> str:
     """Build a guarded deterministic SHA-256 file manifest and tree Merkle."""
     _maybe_live_reload()
-    started = time.time()
     args = {
         "path": path, "max_depth": max_depth, "max_files": max_files,
         "max_total_bytes": max_total_bytes, "max_file_bytes": max_file_bytes,
         "max_results": max_results,
     }
-    try:
-        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
-        data = content_digest.digest_directory(
-            path, max_depth=max_depth, max_files=max_files,
-            max_total_bytes=max_total_bytes, max_file_bytes=max_file_bytes,
-            max_results=max_results, extra_roots=trusted_roots,
-        )
-    except Exception as exc:
-        _record_direct_tool("directory_digest", args, ok=False, started=started, summary=str(exc))
-        return "ERROR: %s" % exc
-    summary = "%d file(s), %d byte(s)%s" % (
-        len(data["manifest"]), data["bytes"], " complete" if data["complete"] else " incomplete",
+    return _run_read_only_inspection(
+        "directory_digest", args, token=token, approval=approval,
+        extra_roots=extra_roots,
     )
-    output = content_digest.format_digest(data)
-    _record_direct_tool("directory_digest", args, ok=data["complete"], started=started,
-                        summary=summary, output=output)
-    activity_tracker.record_event("directory_digest", summary=summary, path=data["root"])
-    return output
 
 
 @mcp.tool()
@@ -7953,26 +7901,16 @@ def archive_list(
 ) -> str:
     """Prevalidate and list a bounded ZIP/TAR without extracting it."""
     _maybe_live_reload()
-    started = time.time()
-    args = {"path": path, "max_entries": max_entries, "max_results": max_results}
-    try:
-        if extra_roots and not _file_bypass_allowed(token, approval):
-            raise PermissionError("extra_roots requires developer authorization or approval")
-        data = archive_tools.list_archive(
-            path, max_entries=max_entries, max_file_bytes=max_file_bytes,
-            max_total_bytes=max_total_bytes, max_ratio=max_ratio,
-            max_path_depth=max_path_depth, max_results=max_results,
-            max_seconds=max_seconds, extra_roots=extra_roots,
-        )
-    except Exception as exc:
-        _record_direct_tool("archive_list", args, ok=False, started=started, summary=str(exc))
-        return "ERROR: %s" % exc
-    output = archive_tools.format_result(data)
-    _record_direct_tool("archive_list", args, ok=data.get("valid", False), started=started,
-                        summary="%d entries" % data.get("entry_count", 0), output=output)
-    activity_tracker.record_event("archive_list", summary="%d entries" % data.get("entry_count", 0),
-                                  path=data.get("source", ""))
-    return output
+    args = {
+        "path": path, "max_entries": max_entries,
+        "max_file_bytes": max_file_bytes, "max_total_bytes": max_total_bytes,
+        "max_ratio": max_ratio, "max_path_depth": max_path_depth,
+        "max_results": max_results, "max_seconds": max_seconds,
+    }
+    return _run_read_only_inspection(
+        "archive_list", args, token=token, approval=approval,
+        extra_roots=extra_roots,
+    )
 
 
 @mcp.tool()
@@ -8030,28 +7968,10 @@ def data_inspect(
     archive members, sample rows).
     """
     _maybe_live_reload()
-    started = time.time()
-    try:
-        data = file_ops.inspect_data(
-            path,
-            max_bytes=max_bytes,
-            extra_roots=extra_roots,
-            bypass=_file_bypass_allowed(token, approval),
-            developer_authorized=_file_developer_allowed(token),
-        )
-    except Exception as e:
-        _record_direct_tool("data_inspect", {"path": path}, ok=False, started=started, summary=str(e))
-        return "ERROR: %s" % e
-    _record_direct_tool(
-        "data_inspect", {"path": path}, ok=True, started=started,
-        summary="%s %s bytes" % (data.get("kind", "?"), data.get("bytes", 0)),
+    return _run_read_only_inspection(
+        "data_inspect", {"path": path, "max_bytes": max_bytes},
+        token=token, approval=approval, extra_roots=extra_roots,
     )
-    activity_tracker.record_event(
-        "data_inspect",
-        summary="%s (%s bytes)" % (data.get("kind", "?"), data.get("bytes", 0)),
-        path=data.get("path", ""),
-    )
-    return _format_file_result("data inspect", data)
 
 
 @mcp.tool()
@@ -8071,45 +7991,16 @@ def data_query(
 ) -> str:
     """Run a bounded read-only SQLite or structured text data query."""
     _maybe_live_reload()
-    started = time.time()
     args = {
         "path": path, "sql": sql, "projection_json": projection_json,
         "filters_json": filters_json, "max_rows": max_rows,
         "max_columns": max_columns, "max_output_bytes": max_output_bytes,
         "max_scan_bytes": max_scan_bytes, "timeout": timeout,
     }
-    try:
-        result = data_query_module.query_data(
-            path,
-            sql=sql,
-            projection=projection_json,
-            filters=filters_json,
-            max_rows=max_rows,
-            max_columns=max_columns,
-            max_output_bytes=max_output_bytes,
-            max_scan_bytes=max_scan_bytes,
-            timeout=timeout,
-            extra_roots=extra_roots,
-            bypass=_file_bypass_allowed(token, approval),
-            developer_authorized=_file_developer_allowed(token),
-        )
-    except Exception as exc:
-        _record_direct_tool(
-            "data_query", args, ok=False, started=started, summary=str(exc),
-        )
-        return "ERROR: %s" % exc
-    output = data_query_module.encode_result(result)
-    _record_direct_tool(
-        "data_query", args, ok=True, started=started,
-        summary="%s %d row(s)" % (result["kind"], result["count"]),
-        output=output,
+    return _run_read_only_inspection(
+        "data_query", args, token=token, approval=approval,
+        extra_roots=extra_roots,
     )
-    activity_tracker.record_event(
-        "data_query",
-        summary="%s (%d row(s))" % (result["kind"], result["count"]),
-        path=result["path"],
-    )
-    return output
 
 
 @mcp.tool()
@@ -8707,35 +8598,14 @@ def dependency_inventory(
 ) -> str:
     """Parse bounded dependency manifests and lockfiles without execution/network."""
     _maybe_live_reload()
-    started = time.time()
     args = {
         "path": path, "max_depth": max_depth, "max_files": max_files,
         "max_total_bytes": max_total_bytes, "max_results": max_results,
     }
-    try:
-        data = dependency_inventory_tool.dependency_inventory(
-            path,
-            max_depth=max_depth,
-            max_files=max_files,
-            max_total_bytes=max_total_bytes,
-            max_results=max_results,
-            extra_roots=extra_roots,
-            bypass=_file_bypass_allowed(token, approval),
-        )
-    except Exception as exc:
-        _record_direct_tool(
-            "dependency_inventory", args, ok=False, started=started,
-            summary=str(exc),
-        )
-        return "ERROR: %s" % exc
-    output = json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False)
-    _record_direct_tool(
-        "dependency_inventory", args, ok=True, started=started,
-        summary="%d dependencies from %d files" % (
-            len(data["items"]), data["files_read"],
-        ), output=output,
+    return _run_read_only_inspection(
+        "dependency_inventory", args, token=token, approval=approval,
+        extra_roots=extra_roots,
     )
-    return output
 
 
 @mcp.tool()
