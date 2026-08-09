@@ -26,9 +26,22 @@ def test_recall_returns_similar_good_solution():
     _store_good(c, "i2", "parse json", "import json", [0.0, 1.0])
     # query embedding aligned with i1
     out = recall.recall(c, "reverse text", k=2, embed_fn=lambda t: [1.0, 0.0], min_sim=0.9)
-    assert len(out) == 1
-    assert "reverse a string" in out[0]
-    assert "s[::-1]" in out[0]
+    assert out == ["reverse a string -> def rev(s): return s[::-1]"]
+
+
+def test_recall_skips_corrupt_embedding_blob_without_disclosure():
+    c = _conn()
+    _store_good(c, "i1", "task", "response", [1.0, 0.0])
+    c.execute(
+        "UPDATE interactions SET task_embedding = ? WHERE id = ?",
+        (b"not-a-float-vector", "i1"),
+    )
+
+    assert recall.recall(
+        c, "q", qv=[1.0, 0.0], min_sim=0.5,
+        embedding_model=embeddings.EMBED_IDENTITY,
+        embedding_revision=embeddings.EMBED_REVISION,
+    ) == []
 
 
 def test_recall_respects_min_sim_threshold():
