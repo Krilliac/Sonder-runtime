@@ -105,6 +105,7 @@ import tier_router
 import project_scaffold
 import environment_probe
 import sonder_hardware
+import tool_capabilities
 import git_tools
 import eval_history
 
@@ -606,6 +607,7 @@ LIVE_RELOAD_MODULES = [
     "intents",
     "runtime_policy",
     "sonder_hardware",
+    "tool_capabilities",
     # NPU accelerator host modules reload in dependency order; the broker and
     # service keep live worker/process state behind reload guards.
     "npu_contract",
@@ -11556,6 +11558,35 @@ def _agent_tool_help(read_only=False):
     return REPOSITORY_AGENT_TOOL_HELP if read_only else AGENT_TOOL_HELP
 
 
+def _tool_capability_shadow_surfaces():
+    """Snapshot authoritative tool surfaces for opt-in drift validation."""
+    manager = getattr(mcp, "_tool_manager", None)
+    registered = getattr(manager, "_tools", {})
+    direct_names = frozenset(registered) if isinstance(registered, dict) else frozenset()
+    dispatch_tools = tool_capabilities.dispatch_names(_agent_dispatch)
+    return tool_capabilities.ShadowSurfaces(
+        direct_mcp_tools=direct_names,
+        repository_read_only_tools=REPOSITORY_READ_ONLY_TOOLS,
+        project_bound_agent_tools=_PROJECT_BOUND_AGENT_TOOLS,
+        project_scoped_tools=_PROJECT_SCOPED_PATH_TOOLS | _PROJECT_SCOPED_EXECUTION_TOOLS,
+        dispatch_tools=dispatch_tools,
+        # Hosted agents currently inherit the ordinary dispatch surface except
+        # for the explicit nested-model deny-list.  This snapshot is
+        # descriptive only: capability metadata must report privacy drift
+        # without silently becoming an authorization mechanism.
+        hosted_agent_tools=dispatch_tools - _CLOUD_AGENT_NESTED_MODEL_TOOLS,
+        deduplicated_inspection_tools=_AGENT_DEDUPLICATED_INSPECTION_TOOLS,
+        work_inspection_tools=_WORK_INSPECTION_TOOLS,
+        full_agent_help=AGENT_TOOL_HELP,
+        repository_agent_help=REPOSITORY_AGENT_TOOL_HELP,
+    )
+
+
+def tool_capability_shadow_report():
+    """Validate descriptor drift without making descriptors authoritative."""
+    return tool_capabilities.format_shadow_report(_tool_capability_shadow_surfaces())
+
+
 def _repository_scope_path_error(tool_name, args, project_root):
     """Reject a project-bound agent path outside its host-selected root.
 
@@ -16122,6 +16153,10 @@ def diagnostics() -> str:
     )
     if mcp_state.get("last_error"):
         lines.append("  mcp refresh ERROR: %s" % mcp_state["last_error"])
+    try:
+        lines.append("  tool capability shadow: %s" % tool_capability_shadow_report())
+    except Exception as e:
+        lines.append("  tool capability shadow: ERROR validator failed: %s" % e)
     lines.append(
         "  execution routing: host-gated foreground/autopilot/fleet with local ambiguity review"
     )
