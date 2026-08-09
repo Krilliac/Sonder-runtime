@@ -11563,12 +11563,18 @@ def _tool_capability_shadow_surfaces():
     manager = getattr(mcp, "_tool_manager", None)
     registered = getattr(manager, "_tools", {})
     direct_names = frozenset(registered) if isinstance(registered, dict) else frozenset()
+    dispatch_tools = tool_capabilities.dispatch_names(_agent_dispatch)
     return tool_capabilities.ShadowSurfaces(
         direct_mcp_tools=direct_names,
         repository_read_only_tools=REPOSITORY_READ_ONLY_TOOLS,
         project_bound_agent_tools=_PROJECT_BOUND_AGENT_TOOLS,
         project_scoped_tools=_PROJECT_SCOPED_PATH_TOOLS | _PROJECT_SCOPED_EXECUTION_TOOLS,
-        dispatch_tools=tool_capabilities.dispatch_names(_agent_dispatch),
+        dispatch_tools=dispatch_tools,
+        # Hosted agents currently inherit the ordinary dispatch surface except
+        # for the explicit nested-model deny-list.  This snapshot is
+        # descriptive only: capability metadata must report privacy drift
+        # without silently becoming an authorization mechanism.
+        hosted_agent_tools=dispatch_tools - _CLOUD_AGENT_NESTED_MODEL_TOOLS,
         deduplicated_inspection_tools=_AGENT_DEDUPLICATED_INSPECTION_TOOLS,
         work_inspection_tools=_WORK_INSPECTION_TOOLS,
         full_agent_help=AGENT_TOOL_HELP,
