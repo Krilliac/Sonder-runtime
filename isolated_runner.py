@@ -63,6 +63,29 @@ def _clamp_float(value, default, minimum, maximum):
     return max(minimum, min(parsed, maximum))
 
 
+def _memory_policy(runtime_name, requested_mb):
+    """Return ``(RAM MiB, total RAM+swap MiB, runtime argv)``.
+
+    Docker accepts ``memory-swap == memory`` as a zero-swap total. Podman
+    rejects equality: its documented contract requires the total to exceed the
+    memory limit. Give Podman the smallest integral allowance exposed here
+    (1 MiB), and reduce its maximum RAM by that MiB so the effective total never
+    exceeds ``MAX_MEMORY_MB``. No code should describe Podman as zero-swap.
+    """
+    if runtime_name not in {"docker", "podman"}:
+        raise ValueError("unknown container runtime memory policy")
+    maximum_ram = MAX_MEMORY_MB if runtime_name == "docker" else MAX_MEMORY_MB - 1
+    memory_mb = _clamp_int(requested_mb, DEFAULT_MEMORY_MB, 64, maximum_ram)
+    total_mb = memory_mb if runtime_name == "docker" else memory_mb + 1
+    if total_mb > MAX_MEMORY_MB or total_mb < memory_mb:
+        raise ValueError("container memory total exceeds the hard ceiling")
+    if runtime_name == "docker":
+        argv = ["--memory=%dm" % memory_mb, "--memory-swap=%dm" % total_mb]
+    else:
+        argv = ["--memory", "%dm" % memory_mb, "--memory-swap", "%dm" % total_mb]
+    return memory_mb, total_mb, argv
+
+
 def detect_runtime():
     """Return ``(name, absolute_executable, pinned_global_argv)`` or ``None``.
 
@@ -519,7 +542,9 @@ def build_runtime_argv(
     image = _validate_image(image)
     command = _parse_argv(command)
     project = resolve_project(project)
-    memory_mb = _clamp_int(memory_mb, DEFAULT_MEMORY_MB, 64, MAX_MEMORY_MB)
+    memory_mb, _effective_total_mb, memory_args = _memory_policy(
+        runtime_name, memory_mb
+    )
     cpus = _clamp_float(cpus, DEFAULT_CPUS, 0.1, MAX_CPUS)
     pids = _clamp_int(pids, DEFAULT_PIDS, 16, MAX_PIDS)
     container_name = name or ("sonder-isolated-" + uuid.uuid4().hex)
@@ -533,11 +558,6 @@ def build_runtime_argv(
     )
     if not writable_workspace:
         mount += ",readonly" if runtime_name == "docker" else ",ro=true"
-    memory_args = (
-        ["--memory=%dm" % memory_mb, "--memory-swap=%dm" % memory_mb]
-        if runtime_name == "docker"
-        else ["--memory", "%dm" % memory_mb, "--memory-swap", "%dm" % memory_mb]
-    )
     image_volume_args = ["--image-volume=ignore"] if runtime_name == "podman" else []
     argv = [
         str(runtime_path), *runtime_prefix, "run", "--rm", "--pull=never",
@@ -710,6 +730,9 @@ def run_isolated(
         }
     runtime_name, runtime_path, runtime_prefix = selected_runtime
     timeout = _clamp_int(timeout, DEFAULT_TIMEOUT, 1, MAX_TIMEOUT)
+    memory_limit_mb, memory_plus_swap_limit_mb, _memory_args = _memory_policy(
+        runtime_name, memory_mb
+    )
     output_limit = _clamp_int(
         output_bytes, DEFAULT_OUTPUT_BYTES, 1024, MAX_OUTPUT_BYTES
     )
@@ -724,7 +747,7 @@ def run_isolated(
         runtime_name, runtime_path, runtime_prefix,
         image, command, resolved_project,
         writable_workspace=writable_workspace is True,
-        memory_mb=memory_mb, cpus=cpus, pids=pids,
+        memory_mb=memory_limit_mb, cpus=cpus, pids=pids,
     )
     expected_identity = _project_identity(resolved_project)
     result = _run_bounded(
@@ -737,6 +760,9 @@ def run_isolated(
         "writable_workspace": writable_workspace is True,
         "timeout": timeout,
         "output_limit": output_limit,
+        "memory_limit_mb": memory_limit_mb,
+        "memory_plus_swap_limit_mb": memory_plus_swap_limit_mb,
+        "swap_allowance_mb": memory_plus_swap_limit_mb - memory_limit_mb,
     })
     return result
 
@@ -751,6 +777,11 @@ def format_result(result):
             "writable (explicit host request)"
             if result.get("writable_workspace") else "read-only"
         ),
+        "  memory limit: %s MiB" % result.get("memory_limit_mb", "unknown"),
+        "  memory plus swap limit: %s MiB" % result.get(
+            "memory_plus_swap_limit_mb", "unknown"
+        ),
+        "  swap allowance: %s MiB" % result.get("swap_allowance_mb", "unknown"),
     ]
     if result.get("cleanup"):
         lines.append("  cleanup: %s" % result["cleanup"])

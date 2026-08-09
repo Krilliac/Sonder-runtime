@@ -305,7 +305,24 @@ def test_podman_argv_uses_pinned_connection_nonrecursive_bind_and_total_cap(tmp_
     assert "--image-volume=ignore" in argv
     memory = argv.index("--memory")
     swap = argv.index("--memory-swap")
-    assert argv[memory + 1] == argv[swap + 1] == "512m"
+    assert argv[memory + 1] == "512m"
+    assert argv[swap + 1] == "513m"
+
+
+def test_runtime_memory_policy_has_bounded_engine_specific_totals():
+    assert isolated_runner._memory_policy("docker", 999999) == (
+        isolated_runner.MAX_MEMORY_MB,
+        isolated_runner.MAX_MEMORY_MB,
+        ["--memory=4096m", "--memory-swap=4096m"],
+    )
+    assert isolated_runner._memory_policy("podman", 999999) == (
+        isolated_runner.MAX_MEMORY_MB - 1,
+        isolated_runner.MAX_MEMORY_MB,
+        ["--memory", "4095m", "--memory-swap", "4096m"],
+    )
+    assert isolated_runner._memory_policy("podman", 1)[:2] == (64, 65)
+    with pytest.raises(ValueError, match="unknown container runtime"):
+        isolated_runner._memory_policy("other", 512)
 
 
 def test_bounded_pinned_image_inspection_returns_immutable_id(monkeypatch):
@@ -395,6 +412,37 @@ def test_run_uses_inspected_image_id_not_mutable_tag(monkeypatch, tmp_path):
     assert result["ok"] is True
     assert IMAGE_ID in captured["argv"]
     assert "busybox:latest" not in captured["argv"]
+    assert result["memory_limit_mb"] == 512
+    assert result["memory_plus_swap_limit_mb"] == 512
+    assert result["swap_allowance_mb"] == 0
+
+
+def test_podman_result_reports_effective_total_and_swap_allowance(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    prefix = ("--url", "ssh://core@127.0.0.1:2222/run/podman.sock")
+    monkeypatch.setattr(
+        isolated_runner, "detect_runtime",
+        lambda: ("podman", str((tmp_path / "podman.exe").resolve()), prefix),
+    )
+    monkeypatch.setattr(isolated_runner, "_inspect_image_policy", lambda *_a: IMAGE_ID)
+    monkeypatch.setattr(
+        isolated_runner, "_run_bounded",
+        lambda *_args: {
+            "ok": True, "returncode": 0, "stdout": "", "stderr": "",
+            "error": "", "cleanup": "not-required",
+        },
+    )
+    result = isolated_runner.run_isolated(
+        "busybox:latest", '["true"]', str(project), memory_mb=4096
+    )
+    assert result["memory_limit_mb"] == 4095
+    assert result["memory_plus_swap_limit_mb"] == 4096
+    assert result["swap_allowance_mb"] == 1
+    formatted = isolated_runner.format_result(result)
+    assert "memory limit: 4095 MiB" in formatted
+    assert "memory plus swap limit: 4096 MiB" in formatted
+    assert "swap allowance: 1 MiB" in formatted
 
 
 def test_process_launch_is_argv_only_with_minimal_bootstrap_environment(monkeypatch):
