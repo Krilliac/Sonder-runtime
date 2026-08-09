@@ -1562,7 +1562,9 @@ def _mcp_command(arg: str) -> str:
             else "MCP source already current."
         )
         if refreshed.get("error"):
-            prefix = "MCP refresh failed closed: %s" % refreshed["error"]
+            prefix = "MCP refresh failed closed: %s" % _safe_mcp_error(
+                refreshed["error"]
+            )
         return "%s\n\n%s" % (prefix, format_mcp_runtime())
     if action in {"help", "?"}:
         return (
@@ -6248,7 +6250,7 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
                 if provenance.get("issue") == "stale_source_root"
                 else "The latest MCP source refresh failed closed."
             ),
-            provenance.get("recovery_action") or (
+            _safe_mcp_recovery_action(provenance) or (
                 "Run /mcp status, fix the reported source error, then use "
                 "/mcp refresh; the last known-good tools remain active."
             ),
@@ -10739,6 +10741,29 @@ def mcp_runtime_data() -> dict:
     return mcp.runtime_snapshot()
 
 
+def _safe_mcp_recovery_action(provenance: dict) -> str:
+    if not provenance.get("issue"):
+        return ""
+    return reloadable_mcp._recovery_action(
+        bool(provenance.get("configured_root_ready"))
+    )
+
+
+def _safe_mcp_error(value) -> str:
+    text = str(value or "")
+    safe_messages = {
+        "stale runtime source: loaded MCP file is unavailable",
+        "configured runtime root is unavailable",
+        "loaded MCP source does not match configured runtime root",
+    }
+    if text in safe_messages:
+        return text
+    error_type = text.partition(":")[0]
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}(?:Error|Exception)", error_type):
+        return "%s: source refresh failed" % error_type
+    return "runtime source refresh failed"
+
+
 def format_mcp_runtime(data: dict | None = None) -> str:
     data = mcp_runtime_data() if data is None else data
     loaded = str(data.get("loaded_digest") or "")[:12] or "unknown"
@@ -10758,38 +10783,47 @@ def format_mcp_runtime(data: dict | None = None) -> str:
         ),
         "  MCP tool-list updates: %s"
         % ("advertised" if data.get("protocol_list_changed") else "not advertised"),
-        "  source: %s" % (data.get("path") or "(unknown)"),
+        "  source registration: %s"
+        % ("available" if data.get("path") else "unknown"),
         "  loaded/current: %s / %s" % (loaded, current),
     ]
     provenance = data.get("provenance") or {}
     if provenance:
         lines.extend([
             "  process: pid=%s | python=%s"
-            % (provenance.get("pid", "unknown"), provenance.get("python", "unknown")),
-            "  process cwd: %s" % provenance.get("cwd", "unknown"),
-            "  source root: %s (%s)"
             % (
-                provenance.get("source_root") or "(unknown)",
-                "present" if provenance.get("source_root_exists") else "missing",
+                provenance.get("pid", "unknown"),
+                "python" if provenance.get("python") else "unknown",
             ),
-            "  configured runtime root: %s (%s)"
+            "  process cwd: %s"
             % (
-                provenance.get("configured_runtime_root") or "(not set)",
-                "present" if provenance.get("configured_root_exists") else "missing/not set",
+                "unavailable"
+                if provenance.get("cwd") == "(deleted or unavailable)"
+                else "available"
+            ),
+            "  source root: %s"
+            % ("present" if provenance.get("source_root_exists") else "missing"),
+            "  configured runtime root: %s"
+            % (
+                "present"
+                if provenance.get("configured_root_exists")
+                else "missing/not set"
             ),
         ])
         if provenance.get("issue"):
             lines.append("  provenance ERROR: %s" % provenance["issue"])
-        if provenance.get("recovery_action"):
-            lines.append("  ACTION: %s" % provenance["recovery_action"])
+        action = _safe_mcp_recovery_action(provenance)
+        if action:
+            lines.append("  ACTION: %s" % action)
     if data.get("last_refresh_ts"):
         lines.append("  last refresh unix time: %s" % data["last_refresh_ts"])
     if data.get("last_error"):
         lines.append(
-            "  ERROR: %s (last known-good registry remains active)" % data["last_error"]
+            "  ERROR: %s (last known-good registry remains active)"
+            % _safe_mcp_error(data["last_error"])
         )
     if data.get("last_notification_error"):
-        lines.append("  notification warning: %s" % data["last_notification_error"])
+        lines.append("  notification warning: MCP list-change notification failed")
     return "\n".join(lines)
 
 
@@ -16595,11 +16629,12 @@ def status() -> str:
             "mcp runtime: ERROR %s (source root: %s)"
             % (
                 provenance["issue"],
-                provenance.get("source_root") or "unknown",
+                "present" if provenance.get("source_root_exists") else "missing",
             )
         )
-        if provenance.get("recovery_action"):
-            lines.append("mcp ACTION: %s" % provenance["recovery_action"])
+        action = _safe_mcp_recovery_action(provenance)
+        if action:
+            lines.append("mcp ACTION: %s" % action)
     try:
         auto = _application().automation.snapshot(include_finished=False, limit=20)
         lines.append(

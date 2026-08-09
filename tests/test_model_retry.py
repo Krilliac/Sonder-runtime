@@ -244,6 +244,8 @@ def test_status_reports_stale_mcp_source_restart_action(monkeypatch):
             "provenance": {
                 "issue": "stale_source_root",
                 "source_root": r"C:\deleted Sonder worktree",
+                "source_root_exists": False,
+                "configured_root_ready": True,
                 "recovery_action": (
                     r"Restart/reconnect from C:\canonical\sonder-runtime.cmd"
                 ),
@@ -254,8 +256,11 @@ def test_status_reports_stale_mcp_source_restart_action(monkeypatch):
     result = server.status()
 
     assert "mcp runtime: ERROR stale_source_root" in result
-    assert r"source root: C:\deleted Sonder worktree" in result
-    assert r"mcp ACTION: Restart/reconnect from C:\canonical" in result
+    assert "source root: missing" in result
+    assert "mcp ACTION: Restart/reconnect the MCP process" in result
+    assert "python -m sonder_runtime mcp" in result
+    assert r"C:\deleted Sonder worktree" not in result
+    assert r"C:\canonical" not in result
 
 
 def test_cancellation_between_attempts_suppresses_retry(monkeypatch):
