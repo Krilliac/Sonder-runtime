@@ -71,6 +71,24 @@ def test_explicit_fleet_uses_hardware_bounded_master(monkeypatch):
     }]
 
 
+def test_explicit_worker_count_routes_as_bounded_per_run_fleet(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        server,
+        "master_orchestrate",
+        lambda **kwargs: calls.append(kwargs) or "fleet complete",
+    )
+
+    output = server.route_work_request(
+        "Use 24 workers for this AI harness research and data run."
+    )
+
+    assert "mode: hardware-bounded fleet" in output
+    assert calls[0]["mode"] == "fleet"
+    assert calls[0]["agents"] == 24
+    assert calls[0]["worker_cap"] == 24
+
+
 def test_simple_work_uses_foreground_without_model_triage(monkeypatch):
     calls = []
     monkeypatch.setattr(

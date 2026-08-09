@@ -6493,6 +6493,7 @@ def master_orchestrate(
     task: str,
     mode: str = "ask",
     agents: int = 0,
+    worker_cap: int = 0,
     tier: str = "auto",
     learn: bool = False,
     retry_of: str = "",
@@ -6504,8 +6505,10 @@ def master_orchestrate(
     lane. mode="delegate" queues bounded subagents across RAM/CPU-safe worker
     slots, then audits and merges their outputs. mode="fleet" queues the full
     hardware-derived breadth ceiling in the background and returns immediately.
-    Pass a positive ``agents`` value to set a smaller explicit fleet breadth;
-    zero/omitted selects three delegates or the hardware ceiling for fleet mode.
+    Pass a positive ``agents`` value to set fleet breadth. ``worker_cap`` is a
+    per-run opt-in that may raise concurrent slots above the hardware-derived
+    default, but never above the operator/compiled ceiling. A clear task phrase
+    such as "use 24 workers" fills both values when they are omitted.
     For existing repository work, pass ``project`` as an existing root. Every
     child and aggregate is confined to that canonical root; missing or
     conflicting repository scope fails closed instead of inheriting the cwd.
@@ -6513,6 +6516,22 @@ def master_orchestrate(
     """
     _maybe_live_reload()
     task = (task or "").strip()
+    inferred_worker_cap = master_orchestrator.requested_worker_cap(task)
+    raw_worker_cap = worker_cap
+    if (worker_cap is None or worker_cap == 0) and not isinstance(worker_cap, bool):
+        worker_cap = inferred_worker_cap
+    worker_cap_supplied = worker_cap is not None and worker_cap != 0
+    if worker_cap_supplied:
+        cap_probe = master_orchestrator.capacity(agents or None, worker_cap=worker_cap)
+        if cap_probe.get("worker_cap_error"):
+            return "ERROR: invalid worker_cap: %s" % cap_probe["worker_cap_error"]
+        worker_cap = int(cap_probe["requested_worker_cap"])
+        if not agents:
+            agents = worker_cap
+    elif isinstance(raw_worker_cap, bool):
+        return "ERROR: invalid worker_cap: boolean values are not worker counts"
+    else:
+        worker_cap = None
     mode = (mode or "ask").strip().lower()
     mode = {
         "delagte": "delegate",
@@ -6525,12 +6544,21 @@ def master_orchestrate(
         if mode in ("ask", "choose", "prompt", "delegate", "delegated", "agents", "parallel"):
             mode = "fleet"
     if mode in ("ask", "choose", "prompt"):
-        delegate_count = master_orchestrator.clamp_agent_count(agents, default=3)
-        fleet_count = master_orchestrator.clamp_agent_count(
-            agents, default=master_orchestrator.max_agents(),
-        )
-        delegate_capacity = master_orchestrator.capacity(delegate_count)
-        fleet_capacity = master_orchestrator.capacity(fleet_count)
+        if worker_cap:
+            delegate_count = fleet_count = min(
+                int(agents or worker_cap), master_orchestrator.explicit_agent_ceiling(),
+            )
+        else:
+            delegate_count = master_orchestrator.clamp_agent_count(agents, default=3)
+            fleet_count = master_orchestrator.clamp_agent_count(
+                agents, default=master_orchestrator.max_agents(),
+            )
+        if worker_cap:
+            delegate_capacity = master_orchestrator.capacity(delegate_count, worker_cap=worker_cap)
+            fleet_capacity = master_orchestrator.capacity(fleet_count, worker_cap=worker_cap)
+        else:
+            delegate_capacity = master_orchestrator.capacity(delegate_count)
+            fleet_capacity = master_orchestrator.capacity(fleet_count)
         return (
             "Master orchestrator ready.\n"
             "Choose execution mode:\n"
@@ -6538,6 +6566,7 @@ def master_orchestrate(
             "  delegate - queue %d agent(s) across %d safe worker slot(s), audit, then merge.\n"
             "  fleet    - queue %d agent(s) across %d safe worker slot(s), return immediately, then monitor it.\n"
             "              Omit agents (or pass 0) to use the hardware ceiling.\n"
+            "              Set worker_cap (or say 'use N workers') for a bounded per-run override.\n"
             "Keywords fleet, swarm, spawn as many agents, parallel agents, and\n"
             "parallel workflow select fleet automatically without replacing an explicit agent count.\n"
             "Call master_orchestrate(task, mode='inline'|'delegate'|'fleet') or chat `/master inline ...`."
@@ -6601,7 +6630,7 @@ def master_orchestrate(
         return result["output"]
     if mode in ("delegate", "delegated", "agents", "parallel", "fleet", "swarm", "fanout"):
         run_fleet_in_background = mode in ("fleet", "swarm", "fanout")
-        if run_fleet_in_background:
+        if run_fleet_in_background and not worker_cap:
             agents = master_orchestrator.clamp_agent_count(
                 agents, default=master_orchestrator.max_agents(),
             )
@@ -6627,6 +6656,7 @@ def master_orchestrate(
                 "project": project_scope,
             },
             project=project_scope,
+            worker_cap=worker_cap,
         )
         if run_fleet_in_background:
             return "\n".join([
@@ -6664,17 +6694,19 @@ def master_status(include_finished: bool = True, limit: int = 20) -> str:
 
 
 @mcp.tool()
-def master_capacity(requested_agents: int = 0) -> str:
-    """Show queued-agent ceiling and current RAM/CPU-bounded worker slots."""
+def master_capacity(requested_agents: int = 0, worker_cap: int = 0) -> str:
+    """Show default or explicit per-run bounded orchestration capacity."""
     _maybe_live_reload()
     try:
         value = int(requested_agents or 0)
     except (TypeError, ValueError):
         value = 0
     requested = value if value > 0 else None
-    return master_orchestrator.format_capacity(
-        master_orchestrator.capacity(requested)
+    data = (
+        master_orchestrator.capacity(requested, worker_cap=worker_cap)
+        if worker_cap else master_orchestrator.capacity(requested)
     )
+    return master_orchestrator.format_capacity(data)
 
 
 @mcp.tool()
@@ -9760,6 +9792,7 @@ def _loop_dispatch(action):
     if action_type in ("master_capacity", "agent_capacity"):
         return _loop_text_result("master_capacity", master_capacity(
             requested_agents=action.get("requested_agents", action.get("agents", 0)),
+            worker_cap=action.get("worker_cap", 0),
         ))
     if action_type in ("master_cancel", "agent_cancel"):
         return _loop_text_result("master_cancel", master_cancel(
@@ -9775,6 +9808,7 @@ def _loop_dispatch(action):
             task=action.get("task", action.get("prompt", "")),
             mode=action.get("mode", "ask"),
             agents=action.get("agents", 0),
+            worker_cap=action.get("worker_cap", 0),
             tier=action.get("tier", "auto"),
             learn=action.get("learn", False),
             project=action.get("project", ""),
@@ -11457,9 +11491,9 @@ AGENT_TOOL_HELP = """Available tools:
 - memory_embedding_backfill: {"limit": 25, "apply": false}
 - memory_interaction_embedding_backfill: {"limit": 25, "apply": false}
 - system_improvement_report: {}
-- master_orchestrate: {"task": "...", "mode": "ask|inline|delegate|fleet", "agents": 3, "tier": "code", "project": "/path/to/repo"}
+- master_orchestrate: {"task": "...", "mode": "ask|inline|delegate|fleet", "agents": 24, "worker_cap": 24, "tier": "code", "project": "/path/to/repo"} -- worker_cap is a per-run override bounded by the operator ceiling
 - master_status: {}
-- master_capacity: {"requested_agents": 0}
+- master_capacity: {"requested_agents": 0, "worker_cap": 0}
 - master_cancel: {"agent_id": "master-id|prefix|all"}
 - master_retry: {"agent_id": "master-id|prefix", "tier": "code"}
 - self_heal_check: {}
@@ -11552,7 +11586,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - memory_privacy_review: {"sample_limit": 20}
 - system_improvement_report: {"session": "", "project": ""}
 - master_status: {}
-- master_capacity: {"requested_agents": 0}
+- master_capacity: {"requested_agents": 0, "worker_cap": 0}
 - self_heal_check: {}
 - status: {}
 - system_profile_text: {}
@@ -13101,6 +13135,7 @@ def _agent_dispatch(
     if tool_name in ("master_capacity", "agent_capacity"):
         return master_capacity(
             requested_agents=args.get("requested_agents", args.get("agents", 0)),
+            worker_cap=args.get("worker_cap", 0),
         )
     if tool_name in ("master_cancel", "agent_cancel"):
         return master_cancel(
@@ -13116,6 +13151,7 @@ def _agent_dispatch(
             task=args.get("task", args.get("prompt", "")),
             mode=args.get("mode", "ask"),
             agents=args.get("agents", 0),
+            worker_cap=args.get("worker_cap", 0),
             tier=args.get("tier", "auto"),
             learn=args.get("learn", False),
             project=args.get("project", ""),
@@ -15923,6 +15959,10 @@ def route_work_request(prompt: str, project: str = "") -> str | None:
             "task": prompt, "mode": "fleet", "tier": selected_tier,
             "learn": False,
         }
+        requested_cap = master_orchestrator.requested_worker_cap(prompt)
+        if requested_cap:
+            master_kwargs["agents"] = requested_cap
+            master_kwargs["worker_cap"] = requested_cap
         if isinstance(resolved_project, str) and os.path.isdir(resolved_project):
             master_kwargs["project"] = resolved_project
         output = master_orchestrate(**master_kwargs)
