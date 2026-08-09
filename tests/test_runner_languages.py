@@ -7,6 +7,7 @@ import pytest
 
 import code_runner
 import grounding
+import sonder_paths
 
 
 NEW_LANGS = {
@@ -36,7 +37,9 @@ def test_all_new_languages_registered():
 @pytest.mark.parametrize("lang", list(NEW_LANGS))
 def test_language_runs_or_reports_missing(lang):
     canonical, code, expected = NEW_LANGS[lang]
-    if shutil.which(_PROBE[lang]) is None:
+    if lang == "bash" and sonder_paths.bash_executable() is None:
+        pytest.skip("compatible bash not installed in this environment")
+    if lang != "bash" and shutil.which(_PROBE[lang]) is None:
         pytest.skip(f"{_PROBE[lang]} not installed in this environment")
     result = code_runner.run_code(code, language=canonical, timeout=60)
     assert result["ok"], result.get("stderr") or result.get("error")

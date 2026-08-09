@@ -18,6 +18,7 @@ import shutil
 import struct
 import subprocess
 import sonder_logging
+import sonder_paths
 import sys
 import threading
 import time
@@ -796,7 +797,12 @@ def run_program(
     max_output=MAX_EXEC_OUTPUT, extra_roots="", bypass=False,
     _allow_cmd_script=False,
 ):
-    executable = _resolve_program(program, extra_roots=extra_roots, bypass=bypass)
+    if str(program).strip().casefold() in {"bash", "sh"}:
+        executable = sonder_paths.bash_executable()
+        if not executable:
+            raise FileNotFoundError("bash/sh executable not found")
+    else:
+        executable = _resolve_program(program, extra_roots=extra_roots, bypass=bypass)
     args = _json_args(args_json)
     basename = Path(executable).name.lower()
     lowered_args = [arg.lower() for arg in args]
@@ -924,7 +930,7 @@ def run_script(
     elif suffix == ".dart":
         executable, prefix = shutil.which("dart"), [str(script)]
     elif suffix == ".sh":
-        executable, prefix = shutil.which("bash"), [str(script)]
+        executable, prefix = sonder_paths.bash_executable(), [str(script)]
     elif suffix in (".exe", ".com"):
         executable, prefix = str(script), []
     else:
