@@ -297,3 +297,13 @@ def test_server_live_reload_rebinds_task_application_modules(monkeypatch):
 
     assert server.task_use_cases is service_module
     assert server.task_state_adapter is adapter_module
+
+
+def test_server_watches_package_owned_evaluation_history_store():
+    import server
+
+    assert (
+        "sonder_runtime.adapters.evaluation_history_store"
+        in server.LIVE_RELOAD_MODULES
+    )
+    assert "eval_history" not in server.LIVE_RELOAD_MODULES
