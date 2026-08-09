@@ -775,7 +775,13 @@ void main() {
 
     expect(find.text('bounded event 0'), findsNothing);
     expect(find.text('bounded event 1'), findsNothing);
-    expect(find.text('bounded event 2'), findsOneWidget);
+    // SelectableText owns both a visible Text and an internal EditableText;
+    // assert the single public widget instead of counting implementation
+    // descendants as duplicate feed rows.
+    expect(
+      find.widgetWithText(SelectableText, 'bounded event 2'),
+      findsOneWidget,
+    );
     expect(find.text('edit harness.dart'), findsOneWidget);
     expect(find.text('12/14 events'), findsOneWidget);
     expect(find.text('Sequence gap'), findsOneWidget);
