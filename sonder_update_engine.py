@@ -290,14 +290,14 @@ class UpdateManager:
                     evidence={"reason": "explicitly skipped by operator"},
                 )
             else:
-                import sonder_backup
+                from sonder_runtime.bootstrap.app import default_app
 
                 target = self._backup_target or str(
                     Path(sonder_migrations.store_db_paths()["operations"])
                     .parent / "backups"
                 )
                 try:
-                    result = sonder_backup.create_backup(target)
+                    result = default_app().backup.create(target)
                     backup_id = result.backup_id
                     self.repository.record_step(
                         update_id, step, "backup", "ok",
