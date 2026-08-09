@@ -4,6 +4,7 @@ import os
 import shutil
 import sys
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 from mcp import ClientSession, StdioServerParameters
@@ -235,6 +236,10 @@ def test_runtime_provenance_detects_configured_root_mismatch(monkeypatch, tmp_pa
         assert mcp._tool_manager.get_tool("alpha").fn() == "stable"
         assert state["provenance"]["issue"] == "root_mismatch"
         assert state["provenance"]["root_matches_configured"] is False
+        assert state["provenance"]["configured_root_ready"] is False
+        assert "Set SONDER_RUNTIME_ROOT" in (
+            state["provenance"]["recovery_action"]
+        )
         assert str(canonical_root) not in repr(state)
         assert "python -m sonder_runtime mcp" in (
             state["provenance"]["recovery_action"]
@@ -244,6 +249,81 @@ def test_runtime_provenance_detects_configured_root_mismatch(monkeypatch, tmp_pa
         assert mcp.refresh_if_changed()["reloaded"] is True
         assert mcp._tool_manager.get_tool("alpha").fn() == "changed"
         assert mcp.runtime_snapshot()["status"] == "current"
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_configured_root_requires_real_module_entrypoint(monkeypatch, tmp_path):
+    monkeypatch.setenv("SONDER_LIVE_RELOAD", "1")
+    source_root = tmp_path / "loaded"
+    configured_root = tmp_path / "candidate"
+    source_root.mkdir()
+    configured_root.mkdir()
+    module_name = "reloadable_mcp_entrypoint_shape_sample"
+    module_path = source_root / (module_name + ".py")
+    module_path.write_text(_module_source("stable"), encoding="utf-8")
+    monkeypatch.setenv("SONDER_RUNTIME_ROOT", str(configured_root))
+    monkeypatch.syspath_prepend(str(source_root))
+    try:
+        mcp = importlib.import_module(module_name).mcp
+        for relative in (
+            "server.py",
+            "sonder_runtime/__init__.py",
+            "sonder_runtime/__main__.py",
+        ):
+            target = configured_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("# entrypoint\n", encoding="utf-8")
+            state = mcp.runtime_snapshot()["provenance"]
+            expected_ready = relative == "sonder_runtime/__main__.py"
+            assert state["configured_root_ready"] is expected_ready
+            if not expected_ready:
+                assert "Set SONDER_RUNTIME_ROOT" in state["recovery_action"]
+        assert "working directory SONDER_RUNTIME_ROOT" in (
+            mcp.runtime_snapshot()["provenance"]["recovery_action"]
+        )
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_expanduser_runtime_error_fails_closed_with_last_known_good(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("SONDER_LIVE_RELOAD", "1")
+    source_root = tmp_path / "loaded"
+    source_root.mkdir()
+    module_name = "reloadable_mcp_expanduser_failure_sample"
+    module_path = source_root / (module_name + ".py")
+    module_path.write_text(_module_source("stable"), encoding="utf-8")
+    configured_text = "~/private-runtime-root"
+    monkeypatch.setenv("SONDER_RUNTIME_ROOT", configured_text)
+    monkeypatch.syspath_prepend(str(source_root))
+    original_expanduser = Path.expanduser
+    try:
+        mcp = importlib.import_module(module_name).mcp
+        loaded_digest = mcp.runtime_snapshot()["loaded_digest"]
+        _write_new_source(module_path, _module_source("changed"))
+
+        def fail_configured_expanduser(path):
+            if str(path) == configured_text:
+                raise RuntimeError("secret home lookup failure")
+            return original_expanduser(path)
+
+        monkeypatch.setattr(Path, "expanduser", fail_configured_expanduser)
+        refreshed = mcp.refresh_if_changed()
+        state = mcp.runtime_snapshot()
+
+        assert refreshed == {
+            "reloaded": False,
+            "surface_changed": False,
+            "error": "configured runtime root is unavailable",
+        }
+        assert mcp._tool_manager.get_tool("alpha").fn() == "stable"
+        assert state["loaded_digest"] == loaded_digest
+        assert state["provenance"]["issue"] == "configured_root_missing"
+        assert state["provenance"]["configured_runtime_root"] == "(set)"
+        assert configured_text not in repr(state)
+        assert "secret home lookup failure" not in repr(state)
     finally:
         sys.modules.pop(module_name, None)
 
