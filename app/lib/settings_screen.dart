@@ -270,7 +270,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             autocorrect: false,
             decoration: const InputDecoration(
               labelText: 'Server URL',
-              hintText: 'http://your-host:11435',
+              hintText: 'https://your-host.example',
               helperText: 'Where the Sonder Runtime server listens',
               prefixIcon: Icon(Icons.dns_outlined),
               border: OutlineInputBorder(),
