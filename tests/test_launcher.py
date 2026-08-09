@@ -16,6 +16,37 @@ import pytest
 import sonder_launcher
 
 
+def test_linux_group_liveness_ignores_zombie_only_groups(monkeypatch, tmp_path):
+    monkeypatch.setattr(sonder_launcher.sys, "platform", "linux")
+    zombie = tmp_path / "101"
+    zombie.mkdir()
+    (zombie / "stat").write_text(
+        "101 (worker with spaces) Z 1 4242 4242\n", encoding="ascii",
+    )
+    assert sonder_launcher._linux_group_has_non_zombie_member(4242, tmp_path) is False
+
+    live = tmp_path / "102"
+    live.mkdir()
+    (live / "stat").write_text(
+        "102 (live worker) S 1 4242 4242\n", encoding="ascii",
+    )
+    assert sonder_launcher._linux_group_has_non_zombie_member(4242, tmp_path) is True
+
+
+@pytest.mark.parametrize("proc_result,expected", [(False, False), (True, True), (None, True)])
+def test_posix_group_liveness_uses_procfs_when_available(
+    monkeypatch, proc_result, expected,
+):
+    monkeypatch.setattr(
+        sonder_launcher.os, "killpg", lambda *_args: None, raising=False,
+    )
+    monkeypatch.setattr(
+        sonder_launcher, "_linux_group_has_non_zombie_member",
+        lambda _group_id: proc_result,
+    )
+    assert sonder_launcher._posix_group_alive(4242) is expected
+
+
 class FakeProcess:
     def __init__(self, *, output=b"started", returncode=0, wait_error=None):
         self.pid = 424242
