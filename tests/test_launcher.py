@@ -502,12 +502,28 @@ def test_launcher_rejects_unsafe_http_body_framing(launcher_server):
     with pytest.raises(urllib.error.HTTPError) as error:
         raw(b"{}", {})
     assert error.value.code == 415
-    with pytest.raises(urllib.error.HTTPError) as error:
-        raw(
-            b"{}",
-            {"Content-Type": "application/json", "Transfer-Encoding": "chunked"},
+    parsed = urllib.parse.urlsplit(base)
+    with socket.create_connection((parsed.hostname, parsed.port), timeout=3) as client:
+        client.sendall(
+            (
+                "POST /v1/launcher/start HTTP/1.1\r\n"
+                "Host: 127.0.0.1\r\n"
+                "Authorization: Bearer %s\r\n"
+                "Content-Type: application/json\r\n"
+                "Transfer-Encoding: chunked\r\n"
+                "Connection: close\r\n\r\n"
+                "2\r\n{}\r\n0\r\n\r\n"
+            ).encode("ascii")
+            % token.encode("ascii")
         )
-    assert error.value.code == 400
+        response = b""
+        while True:
+            chunk = client.recv(4096)
+            if not chunk:
+                break
+            response += chunk
+    assert b" 400 " in response.split(b"\r\n", 1)[0]
+    assert b"transfer encoding is not supported" in response
     with pytest.raises(urllib.error.HTTPError) as error:
         raw(
             b"x" * (sonder_launcher.MAX_BODY + 1),
