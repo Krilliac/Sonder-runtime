@@ -138,6 +138,24 @@ _GENERIC_DURABLE_RE = re.compile(
     re.I,
 )
 
+_TOPICAL_DIRECTIVE_RE = re.compile(
+    r"^(?:user\s+(?:wants\s+sonder\s+to\s+always|does\s+not\s+want\s+sonder\s+to)\s+|"
+    r"from\s+now\s+on,?\s+)"
+    r"(?:explain|describe|summarize|analyse|analyze|review|research|discuss|"
+    r"teach|solve|calculate|generate|create|build|write|implement|fix)\s+"
+    r"(?P<subject>[^.!?]+)",
+    re.I,
+)
+_TOPIC_WORD_RE = re.compile(r"[a-z0-9]+", re.I)
+_TOPIC_STOP_WORDS = frozenset({
+    "a", "about", "all", "an", "and", "answer", "answers", "as", "at",
+    "be", "brief", "briefly", "by", "clear", "clearly", "detailed",
+    "direct", "directly", "for", "from", "in", "it", "me", "my", "of",
+    "on", "or", "please", "response", "responses", "sonder", "step",
+    "steps", "that", "the", "their", "them", "this", "to", "user", "we",
+    "what", "when", "with", "you", "your",
+})
+
 _TASK_CATEGORY_PATTERNS = {
     "shell": re.compile(
         r"\b(?:powershell|pwsh|bash|zsh|cmd|terminal|shell|command|script|"
@@ -221,12 +239,34 @@ def preference_category(text):
         or any(ord(char) < 32 for char in value)
     ):
         return ""
+    if _topical_terms(value):
+        return "topic"
     for category, pattern in _CATEGORY_PATTERNS:
         if pattern.search(value):
             return category
     if _GENERIC_DURABLE_RE.search(value):
         return "general"
     return ""
+
+
+def _topical_terms(text):
+    """Return bounded subject terms for a durable topical directive."""
+    match = _TOPICAL_DIRECTIVE_RE.search(_clean(text))
+    if not match:
+        return frozenset()
+    return frozenset(
+        word.casefold()
+        for word in _TOPIC_WORD_RE.findall(match.group("subject"))
+        if len(word) > 2 and word.casefold() not in _TOPIC_STOP_WORDS
+    )
+
+
+def _task_terms(text):
+    return frozenset(
+        word.casefold()
+        for word in _TOPIC_WORD_RE.findall(_clean(text))
+        if len(word) > 2 and word.casefold() not in _TOPIC_STOP_WORDS
+    )
 
 
 def is_stable_preference(text, source_text=None):
@@ -283,6 +323,8 @@ def preference_applies(text, task):
     if category in {"general", "identity", "response_style"}:
         return True
     task = str(task or "")
+    if category == "topic":
+        return bool(_topical_terms(text) & _task_terms(task))
     task_pattern = _TASK_CATEGORY_PATTERNS.get(category)
     if task_pattern is None or not task_pattern.search(task):
         return False
