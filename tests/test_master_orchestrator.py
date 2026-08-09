@@ -4,6 +4,8 @@ import threading
 import time
 from types import SimpleNamespace
 
+import pytest
+
 import master_orchestrator
 import server
 
@@ -136,6 +138,62 @@ def test_run_inline_tracks_master_agent():
     assert result["mode"] == "inline"
     assert result["output"] == "done: say hi"
     assert any(a["id"] == result["master_id"] and a["status"] == "done" for a in snap["agents"])
+
+
+def test_retained_agent_service_wrappers_preserve_project_and_parent_scope(tmp_path):
+    project = str(tmp_path.resolve())
+    master_id = master_orchestrator._new_agent(
+        "master", "coordinate", metadata={"project": project},
+    )
+    child_id = master_orchestrator._new_agent(
+        "agent", "inspect", parent_id=master_id, metadata={"project": project},
+    )
+
+    discovered = master_orchestrator.discover_retained_agents(
+        project=project, parent_id=master_id,
+    )
+    queued = master_orchestrator.send_retained_agent_message(
+        master_id, child_id, "check the boundary", mode="steer", project=project,
+    )
+    delivered = master_orchestrator.receive_retained_agent_messages(
+        child_id, project=project,
+    )
+
+    assert {row["id"] for row in discovered} == {master_id, child_id}
+    assert queued["status"] == "queued"
+    assert delivered[0]["message_id"] == queued["message_id"]
+    assert delivered[0]["status"] == "delivered"
+
+
+def test_live_reload_with_legacy_fleet_store_refuses_unscoped_orchestration(
+    monkeypatch,
+):
+    original_create = master_orchestrator.fleet_store.create_agent
+    create_calls = []
+
+    def legacy_create(row, owner_id, owner_pid):
+        create_calls.append(row["id"])
+        return original_create(row, owner_id, owner_pid)
+
+    monkeypatch.setattr(master_orchestrator.fleet_store, "create_agent", legacy_create)
+    for name in (
+        "local_principal_credentials",
+        "register_principal",
+        "list_agents_scoped",
+        "queue_agent_message",
+        "claim_agent_messages",
+    ):
+        monkeypatch.delattr(master_orchestrator.fleet_store, name)
+    monkeypatch.setattr(master_orchestrator, "_PRINCIPAL_ID", "stale-principal")
+    monkeypatch.setattr(master_orchestrator, "_PRINCIPAL_SECRET", "stale-secret")
+
+    with pytest.raises(RuntimeError, match="runtime restart"):
+        master_orchestrator.run_inline("after reload", lambda prompt: "ok")
+
+    assert create_calls == []
+    assert master_orchestrator._PRINCIPAL_ID == "stale-principal"
+    with pytest.raises(RuntimeError, match="runtime restart"):
+        master_orchestrator.discover_retained_agents()
 
 
 def test_run_delegated_tracks_children_and_audit():
