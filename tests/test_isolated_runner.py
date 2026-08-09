@@ -4,6 +4,7 @@ import os
 import socket
 import subprocess
 import threading
+from decimal import Decimal
 
 import pytest
 
@@ -323,6 +324,45 @@ def test_runtime_memory_policy_has_bounded_engine_specific_totals():
     assert isolated_runner._memory_policy("podman", 1)[:2] == (64, 65)
     with pytest.raises(ValueError, match="unknown container runtime"):
         isolated_runner._memory_policy("other", 512)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [True, False, float("nan"), float("inf"), float("-inf"), 1.5,
+     Decimal("7"), "7", object()],
+)
+def test_integer_resource_limits_reject_non_integer_and_conversion_weirdness(value):
+    with pytest.raises(ValueError, match="finite JSON integer"):
+        isolated_runner._clamp_int(value, 30, 1, 120)
+
+
+@pytest.mark.parametrize(
+    "value", [True, False, float("nan"), float("inf"), float("-inf"),
+              Decimal("1.0"), "1.0", object()],
+)
+def test_float_resource_limits_reject_nonfinite_and_conversion_weirdness(value):
+    with pytest.raises(ValueError, match="finite JSON number"):
+        isolated_runner._clamp_float(value, 1.0, 0.1, 4.0)
+
+
+def test_numeric_resource_boundaries_clamp_without_overflow():
+    huge = 10 ** 10000
+    assert isolated_runner._clamp_int(huge, 30, 1, 120) == 120
+    assert isolated_runner._clamp_int(-huge, 30, 1, 120) == 1
+    assert isolated_runner._clamp_float(huge, 1.0, 0.1, 4.0) == 4.0
+    assert isolated_runner._clamp_float(-huge, 1.0, 0.1, 4.0) == 0.1
+
+
+def test_numeric_resource_validation_never_invokes_conversion_hooks():
+    class ExplodingNumber:
+        def __int__(self):
+            raise OverflowError("must not be invoked")
+        def __float__(self):
+            raise OverflowError("must not be invoked")
+    with pytest.raises(ValueError, match="finite JSON integer"):
+        isolated_runner._clamp_int(ExplodingNumber(), 30, 1, 120)
+    with pytest.raises(ValueError, match="finite JSON number"):
+        isolated_runner._clamp_float(ExplodingNumber(), 1.0, 0.1, 4.0)
 
 
 def test_bounded_pinned_image_inspection_returns_immutable_id(monkeypatch):

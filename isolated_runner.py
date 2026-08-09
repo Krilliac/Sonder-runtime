@@ -9,6 +9,7 @@ devices, runtime flags, privileges, environment variables, or a container user.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -46,21 +47,29 @@ _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def _clamp_int(value, default, minimum, maximum):
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        parsed = default
-    return max(minimum, min(parsed, maximum))
+    """Validate an integer resource request, then clamp it to policy bounds.
+
+    MCP resource fields are JSON integers. Do not invoke caller-defined
+    ``__int__`` methods or silently turn booleans, decimals, NaN, or infinities
+    into defaults: malformed policy input must fail closed and be audited by the
+    direct-tool wrapper. Python integers are arbitrary precision, so comparison
+    before clamping cannot overflow.
+    """
+    del default  # Retained in the private signature for call-site readability.
+    if type(value) is not int:
+        raise ValueError("integer resource limit must be a finite JSON integer")
+    return max(minimum, min(value, maximum))
 
 
 def _clamp_float(value, default, minimum, maximum):
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        parsed = default
-    if parsed != parsed or parsed in (float("inf"), float("-inf")):
-        parsed = default
-    return max(minimum, min(parsed, maximum))
+    """Validate a finite JSON number without invoking conversion hooks."""
+    del default
+    if type(value) not in (int, float):
+        raise ValueError("numeric resource limit must be a finite JSON number")
+    if type(value) is float and not math.isfinite(value):
+        raise ValueError("numeric resource limit must be a finite JSON number")
+    # Clamp arbitrary-size integers before converting the bounded result.
+    return float(max(minimum, min(value, maximum)))
 
 
 def _memory_policy(runtime_name, requested_mb):
