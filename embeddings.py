@@ -316,6 +316,15 @@ def _npu_shadow_embed(prompt, identity, revision):
         pass
 
 
+def _record_npu_fallback_handler(handled):
+    try:
+        _npu_service().record_fallback_handler(
+            "embeddings", "ollama", handled is True,
+        )
+    except Exception:
+        pass
+
+
 def embed(text, timeout=30, base=None, model=None):
     _EMBED_STATE.vector = None
     _EMBED_STATE.revision = None
@@ -324,6 +333,7 @@ def embed(text, timeout=30, base=None, model=None):
     _EMBED_STATE.accelerated = False
     _EMBED_STATE.simulated = False
     _EMBED_STATE.fallback_reason = ""
+    npu_fallback_pending = False
     try:
         selected_base = ollama_endpoint.configured_origin(base or BASE)
     except ValueError:
@@ -412,6 +422,7 @@ def embed(text, timeout=30, base=None, model=None):
             return vector
         if _npu_prefer_active():
             _EMBED_STATE.fallback_reason = "npu_unavailable"
+            npu_fallback_pending = True
     payload = json.dumps({"model": selected_model, "prompt": prompt}).encode("utf-8")
     req = urllib.request.Request(
         "%s/api/embeddings" % selected_base,
@@ -427,8 +438,12 @@ def embed(text, timeout=30, base=None, model=None):
                 if explicit_runtime else refresh_runtime_revision()
             )
             if revision_after != revision_before:
+                if npu_fallback_pending:
+                    _record_npu_fallback_handler(False)
                 return None
             if not valid_vector(vector):
+                if npu_fallback_pending:
+                    _record_npu_fallback_handler(False)
                 return None
             _EMBED_STATE.vector = vector
             _EMBED_STATE.revision = revision_before
@@ -440,8 +455,12 @@ def embed(text, timeout=30, base=None, model=None):
                     provider="ollama",
                 )
                 _npu_shadow_embed(prompt, identity, revision_before)
+            if npu_fallback_pending:
+                _record_npu_fallback_handler(True)
             return vector
     except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+        if npu_fallback_pending:
+            _record_npu_fallback_handler(False)
         return None
 
 
