@@ -32,6 +32,7 @@ def test_legacy_root_allowlist_has_a_shrink_only_ratchet():
     spec.loader.exec_module(module)
     assert len(module.ROOT_LEGACY_MODULES) <= module.ROOT_LEGACY_MODULE_LIMIT
     assert "memory_store" not in module.ROOT_LEGACY_MODULES
+    assert "eval_history" not in module.ROOT_LEGACY_MODULES
     assert module.ROOT_LEGACY_MODULES <= module.BASELINE_ROOT_LEGACY_MODULES
 
     removed = next(iter(module.ROOT_LEGACY_MODULES))
@@ -167,3 +168,33 @@ def test_task_application_service_has_no_legacy_or_sqlite_dependency():
     assert "import sqlite3" not in source
     assert "import activity_tracker" not in source
     assert "import server" not in source
+
+
+def test_evaluation_history_application_service_has_no_persistence_dependency():
+    service = (
+        _REPO_ROOT / "sonder_runtime" / "application"
+        / "evaluation_history" / "use_cases.py"
+    )
+    source = service.read_text(encoding="utf-8")
+    assert "evaluation_history_store" not in source
+    assert "import eval_history" not in source
+    assert "import server" not in source
+
+
+def test_production_callers_use_the_evaluation_history_adapter():
+    offenders = []
+    for path in _REPO_ROOT.rglob("*.py"):
+        relative = path.relative_to(_REPO_ROOT)
+        if relative == Path("eval_history.py") or relative.parts[0] == "tests":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import) and any(
+                alias.name == "eval_history" for alias in node.names
+            ):
+                offenders.append(str(relative))
+                break
+            if isinstance(node, ast.ImportFrom) and node.module == "eval_history":
+                offenders.append(str(relative))
+                break
+    assert offenders == []
