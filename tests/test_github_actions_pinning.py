@@ -6,10 +6,10 @@ import pytest
 
 WORKFLOWS_DIR = Path(__file__).resolve().parents[1] / ".github" / "workflows"
 USES_LINE = re.compile(
-    r"^\s*(?:-\s*)?uses\s*:\s*(?P<reference>[^\s#]+)"
+    r"^\s*(?:-\s*)?(?:uses|['\"]uses['\"])\s*:\s*(?P<reference>[^\s#]+)"
     r"\s*(?P<comment>\#.*)?$"
 )
-INLINE_USES = re.compile(r"(?:^|[{,]\s*)uses\s*:")
+INLINE_USES = re.compile(r"(?:^|[{,]\s*)(?:uses|['\"]uses['\"])\s*:")
 REMOTE_ACTION = re.compile(
     r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"
     r"(?:/[A-Za-z0-9_.\-/]+)?@[0-9a-fA-F]{40}$"
@@ -95,3 +95,14 @@ def test_immutable_reference_policy_allows_supported_pins(reference):
 )
 def test_immutable_reference_policy_rejects_movable_or_ambiguous_refs(reference):
     assert not _is_immutable_reference(reference)
+
+
+def test_quoted_uses_key_cannot_bypass_pin_policy(tmp_path):
+    workflow = tmp_path / "quoted.yml"
+    workflow.write_text(
+        'steps:\n  - "uses": "actions/checkout@v7"\n', encoding="utf-8"
+    )
+
+    assert list(_uses_entries(workflow)) == [
+        (2, "actions/checkout@v7", "")
+    ]

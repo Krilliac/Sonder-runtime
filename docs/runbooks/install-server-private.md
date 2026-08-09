@@ -19,12 +19,13 @@ SHA-256 hashes to `PACKAGE-MANIFEST.json`.
 
 ## 2. Install the verified release
 
-Until the SPEC-4 signed distribution exists, install from a checked-out tag
-through the manifest-verified package path — never copy or run production from
-a mutable developer checkout:
+This runbook covers the initial source-checkout install. Install from a reviewed
+tag or exact commit through the manifest-verified package path — never copy or
+run production from a mutable developer checkout. SPEC-4 signed bundles are
+the separate update/distribution path described in `publish-release.md`.
 
 ```bash
-VERSION_TAG=$(git describe --always)
+VERSION_TAG=$(git rev-parse --verify HEAD)
 sudo packaging/install_sonder.sh \
   --package-source dist/local-system \
   --version-tag "$VERSION_TAG"
