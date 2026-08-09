@@ -217,3 +217,11 @@ def test_activity_projection_vocabulary_matches_npu_contract():
         "fallback_handler": c.FALLBACK_HANDLERS,
         "handler_state": c.FALLBACK_HANDLER_STATES,
     }
+
+
+def test_controlled_value_fails_closed_when_value_cannot_render():
+    class BrokenValue:
+        def __str__(self):
+            raise RuntimeError(r"C:\private\model token=secret")
+
+    assert c.fallback_reason(BrokenValue()) == "unknown"

@@ -143,7 +143,10 @@ FALLBACK_HANDLER_STATES = frozenset({"pending", "handled", "failed", "observed"}
 
 
 def controlled_value(value, allowed) -> str:
-    text = str(value or "").strip().lower()
+    try:
+        text = str(value or "").strip().lower()
+    except Exception:
+        return "unknown"
     return text if text in allowed else "unknown"
 
 
