@@ -1893,6 +1893,10 @@ def control_command(prompt: str, history=None, session="", project=""):
         return _selfmod_command(arg)
     if cmd in ("/goal", "/goals"):
         return _goal_command(arg)
+    if cmd in ("/ensemble",):
+        if not arg.strip():
+            return "usage: /ensemble <question>   (polls several local tiers, then compounds one answer)"
+        return ensemble_answer(arg.strip(), project=_resolve_project(project))
     if cmd in ("/mcp", "/convergence"):
         return _mcp_command(arg)
     if cmd in ("/learning", "/learnhealth", "/metrics"):
