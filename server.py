@@ -2264,8 +2264,11 @@ def _maybe_title(conn, session_id, first_prompt, internal_generate=None):
 
 def _preference_facts(conn, task, project=None, limit=12):
     """Return only enabled, scope-authorized preferences relevant to ``task``."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        return []
+    limit = min(limit, 12)
     scopes = []
-    if project:
+    if isinstance(project, str) and project:
         scopes.extend((str(project), "project:%s" % project))
     scopes.append("global")
     selected = []
@@ -2280,6 +2283,8 @@ def _preference_facts(conn, task, project=None, limit=12):
                 continue
             seen.add(identity)
             text = pref.get("text", "")
+            if not isinstance(text, str):
+                continue
             if not preference_learning.preference_applies(text, task):
                 continue
             selected.append("User preference: %s" % text)
