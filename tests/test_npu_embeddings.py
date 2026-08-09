@@ -181,14 +181,22 @@ def test_embed_rejects_untrusted_accelerator_provenance(
 def test_embed_prefer_miss_falls_back_to_legacy_and_is_explicit(
     legacy_http, monkeypatch,
 ):
+    handled = []
     monkeypatch.setattr(npu_service, "embed_for_space", lambda *a: None)
     monkeypatch.setattr(npu_service, "embeddings_active", lambda: "prefer")
+    monkeypatch.setattr(
+        npu_service, "record_fallback_handler",
+        lambda capability, handler, ok: handled.append(
+            (capability, handler, ok)
+        ),
+    )
     result = e.embed_result("fall back please")
     assert result is not None
     assert result["vector"] == pytest.approx([0.25, 0.5, 0.25])
     assert result["provider"] == "ollama"
     assert result["accelerated"] is False
     assert result["fallback_reason"] == "npu_unavailable"
+    assert handled == [("embeddings", "ollama", True)]
 
 
 def test_embed_result_off_policy_has_no_fallback_reason(legacy_http):
@@ -225,13 +233,25 @@ def test_embed_shadow_exercises_accelerator_without_substitution(
 
 
 def test_embed_total_failure_still_soft_fails_to_none(monkeypatch):
+    handled = []
     def boom(*a, **k):
         raise OSError("no ollama")
 
     monkeypatch.setattr(e.ollama_endpoint, "open_url", boom)
     monkeypatch.setattr(npu_service, "embed_for_space", lambda *a: None)
+    monkeypatch.setattr(npu_service, "embeddings_active", lambda: "prefer")
+    monkeypatch.setattr(
+        npu_service, "record_fallback_handler",
+        lambda capability, handler, ok: handled.append(
+            (capability, handler, ok)
+        ),
+    )
     assert e.embed("anything") is None
     assert e.embed_result("anything") is None
+    assert handled == [
+        ("embeddings", "ollama", False),
+        ("embeddings", "ollama", False),
+    ]
 
 
 def test_space_gating_end_to_end_prevents_mixing(legacy_http, monkeypatch):
