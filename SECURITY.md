@@ -72,6 +72,14 @@ Mitigations that are already in place and worth knowing about:
 - `log_inspect` rejects sensitive/control paths and reparse traversal, validates
   the already-open regular-file handle, and uses only fixed host parsers under
   hard file, byte, line, result, output, and time ceilings.
+- `artifact_risk_inspect` never renders or executes its input and never returns
+  raw file content. It reports bounded static indicators for PDFs, PE/ELF/Mach-O
+  executables, scripts, and opaque binaries. Static findings are evidence, not
+  a malware verdict; incomplete or unsupported scans are never labelled clean.
+- `script_run` applies `SONDER_EXECUTION_RISK_POLICY` before launching an exact
+  guarded script. The default is `report`; operators may choose `deny-high`,
+  `deny-medium`, or `deny-unknown`. A caller may strengthen but cannot weaken
+  the configured policy. This is defense in depth, not an OS sandbox.
 - `local_service_probe` remains a direct, explicit MCP operation only. It is
   excluded from agents, repository read-only sessions, loops, and autopilot
   because arbitrary loopback response bodies can contain host-local secrets.
