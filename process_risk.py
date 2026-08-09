@@ -231,12 +231,15 @@ def inspect_process_memory(
             "status": "protected_pid",
             "pid": parsed_pid,
         }
-    if os.name != "nt":
-        return _unsupported("process_memory_inspect")
 
+    # Validate caller-controlled limits before the platform capability check.
+    # Unsupported hosts must not silently accept malformed policy inputs that
+    # Windows would reject.
     byte_limit = _bounded_int(max_bytes, 4 * 1024 * 1024, 4096, _MAX_BYTES)
     region_limit = _bounded_int(max_regions, 256, 1, _MAX_REGIONS)
     seconds = _bounded_float(max_seconds, 1.0, 0.05, _MAX_SECONDS)
+    if os.name != "nt":
+        return _unsupported("process_memory_inspect")
     deadline = time.monotonic() + seconds
 
     class MemoryBasicInformation(ctypes.Structure):
