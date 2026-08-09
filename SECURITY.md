@@ -42,6 +42,11 @@ Mitigations that are already in place and worth knowing about:
 - Structured `data_query` reads are bounded and side-effect-free: SQLite uses
   a read-only URI and deny-by-default authorizer, while JSON/JSONL/CSV/TSV use
   exact structured filters and projections without expression evaluation.
+- Git history inspection (`repo_log`, `repo_show`, `repo_blame`) is read-only, project-bound,
+  argv-only, and bounded; it disables parent-repository discovery, pagers,
+  external diffs, and text-conversion helpers. Gitfile targets must remain in
+  authorized roots, and `repo_show` requires a contained path before returning
+  patch content.
 - `file_batch_write` never targets secrets/control state or traverses symlinks,
   requires explicit create-versus-overwrite intent, and rolls back completed
   writes on a later failure when restoration remains possible.

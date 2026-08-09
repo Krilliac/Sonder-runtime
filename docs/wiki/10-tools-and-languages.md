@@ -60,11 +60,20 @@ expressions or file content are executed.
 
 `file_find`, `file_read`, `file_read_range`, `file_write`, `file_batch_write`, `file_edit`,
 `file_delete`, `directory_tree`, `directory_create`, `workspace_inventory`,
-`text_search`, `script_search`, `program_search`, `image_inspect`. All are
+`text_search`, `script_search`, `program_search`, `image_inspect`, `repo_log`,
+`repo_show`, `repo_blame`. All are
 confined to `SONDER_FILE_ROOTS`, honor the permission policy
 ([Security Model](09-security-model.md)), and record byte/line accounting
 into the activity trail. `file_delete` is dry-run unless an explicit
 confirm string matches.
+
+`repo_log`, `repo_show`, and `repo_blame` expose structured, read-only Git history from an
+exact repository root. They use fixed argv-only Git commands, never discover a
+parent repository, reject unsafe revision/path syntax, disable pagers and
+external diff/text-conversion helpers, and enforce count, byte, and time caps.
+`repo_show` additionally requires one contained non-sensitive regular file,
+both in the worktree and at the requested revision, before it returns patch
+content; an unfiltered commit can never expose unrelated files.
 
 `file_batch_write` accepts a JSON list of explicit `create` or `overwrite`
 operations. It prevalidates every target before writing, caps per-file and
