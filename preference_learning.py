@@ -103,6 +103,21 @@ _PROMPT_CONTROL_RE = re.compile(
     r"\b(?:jailbreak|prompt\s+injection)\b",
     re.I,
 )
+_SENSITIVE_DISCLOSURE_RE = re.compile(
+    r"\b(?:reveal|expose|leak|disclose|dump|export|send|upload|print|show|read|"
+    r"include|attach|transmit|share|quote|enable|report)\b[^\n]{0,120}\b"
+    r"(?:environment\s+variables?|env\s+vars?|process\s+environment\s+values?|"
+    r"secrets?|passwords?|credentials?|(?:api|access)\s+keys?|session\s+tokens?|"
+    r"bearer\s+values?|login\s+details?|connection\s+strings?|"
+    r"(?:system|developer)\s+(?:prompts?|messages?|instructions?)|"
+    r"hidden\s+(?:data|details?|instructions?)|configuration\s+files?|dotfiles?|"
+    r"(?:contents?\s+of\s+)?local\s+files?|(?:diagnostic\s+)?logs?|usage\s+data|"
+    r"telemetry(?:\s+identifiers?)?|machine\s+identifiers?|hostnames?|usernames?|"
+    r"browser\s+history|clipboard\s+contents?|database\s+rows?|webhooks?|"
+    r"command\s+output|private\s+(?:data|details?|information)|"
+    r"confidential\s+(?:data|details?|information))\b",
+    re.I,
+)
 
 _CATEGORY_PATTERNS = (
     ("identity", re.compile(r"\b(?:wants?\s+to\s+be\s+called|name\s+is)\b", re.I)),
@@ -135,6 +150,14 @@ _GENERIC_DURABLE_RE = re.compile(
     r"^(?:user\s+(?:prefers\b|does\s+not\s+(?:want\s+sonder\s+to|like)\b|"
     r"likes\s+it\s+when\b|wants\s+sonder\s+to\s+always\b)|"
     r"from\s+now\s+on\b|(?:i|we)\s+prefer\b)",
+    re.I,
+)
+_SAFE_GENERAL_DEFAULT_RE = re.compile(
+    r"^(?:user\s+prefers\s+|user\s+wants\s+sonder\s+to\s+always\s+use\s+|"
+    r"from\s+now\s+on,?\s+use\s+)"
+    r"(?:(?:metric|imperial|si)\s+units?|iso[ -]?8601\s+dates?|"
+    r"(?:12|24)[ -]hour\s+time|(?:utc|local)\s+time(?:\s+zone)?|"
+    r"answers?\s+in\s+[a-z][a-z -]{1,24})\.?$",
     re.I,
 )
 
@@ -236,6 +259,7 @@ def preference_category(text):
         or _QUOTED_PREFERENCE_RE.search(value)
         or _INSTRUCTION_OVERRIDE_RE.search(value)
         or _PROMPT_CONTROL_RE.search(value)
+        or _SENSITIVE_DISCLOSURE_RE.search(value)
         or any(ord(char) < 32 for char in value)
     ):
         return ""
@@ -244,7 +268,10 @@ def preference_category(text):
     for category, pattern in _CATEGORY_PATTERNS:
         if pattern.search(value):
             return category
-    if _GENERIC_DURABLE_RE.search(value):
+    if (
+        _GENERIC_DURABLE_RE.search(value)
+        and _SAFE_GENERAL_DEFAULT_RE.fullmatch(value)
+    ):
         return "general"
     return ""
 
@@ -281,6 +308,7 @@ def is_stable_preference(text, source_text=None):
         or _INSTRUCTION_OVERRIDE_RE.search(source)
         or _COMMAND_TAIL_RE.search(source)
         or _PROMPT_CONTROL_RE.search(source)
+        or _SENSITIVE_DISCLOSURE_RE.search(source)
         or any(ord(char) < 32 and char not in "\t\r\n" for char in source)
     ):
         return False
@@ -377,6 +405,7 @@ def extract_preferences(text):
         or _INSTRUCTION_OVERRIDE_RE.search(text)
         or _COMMAND_TAIL_RE.search(text)
         or _PROMPT_CONTROL_RE.search(text)
+        or _SENSITIVE_DISCLOSURE_RE.search(text)
     ):
         return []
     found = []
