@@ -15,6 +15,8 @@ import re
 import time
 from typing import Iterable
 
+import unsafe_lab
+
 REDACTED = "[REDACTED]"
 REDACTION_FAILED = "[REDACTION_FAILED]"
 
@@ -28,6 +30,27 @@ SECRET_ENV_VARS = (
     "SONDER_LAUNCHER_CONTROL_GATE",
     "SONDER_OPENAI_API_KEY",
 )
+
+_UNSAFE_CHILD_SECRET_MARKERS = (
+    "ACCESS_KEY", "API_KEY", "AUTH", "BEARER", "CONNECTION_STRING",
+    "COOKIE", "CREDENTIAL", "DATABASE_URL", "PASSWORD", "PASSWD",
+    "PRIVATE_KEY", "SECRET", "SESSION", "TOKEN",
+)
+_UNSAFE_CHILD_SECRET_SUFFIXES = ("_KEY", "_KEY_ID")
+_UNSAFE_CHILD_CONTROL_MARKERS = (
+    "APPROVAL", "BYPASS", "CONTROL", "DANGEROUS", "ELEVAT", "GATE",
+    "PERMISSION", "UNSAFE",
+)
+
+
+def _unsafe_child_secret_name(name):
+    upper = str(name or "").upper()
+    return (
+        upper.startswith("SONDER_")
+        or any(marker in upper for marker in _UNSAFE_CHILD_SECRET_MARKERS)
+        or upper.endswith(_UNSAFE_CHILD_SECRET_SUFFIXES)
+        or any(marker in upper for marker in _UNSAFE_CHILD_CONTROL_MARKERS)
+    )
 
 
 def child_environment(base=None):
@@ -46,6 +69,12 @@ def child_environment(base=None):
 
     source = os.environ if base is None else base
     secret = set(SECRET_ENV_VARS)
+    # Unsafe mode removes model-facing host policy, so its actual subprocess
+    # boundary gets a correspondingly broader denylist.  Do not make this the
+    # normal-mode environment contract: existing users may intentionally pass
+    # non-Sonder credentials to their own guarded scripts.
+    if unsafe_lab.active():
+        secret.update(key for key in source if _unsafe_child_secret_name(key))
     return {key: value for key, value in source.items() if key not in secret}
 
 _PATTERNS: tuple[re.Pattern, ...] = (
