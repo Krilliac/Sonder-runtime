@@ -108,6 +108,8 @@ import sonder_hardware
 import tool_capabilities
 import git_tools
 import eval_history
+import artifact_risk as artifact_risk_module
+import process_risk as process_risk_module
 
 BASE = ollama_endpoint.normalize()
 OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
@@ -619,6 +621,9 @@ LIVE_RELOAD_MODULES = [
     # autopilot_store intentionally stays loaded because it exclusively owns a
     # process-safe SQLite schema and may be serving background worker threads.
     "autopilot_controller",
+    "pdf_risk",
+    "artifact_risk",
+    "process_risk",
 ]
 
 def _prime_live_reload_modules():
@@ -678,6 +683,12 @@ def _maybe_live_reload():
             continue
         if name == "archive_create":
             globals()["archive_create_tool"] = module
+            continue
+        if name == "artifact_risk":
+            globals()["artifact_risk_module"] = module
+            continue
+        if name == "process_risk":
+            globals()["process_risk_module"] = module
             continue
         if name == "sqlite_mutate":
             globals()["sqlite_mutate_module"] = module
@@ -8945,6 +8956,104 @@ def workspace_run(
 
 
 @mcp.tool()
+def process_list(max_processes: int = 128, max_seconds: float = 0.5) -> str:
+    """List bounded process metadata when host inspection is explicitly enabled."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"max_processes": max_processes, "max_seconds": max_seconds}
+    try:
+        data = process_risk_module.list_processes(
+            max_processes=max_processes, max_seconds=max_seconds,
+        )
+    except Exception as exc:
+        _record_direct_tool("process_list", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = json.dumps(data, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    _record_direct_tool(
+        "process_list", args, ok=bool(data.get("ok")), started=started,
+        summary="%s; %d process(es)" % (data.get("status"), data.get("process_count", 0)),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def process_memory_risk_inspect(
+    pid: int,
+    max_bytes: int = 4 * 1024 * 1024,
+    max_regions: int = 256,
+    max_seconds: float = 1.0,
+) -> str:
+    """Inspect one PID for fixed memory-risk indicators without returning content."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "pid": pid, "max_bytes": max_bytes, "max_regions": max_regions,
+        "max_seconds": max_seconds,
+    }
+    try:
+        data = process_risk_module.inspect_process_memory(
+            pid, max_bytes=max_bytes, max_regions=max_regions,
+            max_seconds=max_seconds,
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "process_memory_risk_inspect", args, ok=False, started=started,
+            summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = json.dumps(data, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    _record_direct_tool(
+        "process_memory_risk_inspect", args, ok=bool(data.get("ok")),
+        started=started,
+        summary="%s; %s risk" % (data.get("status"), data.get("risk", "unknown")),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def artifact_risk_inspect(
+    path: str,
+    max_scan_bytes: int = 16 * 1024 * 1024,
+    max_seconds: float = 5.0,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Statically inspect a guarded document, executable, script, or binary."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"path": path, "max_scan_bytes": max_scan_bytes, "max_seconds": max_seconds}
+    trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
+    try:
+        data = artifact_risk_module.inspect_artifact(
+            path,
+            max_scan_bytes=max_scan_bytes,
+            max_seconds=max_seconds,
+            extra_roots=trusted_roots,
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "artifact_risk_inspect", args, ok=False, started=started,
+            summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = artifact_risk_module.format_result(data)
+    _record_direct_tool(
+        "artifact_risk_inspect", args, ok=True, started=started,
+        summary="%s risk; %s" % (data.get("risk"), data.get("kind", "artifact")),
+        output=output,
+    )
+    activity_tracker.record_event(
+        "artifact_risk_inspect",
+        summary="%s risk; %s" % (data.get("risk"), data.get("kind", "artifact")),
+        path=data.get("path", ""),
+    )
+    return output
+
+
+@mcp.tool()
 def script_run(
     path: str,
     args_json: str = "[]",
@@ -8952,6 +9061,7 @@ def script_run(
     stdin: str = "",
     timeout: int = 30,
     max_output: int = 128000,
+    risk_policy: str = "",
     token: str = "",
     approval: str = "",
     extra_roots: str = "",
@@ -8959,17 +9069,56 @@ def script_run(
     """Run a guarded script with its known interpreter and bounded output."""
     _maybe_live_reload()
     started = time.time()
-    args = {"path": path, "args_json": args_json, "cwd": cwd, "timeout": timeout}
+    args = {
+        "path": path, "args_json": args_json, "cwd": cwd, "timeout": timeout,
+        "risk_policy": risk_policy,
+    }
     try:
+        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
+        risk = artifact_risk_module.enforce_execution_policy(
+            path, requested=risk_policy, extra_roots=trusted_roots,
+        )
+        if str(risk.get("policy", "")).startswith("deny-"):
+            # A scan followed by a pathname-based interpreter launch is not an
+            # exact-file handoff: another same-user process could replace the
+            # path between those operations. Until the runner can execute the
+            # already-inspected handle cross-platform, enforcing policies fail
+            # closed even when the static result itself is below the threshold.
+            refused = dict(risk)
+            refused.update({
+                "denied": True,
+                "denial_reason": "exact_execution_handoff_unavailable",
+            })
+            raise artifact_risk_module.ArtifactRiskDenied(refused)
         data = workbench.run_script(
             path, args_json=args_json, cwd=cwd, stdin=stdin, timeout=timeout,
             max_output=max_output, extra_roots=extra_roots,
             bypass=_file_bypass_allowed(token, approval),
         )
+    except artifact_risk_module.ArtifactRiskDenied as exc:
+        output = (
+            "artifact risk: %s\nexecution denied by effective policy %s"
+            % (
+                artifact_risk_module.format_result(exc.result),
+                exc.result.get("policy", "unknown"),
+            )
+        )
+        _record_direct_tool(
+            "script_run", args, ok=False, started=started,
+            summary=str(exc), output=output,
+        )
+        return output
     except Exception as exc:
         _record_direct_tool("script_run", args, ok=False, started=started, summary=str(exc))
         return "ERROR: %s" % exc
-    output = _format_run_result("script run", data)
+    output = (
+        "artifact risk: %s\n%s\n%s"
+        % (
+            artifact_risk_module.format_result(risk),
+            "execution allowed by effective policy %s" % risk.get("policy", "off"),
+            _format_run_result("script run", data),
+        )
+    )
     _record_direct_tool(
         "script_run", args, ok=data["ok"], started=started,
         summary="exit %s" % data.get("returncode"),
@@ -9917,10 +10066,34 @@ def _loop_dispatch(action):
             stdin=action.get("stdin", ""),
             timeout=action.get("timeout", 30),
             max_output=action.get("max_output", 128000),
+            risk_policy=action.get("risk_policy", ""),
             token=action.get("token", ""),
             approval=action.get("approval", ""),
             extra_roots=action.get("extra_roots", ""),
         ))
+    if action_type == "artifact_risk_inspect":
+        return _loop_text_result("artifact_risk_inspect", artifact_risk_inspect(
+            path=action.get("path", ""),
+            max_scan_bytes=action.get("max_scan_bytes", 16 * 1024 * 1024),
+            max_seconds=action.get("max_seconds", 5.0),
+            token=action.get("token", ""),
+            approval=action.get("approval", ""),
+            extra_roots=action.get("extra_roots", ""),
+        ))
+    if action_type == "process_list":
+        return _loop_text_result("process_list", process_list(
+            max_processes=action.get("max_processes", 128),
+            max_seconds=action.get("max_seconds", 0.5),
+        ))
+    if action_type == "process_memory_risk_inspect":
+        return _loop_text_result(
+            "process_memory_risk_inspect", process_memory_risk_inspect(
+                pid=action.get("pid", 0),
+                max_bytes=action.get("max_bytes", 4 * 1024 * 1024),
+                max_regions=action.get("max_regions", 256),
+                max_seconds=action.get("max_seconds", 1.0),
+            ),
+        )
     if action_type == "image_inspect":
         return _loop_text_result("image_inspect", image_inspect(
             path=action.get("path", ""),
@@ -11366,13 +11539,15 @@ def tool_manifest() -> str:
         "file_digest/directory_digest": "Stream guarded files into SHA-256 and build deterministic relative-path manifests with fail-closed complete or explicitly partial directory Merkle roots.",
         "archive_list/archive_extract": "Prevalidate bounded ZIP/TAR manifests or transactionally extract them to a new non-overwriting workspace directory.",
         "archive_create": "Transactionally create a bounded deterministic ZIP/TAR from explicit guarded project inputs without overwriting.",
+        "artifact_risk_inspect": "Statically inspect guarded PDFs, PE/ELF/Mach-O executables, scripts, or opaque binaries for bounded risk indicators without executing or returning content.",
+        "process_list/process_memory_risk_inspect": "Opt-in bounded Windows process metadata and fixed-indicator memory-risk inspection; never returns command lines, paths, addresses, strings, or raw bytes.",
         "log_inspect": "Inspect one guarded text log with fixed level/timestamp/source extraction, failure clusters, repeats, and bounded context.",
         "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
         "environment_status": "Report the host OS, available shells (PowerShell/cmd/bash/wsl), and installed toolchains -- check before choosing a command shape or assuming a tool exists.",
         "hardware_profile": "Detect cross-vendor accelerators and report conservative resident, unified-memory, and GPU+RAM-spill model plans without changing host settings.",
         "data_inspect/data_query/sqlite_mutate": "Preview structured data, run bounded read-only queries, or explicitly preview/apply one guarded parameterized SQLite DML statement.",
         "data_convert": "Preview or atomically create a non-overwriting JSON/JSONL/CSV/TSV conversion with explicit ordered fields.",
-        "program_search/script_search/workspace_run/script_run/image_inspect": "Discover installed programs and workspace scripts, run bounded argv-only processes, and inspect image metadata.",
+        "program_search/script_search/workspace_run/script_run/image_inspect": "Discover installed programs and workspace scripts, run bounded argv-only processes, and inspect image metadata; script_run applies the operator execution-risk policy before launch.",
         "task_create/task_list/task_update/task_show/checklist_create/checklist_update/checklist_show": "Visible todo and ordered checklist state shared by console, app, agents, and MCP.",
         "workbench_agent": "Run an autonomous local tool loop with a guaranteed checklist, exact action transcript, validation gate, and end report.",
         "command_registry_list": "Inspect available slash commands by category, name, or risk.",
@@ -11443,6 +11618,9 @@ AGENT_TOOL_HELP = """Available tools:
 - archive_list: {"path": "bundle.zip", "max_entries": 2000, "max_total_bytes": 256000000, "max_ratio": 100, "max_results": 2500}
 - archive_extract: {"source": "bundle.zip", "destination": "unpacked", "max_entries": 2000, "max_total_bytes": 256000000, "max_ratio": 100} -- creates a new directory; never overwrites
 - archive_create: {"root": ".", "inputs_json": ["src", "README.md"], "destination": "release.zip", "archive_format": "zip|tar", "deterministic": true} -- destination must be new and outside input directories
+- artifact_risk_inspect: {"path": "artifact.exe", "max_scan_bytes": 16777216, "max_seconds": 5} -- static indicators only; no content execution or raw content return
+- process_list: {"max_processes": 128, "max_seconds": 0.5} -- requires exact host opt-in; names/PIDs/counts only
+- process_memory_risk_inspect: {"pid": 1234, "max_bytes": 4194304, "max_regions": 256, "max_seconds": 1} -- fixed aggregate indicators only; never raw memory
 - log_inspect: {"path": "logs/app.log", "tail_lines": 0, "context_lines": 2, "max_file_bytes": 64000000, "max_scan_bytes": 4000000, "max_lines": 10000, "max_line_bytes": 4096, "max_results": 100, "max_output_bytes": 256000, "timeout": 5}
 - text_search: {"query": "TODO", "root": ".", "glob": "*.py", "regex": false, "max_results": 100}
 - file_write: {"path": "notes.txt", "content": "...", "mode": "create|overwrite|append"}
@@ -11459,7 +11637,7 @@ AGENT_TOOL_HELP = """Available tools:
 - script_search: {"query": "build", "root": ".", "max_results": 100}
 - program_search: {"query": "python", "max_results": 50}
 - workspace_run: {"program": "git", "args_json": ["status", "--short"], "cwd": ".", "timeout": 30}
-- script_run: {"path": "scripts/check.py", "args_json": [], "cwd": ".", "timeout": 30}
+- script_run: {"path": "scripts/check.py", "args_json": [], "cwd": ".", "timeout": 30, "risk_policy": "off|report|deny-high|deny-medium|deny-unknown"} -- request may strengthen but never weaken operator policy
 - image_inspect: {"path": "artifacts/generated/demo/icon.png"}
 - data_inspect: {"path": "data/records.jsonl", "max_bytes": 256000}
 - data_query: {"path": "data/records.jsonl", "sql": "", "projection_json": ["id", "/nested/name"], "filters_json": {"status": "active"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
@@ -11524,7 +11702,7 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "file_read_range", "context_pack",
     "repo_status", "repo_diff",
     "repo_log", "repo_show", "repo_blame",
-    "project_detect", "data_inspect", "data_query", "archive_list",
+    "project_detect", "data_inspect", "data_query", "archive_list", "artifact_risk_inspect",
     "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
     "diagnostics", "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
@@ -11561,6 +11739,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - repo_show: {"path": ".", "revision": "HEAD", "file_path": "<required contained relative file>", "timeout": 5, "max_bytes": 256000}
 - repo_blame: {"path": ".", "file_path": "<required contained relative file>", "revision": "HEAD", "start_line": 1, "end_line": 100, "timeout": 5, "max_bytes": 256000}
 - archive_list: {"path": "<task-relevant ZIP or TAR>", "max_entries": 2000, "max_total_bytes": 256000000, "max_ratio": 100, "max_results": 2500}
+- artifact_risk_inspect: {"path": "<task-relevant document, executable, script, or binary>", "max_scan_bytes": 16777216, "max_seconds": 5}
 - log_inspect: {"path": "<task-relevant log file>", "tail_lines": 0, "context_lines": 2, "max_file_bytes": 64000000, "max_scan_bytes": 4000000, "max_lines": 10000, "max_line_bytes": 4096, "max_results": 100, "max_output_bytes": 256000, "timeout": 5}
 - text_search: {"query": "<exact task symbol or anchor>", "root": ".", "glob": "<task-relevant glob>", "max_results": 100}
 - script_search: {"query": "<task-relevant script name>", "root": ".", "max_results": 100}
@@ -11913,7 +12092,7 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
     if scope_error:
         return scope_error
     try:
-        if tool_name in {"file_read", "file_digest", "file_read_range", "image_inspect", "data_inspect", "data_query", "log_inspect"}:
+        if tool_name in {"file_read", "file_digest", "file_read_range", "image_inspect", "data_inspect", "data_query", "log_inspect", "artifact_risk_inspect"}:
             file_ops.resolve_repository_read_path(
                 args.get("path", ""),
                 allow_workspace_root=False,
@@ -12997,9 +13176,31 @@ def _agent_dispatch(
             stdin=args.get("stdin", ""),
             timeout=args.get("timeout", 30),
             max_output=args.get("max_output", 128000),
+            risk_policy=args.get("risk_policy", ""),
             token=args.get("token", ""),
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "artifact_risk_inspect":
+        return artifact_risk_inspect(
+            path=args.get("path", ""),
+            max_scan_bytes=args.get("max_scan_bytes", 16 * 1024 * 1024),
+            max_seconds=args.get("max_seconds", 5.0),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "process_list":
+        return process_list(
+            max_processes=args.get("max_processes", 128),
+            max_seconds=args.get("max_seconds", 0.5),
+        )
+    if tool_name == "process_memory_risk_inspect":
+        return process_memory_risk_inspect(
+            pid=args.get("pid", 0),
+            max_bytes=args.get("max_bytes", 4 * 1024 * 1024),
+            max_regions=args.get("max_regions", 256),
+            max_seconds=args.get("max_seconds", 1.0),
         )
     if tool_name == "image_inspect":
         return image_inspect(
@@ -13238,6 +13439,10 @@ def _agent_activity_command(tool_name, args):
         return "%s %s" % (
             str(args.get("method", "GET")).upper(), args.get("url", ""),
         )
+    if tool_name == "process_memory_risk_inspect":
+        return "pid=%s" % args.get("pid", "")
+    if tool_name == "process_list":
+        return "max_processes=%s" % args.get("max_processes", 128)
     path = args.get("path") or args.get("root") or ""
     if path:
         return str(path)
@@ -13253,7 +13458,7 @@ _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "archive_list", "archive_extract",
     "file_delete", "directory_create", "workspace_inventory", "dependency_inventory", "directory_tree",
     "file_find", "repository_symbol_index", "text_search", "script_search", "artifact_verify",
-    "artifact_ground", "scaffold_project", "archive_create", "repo_status", "repo_diff", "project_detect", "file_copy", "file_move",
+    "artifact_ground", "artifact_risk_inspect", "scaffold_project", "archive_create", "repo_status", "repo_diff", "project_detect", "file_copy", "file_move",
 })
 _PROJECT_SCOPED_EXECUTION_TOOLS = frozenset({"workspace_run", "script_run"})
 _AGENT_TOOL_ALIASES = {
@@ -13284,6 +13489,7 @@ _PROJECT_BOUND_AGENT_TOOLS = (
         "master_capacity", "self_heal_check", "status", "system_profile_text",
         "emotion_vector_status", "preferences_status", "context_policy_status",
         "environment_status", "hardware_profile",
+        "process_list", "process_memory_risk_inspect",
     })
 )
 _CLOUD_AGENT_NESTED_MODEL_TOOLS = frozenset({
@@ -13993,18 +14199,18 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
     "text_search", "script_search", "program_search", "image_inspect", "repo_status", "repo_diff",
     "repo_log", "repo_show", "repo_blame",
-    "data_inspect", "data_query", "project_detect", "archive_list",
+    "data_inspect", "data_query", "project_detect", "archive_list", "artifact_risk_inspect",
     "memory_search", "learning_health_status", "evaluation_history_status",
     "memory_quality_report", "memory_privacy_review", "artifact_ground",
     "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",
-    "status", "diagnostics",
+    "status", "diagnostics", "process_list", "process_memory_risk_inspect",
 })
 _AGENT_FILE_EVIDENCE_TOOLS = frozenset({
     "workspace_inventory", "workspace_compare", "directory_tree", "file_read", "file_read_range",
     "file_digest", "directory_digest", "file_find", "text_search",
     "script_search", "image_inspect", "log_inspect", "data_inspect", "data_query", "project_detect",
     "context_pack", "repo_log", "repo_show", "repo_blame", "archive_list",
-    "dependency_inventory",
+    "dependency_inventory", "artifact_risk_inspect",
 })
 _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "directory_digest", "file_find",
@@ -14012,7 +14218,8 @@ _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
     "data_inspect", "data_query", "text_search", "script_search",
     "program_search", "image_inspect", "environment_status", "hardware_profile", "repo_status", "repo_diff", "project_detect",
-    "repo_log", "repo_show", "repo_blame", "archive_list",
+    "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
+    "process_list", "process_memory_risk_inspect",
 })
 _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "workflow_run",
@@ -15159,8 +15366,8 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "dependency_inventory",
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "data_inspect", "data_query", "text_search", "script_search",
     "project_detect",
-    "repo_status", "repo_diff", "repo_log", "repo_show", "repo_blame", "archive_list",
-    "program_search", "image_inspect", "memory_search", "web_search",
+    "repo_status", "repo_diff", "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
+    "program_search", "image_inspect", "memory_search", "process_list", "process_memory_risk_inspect", "web_search",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
 })
