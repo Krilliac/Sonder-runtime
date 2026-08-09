@@ -32,9 +32,11 @@ SECRET_ENV_VARS = (
 )
 
 _UNSAFE_CHILD_SECRET_MARKERS = (
-    "API_KEY", "AUTH", "BEARER", "COOKIE", "CREDENTIAL", "PASSWORD",
-    "PASSWD", "PRIVATE_KEY", "SECRET", "SESSION", "TOKEN",
+    "ACCESS_KEY", "API_KEY", "AUTH", "BEARER", "CONNECTION_STRING",
+    "COOKIE", "CREDENTIAL", "DATABASE_URL", "PASSWORD", "PASSWD",
+    "PRIVATE_KEY", "SECRET", "SESSION", "TOKEN",
 )
+_UNSAFE_CHILD_SECRET_SUFFIXES = ("_KEY", "_KEY_ID")
 _UNSAFE_CHILD_CONTROL_MARKERS = (
     "APPROVAL", "BYPASS", "CONTROL", "DANGEROUS", "ELEVAT", "GATE",
     "PERMISSION", "UNSAFE",
@@ -46,6 +48,7 @@ def _unsafe_child_secret_name(name):
     return (
         upper.startswith("SONDER_")
         or any(marker in upper for marker in _UNSAFE_CHILD_SECRET_MARKERS)
+        or upper.endswith(_UNSAFE_CHILD_SECRET_SUFFIXES)
         or any(marker in upper for marker in _UNSAFE_CHILD_CONTROL_MARKERS)
     )
 

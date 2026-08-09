@@ -5,6 +5,7 @@ import sys
 import pytest
 
 import code_runner
+import grounding
 import server
 import sonder_config
 import sonder_logging
@@ -56,6 +57,60 @@ def test_unsafe_lab_refuses_privileged_process():
     assert "root or elevated" in state.error
 
 
+@pytest.mark.parametrize("value", ["1", "true", "YES", "on"])
+def test_unsafe_lab_refuses_cloud_opt_in(value):
+    state = unsafe_lab.inspect(
+        env={
+            unsafe_lab.ACK_ENV: ACK,
+            "SONDER_HOST": "127.0.0.1",
+            "SONDER_ALLOW_CLOUD": value,
+        },
+        privilege_probe=lambda: False,
+    )
+    assert state.enabled is False
+    assert "cloud" in state.error
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://models.example:443",
+        "http://192.168.1.9:11434",
+        "http://127.0.0.1",
+        "ftp://127.0.0.1:11434",
+        "http://[::1",
+        "not an endpoint",
+    ],
+)
+def test_unsafe_lab_refuses_remote_or_malformed_ollama_endpoint(endpoint):
+    state = unsafe_lab.inspect(
+        env={
+            unsafe_lab.ACK_ENV: ACK,
+            "SONDER_HOST": "127.0.0.1",
+            "OLLAMA_HOST": endpoint,
+            "SONDER_ALLOW_REMOTE_OLLAMA": "1",
+        },
+        privilege_probe=lambda: False,
+    )
+    assert state.enabled is False
+    assert "OLLAMA_HOST" in state.error
+
+
+@pytest.mark.parametrize(
+    "endpoint", ["127.0.0.1:11434", "http://localhost:11434", "http://[::1]:11434"]
+)
+def test_unsafe_lab_accepts_loopback_ollama_endpoint(endpoint):
+    state = unsafe_lab.inspect(
+        env={
+            unsafe_lab.ACK_ENV: ACK,
+            "SONDER_HOST": "127.0.0.1",
+            "OLLAMA_HOST": endpoint,
+        },
+        privilege_probe=lambda: False,
+    )
+    assert state.enabled is True
+
+
 def test_exact_unprivileged_loopback_activation_writes_durable_warning(tmp_path):
     audit = tmp_path / "audit" / "unsafe.jsonl"
     env = {
@@ -71,6 +126,94 @@ def test_exact_unprivileged_loopback_activation_writes_durable_warning(tmp_path)
     assert payload["event"] == "unsafe_lab_activated"
     assert payload["host"] == "::1"
     assert "NOT OS ISOLATION" in payload["warning"]
+
+
+def test_audit_write_failure_blocks_mcp_startup(monkeypatch, tmp_path):
+    from sonder_runtime.__main__ import cmd_mcp
+
+    calls = []
+    monkeypatch.setenv(unsafe_lab.ACK_ENV, ACK)
+    monkeypatch.setenv("SONDER_HOST", "127.0.0.1")
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+    monkeypatch.setenv(unsafe_lab.AUDIT_PATH_ENV, str(tmp_path))
+    monkeypatch.setattr(unsafe_lab, "is_privileged", lambda: False)
+    monkeypatch.setattr(server.mcp, "run", lambda: calls.append("mcp"))
+    unsafe_lab._audited_processes.discard(os.getpid())
+
+    with pytest.raises(OSError):
+        cmd_mcp(object())
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("ack", "privileged", "match"),
+    [("true", False, "exactly match"), (ACK, True, "root or elevated")],
+)
+def test_mcp_startup_refuses_invalid_gate_before_adapter(
+    monkeypatch, ack, privileged, match
+):
+    from sonder_runtime.__main__ import cmd_mcp
+
+    calls = []
+    monkeypatch.setenv(unsafe_lab.ACK_ENV, ack)
+    monkeypatch.setenv("SONDER_HOST", "127.0.0.1")
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+    monkeypatch.setattr(unsafe_lab, "is_privileged", lambda: privileged)
+    monkeypatch.setattr(server.mcp, "run", lambda: calls.append("mcp"))
+
+    with pytest.raises(unsafe_lab.UnsafeLabError, match=match):
+        cmd_mcp(object())
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("environment", "match"),
+    [
+        ({"SONDER_ALLOW_CLOUD": "1"}, "cloud"),
+        (
+            {
+                "OLLAMA_HOST": "https://models.example:443",
+                "SONDER_ALLOW_REMOTE_OLLAMA": "1",
+            },
+            "loopback OLLAMA_HOST",
+        ),
+        ({"OLLAMA_HOST": "http://[::1"}, "loopback OLLAMA_HOST"),
+    ],
+)
+def test_mcp_startup_refuses_nonlocal_model_transport_before_adapter(
+    monkeypatch, environment, match
+):
+    from sonder_runtime.__main__ import cmd_mcp
+
+    calls = []
+    monkeypatch.setenv(unsafe_lab.ACK_ENV, ACK)
+    monkeypatch.setenv("SONDER_HOST", "127.0.0.1")
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+    monkeypatch.delenv("SONDER_ALLOW_CLOUD", raising=False)
+    monkeypatch.delenv("SONDER_ALLOW_REMOTE_OLLAMA", raising=False)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(unsafe_lab, "is_privileged", lambda: False)
+    monkeypatch.setattr(server.mcp, "run", lambda: calls.append("mcp"))
+
+    with pytest.raises(unsafe_lab.UnsafeLabError, match=match):
+        cmd_mcp(object())
+    assert calls == []
+
+
+def test_http_startup_refuses_unsafe_elevation_before_listener(monkeypatch):
+    listeners = []
+    monkeypatch.setenv(unsafe_lab.ACK_ENV, ACK)
+    monkeypatch.setenv("SONDER_HOST", "127.0.0.1")
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+    monkeypatch.setattr(unsafe_lab, "is_privileged", lambda: True)
+    monkeypatch.setattr(sonder_serve, "HOST", "127.0.0.1")
+    monkeypatch.setattr(sonder_serve, "ThreadingHTTPServer", lambda *a: listeners.append(a))
+    monkeypatch.setattr(sys, "argv", ["sonder_serve.py"])
+
+    with pytest.raises(unsafe_lab.UnsafeLabError, match="root or elevated"):
+        sonder_serve.main()
+    assert listeners == []
 
 
 def test_production_config_rejects_inexact_acknowledgement():
@@ -144,6 +287,10 @@ def test_unsafe_child_environment_scrubs_secret_and_control_names(monkeypatch):
     source = {
         "PATH": "safe-path",
         "AWS_SESSION_TOKEN": "cloud-secret",
+        "AWS_ACCESS_KEY_ID": "cloud-identity",
+        "ANTHROPIC_KEY": "provider-secret-key",
+        "DATABASE_URL": "postgres://user:password@host/db",
+        "AZURE_STORAGE_CONNECTION_STRING": "connection-secret",
         "MY_API_KEY": "provider-secret",
         "CUSTOM_CONTROL_GATE": "control-secret",
         "SONDER_HOME": "runtime-control-path",
@@ -152,6 +299,29 @@ def test_unsafe_child_environment_scrubs_secret_and_control_names(monkeypatch):
     }
     child = sonder_logging.child_environment(source)
     assert child == {"PATH": "safe-path"}
+
+
+def test_child_environment_does_not_mutate_source_or_parent(monkeypatch, tmp_path):
+    monkeypatch.setattr(unsafe_lab, "active", lambda: True)
+    monkeypatch.setenv("PARENT_SESSION_TOKEN", "parent-value")
+    source = dict(os.environ)
+    child = sonder_logging.child_environment(source)
+    assert source == dict(os.environ)
+    assert "PARENT_SESSION_TOKEN" not in child
+
+    result = code_runner._run_process(
+        [
+            sys.executable,
+            "-c",
+            "import os; os.environ['PARENT_SESSION_TOKEN']='child-value'",
+        ],
+        str(tmp_path),
+        "",
+        10,
+        "python",
+    )
+    assert result["ok"] is True
+    assert os.environ["PARENT_SESSION_TOKEN"] == "parent-value"
 
 
 def test_unsafe_secret_scrub_is_enforced_at_real_code_subprocess(monkeypatch, tmp_path):
@@ -172,3 +342,79 @@ def test_unsafe_secret_scrub_is_enforced_at_real_code_subprocess(monkeypatch, tm
     )
     assert out["ok"] is True
     assert out["stdout"].splitlines() == ["missing", "missing"]
+
+
+def test_unsafe_secret_scrub_reaches_grounding_generated_python(monkeypatch):
+    monkeypatch.setattr(unsafe_lab, "active", lambda: True)
+    monkeypatch.setenv("GROUNDING_API_KEY", "must-not-cross")
+    result = grounding.run_code_detail(
+        "import os; print(os.getenv('GROUNDING_API_KEY', 'missing'))",
+        timeout=10,
+    )
+    assert result["ok"] is True
+    assert result["stdout"] == "missing"
+
+
+def test_unsafe_secret_scrub_reaches_grounding_language_runner(monkeypatch):
+    monkeypatch.setattr(unsafe_lab, "active", lambda: True)
+    monkeypatch.setenv("LANGUAGE_SESSION_TOKEN", "must-not-cross")
+    ok, output = grounding._run_cmd(
+        [
+            sys.executable,
+            "-c",
+            "import os; print(os.getenv('LANGUAGE_SESSION_TOKEN', 'missing'))",
+        ],
+        timeout=10,
+    )
+    assert ok is True
+    assert output == "missing"
+
+
+def test_all_grounding_subprocess_calls_receive_scrubbed_environment(monkeypatch):
+    monkeypatch.setattr(unsafe_lab, "active", lambda: True)
+    monkeypatch.setenv("GROUNDING_CONTROL_GATE", "must-not-cross")
+    real_run = grounding.subprocess.run
+    environments = []
+
+    def capture(*args, **kwargs):
+        environments.append(kwargs.get("env"))
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(grounding.subprocess, "run", capture)
+    assert grounding.run_code_detail("print('ok')", timeout=10)["ok"] is True
+    assert grounding.compile_code("value = 1", timeout=10)[0] is True
+    assert grounding._run_cmd([sys.executable, "-c", "print('ok')"], 10)[0] is True
+    assert len(environments) == 3
+    assert all(env is not None for env in environments)
+    assert all("GROUNDING_CONTROL_GATE" not in env for env in environments)
+
+
+def test_root_bypass_requires_exact_active_unsafe_gate(monkeypatch, tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside-root-evidence", encoding="utf-8")
+    for name in (
+        unsafe_lab.ACK_ENV,
+        "SONDER_FILE_BYPASS",
+        "SONDER_FILE_APPROVAL_CODE",
+        "SONDER_FILE_ROOTS",
+        "SONDER_FILE_ROOTS_FILE",
+        "SONDER_ALLOW_CLOUD",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SONDER_HOST", "127.0.0.1")
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+    monkeypatch.setattr(unsafe_lab, "is_privileged", lambda: False)
+
+    assert server.file_read(str(outside)).startswith("ERROR:")
+
+    monkeypatch.setenv(unsafe_lab.ACK_ENV, "true")
+    malformed = server.file_read(str(outside))
+    assert malformed.startswith("ERROR:")
+    assert "exactly match" in malformed
+
+    audit = tmp_path / "unsafe-audit.jsonl"
+    monkeypatch.setenv(unsafe_lab.ACK_ENV, ACK)
+    monkeypatch.setenv(unsafe_lab.AUDIT_PATH_ENV, str(audit))
+    unsafe_lab._audited_processes.discard(os.getpid())
+    allowed = server.file_read(str(outside))
+    assert "outside-root-evidence" in allowed

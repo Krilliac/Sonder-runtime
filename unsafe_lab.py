@@ -27,6 +27,7 @@ WARNING = (
     "DANGER: UNSAFE LAB MODE IS ACTIVE; MODEL AGENT/AUTOPILOT HOST-TOOL "
     "RESTRICTIONS ARE DISABLED. THIS IS NOT OS ISOLATION."
 )
+_TRUE = frozenset({"1", "true", "yes", "on"})
 
 
 class UnsafeLabError(RuntimeError):
@@ -87,6 +88,22 @@ def is_privileged() -> bool:
     return True if geteuid is None else geteuid() == 0
 
 
+def _local_ollama_error(env) -> str:
+    """Require the model endpoint itself to stay inside the isolated guest."""
+    value = str(env.get("OLLAMA_HOST", "127.0.0.1:11434")).strip()
+    try:
+        # Keep this aligned with the runtime transport's canonical parsing,
+        # including its handling of bind-all aliases and malformed origins.
+        import ollama_endpoint
+
+        error = ollama_endpoint.policy_error(value, allow_remote=False)
+    except Exception as exc:
+        return "unsafe lab mode could not validate OLLAMA_HOST: %s" % exc
+    if error:
+        return "unsafe lab mode requires a loopback OLLAMA_HOST: %s" % error
+    return ""
+
+
 def inspect(*, env=None, host=None, privilege_probe=None) -> State:
     source = os.environ if env is None else env
     if ACK_ENV not in source:
@@ -110,6 +127,21 @@ def inspect(*, env=None, host=None, privilege_probe=None) -> State:
             requested=True,
             enabled=False,
             error="unsafe lab mode refuses non-loopback SONDER_HOST exposure",
+            host=configured_host,
+        )
+    if str(source.get("SONDER_ALLOW_CLOUD", "")).strip().lower() in _TRUE:
+        return State(
+            requested=True,
+            enabled=False,
+            error="unsafe lab mode refuses hosted/cloud model opt-in",
+            host=configured_host,
+        )
+    ollama_error = _local_ollama_error(source)
+    if ollama_error:
+        return State(
+            requested=True,
+            enabled=False,
+            error=ollama_error,
             host=configured_host,
         )
     probe = is_privileged if privilege_probe is None else privilege_probe
