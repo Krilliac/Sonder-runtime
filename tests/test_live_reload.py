@@ -314,6 +314,15 @@ def test_server_live_reload_rebinds_evaluation_history_modules(monkeypatch):
 
     service_module = object()
     adapter_module = object()
+    # _maybe_live_reload intentionally rebinds these server globals. Register
+    # their originals with monkeypatch so this test cannot poison later tests
+    # in the same interpreter.
+    monkeypatch.setattr(
+        server, "eval_history_use_cases", server.eval_history_use_cases
+    )
+    monkeypatch.setattr(
+        server, "eval_history_adapter", server.eval_history_adapter
+    )
     monkeypatch.setattr(
         server.live_reload,
         "reload_changed_modules",
