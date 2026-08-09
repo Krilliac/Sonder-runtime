@@ -62,6 +62,38 @@ def test_generate_shapes_request_and_parses_response():
     assert seen["payload"]["messages"][-1]["content"] == "hi"
 
 
+def test_generate_preserves_llama_cpp_timing_extension():
+    def transport(*args):
+        response = _chat_response("measured")
+        response["timings"] = {
+            "prompt_n": 12,
+            "prompt_ms": 300.0,
+            "predicted_n": 8,
+            "predicted_ms": 400.0,
+            "load_ms": 25.0,
+            "prompt_per_second": 40.0,
+            "predicted_per_second": 20.0,
+        }
+        response["cold_start"] = False
+        return response
+
+    response = OpenAICompatibleGateway(
+        _local_cfg(), transport=transport
+    ).generate(ModelRequest(prompt="hi", tier="code"), _ctx())
+    assert response.telemetry.prompt_eval_ms == 300.0
+    assert response.telemetry.eval_ms == 400.0
+    assert response.telemetry.prompt_tokens_per_second == 40.0
+    assert response.telemetry.output_tokens_per_second == 20.0
+    assert response.telemetry.load_state == "warm"
+
+
+def test_generate_does_not_invent_missing_timing():
+    response = OpenAICompatibleGateway(
+        _local_cfg(), transport=lambda *args: _chat_response("no extension")
+    ).generate(ModelRequest(prompt="hi", tier="code"), _ctx())
+    assert response.telemetry is None
+
+
 def test_history_is_mapped_into_messages():
     captured = {}
 

@@ -19,6 +19,7 @@ Tiers (escalation ladder, cheapest first):
 """
 
 import contextlib
+import hmac
 import importlib
 import http.client
 import json
@@ -33,22 +34,25 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-import memory_store
+import sonder_runtime.adapters.legacy.task_state as task_state_adapter
+import sonder_runtime.application.tasks.use_cases as task_use_cases
+import sonder_runtime.adapters.legacy.evaluation_history as eval_history_adapter
+import sonder_runtime.application.evaluation_history.use_cases as eval_history_use_cases
+import sonder_runtime.adapters.memory_store as memory_store
 import orchestrator
 import retriever
 import reward
 import reflection
 import embeddings
 import personas
-import recall
 import summarizer
 import code_runner
+import isolated_runner
 import live_reload
 import system_profile
 import emotion_vectors
 import preference_learning
-import process_liveness
-import workflow_store
+from sonder_runtime.adapters import process_liveness
 import web_tools
 import local_service_probe as local_probe
 import web_intents
@@ -59,6 +63,7 @@ import memory_quality
 import learning_health
 import domain_grounding
 import master_orchestrator
+import execution_status
 import ollama_lifecycle
 import admin_auth
 import codegen_loop
@@ -105,8 +110,13 @@ import tier_router
 import project_scaffold
 import environment_probe
 import sonder_hardware
+import sonder_logging
+import tool_capabilities
 import git_tools
-import eval_history
+import sonder_runtime.adapters.evaluation_history_store as eval_history
+import artifact_risk as artifact_risk_module
+import process_risk as process_risk_module
+import unsafe_lab
 
 BASE = ollama_endpoint.normalize()
 OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
@@ -547,7 +557,11 @@ _SESSION_TURN_CLAIM_WAIT_SECONDS = max(
 )
 
 LIVE_RELOAD_MODULES = [
-    "memory_store",
+    "sonder_runtime.adapters.legacy.task_state",
+    "sonder_runtime.application.tasks.use_cases",
+    "sonder_runtime.adapters.legacy.evaluation_history",
+    "sonder_runtime.application.evaluation_history.use_cases",
+    "sonder_runtime.adapters.memory_store",
     "process_liveness",
     "orchestrator",
     "retriever",
@@ -556,9 +570,10 @@ LIVE_RELOAD_MODULES = [
     "embeddings",
     "ollama_endpoint",
     "personas",
-    "recall",
+    "sonder_runtime.adapters.recall",
     "summarizer",
     "code_runner",
+    "isolated_runner",
     "system_profile",
     "emotion_vectors",
     "preference_learning",
@@ -569,7 +584,7 @@ LIVE_RELOAD_MODULES = [
     "self_heal",
     "memory_quality",
     "learning_health",
-    "eval_history",
+    "sonder_runtime.adapters.evaluation_history_store",
     "domain_grounding",
     "master_orchestrator",
     "ollama_lifecycle",
@@ -606,6 +621,7 @@ LIVE_RELOAD_MODULES = [
     "intents",
     "runtime_policy",
     "sonder_hardware",
+    "tool_capabilities",
     # NPU accelerator host modules reload in dependency order; the broker and
     # service keep live worker/process state behind reload guards.
     "npu_contract",
@@ -617,6 +633,9 @@ LIVE_RELOAD_MODULES = [
     # autopilot_store intentionally stays loaded because it exclusively owns a
     # process-safe SQLite schema and may be serving background worker threads.
     "autopilot_controller",
+    "pdf_risk",
+    "artifact_risk",
+    "process_risk",
 ]
 
 def _prime_live_reload_modules():
@@ -650,6 +669,29 @@ _prime_live_reload_modules()
 def _maybe_live_reload():
     modules = live_reload.reload_changed_modules(LIVE_RELOAD_MODULES)
     for name, module in modules.items():
+        if name == "sonder_runtime.adapters.recall":
+            # Recall resolves its migrated adapter lazily through the
+            # application gateway. Keep the root compatibility alias on the
+            # same live module object without restoring a production import.
+            sys.modules[name] = module
+            if "recall" in sys.modules:
+                sys.modules["recall"] = module
+            continue
+        if name == "sonder_runtime.adapters.legacy.task_state":
+            globals()["task_state_adapter"] = module
+            continue
+        if name == "sonder_runtime.application.tasks.use_cases":
+            globals()["task_use_cases"] = module
+            continue
+        if name == "sonder_runtime.adapters.legacy.evaluation_history":
+            globals()["eval_history_adapter"] = module
+            continue
+        if name == "sonder_runtime.application.evaluation_history.use_cases":
+            globals()["eval_history_use_cases"] = module
+            continue
+        if name == "sonder_runtime.adapters.memory_store":
+            globals()["memory_store"] = module
+            continue
         if name == "local_service_probe":
             globals()["local_probe"] = module
             continue
@@ -676,6 +718,16 @@ def _maybe_live_reload():
             continue
         if name == "archive_create":
             globals()["archive_create_tool"] = module
+            continue
+        if name == "workflow_store":
+            # The workflow adapter resolves this watched legacy module lazily.
+            # Do not recreate a direct server dependency during live reload.
+            continue
+        if name == "artifact_risk":
+            globals()["artifact_risk_module"] = module
+            continue
+        if name == "process_risk":
+            globals()["process_risk_module"] = module
             continue
         if name == "sqlite_mutate":
             globals()["sqlite_mutate_module"] = module
@@ -859,8 +911,21 @@ def _make_generate(
                 "token_source": source,
             }
             gen.last_usage = dict(usage)
+            # Keep only the backend's bounded, non-content inference metadata.
+            # Gateways can expose measured phase timing without retaining prompts,
+            # responses, or arbitrary provider fields.
             gen.last_response_meta = {
                 "done_reason": str(out.get("done_reason") or "").strip().casefold(),
+                **{
+                    key: out.get(key)
+                    for key in (
+                        "total_duration", "load_duration",
+                        "prompt_eval_count", "prompt_eval_duration",
+                        "eval_count", "eval_duration",
+                        "load_state", "cold_start",
+                    )
+                    if key in out
+                },
             }
             ok = True
         finally:
@@ -871,6 +936,8 @@ def _make_generate(
                 tokens_in=usage.get("tokens_in", 0),
                 tokens_out=usage.get("tokens_out", 0),
                 token_source=usage.get("token_source", ""),
+                request_preview=prompt,
+                response_preview=content if ok else None,
                 ok=ok,
                 elapsed_ms=int((time.time() - started) * 1000),
             )
@@ -907,7 +974,10 @@ def _application():
     with _APP_GRAPH_LOCK:
         if _APP_GRAPH is None:
             from sonder_runtime.bootstrap import app as _bootstrap_app
-            _APP_GRAPH = _bootstrap_app.build_application()
+            _APP_GRAPH = _bootstrap_app.build_application(
+                preference_connection_factory=_open_db,
+                preference_module_provider=lambda: preference_learning,
+            )
         return _APP_GRAPH
 
 
@@ -2258,7 +2328,7 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
     embedding_provenance = embeddings.provenance(qv) if qv else {}
     if augment:
         recalls = (
-            recall.recall(
+            _application().recall.retrieve(
                 conn, prompt, qv=qv, exclude_session=session_id,
                 project=project,
                 embedding_model=embedding_provenance.get("model"),
@@ -3426,6 +3496,7 @@ def _offload_impl(
         ok = False
         usage = {}
         used_model = model
+        msg = ""
         try:
             if cloud:
                 out, msg, used_model = _chat_request_with_cloud_fallback(
@@ -3471,6 +3542,8 @@ def _offload_impl(
                 tokens_in=usage.get("tokens_in", 0),
                 tokens_out=usage.get("tokens_out", 0),
                 token_source=usage.get("token_source", ""),
+                request_preview=prompt,
+                response_preview=msg if ok else None,
                 ok=ok,
                 elapsed_ms=int((time.time() - started) * 1000),
             )
@@ -4871,6 +4944,7 @@ def _repo_repair_pytest(workdir, timeout):
             # identical call from a child process took 0.8s.
             stdin=subprocess.DEVNULL,
             timeout=max(5, timeout),
+            env=sonder_logging.child_environment(),
         )
     except subprocess.TimeoutExpired:
         return False, "pytest timed out", "pytest timed out"
@@ -5315,7 +5389,10 @@ def context_health(session: str = "", project: str = "") -> str:
 def activity_status(include_events: bool = True) -> str:
     """Show active and most recent observable response activity."""
     _maybe_live_reload()
-    snap = activity_tracker.snapshot()
+    source = activity_tracker.snapshot()
+    snap = activity_tracker.public_snapshot(source)
+    if snap is None:
+        return "sonder activity\n  state: unknown"
     lines = [
         "sonder activity",
         "  active responses: %s" % snap.get("active_count", 0),
@@ -5342,6 +5419,13 @@ def activity_status(include_events: bool = True) -> str:
         lines.extend(["", activity_tracker.format_response(latest)])
     elif include_events:
         lines.append("  latest: (none yet)")
+    if include_events:
+        lines.extend([
+            "",
+            activity_tracker.format_execution_feed(
+                activity_tracker.execution_feed(source)
+            ),
+        ])
     return "\n".join(lines)
 
 
@@ -5402,6 +5486,13 @@ def _format_task(row: dict) -> str:
     )
 
 
+def _task_service(conn):
+    return task_use_cases.TaskService(
+        task_state_adapter.LegacyTaskRepository(conn),
+        task_state_adapter.LegacyChecklistEventSink(activity_tracker.set_checklist),
+    )
+
+
 @mcp.tool()
 def task_create(
     title: str,
@@ -5415,8 +5506,7 @@ def task_create(
     _maybe_live_reload()
     conn = _open_db()
     try:
-        row = memory_store.create_task(
-            conn,
+        row = _task_service(conn).create_task(
             title=title,
             detail=detail,
             priority=priority,
@@ -5428,7 +5518,7 @@ def task_create(
         return "ERROR: %s" % e
     finally:
         conn.close()
-    return "task created\n  " + _format_task(row)
+    return "task created\n  " + _format_task(row.to_dict())
 
 
 @mcp.tool()
@@ -5443,8 +5533,7 @@ def task_list(
     _maybe_live_reload()
     conn = _open_db()
     try:
-        rows = memory_store.list_tasks(
-            conn,
+        rows = _task_service(conn).list_tasks(
             status=status,
             project=project,
             owner=owner,
@@ -5459,7 +5548,7 @@ def task_list(
     if not rows:
         lines.append("  (no matching tasks)")
     for row in rows:
-        lines.append("  " + _format_task(row))
+        lines.append("  " + _format_task(row.to_dict()))
     return "\n".join(lines)
 
 
@@ -5478,8 +5567,7 @@ def task_update(
     _maybe_live_reload()
     conn = _open_db()
     try:
-        row = memory_store.update_task(
-            conn,
+        row = _task_service(conn).update_task(
             task_id,
             status=status or None,
             title=title or None,
@@ -5493,7 +5581,7 @@ def task_update(
         return "ERROR: %s" % e
     finally:
         conn.close()
-    return "task updated\n  " + _format_task(row)
+    return "task updated\n  " + _format_task(row.to_dict())
 
 
 @mcp.tool()
@@ -5502,16 +5590,15 @@ def task_show(task_id: str, events: bool = True) -> str:
     _maybe_live_reload()
     conn = _open_db()
     try:
-        row = memory_store.get_task(conn, task_id)
-        history = memory_store.task_events(conn, task_id, limit=20) if events else []
+        detail = _task_service(conn).show_task(task_id, include_events=events)
     finally:
         conn.close()
-    if not row:
+    if not detail.task:
         return "ERROR: no task '%s'." % task_id
-    lines = ["task", "  " + _format_task(row)]
-    if history:
+    lines = ["task", "  " + _format_task(detail.task.to_dict())]
+    if detail.events:
         lines.append("events:")
-        for event in history:
+        for event in detail.events:
             lines.append("  %(ts)s  %(event)s  %(note)s" % event)
     return "\n".join(lines)
 
@@ -6395,9 +6482,6 @@ def _orchestrator_agent_worker(
                 return_host_receipt=True,
                 cancel_check=master_orchestrator.current_worker_cancel_requested,
             )
-            output = str(getattr(receipt, "output", receipt) or "")
-            if output.startswith("ERROR:"):
-                raise RuntimeError(output[:800])
             return master_orchestrator.repository_worker_result(
                 receipt, project_scope,
             )
@@ -6481,6 +6565,7 @@ def master_orchestrate(
     task: str,
     mode: str = "ask",
     agents: int = 0,
+    worker_cap: int = 0,
     tier: str = "auto",
     learn: bool = False,
     retry_of: str = "",
@@ -6492,8 +6577,10 @@ def master_orchestrate(
     lane. mode="delegate" queues bounded subagents across RAM/CPU-safe worker
     slots, then audits and merges their outputs. mode="fleet" queues the full
     hardware-derived breadth ceiling in the background and returns immediately.
-    Pass a positive ``agents`` value to set a smaller explicit fleet breadth;
-    zero/omitted selects three delegates or the hardware ceiling for fleet mode.
+    Pass a positive ``agents`` value to set fleet breadth. ``worker_cap`` is a
+    per-run opt-in that may raise concurrent slots above the hardware-derived
+    default, but never above the operator/compiled ceiling. A clear task phrase
+    such as "use 24 workers" fills both values when they are omitted.
     For existing repository work, pass ``project`` as an existing root. Every
     child and aggregate is confined to that canonical root; missing or
     conflicting repository scope fails closed instead of inheriting the cwd.
@@ -6501,6 +6588,22 @@ def master_orchestrate(
     """
     _maybe_live_reload()
     task = (task or "").strip()
+    inferred_worker_cap = master_orchestrator.requested_worker_cap(task)
+    raw_worker_cap = worker_cap
+    if (worker_cap is None or worker_cap == 0) and not isinstance(worker_cap, bool):
+        worker_cap = inferred_worker_cap
+    worker_cap_supplied = worker_cap is not None and worker_cap != 0
+    if worker_cap_supplied:
+        cap_probe = master_orchestrator.capacity(agents or None, worker_cap=worker_cap)
+        if cap_probe.get("worker_cap_error"):
+            return "ERROR: invalid worker_cap: %s" % cap_probe["worker_cap_error"]
+        worker_cap = int(cap_probe["requested_worker_cap"])
+        if not agents:
+            agents = worker_cap
+    elif isinstance(raw_worker_cap, bool):
+        return "ERROR: invalid worker_cap: boolean values are not worker counts"
+    else:
+        worker_cap = None
     mode = (mode or "ask").strip().lower()
     mode = {
         "delagte": "delegate",
@@ -6513,12 +6616,21 @@ def master_orchestrate(
         if mode in ("ask", "choose", "prompt", "delegate", "delegated", "agents", "parallel"):
             mode = "fleet"
     if mode in ("ask", "choose", "prompt"):
-        delegate_count = master_orchestrator.clamp_agent_count(agents, default=3)
-        fleet_count = master_orchestrator.clamp_agent_count(
-            agents, default=master_orchestrator.max_agents(),
-        )
-        delegate_capacity = master_orchestrator.capacity(delegate_count)
-        fleet_capacity = master_orchestrator.capacity(fleet_count)
+        if worker_cap:
+            delegate_count = fleet_count = min(
+                int(agents or worker_cap), master_orchestrator.explicit_agent_ceiling(),
+            )
+        else:
+            delegate_count = master_orchestrator.clamp_agent_count(agents, default=3)
+            fleet_count = master_orchestrator.clamp_agent_count(
+                agents, default=master_orchestrator.max_agents(),
+            )
+        if worker_cap:
+            delegate_capacity = master_orchestrator.capacity(delegate_count, worker_cap=worker_cap)
+            fleet_capacity = master_orchestrator.capacity(fleet_count, worker_cap=worker_cap)
+        else:
+            delegate_capacity = master_orchestrator.capacity(delegate_count)
+            fleet_capacity = master_orchestrator.capacity(fleet_count)
         return (
             "Master orchestrator ready.\n"
             "Choose execution mode:\n"
@@ -6526,6 +6638,7 @@ def master_orchestrate(
             "  delegate - queue %d agent(s) across %d safe worker slot(s), audit, then merge.\n"
             "  fleet    - queue %d agent(s) across %d safe worker slot(s), return immediately, then monitor it.\n"
             "              Omit agents (or pass 0) to use the hardware ceiling.\n"
+            "              Set worker_cap (or say 'use N workers') for a bounded per-run override.\n"
             "Keywords fleet, swarm, spawn as many agents, parallel agents, and\n"
             "parallel workflow select fleet automatically without replacing an explicit agent count.\n"
             "Call master_orchestrate(task, mode='inline'|'delegate'|'fleet') or chat `/master inline ...`."
@@ -6589,7 +6702,7 @@ def master_orchestrate(
         return result["output"]
     if mode in ("delegate", "delegated", "agents", "parallel", "fleet", "swarm", "fanout"):
         run_fleet_in_background = mode in ("fleet", "swarm", "fanout")
-        if run_fleet_in_background:
+        if run_fleet_in_background and not worker_cap:
             agents = master_orchestrator.clamp_agent_count(
                 agents, default=master_orchestrator.max_agents(),
             )
@@ -6615,6 +6728,7 @@ def master_orchestrate(
                 "project": project_scope,
             },
             project=project_scope,
+            worker_cap=worker_cap,
         )
         if run_fleet_in_background:
             return "\n".join([
@@ -6651,18 +6765,57 @@ def master_status(include_finished: bool = True, limit: int = 20) -> str:
     )
 
 
+def execution_status_data(
+    agent_snapshot: dict | None = None,
+    activity_snapshot: dict | None = None,
+    *,
+    include_detail: bool | None = None,
+) -> dict:
+    """Return the shared terminal/app fleet concurrency contract."""
+    try:
+        snapshot = agent_snapshot
+        if snapshot is None:
+            snapshot = master_orchestrator.snapshot(include_finished=False, limit=1)
+        activity = activity_snapshot
+        if activity is None:
+            activity = activity_tracker.snapshot()
+        feed = activity_tracker.execution_feed(
+            activity, include_detail=include_detail,
+        )
+        return execution_status.with_feed(snapshot, feed)
+    except Exception as exc:
+        return execution_status.with_feed(
+            execution_status.unavailable(type(exc).__name__), None,
+        )
+
+
+def execution_feed_data(activity_snapshot: dict | None = None) -> dict:
+    """Return only the projected feed, without fleet capacity probes."""
+    try:
+        activity = activity_snapshot
+        if activity is None:
+            activity = activity_tracker.snapshot()
+        return activity_tracker.execution_feed(activity)
+    except Exception as exc:
+        return activity_tracker.execution_feed([]) | {
+            "error": type(exc).__name__,
+        }
+
+
 @mcp.tool()
-def master_capacity(requested_agents: int = 0) -> str:
-    """Show queued-agent ceiling and current RAM/CPU-bounded worker slots."""
+def master_capacity(requested_agents: int = 0, worker_cap: int = 0) -> str:
+    """Show default or explicit per-run bounded orchestration capacity."""
     _maybe_live_reload()
     try:
         value = int(requested_agents or 0)
     except (TypeError, ValueError):
         value = 0
     requested = value if value > 0 else None
-    return master_orchestrator.format_capacity(
-        master_orchestrator.capacity(requested)
+    data = (
+        master_orchestrator.capacity(requested, worker_cap=worker_cap)
+        if worker_cap else master_orchestrator.capacity(requested)
     )
+    return master_orchestrator.format_capacity(data)
 
 
 @mcp.tool()
@@ -6927,6 +7080,10 @@ _TRUSTED_REPOSITORY_APPROVAL = object()
 
 
 def _file_bypass_allowed(token: str = "", approval: str = "") -> bool:
+    if unsafe_lab.active():
+        # The exact acknowledgement substitutes for every model-visible file
+        # approval only in this deliberately unrestricted process.
+        return True
     # Repository agents may receive one host-authorized project root.  The
     # unforgeable in-process sentinel is injected only after the read-only
     # policy has validated the tool and path; an MCP caller can supply strings,
@@ -6941,6 +7098,23 @@ def _file_bypass_allowed(token: str = "", approval: str = "") -> bool:
     return _file_developer_allowed(token)
 
 
+_GIT_IGNORE_DISCOVERY_TOOLS = frozenset({
+    "workspace_inventory", "directory_tree", "file_find", "text_search",
+    "script_search",
+})
+
+
+def _include_ignored_error(tool_name: str, include_ignored, token: str = "") -> str:
+    if not include_ignored:
+        return ""
+    if _file_developer_allowed(token):
+        return ""
+    return (
+        "ERROR: include_ignored=true for '%s' requires an explicitly "
+        "authenticated developer account." % tool_name
+    )
+
+
 def _format_file_result(title: str, data: dict) -> str:
     lines = [title]
     for key, value in data.items():
@@ -6953,20 +7127,7 @@ def _format_file_result(title: str, data: dict) -> str:
 
 
 def _checklist_data(conn, checklist_id: str) -> dict:
-    parent = memory_store.get_task(conn, checklist_id)
-    if not parent:
-        raise ValueError("no checklist '%s'" % checklist_id)
-    items = memory_store.task_children(conn, parent["id"])
-    done = sum(1 for item in items if item.get("status") == "done")
-    return {
-        "id": parent["id"],
-        "title": parent.get("title", ""),
-        "status": parent.get("status", "pending"),
-        "project": parent.get("project", ""),
-        "owner": parent.get("owner", ""),
-        "items": items,
-        "summary": "%d/%d complete" % (done, len(items)),
-    }
+    return _task_service(conn).checklist(checklist_id).to_dict()
 
 
 def _format_checklist(data: dict) -> str:
@@ -7000,45 +7161,27 @@ def checklist_create(
     _maybe_live_reload()
     started = time.time()
     try:
-        items = json.loads(items_json) if isinstance(items_json, str) else items_json
-        if not isinstance(items, list) or not items:
-            raise ValueError("items_json must be a non-empty JSON list")
-        if len(items) > 20:
-            raise ValueError("a checklist supports at most 20 items")
-        normalized_items = []
-        for item in items:
-            if isinstance(item, dict):
-                item_title = str(item.get("title", "")).strip()
-                detail = str(item.get("detail", ""))
-            else:
-                item_title = str(item).strip()
-                detail = ""
-            if not item_title:
-                raise ValueError("checklist item titles cannot be empty")
-            normalized_items.append((item_title, detail))
+        normalized_items = task_use_cases.normalize_checklist_items(items_json)
         conn = _open_db()
         try:
-            parent = memory_store.create_task(
-                conn, title=title, detail="work checklist", status="in_progress",
-                priority=priority, project=project, owner=owner,
+            service = _task_service(conn)
+            checklist = service.create_checklist(
+                title, [
+                    {"title": item_title, "detail": detail}
+                    for item_title, detail in normalized_items
+                ], project=project, owner=owner, priority=priority,
             )
-            for item_title, detail in normalized_items:
-                memory_store.create_task(
-                    conn, title=item_title, detail=detail, status="pending",
-                    priority=priority, project=project, owner=owner,
-                    parent_id=parent["id"],
-                )
-            data = _checklist_data(conn, parent["id"])
+            data = checklist.to_dict()
         finally:
             conn.close()
     except Exception as exc:
         _record_direct_tool("checklist_create", {"title": title}, ok=False, started=started, summary=str(exc))
         return "ERROR: %s" % exc
     _record_direct_tool(
-        "checklist_create", {"title": title, "items": len(items)},
+        "checklist_create", {"title": title, "items": len(checklist.items)},
         ok=True, started=started, summary=data["summary"],
     )
-    activity_tracker.set_checklist(data)
+    service.publish_checklist(checklist)
     return _format_checklist(data)
 
 
@@ -7050,7 +7193,9 @@ def checklist_show(checklist_id: str) -> str:
     try:
         conn = _open_db()
         try:
-            data = _checklist_data(conn, checklist_id)
+            service = _task_service(conn)
+            checklist = service.checklist(checklist_id)
+            data = checklist.to_dict()
         finally:
             conn.close()
     except Exception as exc:
@@ -7059,7 +7204,7 @@ def checklist_show(checklist_id: str) -> str:
             ok=False, started=started, summary=str(exc),
         )
         return "ERROR: %s" % exc
-    activity_tracker.set_checklist(data)
+    service.publish_checklist(checklist)
     output = _format_checklist(data)
     _record_direct_tool(
         "checklist_show", {"checklist_id": checklist_id},
@@ -7081,33 +7226,9 @@ def checklist_update(
     try:
         conn = _open_db()
         try:
-            data = _checklist_data(conn, checklist_id)
-            children = data["items"]
-            selected = None
-            value = str(item or "").strip()
-            if value.isdigit() and 1 <= int(value) <= len(children):
-                selected = children[int(value) - 1]
-            else:
-                matches = [row for row in children if row["id"].startswith(value)]
-                if len(matches) == 1:
-                    selected = matches[0]
-            if not selected:
-                raise ValueError("no unique checklist item '%s'" % item)
-            memory_store.update_task(
-                conn, selected["id"], status=status, note=note or "checklist update",
-            )
-            data = _checklist_data(conn, checklist_id)
-            states = [row.get("status") for row in data["items"]]
-            parent_status = (
-                "done" if states and all(state in ("done", "canceled") for state in states)
-                else "blocked" if "blocked" in states
-                else "in_progress"
-            )
-            memory_store.update_task(
-                conn, data["id"], status=parent_status,
-                note="checklist %s" % data["summary"],
-            )
-            data = _checklist_data(conn, checklist_id)
+            service = _task_service(conn)
+            checklist = service.update_checklist(checklist_id, item, status, note)
+            data = checklist.to_dict()
         finally:
             conn.close()
     except Exception as exc:
@@ -7120,11 +7241,17 @@ def checklist_update(
         "checklist_update", {"checklist_id": checklist_id, "item": item, "status": status},
         ok=True, started=started, summary=data["summary"],
     )
-    activity_tracker.set_checklist(data)
+    service.publish_checklist(checklist)
     return _format_checklist(data)
 
 
-def _record_file_activity(default_action: str, data: dict) -> None:
+def _record_file_activity(
+    default_action: str,
+    data: dict,
+    *,
+    preview=None,
+    preview_kind: str = "",
+) -> None:
     if not isinstance(data, dict):
         return
     action = data.get("action") or default_action
@@ -7137,6 +7264,8 @@ def _record_file_activity(default_action: str, data: dict) -> None:
         bytes_written=data.get("bytes", 0),
         dry_run=data.get("dry_run", False),
         summary="%s bytes" % data.get("bytes", 0) if data.get("bytes") else "",
+        preview=preview,
+        preview_kind=preview_kind,
     )
 
 
@@ -7175,10 +7304,14 @@ def file_find(
     token: str = "",
     approval: str = "",
     extra_roots: str = "",
+    include_ignored: bool = False,
 ) -> str:
-    """Find files under allowed roots. Use extra_roots or admin/dev bypass for broader search."""
+    """Find files under allowed roots; ignored paths require developer authentication."""
     _maybe_live_reload()
     started = time.time()
+    policy_error = _include_ignored_error("file_find", include_ignored, token)
+    if policy_error:
+        return policy_error
     try:
         data = file_ops.find_files(
             query=query,
@@ -7186,6 +7319,7 @@ def file_find(
             max_results=max_results,
             extra_roots=extra_roots,
             bypass=_file_bypass_allowed(token, approval),
+            include_ignored=include_ignored,
         )
     except Exception as e:
         _record_direct_tool("file_find", {"query": query, "root": root}, ok=False, started=started, summary=str(e))
@@ -7600,6 +7734,55 @@ def data_convert(
     return output
 
 
+def _run_read_only_inspection(
+    name: str, arguments: dict, *, token: str = "", approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Bridge one MCP inspection call through the typed application facade."""
+    from sonder_runtime.application.context import local_owner_context
+
+    started = time.time()
+    developer = _file_developer_allowed(token)
+    authorized = _file_bypass_allowed(token, approval)
+    roots = tuple(
+        Path(item.strip()).expanduser()
+        for item in (extra_roots or "").split(os.pathsep)
+        if item.strip()
+    ) if authorized else ()
+    context = local_owner_context(
+        correlation_id="inspection-%s" % os.urandom(4).hex(),
+        source="mcp",
+        auth_level="developer" if developer else "user" if authorized else "local",
+        workspace_roots=roots,
+    )
+    call_args = dict(arguments)
+    call_args["extra_roots"] = extra_roots
+    result = _application().inspections.inspect(name, call_args, context)
+    evidence = result.evidence or {}
+    _record_direct_tool(
+        name,
+        evidence.get("audit_args", arguments),
+        ok=result.ok,
+        started=started,
+        summary=evidence.get("summary", result.output),
+        output=(
+            result.output
+            if not result.error_code and evidence.get("record_output", True)
+            else ""
+        ),
+    )
+    if result.error_code:
+        return "ERROR: %s" % result.output
+    activity = evidence.get("activity") or {}
+    if activity:
+        activity_tracker.record_event(
+            name,
+            summary=activity.get("summary", ""),
+            path=activity.get("path", ""),
+        )
+    return result.output
+
+
 @mcp.tool()
 def log_inspect(
     path: str,
@@ -7618,7 +7801,6 @@ def log_inspect(
 ) -> str:
     """Inspect one guarded text log without execution or caller expressions."""
     _maybe_live_reload()
-    started = time.time()
     args = {
         "path": path, "tail_lines": tail_lines, "context_lines": context_lines,
         "max_file_bytes": max_file_bytes, "max_scan_bytes": max_scan_bytes,
@@ -7626,35 +7808,10 @@ def log_inspect(
         "max_results": max_results, "max_output_bytes": max_output_bytes,
         "timeout": timeout,
     }
-    try:
-        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
-        report = log_inspect_module.inspect_log(
-            path, tail_lines=tail_lines, context_lines=context_lines,
-            max_file_bytes=max_file_bytes, max_scan_bytes=max_scan_bytes,
-            max_lines=max_lines, max_line_bytes=max_line_bytes,
-            max_results=max_results, max_output_bytes=max_output_bytes,
-            timeout=timeout, extra_roots=trusted_roots,
-        )
-    except Exception as exc:
-        _record_direct_tool(
-            "log_inspect", args, ok=False, started=started, summary=str(exc),
-        )
-        return "ERROR: %s" % exc
-    output = log_inspect_module.encode_result(report)
-    summary = report["summary"]
-    activity_summary = "%d line(s), %d error(s), %d warning(s)%s" % (
-        summary["lines_inspected"], summary["error_lines"],
-        summary["warning_lines"],
-        ", truncated" if report["scan_truncated"] or report["details_truncated"] else "",
+    return _run_read_only_inspection(
+        "log_inspect", args, token=token, approval=approval,
+        extra_roots=extra_roots,
     )
-    _record_direct_tool(
-        "log_inspect", args, ok=True, started=started,
-        summary=activity_summary, output=output,
-    )
-    activity_tracker.record_event(
-        "log_inspect", summary=activity_summary, path=report["path"],
-    )
-    return output
 
 
 @mcp.tool()
@@ -7673,51 +7830,16 @@ def workspace_compare(
 ) -> str:
     """Compare two guarded files/directories by path, type, size, and SHA-256."""
     _maybe_live_reload()
-    started = time.time()
     args = {
         "left": left, "right": right, "max_entries": max_entries,
         "max_file_bytes": max_file_bytes, "max_total_bytes": max_total_bytes,
         "max_details": max_details, "max_output_bytes": max_output_bytes,
         "timeout": timeout,
     }
-    try:
-        report = workspace_compare_module.compare_workspaces(
-            left, right,
-            max_entries=max_entries,
-            max_file_bytes=max_file_bytes,
-            max_total_bytes=max_total_bytes,
-            max_details=max_details,
-            max_output_bytes=max_output_bytes,
-            timeout=timeout,
-            extra_roots=extra_roots,
-            bypass=_file_bypass_allowed(token, approval),
-            developer_authorized=_file_developer_allowed(token),
-        )
-    except Exception as exc:
-        _record_direct_tool(
-            "workspace_compare", args, ok=False, started=started,
-            summary=str(exc),
-        )
-        return "ERROR: %s" % exc
-    output = workspace_compare_module.encode_result(report)
-    summary = report["summary"]
-    _record_direct_tool(
-        "workspace_compare", args, ok=True, started=started,
-        summary="added=%d removed=%d changed=%d same=%d" % (
-            summary["added"], summary["removed"],
-            summary["changed"], summary["same"],
-        ),
-        output=output,
+    return _run_read_only_inspection(
+        "workspace_compare", args, token=token, approval=approval,
+        extra_roots=extra_roots,
     )
-    activity_tracker.record_event(
-        "workspace_compare",
-        summary="%d difference(s), %d same" % (
-            summary["added"] + summary["removed"] + summary["changed"],
-            summary["same"],
-        ),
-        path="%s | %s" % (report["left"]["root"], report["right"]["root"]),
-    )
-    return output
 
 
 @mcp.tool()
@@ -7734,31 +7856,15 @@ def project_detect(
 ) -> str:
     """Inventory guarded project manifests and evidence-backed command candidates."""
     _maybe_live_reload()
-    started = time.time()
     args = {
         "path": path, "max_depth": max_depth, "max_files": max_files,
         "max_total_bytes": max_total_bytes, "max_file_bytes": max_file_bytes,
         "max_results": max_results,
     }
-    try:
-        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
-        data = project_detector.detect_project(
-            path=path, max_depth=max_depth, max_files=max_files,
-            max_total_bytes=max_total_bytes, max_file_bytes=max_file_bytes,
-            max_results=max_results, extra_roots=trusted_roots,
-        )
-    except Exception as exc:
-        _record_direct_tool("project_detect", args, ok=False, started=started, summary=str(exc))
-        return "ERROR: %s" % exc
-    summary = "%d manifest(s), %d command candidate(s)%s" % (
-        len(data["manifests"]), len(data["commands"]),
-        ", truncated" if data["truncated"] else "",
+    return _run_read_only_inspection(
+        "project_detect", args, token=token, approval=approval,
+        extra_roots=extra_roots,
     )
-    output = project_detector.format_detection(data)
-    _record_direct_tool("project_detect", args, ok=not data["errors"], started=started,
-                        summary=summary, output=output)
-    activity_tracker.record_event("project_detect", summary=summary, path=data["root"])
-    return output
 
 
 @mcp.tool()
@@ -7766,20 +7872,11 @@ def file_digest(path: str, max_bytes: int = 32_000_000, token: str = "",
                 approval: str = "", extra_roots: str = "") -> str:
     """Stream a guarded regular file into a fixed SHA-256 content digest."""
     _maybe_live_reload()
-    started = time.time()
     args = {"path": path, "max_bytes": max_bytes}
-    try:
-        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
-        data = content_digest.digest_file(path, max_bytes=max_bytes, extra_roots=trusted_roots)
-    except Exception as exc:
-        _record_direct_tool("file_digest", args, ok=False, started=started, summary=str(exc))
-        return "ERROR: %s" % exc
-    summary = "%d byte(s)%s" % (data["bytes"], ", incomplete" if data["sha256"] is None else "")
-    output = content_digest.format_digest(data)
-    _record_direct_tool("file_digest", args, ok=data["sha256"] is not None,
-                        started=started, summary=summary, output=output)
-    activity_tracker.record_event("file_digest", summary=summary, path=data["path"])
-    return output
+    return _run_read_only_inspection(
+        "file_digest", args, token=token, approval=approval,
+        extra_roots=extra_roots,
+    )
 
 
 @mcp.tool()
@@ -7791,30 +7888,15 @@ def directory_digest(
 ) -> str:
     """Build a guarded deterministic SHA-256 file manifest and tree Merkle."""
     _maybe_live_reload()
-    started = time.time()
     args = {
         "path": path, "max_depth": max_depth, "max_files": max_files,
         "max_total_bytes": max_total_bytes, "max_file_bytes": max_file_bytes,
         "max_results": max_results,
     }
-    try:
-        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
-        data = content_digest.digest_directory(
-            path, max_depth=max_depth, max_files=max_files,
-            max_total_bytes=max_total_bytes, max_file_bytes=max_file_bytes,
-            max_results=max_results, extra_roots=trusted_roots,
-        )
-    except Exception as exc:
-        _record_direct_tool("directory_digest", args, ok=False, started=started, summary=str(exc))
-        return "ERROR: %s" % exc
-    summary = "%d file(s), %d byte(s)%s" % (
-        len(data["manifest"]), data["bytes"], " complete" if data["complete"] else " incomplete",
+    return _run_read_only_inspection(
+        "directory_digest", args, token=token, approval=approval,
+        extra_roots=extra_roots,
     )
-    output = content_digest.format_digest(data)
-    _record_direct_tool("directory_digest", args, ok=data["complete"], started=started,
-                        summary=summary, output=output)
-    activity_tracker.record_event("directory_digest", summary=summary, path=data["root"])
-    return output
 
 
 @mcp.tool()
@@ -7831,26 +7913,16 @@ def archive_list(
 ) -> str:
     """Prevalidate and list a bounded ZIP/TAR without extracting it."""
     _maybe_live_reload()
-    started = time.time()
-    args = {"path": path, "max_entries": max_entries, "max_results": max_results}
-    try:
-        if extra_roots and not _file_bypass_allowed(token, approval):
-            raise PermissionError("extra_roots requires developer authorization or approval")
-        data = archive_tools.list_archive(
-            path, max_entries=max_entries, max_file_bytes=max_file_bytes,
-            max_total_bytes=max_total_bytes, max_ratio=max_ratio,
-            max_path_depth=max_path_depth, max_results=max_results,
-            max_seconds=max_seconds, extra_roots=extra_roots,
-        )
-    except Exception as exc:
-        _record_direct_tool("archive_list", args, ok=False, started=started, summary=str(exc))
-        return "ERROR: %s" % exc
-    output = archive_tools.format_result(data)
-    _record_direct_tool("archive_list", args, ok=data.get("valid", False), started=started,
-                        summary="%d entries" % data.get("entry_count", 0), output=output)
-    activity_tracker.record_event("archive_list", summary="%d entries" % data.get("entry_count", 0),
-                                  path=data.get("source", ""))
-    return output
+    args = {
+        "path": path, "max_entries": max_entries,
+        "max_file_bytes": max_file_bytes, "max_total_bytes": max_total_bytes,
+        "max_ratio": max_ratio, "max_path_depth": max_path_depth,
+        "max_results": max_results, "max_seconds": max_seconds,
+    }
+    return _run_read_only_inspection(
+        "archive_list", args, token=token, approval=approval,
+        extra_roots=extra_roots,
+    )
 
 
 @mcp.tool()
@@ -7908,28 +7980,10 @@ def data_inspect(
     archive members, sample rows).
     """
     _maybe_live_reload()
-    started = time.time()
-    try:
-        data = file_ops.inspect_data(
-            path,
-            max_bytes=max_bytes,
-            extra_roots=extra_roots,
-            bypass=_file_bypass_allowed(token, approval),
-            developer_authorized=_file_developer_allowed(token),
-        )
-    except Exception as e:
-        _record_direct_tool("data_inspect", {"path": path}, ok=False, started=started, summary=str(e))
-        return "ERROR: %s" % e
-    _record_direct_tool(
-        "data_inspect", {"path": path}, ok=True, started=started,
-        summary="%s %s bytes" % (data.get("kind", "?"), data.get("bytes", 0)),
+    return _run_read_only_inspection(
+        "data_inspect", {"path": path, "max_bytes": max_bytes},
+        token=token, approval=approval, extra_roots=extra_roots,
     )
-    activity_tracker.record_event(
-        "data_inspect",
-        summary="%s (%s bytes)" % (data.get("kind", "?"), data.get("bytes", 0)),
-        path=data.get("path", ""),
-    )
-    return _format_file_result("data inspect", data)
 
 
 @mcp.tool()
@@ -7949,45 +8003,16 @@ def data_query(
 ) -> str:
     """Run a bounded read-only SQLite or structured text data query."""
     _maybe_live_reload()
-    started = time.time()
     args = {
         "path": path, "sql": sql, "projection_json": projection_json,
         "filters_json": filters_json, "max_rows": max_rows,
         "max_columns": max_columns, "max_output_bytes": max_output_bytes,
         "max_scan_bytes": max_scan_bytes, "timeout": timeout,
     }
-    try:
-        result = data_query_module.query_data(
-            path,
-            sql=sql,
-            projection=projection_json,
-            filters=filters_json,
-            max_rows=max_rows,
-            max_columns=max_columns,
-            max_output_bytes=max_output_bytes,
-            max_scan_bytes=max_scan_bytes,
-            timeout=timeout,
-            extra_roots=extra_roots,
-            bypass=_file_bypass_allowed(token, approval),
-            developer_authorized=_file_developer_allowed(token),
-        )
-    except Exception as exc:
-        _record_direct_tool(
-            "data_query", args, ok=False, started=started, summary=str(exc),
-        )
-        return "ERROR: %s" % exc
-    output = data_query_module.encode_result(result)
-    _record_direct_tool(
-        "data_query", args, ok=True, started=started,
-        summary="%s %d row(s)" % (result["kind"], result["count"]),
-        output=output,
+    return _run_read_only_inspection(
+        "data_query", args, token=token, approval=approval,
+        extra_roots=extra_roots,
     )
-    activity_tracker.record_event(
-        "data_query",
-        summary="%s (%d row(s))" % (result["kind"], result["count"]),
-        path=result["path"],
-    )
-    return output
 
 
 @mcp.tool()
@@ -8068,7 +8093,7 @@ def file_write(
         activity_tracker.record_file_change(
             "create_directory", created_directory, summary="parent created by file_write",
         )
-    _record_file_activity("write", data)
+    _record_file_activity("write", data, preview=content, preview_kind="content")
     return _format_file_result("file write", data)
 
 
@@ -8285,6 +8310,8 @@ def text_patch(
                 "create" if row["action"] == "create" else "edit",
                 str(Path(data["root"]) / Path(*row["path"].split("/"))),
                 summary="text_patch %s" % row["action"],
+                preview=patch,
+                preview_kind="diff",
             )
     return output
 
@@ -8316,7 +8343,10 @@ def file_edit(
         _record_direct_tool("file_edit", {"path": path, "count": count}, ok=False, started=started, summary=str(e))
         return "ERROR: %s" % e
     _record_direct_tool("file_edit", {"path": path, "count": count}, ok=True, started=started, summary="%s replacement(s)" % data.get("replacements", 0))
-    _record_file_activity("edit", data)
+    diff_preview = "--- selected text\n+++ replacement text\n- %s\n+ %s" % (old, new)
+    _record_file_activity(
+        "edit", data, preview=diff_preview, preview_kind="diff",
+    )
     return _format_file_result("file edit", data)
 
 
@@ -8498,9 +8528,14 @@ def workspace_inventory(
     approval: str = "",
     extra_roots: str = "",
 ) -> str:
-    """Summarize a guarded workspace with explicit traversal budgets."""
+    """Summarize a guarded workspace; ignored paths require developer authentication."""
     _maybe_live_reload()
     started = time.time()
+    policy_error = _include_ignored_error(
+        "workspace_inventory", include_ignored, token,
+    )
+    if policy_error:
+        return policy_error
     args = {
         "path": path, "max_entries": max_entries,
         "timeout_seconds": timeout_seconds, "top_n": top_n,
@@ -8580,35 +8615,14 @@ def dependency_inventory(
 ) -> str:
     """Parse bounded dependency manifests and lockfiles without execution/network."""
     _maybe_live_reload()
-    started = time.time()
     args = {
         "path": path, "max_depth": max_depth, "max_files": max_files,
         "max_total_bytes": max_total_bytes, "max_results": max_results,
     }
-    try:
-        data = dependency_inventory_tool.dependency_inventory(
-            path,
-            max_depth=max_depth,
-            max_files=max_files,
-            max_total_bytes=max_total_bytes,
-            max_results=max_results,
-            extra_roots=extra_roots,
-            bypass=_file_bypass_allowed(token, approval),
-        )
-    except Exception as exc:
-        _record_direct_tool(
-            "dependency_inventory", args, ok=False, started=started,
-            summary=str(exc),
-        )
-        return "ERROR: %s" % exc
-    output = json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False)
-    _record_direct_tool(
-        "dependency_inventory", args, ok=True, started=started,
-        summary="%d dependencies from %d files" % (
-            len(data["items"]), data["files_read"],
-        ), output=output,
+    return _run_read_only_inspection(
+        "dependency_inventory", args, token=token, approval=approval,
+        extra_roots=extra_roots,
     )
-    return output
 
 
 @mcp.tool()
@@ -8620,15 +8634,20 @@ def directory_tree(
     token: str = "",
     approval: str = "",
     extra_roots: str = "",
+    include_ignored: bool = False,
 ) -> str:
-    """List a bounded guarded folder tree with file sizes."""
+    """List a bounded guarded tree; ignored paths require developer authentication."""
     _maybe_live_reload()
     started = time.time()
+    policy_error = _include_ignored_error("directory_tree", include_ignored, token)
+    if policy_error:
+        return policy_error
     args = {"path": path, "depth": depth, "max_entries": max_entries}
     try:
         data = workbench.directory_tree(
             path, depth=depth, max_entries=max_entries,
-            include_hidden=include_hidden, extra_roots=extra_roots,
+            include_hidden=include_hidden, include_ignored=include_ignored,
+            extra_roots=extra_roots,
             bypass=_file_bypass_allowed(token, approval),
         )
     except Exception as exc:
@@ -8735,7 +8754,7 @@ def text_search(
     approval: str = "",
     extra_roots: str = "",
 ) -> str:
-    """Search text inside guarded workspace files with line evidence.
+    """Search guarded files; ignored paths require developer authentication.
 
     `query` is matched LITERALLY against file contents -- a substring, or a
     regular expression when regex=True. It is NOT a description of what you are
@@ -8754,6 +8773,9 @@ def text_search(
     """
     _maybe_live_reload()
     started = time.time()
+    policy_error = _include_ignored_error("text_search", include_ignored, token)
+    if policy_error:
+        return policy_error
     args = {
         "query": query, "root": root, "glob": glob, "regex": regex,
         "max_entries": max_entries, "timeout_seconds": timeout_seconds,
@@ -8802,9 +8824,12 @@ def script_search(
     approval: str = "",
     extra_roots: str = "",
 ) -> str:
-    """Find runnable scripts under guarded roots and identify their runner."""
+    """Find guarded scripts; ignored paths require developer authentication."""
     _maybe_live_reload()
     started = time.time()
+    policy_error = _include_ignored_error("script_search", include_ignored, token)
+    if policy_error:
+        return policy_error
     args = {
         "query": query, "root": root, "max_entries": max_entries,
         "timeout_seconds": timeout_seconds,
@@ -8901,6 +8926,104 @@ def workspace_run(
 
 
 @mcp.tool()
+def process_list(max_processes: int = 128, max_seconds: float = 0.5) -> str:
+    """List bounded process metadata when host inspection is explicitly enabled."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"max_processes": max_processes, "max_seconds": max_seconds}
+    try:
+        data = process_risk_module.list_processes(
+            max_processes=max_processes, max_seconds=max_seconds,
+        )
+    except Exception as exc:
+        _record_direct_tool("process_list", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = json.dumps(data, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    _record_direct_tool(
+        "process_list", args, ok=bool(data.get("ok")), started=started,
+        summary="%s; %d process(es)" % (data.get("status"), data.get("process_count", 0)),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def process_memory_risk_inspect(
+    pid: int,
+    max_bytes: int = 4 * 1024 * 1024,
+    max_regions: int = 256,
+    max_seconds: float = 1.0,
+) -> str:
+    """Inspect one PID for fixed memory-risk indicators without returning content."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "pid": pid, "max_bytes": max_bytes, "max_regions": max_regions,
+        "max_seconds": max_seconds,
+    }
+    try:
+        data = process_risk_module.inspect_process_memory(
+            pid, max_bytes=max_bytes, max_regions=max_regions,
+            max_seconds=max_seconds,
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "process_memory_risk_inspect", args, ok=False, started=started,
+            summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = json.dumps(data, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    _record_direct_tool(
+        "process_memory_risk_inspect", args, ok=bool(data.get("ok")),
+        started=started,
+        summary="%s; %s risk" % (data.get("status"), data.get("risk", "unknown")),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def artifact_risk_inspect(
+    path: str,
+    max_scan_bytes: int = 16 * 1024 * 1024,
+    max_seconds: float = 5.0,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Statically inspect a guarded document, executable, script, or binary."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"path": path, "max_scan_bytes": max_scan_bytes, "max_seconds": max_seconds}
+    trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
+    try:
+        data = artifact_risk_module.inspect_artifact(
+            path,
+            max_scan_bytes=max_scan_bytes,
+            max_seconds=max_seconds,
+            extra_roots=trusted_roots,
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "artifact_risk_inspect", args, ok=False, started=started,
+            summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = artifact_risk_module.format_result(data)
+    _record_direct_tool(
+        "artifact_risk_inspect", args, ok=True, started=started,
+        summary="%s risk; %s" % (data.get("risk"), data.get("kind", "artifact")),
+        output=output,
+    )
+    activity_tracker.record_event(
+        "artifact_risk_inspect",
+        summary="%s risk; %s" % (data.get("risk"), data.get("kind", "artifact")),
+        path=data.get("path", ""),
+    )
+    return output
+
+
+@mcp.tool()
 def script_run(
     path: str,
     args_json: str = "[]",
@@ -8908,6 +9031,7 @@ def script_run(
     stdin: str = "",
     timeout: int = 30,
     max_output: int = 128000,
+    risk_policy: str = "",
     token: str = "",
     approval: str = "",
     extra_roots: str = "",
@@ -8915,17 +9039,56 @@ def script_run(
     """Run a guarded script with its known interpreter and bounded output."""
     _maybe_live_reload()
     started = time.time()
-    args = {"path": path, "args_json": args_json, "cwd": cwd, "timeout": timeout}
+    args = {
+        "path": path, "args_json": args_json, "cwd": cwd, "timeout": timeout,
+        "risk_policy": risk_policy,
+    }
     try:
+        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
+        risk = artifact_risk_module.enforce_execution_policy(
+            path, requested=risk_policy, extra_roots=trusted_roots,
+        )
+        if str(risk.get("policy", "")).startswith("deny-"):
+            # A scan followed by a pathname-based interpreter launch is not an
+            # exact-file handoff: another same-user process could replace the
+            # path between those operations. Until the runner can execute the
+            # already-inspected handle cross-platform, enforcing policies fail
+            # closed even when the static result itself is below the threshold.
+            refused = dict(risk)
+            refused.update({
+                "denied": True,
+                "denial_reason": "exact_execution_handoff_unavailable",
+            })
+            raise artifact_risk_module.ArtifactRiskDenied(refused)
         data = workbench.run_script(
             path, args_json=args_json, cwd=cwd, stdin=stdin, timeout=timeout,
             max_output=max_output, extra_roots=extra_roots,
             bypass=_file_bypass_allowed(token, approval),
         )
+    except artifact_risk_module.ArtifactRiskDenied as exc:
+        output = (
+            "artifact risk: %s\nexecution denied by effective policy %s"
+            % (
+                artifact_risk_module.format_result(exc.result),
+                exc.result.get("policy", "unknown"),
+            )
+        )
+        _record_direct_tool(
+            "script_run", args, ok=False, started=started,
+            summary=str(exc), output=output,
+        )
+        return output
     except Exception as exc:
         _record_direct_tool("script_run", args, ok=False, started=started, summary=str(exc))
         return "ERROR: %s" % exc
-    output = _format_run_result("script run", data)
+    output = (
+        "artifact risk: %s\n%s\n%s"
+        % (
+            artifact_risk_module.format_result(risk),
+            "execution allowed by effective policy %s" % risk.get("policy", "off"),
+            _format_run_result("script run", data),
+        )
+    )
     _record_direct_tool(
         "script_run", args, ok=data["ok"], started=started,
         summary="exit %s" % data.get("returncode"),
@@ -9111,6 +9274,110 @@ def run_project(
         {"timeout": timeout},
         ok=ok, started=started,
         summary=("ok" if ok else "failed"),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def isolated_run(
+    image: str,
+    argv_json: str,
+    project: str,
+    stdin: str = "",
+    writable_workspace: bool = False,
+    timeout: int = 30,
+    memory_mb: int = 512,
+    cpus: float = 1.0,
+    pids: int = 64,
+    output_bytes: int = 131072,
+    acknowledge_isolation_limits: bool = False,
+    token: str = "",
+    approval: str = "",
+    write_approval: str = "",
+) -> str:
+    """Run an installed Linux container image under a fixed isolation policy.
+
+    This direct MCP tool requires developer authentication, a host approval
+    secret, and explicit risk acknowledgement in addition to the local ``ask``
+    policy. Writable binds require a second host secret. It is intentionally
+    unavailable to Sonder agents and autopilot. ``argv_json``
+    must be a JSON string array. The exact absolute ``project`` directory is the
+    only host bind and is read-only unless the host explicitly sets
+    ``writable_workspace=true``. Docker/Podman flags, mounts, devices, user,
+    environment, sockets, and privileges are not caller-configurable.
+
+    The fixed policy disables networking, uses a read-only root filesystem,
+    drops all capabilities, enables no-new-privileges, scrubs the process
+    environment, and caps time, output, memory, CPU, PIDs, stdin, and /tmp.
+    This relies on the external runtime and host kernel and is not escape-proof.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    ok = False
+    def deny(code: str, message: str) -> str:
+        _record_direct_tool(
+            "isolated_run",
+            {"denial": code, "writable_workspace": writable_workspace is True},
+            ok=False, started=started, summary=code, output=message,
+        )
+        return message
+
+    account = _admin_account_from_token(token) if token else None
+    authorized, _message = admin_auth.require(account, "developer")
+    expected = os.environ.get("SONDER_ISOLATED_APPROVAL_CODE", "")
+    approval_ok = bool(
+        expected and approval and hmac.compare_digest(approval, expected)
+    )
+    if not authorized or not approval_ok:
+        return deny("authorization-denied", (
+            "ERROR: isolated_run requires a developer token and the host's "
+            "SONDER_ISOLATED_APPROVAL_CODE."
+        ))
+    if acknowledge_isolation_limits is not True:
+        return deny(
+            "risk-acknowledgement-denied",
+            "ERROR: acknowledge_isolation_limits=true is required.",
+        )
+    if writable_workspace is True:
+        expected_write = os.environ.get("SONDER_ISOLATED_WRITE_APPROVAL_CODE", "")
+        if not (
+            expected_write
+            and write_approval
+            and hmac.compare_digest(write_approval, expected_write)
+        ):
+            return deny("writable-authorization-denied", (
+                "ERROR: writable_workspace requires the separate host "
+                "SONDER_ISOLATED_WRITE_APPROVAL_CODE."
+            ))
+    try:
+        result = isolated_runner.run_isolated(
+            image=image,
+            argv_json=argv_json,
+            project=project,
+            stdin=stdin,
+            writable_workspace=writable_workspace,
+            timeout=timeout,
+            memory_mb=memory_mb,
+            cpus=cpus,
+            pids=pids,
+            output_bytes=output_bytes,
+        )
+        ok = bool(result.get("ok"))
+    except (OSError, ValueError) as exc:
+        _record_direct_tool(
+            "isolated_run",
+            {"failure": "policy-or-runtime-error",
+             "writable_workspace": writable_workspace is True},
+            ok=False, started=started, summary="isolated runner rejected request",
+        )
+        return "ERROR: %s" % exc
+    output = isolated_runner.format_result(result)
+    _record_direct_tool(
+        "isolated_run",
+        {"image": image, "project": project,
+         "writable_workspace": writable_workspace is True},
+        ok=ok, started=started, summary=("ok" if ok else "failed"),
         output=output,
     )
     return output
@@ -9746,9 +10013,12 @@ def _loop_dispatch(action):
             limit=action.get("limit", 20),
         ))
     if action_type in ("master_capacity", "agent_capacity"):
-        return _loop_text_result("master_capacity", master_capacity(
-            requested_agents=action.get("requested_agents", action.get("agents", 0)),
-        ))
+        capacity_args = {
+            "requested_agents": action.get("requested_agents", action.get("agents", 0)),
+        }
+        if "worker_cap" in action:
+            capacity_args["worker_cap"] = action.get("worker_cap")
+        return _loop_text_result("master_capacity", master_capacity(**capacity_args))
     if action_type in ("master_cancel", "agent_cancel"):
         return _loop_text_result("master_cancel", master_cancel(
             agent_id=action.get("agent_id", action.get("selector", "")),
@@ -9763,6 +10033,7 @@ def _loop_dispatch(action):
             task=action.get("task", action.get("prompt", "")),
             mode=action.get("mode", "ask"),
             agents=action.get("agents", 0),
+            worker_cap=action.get("worker_cap", 0),
             tier=action.get("tier", "auto"),
             learn=action.get("learn", False),
             project=action.get("project", ""),
@@ -9869,10 +10140,34 @@ def _loop_dispatch(action):
             stdin=action.get("stdin", ""),
             timeout=action.get("timeout", 30),
             max_output=action.get("max_output", 128000),
+            risk_policy=action.get("risk_policy", ""),
             token=action.get("token", ""),
             approval=action.get("approval", ""),
             extra_roots=action.get("extra_roots", ""),
         ))
+    if action_type == "artifact_risk_inspect":
+        return _loop_text_result("artifact_risk_inspect", artifact_risk_inspect(
+            path=action.get("path", ""),
+            max_scan_bytes=action.get("max_scan_bytes", 16 * 1024 * 1024),
+            max_seconds=action.get("max_seconds", 5.0),
+            token=action.get("token", ""),
+            approval=action.get("approval", ""),
+            extra_roots=action.get("extra_roots", ""),
+        ))
+    if action_type == "process_list":
+        return _loop_text_result("process_list", process_list(
+            max_processes=action.get("max_processes", 128),
+            max_seconds=action.get("max_seconds", 0.5),
+        ))
+    if action_type == "process_memory_risk_inspect":
+        return _loop_text_result(
+            "process_memory_risk_inspect", process_memory_risk_inspect(
+                pid=action.get("pid", 0),
+                max_bytes=action.get("max_bytes", 4 * 1024 * 1024),
+                max_regions=action.get("max_regions", 256),
+                max_seconds=action.get("max_seconds", 1.0),
+            ),
+        )
     if action_type == "image_inspect":
         return _loop_text_result("image_inspect", image_inspect(
             path=action.get("path", ""),
@@ -10141,8 +10436,9 @@ def loop(
 def workflow_list() -> str:
     """List reusable named workflows stored in workflows.json."""
     _maybe_live_reload()
-    workflows, path = workflow_store.ensure_workflows()
-    return "workflows: %s\n\n%s" % (path, workflow_store.format_workflows(workflows))
+    from sonder_runtime.application.workflows import render_workflow_result
+
+    return render_workflow_result(_application().workflows.list())
 
 
 @mcp.tool()
@@ -10152,17 +10448,11 @@ def workflow_save(name: str, actions_json: str, description: str = "") -> str:
     `actions_json` may be a JSON list or {"actions": [...]}.
     """
     _maybe_live_reload()
-    try:
-        parsed = json.loads(actions_json)
-    except json.JSONDecodeError as e:
-        return "ERROR: actions_json is not valid JSON: %s" % e
-    actions = parsed.get("actions") if isinstance(parsed, dict) else parsed
-    try:
-        workflow, path = workflow_store.save_workflow(name, actions, description)
-    except ValueError as e:
-        return "ERROR: %s" % e
-    return "Saved workflow '%s' to %s (%d actions)." % (
-        workflow_store.normalize_name(name), path, len(workflow["actions"]))
+    from sonder_runtime.application.workflows import render_workflow_result
+
+    return render_workflow_result(
+        _application().workflows.save(name, actions_json, description)
+    )
 
 
 @mcp.tool()
@@ -10175,38 +10465,26 @@ def workflow_run(
 ) -> str:
     """Run a saved workflow through the bounded loop engine."""
     _maybe_live_reload()
-    try:
-        workflow = workflow_store.get_workflow(name)
-    except ValueError as e:
-        return "ERROR: %s" % e
-    if workflow is None:
-        return "ERROR: no workflow named '%s'." % name
-    result = code_runner.run_loop(
-        workflow["actions"],
+    from sonder_runtime.application.workflows import render_workflow_result
+
+    result = _application().workflows.run(
+        name,
         _loop_dispatch,
         max_iterations=max_iterations,
         stop_on_failure=stop_on_failure,
         stop_on_success=stop_on_success,
         delay_seconds=delay_seconds,
     )
-    header = "workflow: %s\n%s\n" % (
-        workflow_store.normalize_name(name),
-        workflow.get("description") or "(no description)",
-    )
-    return header + code_runner.format_loop_result(result)
+    return render_workflow_result(result)
 
 
 @mcp.tool()
 def workflow_delete(name: str) -> str:
     """Delete a saved workflow from workflows.json."""
     _maybe_live_reload()
-    try:
-        existed, path = workflow_store.delete_workflow(name)
-    except ValueError as e:
-        return "ERROR: %s" % e
-    if not existed:
-        return "No workflow named '%s' existed. File unchanged except normalization: %s" % (name, path)
-    return "Deleted workflow '%s' from %s." % (workflow_store.normalize_name(name), path)
+    from sonder_runtime.application.workflows import render_workflow_result
+
+    return render_workflow_result(_application().workflows.delete(name))
 
 
 @mcp.tool()
@@ -10851,45 +11129,20 @@ def learn_preference(text: str, scope: str = "global") -> str:
     prompts and apply without restarting.
     """
     _maybe_live_reload()
-    extracted = preference_learning.extract_preferences(text)
-    text = extracted[0] if extracted else preference_learning.normalize_preference(text)
-    if not text:
-        return "ERROR: preference text is empty."
-    key = preference_learning.preference_key(text)
-    conn = _open_db()
-    try:
-        memory_store.upsert_preference(
-            conn,
-            memory_store.new_id(),
-            scope or "global",
-            key,
-            text,
-            confidence=0.8,
-        )
-        rows = memory_store.preferences_for_scope(conn, scope or "global", limit=20)
-    finally:
-        conn.close()
-    return "Learned preference: %s\n\n%s" % (
-        text,
-        preference_learning.format_preferences(rows),
-    )
+    from sonder_runtime.application.preferences import render_preference_result
+
+    return render_preference_result(_application().preferences.learn(text, scope))
 
 
 @mcp.tool()
 def preferences_status(include_disabled: bool = False, limit: int = 50) -> str:
     """List learned user preferences that shape future responses."""
     _maybe_live_reload()
-    limit = _safe_limit(limit, 50, 200)
-    conn = _open_db()
-    try:
-        rows = memory_store.all_preferences(
-            conn,
-            limit=limit,
-            include_disabled=bool(include_disabled),
-        )
-    finally:
-        conn.close()
-    return "learned preferences\n%s" % preference_learning.format_preferences(rows)
+    from sonder_runtime.application.preferences import render_preference_result
+
+    return render_preference_result(
+        _application().preferences.status(include_disabled, limit)
+    )
 
 
 def preference_command(arg: str = "") -> str:
@@ -10901,12 +11154,11 @@ def preference_command(arg: str = "") -> str:
         target = text[7:].strip()
         if not target:
             return "usage: /prefer forget <id-or-key>"
-        conn = _open_db()
-        try:
-            changed = memory_store.set_preference_enabled(conn, target, False)
-        finally:
-            conn.close()
-        return "forgot %d matching preference(s)" % changed
+        from sonder_runtime.application.preferences import render_preference_result
+
+        return render_preference_result(
+            _application().preferences.disable(target)
+        )
     if lower.startswith("learn "):
         text = text[6:].strip()
     return learn_preference(text)
@@ -11138,7 +11390,9 @@ def evaluation_history_status(
         "tolerance": tolerance, "max_records": max_records,
     }
     try:
-        data = eval_history.history_status(
+        data = eval_history_use_cases.EvaluationHistoryService(
+            eval_history_adapter.LegacyEvaluationHistoryReader()
+        ).status(
             model=model,
             model_digest=model_digest,
             suite=suite,
@@ -11298,7 +11552,7 @@ def repo_blame(
 def tool_manifest() -> str:
     """List the sonder-runtime MCP tools and what they are for."""
     tools = {
-        "agent": "Run a Claude-like tool-calling loop that can use local tools and web tools.",
+        "agent": "Run a Claude-like tool-calling loop that can use local tools and web tools. Exact-ack unsafe lab mode removes its host tool policy only on a loopback, unprivileged process.",
         "autopilot_start/autopilot_status/autopilot_resume/autopilot_pause/autopilot_cancel": "Run a restart-persistent local goal with evidence-aware checkpoints, bounded replans, host tool gates, and explicit lifecycle control.",
         "runtime_policy_status/runtime_policy_update": "Inspect or guarded-edit shared hot-reloadable local model mappings and execution-lane tiers; cloud opt-in stays separate.",
         "mcp_runtime_status/live_reload_status": "Audit atomic MCP source/tool convergence, refresh history, list-change signaling, and fail-closed reload errors.",
@@ -11318,13 +11572,15 @@ def tool_manifest() -> str:
         "file_digest/directory_digest": "Stream guarded files into SHA-256 and build deterministic relative-path manifests with fail-closed complete or explicitly partial directory Merkle roots.",
         "archive_list/archive_extract": "Prevalidate bounded ZIP/TAR manifests or transactionally extract them to a new non-overwriting workspace directory.",
         "archive_create": "Transactionally create a bounded deterministic ZIP/TAR from explicit guarded project inputs without overwriting.",
+        "artifact_risk_inspect": "Statically inspect guarded PDFs, PE/ELF/Mach-O executables, scripts, or opaque binaries for bounded risk indicators without executing or returning content.",
+        "process_list/process_memory_risk_inspect": "Opt-in bounded Windows process metadata and fixed-indicator memory-risk inspection; never returns command lines, paths, addresses, strings, or raw bytes.",
         "log_inspect": "Inspect one guarded text log with fixed level/timestamp/source extraction, failure clusters, repeats, and bounded context.",
         "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
         "environment_status": "Report the host OS, available shells (PowerShell/cmd/bash/wsl), and installed toolchains -- check before choosing a command shape or assuming a tool exists.",
         "hardware_profile": "Detect cross-vendor accelerators and report conservative resident, unified-memory, and GPU+RAM-spill model plans without changing host settings.",
         "data_inspect/data_query/sqlite_mutate": "Preview structured data, run bounded read-only queries, or explicitly preview/apply one guarded parameterized SQLite DML statement.",
         "data_convert": "Preview or atomically create a non-overwriting JSON/JSONL/CSV/TSV conversion with explicit ordered fields.",
-        "program_search/script_search/workspace_run/script_run/image_inspect": "Discover installed programs and workspace scripts, run bounded argv-only processes, and inspect image metadata.",
+        "program_search/script_search/workspace_run/script_run/image_inspect": "Discover installed programs and workspace scripts, run bounded argv-only processes, and inspect image metadata; script_run applies the operator execution-risk policy before launch.",
         "task_create/task_list/task_update/task_show/checklist_create/checklist_update/checklist_show": "Visible todo and ordered checklist state shared by console, app, agents, and MCP.",
         "workbench_agent": "Run an autonomous local tool loop with a guaranteed checklist, exact action transcript, validation gate, and end report.",
         "command_registry_list": "Inspect available slash commands by category, name, or risk.",
@@ -11332,6 +11588,7 @@ def tool_manifest() -> str:
         "permission_policy/permission_rule_set": "Inspect or guarded-edit local permission rules for tool actions.",
         "context_compaction_plan": "Preview when to summarize, split sessions, or reduce live context.",
         "run_code": "Run a bounded snippet: Python, JS/TypeScript, Bash, Ruby, Perl, PHP, Lua, R, Go, Java, Rust, PowerShell, C++, C#.",
+        "isolated_run": "Direct MCP-only, explicitly enabled and developer-authorized Docker/Podman execution with approved roots, separate writable approval, and a fixed resource-capped isolation policy.",
         "ground_artifact": "Validate in-memory non-code content with exact/contains/regex/JSON checks.",
         "artifact_ground": "Validate files or bundles with inferred writing, data, editable Office/media/timelines, UI, image, audio, and static or animated humanoid model recipes.",
         "run_project": "Run a bounded temporary multi-file project with optional build commands.",
@@ -11395,6 +11652,9 @@ AGENT_TOOL_HELP = """Available tools:
 - archive_list: {"path": "bundle.zip", "max_entries": 2000, "max_total_bytes": 256000000, "max_ratio": 100, "max_results": 2500}
 - archive_extract: {"source": "bundle.zip", "destination": "unpacked", "max_entries": 2000, "max_total_bytes": 256000000, "max_ratio": 100} -- creates a new directory; never overwrites
 - archive_create: {"root": ".", "inputs_json": ["src", "README.md"], "destination": "release.zip", "archive_format": "zip|tar", "deterministic": true} -- destination must be new and outside input directories
+- artifact_risk_inspect: {"path": "artifact.exe", "max_scan_bytes": 16777216, "max_seconds": 5} -- static indicators only; no content execution or raw content return
+- process_list: {"max_processes": 128, "max_seconds": 0.5} -- requires exact host opt-in; names/PIDs/counts only
+- process_memory_risk_inspect: {"pid": 1234, "max_bytes": 4194304, "max_regions": 256, "max_seconds": 1} -- fixed aggregate indicators only; never raw memory
 - log_inspect: {"path": "logs/app.log", "tail_lines": 0, "context_lines": 2, "max_file_bytes": 64000000, "max_scan_bytes": 4000000, "max_lines": 10000, "max_line_bytes": 4096, "max_results": 100, "max_output_bytes": 256000, "timeout": 5}
 - text_search: {"query": "TODO", "root": ".", "glob": "*.py", "regex": false, "max_results": 100}
 - file_write: {"path": "notes.txt", "content": "...", "mode": "create|overwrite|append"}
@@ -11411,7 +11671,7 @@ AGENT_TOOL_HELP = """Available tools:
 - script_search: {"query": "build", "root": ".", "max_results": 100}
 - program_search: {"query": "python", "max_results": 50}
 - workspace_run: {"program": "git", "args_json": ["status", "--short"], "cwd": ".", "timeout": 30}
-- script_run: {"path": "scripts/check.py", "args_json": [], "cwd": ".", "timeout": 30}
+- script_run: {"path": "scripts/check.py", "args_json": [], "cwd": ".", "timeout": 30, "risk_policy": "off|report|deny-high|deny-medium|deny-unknown"} -- request may strengthen but never weaken operator policy
 - image_inspect: {"path": "artifacts/generated/demo/icon.png"}
 - data_inspect: {"path": "data/records.jsonl", "max_bytes": 256000}
 - data_query: {"path": "data/records.jsonl", "sql": "", "projection_json": ["id", "/nested/name"], "filters_json": {"status": "active"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
@@ -11445,9 +11705,9 @@ AGENT_TOOL_HELP = """Available tools:
 - memory_embedding_backfill: {"limit": 25, "apply": false}
 - memory_interaction_embedding_backfill: {"limit": 25, "apply": false}
 - system_improvement_report: {}
-- master_orchestrate: {"task": "...", "mode": "ask|inline|delegate|fleet", "agents": 3, "tier": "code", "project": "/path/to/repo"}
+- master_orchestrate: {"task": "...", "mode": "ask|inline|delegate|fleet", "agents": 24, "worker_cap": 24, "tier": "code", "project": "/path/to/repo"} -- worker_cap is a per-run override bounded by the operator ceiling
 - master_status: {}
-- master_capacity: {"requested_agents": 0}
+- master_capacity: {"requested_agents": 0, "worker_cap": 0}
 - master_cancel: {"agent_id": "master-id|prefix|all"}
 - master_retry: {"agent_id": "master-id|prefix", "tier": "code"}
 - self_heal_check: {}
@@ -11476,7 +11736,7 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "file_read_range", "context_pack",
     "repo_status", "repo_diff",
     "repo_log", "repo_show", "repo_blame",
-    "project_detect", "data_inspect", "data_query", "archive_list",
+    "project_detect", "data_inspect", "data_query", "archive_list", "artifact_risk_inspect",
     "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
     "diagnostics", "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
@@ -11513,6 +11773,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - repo_show: {"path": ".", "revision": "HEAD", "file_path": "<required contained relative file>", "timeout": 5, "max_bytes": 256000}
 - repo_blame: {"path": ".", "file_path": "<required contained relative file>", "revision": "HEAD", "start_line": 1, "end_line": 100, "timeout": 5, "max_bytes": 256000}
 - archive_list: {"path": "<task-relevant ZIP or TAR>", "max_entries": 2000, "max_total_bytes": 256000000, "max_ratio": 100, "max_results": 2500}
+- artifact_risk_inspect: {"path": "<task-relevant document, executable, script, or binary>", "max_scan_bytes": 16777216, "max_seconds": 5}
 - log_inspect: {"path": "<task-relevant log file>", "tail_lines": 0, "context_lines": 2, "max_file_bytes": 64000000, "max_scan_bytes": 4000000, "max_lines": 10000, "max_line_bytes": 4096, "max_results": 100, "max_output_bytes": 256000, "timeout": 5}
 - text_search: {"query": "<exact task symbol or anchor>", "root": ".", "glob": "<task-relevant glob>", "max_results": 100}
 - script_search: {"query": "<task-relevant script name>", "root": ".", "max_results": 100}
@@ -11540,7 +11801,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - memory_privacy_review: {"sample_limit": 20}
 - system_improvement_report: {"session": "", "project": ""}
 - master_status: {}
-- master_capacity: {"requested_agents": 0}
+- master_capacity: {"requested_agents": 0, "worker_cap": 0}
 - self_heal_check: {}
 - status: {}
 - system_profile_text: {}
@@ -11555,8 +11816,48 @@ or
 """
 
 
-def _agent_tool_help(read_only=False):
-    return REPOSITORY_AGENT_TOOL_HELP if read_only else AGENT_TOOL_HELP
+def _agent_tool_help(read_only=False, cloud=False):
+    help_text = REPOSITORY_AGENT_TOOL_HELP if read_only else AGENT_TOOL_HELP
+    if not cloud:
+        return help_text
+    return "\n".join(
+        line for line in help_text.splitlines()
+        if not any(
+            line.lstrip().startswith("- %s:" % name)
+            for name in _CLOUD_AGENT_LOCAL_ONLY_TOOLS
+        )
+    )
+
+
+def _tool_capability_shadow_surfaces():
+    """Snapshot authoritative tool surfaces for opt-in drift validation."""
+    manager = getattr(mcp, "_tool_manager", None)
+    registered = getattr(manager, "_tools", {})
+    direct_names = frozenset(registered) if isinstance(registered, dict) else frozenset()
+    dispatch_tools = tool_capabilities.dispatch_names(_agent_dispatch)
+    return tool_capabilities.ShadowSurfaces(
+        direct_mcp_tools=direct_names,
+        tool_manifest=tool_manifest(),
+        repository_read_only_tools=REPOSITORY_READ_ONLY_TOOLS,
+        project_bound_agent_tools=_PROJECT_BOUND_AGENT_TOOLS,
+        project_scoped_tools=_PROJECT_SCOPED_PATH_TOOLS | _PROJECT_SCOPED_EXECUTION_TOOLS,
+        dispatch_tools=dispatch_tools,
+        hosted_agent_tools=(
+            dispatch_tools
+            - _CLOUD_AGENT_NESTED_MODEL_TOOLS
+            - _CLOUD_AGENT_LOCAL_ONLY_TOOLS
+        ),
+        deduplicated_inspection_tools=_AGENT_DEDUPLICATED_INSPECTION_TOOLS,
+        work_inspection_tools=_WORK_INSPECTION_TOOLS,
+        full_agent_help=AGENT_TOOL_HELP,
+        repository_agent_help=REPOSITORY_AGENT_TOOL_HELP,
+        hosted_agent_help=_agent_tool_help(cloud=True),
+    )
+
+
+def tool_capability_shadow_report():
+    """Validate descriptor drift without making descriptors authoritative."""
+    return tool_capabilities.format_shadow_report(_tool_capability_shadow_surfaces())
 
 
 def _repository_scope_path_error(tool_name, args, project_root):
@@ -11817,6 +12118,11 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
         return "ERROR: repository read-only tool args must be a JSON object."
     if tool_name not in REPOSITORY_READ_ONLY_TOOLS:
         return "ERROR: tool '%s' is not allowed by the repository read-only policy." % tool_name
+    if tool_name in _GIT_IGNORE_DISCOVERY_TOOLS and args.get("include_ignored"):
+        return (
+            "ERROR: repository read-only tool '%s' forbids include_ignored=true."
+            % tool_name
+        )
     forbidden = sorted(
         name for name in REPOSITORY_READ_ONLY_FORBIDDEN_ARGS.intersection(args)
         if not (
@@ -11836,7 +12142,7 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
     if scope_error:
         return scope_error
     try:
-        if tool_name in {"file_read", "file_digest", "file_read_range", "image_inspect", "data_inspect", "data_query", "log_inspect"}:
+        if tool_name in {"file_read", "file_digest", "file_read_range", "image_inspect", "data_inspect", "data_query", "log_inspect", "artifact_risk_inspect"}:
             file_ops.resolve_repository_read_path(
                 args.get("path", ""),
                 allow_workspace_root=False,
@@ -12331,6 +12637,14 @@ def _agent_dispatch(
     tool_name, args, allow_web=True, read_only=False, allow_location=False,
     repository_extra_roots="",
 ):
+    unsafe = unsafe_lab.active()
+    if unsafe:
+        # The acknowledgement is specifically permission to remove model-loop
+        # policy.  Direct MCP tool contracts remain explicit and unchanged.
+        allow_web = True
+        read_only = False
+        allow_location = True
+        repository_extra_roots = ""
     tool_name = (tool_name or "").strip()
     args = args or {}
     if not isinstance(args, dict):
@@ -12520,6 +12834,7 @@ def _agent_dispatch(
             depth=args.get("depth", 2),
             max_entries=args.get("max_entries", 200),
             include_hidden=args.get("include_hidden", False),
+            include_ignored=args.get("include_ignored", False),
             token=args.get("token", ""),
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
@@ -12537,6 +12852,7 @@ def _agent_dispatch(
             query=args.get("query", "*"),
             root=args.get("root", ""),
             max_results=args.get("max_results", 50),
+            include_ignored=args.get("include_ignored", False),
             token=args.get("token", ""),
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
@@ -12920,9 +13236,31 @@ def _agent_dispatch(
             stdin=args.get("stdin", ""),
             timeout=args.get("timeout", 30),
             max_output=args.get("max_output", 128000),
+            risk_policy=args.get("risk_policy", ""),
             token=args.get("token", ""),
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "artifact_risk_inspect":
+        return artifact_risk_inspect(
+            path=args.get("path", ""),
+            max_scan_bytes=args.get("max_scan_bytes", 16 * 1024 * 1024),
+            max_seconds=args.get("max_seconds", 5.0),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "process_list":
+        return process_list(
+            max_processes=args.get("max_processes", 128),
+            max_seconds=args.get("max_seconds", 0.5),
+        )
+    if tool_name == "process_memory_risk_inspect":
+        return process_memory_risk_inspect(
+            pid=args.get("pid", 0),
+            max_bytes=args.get("max_bytes", 4 * 1024 * 1024),
+            max_regions=args.get("max_regions", 256),
+            max_seconds=args.get("max_seconds", 1.0),
         )
     if tool_name == "image_inspect":
         return image_inspect(
@@ -13058,9 +13396,12 @@ def _agent_dispatch(
             limit=args.get("limit", 20),
         )
     if tool_name in ("master_capacity", "agent_capacity"):
-        return master_capacity(
-            requested_agents=args.get("requested_agents", args.get("agents", 0)),
-        )
+        capacity_args = {
+            "requested_agents": args.get("requested_agents", args.get("agents", 0)),
+        }
+        if "worker_cap" in args:
+            capacity_args["worker_cap"] = args.get("worker_cap")
+        return master_capacity(**capacity_args)
     if tool_name in ("master_cancel", "agent_cancel"):
         return master_cancel(
             agent_id=args.get("agent_id", args.get("selector", "")),
@@ -13075,6 +13416,7 @@ def _agent_dispatch(
             task=args.get("task", args.get("prompt", "")),
             mode=args.get("mode", "ask"),
             agents=args.get("agents", 0),
+            worker_cap=args.get("worker_cap", 0),
             tier=args.get("tier", "auto"),
             learn=args.get("learn", False),
             project=args.get("project", ""),
@@ -13157,6 +13499,10 @@ def _agent_activity_command(tool_name, args):
         return "%s %s" % (
             str(args.get("method", "GET")).upper(), args.get("url", ""),
         )
+    if tool_name == "process_memory_risk_inspect":
+        return "pid=%s" % args.get("pid", "")
+    if tool_name == "process_list":
+        return "max_processes=%s" % args.get("max_processes", 128)
     path = args.get("path") or args.get("root") or ""
     if path:
         return str(path)
@@ -13172,7 +13518,7 @@ _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "archive_list", "archive_extract",
     "file_delete", "directory_create", "workspace_inventory", "dependency_inventory", "directory_tree",
     "file_find", "repository_symbol_index", "text_search", "script_search", "artifact_verify",
-    "artifact_ground", "scaffold_project", "archive_create", "repo_status", "repo_diff", "project_detect", "file_copy", "file_move",
+    "artifact_ground", "artifact_risk_inspect", "scaffold_project", "archive_create", "repo_status", "repo_diff", "project_detect", "file_copy", "file_move",
 })
 _PROJECT_SCOPED_EXECUTION_TOOLS = frozenset({"workspace_run", "script_run"})
 _AGENT_TOOL_ALIASES = {
@@ -13203,12 +13549,39 @@ _PROJECT_BOUND_AGENT_TOOLS = (
         "master_capacity", "self_heal_check", "status", "system_profile_text",
         "emotion_vector_status", "preferences_status", "context_policy_status",
         "environment_status", "hardware_profile",
+        "process_list", "process_memory_risk_inspect",
     })
 )
 _CLOUD_AGENT_NESTED_MODEL_TOOLS = frozenset({
     "offload", "master_orchestrate", "master_retry", "workflow_run",
     "game_reference_suite", "game_generate_and_test", "game_generation_campaign",
 })
+_CLOUD_AGENT_LOCAL_ONLY_TOOLS = frozenset({
+    "environment_status", "hardware_profile", "file_policy",
+    "workspace_inventory", "directory_tree", "file_find", "file_read",
+    "file_read_range", "file_digest", "text_search", "repo_status",
+    "repo_diff", "artifact_risk_inspect", "process_list",
+    "process_memory_risk_inspect",
+})
+
+
+def _cloud_agent_tool_policy_error(tool_name, *, unsafe=False):
+    """Keep host-data denial absolute; unsafe bypasses nested models only."""
+    if tool_name in _CLOUD_AGENT_LOCAL_ONLY_TOOLS:
+        return (
+            "ERROR: HOST POLICY: local-only tool '%s' is disabled inside a "
+            "hosted agent so private workspace or machine data cannot enter "
+            "the hosted model transcript." % tool_name
+        )
+    if tool_name in _CLOUD_AGENT_NESTED_MODEL_TOOLS:
+        if unsafe is True:
+            return ""
+        return (
+            "ERROR: HOST POLICY: nested model-spawning tool '%s' is disabled "
+            "inside a hosted agent so all hosted output remains in one "
+            "bounded ledger." % tool_name
+        )
+    return ""
 
 
 def _canonical_agent_tool_name(tool_name):
@@ -13912,18 +14285,18 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
     "text_search", "script_search", "program_search", "image_inspect", "repo_status", "repo_diff",
     "repo_log", "repo_show", "repo_blame",
-    "data_inspect", "data_query", "project_detect", "archive_list",
+    "data_inspect", "data_query", "project_detect", "archive_list", "artifact_risk_inspect",
     "memory_search", "learning_health_status", "evaluation_history_status",
     "memory_quality_report", "memory_privacy_review", "artifact_ground",
     "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",
-    "status", "diagnostics",
+    "status", "diagnostics", "process_list", "process_memory_risk_inspect",
 })
 _AGENT_FILE_EVIDENCE_TOOLS = frozenset({
     "workspace_inventory", "workspace_compare", "directory_tree", "file_read", "file_read_range",
     "file_digest", "directory_digest", "file_find", "text_search",
     "script_search", "image_inspect", "log_inspect", "data_inspect", "data_query", "project_detect",
     "context_pack", "repo_log", "repo_show", "repo_blame", "archive_list",
-    "dependency_inventory",
+    "dependency_inventory", "artifact_risk_inspect",
 })
 _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "directory_digest", "file_find",
@@ -13931,7 +14304,8 @@ _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
     "data_inspect", "data_query", "text_search", "script_search",
     "program_search", "image_inspect", "environment_status", "hardware_profile", "repo_status", "repo_diff", "project_detect",
-    "repo_log", "repo_show", "repo_blame", "archive_list",
+    "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
+    "process_list", "process_memory_risk_inspect",
 })
 _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "workflow_run",
@@ -14121,6 +14495,20 @@ def _agent_impl(
     public web search/fetch/weather when allow_web=True and web tools are on.
     """
     _maybe_live_reload()
+    unsafe = unsafe_lab.active()
+    if unsafe:
+        # Unsafe lab mode is for a disposable host where the model is the
+        # adversary under test. Remove all model-loop tool/root/read-only gates;
+        # bounded execution time and the direct MCP tool implementations remain.
+        allow_web = True
+        allow_location = True
+        read_only = False
+        require_file_evidence = False
+        project = ""
+        required_tool_names = ()
+        tool_allowlist = None
+        tool_policy = None
+        auto_checklist = False
     max_steps = _safe_limit(max_steps, 6, 20)
     model, cloud, augment, tier_label = _serve_target(tier, None)
     if tier_label == "cloud-disabled":
@@ -14137,24 +14525,39 @@ def _agent_impl(
                 project_scope="",
             )
         return project_error
-    system = _build_system(
-        system or
-        "You are a local tool-using coding agent. Inspect real workspace evidence before making claims. "
-        "For action tasks, use tools instead of merely describing commands. Prefer workspace_inventory, directory_tree, "
-        "text_search, file_read_range, and program_search for discovery; use guarded file tools for "
-        "mutations; validate every mutation with workspace_run, script_run, file_read_range, "
-        "image_inspect, artifact_verify, or another path-specific checker before returning final. "
-        "After editing a script, run that exact path "
-        "with script_run; an equivalent run_code snippet does not validate the on-disk file. "
-        "Never invent tool results. "
-        "Use web tools for current external information and cite fetched URLs in the final answer. "
-        "Your final answer must lead with the outcome, mention changed paths and checks, and disclose failures. "
-        # One deterministic line about the host, so the model picks the right
-        # command shape (Windows vs POSIX, which build tool exists) instead of
-        # guessing and burning steps on `ls` under cmd or a missing toolchain.
-        + environment_probe.agent_brief(),
-        False,
-        "",
+    if cloud:
+        default_agent_system = (
+            "You are a hosted tool-using coding agent. Use only the tools listed "
+            "in the task transcript; host policy may withhold private machine or "
+            "workspace capabilities. Never invent tool results. Use web tools "
+            "for current external information and cite fetched URLs in the final "
+            "answer. Lead with the outcome and disclose failures."
+        )
+    else:
+        default_agent_system = (
+            "You are a local tool-using coding agent. Inspect real workspace evidence before making claims. "
+            "For action tasks, use tools instead of merely describing commands. Prefer workspace_inventory, directory_tree, "
+            "text_search, file_read_range, and program_search for discovery; use guarded file tools for "
+            "mutations; validate every mutation with workspace_run, script_run, file_read_range, "
+            "image_inspect, artifact_verify, or another path-specific checker before returning final. "
+            "After editing a script, run that exact path "
+            "with script_run; an equivalent run_code snippet does not validate the on-disk file. "
+            "Never invent tool results. "
+            "Use web tools for current external information and cite fetched URLs in the final answer. "
+            "Your final answer must lead with the outcome, mention changed paths and checks, and disclose failures. "
+            # One deterministic line about the host, so a local model picks the
+            # right command shape instead of guessing. Never send this private
+            # machine inventory to a hosted agent.
+            + environment_probe.agent_brief()
+        )
+    # Hosted agents receive only the explicitly supplied/default hosted
+    # system text. _build_system also appends mutable local profile, emotion,
+    # goal, and runtime-identity blocks; those are useful local context but
+    # are not part of the caller's cloud disclosure consent.
+    system = (
+        system or default_agent_system
+        if cloud
+        else _build_system(system or default_agent_system, False, "")
     )
     agent_num_predict = (
         _CLOUD_AGENT_NUM_PREDICT if cloud else _LOCAL_AGENT_NUM_PREDICT
@@ -14235,7 +14638,11 @@ def _agent_impl(
     # A clear bare namespace label such as "default" remains checklist-only;
     # path-like typos were rejected above rather than failing open to Sonder's
     # own workspace.
-    transcript = "Task:\n%s\n\n%s" % (prompt, _agent_tool_help(read_only=read_only))
+    transcript = "Task:\n%s\n\n%s" % (
+        prompt, _agent_tool_help(read_only=read_only, cloud=cloud)
+    )
+    if unsafe:
+        transcript = "%s\n\n%s" % (unsafe_lab.WARNING, transcript)
     if project_scope:
         transcript += (
             "\n\nPROJECT ROOT: %s\nYour file/inspection tools are rooted at this "
@@ -14266,6 +14673,21 @@ def _agent_impl(
         except Exception:
             pass
 
+    def _attach_tool_evidence(text):
+        """Append exactly one host-owned evidence section.
+
+        Model text may quote or fabricate the public marker. Neutralize those
+        occurrences before adding the host ledger so downstream validation can
+        require one structural marker instead of trusting model-controlled
+        prose.
+        """
+        text = str(text or "")
+        marker = "=== TOOL EVIDENCE ==="
+        if include_evidence and observations:
+            text = text.replace(marker, "=== UNTRUSTED TOOL EVIDENCE MARKER ===")
+            text += "\n\n%s\n%s" % (marker, "\n\n".join(observations))
+        return text
+
     def finish_final(final):
         _teardown_speculation()
         final = str(final or "")
@@ -14292,8 +14714,7 @@ def _agent_impl(
                 "VALIDATION_FAILED: workspace changes were not successfully validated.\n\n"
                 + final
             )
-        if include_evidence and observations:
-            final += "\n\n=== TOOL EVIDENCE ===\n" + "\n\n".join(observations)
+        final = _attach_tool_evidence(final)
         activity_tracker.set_result_summary(
             final.splitlines()[0] if final else "agent completed"
         )
@@ -14318,6 +14739,14 @@ def _agent_impl(
         """
         _teardown_speculation()
         text = str(text or "")
+        # Early exits are still auditable outcomes.  A worker may have already
+        # collected valid, host-observed repository evidence before the model
+        # exhausted its step budget, repeated a cached inspection, or failed
+        # final synthesis.  Preserve that ledger exactly as finish_final does;
+        # otherwise the orchestrator sees a receipt naming a real evidence tool
+        # but no evidence section and incorrectly downgrades the whole lane to
+        # EVIDENCE_REQUIRED.
+        text = _attach_tool_evidence(text)
         if return_host_receipt:
             return autopilot_controller.HostTaskResult(
                 output=text,
@@ -14351,6 +14780,8 @@ def _agent_impl(
             )
         if not policy_error and tool_policy is not None:
             policy_error = str(tool_policy(tool_name, policy_tool_args) or "")
+        if not policy_error and cloud:
+            policy_error = _cloud_agent_tool_policy_error(tool_name)
         if not policy_error:
             policy_error = _repository_read_only_error(
                 tool_name,
@@ -14494,7 +14925,7 @@ def _agent_impl(
                     "Run or retry an exact validator now."
                 )
                 continue
-            if _AGENT_NEGATIVE_CLAIM_RE.search(final):
+            if not unsafe and _AGENT_NEGATIVE_CLAIM_RE.search(final):
                 claim_review = _agent_negative_claim_review(
                     prompt, final, observations, model, cloud=cloud,
                     cancel_check=cancel_check,
@@ -14623,15 +15054,9 @@ def _agent_impl(
             )
         if not policy_error and tool_policy is not None:
             policy_error = str(tool_policy(tool_name, policy_tool_args) or "")
-        if (
-            not policy_error
-            and cloud
-            and tool_name in _CLOUD_AGENT_NESTED_MODEL_TOOLS
-        ):
-            policy_error = (
-                "ERROR: HOST POLICY: nested model-spawning tool '%s' is disabled "
-                "inside a hosted agent so all hosted output remains in one "
-                "bounded ledger." % tool_name
+        if not policy_error and cloud:
+            policy_error = _cloud_agent_tool_policy_error(
+                tool_name, unsafe=unsafe,
             )
         if not policy_error and project_scope:
             policy_error = _repository_scope_path_error(
@@ -14697,9 +15122,16 @@ def _agent_impl(
                 )
             observation = (
                 "HOST CACHED INSPECTION: this identical call already succeeded; "
-                "reusing its prior observation without dispatching it again.\n"
+                "reusing its prior observation without dispatching it again. "
+                "Read the cached hit below and either finalize from it now or "
+                "change the arguments to inspect different evidence; do not repeat "
+                "this identical call.\n"
                 + successful_inspection_results[call_signature]
             )
+        elif cloud and tool_name == "tool_manifest":
+            # The direct/local manifest remains authoritative and complete,
+            # while a hosted model sees only the capabilities it may request.
+            observation = _agent_tool_help(read_only=read_only, cloud=True)
         elif read_only and tool_name in {"command_registry_list", "tool_manifest"}:
             observation = _agent_tool_help(read_only=True)
         else:
@@ -15053,8 +15485,8 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "dependency_inventory",
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "data_inspect", "data_query", "text_search", "script_search",
     "project_detect",
-    "repo_status", "repo_diff", "repo_log", "repo_show", "repo_blame", "archive_list",
-    "program_search", "image_inspect", "memory_search", "web_search",
+    "repo_status", "repo_diff", "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
+    "program_search", "image_inspect", "memory_search", "process_list", "process_memory_risk_inspect", "web_search",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
 })
@@ -15078,7 +15510,9 @@ _AUTOPILOT_MUTATION_EVIDENCE = frozenset({
 })
 
 
-def _autopilot_allowed_tools(run: dict) -> frozenset:
+def _autopilot_allowed_tools(run: dict) -> frozenset | None:
+    if unsafe_lab.active():
+        return None
     return (
         _AUTOPILOT_OBSERVE_TOOLS
         if run.get("policy") == "observe"
@@ -15108,6 +15542,8 @@ def _autopilot_command_programs(value) -> list[str]:
 
 def _autopilot_tool_policy(run: dict):
     """Return an argument-aware policy that models cannot override."""
+    if unsafe_lab.active():
+        return None
     project_scope, _project_error = _agent_project_scope(run.get("project", ""))
     allowed_tools = _autopilot_allowed_tools(run)
 
@@ -15115,6 +15551,11 @@ def _autopilot_tool_policy(run: dict):
         args = args if isinstance(args, dict) else {}
         if tool_name not in allowed_tools:
             return "ERROR: HOST POLICY: tool '%s' is not allowed for this autonomous run." % tool_name
+        if tool_name in _GIT_IGNORE_DISCOVERY_TOOLS and args.get("include_ignored"):
+            return (
+                "ERROR: HOST POLICY: autonomous runs cannot set "
+                "include_ignored=true."
+            )
         host_scoped_text_patch = (
             tool_name == "text_patch"
             and bool(project_scope)
@@ -15207,7 +15648,12 @@ def _autopilot_json_model(run: dict, role: str, prompt: str, validator) -> dict:
 
 
 def _autopilot_plan_model(run: dict) -> dict:
-    allowed = sorted(_autopilot_allowed_tools(run))
+    allowed_set = _autopilot_allowed_tools(run)
+    allowed = (
+        sorted(allowed_set)
+        if allowed_set is not None
+        else ["UNRESTRICTED HOST-NATIVE AGENT TOOLS (UNSAFE LAB MODE)"]
+    )
     max_tasks = int(run.get("max_tasks") or 12)
     reserve = (
         min(int(run.get("max_replans") or 0), max(0, max_tasks - 3))
@@ -15256,7 +15702,7 @@ def _autopilot_plan_model(run: dict) -> dict:
         normalized = autopilot_controller.normalize_plan(
             payload, run.get("objective", ""), max_tasks,
         )
-        if run.get("policy") == "observe" and any(
+        if not unsafe_lab.active() and run.get("policy") == "observe" and any(
             task.get("kind") == "implement" for task in normalized["tasks"]
         ):
             raise ValueError("observe policy cannot contain implementation tasks")
@@ -15416,13 +15862,14 @@ def _autopilot_work_model(
         criteria="\n".join("- " + item for item in (run.get("criteria") or [])),
         prior=prior or "(none yet)",
     )
+    unsafe = unsafe_lab.active()
     output = _agent_impl(
         prompt,
         tier=run.get("tier", "code"),
         max_steps=12,
         allow_web=bool(run.get("allow_web")),
         require_file_evidence=False,
-        read_only=run.get("policy") == "observe",
+        read_only=(run.get("policy") == "observe" and not unsafe),
         include_evidence=True,
         auto_checklist=True,
         project=run.get("project", ""),
@@ -15768,7 +16215,16 @@ def _capability_refined_tier(
 def route_work_request(prompt: str, project: str = "") -> str | None:
     """Transparently route eligible natural work to a bounded execution lane."""
     _maybe_live_reload()
-    decision = intents.classify_execution(prompt)
+    explicit_worker_cap = master_orchestrator.requested_worker_cap(prompt)
+    decision = (
+        {
+            "mode": "fleet",
+            "reason": "explicit bounded worker-count request",
+            "plan_only": False,
+            "actions": [],
+        }
+        if explicit_worker_cap else intents.classify_execution(prompt)
+    )
     if not decision:
         return None
     mode = decision["mode"]
@@ -15857,6 +16313,9 @@ def route_work_request(prompt: str, project: str = "") -> str | None:
             "task": prompt, "mode": "fleet", "tier": selected_tier,
             "learn": False,
         }
+        if explicit_worker_cap:
+            master_kwargs["agents"] = explicit_worker_cap
+            master_kwargs["worker_cap"] = explicit_worker_cap
         if isinstance(resolved_project, str) and os.path.isdir(resolved_project):
             master_kwargs["project"] = resolved_project
         output = master_orchestrate(**master_kwargs)
@@ -16079,6 +16538,7 @@ def diagnostics() -> str:
     """Run lightweight health checks for the local Sonder Runtime installation."""
     _maybe_live_reload()
     lines = ["sonder diagnostics"]
+    lines.append("  unsafe lab mode: %s" % unsafe_lab.status_line())
     lines.append("  live reload: %s" % ("on" if live_reload.enabled() else "off"))
     lines.append(
         "  ollama endpoint: %s (%s; remote opt-in %s)"
@@ -16100,6 +16560,10 @@ def diagnostics() -> str:
     )
     if mcp_state.get("last_error"):
         lines.append("  mcp refresh ERROR: %s" % mcp_state["last_error"])
+    try:
+        lines.append("  tool capability shadow: %s" % tool_capability_shadow_report())
+    except Exception as e:
+        lines.append("  tool capability shadow: ERROR validator failed: %s" % e)
     lines.append(
         "  execution routing: host-gated foreground/autopilot/fleet with local ambiguity review"
     )
@@ -16254,6 +16718,7 @@ def status() -> str:
             for line in tier_lines
         ]
     lines = [
+        "Unsafe lab mode: %s" % unsafe_lab.status_line(),
         f"Ollama @ {_ollama_display()} ({ollama_endpoint.locality(BASE)})",
         "Tiers:",
         *tier_lines,
@@ -17220,5 +17685,11 @@ def _prompt_debug_failure(symptom: str, evidence: str = "") -> str:
 mcp.finish_module_refresh(__name__, __file__, globals())
 
 
-if __name__ == "__main__" and not globals().get("_MCP_HOT_RELOAD_EXEC"):
+def run_mcp() -> None:
+    """Run the MCP adapter only after the process-level lab gate succeeds."""
+    unsafe_lab.require_startup()
     mcp.run()
+
+
+if __name__ == "__main__" and not globals().get("_MCP_HOT_RELOAD_EXEC"):
+    run_mcp()

@@ -1,6 +1,8 @@
+from pathlib import Path
+
 import pytest
 
-from scripts.configure_flutter_networking import configure
+from scripts.configure_flutter_networking import configure, main
 
 
 def test_configures_generated_android_and_apple_projects(tmp_path):
@@ -144,6 +146,31 @@ def test_network_configuration_is_repeatable(tmp_path):
     text = manifest.read_text(encoding="utf-8")
     assert text.count("android:usesCleartextTraffic") == 1
     assert 'android:usesCleartextTraffic="false"' in text
+
+
+def test_cleartext_requires_explicit_development_cli_override(tmp_path):
+    manifest = tmp_path / "android/app/src/main/AndroidManifest.xml"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("<manifest><application /></manifest>\n", encoding="utf-8")
+
+    assert main([str(tmp_path)]) == 0
+    assert 'android:usesCleartextTraffic="false"' in manifest.read_text(
+        encoding="utf-8"
+    )
+
+    assert main([
+        str(tmp_path), "--allow-android-cleartext-for-development"
+    ]) == 0
+    assert 'android:usesCleartextTraffic="true"' in manifest.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_production_workflow_never_enables_android_cleartext():
+    workflow = (
+        Path(__file__).resolve().parents[1] / ".github/workflows/build-apps.yml"
+    ).read_text(encoding="utf-8")
+    assert "--allow-android-cleartext" not in workflow
 
 
 def test_malformed_generated_project_fails_closed(tmp_path):

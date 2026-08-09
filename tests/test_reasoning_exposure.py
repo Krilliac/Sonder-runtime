@@ -117,6 +117,21 @@ def test_completion_object_omits_reasoning_when_empty():
     assert obj["sonder_reasoning"] == "because"
 
 
+def test_chat_completion_activity_is_always_metadata_only(monkeypatch):
+    monkeypatch.setenv("SONDER_EXECUTION_FEED_DETAIL", "1")
+    at.reset_for_tests()
+    with at.response_span("chat", "private prompt"):
+        at.record_tool_result(
+            "run_code", {"code": "CONTENT_CANARY"}, output="OUTPUT_CANARY",
+        )
+        at.set_result_summary("RESULT_CANARY")
+
+    encoded = repr(ts._chat_completion_object("answer", "sonder"))
+    assert "CONTENT_CANARY" not in encoded
+    assert "OUTPUT_CANARY" not in encoded
+    assert "RESULT_CANARY" not in encoded
+
+
 def test_turn_reasoning_is_empty_while_exposure_is_off(monkeypatch):
     monkeypatch.delenv("SONDER_EXPOSE_REASONING", raising=False)
     with at.response_span("t", "p"):

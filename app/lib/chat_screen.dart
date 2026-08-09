@@ -989,7 +989,7 @@ class _LiveStatusBar extends StatelessWidget {
       // it is.
       'native ${contextInfo?.nativeContextLimit ?? 0} tok',
       'mode ${contextInfo?.contextMode ?? "native"}',
-      'agents ${agentInfo?.activeAgents ?? 0}',
+      info?.executionSummary ?? 'lanes unknown | agents unknown',
       'responses ${activityInfo?.activeCount ?? 0}',
       'tools ${responseInfo?.toolCalls ?? 0}/${activityInfo?.totalToolCalls ?? 0}',
       'models ${responseInfo?.modelCalls ?? 0}',

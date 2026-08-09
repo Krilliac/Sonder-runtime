@@ -67,6 +67,30 @@ All model transport is moving behind a single port,
 Session summarization and titling already route through it
 (`ChatService` → `OllamaGateway`); more call-sites migrate incrementally.
 
+### Measured inference telemetry
+
+`ModelResponse.telemetry` optionally carries backend-measured phase data:
+total, model load, prompt evaluation, generation, and prompt/output token
+rates. Ollama's nanosecond fields and the bounded llama.cpp-compatible
+`timings` extension are normalized to milliseconds. Existing response fields
+and positional constructors remain compatible; callers that do not need
+telemetry can ignore it.
+
+Missing values stay missing. Sonder does not estimate timing from response
+length, and it derives a token rate only when both a backend token count and a
+measured phase duration exist. A load duration alone is not called a cold
+start: `load_state` is `cold` or `warm` only when the backend explicitly says
+so. This follows the useful measurement discipline demonstrated by
+`kimi-k3-in-c`: separate one-time load/prompt work from steady generation and
+report measured facts instead of smoothing unlike phases together.
+
+The optional Prometheus projection uses fixed, content-free labels only:
+`sonder_model_backend_phase_duration_seconds{backend,phase}`,
+`sonder_model_token_throughput_per_second{backend,direction}`, and
+`sonder_model_load_states_total{backend,state}`. Prompts, generated text,
+model names, endpoints, and arbitrary provider keys are never labels. Invalid,
+negative, non-finite, or implausibly unbounded provider values are discarded.
+
 ## Choosing a model
 
 Grounded in the live A/B runs on this codebase:
