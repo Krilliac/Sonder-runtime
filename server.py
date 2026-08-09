@@ -33,6 +33,8 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+import sonder_runtime.adapters.legacy.task_state as task_state_adapter
+import sonder_runtime.application.tasks.use_cases as task_use_cases
 import sonder_runtime.adapters.memory_store as memory_store
 import orchestrator
 import retriever
@@ -550,6 +552,8 @@ _SESSION_TURN_CLAIM_WAIT_SECONDS = max(
 )
 
 LIVE_RELOAD_MODULES = [
+    "sonder_runtime.adapters.legacy.task_state",
+    "sonder_runtime.application.tasks.use_cases",
     "sonder_runtime.adapters.memory_store",
     "process_liveness",
     "orchestrator",
@@ -657,6 +661,12 @@ _prime_live_reload_modules()
 def _maybe_live_reload():
     modules = live_reload.reload_changed_modules(LIVE_RELOAD_MODULES)
     for name, module in modules.items():
+        if name == "sonder_runtime.adapters.legacy.task_state":
+            globals()["task_state_adapter"] = module
+            continue
+        if name == "sonder_runtime.application.tasks.use_cases":
+            globals()["task_use_cases"] = module
+            continue
         if name == "sonder_runtime.adapters.memory_store":
             globals()["memory_store"] = module
             continue
@@ -5450,6 +5460,13 @@ def _format_task(row: dict) -> str:
     )
 
 
+def _task_service(conn):
+    return task_use_cases.TaskService(
+        task_state_adapter.LegacyTaskRepository(conn),
+        task_state_adapter.LegacyChecklistEventSink(activity_tracker.set_checklist),
+    )
+
+
 @mcp.tool()
 def task_create(
     title: str,
@@ -5463,8 +5480,7 @@ def task_create(
     _maybe_live_reload()
     conn = _open_db()
     try:
-        row = memory_store.create_task(
-            conn,
+        row = _task_service(conn).create_task(
             title=title,
             detail=detail,
             priority=priority,
@@ -5476,7 +5492,7 @@ def task_create(
         return "ERROR: %s" % e
     finally:
         conn.close()
-    return "task created\n  " + _format_task(row)
+    return "task created\n  " + _format_task(row.to_dict())
 
 
 @mcp.tool()
@@ -5491,8 +5507,7 @@ def task_list(
     _maybe_live_reload()
     conn = _open_db()
     try:
-        rows = memory_store.list_tasks(
-            conn,
+        rows = _task_service(conn).list_tasks(
             status=status,
             project=project,
             owner=owner,
@@ -5507,7 +5522,7 @@ def task_list(
     if not rows:
         lines.append("  (no matching tasks)")
     for row in rows:
-        lines.append("  " + _format_task(row))
+        lines.append("  " + _format_task(row.to_dict()))
     return "\n".join(lines)
 
 
@@ -5526,8 +5541,7 @@ def task_update(
     _maybe_live_reload()
     conn = _open_db()
     try:
-        row = memory_store.update_task(
-            conn,
+        row = _task_service(conn).update_task(
             task_id,
             status=status or None,
             title=title or None,
@@ -5541,7 +5555,7 @@ def task_update(
         return "ERROR: %s" % e
     finally:
         conn.close()
-    return "task updated\n  " + _format_task(row)
+    return "task updated\n  " + _format_task(row.to_dict())
 
 
 @mcp.tool()
@@ -5550,16 +5564,15 @@ def task_show(task_id: str, events: bool = True) -> str:
     _maybe_live_reload()
     conn = _open_db()
     try:
-        row = memory_store.get_task(conn, task_id)
-        history = memory_store.task_events(conn, task_id, limit=20) if events else []
+        detail = _task_service(conn).show_task(task_id, include_events=events)
     finally:
         conn.close()
-    if not row:
+    if not detail.task:
         return "ERROR: no task '%s'." % task_id
-    lines = ["task", "  " + _format_task(row)]
-    if history:
+    lines = ["task", "  " + _format_task(detail.task.to_dict())]
+    if detail.events:
         lines.append("events:")
-        for event in history:
+        for event in detail.events:
             lines.append("  %(ts)s  %(event)s  %(note)s" % event)
     return "\n".join(lines)
 
@@ -7067,20 +7080,7 @@ def _format_file_result(title: str, data: dict) -> str:
 
 
 def _checklist_data(conn, checklist_id: str) -> dict:
-    parent = memory_store.get_task(conn, checklist_id)
-    if not parent:
-        raise ValueError("no checklist '%s'" % checklist_id)
-    items = memory_store.task_children(conn, parent["id"])
-    done = sum(1 for item in items if item.get("status") == "done")
-    return {
-        "id": parent["id"],
-        "title": parent.get("title", ""),
-        "status": parent.get("status", "pending"),
-        "project": parent.get("project", ""),
-        "owner": parent.get("owner", ""),
-        "items": items,
-        "summary": "%d/%d complete" % (done, len(items)),
-    }
+    return _task_service(conn).checklist(checklist_id).to_dict()
 
 
 def _format_checklist(data: dict) -> str:
@@ -7114,45 +7114,27 @@ def checklist_create(
     _maybe_live_reload()
     started = time.time()
     try:
-        items = json.loads(items_json) if isinstance(items_json, str) else items_json
-        if not isinstance(items, list) or not items:
-            raise ValueError("items_json must be a non-empty JSON list")
-        if len(items) > 20:
-            raise ValueError("a checklist supports at most 20 items")
-        normalized_items = []
-        for item in items:
-            if isinstance(item, dict):
-                item_title = str(item.get("title", "")).strip()
-                detail = str(item.get("detail", ""))
-            else:
-                item_title = str(item).strip()
-                detail = ""
-            if not item_title:
-                raise ValueError("checklist item titles cannot be empty")
-            normalized_items.append((item_title, detail))
+        normalized_items = task_use_cases.normalize_checklist_items(items_json)
         conn = _open_db()
         try:
-            parent = memory_store.create_task(
-                conn, title=title, detail="work checklist", status="in_progress",
-                priority=priority, project=project, owner=owner,
+            service = _task_service(conn)
+            checklist = service.create_checklist(
+                title, [
+                    {"title": item_title, "detail": detail}
+                    for item_title, detail in normalized_items
+                ], project=project, owner=owner, priority=priority,
             )
-            for item_title, detail in normalized_items:
-                memory_store.create_task(
-                    conn, title=item_title, detail=detail, status="pending",
-                    priority=priority, project=project, owner=owner,
-                    parent_id=parent["id"],
-                )
-            data = _checklist_data(conn, parent["id"])
+            data = checklist.to_dict()
         finally:
             conn.close()
     except Exception as exc:
         _record_direct_tool("checklist_create", {"title": title}, ok=False, started=started, summary=str(exc))
         return "ERROR: %s" % exc
     _record_direct_tool(
-        "checklist_create", {"title": title, "items": len(items)},
+        "checklist_create", {"title": title, "items": len(checklist.items)},
         ok=True, started=started, summary=data["summary"],
     )
-    activity_tracker.set_checklist(data)
+    service.publish_checklist(checklist)
     return _format_checklist(data)
 
 
@@ -7164,7 +7146,9 @@ def checklist_show(checklist_id: str) -> str:
     try:
         conn = _open_db()
         try:
-            data = _checklist_data(conn, checklist_id)
+            service = _task_service(conn)
+            checklist = service.checklist(checklist_id)
+            data = checklist.to_dict()
         finally:
             conn.close()
     except Exception as exc:
@@ -7173,7 +7157,7 @@ def checklist_show(checklist_id: str) -> str:
             ok=False, started=started, summary=str(exc),
         )
         return "ERROR: %s" % exc
-    activity_tracker.set_checklist(data)
+    service.publish_checklist(checklist)
     output = _format_checklist(data)
     _record_direct_tool(
         "checklist_show", {"checklist_id": checklist_id},
@@ -7195,33 +7179,9 @@ def checklist_update(
     try:
         conn = _open_db()
         try:
-            data = _checklist_data(conn, checklist_id)
-            children = data["items"]
-            selected = None
-            value = str(item or "").strip()
-            if value.isdigit() and 1 <= int(value) <= len(children):
-                selected = children[int(value) - 1]
-            else:
-                matches = [row for row in children if row["id"].startswith(value)]
-                if len(matches) == 1:
-                    selected = matches[0]
-            if not selected:
-                raise ValueError("no unique checklist item '%s'" % item)
-            memory_store.update_task(
-                conn, selected["id"], status=status, note=note or "checklist update",
-            )
-            data = _checklist_data(conn, checklist_id)
-            states = [row.get("status") for row in data["items"]]
-            parent_status = (
-                "done" if states and all(state in ("done", "canceled") for state in states)
-                else "blocked" if "blocked" in states
-                else "in_progress"
-            )
-            memory_store.update_task(
-                conn, data["id"], status=parent_status,
-                note="checklist %s" % data["summary"],
-            )
-            data = _checklist_data(conn, checklist_id)
+            service = _task_service(conn)
+            checklist = service.update_checklist(checklist_id, item, status, note)
+            data = checklist.to_dict()
         finally:
             conn.close()
     except Exception as exc:
@@ -7234,7 +7194,7 @@ def checklist_update(
         "checklist_update", {"checklist_id": checklist_id, "item": item, "status": status},
         ok=True, started=started, summary=data["summary"],
     )
-    activity_tracker.set_checklist(data)
+    service.publish_checklist(checklist)
     return _format_checklist(data)
 
 
