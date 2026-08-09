@@ -591,6 +591,12 @@ that protection. `SONDER_FILE_APPROVAL_CODE` and
 paths. Deletes require the exact `DELETE <resolved path>` confirmation string
 returned by the dry-run.
 
+`archive_create` builds ZIP or TAR files from an explicit bounded input list.
+It rejects sensitive/control state, links, special files, escapes, mutations
+during creation, and existing destinations. Output is staged beside the final
+path and published atomically without overwrite; deterministic metadata is the
+default for reproducible archives.
+
 `workspace_inventory` reads metadata only and reports manifests, extension and
 area sizes, largest files, exclusions, elapsed time, and a concrete truncation
 reason. Inventory, text search, and script discovery enforce both an entry

@@ -66,6 +66,7 @@ import ollama_lifecycle
 import admin_auth
 import codegen_loop
 import file_ops
+import archive_create as archive_create_tool
 import context_policy
 import command_registry
 import adaptive_training
@@ -557,6 +558,7 @@ LIVE_RELOAD_MODULES = [
     "ollama_lifecycle",
     "admin_auth",
     "file_ops",
+    "archive_create",
     "context_policy",
     "command_registry",
     "permission_rules",
@@ -7364,6 +7366,64 @@ def context_pack(
 
 
 @mcp.tool()
+def archive_create(
+    root: str,
+    inputs_json: str,
+    destination: str,
+    archive_format: str = "zip",
+    deterministic: bool = True,
+    max_files: int = archive_create_tool.DEFAULT_MAX_FILES,
+    max_entries: int = archive_create_tool.DEFAULT_MAX_ENTRIES,
+    max_file_bytes: int = archive_create_tool.DEFAULT_MAX_FILE_BYTES,
+    max_total_bytes: int = archive_create_tool.DEFAULT_MAX_TOTAL_BYTES,
+    max_depth: int = archive_create_tool.DEFAULT_MAX_DEPTH,
+    max_results: int = archive_create_tool.DEFAULT_MAX_RESULTS,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Create a guarded transactional ZIP/TAR from explicit workspace inputs.
+
+    The destination must be new and inside root. Inputs retain root-relative
+    paths; directories recurse without following links. No shell is executed.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "root": root, "inputs_json": inputs_json, "destination": destination,
+        "archive_format": archive_format, "deterministic": deterministic,
+    }
+    try:
+        data = archive_create_tool.create_archive(
+            root, inputs_json, destination,
+            archive_format=archive_format, deterministic=deterministic is True,
+            max_files=max_files, max_entries=max_entries,
+            max_file_bytes=max_file_bytes,
+            max_total_bytes=max_total_bytes, max_depth=max_depth,
+            max_results=max_results, extra_roots=extra_roots,
+            developer_authorized=_file_developer_allowed(token),
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "archive_create", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = archive_create_tool.format_result(data)
+    _record_direct_tool(
+        "archive_create", args, ok=True, started=started,
+        summary="%d file(s), %d input bytes" % (data["files"], data["input_bytes"]),
+        output=output,
+    )
+    activity_tracker.record_file_change(
+        "create", data["destination"], bytes_written=data["archive_bytes"],
+        summary="archive_create: %s, %d entries" % (
+            data["archive_format"], data["files"] + data["directories"],
+        ),
+    )
+    return output
+
+
+@mcp.tool()
 def data_inspect(
     path: str,
     max_bytes: int = 256000,
@@ -10164,6 +10224,7 @@ def tool_manifest() -> str:
         "offload": "Route a self-contained task to a configured local/cloud tier.",
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
         "workspace_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace inventory, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
+        "archive_create": "Transactionally create a bounded deterministic ZIP/TAR from explicit guarded project inputs without overwriting.",
         "file_policy/file_find/file_read/file_write/file_batch_write/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete, including bounded transactional multi-file create/overwrite.",
         "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
         "environment_status": "Report the host OS, available shells (PowerShell/cmd/bash/wsl), and installed toolchains -- check before choosing a command shape or assuming a tool exists.",
@@ -10225,6 +10286,7 @@ AGENT_TOOL_HELP = """Available tools:
 - file_read: {"path": "README.md"}
 - file_read_range: {"path": "server.py", "start_line": 1, "end_line": 200}
 - context_pack: {"paths_json": ["README.md", "src/main.py"], "max_files": 12, "max_total_bytes": 256000, "max_bytes_per_file": 64000}
+- archive_create: {"root": ".", "inputs_json": ["src", "README.md"], "destination": "release.zip", "archive_format": "zip|tar", "deterministic": true} -- destination must be new and outside input directories
 - text_search: {"query": "TODO", "root": ".", "glob": "*.py", "regex": false, "max_results": 100}
 - file_write: {"path": "notes.txt", "content": "...", "mode": "create|overwrite|append"}
 - file_batch_write: {"operations_json": [{"path": "a.txt", "content": "...", "mode": "create|overwrite"}]}
@@ -10400,6 +10462,33 @@ def _repository_scope_path_error(tool_name, args, project_root):
                     args.get("paths_json", args.get("paths", []))
                 )
             ]
+        elif tool_name == "archive_create":
+            archive_root = Path(str(args.get("root") or ".")).expanduser()
+            if not archive_root.is_absolute():
+                archive_root = root / archive_root
+            targets = [("archive root", archive_root)]
+            try:
+                archive_inputs = archive_create_tool._parse_inputs(
+                    args.get("inputs_json", args.get("inputs", []))
+                )
+            except ValueError as exc:
+                return "ERROR: agent project archive inputs rejected: %s" % exc
+            for raw_input in archive_inputs:
+                candidate = Path(raw_input).expanduser()
+                targets.append((
+                    "archive input",
+                    candidate if candidate.is_absolute() else archive_root / candidate,
+                ))
+            destination_text = str(args.get("destination") or "").strip()
+            if not destination_text:
+                targets.append(("archive destination", ""))
+            else:
+                raw_destination = Path(destination_text).expanduser()
+                targets.append((
+                    "archive destination",
+                    raw_destination if raw_destination.is_absolute()
+                    else archive_root / raw_destination,
+                ))
         else:
             key = _project_scoped_path_key(tool_name)
             targets = [("path", args.get(key) or ".")]
@@ -11216,6 +11305,22 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "archive_create":
+        return archive_create(
+            root=args.get("root", "."),
+            inputs_json=args.get("inputs_json", args.get("inputs", [])),
+            destination=args.get("destination", ""),
+            archive_format=args.get("archive_format", args.get("format", "zip")),
+            deterministic=args.get("deterministic", True),
+            max_files=args.get("max_files", archive_create_tool.DEFAULT_MAX_FILES),
+            max_entries=args.get("max_entries", archive_create_tool.DEFAULT_MAX_ENTRIES),
+            max_file_bytes=args.get("max_file_bytes", archive_create_tool.DEFAULT_MAX_FILE_BYTES),
+            max_total_bytes=args.get("max_total_bytes", archive_create_tool.DEFAULT_MAX_TOTAL_BYTES),
+            max_depth=args.get("max_depth", archive_create_tool.DEFAULT_MAX_DEPTH),
+            max_results=args.get("max_results", archive_create_tool.DEFAULT_MAX_RESULTS),
+            token=args.get("token", ""), approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "text_search":
         return text_search(
             query=args.get("query", args.get("pattern", "")),
@@ -11562,7 +11667,7 @@ _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "file_write", "file_batch_write", "file_edit",
     "file_delete", "directory_create", "workspace_inventory", "directory_tree",
     "file_find", "text_search", "script_search", "artifact_verify",
-    "artifact_ground", "scaffold_project",
+    "artifact_ground", "scaffold_project", "archive_create",
 })
 _PROJECT_SCOPED_EXECUTION_TOOLS = frozenset({"workspace_run", "script_run"})
 _AGENT_TOOL_ALIASES = {
@@ -11606,7 +11711,10 @@ def _canonical_agent_tool_name(tool_name):
 
 
 def _project_scoped_path_key(tool_name):
-    if tool_name in {"file_find", "text_search", "script_search", "scaffold_project"}:
+    if tool_name in {
+        "file_find", "text_search", "script_search", "scaffold_project",
+        "archive_create",
+    }:
         return "root"
     return "path"
 
@@ -11757,7 +11865,7 @@ def _agent_dispatch_observed(
 
 _WORK_MUTATION_TOOLS = frozenset({
     "directory_create", "file_write", "file_batch_write", "file_edit", "file_delete",
-    "scaffold_project",
+    "scaffold_project", "archive_create",
     "artifact_generate", "game_generate_and_test", "game_generation_campaign",
     "memory_quality_repair", "memory_privacy_repair", "memory_embedding_backfill",
     "memory_interaction_embedding_backfill",
@@ -11774,7 +11882,7 @@ _WORK_VALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_verify", "game_reference_suite", "game_generate_and_test",
     "game_generation_campaign", "self_heal_check", "workspace_inventory", "directory_tree", "file_find",
-    "file_read", "file_read_range", "text_search", "image_inspect",
+    "file_read", "file_read_range", "archive_create", "text_search", "image_inspect",
     "memory_quality_report", "memory_privacy_review", "learning_health_status",
 })
 
@@ -11834,8 +11942,33 @@ def _agent_call_signature(tool_name, args):
     """Return a stable signature for equivalent host-scoped tool calls."""
     canonical = dict(args) if isinstance(args, dict) else args
     if isinstance(canonical, dict):
+        if tool_name == "archive_create":
+            root = os.path.realpath(os.path.normpath(str(canonical.get("root") or ".")))
+            canonical["root"] = os.path.normcase(root)
+            destination = str(canonical.get("destination") or "")
+            if destination:
+                if not os.path.isabs(destination):
+                    destination = os.path.join(root, destination)
+                canonical["destination"] = os.path.normcase(
+                    os.path.realpath(os.path.normpath(destination))
+                )
+            try:
+                inputs = archive_create_tool._parse_inputs(
+                    canonical.get("inputs_json", canonical.get("inputs", []))
+                )
+                canonical["inputs_json"] = [
+                    os.path.normcase(os.path.realpath(os.path.normpath(
+                        value if os.path.isabs(value) else os.path.join(root, value)
+                    )))
+                    for value in inputs
+                ]
+                canonical.pop("inputs", None)
+            except ValueError:
+                pass
         path_keys = []
-        if tool_name in _PROJECT_SCOPED_PATH_TOOLS:
+        if tool_name == "archive_create":
+            path_keys = []
+        elif tool_name in _PROJECT_SCOPED_PATH_TOOLS:
             path_keys.append(_project_scoped_path_key(tool_name))
         elif tool_name == "workspace_run":
             path_keys.append("cwd")
@@ -11864,6 +11997,12 @@ def _agent_mutation_records(tool_name, args):
             {"tool": tool_name, "path": _agent_normalized_path(item.get("path", ""))}
             for item in operations if isinstance(item, dict)
         ]
+    if tool_name == "archive_create":
+        root = str(args.get("root") or ".")
+        destination = str(args.get("destination") or "")
+        if destination and not os.path.isabs(destination):
+            destination = os.path.join(root, destination)
+        return [{"tool": tool_name, "path": _agent_normalized_path(destination)}]
     path = args.get("path", "")
     if tool_name == "artifact_generate":
         path = args.get("output_dir") or os.path.join(
@@ -11950,6 +12089,20 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
             return True
     paths = [record["path"] for record in records if record.get("path")]
     target = _agent_normalized_path(args.get("path", args.get("artifact", "")))
+
+    if tool_name == "archive_create":
+        root = str(args.get("root") or ".")
+        destination = str(args.get("destination") or "")
+        if destination and not os.path.isabs(destination):
+            destination = os.path.join(root, destination)
+        destination = _agent_normalized_path(destination)
+        return bool(destination) and all(
+            record["tool"] == "archive_create"
+            and record.get("path") == destination
+            for record in records
+        ) and '"ok": true' in str(observation or "").lower() and bool(
+            re.search(r'"archive_sha256":\s*"[0-9a-f]{64}"', str(observation or "").lower())
+        )
 
     if tool_name in {
         "game_reference_suite", "game_generate_and_test", "game_generation_campaign",
@@ -13299,7 +13452,7 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
 })
 _AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
-    "directory_create", "file_write", "file_batch_write", "file_edit", "workspace_run",
+    "directory_create", "file_write", "file_batch_write", "file_edit", "archive_create", "workspace_run",
     "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_generate", "artifact_verify", "game_reference_suite",
     "game_generate_and_test",
@@ -13313,7 +13466,7 @@ _AUTOPILOT_RUNNERS = frozenset({
 })
 _AUTOPILOT_SCRIPT_SUFFIXES = frozenset({".py", ".js", ".dart", ".exe", ".com"})
 _AUTOPILOT_MUTATION_EVIDENCE = frozenset({
-    "directory_create", "file_write", "file_batch_write", "file_edit", "artifact_generate",
+    "directory_create", "file_write", "file_batch_write", "file_edit", "archive_create", "artifact_generate",
     "game_generate_and_test",
 })
 

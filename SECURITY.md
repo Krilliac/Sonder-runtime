@@ -22,7 +22,7 @@ Sonder Runtime is not a chat wrapper. By design it will, on request:
 - **execute code and shell commands** (`run_code`, `script_run`,
   `workspace_run`, `run_project`)
 - **read, write, and delete files** (`file_read`, `file_write`, `file_batch_write`, `file_edit`,
-  `file_delete`, `directory_create`)
+  `file_delete`, `directory_create`, `archive_create`)
 - **fetch from the network** (`web_fetch`, `web_search`)
 - **run unattended** (`autopilot_start`, `master_orchestrate`, `loop`)
 - **modify its own source** when self-modification is enabled
@@ -42,6 +42,9 @@ Mitigations that are already in place and worth knowing about:
 - `file_batch_write` never targets secrets/control state or traverses symlinks,
   requires explicit create-versus-overwrite intent, and rolls back completed
   writes on a later failure when restoration remains possible.
+- `archive_create` prevalidates every explicit input and directory membership,
+  refuses sensitive paths, links, special files, caps/escapes, and overwrites,
+  then revalidates mutations before atomically publishing a staged ZIP/TAR.
 - Cloud tiers are **opt-in**. Local tiers run against loopback Ollama, and a
   remote `OLLAMA_HOST` must be explicitly enabled.
 - Lessons are passed through a 20-rule privacy classifier before storage, so

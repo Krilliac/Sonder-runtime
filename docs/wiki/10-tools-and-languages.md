@@ -54,7 +54,7 @@ file's *structure* without dumping raw bytes.
 
 `file_find`, `file_read`, `file_read_range`, `file_write`, `file_batch_write`, `file_edit`,
 `file_delete`, `directory_tree`, `directory_create`, `workspace_inventory`,
-`text_search`, `script_search`, `program_search`, `image_inspect`. All are
+`text_search`, `script_search`, `program_search`, `image_inspect`, `archive_create`. All are
 confined to `SONDER_FILE_ROOTS`, honor the permission policy
 ([Security Model](09-security-model.md)), and record byte/line accounting
 into the activity trail. `file_delete` is dry-run unless an explicit
@@ -64,6 +64,12 @@ confirm string matches.
 operations. It prevalidates every target before writing, caps per-file and
 aggregate bytes, rejects duplicate/sensitive/symlink targets, and makes a
 best-effort rollback if any write fails.
+
+`archive_create` accepts explicit project-contained inputs and a new destination,
+supports ZIP and TAR, and defaults to reproducible metadata. It performs a full
+bounded preflight, refuses links and sensitive/control state, streams stable file
+handles, revalidates input mutation, and publishes through a non-overwriting
+sibling staging file.
 
 ## Other tool families
 
