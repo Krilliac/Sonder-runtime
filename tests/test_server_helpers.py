@@ -1378,6 +1378,7 @@ def test_preference_command_learns_and_lists(monkeypatch, tmp_path):
 
 def test_activity_tracks_file_line_deltas(monkeypatch, tmp_path):
     monkeypatch.setattr(server.file_ops, "workspace_root", lambda: tmp_path)
+    monkeypatch.setenv("SONDER_EXECUTION_FEED_DETAIL", "1")
     server.activity_tracker.reset_for_tests()
 
     with server.activity_tracker.response_span("test", "create a file"):
@@ -1388,6 +1389,10 @@ def test_activity_tracks_file_line_deltas(monkeypatch, tmp_path):
     assert latest["file_creates"] == 1
     assert latest["lines_added"] == 2
     assert latest["files"][0]["path"].endswith("notes.txt")
+    feed = server.activity_tracker.execution_feed(server.activity_tracker.snapshot())
+    changed = next(row for row in feed["events"] if row["kind"] == "file_change")
+    assert changed["content_preview"]["text"] == "one\ntwo\n"
+    assert changed["preview_kind"] == "content"
 
 
 def test_completed_surface_replaces_inflight_activity_snapshot():
@@ -1698,6 +1703,7 @@ def test_non_learning_offload_records_model_usage(monkeypatch):
         },
     )
     server.activity_tracker.reset_for_tests()
+    monkeypatch.setenv("SONDER_EXECUTION_FEED_DETAIL", "1")
 
     with server.activity_tracker.response_span("offload", "plain") as response:
         output = server.offload("plain", tier="fast", learn=False)
@@ -1706,6 +1712,11 @@ def test_non_learning_offload_records_model_usage(monkeypatch):
         assert response["model_calls"] == 1
         assert response["tokens_in"] == 9
         assert response["tokens_out"] == 3
+
+    feed = server.activity_tracker.execution_feed(server.activity_tracker.snapshot())
+    model = next(row for row in feed["events"] if row["kind"] == "model_call")
+    assert model["request_preview"]["text"] == "plain"
+    assert model["response_preview"]["text"] == "plain output"
 
 
 def test_activity_tracker_hot_reload_preserves_open_response_span():
