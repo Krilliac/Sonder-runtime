@@ -61,9 +61,15 @@ _META_QUOTE_RE = re.compile(
     r"contains?|mentions?)\b[^\n]{0,100}[\"'“”‘’]",
     re.I,
 )
+_PREFERENCE_CAPTURE_SYNTAX = (
+    r"(?:(?:i|we)\s+(?:prefer\b|(?:do\s+not|don't|don’t)\s+like\b|"
+    r"like\s+it\s+when\b)|(?:please\s+)?(?:always|never)\b|"
+    r"from\s+now\s+on\b|call\s+me\b|my\s+name\s+is\b)"
+)
 _QUOTED_PREFERENCE_RE = re.compile(
-    r"(?:[\"“][^\"\n]{0,100}\b(?:i|we)\s+prefer\b[^\"\n]{0,100}[\"”]|"
-    r"(?:^|[\s(])'[^'\n]{0,100}\b(?:i|we)\s+prefer\b[^'\n]{0,100}')",
+    rf"(?:[\"“][^\"\n]{{0,100}}{_PREFERENCE_CAPTURE_SYNTAX}"
+    rf"[^\"\n]{{0,100}}[\"”]|(?:^|[\s(])'[^'\n]{{0,100}}"
+    rf"{_PREFERENCE_CAPTURE_SYNTAX}[^'\n]{{0,100}}')",
     re.I,
 )
 _META_REFERENCE_RE = re.compile(
@@ -84,12 +90,9 @@ _INSTRUCTION_OVERRIDE_RE = re.compile(
     re.I,
 )
 _COMMAND_TAIL_RE = re.compile(
-    r"(?:[.;]|--)\s*(?:please\s+)?"
+    r"(?:[.;]|--|\b(?:and|then)\b)\s*(?:please\s+)?"
     r"(?:ignore|disregard|override|bypass|forget|reveal|expose|leak|send|"
-    r"upload|run|execute|delete|read|write|call|use|print|show)\b|"
-    r"\b(?:and|then)\s+(?:please\s+)?"
-    r"(?:ignore|disregard|override|bypass|forget|reveal|expose|leak|send|"
-    r"upload|execute|delete)\b",
+    r"upload|run|execute|delete|read|write|call|use|print|show)\b",
     re.I,
 )
 _PROMPT_CONTROL_RE = re.compile(
@@ -126,6 +129,12 @@ _CATEGORY_PATTERNS = (
         r"status\s+updates?|"
         r"mention\s+what\s+changed|show\s+(?:your\s+)?progress)\b", re.I,
     )),
+)
+_GENERIC_DURABLE_RE = re.compile(
+    r"^(?:user\s+(?:prefers\b|does\s+not\s+(?:want\s+sonder\s+to|like)\b|"
+    r"likes\s+it\s+when\b|wants\s+sonder\s+to\s+always\b)|"
+    r"from\s+now\s+on\b|(?:i|we)\s+prefer\b)",
+    re.I,
 )
 
 _TASK_CATEGORY_PATTERNS = {
@@ -214,6 +223,8 @@ def preference_category(text):
     for category, pattern in _CATEGORY_PATTERNS:
         if pattern.search(value):
             return category
+    if _GENERIC_DURABLE_RE.search(value):
+        return "general"
     return ""
 
 
@@ -268,7 +279,7 @@ def preference_applies(text, task):
     category = preference_category(text)
     if not category:
         return False
-    if category in {"identity", "response_style"}:
+    if category in {"general", "identity", "response_style"}:
         return True
     task = str(task or "")
     task_pattern = _TASK_CATEGORY_PATTERNS.get(category)
