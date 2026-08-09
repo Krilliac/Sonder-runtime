@@ -45,7 +45,7 @@ sonder-launcher.cmd --host 0.0.0.0 --cert C:\path\fullchain.pem --key C:\path\pr
 ```
 
 The autostart installer creates a per-user Startup entry only after the token
-and both TLS paths are configured. It does not copy those values into the
+and both TLS paths name existing files. It does not copy those values into the
 entry. Remove it with:
 
 ```bat
@@ -72,7 +72,10 @@ SONDER_LAUNCHER_KEY=/path/privkey.pem \
 Use the operating system's normal per-user service manager to start this script
 at login. Keep the environment file readable only by that user. The launcher
 also accepts `--cert` and `--key`, or `SONDER_LAUNCHER_CERT` and
-`SONDER_LAUNCHER_KEY`, for TLS.
+`SONDER_LAUNCHER_KEY`, for TLS. A non-loopback launcher refuses to start
+without both. An intentionally isolated development build may opt into
+plaintext with `--allow-insecure-http-for-development`; never use that override
+with a distributed app or bearer credentials on an untrusted network.
 
 ## App setup
 

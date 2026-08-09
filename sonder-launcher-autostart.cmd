@@ -19,6 +19,14 @@ if not defined SONDER_LAUNCHER_KEY (
   echo ERROR: Remote launcher autostart requires SONDER_LAUNCHER_KEY.
   exit /b 2
 )
+if not exist "%SONDER_LAUNCHER_CERT%" (
+  echo ERROR: SONDER_LAUNCHER_CERT does not name an existing file.
+  exit /b 2
+)
+if not exist "%SONDER_LAUNCHER_KEY%" (
+  echo ERROR: SONDER_LAUNCHER_KEY does not name an existing file.
+  exit /b 2
+)
 >"%TARGET%" echo @echo off
 >>"%TARGET%" echo start "" /min "%~dp0sonder-launcher.cmd" --host 0.0.0.0
 echo Installed: %TARGET%
