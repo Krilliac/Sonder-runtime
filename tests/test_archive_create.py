@@ -241,6 +241,63 @@ def test_destination_appearing_during_creation_is_preserved(project, monkeypatch
     assert list(project.glob(".sonder-archive-create-*")) == []
 
 
+def test_destination_parent_replacement_is_blocked_or_rejected(project, tmp_path, monkeypatch):
+    (project / "input.txt").write_text("input", encoding="utf-8")
+    destination_parent = project / "release"
+    destination_parent.mkdir()
+    moved_parent = project / "release-moved"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    original_plan = archive_create._plan
+    race = {"replaced": False, "blocked": False}
+
+    def replace_parent(*args, **kwargs):
+        plan = original_plan(*args, **kwargs)
+        try:
+            destination_parent.rename(moved_parent)
+            destination_parent.symlink_to(outside, target_is_directory=True)
+            race["replaced"] = True
+        except OSError:
+            race["blocked"] = True
+        return plan
+
+    monkeypatch.setattr(archive_create, "_plan", replace_parent)
+    try:
+        result = _create(project, ["input.txt"], "release/output.zip")
+    except PermissionError as exc:
+        assert "identity changed" in str(exc)
+        assert race["replaced"] is True
+        assert not (outside / "output.zip").exists()
+        assert not (moved_parent / "output.zip").exists()
+    else:
+        assert race["blocked"] is True
+        assert result["ok"] is True
+        assert (destination_parent / "output.zip").exists()
+
+
+def test_server_gates_extra_roots_behind_filesystem_approval(project, tmp_path, monkeypatch):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    captured = []
+
+    def fake_create(*args, **kwargs):
+        captured.append(kwargs["extra_roots"])
+        return {
+            "ok": True, "files": 0, "input_bytes": 0,
+            "destination": str(project / "output.zip"), "archive_bytes": 0,
+            "archive_format": "zip", "directories": 0,
+        }
+
+    monkeypatch.setattr(archive_create, "create_archive", fake_create)
+    monkeypatch.setattr(server, "_file_bypass_allowed", lambda *args: False)
+    server.archive_create(str(outside), [], "output.zip", extra_roots=str(outside))
+    assert captured[-1] == ""
+
+    monkeypatch.setattr(server, "_file_bypass_allowed", lambda *args: True)
+    server.archive_create(str(outside), [], "output.zip", extra_roots=str(outside))
+    assert captured[-1] == str(outside)
+
+
 def test_module_has_no_shell_or_network_api():
     source = Path(archive_create.__file__).read_text(encoding="utf-8")
     forbidden = ("subprocess", "urllib", "requests", "http.client", "os.system", "eval(", "exec(")

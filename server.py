@@ -7446,13 +7446,14 @@ def archive_create(
         "archive_format": archive_format, "deterministic": deterministic,
     }
     try:
+        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
         data = archive_create_tool.create_archive(
             root, inputs_json, destination,
             archive_format=archive_format, deterministic=deterministic is True,
             max_files=max_files, max_entries=max_entries,
             max_file_bytes=max_file_bytes,
             max_total_bytes=max_total_bytes, max_depth=max_depth,
-            max_results=max_results, extra_roots=extra_roots,
+            max_results=max_results, extra_roots=trusted_roots,
             developer_authorized=_file_developer_allowed(token),
         )
     except Exception as exc:
@@ -11906,6 +11907,13 @@ def _agent_dispatch_observed(
     ok = False
     observation = ""
     args = _project_scope_args(tool_name, args, project)
+    dispatch_args = args
+    if project and tool_name == "archive_create":
+        # The project is selected by the host, not the model. Preserve that
+        # authority with the same unforgeable sentinel used by repository
+        # read-only dispatch, without recording the sentinel in activity data.
+        dispatch_args = dict(args)
+        dispatch_args["approval"] = _TRUSTED_REPOSITORY_APPROVAL
     try:
         with activity_tracker.tool_dispatch_context():
             dispatch_options = {"allow_web": allow_web}
@@ -11913,11 +11921,11 @@ def _agent_dispatch_observed(
                 dispatch_options["allow_location"] = True
             if read_only:
                 observation = _agent_dispatch(
-                    tool_name, args, read_only=True,
+                    tool_name, dispatch_args, read_only=True,
                     repository_extra_roots=project, **dispatch_options,
                 )
             else:
-                observation = _agent_dispatch(tool_name, args, **dispatch_options)
+                observation = _agent_dispatch(tool_name, dispatch_args, **dispatch_options)
         ok = not str(observation).startswith("ERROR:")
         return observation
     finally:

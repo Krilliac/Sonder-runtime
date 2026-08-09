@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import json
 import os
+import secrets
 import stat
 import tarfile
 import tempfile
@@ -90,26 +91,8 @@ def _signature(value) -> tuple[int, int, int, int, int]:
 
 def _opened_handle_path(fd: int) -> Path:
     if os.name == "nt":
-        import ctypes
         import msvcrt
-
-        handle = msvcrt.get_osfhandle(fd)
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        function = kernel32.GetFinalPathNameByHandleW
-        function.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32]
-        function.restype = ctypes.c_uint32
-        needed = function(handle, None, 0, 0)
-        if not needed:
-            raise OSError(ctypes.get_last_error(), "could not resolve opened input handle")
-        buffer = ctypes.create_unicode_buffer(needed + 1)
-        if not function(handle, buffer, len(buffer), 0):
-            raise OSError(ctypes.get_last_error(), "could not resolve opened input handle")
-        value = buffer.value
-        if value.startswith("\\\\?\\UNC\\"):
-            value = "\\\\" + value[8:]
-        elif value.startswith("\\\\?\\"):
-            value = value[4:]
-        return Path(value)
+        return _windows_handle_path(msvcrt.get_osfhandle(fd))
     for link in ("/proc/self/fd/%d" % fd, "/dev/fd/%d" % fd):
         try:
             value = os.readlink(link)
@@ -119,6 +102,158 @@ def _opened_handle_path(fd: int) -> Path:
             raise PermissionError("archive input was deleted after preflight")
         return Path(value)
     raise PermissionError("platform cannot validate an opened archive input")
+
+
+def _windows_handle_path(handle) -> Path:
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    function = kernel32.GetFinalPathNameByHandleW
+    function.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32]
+    function.restype = ctypes.c_uint32
+    needed = function(handle, None, 0, 0)
+    if not needed:
+        raise OSError(ctypes.get_last_error(), "could not resolve opened filesystem handle")
+    buffer = ctypes.create_unicode_buffer(needed + 1)
+    if not function(handle, buffer, len(buffer), 0):
+        raise OSError(ctypes.get_last_error(), "could not resolve opened filesystem handle")
+    value = buffer.value
+    if value.startswith("\\\\?\\UNC\\"):
+        value = "\\\\" + value[8:]
+    elif value.startswith("\\\\?\\"):
+        value = value[4:]
+    return Path(value)
+
+
+class _DestinationDirectory:
+    """Hold and address the validated destination directory by identity."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.fd = None
+        self.handle = None
+
+    def __enter__(self):
+        if os.name == "nt":
+            import ctypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            create = kernel32.CreateFileW
+            create.argtypes = [
+                ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32,
+                ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+                ctypes.c_void_p,
+            ]
+            create.restype = ctypes.c_void_p
+            # Request the narrowest sharing and expose, rather than follow, a
+            # late junction or directory symlink. The named staging handle
+            # opened before preflight supplies the Windows rename anchor.
+            self.handle = create(
+                str(self.path), 0x00000080, 0x00000001 | 0x00000002,
+                None, 3, 0x02000000 | 0x00200000, None,
+            )
+            if self.handle in (None, ctypes.c_void_p(-1).value):
+                self.handle = None
+                raise OSError(ctypes.get_last_error(), "could not lock archive destination directory")
+        else:
+            flags = (
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            )
+            self.fd = os.open(self.path, flags)
+        try:
+            self.validate()
+        except Exception:
+            self._close()
+            raise
+        return self
+
+    def __exit__(self, _type, _value, _traceback):
+        self._close()
+
+    def _close(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+        if self.handle is not None:
+            import ctypes
+            close = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+            close.argtypes = [ctypes.c_void_p]
+            close.restype = ctypes.c_int
+            close(self.handle)
+            self.handle = None
+
+    def validate(self) -> None:
+        if os.name == "nt":
+            opened = _windows_handle_path(self.handle).resolve()
+            if opened != self.path or _is_reparse(self.path):
+                raise PermissionError("archive destination directory identity changed")
+            metadata = self.path.lstat()
+        else:
+            metadata = os.stat(self.path, follow_symlinks=False)
+            opened = os.fstat(self.fd)
+            if not os.path.samestat(opened, metadata):
+                raise PermissionError("archive destination directory identity changed")
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise PermissionError("archive destination parent is not a regular directory")
+
+    def create_stage(self) -> tuple[int, str]:
+        self.validate()
+        if os.name == "nt":
+            descriptor, path = tempfile.mkstemp(
+                prefix=".sonder-archive-create-", suffix=".tmp", dir=self.path,
+            )
+            actual = _opened_handle_path(descriptor)
+            if actual.parent.resolve() != self.path:
+                os.close(descriptor)
+                try:
+                    actual.unlink()
+                except OSError:
+                    pass
+                raise PermissionError("archive staging escaped the destination directory")
+            return descriptor, Path(path).name
+        flags = (
+            os.O_RDWR | os.O_CREAT | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        )
+        for _attempt in range(128):
+            name = ".sonder-archive-create-%s.tmp" % secrets.token_hex(12)
+            try:
+                return os.open(name, flags, 0o600, dir_fd=self.fd), name
+            except FileExistsError:
+                continue
+        raise FileExistsError("could not allocate unique archive staging file")
+
+    def stat(self, name: str):
+        if os.name == "nt":
+            return (self.path / name).lstat()
+        return os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+
+    def exists(self, name: str) -> bool:
+        try:
+            self.stat(name)
+            return True
+        except FileNotFoundError:
+            return False
+
+    def link(self, source: str, destination: str) -> None:
+        self.validate()
+        if os.name == "nt":
+            os.link(
+                self.path / source, self.path / destination,
+                follow_symlinks=False,
+            )
+        else:
+            os.link(
+                source, destination, src_dir_fd=self.fd, dst_dir_fd=self.fd,
+                follow_symlinks=False,
+            )
+
+    def unlink(self, name: str) -> None:
+        if os.name == "nt":
+            (self.path / name).unlink()
+        else:
+            os.unlink(name, dir_fd=self.fd)
 
 
 def _open_no_follow(path: Path) -> int:
@@ -562,58 +697,69 @@ def create_archive(
         destination, resolved_root, extra_roots, developer_authorized,
     )
     inputs = _parse_inputs(inputs_json)
-    plan = _plan(
-        resolved_root, inputs, resolved_destination, limits, extra_roots,
-    )
-    _revalidate(plan)
-    descriptor, stage_name = tempfile.mkstemp(
-        prefix=".sonder-archive-create-", suffix=".tmp",
-        dir=resolved_destination.parent,
-    )
-    stage = Path(stage_name)
-    published = False
-    destination_created = False
-    destination_signature = None
-    try:
-        with os.fdopen(descriptor, "w+b", closefd=False) as stage_handle:
-            if archive_format == "zip":
-                _write_zip(stage_handle, plan, deterministic is True, extra_roots)
-            else:
-                _write_tar(stage_handle, plan, deterministic is True, extra_roots)
-            stage_handle.flush()
-            os.fsync(descriptor)
+    destination_name = resolved_destination.name
+    with _DestinationDirectory(resolved_destination.parent) as parent:
+        descriptor = None
+        stage_name = ""
+        published = False
+        destination_created = False
+        destination_signature = None
+        try:
+            # A named open child prevents destination-parent replacement on
+            # Windows. POSIX publication is already rooted at dir_fd, so defer
+            # staging there until after the input plan to avoid introducing a
+            # temporary member into a directory being scanned.
+            if os.name == "nt":
+                descriptor, stage_name = parent.create_stage()
+            plan = _plan(
+                resolved_root, inputs, resolved_destination, limits, extra_roots,
+            )
             _revalidate(plan)
-            digest = _sha256(stage_handle)
-            opened_stage = os.fstat(descriptor)
-            archive_bytes = opened_stage.st_size
-            named_stage = stage.lstat()
-            if _is_reparse(stage) or not os.path.samestat(opened_stage, named_stage):
-                raise ArchiveCreateRejected("archive staging file identity changed")
-        if resolved_destination.exists() or resolved_destination.is_symlink():
-            raise FileExistsError("archive destination appeared during creation")
-        # The sibling staging file guarantees one filesystem. Hard-linking is
-        # an atomic create-if-absent publication on both supported host families;
-        # unlike rename on POSIX it cannot overwrite a concurrently-created name.
-        os.link(stage, resolved_destination, follow_symlinks=False)
-        destination_created = True
-        destination_metadata = resolved_destination.lstat()
-        destination_signature = _signature(destination_metadata)
-        if _is_reparse(resolved_destination) or not os.path.samestat(
-            os.fstat(descriptor), destination_metadata,
-        ):
-            raise ArchiveCreateRejected("published archive identity does not match staging")
-        published = True
-    finally:
-        os.close(descriptor)
-        if destination_created and not published and resolved_destination.exists():
-            try:
-                current = resolved_destination.lstat()
-                if _signature(current) == destination_signature:
-                    resolved_destination.unlink()
-            except OSError:
-                pass
-        if stage.exists():
-            stage.unlink()
+            if descriptor is None:
+                descriptor, stage_name = parent.create_stage()
+            with os.fdopen(descriptor, "w+b", closefd=False) as stage_handle:
+                if archive_format == "zip":
+                    _write_zip(stage_handle, plan, deterministic is True, extra_roots)
+                else:
+                    _write_tar(stage_handle, plan, deterministic is True, extra_roots)
+                stage_handle.flush()
+                os.fsync(descriptor)
+                _revalidate(plan)
+                digest = _sha256(stage_handle)
+                opened_stage = os.fstat(descriptor)
+                archive_bytes = opened_stage.st_size
+                named_stage = parent.stat(stage_name)
+                if not stat.S_ISREG(named_stage.st_mode) or not os.path.samestat(
+                    opened_stage, named_stage,
+                ):
+                    raise ArchiveCreateRejected("archive staging file identity changed")
+            if parent.exists(destination_name):
+                raise FileExistsError("archive destination appeared during creation")
+            # Publish relative to the held directory identity. On Windows the
+            # handle denies replacement; on POSIX both names are resolved by
+            # dir_fd, so a swapped path or symlink is never followed.
+            parent.link(stage_name, destination_name)
+            destination_created = True
+            destination_metadata = parent.stat(destination_name)
+            destination_signature = _signature(destination_metadata)
+            if not stat.S_ISREG(destination_metadata.st_mode) or not os.path.samestat(
+                os.fstat(descriptor), destination_metadata,
+            ):
+                raise ArchiveCreateRejected("published archive identity does not match staging")
+            parent.validate()
+            published = True
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            if destination_created and not published:
+                try:
+                    current = parent.stat(destination_name)
+                    if _signature(current) == destination_signature:
+                        parent.unlink(destination_name)
+                except OSError:
+                    pass
+            if stage_name and parent.exists(stage_name):
+                parent.unlink(stage_name)
     rows = [
         {"path": row["path"], "type": row["type"], "bytes": row["bytes"]}
         for row in plan["rows"]
