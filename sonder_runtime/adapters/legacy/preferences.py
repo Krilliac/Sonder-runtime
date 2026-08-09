@@ -87,6 +87,9 @@ class LegacyPreferenceCodec:
     def key(self, text):
         return self._module_provider().preference_key(text)
 
+    def is_stable(self, text, source_text=None):
+        return self._module_provider().is_stable_preference(text, source_text)
+
     def format(self, rows):
         return self._module_provider().format_preferences(rows)
 
