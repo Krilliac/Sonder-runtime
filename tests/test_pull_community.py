@@ -80,3 +80,30 @@ def test_merge_lessons_rejects_private_text_before_embedding_or_fts():
     assert embedded == []
     assert ms.all_lessons(c) == []
     assert c.execute("SELECT COUNT(*) FROM lessons_fts").fetchone()[0] == 0
+
+
+def test_merge_lessons_rejects_vague_platitudes_before_embedding():
+    c = _conn()
+    embedded = []
+    added = pc.merge_lessons(
+        c,
+        [{"id": "vague", "text": "Use data structures efficiently."}],
+        embed_fn=lambda text: embedded.append(text) or [1.0, 0.0],
+    )
+    assert added == 0
+    assert embedded == []
+    assert ms.all_lessons(c) == []
+
+
+def test_merge_lessons_applies_embedding_similarity_dedup(monkeypatch):
+    c = _conn()
+    ms.add_lesson(c, "existing", "Use bisect for ordered insertion.",
+                  embeddings.to_blob([1.0, 0.0]), "grounded")
+    monkeypatch.setattr(pc.reflection, "is_duplicate", lambda *args, **kwargs: True)
+    added = pc.merge_lessons(
+        c,
+        [{"id": "similar", "text": "Use bisect_left to retain sorted order."}],
+        embed_fn=lambda _text: [1.0, 0.0],
+    )
+    assert added == 0
+    assert len(ms.all_lessons(c)) == 1
