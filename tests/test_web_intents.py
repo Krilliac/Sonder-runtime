@@ -15,6 +15,31 @@ def test_weather_extracts_city_or_zip_without_time_suffix():
     assert postal["location"] == "60601"
 
 
+def test_locationless_weather_question_does_not_extract_scaffolding():
+    assert web_intents.classify("whats the weather going to be like today") == {
+        "kind": "weather", "location": "",
+    }
+
+
+def test_question_form_can_still_name_an_explicit_location():
+    assert web_intents.classify("What's Chicago weather going to be today?") == {
+        "kind": "weather", "location": "Chicago",
+    }
+
+
+def test_ambiguous_weather_locations_require_clarification():
+    assert web_intents.classify("weather in Chicago or Boston today") == {
+        "kind": "weather", "location": "",
+    }
+
+
+def test_meta_and_negated_weather_phrases_do_not_route():
+    assert web_intents.classify(
+        'Why did the parser extract "whats the" from this weather query?'
+    ) is None
+    assert web_intents.classify("Do not check the weather in Chicago") is None
+
+
 def test_capability_followup_preserves_unresolved_weather_context():
     history = [
         {"role": "user", "content": "weather in my area"},
