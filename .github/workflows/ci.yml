@@ -25,6 +25,8 @@ jobs:
           from mcp.server.fastmcp.tools import ToolManager"
       - name: Enforce architecture boundaries (SPEC-3)
         run: python scripts/check_architecture.py
+      - name: Enforce legacy error-signal ratchet
+        run: python scripts/check_error_signals.py
       - name: Prevent new Git-history privacy debt
         run: python scripts/check_history_privacy.py --json
       - name: Run test suite
