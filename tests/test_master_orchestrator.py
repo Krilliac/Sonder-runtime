@@ -527,6 +527,7 @@ def _fake_hardware(
     """
     monkeypatch.delenv("SONDER_MAX_AGENTS", raising=False)
     monkeypatch.delenv("SONDER_PARALLEL_WORKERS", raising=False)
+    monkeypatch.delenv("SONDER_MAX_WORKER_CAP", raising=False)
     monkeypatch.setattr(master_orchestrator.os, "cpu_count", lambda: cpus)
     monkeypatch.setattr(
         master_orchestrator, "physical_memory_bytes",
@@ -668,6 +669,66 @@ def test_parallel_worker_override_is_explicit_and_bounded(monkeypatch):
     assert report["worker_slots"] == 6
     assert report["source"] == "SONDER_PARALLEL_WORKERS"
     assert "concurrent worker slots: 6" in master_orchestrator.format_capacity(report)
+
+
+def test_per_run_worker_cap_overrides_global_and_hardware_only_for_that_run(monkeypatch):
+    _fake_hardware(monkeypatch, cpus=8, ram_avail_gib=2)
+    monkeypatch.setenv("SONDER_PARALLEL_WORKERS", "3")
+
+    ordinary = master_orchestrator.capacity(24)
+    widened = master_orchestrator.capacity(24, worker_cap=24)
+    after = master_orchestrator.capacity(24)
+
+    assert ordinary["worker_slots"] == 3
+    assert widened["worker_slots"] == 24
+    assert widened["source"] == "per-run worker_cap"
+    assert widened["requested_worker_cap"] == 24
+    assert after["worker_slots"] == 3
+
+
+def test_per_run_worker_cap_respects_operator_and_compiled_ceilings(monkeypatch):
+    _fake_hardware(monkeypatch, cpus=4, ram_avail_gib=2)
+    monkeypatch.setenv("SONDER_MAX_WORKER_CAP", "40")
+
+    operator_limited = master_orchestrator.capacity(10**9, worker_cap=10**9)
+    monkeypatch.setenv("SONDER_MAX_WORKER_CAP", str(10**9))
+    compiled_limited = master_orchestrator.capacity(10**9, worker_cap=10**9)
+
+    assert operator_limited["worker_slots"] == 40
+    assert operator_limited["requested_agents"] == 40
+    assert operator_limited["bound_by"] == "operator worker ceiling"
+    assert compiled_limited["worker_slots"] == master_orchestrator.ABSOLUTE_MAX_WORKERS
+    assert compiled_limited["requested_agents"] == master_orchestrator.ABSOLUTE_MAX_AGENTS
+    assert compiled_limited["worker_slots"] <= compiled_limited["requested_agents"]
+
+
+def test_worker_cap_rejects_bool_nonfinite_fractional_and_negative(monkeypatch):
+    _fake_hardware(monkeypatch, cpus=8, ram_avail_gib=2)
+
+    for invalid in (True, False, "nan", "inf", "3.5", "-4", 0, -4, float("nan")):
+        report = master_orchestrator.capacity(24, worker_cap=invalid)
+        assert report["source"] == "auto"
+        assert report["worker_slots"] == 2
+        assert report["worker_cap_error"]
+
+
+def test_invalid_operator_ceiling_fails_safe_and_is_visible(monkeypatch):
+    _fake_hardware(monkeypatch, cpus=8, ram_avail_gib=10)
+    monkeypatch.setenv("SONDER_MAX_WORKER_CAP", "true")
+
+    report = master_orchestrator.capacity(64, worker_cap=64)
+
+    assert report["worker_slots"] == master_orchestrator.STANDARD_MAX_WORKERS
+    assert "invalid SONDER_MAX_WORKER_CAP" in report["warning"]
+    assert "operator/absolute ceiling: 16/64" in master_orchestrator.format_capacity(report)
+
+
+def test_natural_language_worker_cap_is_narrow_and_bounded():
+    assert master_orchestrator.requested_worker_cap(
+        "Use 24 workers for this AI harness research and data run."
+    ) == 24
+    assert master_orchestrator.requested_worker_cap("launch 999999 workers") == 64
+    assert master_orchestrator.requested_worker_cap("research worker scheduling") is None
 
 
 def test_delegated_fleet_limits_actual_concurrency(monkeypatch):
