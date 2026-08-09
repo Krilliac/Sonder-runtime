@@ -32,7 +32,7 @@ def _fake_target(monkeypatch, *, model="sonder:latest", cloud=False,
 
 
 def _fake_gen(monkeypatch, result="generated text", error=None,
-              usage=None):
+              usage=None, response_meta=None):
     def make_generate(model, system, temperature, num_predict, num_ctx,
                       cloud=False, timeout=None, cancel_check=None, **kwargs):
         def gen(prompt, history=None):
@@ -40,6 +40,7 @@ def _fake_gen(monkeypatch, result="generated text", error=None,
                 raise error
             return result
         gen.last_usage = usage or {"prompt_eval_count": 10, "eval_count": 5}
+        gen.last_response_meta = response_meta or {}
         return gen
     monkeypatch.setattr(server, "_make_generate", make_generate)
 
@@ -53,6 +54,32 @@ def test_generate_returns_domain_response(monkeypatch):
     assert response.text == "generated text"
     assert response.tier == "code"
     assert response.tokens_in == 10 and response.tokens_out == 5
+
+
+def test_generate_preserves_backend_measured_phases(monkeypatch):
+    _fake_target(monkeypatch)
+    _fake_gen(
+        monkeypatch,
+        usage={"tokens_in": 20, "tokens_out": 10, "token_source": "ollama"},
+        response_meta={
+            "total_duration": 4_000_000_000,
+            "load_duration": 500_000_000,
+            "prompt_eval_count": 20,
+            "prompt_eval_duration": 2_000_000_000,
+            "eval_count": 10,
+            "eval_duration": 1_000_000_000,
+        },
+    )
+    response = OllamaGateway().generate(
+        ModelRequest(prompt="hello", tier="code"), _context(),
+    )
+    assert response.tokens_in == 20 and response.tokens_out == 10
+    assert response.telemetry.backend_total_ms == 4000.0
+    assert response.telemetry.load_ms == 500.0
+    assert response.telemetry.prompt_tokens_per_second == 10.0
+    assert response.telemetry.output_tokens_per_second == 10.0
+    # A load duration is evidence of elapsed work, not a standardized cold flag.
+    assert response.telemetry.load_state is None
 
 
 def test_cloud_tier_requires_context_consent(monkeypatch):

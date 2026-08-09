@@ -767,6 +767,33 @@ def test_make_generate_captures_ollama_token_counts(monkeypatch):
     }
 
 
+def test_make_generate_retains_only_content_free_backend_measurements(monkeypatch):
+    def fake_post(path, payload):
+        return {
+            "message": {"content": "ok"},
+            "total_duration": 3_000_000,
+            "load_duration": 1_000_000,
+            "prompt_eval_count": 2,
+            "prompt_eval_duration": 1_000_000,
+            "eval_count": 1,
+            "eval_duration": 1_000_000,
+            "provider_secret": "must not cross the adapter boundary",
+        }
+
+    monkeypatch.setattr(server, "_post", fake_post)
+    gen = server._make_generate("local-model", "", 0.1, 20, 2048)
+    assert gen("hello") == "ok"
+    assert gen.last_response_meta == {
+        "done_reason": "",
+        "total_duration": 3_000_000,
+        "load_duration": 1_000_000,
+        "prompt_eval_count": 2,
+        "prompt_eval_duration": 1_000_000,
+        "eval_count": 1,
+        "eval_duration": 1_000_000,
+    }
+
+
 def test_serve_target_cloud_tier_requires_opt_in(monkeypatch):
     monkeypatch.delenv("SONDER_ALLOW_CLOUD", raising=False)
     model, cloud, augment, label = server._serve_target("cloud-code", None)

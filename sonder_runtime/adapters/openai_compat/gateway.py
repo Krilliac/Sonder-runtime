@@ -36,6 +36,8 @@ from ...application.ports.model_gateway import (
     ModelRequest,
     ModelResponse,
 )
+from ...platform.metrics import default_registry
+from ..inference_telemetry import from_openai_compatible
 from ...domain.common.errors import (
     Cancelled,
     DeadlineExceeded,
@@ -137,14 +139,19 @@ class OpenAICompatibleGateway:
         data = self._post("/v1/chat/completions", payload, cfg, timeout)
         text = self._extract_text(data)
         usage = data.get("usage") or {}
-        return ModelResponse(
+        timings = data.get("timings") if isinstance(data.get("timings"), dict) else {}
+        telemetry = from_openai_compatible(data)
+        response = ModelResponse(
             text=text,
             model=model,
             tier=request.tier or "openai",
             duration_ms=int((time.monotonic() - started) * 1000),
-            tokens_in=usage.get("prompt_tokens"),
-            tokens_out=usage.get("completion_tokens"),
+            tokens_in=usage.get("prompt_tokens", timings.get("prompt_n")),
+            tokens_out=usage.get("completion_tokens", timings.get("predicted_n")),
+            telemetry=telemetry,
         )
+        default_registry().observe_inference("openai_compatible", telemetry)
+        return response
 
     # -- embed -------------------------------------------------------------
 
