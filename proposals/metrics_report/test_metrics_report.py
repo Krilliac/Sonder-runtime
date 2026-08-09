@@ -4,7 +4,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-import memory_store as ms  # noqa: E402  (repo root, read-only)
+import sonder_runtime.adapters.memory_store as ms  # noqa: E402
 import metrics_report as mr  # noqa: E402
 
 
