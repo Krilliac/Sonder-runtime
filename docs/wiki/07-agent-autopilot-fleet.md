@@ -65,6 +65,28 @@ Statuses `queued → running → done | failed | cancelled | interrupted`, with
 compare-and-set; heartbeats detect stale owners. Two model instances (e.g.
 two `facts.` sticks) roughly double fleet throughput.
 
+Research tasks can opt into deterministic provenance checks with bounded,
+standalone marker lines:
+
+```
+[objective:history-eval|file:eval_history.py|symbol:main]
+```
+
+For such tasks, the master and delegated-task SHA-256 digests and objective IDs
+are immutable fleet-row and event fields. The delegated prompt labels the master
+task and objective contract as authoritative; retrieved lessons and tool output
+remain non-authoritative context. Exact host-observed file/symbol evidence is
+required before a worker result is accepted and again before aggregation. Marker
+text embedded in prose, quotations, or fenced code is rejected as ambiguous;
+private/control-plane paths and reparse targets are never valid objectives. The
+host verifies the exact target and symbol through a stable bounded file handle,
+then rejects a result if that target changes during the model call. Protected
+objective runs require local worker and audit tiers, including retries, so task
+text and repository evidence cannot be routed to a hosted model. Missing or
+displaced coverage produces `task_drift`, suppresses the drifted output, and does
+not enter the learning path. Inline protected runs use the same checks. Runs
+without objective markers retain the ordinary fleet behavior.
+
 ## Idempotency & recovery
 
 Autopilot/fleet control requests carry durable operation IDs; retrying a
