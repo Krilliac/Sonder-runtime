@@ -1,25 +1,21 @@
 """
 sonder-runtime MCP server
 ---------------------
-Bridges Claude Code to a local Ollama instance running on the RTX 4050 (6 GB VRAM).
+Bridges MCP clients to a local Ollama instance on operator-controlled hardware.
 
 Design goals:
-  * Claude decides WHEN to offload (tools are opt-in), so VRAM is idle until used.
-  * Tiered models: only one sits in VRAM at a time; short keep_alive frees it fast.
+  * The caller decides WHEN to offload, so local compute is idle until used.
+  * Tiered models can share one stable alias; bounded keep_alive limits memory use.
   * Zero third-party HTTP deps (stdlib urllib) -> only `mcp` is required.
 
 Tiers (escalation ladder, cheapest first):
-  LOCAL BASE (private, free, offline, runs on the 6 GB 4050; always bound):
-    fast        -> qwen2.5:3b            (~2 GB, fully GPU-resident, snappy)
-    code        -> qwen2.5-coder:7b      (~4.7 GB Q4, strong coding model)
-    general     -> qwen2.5:7b-instruct   (~4.7 GB Q4, general text grunt-work)
+  LOCAL BASE (private, free, offline; always bound):
+    fast/code/general -> sonder:latest (hardware-sized by setup, operator-owned)
   LOCAL SPECIALIST (capability-routed; either may be left unset by the operator,
                     in which case that work degrades to a base tier):
-    reasoning   -> deepseek-r1:7b        (~4.7 GB Q4, proofs/derivations/planning)
-    vision      -> moondream             (~1.7 GB, images/screenshots/OCR)
+    reasoning/vision -> unbound until configured with installed models
   CLOUD  (Ollama-hosted, huge, metered; prompt leaves this machine):
-    cloud-code  -> kimi-k2.7-code:cloud   (plan-covered coding, no local VRAM cost)
-    cloud-general -> glm-5.2:cloud        (long-context reasoning, no local VRAM cost)
+    cloud-code/cloud-general -> configured hosted defaults (no local memory cost)
 """
 
 import contextlib
@@ -67,6 +63,7 @@ import ollama_lifecycle
 import admin_auth
 import codegen_loop
 import file_ops
+import symbol_index
 import context_policy
 import command_registry
 import adaptive_training
@@ -104,7 +101,7 @@ OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
 KEEP_ALIVE = os.environ.get("SONDER_KEEP_ALIVE", "2m")
 TIMEOUT = int(os.environ.get("SONDER_TIMEOUT", "300"))
 SONDER_STABLE_ALIAS = "sonder:latest"
-LOCAL_CODE_MODEL = os.environ.get("SONDER_CODE_LOCAL", "qwen2.5-coder:7b")
+LOCAL_CODE_MODEL = os.environ.get("SONDER_CODE_LOCAL", SONDER_STABLE_ALIAS)
 DEFAULT_CLOUD_CODE_MODEL = "kimi-k2.7-code:cloud"
 DEFAULT_CLOUD_GENERAL_MODEL = "glm-5.2:cloud"
 CLOUD_EXTRA_USAGE_FALLBACK_MODEL = "kimi-k2.7-code:cloud"
@@ -157,7 +154,11 @@ def _local_model_options(temperature, num_predict, num_ctx):
     }
     runtime = {
         "num_thread": _env_int_option("SONDER_NUM_THREAD", _cpu_thread_default()),
-        "num_gpu": _env_int_option("SONDER_NUM_GPU", 999),
+        # Omit num_gpu unless the operator explicitly pins it. Ollama can then
+        # select CPU, Metal, ROCm, CUDA, Vulkan, or another supported backend
+        # from live host capabilities instead of inheriting an NVIDIA-shaped
+        # default from the maintainer's workstation.
+        "num_gpu": _env_int_option("SONDER_NUM_GPU"),
         "num_batch": _env_int_option("SONDER_NUM_BATCH", 512),
     }
     for key, value in runtime.items():
@@ -186,15 +187,15 @@ def _context_native(value=None):
 
 
 TIERS = {
-    "fast": os.environ.get("SONDER_FAST", "qwen2.5:3b"),
-    "code": os.environ.get("SONDER_CODE", "qwen2.5-coder:7b"),
-    "general": os.environ.get("SONDER_GENERAL", "qwen2.5:7b-instruct"),
+    "fast": os.environ.get("SONDER_FAST", SONDER_STABLE_ALIAS),
+    "code": os.environ.get("SONDER_CODE", SONDER_STABLE_ALIAS),
+    "general": os.environ.get("SONDER_GENERAL", SONDER_STABLE_ALIAS),
     # Specialist local tiers the capability router prefers for reasoning and
     # vision work. `_refresh_runtime_policy` drops either one when the shared
     # policy leaves it unbound, so an unset tier is simply not offered and
     # routing degrades to a base tier exactly as it did before they existed.
-    "reasoning": os.environ.get("SONDER_REASONING", "deepseek-r1:7b"),
-    "vision": os.environ.get("SONDER_VISION", "moondream"),
+    "reasoning": os.environ.get("SONDER_REASONING", ""),
+    "vision": os.environ.get("SONDER_VISION", ""),
     "cloud-code": _live_cloud_model(
         os.environ.get("SONDER_CLOUD_CODE"), DEFAULT_CLOUD_CODE_MODEL
     ),
@@ -512,7 +513,7 @@ _STRICT_DEFAULT = os.environ.get("SONDER_STRICT", "").strip().lower() in ("1", "
 # (single-turn), or a distinct id to isolate a thread. Same idea for project facts.
 DEFAULT_SESSION = os.environ.get("SONDER_DEFAULT_SESSION", "default")
 DEFAULT_PROJECT = os.environ.get("SONDER_DEFAULT_PROJECT", "default")
-# Sessioned calls get a roomier context (fits easily on the 6 GB 4050) and keep the
+# Sessioned calls use the context policy selected for the live model and keep the
 # last MAX_TURNS turns live; older turns are rolled into a summary.
 SESSION_NUM_CTX = context_policy.default_requested()
 MAX_TURNS = int(os.environ.get("SONDER_MAX_TURNS", "12"))
@@ -558,6 +559,7 @@ LIVE_RELOAD_MODULES = [
     "ollama_lifecycle",
     "admin_auth",
     "file_ops",
+    "symbol_index",
     "context_policy",
     "command_registry",
     "permission_rules",
@@ -3320,12 +3322,9 @@ def _offload_impl(
     # 0 means "ask the context policy", which the session path already does.
     # This path hardcoded 4096 and so ignored the policy and its env knobs,
     # which cost real capability: an autopilot run inspecting a 524 KB source
-    # file looped on search because the file was 32x its window. Measured on a
-    # 6 GiB RTX 4050 with a 7B q4 model resident, VRAM at 4096/8192/12288/16384
-    # was 4849/5301/5753/5881 MiB, so the policy default of 8192 doubles the
-    # window and still leaves ~840 MiB for the display and other processes.
-    # Past that the card is tight enough that another GPU consumer pushes
-    # llama.cpp into CPU offload, which costs more than the context is worth.
+    # file looped on search because the file was 32x its window. Defer the
+    # actual native size to context policy: CPU, Metal, AMD, Intel, NVIDIA, and
+    # remote Ollama hosts have different KV-cache and memory ceilings.
     num_ctx = num_ctx or context_policy.native()
     _refresh_live_cloud_tiers()
     request_timeout = _bounded_timeout(timeout)
@@ -3466,11 +3465,12 @@ def offload(
     learn: bool = True,
     timeout: int = TIMEOUT,
 ) -> str:
-    """Offload a self-contained subtask to a local-GPU or Ollama-cloud model.
+    """Offload a self-contained subtask to a local or Ollama-cloud model.
 
     Local aliases (fast/code/general, plus reasoning/vision when the operator
-    binds them) run privately on the loopback 6 GB 4050 by
-    default; an explicitly opted-in remote OLLAMA_HOST leaves this machine. The learning tiers
+    binds them) run privately through loopback Ollama by default on CPU or any
+    accelerator Ollama supports; an explicitly opted-in remote OLLAMA_HOST
+    leaves this machine. The learning tiers
     (SONDER_LEARN_TIERS, default: every configured local tier) participate in the
     lesson loop: with learn=True (default) the call is captured and the response ends
     with a '[interaction_id: <id>]' footer you can pass to record_outcome once you know
@@ -7157,6 +7157,58 @@ def file_find(
 
 
 @mcp.tool()
+def repository_symbol_index(
+    path: str = ".",
+    glob: str = "*",
+    language: str = "",
+    max_files: int = 200,
+    max_total_bytes: int = 2_000_000,
+    max_file_bytes: int = 256_000,
+    max_symbols: int = 2_000,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Build a bounded read-only declaration index inside one guarded repository.
+
+    Uses Python AST and conservative stdlib-only extraction for JavaScript,
+    TypeScript, C, C++, C#, Rust, and Go. It never executes repository content,
+    follows symlinks, shells out, or accesses the network.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "path": path, "glob": glob, "language": language,
+        "max_files": max_files, "max_total_bytes": max_total_bytes,
+        "max_file_bytes": max_file_bytes, "max_symbols": max_symbols,
+    }
+    try:
+        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
+        data = symbol_index.index_repository(
+            path=path, glob=glob, language=language, max_files=max_files,
+            max_total_bytes=max_total_bytes, max_file_bytes=max_file_bytes,
+            max_symbols=max_symbols, extra_roots=trusted_roots,
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "repository_symbol_index", args, ok=False, started=started,
+            summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    summary = "%d file(s), %d symbol(s)%s" % (
+        data["files"], len(data["symbols"]),
+        ", truncated" if data["truncated"] else "",
+    )
+    _record_direct_tool(
+        "repository_symbol_index", args, ok=True, started=started, summary=summary,
+    )
+    activity_tracker.record_event(
+        "repository_symbol_index", summary=summary, path=data["root"],
+    )
+    return symbol_index.format_index(data)
+
+
+@mcp.tool()
 def file_read(path: str, max_bytes: int = 256000, token: str = "", approval: str = "", extra_roots: str = "") -> str:
     """Read a UTF-8-ish text file inside allowed roots."""
     _maybe_live_reload()
@@ -9109,7 +9161,7 @@ def loop(
       - {"type":"offload","prompt":"...","tier":"fast|code|general|reasoning|vision|cloud-code|cloud-general"}
       - {"type":"sonder","prompt":"...","session":"none"}
       - {"type":"sonder","prompt":"...","context_size":"1m"}
-      - {"type":"master_orchestrate","task":"...","mode":"inline|delegate|fleet","agents":3,"project":"C:\\repo"}
+      - {"type":"master_orchestrate","task":"...","mode":"inline|delegate|fleet","agents":3,"project":"/path/to/repo"}
       - {"type":"master_status"}
       - {"type":"master_capacity","requested_agents":32}
       - {"type":"master_cancel","agent_id":"master-id|prefix|all"}
@@ -10203,6 +10255,7 @@ def tool_manifest() -> str:
         "local_service_probe": "Bounded unauthenticated GET/HEAD health probe for an explicit-port HTTP/HTTPS service resolving exclusively to loopback.",
         "workspace_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace inventory, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
         "file_policy/file_find/file_read/file_write/file_batch_write/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete, including bounded transactional multi-file create/overwrite.",
+        "repository_symbol_index": "Build a deterministic bounded read-only declaration index with Python AST and conservative JS/TS/C/C++/C#/Rust/Go extraction.",
         "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
         "environment_status": "Report the host OS, available shells (PowerShell/cmd/bash/wsl), and installed toolchains -- check before choosing a command shape or assuming a tool exists.",
         "data_inspect": "Read-only structured preview of JSON/JSONL/TOML/YAML/CSV/TSV/SQLite/ZIP/TAR/INI data files inside allowed roots.",
@@ -10261,6 +10314,7 @@ AGENT_TOOL_HELP = """Available tools:
 - directory_tree: {"path": ".", "depth": 2, "max_entries": 200}
 - directory_create: {"path": "output/reports", "parents": true}
 - file_find: {"query": "*.py", "root": ".", "max_results": 50}
+- repository_symbol_index: {"path": ".", "glob": "*", "language": "auto|python|javascript|typescript|c|cpp|csharp|rust|go", "max_files": 200, "max_total_bytes": 2000000, "max_file_bytes": 256000, "max_symbols": 2000}
 - file_read: {"path": "README.md"}
 - file_read_range: {"path": "server.py", "start_line": 1, "end_line": 200}
 - context_pack: {"paths_json": ["README.md", "src/main.py"], "max_files": 12, "max_total_bytes": 256000, "max_bytes_per_file": 64000}
@@ -10305,7 +10359,7 @@ AGENT_TOOL_HELP = """Available tools:
 - memory_embedding_backfill: {"limit": 25, "apply": false}
 - memory_interaction_embedding_backfill: {"limit": 25, "apply": false}
 - system_improvement_report: {}
-- master_orchestrate: {"task": "...", "mode": "ask|inline|delegate|fleet", "agents": 3, "tier": "code", "project": "C:\\repo"}
+- master_orchestrate: {"task": "...", "mode": "ask|inline|delegate|fleet", "agents": 3, "tier": "code", "project": "/path/to/repo"}
 - master_status: {}
 - master_capacity: {"requested_agents": 0}
 - master_cancel: {"agent_id": "master-id|prefix|all"}
@@ -10331,7 +10385,8 @@ or
 
 
 REPOSITORY_READ_ONLY_TOOLS = frozenset({
-    "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range", "context_pack",
+    "file_policy", "workspace_inventory", "directory_tree", "file_find",
+    "repository_symbol_index", "file_read", "file_read_range", "context_pack",
     "data_inspect",
     "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
@@ -10355,6 +10410,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - workspace_inventory: {"path": ".", "max_entries": 20000, "timeout_seconds": 10, "top_n": 15}
 - directory_tree: {"path": ".", "depth": 2, "max_entries": 200}
 - file_find: {"query": "<task-relevant filename or glob>", "root": ".", "max_results": 50}
+- repository_symbol_index: {"path": ".", "glob": "<task-relevant source glob>", "language": "auto|python|javascript|typescript|c|cpp|csharp|rust|go", "max_files": 200, "max_total_bytes": 2000000, "max_file_bytes": 256000, "max_symbols": 2000}
 - file_read: {"path": "<task-relevant relative path>", "max_bytes": 256000}
 - file_read_range: {"path": "<task-relevant relative path>", "start_line": 1, "end_line": 200}
 - context_pack: {"paths_json": ["<task-relevant relative path>", "<another task-relevant relative path>"], "max_files": 12, "max_total_bytes": 256000, "max_bytes_per_file": 64000}
@@ -10631,7 +10687,7 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
                     reject_sensitive=True,
                     extra_roots=trusted_extra_roots,
                 )
-        elif tool_name in {"workspace_inventory", "directory_tree", "file_find", "text_search", "script_search"}:
+        elif tool_name in {"workspace_inventory", "directory_tree", "file_find", "repository_symbol_index", "text_search", "script_search"}:
             file_ops.resolve_repository_read_path(
                 args.get("path", "") or args.get("root", "") or ".",
                 allow_workspace_root=True,
@@ -10719,7 +10775,7 @@ _AGENT_NEGATIVE_CLAIM_RE = re.compile(
     re.IGNORECASE,
 )
 _AGENT_CLAIM_REVIEW_TOOLS = frozenset({
-    "text_search", "file_read_range", "file_find",
+    "text_search", "file_read_range", "file_find", "repository_symbol_index",
 })
 _AGENT_QUOTED_ANCHOR_RE = re.compile(
     r"`([^`\r\n]{2,120})`|\"([^\"\r\n]{2,120})\"|\'([^\'\r\n]{2,120})\'"
@@ -11244,6 +11300,19 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "repository_symbol_index":
+        return repository_symbol_index(
+            path=args.get("path", args.get("root", ".")),
+            glob=args.get("glob", "*"),
+            language=args.get("language", ""),
+            max_files=args.get("max_files", 200),
+            max_total_bytes=args.get("max_total_bytes", 2_000_000),
+            max_file_bytes=args.get("max_file_bytes", 256_000),
+            max_symbols=args.get("max_symbols", 2_000),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "file_read_range":
         return file_read_range(
             path=args.get("path", ""),
@@ -11612,7 +11681,7 @@ _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "file_read", "file_read_range", "context_pack", "image_inspect",
     "file_write", "file_batch_write", "file_edit",
     "file_delete", "directory_create", "workspace_inventory", "directory_tree",
-    "file_find", "text_search", "script_search", "artifact_verify",
+    "file_find", "repository_symbol_index", "text_search", "script_search", "artifact_verify",
     "artifact_ground", "scaffold_project",
 })
 _PROJECT_SCOPED_EXECUTION_TOOLS = frozenset({"workspace_run", "script_run"})
@@ -11826,7 +11895,7 @@ _WORK_VALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_verify", "game_reference_suite", "game_generate_and_test",
     "game_generation_campaign", "self_heal_check", "workspace_inventory", "directory_tree", "file_find",
-    "file_read", "file_read_range", "text_search", "image_inspect",
+    "repository_symbol_index", "file_read", "file_read_range", "text_search", "image_inspect",
     "memory_quality_report", "memory_privacy_review", "learning_health_status",
 })
 
@@ -12192,7 +12261,8 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
     # persistent files just edited. self_heal_check is likewise unrelated.
     return False
 _WORK_INSPECTION_TOOLS = frozenset({
-    "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range", "context_pack",
+    "file_policy", "workspace_inventory", "directory_tree", "file_find",
+    "repository_symbol_index", "file_read", "file_read_range", "context_pack",
     "text_search", "script_search", "program_search", "image_inspect",
     "memory_search", "learning_health_status", "evaluation_history_status",
     "memory_quality_report", "memory_privacy_review", "artifact_ground",
@@ -12201,7 +12271,8 @@ _WORK_INSPECTION_TOOLS = frozenset({
 })
 _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find",
-    "file_read", "file_read_range", "context_pack", "text_search", "script_search",
+    "repository_symbol_index", "file_read", "file_read_range", "context_pack",
+    "text_search", "script_search",
     "program_search", "image_inspect", "environment_status", "local_service_probe",
 })
 _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
@@ -13345,7 +13416,7 @@ def workbench_agent(
 
 _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find",
-    "file_read", "file_read_range", "text_search", "script_search",
+    "repository_symbol_index", "file_read", "file_read_range", "text_search", "script_search",
     "program_search", "image_inspect", "memory_search", "web_search",
     "web_fetch", "local_service_probe", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
@@ -14502,16 +14573,14 @@ def status() -> str:
         return f"ERROR contacting Ollama at {_ollama_display()}: {e}"
 
     installed = sorted(m.get("name", "?") for m in tags)
-    loaded = [
-        f"{m.get('name')} (VRAM ~{round(m.get('size_vram', 0)/1e9, 1)} GB)" for m in ps
-    ]
+    loaded = [str(m.get("name")) for m in ps if m.get("name")]
     tier_lines = [
-        f"  {k}={v}" + ("  [CLOUD — leaves machine]" if _is_cloud_tier(k, v) else "  [local GPU]")
+        f"  {k}={v}" + ("  [CLOUD — leaves machine]" if _is_cloud_tier(k, v) else "  [local Ollama]")
         for k, v in available_tiers(include_disabled=cloud_allowed()).items()
     ]
     if not ollama_endpoint.is_loopback(BASE):
         tier_lines = [
-            line.replace("  [local GPU]", "  [REMOTE OLLAMA - leaves machine]")
+            line.replace("  [local Ollama]", "  [REMOTE OLLAMA - leaves machine]")
             for line in tier_lines
         ]
     lines = [
@@ -14520,7 +14589,7 @@ def status() -> str:
         *tier_lines,
         f"Learning tiers: {', '.join(sorted(LEARN_TIERS)) if LEARN_TIERS else '(none)'}",
         f"Installed/registered models: {', '.join(installed) if installed else '(none)'}",
-        f"In VRAM now: {', '.join(loaded) if loaded else '(none — GPU idle)'}",
+        f"Resident in Ollama now: {', '.join(loaded) if loaded else '(none loaded)'}",
         f"local keep_alive: {KEEP_ALIVE}",
         "loopback retry: %d transient retry(s), %dms base delay; remote/cloud retries off" % (
             _local_model_retries(), int(_local_retry_delay(1) * 1000),
@@ -14561,10 +14630,9 @@ def status() -> str:
 
 # Ensemble ("ask several models, compound one answer") -------------------------
 #
-# Sequential by construction. On a 6 GB card only one model is resident at a
-# time, so polling N models costs N load+generate cycles; running them
-# concurrently would just thrash. Each model is unloaded after it answers so the
-# next one has room.
+# Sequential by construction. This keeps peak RAM/VRAM predictable on CPU-only
+# and accelerated hosts; concurrent model loads can otherwise thrash shared or
+# discrete memory. Each model is unloaded after it answers so the next has room.
 ENSEMBLE_MAX_MODELS = 4
 # Vision needs an image channel this path does not have, and a VLM handed a
 # text-only prompt answers with an immediate end-of-sequence.
@@ -14851,8 +14919,8 @@ def consult(
     tier fails; if the judge fails, a token-overlap fallback is labeled
     unknown-confidence.
 
-    By default it contrasts two LOCAL models (code=sonder:latest,
-    reasoning=deepseek-r1:7b) AND joins a cloud model (cloud-general) whenever
+    By default it contrasts configured LOCAL base/specialist models and joins a
+    cloud model (cloud-general) whenever
     cloud is enabled (SONDER_ALLOW_CLOUD=1) -- so the cloud is used when
     available but a disabled cloud never blocks the second opinion.
 
