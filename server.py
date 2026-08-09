@@ -436,6 +436,7 @@ def _chat_request_with_cloud_fallback(
             timeout=timeout,
             cancel_check=cancel_check,
             accept_native_tool_calls=accept_native_tool_calls,
+            idempotent=True,
         )
         return out, content, model
     except ModelCallError as error:
@@ -456,6 +457,7 @@ def _chat_request_with_cloud_fallback(
         timeout=timeout,
         cancel_check=cancel_check,
         accept_native_tool_calls=accept_native_tool_calls,
+        idempotent=True,
     )
     return out, content, fallback
 
@@ -898,6 +900,7 @@ def _make_generate(
                     timeout=timeout,
                     cancel_check=cancel_check,
                     accept_native_tool_calls=accept_native_tool_calls,
+                    idempotent=True,
                 )
             tokens_in = _model_usage_count(out.get("prompt_eval_count"))
             tokens_out = _model_usage_count(out.get("eval_count"))
@@ -3031,7 +3034,9 @@ def _safe_model_error_detail(value, limit: int = 600) -> str:
     # tokens or API keys accidentally echoed by an upstream proxy.
     if not structured:
         text = re.sub(
-            r"(?i)\b(bearer|token|secret|api[-_]?key)\b\s*[:=]?\s*\S+",
+            r"(?i)\b(bearer|token|secret|api[-_]?key)\b\s*[:=]?\s*"
+            r"(?!(?:limit|count|budget|window|usage|quota|length|maximum|minimum)\b)"
+            r"\S+",
             r"\1=<redacted>",
             text,
         )
@@ -3622,6 +3627,7 @@ def _offload_impl(
                     cloud=False,
                     timeout=request_timeout,
                     cancel_check=cancel_check,
+                    idempotent=True,
                 )
             tokens_in = _model_usage_count(out.get("prompt_eval_count"))
             tokens_out = _model_usage_count(out.get("eval_count"))
