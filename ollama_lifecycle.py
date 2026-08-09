@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import time
 
-import process_liveness
+from sonder_runtime.adapters import process_liveness
 
 
 _DISCOVERY_SERVER = re.compile(

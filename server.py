@@ -47,7 +47,7 @@ import live_reload
 import system_profile
 import emotion_vectors
 import preference_learning
-import process_liveness
+from sonder_runtime.adapters import process_liveness
 import web_tools
 import local_service_probe as local_probe
 import web_intents
