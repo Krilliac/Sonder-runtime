@@ -48,3 +48,10 @@ def test_app_remote_host_hint_requires_https():
 
     assert "hintText: 'https://your-host.example'" in settings_screen
     assert "hintText: 'http://your-host" not in settings_screen
+
+    mobile = _text("MOBILE_HOST_CONTROL.md")
+    assert "CI and tagged\nrelease builds keep Android cleartext disabled" in mobile
+    assert "--allow-android-cleartext-for-development" in mobile
+    assert "--allow-android-cleartext\n" not in mobile
+    assert "http://HOST" not in mobile
+    assert "http://192.168" not in mobile

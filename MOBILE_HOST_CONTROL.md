@@ -69,9 +69,9 @@ also accepts `--cert` and `--key`, or `SONDER_LAUNCHER_CERT` and
 
 In **Settings → Connection**, enter:
 
-1. Main server URL, such as `http://192.168.1.20:11435`.
+1. Main server URL, such as `https://sonder.example.com`.
 2. Main API key.
-3. Host launcher URL, such as `http://192.168.1.20:11436`. This must be
+3. Host launcher URL, such as `https://launcher.sonder.example.com`. This must be
    entered explicitly; Sonder Runtime never derives a credential-bearing control
    endpoint from the chat server URL.
 4. Host launcher token.
@@ -131,7 +131,7 @@ curl -X POST -H "Authorization: Bearer LAUNCHER_TOKEN" \
   -H "Content-Type: application/json" \
   -H "X-Sonder-Client-Id: phone-1" \
   -H "X-Sonder-Command-Id: restart-2026-08-08-1" \
-  -d '{}' http://HOST:11436/v1/launcher/commands/ack
+  -d '{}' https://launcher.sonder.example.com/v1/launcher/commands/ack
 ```
 
 Acknowledgement makes old result records eligible for bounded compaction. The
@@ -143,20 +143,23 @@ actual terminal state.
 
 ## Transport and mobile packaging
 
-HTTPS is recommended because bearer credentials sent over plain HTTP can be
-observed by other devices on the network. For an intentionally trusted LAN or
-VPN, CI explicitly enables Android cleartext access so existing `http://` host
-URLs work. Local builds make that choice after generating the native project:
+Distributed Android APKs require HTTPS because bearer credentials sent over
+plain HTTP can be observed by other devices on the network. CI and tagged
+release builds keep Android cleartext disabled. Configure the TLS reverse proxy
+before entering a remote server or launcher URL in a distributed app.
+
+Only a locally built development APK may opt into cleartext for an intentionally
+trusted loopback/LAN test after generating the native project:
 
 ```sh
 flutter create --org com.sonder --project-name sonder .
-python ../scripts/configure_flutter_networking.py . --allow-android-cleartext
+python ../scripts/configure_flutter_networking.py . --allow-android-cleartext-for-development
 ```
 
-Omit `--allow-android-cleartext` for an HTTPS-only Android build. The same
-script adds Apple's local-network usage explanation when an iOS or macOS native
-project exists. Android's generated manifest already includes the required
-Internet permission.
+Omit that development-only flag for every distributed build. The same script
+adds Apple's local-network usage explanation when an iOS or macOS native project
+exists. Android's generated manifest already includes the required Internet
+permission.
 
 The launcher does not implement wake-on-LAN. The computer must be powered on
 and the launcher service must already be running. For access away from home,
@@ -175,7 +178,7 @@ From another trusted machine, replace the token and host:
 
 ```sh
 curl -H "Authorization: Bearer LAUNCHER_TOKEN" \
-  http://HOST:11436/v1/launcher/status
+  https://launcher.sonder.example.com/v1/launcher/status
 ```
 
 The status response includes `active_operation` when work is in progress. Its
@@ -183,7 +186,7 @@ The status response includes `active_operation` when work is in progress. Its
 
 ```sh
 curl -H "Authorization: Bearer LAUNCHER_TOKEN" \
-  http://HOST:11436/v1/launcher/operations/OPERATION_ID
+  https://launcher.sonder.example.com/v1/launcher/operations/OPERATION_ID
 ```
 
 If the launcher is reachable but server startup fails, inspect the launcher
