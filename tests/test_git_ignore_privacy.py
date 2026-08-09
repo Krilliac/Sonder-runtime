@@ -1,5 +1,7 @@
 import os
 import subprocess
+import sys
+import time
 
 import pytest
 
@@ -83,6 +85,42 @@ def test_nested_ignore_negation_and_subroot_are_exact(monkeypatch, tmp_path):
     assert inventory["files"] == 2  # hidden .gitignore plus both non-ignored files
 
 
+def test_tracked_file_under_ignored_parent_remains_git_visible(monkeypatch, tmp_path):
+    root = _repository(monkeypatch, tmp_path)
+    tracked = root / "generated" / "tracked.txt"
+    tracked.parent.mkdir()
+    tracked.write_text("tracked-marker\n", encoding="utf-8")
+    _git("add", "-f", "generated/tracked.txt", cwd=root)
+    (root / ".gitignore").write_text("generated/\n", encoding="utf-8")
+    (root / "generated" / "private.bin").write_text("private-marker\n", encoding="utf-8")
+
+    inventory = workbench.workspace_inventory(".", include_hidden=True)
+    search = workbench.text_search("tracked-marker", root=".")
+    serialized = repr((inventory, search))
+    assert "tracked.txt" in serialized
+    assert "private.bin" not in serialized
+
+
+def test_linked_worktree_gitfile_uses_its_exact_worktree(monkeypatch, tmp_path):
+    main = _repository(monkeypatch, tmp_path)
+    _git("config", "user.name", "Sonder Test", cwd=main)
+    _git("config", "user.email", "sonder-test@example.invalid", cwd=main)
+    (main / "tracked.txt").write_text("tracked-marker\n", encoding="utf-8")
+    (main / ".gitignore").write_text("private/\n", encoding="utf-8")
+    _git("add", ".", cwd=main)
+    _git("commit", "--quiet", "-m", "fixture", cwd=main)
+    linked = tmp_path / "linked-worktree"
+    _git("worktree", "add", "--quiet", "--detach", str(linked), cwd=main)
+    (linked / "private").mkdir()
+    (linked / "private" / "weights.gguf").write_bytes(b"x" * 1000)
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: linked)
+
+    inventory = workbench.workspace_inventory(".", include_hidden=True)
+    assert "tracked.txt" in repr(inventory)
+    assert "private" not in repr(inventory)
+    assert "weights.gguf" not in repr(inventory)
+
+
 def test_git_discovery_failure_is_fail_closed_before_filesystem_scan(
     monkeypatch, tmp_path,
 ):
@@ -109,6 +147,70 @@ def test_git_discovery_output_truncation_is_explicit(monkeypatch, tmp_path):
         git_discovery.visible_paths(root, output_limit=1)
 
 
+def test_bounded_runner_timeout_and_stderr_do_not_leak_details():
+    started = time.monotonic()
+    with pytest.raises(git_discovery.GitDiscoveryError, match="timed out"):
+        git_discovery._run_bounded(
+            [sys.executable, "-c", "import time; time.sleep(5)"],
+            timeout_seconds=0.05,
+            output_limit=1024,
+        )
+    assert time.monotonic() - started < 2
+    with pytest.raises(git_discovery.GitDiscoveryError) as failure:
+        git_discovery._run_bounded(
+            [
+                sys.executable, "-c",
+                "import sys; sys.stderr.write('ignored-private-name'); sys.exit(2)",
+            ],
+            timeout_seconds=1,
+            output_limit=1024,
+        )
+    assert "ignored-private-name" not in str(failure.value)
+
+
+def test_repository_identity_cannot_escape_nearest_git_marker(monkeypatch, tmp_path):
+    root = _repository(monkeypatch, tmp_path)
+    outside = tmp_path / "outside"
+    (outside / ".git").mkdir(parents=True)
+    metadata = (str(outside) + "\n" + str(outside / ".git") + "\n").encode()
+    monkeypatch.setattr(git_discovery, "_run_bounded", lambda *_args, **_kwargs: metadata)
+
+    with pytest.raises(git_discovery.GitDiscoveryError, match="outside"):
+        git_discovery.visible_paths(root)
+
+
+def test_git_identity_decode_failure_is_generic_and_precedes_scan(monkeypatch, tmp_path):
+    _repository(monkeypatch, tmp_path)
+    monkeypatch.setattr(git_discovery, "_run_bounded", lambda *_args, **_kwargs: b"\xff")
+    monkeypatch.setattr(
+        workbench.os, "scandir",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("scanned")),
+    )
+
+    output = server.workspace_inventory()
+    assert output == "ERROR: Git repository identity was not valid UTF-8"
+
+
+def test_changed_visibility_snapshot_discards_results(monkeypatch, tmp_path):
+    root = _repository(monkeypatch, tmp_path)
+    target = root / "visible.txt"
+    target.write_text("private-marker\n", encoding="utf-8")
+    real_visible_paths = git_discovery.visible_paths
+    calls = {"count": 0}
+
+    def change_after_snapshot(path, **kwargs):
+        snapshot = real_visible_paths(path, **kwargs)
+        calls["count"] += 1
+        if calls["count"] == 1:
+            (root / ".gitignore").write_text("visible.txt\n", encoding="utf-8")
+        return snapshot
+
+    monkeypatch.setattr(git_discovery, "visible_paths", change_after_snapshot)
+    output = server.text_search("private-marker")
+    assert output == "ERROR: Git visibility changed during filesystem scan"
+    assert "visible.txt" not in output
+
+
 def test_hostile_ambient_git_redirection_and_global_ignore_are_scrubbed(
     monkeypatch, tmp_path,
 ):
@@ -133,6 +235,26 @@ def test_hostile_ambient_git_redirection_and_global_ignore_are_scrubbed(
     assert "visible.txt" in git_discovery.visible_paths(root)
 
 
+def test_repository_filter_and_fsmonitor_commands_are_not_executed(
+    monkeypatch, tmp_path,
+):
+    root = _repository(monkeypatch, tmp_path)
+    sentinel = tmp_path / "executed.txt"
+    probe = tmp_path / ("probe.cmd" if os.name == "nt" else "probe.sh")
+    if os.name == "nt":
+        probe.write_text("@echo executed>\"%s\"\n" % sentinel, encoding="utf-8")
+    else:
+        probe.write_text("#!/bin/sh\nprintf executed > '%s'\n" % sentinel, encoding="utf-8")
+        probe.chmod(0o700)
+    _git("config", "core.fsmonitor", str(probe), cwd=root)
+    _git("config", "filter.hostile.process", str(probe), cwd=root)
+    (root / ".gitattributes").write_text("* filter=hostile\n", encoding="utf-8")
+    (root / "visible.txt").write_text("visible\n", encoding="utf-8")
+
+    assert "visible.txt" in git_discovery.visible_paths(root)
+    assert not sentinel.exists()
+
+
 def test_non_git_fallback_and_symlink_non_traversal(monkeypatch, tmp_path):
     root = tmp_path / "plain"
     root.mkdir()
@@ -149,9 +271,11 @@ def test_non_git_fallback_and_symlink_non_traversal(monkeypatch, tmp_path):
 
     inventory = workbench.workspace_inventory(".")
     search = workbench.text_search("private-marker", root=".")
+    found = file_ops.find_files("*", root=".")
     assert inventory["files"] == 1
     assert search["matches"] == []
     assert inventory["skipped_by_reason"]["symlink"] == 1
+    assert "linked" not in repr(found)
 
 
 @pytest.mark.parametrize("tool", sorted(server._GIT_IGNORE_DISCOVERY_TOOLS))
