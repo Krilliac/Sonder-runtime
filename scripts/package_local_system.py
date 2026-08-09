@@ -73,6 +73,7 @@ REQUIRED_FILES = {
     "bootstrap-engine.cmd",
     "bootstrap-engine.sh",
     "bootstrap_engine.py",
+    "context_overflow.py",
     "creative_router.py",
     "engine_bundle.py",
     "endless-train.sh",

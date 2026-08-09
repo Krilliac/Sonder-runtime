@@ -207,6 +207,21 @@ and never changes endpoint, model, or tier. Hosted/cloud calls are always
 single-attempt to avoid silently duplicating metered work. Set
 `SONDER_LOCAL_RETRIES=0..2` and `SONDER_LOCAL_RETRY_DELAY_MS=0..1000` to tune the
 loopback policy. Explicit remote Ollama and hosted/cloud calls are single-attempt.
+
+One extra attempt exists on top of that policy, and only for a *classified*
+context overflow. The gateway reads the failure text - never the HTTP status,
+which providers and proxies get wrong often enough that a real overflow can
+arrive as a 429 - and if it says the prompt did not fit, a loopback call may
+compact the prompt once and resend it inside the same timeout and cancellation
+budget. Compaction drops the oldest turns and leaves a short in-band note, the
+same discipline the session live-turn window already uses; it never rewrites or
+truncates a message, and it never raises `num_ctx` behind the context policy's
+back. A request that is one oversized turn has nothing safe to drop and is
+reported rather than retried. Body-too-large, device out-of-memory, plain rate
+limits, and missing models are recognised as explicitly *not* overflow and are
+never retried this way. Hosted and remote routes keep their single-attempt
+posture unless the call site declares the request idempotent **and**
+`SONDER_HOSTED_OVERFLOW_RETRY=1` is set.
 Good-outcome lesson reflection does not queue another model request behind an
 active fleet: the outcome is committed immediately and its lesson remains
 retryable. When the fleet is idle, reflection uses a separate shared generation
