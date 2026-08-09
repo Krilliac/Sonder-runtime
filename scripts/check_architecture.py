@@ -21,6 +21,8 @@ listed one per line and exit 1.
 from __future__ import annotations
 
 import ast
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -40,7 +42,7 @@ BASELINE_ROOT_LEGACY_MODULES = frozenset({
     "sonder_migrations",
     "sonder_lifecycle", "sonder_secrets", "sonder_serve", "sonder_repl",
     "sonder_updates", "sonder_update_engine",
-    "recall", "workbench", "file_ops",
+    "workbench", "file_ops",
 })
 ROOT_LEGACY_MODULES = set(BASELINE_ROOT_LEGACY_MODULES)
 # This is a ratchet, not a target.  Removing a legacy root dependency is
@@ -70,6 +72,80 @@ ALLOWED_ROOT_IMPORTS = {
 }
 
 IO_MODULES = {"urllib", "socket", "http", "ftplib", "smtplib"}
+
+COMPATIBILITY_ROOT_MODULES = {
+    "eval_history": Path("eval_history.py"),
+    "memory_store": Path("memory_store.py"),
+    "recall": Path("recall.py"),
+}
+
+
+def tracked_production_python_files(
+    repo_root: Path = REPO_ROOT,
+) -> tuple[Path, ...]:
+    """Return the deterministic production-source inventory.
+
+    Packaging is built from ``git ls-files`` rather than a filesystem walk so
+    ignored build outputs can never become accidental inputs.  Architecture
+    checks use the same boundary.  Missing tracked sources and Git failures
+    fail closed instead of silently weakening the gate.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "git", "-C", str(repo_root), "ls-files", "-z", "--cached",
+                "--", "*.py",
+            ],
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(
+            "git ls-files is required for the architecture source inventory"
+        ) from exc
+
+    paths: list[Path] = []
+    for raw in result.stdout.split(b"\0"):
+        if not raw:
+            continue
+        relative = Path(os.fsdecode(raw))
+        if not relative.parts or relative.parts[0] == "tests":
+            continue
+        path = repo_root / relative
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError(
+                f"tracked production source is missing or not a regular file: {relative}"
+            )
+        paths.append(path)
+    return tuple(sorted(paths, key=lambda path: path.as_posix()))
+
+
+def compatibility_import_offenders(
+    module: str,
+    compatibility_path: Path,
+    repo_root: Path = REPO_ROOT,
+) -> tuple[Path, ...]:
+    """Find production callers that bypass a compatibility module's adapter."""
+    offenders: list[Path] = []
+    for path in tracked_production_python_files(repo_root):
+        relative = path.relative_to(repo_root)
+        if relative == compatibility_path:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import) and any(
+                alias.name == module for alias in node.names
+            ):
+                offenders.append(relative)
+                break
+            if (
+                isinstance(node, ast.ImportFrom)
+                and node.level == 0
+                and node.module == module
+            ):
+                offenders.append(relative)
+                break
+    return tuple(offenders)
 
 
 def layer_of(path: Path) -> str:
@@ -190,6 +266,12 @@ def check() -> list[str]:
                 )
 
     violations.extend(find_cycles(imports))
+    for module, compatibility_path in COMPATIBILITY_ROOT_MODULES.items():
+        for offender in compatibility_import_offenders(module, compatibility_path):
+            violations.append(
+                f"{offender}: production caller imports compatibility root "
+                f"module {module!r}"
+            )
     return violations
 
 

@@ -75,6 +75,14 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
         "sonder_runtime/application/backup/use_cases.py",
         "sonder_runtime/application/ports/backup.py",
     } <= set(entries)
+    assert "recall.py" in entries
+    assert {
+        "sonder_runtime/adapters/legacy/recall.py",
+        "sonder_runtime/adapters/recall.py",
+        "sonder_runtime/application/ports/recall.py",
+        "sonder_runtime/application/recall/__init__.py",
+        "sonder_runtime/application/recall/use_cases.py",
+    } <= set(entries)
     assert "sonder_runtime/adapters/git_discovery.py" in entries
     assert {
         "sonder_preflight.py",
@@ -95,7 +103,9 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     assert "sonder_runtime/adapters/memory_store.py" in entries
     assert "process_liveness.py" in entries
     assert "artifact_grounding.py" in entries
-    assert {"artifact_risk.py", "pdf_risk.py", "process_risk.py"} <= set(entries)
+    assert {
+        "artifact_risk.py", "pdf_risk.py", "process_risk.py", "unsafe_lab.py",
+    } <= set(entries)
     assert "media_assets.py" in entries
     assert "model_transport.py" in entries
     assert "sonder_runtime/adapters/model_transport.py" in entries

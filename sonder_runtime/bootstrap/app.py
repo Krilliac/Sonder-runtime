@@ -24,6 +24,7 @@ from ..adapters.legacy.services import (
 from ..adapters.legacy.evaluation_history import LegacyEvaluationHistoryReader
 from ..adapters.legacy.inspections import LegacyInspectionExecutor
 from ..adapters.legacy.backup import LegacyBackupGateway
+from ..adapters.legacy.recall import LegacyRecallGateway
 from ..adapters.legacy.preferences import (
     LegacyPreferenceCodec,
     LegacyPreferenceRepository,
@@ -36,6 +37,7 @@ from ..application.chat.handle_chat import ChatService
 from ..application.backup import BackupService
 from ..application.evaluation_history import EvaluationHistoryService
 from ..application.inspection import InspectionService
+from ..application.recall import RecallService
 from ..application.preferences import PreferenceService
 from ..application.ports.preferences import (
     ConnectionFactory,
@@ -67,6 +69,7 @@ class Application:
     clock: Clock
     backup: BackupService
     inspections: InspectionService
+    recall: RecallService
     evaluation_history: EvaluationHistoryService
     preferences: PreferenceService
     workflows: WorkflowService
@@ -126,6 +129,7 @@ def build_application(
         clock=SystemClock(),
         backup=BackupService(LegacyBackupGateway()),
         inspections=InspectionService(LegacyInspectionExecutor()),
+        recall=RecallService(LegacyRecallGateway()),
         evaluation_history=EvaluationHistoryService(
             LegacyEvaluationHistoryReader()
         ),

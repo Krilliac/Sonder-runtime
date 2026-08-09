@@ -483,7 +483,7 @@ def cmd_mcp(args) -> int:
     del args
     import server
 
-    server.mcp.run()
+    server.run_mcp()
     return 0
 
 
