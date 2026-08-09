@@ -78,7 +78,13 @@ def _parse_parameters(value):
         raise SqliteMutateError("parameters exceed max count (%d)" % MAX_PARAMETERS)
     parameters = []
     for index, item in enumerate(value):
-        if item is None or isinstance(item, (bool, int)):
+        if item is None or isinstance(item, bool):
+            parameters.append(item)
+        elif isinstance(item, int):
+            if item < -(1 << 63) or item > (1 << 63) - 1:
+                raise SqliteMutateError(
+                    "parameter %d integer exceeds SQLite signed 64-bit range" % index
+                )
             parameters.append(item)
         elif isinstance(item, float) and math.isfinite(item):
             parameters.append(item)
@@ -158,8 +164,8 @@ def _scan_sql(sql):
         raise SqliteMutateError("SQL must start with exactly INSERT, UPDATE, or DELETE")
     if "RETURNING" in words:
         raise SqliteMutateError("RETURNING is not supported")
-    if words[0] == "INSERT" and "REPLACE" in words:
-        raise SqliteMutateError("INSERT OR REPLACE is not supported")
+    if words[0] in {"INSERT", "UPDATE"} and "REPLACE" in words:
+        raise SqliteMutateError("REPLACE conflict actions are not supported")
     return words[0], placeholders
 
 
@@ -221,6 +227,26 @@ def _authorizer(statement, virtual_tables):
     return authorize, state
 
 
+def _restricted_table_names(conn) -> set[str]:
+    """Return virtual and implementation-shadow tables, or fail closed."""
+    try:
+        rows = conn.execute("PRAGMA table_list").fetchall()
+    except sqlite3.Error as exc:
+        raise SqliteMutateError(
+            "SQLite cannot classify virtual and shadow tables safely: %s" % exc
+        ) from exc
+    if not rows or any(len(row) < 3 for row in rows):
+        raise SqliteMutateError(
+            "SQLite cannot classify virtual and shadow tables safely"
+        )
+    return {
+        str(row[1]).casefold()
+        for row in rows
+        if str(row[0]).casefold() == "main"
+        and str(row[2]).casefold() in {"virtual", "shadow"}
+    }
+
+
 def _check_deadline(deadline):
     if time.monotonic() >= deadline:
         raise SqliteMutateError("SQLite mutation exceeded the timeout ceiling")
@@ -263,24 +289,29 @@ def mutate_sqlite(path, sql, parameters, *, mode="preview",
         # Preserve declared relational constraints. Cross-table cascades are
         # still denied by the authorizer's single-target-table contract.
         conn.execute("PRAGMA foreign_keys=ON")
+        # Prevent dirty WAL pages from spilling before the projection below;
+        # commit then appends at most one frame per changed logical page.
+        conn.execute("PRAGMA cache_spill=OFF")
         database_path = Path(conn.execute("PRAGMA database_list").fetchone()[2]).resolve()
         opened = target.stat()
         if database_path != target or (opened.st_dev, opened.st_ino) != identity:
             raise SqliteMutateError("SQLite target identity changed during open")
-        virtual_tables = {
-            str(row[0]).casefold() for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' "
-                "AND upper(sql) LIKE 'CREATE VIRTUAL TABLE%'"
-            )
-        }
+        restricted_tables = _restricted_table_names(conn)
+        journal_mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0]).casefold()
+        page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
+        page_count_before = int(conn.execute("PRAGMA page_count").fetchone()[0])
+        if page_count_before * page_size > max_db_bytes:
+            raise SqliteMutateError("SQLite logical database exceeds size ceiling")
         if hasattr(conn, "setlimit"):
             conn.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, MAX_SQL_BYTES)
             conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, MAX_PARAMETERS)
-            conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_PARAMETER_BYTES)
+            # SQLITE_LIMIT_LENGTH governs complete encoded rows/blobs, not
+            # bound parameters. Parameter bytes are already validated above.
+            conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, max_db_bytes)
         conn.set_progress_handler(lambda: 1 if time.monotonic() >= deadline else 0, 100)
         conn.execute("BEGIN IMMEDIATE")
         transaction = True
-        authorize, state = _authorizer(statement, virtual_tables)
+        authorize, state = _authorizer(statement, restricted_tables)
         conn.set_authorizer(authorize)
         before_changes = conn.total_changes
         try:
@@ -301,11 +332,30 @@ def mutate_sqlite(path, sql, parameters, *, mode="preview",
         if storage_during > max_db_bytes:
             raise SqliteMutateError("SQLite mutation exceeds database size ceiling")
         page_count = int(conn.execute("PRAGMA page_count").fetchone()[0])
-        page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
         if page_count * page_size > max_db_bytes:
             raise SqliteMutateError(
                 "SQLite mutation exceeds logical database size ceiling"
             )
+        if journal_mode == "wal":
+            # Python's sqlite3 API does not expose SQLite's dirty-page set. A
+            # same-value UPDATE can dirty a page even when the logical image is
+            # byte-identical, so only the all-pages upper bound is fail-closed.
+            projected_frames = page_count if affected else 0
+            wal_path = Path(str(target) + "-wal")
+            try:
+                wal_bytes = wal_path.lstat().st_size
+            except FileNotFoundError:
+                wal_bytes = 0
+            projected_storage = (
+                storage_during
+                + projected_frames * (page_size + 24)
+                + (32 if projected_frames and wal_bytes == 0 else 0)
+            )
+            if projected_storage > max_db_bytes:
+                raise SqliteMutateError(
+                    "SQLite mutation exceeds projected WAL storage ceiling"
+                )
+        _check_deadline(deadline)
         file_ops._require_no_reparse_components(requested)
         if file_ops.resolve_path(str(path), extra_roots=extra_roots, bypass=bypass) != target:
             raise SqliteMutateError("SQLite target resolution changed before completion")
