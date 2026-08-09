@@ -65,6 +65,13 @@ operations. It prevalidates every target before writing, caps per-file and
 aggregate bytes, rejects duplicate/sensitive/symlink targets, and makes a
 best-effort rollback if any write fails.
 
+`workspace_compare` compares two guarded files or directory trees without
+returning their contents. It emits a deterministic relative-path inventory of
+entry type, size, and SHA-256 plus exact added/removed/changed/same counts.
+Entry, file, aggregate-byte, detail, output, and time ceilings are enforced;
+sensitive/control paths, special files, and symlink or junction traversal are
+rejected.
+
 ## Other tool families
 
 - **Web (opt-in):** `web_search`, `web_fetch`, `weather_lookup`,
@@ -81,6 +88,7 @@ best-effort rollback if any write fails.
 ## Read-only tool set & speculation
 
 The read-only subset (inventory, tree, find, read, search, `data_inspect`,
+`workspace_compare`,
 image inspect, memory search, status) is what the speculation engine may
 run speculatively while the model thinks — never a mutating or executing
 tool ([Speculation & Prediction](11-speculation-and-prediction.md)).

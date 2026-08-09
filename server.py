@@ -66,6 +66,7 @@ import ollama_lifecycle
 import admin_auth
 import codegen_loop
 import file_ops
+import workspace_compare as workspace_compare_module
 import context_policy
 import command_registry
 import adaptive_training
@@ -557,6 +558,7 @@ LIVE_RELOAD_MODULES = [
     "ollama_lifecycle",
     "admin_auth",
     "file_ops",
+    "workspace_compare",
     "context_policy",
     "command_registry",
     "permission_rules",
@@ -7364,6 +7366,69 @@ def context_pack(
 
 
 @mcp.tool()
+def workspace_compare(
+    left: str,
+    right: str,
+    max_entries: int = 2000,
+    max_file_bytes: int = 64000000,
+    max_total_bytes: int = 256000000,
+    max_details: int = 1000,
+    max_output_bytes: int = 256000,
+    timeout: float = 5.0,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Compare two guarded files/directories by path, type, size, and SHA-256."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "left": left, "right": right, "max_entries": max_entries,
+        "max_file_bytes": max_file_bytes, "max_total_bytes": max_total_bytes,
+        "max_details": max_details, "max_output_bytes": max_output_bytes,
+        "timeout": timeout,
+    }
+    try:
+        report = workspace_compare_module.compare_workspaces(
+            left, right,
+            max_entries=max_entries,
+            max_file_bytes=max_file_bytes,
+            max_total_bytes=max_total_bytes,
+            max_details=max_details,
+            max_output_bytes=max_output_bytes,
+            timeout=timeout,
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+            developer_authorized=_file_developer_allowed(token),
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "workspace_compare", args, ok=False, started=started,
+            summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = workspace_compare_module.encode_result(report)
+    summary = report["summary"]
+    _record_direct_tool(
+        "workspace_compare", args, ok=True, started=started,
+        summary="added=%d removed=%d changed=%d same=%d" % (
+            summary["added"], summary["removed"],
+            summary["changed"], summary["same"],
+        ),
+        output=output,
+    )
+    activity_tracker.record_event(
+        "workspace_compare",
+        summary="%d difference(s), %d same" % (
+            summary["added"] + summary["removed"] + summary["changed"],
+            summary["same"],
+        ),
+        path="%s | %s" % (report["left"]["root"], report["right"]["root"]),
+    )
+    return output
+
+
+@mcp.tool()
 def data_inspect(
     path: str,
     max_bytes: int = 256000,
@@ -10163,7 +10228,7 @@ def tool_manifest() -> str:
         "sonder": "Ask through Sonder Runtime's local learning loop.",
         "offload": "Route a self-contained task to a configured local/cloud tier.",
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
-        "workspace_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace inventory, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
+        "workspace_inventory/workspace_compare/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace inventory and metadata-only comparison, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
         "file_policy/file_find/file_read/file_write/file_batch_write/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete, including bounded transactional multi-file create/overwrite.",
         "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
         "environment_status": "Report the host OS, available shells (PowerShell/cmd/bash/wsl), and installed toolchains -- check before choosing a command shape or assuming a tool exists.",
@@ -10225,6 +10290,7 @@ AGENT_TOOL_HELP = """Available tools:
 - file_read: {"path": "README.md"}
 - file_read_range: {"path": "server.py", "start_line": 1, "end_line": 200}
 - context_pack: {"paths_json": ["README.md", "src/main.py"], "max_files": 12, "max_total_bytes": 256000, "max_bytes_per_file": 64000}
+- workspace_compare: {"left": "path/to/left", "right": "path/to/right", "max_entries": 2000, "max_file_bytes": 64000000, "max_total_bytes": 256000000, "max_details": 1000, "max_output_bytes": 256000, "timeout": 5}
 - text_search: {"query": "TODO", "root": ".", "glob": "*.py", "regex": false, "max_results": 100}
 - file_write: {"path": "notes.txt", "content": "...", "mode": "create|overwrite|append"}
 - file_batch_write: {"operations_json": [{"path": "a.txt", "content": "...", "mode": "create|overwrite"}]}
@@ -10292,7 +10358,7 @@ or
 
 
 REPOSITORY_READ_ONLY_TOOLS = frozenset({
-    "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range", "context_pack",
+    "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "file_find", "file_read", "file_read_range", "context_pack",
     "data_inspect",
     "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
@@ -10318,6 +10384,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - file_read: {"path": "<task-relevant relative path>", "max_bytes": 256000}
 - file_read_range: {"path": "<task-relevant relative path>", "start_line": 1, "end_line": 200}
 - context_pack: {"paths_json": ["<task-relevant relative path>", "<another task-relevant relative path>"], "max_files": 12, "max_total_bytes": 256000, "max_bytes_per_file": 64000}
+- workspace_compare: {"left": "<first task-relevant file or directory>", "right": "<second task-relevant file or directory>", "max_entries": 2000, "max_file_bytes": 64000000, "max_total_bytes": 256000000, "max_details": 1000, "max_output_bytes": 256000, "timeout": 5}
 - text_search: {"query": "<exact task symbol or anchor>", "root": ".", "glob": "<task-relevant glob>", "max_results": 100}
 - script_search: {"query": "<task-relevant script name>", "root": ".", "max_results": 100}
 - program_search: {"query": "<required program name>", "max_results": 50}
@@ -10399,6 +10466,11 @@ def _repository_scope_path_error(tool_name, args, project_root):
                 for path in _context_pack_paths(
                     args.get("paths_json", args.get("paths", []))
                 )
+            ]
+        elif tool_name == "workspace_compare":
+            targets = [
+                ("left path", args.get("left") or ""),
+                ("right path", args.get("right") or ""),
             ]
         else:
             key = _project_scoped_path_key(tool_name)
@@ -10587,6 +10659,14 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
                 file_ops.resolve_repository_read_path(
                     path,
                     allow_workspace_root=False,
+                    reject_sensitive=True,
+                    extra_roots=trusted_extra_roots,
+                )
+        elif tool_name == "workspace_compare":
+            for path in (args.get("left", ""), args.get("right", "")):
+                file_ops.resolve_repository_read_path(
+                    path,
+                    allow_workspace_root=True,
                     reject_sensitive=True,
                     extra_roots=trusted_extra_roots,
                 )
@@ -11216,6 +11296,20 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "workspace_compare":
+        return workspace_compare(
+            left=args.get("left", ""),
+            right=args.get("right", ""),
+            max_entries=args.get("max_entries", 2000),
+            max_file_bytes=args.get("max_file_bytes", 64000000),
+            max_total_bytes=args.get("max_total_bytes", 256000000),
+            max_details=args.get("max_details", 1000),
+            max_output_bytes=args.get("max_output_bytes", 256000),
+            timeout=args.get("timeout", 5.0),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "text_search":
         return text_search(
             query=args.get("query", args.get("pattern", "")),
@@ -11539,6 +11633,8 @@ def _agent_activity_command(tool_name, args):
             [item.get("path", "") for item in operations if isinstance(item, dict)],
             ensure_ascii=False,
         )
+    if tool_name == "workspace_compare":
+        return "%s | %s" % (args.get("left", ""), args.get("right", ""))
     if tool_name == "workspace_run":
         return "%s %s" % (
             args.get("program", ""),
@@ -11558,7 +11654,7 @@ def _agent_activity_command(tool_name, args):
 
 
 _PROJECT_SCOPED_PATH_TOOLS = frozenset({
-    "file_read", "file_read_range", "context_pack", "image_inspect",
+    "file_read", "file_read_range", "context_pack", "workspace_compare", "image_inspect",
     "file_write", "file_batch_write", "file_edit",
     "file_delete", "directory_create", "workspace_inventory", "directory_tree",
     "file_find", "text_search", "script_search", "artifact_verify",
@@ -11686,6 +11782,16 @@ def _project_scope_args(tool_name, args, project):
             rebased.append(raw_path if is_abs else os.path.join(project, raw_path))
         scoped["paths_json"] = rebased
         scoped.pop("paths", None)
+        return scoped
+
+    if tool_name == "workspace_compare":
+        for key in ("left", "right"):
+            raw_path = str(scoped.get(key) or "").strip()
+            is_abs = os.path.isabs(raw_path) or bool(
+                re.match(r"^[A-Za-z]:[\\/]", raw_path)
+            )
+            if raw_path and not is_abs:
+                scoped[key] = os.path.join(project, raw_path)
         return scoped
 
     if tool_name == "workspace_run":
@@ -12140,7 +12246,7 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
     # persistent files just edited. self_heal_check is likewise unrelated.
     return False
 _WORK_INSPECTION_TOOLS = frozenset({
-    "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range", "context_pack",
+    "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "file_find", "file_read", "file_read_range", "context_pack",
     "text_search", "script_search", "program_search", "image_inspect",
     "memory_search", "learning_health_status", "evaluation_history_status",
     "memory_quality_report", "memory_privacy_review", "artifact_ground",
@@ -12149,7 +12255,7 @@ _WORK_INSPECTION_TOOLS = frozenset({
 })
 _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find",
-    "file_read", "file_read_range", "context_pack", "text_search", "script_search",
+    "file_read", "file_read_range", "context_pack", "workspace_compare", "text_search", "script_search",
     "program_search", "image_inspect", "environment_status",
 })
 _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
@@ -13015,7 +13121,7 @@ def _agent_impl(
                 repeated_inspection_counts.pop(call_signature, None)
         if tool_name in {
             "workspace_inventory", "directory_tree", "file_read", "file_read_range", "file_find",
-            "text_search", "script_search", "image_inspect",
+            "workspace_compare", "text_search", "script_search", "image_inspect",
         } and tool_ok:
             file_evidence = True
         if auto_checklist and tool_name in _WORK_INSPECTION_TOOLS and tool_ok:
@@ -13293,7 +13399,7 @@ def workbench_agent(
 
 _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find",
-    "file_read", "file_read_range", "text_search", "script_search",
+    "file_read", "file_read_range", "workspace_compare", "text_search", "script_search",
     "program_search", "image_inspect", "memory_search", "web_search",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
