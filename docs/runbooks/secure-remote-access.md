@@ -1,7 +1,8 @@
 # Secure remote access
 
-Sonder never terminates TLS itself and never binds non-loopback directly.
-Remote access = TLS reverse proxy in front of the loopback listener.
+The reference Sonder deployment never terminates TLS itself or binds the
+runtime listener to a non-loopback address. Remote access uses a TLS reverse
+proxy in front of that loopback listener.
 
 ## Rules (SPEC-2, non-negotiable)
 
