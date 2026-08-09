@@ -447,10 +447,8 @@ def cmd_repl(args) -> int:
 def cmd_mcp(args) -> int:
     del args
     import server
-    import unsafe_lab
 
-    unsafe_lab.require_startup()
-    server.mcp.run()
+    server.run_mcp()
     return 0
 
 

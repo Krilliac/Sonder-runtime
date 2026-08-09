@@ -17284,6 +17284,11 @@ def _prompt_debug_failure(symptom: str, evidence: str = "") -> str:
 mcp.finish_module_refresh(__name__, __file__, globals())
 
 
-if __name__ == "__main__" and not globals().get("_MCP_HOT_RELOAD_EXEC"):
+def run_mcp() -> None:
+    """Run the MCP adapter only after the process-level lab gate succeeds."""
     unsafe_lab.require_startup()
     mcp.run()
+
+
+if __name__ == "__main__" and not globals().get("_MCP_HOT_RELOAD_EXEC"):
+    run_mcp()

@@ -18,6 +18,7 @@ Prepare the isolation outside Sonder:
 - no privileged container, host PID/network namespace, device passthrough, or
   broad Linux capabilities;
 - loopback-only Sonder service exposure and restricted outbound network;
+- a loopback-only Ollama endpoint with hosted/cloud model tiers disabled;
 - strict CPU, memory, process, disk, and execution-time limits at the VM or
   container boundary; and
 - a clean snapshot that can be destroyed after the experiment.
@@ -33,6 +34,9 @@ Set the acknowledgement as one exact value before starting Sonder:
 ```powershell
 $env:SONDER_UNSAFE_LAB_ACK = 'I UNDERSTAND SONDER UNSAFE LAB MODE GIVES MODELS UNRESTRICTED HOST TOOL ACCESS AND I AM RUNNING IN A DISPOSABLE ISOLATED ENVIRONMENT'
 $env:SONDER_HOST = '127.0.0.1'
+$env:OLLAMA_HOST = 'http://127.0.0.1:11434'
+Remove-Item Env:SONDER_ALLOW_CLOUD -ErrorAction SilentlyContinue
+$env:SONDER_ALLOW_REMOTE_OLLAMA = '0'
 python server.py
 ```
 
@@ -40,8 +44,9 @@ On POSIX, export the same two values and run under the dedicated non-root
 account. Do not use `sudo`.
 
 Sonder refuses misspellings/truthy shorthand, non-loopback binding, and
-root/elevated execution. A successful activation prints the warning through
-`status()` and `diagnostics()` and durably appends it to
+root/elevated execution. It also refuses malformed or non-loopback Ollama
+endpoints and any hosted/cloud model opt-in. A successful activation prints
+the warning through `status()` and `diagnostics()` and durably appends it to
 `$SONDER_HOME/audit/unsafe-lab.jsonl`. `SONDER_UNSAFE_LAB_AUDIT_PATH` may point
 that record at a persistent evidence volume, but never at a host-mounted
 credential or source directory.
