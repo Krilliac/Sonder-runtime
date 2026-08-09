@@ -118,6 +118,16 @@ def test_release_workflow_stamps_and_gates_artifacts():
     assert "integrity:\n    needs: [android, linux, windows, macos]" in workflow
     release_block = workflow.split("\n  release:\n", 1)[1]
     assert "needs: [integrity]" in release_block
+    assert (
+        "scripts/check_release_version.py --require-release --json" in release_block
+    )
+    assert release_block.index("--require-release") < release_block.index(
+        "Publish release"
+    )
     assert "scripts/release_artifacts.py dist" in workflow
+    assert "fail_on_unmatched_files: true" in release_block
+    for artifact in release.EXPECTED_ARTIFACTS:
+        assert artifact in release_block
     for output in release.OUTPUTS:
         assert f"dist/{output}" in workflow
+        assert output in release_block
