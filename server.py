@@ -67,6 +67,7 @@ import data_query as data_query_module
 import json_patch_tool
 import text_patch as text_patch_ops
 import workspace_compare as workspace_compare_module
+import log_inspect as log_inspect_module
 import symbol_index
 import project_detect as project_detector
 import git_history
@@ -578,6 +579,7 @@ LIVE_RELOAD_MODULES = [
     "archive_tools",
     "text_patch",
     "workspace_compare",
+    "log_inspect",
     "context_policy",
     "command_registry",
     "permission_rules",
@@ -648,6 +650,9 @@ def _maybe_live_reload():
             continue
         if name == "workspace_compare":
             globals()["workspace_compare_module"] = module
+            continue
+        if name == "log_inspect":
+            globals()["log_inspect_module"] = module
             continue
         if name in globals():
             globals()[name] = module
@@ -7447,6 +7452,63 @@ def context_pack(
 
 
 @mcp.tool()
+def log_inspect(
+    path: str,
+    tail_lines: int = 0,
+    context_lines: int = 2,
+    max_file_bytes: int = 64000000,
+    max_scan_bytes: int = 4000000,
+    max_lines: int = 10000,
+    max_line_bytes: int = 4096,
+    max_results: int = 100,
+    max_output_bytes: int = 256000,
+    timeout: float = 5.0,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Inspect one guarded text log without execution or caller expressions."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "path": path, "tail_lines": tail_lines, "context_lines": context_lines,
+        "max_file_bytes": max_file_bytes, "max_scan_bytes": max_scan_bytes,
+        "max_lines": max_lines, "max_line_bytes": max_line_bytes,
+        "max_results": max_results, "max_output_bytes": max_output_bytes,
+        "timeout": timeout,
+    }
+    try:
+        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
+        report = log_inspect_module.inspect_log(
+            path, tail_lines=tail_lines, context_lines=context_lines,
+            max_file_bytes=max_file_bytes, max_scan_bytes=max_scan_bytes,
+            max_lines=max_lines, max_line_bytes=max_line_bytes,
+            max_results=max_results, max_output_bytes=max_output_bytes,
+            timeout=timeout, extra_roots=trusted_roots,
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "log_inspect", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = log_inspect_module.encode_result(report)
+    summary = report["summary"]
+    activity_summary = "%d line(s), %d error(s), %d warning(s)%s" % (
+        summary["lines_inspected"], summary["error_lines"],
+        summary["warning_lines"],
+        ", truncated" if report["scan_truncated"] or report["details_truncated"] else "",
+    )
+    _record_direct_tool(
+        "log_inspect", args, ok=True, started=started,
+        summary=activity_summary, output=output,
+    )
+    activity_tracker.record_event(
+        "log_inspect", summary=activity_summary, path=report["path"],
+    )
+    return output
+
+
+@mcp.tool()
 def workspace_compare(
     left: str,
     right: str,
@@ -11064,6 +11126,7 @@ def tool_manifest() -> str:
         "repo_log/repo_show/repo_blame": "Read bounded structured Git history, patches, and line attribution from an exact project repository without shell execution or upward discovery.",
         "file_digest/directory_digest": "Stream guarded files into SHA-256 and build deterministic relative-path manifests with fail-closed complete or explicitly partial directory Merkle roots.",
         "archive_list/archive_extract": "Prevalidate bounded ZIP/TAR manifests or transactionally extract them to a new non-overwriting workspace directory.",
+        "log_inspect": "Inspect one guarded text log with fixed level/timestamp/source extraction, failure clusters, repeats, and bounded context.",
         "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
         "environment_status": "Report the host OS, available shells (PowerShell/cmd/bash/wsl), and installed toolchains -- check before choosing a command shape or assuming a tool exists.",
         "data_inspect/data_query": "Preview structured data or run bounded read-only SQLite SELECT/CTE and exact-filter JSON/JSONL/CSV/TSV queries inside allowed roots.",
@@ -11138,6 +11201,7 @@ AGENT_TOOL_HELP = """Available tools:
 - repo_blame: {"path": ".", "file_path": "<contained relative file>", "revision": "HEAD", "start_line": 1, "end_line": 100, "timeout": 5, "max_bytes": 256000}
 - archive_list: {"path": "bundle.zip", "max_entries": 2000, "max_total_bytes": 256000000, "max_ratio": 100, "max_results": 2500}
 - archive_extract: {"source": "bundle.zip", "destination": "unpacked", "max_entries": 2000, "max_total_bytes": 256000000, "max_ratio": 100} -- creates a new directory; never overwrites
+- log_inspect: {"path": "logs/app.log", "tail_lines": 0, "context_lines": 2, "max_file_bytes": 64000000, "max_scan_bytes": 4000000, "max_lines": 10000, "max_line_bytes": 4096, "max_results": 100, "max_output_bytes": 256000, "timeout": 5}
 - text_search: {"query": "TODO", "root": ".", "glob": "*.py", "regex": false, "max_results": 100}
 - file_write: {"path": "notes.txt", "content": "...", "mode": "create|overwrite|append"}
 - file_batch_write: {"operations_json": [{"path": "a.txt", "content": "...", "mode": "create|overwrite"}]}
@@ -11212,7 +11276,7 @@ or
 REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "file_find",
     "dependency_inventory",
-    "repository_symbol_index", "file_read", "file_digest", "directory_digest",
+    "repository_symbol_index", "log_inspect", "file_read", "file_digest", "directory_digest",
     "file_read_range", "context_pack",
     "repo_status", "repo_diff",
     "repo_log", "repo_show", "repo_blame",
@@ -11254,6 +11318,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - repo_show: {"path": ".", "revision": "HEAD", "file_path": "<required contained relative file>", "timeout": 5, "max_bytes": 256000}
 - repo_blame: {"path": ".", "file_path": "<required contained relative file>", "revision": "HEAD", "start_line": 1, "end_line": 100, "timeout": 5, "max_bytes": 256000}
 - archive_list: {"path": "<task-relevant ZIP or TAR>", "max_entries": 2000, "max_total_bytes": 256000000, "max_ratio": 100, "max_results": 2500}
+- log_inspect: {"path": "<task-relevant log file>", "tail_lines": 0, "context_lines": 2, "max_file_bytes": 64000000, "max_scan_bytes": 4000000, "max_lines": 10000, "max_line_bytes": 4096, "max_results": 100, "max_output_bytes": 256000, "timeout": 5}
 - text_search: {"query": "<exact task symbol or anchor>", "root": ".", "glob": "<task-relevant glob>", "max_results": 100}
 - script_search: {"query": "<task-relevant script name>", "root": ".", "max_results": 100}
 - program_search: {"query": "<required program name>", "max_results": 50}
@@ -11547,7 +11612,7 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
     if scope_error:
         return scope_error
     try:
-        if tool_name in {"file_read", "file_digest", "file_read_range", "image_inspect", "data_inspect", "data_query"}:
+        if tool_name in {"file_read", "file_digest", "file_read_range", "image_inspect", "data_inspect", "data_query", "log_inspect"}:
             file_ops.resolve_repository_read_path(
                 args.get("path", ""),
                 allow_workspace_root=False,
@@ -12313,6 +12378,22 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "log_inspect":
+        return log_inspect(
+            path=args.get("path", ""),
+            tail_lines=args.get("tail_lines", 0),
+            context_lines=args.get("context_lines", 2),
+            max_file_bytes=args.get("max_file_bytes", 64000000),
+            max_scan_bytes=args.get("max_scan_bytes", 4000000),
+            max_lines=args.get("max_lines", 10000),
+            max_line_bytes=args.get("max_line_bytes", 4096),
+            max_results=args.get("max_results", 100),
+            max_output_bytes=args.get("max_output_bytes", 256000),
+            timeout=args.get("timeout", 5.0),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "workspace_compare":
         return workspace_compare(
             left=args.get("left", ""),
@@ -12799,7 +12880,7 @@ def _agent_activity_command(tool_name, args):
 _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "file_read", "file_digest", "directory_digest", "file_read_range", "context_pack", "workspace_compare",
     "repo_log", "repo_show", "repo_blame",
-    "data_query", "image_inspect", "file_write", "file_batch_write", "json_patch", "file_edit", "text_patch",
+    "data_query", "image_inspect", "log_inspect", "file_write", "file_batch_write", "json_patch", "file_edit", "text_patch",
     "archive_list", "archive_extract",
     "file_delete", "directory_create", "workspace_inventory", "dependency_inventory", "directory_tree",
     "file_find", "repository_symbol_index", "text_search", "script_search", "artifact_verify",
@@ -13465,7 +13546,7 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
 _WORK_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "directory_digest", "file_find",
     "dependency_inventory",
-    "repository_symbol_index", "file_read", "file_digest", "file_read_range", "context_pack",
+    "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
     "text_search", "script_search", "program_search", "image_inspect", "repo_status", "repo_diff",
     "repo_log", "repo_show", "repo_blame",
     "data_query", "project_detect", "archive_list",
@@ -13477,14 +13558,14 @@ _WORK_INSPECTION_TOOLS = frozenset({
 _AGENT_FILE_EVIDENCE_TOOLS = frozenset({
     "workspace_inventory", "workspace_compare", "directory_tree", "file_read", "file_read_range",
     "file_digest", "directory_digest", "file_find", "text_search",
-    "script_search", "image_inspect", "data_query", "project_detect",
+    "script_search", "image_inspect", "log_inspect", "data_query", "project_detect",
     "context_pack", "repo_log", "repo_show", "repo_blame", "archive_list",
     "dependency_inventory",
 })
 _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "directory_digest", "file_find",
     "dependency_inventory",
-    "repository_symbol_index", "file_read", "file_digest", "file_read_range", "context_pack",
+    "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
     "data_query", "text_search", "script_search",
     "program_search", "image_inspect", "environment_status", "repo_status", "repo_diff", "project_detect",
     "repo_log", "repo_show", "repo_blame", "archive_list", "local_service_probe",
@@ -14603,7 +14684,7 @@ def workbench_agent(
 _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "directory_digest", "file_find",
     "dependency_inventory",
-    "repository_symbol_index", "file_read", "file_digest", "file_read_range", "data_query", "text_search", "script_search",
+    "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "data_query", "text_search", "script_search",
     "project_detect",
     "repo_log", "repo_show", "repo_blame", "archive_list",
     "program_search", "image_inspect", "memory_search", "web_search",

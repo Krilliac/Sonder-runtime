@@ -60,7 +60,7 @@ expressions or file content are executed.
 
 `file_find`, `file_read`, `file_read_range`, `file_write`, `file_batch_write`, `file_edit`, `text_patch`,
 `file_copy`, `file_move`, `file_delete`, `directory_tree`, `directory_create`, `workspace_inventory`,
-`workspace_compare`, `text_search`, `script_search`, `program_search`, `image_inspect`, `archive_list`,
+`workspace_compare`, `text_search`, `script_search`, `program_search`, `image_inspect`, `log_inspect`, `archive_list`,
 `archive_extract`, `repo_log`,
 `repo_show`, `repo_blame`. All are
 confined to `SONDER_FILE_ROOTS`, honor the permission policy
@@ -111,6 +111,13 @@ Entry, file, aggregate-byte, detail, output, and time ceilings are enforced;
 sensitive/control paths, special files, and symlink or junction traversal are
 rejected.
 
+`log_inspect` reads one guarded UTF-8 text log through a validated no-follow
+file handle. Fixed host parsers extract common text and JSON-log timestamps,
+levels, and sources; the result summarizes error/warning clusters, repeated
+messages, and bounded first/last-failure context. Prefix or tail inspection is
+available under file, scan-byte, line, per-line, result, output, and time caps.
+Callers cannot supply regular expressions or executable parsing rules.
+
 ## Other tool families
 
 - **Local service probe:** `local_service_probe` performs bounded,
@@ -132,7 +139,7 @@ rejected.
 
 ## Read-only tool set & speculation
 
-The read-only subset (inventory, tree, find, read, search, `data_inspect`,
+The read-only subset (inventory, tree, find, read, search, `data_inspect`, `log_inspect`,
 image inspect, memory search, status) is what the speculation engine may
 run speculatively while the model thinks — never a mutating or executing
 tool ([Speculation & Prediction](11-speculation-and-prediction.md)).
