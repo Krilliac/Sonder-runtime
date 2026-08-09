@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import embeddings
 import memory_quality
-import memory_store
+import sonder_runtime.adapters.memory_store as memory_store
 import retriever
 import reward
 

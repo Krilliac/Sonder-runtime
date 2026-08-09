@@ -15,7 +15,7 @@ import tempfile
 import unicodedata
 
 import contribute
-import memory_store
+import sonder_runtime.adapters.memory_store as memory_store
 import reward
 import sonder_paths
 import training_data

@@ -94,6 +94,26 @@ class MetricsRegistry:
                 ["tier"],
                 registry=self._registry,
             )
+            self.model_backend_phase_duration_seconds = Histogram(
+                "sonder_model_backend_phase_duration_seconds",
+                "Backend-measured inference phase duration",
+                ["backend", "phase"],
+                registry=self._registry,
+            )
+            self.model_token_throughput_per_second = Histogram(
+                "sonder_model_token_throughput_per_second",
+                "Backend-measured token throughput",
+                ["backend", "direction"],
+                buckets=(0.1, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500,
+                         1000, 2000, 5000, 10000, float("inf")),
+                registry=self._registry,
+            )
+            self.model_load_states_total = Counter(
+                "sonder_model_load_states_total",
+                "Explicit backend load-state observations",
+                ["backend", "state"],
+                registry=self._registry,
+            )
             self.sqlite_lock_wait_seconds = Histogram(
                 "sonder_sqlite_lock_wait_seconds",
                 "SQLite lock waits by store",
@@ -150,6 +170,9 @@ class MetricsRegistry:
                 "active_requests",
                 "model_calls_total",
                 "model_call_duration_seconds",
+                "model_backend_phase_duration_seconds",
+                "model_token_throughput_per_second",
+                "model_load_states_total",
                 "sqlite_lock_wait_seconds",
                 "task_states",
                 "autopilot_runs_total",
@@ -160,6 +183,35 @@ class MetricsRegistry:
                 "auth_failures_total",
             ):
                 setattr(self, name, noop)
+
+    def observe_inference(self, backend: str, telemetry) -> None:
+        """Record bounded, content-free measurements when a backend supplies them."""
+        if telemetry is None:
+            return
+        backend = backend if backend in ("ollama", "openai_compatible") else "other"
+        phases = (
+            ("total", getattr(telemetry, "backend_total_ms", None)),
+            ("load", getattr(telemetry, "load_ms", None)),
+            ("prompt_eval", getattr(telemetry, "prompt_eval_ms", None)),
+            ("eval", getattr(telemetry, "eval_ms", None)),
+        )
+        for phase, milliseconds in phases:
+            if isinstance(milliseconds, (int, float)) and 0 <= milliseconds <= 86_400_000:
+                self.model_backend_phase_duration_seconds.labels(
+                    backend=backend, phase=phase
+                ).observe(milliseconds / 1000.0)
+        rates = (
+            ("prompt", getattr(telemetry, "prompt_tokens_per_second", None)),
+            ("output", getattr(telemetry, "output_tokens_per_second", None)),
+        )
+        for direction, rate in rates:
+            if isinstance(rate, (int, float)) and 0 <= rate <= 1_000_000:
+                self.model_token_throughput_per_second.labels(
+                    backend=backend, direction=direction
+                ).observe(rate)
+        state = getattr(telemetry, "load_state", None)
+        if state in ("cold", "warm"):
+            self.model_load_states_total.labels(backend=backend, state=state).inc()
 
     def set_build_info(self, version: str, commit: str) -> None:
         self.build_info.labels(version=version, commit=commit).set(1)

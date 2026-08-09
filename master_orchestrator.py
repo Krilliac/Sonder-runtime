@@ -48,7 +48,14 @@ _MAX_EVENTS = 80
 DEFAULT_MAX_AGENTS = 16
 ABSOLUTE_MAX_AGENTS = 64
 DEFAULT_MAX_WORKERS = 8
-ABSOLUTE_MAX_WORKERS = 16
+# Ordinary environment overrides retain the historical 16-worker ceiling.
+# A single orchestration run may explicitly request more, but never beyond the
+# compiled ceiling (and an operator may lower that ceiling with
+# SONDER_MAX_WORKER_CAP).  Keeping these separate makes high-width harness/data
+# runs opt-in without changing the conservative hardware-derived default.
+STANDARD_MAX_WORKERS = 16
+ABSOLUTE_MAX_WORKERS = 64
+_MAX_WORKER_COUNT_DIGITS = 64
 RAM_RESERVE_BYTES = int(1.5 * 1024 ** 3)
 # A "worker" is a Python thread that POSTs to Ollama and waits -- the model
 # weights live in the ollama server process (and in VRAM), NOT once per worker.
@@ -358,13 +365,108 @@ def gpu_worker_slots() -> int:
     return max(1, min(ABSOLUTE_MAX_WORKERS, headroom // GPU_KV_CACHE_PER_WORKER_BYTES))
 
 
-def capacity(requested_agents: int | str | None = None) -> dict:
-    """Describe queued-agent ceiling separately from safe concurrent slots."""
+def _positive_int(value) -> tuple[int | None, str]:
+    """Parse a positive decimal integer without accepting bools/floats."""
+    if isinstance(value, bool):
+        return None, "boolean values are not worker counts"
+    if isinstance(value, int):
+        return (value, "") if value > 0 else (None, "worker count must be positive")
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw.isdecimal():
+            if len(raw) > _MAX_WORKER_COUNT_DIGITS:
+                return None, "worker count has too many digits"
+            try:
+                parsed = int(raw)
+            except (ValueError, OverflowError):
+                return None, "worker count must be a positive decimal integer"
+            return (parsed, "") if parsed > 0 else (None, "worker count must be positive")
+        return None, "worker count must be a positive decimal integer"
+    return None, "worker count must be a positive decimal integer"
+
+
+def operator_worker_ceiling() -> tuple[int, str]:
+    """Return the operator ceiling and any fail-safe configuration warning."""
+    raw = os.environ.get("SONDER_MAX_WORKER_CAP", "").strip()
+    if not raw:
+        return ABSOLUTE_MAX_WORKERS, ""
+    value, error = _positive_int(raw)
+    if error:
+        return STANDARD_MAX_WORKERS, "invalid SONDER_MAX_WORKER_CAP: %s" % error
+    return min(int(value), ABSOLUTE_MAX_WORKERS), ""
+
+
+def explicit_agent_ceiling() -> int:
+    """Breadth ceiling for a run that explicitly opts into a worker cap.
+
+    An explicit SONDER_MAX_AGENTS remains authoritative.  Otherwise an
+    explicit run may exceed the hardware-derived breadth default, but it is
+    still bounded by both compiled agent and operator worker ceilings.
+    """
+    if os.environ.get("SONDER_MAX_AGENTS", "").strip():
+        return max_agents()
+    operator_ceiling, _error = operator_worker_ceiling()
+    return max(1, min(ABSOLUTE_MAX_AGENTS, operator_ceiling))
+
+
+_AFFIRMATIVE_WORKER_REQUEST = re.compile(
+    r"(?i)^\s*(?:please\s+)?(?:use|run|spawn|launch)\s+"
+    r"(?P<count>[1-9]\d*)\s+(?:concurrent\s+)?(?:workers?|agents?)\b"
+)
+_WORKER_COUNT_MENTION = re.compile(
+    r"(?i)(?<!\d)(?P<count>[1-9]\d*)(?!\d)\s+"
+    r"(?:concurrent\s+)?(?:workers?|agents?)\b"
+)
+_WORKER_REQUEST_NEGATION = re.compile(
+    r"(?i)\b(?:do\s+not|don't|never|not|no)\b"
+)
+_WORKER_REQUEST_META = re.compile(
+    r"(?i)\b(?:ignore|quoted?|phrase|document|instruction|example|"
+    r"says?|mentions?|explain|why)\b"
+)
+_WORKER_REQUEST_COMPARATIVE = re.compile(
+    r"(?i)\b(?:more|fewer|less|greater|lower)\s+than\b"
+)
+_WORKER_REQUEST_QUOTES = frozenset("\"'`“”‘’")
+
+
+def requested_worker_cap(task: str) -> int | None:
+    """Extract one tightly anchored, affirmative worker-count directive."""
+    text = str(task or "")
+    match = _AFFIRMATIVE_WORKER_REQUEST.match(text)
+    if not match:
+        return None
+    if (
+        _WORKER_REQUEST_NEGATION.search(text)
+        or _WORKER_REQUEST_META.search(text)
+        or _WORKER_REQUEST_COMPARATIVE.search(text)
+        or any(quote in text for quote in _WORKER_REQUEST_QUOTES)
+    ):
+        return None
+    mentions = list(_WORKER_COUNT_MENTION.finditer(text))
+    if len(mentions) != 1 or mentions[0].start("count") != match.start("count"):
+        return None
+    value, error = _positive_int(match.group("count"))
+    return None if error else min(int(value), ABSOLUTE_MAX_WORKERS)
+
+
+def capacity(
+    requested_agents: int | str | None = None,
+    worker_cap: int | str | None = None,
+) -> dict:
+    """Describe queued breadth and bounded concurrent slots for one run."""
     logical = max(1, int(os.cpu_count() or 1))
-    ceiling = max_agents()
-    requested = clamp_agent_count(
-        requested_agents, default=ceiling if requested_agents is None else 3,
-    )
+    explicit_cap, cap_error = _positive_int(worker_cap) if worker_cap is not None else (None, "")
+    ceiling = explicit_agent_ceiling() if explicit_cap else max_agents()
+    if explicit_cap:
+        requested_value, requested_error = _positive_int(requested_agents)
+        requested = min(requested_value or explicit_cap, ceiling)
+        if requested_error and requested_agents is not None:
+            cap_error = "invalid requested_agents: %s" % requested_error
+    else:
+        requested = clamp_agent_count(
+            requested_agents, default=ceiling if requested_agents is None else 3,
+        )
     total, available = physical_memory_bytes()
     # Workers block on a network call to Ollama rather than burning a core
     # each, so half the logical CPUs is a sane ceiling (was logical // 4).
@@ -394,33 +496,43 @@ def capacity(requested_agents: int | str | None = None) -> dict:
 
     source = "auto"
     slots = automatic
+    operator_ceiling, operator_error = operator_worker_ceiling()
     raw_override = os.environ.get("SONDER_PARALLEL_WORKERS", "").strip()
     if raw_override:
-        try:
-            override = int(raw_override)
-        except (TypeError, ValueError):
-            override = automatic
-            source = "invalid override; auto"
+        override, legacy_error = _positive_int(raw_override)
+        if legacy_error:
+            cap_error = cap_error or "invalid SONDER_PARALLEL_WORKERS: %s" % legacy_error
         else:
-            slots = max(1, min(override, requested, ABSOLUTE_MAX_WORKERS))
+            slots = min(override, requested, STANDARD_MAX_WORKERS, operator_ceiling)
             source = "SONDER_PARALLEL_WORKERS"
             bound_by = "SONDER_PARALLEL_WORKERS"
+    if explicit_cap:
+        slots = min(explicit_cap, requested, operator_ceiling, ABSOLUTE_MAX_WORKERS)
+        source = "per-run worker_cap"
+        if slots == operator_ceiling and explicit_cap > operator_ceiling:
+            bound_by = "operator worker ceiling"
+        elif slots == requested and explicit_cap > requested:
+            bound_by = "requested agents"
+        else:
+            bound_by = "per-run worker_cap"
     gpu_total, gpu_free = gpu_memory_bytes()
     warning = ""
+    warnings = [message for message in (operator_error, cap_error) if message]
     if ollama_parallel <= 0 and slots > 1:
-        warning = (
+        warnings.append(
             "OLLAMA_NUM_PARALLEL is unset -- Ollama auto-selects its batch width and "
             "collapses to 1 on a VRAM-tight box, which serializes every request and "
             "makes these %d worker slots buy nothing. Set OLLAMA_NUM_PARALLEL=%d and "
             "restart the Ollama server to actually get the concurrency."
             % (slots, slots)
         )
-    elif 0 < ollama_parallel < automatic:
-        warning = (
-            "OLLAMA_NUM_PARALLEL=%d is below the %d slots this hardware could sustain; "
-            "raise it (and restart Ollama) to use the remaining headroom."
-            % (ollama_parallel, automatic)
+    elif 0 < ollama_parallel < slots:
+        warnings.append(
+            "OLLAMA_NUM_PARALLEL=%d is below the selected %d worker slots; raise it "
+            "(and restart Ollama) or the extra workers will queue in Ollama."
+            % (ollama_parallel, slots)
         )
+    warning = "; ".join(warnings)
     return {
         "logical_cpus": logical,
         "total_memory_bytes": total,
@@ -433,6 +545,11 @@ def capacity(requested_agents: int | str | None = None) -> dict:
         "requested_agents": requested,
         "worker_slots": slots,
         "automatic_worker_slots": automatic,
+        "requested_worker_cap": explicit_cap or 0,
+        "operator_worker_ceiling": operator_ceiling,
+        "absolute_worker_ceiling": ABSOLUTE_MAX_WORKERS,
+        "worker_cap_error": cap_error,
+        "operator_worker_error": operator_error,
         "slot_limits": limits,
         "bound_by": bound_by,
         "source": source,
@@ -442,13 +559,16 @@ def capacity(requested_agents: int | str | None = None) -> dict:
     }
 
 
-def parallel_worker_slots(requested_agents: int | str | None = None) -> int:
-    return int(capacity(requested_agents)["worker_slots"])
+def parallel_worker_slots(
+    requested_agents: int | str | None = None,
+    worker_cap: int | str | None = None,
+) -> int:
+    return int(capacity(requested_agents, worker_cap=worker_cap)["worker_slots"])
 
 
 def requests_fleet(task: str) -> bool:
     """Recognize explicit natural-language requests for maximum fan-out."""
-    return bool(_FLEET_REQUEST.search(task or ""))
+    return bool(_FLEET_REQUEST.search(task or "") or requested_worker_cap(task))
 
 
 def requires_repository_tools(task: str) -> bool:
@@ -1008,13 +1128,23 @@ def _subtask_prompts(
 def run_delegated(
     task: str, worker_fn, audit_fn, agents: int = 3,
     metadata: dict | None = None, _on_started=None, project: str = "",
+    worker_cap: int | str | None = None,
 ) -> dict:
     repository_task = requires_repository_tools(task) or bool(str(project or "").strip())
     project_scope = (
         resolve_repository_project_root(task, project) if repository_task else ""
     )
-    agents = clamp_agent_count(agents, default=3)
-    worker_slots = parallel_worker_slots(agents)
+    explicit_cap, _cap_error = _positive_int(worker_cap) if worker_cap is not None else (None, "")
+    if explicit_cap:
+        agents_value, _agents_error = _positive_int(agents)
+        agents = min(agents_value or explicit_cap, explicit_agent_ceiling())
+    else:
+        agents = clamp_agent_count(agents, default=3)
+    capacity_data = capacity(agents, worker_cap=worker_cap)
+    worker_slots = int(
+        parallel_worker_slots(agents, worker_cap=worker_cap)
+        if worker_cap is not None else parallel_worker_slots(agents)
+    )
     metadata = dict(metadata or {})
     metadata.setdefault("mode", "delegated")
     metadata["requested_agents"] = agents
@@ -1022,9 +1152,15 @@ def run_delegated(
     if project_scope:
         metadata["project"] = project_scope
     master_id = _new_agent("master", task, metadata=metadata)
+    schedule = "queued %d agent(s) across %d worker slot(s)" % (agents, worker_slots)
+    if capacity_data.get("source") == "per-run worker_cap":
+        schedule += " [per-run worker_cap=%d; operator ceiling=%d]" % (
+            capacity_data["requested_worker_cap"],
+            capacity_data["operator_worker_ceiling"],
+        )
     started = _start_agent(
         master_id,
-        "queued %d agent(s) across %d worker slot(s)" % (agents, worker_slots),
+        schedule,
         requested_agents=agents,
         worker_slots=worker_slots,
     )
@@ -1207,7 +1343,7 @@ def run_delegated(
 def start_delegated(
     task: str, worker_fn, audit_fn, agents: int = 3,
     metadata: dict | None = None, startup_timeout: float = 5.0,
-    project: str = "",
+    project: str = "", worker_cap: int | str | None = None,
 ) -> dict:
     """Start delegated orchestration in a daemon thread and return ledger IDs.
 
@@ -1235,6 +1371,7 @@ def start_delegated(
                 metadata=metadata,
                 _on_started=on_started,
                 project=project,
+                worker_cap=worker_cap,
             )
         except Exception as exc:  # keep startup failures observable
             master_id = started_result.get("master_id")
@@ -1281,6 +1418,15 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
             listed = listed[:max(1, int(limit or 20))]
             data = {
                 "active_agents": len(active),
+                "running_agents": sum(
+                    1 for row in active if row.get("status") == "running"
+                ),
+                "queued_agents": sum(
+                    1 for row in active if row.get("status") == "queued"
+                ),
+                "active_model_calls": sum(
+                    1 for row in active if row.get("in_model_call")
+                ),
                 "cancel_pending": sum(
                     1 for row in active if row.get("cancel_requested")
                 ),
@@ -1343,6 +1489,11 @@ def format_capacity(data: dict | None = None) -> str:
             data.get("bound_by", "?"),
             data.get("source", "auto"),
         ),
+        "  per-run requested cap: %s | operator/absolute ceiling: %s/%s" % (
+            data.get("requested_worker_cap", 0) or "none",
+            data.get("operator_worker_ceiling", ABSOLUTE_MAX_WORKERS),
+            data.get("absolute_worker_ceiling", ABSOLUTE_MAX_WORKERS),
+        ),
     ])
     if limits:
         lines.append(
@@ -1395,6 +1546,10 @@ def format_snapshot(data: dict) -> str:
         lines.append("  agents: none yet")
     for row in agents[:12]:
         lines.append("  - %(id)s [%(status)s] %(activity)s" % row)
+        if row.get("role") == "master" and row.get("requested_agents"):
+            lines.append("      schedule: %s agents / %s worker slots" % (
+                row.get("requested_agents", 0), row.get("worker_slots", 0),
+            ))
         lines.append("      task: %s" % (row.get("task") or "")[:180])
         if row.get("project"):
             lines.append("      project: %s" % row["project"])

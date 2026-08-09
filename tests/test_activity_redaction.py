@@ -1,10 +1,12 @@
-"""_redact_text is the only sanitizer on the activity ledger's free-text fields.
+"""Security contracts for the app-safe activity and execution-feed projections.
 
-record_tool_result stores tool stdout and summaries through it, and those reach
-snapshot() -> the sonder_activity field on chat responses and the status payload.
+record_tool_result stores tool stdout and summaries through it; public_snapshot
+then applies an independent bounded projection before HTTP clients receive it.
 It had drifted behind npu_contract's rule set, which does the same job on the
 same shapes; these pin the shapes that were measured passing through it.
 """
+import json
+
 import activity_tracker as at
 
 
@@ -71,3 +73,200 @@ def test_unrelated_flags_after_a_secret_are_kept():
     out = at._redact_text("deploy --token abcd1234 --verbose --region us-east-1")
     assert "abcd1234" not in out
     assert "--verbose" in out and "us-east-1" in out
+
+
+def test_redactor_failure_fails_closed():
+    class BrokenText:
+        def __str__(self):
+            raise RuntimeError("cannot render")
+
+    assert at._redact_text(BrokenText()) == "<redaction-failed>"
+
+
+def test_public_activity_defaults_to_metadata_only_and_basename_paths(monkeypatch):
+    monkeypatch.delenv("SONDER_EXECUTION_FEED_DETAIL", raising=False)
+    at.reset_for_tests()
+    with at.response_span("work", "private prose token=prompt-secret"):
+        at.record_model_call(
+            model="local-model", request_preview="token=request-secret",
+            response_preview="password=response-secret", ok=True,
+        )
+        at.record_tool_result(
+            "file_write",
+            {"path": r"C:\private\report.txt", "content": "api_key=arg-secret"},
+            command=["writer", "--token", "command-secret"],
+            output="CLIENT_SECRET=output-secret",
+        )
+        at.record_file_change(
+            "create", r"C:\private\report.txt", lines_added=2,
+            preview="AWS_SECRET_ACCESS_KEY=file-secret", preview_kind="content",
+        )
+
+    public = at.public_snapshot()
+    encoded = json.dumps(public)
+    for secret in (
+        "private prose", "prompt-secret", "request-secret", "response-secret",
+        "arg-secret", "command-secret", "output-secret", "file-secret",
+    ):
+        assert secret not in encoded
+    assert r"C:\private" not in encoded
+    assert "report.txt" in encoded
+    assert "prompt" not in public["latest"]
+    assert public["detail_enabled"] is False
+    model = next(row for row in public["latest"]["events"] if row["kind"] == "model_call")
+    assert model["request_preview"]["state"] == "disabled"
+    assert next(row for row in public["latest"]["events"] if row["kind"] == "response_start")["phase"] == "started"
+    file_event = next(row for row in public["latest"]["events"] if row["kind"] == "file_change")
+    assert file_event["preview"]["state"] == "disabled"
+    assert file_event["phase"] == "applied"
+
+
+def test_public_paths_never_disclose_relative_directory_components():
+    cases = {
+        r"private\customer-name\secret-project\foo.py": "foo.py",
+        "private/customer-name/secret-project/foo.py": "foo.py",
+        r"private/mixed\secret/foo.py": "foo.py",
+        r"..\private\foo.py": "foo.py",
+        r"C:private\foo.py": "foo.py",
+        "foo.py": "foo.py",
+    }
+    for source, expected in cases.items():
+        assert at._safe_path(source) == expected
+
+
+def test_metadata_projection_suppresses_all_free_text_summaries(monkeypatch):
+    monkeypatch.delenv("SONDER_EXECUTION_FEED_DETAIL", raising=False)
+    at.reset_for_tests()
+    with at.response_span("work", "private prompt"):
+        at.record_event("notice", summary="SUMMARY_CANARY")
+        at.record_file_change(
+            "edit", "report.txt", summary="FILE_SUMMARY_CANARY",
+        )
+        at.set_checklist({
+            "id": "check-1", "title": "CHECKLIST_TITLE_CANARY",
+            "status": "running", "summary": "CHECKLIST_SUMMARY_CANARY",
+            "items": [{
+                "id": "item-1", "title": "CHECKLIST_ITEM_CANARY",
+                "status": "pending",
+            }],
+        })
+        at.set_result_summary("RESULT_CANARY")
+
+    encoded = json.dumps(at.public_snapshot(include_detail=False))
+    for canary in (
+        "SUMMARY_CANARY", "FILE_SUMMARY_CANARY", "RESULT_CANARY",
+        "CHECKLIST_TITLE_CANARY", "CHECKLIST_SUMMARY_CANARY",
+        "CHECKLIST_ITEM_CANARY",
+    ):
+        assert canary not in encoded
+
+    monkeypatch.setenv("SONDER_EXECUTION_FEED_DETAIL", "1")
+    detailed = json.dumps(at.public_snapshot(include_detail=True))
+    assert "SUMMARY_CANARY" in detailed
+    assert "RESULT_CANARY" in detailed
+
+
+def test_detailed_execution_feed_is_bounded_redacted_and_versioned(monkeypatch):
+    monkeypatch.setenv("SONDER_EXECUTION_FEED_DETAIL", "1")
+    at.reset_for_tests()
+    with at.response_span("work", "not exported from response span"):
+        at.record_model_call(
+            model="local-model",
+            request_preview="token=request-secret " + "q" * 1500,
+            response_preview="password=response-secret " + "a" * 1500,
+            ok=True,
+        )
+        at.record_tool_result(
+            "run_code",
+            {"code": "api_key=arg-secret\n" + "x" * 1500, "token": "never"},
+            output="CLIENT_SECRET=output-secret\n" + "y" * 1500,
+        )
+        at.record_file_change(
+            "edit", r"C:\private\source.py", lines_added=2, lines_edited=1,
+            lines_deleted=3, preview="token=file-secret\n" + "z" * 1500,
+            preview_kind="diff",
+        )
+
+    feed = at.execution_feed(at.snapshot())
+    encoded = json.dumps(feed)
+    assert feed["schema_version"] == 1
+    assert feed["runtime_id"].startswith("rt-")
+    assert feed["known"] is True
+    assert len(feed["events"]) <= 20
+    assert feed["bytes"] <= 64 * 1024
+    assert feed["truncated"] is True
+    assert feed["redaction_applied"] is True
+    for secret in ("request-secret", "response-secret", "arg-secret", "output-secret", "file-secret", '"never"'):
+        assert secret not in encoded
+    model = next(row for row in feed["events"] if row["kind"] == "model_call")
+    assert model["phase"] == "completed"
+    assert model["request_preview"]["state"] == "available"
+    assert model["request_preview"]["truncated"] is True
+    tool = next(row for row in feed["events"] if row["kind"] == "tool_call")
+    assert tool["args_preview"]["redacted"] is True
+    changed = next(row for row in feed["events"] if row["kind"] == "file_change")
+    assert changed["path"] == "source.py"
+    assert (changed["lines_added"], changed["lines_edited"], changed["lines_deleted"]) == (2, 1, 3)
+
+
+def test_public_response_and_feed_enforce_event_and_byte_caps(monkeypatch):
+    monkeypatch.setenv("SONDER_EXECUTION_FEED_DETAIL", "1")
+    at.reset_for_tests()
+    with at.response_span("bounded", "private prompt"):
+        for index in range(35):
+            at.record_tool_result(
+                "run_code", {"code": "x" * 2000, "index": index},
+                output="y" * 3000,
+            )
+
+    public = at.public_snapshot()
+    latest = public["latest"]
+    assert len(latest["events"]) <= 20
+    assert len(json.dumps(latest).encode("utf-8")) <= 64 * 1024
+    assert latest["truncated"] is True
+    feed = at.execution_feed(public)
+    assert len(feed["events"]) <= 20
+    assert feed["bytes"] <= 64 * 1024
+    assert feed["truncated"] is True
+
+
+def test_detail_gate_requires_exact_one(monkeypatch):
+    monkeypatch.setenv("SONDER_EXECUTION_FEED_DETAIL", "true")
+    assert at.detail_enabled() is False
+    monkeypatch.setenv("SONDER_EXECUTION_FEED_DETAIL", "1")
+    assert at.detail_enabled() is True
+
+
+def test_feed_ring_retains_rapidly_completed_responses_between_polls(monkeypatch):
+    monkeypatch.delenv("SONDER_EXECUTION_FEED_DETAIL", raising=False)
+    at.reset_for_tests()
+    response_ids = []
+    for label in ("first", "second"):
+        with at.response_span(label, "private") as response:
+            response_ids.append(response["id"])
+            at.record_tool_call("file_read", {"path": "%s.txt" % label})
+
+    snap = at.snapshot()
+    assert snap["latest"]["id"] == response_ids[1]
+    feed = at.execution_feed(snap)
+    seen = {row["response_id"] for row in feed["events"]}
+    assert set(response_ids).issubset(seen)
+    seqs = [row["seq"] for row in feed["events"]]
+    assert seqs == sorted(set(seqs))
+    assert feed["oldest_seq"] == 1
+    assert feed["next_seq"] > max(seqs)
+    assert feed["dropped_events"] == 0
+
+
+def test_feed_reports_ring_drops_and_sequence_window(monkeypatch):
+    monkeypatch.delenv("SONDER_EXECUTION_FEED_DETAIL", raising=False)
+    at.reset_for_tests()
+    with at.response_span("burst", "private"):
+        for index in range(at.MAX_EVENT_RING + 20):
+            at.record_event("heartbeat", summary="event %d" % index)
+
+    feed = at.execution_feed(at.snapshot())
+    assert feed["dropped_events"] > 0
+    assert feed["sequence_gap"] == feed["dropped_events"]
+    assert feed["oldest_seq"] > 1
+    assert feed["truncated"] is True

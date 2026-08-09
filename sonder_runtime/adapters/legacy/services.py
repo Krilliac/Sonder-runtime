@@ -15,10 +15,12 @@ from ...application.ports.model_gateway import (
     Embedding,
     ModelRequest,
     ModelResponse,
+    require_embedding_vector,
+    require_model_text,
 )
 from ...application.ports.process_probe import ProbeResult, ProcessIdentity
 from ...application.ports.tool_executor import ToolCall, ToolResult
-from ...domain.common.errors import Cancelled, DeadlineExceeded
+from ...domain.common.errors import Cancelled, DeadlineExceeded, InvalidInput
 
 
 def _check_context_liveness(context: OperationContext) -> None:
@@ -191,7 +193,7 @@ class LegacyAutomationRepository:
 
 
 class LegacyMemoryRepository:
-    """MemoryRepository over the root ``memory_store`` / ``recall`` modules.
+    """MemoryRepository over the memory adapter and root ``recall`` module.
 
     Bound to a live SQLite connection owned by the UnitOfWork — all methods
     delegate against that one connection. Constructed by the UnitOfWork, not
@@ -202,17 +204,17 @@ class LegacyMemoryRepository:
         self._conn = conn
 
     def add_fact(self, fact_id: str, project: str, text: str, embedding=None) -> None:
-        import memory_store
+        import sonder_runtime.adapters.memory_store as memory_store
 
         memory_store.add_fact(self._conn, fact_id, project, text, embedding)
 
     def facts_for_project(self, project: str) -> list:
-        import memory_store
+        import sonder_runtime.adapters.memory_store as memory_store
 
         return memory_store.facts_for_project(self._conn, project)
 
     def count_facts(self, project: str) -> int:
-        import memory_store
+        import sonder_runtime.adapters.memory_store as memory_store
 
         return memory_store.count_facts(self._conn, project)
 
@@ -225,14 +227,14 @@ class LegacyMemoryRepository:
         tier: str,
         **fields,
     ) -> None:
-        import memory_store
+        import sonder_runtime.adapters.memory_store as memory_store
 
         return memory_store.log_interaction(
             self._conn, interaction_id, task, retrieved_ctx, response, tier, **fields
         )
 
     def get_interaction(self, interaction_id: str) -> dict | None:
-        import memory_store
+        import sonder_runtime.adapters.memory_store as memory_store
 
         return memory_store.get_interaction(self._conn, interaction_id)
 
@@ -244,7 +246,7 @@ class LegacyMemoryRepository:
     def record_outcome(
         self, interaction_id: str, signal: str, reward_value: float, **options
     ):
-        import memory_store
+        import sonder_runtime.adapters.memory_store as memory_store
 
         return memory_store.record_outcome_and_claim_lesson_distillation(
             self._conn, interaction_id, signal, reward_value, **options
@@ -274,7 +276,7 @@ class LegacyUnitOfWork:
         self.events = OperationsEventSink()
 
     def __enter__(self) -> "LegacyUnitOfWork":
-        import memory_store
+        import sonder_runtime.adapters.memory_store as memory_store
         import sonder_paths
 
         path = self._db_path or sonder_paths.memory_db_path()
@@ -311,6 +313,8 @@ class LegacyModelGateway:
     ) -> ModelResponse:
         import server
 
+        if not (request.prompt or "").strip():
+            raise InvalidInput("model request prompt is empty")
         _check_context_liveness(context)
         started = time.monotonic()
         text = server.sonder(
@@ -319,7 +323,7 @@ class LegacyModelGateway:
             tier=request.tier or None,
         )
         return ModelResponse(
-            text=text,
+            text=require_model_text(text),
             model=request.tier or "sonder",
             tier=request.tier or "general",
             duration_ms=int((time.monotonic() - started) * 1000),
@@ -333,9 +337,10 @@ class LegacyModelGateway:
             # Cancellation used to be ignored, so adapter swaps could keep doing
             # model work after the application had abandoned the operation.
             _check_context_liveness(context)
-            results.append(
-                Embedding(vector=tuple(embeddings.embed(text) or ()), model="local")
-            )
+            results.append(Embedding(
+                vector=require_embedding_vector(embeddings.embed(text)),
+                model="local",
+            ))
         return results
 
 
@@ -384,7 +389,7 @@ class SystemClock:
 
 
 class LegacyProcessProbe:
-    """ProcessProbe over the root ``process_liveness`` module.
+    """ProcessProbe over the adapter ``process_liveness`` module.
 
     ``process_liveness`` encodes start-time / boot-id into one opaque identity
     string rather than a separate float, so ``started_at`` stays 0.0 and the
@@ -393,7 +398,7 @@ class LegacyProcessProbe:
     """
 
     def identity(self, pid: int) -> ProcessIdentity | None:
-        import process_liveness
+        import sonder_runtime.adapters.process_liveness as process_liveness
 
         state, fingerprint = process_liveness.probe_process(pid)
         if state == process_liveness.PROCESS_DEAD or not fingerprint:
@@ -403,7 +408,7 @@ class LegacyProcessProbe:
         )
 
     def is_same_live_process(self, identity: ProcessIdentity) -> ProbeResult:
-        import process_liveness
+        import sonder_runtime.adapters.process_liveness as process_liveness
 
         state, _observed = process_liveness.probe_process(
             identity.pid, expected_identity=identity.fingerprint or None

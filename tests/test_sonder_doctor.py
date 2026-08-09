@@ -165,6 +165,8 @@ def test_default_checks_registry_is_read_only_pairs_and_stable():
     names = [name for name, _ in first]
     assert names == [
         "config",
+        "storage_state",
+        "storage_models",
         "self_heal",
         "memory_quality",
         "runtime_policy",

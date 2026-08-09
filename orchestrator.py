@@ -4,7 +4,7 @@ The current turn is augmented with facts (durable), lessons (distilled tips), an
 recalls (similar past solutions), then answered. `history` (prior conversation turns)
 is passed to the model as real chat messages, not folded into the prompt text.
 """
-import memory_store
+import sonder_runtime.adapters.memory_store as memory_store
 import retriever
 
 MEMORY_HEADER = "# Relevant lessons from past work (may help):"
