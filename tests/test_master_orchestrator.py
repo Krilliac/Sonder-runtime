@@ -165,12 +165,14 @@ def test_retained_agent_service_wrappers_preserve_project_and_parent_scope(tmp_p
     assert delivered[0]["status"] == "delivered"
 
 
-def test_live_reload_with_legacy_fleet_store_preserves_ordinary_orchestration(
+def test_live_reload_with_legacy_fleet_store_refuses_unscoped_orchestration(
     monkeypatch,
 ):
     original_create = master_orchestrator.fleet_store.create_agent
+    create_calls = []
 
     def legacy_create(row, owner_id, owner_pid):
+        create_calls.append(row["id"])
         return original_create(row, owner_id, owner_pid)
 
     monkeypatch.setattr(master_orchestrator.fleet_store, "create_agent", legacy_create)
@@ -185,10 +187,11 @@ def test_live_reload_with_legacy_fleet_store_preserves_ordinary_orchestration(
     monkeypatch.setattr(master_orchestrator, "_PRINCIPAL_ID", "stale-principal")
     monkeypatch.setattr(master_orchestrator, "_PRINCIPAL_SECRET", "stale-secret")
 
-    result = master_orchestrator.run_inline("after reload", lambda prompt: "ok")
+    with pytest.raises(RuntimeError, match="runtime restart"):
+        master_orchestrator.run_inline("after reload", lambda prompt: "ok")
 
-    assert result["output"] == "ok"
-    assert master_orchestrator._PRINCIPAL_ID == ""
+    assert create_calls == []
+    assert master_orchestrator._PRINCIPAL_ID == "stale-principal"
     with pytest.raises(RuntimeError, match="runtime restart"):
         master_orchestrator.discover_retained_agents()
 
