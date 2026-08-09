@@ -5,6 +5,7 @@ executors, event sinks, and transactions are reached only through these
 interfaces. Ports raise the domain error taxonomy, never transport or
 driver exceptions.
 """
+from .backup import BackupGateway, BackupPath, BackupResultView
 from .clock import Clock
 from .event_sink import EventSink
 from .model_gateway import (
@@ -27,6 +28,9 @@ from .workflows import LoopRunner, WorkflowRepository
 
 __all__ = [
     "AutomationRepository",
+    "BackupGateway",
+    "BackupPath",
+    "BackupResultView",
     "ChecklistEventPort",
     "Clock",
     "Embedding",
