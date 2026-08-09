@@ -139,12 +139,14 @@ def _operations_db_path() -> str:
 def store_db_paths() -> dict[str, str]:
     import autopilot_store
     import fleet_store
+    import queued_actions
 
     return {
         "memory": sonder_paths.memory_db_path(),
         "autopilot": autopilot_store.database_path(),
         "fleet": fleet_store.database_path(),
         "operations": _operations_db_path(),
+        "queued_actions": queued_actions.database_path(),
         "updates": sonder_paths.state_path("updates.db", "SONDER_UPDATES_DB"),
     }
 
