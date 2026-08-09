@@ -83,6 +83,52 @@ def test_redactor_failure_fails_closed():
     assert at._redact_text(BrokenText()) == "<redaction-failed>"
 
 
+def test_npu_events_remain_enum_only_even_with_authorized_detail():
+    at.reset_for_tests()
+    secret = r"C:\private\weights\model.onnx token=npu-secret"
+    with at.response_span("npu-detail", "safe"):
+        at.record_event(
+            "npu_fallback",
+            capability="embeddings",
+            reason="ram_gate",
+            operation_mode="execution",
+            fallback_handler="ollama",
+            handler_state="pending",
+            model=secret,
+            path=secret,
+            summary=secret,
+            args={"content": secret},
+            command=secret,
+            output=secret,
+            request_preview={"state": "available", "text": secret},
+            prompt_chars=123,
+        )
+
+    feed = at.execution_feed(include_detail=True)
+    event = next(row for row in feed["events"] if row["kind"] == "npu_fallback")
+    assert set(event) == {
+        "response_id", "response_status", "seq", "ts", "elapsed_ms",
+        "kind", "phase", "capability", "reason", "operation_mode",
+        "fallback_handler", "handler_state",
+    }
+    assert secret not in json.dumps(feed)
+
+
+def test_npu_enum_projection_fails_closed_when_value_cannot_render():
+    class BrokenValue:
+        def __str__(self):
+            raise RuntimeError(r"C:\private\model token=secret")
+
+    event = at._public_event({
+        "kind": "npu_fallback", "capability": BrokenValue(),
+        "reason": BrokenValue(), "operation_mode": BrokenValue(),
+        "fallback_handler": BrokenValue(), "handler_state": BrokenValue(),
+    }, include_detail=True)
+    assert event["capability"] == "unknown"
+    assert event["reason"] == "unknown"
+    assert "private" not in json.dumps(event)
+
+
 def test_public_activity_defaults_to_metadata_only_and_basename_paths(monkeypatch):
     monkeypatch.delenv("SONDER_EXECUTION_FEED_DETAIL", raising=False)
     at.reset_for_tests()
