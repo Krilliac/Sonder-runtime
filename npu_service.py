@@ -810,9 +810,7 @@ def _manifest_summary(manifest):
         "operation": str(manifest.get("operation") or ""),
         "hash8": str(manifest.get("manifest_hash") or "")[:8],
         "providers": list(manifest.get("providers") or []),
-        "error": npu_contract.sanitize_error(
-            manifest.get("error") or "", 200,
-        ),
+        "error": bool(manifest.get("error")),
     }
     if manifest.get("operation") == "embedding":
         summary["dimension"] = manifest.get("dimension")
@@ -994,9 +992,8 @@ def status(probe=False) -> dict:
                 pass
     broker_status = dict(broker.status())
     hello = dict(broker_status.get("hello") or {})
-    hello["ort_error"] = npu_contract.sanitize_error(
-        hello.get("ort_error") or "", 160,
-    )
+    hello["ort_available"] = not bool(hello.get("ort_error"))
+    hello.pop("ort_error", None)
     broker_status["hello"] = hello
     provider_rows = []
     seen_provider_ids = set()
@@ -1022,8 +1019,8 @@ def status(probe=False) -> dict:
                 if provider_id == "cpu-sim"
                 else npu_providers.PROVIDER_EPS.get(provider_id, "")
             ),
-            "reason": npu_contract.sanitize_error(
-                raw_row.get("reason") or "", 160,
+            "reason": npu_contract.categorize_error(
+                raw_row.get("reason") or "",
             ),
         }
         provider_rows.append(provider_row)
@@ -1044,14 +1041,16 @@ def status(probe=False) -> dict:
             continue
         model_row = dict(raw_row)
         model_row.pop("manifest_hash", None)
-        model_row["error"] = npu_contract.sanitize_error(
-            model_row.get("error") or "", 200,
+        model_row["error_category"] = npu_contract.categorize_error(
+            model_row.get("error") or "",
         )
+        model_row.pop("error", None)
         model_rows.append(model_row)
     broker_status["models"] = model_rows
-    broker_status["last_error"] = npu_contract.sanitize_error(
-        broker_status.get("last_error") or "", 200,
+    broker_status["last_error_category"] = npu_contract.categorize_error(
+        broker_status.get("last_error") or "",
     )
+    broker_status.pop("last_error", None)
     providers = broker_status.get("providers") or []
     try:
         npu_vendor, _npu_name, detected_raw = (
@@ -1249,7 +1248,7 @@ def format_status(state=None) -> str:
     ]
     if hello.get("ort_version"):
         lines.append("  onnxruntime: available")
-    elif hello.get("ort_error"):
+    elif hello.get("ort_available") is False:
         lines.append("  onnxruntime: unavailable")
     providers = broker_state.get("providers") or []
     if providers:
@@ -1296,7 +1295,7 @@ def format_status(state=None) -> str:
                 "  note: %d call(s) fell back for free RAM, each one an "
                 "embedding served by the model server instead; with a "
                 "one-model cap that evicts and reloads the generation model. "
-                "Tune SONDER_NPU_MIN_FREE_RAM_GB (default 2) or free RAM to "
+                "Free RAM or raise the minimum free RAM threshold to "
                 "let the accelerator take them." % gated
             )
     last_fallback = projection.get("last_fallback") or {}
