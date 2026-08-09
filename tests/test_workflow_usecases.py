@@ -2,6 +2,7 @@ import inspect
 
 from sonder_runtime.application.ports.tool_executor import ToolResult
 from sonder_runtime.application.workflows import WorkflowService, render_workflow_result
+from sonder_runtime.application.workflows import loop as workflow_loop
 
 
 class Repository:
@@ -31,11 +32,16 @@ class Repository:
 
 
 class Runner:
-    def __init__(self, formatted="done"):
+    def __init__(self, formatted="done", ok=True, cancelled=False):
         self.formatted = formatted
+        self.ok = ok
+        self.cancelled = cancelled
 
     def run(self, actions, dispatch, **options):
-        return {"ok": True, "actions": actions, "options": options}
+        return {
+            "ok": self.ok, "cancelled": self.cancelled,
+            "actions": actions, "options": options,
+        }
 
     def format(self, result):
         return self.formatted
@@ -85,3 +91,67 @@ def test_workflow_invalid_json_and_missing_name_are_typed_failures():
     )
     assert missing.ok is False and missing.error_code == "NOT_FOUND"
     assert render_workflow_result(missing) == "ERROR: no workflow named 'missing'."
+
+
+def test_failed_and_cancelled_loops_are_typed_without_changing_legacy_text():
+    repository = Repository()
+    repository.save("demo", [{"type": "probe"}], "demo flow")
+    failed = WorkflowService(repository, Runner("loop status: failed", ok=False)).run(
+        "demo", lambda _action: {"ok": False}
+    )
+    cancelled = WorkflowService(
+        repository, Runner("loop status: cancelled", ok=False, cancelled=True)
+    ).run("demo", lambda _action: {"ok": True})
+
+    assert failed.ok is False and failed.error_code == "WORKFLOW_FAILED"
+    assert cancelled.ok is False and cancelled.error_code == "CANCELLED"
+    assert render_workflow_result(failed) == (
+        "workflow: demo\ndemo flow\nloop status: failed"
+    )
+    assert render_workflow_result(cancelled) == (
+        "workflow: demo\ndemo flow\nloop status: cancelled"
+    )
+
+
+def test_loop_cancellation_is_fail_closed_and_discards_late_success():
+    cancelled = {"value": False}
+
+    def dispatch(_action):
+        cancelled["value"] = True
+        return {"ok": True, "type": "probe", "summary": "late", "output": ""}
+
+    result = workflow_loop.run_loop(
+        [{"type": "probe"}, {"type": "never"}],
+        dispatch,
+        max_iterations=5,
+        cancel_check=lambda: cancelled["value"],
+    )
+    assert result["ok"] is False
+    assert result["cancelled"] is True
+    assert result["stop_reason"] == "cancelled after action 1 in iteration 1"
+    assert len(result["iterations"][0]["actions"]) == 1
+
+    checker_failure = workflow_loop.run_loop(
+        [{"type": "never"}],
+        lambda _action: (_ for _ in ()).throw(AssertionError("must not dispatch")),
+        cancel_check=lambda: (_ for _ in ()).throw(RuntimeError("ledger unavailable")),
+    )
+    assert checker_failure["cancelled"] is True
+    assert checker_failure["iterations"] == []
+
+
+def test_loop_rejects_unbounded_actions_and_invalid_dispatch_results():
+    too_many = [{"type": "probe"}] * (workflow_loop.MAX_LOOP_ACTIONS + 1)
+    try:
+        workflow_loop.run_loop(too_many, lambda _action: {"ok": True})
+    except ValueError as exc:
+        assert "action loop limit" in str(exc)
+    else:
+        raise AssertionError("expected action-count rejection")
+
+    invalid = workflow_loop.run_loop(
+        [{"type": "probe"}], lambda _action: "ERROR: not a typed result"
+    )
+    row = invalid["iterations"][0]["actions"][0]["result"]
+    assert invalid["ok"] is False
+    assert row["summary"] == "dispatcher returned an invalid result"

@@ -31,6 +31,7 @@ class LoopRunner(Protocol):
         stop_on_failure: bool,
         stop_on_success: bool,
         delay_seconds: float,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> dict: ...
 
     def format(self, result: dict) -> str: ...
