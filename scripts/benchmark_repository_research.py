@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import tempfile
@@ -71,8 +72,12 @@ _NEGATIVE_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
         r"\bno\s+(?:such\s+)?implementation\s+exists\b",
+        r"\b(?:this|that|the|an?)?\s*implementation\s+(?:does|did)\s+not\s+exist\b",
         r"\b(?:is|are|was|were)\s+not\s+implemented\b",
+        r"\bimplementation\s+(?:is|was)\s+(?:absent|missing)\b",
         r"\bcould\s+not\s+find\s+(?:an|any|the)?\s*implementation\b",
+        r"\b(?:can(?:not|'t)|couldn't|did\s+not)\s+(?:find|locate)\s+"
+        r"(?:an|any|the)?\s*implementation\b",
         r"\bno\s+implementation\s+(?:was\s+)?found\b",
     )
 )
@@ -101,8 +106,17 @@ def _object(value: Any, label: str, allowed: set[str]) -> Mapping[str, Any]:
         raise ResearchBenchmarkError(f"{label} must be an object")
     unknown = set(value) - allowed
     if unknown:
-        raise ResearchBenchmarkError(f"{label} has unknown fields: {sorted(unknown)}")
+        # Field names are untrusted too; report only the schema violation count.
+        raise ResearchBenchmarkError(
+            f"{label} has {len(unknown)} unknown field(s)"
+        )
     return value
+
+
+def _required(value: Mapping[str, Any], label: str, fields: set[str]) -> None:
+    missing = fields - set(value)
+    if missing:
+        raise ResearchBenchmarkError(f"{label} is missing fields: {sorted(missing)}")
 
 
 def _array(value: Any, label: str, limit: int) -> Sequence[Any]:
@@ -179,27 +193,57 @@ def suite_descriptor(cases: Sequence[Mapping[str, Any]] = DEFAULT_CASES) -> dict
 
 def _load_json(path: Path) -> Any:
     try:
-        size = path.stat().st_size
-    except OSError as exc:
-        raise ResearchBenchmarkError("cannot inspect submission") from exc
-    if size > MAX_INPUT_BYTES:
-        raise ResearchBenchmarkError(f"submission exceeds {MAX_INPUT_BYTES} bytes")
-    try:
+        # Open once, then inspect and read that same handle.  A pathname swap
+        # between a separate stat and read must not bypass the input ceiling.
+        with path.open("rb") as handle:
+            if os.fstat(handle.fileno()).st_size > MAX_INPUT_BYTES:
+                raise ResearchBenchmarkError(
+                    f"submission exceeds {MAX_INPUT_BYTES} bytes"
+                )
+            encoded = handle.read(MAX_INPUT_BYTES + 1)
+        if len(encoded) > MAX_INPUT_BYTES:
+            raise ResearchBenchmarkError(
+                f"submission exceeds {MAX_INPUT_BYTES} bytes"
+            )
+        text = encoded.decode("utf-8")
         return json.loads(
-            path.read_text(encoding="utf-8"),
+            text,
             parse_constant=lambda value: (_ for _ in ()).throw(
                 ValueError(f"non-finite number: {value}")
             ),
         )
+    except ResearchBenchmarkError:
+        raise
     except (OSError, UnicodeError, ValueError, RecursionError) as exc:
         raise ResearchBenchmarkError("submission is not valid bounded UTF-8 JSON") from exc
 
 
+def _normalized_json(value: Any, label: str) -> Any:
+    """Return strict JSON with equivalent integral number spellings unified."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ResearchBenchmarkError(f"{label} must contain finite numbers")
+        if value == 0 or value.is_integer():
+            return int(value)
+        return value
+    if isinstance(value, list):
+        return [_normalized_json(item, label) for item in value]
+    if isinstance(value, dict):
+        if any(not isinstance(key, str) for key in value):
+            raise ResearchBenchmarkError(f"{label} object keys must be strings")
+        return {key: _normalized_json(item, label) for key, item in value.items()}
+    raise ResearchBenchmarkError(f"{label} must be a JSON value")
+
+
 def _canonical_arguments(value: Any, label: str) -> bytes:
-    if not isinstance(value, (dict, list, str, int, float, bool)) and value is not None:
-        raise ResearchBenchmarkError(f"{label} must be a JSON value")
     try:
-        encoded = _canonical(value)
+        normalized = _normalized_json(value, label)
+    except RecursionError as exc:
+        raise ResearchBenchmarkError(f"{label} is not canonical JSON") from exc
+    try:
+        encoded = _canonical(normalized)
     except (TypeError, ValueError, RecursionError) as exc:
         raise ResearchBenchmarkError(f"{label} is not canonical JSON") from exc
     if len(encoded) > MAX_TEXT_CHARS:
@@ -213,7 +257,10 @@ def _tool_loop(tool_calls: Sequence[Any], label: str) -> tuple[bool, int]:
     previous: tuple[str, bytes] | None = None
     for index, raw in enumerate(tool_calls):
         call = _object(raw, f"{label}[{index}]", {"tool", "arguments"})
+        _required(call, f"{label}[{index}]", {"tool", "arguments"})
         tool = _safe_name(call.get("tool"), f"{label}[{index}].tool", limit=64)
+        if tool == "<unsafe-name>":
+            raise ResearchBenchmarkError(f"{label}[{index}].tool is not a safe name")
         signature = (
             tool,
             _canonical_arguments(call.get("arguments"), f"{label}[{index}].arguments"),
@@ -232,21 +279,32 @@ def evaluate(
 ) -> dict[str, Any]:
     """Validate and score one submission without touching models or the network."""
     root = _object(submission, "submission", {"schema", "cases"})
+    _required(root, "submission", {"schema", "cases"})
     if root.get("schema") != SUBMISSION_SCHEMA:
         raise ResearchBenchmarkError(f"submission.schema must be {SUBMISSION_SCHEMA}")
     raw_cases = _array(root.get("cases"), "submission.cases", MAX_CASES)
     submitted: dict[str, Mapping[str, Any]] = {}
     for index, raw in enumerate(raw_cases):
         item = _object(raw, f"submission.cases[{index}]", {"id", "answer", "claims", "tool_calls"})
+        _required(
+            item,
+            f"submission.cases[{index}]",
+            {"id", "answer", "claims", "tool_calls"},
+        )
         case_id = _safe_name(item.get("id"), f"submission.cases[{index}].id", limit=96)
         if case_id in submitted:
-            raise ResearchBenchmarkError(f"duplicate case id: {case_id}")
+            raise ResearchBenchmarkError(
+                f"duplicate case id: {_opaque_evidence_id(case_id)}"
+            )
         submitted[case_id] = item
 
     expected_ids = {str(case["id"]) for case in cases}
     unknown_ids = set(submitted) - expected_ids
     if unknown_ids:
-        raise ResearchBenchmarkError(f"unknown case ids: {sorted(unknown_ids)}")
+        raise ResearchBenchmarkError(
+            "unknown case ids: %s"
+            % sorted(_opaque_evidence_id(case_id) for case_id in unknown_ids)
+        )
 
     case_reports: list[dict[str, Any]] = []
     for fixture in cases:
@@ -292,6 +350,11 @@ def evaluate(
                 f"case {case_id}.claims[{claim_index}]",
                 {"text", "status", "citations"},
             )
+            _required(
+                claim,
+                f"case {case_id}.claims[{claim_index}]",
+                {"text", "status", "citations"},
+            )
             claim_text = _text(claim.get("text"), f"case {case_id}.claims[{claim_index}].text")
             status = claim.get("status")
             if status not in {"exists", "missing"}:
@@ -311,6 +374,11 @@ def evaluate(
             for citation_index, raw_citation in enumerate(raw_citations):
                 citation = _object(
                     raw_citation,
+                    f"case {case_id}.claims[{claim_index}].citations[{citation_index}]",
+                    {"path", "symbol"},
+                )
+                _required(
+                    citation,
                     f"case {case_id}.claims[{claim_index}].citations[{citation_index}]",
                     {"path", "symbol"},
                 )
@@ -444,9 +512,20 @@ def _atomic_write(path: Path, data: str) -> None:
 
 
 def _distinct_paths(paths: Sequence[Path | None]) -> None:
-    resolved = [path.resolve() for path in paths if path is not None]
-    if len(resolved) != len(set(resolved)):
-        raise ResearchBenchmarkError("input and output paths must be distinct")
+    try:
+        resolved = [path.resolve() for path in paths if path is not None]
+        for index, left in enumerate(resolved):
+            for right in resolved[index + 1:]:
+                if left == right or (
+                    left.exists() and right.exists() and os.path.samefile(left, right)
+                ):
+                    raise ResearchBenchmarkError(
+                        "input and output paths must be distinct"
+                    )
+    except ResearchBenchmarkError:
+        raise
+    except OSError as exc:
+        raise ResearchBenchmarkError("cannot inspect input and output paths") from exc
 
 
 def main(argv: Sequence[str] | None = None) -> int:
