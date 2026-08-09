@@ -11848,8 +11848,17 @@ or
 """
 
 
-def _agent_tool_help(read_only=False):
-    return REPOSITORY_AGENT_TOOL_HELP if read_only else AGENT_TOOL_HELP
+def _agent_tool_help(read_only=False, cloud=False):
+    help_text = REPOSITORY_AGENT_TOOL_HELP if read_only else AGENT_TOOL_HELP
+    if not cloud:
+        return help_text
+    return "\n".join(
+        line for line in help_text.splitlines()
+        if not any(
+            line.lstrip().startswith("- %s:" % name)
+            for name in _CLOUD_AGENT_LOCAL_ONLY_TOOLS
+        )
+    )
 
 
 def _tool_capability_shadow_surfaces():
@@ -11860,19 +11869,21 @@ def _tool_capability_shadow_surfaces():
     dispatch_tools = tool_capabilities.dispatch_names(_agent_dispatch)
     return tool_capabilities.ShadowSurfaces(
         direct_mcp_tools=direct_names,
+        tool_manifest=tool_manifest(),
         repository_read_only_tools=REPOSITORY_READ_ONLY_TOOLS,
         project_bound_agent_tools=_PROJECT_BOUND_AGENT_TOOLS,
         project_scoped_tools=_PROJECT_SCOPED_PATH_TOOLS | _PROJECT_SCOPED_EXECUTION_TOOLS,
         dispatch_tools=dispatch_tools,
-        # Hosted agents currently inherit the ordinary dispatch surface except
-        # for the explicit nested-model deny-list.  This snapshot is
-        # descriptive only: capability metadata must report privacy drift
-        # without silently becoming an authorization mechanism.
-        hosted_agent_tools=dispatch_tools - _CLOUD_AGENT_NESTED_MODEL_TOOLS,
+        hosted_agent_tools=(
+            dispatch_tools
+            - _CLOUD_AGENT_NESTED_MODEL_TOOLS
+            - _CLOUD_AGENT_LOCAL_ONLY_TOOLS
+        ),
         deduplicated_inspection_tools=_AGENT_DEDUPLICATED_INSPECTION_TOOLS,
         work_inspection_tools=_WORK_INSPECTION_TOOLS,
         full_agent_help=AGENT_TOOL_HELP,
         repository_agent_help=REPOSITORY_AGENT_TOOL_HELP,
+        hosted_agent_help=_agent_tool_help(cloud=True),
     )
 
 
@@ -13562,6 +13573,28 @@ _CLOUD_AGENT_NESTED_MODEL_TOOLS = frozenset({
     "offload", "master_orchestrate", "master_retry", "workflow_run",
     "game_reference_suite", "game_generate_and_test", "game_generation_campaign",
 })
+_CLOUD_AGENT_LOCAL_ONLY_TOOLS = frozenset({
+    "environment_status", "hardware_profile", "file_policy",
+    "workspace_inventory", "directory_tree", "file_find", "file_read",
+    "file_read_range", "file_digest", "text_search", "repo_status",
+    "repo_diff",
+})
+
+
+def _cloud_agent_tool_policy_error(tool_name):
+    if tool_name in _CLOUD_AGENT_LOCAL_ONLY_TOOLS:
+        return (
+            "ERROR: HOST POLICY: local-only tool '%s' is disabled inside a "
+            "hosted agent so private workspace or machine data cannot enter "
+            "the hosted model transcript." % tool_name
+        )
+    if tool_name in _CLOUD_AGENT_NESTED_MODEL_TOOLS:
+        return (
+            "ERROR: HOST POLICY: nested model-spawning tool '%s' is disabled "
+            "inside a hosted agent so all hosted output remains in one "
+            "bounded ledger." % tool_name
+        )
+    return ""
 
 
 def _canonical_agent_tool_name(tool_name):
@@ -14589,7 +14622,9 @@ def _agent_impl(
     # A clear bare namespace label such as "default" remains checklist-only;
     # path-like typos were rejected above rather than failing open to Sonder's
     # own workspace.
-    transcript = "Task:\n%s\n\n%s" % (prompt, _agent_tool_help(read_only=read_only))
+    transcript = "Task:\n%s\n\n%s" % (
+        prompt, _agent_tool_help(read_only=read_only, cloud=cloud)
+    )
     if project_scope:
         transcript += (
             "\n\nPROJECT ROOT: %s\nYour file/inspection tools are rooted at this "
@@ -14999,16 +15034,8 @@ def _agent_impl(
             )
         if not policy_error and tool_policy is not None:
             policy_error = str(tool_policy(tool_name, policy_tool_args) or "")
-        if (
-            not policy_error
-            and cloud
-            and tool_name in _CLOUD_AGENT_NESTED_MODEL_TOOLS
-        ):
-            policy_error = (
-                "ERROR: HOST POLICY: nested model-spawning tool '%s' is disabled "
-                "inside a hosted agent so all hosted output remains in one "
-                "bounded ledger." % tool_name
-            )
+        if not policy_error and cloud:
+            policy_error = _cloud_agent_tool_policy_error(tool_name)
         if not policy_error and project_scope:
             policy_error = _repository_scope_path_error(
                 tool_name, policy_tool_args, project_scope,
