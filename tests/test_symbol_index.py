@@ -163,6 +163,37 @@ def test_symlink_roots_are_rejected_and_tree_links_are_not_followed(project, tmp
         symbol_index.index_repository(str(root_link))
 
 
+def test_candidate_replaced_by_symlink_before_open_is_not_followed(
+    project, tmp_path, monkeypatch,
+):
+    candidate = project / "race.py"
+    candidate.write_text("def safe(): pass\n", encoding="utf-8")
+    outside = tmp_path / "outside.py"
+    outside.write_text("def escaped(): pass\n", encoding="utf-8")
+    original = file_ops.resolve_repository_read_path
+    replaced = False
+
+    def race(path, **kwargs):
+        nonlocal replaced
+        resolved = original(path, **kwargs)
+        if resolved == candidate and not replaced:
+            replaced = True
+            candidate.unlink()
+            try:
+                candidate.symlink_to(outside)
+            except (OSError, NotImplementedError) as exc:
+                pytest.skip("symlink creation unavailable: %s" % exc)
+        return resolved
+
+    monkeypatch.setattr(file_ops, "resolve_repository_read_path", race)
+
+    data = _index(project)
+
+    assert replaced
+    assert not any(row["name"] == "escaped" for row in data["symbols"])
+    assert "symlink" in data["errors"][0]["error"].lower()
+
+
 def test_relative_paths_use_forward_slashes_in_output(project):
     nested = project / "src" / "inner"
     nested.mkdir(parents=True)
