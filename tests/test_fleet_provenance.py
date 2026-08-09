@@ -189,6 +189,39 @@ def test_result_requires_standalone_marker_and_same_exact_evidence_block():
     )["task_drift"] is True
 
 
+def test_result_path_evidence_normalizes_windows_separators_and_anchors_root(
+    isolated_fleet,
+):
+    objective = fleet_provenance.parse_objectives(_task(MARKERS[0]))
+    target = isolated_fleet / objective[0].path
+
+    def result(path):
+        return (
+            "%s\n\n%s\nstep 1 tool=file_read reason=inspect\n%s\n%s"
+            % (
+                objective[0].result_marker,
+                fleet_provenance.EVIDENCE_MARKER,
+                path,
+                objective[0].symbol,
+            )
+        )
+
+    windows_relative = objective[0].path.replace("/", "\\")
+    assert fleet_provenance.validate_result(
+        result(windows_relative), objective, project=str(isolated_fleet),
+    )["task_drift"] is False
+    assert fleet_provenance.validate_result(
+        result(str(target)), objective, project=str(isolated_fleet),
+    )["task_drift"] is False
+
+    suffix = isolated_fleet / "vendor" / objective[0].path
+    metrics = fleet_provenance.validate_result(
+        result(str(suffix)), objective, project=str(isolated_fleet),
+    )
+    assert metrics["task_drift"] is True
+    assert metrics["missing_evidence"] == 1
+
+
 def test_failed_worker_and_audit_outputs_fail_closed_even_with_markers():
     objective = fleet_provenance.parse_objectives(_task(MARKERS[1]))
     failed = (
@@ -288,6 +321,49 @@ def test_pre_call_missing_public_target_blocks_model_call(isolated_fleet):
     assert result is master_orchestrator._WORKER_FAILED
     assert calls == []
     assert row["drift_metrics"]["missing_target_ids"] == ["missing"]
+
+
+def test_cancellation_during_pre_call_validation_finishes_durable_row(
+    isolated_fleet, monkeypatch,
+):
+    project = str(isolated_fleet)
+    task = _task(MARKERS[0])
+    objectives = fleet_provenance.parse_objectives(task)
+    prompt = master_orchestrator._subtask_prompts(
+        task, 1, tool_access=True, project=project,
+        objective_assignments=(objectives,),
+    )[0]
+    digest = fleet_provenance.task_digest(task)
+    child = master_orchestrator._new_agent(
+        "agent", prompt, metadata={
+            "master_task_digest": digest,
+            "delegated_task_digest": fleet_provenance.task_digest(prompt),
+            "objective_ids": ["moat"],
+        },
+    )
+    original = fleet_provenance.validate_delegation
+
+    def cancel_after_validation(*args, **kwargs):
+        metrics = original(*args, **kwargs)
+        master_orchestrator.request_cancel(child)
+        return metrics
+
+    monkeypatch.setattr(
+        fleet_provenance, "validate_delegation", cancel_after_validation,
+    )
+    calls = []
+    result = master_orchestrator._run_worker(
+        child, prompt, lambda _prompt, _project: calls.append(True), project,
+        task, objectives, digest, fleet_provenance.task_digest(prompt),
+    )
+
+    row = fleet_store.get_agent(child)
+    assert result == "CANCELLED"
+    assert calls == []
+    assert row["status"] == "cancelled"
+    assert row["finished_ts"] is not None
+    assert row["in_model_call"] is False
+    assert fleet_store.snapshot(include_finished=False)["active_agents"] == 0
 
 
 def test_pre_call_rejects_symbol_substrings_and_reparse_targets(

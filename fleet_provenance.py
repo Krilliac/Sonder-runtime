@@ -344,6 +344,27 @@ def _exact_token(text: str, token: str, *, path: bool = False) -> bool:
     ))
 
 
+def _exact_evidence_path(text: str, path: str, project: str = "") -> bool:
+    """Match a relative target or that exact target below the bound repo root."""
+    normalized = str(text or "").replace("\\", "/")
+    relative = PurePosixPath(path).as_posix()
+    candidates = [relative]
+    if project:
+        try:
+            root = str(Path(project).resolve(strict=True)).replace("\\", "/")
+        except (OSError, RuntimeError, ValueError):
+            return False
+        candidates.insert(0, root.rstrip("/") + "/" + relative)
+    flags = re.IGNORECASE if os.name == "nt" else 0
+    path_edge = r"A-Za-z0-9_.\\/-"
+    return any(re.search(
+        r"(?<![%s])%s(?![%s])"
+        % (path_edge, re.escape(candidate), path_edge),
+        normalized,
+        flags,
+    ) for candidate in candidates)
+
+
 def _evidence_blocks(evidence: str) -> tuple[tuple[str, str], ...]:
     headers = list(_EVIDENCE_HEADER.finditer(evidence))
     return tuple(
@@ -360,10 +381,12 @@ def _evidence_blocks(evidence: str) -> tuple[tuple[str, str], ...]:
     ) if headers else ()
 
 
-def _has_target_evidence(evidence: str, objective: Objective) -> bool:
+def _has_target_evidence(
+    evidence: str, objective: Objective, project: str = "",
+) -> bool:
     return any(
         tool in _TARGET_EVIDENCE_TOOLS
-        and _exact_token(block, objective.path, path=True)
+        and _exact_evidence_path(block, objective.path, project)
         and _exact_token(block, objective.symbol)
         for tool, block in _evidence_blocks(evidence)
     )
@@ -376,7 +399,9 @@ def _failed_output(synthesis: str) -> bool:
     )
 
 
-def validate_result(output: str, objectives: Sequence[Objective]) -> dict:
+def validate_result(
+    output: str, objectives: Sequence[Objective], *, project: str = "",
+) -> dict:
     """Require synthesis markers and exact evidence only after the host ledger."""
     text = str(output or "")
     if EVIDENCE_MARKER in text:
@@ -389,7 +414,7 @@ def validate_result(output: str, objectives: Sequence[Objective]) -> dict:
     missing_evidence = 0
     for objective in objectives:
         has_result_marker = marker_counts.get(objective.objective_id) == 1
-        has_evidence = _has_target_evidence(evidence, objective)
+        has_evidence = _has_target_evidence(evidence, objective, project)
         if has_result_marker and has_evidence:
             covered.append(objective.objective_id)
         else:

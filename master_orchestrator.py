@@ -1062,7 +1062,8 @@ def _run_worker(
         if not _begin_model_call(
             agent_id, "calling model for provenance-validated task", tool_calls=1,
         ):
-            return "CANCELLED"
+            final = _finish(agent_id)
+            return final or "CANCELLED"
     elif not _start_agent(
         agent_id, "calling model for delegated task", tool_calls=1,
         in_model_call=True,
@@ -1102,7 +1103,9 @@ def _run_worker(
                 drift_metrics=post_call,
             )
             return _WORKER_FAILED
-        metrics = fleet_provenance.validate_result(stored_output, objectives)
+        metrics = fleet_provenance.validate_result(
+            stored_output, objectives, project=project_scope,
+        )
         if metrics["task_drift"]:
             _finish(
                 agent_id,
@@ -1216,7 +1219,7 @@ def run_inline(
         )
         post_call["phase"] = "post_call"
         result_metrics = fleet_provenance.validate_result(
-            stored_output, objectives,
+            stored_output, objectives, project=project_scope,
         )
         metrics = post_call if post_call["task_drift"] else result_metrics
         if metrics["task_drift"]:
@@ -1499,6 +1502,7 @@ def run_delegated(
             _render_repository_result(output)
             if isinstance(output, RepositoryWorkerResult) else str(output or ""),
             assigned,
+            project=project_scope,
         )
         for (_agent_id, output), assigned in zip(
             outputs,
