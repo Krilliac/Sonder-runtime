@@ -22,6 +22,7 @@ DEFAULT_OUTPUT_BYTES = 256_000
 MAX_STDERR_BYTES = 16_384
 MAX_TIMEOUT_SECONDS = 15.0
 DEFAULT_TIMEOUT_SECONDS = 5.0
+MAX_GITFILE_BYTES = 4096
 _REVISION_RE = re.compile(
     r"(?:HEAD|[0-9a-fA-F]{4,64}|(?:refs/(?:heads|tags|remotes)/)?"
     r"[A-Za-z0-9][A-Za-z0-9._/-]*)(?:[~^][0-9]*)*\Z"
@@ -65,6 +66,49 @@ def validate_revision(value: str) -> str:
     return revision
 
 
+def _validate_git_entry(root: Path, *, extra_roots="") -> None:
+    entry = root / ".git"
+    if not entry.exists():
+        raise GitHistoryError(
+            "exact repository root must contain .git; upward discovery is disabled"
+        )
+    if file_ops._is_reparse_point(entry):
+        raise GitHistoryError("repository .git entry must not be a symlink or junction")
+    if entry.is_dir():
+        return
+    if not entry.is_file() or entry.stat().st_size > MAX_GITFILE_BYTES:
+        raise GitHistoryError("repository .git file is malformed or oversized")
+    try:
+        lines = entry.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise GitHistoryError("repository .git file could not be safely read") from exc
+    if len(lines) != 1 or not lines[0].lower().startswith("gitdir:"):
+        raise GitHistoryError("repository .git file is malformed")
+    raw_target = lines[0][len("gitdir:"):].strip()
+    if not raw_target or file_ops._foreign_absolute(raw_target):
+        raise GitHistoryError("repository gitfile target uses an unsafe path")
+    # Git resolves relative gitdir values against the gitfile's directory and
+    # does not perform shell-style tilde expansion; validate the same path Git
+    # will actually open.
+    requested = Path(raw_target)
+    if not requested.is_absolute():
+        requested = entry.parent / requested
+    if file_ops._is_reparse_point(requested):
+        raise GitHistoryError("repository gitfile target must not be a symlink or junction")
+    target = file_ops._resolve_best_effort(requested)
+    authorized_roots = [
+        file_ops._resolve_best_effort(candidate)
+        for candidate in file_ops.allowed_roots(extra_roots)
+    ]
+    if not any(
+        target == candidate or file_ops._is_inside(target, candidate)
+        for candidate in authorized_roots
+    ):
+        raise GitHistoryError("repository gitfile target is outside authorized roots")
+    if not target.is_dir():
+        raise GitHistoryError("repository gitfile target is not a directory")
+
+
 def resolve_repo_root(path=".", *, extra_roots="") -> Path:
     try:
         root = file_ops.resolve_repository_read_path(
@@ -77,14 +121,10 @@ def resolve_repo_root(path=".", *, extra_roots="") -> Path:
         raise GitHistoryError("repository root rejected: %s" % exc) from exc
     if not root.is_dir():
         raise GitHistoryError("repository root is not a directory: %s" % root)
-    # Deliberately do not ask Git to discover a parent repository.  A normal
-    # checkout has a .git directory; a linked worktree has a .git file.
-    if not (root / ".git").exists():
-        raise GitHistoryError(
-            "exact repository root must contain .git; upward discovery is disabled"
-        )
-    if file_ops._is_reparse_point(root / ".git"):
-        raise GitHistoryError("repository .git entry must not be a symlink or junction")
+    # Deliberately do not ask Git to discover a parent repository. A linked
+    # worktree's gitfile is accepted only when its target is independently
+    # contained by an operator-authorized root.
+    _validate_git_entry(root, extra_roots=extra_roots)
     return root
 
 
@@ -112,6 +152,19 @@ def resolve_path_filter(root: Path, value="") -> str:
     if relative == Path("."):
         raise GitHistoryError("path filter must name a path below the repository root")
     return relative.as_posix()
+
+
+def resolve_show_target(root: Path, value) -> str:
+    """Require one safe contained path before exposing commit patch content."""
+    relative = resolve_path_filter(root, value)
+    if not relative:
+        raise GitHistoryError("repo_show requires a contained file_path")
+    target = root / Path(relative)
+    if not target.exists() or not target.is_file():
+        raise GitHistoryError("repo_show file_path must be an existing regular file")
+    if file_ops._is_reparse_point(target):
+        raise GitHistoryError("repo_show file_path must not be a symlink or junction")
+    return relative
 
 
 def resolve_blame_target(root: Path, value) -> str:
@@ -334,16 +387,26 @@ def repo_show(
 ) -> dict:
     root = resolve_repo_root(path, extra_roots=extra_roots)
     revision = validate_revision(revision)
-    file_path = resolve_path_filter(root, file_path)
+    file_path = resolve_show_target(root, file_path)
+    timeout_budget = _bounded_timeout(timeout)
+    probe_timeout = max(0.1, timeout_budget / 3.0)
+    patch_timeout = max(0.1, timeout_budget - probe_timeout)
+    object_result = _run_git(
+        root, ["cat-file", "-t", revision + "^0:" + file_path],
+        timeout=probe_timeout, max_bytes=1024,
+    )
+    if object_result["truncated"] or object_result["stdout"].strip() != b"blob":
+        raise GitHistoryError("repo_show path is not a file at the requested revision")
     arguments = [
         "show", "--no-color", "--no-show-signature", "--no-notes",
         "--no-ext-diff", "--no-textconv", "--no-renames", "--unified=3",
         "--format=%H%x00%P%x00%an%x00%ae%x00%aI%x00%s%x00%B%x00",
-        revision,
+        revision + "^0",
     ]
-    if file_path:
-        arguments.extend(["--", file_path])
-    result = _run_git(root, arguments, timeout=timeout, max_bytes=max_bytes)
+    arguments.extend(["--", file_path])
+    result = _run_git(
+        root, arguments, timeout=patch_timeout, max_bytes=max_bytes,
+    )
     fields = result["stdout"].split(b"\0", 7)
     if len(fields) != 8:
         raise GitHistoryError("git show output was incomplete before metadata ended")

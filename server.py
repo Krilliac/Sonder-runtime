@@ -10161,7 +10161,7 @@ def repo_show(
     approval: str = "",
     extra_roots: str = "",
 ) -> str:
-    """Read one bounded structured commit and patch from an exact repository root."""
+    """Read one bounded commit patch for a required safe contained file."""
     _maybe_live_reload()
     started = time.time()
     args = {
@@ -10317,7 +10317,7 @@ AGENT_TOOL_HELP = """Available tools:
 - file_read_range: {"path": "server.py", "start_line": 1, "end_line": 200}
 - context_pack: {"paths_json": ["README.md", "src/main.py"], "max_files": 12, "max_total_bytes": 256000, "max_bytes_per_file": 64000}
 - repo_log: {"path": ".", "revision": "HEAD", "file_path": "", "count": 20, "timeout": 5, "max_bytes": 256000}
-- repo_show: {"path": ".", "revision": "HEAD", "file_path": "", "timeout": 5, "max_bytes": 256000}
+- repo_show: {"path": ".", "revision": "HEAD", "file_path": "<required contained relative file>", "timeout": 5, "max_bytes": 256000}
 - repo_blame: {"path": ".", "file_path": "<contained relative file>", "revision": "HEAD", "start_line": 1, "end_line": 100, "timeout": 5, "max_bytes": 256000}
 - text_search: {"query": "TODO", "root": ".", "glob": "*.py", "regex": false, "max_results": 100}
 - file_write: {"path": "notes.txt", "content": "...", "mode": "create|overwrite|append"}
@@ -10413,7 +10413,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - file_read_range: {"path": "<task-relevant relative path>", "start_line": 1, "end_line": 200}
 - context_pack: {"paths_json": ["<task-relevant relative path>", "<another task-relevant relative path>"], "max_files": 12, "max_total_bytes": 256000, "max_bytes_per_file": 64000}
 - repo_log: {"path": ".", "revision": "HEAD", "file_path": "<optional contained relative path>", "count": 20, "timeout": 5, "max_bytes": 256000}
-- repo_show: {"path": ".", "revision": "HEAD", "file_path": "<optional contained relative path>", "timeout": 5, "max_bytes": 256000}
+- repo_show: {"path": ".", "revision": "HEAD", "file_path": "<required contained relative file>", "timeout": 5, "max_bytes": 256000}
 - repo_blame: {"path": ".", "file_path": "<required contained relative file>", "revision": "HEAD", "start_line": 1, "end_line": 100, "timeout": 5, "max_bytes": 256000}
 - text_search: {"query": "<exact task symbol or anchor>", "root": ".", "glob": "<task-relevant glob>", "max_results": 100}
 - script_search: {"query": "<task-relevant script name>", "root": ".", "max_results": 100}
@@ -10688,6 +10688,8 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
                 git_history.normalize_blame_range(
                     args.get("start_line", 1), args.get("end_line", 0),
                 )
+            elif tool_name == "repo_show":
+                git_history.resolve_show_target(root, args.get("file_path", ""))
             else:
                 git_history.resolve_path_filter(root, args.get("file_path", ""))
         elif tool_name in {"workspace_inventory", "directory_tree", "file_find", "text_search", "script_search"}:
