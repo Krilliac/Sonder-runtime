@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import ntpath
+import platform
 import re
 import shutil
 from pathlib import Path
@@ -63,14 +64,35 @@ def default_machine_home(*, env=None, platform_name=None) -> Path:
     return Path("/opt/sonder")
 
 
+def macos_default_home(user_home: Path | None = None) -> Path:
+    """Use the native macOS location without hiding an existing legacy store."""
+    root = Path.home() if user_home is None else Path(user_home)
+    native = root / "Library" / "Application Support" / "sonder"
+    legacy = root / ".local" / "share" / "sonder"
+    if legacy.exists() and not native.exists():
+        return legacy
+    return native
+
+
 def default_home() -> Path:
     override = os.environ.get("SONDER_HOME", "").strip()
     if override:
         return Path(override).expanduser()
-    if os.name == "nt":
+    system = platform.system()
+    if system == "Windows" or (not system and os.name == "nt"):
         root = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
         if root:
             return Path(root) / "sonder"
+        profile = os.environ.get("USERPROFILE", "").strip()
+        if profile:
+            return Path(profile) / "AppData" / "Local" / "sonder"
+        # Service/minimal Windows environments may have no user-profile
+        # variables. Honor SystemDrive and use C: only as the final fallback.
+        drive = os.environ.get("SystemDrive", "").strip() or "C:"
+        suffix = "" if drive.endswith(("\\", "/")) else os.sep
+        return Path(drive + suffix) / "Sonder"
+    if system == "Darwin":
+        return macos_default_home()
     xdg = os.environ.get("XDG_DATA_HOME", "").strip()
     if xdg:
         return Path(xdg).expanduser() / "sonder"

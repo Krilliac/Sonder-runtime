@@ -21,12 +21,53 @@ def test_memory_db_env_override_wins(monkeypatch, tmp_path):
 
 
 def test_default_home_prefers_xdg_data_home(monkeypatch, tmp_path):
+    monkeypatch.setattr(sonder_paths.platform, "system", lambda: "Linux")
     monkeypatch.delenv("SONDER_HOME", raising=False)
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
     monkeypatch.delenv("APPDATA", raising=False)
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
 
     assert sonder_paths.default_home() == tmp_path / "xdg" / "sonder"
+
+
+def test_default_home_uses_macos_application_support(monkeypatch, tmp_path):
+    monkeypatch.delenv("SONDER_HOME", raising=False)
+    monkeypatch.setattr(sonder_paths.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(sonder_paths.Path, "home", lambda: tmp_path / "user")
+
+    assert sonder_paths.default_home() == (
+        tmp_path / "user" / "Library" / "Application Support" / "sonder"
+    )
+
+
+def test_default_home_preserves_existing_macos_legacy_store(monkeypatch, tmp_path):
+    monkeypatch.delenv("SONDER_HOME", raising=False)
+    monkeypatch.setattr(sonder_paths.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(sonder_paths.Path, "home", lambda: tmp_path / "user")
+    legacy = tmp_path / "user" / ".local" / "share" / "sonder"
+    legacy.mkdir(parents=True)
+
+    assert sonder_paths.default_home() == legacy
+
+    native = tmp_path / "user" / "Library" / "Application Support" / "sonder"
+    native.mkdir(parents=True)
+    assert sonder_paths.default_home() == native
+
+
+def test_default_home_uses_windows_profile_then_system_drive(monkeypatch, tmp_path):
+    monkeypatch.delenv("SONDER_HOME", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.setattr(sonder_paths.platform, "system", lambda: "Windows")
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "profile"))
+
+    assert sonder_paths.default_home() == (
+        tmp_path / "profile" / "AppData" / "Local" / "sonder"
+    )
+
+    monkeypatch.delenv("USERPROFILE")
+    monkeypatch.setenv("SystemDrive", str(tmp_path / "system-drive"))
+    assert sonder_paths.default_home() == tmp_path / "system-drive" / "Sonder"
 
 
 def test_windows_system_drive_uses_environment_then_system_root_then_c():

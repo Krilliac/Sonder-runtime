@@ -8,12 +8,17 @@ import shutil
 import subprocess
 import tempfile
 
+import bootstrap_engine
 import ollama_endpoint
 
 
-DEFAULT_BASE_MODEL = "qwen2.5-coder:7b"
 DEFAULT_EMBED_MODEL = "nomic-embed-text"
 STABLE_ALIAS = "sonder:latest"
+
+
+def default_base_model() -> str:
+    """Choose a practical model from live RAM unless the operator pins one."""
+    return os.environ.get("SONDER_BASE_MODEL", "").strip() or bootstrap_engine.choose_model()
 
 # Directories a mounted removable drive (e.g. an "Open Source Everything"
 # facts. USB) typically appears under, per platform. Used only when the
@@ -175,7 +180,11 @@ def create_alias(
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", default=os.environ.get("SONDER_BASE_MODEL", DEFAULT_BASE_MODEL))
+    parser.add_argument(
+        "--model",
+        default=os.environ.get("SONDER_BASE_MODEL", "").strip(),
+        help="Base Ollama model (default: choose from live host memory)",
+    )
     parser.add_argument(
         "--embed-model",
         default=os.environ.get("SONDER_EMBED_MODEL", DEFAULT_EMBED_MODEL),
@@ -244,7 +253,7 @@ def main(argv=None) -> int:
               % STABLE_ALIAS)
         return 0
 
-    base_model = args.model.strip()
+    base_model = args.model.strip() or default_base_model()
     if not base_model or not embed_model:
         parser.error("model names may not be empty")
 
