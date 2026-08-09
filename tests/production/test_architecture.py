@@ -64,6 +64,51 @@ def test_production_callers_use_the_memory_adapter():
     assert offenders == []
 
 
+def test_recall_root_module_is_compatibility_only_and_ratchet_shrank():
+    import importlib.util
+
+    checker = _REPO_ROOT / "scripts" / "check_architecture.py"
+    spec = importlib.util.spec_from_file_location("recall_architecture", checker)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert "recall" not in module.ROOT_LEGACY_MODULES
+    assert module.ROOT_LEGACY_MODULE_LIMIT == 16
+
+    offenders = []
+    for path in _REPO_ROOT.rglob("*.py"):
+        relative = path.relative_to(_REPO_ROOT)
+        if relative == Path("recall.py") or relative.parts[0] == "tests":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import) and any(
+                alias.name == "recall" for alias in node.names
+            ):
+                offenders.append(str(relative))
+                break
+            if (
+                isinstance(node, ast.ImportFrom)
+                and node.level == 0
+                and node.module == "recall"
+            ):
+                offenders.append(str(relative))
+                break
+    assert offenders == []
+
+
+def test_recall_use_case_depends_only_on_its_narrow_port():
+    service = (
+        _REPO_ROOT / "sonder_runtime" / "application" / "recall" / "use_cases.py"
+    )
+    tree = ast.parse(service.read_text(encoding="utf-8"), filename=str(service))
+    imports = {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+    assert imports == {"__future__", "ports.recall"}
+
+
 def test_checker_detects_a_violation(tmp_path):
     # Prove the checker is not vacuously green: a domain module importing
     # an adapter must fail.
