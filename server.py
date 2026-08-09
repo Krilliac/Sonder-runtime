@@ -80,6 +80,7 @@ import assetgen
 import artifact_grounding
 import game_forge
 import workbench
+import dependency_inventory as dependency_inventory_tool
 import creative_router
 import intents
 import runtime_policy
@@ -8145,6 +8146,50 @@ def workspace_inventory(
 
 
 @mcp.tool()
+def dependency_inventory(
+    path: str = ".",
+    max_depth: int = 5,
+    max_files: int = 100,
+    max_total_bytes: int = 2000000,
+    max_results: int = 2000,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Parse bounded dependency manifests and lockfiles without execution/network."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "path": path, "max_depth": max_depth, "max_files": max_files,
+        "max_total_bytes": max_total_bytes, "max_results": max_results,
+    }
+    try:
+        data = dependency_inventory_tool.dependency_inventory(
+            path,
+            max_depth=max_depth,
+            max_files=max_files,
+            max_total_bytes=max_total_bytes,
+            max_results=max_results,
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "dependency_inventory", args, ok=False, started=started,
+            summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False)
+    _record_direct_tool(
+        "dependency_inventory", args, ok=True, started=started,
+        summary="%d dependencies from %d files" % (
+            len(data["items"]), data["files_read"],
+        ), output=output,
+    )
+    return output
+
+
+@mcp.tool()
 def directory_tree(
     path: str = ".",
     depth: int = 2,
@@ -10849,7 +10894,7 @@ def tool_manifest() -> str:
         "offload": "Route a self-contained task to a configured local/cloud tier.",
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
         "local_service_probe": "Bounded unauthenticated GET/HEAD health probe for an explicit-port HTTP/HTTPS service resolving exclusively to loopback.",
-        "workspace_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace inventory, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
+        "workspace_inventory/dependency_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace and dependency inventory, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
         "repo_status/repo_diff": "Inspect bounded read-only Git branch, worktree, staged, and unstaged state without shell execution.",
         "project_detect": "Inventory guarded build/test/runtime manifests and return deterministic evidence-backed language, framework, and cross-platform argv candidates without executing them.",
         "file_policy/file_find/file_read/file_write/file_batch_write/file_edit/file_copy/file_move/file_delete": "Guarded filesystem find/read/create/edit/transactional batch write/single-file transfer/delete.",
@@ -10915,6 +10960,7 @@ AGENT_TOOL_HELP = """Available tools:
 - repo_status: {"root": ".", "timeout": 10, "max_output": 128000}
 - repo_diff: {"root": ".", "staged": false, "path": "", "context": 3, "timeout": 10, "max_output": 128000}
 - project_detect: {"path": ".", "max_depth": 8, "max_files": 200, "max_total_bytes": 2000000, "max_file_bytes": 256000, "max_results": 500}
+- dependency_inventory: {"path": ".", "max_depth": 5, "max_files": 100, "max_total_bytes": 2000000, "max_results": 2000}
 - directory_tree: {"path": ".", "depth": 2, "max_entries": 200}
 - directory_create: {"path": "output/reports", "parents": true}
 - file_find: {"query": "*.py", "root": ".", "max_results": 50}
@@ -11000,6 +11046,7 @@ or
 
 REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find",
+    "dependency_inventory",
     "repository_symbol_index", "file_read", "file_digest", "directory_digest",
     "file_read_range", "context_pack",
     "repo_status", "repo_diff",
@@ -11028,6 +11075,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - repo_status: {"root": ".", "timeout": 10, "max_output": 128000}
 - repo_diff: {"root": ".", "staged": false, "path": "", "context": 3, "timeout": 10, "max_output": 128000}
 - project_detect: {"path": ".", "max_depth": 8, "max_files": 200, "max_total_bytes": 2000000, "max_file_bytes": 256000, "max_results": 500}
+- dependency_inventory: {"path": ".", "max_depth": 5, "max_files": 100, "max_total_bytes": 2000000, "max_results": 2000}
 - directory_tree: {"path": ".", "depth": 2, "max_entries": 200}
 - file_find: {"query": "<task-relevant filename or glob>", "root": ".", "max_results": 50}
 - repository_symbol_index: {"path": ".", "glob": "<task-relevant source glob>", "language": "auto|python|javascript|typescript|c|cpp|csharp|rust|go", "max_files": 200, "max_total_bytes": 2000000, "max_file_bytes": 256000, "max_symbols": 2000}
@@ -11367,7 +11415,7 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
                 args.get("path", ""), allow_workspace_root=False,
                 reject_sensitive=True, extra_roots=trusted_extra_roots,
             )
-        elif tool_name in {"workspace_inventory", "project_detect", "directory_digest", "directory_tree", "file_find", "repository_symbol_index", "text_search", "script_search"}:
+        elif tool_name in {"workspace_inventory", "dependency_inventory", "project_detect", "directory_digest", "directory_tree", "file_find", "repository_symbol_index", "text_search", "script_search"}:
             file_ops.resolve_repository_read_path(
                 args.get("path", "") or args.get("root", "") or ".",
                 allow_workspace_root=True,
@@ -11986,6 +12034,17 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "dependency_inventory":
+        return dependency_inventory(
+            path=args.get("path", args.get("root", ".")),
+            max_depth=args.get("max_depth", 5),
+            max_files=args.get("max_files", 100),
+            max_total_bytes=args.get("max_total_bytes", 2000000),
+            max_results=args.get("max_results", 2000),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "directory_tree":
         return directory_tree(
             path=args.get("path", args.get("root", ".")),
@@ -12521,7 +12580,7 @@ _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "repo_log", "repo_show", "repo_blame",
     "data_query", "image_inspect", "file_write", "file_batch_write", "file_edit",
     "archive_list", "archive_extract",
-    "file_delete", "directory_create", "workspace_inventory", "directory_tree",
+    "file_delete", "directory_create", "workspace_inventory", "dependency_inventory", "directory_tree",
     "file_find", "repository_symbol_index", "text_search", "script_search", "artifact_verify",
     "artifact_ground", "scaffold_project", "repo_status", "repo_diff", "project_detect", "file_copy", "file_move",
 })
@@ -12744,7 +12803,7 @@ _WORK_MUTATION_TOOLS = frozenset({
 # name-only branch prediction yields a deterministic call signature that can
 # be speculatively executed and reliably matched against the real decision.
 _SPECULATABLE_ARGFREE_TOOLS = frozenset({
-    "workspace_inventory", "directory_tree", "status", "activity_status",
+    "workspace_inventory", "dependency_inventory", "directory_tree", "status", "activity_status",
     "context_health", "command_registry_list",
 })
 _WORK_VALIDATION_TOOLS = frozenset({
@@ -13142,6 +13201,7 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
     return False
 _WORK_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "directory_digest", "file_find",
+    "dependency_inventory",
     "repository_symbol_index", "file_read", "file_digest", "file_read_range", "context_pack",
     "text_search", "script_search", "program_search", "image_inspect", "repo_status", "repo_diff",
     "repo_log", "repo_show", "repo_blame",
@@ -13156,9 +13216,11 @@ _AGENT_FILE_EVIDENCE_TOOLS = frozenset({
     "file_digest", "directory_digest", "file_find", "text_search",
     "script_search", "image_inspect", "data_query", "project_detect",
     "context_pack", "repo_log", "repo_show", "repo_blame", "archive_list",
+    "dependency_inventory",
 })
 _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "directory_digest", "file_find",
+    "dependency_inventory",
     "repository_symbol_index", "file_read", "file_digest", "file_read_range", "context_pack",
     "data_query", "text_search", "script_search",
     "program_search", "image_inspect", "environment_status", "repo_status", "repo_diff", "project_detect",
@@ -14302,6 +14364,7 @@ def workbench_agent(
 
 _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "directory_digest", "file_find",
+    "dependency_inventory",
     "repository_symbol_index", "file_read", "file_digest", "file_read_range", "data_query", "text_search", "script_search",
     "project_detect",
     "repo_log", "repo_show", "repo_blame", "archive_list",
