@@ -93,6 +93,7 @@ REQUIRED_FILES = {
     "ooxml_assets.py",
     "process_liveness.py",
     "reloadable_mcp.py",
+    "refinement_transactions.py",
     "requirements-runtime.txt",
     "runtime_policy.py",
     "server.py",
