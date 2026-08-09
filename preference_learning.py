@@ -144,6 +144,48 @@ _BENIGN_RESOURCE_CANONICAL_RE = re.compile(
     r"(?:powershell|pwsh|bash|zsh|windows|linux) environment variables? "
     r"(?:syntax|notation|naming|names|expansion)\.?$"
 )
+_SAFE_STYLE_CANONICAL_RE = re.compile(
+    r"^(?:user prefers|user likes it when|user does not like|"
+    r"user does not want sonder to|user wants sonder to always|from now on) "
+    r"(?:(?:(?:concise|brief|short|direct|detailed|verbose|formal|casual|clear) )+"
+    r"(?:answers?|responses?|replies|explanations?|reports?|status updates?)|"
+    r"step by step (?:answers?|responses?|explanations?)|"
+    r"(?:bullet|bulleted) (?:lists?|answers?|responses?)|"
+    r"(?:use )?markdown(?: formatting| headings?)?|use emojis?|avoid emojis?|"
+    r"mention what changed|show (?:your )?progress)\.?$"
+)
+_SAFE_SHELL_CANONICAL_RE = re.compile(
+    r"^user prefers "
+    r"(?:(?:(?:concise|brief|short|direct|detailed|clear) )?"
+    r"(?:powershell|pwsh|bash|zsh|cmd|windows|linux) "
+    r"(?:commands?|shell|syntax)|"
+    r"(?:powershell|pwsh|bash|zsh|windows|linux) environment variables? "
+    r"(?:syntax|notation|naming|names|expansion))\.?$"
+)
+_SAFE_CODE_CANONICAL_RE = re.compile(
+    r"^user prefers "
+    r"(?:(?:(?:concise|brief|short|direct|detailed|clear) )?"
+    r"(?:code|coding|programming)(?: examples?| audits?| style)?|"
+    r"(?:(?:concise|brief|short|direct|detailed|clear) )?"
+    r"(?:python|javascript|typescript|rust|java|cpp|csharp) "
+    r"(?:code|examples?|tests?)|"
+    r"(?:python|javascript|typescript|rust|java|cpp|csharp)|"
+    r"(?:msvc|clang|gcc) for (?:c|cpp) examples?|"
+    r"(?:tabs|spaces) for indentation|type hints|docstrings)\.?$"
+)
+_SAFE_UI_CANONICAL_RE = re.compile(
+    r"^user prefers (?:(?:dark|light) mode|(?:dark|light) theme|"
+    r"(?:dark|light) color scheme|compact layout)\.?$"
+)
+_SAFE_WORKFLOW_CANONICAL_RE = re.compile(
+    r"^(?:user prefers|user wants sonder to always|"
+    r"user does not want sonder to) "
+    r"(?:ask (?:me )?before (?:deleting|removing|overwriting|committing|pushing)|"
+    r"confirm before (?:deleting|removing|overwriting|committing|pushing)|"
+    r"include source citations|use source citations|"
+    r"update (?:documentation|docs|the changelog)|"
+    r"mention documentation changes)\.?$"
+)
 
 _CATEGORY_PATTERNS = (
     ("identity", re.compile(r"\b(?:wants?\s+to\s+be\s+called|name\s+is)\b", re.I)),
@@ -254,9 +296,20 @@ def _clean(text):
 
 def _security_canonical(text):
     """Canonicalize security-significant text before resource matching."""
-    value = unicodedata.normalize("NFKC", _clean(text)).casefold()
+    value = unicodedata.normalize("NFKC", _clean(text))
+    value = value.replace("C++", "cpp").replace("c++", "cpp")
+    value = value.replace("C#", "csharp").replace("c#", "csharp")
+    value = value.translate(str.maketrans({
+        "А": "A", "а": "a", "С": "C", "с": "c", "І": "I", "і": "i",
+        "Е": "E", "е": "e", "О": "O", "о": "o", "Р": "P", "р": "p",
+        "Х": "X", "х": "x",
+    })).casefold()
     value = "".join(
         char for char in value if unicodedata.category(char) != "Cf"
+    )
+    value = "".join(
+        " " if unicodedata.category(char)[:1] in {"P", "S", "Z"} else char
+        for char in value
     )
     return _SECURITY_SEPARATOR_RE.sub(" ", value).strip()
 
@@ -267,6 +320,20 @@ def _has_sensitive_resource(text):
     if _BENIGN_RESOURCE_CANONICAL_RE.fullmatch(value):
         return False
     return bool(_SENSITIVE_RESOURCE_CANONICAL_RE.search(value))
+
+
+def _category_shape_safe(category, text):
+    """Require a complete known-safe grammar, not keyword classification."""
+    value = _security_canonical(text)
+    patterns = {
+        "shell": _SAFE_SHELL_CANONICAL_RE,
+        "code": _SAFE_CODE_CANONICAL_RE,
+        "ui": _SAFE_UI_CANONICAL_RE,
+        "workflow": _SAFE_WORKFLOW_CANONICAL_RE,
+        "response_style": _SAFE_STYLE_CANONICAL_RE,
+    }
+    pattern = patterns.get(category)
+    return bool(pattern and pattern.fullmatch(value))
 
 
 def _trim_body(body):
@@ -309,11 +376,10 @@ def preference_category(text):
         return ""
     if _BENIGN_RESOURCE_CANONICAL_RE.fullmatch(_security_canonical(value)):
         return "shell"
-    if _topical_terms(value):
-        return "topic"
     for category, pattern in _CATEGORY_PATTERNS:
         if pattern.search(value):
-            return category
+            if category == "identity" or _category_shape_safe(category, value):
+                return category
     if (
         _GENERIC_DURABLE_RE.search(value)
         and _SAFE_GENERAL_DEFAULT_RE.fullmatch(value)
