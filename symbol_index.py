@@ -7,6 +7,7 @@ anchored declaration patterns that never execute source or invoke toolchains.
 from __future__ import annotations
 
 import ast
+import contextlib
 import fnmatch
 import os
 import re
@@ -115,6 +116,99 @@ def _is_reparse(path: Path) -> bool:
     except OSError:
         return False
     return bool(attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
+def _opened_handle_path(fd: int) -> Path:
+    """Return the path of the already-open handle, or fail closed."""
+    if os.name == "nt":
+        import ctypes
+        import msvcrt
+
+        handle = msvcrt.get_osfhandle(fd)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        function = kernel32.GetFinalPathNameByHandleW
+        function.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32]
+        function.restype = ctypes.c_uint32
+        needed = function(handle, None, 0, 0)
+        if not needed:
+            raise OSError(ctypes.get_last_error(), "could not resolve opened file handle")
+        buffer = ctypes.create_unicode_buffer(needed + 1)
+        if not function(handle, buffer, len(buffer), 0):
+            raise OSError(ctypes.get_last_error(), "could not resolve opened file handle")
+        value = buffer.value
+        if value.startswith("\\\\?\\UNC\\"):
+            value = "\\\\" + value[8:]
+        elif value.startswith("\\\\?\\"):
+            value = value[4:]
+        return Path(value)
+    for link in ("/proc/self/fd/%d" % fd, "/dev/fd/%d" % fd):
+        try:
+            value = os.readlink(link)
+        except OSError:
+            continue
+        if value.endswith(" (deleted)"):
+            raise PermissionError("opened source was deleted during validation")
+        return Path(value)
+    raise PermissionError("platform cannot validate an opened file handle")
+
+
+@contextlib.contextmanager
+def _open_guarded_binary(path: Path, extra_roots: str):
+    """Open without following a replacement link and validate the handle."""
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+    if os.name == "nt":
+        import ctypes
+        import msvcrt
+
+        class FileAttributeTagInfo(ctypes.Structure):
+            _fields_ = [("attributes", ctypes.c_uint32), ("reparse_tag", ctypes.c_uint32)]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create = kernel32.CreateFileW
+        create.argtypes = [
+            ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+            ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+        ]
+        create.restype = ctypes.c_void_p
+        raw_handle = create(
+            str(path), 0x80000000, 0x00000001 | 0x00000002 | 0x00000004,
+            None, 3, 0x00200000 | 0x08000000, None,
+        )
+        invalid = ctypes.c_void_p(-1).value
+        if raw_handle == invalid:
+            raise OSError(ctypes.get_last_error(), "could not open guarded source")
+        info = FileAttributeTagInfo()
+        get_info = kernel32.GetFileInformationByHandleEx
+        get_info.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        get_info.restype = ctypes.c_int
+        if not get_info(raw_handle, 9, ctypes.byref(info), ctypes.sizeof(info)):
+            kernel32.CloseHandle(raw_handle)
+            raise OSError(ctypes.get_last_error(), "could not inspect guarded source")
+        if info.attributes & 0x00000400:
+            kernel32.CloseHandle(raw_handle)
+            raise PermissionError("replacement symlink or junction is not indexed")
+        try:
+            fd = msvcrt.open_osfhandle(raw_handle, flags)
+        except Exception:
+            kernel32.CloseHandle(raw_handle)
+            raise
+    else:
+        fd = os.open(path, flags | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise PermissionError("opened source is not a regular file")
+        actual = file_ops.resolve_repository_read_path(
+            str(_opened_handle_path(fd)), allow_workspace_root=False,
+            reject_sensitive=True, extra_roots=extra_roots,
+        )
+        current = actual.stat(follow_symlinks=False)
+        if not os.path.samestat(opened, current):
+            raise PermissionError("source changed while validating its opened handle")
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            yield handle
+    finally:
+        os.close(fd)
 
 
 def _requested_path(path: str) -> Path:
@@ -398,7 +492,7 @@ def index_repository(
                 break
             remaining_bytes = limits["max_total_bytes"] - result["bytes"]
             read_limit = min(limits["max_file_bytes"], remaining_bytes)
-            with guarded.open("rb") as handle:
+            with _open_guarded_binary(guarded, extra_roots) as handle:
                 payload = handle.read(read_limit)
                 observed_size = os.fstat(handle.fileno()).st_size
             if observed_size > limits["max_file_bytes"]:
