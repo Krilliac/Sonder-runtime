@@ -16006,20 +16006,24 @@ def runtime_policy_update(
         routing = _runtime_update_object(routing_json, "routing_json")
         npu = _runtime_update_object(npu_json, "npu_json")
         if local_models:
-            installed = _runtime_installed_models()
-            missing = [
-                str(model) for tier, model in local_models.items()
+            models_to_validate = {
+                tier: model for tier, model in local_models.items()
                 if not (
                     tier in runtime_policy.OPTIONAL_LOCAL_TIERS
                     and not str(model or "").strip()
                 )
-                and not _runtime_model_is_installed(model, installed)
-            ]
-            if missing:
-                raise ValueError(
-                    "local model(s) are not installed: %s"
-                    % ", ".join(sorted(set(missing)))
-                )
+            }
+            if models_to_validate:
+                installed = _runtime_installed_models()
+                missing = [
+                    str(model) for model in models_to_validate.values()
+                    if not _runtime_model_is_installed(model, installed)
+                ]
+                if missing:
+                    raise ValueError(
+                        "local model(s) are not installed: %s"
+                        % ", ".join(sorted(set(missing)))
+                    )
         runtime_policy.update(
             local_models=local_models,
             routing=routing,

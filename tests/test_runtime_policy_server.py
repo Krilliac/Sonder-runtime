@@ -63,6 +63,11 @@ def test_guarded_update_requires_installed_local_model(
     cloud = server.runtime_policy_update(
         local_models_json='{"code":"qwen3-coder:480b-cloud"}',
     )
+    monkeypatch.setattr(
+        server,
+        "_runtime_installed_models",
+        lambda: pytest.fail("optional-tier unbinding must not query Ollama"),
+    )
     optional_unset = server.runtime_policy_update(
         local_models_json='{"reasoning":""}',
     )
