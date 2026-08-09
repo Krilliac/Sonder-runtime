@@ -344,7 +344,7 @@ class SonderLauncherApi {
 /// with an optional `Authorization: Bearer <key>` header when the host
 /// enabled auth. This mirrors sonder_client.py, but for a GUI.
 class SonderApi {
-  final String baseUrl; // e.g. http://192.168.1.10:11435
+  final String baseUrl; // e.g. https://sonder.example.com
   final String apiKey; // empty when the server has auth disabled
   final String localFallbackUrl;
 
