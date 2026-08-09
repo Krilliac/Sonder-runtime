@@ -23,7 +23,8 @@ import uuid
 from pathlib import Path
 
 import sonder_paths
-from process_liveness import pid_alive as _process_pid_alive
+import sonder_logging
+from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_alive
 
 
 MODES = ("observe", "propose", "auto-low-risk")
@@ -37,7 +38,7 @@ TERMINAL_PHASES = {"rejected", "restored", "cancelled"}
 SENSITIVE_PREFIXES = (
     "permission_rules.py", "admin_auth.py", "file_ops.py", "safe_update.py",
     "selfmod.py", "selfmod_recover.py", "server.py", "reloadable_mcp.py",
-    "model_transport.py",
+    "model_transport.py", "sonder_runtime/adapters/model_transport.py",
     "ollama_endpoint.py",
     "process_liveness.py",
     "autopilot_controller.py", "autopilot_store.py", "sonder_paths.py", "sonder_serve.py",
@@ -210,6 +211,7 @@ def _run(command, cwd, timeout=30):
             list(command), cwd=str(cwd), text=True, capture_output=True,
             stdin=subprocess.DEVNULL,
             timeout=max(1, int(timeout)), check=False,
+            env=sonder_logging.child_environment(),
         )
         output = "\n".join(x.strip() for x in (result.stdout, result.stderr) if x and x.strip())
         return result.returncode, output[:100_000], int((time.monotonic() - started) * 1000)
@@ -229,6 +231,7 @@ def _git(root: Path, *args, timeout=30):
             stdin=subprocess.DEVNULL,
             timeout=max(1, int(timeout)),
             check=False,
+            env=sonder_logging.child_environment(),
         )
     except subprocess.TimeoutExpired as exc:
         output = "\n".join(str(x or "") for x in (exc.stdout, exc.stderr)).strip()

@@ -73,6 +73,55 @@ def test_checklist_lifecycle_persists_order_and_parent_status(monkeypatch, tmp_p
     assert final.index("Inspect files") < final.index("Run tests")
 
 
+def test_checklist_create_preserves_activity_projection_and_event_order(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "activity.db"))
+    activity_tracker.reset_for_tests()
+    with activity_tracker.response_span("checklist", "create visible plan"):
+        output = server.checklist_create("Visible", json.dumps(["inspect"]))
+
+    response = activity_tracker.latest()
+    assert output.startswith("sonder checklist ")
+    assert response["checklist"]["summary"] == "0/1 complete"
+    assert response["checklist"]["items"][0]["title"] == "inspect"
+    relevant = [
+        row["kind"] for row in response["events"]
+        if row["kind"] in ("tool_call", "checklist")
+    ]
+    assert relevant[-2:] == [
+        "tool_call", "checklist",
+    ]
+
+
+def test_checklist_show_and_update_preserve_legacy_activity_order(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "activity-order.db"))
+    created = server.checklist_create("Visible", json.dumps(["inspect"]))
+    checklist_id = created.split("\n", 1)[0].split()[-1]
+
+    activity_tracker.reset_for_tests()
+    with activity_tracker.response_span("checklist", "show visible plan"):
+        shown = server.checklist_show(checklist_id)
+    show_events = [
+        row["kind"] for row in activity_tracker.latest()["events"]
+        if row["kind"] in ("tool_call", "checklist")
+    ]
+    assert shown.startswith("sonder checklist ")
+    assert show_events[-2:] == ["checklist", "tool_call"]
+
+    activity_tracker.reset_for_tests()
+    with activity_tracker.response_span("checklist", "update visible plan"):
+        updated = server.checklist_update(checklist_id, "1", "done")
+    update_events = [
+        row["kind"] for row in activity_tracker.latest()["events"]
+        if row["kind"] in ("tool_call", "checklist")
+    ]
+    assert "1/1 complete" in updated
+    assert update_events[-2:] == ["tool_call", "checklist"]
+
+
 def test_checklist_rejects_all_invalid_items_before_writing(monkeypatch, tmp_path):
     db_path = tmp_path / "atomic.db"
     monkeypatch.setattr(server, "_DB_PATH", str(db_path))
@@ -83,6 +132,40 @@ def test_checklist_rejects_all_invalid_items_before_writing(monkeypatch, tmp_pat
     conn = memory_store.connect(str(db_path))
     try:
         assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_checklist_validation_still_precedes_database_open(monkeypatch):
+    opened = []
+    monkeypatch.setattr(server, "_open_db", lambda: opened.append(True))
+    result = server.checklist_create("Atomic", json.dumps(["valid", ""]))
+    assert result.startswith("ERROR: checklist item titles cannot be empty")
+    assert opened == []
+
+
+def test_checklist_late_write_failure_preserves_legacy_partial_rows(
+    monkeypatch, tmp_path,
+):
+    db_path = tmp_path / "partial.db"
+    monkeypatch.setattr(server, "_DB_PATH", str(db_path))
+    original = memory_store.create_task
+    calls = 0
+
+    def fail_third_create(conn, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise RuntimeError("injected child failure")
+        return original(conn, *args, **kwargs)
+
+    monkeypatch.setattr(memory_store, "create_task", fail_third_create)
+    result = server.checklist_create("Partial", json.dumps(["first", "second"]))
+    assert result == "ERROR: injected child failure"
+    conn = memory_store.connect(str(db_path))
+    try:
+        rows = conn.execute("SELECT title FROM tasks ORDER BY rowid").fetchall()
+        assert [row[0] for row in rows] == ["Partial", "first"]
     finally:
         conn.close()
 
@@ -191,8 +274,13 @@ def test_loop_dispatch_supports_weather_and_consent_gated_location(monkeypatch):
 
 
 def test_loop_dispatch_supports_fleet_capacity_and_cancellation(monkeypatch):
+    capacity_calls = []
     monkeypatch.setattr(
-        server, "master_capacity", lambda requested_agents=0: f"capacity:{requested_agents}",
+        server, "master_capacity",
+        lambda requested_agents=0, **kwargs: (
+            capacity_calls.append((requested_agents, kwargs))
+            or f"capacity:{requested_agents}:{kwargs.get('worker_cap', 0)}"
+        ),
     )
     monkeypatch.setattr(
         server, "master_cancel", lambda agent_id: f"cancel:{agent_id}",
@@ -204,6 +292,9 @@ def test_loop_dispatch_supports_fleet_capacity_and_cancellation(monkeypatch):
     capacity = server._loop_dispatch({
         "type": "master_capacity", "requested_agents": 20,
     })
+    capped_capacity = server._loop_dispatch({
+        "type": "master_capacity", "requested_agents": 20, "worker_cap": 24,
+    })
     cancelled = server._loop_dispatch({
         "type": "master_cancel", "agent_id": "all",
     })
@@ -212,7 +303,10 @@ def test_loop_dispatch_supports_fleet_capacity_and_cancellation(monkeypatch):
     })
 
     assert capacity["ok"] is True
-    assert capacity["output"] == "capacity:20"
+    assert capacity["output"] == "capacity:20:0"
+    assert capacity_calls[0] == (20, {})
+    assert capped_capacity["output"] == "capacity:20:24"
+    assert capacity_calls[1] == (20, {"worker_cap": 24})
     assert cancelled["ok"] is True
     assert cancelled["output"] == "cancel:all"
     assert retried["ok"] is True

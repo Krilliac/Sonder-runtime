@@ -21,8 +21,26 @@ from ..adapters.legacy.services import (
     OperationsEventSink,
     SystemClock,
 )
+from ..adapters.legacy.evaluation_history import LegacyEvaluationHistoryReader
+from ..adapters.legacy.inspections import LegacyInspectionExecutor
+from ..adapters.legacy.recall import LegacyRecallGateway
+from ..adapters.legacy.preferences import (
+    LegacyPreferenceCodec,
+    LegacyPreferenceRepository,
+    NullPreferenceEventSink,
+)
+from ..adapters.legacy.workflows import LegacyLoopRunner, LegacyWorkflowRepository
+from ..adapters.local_observability import LocalObservabilitySink
 from ..adapters.ollama.gateway import OllamaGateway
 from ..application.chat.handle_chat import ChatService
+from ..application.evaluation_history import EvaluationHistoryService
+from ..application.inspection import InspectionService
+from ..application.recall import RecallService
+from ..application.preferences import PreferenceService
+from ..application.ports.preferences import (
+    ConnectionFactory,
+    PreferenceModuleProvider,
+)
 from ..application.ports.clock import Clock
 from ..application.ports.event_sink import EventSink
 from ..application.ports.model_gateway import ModelGateway
@@ -30,6 +48,7 @@ from ..application.ports.process_probe import ProcessProbe
 from ..application.ports.repositories import AutomationRepository, UnitOfWork
 from ..application.ports.tool_executor import ToolExecutor
 from ..application.runtime_policy.use_cases import RuntimePolicyService
+from ..application.workflows.use_cases import WorkflowService
 
 PROFILES = ("workstation-local", "server-private")
 
@@ -46,6 +65,11 @@ class Application:
     process_probe: ProcessProbe
     events: EventSink
     clock: Clock
+    inspections: InspectionService
+    recall: RecallService
+    evaluation_history: EvaluationHistoryService
+    preferences: PreferenceService
+    workflows: WorkflowService
 
 
 def _build_model_gateway() -> ModelGateway:
@@ -67,7 +91,12 @@ def _build_model_gateway() -> ModelGateway:
     return OllamaGateway()
 
 
-def build_application(profile: str = "workstation-local") -> Application:
+def build_application(
+    profile: str = "workstation-local",
+    *,
+    preference_connection_factory: ConnectionFactory | None = None,
+    preference_module_provider: PreferenceModuleProvider | None = None,
+) -> Application:
     """Assemble one application graph for the selected profile.
 
     Entry points call this exactly once. As SPEC-3 phases extract more
@@ -91,8 +120,21 @@ def build_application(profile: str = "workstation-local") -> Application:
         unit_of_work=LegacyUnitOfWork,
         tool_executor=LegacyToolExecutor(),
         process_probe=LegacyProcessProbe(),
-        events=OperationsEventSink(),
+        # Bounded process-local counters/recent events decorate the durable
+        # operations.db sink; they never replace its audit authority.
+        events=LocalObservabilitySink(OperationsEventSink()),
         clock=SystemClock(),
+        inspections=InspectionService(LegacyInspectionExecutor()),
+        recall=RecallService(LegacyRecallGateway()),
+        evaluation_history=EvaluationHistoryService(
+            LegacyEvaluationHistoryReader()
+        ),
+        preferences=PreferenceService(
+            LegacyPreferenceRepository(preference_connection_factory),
+            LegacyPreferenceCodec(preference_module_provider),
+            NullPreferenceEventSink(),
+        ),
+        workflows=WorkflowService(LegacyWorkflowRepository(), LegacyLoopRunner()),
     )
 
 
