@@ -580,7 +580,45 @@ void main() {
     expect(info.runtimePolicy, isNull);
     expect(info.mcpRuntime, isNull);
     expect(info.learningHealth, isNull);
+    expect(info.execution, isNull);
+    expect(info.executionSummary, 'lanes unknown | agents unknown');
     expect(info.models, isEmpty);
+  });
+
+  test('system info parses shared live execution counts', () {
+    final info = SystemInfo.fromJson({
+      'execution': {
+        'known': true,
+        'running_lanes': 2,
+        'running_agents': 3,
+        'queued_agents': 4,
+        'active_agents': 7,
+        'semantics': 'fleet model-call lanes and durable fleet agents',
+        'error': '',
+      },
+    });
+
+    expect(info.execution?.known, isTrue);
+    expect(info.execution?.runningLanes, 2);
+    expect(info.execution?.runningAgents, 3);
+    expect(info.execution?.queuedAgents, 4);
+    expect(info.execution?.activeAgents, 7);
+    expect(info.executionSummary, 'lanes 2 | agents 3 +4 queued');
+  });
+
+  test('unknown execution counts stay nullable rather than becoming zero', () {
+    final execution = ExecutionStatus.fromJson({
+      'known': false,
+      'running_lanes': 0,
+      'running_agents': 0,
+      'queued_agents': 0,
+      'active_agents': 0,
+    });
+
+    expect(execution.known, isFalse);
+    expect(execution.runningLanes, isNull);
+    expect(execution.runningAgents, isNull);
+    expect(execution.summary, 'lanes unknown | agents unknown');
   });
 
   test('system info parses shared local runtime policy state', () {

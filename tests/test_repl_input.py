@@ -63,3 +63,19 @@ def test_startup_banner_reads_the_live_runtime_not_a_literal(monkeypatch):
     assert "some-model:13b" in text
     assert "coder" in text and "duetos" in text
     assert "/help" in text
+
+
+def test_execution_prompt_shows_live_lanes_running_and_queued_agents(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    text = sonder_repl._execution_prompt({
+        "known": True,
+        "running_lanes": 2,
+        "running_agents": 3,
+        "queued_agents": 4,
+    })
+    assert text == "[lanes 2 | agents 3+4q]"
+
+
+def test_execution_prompt_reports_unknown_instead_of_zero(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    assert sonder_repl._execution_prompt({"known": False}) == "[lanes ? | agents ?]"

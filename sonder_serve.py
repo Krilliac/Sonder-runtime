@@ -1741,6 +1741,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_auth_error()
                 return
             account = context["account"]
+            agents = server.master_orchestrator.snapshot()
             payload = {
                 "status": server.status(),
                 "stats": server.sonder_stats(),
@@ -1748,7 +1749,8 @@ class Handler(BaseHTTPRequestHandler):
                 "improvements": server.system_improvement_report(),
                 "context": server.context_health_data(),
                 "context_policy": server.context_policy.policy(server.SESSION_NUM_CTX),
-                "agents": server.master_orchestrator.snapshot(),
+                "agents": agents,
+                "execution": server.execution_status_data(agents),
                 "autopilot": server.autopilot_controller.snapshot(),
                 "runtime_policy": server.runtime_policy_data(),
                 "selfmod": server.selfmod.status_data(),

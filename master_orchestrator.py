@@ -1281,6 +1281,15 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
             listed = listed[:max(1, int(limit or 20))]
             data = {
                 "active_agents": len(active),
+                "running_agents": sum(
+                    1 for row in active if row.get("status") == "running"
+                ),
+                "queued_agents": sum(
+                    1 for row in active if row.get("status") == "queued"
+                ),
+                "active_model_calls": sum(
+                    1 for row in active if row.get("in_model_call")
+                ),
                 "cancel_pending": sum(
                     1 for row in active if row.get("cancel_requested")
                 ),
