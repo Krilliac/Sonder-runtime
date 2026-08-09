@@ -141,6 +141,11 @@ FALLBACK_OPERATION_MODES = frozenset({"execution", "shadow"})
 FALLBACK_HANDLERS = frozenset({"npu", "cpu", "ollama", "host"})
 FALLBACK_HANDLER_STATES = frozenset({"pending", "handled", "failed", "observed"})
 
+ERROR_CATEGORIES = frozenset({
+    "none", "ort_unavailable", "provider_unavailable", "model_load",
+    "worker_crash", "ram_insufficient", "timeout", "internal", "unknown",
+})
+
 
 def controlled_value(value, allowed) -> str:
     try:
@@ -168,6 +173,29 @@ def fallback_handler(value) -> str:
 
 def fallback_handler_state(value) -> str:
     return controlled_value(value, FALLBACK_HANDLER_STATES)
+
+
+def categorize_error(value) -> str:
+    """Map sanitized error text to a controlled error category."""
+    try:
+        text = str(value or "").strip().lower()
+    except Exception:
+        return "unknown"
+    if not text:
+        return "none"
+    if "onnxruntime" in text or "ort " in text or "ort_" in text:
+        return "ort_unavailable"
+    if "not installed" in text or "provider" in text or "no provider" in text:
+        return "provider_unavailable"
+    if "model" in text or "load" in text or "manifest" in text:
+        return "model_load"
+    if "crash" in text or "killed" in text or "died" in text or "exit" in text:
+        return "worker_crash"
+    if "ram" in text or "memory" in text or "oom" in text:
+        return "ram_insufficient"
+    if "timeout" in text or "deadline" in text or "timed out" in text:
+        return "timeout"
+    return "unknown"
 
 
 def sanitize_error(value, limit=200) -> str:

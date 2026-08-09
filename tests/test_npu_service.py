@@ -956,7 +956,13 @@ def test_status_redacts_vendor_paths_and_credentials(npu_env, monkeypatch):
     assert "secret-value" not in rendered
     assert "/home/example" not in rendered
     assert "another-secret" not in rendered
-    assert "<redacted>" in rendered or "<path>" in rendered
+    assert "ort_available" in rendered
+    assert "last_error_category" in rendered
+    hello = state["broker"]["hello"]
+    assert hello["ort_available"] is False
+    assert "ort_error" not in hello
+    assert state["broker"]["last_error_category"] == "unknown"
+    assert "last_error" not in state["broker"]
 
 
 def test_shadow_ledger_persists_and_advises(monkeypatch, tmp_path):
@@ -1018,7 +1024,8 @@ def test_ram_gate_fallbacks_are_reported_as_a_cost(npu_env, monkeypatch):
     text = npu_service.format_status()
     assert "ram_gate=357" in text
     assert "357 call(s) fell back for free RAM" in text
-    assert "SONDER_NPU_MIN_FREE_RAM_GB" in text
+    assert "SONDER_NPU_MIN_FREE_RAM_GB" not in text
+    assert "free ram threshold" in text.lower()
 
 
 def test_a_non_dominant_ram_gate_does_not_claim_the_cost(npu_env, monkeypatch):
