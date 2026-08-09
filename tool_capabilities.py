@@ -113,6 +113,7 @@ _READ_RESOURCES = frozenset({ResourceClass.CPU, ResourceClass.RAM, ResourceClass
 def _read_tool(
     name: str,
     *,
+    visibility: frozenset[Visibility] = _ALL_VISIBILITY,
     root: RootRequirement = RootRequirement.GUARDED_SCOPE,
     mode: ExecutionMode = ExecutionMode.IN_PROCESS,
     resources: frozenset[ResourceClass] = _READ_RESOURCES,
@@ -123,7 +124,7 @@ def _read_tool(
     return ToolCapability(
         name=name,
         effect=Effect.READ_ONLY,
-        visibility=_ALL_VISIBILITY,
+        visibility=visibility,
         permission=Permission.NONE if root is RootRequirement.NONE else Permission.GUARDED_READ,
         root=root,
         network=NetworkRequirement.NONE,
@@ -167,6 +168,25 @@ _DESCRIPTORS = (
     _read_tool("text_search"),
     _read_tool("repo_status", mode=ExecutionMode.BOUNDED_SUBPROCESS),
     _read_tool("repo_diff", mode=ExecutionMode.BOUNDED_SUBPROCESS),
+    _read_tool(
+        "artifact_risk_inspect",
+        mode=ExecutionMode.IN_PROCESS,
+        secrets=SecretPolicy.NO_SECRET_INPUT,
+    ),
+    _read_tool(
+        "process_list",
+        visibility=frozenset({Visibility.DIRECT_MCP, Visibility.FULL_AGENT}),
+        root=RootRequirement.NONE,
+        resources=frozenset({ResourceClass.CPU, ResourceClass.RAM}),
+        secrets=SecretPolicy.NO_SECRET_INPUT,
+    ),
+    _read_tool(
+        "process_memory_risk_inspect",
+        visibility=frozenset({Visibility.DIRECT_MCP, Visibility.FULL_AGENT}),
+        root=RootRequirement.NONE,
+        resources=frozenset({ResourceClass.CPU, ResourceClass.RAM}),
+        secrets=SecretPolicy.NO_SECRET_INPUT,
+    ),
 )
 
 CAPABILITIES: Mapping[str, ToolCapability] = MappingProxyType(

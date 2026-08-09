@@ -12,6 +12,7 @@ those only happen in the __main__ live driver.
 import os
 import py_compile
 import subprocess
+import sonder_logging
 import sys
 import tempfile
 
@@ -113,6 +114,7 @@ def python_interpreter():
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 timeout=3,
+                env=sonder_logging.child_environment(),
             )
             if p.returncode == 0:
                 return PY
@@ -176,7 +178,7 @@ def _ground_capture(code, kind, timeout=12):
             last_line = msg.splitlines()[-1] if msg else "syntax error"
             return False, "SyntaxError: %s" % last_line, msg
 
-        env = dict(os.environ)
+        env = sonder_logging.child_environment()
         env.update({
             "SDL_VIDEODRIVER": "dummy",
             "SDL_AUDIODRIVER": "dummy",
