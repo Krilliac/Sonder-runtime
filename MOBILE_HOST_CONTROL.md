@@ -34,13 +34,14 @@ setx SONDER_API_KEY "PASTE_A_DIFFERENT_MAIN_API_KEY"
 setx SONDER_AUTH_MODE "api-key"
 setx SONDER_LAUNCHER_CERT "C:\path\fullchain.pem"
 setx SONDER_LAUNCHER_KEY "C:\path\privkey.pem"
-sonder-launcher-autostart.cmd
 ```
 
-Sign out and back in so the user environment is refreshed, or set the same
-variables in the current terminal for the first run. Then launch:
+`setx` updates future command windows, not this one. Close this terminal and
+open a new terminal in the repository (or set the same variables in the
+current terminal), then install autostart and launch:
 
 ```bat
+sonder-launcher-autostart.cmd
 sonder-launcher.cmd --host 0.0.0.0 --cert C:\path\fullchain.pem --key C:\path\privkey.pem
 ```
 
