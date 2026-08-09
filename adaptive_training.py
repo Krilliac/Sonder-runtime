@@ -29,7 +29,7 @@ from pathlib import Path
 import runtime_policy
 import promotion_eval
 import ollama_endpoint
-from process_liveness import pid_alive as _process_pid_alive
+from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_alive
 import system_profile
 import sonder_paths
 import training_data
