@@ -425,11 +425,37 @@ def test_error_redaction_preserves_literal_token_limit_overflow(monkeypatch):
     assert len(seen) == 2
 
 
+def test_error_redaction_preserves_numeric_token_context_overflow(monkeypatch):
+    detail = "12000 tokens exceeds the 8192 token context"
+    assert server._safe_model_error_detail(detail) == detail
+
+    def responder(call):
+        if call == 1:
+            raise _http_error(
+                400,
+                b'{"error":"12000 tokens exceeds the 8192 token context"}',
+            )
+        return {"message": {"content": "recovered"}}
+
+    seen = _recording_post(monkeypatch, responder)
+
+    _, content = server._chat_request(_payload(), model="local", timeout=30)
+
+    assert content == "recovered"
+    assert len(seen) == 2
+    assert len(seen[1]["messages"]) < len(seen[0]["messages"])
+
+
 def test_error_redaction_still_scrubs_credential_shaped_values():
     assert "super-secret-value" not in server._safe_model_error_detail(
         "token=super-secret-value",
     )
     assert "abc123" not in server._safe_model_error_detail("Bearer abc123")
+    mixed = server._safe_model_error_detail(
+        "12000 tokens exceeds the 8192 token context; token=super-secret-value",
+    )
+    assert "8192 token context" in mixed
+    assert "super-secret-value" not in mixed
 
 
 def test_in_band_non_overflow_error_is_still_reported(monkeypatch):
