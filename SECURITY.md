@@ -41,7 +41,9 @@ Mitigations that are already in place and worth knowing about:
   explicit `extra_roots` or a bypass token.
 - Git history inspection (`repo_log`, `repo_show`, `repo_blame`) is read-only, project-bound,
   argv-only, and bounded; it disables parent-repository discovery, pagers,
-  external diffs, and text-conversion helpers.
+  external diffs, and text-conversion helpers. Gitfile targets must remain in
+  authorized roots, and `repo_show` requires a contained path before returning
+  patch content.
 - Cloud tiers are **opt-in**. Local tiers run against loopback Ollama, and a
   remote `OLLAMA_HOST` must be explicitly enabled.
 - Lessons are passed through a 20-rule privacy classifier before storage, so

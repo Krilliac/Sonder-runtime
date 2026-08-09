@@ -65,6 +65,9 @@ confirm string matches.
 exact repository root. They use fixed argv-only Git commands, never discover a
 parent repository, reject unsafe revision/path syntax, disable pagers and
 external diff/text-conversion helpers, and enforce count, byte, and time caps.
+`repo_show` additionally requires one contained non-sensitive regular file,
+both in the worktree and at the requested revision, before it returns patch
+content; an unfiltered commit can never expose unrelated files.
 
 ## Other tool families
 

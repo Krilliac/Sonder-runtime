@@ -67,7 +67,9 @@ def test_repo_log_path_filter_is_literal_and_contained(repository):
 
 
 def test_repo_show_returns_metadata_message_and_bounded_patch(repository):
-    report = git_history.repo_show(repository, revision="HEAD")
+    report = git_history.repo_show(
+        repository, revision="HEAD", file_path="a.txt",
+    )
     assert report["subject"] == "third commit"
     assert report["message"].strip() == "third commit"
     assert "diff --git a/a.txt b/a.txt" in report["patch"]
@@ -80,6 +82,46 @@ def test_repo_show_returns_metadata_message_and_bounded_patch(repository):
     assert prior["subject"] == "second commit"
     assert prior["path_filter"] == "b.txt"
     assert "+two" in prior["patch"]
+
+
+def test_repo_show_requires_safe_path_and_never_exposes_unfiltered_secrets(repository):
+    secret = repository / ".env"
+    secret.write_text("TOKEN=do-not-return\n", encoding="utf-8")
+    _git(repository, "add", ".env")
+    _git(repository, "commit", "--quiet", "-m", "secret fixture")
+    with pytest.raises(git_history.GitHistoryError, match="requires.*file_path"):
+        git_history.repo_show(repository)
+    with pytest.raises(git_history.GitHistoryError, match="path filter rejected"):
+        git_history.repo_show(repository, file_path=".env")
+
+
+def test_repo_show_peels_annotated_tag_before_structured_metadata(repository):
+    _git(repository, "tag", "-a", "v1.0.0", "-m", "annotated tag message")
+    expected = _git(repository, "rev-parse", "HEAD")
+    report = git_history.repo_show(
+        repository, revision="v1.0.0", file_path="a.txt",
+    )
+    assert report["commit"] == expected
+    assert report["subject"] == "third commit"
+    assert "annotated tag message" not in report["message"]
+
+
+def test_repo_show_rejects_historical_directory_pathspec_confusion(repository):
+    confusing = repository / "safe"
+    confusing.mkdir()
+    (confusing / ".env").write_text("TOKEN=historical-secret\n", encoding="utf-8")
+    _git(repository, "add", "safe/.env")
+    _git(repository, "commit", "--quiet", "-m", "directory version")
+    directory_revision = _git(repository, "rev-parse", "HEAD")
+    (confusing / ".env").unlink()
+    confusing.rmdir()
+    confusing.write_text("safe file\n", encoding="utf-8")
+    _git(repository, "add", "-A", "safe")
+    _git(repository, "commit", "--quiet", "-m", "file version")
+    with pytest.raises(git_history.GitHistoryError, match="command failed|not a file"):
+        git_history.repo_show(
+            repository, revision=directory_revision, file_path="safe",
+        )
 
 
 def test_repo_blame_returns_structured_bounded_lines(repository):
@@ -189,6 +231,42 @@ def test_exact_root_disables_parent_discovery(repository):
         git_history.repo_log(child)
 
 
+def test_gitfile_target_outside_authorized_roots_is_rejected(
+    repository, tmp_path,
+):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _git(outside, "init", "--quiet")
+    _git(outside, "config", "user.name", "Outside")
+    _git(outside, "config", "user.email", "outside@example.test")
+    (outside / "secret.txt").write_text("outside history\n", encoding="utf-8")
+    _git(outside, "add", "secret.txt")
+    _git(outside, "commit", "--quiet", "-m", "outside commit")
+
+    crafted = repository / "crafted"
+    crafted.mkdir()
+    (crafted / ".git").write_text(
+        "gitdir: %s\n" % (outside / ".git"), encoding="utf-8",
+    )
+    with pytest.raises(git_history.GitHistoryError, match="outside authorized roots"):
+        git_history.repo_log(crafted)
+
+
+def test_contained_gitfile_target_remains_supported(repository):
+    nested = repository / "nested"
+    nested.mkdir()
+    _git(nested, "init", "--quiet")
+    _git(nested, "config", "user.name", "Nested")
+    _git(nested, "config", "user.email", "nested@example.test")
+    (nested / "tracked.txt").write_text("nested\n", encoding="utf-8")
+    _git(nested, "add", "tracked.txt")
+    _git(nested, "commit", "--quiet", "-m", "nested commit")
+    (nested / ".git").rename(nested / "metadata")
+    (nested / ".git").write_text("gitdir: metadata\n", encoding="utf-8")
+    report = git_history.repo_log(nested, count=1)
+    assert report["commits"][0]["subject"] == "nested commit"
+
+
 def test_path_filter_rejects_escape_metadata_and_foreign_absolute(repository):
     with pytest.raises(git_history.GitHistoryError, match="path filter rejected"):
         git_history.repo_log(repository, file_path="../outside.txt")
@@ -218,7 +296,9 @@ def test_repo_show_hard_output_ceiling_returns_parseable_truncation(repository):
     large.write_text("line\n" * 5000, encoding="utf-8")
     _git(repository, "add", "large.txt")
     _git(repository, "commit", "--quiet", "-m", "large patch")
-    report = git_history.repo_show(repository, max_bytes=1024)
+    report = git_history.repo_show(
+        repository, file_path="large.txt", max_bytes=1024,
+    )
     assert report["truncated"] is True
     assert report["output_bytes"] <= 1024
     assert report["subject"] == "large patch"
@@ -243,7 +323,9 @@ def test_repo_blame_hard_output_ceiling_keeps_only_complete_records(repository):
 
 def test_invalid_but_safe_revision_reports_bounded_git_error(repository):
     with pytest.raises(git_history.GitHistoryError, match="git history command failed"):
-        git_history.repo_show(repository, revision="deadbeef")
+        git_history.repo_show(
+            repository, revision="deadbeef", file_path="a.txt",
+        )
 
 
 def test_runner_uses_argv_no_shell_and_scrubs_git_environment(
@@ -362,7 +444,9 @@ def test_server_activity_records_direct_git_tool(monkeypatch, repository):
         server.activity_tracker, "record_tool_result",
         lambda name, args, **kwargs: calls.append((name, kwargs)),
     )
-    output = server.repo_show(str(repository), max_bytes=4096)
+    output = server.repo_show(
+        str(repository), file_path="a.txt", max_bytes=4096,
+    )
     assert json.loads(output)["subject"] == "third commit"
     assert calls[-1][0] == "repo_show"
     assert calls[-1][1]["ok"] is True
