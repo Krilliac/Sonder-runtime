@@ -13,14 +13,16 @@ are ancestors of `origin/main`. It refuses:
 - protected names (`main`, `master`, `develop`, `development`, and
   `release/*`, plus caller-supplied patterns);
 - the branch in the repository's current worktree;
-- dirty, locked, missing, or prunable worktrees; and
+- dirty (including ignored-only content), locked, missing, or prunable worktrees; and
 - local or remote tips not contained in remote main.
 
 Apply mode refreshes the selected remote before evaluating. It requires every
 target as an explicit `--branch`; there is no bulk apply from discovery. It
-uses ordinary remote deletion, `git worktree remove`, and `git branch -d` with
-exact argument boundaries. It never uses force, constructs shell commands, or
-recursively deletes a directory.
+uses an explicit `--force-with-lease=<ref>:<audited-tip>` for remote deletion,
+then `git worktree remove` and `git branch -d` with exact argument boundaries.
+The lease does not permit overwriting a concurrent remote update: it makes the
+deletion fail if the ref moved after audit. The tool never constructs shell
+commands or recursively deletes a directory.
 
 ## Audit
 
@@ -59,6 +61,7 @@ python scripts/cleanup_merged_branches.py \
 ```
 
 For an eligible target with a remote branch, the order is remote branch,
-worktree, local branch, then worktree metadata pruning. A failure stops that
-target at the failed stage and is reported without exposing Git or credential
-output. Re-run dry-run before retrying a partial cleanup.
+worktree, then local branch. A failure stops that target at the failed stage
+and is reported without exposing Git or credential output. The tool never runs
+repository-wide `git worktree prune`, so refused and unrelated registrations
+remain untouched. Re-run dry-run before retrying a partial cleanup.
