@@ -5,6 +5,8 @@ import os
 
 import embeddings
 import sonder_runtime.adapters.memory_store as memory_store
+from sonder_runtime.application.recall.use_cases import validate_recall_request
+from sonder_runtime.domain.common.errors import InvalidInput
 from sonder_runtime.domain.memory import rules as _rules
 
 
@@ -34,7 +36,13 @@ def recall(conn, task, k=2, embed_fn=None, min_sim=None,
     """Return project-scoped good outcomes similar to ``task``."""
     include_all_projects = include_all_projects is True
     if min_sim is None:
-        min_sim = float(os.environ.get("SONDER_RECALL_MIN_SIM", str(DEFAULT_MIN_SIM)))
+        try:
+            min_sim = float(
+                os.environ.get("SONDER_RECALL_MIN_SIM", str(DEFAULT_MIN_SIM))
+            )
+        except (TypeError, ValueError) as exc:
+            raise InvalidInput("recall similarity threshold is invalid") from exc
+    validate_recall_request(task, k, min_sim)
     runtime_default = embed_fn is None
     embed_fn = embed_fn or embeddings.embed
     if qv is None:
@@ -55,7 +63,10 @@ def recall(conn, task, k=2, embed_fn=None, min_sim=None,
         include_all_projects=include_all_projects,
     ):
         emb = row.get("task_embedding")
-        if not emb:
+        if not emb or not isinstance(row.get("task"), str):
+            continue
+        response = row.get("response")
+        if response is not None and not isinstance(response, str):
             continue
         try:
             stored = embeddings.from_blob(emb)
