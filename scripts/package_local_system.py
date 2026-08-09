@@ -74,6 +74,7 @@ REQUIRED_FILES = {
     "bootstrap-engine.sh",
     "bootstrap_engine.py",
     "creative_router.py",
+    "command_recovery.py",
     "engine_bundle.py",
     "endless-train.sh",
     "game_forge.py",
@@ -92,7 +93,9 @@ REQUIRED_FILES = {
     "model_assets.py",
     "ooxml_assets.py",
     "process_liveness.py",
+    "queued_actions.py",
     "reloadable_mcp.py",
+    "refinement_transactions.py",
     "requirements-runtime.txt",
     "runtime_policy.py",
     "server.py",
@@ -112,6 +115,7 @@ REQUIRED_FILES = {
     "migrations/fleet/0001_baseline.py",
     "migrations/memory/0001_baseline.py",
     "migrations/operations/0001_baseline.py",
+    "migrations/queued_actions/0001_baseline.py",
     "migrations/updates/0001_baseline.py",
 }
 EXACT_OUTPUTS = (

@@ -21,6 +21,7 @@ from ..adapters.legacy.services import (
     OperationsEventSink,
     SystemClock,
 )
+from ..adapters.local_observability import LocalObservabilitySink
 from ..adapters.ollama.gateway import OllamaGateway
 from ..application.chat.handle_chat import ChatService
 from ..application.ports.clock import Clock
@@ -91,7 +92,9 @@ def build_application(profile: str = "workstation-local") -> Application:
         unit_of_work=LegacyUnitOfWork,
         tool_executor=LegacyToolExecutor(),
         process_probe=LegacyProcessProbe(),
-        events=OperationsEventSink(),
+        # Bounded process-local counters/recent events decorate the durable
+        # operations.db sink; they never replace its audit authority.
+        events=LocalObservabilitySink(OperationsEventSink()),
         clock=SystemClock(),
     )
 
