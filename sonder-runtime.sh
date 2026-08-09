@@ -5,6 +5,14 @@ SONDER_RUNTIME_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 if [ -z "${SONDER_HOME:-}" ]; then
   if [ -n "${XDG_DATA_HOME:-}" ]; then
     SONDER_HOME="$XDG_DATA_HOME/sonder"
+  elif [ "$(uname -s 2>/dev/null || true)" = "Darwin" ]; then
+    sonder_native_home="${HOME:-$SONDER_RUNTIME_ROOT}/Library/Application Support/sonder"
+    sonder_legacy_home="${HOME:-$SONDER_RUNTIME_ROOT}/.local/share/sonder"
+    if [ -d "$sonder_legacy_home" ] && [ ! -e "$sonder_native_home" ]; then
+      SONDER_HOME="$sonder_legacy_home"
+    else
+      SONDER_HOME="$sonder_native_home"
+    fi
   else
     SONDER_HOME="${HOME:-$SONDER_RUNTIME_ROOT}/.local/share/sonder"
   fi
@@ -66,3 +74,4 @@ fi
 export SONDER_RUNTIME_ROOT SONDER_HOME SONDER_ENGINE_ROOT
 export SONDER_PYTHON SONDER_OLLAMA_EXE OLLAMA_MODELS OLLAMA_NO_CLOUD PATH
 unset sonder_platform sonder_arch sonder_identity sonder_configured_python candidate
+unset sonder_native_home sonder_legacy_home
