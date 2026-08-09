@@ -33,12 +33,33 @@ class Finding:
 
     @property
     def key(self) -> tuple[str, str, str, str]:
-        normalized = ast.dump(ast.parse(self.expression, mode="eval"), include_attributes=False)
+        normalized = _stable_ast_dump(ast.parse(self.expression, mode="eval"))
         signal = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
         return self.path, self.scope, self.category, signal
 
 
+def _stable_ast_dump(value) -> str:
+    """Serialize AST fields explicitly, independent of ``ast.dump`` defaults."""
+    if isinstance(value, ast.AST):
+        present = (
+            (name, getattr(value, name, None))
+            for name in value._fields
+            if getattr(value, name, None) is not None
+        )
+        fields = ", ".join(
+            "%s=%s" % (name, _stable_ast_dump(field_value))
+            for name, field_value in present
+        )
+        return "%s(%s)" % (type(value).__name__, fields)
+    if isinstance(value, list):
+        return "[%s]" % ", ".join(_stable_ast_dump(item) for item in value)
+    return repr(value)
+
+
 def _literal_error_prefix(node: ast.AST | None) -> bool:
+    static_string = _bounded_static_string(node) if node is not None else None
+    if static_string is not None:
+        return static_string.startswith("ERROR:")
     if isinstance(node, ast.Constant):
         return isinstance(node.value, str) and node.value.startswith("ERROR:")
     if isinstance(node, ast.JoinedStr):
