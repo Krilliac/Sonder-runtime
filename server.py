@@ -91,6 +91,7 @@ import code_improve
 import tier_router
 import project_scaffold
 import environment_probe
+import git_tools
 import eval_history
 
 BASE = ollama_endpoint.normalize()
@@ -7678,6 +7679,120 @@ def _format_run_result(title: str, data: dict) -> str:
 
 
 @mcp.tool()
+def repo_status(
+    root: str = ".",
+    timeout: int = 10,
+    max_output: int = 128000,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Inspect bounded read-only Git branch and worktree status at a repo root."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "timeout": timeout, "max_output": max_output}
+    try:
+        data = git_tools.repo_status(
+            root,
+            timeout=timeout,
+            max_output=max_output,
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "repo_status", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    lines = [
+        "repository status: %s" % data["root"],
+        "  branch: %s" % (
+            "(detached at %s)" % data["oid"][:12]
+            if data["detached"] else (data["branch"] or "(unborn)")
+        ),
+        "  upstream: %s | ahead: %d | behind: %d" % (
+            data["upstream"] or "(none)", data["ahead"], data["behind"],
+        ),
+        "  clean: %s | changes: %d | elapsed_ms: %d" % (
+            "unknown" if data["clean"] is None else str(data["clean"]).lower(),
+            data["change_count"], data["elapsed_ms"],
+        ),
+    ]
+    lines.extend("  %s" % entry for entry in data["entries"])
+    if data["truncated"]:
+        lines.append(
+            "  ... output truncated at %d bytes; status may be incomplete"
+            % data["output_limit"]
+        )
+    output = "\n".join(lines)
+    _record_direct_tool(
+        "repo_status", args, ok=True, started=started,
+        summary="%d change(s)" % data["change_count"], output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def repo_diff(
+    root: str = ".",
+    staged: bool = False,
+    path: str = "",
+    context: int = 3,
+    timeout: int = 10,
+    max_output: int = 128000,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Inspect a bounded read-only unstaged or staged Git diff at a repo root."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "root": root, "staged": staged, "path": path, "context": context,
+        "timeout": timeout, "max_output": max_output,
+    }
+    try:
+        data = git_tools.repo_diff(
+            root,
+            staged=staged is True,
+            path=path,
+            context=context,
+            timeout=timeout,
+            max_output=max_output,
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "repo_diff", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    scope = data["path"] or "(all tracked paths)"
+    lines = [
+        "repository diff: %s" % data["root"],
+        "  mode: %s | path: %s | context: %d | elapsed_ms: %d" % (
+            "staged" if data["staged"] else "unstaged",
+            scope, data["context"], data["elapsed_ms"],
+        ),
+    ]
+    if data["diff"]:
+        lines.append(data["diff"].rstrip())
+    else:
+        lines.append("  (no diff)")
+    if data["truncated"]:
+        lines.append(
+            "  ... output truncated at %d bytes" % data["output_limit"]
+        )
+    output = "\n".join(lines)
+    _record_direct_tool(
+        "repo_diff", args, ok=True, started=started,
+        summary="%s diff" % ("staged" if data["staged"] else "unstaged"),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
 def workspace_inventory(
     path: str = ".",
     max_entries: int = 20000,
@@ -10276,6 +10391,7 @@ def tool_manifest() -> str:
         "offload": "Route a self-contained task to a configured local/cloud tier.",
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
         "workspace_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace inventory, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
+        "repo_status/repo_diff": "Inspect bounded read-only Git branch, worktree, staged, and unstaged state without shell execution.",
         "file_policy/file_find/file_read/file_write/file_batch_write/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete, including bounded transactional multi-file create/overwrite.",
         "repository_symbol_index": "Build a deterministic bounded read-only declaration index with Python AST and conservative JS/TS/C/C++/C#/Rust/Go extraction.",
         "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
@@ -10332,6 +10448,8 @@ AGENT_TOOL_HELP = """Available tools:
 - approximate_location_lookup: {"consent": true} (only after the user explicitly enables or requests IP location)
 - file_policy: {}
 - workspace_inventory: {"path": ".", "max_entries": 20000, "timeout_seconds": 10, "top_n": 15}
+- repo_status: {"root": ".", "timeout": 10, "max_output": 128000}
+- repo_diff: {"root": ".", "staged": false, "path": "", "context": 3, "timeout": 10, "max_output": 128000}
 - directory_tree: {"path": ".", "depth": 2, "max_entries": 200}
 - directory_create: {"path": "output/reports", "parents": true}
 - file_find: {"query": "*.py", "root": ".", "max_results": 50}
@@ -10409,6 +10527,7 @@ or
 REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find",
     "repository_symbol_index", "file_read", "file_read_range", "context_pack",
+    "repo_status", "repo_diff",
     "data_inspect", "data_query",
     "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
@@ -10429,6 +10548,8 @@ symbol, filename, or glob. For a code/symbol audit, start with text_search for
 an exact symbol named by the task; do not default to Python or server.py.
 - file_policy: {}
 - workspace_inventory: {"path": ".", "max_entries": 20000, "timeout_seconds": 10, "top_n": 15}
+- repo_status: {"root": ".", "timeout": 10, "max_output": 128000}
+- repo_diff: {"root": ".", "staged": false, "path": "", "context": 3, "timeout": 10, "max_output": 128000}
 - directory_tree: {"path": ".", "depth": 2, "max_entries": 200}
 - file_find: {"query": "<task-relevant filename or glob>", "root": ".", "max_results": 50}
 - repository_symbol_index: {"path": ".", "glob": "<task-relevant source glob>", "language": "auto|python|javascript|typescript|c|cpp|csharp|rust|go", "max_files": 200, "max_total_bytes": 2000000, "max_file_bytes": 256000, "max_symbols": 2000}
@@ -10438,6 +10559,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - text_search: {"query": "<exact task symbol or anchor>", "root": ".", "glob": "<task-relevant glob>", "max_results": 100}
 - script_search: {"query": "<task-relevant script name>", "root": ".", "max_results": 100}
 - program_search: {"query": "<required program name>", "max_results": 50}
+- environment_status: {"refresh": false}
 - image_inspect: {"path": "<task-relevant image path>"}
 - data_inspect: {"path": "<task-relevant data file>", "max_bytes": 256000}
 - data_query: {"path": "<task-relevant SQLite, JSON, JSONL, CSV, or TSV file>", "sql": "<SQLite SELECT/CTE only, otherwise empty>", "projection_json": ["<field or JSON pointer>"], "filters_json": {"<field or JSON pointer>": "<exact value>"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
@@ -10502,6 +10624,10 @@ def _repository_scope_path_error(tool_name, args, project_root):
             targets = [("script path", args.get("path") or "")]
             if str(args.get("cwd") or "").strip():
                 targets.append(("working directory", args.get("cwd")))
+        elif tool_name == "repo_diff":
+            targets = [("repository root", args.get("root") or ".")]
+            if str(args.get("path") or "").strip():
+                targets.append(("diff path", args.get("path")))
         elif tool_name == "file_batch_write":
             operations = _batch_agent_operations(args)
             if operations is None or not operations:
@@ -10528,7 +10654,12 @@ def _repository_scope_path_error(tool_name, args, project_root):
             target = Path(raw).expanduser()
             if not target.is_absolute():
                 target = root / target
-            target = target.resolve(strict=False)
+            if label == "diff path":
+                # Preserve a tracked symlink as the lexical Git pathspec while
+                # still resolving and confining every parent component.
+                target = target.parent.resolve(strict=False) / target.name
+            else:
+                target = target.resolve(strict=False)
             try:
                 target.relative_to(root)
             except ValueError:
@@ -10700,6 +10831,20 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
                 reject_sensitive=True,
                 extra_roots=trusted_extra_roots,
             )
+        elif tool_name in {"repo_status", "repo_diff"}:
+            root_value = args.get("root", "") or "."
+            resolved_root = file_ops.resolve_repository_read_path(
+                root_value,
+                allow_workspace_root=True,
+                reject_sensitive=True,
+                extra_roots=trusted_extra_roots,
+            )
+            diff_path = str(args.get("path") or "").strip()
+            if tool_name == "repo_diff" and diff_path:
+                git_tools._resolve_diff_path(
+                    resolved_root, diff_path,
+                    extra_roots=trusted_extra_roots,
+                )
         elif tool_name == "context_pack":
             for path in _context_pack_paths(args.get("paths_json", args.get("paths", []))):
                 file_ops.resolve_repository_read_path(
@@ -11276,6 +11421,27 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "repo_status":
+        return repo_status(
+            root=args.get("root", "."),
+            timeout=args.get("timeout", 10),
+            max_output=args.get("max_output", 128000),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "repo_diff":
+        return repo_diff(
+            root=args.get("root", "."),
+            staged=args.get("staged") is True,
+            path=args.get("path", ""),
+            context=args.get("context", 3),
+            timeout=args.get("timeout", 10),
+            max_output=args.get("max_output", 128000),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "workspace_inventory":
         return workspace_inventory(
             path=args.get("path", args.get("root", ".")),
@@ -11716,7 +11882,7 @@ _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "file_write", "file_batch_write", "file_edit",
     "file_delete", "directory_create", "workspace_inventory", "directory_tree",
     "file_find", "repository_symbol_index", "text_search", "script_search", "artifact_verify",
-    "artifact_ground", "scaffold_project",
+    "artifact_ground", "scaffold_project", "repo_status", "repo_diff",
 })
 _PROJECT_SCOPED_EXECUTION_TOOLS = frozenset({"workspace_run", "script_run"})
 _AGENT_TOOL_ALIASES = {
@@ -11760,7 +11926,10 @@ def _canonical_agent_tool_name(tool_name):
 
 
 def _project_scoped_path_key(tool_name):
-    if tool_name in {"file_find", "text_search", "script_search", "scaffold_project"}:
+    if tool_name in {
+        "file_find", "text_search", "script_search", "scaffold_project",
+        "repo_status", "repo_diff",
+    }:
         return "root"
     return "path"
 
@@ -12296,7 +12465,8 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
 _WORK_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find",
     "repository_symbol_index", "file_read", "file_read_range", "context_pack",
-    "text_search", "script_search", "program_search", "image_inspect", "data_query",
+    "text_search", "script_search", "program_search", "image_inspect", "repo_status", "repo_diff",
+    "data_query",
     "memory_search", "learning_health_status", "evaluation_history_status",
     "memory_quality_report", "memory_privacy_review", "artifact_ground",
     "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",
@@ -12306,7 +12476,7 @@ _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find",
     "repository_symbol_index", "file_read", "file_read_range", "context_pack",
     "data_query", "text_search", "script_search",
-    "program_search", "image_inspect", "environment_status",
+    "program_search", "image_inspect", "environment_status", "repo_status", "repo_diff",
 })
 _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "workflow_run",
