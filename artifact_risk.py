@@ -231,11 +231,11 @@ def _parse_elf(data, indicators, deadline):
         if len(data) < 64:
             raise ArtifactRiskError("truncated ELF64 header")
         e_type, machine = struct.unpack_from(endian + "HH", data, 16)
-        entry, phoff = struct.unpack_from(endian + "QQ", data, 24)
+        _entry, phoff = struct.unpack_from(endian + "QQ", data, 24)
         phentsize, phnum = struct.unpack_from(endian + "HH", data, 54)
     else:
         e_type, machine = struct.unpack_from(endian + "HH", data, 16)
-        entry, phoff = struct.unpack_from(endian + "II", data, 24)
+        _entry, phoff = struct.unpack_from(endian + "II", data, 24)
         phentsize, phnum = struct.unpack_from(endian + "HH", data, 42)
     if e_type == 0 or machine == 0 or phnum == 0:
         raise ArtifactRiskError("ELF header lacks required executable metadata")
@@ -259,7 +259,7 @@ def _parse_elf(data, indicators, deadline):
     if wx_segments:
         _add_indicator(indicators, "writable_executable_segment", "high", wx_segments)
     return {"bits": 64 if bits == 2 else 32, "byte_order": "little" if endian == "<" else "big",
-            "type": e_type, "machine": machine, "entry": entry,
+            "type": e_type, "machine": machine,
             "program_headers": phnum, "interpreter_present": interpreter,
             "writable_executable_segments": wx_segments}
 
@@ -363,6 +363,7 @@ def inspect_artifact(path, *, max_scan_bytes=DEFAULT_MAX_SCAN_BYTES,
     indicators = {}
     for region in scan_regions:
         _scan_patterns(region, indicators)
+        _check(deadline)
     details = {}
     incomplete = [] if complete else ["file_exceeds_scan_budget"]
     try:
@@ -385,6 +386,7 @@ def inspect_artifact(path, *, max_scan_bytes=DEFAULT_MAX_SCAN_BYTES,
     except (ArtifactRiskError, struct.error) as exc:
         incomplete.append("malformed_%s" % kind)
         details = {"parse_error": str(exc)}
+    _check(deadline)
     ordered = [indicators[name] for name in sorted(indicators)]
     severities = {row["severity"] for row in ordered}
     if "high" in severities:
