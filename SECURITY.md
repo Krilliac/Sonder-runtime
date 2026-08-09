@@ -21,9 +21,10 @@ Sonder Runtime is not a chat wrapper. By design it will, on request:
 
 - **execute code and shell commands** (`run_code`, `script_run`,
   `workspace_run`, `run_project`)
-- **read, write, and delete files** (`file_read`, `file_write`, `file_batch_write`, `file_edit`,
-  `file_delete`, `directory_create`)
-- **fetch from the network** (`web_fetch`, `web_search`)
+- **read, write, patch, and delete files** (`file_read`, `file_write`, `file_batch_write`, `file_edit`, `text_patch`,
+  `file_delete`, `directory_create`, `archive_create`)
+- **fetch from the network** (`web_fetch`, `web_search`) and explicitly probe
+  loopback services (`local_service_probe`)
 - **run unattended** (`autopilot_start`, `master_orchestrate`, `loop`)
 - **modify its own source** when self-modification is enabled
 
@@ -42,9 +43,38 @@ Mitigations that are already in place and worth knowing about:
 - Structured `data_query` reads are bounded and side-effect-free: SQLite uses
   a read-only URI and deny-by-default authorizer, while JSON/JSONL/CSV/TSV use
   exact structured filters and projections without expression evaluation.
+- `data_convert` rejects sensitive/control and reparse paths, validates input
+  through a no-follow opened handle, and can only atomically create a new
+  destination after a complete bounded conversion; it never overwrites.
+- Git history inspection (`repo_log`, `repo_show`, `repo_blame`) is read-only, project-bound,
+  argv-only, and bounded; it disables parent-repository discovery, pagers,
+  external diffs, and text-conversion helpers. Gitfile targets must remain in
+  authorized roots, and `repo_show` requires a contained path before returning
+  patch content.
 - `file_batch_write` never targets secrets/control state or traverses symlinks,
   requires explicit create-versus-overwrite intent, and rolls back completed
   writes on a later failure when restoration remains possible.
+- `archive_list` and `archive_extract` accept ZIP/TAR only and prevalidate every
+  member under hard entry, byte, ratio, depth, result, and time ceilings.
+  Absolute/traversal paths, links/devices, encrypted ZIPs, collisions, nested
+  archives, sensitive state, and existing destinations are rejected before a
+  staged non-overwriting extraction is promoted.
+- `archive_create` prevalidates every explicit input and directory membership,
+  refuses sensitive paths, links, special files, caps/escapes, and overwrites,
+  then revalidates mutations before atomically publishing a staged ZIP/TAR.
+- `text_patch` accepts a narrow unified-diff grammar for explicit relative
+  UTF-8 text files. Preview is the default. Apply prevalidates the entire patch,
+  rejects deletes/renames/binary/sensitive/link targets, publishes staged files,
+  and uses digest-guarded rollback that will not overwrite a concurrent change.
+- `workspace_compare` exposes metadata and SHA-256 digests, never file content;
+  it fails closed on sensitive/control state, reparse points, special files,
+  identity races, or any scan/time/output ceiling.
+- `log_inspect` rejects sensitive/control paths and reparse traversal, validates
+  the already-open regular-file handle, and uses only fixed host parsers under
+  hard file, byte, line, result, output, and time ceilings.
+- `local_service_probe` remains a direct, explicit MCP operation only. It is
+  excluded from agents, repository read-only sessions, loops, and autopilot
+  because arbitrary loopback response bodies can contain host-local secrets.
 - Cloud tiers are **opt-in**. Local tiers run against loopback Ollama, and a
   remote `OLLAMA_HOST` must be explicitly enabled.
 - Lessons are passed through a 20-rule privacy classifier before storage, so

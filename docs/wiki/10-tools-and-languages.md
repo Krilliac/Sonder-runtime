@@ -56,23 +56,92 @@ with an authorizer plus row, column, byte, and time ceilings. Text formats use
 only structured exact-equality filters and field/JSON-pointer projections; no
 expressions or file content are executed.
 
+`data_convert` deterministically converts JSON arrays, JSONL, CSV, and TSV
+using an explicit ordered list of exact top-level fields. Preview mode fully
+validates and sizes the conversion without touching disk. Apply mode writes a
+same-directory staging file and atomically publishes it only if the destination
+does not exist. UTF-8, headers, finite values, nesting, fields, rows, columns,
+input bytes, and output bytes are all validated under hard ceilings; no
+expressions, implicit type inference, or overwrite mode are available.
+
 ## Guarded filesystem tools
 
-`file_find`, `file_read`, `file_read_range`, `file_write`, `file_batch_write`, `file_edit`,
-`file_delete`, `directory_tree`, `directory_create`, `workspace_inventory`,
-`text_search`, `script_search`, `program_search`, `image_inspect`. All are
+`file_find`, `file_read`, `file_read_range`, `file_write`, `file_batch_write`, `file_edit`, `text_patch`,
+`file_copy`, `file_move`, `file_delete`, `directory_tree`, `directory_create`, `workspace_inventory`,
+`workspace_compare`, `text_search`, `script_search`, `program_search`, `image_inspect`, `log_inspect`, `data_convert`, `archive_create`, `archive_list`,
+`archive_extract`, `repo_log`,
+`repo_show`, `repo_blame`. All are
 confined to `SONDER_FILE_ROOTS`, honor the permission policy
 ([Security Model](09-security-model.md)), and record byte/line accounting
 into the activity trail. `file_delete` is dry-run unless an explicit
 confirm string matches.
+
+`repo_log`, `repo_show`, and `repo_blame` expose structured, read-only Git history from an
+exact repository root. They use fixed argv-only Git commands, never discover a
+parent repository, reject unsafe revision/path syntax, disable pagers and
+external diff/text-conversion helpers, and enforce count, byte, and time caps.
+`repo_show` additionally requires one contained non-sensitive regular file,
+both in the worktree and at the requested revision, before it returns patch
+content; an unfiltered commit can never expose unrelated files.
+
+`file_copy` and `file_move` transfer exactly one regular file between explicit
+source and destination paths. They are binary-safe, refuse overwrite by
+default, reject symlink/junction and sensitive-control-state paths at both
+ends, and cap each transfer at 64 MiB. Copy commits through a same-directory
+temporary file; no-overwrite publication is atomic and never replaces a
+competitor. Move stages the same bounded copy at the destination, revalidates
+the source, and deletes it only after publication. They never recurse and never
+invoke a shell or network service. Repository agents rebase and validate both
+paths against their exact assigned project root; autopilot accepts these tools
+only with overwrite disabled and no caller-supplied approval or extra root.
 
 `file_batch_write` accepts a JSON list of explicit `create` or `overwrite`
 operations. It prevalidates every target before writing, caps per-file and
 aggregate bytes, rejects duplicate/sensitive/symlink targets, and makes a
 best-effort rollback if any write fails.
 
+`archive_list` prevalidates bounded ZIP/TAR manifests without extraction.
+`archive_extract` uses the same fail-closed validation, streams members into a
+sibling staging directory, and promotes only to a new non-overwriting project
+destination. Traversal, absolute paths, links/devices, encrypted entries,
+collisions, nested archives, sensitive paths, and archive bombs are rejected.
+
+`archive_create` accepts explicit project-contained inputs and a new destination,
+supports ZIP and TAR, and defaults to reproducible metadata. It performs a full
+bounded preflight, refuses links and sensitive/control state, streams stable file
+handles, revalidates input mutation, and publishes through a non-overwriting
+sibling staging file.
+
+`text_patch` previews strict unified diffs rooted at an explicit project
+directory. With `apply=true`, it performs an all-file transaction for create
+and modify operations only. Context must match exactly; deletes, renames,
+binary/non-UTF-8 data, sensitive paths, links, escapes, and over-budget input
+are rejected.
+
+`workspace_compare` compares two guarded files or directory trees without
+returning their contents. It emits a deterministic relative-path inventory of
+entry type, size, and SHA-256 plus exact added/removed/changed/same counts.
+Entry, file, aggregate-byte, detail, output, and time ceilings are enforced;
+sensitive/control paths, special files, and symlink or junction traversal are
+rejected.
+
+`log_inspect` reads one guarded UTF-8 text log through a validated no-follow
+file handle. Fixed host parsers extract common text and JSON-log timestamps,
+levels, and sources; the result summarizes error/warning clusters, repeated
+messages, and bounded first/last-failure context. Prefix or tail inspection is
+available under file, scan-byte, line, per-line, result, output, and time caps.
+Callers cannot supply regular expressions or executable parsing rules.
+
 ## Other tool families
 
+- **Local service probe:** `local_service_probe` performs bounded,
+  unauthenticated `GET`/`HEAD` checks against explicit-port HTTP/HTTPS URLs.
+  Every DNS answer must be loopback (`127/8` or `::1`) and is rechecked before
+  a direct numeric-address connection. The probe ignores proxy environment,
+  sends no cookies or authorization, rejects credential-bearing URLs and
+  non-loopback redirects, and caps timeout, headers, body, and preview output.
+  It is intentionally direct-MCP-only: agents, repository sessions, loops, and
+  autopilot cannot invoke it because localhost responses may contain secrets.
 - **Web (opt-in):** `web_search`, `web_fetch`, `weather_lookup`,
   `approximate_location_lookup` — gated by `SONDER_WEB_TOOLS`.
 - **Artifacts:** `artifact_generate` / `artifact_verify` /
@@ -86,7 +155,7 @@ best-effort rollback if any write fails.
 
 ## Read-only tool set & speculation
 
-The read-only subset (inventory, tree, find, read, search, `data_inspect`,
+The read-only subset (inventory, tree, find, read, search, `data_inspect`, `log_inspect`,
 image inspect, memory search, status) is what the speculation engine may
 run speculatively while the model thinks — never a mutating or executing
 tool ([Speculation & Prediction](11-speculation-and-prediction.md)).

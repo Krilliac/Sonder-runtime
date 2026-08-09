@@ -12,6 +12,7 @@ import shutil
 
 import file_ops
 import pytest
+import sonder_paths
 import workbench
 
 
@@ -54,7 +55,9 @@ SCRIPT_CASES = [
 @pytest.mark.parametrize("program,flag", INLINE_CASES)
 def test_run_program_refuses_inline_code_flags(monkeypatch, tmp_path, program, flag):
     _guard_root(monkeypatch, tmp_path)
-    if shutil.which(program) is None:
+    if program in {"bash", "sh"} and sonder_paths.bash_executable() is None:
+        pytest.skip("compatible bash not installed")
+    if program not in {"bash", "sh"} and shutil.which(program) is None:
         pytest.skip("%s not installed" % program)
 
     with pytest.raises(PermissionError) as excinfo:
@@ -69,7 +72,9 @@ def test_run_program_allows_plain_script_invocation(
     monkeypatch, tmp_path, program, filename, body, expected
 ):
     _guard_root(monkeypatch, tmp_path)
-    if shutil.which(program) is None:
+    if program in {"bash", "sh"} and sonder_paths.bash_executable() is None:
+        pytest.skip("compatible bash not installed")
+    if program not in {"bash", "sh"} and shutil.which(program) is None:
         pytest.skip("%s not installed" % program)
     script = tmp_path / filename
     script.write_text(body, encoding="utf-8")
