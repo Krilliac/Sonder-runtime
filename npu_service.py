@@ -115,6 +115,8 @@ if "_LAST_FALLBACK" not in globals():
         "handler_state": "unknown",
         "count": 0,
     }
+if "_SERVICE_FALLBACKS" not in globals():
+    _SERVICE_FALLBACKS = {}
 if "_FALLBACK_LOCAL" not in globals():
     _FALLBACK_LOCAL = threading.local()
 
@@ -141,6 +143,7 @@ def reset_for_tests():
             handler_state="unknown",
             count=0,
         )
+        _SERVICE_FALLBACKS.clear()
         _FALLBACK_LOCAL.pending = {}
 
 
@@ -263,7 +266,9 @@ def _handler_for_execution(provider="", accelerated=False) -> str:
     return "host"
 
 
-def _record_fallback(capability, reason, *, handler="ollama") -> dict:
+def _record_fallback(
+    capability, reason, *, handler="ollama", broker_counted=False,
+) -> dict:
     projected = {
         "known": True,
         "capability": npu_contract.fallback_capability(capability),
@@ -275,6 +280,12 @@ def _record_fallback(capability, reason, *, handler="ollama") -> dict:
     with _STATE_LOCK:
         count = int(_LAST_FALLBACK.get("count") or 0) + 1
         _LAST_FALLBACK.update(projected, count=count)
+        if broker_counted is not True:
+            bounded_reason = projected["reason"]
+            _SERVICE_FALLBACKS[bounded_reason] = min(
+                2_147_483_647,
+                _safe_fallback_count(_SERVICE_FALLBACKS.get(bounded_reason)) + 1,
+            )
     pending = dict(getattr(_FALLBACK_LOCAL, "pending", {}))
     pending[projected["capability"]] = dict(projected, count=count)
     _FALLBACK_LOCAL.pending = pending
@@ -527,35 +538,35 @@ def _execution_provenance(response, manifest) -> dict:
 
 
 def _routing_call(prompt):
-    """Shared prefer/shadow path: returns (decision, provider) or (None, why)."""
+    """Return (decision, reason, broker_counted) for prefer/shadow routing."""
     manifest = _active("routing")
     if manifest is None:
-        return None, "no_manifest"
+        return None, "no_manifest", False
     declared = manifest.get("input") or {}
     contract = FEATURE_CONTRACTS.get(str(declared.get("identity") or ""))
     if contract is None:
-        return None, "identity_mismatch"
+        return None, "identity_mismatch", False
     dimension, feature_fn = contract
     features = feature_fn(prompt)
     if declared.get("dimension") != dimension or len(features) != dimension:
-        return None, "identity_mismatch"
+        return None, "identity_mismatch", False
     broker = npu_broker.get_broker()
     try:
         response = broker.call(
             manifest, {"kind": "routing", "features": features},
         )
     except npu_broker.NpuUnavailable as exc:
-        return None, exc.reason
+        return None, exc.reason, True
     except Exception:
-        return None, "internal"
+        return None, "internal", False
     try:
         validated = npu_contract.validate_route_scores(response)
     except ValueError:
-        return None, "invalid"
+        return None, "invalid", False
     try:
         execution = _execution_provenance(response, manifest)
     except ValueError:
-        return None, "invalid"
+        return None, "invalid", False
     scores = validated["scores"]
     winner = max(npu_contract.ROUTE_MODES, key=lambda mode: scores[mode])
     margin = abs(scores["autopilot"] - scores["workbench"])
@@ -566,7 +577,7 @@ def _routing_call(prompt):
         **execution,
         "reason_code": validated["reason_code"],
     }
-    return decision, ""
+    return decision, "", False
 
 
 def route_decide(prompt):
@@ -579,9 +590,9 @@ def route_decide(prompt):
     policy = _policy()
     if _mode("routing", policy) != "prefer":
         return None
-    decision, why = _routing_call(prompt)
+    decision, why, broker_counted = _routing_call(prompt)
     if decision is None:
-        _record_fallback("routing", why)
+        _record_fallback("routing", why, broker_counted=broker_counted)
         return None
     score = decision["scores"][decision["winner"]]
     if (
@@ -629,7 +640,7 @@ def route_shadow(prompt, baseline):
     baseline_handler = npu_contract.fallback_handler(
         (baseline or {}).get("handler")
     )
-    decision, why = _routing_call(prompt)
+    decision, why, _broker_counted = _routing_call(prompt)
     if decision is None:
         with _STATE_LOCK:
             _SHADOW["errors"] += 1
@@ -723,7 +734,7 @@ def embed_for_space(text, model_identity, revision, expected_dimension=None):
     try:
         result = _embedding_call(manifest, text)
     except npu_broker.NpuUnavailable as exc:
-        _record_fallback("embeddings", exc.reason)
+        _record_fallback("embeddings", exc.reason, broker_counted=True)
         return None
     except (TypeError, ValueError):
         _record_fallback("embeddings", "invalid")
@@ -915,6 +926,13 @@ def _fallback_status(modes, broker_status) -> dict:
             )
     with _STATE_LOCK:
         latest = dict(_LAST_FALLBACK)
+        service_fallbacks = dict(_SERVICE_FALLBACKS)
+    for raw_reason, raw_count in service_fallbacks.items():
+        reason = npu_contract.fallback_reason(raw_reason)
+        reason_counts[reason] = min(
+            2_147_483_647,
+            reason_counts.get(reason, 0) + _safe_fallback_count(raw_count),
+        )
     known = bool(latest.get("known"))
     if not known and any(reason_counts.values()):
         observed = [reason for reason, count in reason_counts.items() if count]

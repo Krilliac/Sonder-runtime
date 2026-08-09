@@ -283,7 +283,15 @@ def test_npu_failure_fallback_stays_local_never_cloud(monkeypatch):
     _no_active(monkeypatch)
     starts = []
     shadows = []
+    handled = []
+    monkeypatch.setattr(server.npu_service, "routing_active", lambda: "prefer")
     monkeypatch.setattr(server.npu_service, "route_decide", lambda prompt: None)
+    monkeypatch.setattr(
+        server.npu_service, "record_fallback_handler",
+        lambda capability, handler, ok: handled.append(
+            (capability, handler, ok)
+        ),
+    )
     monkeypatch.setattr(
         server,
         "_execution_route_model",
@@ -305,6 +313,7 @@ def test_npu_failure_fallback_stays_local_never_cloud(monkeypatch):
     assert "source: host fallback" in output
     assert "mode: persistent Autopilot" in output
     assert starts
+    assert handled == [("routing", "host", True)]
     assert shadows == [(
         AMBIGUOUS,
         {"mode": "autopilot", "tier": "code", "handler": "host"},

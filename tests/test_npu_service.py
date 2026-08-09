@@ -355,6 +355,41 @@ def test_fallback_projection_reports_ram_gate_and_execution_handler(
     assert "available RAM" not in json.dumps(projection)
 
 
+def test_service_level_fallback_reasons_are_counted_without_broker_help(
+    npu_env, monkeypatch,
+):
+    _set_mode("prefer", embeddings="prefer")
+    fake = FakeBroker()
+    monkeypatch.setattr(npu_service.npu_broker, "get_broker", lambda: fake)
+
+    npu_service._record_fallback("embeddings", "no_manifest")
+    npu_service._record_fallback("embeddings", "dimension_mismatch")
+    npu_service._record_fallback("embeddings", "dimension_mismatch")
+
+    projection = npu_service.fallback_projection()
+    assert projection["reason_counts"] == {
+        "dimension_mismatch": 2,
+        "no_manifest": 1,
+    }
+
+
+def test_broker_counted_fallback_is_not_double_counted(npu_env, monkeypatch):
+    _set_mode("prefer")
+    fake = FakeBroker()
+    broker_status = fake.status()
+    broker_status["fallbacks"] = {"ram_gate": 1}
+    monkeypatch.setattr(fake, "status", lambda: broker_status)
+    monkeypatch.setattr(npu_service.npu_broker, "get_broker", lambda: fake)
+
+    npu_service._record_fallback(
+        "routing", "ram_gate", broker_counted=True,
+    )
+
+    assert npu_service.fallback_projection()["reason_counts"] == {
+        "ram_gate": 1,
+    }
+
+
 def test_unknown_broker_reason_is_collapsed_before_human_status(
     npu_env, monkeypatch,
 ):
