@@ -25,7 +25,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import contribute  # noqa: E402
 import embeddings  # noqa: E402
-import memory_store  # noqa: E402
+import sonder_runtime.adapters.memory_store as memory_store  # noqa: E402
 import reflection  # noqa: E402
 
 SEED_GLOB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seed", "**", "*.jsonl")
