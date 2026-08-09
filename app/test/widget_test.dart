@@ -673,6 +673,141 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('Live execution feed bounds rows and shows unknown or offline',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(900, 1400));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final events = List<Map<String, dynamic>>.generate(
+      14,
+      (index) => {
+        'response_id': 'response-widget',
+        'response_status': 'running',
+        'seq': index == 13 ? 15 : index,
+        'kind': 'other',
+        'phase': 'completed',
+        'ok': true,
+        'summary_preview': {
+          'state': 'available',
+          'text': 'bounded event $index',
+          'chars': 16,
+          'truncated': false,
+          'redacted': false,
+        },
+        if (index == 13) ...{
+          'kind': 'file_change',
+          'action': 'edit',
+          'path': 'harness.dart',
+          'lines_added': 4,
+          'content_preview': {
+            'state': 'available',
+            'text': 'token=private-value candidate preview',
+            'chars': 37,
+            'truncated': false,
+            'redacted': true,
+          },
+        },
+      },
+    );
+    final feed = ExecutionFeed.fromJson({
+      'known': true,
+      'schema_version': 1,
+      'runtime_id': 'runtime-test',
+      'active_responses': 1,
+      'truncated': true,
+      'redaction_applied': true,
+      'oldest_seq': 0,
+      'next_seq': 16,
+      'dropped_events': 2,
+      'sequence_gap': 1,
+      'limits': {'events': 20, 'preview_chars': 1000},
+      'error': '',
+      'bytes': 2048,
+      'events': events,
+    });
+    final unknown = ExecutionFeed.fromJson({
+      'known': true,
+      'schema_version': 1,
+      'limits': {'events': 20, 'preview_chars': 1000},
+      'events': const [],
+    });
+    final noDetails = ExecutionFeed.fromJson({
+      'known': true,
+      'schema_version': 1,
+      'limits': {'events': 20, 'preview_chars': 1000},
+      'events': [
+        {
+          'response_id': 'r-disabled',
+          'response_status': 'running',
+          'seq': 99,
+          'kind': 'model_call',
+          'phase': 'completed',
+          'model': 'sonder:latest',
+          'response_preview': {'state': 'disabled'},
+        },
+      ],
+    });
+    final errored = ExecutionFeed.fromJson({
+      'known': true,
+      'schema_version': 1,
+      'limits': {'events': 20, 'preview_chars': 1000},
+      'error': 'feed projection unavailable',
+      'events': const [],
+    });
+
+    await tester.pumpWidget(MaterialApp(
+      theme: ThemeData.dark(useMaterial3: true),
+      home: Scaffold(
+        body: SingleChildScrollView(
+          child: Column(
+            children: [
+              LiveExecutionFeed(feed: feed),
+              const LiveExecutionFeed(feed: null),
+              LiveExecutionFeed(feed: unknown),
+              LiveExecutionFeed(feed: noDetails),
+              LiveExecutionFeed(feed: errored),
+              LiveExecutionFeed(feed: feed, offline: true),
+            ],
+          ),
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    final primaryFeed = find.byType(LiveExecutionFeed).first;
+    Finder inPrimary(Finder matching) => find.descendant(
+          of: primaryFeed,
+          matching: matching,
+        );
+    expect(find.text('bounded event 0'), findsNothing);
+    expect(find.text('bounded event 1'), findsNothing);
+    // SelectableText owns both a visible Text and an internal EditableText;
+    // assert the single public widget instead of counting implementation
+    // descendants as duplicate feed rows.
+    expect(
+      inPrimary(find.widgetWithText(SelectableText, 'bounded event 2')),
+      findsOneWidget,
+    );
+    expect(inPrimary(find.text('edit harness.dart')), findsOneWidget);
+    expect(inPrimary(find.text('12/14 events')), findsOneWidget);
+    expect(inPrimary(find.text('Sequence gap')), findsOneWidget);
+    expect(inPrimary(find.text('window 0 → 16')), findsOneWidget);
+    expect(inPrimary(find.text('2 dropped')), findsOneWidget);
+    expect(inPrimary(find.text('History truncated')), findsOneWidget);
+    expect(inPrimary(find.text('Redaction applied')), findsOneWidget);
+    expect(inPrimary(find.textContaining('file edit')), findsOneWidget);
+    expect(inPrimary(find.textContaining('lines +4 ~0 -0')), findsOneWidget);
+    expect(inPrimary(find.textContaining('<redacted>')), findsOneWidget);
+    expect(find.textContaining('private-value'), findsNothing);
+    expect(find.byType(SelectableText), findsWidgets);
+    expect(find.text('Unavailable'), findsNWidgets(2));
+    expect(find.text('The runtime reported an execution feed error.'),
+        findsOneWidget);
+    expect(find.text('Details disabled'), findsOneWidget);
+    expect(find.text('Unknown'), findsOneWidget);
+    expect(find.text('Offline'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('System keeps one return affordance and no stacked tooltip',
       (tester) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));

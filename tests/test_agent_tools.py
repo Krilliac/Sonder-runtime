@@ -83,6 +83,9 @@ def test_repository_worker_result_still_fails_closed_on_real_scope_mismatch(
 
 
 def test_host_receipt_uses_latest_validator_result(monkeypatch):
+    # Keep the test about validator ordering: a predictor trained by an earlier
+    # test may otherwise schedule an additional speculative inspection first.
+    monkeypatch.setenv("SONDER_SPECULATION", "0")
     responses = [
         '{"tool":"workspace_run","args":{"program":"python","args":["-m","pytest"]}}',
         '{"tool":"workspace_run","args":{"program":"python","args":["-m","pytest","tests"]}}',
