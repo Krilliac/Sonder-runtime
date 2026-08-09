@@ -23,6 +23,7 @@ from ..adapters.legacy.services import (
 )
 from ..adapters.legacy.evaluation_history import LegacyEvaluationHistoryReader
 from ..adapters.legacy.inspections import LegacyInspectionExecutor
+from ..adapters.legacy.backup import LegacyBackupGateway
 from ..adapters.legacy.recall import LegacyRecallGateway
 from ..adapters.legacy.preferences import (
     LegacyPreferenceCodec,
@@ -33,6 +34,7 @@ from ..adapters.legacy.workflows import LegacyLoopRunner, LegacyWorkflowReposito
 from ..adapters.local_observability import LocalObservabilitySink
 from ..adapters.ollama.gateway import OllamaGateway
 from ..application.chat.handle_chat import ChatService
+from ..application.backup import BackupService
 from ..application.evaluation_history import EvaluationHistoryService
 from ..application.inspection import InspectionService
 from ..application.recall import RecallService
@@ -65,6 +67,7 @@ class Application:
     process_probe: ProcessProbe
     events: EventSink
     clock: Clock
+    backup: BackupService
     inspections: InspectionService
     recall: RecallService
     evaluation_history: EvaluationHistoryService
@@ -124,6 +127,7 @@ def build_application(
         # operations.db sink; they never replace its audit authority.
         events=LocalObservabilitySink(OperationsEventSink()),
         clock=SystemClock(),
+        backup=BackupService(LegacyBackupGateway()),
         inspections=InspectionService(LegacyInspectionExecutor()),
         recall=RecallService(LegacyRecallGateway()),
         evaluation_history=EvaluationHistoryService(
