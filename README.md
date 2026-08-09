@@ -13,10 +13,10 @@ model and hardware that fit your needs.
 
 <!-- ci-artifact-badges:start -->
 [![Prerelease downloads](https://img.shields.io/badge/app--latest-prerelease-2088FF?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Krilliac/Sonder-runtime/releases/tag/app-latest)
-[![Android download](https://img.shields.io/badge/Android-download-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/Krilliac/Sonder-runtime/releases/download/app-latest/sonder-runtime-android.apk)
-[![Linux download](https://img.shields.io/badge/Linux-download-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/Krilliac/Sonder-runtime/releases/download/app-latest/sonder-runtime-linux-x64.tar.gz)
-[![Windows download](https://img.shields.io/badge/Windows-download-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Krilliac/Sonder-runtime/releases/download/app-latest/sonder-runtime-windows-x64.zip)
-[![macOS download](https://img.shields.io/badge/macOS-download-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/Krilliac/Sonder-runtime/releases/download/app-latest/sonder-runtime-macos.zip)
+[![Android prerelease](https://img.shields.io/badge/Android-prerelease-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/Krilliac/Sonder-runtime/releases/download/app-latest/sonder-runtime-android.apk)
+[![Linux prerelease](https://img.shields.io/badge/Linux-prerelease-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/Krilliac/Sonder-runtime/releases/download/app-latest/sonder-runtime-linux-x64.tar.gz)
+[![Windows prerelease](https://img.shields.io/badge/Windows-prerelease-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Krilliac/Sonder-runtime/releases/download/app-latest/sonder-runtime-windows-x64.zip)
+[![macOS prerelease](https://img.shields.io/badge/macOS-prerelease-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/Krilliac/Sonder-runtime/releases/download/app-latest/sonder-runtime-macos.zip)
 <!-- ci-artifact-badges:end -->
 
 ## Why Sonder
@@ -54,7 +54,10 @@ by Ollama. Ollama is the local model server.
 
 ## Quick start
 
-The release badges above provide packaged apps. For a local server install:
+The `app-latest` badges are a mutable prerelease snapshot. They may lag `main`
+and are not a versioned, release-ready build. Versioned `app-vX.Y.Z` releases
+must pass the repository's version, artifact-integrity, SBOM, and provenance
+gates. For a local server install from source:
 
 ```bash
 git clone https://github.com/Krilliac/Sonder-runtime.git
@@ -126,6 +129,11 @@ detects available memory, starts Ollama, and selects a compatible local model.
 Read [SECURITY.md](SECURITY.md) before enabling remote access. Use the
 server-private profile behind TLS and report vulnerabilities privately through
 GitHub's Security tab.
+
+Optional direct MCP container execution is documented in
+[docs/security/ISOLATED_EXECUTION.md](docs/security/ISOLATED_EXECUTION.md). It
+uses a fixed Docker/Podman policy and is stronger than local `run_code`, but it
+still relies on the external runtime and host kernel and is not escape-proof.
 
 Contributions are welcome under the [Apache License 2.0](LICENSE). See
 [CONTRIBUTING.md](CONTRIBUTING.md) for the development and review workflow.
