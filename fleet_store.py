@@ -13,6 +13,7 @@ Ownership and concurrency contract:
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import socket
@@ -131,6 +132,28 @@ def _files_json(value) -> str:
     return json.dumps([_clamp_text(item, 2000) for item in parsed[:100]])
 
 
+def _objective_ids_json(value) -> str:
+    values = value if isinstance(value, (list, tuple)) else []
+    return json.dumps(
+        [_clamp_text(item, 64) for item in values[:32]],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+
+
+def _drift_metrics_json(value) -> str:
+    metrics = value if isinstance(value, dict) else {}
+    encoded = json.dumps(
+        metrics, sort_keys=True, ensure_ascii=True, separators=(",", ":"),
+    )
+    if len(encoded.encode("utf-8")) <= 4000:
+        return encoded
+    return json.dumps({
+        "audit_truncated": True,
+        "sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+    }, sort_keys=True, separators=(",", ":"))
+
+
 def _ensure_schema(path: str) -> None:
     resolved = str(Path(path).expanduser().resolve())
     with _SCHEMA_LOCK:
@@ -184,10 +207,14 @@ def _ensure_schema(path: str) -> None:
                     "task_drift": "INTEGER DEFAULT 0",
                 }.items():
                     if name not in event_columns:
-                        conn.execute(
-                            "ALTER TABLE fleet_events ADD COLUMN %s %s"
-                            % (name, definition)
-                        )
+                        try:
+                            conn.execute(
+                                "ALTER TABLE fleet_events ADD COLUMN %s %s"
+                                % (name, definition)
+                            )
+                        except sqlite3.OperationalError as exc:
+                            if "duplicate column" not in str(exc).lower():
+                                raise
                 conn.commit()
                 if os.name != "nt":
                     with contextlib.suppress(OSError):
@@ -249,6 +276,8 @@ def _row_dict(row) -> dict | None:
             data[public_name] = json.loads(data.pop(column, "") or json.dumps(fallback))
         except (TypeError, ValueError):
             data[public_name] = fallback
+        if not isinstance(data[public_name], type(fallback)):
+            data[public_name] = fallback
     return data
 
 
@@ -257,6 +286,8 @@ def _event_dict(row) -> dict:
     try:
         data["objective_ids"] = json.loads(data.pop("objective_ids_json", "[]") or "[]")
     except (TypeError, ValueError):
+        data["objective_ids"] = []
+    if not isinstance(data["objective_ids"], list):
         data["objective_ids"] = []
     data["task_drift"] = bool(data.get("task_drift"))
     return data
@@ -438,9 +469,9 @@ def create_agent(row: dict, owner_id: str, owner_pid: int) -> dict:
                 str(row.get("retried_by") or ""),
                 _clamp_text(row.get("master_task_digest"), 64),
                 _clamp_text(row.get("delegated_task_digest"), 64),
-                json.dumps(list(row.get("objective_ids") or ())[:32]),
+                _objective_ids_json(row.get("objective_ids")),
                 int(bool(row.get("task_drift"))),
-                json.dumps(row.get("drift_metrics") or {}, sort_keys=True)[:4000],
+                _drift_metrics_json(row.get("drift_metrics")),
             ),
         )
         stored = conn.execute(
@@ -510,7 +541,7 @@ def update_agent(agent_id: str, owner_id: str, **changes) -> dict | None:
     allowed = {
         "activity", "tool_calls", "tokens_in", "tokens_out", "files",
         "summary", "requested_agents", "worker_slots", "mode", "tier",
-        "in_model_call", "task_drift", "drift_metrics",
+        "in_model_call",
     }
     values = []
     assignments = []
@@ -526,11 +557,6 @@ def update_agent(agent_id: str, owner_id: str, **changes) -> dict | None:
             value = _clamp_text(value, MAX_SUMMARY_CHARS)
         elif key == "in_model_call":
             value = int(bool(value))
-        elif key == "task_drift":
-            value = int(bool(value))
-        elif key == "drift_metrics":
-            column = "drift_metrics_json"
-            value = json.dumps(value or {}, sort_keys=True)[:4000]
         assignments.append(f"{column}=?")
         values.append(value)
     if not assignments:
@@ -604,7 +630,7 @@ def finish_agent(
             (
                 status, activity, summary, final_output, final_error, tokens_out,
                 now, now, int(bool(task_drift)),
-                json.dumps(drift_metrics or {}, sort_keys=True)[:4000],
+                _drift_metrics_json(drift_metrics),
                 agent_id, owner_id,
             ),
         )
