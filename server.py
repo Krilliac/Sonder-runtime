@@ -59,6 +59,7 @@ import memory_quality
 import learning_health
 import domain_grounding
 import master_orchestrator
+import execution_status
 import ollama_lifecycle
 import admin_auth
 import codegen_loop
@@ -897,6 +898,8 @@ def _make_generate(
                 tokens_in=usage.get("tokens_in", 0),
                 tokens_out=usage.get("tokens_out", 0),
                 token_source=usage.get("token_source", ""),
+                request_preview=prompt,
+                response_preview=content if ok else None,
                 ok=ok,
                 elapsed_ms=int((time.time() - started) * 1000),
             )
@@ -3452,6 +3455,7 @@ def _offload_impl(
         ok = False
         usage = {}
         used_model = model
+        msg = ""
         try:
             if cloud:
                 out, msg, used_model = _chat_request_with_cloud_fallback(
@@ -3497,6 +3501,8 @@ def _offload_impl(
                 tokens_in=usage.get("tokens_in", 0),
                 tokens_out=usage.get("tokens_out", 0),
                 token_source=usage.get("token_source", ""),
+                request_preview=prompt,
+                response_preview=msg if ok else None,
                 ok=ok,
                 elapsed_ms=int((time.time() - started) * 1000),
             )
@@ -5341,7 +5347,10 @@ def context_health(session: str = "", project: str = "") -> str:
 def activity_status(include_events: bool = True) -> str:
     """Show active and most recent observable response activity."""
     _maybe_live_reload()
-    snap = activity_tracker.snapshot()
+    source = activity_tracker.snapshot()
+    snap = activity_tracker.public_snapshot(source)
+    if snap is None:
+        return "sonder activity\n  state: unknown"
     lines = [
         "sonder activity",
         "  active responses: %s" % snap.get("active_count", 0),
@@ -5368,6 +5377,13 @@ def activity_status(include_events: bool = True) -> str:
         lines.extend(["", activity_tracker.format_response(latest)])
     elif include_events:
         lines.append("  latest: (none yet)")
+    if include_events:
+        lines.extend([
+            "",
+            activity_tracker.format_execution_feed(
+                activity_tracker.execution_feed(source)
+            ),
+        ])
     return "\n".join(lines)
 
 
@@ -6704,6 +6720,43 @@ def master_status(include_finished: bool = True, limit: int = 20) -> str:
     )
 
 
+def execution_status_data(
+    agent_snapshot: dict | None = None,
+    activity_snapshot: dict | None = None,
+    *,
+    include_detail: bool | None = None,
+) -> dict:
+    """Return the shared terminal/app fleet concurrency contract."""
+    try:
+        snapshot = agent_snapshot
+        if snapshot is None:
+            snapshot = master_orchestrator.snapshot(include_finished=False, limit=1)
+        activity = activity_snapshot
+        if activity is None:
+            activity = activity_tracker.snapshot()
+        feed = activity_tracker.execution_feed(
+            activity, include_detail=include_detail,
+        )
+        return execution_status.with_feed(snapshot, feed)
+    except Exception as exc:
+        return execution_status.with_feed(
+            execution_status.unavailable(type(exc).__name__), None,
+        )
+
+
+def execution_feed_data(activity_snapshot: dict | None = None) -> dict:
+    """Return only the projected feed, without fleet capacity probes."""
+    try:
+        activity = activity_snapshot
+        if activity is None:
+            activity = activity_tracker.snapshot()
+        return activity_tracker.execution_feed(activity)
+    except Exception as exc:
+        return activity_tracker.execution_feed([]) | {
+            "error": type(exc).__name__,
+        }
+
+
 @mcp.tool()
 def master_capacity(requested_agents: int = 0, worker_cap: int = 0) -> str:
     """Show default or explicit per-run bounded orchestration capacity."""
@@ -7179,7 +7232,13 @@ def checklist_update(
     return _format_checklist(data)
 
 
-def _record_file_activity(default_action: str, data: dict) -> None:
+def _record_file_activity(
+    default_action: str,
+    data: dict,
+    *,
+    preview=None,
+    preview_kind: str = "",
+) -> None:
     if not isinstance(data, dict):
         return
     action = data.get("action") or default_action
@@ -7192,6 +7251,8 @@ def _record_file_activity(default_action: str, data: dict) -> None:
         bytes_written=data.get("bytes", 0),
         dry_run=data.get("dry_run", False),
         summary="%s bytes" % data.get("bytes", 0) if data.get("bytes") else "",
+        preview=preview,
+        preview_kind=preview_kind,
     )
 
 
@@ -8123,7 +8184,7 @@ def file_write(
         activity_tracker.record_file_change(
             "create_directory", created_directory, summary="parent created by file_write",
         )
-    _record_file_activity("write", data)
+    _record_file_activity("write", data, preview=content, preview_kind="content")
     return _format_file_result("file write", data)
 
 
@@ -8340,6 +8401,8 @@ def text_patch(
                 "create" if row["action"] == "create" else "edit",
                 str(Path(data["root"]) / Path(*row["path"].split("/"))),
                 summary="text_patch %s" % row["action"],
+                preview=patch,
+                preview_kind="diff",
             )
     return output
 
@@ -8371,7 +8434,10 @@ def file_edit(
         _record_direct_tool("file_edit", {"path": path, "count": count}, ok=False, started=started, summary=str(e))
         return "ERROR: %s" % e
     _record_direct_tool("file_edit", {"path": path, "count": count}, ok=True, started=started, summary="%s replacement(s)" % data.get("replacements", 0))
-    _record_file_activity("edit", data)
+    diff_preview = "--- selected text\n+++ replacement text\n- %s\n+ %s" % (old, new)
+    _record_file_activity(
+        "edit", data, preview=diff_preview, preview_kind="diff",
+    )
     return _format_file_result("file edit", data)
 
 
