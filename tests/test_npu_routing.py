@@ -179,7 +179,15 @@ def test_incomplete_npu_decision_falls_back_locally(
 
 def test_prefer_miss_falls_back_to_local_ollama_router(monkeypatch):
     calls = []
+    handled = []
+    monkeypatch.setattr(server.npu_service, "routing_active", lambda: "prefer")
     monkeypatch.setattr(server.npu_service, "route_decide", lambda prompt: None)
+    monkeypatch.setattr(
+        server.npu_service, "record_fallback_handler",
+        lambda capability, handler, ok: handled.append(
+            (capability, handler, ok)
+        ),
+    )
     monkeypatch.setattr(
         server,
         "_execution_route_model",
@@ -199,6 +207,7 @@ def test_prefer_miss_falls_back_to_local_ollama_router(monkeypatch):
 
     assert "source: bounded local mode model" in output
     assert calls
+    assert handled == [("routing", "ollama", True)]
 
 
 def test_shadow_observes_baseline_without_changing_it(monkeypatch):

@@ -27,6 +27,20 @@ MAX_FEED_BYTES = 64 * 1024
 MAX_PUBLIC_EVENTS = 20
 MAX_PUBLIC_RESPONSE_BYTES = 64 * 1024
 MAX_EVENT_RING = 512
+_NPU_PUBLIC_ENUMS = {
+    "capability": frozenset({"routing", "embeddings"}),
+    "reason": frozenset({
+        "bundle_limit", "busy", "circuit_open", "cold", "crash",
+        "dimension_mismatch", "hash_drift", "identity_mismatch", "internal",
+        "invalid", "low_confidence", "malformed", "manifest_unhealthy",
+        "no_manifest", "oversized", "ram_gate", "rss_limit",
+        "simulated_provider", "space_mismatch", "space_unpinned", "spawn",
+        "target_unattested", "timeout", "warming", "worker_error",
+    }),
+    "operation_mode": frozenset({"execution", "shadow"}),
+    "fallback_handler": frozenset({"npu", "cpu", "ollama", "host"}),
+    "handler_state": frozenset({"pending", "handled", "failed", "observed"}),
+}
 # Keep active response spans intact when this helper is refreshed at a request
 # boundary. Function definitions may reload; live response ownership may not.
 if "_LOCK" not in globals():
@@ -759,6 +773,10 @@ def _public_event(event, *, include_detail=False):
     for key in ("ok", "dry_run"):
         if key in event:
             out[key] = bool(event.get(key))
+    if kind.startswith("npu_"):
+        for key, allowed in _NPU_PUBLIC_ENUMS.items():
+            value = str(event.get(key) or "").strip().lower()
+            out[key] = value if value in allowed else "unknown"
     if event.get("path") not in (None, ""):
         out["path"] = _safe_path(event.get("path"))
     if (
@@ -981,6 +999,14 @@ def execution_feed(
                     ) if key in event
                 })
                 row["content_preview"] = _feed_preview(event.get("preview"))
+            elif kind.startswith("npu_"):
+                row.update({
+                    key: event.get(key, "unknown") for key in (
+                        "capability", "reason", "operation_mode",
+                        "fallback_handler", "handler_state", "ok",
+                    )
+                    if key in event
+                })
             else:
                 summary = event.get("summary")
                 row["summary_preview"] = _feed_preview(
@@ -1056,7 +1082,16 @@ def format_execution_feed(feed):
         )
     for event in (feed.get("events") or [])[-12:]:
         kind = event.get("kind", "event")
-        detail = event.get("tool") or event.get("model") or event.get("path") or ""
+        if str(kind).startswith("npu_"):
+            detail = "%s reason=%s mode=%s handler=%s/%s" % (
+                event.get("capability", "unknown"),
+                event.get("reason", "unknown"),
+                event.get("operation_mode", "unknown"),
+                event.get("fallback_handler", "unknown"),
+                event.get("handler_state", "unknown"),
+            )
+        else:
+            detail = event.get("tool") or event.get("model") or event.get("path") or ""
         lines.append("  +%sms %s %s" % (
             event.get("elapsed_ms", 0), _terminal_safe(kind), _terminal_safe(detail),
         ))

@@ -121,6 +121,16 @@ def test_system_status_uses_projected_activity_and_shared_feed(
                  "content": "api_key=argument-secret"},
                 output="CLIENT_SECRET=output-secret",
             )
+            if label == "second":
+                ts.server.activity_tracker.record_event(
+                    "npu_fallback_handled",
+                    capability="embeddings",
+                    reason="ram_gate",
+                    operation_mode="execution",
+                    fallback_handler="ollama",
+                    handler_state="handled",
+                    raw_error="C:\\private\\model token=npu-secret",
+                )
     monkeypatch.setattr(ts.server, "status", lambda: "ready")
     monkeypatch.setattr(ts.server, "sonder_stats", lambda: "stats")
     monkeypatch.setattr(ts.server, "learn_tiers", lambda: "tiers")
@@ -138,6 +148,26 @@ def test_system_status_uses_projected_activity_and_shared_feed(
     monkeypatch.setattr(ts.server, "learning_health_data", lambda: {})
     monkeypatch.setattr(ts.server.sonder_paths, "default_home", lambda: tmp_path)
     monkeypatch.setattr(ts.server, "available_tiers", lambda: {})
+    monkeypatch.setattr(ts.server, "npu_fallback_status_data", lambda: {
+        "schema_version": 1,
+        "known": True,
+        "capabilities": {
+            "routing": {
+                "policy_mode": "shadow", "role": "observer",
+                "local_fallback_handler": "ollama",
+            },
+            "embeddings": {
+                "policy_mode": "prefer", "role": "executor",
+                "local_fallback_handler": "ollama",
+            },
+        },
+        "last_fallback": {
+            "capability": "embeddings", "reason": "ram_gate",
+            "operation_mode": "execution", "fallback_handler": "ollama",
+            "handler_state": "handled", "count": 1,
+        },
+        "reason_counts": {"ram_gate": 1},
+    })
 
     with _http_server(monkeypatch) as port:
         status, _, body = _request(port, "GET", "/v1/sonder/status")
@@ -149,13 +179,24 @@ def test_system_status_uses_projected_activity_and_shared_feed(
     assert payload["activity"]["detail_enabled"] is False
     assert payload["execution"]["feed"]["schema_version"] == 1
     assert payload["execution"]["feed"]["events"]
+    assert payload["npu_fallback"]["last_fallback"] == {
+        "capability": "embeddings", "reason": "ram_gate",
+        "operation_mode": "execution", "fallback_handler": "ollama",
+        "handler_state": "handled", "count": 1,
+    }
+    npu_event = next(
+        row for row in payload["execution"]["feed"]["events"]
+        if row["kind"] == "npu_fallback_handled"
+    )
+    assert npu_event["reason"] == "ram_gate"
+    assert npu_event["fallback_handler"] == "ollama"
     feed_response_ids = {
         row["response_id"] for row in payload["execution"]["feed"]["events"]
     }
     assert set(response_ids).issubset(feed_response_ids)
     for secret in (
         "private prose", "prompt-secret", "argument-secret", "output-secret",
-        str(tmp_path / "private"),
+        "npu-secret", str(tmp_path / "private"),
     ):
         assert secret not in text
 

@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+import activity_tracker
 import npu_contract as c
 
 
@@ -206,3 +207,13 @@ def test_sanitize_error_redacts_paths_credentials_and_multiline_text():
     assert "\n" not in detail
     assert "\x1b" not in detail
     assert "[31m" not in detail
+
+
+def test_activity_projection_vocabulary_matches_npu_contract():
+    assert activity_tracker._NPU_PUBLIC_ENUMS == {
+        "capability": c.FALLBACK_CAPABILITIES,
+        "reason": c.FALLBACK_REASON_CODES,
+        "operation_mode": c.FALLBACK_OPERATION_MODES,
+        "fallback_handler": c.FALLBACK_HANDLERS,
+        "handler_state": c.FALLBACK_HANDLER_STATES,
+    }

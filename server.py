@@ -16068,6 +16068,9 @@ def route_work_request(prompt: str, project: str = "") -> str | None:
         # validated inside npu_service, and any miss lands on the existing
         # local router — an accelerator problem can never widen behavior.
         npu_decision = None
+        npu_prefer_active = False
+        with contextlib.suppress(Exception):
+            npu_prefer_active = npu_service.routing_active() == "prefer"
         try:
             npu_decision = npu_service.route_decide(prompt)
         except Exception:
@@ -16098,6 +16101,7 @@ def route_work_request(prompt: str, project: str = "") -> str | None:
                     "reason": candidate_reason.strip()[:240],
                     "confidence": float(candidate_confidence),
                 }
+        npu_fallback_attempted = npu_prefer_active and not validated_npu
         if validated_npu:
             mode = validated_npu["mode"]
             selected_tier = runtime_policy.route_tier(
@@ -16116,7 +16120,17 @@ def route_work_request(prompt: str, project: str = "") -> str | None:
                 reason = routed["reason"]
                 confidence = routed["confidence"]
                 source = "bounded local mode model"
+                if npu_fallback_attempted:
+                    with contextlib.suppress(Exception):
+                        npu_service.record_fallback_handler(
+                            "routing", "ollama", True,
+                        )
             except (OSError, RuntimeError, ValueError) as exc:
+                if npu_fallback_attempted:
+                    with contextlib.suppress(Exception):
+                        npu_service.record_fallback_handler(
+                            "routing", "ollama", False,
+                        )
                 mode = "autopilot"
                 selected_tier = runtime_policy.route_tier(
                     "autopilot", _RUNTIME_POLICY, fallback="code",
@@ -16252,6 +16266,20 @@ def runtime_policy_status() -> str:
     if data.get("inventory_error"):
         output += "\n  WARNING model inventory unavailable: %s" % data["inventory_error"]
     return output
+
+
+def npu_fallback_status_data() -> dict:
+    """Enum-only NPU fallback state suitable for summary-mode status APIs."""
+    try:
+        return npu_service.fallback_projection()
+    except Exception:
+        return {
+            "schema_version": 1,
+            "known": False,
+            "capabilities": {},
+            "last_fallback": {},
+            "reason_counts": {},
+        }
 
 
 @mcp.tool()

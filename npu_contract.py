@@ -126,6 +126,46 @@ _POSIX_ABSOLUTE_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9:/.])/(?!/)[^,;\r\n]*"
 )
 
+# Public activity/status vocabulary. Driver messages and exception text never
+# cross this boundary; an unrecognized value is deliberately ``unknown``.
+FALLBACK_REASON_CODES = frozenset({
+    "bundle_limit", "busy", "circuit_open", "cold", "crash",
+    "dimension_mismatch", "hash_drift", "identity_mismatch", "internal",
+    "invalid", "low_confidence", "malformed", "manifest_unhealthy",
+    "no_manifest", "oversized", "ram_gate", "rss_limit", "simulated_provider",
+    "space_mismatch", "space_unpinned", "spawn", "target_unattested",
+    "timeout", "warming", "worker_error",
+})
+FALLBACK_CAPABILITIES = frozenset({"routing", "embeddings"})
+FALLBACK_OPERATION_MODES = frozenset({"execution", "shadow"})
+FALLBACK_HANDLERS = frozenset({"npu", "cpu", "ollama", "host"})
+FALLBACK_HANDLER_STATES = frozenset({"pending", "handled", "failed", "observed"})
+
+
+def controlled_value(value, allowed) -> str:
+    text = str(value or "").strip().lower()
+    return text if text in allowed else "unknown"
+
+
+def fallback_reason(value) -> str:
+    return controlled_value(value, FALLBACK_REASON_CODES)
+
+
+def fallback_capability(value) -> str:
+    return controlled_value(value, FALLBACK_CAPABILITIES)
+
+
+def fallback_operation_mode(value) -> str:
+    return controlled_value(value, FALLBACK_OPERATION_MODES)
+
+
+def fallback_handler(value) -> str:
+    return controlled_value(value, FALLBACK_HANDLERS)
+
+
+def fallback_handler_state(value) -> str:
+    return controlled_value(value, FALLBACK_HANDLER_STATES)
+
 
 def sanitize_error(value, limit=200) -> str:
     """Bound and redact exception text before it crosses/statuses the worker.
