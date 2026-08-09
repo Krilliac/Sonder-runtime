@@ -159,7 +159,10 @@ def _is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
 
 def _is_dirty(worktree: Worktree) -> bool:
     result = _run(
-        ("git", "-C", str(worktree.path), "status", "--porcelain=v1", "-z"),
+        (
+            "git", "-C", str(worktree.path), "status", "--porcelain=v1",
+            "-z", "--ignored=matching",
+        ),
         cwd=worktree.path,
     )
     return bool(result.stdout)
@@ -294,7 +297,14 @@ def cleanup(
             continue
         actions = []
         if candidate.remote_tip:
-            result = _git(repo, "push", remote, "--delete", "--", candidate.branch, check=False)
+            lease = (
+                f"--force-with-lease=refs/heads/{candidate.branch}:"
+                f"{candidate.remote_tip}"
+            )
+            result = _git(
+                repo, "push", lease, remote, "--delete", "--",
+                candidate.branch, check=False,
+            )
             if result.returncode != 0:
                 results.append({
                     "branch": candidate.branch,
@@ -324,7 +334,6 @@ def cleanup(
             continue
         actions.append("local_branch_deleted")
         results.append({"actions": actions, "branch": candidate.branch, "status": "deleted"})
-    _git(repo, "worktree", "prune")
     return results
 
 
