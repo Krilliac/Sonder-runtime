@@ -79,11 +79,19 @@ def test_limits_are_clamped(monkeypatch):
         child.wait(timeout=5)
 
 
-@pytest.mark.parametrize("value", [True, 1.5, "4096", float("inf")])
-def test_malformed_memory_limits_fail_closed(monkeypatch, value):
+@pytest.mark.parametrize("field", ["max_bytes", "max_regions", "max_seconds"])
+@pytest.mark.parametrize("value", [True, "4096", float("inf")])
+def test_malformed_memory_limits_fail_closed(monkeypatch, field, value):
     monkeypatch.setenv(process_risk.OPT_IN_ENV, process_risk.OPT_IN_VALUE)
     with pytest.raises(ValueError):
-        process_risk.inspect_process_memory(1234, max_bytes=value)
+        process_risk.inspect_process_memory(1234, **{field: value})
+
+
+@pytest.mark.parametrize("field", ["max_bytes", "max_regions"])
+def test_fractional_integer_memory_limits_fail_closed(monkeypatch, field):
+    monkeypatch.setenv(process_risk.OPT_IN_ENV, process_risk.OPT_IN_VALUE)
+    with pytest.raises(ValueError):
+        process_risk.inspect_process_memory(1234, **{field: 1.5})
 
 
 def _scan_inert_child(blob, *, executable=False):
