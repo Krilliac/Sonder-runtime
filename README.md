@@ -1,11 +1,11 @@
 # Sonder Runtime
 
 <!-- ci-artifact-badges:start -->
-[![Latest CI artifacts 4 files](https://img.shields.io/badge/Latest%20CI%20artifacts-4%20files-2088FF?style=for-the-badge&logo=githubactions&logoColor=white)](https://github.com/Krilliac/Sonder-runtime/actions/runs/28965607688)
-[![Android download](https://img.shields.io/badge/Android-download-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/Krilliac/Sonder-runtime/actions/runs/28965607688/artifacts/8178000122)
-[![Linux download](https://img.shields.io/badge/Linux-download-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/Krilliac/Sonder-runtime/actions/runs/28965607688/artifacts/8177919570)
-[![Windows download](https://img.shields.io/badge/Windows-download-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Krilliac/Sonder-runtime/actions/runs/28965607688/artifacts/8177965622)
-[![macOS download](https://img.shields.io/badge/macOS-download-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/Krilliac/Sonder-runtime/actions/runs/28965607688/artifacts/8177924740)
+[![Prerelease downloads](https://img.shields.io/badge/app--latest-prerelease-2088FF?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Krilliac/Sonder-runtime/releases/tag/app-latest)
+[![Android download](https://img.shields.io/badge/Android-download-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/Krilliac/Sonder-runtime/releases/download/app-latest/sonder-runtime-android.apk)
+[![Linux download](https://img.shields.io/badge/Linux-download-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/Krilliac/Sonder-runtime/releases/download/app-latest/sonder-runtime-linux-x64.tar.gz)
+[![Windows download](https://img.shields.io/badge/Windows-download-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Krilliac/Sonder-runtime/releases/download/app-latest/sonder-runtime-windows-x64.zip)
+[![macOS download](https://img.shields.io/badge/macOS-download-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/Krilliac/Sonder-runtime/releases/download/app-latest/sonder-runtime-macos.zip)
 <!-- ci-artifact-badges:end -->
 
 **A private, adaptive AI runtime that's *yours*.** It orchestrates models,
@@ -595,6 +595,12 @@ that protection. `SONDER_FILE_APPROVAL_CODE` and
 paths. Deletes require the exact `DELETE <resolved path>` confirmation string
 returned by the dry-run.
 
+`archive_create` builds ZIP or TAR files from an explicit bounded input list.
+It rejects sensitive/control state, links, special files, escapes, mutations
+during creation, and existing destinations. Output is staged beside the final
+path and published atomically without overwrite; deterministic metadata is the
+default for reproducible archives.
+
 `workspace_inventory` reads metadata only and reports manifests, extension and
 area sizes, largest files, exclusions, elapsed time, and a concrete truncation
 reason. Inventory, text search, and script discovery enforce both an entry
@@ -854,7 +860,7 @@ path, and any missing-model warning alongside MCP source/tool convergence.
 
 `workflows.json` stores reusable `loop` action lists. Use `workflow_save()` to keep a routine, `workflow_run()` to execute it, and `workflow_list()` / `workflow_delete()` to manage it. The built-in `status_sweep` workflow checks diagnostics, profile, emotion vectors, and Ollama state.
 
-The MCP surface also includes `memory_search()`, `memory_export()`, and `session_export()` so the model can inspect local lessons, facts, sessions, and transcripts without raw SQLite access. `memory_embedding_backfill()` and `memory_interaction_embedding_backfill()` preview or repair bounded local-only vector batches; the interaction tool reports IDs and counts without printing raw task text. `tool_manifest()` prints a compact map of the available tools.
+The MCP surface also includes `memory_search()`, `memory_export()`, and `session_export()` so the model can inspect local lessons, facts, sessions, and transcripts without raw SQLite access. `memory_embedding_backfill()` and `memory_interaction_embedding_backfill()` preview or repair bounded local-only vector batches; the interaction tool reports IDs and counts without printing raw task text. `text_patch()` previews strict unified diffs by default and can transactionally apply bounded create/modify-only UTF-8 patches inside one authorized project root. `tool_manifest()` prints a compact map of the available tools.
 
 `learn_from_example()` lets you teach from a known-good task/solution pair, while `apply_learned()` shows which lessons would be applied to a new task. Lesson usage is tracked: when a retrieved lesson participates in an answer and you later call `record_outcome()`, the lesson gets credited or debited so future retrieval can prefer lessons that actually helped.
 

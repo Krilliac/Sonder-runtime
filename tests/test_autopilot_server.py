@@ -376,6 +376,9 @@ def test_autopilot_policy_blocks_control_plane_shell_and_bypass():
     assert "approximate_location_lookup" not in server._AUTOPILOT_WORKSPACE_TOOLS
     assert "file_delete" not in server._AUTOPILOT_WORKSPACE_TOOLS
     assert "master_orchestrate" not in server._AUTOPILOT_WORKSPACE_TOOLS
+    assert {"data_inspect", "repo_status", "repo_diff"}.issubset(
+        server._AUTOPILOT_OBSERVE_TOOLS
+    )
 
 
 def test_agent_host_allowlist_rejects_model_tool_expansion(monkeypatch):

@@ -39,6 +39,11 @@ of the model — an uncensored or "abliterated" model changes what it will
   code runner is confined to the workspace cwd. It is a containment layer,
   not a sandbox — it does not replace OS isolation.
 
+- **Local HTTP probes** require an explicit port and pin direct connections to
+  DNS answers that are exclusively loopback. DNS is checked again before
+  connect; proxies, credentials, cookies, authorization, fragments, sensitive
+  control-state paths, and non-loopback redirects are refused.
+
 ## Data protection
 
 - **Redaction before logging** (`sonder_logging.py`): bearer tokens, API

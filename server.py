@@ -50,6 +50,7 @@ import preference_learning
 import process_liveness
 import workflow_store
 import web_tools
+import local_service_probe as local_probe
 import web_intents
 import self_heal
 import grounding
@@ -63,8 +64,18 @@ import admin_auth
 import codegen_loop
 import file_ops
 import data_query as data_query_module
+import json_patch_tool
+import text_patch as text_patch_ops
+import workspace_compare as workspace_compare_module
+import log_inspect as log_inspect_module
+import data_convert as data_convert_module
 import sqlite_mutate as sqlite_mutate_module
 import symbol_index
+import project_detect as project_detector
+import git_history
+import content_digest
+import archive_tools
+import archive_create as archive_create_tool
 import context_policy
 import command_registry
 import adaptive_training
@@ -76,6 +87,7 @@ import assetgen
 import artifact_grounding
 import game_forge
 import workbench
+import dependency_inventory as dependency_inventory_tool
 import creative_router
 import intents
 import runtime_policy
@@ -92,6 +104,7 @@ import code_improve
 import tier_router
 import project_scaffold
 import environment_probe
+import git_tools
 import eval_history
 
 BASE = ollama_endpoint.normalize()
@@ -550,6 +563,7 @@ LIVE_RELOAD_MODULES = [
     "preference_learning",
     "workflow_store",
     "web_tools",
+    "local_service_probe",
     "web_intents",
     "self_heal",
     "memory_quality",
@@ -561,8 +575,20 @@ LIVE_RELOAD_MODULES = [
     "admin_auth",
     "file_ops",
     "data_query",
+    "json_patch_tool",
+    "dependency_inventory",
     "sqlite_mutate",
     "symbol_index",
+    "project_detect",
+    "git_history",
+    "git_tools",
+    "content_digest",
+    "archive_tools",
+    "archive_create",
+    "text_patch",
+    "workspace_compare",
+    "log_inspect",
+    "data_convert",
     "context_policy",
     "command_registry",
     "permission_rules",
@@ -622,9 +648,37 @@ _prime_live_reload_modules()
 def _maybe_live_reload():
     modules = live_reload.reload_changed_modules(LIVE_RELOAD_MODULES)
     for name, module in modules.items():
+        if name == "local_service_probe":
+            globals()["local_probe"] = module
+            continue
+        if name == "dependency_inventory":
+            globals()["dependency_inventory_tool"] = module
+            continue
+        if name == "project_detect":
+            globals()["project_detector"] = module
+            continue
+        if name == "data_query":
+            globals()["data_query_module"] = module
+            continue
+        if name == "text_patch":
+            globals()["text_patch_ops"] = module
+            continue
+        if name == "workspace_compare":
+            globals()["workspace_compare_module"] = module
+            continue
+        if name == "log_inspect":
+            globals()["log_inspect_module"] = module
+            continue
+        if name == "data_convert":
+            globals()["data_convert_module"] = module
+            continue
+        if name == "archive_create":
+            globals()["archive_create_tool"] = module
+            continue
         if name == "sqlite_mutate":
             globals()["sqlite_mutate_module"] = module
-        elif name in globals():
+            continue
+        if name in globals():
             globals()[name] = module
     _refresh_runtime_policy(create=True)
 
@@ -7422,6 +7476,420 @@ def context_pack(
 
 
 @mcp.tool()
+def archive_create(
+    root: str,
+    inputs_json: str,
+    destination: str,
+    archive_format: str = "zip",
+    deterministic: bool = True,
+    max_files: int = archive_create_tool.DEFAULT_MAX_FILES,
+    max_entries: int = archive_create_tool.DEFAULT_MAX_ENTRIES,
+    max_file_bytes: int = archive_create_tool.DEFAULT_MAX_FILE_BYTES,
+    max_total_bytes: int = archive_create_tool.DEFAULT_MAX_TOTAL_BYTES,
+    max_depth: int = archive_create_tool.DEFAULT_MAX_DEPTH,
+    max_results: int = archive_create_tool.DEFAULT_MAX_RESULTS,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Create a guarded transactional ZIP/TAR from explicit workspace inputs."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "root": root, "inputs_json": inputs_json, "destination": destination,
+        "archive_format": archive_format, "deterministic": deterministic,
+    }
+    try:
+        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
+        data = archive_create_tool.create_archive(
+            root, inputs_json, destination,
+            archive_format=archive_format, deterministic=deterministic is True,
+            max_files=max_files, max_entries=max_entries,
+            max_file_bytes=max_file_bytes,
+            max_total_bytes=max_total_bytes, max_depth=max_depth,
+            max_results=max_results, extra_roots=trusted_roots,
+            developer_authorized=_file_developer_allowed(token),
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "archive_create", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = archive_create_tool.format_result(data)
+    _record_direct_tool(
+        "archive_create", args, ok=True, started=started,
+        summary="%d file(s), %d input bytes" % (data["files"], data["input_bytes"]),
+        output=output,
+    )
+    activity_tracker.record_file_change(
+        "create", data["destination"], bytes_written=data["archive_bytes"],
+        summary="archive_create: %s, %d entries" % (
+            data["archive_format"], data["files"] + data["directories"],
+        ),
+    )
+    return output
+
+
+@mcp.tool()
+def data_convert(
+    input_path: str,
+    output_path: str,
+    fields_json: str,
+    output_format: str = "",
+    apply: bool = False,
+    max_input_bytes: int = 16000000,
+    max_output_bytes: int = 16000000,
+    max_rows: int = 10000,
+    max_columns: int = 100,
+    max_fields: int = 50,
+    max_field_bytes: int = 64000,
+    max_depth: int = 16,
+    preview_rows: int = 5,
+    timeout: float = 10.0,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Preview or atomically create a deterministic structured-data conversion."""
+    _maybe_live_reload()
+    started = time.time()
+    apply = apply is True
+    args = {
+        "input_path": input_path, "output_path": output_path,
+        "output_format": output_format, "apply": apply,
+        "max_input_bytes": max_input_bytes, "max_output_bytes": max_output_bytes,
+        "max_rows": max_rows, "max_columns": max_columns,
+        "max_fields": max_fields, "max_field_bytes": max_field_bytes,
+        "max_depth": max_depth, "preview_rows": preview_rows,
+        "timeout": timeout,
+    }
+    try:
+        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
+        report = data_convert_module.convert_data(
+            input_path, output_path, fields_json,
+            output_format=output_format, apply=apply,
+            max_input_bytes=max_input_bytes, max_output_bytes=max_output_bytes,
+            max_rows=max_rows, max_columns=max_columns, max_fields=max_fields,
+            max_field_bytes=max_field_bytes, max_depth=max_depth,
+            preview_rows=preview_rows, timeout=timeout,
+            extra_roots=trusted_roots,
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "data_convert", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = data_convert_module.encode_result(report)
+    summary = "%s %d row(s), %d byte(s)" % (
+        report["mode"], report["rows"], report["converted_bytes"],
+    )
+    _record_direct_tool(
+        "data_convert", args, ok=True, started=started, summary=summary,
+        output=output,
+    )
+    activity_tracker.record_event(
+        "data_convert", summary=summary, path=report["output_path"],
+    )
+    if report["applied"]:
+        _record_file_activity("create", {
+            "action": "create", "path": report["output_path"],
+            "bytes": report["converted_bytes"],
+        })
+    return output
+
+
+@mcp.tool()
+def log_inspect(
+    path: str,
+    tail_lines: int = 0,
+    context_lines: int = 2,
+    max_file_bytes: int = 64000000,
+    max_scan_bytes: int = 4000000,
+    max_lines: int = 10000,
+    max_line_bytes: int = 4096,
+    max_results: int = 100,
+    max_output_bytes: int = 256000,
+    timeout: float = 5.0,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Inspect one guarded text log without execution or caller expressions."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "path": path, "tail_lines": tail_lines, "context_lines": context_lines,
+        "max_file_bytes": max_file_bytes, "max_scan_bytes": max_scan_bytes,
+        "max_lines": max_lines, "max_line_bytes": max_line_bytes,
+        "max_results": max_results, "max_output_bytes": max_output_bytes,
+        "timeout": timeout,
+    }
+    try:
+        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
+        report = log_inspect_module.inspect_log(
+            path, tail_lines=tail_lines, context_lines=context_lines,
+            max_file_bytes=max_file_bytes, max_scan_bytes=max_scan_bytes,
+            max_lines=max_lines, max_line_bytes=max_line_bytes,
+            max_results=max_results, max_output_bytes=max_output_bytes,
+            timeout=timeout, extra_roots=trusted_roots,
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "log_inspect", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = log_inspect_module.encode_result(report)
+    summary = report["summary"]
+    activity_summary = "%d line(s), %d error(s), %d warning(s)%s" % (
+        summary["lines_inspected"], summary["error_lines"],
+        summary["warning_lines"],
+        ", truncated" if report["scan_truncated"] or report["details_truncated"] else "",
+    )
+    _record_direct_tool(
+        "log_inspect", args, ok=True, started=started,
+        summary=activity_summary, output=output,
+    )
+    activity_tracker.record_event(
+        "log_inspect", summary=activity_summary, path=report["path"],
+    )
+    return output
+
+
+@mcp.tool()
+def workspace_compare(
+    left: str,
+    right: str,
+    max_entries: int = 2000,
+    max_file_bytes: int = 64000000,
+    max_total_bytes: int = 256000000,
+    max_details: int = 1000,
+    max_output_bytes: int = 256000,
+    timeout: float = 5.0,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Compare two guarded files/directories by path, type, size, and SHA-256."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "left": left, "right": right, "max_entries": max_entries,
+        "max_file_bytes": max_file_bytes, "max_total_bytes": max_total_bytes,
+        "max_details": max_details, "max_output_bytes": max_output_bytes,
+        "timeout": timeout,
+    }
+    try:
+        report = workspace_compare_module.compare_workspaces(
+            left, right,
+            max_entries=max_entries,
+            max_file_bytes=max_file_bytes,
+            max_total_bytes=max_total_bytes,
+            max_details=max_details,
+            max_output_bytes=max_output_bytes,
+            timeout=timeout,
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+            developer_authorized=_file_developer_allowed(token),
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "workspace_compare", args, ok=False, started=started,
+            summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = workspace_compare_module.encode_result(report)
+    summary = report["summary"]
+    _record_direct_tool(
+        "workspace_compare", args, ok=True, started=started,
+        summary="added=%d removed=%d changed=%d same=%d" % (
+            summary["added"], summary["removed"],
+            summary["changed"], summary["same"],
+        ),
+        output=output,
+    )
+    activity_tracker.record_event(
+        "workspace_compare",
+        summary="%d difference(s), %d same" % (
+            summary["added"] + summary["removed"] + summary["changed"],
+            summary["same"],
+        ),
+        path="%s | %s" % (report["left"]["root"], report["right"]["root"]),
+    )
+    return output
+
+
+@mcp.tool()
+def project_detect(
+    path: str = ".",
+    max_depth: int = 8,
+    max_files: int = 200,
+    max_total_bytes: int = 2_000_000,
+    max_file_bytes: int = 256_000,
+    max_results: int = 500,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Inventory guarded project manifests and evidence-backed command candidates."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "path": path, "max_depth": max_depth, "max_files": max_files,
+        "max_total_bytes": max_total_bytes, "max_file_bytes": max_file_bytes,
+        "max_results": max_results,
+    }
+    try:
+        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
+        data = project_detector.detect_project(
+            path=path, max_depth=max_depth, max_files=max_files,
+            max_total_bytes=max_total_bytes, max_file_bytes=max_file_bytes,
+            max_results=max_results, extra_roots=trusted_roots,
+        )
+    except Exception as exc:
+        _record_direct_tool("project_detect", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    summary = "%d manifest(s), %d command candidate(s)%s" % (
+        len(data["manifests"]), len(data["commands"]),
+        ", truncated" if data["truncated"] else "",
+    )
+    output = project_detector.format_detection(data)
+    _record_direct_tool("project_detect", args, ok=not data["errors"], started=started,
+                        summary=summary, output=output)
+    activity_tracker.record_event("project_detect", summary=summary, path=data["root"])
+    return output
+
+
+@mcp.tool()
+def file_digest(path: str, max_bytes: int = 32_000_000, token: str = "",
+                approval: str = "", extra_roots: str = "") -> str:
+    """Stream a guarded regular file into a fixed SHA-256 content digest."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"path": path, "max_bytes": max_bytes}
+    try:
+        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
+        data = content_digest.digest_file(path, max_bytes=max_bytes, extra_roots=trusted_roots)
+    except Exception as exc:
+        _record_direct_tool("file_digest", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    summary = "%d byte(s)%s" % (data["bytes"], ", incomplete" if data["sha256"] is None else "")
+    output = content_digest.format_digest(data)
+    _record_direct_tool("file_digest", args, ok=data["sha256"] is not None,
+                        started=started, summary=summary, output=output)
+    activity_tracker.record_event("file_digest", summary=summary, path=data["path"])
+    return output
+
+
+@mcp.tool()
+def directory_digest(
+    path: str = ".", max_depth: int = 12, max_files: int = 2_000,
+    max_total_bytes: int = 32_000_000, max_file_bytes: int = 32_000_000,
+    max_results: int = 2_500, token: str = "", approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Build a guarded deterministic SHA-256 file manifest and tree Merkle."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "path": path, "max_depth": max_depth, "max_files": max_files,
+        "max_total_bytes": max_total_bytes, "max_file_bytes": max_file_bytes,
+        "max_results": max_results,
+    }
+    try:
+        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
+        data = content_digest.digest_directory(
+            path, max_depth=max_depth, max_files=max_files,
+            max_total_bytes=max_total_bytes, max_file_bytes=max_file_bytes,
+            max_results=max_results, extra_roots=trusted_roots,
+        )
+    except Exception as exc:
+        _record_direct_tool("directory_digest", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    summary = "%d file(s), %d byte(s)%s" % (
+        len(data["manifest"]), data["bytes"], " complete" if data["complete"] else " incomplete",
+    )
+    output = content_digest.format_digest(data)
+    _record_direct_tool("directory_digest", args, ok=data["complete"], started=started,
+                        summary=summary, output=output)
+    activity_tracker.record_event("directory_digest", summary=summary, path=data["root"])
+    return output
+
+
+@mcp.tool()
+def archive_list(
+    path: str,
+    max_entries: int = archive_tools.DEFAULT_MAX_ENTRIES,
+    max_file_bytes: int = archive_tools.DEFAULT_MAX_FILE_BYTES,
+    max_total_bytes: int = archive_tools.DEFAULT_MAX_TOTAL_BYTES,
+    max_ratio: float = archive_tools.DEFAULT_MAX_RATIO,
+    max_path_depth: int = archive_tools.DEFAULT_MAX_PATH_DEPTH,
+    max_results: int = archive_tools.DEFAULT_MAX_RESULTS,
+    max_seconds: float = archive_tools.DEFAULT_MAX_SECONDS,
+    token: str = "", approval: str = "", extra_roots: str = "",
+) -> str:
+    """Prevalidate and list a bounded ZIP/TAR without extracting it."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"path": path, "max_entries": max_entries, "max_results": max_results}
+    try:
+        if extra_roots and not _file_bypass_allowed(token, approval):
+            raise PermissionError("extra_roots requires developer authorization or approval")
+        data = archive_tools.list_archive(
+            path, max_entries=max_entries, max_file_bytes=max_file_bytes,
+            max_total_bytes=max_total_bytes, max_ratio=max_ratio,
+            max_path_depth=max_path_depth, max_results=max_results,
+            max_seconds=max_seconds, extra_roots=extra_roots,
+        )
+    except Exception as exc:
+        _record_direct_tool("archive_list", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = archive_tools.format_result(data)
+    _record_direct_tool("archive_list", args, ok=data.get("valid", False), started=started,
+                        summary="%d entries" % data.get("entry_count", 0), output=output)
+    activity_tracker.record_event("archive_list", summary="%d entries" % data.get("entry_count", 0),
+                                  path=data.get("source", ""))
+    return output
+
+
+@mcp.tool()
+def archive_extract(
+    source: str, destination: str,
+    max_entries: int = archive_tools.DEFAULT_MAX_ENTRIES,
+    max_file_bytes: int = archive_tools.DEFAULT_MAX_FILE_BYTES,
+    max_total_bytes: int = archive_tools.DEFAULT_MAX_TOTAL_BYTES,
+    max_ratio: float = archive_tools.DEFAULT_MAX_RATIO,
+    max_path_depth: int = archive_tools.DEFAULT_MAX_PATH_DEPTH,
+    max_seconds: float = archive_tools.DEFAULT_MAX_SECONDS,
+    token: str = "", approval: str = "", extra_roots: str = "",
+) -> str:
+    """Transactionally extract a prevalidated ZIP/TAR to a new directory."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"source": source, "destination": destination, "max_entries": max_entries}
+    try:
+        if extra_roots and not _file_bypass_allowed(token, approval):
+            raise PermissionError("extra_roots requires developer authorization or approval")
+        data = archive_tools.extract_archive(
+            source, destination, max_entries=max_entries,
+            max_file_bytes=max_file_bytes, max_total_bytes=max_total_bytes,
+            max_ratio=max_ratio, max_path_depth=max_path_depth,
+            max_seconds=max_seconds, extra_roots=extra_roots,
+            developer_authorized=_file_developer_allowed(token),
+        )
+    except Exception as exc:
+        _record_direct_tool("archive_extract", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = archive_tools.format_result(data)
+    _record_direct_tool("archive_extract", args, ok=True, started=started,
+                        summary="%d entries, %d bytes" % (data["entries"], data["bytes"]), output=output)
+    activity_tracker.record_file_change(
+        "create_directory", data["destination"], bytes_written=data["bytes"],
+        summary="archive_extract: %d entries" % data["entries"],
+    )
+    return output
+
+
+@mcp.tool()
 def data_inspect(
     path: str,
     max_bytes: int = 256000,
@@ -7603,6 +8071,90 @@ def file_write(
 
 
 @mcp.tool()
+def file_copy(
+    source: str,
+    destination: str,
+    overwrite: bool = False,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Copy one bounded binary-safe file inside allowed roots."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "source": source, "destination": destination,
+        "overwrite": overwrite,
+    }
+    try:
+        if type(overwrite) is not bool:
+            raise ValueError("overwrite must be a boolean")
+        data = file_ops.copy_file(
+            source,
+            destination,
+            overwrite=overwrite,
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+            developer_authorized=_file_developer_allowed(token),
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "file_copy", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    _record_direct_tool(
+        "file_copy", args, ok=True, started=started,
+        summary="%s bytes" % data.get("bytes", 0),
+    )
+    _record_file_activity("copy", data)
+    return _format_file_result("file copy", data)
+
+
+@mcp.tool()
+def file_move(
+    source: str,
+    destination: str,
+    overwrite: bool = False,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Move one bounded binary-safe file inside allowed roots."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "source": source, "destination": destination,
+        "overwrite": overwrite,
+    }
+    try:
+        if type(overwrite) is not bool:
+            raise ValueError("overwrite must be a boolean")
+        data = file_ops.move_file(
+            source,
+            destination,
+            overwrite=overwrite,
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+            developer_authorized=_file_developer_allowed(token),
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "file_move", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    _record_direct_tool(
+        "file_move", args, ok=True, started=started,
+        summary="%s bytes" % data.get("bytes", 0),
+    )
+    activity_tracker.record_file_change(
+        "move_source", data.get("source", ""),
+        summary="moved to %s" % data.get("destination", ""),
+    )
+    _record_file_activity("move", data)
+    return _format_file_result("file move", data)
+
+
+@mcp.tool()
 def file_batch_write(
     operations_json: str,
     token: str = "",
@@ -7644,6 +8196,94 @@ def file_batch_write(
                 summary="parent created by file_batch_write",
             )
         _record_file_activity(result.get("action", "write"), result)
+    return output
+
+
+@mcp.tool()
+def json_patch(
+    path: str,
+    operations_json: str,
+    mode: str = "preview",
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Preview or atomically apply a bounded RFC 6902 subset to one JSON file."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "path": path, "mode": mode,
+        "input_chars": len(operations_json) if isinstance(operations_json, str) else 0,
+    }
+    try:
+        data = json_patch_tool.patch_json(
+            path, operations_json, mode=mode, extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except json_patch_tool.JsonPatchError as exc:
+        output = json.dumps(exc.report, indent=2, sort_keys=True, ensure_ascii=False)
+        _record_direct_tool(
+            "json_patch", args, ok=False, started=started,
+            summary=str(exc), output=output,
+        )
+        return "ERROR: %s" % output
+    except Exception as exc:
+        _record_direct_tool(
+            "json_patch", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False)
+    _record_direct_tool(
+        "json_patch", args, ok=True, started=started,
+        summary="%s %d operation(s)" % (data["mode"], data["operations"]),
+        output=output,
+    )
+    if data["applied"]:
+        _record_file_activity("json_patch", {
+            "action": "json_patch", "path": data["path"],
+            "bytes": data["bytes_after"], "lines_edited": data["operations"],
+        })
+    return output
+
+
+@mcp.tool()
+def text_patch(
+    root: str,
+    patch: str,
+    apply: bool = False,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Strictly preview or transactionally apply a bounded unified text diff."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "patch_bytes": len(patch.encode("utf-8")) if isinstance(patch, str) else 0,
+            "apply": bool(apply)}
+    try:
+        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
+        data = text_patch_ops.text_patch(
+            root, patch, apply=bool(apply), extra_roots=trusted_roots,
+            developer_authorized=_file_developer_allowed(token),
+        )
+    except text_patch_ops.TextPatchError as exc:
+        output = json.dumps(exc.report, indent=2, sort_keys=True)
+        _record_direct_tool("text_patch", args, ok=False, started=started, summary=str(exc), output=output)
+        return "ERROR: %s" % output
+    except Exception as exc:
+        _record_direct_tool("text_patch", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = json.dumps(data, indent=2, sort_keys=True)
+    _record_direct_tool("text_patch", args, ok=True, started=started,
+                        summary="%s %d file(s)" % ("applied" if apply else "previewed", len(data["files"])),
+                        output=output)
+    if apply:
+        for row in data["files"]:
+            activity_tracker.record_file_change(
+                "create" if row["action"] == "create" else "edit",
+                str(Path(data["root"]) / Path(*row["path"].split("/"))),
+                summary="text_patch %s" % row["action"],
+            )
     return output
 
 
@@ -7731,6 +8371,120 @@ def _format_run_result(title: str, data: dict) -> str:
 
 
 @mcp.tool()
+def repo_status(
+    root: str = ".",
+    timeout: int = 10,
+    max_output: int = 128000,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Inspect bounded read-only Git branch and worktree status at a repo root."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "timeout": timeout, "max_output": max_output}
+    try:
+        data = git_tools.repo_status(
+            root,
+            timeout=timeout,
+            max_output=max_output,
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "repo_status", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    lines = [
+        "repository status: %s" % data["root"],
+        "  branch: %s" % (
+            "(detached at %s)" % data["oid"][:12]
+            if data["detached"] else (data["branch"] or "(unborn)")
+        ),
+        "  upstream: %s | ahead: %d | behind: %d" % (
+            data["upstream"] or "(none)", data["ahead"], data["behind"],
+        ),
+        "  clean: %s | changes: %d | elapsed_ms: %d" % (
+            "unknown" if data["clean"] is None else str(data["clean"]).lower(),
+            data["change_count"], data["elapsed_ms"],
+        ),
+    ]
+    lines.extend("  %s" % entry for entry in data["entries"])
+    if data["truncated"]:
+        lines.append(
+            "  ... output truncated at %d bytes; status may be incomplete"
+            % data["output_limit"]
+        )
+    output = "\n".join(lines)
+    _record_direct_tool(
+        "repo_status", args, ok=True, started=started,
+        summary="%d change(s)" % data["change_count"], output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def repo_diff(
+    root: str = ".",
+    staged: bool = False,
+    path: str = "",
+    context: int = 3,
+    timeout: int = 10,
+    max_output: int = 128000,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Inspect a bounded read-only unstaged or staged Git diff at a repo root."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "root": root, "staged": staged, "path": path, "context": context,
+        "timeout": timeout, "max_output": max_output,
+    }
+    try:
+        data = git_tools.repo_diff(
+            root,
+            staged=staged is True,
+            path=path,
+            context=context,
+            timeout=timeout,
+            max_output=max_output,
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "repo_diff", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    scope = data["path"] or "(all tracked paths)"
+    lines = [
+        "repository diff: %s" % data["root"],
+        "  mode: %s | path: %s | context: %d | elapsed_ms: %d" % (
+            "staged" if data["staged"] else "unstaged",
+            scope, data["context"], data["elapsed_ms"],
+        ),
+    ]
+    if data["diff"]:
+        lines.append(data["diff"].rstrip())
+    else:
+        lines.append("  (no diff)")
+    if data["truncated"]:
+        lines.append(
+            "  ... output truncated at %d bytes" % data["output_limit"]
+        )
+    output = "\n".join(lines)
+    _record_direct_tool(
+        "repo_diff", args, ok=True, started=started,
+        summary="%s diff" % ("staged" if data["staged"] else "unstaged"),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
 def workspace_inventory(
     path: str = ".",
     max_entries: int = 20000,
@@ -7807,6 +8561,50 @@ def workspace_inventory(
         "workspace_inventory", args, ok=True, started=started,
         summary="%d files, %d bytes" % (data["files"], data["bytes"]),
         output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def dependency_inventory(
+    path: str = ".",
+    max_depth: int = 5,
+    max_files: int = 100,
+    max_total_bytes: int = 2000000,
+    max_results: int = 2000,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Parse bounded dependency manifests and lockfiles without execution/network."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "path": path, "max_depth": max_depth, "max_files": max_files,
+        "max_total_bytes": max_total_bytes, "max_results": max_results,
+    }
+    try:
+        data = dependency_inventory_tool.dependency_inventory(
+            path,
+            max_depth=max_depth,
+            max_files=max_files,
+            max_total_bytes=max_total_bytes,
+            max_results=max_results,
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "dependency_inventory", args, ok=False, started=started,
+            summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False)
+    _record_direct_tool(
+        "dependency_inventory", args, ok=True, started=started,
+        summary="%d dependencies from %d files" % (
+            len(data["items"]), data["files_read"],
+        ), output=output,
     )
     return output
 
@@ -9140,6 +9938,24 @@ def _loop_dispatch(action):
             approval=action.get("approval", ""),
             extra_roots=action.get("extra_roots", ""),
         ))
+    if action_type == "file_copy":
+        return _loop_text_result("file_copy", file_copy(
+            source=action.get("source", ""),
+            destination=action.get("destination", ""),
+            overwrite=action.get("overwrite", False),
+            token=action.get("token", ""),
+            approval=action.get("approval", ""),
+            extra_roots=action.get("extra_roots", ""),
+        ))
+    if action_type == "file_move":
+        return _loop_text_result("file_move", file_move(
+            source=action.get("source", ""),
+            destination=action.get("destination", ""),
+            overwrite=action.get("overwrite", False),
+            token=action.get("token", ""),
+            approval=action.get("approval", ""),
+            extra_roots=action.get("extra_roots", ""),
+        ))
     if action_type == "file_edit":
         return _loop_text_result("file_edit", file_edit(
             path=action.get("path", ""),
@@ -9242,7 +10058,7 @@ def _loop_dispatch(action):
         "ok": False,
         "type": action_type or "(unknown)",
         "summary": "unknown action type",
-        "output": "Valid action types: code, project, artifact_generate, artifact_ground, game_reference_suite, game_generate_and_test, game_generation_campaign, offload, sonder, master_orchestrate, master_status, master_capacity, master_cancel, master_retry, file_policy, workspace_inventory, directory_tree, text_search, script_search, program_search, workspace_run, script_run, image_inspect, file_find, file_read, file_write, file_edit, file_delete, status, diagnostics, context_health, learning_health, memory_quality_report, memory_quality_repair, memory_privacy_review, memory_privacy_repair, memory_embedding_backfill, memory_interaction_embedding_backfill, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, weather_lookup, approximate_location_lookup, unload, sleep.",
+        "output": "Valid action types: code, project, artifact_generate, artifact_ground, game_reference_suite, game_generate_and_test, game_generation_campaign, offload, sonder, master_orchestrate, master_status, master_capacity, master_cancel, master_retry, file_policy, workspace_inventory, directory_tree, text_search, script_search, program_search, workspace_run, script_run, image_inspect, file_find, file_read, file_write, file_edit, file_copy, file_move, file_delete, status, diagnostics, context_health, learning_health, memory_quality_report, memory_quality_repair, memory_privacy_review, memory_privacy_repair, memory_embedding_backfill, memory_interaction_embedding_backfill, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, weather_lookup, approximate_location_lookup, unload, sleep.",
     }
 
 
@@ -9448,6 +10264,35 @@ def web_fetch(url: str, max_chars: int = 8000) -> str:
         output=out,
     )
     return out
+
+
+@mcp.tool()
+def local_service_probe(
+    url: str,
+    method: str = "GET",
+    timeout: float = 2.0,
+) -> str:
+    """Probe an unauthenticated HTTP service that resolves only to loopback."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"url": url, "method": method, "timeout": timeout}
+    try:
+        result = local_probe.probe(url, method=method, timeout=timeout)
+    except Exception as exc:
+        _record_direct_tool(
+            "local_service_probe", args, ok=False, started=started,
+            summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = json.dumps(result, ensure_ascii=False, sort_keys=True)
+    _record_direct_tool(
+        "local_service_probe", args, ok=True, started=started,
+        summary="HTTP %s in %sms" % (
+            result.get("status", "?"), result.get("latency_ms", "?"),
+        ),
+        output=output,
+    )
+    return output
 
 
 @mcp.tool()
@@ -10315,6 +11160,139 @@ def evaluation_history_status(
 
 
 @mcp.tool()
+def repo_log(
+    path: str = ".",
+    revision: str = "HEAD",
+    file_path: str = "",
+    count: int = 20,
+    timeout: float = 5.0,
+    max_bytes: int = 256000,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Read bounded structured commit history from an exact repository root."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "path": path, "revision": revision, "file_path": file_path,
+        "count": count, "timeout": timeout, "max_bytes": max_bytes,
+    }
+    try:
+        data = git_history.repo_log(
+            path,
+            revision=revision,
+            file_path=file_path,
+            count=count,
+            timeout=timeout,
+            max_bytes=max_bytes,
+            extra_roots=(
+                extra_roots if _file_bypass_allowed(token, approval) else ""
+            ),
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "repo_log", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = json.dumps(data, indent=2, sort_keys=True)
+    _record_direct_tool(
+        "repo_log", args, ok=True, started=started,
+        summary="%d commit(s)" % data["count"], output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def repo_show(
+    path: str = ".",
+    revision: str = "HEAD",
+    file_path: str = "",
+    timeout: float = 5.0,
+    max_bytes: int = 256000,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Read one bounded commit patch for a required safe contained file."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "path": path, "revision": revision, "file_path": file_path,
+        "timeout": timeout, "max_bytes": max_bytes,
+    }
+    try:
+        data = git_history.repo_show(
+            path,
+            revision=revision,
+            file_path=file_path,
+            timeout=timeout,
+            max_bytes=max_bytes,
+            extra_roots=(
+                extra_roots if _file_bypass_allowed(token, approval) else ""
+            ),
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "repo_show", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = json.dumps(data, indent=2, sort_keys=True)
+    _record_direct_tool(
+        "repo_show", args, ok=True, started=started,
+        summary=data["commit"][:12], output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def repo_blame(
+    path: str = ".",
+    file_path: str = "",
+    revision: str = "HEAD",
+    start_line: int = 1,
+    end_line: int = 0,
+    timeout: float = 5.0,
+    max_bytes: int = 256000,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Read bounded structured blame records for one contained regular file."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "path": path, "file_path": file_path, "revision": revision,
+        "start_line": start_line, "end_line": end_line,
+        "timeout": timeout, "max_bytes": max_bytes,
+    }
+    try:
+        data = git_history.repo_blame(
+            path,
+            file_path=file_path,
+            revision=revision,
+            start_line=start_line,
+            end_line=end_line,
+            timeout=timeout,
+            max_bytes=max_bytes,
+            extra_roots=(
+                extra_roots if _file_bypass_allowed(token, approval) else ""
+            ),
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "repo_blame", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = json.dumps(data, indent=2, sort_keys=True)
+    _record_direct_tool(
+        "repo_blame", args, ok=True, started=started,
+        summary="%d line(s)" % data["count"], output=output,
+    )
+    return output
+
+
+@mcp.tool()
 def tool_manifest() -> str:
     """List the sonder-runtime MCP tools and what they are for."""
     tools = {
@@ -10328,12 +11306,21 @@ def tool_manifest() -> str:
         "sonder": "Ask through Sonder Runtime's local learning loop.",
         "offload": "Route a self-contained task to a configured local/cloud tier.",
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
-        "workspace_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace inventory, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
-        "file_policy/file_find/file_read/file_write/file_batch_write/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete, including bounded transactional multi-file create/overwrite.",
+        "local_service_probe": "Bounded unauthenticated GET/HEAD health probe for an explicit-port HTTP/HTTPS service resolving exclusively to loopback.",
+        "workspace_inventory/workspace_compare/dependency_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace/dependency inventory and metadata-only comparison, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
+        "repo_status/repo_diff": "Inspect bounded read-only Git branch, worktree, staged, and unstaged state without shell execution.",
+        "project_detect": "Inventory guarded build/test/runtime manifests and return deterministic evidence-backed language, framework, and cross-platform argv candidates without executing them.",
+        "file_policy/file_find/file_read/file_write/file_batch_write/json_patch/file_edit/file_copy/file_move/file_delete/text_patch": "Guarded filesystem find/read/create/edit/transactional batch write/atomic JSON patch/single-file transfer/delete and strict unified-diff preview/apply.",
         "repository_symbol_index": "Build a deterministic bounded read-only declaration index with Python AST and conservative JS/TS/C/C++/C#/Rust/Go extraction.",
+        "repo_log/repo_show/repo_blame": "Read bounded structured Git history, patches, and line attribution from an exact project repository without shell execution or upward discovery.",
+        "file_digest/directory_digest": "Stream guarded files into SHA-256 and build deterministic relative-path manifests with fail-closed complete or explicitly partial directory Merkle roots.",
+        "archive_list/archive_extract": "Prevalidate bounded ZIP/TAR manifests or transactionally extract them to a new non-overwriting workspace directory.",
+        "archive_create": "Transactionally create a bounded deterministic ZIP/TAR from explicit guarded project inputs without overwriting.",
+        "log_inspect": "Inspect one guarded text log with fixed level/timestamp/source extraction, failure clusters, repeats, and bounded context.",
         "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
         "environment_status": "Report the host OS, available shells (PowerShell/cmd/bash/wsl), and installed toolchains -- check before choosing a command shape or assuming a tool exists.",
         "data_inspect/data_query/sqlite_mutate": "Preview structured data, run bounded read-only queries, or explicitly preview/apply one guarded parameterized SQLite DML statement.",
+        "data_convert": "Preview or atomically create a non-overwriting JSON/JSONL/CSV/TSV conversion with explicit ordered fields.",
         "program_search/script_search/workspace_run/script_run/image_inspect": "Discover installed programs and workspace scripts, run bounded argv-only processes, and inspect image metadata.",
         "task_create/task_list/task_update/task_show/checklist_create/checklist_update/checklist_show": "Visible todo and ordered checklist state shared by console, app, agents, and MCP.",
         "workbench_agent": "Run an autonomous local tool loop with a guaranteed checklist, exact action transcript, validation gate, and end report.",
@@ -10385,17 +11372,35 @@ AGENT_TOOL_HELP = """Available tools:
 - approximate_location_lookup: {"consent": true} (only after the user explicitly enables or requests IP location)
 - file_policy: {}
 - workspace_inventory: {"path": ".", "max_entries": 20000, "timeout_seconds": 10, "top_n": 15}
+- workspace_compare: {"left": "path/to/left", "right": "path/to/right", "max_entries": 2000, "max_file_bytes": 64000000, "max_total_bytes": 256000000, "max_details": 1000, "max_output_bytes": 256000, "timeout": 5}
+- repo_status: {"root": ".", "timeout": 10, "max_output": 128000}
+- repo_diff: {"root": ".", "staged": false, "path": "", "context": 3, "timeout": 10, "max_output": 128000}
+- project_detect: {"path": ".", "max_depth": 8, "max_files": 200, "max_total_bytes": 2000000, "max_file_bytes": 256000, "max_results": 500}
+- dependency_inventory: {"path": ".", "max_depth": 5, "max_files": 100, "max_total_bytes": 2000000, "max_results": 2000}
 - directory_tree: {"path": ".", "depth": 2, "max_entries": 200}
 - directory_create: {"path": "output/reports", "parents": true}
 - file_find: {"query": "*.py", "root": ".", "max_results": 50}
 - repository_symbol_index: {"path": ".", "glob": "*", "language": "auto|python|javascript|typescript|c|cpp|csharp|rust|go", "max_files": 200, "max_total_bytes": 2000000, "max_file_bytes": 256000, "max_symbols": 2000}
 - file_read: {"path": "README.md"}
+- file_digest: {"path": "artifact.bin", "max_bytes": 32000000}
+- directory_digest: {"path": ".", "max_depth": 12, "max_files": 2000, "max_total_bytes": 32000000, "max_file_bytes": 32000000, "max_results": 2500}
 - file_read_range: {"path": "server.py", "start_line": 1, "end_line": 200}
 - context_pack: {"paths_json": ["README.md", "src/main.py"], "max_files": 12, "max_total_bytes": 256000, "max_bytes_per_file": 64000}
+- repo_log: {"path": ".", "revision": "HEAD", "file_path": "", "count": 20, "timeout": 5, "max_bytes": 256000}
+- repo_show: {"path": ".", "revision": "HEAD", "file_path": "<required contained relative file>", "timeout": 5, "max_bytes": 256000}
+- repo_blame: {"path": ".", "file_path": "<contained relative file>", "revision": "HEAD", "start_line": 1, "end_line": 100, "timeout": 5, "max_bytes": 256000}
+- archive_list: {"path": "bundle.zip", "max_entries": 2000, "max_total_bytes": 256000000, "max_ratio": 100, "max_results": 2500}
+- archive_extract: {"source": "bundle.zip", "destination": "unpacked", "max_entries": 2000, "max_total_bytes": 256000000, "max_ratio": 100} -- creates a new directory; never overwrites
+- archive_create: {"root": ".", "inputs_json": ["src", "README.md"], "destination": "release.zip", "archive_format": "zip|tar", "deterministic": true} -- destination must be new and outside input directories
+- log_inspect: {"path": "logs/app.log", "tail_lines": 0, "context_lines": 2, "max_file_bytes": 64000000, "max_scan_bytes": 4000000, "max_lines": 10000, "max_line_bytes": 4096, "max_results": 100, "max_output_bytes": 256000, "timeout": 5}
 - text_search: {"query": "TODO", "root": ".", "glob": "*.py", "regex": false, "max_results": 100}
 - file_write: {"path": "notes.txt", "content": "...", "mode": "create|overwrite|append"}
 - file_batch_write: {"operations_json": [{"path": "a.txt", "content": "...", "mode": "create|overwrite"}]}
+- json_patch: {"path": "config.json", "operations_json": [{"op": "test", "path": "/version", "value": 1}, {"op": "replace", "path": "/version", "value": 2}], "mode": "preview|apply"}
+- text_patch: {"root": ".", "patch": "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n", "apply": false}
 - file_edit: {"path": "notes.txt", "old": "before", "new": "after", "count": 1}
+- file_copy: {"source": "assets/input.bin", "destination": "build/input.bin", "overwrite": false}
+- file_move: {"source": "build/draft.bin", "destination": "dist/final.bin", "overwrite": false}
 - file_delete: {"path": "notes.txt", "dry_run": true}
 - scaffold_project: {"kind": "cpp-msvc|cpp-cmake|csharp|rust|python|node|typescript|go|java-maven", "name": "MyApp", "root": "MyApp"} -- writes the full skeleton (.sln/.vcxproj/Cargo.toml/...); use this instead of hand-writing build/solution files
 - environment_status: {} -- host OS, shells, installed toolchains; check before choosing command shapes
@@ -10406,6 +11411,7 @@ AGENT_TOOL_HELP = """Available tools:
 - image_inspect: {"path": "artifacts/generated/demo/icon.png"}
 - data_inspect: {"path": "data/records.jsonl", "max_bytes": 256000}
 - data_query: {"path": "data/records.jsonl", "sql": "", "projection_json": ["id", "/nested/name"], "filters_json": {"status": "active"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
+- data_convert: {"input_path": "data/records.jsonl", "output_path": "data/records.csv", "fields_json": ["id", "name"], "output_format": "csv", "apply": false, "max_input_bytes": 16000000, "max_output_bytes": 16000000, "max_rows": 10000, "max_columns": 100, "max_fields": 50, "max_field_bytes": 64000, "max_depth": 16, "preview_rows": 5, "timeout": 10}
 - sqlite_mutate: {"path": "data/app.db", "sql": "UPDATE records SET status = ? WHERE id = ?", "parameters_json": ["done", 42], "mode": "preview|apply", "max_rows": 1000, "timeout": 2, "max_db_bytes": 67108864}
 - task_create: {"title": "...", "detail": "...", "priority": 2, "project": "...", "owner": "..."}
 - task_list: {"status": "pending|in_progress|blocked|done|canceled", "project": "", "include_done": false, "limit": 50}
@@ -10444,7 +11450,6 @@ AGENT_TOOL_HELP = """Available tools:
 - self_heal_repair: {"apply": false}
 - status: {}
 - system_profile_text: {}
-- environment_status: {}
 - emotion_vector_status: {}
 - update_emotion_vectors: {"vectors_json": {"warmth": 0.5, "brevity": 0.2}, "mode": "merge|replace|clear|reset"}
 - tune_emotion_vectors: {"feedback_text": "be warmer but more concise", "step": 0.1}
@@ -10461,9 +11466,13 @@ or
 
 
 REPOSITORY_READ_ONLY_TOOLS = frozenset({
-    "file_policy", "workspace_inventory", "directory_tree", "file_find",
-    "repository_symbol_index", "file_read", "file_read_range", "context_pack",
-    "data_inspect", "data_query",
+    "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "file_find",
+    "dependency_inventory",
+    "repository_symbol_index", "log_inspect", "file_read", "file_digest", "directory_digest",
+    "file_read_range", "context_pack",
+    "repo_status", "repo_diff",
+    "repo_log", "repo_show", "repo_blame",
+    "project_detect", "data_inspect", "data_query", "archive_list",
     "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
     "diagnostics", "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
@@ -10483,15 +11492,28 @@ symbol, filename, or glob. For a code/symbol audit, start with text_search for
 an exact symbol named by the task; do not default to Python or server.py.
 - file_policy: {}
 - workspace_inventory: {"path": ".", "max_entries": 20000, "timeout_seconds": 10, "top_n": 15}
+- workspace_compare: {"left": "<first task-relevant file or directory>", "right": "<second task-relevant file or directory>", "max_entries": 2000, "max_file_bytes": 64000000, "max_total_bytes": 256000000, "max_details": 1000, "max_output_bytes": 256000, "timeout": 5}
+- repo_status: {"root": ".", "timeout": 10, "max_output": 128000}
+- repo_diff: {"root": ".", "staged": false, "path": "", "context": 3, "timeout": 10, "max_output": 128000}
+- project_detect: {"path": ".", "max_depth": 8, "max_files": 200, "max_total_bytes": 2000000, "max_file_bytes": 256000, "max_results": 500}
+- dependency_inventory: {"path": ".", "max_depth": 5, "max_files": 100, "max_total_bytes": 2000000, "max_results": 2000}
 - directory_tree: {"path": ".", "depth": 2, "max_entries": 200}
 - file_find: {"query": "<task-relevant filename or glob>", "root": ".", "max_results": 50}
 - repository_symbol_index: {"path": ".", "glob": "<task-relevant source glob>", "language": "auto|python|javascript|typescript|c|cpp|csharp|rust|go", "max_files": 200, "max_total_bytes": 2000000, "max_file_bytes": 256000, "max_symbols": 2000}
 - file_read: {"path": "<task-relevant relative path>", "max_bytes": 256000}
+- file_digest: {"path": "<task-relevant relative file>", "max_bytes": 32000000}
+- directory_digest: {"path": ".", "max_depth": 12, "max_files": 2000, "max_total_bytes": 32000000, "max_file_bytes": 32000000, "max_results": 2500}
 - file_read_range: {"path": "<task-relevant relative path>", "start_line": 1, "end_line": 200}
 - context_pack: {"paths_json": ["<task-relevant relative path>", "<another task-relevant relative path>"], "max_files": 12, "max_total_bytes": 256000, "max_bytes_per_file": 64000}
+- repo_log: {"path": ".", "revision": "HEAD", "file_path": "<optional contained relative path>", "count": 20, "timeout": 5, "max_bytes": 256000}
+- repo_show: {"path": ".", "revision": "HEAD", "file_path": "<required contained relative file>", "timeout": 5, "max_bytes": 256000}
+- repo_blame: {"path": ".", "file_path": "<required contained relative file>", "revision": "HEAD", "start_line": 1, "end_line": 100, "timeout": 5, "max_bytes": 256000}
+- archive_list: {"path": "<task-relevant ZIP or TAR>", "max_entries": 2000, "max_total_bytes": 256000000, "max_ratio": 100, "max_results": 2500}
+- log_inspect: {"path": "<task-relevant log file>", "tail_lines": 0, "context_lines": 2, "max_file_bytes": 64000000, "max_scan_bytes": 4000000, "max_lines": 10000, "max_line_bytes": 4096, "max_results": 100, "max_output_bytes": 256000, "timeout": 5}
 - text_search: {"query": "<exact task symbol or anchor>", "root": ".", "glob": "<task-relevant glob>", "max_results": 100}
 - script_search: {"query": "<task-relevant script name>", "root": ".", "max_results": 100}
 - program_search: {"query": "<required program name>", "max_results": 50}
+- environment_status: {"refresh": false}
 - image_inspect: {"path": "<task-relevant image path>"}
 - data_inspect: {"path": "<task-relevant data file>", "max_bytes": 256000}
 - data_query: {"path": "<task-relevant SQLite, JSON, JSONL, CSV, or TSV file>", "sql": "<SQLite SELECT/CTE only, otherwise empty>", "projection_json": ["<field or JSON pointer>"], "filters_json": {"<field or JSON pointer>": "<exact value>"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
@@ -10501,7 +11523,6 @@ an exact symbol named by the task; do not default to Python or server.py.
 - weather_lookup: {"location": "Chicago, IL|60601", "forecast_days": 3, "units": "auto|metric|imperial"}
 - command_registry_list: {"filter_text": "filesystem|context|status"}
 - activity_status: {}
-- environment_status: {"refresh": false}
 - permission_policy: {"tool_name": "file_read"}
 - context_compaction_plan: {"session": "", "project": ""}
 - diagnostics: {}
@@ -10517,9 +11538,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - master_capacity: {"requested_agents": 0}
 - self_heal_check: {}
 - status: {}
-- environment_status: {}
 - system_profile_text: {}
-- environment_status: {}
 - emotion_vector_status: {}
 - preferences_status: {"include_disabled": false, "limit": 20}
 - tool_manifest: {}
@@ -10556,6 +11575,15 @@ def _repository_scope_path_error(tool_name, args, project_root):
             targets = [("script path", args.get("path") or "")]
             if str(args.get("cwd") or "").strip():
                 targets.append(("working directory", args.get("cwd")))
+        elif tool_name == "data_convert":
+            targets = [
+                ("input path", args.get("input_path") or ""),
+                ("output path", args.get("output_path") or ""),
+            ]
+        elif tool_name == "repo_diff":
+            targets = [("repository root", args.get("root") or ".")]
+            if str(args.get("path") or "").strip():
+                targets.append(("diff path", args.get("path")))
         elif tool_name == "file_batch_write":
             operations = _batch_agent_operations(args)
             if operations is None or not operations:
@@ -10572,6 +11600,57 @@ def _repository_scope_path_error(tool_name, args, project_root):
                     args.get("paths_json", args.get("paths", []))
                 )
             ]
+        elif tool_name == "archive_create":
+            archive_root = Path(str(args.get("root") or ".")).expanduser()
+            if not archive_root.is_absolute():
+                archive_root = root / archive_root
+            targets = [("archive root", archive_root)]
+            try:
+                archive_inputs = archive_create_tool._parse_inputs(
+                    args.get("inputs_json", args.get("inputs", []))
+                )
+            except ValueError as exc:
+                return "ERROR: agent project archive inputs rejected: %s" % exc
+            for raw_input in archive_inputs:
+                candidate = Path(raw_input).expanduser()
+                targets.append((
+                    "archive input",
+                    candidate if candidate.is_absolute() else archive_root / candidate,
+                ))
+            destination_text = str(args.get("destination") or "").strip()
+            if not destination_text:
+                targets.append(("archive destination", ""))
+            else:
+                raw_destination = Path(destination_text).expanduser()
+                targets.append((
+                    "archive destination",
+                    raw_destination if raw_destination.is_absolute()
+                    else archive_root / raw_destination,
+                ))
+        elif tool_name in {"file_copy", "file_move"}:
+            targets = [
+                ("source", args.get("source") or ""),
+                ("destination", args.get("destination") or ""),
+            ]
+        elif tool_name == "archive_extract":
+            targets = [
+                ("archive source", args.get("source") or ""),
+                ("archive destination", args.get("destination") or ""),
+            ]
+        elif tool_name == "text_patch":
+            targets = [("root", args.get("root") or ".")]
+            try:
+                targets.extend(
+                    ("patch path", item["path"])
+                    for item in text_patch_ops._parse(args.get("patch", ""))
+                )
+            except (TypeError, ValueError, PermissionError) as exc:
+                return "ERROR: agent project path rejected: invalid patch: %s" % exc
+        elif tool_name == "workspace_compare":
+            targets = [
+                ("left path", args.get("left") or ""),
+                ("right path", args.get("right") or ""),
+            ]
         else:
             key = _project_scoped_path_key(tool_name)
             targets = [("path", args.get(key) or ".")]
@@ -10582,7 +11661,12 @@ def _repository_scope_path_error(tool_name, args, project_root):
             target = Path(raw).expanduser()
             if not target.is_absolute():
                 target = root / target
-            target = target.resolve(strict=False)
+            if label == "diff path":
+                # Preserve a tracked symlink as the lexical Git pathspec while
+                # still resolving and confining every parent component.
+                target = target.parent.resolve(strict=False) / target.name
+            else:
+                target = target.resolve(strict=False)
             try:
                 target.relative_to(root)
             except ValueError:
@@ -10747,13 +11831,27 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
     if scope_error:
         return scope_error
     try:
-        if tool_name in {"file_read", "file_read_range", "image_inspect", "data_inspect", "data_query"}:
+        if tool_name in {"file_read", "file_digest", "file_read_range", "image_inspect", "data_inspect", "data_query", "log_inspect"}:
             file_ops.resolve_repository_read_path(
                 args.get("path", ""),
                 allow_workspace_root=False,
                 reject_sensitive=True,
                 extra_roots=trusted_extra_roots,
             )
+        elif tool_name in {"repo_status", "repo_diff"}:
+            root_value = args.get("root", "") or "."
+            resolved_root = file_ops.resolve_repository_read_path(
+                root_value,
+                allow_workspace_root=True,
+                reject_sensitive=True,
+                extra_roots=trusted_extra_roots,
+            )
+            diff_path = str(args.get("path") or "").strip()
+            if tool_name == "repo_diff" and diff_path:
+                git_tools._resolve_diff_path(
+                    resolved_root, diff_path,
+                    extra_roots=trusted_extra_roots,
+                )
         elif tool_name == "context_pack":
             for path in _context_pack_paths(args.get("paths_json", args.get("paths", []))):
                 file_ops.resolve_repository_read_path(
@@ -10762,14 +11860,39 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
                     reject_sensitive=True,
                     extra_roots=trusted_extra_roots,
                 )
-        elif tool_name in {"workspace_inventory", "directory_tree", "file_find", "repository_symbol_index", "text_search", "script_search"}:
+        elif tool_name in {"repo_log", "repo_show", "repo_blame"}:
+            root = git_history.resolve_repo_root(
+                args.get("path", "."), extra_roots=trusted_extra_roots,
+            )
+            git_history.validate_revision(args.get("revision", "HEAD"))
+            if tool_name == "repo_blame":
+                git_history.resolve_blame_target(root, args.get("file_path", ""))
+                git_history.normalize_blame_range(
+                    args.get("start_line", 1), args.get("end_line", 0),
+                )
+            elif tool_name == "repo_show":
+                git_history.resolve_show_target(root, args.get("file_path", ""))
+            else:
+                git_history.resolve_path_filter(root, args.get("file_path", ""))
+        elif tool_name == "archive_list":
+            file_ops.resolve_repository_read_path(
+                args.get("path", ""), allow_workspace_root=False,
+                reject_sensitive=True, extra_roots=trusted_extra_roots,
+            )
+        elif tool_name == "workspace_compare":
+            for path in (args.get("left", ""), args.get("right", "")):
+                file_ops.resolve_repository_read_path(
+                    path, allow_workspace_root=True, reject_sensitive=True,
+                    extra_roots=trusted_extra_roots,
+                )
+        elif tool_name in {"workspace_inventory", "dependency_inventory", "project_detect", "directory_digest", "directory_tree", "file_find", "repository_symbol_index", "text_search", "script_search"}:
             file_ops.resolve_repository_read_path(
                 args.get("path", "") or args.get("root", "") or ".",
                 allow_workspace_root=True,
                 reject_sensitive=True,
                 extra_roots=trusted_extra_roots,
             )
-    except (PermissionError, ValueError) as exc:
+    except (OSError, PermissionError, RuntimeError, ValueError) as exc:
         return "ERROR: repository read-only path rejected: %s" % exc
     return ""
 
@@ -10850,7 +11973,7 @@ _AGENT_NEGATIVE_CLAIM_RE = re.compile(
     re.IGNORECASE,
 )
 _AGENT_CLAIM_REVIEW_TOOLS = frozenset({
-    "text_search", "file_read_range", "file_find", "repository_symbol_index",
+    "text_search", "file_read_range", "file_find", "repository_symbol_index", "project_detect",
 })
 _AGENT_QUOTED_ANCHOR_RE = re.compile(
     r"`([^`\r\n]{2,120})`|\"([^\"\r\n]{2,120})\"|\'([^\'\r\n]{2,120})\'"
@@ -11330,6 +12453,27 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "repo_status":
+        return repo_status(
+            root=args.get("root", "."),
+            timeout=args.get("timeout", 10),
+            max_output=args.get("max_output", 128000),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "repo_diff":
+        return repo_diff(
+            root=args.get("root", "."),
+            staged=args.get("staged") is True,
+            path=args.get("path", ""),
+            context=args.get("context", 3),
+            timeout=args.get("timeout", 10),
+            max_output=args.get("max_output", 128000),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "workspace_inventory":
         return workspace_inventory(
             path=args.get("path", args.get("root", ".")),
@@ -11338,6 +12482,29 @@ def _agent_dispatch(
             top_n=args.get("top_n", 15),
             include_hidden=args.get("include_hidden", False),
             include_ignored=args.get("include_ignored", False),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "project_detect":
+        return project_detect(
+            path=args.get("path", args.get("root", ".")),
+            max_depth=args.get("max_depth", 8),
+            max_files=args.get("max_files", 200),
+            max_total_bytes=args.get("max_total_bytes", 2_000_000),
+            max_file_bytes=args.get("max_file_bytes", 256_000),
+            max_results=args.get("max_results", 500),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "dependency_inventory":
+        return dependency_inventory(
+            path=args.get("path", args.get("root", ".")),
+            max_depth=args.get("max_depth", 5),
+            max_files=args.get("max_files", 100),
+            max_total_bytes=args.get("max_total_bytes", 2000000),
+            max_results=args.get("max_results", 2000),
             token=args.get("token", ""),
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
@@ -11401,6 +12568,14 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "data_inspect":
+        return data_inspect(
+            path=args.get("path", ""),
+            max_bytes=args.get("max_bytes", 256000),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "data_query":
         return data_query(
             path=args.get("path", ""),
@@ -11424,6 +12599,29 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "data_convert":
+        fields = args.get("fields_json", args.get("fields", []))
+        if not isinstance(fields, str):
+            fields = json.dumps(fields, ensure_ascii=False)
+        return data_convert(
+            input_path=args.get("input_path", ""),
+            output_path=args.get("output_path", ""),
+            fields_json=fields,
+            output_format=args.get("output_format", ""),
+            apply=args.get("apply", False),
+            max_input_bytes=args.get("max_input_bytes", 16_000_000),
+            max_output_bytes=args.get("max_output_bytes", 16_000_000),
+            max_rows=args.get("max_rows", 10_000),
+            max_columns=args.get("max_columns", 100),
+            max_fields=args.get("max_fields", 50),
+            max_field_bytes=args.get("max_field_bytes", 64_000),
+            max_depth=args.get("max_depth", 16),
+            preview_rows=args.get("preview_rows", 5),
+            timeout=args.get("timeout", 10.0),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "sqlite_mutate":
         parameters = args.get("parameters_json", args.get("parameters", []))
         if not isinstance(parameters, str):
@@ -11433,6 +12631,115 @@ def _agent_dispatch(
             parameters_json=parameters, mode=args.get("mode", "preview"),
             max_rows=args.get("max_rows", 1000), timeout=args.get("timeout", 2.0),
             max_db_bytes=args.get("max_db_bytes", 67108864),
+            token=args.get("token", ""), approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "log_inspect":
+        return log_inspect(
+            path=args.get("path", ""),
+            tail_lines=args.get("tail_lines", 0),
+            context_lines=args.get("context_lines", 2),
+            max_file_bytes=args.get("max_file_bytes", 64000000),
+            max_scan_bytes=args.get("max_scan_bytes", 4000000),
+            max_lines=args.get("max_lines", 10000),
+            max_line_bytes=args.get("max_line_bytes", 4096),
+            max_results=args.get("max_results", 100),
+            max_output_bytes=args.get("max_output_bytes", 256000),
+            timeout=args.get("timeout", 5.0),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "workspace_compare":
+        return workspace_compare(
+            left=args.get("left", ""),
+            right=args.get("right", ""),
+            max_entries=args.get("max_entries", 2000),
+            max_file_bytes=args.get("max_file_bytes", 64000000),
+            max_total_bytes=args.get("max_total_bytes", 256000000),
+            max_details=args.get("max_details", 1000),
+            max_output_bytes=args.get("max_output_bytes", 256000),
+            timeout=args.get("timeout", 5.0),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "repo_log":
+        return repo_log(
+            path=args.get("path", "."),
+            revision=args.get("revision", "HEAD"),
+            file_path=args.get("file_path", ""),
+            count=args.get("count", 20),
+            timeout=args.get("timeout", 5.0),
+            max_bytes=args.get("max_bytes", 256000),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "repo_show":
+        return repo_show(
+            path=args.get("path", "."),
+            revision=args.get("revision", "HEAD"),
+            file_path=args.get("file_path", ""),
+            timeout=args.get("timeout", 5.0),
+            max_bytes=args.get("max_bytes", 256000),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "repo_blame":
+        return repo_blame(
+            path=args.get("path", "."),
+            file_path=args.get("file_path", ""),
+            revision=args.get("revision", "HEAD"),
+            start_line=args.get("start_line", 1),
+            end_line=args.get("end_line", 0),
+            timeout=args.get("timeout", 5.0),
+            max_bytes=args.get("max_bytes", 256000),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "archive_list":
+        return archive_list(
+            path=args.get("path", ""),
+            max_entries=args.get("max_entries", archive_tools.DEFAULT_MAX_ENTRIES),
+            max_file_bytes=args.get("max_file_bytes", archive_tools.DEFAULT_MAX_FILE_BYTES),
+            max_total_bytes=args.get("max_total_bytes", archive_tools.DEFAULT_MAX_TOTAL_BYTES),
+            max_ratio=args.get("max_ratio", archive_tools.DEFAULT_MAX_RATIO),
+            max_path_depth=args.get("max_path_depth", archive_tools.DEFAULT_MAX_PATH_DEPTH),
+            max_results=args.get("max_results", archive_tools.DEFAULT_MAX_RESULTS),
+            max_seconds=args.get("max_seconds", archive_tools.DEFAULT_MAX_SECONDS),
+            token=args.get("token", ""), approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "archive_extract":
+        return archive_extract(
+            source=args.get("source", ""), destination=args.get("destination", ""),
+            max_entries=args.get("max_entries", archive_tools.DEFAULT_MAX_ENTRIES),
+            max_file_bytes=args.get("max_file_bytes", archive_tools.DEFAULT_MAX_FILE_BYTES),
+            max_total_bytes=args.get("max_total_bytes", archive_tools.DEFAULT_MAX_TOTAL_BYTES),
+            max_ratio=args.get("max_ratio", archive_tools.DEFAULT_MAX_RATIO),
+            max_path_depth=args.get("max_path_depth", archive_tools.DEFAULT_MAX_PATH_DEPTH),
+            max_seconds=args.get("max_seconds", archive_tools.DEFAULT_MAX_SECONDS),
+            token=args.get("token", ""), approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "archive_create":
+        inputs = args.get("inputs_json", args.get("inputs", []))
+        if not isinstance(inputs, str):
+            inputs = json.dumps(inputs, ensure_ascii=False)
+        return archive_create(
+            root=args.get("root", "."), inputs_json=inputs,
+            destination=args.get("destination", ""),
+            archive_format=args.get("archive_format", args.get("format", "zip")),
+            deterministic=args.get("deterministic", True),
+            max_files=args.get("max_files", archive_create_tool.DEFAULT_MAX_FILES),
+            max_entries=args.get("max_entries", archive_create_tool.DEFAULT_MAX_ENTRIES),
+            max_file_bytes=args.get("max_file_bytes", archive_create_tool.DEFAULT_MAX_FILE_BYTES),
+            max_total_bytes=args.get("max_total_bytes", archive_create_tool.DEFAULT_MAX_TOTAL_BYTES),
+            max_depth=args.get("max_depth", archive_create_tool.DEFAULT_MAX_DEPTH),
+            max_results=args.get("max_results", archive_create_tool.DEFAULT_MAX_RESULTS),
             token=args.get("token", ""), approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
@@ -11460,11 +12767,49 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "file_digest":
+        return file_digest(
+            path=args.get("path", ""),
+            max_bytes=args.get("max_bytes", 32_000_000),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "directory_digest":
+        return directory_digest(
+            path=args.get("path", args.get("root", ".")),
+            max_depth=args.get("max_depth", 12),
+            max_files=args.get("max_files", 2_000),
+            max_total_bytes=args.get("max_total_bytes", 32_000_000),
+            max_file_bytes=args.get("max_file_bytes", 32_000_000),
+            max_results=args.get("max_results", 2_500),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "file_write":
         return file_write(
             path=args.get("path", ""),
             content=args.get("content", ""),
             mode=args.get("mode", "create"),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "file_copy":
+        return file_copy(
+            source=args.get("source", ""),
+            destination=args.get("destination", ""),
+            overwrite=args.get("overwrite", False),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "file_move":
+        return file_move(
+            source=args.get("source", ""),
+            destination=args.get("destination", ""),
+            overwrite=args.get("overwrite", False),
             token=args.get("token", ""),
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
@@ -11476,6 +12821,25 @@ def _agent_dispatch(
         return file_batch_write(
             operations_json=operations,
             token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "json_patch":
+        operations = args.get("operations_json", args.get("operations", []))
+        if not isinstance(operations, str):
+            operations = json.dumps(operations, ensure_ascii=False)
+        return json_patch(
+            path=args.get("path", ""),
+            operations_json=operations,
+            mode=args.get("mode", "preview"),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "text_patch":
+        return text_patch(
+            root=args.get("root", "."), patch=args.get("patch", ""),
+            apply=args.get("apply") is True, token=args.get("token", ""),
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
@@ -11759,6 +13123,12 @@ def _agent_activity_command(tool_name, args):
             [item.get("path", "") for item in operations if isinstance(item, dict)],
             ensure_ascii=False,
         )
+    if tool_name == "workspace_compare":
+        return "%s | %s" % (args.get("left", ""), args.get("right", ""))
+    if tool_name == "data_convert":
+        return "%s -> %s" % (
+            args.get("input_path", ""), args.get("output_path", ""),
+        )
     if tool_name == "workspace_run":
         return "%s %s" % (
             args.get("program", ""),
@@ -11769,6 +13139,14 @@ def _agent_activity_command(tool_name, args):
             args.get("path", ""),
             json.dumps(args.get("args_json", args.get("args", [])), ensure_ascii=False),
         )
+    if tool_name in {"file_copy", "file_move"}:
+        return "%s -> %s" % (
+            args.get("source", ""), args.get("destination", ""),
+        )
+    if tool_name == "local_service_probe":
+        return "%s %s" % (
+            str(args.get("method", "GET")).upper(), args.get("url", ""),
+        )
     path = args.get("path") or args.get("root") or ""
     if path:
         return str(path)
@@ -11778,11 +13156,13 @@ def _agent_activity_command(tool_name, args):
 
 
 _PROJECT_SCOPED_PATH_TOOLS = frozenset({
-    "file_read", "file_read_range", "context_pack", "data_query", "sqlite_mutate", "image_inspect",
-    "file_write", "file_batch_write", "file_edit",
-    "file_delete", "directory_create", "workspace_inventory", "directory_tree",
+    "file_read", "file_digest", "directory_digest", "file_read_range", "context_pack", "workspace_compare",
+    "repo_log", "repo_show", "repo_blame",
+    "data_inspect", "data_query", "data_convert", "sqlite_mutate", "image_inspect", "log_inspect", "file_write", "file_batch_write", "json_patch", "file_edit", "text_patch",
+    "archive_list", "archive_extract",
+    "file_delete", "directory_create", "workspace_inventory", "dependency_inventory", "directory_tree",
     "file_find", "repository_symbol_index", "text_search", "script_search", "artifact_verify",
-    "artifact_ground", "scaffold_project",
+    "artifact_ground", "scaffold_project", "archive_create", "repo_status", "repo_diff", "project_detect", "file_copy", "file_move",
 })
 _PROJECT_SCOPED_EXECUTION_TOOLS = frozenset({"workspace_run", "script_run"})
 _AGENT_TOOL_ALIASES = {
@@ -11800,7 +13180,8 @@ _PROJECT_BOUND_AGENT_TOOLS = (
     _PROJECT_SCOPED_PATH_TOOLS
     | _PROJECT_SCOPED_EXECUTION_TOOLS
     | frozenset({
-        "ground_artifact", "program_search", "web_search", "web_fetch",
+        "ground_artifact", "program_search",
+        "web_search", "web_fetch",
         "weather_lookup", "approximate_location_lookup", "memory_search",
         "file_policy", "task_create", "task_list", "task_update", "task_show",
         "checklist_create", "checklist_update", "checklist_show",
@@ -11826,7 +13207,12 @@ def _canonical_agent_tool_name(tool_name):
 
 
 def _project_scoped_path_key(tool_name):
-    if tool_name in {"file_find", "text_search", "script_search", "scaffold_project"}:
+    if tool_name == "archive_extract":
+        return "destination"
+    if tool_name in {
+        "file_find", "text_search", "script_search", "scaffold_project",
+        "repo_status", "repo_diff", "text_patch", "archive_create",
+    }:
         return "root"
     return "path"
 
@@ -11866,6 +13252,20 @@ def _project_scope_args(tool_name, args, project):
     # the host-resolved path boundary; child processes remain user-level code,
     # not an operating-system sandbox.
     scoped["extra_roots"] = project
+    if tool_name == "text_patch":
+        # This sentinel is injected only after the host binds the call to its
+        # selected project. A model-supplied approval never reaches this path.
+        scoped["approval"] = _TRUSTED_REPOSITORY_APPROVAL
+
+    if tool_name == "data_convert":
+        for key in ("input_path", "output_path"):
+            raw_path = str(scoped.get(key) or "").strip()
+            is_abs = os.path.isabs(raw_path) or bool(
+                re.match(r"^[A-Za-z]:[\\/]", raw_path)
+            )
+            if raw_path and not is_abs:
+                scoped[key] = os.path.normpath(os.path.join(project, raw_path))
+        return scoped
 
     if tool_name == "file_batch_write":
         operations = _batch_agent_operations(scoped)
@@ -11906,6 +13306,26 @@ def _project_scope_args(tool_name, args, project):
             rebased.append(raw_path if is_abs else os.path.join(project, raw_path))
         scoped["paths_json"] = rebased
         scoped.pop("paths", None)
+        return scoped
+
+    if tool_name in {"file_copy", "file_move", "archive_extract"}:
+        for key in ("source", "destination"):
+            raw_path = str(scoped.get(key) or "").strip()
+            is_abs = os.path.isabs(raw_path) or bool(
+                re.match(r"^[A-Za-z]:[\\/]", raw_path)
+            )
+            if raw_path and not is_abs:
+                scoped[key] = os.path.join(project, raw_path)
+        return scoped
+
+    if tool_name == "workspace_compare":
+        for key in ("left", "right"):
+            raw_path = str(scoped.get(key) or "").strip()
+            is_abs = os.path.isabs(raw_path) or bool(
+                re.match(r"^[A-Za-z]:[\\/]", raw_path)
+            )
+            if raw_path and not is_abs:
+                scoped[key] = os.path.join(project, raw_path)
         return scoped
 
     if tool_name == "workspace_run":
@@ -11950,7 +13370,7 @@ def _agent_dispatch_observed(
     observation = ""
     args = _project_scope_args(tool_name, args, project)
     dispatch_args = args
-    if project and tool_name == "sqlite_mutate":
+    if project and tool_name in {"archive_create", "sqlite_mutate"}:
         # Project scope is selected by the host. Grant only that exact root
         # through the unforgeable in-process approval sentinel, while keeping
         # credentials out of the activity record and model-visible arguments.
@@ -11983,8 +13403,8 @@ def _agent_dispatch_observed(
 
 
 _WORK_MUTATION_TOOLS = frozenset({
-    "directory_create", "file_write", "file_batch_write", "sqlite_mutate", "file_edit", "file_delete",
-    "scaffold_project",
+    "directory_create", "file_write", "file_batch_write", "json_patch", "file_edit", "file_copy", "file_move", "file_delete", "text_patch", "data_convert",
+    "sqlite_mutate", "scaffold_project", "archive_extract", "archive_create",
     "artifact_generate", "game_generate_and_test", "game_generation_campaign",
     "memory_quality_repair", "memory_privacy_repair", "memory_embedding_backfill",
     "memory_interaction_embedding_backfill",
@@ -11998,6 +13418,12 @@ def _agent_tool_mutates(tool_name, args):
         return False
     if tool_name == "file_delete":
         return args.get("dry_run") is False
+    if tool_name == "json_patch":
+        return str(args.get("mode", "preview")).strip().lower() == "apply"
+    if tool_name == "text_patch":
+        return args.get("apply") is True
+    if tool_name == "data_convert":
+        return args.get("apply") is True
     if tool_name == "sqlite_mutate":
         return str(args.get("mode", "preview")).strip().lower() == "apply"
     if tool_name in {
@@ -12011,14 +13437,14 @@ def _agent_tool_mutates(tool_name, args):
 # name-only branch prediction yields a deterministic call signature that can
 # be speculatively executed and reliably matched against the real decision.
 _SPECULATABLE_ARGFREE_TOOLS = frozenset({
-    "workspace_inventory", "directory_tree", "status", "activity_status",
+    "workspace_inventory", "dependency_inventory", "directory_tree", "status", "activity_status",
     "context_health", "command_registry_list",
 })
 _WORK_VALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_verify", "game_reference_suite", "game_generate_and_test",
     "game_generation_campaign", "self_heal_check", "workspace_inventory", "directory_tree", "file_find",
-    "repository_symbol_index", "file_read", "file_read_range", "text_search", "image_inspect",
+    "repository_symbol_index", "file_read", "file_read_range", "archive_extract", "archive_create", "text_search", "image_inspect",
     "memory_quality_report", "memory_privacy_review", "learning_health_status",
 })
 
@@ -12042,6 +13468,11 @@ def _agent_tool_observation_ok(tool_name, observation):
         return False
     if not _agent_observation_ok(observation):
         return False
+    if str(tool_name or "") == "archive_list":
+        try:
+            return bool(json.loads(str(observation or "")).get("valid"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
     if str(tool_name or "") != "web_fetch":
         return True
     # A transport-level success with an empty page is not grounding. Require
@@ -12078,8 +13509,37 @@ def _agent_call_signature(tool_name, args):
     """Return a stable signature for equivalent host-scoped tool calls."""
     canonical = dict(args) if isinstance(args, dict) else args
     if isinstance(canonical, dict):
+        if tool_name == "archive_create":
+            root = os.path.realpath(os.path.normpath(str(canonical.get("root") or ".")))
+            canonical["root"] = os.path.normcase(root)
+            destination = str(canonical.get("destination") or "")
+            if destination:
+                if not os.path.isabs(destination):
+                    destination = os.path.join(root, destination)
+                canonical["destination"] = os.path.normcase(
+                    os.path.realpath(os.path.normpath(destination))
+                )
+            try:
+                inputs = archive_create_tool._parse_inputs(
+                    canonical.get("inputs_json", canonical.get("inputs", []))
+                )
+                canonical["inputs_json"] = [
+                    os.path.normcase(os.path.realpath(os.path.normpath(
+                        value if os.path.isabs(value) else os.path.join(root, value)
+                    )))
+                    for value in inputs
+                ]
+                canonical.pop("inputs", None)
+            except ValueError:
+                pass
         path_keys = []
-        if tool_name in _PROJECT_SCOPED_PATH_TOOLS:
+        if tool_name == "data_convert":
+            path_keys.extend(("input_path", "output_path"))
+        elif tool_name in {"file_copy", "file_move", "archive_extract"}:
+            path_keys.extend(("source", "destination"))
+        elif tool_name == "archive_create":
+            path_keys = []
+        elif tool_name in _PROJECT_SCOPED_PATH_TOOLS:
             path_keys.append(_project_scoped_path_key(tool_name))
         elif tool_name == "workspace_run":
             path_keys.append("cwd")
@@ -12108,17 +13568,46 @@ def _agent_mutation_records(tool_name, args):
             {"tool": tool_name, "path": _agent_normalized_path(item.get("path", ""))}
             for item in operations if isinstance(item, dict)
         ]
+    if tool_name == "text_patch":
+        try:
+            root = args.get("root") or "."
+            return [
+                {"tool": tool_name, "path": _agent_normalized_path(os.path.join(root, *item["path"].split("/")))}
+                for item in text_patch_ops._parse(args.get("patch", ""))
+            ]
+        except (TypeError, ValueError, PermissionError):
+            return [{"tool": tool_name, "path": _agent_normalized_path(args.get("root", ""))}]
+    if tool_name == "data_convert":
+        if args.get("apply") is not True:
+            return []
+        return [{
+            "tool": tool_name,
+            "path": _agent_normalized_path(args.get("output_path", "")),
+        }]
+    if tool_name == "archive_create":
+        root = str(args.get("root") or ".")
+        destination = str(args.get("destination") or "")
+        if destination and not os.path.isabs(destination):
+            destination = os.path.join(root, destination)
+        return [{"tool": tool_name, "path": _agent_normalized_path(destination)}]
     path = args.get("path", "")
-    if tool_name == "artifact_generate":
+    if tool_name == "archive_extract":
+        path = args.get("destination", "")
+    elif tool_name == "artifact_generate":
         path = args.get("output_dir") or os.path.join(
             "artifacts", "generated", str(args.get("name", "generated-artifact")),
         )
     elif tool_name in {"game_generate_and_test", "game_generation_campaign"}:
         path = os.path.join("games", str(args.get("name", "generated-game")))
-    return [{
+    elif tool_name in {"file_copy", "file_move"}:
+        path = args.get("destination", "")
+    record = {
         "tool": tool_name,
         "path": _agent_normalized_path(path),
-    }]
+    }
+    if tool_name == "file_move":
+        record["source"] = _agent_normalized_path(args.get("source", ""))
+    return [record]
 
 
 def _agent_mutation_record(tool_name, args):
@@ -12194,6 +13683,28 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
             return True
     paths = [record["path"] for record in records if record.get("path")]
     target = _agent_normalized_path(args.get("path", args.get("artifact", "")))
+
+    if tool_name == "archive_extract":
+        destination = _agent_normalized_path(args.get("destination", ""))
+        return bool(destination) and all(
+            record["tool"] == "archive_extract"
+            and record.get("path") == destination
+            for record in records
+        ) and '"validation_passed": true' in str(observation or "").lower()
+
+    if tool_name == "archive_create":
+        root = str(args.get("root") or ".")
+        destination = str(args.get("destination") or "")
+        if destination and not os.path.isabs(destination):
+            destination = os.path.join(root, destination)
+        destination = _agent_normalized_path(destination)
+        return bool(destination) and all(
+            record["tool"] == "archive_create"
+            and record.get("path") == destination
+            for record in records
+        ) and '"ok": true' in str(observation or "").lower() and bool(
+            re.search(r'"archive_sha256":\s*"[0-9a-f]{64}"', str(observation or "").lower())
+        )
 
     if tool_name in {
         "game_reference_suite", "game_generate_and_test", "game_generation_campaign",
@@ -12366,7 +13877,9 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
             and (
                 (
                     tool_name in {"workspace_inventory", "directory_tree", "file_find"}
-                    and record["tool"] == "directory_create"
+                    and record["tool"] in {
+                        "directory_create", "file_copy", "file_move",
+                    }
                 )
                 or (
                     tool_name == "text_search"
@@ -12384,19 +13897,31 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
     # persistent files just edited. self_heal_check is likewise unrelated.
     return False
 _WORK_INSPECTION_TOOLS = frozenset({
-    "file_policy", "workspace_inventory", "directory_tree", "file_find",
-    "repository_symbol_index", "file_read", "file_read_range", "context_pack",
-    "text_search", "script_search", "program_search", "image_inspect", "data_query",
+    "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "directory_digest", "file_find",
+    "dependency_inventory",
+    "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
+    "text_search", "script_search", "program_search", "image_inspect", "repo_status", "repo_diff",
+    "repo_log", "repo_show", "repo_blame",
+    "data_inspect", "data_query", "project_detect", "archive_list",
     "memory_search", "learning_health_status", "evaluation_history_status",
     "memory_quality_report", "memory_privacy_review", "artifact_ground",
     "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",
     "status", "diagnostics",
 })
+_AGENT_FILE_EVIDENCE_TOOLS = frozenset({
+    "workspace_inventory", "workspace_compare", "directory_tree", "file_read", "file_read_range",
+    "file_digest", "directory_digest", "file_find", "text_search",
+    "script_search", "image_inspect", "log_inspect", "data_inspect", "data_query", "project_detect",
+    "context_pack", "repo_log", "repo_show", "repo_blame", "archive_list",
+    "dependency_inventory",
+})
 _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
-    "file_policy", "workspace_inventory", "directory_tree", "file_find",
-    "repository_symbol_index", "file_read", "file_read_range", "context_pack",
-    "data_query", "text_search", "script_search",
-    "program_search", "image_inspect", "environment_status",
+    "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "directory_digest", "file_find",
+    "dependency_inventory",
+    "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
+    "data_inspect", "data_query", "text_search", "script_search",
+    "program_search", "image_inspect", "environment_status", "repo_status", "repo_diff", "project_detect",
+    "repo_log", "repo_show", "repo_blame", "archive_list",
 })
 _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "workflow_run",
@@ -13217,6 +14742,10 @@ def _agent_impl(
                         run_created_paths.add(
                             _agent_created_path_key(item.get("path"))
                         )
+            elif tool_name == "data_convert" and policy_tool_args.get("apply") is True:
+                run_created_paths.add(
+                    _agent_created_path_key(policy_tool_args.get("output_path"))
+                )
         else:
             failed_call_counts[call_signature] = prior_identical_failures + 1
             recovery = (
@@ -13259,10 +14788,7 @@ def _agent_impl(
             ):
                 successful_inspection_results[call_signature] = observation_text[:6000]
                 repeated_inspection_counts.pop(call_signature, None)
-        if tool_name in {
-            "workspace_inventory", "directory_tree", "file_read", "file_read_range", "file_find",
-            "data_query", "text_search", "script_search", "image_inspect",
-        } and tool_ok:
+        if tool_name in _AGENT_FILE_EVIDENCE_TOOLS and tool_ok:
             file_evidence = True
         if auto_checklist and tool_name in _WORK_INSPECTION_TOOLS and tool_ok:
             inspected = True
@@ -13513,14 +15039,17 @@ def workbench_agent(
 
 
 _AUTOPILOT_OBSERVE_TOOLS = frozenset({
-    "file_policy", "workspace_inventory", "directory_tree", "file_find",
-    "repository_symbol_index", "file_read", "file_read_range", "data_query", "text_search", "script_search",
+    "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "directory_digest", "file_find",
+    "dependency_inventory",
+    "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "data_inspect", "data_query", "text_search", "script_search",
+    "project_detect",
+    "repo_status", "repo_diff", "repo_log", "repo_show", "repo_blame", "archive_list",
     "program_search", "image_inspect", "memory_search", "web_search",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
 })
 _AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
-    "directory_create", "file_write", "file_batch_write", "file_edit", "workspace_run",
+    "directory_create", "file_write", "file_batch_write", "json_patch", "file_edit", "file_copy", "file_move", "archive_extract", "archive_create", "text_patch", "data_convert", "workspace_run",
     "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_generate", "artifact_verify", "game_reference_suite",
     "game_generate_and_test",
@@ -13534,7 +15063,7 @@ _AUTOPILOT_RUNNERS = frozenset({
 })
 _AUTOPILOT_SCRIPT_SUFFIXES = frozenset({".py", ".js", ".dart", ".exe", ".com"})
 _AUTOPILOT_MUTATION_EVIDENCE = frozenset({
-    "directory_create", "file_write", "file_batch_write", "file_edit", "artifact_generate",
+    "directory_create", "file_write", "file_batch_write", "json_patch", "file_edit", "file_copy", "file_move", "archive_extract", "archive_create", "text_patch", "data_convert", "artifact_generate",
     "game_generate_and_test",
 })
 
@@ -13569,10 +15098,35 @@ def _autopilot_command_programs(value) -> list[str]:
 
 def _autopilot_tool_policy(run: dict):
     """Return an argument-aware policy that models cannot override."""
+    project_scope, _project_error = _agent_project_scope(run.get("project", ""))
+    allowed_tools = _autopilot_allowed_tools(run)
+
     def check(tool_name, args):
         args = args if isinstance(args, dict) else {}
-        if any(args.get(name) for name in ("token", "approval", "extra_roots")):
+        if tool_name not in allowed_tools:
+            return "ERROR: HOST POLICY: tool '%s' is not allowed for this autonomous run." % tool_name
+        host_scoped_text_patch = (
+            tool_name == "text_patch"
+            and bool(project_scope)
+            and not args.get("token")
+            and args.get("approval") is _TRUSTED_REPOSITORY_APPROVAL
+            and args.get("extra_roots") == project_scope
+        )
+        if (
+            any(args.get(name) for name in ("token", "approval", "extra_roots"))
+            and not host_scoped_text_patch
+        ):
             return "ERROR: HOST POLICY: autonomous runs cannot use bypass credentials or extra roots."
+        if tool_name in {"file_copy", "file_move"}:
+            if not str(args.get("source") or "").strip() or not str(
+                args.get("destination") or ""
+            ).strip():
+                return "ERROR: HOST POLICY: autonomous file transfers require exact source and destination paths."
+            if "overwrite" in args and args.get("overwrite") is not False:
+                return (
+                    "ERROR: HOST POLICY: autonomous file transfers require "
+                    "overwrite to be the boolean false."
+                )
         if tool_name == "workspace_run":
             program = os.path.basename(str(args.get("program", ""))).lower()
             if program not in _AUTOPILOT_RUNNERS:

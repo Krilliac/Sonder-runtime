@@ -23,9 +23,12 @@ DEFAULT_RULES = [
     {"pattern": "file_find", "action": "ask", "note": "enumerates local files"},
     {"pattern": "file_write", "action": "ask", "note": "writes local files"},
     {"pattern": "file_edit", "action": "ask", "note": "edits local files"},
+    {"pattern": "file_copy", "action": "ask", "note": "copies one local file"},
+    {"pattern": "file_move", "action": "ask", "note": "moves one local file"},
     {"pattern": "file_delete", "action": "deny", "note": "destructive by default"},
     {"pattern": "run_*", "action": "ask", "note": "executes generated code"},
     {"pattern": "web_*", "action": "ask", "note": "uses network access"},
+    {"pattern": "local_service_probe", "action": "ask", "note": "reads one loopback HTTP endpoint"},
     {"pattern": "admin_private_chain_of_thought", "action": "deny",
      "note": "private chain-of-thought is never exposed"},
 ]

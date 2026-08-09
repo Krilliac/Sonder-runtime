@@ -73,10 +73,11 @@ def test_partial_load_reports_the_dropped_rule(tmp_path):
 
     assert report.status == permission_rules.LOAD_PARTIAL
     assert report.degraded is True
-    assert report.rules_seen == 11
-    assert report.rules_kept == 10
+    expected_rules = len(_policy.DEFAULT_RULES)
+    assert report.rules_seen == expected_rules
+    assert report.rules_kept == expected_rules - 1
     assert report.rules_dropped == 1
-    assert len(rules) == 10
+    assert len(rules) == expected_rules - 1
     # The dropped rule is identified specifically enough to find it on disk.
     assert any("file_delete" in entry for entry in report.dropped)
     assert any("DENY!" in entry for entry in report.dropped)
@@ -98,7 +99,7 @@ def test_partial_load_states_the_deny_to_ask_consequence(tmp_path):
     assert _policy.evaluate(rules, "file_delete")["action"] == "ask"
     # ...but it is now stated.
     message = report.describe()
-    assert "dropped 1 malformed rule(s) of 11" in message
+    assert "dropped 1 malformed rule(s) of %d" % len(_policy.DEFAULT_RULES) in message
     assert "file_delete" in message
     assert "falls through to 'ask'" in message
 
@@ -116,7 +117,7 @@ def test_partial_load_surfaces_warning_in_format_policy(tmp_path):
 
     listing = permission_rules.format_policy(tmp_path)
     assert "WARNING:" in listing
-    assert "dropped 1 malformed rule(s) of 11" in listing
+    assert "dropped 1 malformed rule(s) of %d" % len(_policy.DEFAULT_RULES) in listing
 
     single = permission_rules.format_policy(tmp_path, "file_delete")
     assert "action: ask" in single
