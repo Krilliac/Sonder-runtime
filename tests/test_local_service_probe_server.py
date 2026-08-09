@@ -69,6 +69,7 @@ def test_probe_is_registered_as_read_only_deduplicated_autopilot_observation():
     assert "local_service_probe" in server._WORK_INSPECTION_TOOLS
     assert "local_service_probe" in server._AGENT_DEDUPLICATED_INSPECTION_TOOLS
     assert "local_service_probe" in server._AUTOPILOT_OBSERVE_TOOLS
+    assert "local_service_probe" in server._PROJECT_BOUND_AGENT_TOOLS
     assert "local_service_probe" not in server._WORK_MUTATION_TOOLS
     assert server._repository_read_only_error(
         "local_service_probe",
