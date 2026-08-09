@@ -48,9 +48,13 @@ Every launch has:
   bounded argv-only `docker|podman rm -f`, retry it, and verify the exact name
   is absent through a successful exact-name container-list query. Command
   failure is uncertainty, never evidence of absence;
-- memory plus swap set to the same total limit, preventing extra swap allowance.
-  Docker uses its fixed assignment form; Podman receives separate arguments and
-  must reject the launch if its cgroup/runtime cannot honor them;
+- an engine-specific memory-plus-swap total. Docker accepts
+  `--memory-swap=<memory>` as a zero-swap total. Podman rejects equality, so it
+  receives the smallest integral allowance exposed by this interface: a total
+  exactly 1 MiB above the RAM limit. The result reports the RAM limit, effective
+  RAM-plus-swap total, and swap allowance explicitly; it never describes Podman
+  as zero-swap. If the selected cgroup/runtime cannot honor these fixed options,
+  the launch fails closed;
 - nested mounts rejected before launch and recursion disabled in the actual
   bind: Docker uses `bind-recursive=disabled`, while Podman uses
   `bind-nonrecursive=true`. Read-only is then applied with the engine-specific
@@ -63,9 +67,11 @@ the caller's mutable tag—is passed to `run`. Podman additionally receives
 `--image-volume=ignore` as defense in depth. Inspection never pulls an image;
 the eventual run remains fixed at `--pull=never` and `--network=none`.
 
-Defaults are 30 seconds, 512 MiB, 1 CPU, 64 PIDs, 64 KiB stdin, and 128 KiB
-combined output. Hard maxima are 120 seconds, 4096 MiB, 4 CPUs, 256 PIDs,
-64 KiB stdin, and 256 KiB combined output.
+Defaults are 30 seconds, 512 MiB RAM, 1 CPU, 64 PIDs, 64 KiB stdin, and 128 KiB
+combined output. Docker's default effective memory-plus-swap total is 512 MiB;
+Podman's is 513 MiB (512 MiB RAM plus 1 MiB swap). The hard effective total is
+4096 MiB, so Podman's maximum RAM request is 4095 MiB. Other hard maxima are
+120 seconds, 4 CPUs, 256 PIDs, 64 KiB stdin, and 256 KiB combined output.
 
 Windows paths must be absolute, drive-qualified local paths. UNC paths, device
 paths, relative paths, control characters, and the comma delimiter used by the
