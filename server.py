@@ -6395,9 +6395,6 @@ def _orchestrator_agent_worker(
                 return_host_receipt=True,
                 cancel_check=master_orchestrator.current_worker_cancel_requested,
             )
-            output = str(getattr(receipt, "output", receipt) or "")
-            if output.startswith("ERROR:"):
-                raise RuntimeError(output[:800])
             return master_orchestrator.repository_worker_result(
                 receipt, project_scope,
             )
@@ -14266,6 +14263,21 @@ def _agent_impl(
         except Exception:
             pass
 
+    def _attach_tool_evidence(text):
+        """Append exactly one host-owned evidence section.
+
+        Model text may quote or fabricate the public marker. Neutralize those
+        occurrences before adding the host ledger so downstream validation can
+        require one structural marker instead of trusting model-controlled
+        prose.
+        """
+        text = str(text or "")
+        marker = "=== TOOL EVIDENCE ==="
+        if include_evidence and observations:
+            text = text.replace(marker, "=== UNTRUSTED TOOL EVIDENCE MARKER ===")
+            text += "\n\n%s\n%s" % (marker, "\n\n".join(observations))
+        return text
+
     def finish_final(final):
         _teardown_speculation()
         final = str(final or "")
@@ -14292,8 +14304,7 @@ def _agent_impl(
                 "VALIDATION_FAILED: workspace changes were not successfully validated.\n\n"
                 + final
             )
-        if include_evidence and observations:
-            final += "\n\n=== TOOL EVIDENCE ===\n" + "\n\n".join(observations)
+        final = _attach_tool_evidence(final)
         activity_tracker.set_result_summary(
             final.splitlines()[0] if final else "agent completed"
         )
@@ -14318,6 +14329,14 @@ def _agent_impl(
         """
         _teardown_speculation()
         text = str(text or "")
+        # Early exits are still auditable outcomes.  A worker may have already
+        # collected valid, host-observed repository evidence before the model
+        # exhausted its step budget, repeated a cached inspection, or failed
+        # final synthesis.  Preserve that ledger exactly as finish_final does;
+        # otherwise the orchestrator sees a receipt naming a real evidence tool
+        # but no evidence section and incorrectly downgrades the whole lane to
+        # EVIDENCE_REQUIRED.
+        text = _attach_tool_evidence(text)
         if return_host_receipt:
             return autopilot_controller.HostTaskResult(
                 output=text,
@@ -14697,7 +14716,10 @@ def _agent_impl(
                 )
             observation = (
                 "HOST CACHED INSPECTION: this identical call already succeeded; "
-                "reusing its prior observation without dispatching it again.\n"
+                "reusing its prior observation without dispatching it again. "
+                "Read the cached hit below and either finalize from it now or "
+                "change the arguments to inspect different evidence; do not repeat "
+                "this identical call.\n"
                 + successful_inspection_results[call_signature]
             )
         elif read_only and tool_name in {"command_registry_list", "tool_manifest"}:
