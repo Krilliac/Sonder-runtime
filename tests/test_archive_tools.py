@@ -72,6 +72,20 @@ def test_tar_slip_is_rejected_before_any_destination_exists(workspace):
     assert list(workspace.glob(".sonder-archive-*")) == []
 
 
+def test_tar_directory_payload_is_rejected(workspace):
+    source = workspace / "directory-payload.tar"
+    with tarfile.open(source, "w") as archive:
+        info = tarfile.TarInfo("payload/")
+        info.type = tarfile.DIRTYPE
+        info.size = 32
+        archive.addfile(info, io.BytesIO(b"x" * 32))
+
+    data = archive_tools.list_archive(str(source))
+
+    assert data["valid"] is False
+    assert "nonzero payload" in data["errors"][0]
+
+
 def test_binary_zip_extracts_transactionally_and_deterministically(workspace):
     payload = bytes(range(256)) + b"\x00\xff"
     _zip(workspace / "bundle.zip", [
@@ -277,6 +291,34 @@ def test_server_registration_dispatch_and_project_scope(workspace, tmp_path):
         str(workspace),
     )
     assert "outside the host-selected project root" in error
+
+
+def test_direct_mcp_extra_roots_require_authorization(workspace, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _zip(outside / "bundle.zip", [("a.txt", b"x")])
+
+    result = server.archive_list(
+        str(outside / "bundle.zip"), extra_roots=str(outside),
+    )
+
+    assert result.startswith("ERROR:")
+    assert "extra_roots requires" in result
+
+
+def test_no_replace_promotion_preserves_competing_destination(workspace):
+    stage = workspace / "stage"
+    destination = workspace / "destination"
+    stage.mkdir()
+    (stage / "ours.txt").write_text("ours", encoding="utf-8")
+    destination.mkdir()
+    (destination / "theirs.txt").write_text("theirs", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        archive_tools._promote_no_replace(stage, destination)
+
+    assert (destination / "theirs.txt").read_text(encoding="utf-8") == "theirs"
+    assert stage.exists()
 
 
 def test_archive_extract_is_self_validating_for_agent_bookkeeping(workspace):

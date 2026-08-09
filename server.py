@@ -7382,6 +7382,8 @@ def archive_list(
     started = time.time()
     args = {"path": path, "max_entries": max_entries, "max_results": max_results}
     try:
+        if extra_roots and not _file_bypass_allowed(token, approval):
+            raise PermissionError("extra_roots requires developer authorization or approval")
         data = archive_tools.list_archive(
             path, max_entries=max_entries, max_file_bytes=max_file_bytes,
             max_total_bytes=max_total_bytes, max_ratio=max_ratio,
@@ -7426,6 +7428,8 @@ def archive_extract(
     started = time.time()
     args = {"source": source, "destination": destination, "max_entries": max_entries}
     try:
+        if extra_roots and not _file_bypass_allowed(token, approval):
+            raise PermissionError("extra_roots requires developer authorization or approval")
         data = archive_tools.extract_archive(
             source, destination, max_entries=max_entries,
             max_file_bytes=max_file_bytes, max_total_bytes=max_total_bytes,
