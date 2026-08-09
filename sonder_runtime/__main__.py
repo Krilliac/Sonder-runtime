@@ -92,10 +92,18 @@ def cmd_doctor(args) -> int:
         print(str(exc), file=sys.stderr)
         return 2
     checks = sonder_doctor.default_checks()
-    storage = dict(sonder_doctor.storage_checks(
+    replacements = dict(sonder_doctor.storage_checks(
         config, throughput=args.storage_probe
     ))
-    checks = [(name, storage.get(name, check)) for name, check in checks]
+    checks = [
+        (
+            name,
+            sonder_doctor.validated_config_check(config)
+            if name == "config" and check is sonder_doctor._check_config
+            else replacements.get(name, check),
+        )
+        for name, check in checks
+    ]
     if args.skip_ollama:
         checks = [(name, check) for name, check in checks if name != "ollama"]
     report = sonder_doctor.run_doctor(checks)
@@ -117,10 +125,13 @@ def cmd_status(args) -> int:
         payload["config_sources"] = list(config.sources)
         _export_runtime_environment(config)
         try:
-            import sonder_storage
-            payload["storage"] = sonder_storage.inspect_config(config)
-        except (OSError, ValueError) as exc:
-            payload["storage_error"] = str(exc)
+            from sonder_runtime.adapters import storage
+            payload["storage"] = storage.inspect_config(config)
+        except Exception as exc:  # status remains available on probe defects
+            payload["storage_error"] = (
+                "%s while inspecting storage (detail suppressed)"
+                % exc.__class__.__name__
+            )
     except sonder_config.ConfigError as exc:
         payload["config_errors"] = list(exc.errors)
     try:

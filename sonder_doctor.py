@@ -259,10 +259,18 @@ def _check_config() -> dict:
         return {"status": STATUS_FAIL, "detail": "config invalid: %s" % exc}
     except Exception as exc:
         return _skip("config load failed (%s)" % exc)
-    detail = "ollama=%s" % getattr(
-        getattr(config, "ollama", None), "url", "?"
-    )
-    return {"status": STATUS_OK, "detail": detail}
+    return validated_config_check(config)()
+
+
+def validated_config_check(config):
+    """Return a check bound to the exact config already validated by the CLI."""
+    def check():
+        detail = "ollama=%s" % getattr(
+            getattr(config, "ollama", None), "url", "?"
+        )
+        return {"status": STATUS_OK, "detail": detail}
+
+    return check
 
 
 def _check_self_heal() -> dict:
