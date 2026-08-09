@@ -35,6 +35,8 @@ from pathlib import Path
 
 import sonder_runtime.adapters.legacy.task_state as task_state_adapter
 import sonder_runtime.application.tasks.use_cases as task_use_cases
+import sonder_runtime.adapters.legacy.evaluation_history as eval_history_adapter
+import sonder_runtime.application.evaluation_history.use_cases as eval_history_use_cases
 import sonder_runtime.adapters.memory_store as memory_store
 import orchestrator
 import retriever
@@ -108,7 +110,7 @@ import environment_probe
 import sonder_hardware
 import tool_capabilities
 import git_tools
-import eval_history
+import sonder_runtime.adapters.evaluation_history_store as eval_history
 import artifact_risk as artifact_risk_module
 import process_risk as process_risk_module
 
@@ -553,6 +555,8 @@ _SESSION_TURN_CLAIM_WAIT_SECONDS = max(
 LIVE_RELOAD_MODULES = [
     "sonder_runtime.adapters.legacy.task_state",
     "sonder_runtime.application.tasks.use_cases",
+    "sonder_runtime.adapters.legacy.evaluation_history",
+    "sonder_runtime.application.evaluation_history.use_cases",
     "sonder_runtime.adapters.memory_store",
     "process_liveness",
     "orchestrator",
@@ -575,7 +579,7 @@ LIVE_RELOAD_MODULES = [
     "self_heal",
     "memory_quality",
     "learning_health",
-    "eval_history",
+    "sonder_runtime.adapters.evaluation_history_store",
     "domain_grounding",
     "master_orchestrator",
     "ollama_lifecycle",
@@ -673,6 +677,12 @@ def _maybe_live_reload():
             continue
         if name == "sonder_runtime.application.tasks.use_cases":
             globals()["task_use_cases"] = module
+            continue
+        if name == "sonder_runtime.adapters.legacy.evaluation_history":
+            globals()["eval_history_adapter"] = module
+            continue
+        if name == "sonder_runtime.application.evaluation_history.use_cases":
+            globals()["eval_history_use_cases"] = module
             continue
         if name == "sonder_runtime.adapters.memory_store":
             globals()["memory_store"] = module
@@ -11266,7 +11276,9 @@ def evaluation_history_status(
         "tolerance": tolerance, "max_records": max_records,
     }
     try:
-        data = eval_history.history_status(
+        data = eval_history_use_cases.EvaluationHistoryService(
+            eval_history_adapter.LegacyEvaluationHistoryReader()
+        ).status(
             model=model,
             model_digest=model_digest,
             suite=suite,
