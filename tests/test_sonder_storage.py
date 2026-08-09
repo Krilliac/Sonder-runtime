@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import io
-import subprocess
+import inspect
+import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-import sonder_storage
+from sonder_runtime.adapters import storage as sonder_storage
 
 
 def test_model_roots_prefers_environment_without_hardcoded_drive(tmp_path):
@@ -53,30 +55,27 @@ def test_linux_mountinfo_read_is_strictly_bounded(monkeypatch, tmp_path):
         sonder_storage._linux_storage(tmp_path)
 
 
-def test_macos_fallback_is_metadata_only(monkeypatch, tmp_path):
-    monkeypatch.setattr(sonder_storage.shutil, "which", lambda name: None)
+def test_linux_partition_inherits_parent_disk_removable_flag(tmp_path):
+    sys_root = tmp_path / "sys" / "dev" / "block"
+    disk = tmp_path / "sys" / "devices" / "disk0"
+    partition = disk / "disk0p1"
+    sys_root.mkdir(parents=True)
+    partition.mkdir(parents=True)
+    (disk / "removable").write_bytes(b"1\n")
+    synthetic_device = "8_1"  # Windows cannot create a colon-bearing fixture.
+    (sys_root / synthetic_device).symlink_to(
+        partition, target_is_directory=True
+    )
+    assert sonder_storage._linux_removable(
+        synthetic_device, sys_block_root=sys_root
+    ) is True
+
+
+def test_macos_fallback_is_metadata_only(tmp_path):
     result = sonder_storage.classify(tmp_path, system="Darwin")
     assert result["drive_type"] == "local-unknown"
     assert result["network"] is False
     assert result["removable"] is False
-
-
-def test_macos_diskutil_classifies_removable_volume(monkeypatch, tmp_path):
-    import plistlib
-
-    payload = plistlib.dumps({
-        "MountPoint": "/Volumes/Models", "FilesystemType": "exfat",
-        "BusProtocol": "USB", "Removable": True,
-    })
-    monkeypatch.setattr(sonder_storage.shutil, "which", lambda name: "/bin/diskutil")
-    monkeypatch.setattr(
-        sonder_storage.subprocess, "run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=payload),
-    )
-    result = sonder_storage.classify(tmp_path, system="Darwin")
-    assert result["filesystem"] == "exfat"
-    assert result["drive_type"] == "removable"
-    assert result["removable"] is True
 
 
 @pytest.mark.parametrize("kind", ["network", "removable"])
@@ -118,14 +117,111 @@ def test_explicit_probe_obeys_fixed_byte_cap_and_cleans_temp(tmp_path):
     assert result["bytes"] == sonder_storage.PROBE_BYTES
     assert result["read_bytes"] == sonder_storage.PROBE_BYTES
     assert result["timeout_seconds"] == sonder_storage.PROBE_TIMEOUT_SECONDS
+    assert result["temporary_file"] == "isolated-handle"
     assert set(tmp_path.iterdir()) == before
 
 
-def test_probe_timeout_still_cleans_temp(monkeypatch, tmp_path):
-    def timeout(*args, **kwargs):
-        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
-
-    monkeypatch.setattr(sonder_storage.subprocess, "run", timeout)
+def test_probe_wall_timeout_kills_blocked_setup(monkeypatch, tmp_path):
+    monkeypatch.setattr(sonder_storage, "PROBE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(
+        sonder_storage, "_PROBE_WORKER", "import time; time.sleep(60)"
+    )
+    started = time.monotonic()
     with pytest.raises(TimeoutError, match="second cap"):
         sonder_storage.throughput_probe(tmp_path)
+    assert time.monotonic() - started < 0.5
     assert list(tmp_path.iterdir()) == []
+
+
+def test_probe_wall_timeout_kills_blocked_io_and_cleans_handle(
+    monkeypatch, tmp_path
+):
+    worker = (
+        "import os,sys,tempfile,time\n"
+        "with tempfile.TemporaryFile(dir=sys.argv[1]) as f:\n"
+        " os.write(f.fileno(), b'x' * 4096)\n"
+        " time.sleep(60)\n"
+    )
+    monkeypatch.setattr(sonder_storage, "PROBE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(sonder_storage, "_PROBE_WORKER", worker)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError, match="second cap"):
+        sonder_storage.throughput_probe(tmp_path)
+    assert time.monotonic() - started < 0.5
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_probe_never_reopens_path_or_unlinks_hardlink_competitor(tmp_path):
+    victim = tmp_path / "victim.bin"
+    victim.write_bytes(b"valuable")
+    competitor = tmp_path / ".sonder-storage-probe-competitor.tmp"
+    try:
+        os.link(victim, competitor)
+    except OSError as exc:
+        pytest.skip("hardlinks unavailable on this test filesystem: %s" % exc)
+    result = sonder_storage.throughput_probe(tmp_path)
+    assert result["bytes"] == sonder_storage.PROBE_BYTES
+    assert competitor.read_bytes() == b"valuable"
+    assert victim.read_bytes() == b"valuable"
+
+
+def test_probe_through_symlink_never_touches_existing_files(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    victim = target / "victim.bin"
+    victim.write_bytes(b"valuable")
+    link = tmp_path / "storage-link"
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip("directory symlinks unavailable: %s" % exc)
+    result = sonder_storage.throughput_probe(link)
+    assert result["bytes"] == sonder_storage.PROBE_BYTES
+    assert victim.read_bytes() == b"valuable"
+
+
+def test_probe_ignores_hostile_python_environment(monkeypatch, tmp_path):
+    hostile = tmp_path / "hostile"
+    hostile.mkdir()
+    marker = tmp_path / "sitecustomize-ran"
+    (hostile / "sitecustomize.py").write_text(
+        "from pathlib import Path\nPath(%r).write_text('ran')\n" % str(marker),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PYTHONPATH", str(hostile))
+    monkeypatch.setenv("SONDER_API_KEY", "must-not-reach-a-child")
+    seen_env = {}
+    real_popen = sonder_storage.subprocess.Popen
+
+    def capture_env(*args, **kwargs):
+        seen_env.update(kwargs["env"])
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(sonder_storage.subprocess, "Popen", capture_env)
+    sonder_storage.throughput_probe(tmp_path)
+    assert not marker.exists()
+    assert "PYTHONPATH" not in seen_env
+    assert "SONDER_API_KEY" not in seen_env
+
+
+def test_probe_rejects_excessive_worker_output_with_bounded_reader(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        sonder_storage, "_PROBE_WORKER",
+        "import sys; sys.stdout.buffer.write(b'x' * 10000000)",
+    )
+    started = time.monotonic()
+    with pytest.raises(OSError, match="failed|invalid|excessive"):
+        sonder_storage.throughput_probe(tmp_path)
+    assert time.monotonic() - started < 1.0
+
+
+def test_probe_child_is_isolated_and_output_is_strictly_bounded():
+    source = inspect.getsource(sonder_storage.throughput_probe)
+    assert "capture_output" not in source
+    assert "NamedTemporaryFile" not in source
+    assert '"-I", "-S", "-E"' in source
+    assert "stderr=subprocess.DEVNULL" in source
+    reader = inspect.getsource(sonder_storage._bounded_worker_output)
+    assert "_PROBE_RESULT.size + 1" in reader

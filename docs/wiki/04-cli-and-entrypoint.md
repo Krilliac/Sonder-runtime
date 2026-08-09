@@ -55,10 +55,13 @@ user profile; no drive letter or machine-specific layout is assumed.
 
 `--storage-probe` is never implied by `doctor`, `status`, preflight, or service
 startup. When explicitly selected it probes only the existing configured state
-directory, using one randomized temporary file in a killable child process.
-The probe is capped at 8 MiB and 5 seconds and removes the temporary file on
-success, failure, or timeout. It does not scan files, alter model data, or probe
-every mounted volume.
+directory. The probe is capped at 8 MiB and 5 seconds and uses one worker-owned
+anonymous handle on supporting systems or delete-on-close handle on Windows. It
+never exposes or reopens a generated pathname. A scrubbed, isolated worker owns
+the handle; a fixed-size result pipe is the only output, and the parent kills
+the worker at the five-second wall deadline so process teardown cleans up
+blocked setup, I/O, sync, or close. The probe does not scan files, alter model
+data, or probe every mounted volume.
 
 ## Exit codes
 
