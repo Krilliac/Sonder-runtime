@@ -409,6 +409,29 @@ def test_in_band_overflow_error_on_a_200_also_compacts(monkeypatch):
     assert len(seen) == 2
 
 
+def test_error_redaction_preserves_literal_token_limit_overflow(monkeypatch):
+    assert server._safe_model_error_detail("token limit exceeded") == "token limit exceeded"
+
+    def responder(call):
+        if call == 1:
+            raise _http_error(400, b'{"error":"token limit exceeded"}')
+        return {"message": {"content": "recovered"}}
+
+    seen = _recording_post(monkeypatch, responder)
+
+    _, content = server._chat_request(_payload(), model="local", timeout=30)
+
+    assert content == "recovered"
+    assert len(seen) == 2
+
+
+def test_error_redaction_still_scrubs_credential_shaped_values():
+    assert "super-secret-value" not in server._safe_model_error_detail(
+        "token=super-secret-value",
+    )
+    assert "abc123" not in server._safe_model_error_detail("Bearer abc123")
+
+
 def test_in_band_non_overflow_error_is_still_reported(monkeypatch):
     seen = _recording_post(monkeypatch, lambda call: {"error": "model not found"})
 
@@ -547,6 +570,40 @@ def test_hosted_retries_once_only_with_both_idempotence_and_opt_in(monkeypatch):
     assert content == "recovered"
     assert len(seen) == 2
     assert len(seen[1]["messages"]) < len(seen[0]["messages"])
+
+
+def test_cloud_wrapper_declares_inference_idempotent(monkeypatch):
+    seen = []
+
+    def fake_chat(payload, **kwargs):
+        seen.append(kwargs)
+        return {"message": {"content": "ok"}}, "ok"
+
+    monkeypatch.setattr(server, "_chat_request", fake_chat)
+
+    _, content, used_model = server._chat_request_with_cloud_fallback(
+        _payload(), model="hosted", timeout=30,
+    )
+
+    assert content == "ok"
+    assert used_model == "hosted"
+    assert seen[0]["idempotent"] is True
+
+
+def test_generate_wrapper_declares_remote_inference_idempotent(monkeypatch):
+    seen = []
+
+    def fake_chat(payload, **kwargs):
+        seen.append(kwargs)
+        return {"message": {"content": "ok"}}, "ok"
+
+    monkeypatch.setattr(server, "_chat_request", fake_chat)
+    generate = server._make_generate(
+        "remote-local", "", 0.2, 128, 4096, cloud=False, timeout=30,
+    )
+
+    assert generate("hello") == "ok"
+    assert seen[0]["idempotent"] is True
 
 
 def test_remote_ollama_overflow_is_not_retried_by_default(monkeypatch):

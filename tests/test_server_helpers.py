@@ -828,9 +828,9 @@ def test_kimi_k3_extra_usage_402_falls_back_once(monkeypatch):
 
     def fake_chat(
         payload, *, model, cloud, timeout=None, cancel_check=None,
-        accept_native_tool_calls=False,
+        accept_native_tool_calls=False, idempotent=False,
     ):
-        calls.append((model, payload.get("think")))
+        calls.append((model, payload.get("think"), idempotent))
         if model == "kimi-k3:cloud":
             raise server.ModelCallError(
                 "http", "extra usage balance is empty", status=402, cloud=True,
@@ -852,8 +852,8 @@ def test_kimi_k3_extra_usage_402_falls_back_once(monkeypatch):
     assert content == "fallback-ok"
     assert used_model == "kimi-k2.7-code:cloud"
     assert calls == [
-        ("kimi-k3:cloud", True),
-        ("kimi-k2.7-code:cloud", True),
+        ("kimi-k3:cloud", True, True),
+        ("kimi-k2.7-code:cloud", True, True),
     ]
     assert payload["model"] == "kimi-k3:cloud"
     assert payload["think"] is True
@@ -864,9 +864,11 @@ def test_kimi_k3_agent_fallback_preserves_compact_native_tool_flags(monkeypatch)
 
     def fake_chat(
         payload, *, model, cloud, timeout=None, cancel_check=None,
-        accept_native_tool_calls=False,
+        accept_native_tool_calls=False, idempotent=False,
     ):
-        calls.append((model, payload.get("think"), accept_native_tool_calls))
+        calls.append((
+            model, payload.get("think"), accept_native_tool_calls, idempotent,
+        ))
         if model == "kimi-k3:cloud":
             raise server.ModelCallError(
                 "http", "extra usage balance is empty", status=402, cloud=True,
@@ -892,8 +894,8 @@ def test_kimi_k3_agent_fallback_preserves_compact_native_tool_flags(monkeypatch)
     assert content == "fallback-ok"
     assert used_model == "kimi-k2.7-code:cloud"
     assert calls == [
-        ("kimi-k3:cloud", True, True),
-        ("kimi-k2.7-code:cloud", False, True),
+        ("kimi-k3:cloud", True, True, True),
+        ("kimi-k2.7-code:cloud", False, True, True),
     ]
 
 
@@ -903,9 +905,9 @@ def test_kimi_k3_non_402_failure_never_falls_back(monkeypatch, status):
 
     def fake_chat(
         payload, *, model, cloud, timeout=None, cancel_check=None,
-        accept_native_tool_calls=False,
+        accept_native_tool_calls=False, idempotent=False,
     ):
-        calls.append(model)
+        calls.append((model, idempotent))
         raise server.ModelCallError("http", "rejected", status=status, cloud=True)
 
     monkeypatch.setattr(server, "_chat_request", fake_chat)
@@ -914,7 +916,7 @@ def test_kimi_k3_non_402_failure_never_falls_back(monkeypatch, status):
             {"model": "kimi-k3:cloud"}, model="kimi-k3:cloud", timeout=30,
         )
     assert caught.value.status == status
-    assert calls == ["kimi-k3:cloud"]
+    assert calls == [("kimi-k3:cloud", True)]
 
 
 def test_live_cloud_model_rewrites_known_retired_model():
