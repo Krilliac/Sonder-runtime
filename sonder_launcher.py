@@ -379,6 +379,7 @@ def _linux_group_has_non_zombie_member(group_id, proc_root=Path("/proc")):
     except OSError:
         return None
     inspected = False
+    ambiguous = False
     for entry in entries:
         if not entry.name.isdigit():
             continue
@@ -387,15 +388,26 @@ def _linux_group_has_non_zombie_member(group_id, proc_root=Path("/proc")):
             end = raw.rfind(")")
             fields = raw[end + 2:].split() if end >= 0 else []
             if len(fields) < 3:
+                ambiguous = True
                 continue
             state = fields[0]
             process_group = int(fields[2])
-        except (OSError, ValueError):
+        except OSError as exc:
+            if isinstance(exc, FileNotFoundError) or exc.errno in (
+                errno.ENOENT, errno.ESRCH,
+            ):
+                continue
+            ambiguous = True
+            continue
+        except ValueError:
+            ambiguous = True
             continue
         inspected = True
-        if process_group == group_id and state != "Z":
+        if process_group == group_id and state not in ("Z", "X", "x"):
             return True
-    return False if inspected else None
+    if ambiguous or not inspected:
+        return None
+    return False
 
 
 def _posix_group_alive(group_id):
