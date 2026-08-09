@@ -93,6 +93,7 @@ class ShadowSurfaces:
     """Snapshots of the currently authoritative server surfaces."""
 
     direct_mcp_tools: frozenset[str]
+    tool_manifest: str
     repository_read_only_tools: frozenset[str]
     project_bound_agent_tools: frozenset[str]
     project_scoped_tools: frozenset[str]
@@ -102,6 +103,7 @@ class ShadowSurfaces:
     work_inspection_tools: frozenset[str]
     full_agent_help: str
     repository_agent_help: str
+    hosted_agent_help: str
 
 
 _ALL_VISIBILITY = frozenset(Visibility)
@@ -200,6 +202,14 @@ def _help_has(help_text: str, name: str) -> bool:
     return any(line.lstrip().startswith("- %s:" % name) for line in help_text.splitlines())
 
 
+def _manifest_has(manifest_text: str, name: str) -> bool:
+    for line in manifest_text.splitlines():
+        key, separator, _ = line.strip().partition(":")
+        if separator and name in key.split("/"):
+            return True
+    return False
+
+
 def validate_shadow(
     surfaces: ShadowSurfaces,
     descriptors: Iterable[ToolCapability] | None = None,
@@ -225,6 +235,7 @@ def validate_shadow(
         )
         checks = (
             ("direct MCP registration", expected_direct, row.name in surfaces.direct_mcp_tools),
+            ("tool manifest", expected_direct, _manifest_has(surfaces.tool_manifest, row.name)),
             ("repository read-only allow-list", expected_repository and row.effect is Effect.READ_ONLY,
              row.name in surfaces.repository_read_only_tools),
             ("project-bound full-agent allow-list", expected_full, row.name in surfaces.project_bound_agent_tools),
@@ -235,6 +246,8 @@ def validate_shadow(
             ("agent dispatcher", expected_repository or expected_full, row.name in surfaces.dispatch_tools),
             ("hosted-agent exposure", expected_hosted,
              row.name in surfaces.hosted_agent_tools),
+            ("hosted-agent help", expected_hosted,
+             _help_has(surfaces.hosted_agent_help, row.name)),
             ("deduplicated inspection set", row.deduplicated_inspection,
              row.name in surfaces.deduplicated_inspection_tools),
             ("work inspection set", row.counts_as_inspection,
