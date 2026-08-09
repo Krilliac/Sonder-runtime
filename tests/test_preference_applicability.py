@@ -137,6 +137,25 @@ _SENSITIVE_CAPTURE_CORPUS = (
     "I prefer Python examples containing private keys",
     "I prefer docs containing authorization headers",
     "Please always summarize OAuth tokens",
+    "I prefer answers in OAuth tokens",
+    "I prefer answers in JWTs",
+    "I prefer answers in APIkeys",
+    "I prefer answers in envvars",
+    "I prefer answers in sessiontokens",
+    "I prefer answers in authorizationheaders",
+    "I prefer answers in screenshots",
+    "I prefer answers in screen contents",
+    "I prefer answers in camera data",
+    "I prefer answers in microphone data",
+    "I prefer answers in geolocation",
+    "I prefer answers in contacts",
+    "I prefer answers in calendar data",
+    "I prefer answers in emails",
+    "I prefer answers in chat transcripts",
+    "I prefer answers in shell history",
+    "I prefer answers in keychain contents",
+    "I prefer answers in DSNs",
+    "I prefer answers in IAM keys",
 )
 _UNBOUNDED_CATEGORY_CORPUS = (
     "I prefer concise answers containing harmless trivia",
@@ -296,6 +315,14 @@ def test_generic_durable_defaults_capture_and_apply_without_task_keywords():
     examples = (
         ("I prefer metric units", "User prefers metric units."),
         ("I prefer answers in French", "User prefers answers in French."),
+        (
+            "I prefer answers in Canadian French",
+            "User prefers answers in Canadian French.",
+        ),
+        (
+            "I prefer answers in Brazilian Portuguese",
+            "User prefers answers in Brazilian Portuguese.",
+        ),
         ("I prefer ISO 8601 dates", "User prefers ISO 8601 dates."),
     )
     for source, normalized in examples:
@@ -304,6 +331,15 @@ def test_generic_durable_defaults_capture_and_apply_without_task_keywords():
         assert preferences.preference_applies(normalized, "Explain photosynthesis")
 
     assert preferences.is_stable_preference("metric units") is False
+
+
+def test_unknown_language_name_is_not_a_durable_general_default():
+    source = "I prefer answers in Klingon"
+    legacy = "User prefers answers in Klingon."
+
+    assert preferences.extract_preferences(source) == []
+    assert preferences.preference_category(legacy) == ""
+    assert not preferences.preference_applies(legacy, "Explain photosynthesis")
 
 
 def test_topical_durable_imperatives_are_not_persisted_as_preferences():

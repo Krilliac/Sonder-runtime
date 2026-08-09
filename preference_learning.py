@@ -225,7 +225,13 @@ _SAFE_GENERAL_DEFAULT_RE = re.compile(
     r"from\s+now\s+on,?\s+use\s+)"
     r"(?:(?:metric|imperial|si)\s+units?|iso[ -]?8601\s+dates?|"
     r"(?:12|24)[ -]hour\s+time|(?:utc|local)\s+time(?:\s+zone)?|"
-    r"answers?\s+in\s+[a-z][a-z -]{1,24})\.?$",
+    r"answers?\s+in\s+(?:english|american english|british english|french|"
+    r"canadian french|spanish|german|italian|portuguese|"
+    r"brazilian portuguese|european portuguese|dutch|polish|czech|slovak|"
+    r"ukrainian|russian|japanese|korean|chinese|simplified chinese|"
+    r"traditional chinese|arabic|hebrew|hindi|bengali|turkish|greek|"
+    r"swedish|norwegian|danish|finnish|romanian|hungarian|indonesian|"
+    r"vietnamese|thai))\.?$",
     re.I,
 )
 
