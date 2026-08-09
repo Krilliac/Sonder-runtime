@@ -1,7 +1,9 @@
 import embeddings
 import memory_store as ms
 import recall
+import sqlite3
 import time
+import pytest
 
 
 def _conn():
@@ -40,6 +42,7 @@ def _bulk_good(c, rows):
         "INSERT INTO outcomes(interaction_id,signal,reward) VALUES(?,?,?)",
         [(row[0], "tests_passed", 1.0) for row in rows],
     )
+    c.execute("UPDATE interactions SET ts=printf('%020d',rowid)")
     c.commit()
 
 
@@ -298,7 +301,8 @@ def test_recall_window_is_bounded_newest_first_with_truthful_cursor():
     assert first.termination == "row_limit"
     assert first.candidates_examined == ms.RECALL_CANDIDATE_ROW_LIMIT
     assert first.candidates_scored == ms.RECALL_CANDIDATE_ROW_LIMIT
-    assert isinstance(first.next_cursor, int)
+    assert isinstance(first.next_cursor, str)
+    assert first.next_cursor.startswith("r1.")
 
     second = recall.recall_page(
         c, "exact", k=5, qv=[1.0, 0.0], min_sim=0.9,
@@ -459,7 +463,7 @@ def test_candidate_cursor_pages_are_exclusive_stable_and_non_overlapping():
     while True:
         page = ms.good_interaction_candidate_page(
             c, embedding_model="embed-v2", embedding_revision="rev-v2",
-            embedding_dim=2, before_rowid=cursor, row_limit=3,
+            embedding_dim=2, cursor=cursor, row_limit=3,
         )
         seen.extend(row["id"] for row in page.rows)
         terminations.append(page.termination)
@@ -471,6 +475,173 @@ def test_candidate_cursor_pages_are_exclusive_stable_and_non_overlapping():
     assert seen == ["page-%02d" % index for index in reversed(range(8))]
     assert len(seen) == len(set(seen)) == 8
     assert terminations == ["row_limit", "row_limit", "complete"]
+
+
+def test_candidate_cursor_rejects_malformed_and_noncanonical_values():
+    c = _conn()
+    _bulk_good(c, [(
+        "one", "task", "result", [1.0, 0.0], None,
+        "embed-v2", "rev-v2",
+    )])
+    valid = ms.good_interaction_candidate_page(
+        c, embedding_model="embed-v2", embedding_revision="rev-v2",
+        embedding_dim=2, row_limit=1,
+    )
+    # Exactly one row means complete/no cursor, so make a canonical token via
+    # the storage-owned encoder for non-canonical mutation coverage.
+    canonical = ms._encode_recall_cursor("00000000000000000001", "one")
+    for invalid in (
+        1, "", "r1.", "r1.not-base64!", canonical + "=", "r2." + canonical[3:],
+        "r1." + "a" * 1025,
+    ):
+        with pytest.raises(ValueError, match="cursor is invalid"):
+            ms.good_interaction_candidate_page(c, cursor=invalid)
+    assert valid.incomplete is False
+
+
+def test_timestamp_id_cursor_is_safe_when_sqlite_reuses_rowids():
+    c = _conn()
+    _bulk_good(c, [
+        (
+            "old-%02d" % index, "task", "result", [1.0, 0.0], None,
+            "embed-v2", "rev-v2",
+        )
+        for index in range(6)
+    ])
+    first = ms.good_interaction_candidate_page(
+        c, embedding_model="embed-v2", embedding_revision="rev-v2",
+        embedding_dim=2, row_limit=3,
+    )
+    assert first.incomplete is True
+    assert first.next_cursor is not None
+
+    c.execute("DELETE FROM outcomes")
+    c.execute("DELETE FROM interactions")
+    c.execute(
+        "INSERT INTO interactions("
+        "id,task,response,tier,ts,task_embedding,task_embedding_model,"
+        "task_embedding_revision,task_embedding_dim) VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            "new-rowid-one", "task", "new result", "code",
+            "99999999999999999999", embeddings.to_blob([1.0, 0.0]),
+            "embed-v2", "rev-v2", 2,
+        ),
+    )
+    c.execute(
+        "INSERT INTO outcomes(interaction_id,signal,reward) VALUES(?,?,?)",
+        ("new-rowid-one", "tests_passed", 1.0),
+    )
+    c.commit()
+    assert c.execute(
+        "SELECT rowid FROM interactions WHERE id='new-rowid-one'"
+    ).fetchone()[0] == 1
+
+    older = ms.good_interaction_candidate_page(
+        c, embedding_model="embed-v2", embedding_revision="rev-v2",
+        embedding_dim=2, cursor=first.next_cursor, row_limit=3,
+    )
+    assert older.rows == ()
+    assert older.incomplete is False
+
+
+def test_project_query_plan_uses_recall_index_without_temp_sort():
+    c = _conn()
+    _bulk_good(c, [(
+        "one", "task", "result", [1.0, 0.0], "project",
+        "embed-v2", "rev-v2",
+    )])
+    statements = []
+    c.set_trace_callback(
+        lambda statement: statements.append(statement)
+        if "candidate_ts" in statement else None
+    )
+    ms.good_interaction_candidate_page(
+        c, project="project", embedding_model="embed-v2",
+        embedding_revision="rev-v2", embedding_dim=2,
+    )
+    c.set_trace_callback(None)
+    query = statements[-1]
+    plan = "\n".join(
+        row[3] for row in c.execute("EXPLAIN QUERY PLAN " + query).fetchall()
+    )
+    assert "idx_interactions_recall_project" in plan
+    assert "USE TEMP B-TREE" not in plan
+
+
+def test_global_query_plan_uses_recall_index_without_temp_sort():
+    c = _conn()
+    _bulk_good(c, [(
+        "one", "task", "result", [1.0, 0.0], "project",
+        "embed-v2", "rev-v2",
+    )])
+    statements = []
+    c.set_trace_callback(
+        lambda statement: statements.append(statement)
+        if "candidate_ts" in statement else None
+    )
+    ms.good_interaction_candidate_page(
+        c, include_all_projects=True, embedding_model="embed-v2",
+        embedding_revision="rev-v2", embedding_dim=2,
+    )
+    c.set_trace_callback(None)
+    query = statements[-1]
+    plan = "\n".join(
+        row[3] for row in c.execute("EXPLAIN QUERY PLAN " + query).fetchall()
+    )
+    assert "idx_interactions_recall_global" in plan
+    assert "USE TEMP B-TREE" not in plan
+
+
+def test_candidate_lock_wait_is_bounded_and_busy_timeout_is_restored(tmp_path):
+    path = tmp_path / "locked-recall.sqlite3"
+    reader = ms.connect(str(path))
+    _bulk_good(reader, [(
+        "one", "task", "result", [1.0, 0.0], None,
+        "embed-v2", "rev-v2",
+    )])
+    # DELETE journal mode makes an EXCLUSIVE transaction block readers too,
+    # exercising the busy-handler path rather than only the VM progress hook.
+    assert reader.execute("PRAGMA journal_mode=DELETE").fetchone()[0] == "delete"
+    locker = sqlite3.connect(str(path), timeout=1)
+    locker.execute("BEGIN EXCLUSIVE")
+    try:
+        started = time.monotonic()
+        page = ms.good_interaction_candidate_page(
+            reader, embedding_model="embed-v2", embedding_revision="rev-v2",
+            embedding_dim=2, time_limit_s=0.05,
+        )
+        elapsed = time.monotonic() - started
+    finally:
+        locker.rollback()
+        locker.close()
+
+    assert page.incomplete is True
+    assert page.termination == "time_limit"
+    assert page.rows == ()
+    assert elapsed < 0.5
+    assert reader.execute("PRAGMA busy_timeout").fetchone()[0] == 30_000
+    assert reader.execute("SELECT COUNT(*) FROM interactions").fetchone()[0] == 1
+
+
+def test_corrupt_ordering_key_never_returns_a_non_advancing_cursor():
+    c = _conn()
+    _bulk_good(c, [
+        ("valid", "task", "result", [1.0, 0.0], None, "embed-v2", "rev-v2"),
+        ("corrupt", "task", "result", [1.0, 0.0], None, "embed-v2", "rev-v2"),
+    ])
+    # SQLite can contain invalid UTF-8 in a value tagged TEXT when corruption
+    # or a non-Python writer bypasses the normal adapter.
+    c.execute("UPDATE interactions SET ts=CAST(X'FF' AS TEXT) WHERE id='corrupt'")
+    c.commit()
+
+    page = ms.good_interaction_candidate_page(
+        c, embedding_model="embed-v2", embedding_revision="rev-v2",
+        embedding_dim=2, row_limit=1,
+    )
+
+    assert page.incomplete is True
+    assert page.termination == "row_limit"
+    assert page.next_cursor is None
 
 
 def test_large_store_request_stays_within_declared_row_and_time_budget():
