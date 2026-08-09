@@ -16506,6 +16506,9 @@ def route_work_request(prompt: str, project: str = "") -> str | None:
         # validated inside npu_service, and any miss lands on the existing
         # local router — an accelerator problem can never widen behavior.
         npu_decision = None
+        npu_prefer_active = False
+        with contextlib.suppress(Exception):
+            npu_prefer_active = npu_service.routing_active() == "prefer"
         try:
             npu_decision = npu_service.route_decide(prompt)
         except Exception:
@@ -16536,6 +16539,7 @@ def route_work_request(prompt: str, project: str = "") -> str | None:
                     "reason": candidate_reason.strip()[:240],
                     "confidence": float(candidate_confidence),
                 }
+        npu_fallback_attempted = npu_prefer_active and not validated_npu
         if validated_npu:
             mode = validated_npu["mode"]
             selected_tier = runtime_policy.route_tier(
@@ -16554,7 +16558,17 @@ def route_work_request(prompt: str, project: str = "") -> str | None:
                 reason = routed["reason"]
                 confidence = routed["confidence"]
                 source = "bounded local mode model"
+                if npu_fallback_attempted:
+                    with contextlib.suppress(Exception):
+                        npu_service.record_fallback_handler(
+                            "routing", "ollama", True,
+                        )
             except (OSError, RuntimeError, ValueError) as exc:
+                if npu_fallback_attempted:
+                    with contextlib.suppress(Exception):
+                        npu_service.record_fallback_handler(
+                            "routing", "host", True,
+                        )
                 mode = "autopilot"
                 selected_tier = runtime_policy.route_tier(
                     "autopilot", _RUNTIME_POLICY, fallback="code",
@@ -16566,7 +16580,15 @@ def route_work_request(prompt: str, project: str = "") -> str | None:
                 source = "host fallback"
             with contextlib.suppress(Exception):
                 npu_service.route_shadow(
-                    prompt, {"mode": mode, "tier": selected_tier},
+                    prompt, {
+                        "mode": mode,
+                        "tier": selected_tier,
+                        "handler": (
+                            "ollama"
+                            if source == "bounded local mode model"
+                            else "host"
+                        ),
+                    },
                 )
 
     selected_tier, reason = _capability_refined_tier(prompt, selected_tier, reason)
@@ -16692,6 +16714,34 @@ def runtime_policy_status() -> str:
     return output
 
 
+def npu_fallback_status_data() -> dict:
+    """Enum-only NPU fallback state suitable for summary-mode status APIs."""
+    try:
+        return npu_service.fallback_projection()
+    except Exception:
+        return {
+            "schema_version": 1,
+            "known": False,
+            "capabilities": {
+                capability: {
+                    "policy_mode": "unknown",
+                    "role": "unknown",
+                    "local_fallback_handler": "unknown",
+                }
+                for capability in ("routing", "embeddings")
+            },
+            "last_fallback": {
+                "capability": "unknown",
+                "reason": "unknown",
+                "operation_mode": "unknown",
+                "fallback_handler": "unknown",
+                "handler_state": "unknown",
+                "count": 0,
+            },
+            "reason_counts": {},
+        }
+
+
 @mcp.tool()
 def npu_status(probe: bool = False) -> str:
     """Show the NPU utility accelerator: detected vs runtime-ready vs enabled
@@ -16703,7 +16753,16 @@ def npu_status(probe: bool = False) -> str:
     warmup when the runtime policy enables the accelerator.
     """
     _maybe_live_reload()
-    return npu_service.format_status(npu_service.status(probe=probe is True))
+    try:
+        state = npu_service.status(probe=probe is True)
+        return npu_service.format_status(state)
+    except Exception:
+        return (
+            "sonder npu accelerator\n"
+            "  state: unknown (status unavailable)\n"
+            "  boundary: NPU failure falls back to existing local behavior; "
+            "cloud is never a fallback"
+        )
 
 
 def _runtime_update_object(value, label):
@@ -16936,8 +16995,8 @@ def diagnostics() -> str:
         lines.append("  autopilot: ERROR %s" % e)
     try:
         lines.append("  npu accelerator: %s" % npu_service.diagnostics_line())
-    except Exception as e:
-        lines.append("  npu accelerator: ERROR %s" % e)
+    except Exception:
+        lines.append("  npu accelerator: unknown (status unavailable)")
     try:
         tags = _get("/api/tags").get("models", [])
         names = sorted(m.get("name", "?") for m in tags)
@@ -17020,8 +17079,8 @@ def status() -> str:
         lines.append("autopilot: ERROR %s" % exc)
     try:
         lines.append("npu accelerator: %s" % npu_service.diagnostics_line())
-    except Exception as exc:
-        lines.append("npu accelerator: ERROR %s" % exc)
+    except Exception:
+        lines.append("npu accelerator: unknown (status unavailable)")
     try:
         spec = sonder_speculation.default_predictor().stats()
         lines.append(
