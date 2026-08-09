@@ -39,7 +39,7 @@ ROOT_PLATFORM_MODULES = {
 BASELINE_ROOT_LEGACY_MODULES = frozenset({
     "server", "runtime_policy", "embeddings",
     "autopilot_store", "fleet_store", "sonder_operations_store",
-    "sonder_migrations", "sonder_backup",
+    "sonder_migrations",
     "sonder_lifecycle", "sonder_secrets", "sonder_serve", "sonder_repl",
     "sonder_updates", "sonder_update_engine",
     "workbench", "file_ops",

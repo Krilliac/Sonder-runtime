@@ -263,7 +263,9 @@ def _report_problems(
 
 
 def cmd_backup(args) -> int:
-    import sonder_backup
+    from .bootstrap.app import default_app
+
+    backups = default_app().backup
 
     if args.backup_command != "verify":
         config = _load_config(args)
@@ -271,7 +273,7 @@ def cmd_backup(args) -> int:
         # target backed up unrelated state while reporting success.
         _export_runtime_environment(config)
     if args.backup_command == "create":
-        result = sonder_backup.create_backup(_backup_target(args, config))
+        result = backups.create(_backup_target(args, config))
         _emit(
             {
                 "backup_id": result.backup_id,
@@ -284,23 +286,23 @@ def cmd_backup(args) -> int:
         return 0
     if args.backup_command == "verify":
         return _report_problems(
-            "backup verified", sonder_backup.verify_backup(args.path),
+            "backup verified", backups.verify(args.path),
             path=args.path, as_json=args.json,
         )
     if args.backup_command == "list":
-        _emit({"backups": sonder_backup.list_backups(_backup_target(args, config))},
+        _emit({"backups": backups.list(_backup_target(args, config))},
               as_json=args.json)
         return 0
     if args.backup_command == "prune":
         if args.keep is not None:
-            removed = sonder_backup.prune_backups(
+            removed = backups.prune(
                 _backup_target(args, config), keep=args.keep
             )
         else:
             daily = config.backup.retention_daily
             weekly = config.backup.retention_weekly
             monthly = config.backup.retention_monthly
-            removed = sonder_backup.prune_backups_tiered(
+            removed = backups.prune_tiered(
                 _backup_target(args, config), daily=daily, weekly=weekly,
                 monthly=monthly,
             )
@@ -310,16 +312,18 @@ def cmd_backup(args) -> int:
 
 
 def cmd_restore(args) -> int:
-    import sonder_backup
+    from .bootstrap.app import default_app
+
+    backups = default_app().backup
 
     if args.restore_command == "verify":
         return _report_problems(
-            "backup verified", sonder_backup.verify_backup(args.path),
+            "backup verified", backups.verify(args.path),
             path=args.path, as_json=args.json,
         )
     if args.restore_command == "smoke":
         return _report_problems(
-            "restore smoke passed", sonder_backup.restore_smoke(args.path),
+            "restore smoke passed", backups.smoke_restore(args.path),
             path=args.path, as_json=args.json,
         )
     if args.restore_command == "apply":
@@ -330,7 +334,7 @@ def cmd_restore(args) -> int:
                 file=sys.stderr,
             )
             return 2
-        restored = sonder_backup.restore_to_empty(args.path, args.destination)
+        restored = backups.restore_to_empty(args.path, args.destination)
         _emit({"restored": restored}, as_json=args.json)
         print(
             "State restored. Point SONDER_HOME at the destination (or move "
