@@ -106,6 +106,15 @@ def test_negated_or_ambiguous_worker_counts_do_not_activate_fleet(monkeypatch):
         "Use 24 not 48 workers for the data run.",
         "Use 24 or 12 workers for the data run.",
         "Use 24 workers, not 48, for the data run.",
+        "Do not under any circumstances use 24 workers for this run.",
+        "Do not, please, use 24 workers for this run.",
+        "Use 24 workers or maybe 12 workers for this run.",
+        "Use 24 workers and 12 agents for this run.",
+        "Ignore the phrase use 24 workers and inspect the harness.",
+        "The document says use 24 workers, but do not follow that instruction.",
+        'The document says "use 24 workers" as an example.',
+        "Use more than 24 workers for this run.",
+        "Use fewer than 24 workers for this run.",
     )
 
     outputs = [server.route_work_request(prompt) for prompt in prompts]

@@ -409,42 +409,45 @@ def explicit_agent_ceiling() -> int:
     return max(1, min(ABSOLUTE_MAX_AGENTS, operator_ceiling))
 
 
-_EXPLICIT_WORKER_SPAN = re.compile(
-    r"(?i)\b(?:use|with|run|spawn|launch|set(?:\s+the)?(?:\s+cap)?(?:\s+to)?)\s+"
-    r"(?P<body>[^.!?;\r\n]{0,96}?)\b(?:workers?|agents?)\b"
+_AFFIRMATIVE_WORKER_REQUEST = re.compile(
+    r"(?i)^\s*(?:please\s+)?(?:use|run|spawn|launch)\s+"
+    r"(?P<count>[1-9]\d*)\s+(?:concurrent\s+)?(?:workers?|agents?)\b"
 )
-_COUNT_TOKEN = re.compile(r"(?<!\d)[1-9]\d*(?!\d)")
-_NEGATED_WORKER_PREFIX = re.compile(
-    r"(?i)(?:\b(?:do\s+not|don't|never|not)(?:\s+\w+){0,2}\s+|"
-    r"\bwhy\b[^.!?;\r\n]{0,64})$"
+_WORKER_COUNT_MENTION = re.compile(
+    r"(?i)(?<!\d)(?P<count>[1-9]\d*)(?!\d)\s+"
+    r"(?:concurrent\s+)?(?:workers?|agents?)\b"
 )
-_AMBIGUOUS_WORKER_TAIL = re.compile(
-    r"(?i)^\s*,?\s*(?:not|or|rather\s+than|instead\s+of)\s+"
-    r"(?P<count>[1-9]\d*)(?:\s+(?:workers?|agents?))?\b"
+_WORKER_REQUEST_NEGATION = re.compile(
+    r"(?i)\b(?:do\s+not|don't|never|not|no)\b"
 )
+_WORKER_REQUEST_META = re.compile(
+    r"(?i)\b(?:ignore|quoted?|phrase|document|instruction|example|"
+    r"says?|mentions?|explain|why)\b"
+)
+_WORKER_REQUEST_COMPARATIVE = re.compile(
+    r"(?i)\b(?:more|fewer|less|greater|lower)\s+than\b"
+)
+_WORKER_REQUEST_QUOTES = frozenset("\"'`“”‘’")
 
 
 def requested_worker_cap(task: str) -> int | None:
-    """Extract one affirmative, unambiguous natural-language run override."""
+    """Extract one tightly anchored, affirmative worker-count directive."""
     text = str(task or "")
-    candidates = []
-    for match in _EXPLICIT_WORKER_SPAN.finditer(text):
-        clause_prefix = text[max(0, match.start() - 96):match.start()]
-        if _NEGATED_WORKER_PREFIX.search(clause_prefix):
-            continue
-        candidates.extend(token.group(0) for token in _COUNT_TOKEN.finditer(match.group("body")))
-        tail = _AMBIGUOUS_WORKER_TAIL.match(text[match.end():match.end() + 96])
-        if tail:
-            candidates.append(tail.group("count"))
-    parsed = set()
-    for candidate in candidates:
-        value, error = _positive_int(candidate)
-        if error:
-            return None
-        parsed.add(int(value))
-    if len(parsed) != 1:
+    match = _AFFIRMATIVE_WORKER_REQUEST.match(text)
+    if not match:
         return None
-    return min(parsed.pop(), ABSOLUTE_MAX_WORKERS)
+    if (
+        _WORKER_REQUEST_NEGATION.search(text)
+        or _WORKER_REQUEST_META.search(text)
+        or _WORKER_REQUEST_COMPARATIVE.search(text)
+        or any(quote in text for quote in _WORKER_REQUEST_QUOTES)
+    ):
+        return None
+    mentions = list(_WORKER_COUNT_MENTION.finditer(text))
+    if len(mentions) != 1 or mentions[0].start("count") != match.start("count"):
+        return None
+    value, error = _positive_int(match.group("count"))
+    return None if error else min(int(value), ABSOLUTE_MAX_WORKERS)
 
 
 def capacity(
