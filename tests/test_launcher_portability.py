@@ -19,6 +19,14 @@ def test_cross_platform_launcher_preserves_explicit_python_override():
     assert "if not defined SONDER_PYTHON if defined SONDER_ENGINE_ROOT" in cmd
 
 
+def test_macos_launcher_preserves_legacy_store_until_native_store_exists():
+    shell = _read("sonder-runtime.sh")
+
+    assert 'sonder_native_home="${HOME:-$SONDER_RUNTIME_ROOT}/Library/Application Support/sonder"' in shell
+    assert 'sonder_legacy_home="${HOME:-$SONDER_RUNTIME_ROOT}/.local/share/sonder"' in shell
+    assert '[ -d "$sonder_legacy_home" ] && [ ! -e "$sonder_native_home" ]' in shell
+
+
 def test_windows_helpers_accept_explicit_python_before_repo_venv():
     remote = _read("sonder-remote.cmd")
     tests = _read("scripts/run-tests.cmd")

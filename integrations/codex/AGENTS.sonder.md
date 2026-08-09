@@ -8,7 +8,8 @@ the Claude variant — it describes the model's behaviour, not the harness.
 
 ## Sonder Runtime (local model offload)
 
-The `sonder` MCP server runs a local model on your own GPU through Ollama.
+The `sonder` MCP server runs a local model on hardware you control through
+Ollama (CPU-only is supported; GPU/accelerator use is optional).
 Use it to spend a small, private, fast model instead of your own context
 budget — but only on the kind of work it is actually good at.
 
