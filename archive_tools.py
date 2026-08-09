@@ -1,10 +1,13 @@
 """Guarded ZIP/TAR inspection and transactional extraction using only stdlib."""
 from __future__ import annotations
 
+import ctypes
+import errno
 import json
 import os
 import shutil
 import stat
+import sys
 import tarfile
 import tempfile
 import time
@@ -253,6 +256,8 @@ def _tar_entry(info: tarfile.TarInfo, limits: dict) -> dict:
     size = int(info.size)
     if size < 0:
         raise ArchiveRejected("TAR entry has an invalid size: %s" % path)
+    if is_directory and size:
+        raise ArchiveRejected("TAR directory entry has a nonzero payload: %s" % path)
     if not is_directory and size > limits["max_file_bytes"]:
         raise ArchiveRejected("entry exceeds per-file byte ceiling: %s" % path)
     return {
@@ -485,6 +490,38 @@ def _verify_stage(stage: Path, plan: dict, deadline: float) -> None:
         raise ArchiveRejected("staged extraction does not match the prevalidated manifest")
 
 
+def _promote_no_replace(stage: Path, destination: Path) -> None:
+    """Atomically rename a directory only when destination is absent."""
+    if os.name == "nt":
+        os.rename(stage, destination)
+        return
+    libc = ctypes.CDLL(None, use_errno=True)
+    source = os.fsencode(stage)
+    target = os.fsencode(destination)
+    if sys.platform.startswith("linux"):
+        rename = getattr(libc, "renameat2", None)
+        if rename is None:
+            raise RuntimeError("atomic no-replace directory promotion is unavailable")
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(-100, source, -100, target, 1)  # AT_FDCWD, RENAME_NOREPLACE
+    elif sys.platform == "darwin":
+        rename = getattr(libc, "renamex_np", None)
+        if rename is None:
+            raise RuntimeError("atomic no-replace directory promotion is unavailable")
+        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(source, target, 0x00000004)  # RENAME_EXCL
+    else:
+        raise RuntimeError("atomic no-replace directory promotion is unsupported")
+    if result == 0:
+        return
+    error = ctypes.get_errno()
+    if error in {errno.EEXIST, errno.ENOTEMPTY}:
+        raise FileExistsError("archive destination appeared during extraction")
+    raise OSError(error, os.strerror(error), str(destination))
+
+
 def extract_archive(
     source_path: str, destination_path: str, *,
     max_entries=DEFAULT_MAX_ENTRIES, max_file_bytes=DEFAULT_MAX_FILE_BYTES,
@@ -515,9 +552,7 @@ def extract_archive(
             _extract_tar(source, stage, plan, deadline)
         _require_same_source(source, plan["source_signature"])
         _verify_stage(stage, plan, deadline)
-        if destination.exists():
-            raise FileExistsError("archive destination appeared during extraction")
-        stage.rename(destination)
+        _promote_no_replace(stage, destination)
         promoted = True
     finally:
         if not promoted and stage.exists():
