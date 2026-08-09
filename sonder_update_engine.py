@@ -290,14 +290,14 @@ class UpdateManager:
                     evidence={"reason": "explicitly skipped by operator"},
                 )
             else:
-                import sonder_backup
+                from sonder_runtime.bootstrap.app import default_app
 
                 target = self._backup_target or str(
                     Path(sonder_migrations.store_db_paths()["operations"])
                     .parent / "backups"
                 )
                 try:
-                    result = sonder_backup.create_backup(target)
+                    result = default_app().backup.create(target)
                     backup_id = result.backup_id
                     self.repository.record_step(
                         update_id, step, "backup", "ok",
@@ -312,7 +312,9 @@ class UpdateManager:
                         plan, "failed", error_code="BACKUP_FAILED",
                         error_detail=type(exc).__name__,
                     )
-                    raise UpdateError(f"backup failed: {exc}") from exc
+                    raise UpdateError(
+                        "backup failed; inspect local update diagnostics"
+                    ) from exc
             plan = self.repository.advance(plan, "draining", backup_id=backup_id)
 
             # Drain the runtime (hook provided by the caller when a live
