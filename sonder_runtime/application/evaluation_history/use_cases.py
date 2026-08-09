@@ -23,7 +23,7 @@ class EvaluationHistoryService:
         tolerance: float = 0.0,
         max_records: int = 10_000,
     ) -> Mapping[str, object]:
-        return self._reader.status(
+        result = self._reader.status(
             model=model,
             model_digest=model_digest,
             suite=suite,
@@ -32,3 +32,8 @@ class EvaluationHistoryService:
             tolerance=tolerance,
             max_records=max_records,
         )
+        if not isinstance(result, Mapping):
+            raise TypeError("evaluation history reader returned a non-mapping payload")
+        if not isinstance(result.get("groups"), list):
+            raise TypeError("evaluation history reader groups must be a list")
+        return result

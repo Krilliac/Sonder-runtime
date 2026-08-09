@@ -66,3 +66,22 @@ def test_root_compatibility_module_is_true_store_alias():
     legacy = importlib.import_module("eval_history")
 
     assert legacy is evaluation_history_store
+
+
+def test_root_compatibility_alias_survives_real_reload_with_identity():
+    legacy = importlib.import_module("eval_history")
+
+    reloaded = importlib.reload(legacy)
+
+    assert reloaded is legacy
+    assert importlib.import_module("eval_history") is reloaded
+
+
+@pytest.mark.parametrize("payload", [None, "ERROR: legitimate payload", {"groups": {}}])
+def test_service_rejects_malformed_reader_payload(payload):
+    class MalformedReader:
+        def status(self, **_filters):
+            return payload
+
+    with pytest.raises(TypeError, match="evaluation history reader"):
+        EvaluationHistoryService(MalformedReader()).status()
