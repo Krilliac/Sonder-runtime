@@ -574,7 +574,7 @@ def convert_data(
     except DataConvertError:
         raise
     except (OSError, PermissionError, TypeError, ValueError, csv.Error) as exc:
-        raise DataConvertError("conversion failed safely: %s" % exc) from exc
+        raise DataConvertError("source conversion failed safely: %s" % exc) from exc
     finally:
         if binary is not None:
             binary.close()
