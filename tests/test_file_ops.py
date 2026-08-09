@@ -183,7 +183,7 @@ def test_repository_read_rejects_traversal_out_of_the_workspace(monkeypatch, tmp
     [
         "C:\\outside.txt",          # Windows drive-absolute, backslash
         "C:/outside.txt",           # Windows drive-absolute, forward slash
-        "D:\\host\\repo\\file.py",  # a different drive letter
+        "Z:\\example\\repo\\file.py",  # an explicitly fake alternate drive
         "\\\\server\\share\\x",     # UNC path
     ],
 )
