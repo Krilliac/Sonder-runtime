@@ -27,6 +27,20 @@ def test_checked_in_error_signal_universe_has_no_growth_or_swaps():
     assert checker.check() == []
 
 
+def test_isolated_run_legacy_wire_error_is_exactly_baselined():
+    matches = [
+        finding
+        for finding in checker.inventory()
+        if finding.path == "server.py"
+        and finding.scope == "isolated_run"
+        and finding.category == checker.CATEGORY_RETURN
+    ]
+
+    assert len(matches) == 1
+    assert matches[0].expression == "'ERROR: %s' % exc"
+    assert checker.load_baseline()[matches[0].key] == 1
+
+
 def test_signal_fingerprint_does_not_depend_on_ast_dump_defaults(monkeypatch):
     finding = checker.Finding(
         "producer.py", "produce", checker.CATEGORY_RETURN, 1,
