@@ -17,7 +17,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import embeddings  # noqa: E402
-import memory_store  # noqa: E402
+import sonder_runtime.adapters.memory_store as memory_store  # noqa: E402
 import sonder_paths  # noqa: E402
 
 # Natural-language coding intents that SHOULD match a seeded lesson.
