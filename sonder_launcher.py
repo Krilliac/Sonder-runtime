@@ -38,6 +38,7 @@ from sonder_paths import state_path
 ROOT = Path(__file__).resolve().parent
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 11436
+DEFAULT_SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 11435
 MAX_BODY = 16_384
 MAX_CONTEXT_TOKENS = 1_000_000
@@ -676,7 +677,7 @@ class LauncherController:
         self,
         root=ROOT,
         python=sys.executable,
-        server_host="0.0.0.0",
+        server_host=DEFAULT_SERVER_HOST,
         server_port=SERVER_PORT,
         *,
         db_path=None,
@@ -2364,7 +2365,9 @@ def main(argv=None):
     parser.add_argument("--host", default=os.environ.get("SONDER_LAUNCHER_HOST", DEFAULT_HOST))
     parser.add_argument("--port", type=int, default=int(os.environ.get("SONDER_LAUNCHER_PORT", DEFAULT_PORT)))
     parser.add_argument("--token", default=os.environ.get("SONDER_LAUNCHER_TOKEN", ""))
-    parser.add_argument("--server-host", default=os.environ.get("SONDER_HOST", "0.0.0.0"))
+    parser.add_argument(
+        "--server-host", default=os.environ.get("SONDER_HOST", DEFAULT_SERVER_HOST)
+    )
     parser.add_argument("--server-port", type=int, default=int(os.environ.get("SONDER_PORT", SERVER_PORT)))
     parser.add_argument("--cert", default=os.environ.get("SONDER_LAUNCHER_CERT", ""))
     parser.add_argument("--key", default=os.environ.get("SONDER_LAUNCHER_KEY", ""))
