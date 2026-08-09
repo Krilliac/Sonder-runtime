@@ -67,15 +67,25 @@ def _emit(payload: dict, *, as_json: bool) -> None:
     walk(payload)
 
 
-def cmd_preflight(args) -> int:
-    import sonder_preflight
+def _run_preflight(config, *, check_ollama=True, ollama_timeout=5.0):
+    """Resolve the host adapter only when an entry-point command needs it."""
+    from .adapters.legacy.preflight import LegacyPreflightExecutor
+    from .application.preflight import PreflightService
 
+    return PreflightService(LegacyPreflightExecutor()).run(
+        config,
+        check_ollama=check_ollama,
+        ollama_timeout=ollama_timeout,
+    )
+
+
+def cmd_preflight(args) -> int:
     try:
         config = _load_config(args)
     except sonder_config.ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    report = sonder_preflight.run_preflight(
+    report = _run_preflight(
         config, check_ollama=not args.skip_ollama
     )
     _emit(report.as_dict(), as_json=args.json)
@@ -151,13 +161,12 @@ def cmd_status(args) -> int:
 
 def cmd_diagnostics(args) -> int:
     import sonder_migrations
-    import sonder_preflight
 
     payload: dict = {"build": sonder_version.build_info().as_dict()}
     try:
         config = _load_config(args)
         payload["config"] = config.as_redacted_dict()
-        payload["preflight"] = sonder_preflight.run_preflight(
+        payload["preflight"] = _run_preflight(
             config, check_ollama=not args.skip_ollama
         ).as_dict()
         _export_runtime_environment(config)
@@ -334,7 +343,6 @@ def cmd_restore(args) -> int:
 def cmd_smoke(args) -> int:
     """Minimal end-to-end: config, migrations, operations write/read."""
     import sonder_migrations
-    import sonder_preflight
     from sonder_operations_store import OperationsStore
 
     try:
@@ -343,7 +351,7 @@ def cmd_smoke(args) -> int:
         print(str(exc), file=sys.stderr)
         return 2
     failures = []
-    report = sonder_preflight.run_preflight(config, check_ollama=not args.skip_ollama)
+    report = _run_preflight(config, check_ollama=not args.skip_ollama)
     if not report.ok:
         failures.extend(
             f"preflight: {c.name}: {c.detail}"
@@ -416,15 +424,13 @@ def _export_runtime_environment(config) -> None:
 
 
 def cmd_serve(args) -> int:
-    import sonder_preflight
-
     try:
         config = _load_config(args)
     except sonder_config.ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
     if not args.skip_preflight:
-        report = sonder_preflight.run_preflight(
+        report = _run_preflight(
             config, check_ollama=not args.skip_ollama
         )
         if not report.ok:
