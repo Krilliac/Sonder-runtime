@@ -40,6 +40,20 @@ def test_default_home_uses_macos_application_support(monkeypatch, tmp_path):
     )
 
 
+def test_default_home_preserves_existing_macos_legacy_store(monkeypatch, tmp_path):
+    monkeypatch.delenv("SONDER_HOME", raising=False)
+    monkeypatch.setattr(sonder_paths.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(sonder_paths.Path, "home", lambda: tmp_path / "user")
+    legacy = tmp_path / "user" / ".local" / "share" / "sonder"
+    legacy.mkdir(parents=True)
+
+    assert sonder_paths.default_home() == legacy
+
+    native = tmp_path / "user" / "Library" / "Application Support" / "sonder"
+    native.mkdir(parents=True)
+    assert sonder_paths.default_home() == native
+
+
 def test_default_home_uses_windows_profile_then_system_drive(monkeypatch, tmp_path):
     monkeypatch.delenv("SONDER_HOME", raising=False)
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
