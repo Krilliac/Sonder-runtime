@@ -160,9 +160,10 @@ def _connect_pinned(
     host: str,
     port: int,
     approved_addresses: tuple[str, ...],
-    timeout: float,
+    deadline: float,
 ):
     current = _resolve_loopback_addresses(host, port)
+    _set_deadline_timeout(None, deadline)
     candidates = tuple(sorted(set(approved_addresses) & set(current)))
     if not candidates:
         raise ValueError("probe hostname addresses changed before connect")
@@ -172,20 +173,42 @@ def _connect_pinned(
         family = socket.AF_INET6 if ip.version == 6 else socket.AF_INET
         sock = socket.socket(family, socket.SOCK_STREAM)
         try:
-            sock.settimeout(timeout)
+            _set_deadline_timeout(sock, deadline)
             target = (address, port, 0, 0) if ip.version == 6 else (address, port)
             sock.connect(target)
+            _set_deadline_timeout(None, deadline)
             return sock
         except OSError as exc:
             last_error = exc
             sock.close()
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "local service probe exceeded its total timeout"
+                ) from exc
     raise OSError("no validated loopback address was reachable") from last_error
 
 
-def _recv_until(sock, marker: bytes, limit: int) -> tuple[bytes, bytes]:
+def _set_deadline_timeout(sock, deadline: float) -> float:
+    """Apply the remaining monotonic budget before one blocking operation."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("local service probe exceeded its total timeout")
+    if sock is not None:
+        sock.settimeout(remaining)
+    return remaining
+
+
+def _recv(sock, size: int, deadline: float) -> bytes:
+    _set_deadline_timeout(sock, deadline)
+    chunk = sock.recv(size)
+    _set_deadline_timeout(None, deadline)
+    return chunk
+
+
+def _recv_until(sock, marker: bytes, limit: int, deadline: float) -> tuple[bytes, bytes]:
     data = bytearray()
     while marker not in data:
-        chunk = sock.recv(min(4096, limit + 1 - len(data)))
+        chunk = _recv(sock, min(4096, limit + 1 - len(data)), deadline)
         if not chunk:
             raise ValueError("local service closed before completing response headers")
         data.extend(chunk)
@@ -223,12 +246,12 @@ def _parse_headers(raw: bytes) -> tuple[int, dict[str, str]]:
     return status, headers
 
 
-def _read_chunked(sock, initial: bytes) -> tuple[bytes, bool]:
+def _read_chunked(sock, initial: bytes, deadline: float) -> tuple[bytes, bool]:
     buffered = bytearray(initial)
     body = bytearray()
 
     def receive_more() -> None:
-        chunk = sock.recv(4096)
+        chunk = _recv(sock, 4096, deadline)
         if not chunk:
             raise ValueError("local service closed during chunked response")
         buffered.extend(chunk)
@@ -270,7 +293,9 @@ def _read_chunked(sock, initial: bytes) -> tuple[bytes, bool]:
             return bytes(body[:MAX_BODY_BYTES]), True
 
 
-def _read_body(sock, initial: bytes, headers: dict[str, str], method: str) -> tuple[bytes, bool]:
+def _read_body(
+    sock, initial: bytes, headers: dict[str, str], method: str, deadline: float,
+) -> tuple[bytes, bool]:
     if method == "HEAD":
         return b"", False
     content_encoding = headers.get("content-encoding", "").strip().casefold()
@@ -278,7 +303,7 @@ def _read_body(sock, initial: bytes, headers: dict[str, str], method: str) -> tu
         raise ValueError("encoded local service response bodies are not supported")
     transfer_encoding = headers.get("transfer-encoding", "").casefold()
     if transfer_encoding == "chunked":
-        return _read_chunked(sock, initial)
+        return _read_chunked(sock, initial, deadline)
     if transfer_encoding and transfer_encoding != "identity":
         raise ValueError("unsupported local service transfer encoding")
     length_text = headers.get("content-length", "")
@@ -294,7 +319,7 @@ def _read_body(sock, initial: bytes, headers: dict[str, str], method: str) -> tu
         wanted = MAX_BODY_BYTES + 1
     data = bytearray(initial[:wanted])
     while len(data) < wanted:
-        chunk = sock.recv(min(4096, wanted - len(data)))
+        chunk = _recv(sock, min(4096, wanted - len(data)), deadline)
         if not chunk:
             break
         data.extend(chunk)
@@ -309,15 +334,20 @@ def _request_once(
     addresses: tuple[str, ...],
     method: str,
     timeout: float,
+    *,
+    deadline: float | None = None,
 ) -> tuple[int, dict[str, str], bytes, bool]:
+    if deadline is None:
+        deadline = time.monotonic() + timeout
     host = (parsed.hostname or "").rstrip(".").encode("idna").decode("ascii")
     port = parsed.port
-    sock = _connect_pinned(host, port, addresses, timeout)
+    sock = _connect_pinned(host, port, addresses, deadline)
     try:
         if parsed.scheme == "https":
             context = ssl.create_default_context()
+            _set_deadline_timeout(sock, deadline)
             sock = context.wrap_socket(sock, server_hostname=host)
-            sock.settimeout(timeout)
+            _set_deadline_timeout(None, deadline)
         path = urllib.parse.quote(
             urllib.parse.unquote(parsed.path or "/"),
             safe="/:@!$&'()*+,;=-._~%",
@@ -332,10 +362,15 @@ def _request_once(
             "Accept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n"
             % (method, target, _host_header(host, port))
         ).encode("ascii")
+        _set_deadline_timeout(sock, deadline)
         sock.sendall(request)
-        raw_headers, initial = _recv_until(sock, b"\r\n\r\n", MAX_HEADER_BYTES)
+        _set_deadline_timeout(None, deadline)
+        raw_headers, initial = _recv_until(
+            sock, b"\r\n\r\n", MAX_HEADER_BYTES, deadline,
+        )
         status, headers = _parse_headers(raw_headers)
-        body, truncated = _read_body(sock, initial, headers, method)
+        body, truncated = _read_body(sock, initial, headers, method, deadline)
+        _set_deadline_timeout(None, deadline)
         return status, headers, body, truncated
     finally:
         sock.close()
@@ -354,16 +389,17 @@ def probe(url: str, *, method: str = "GET", timeout: float = 2.0) -> dict:
     current_url = url
     redirects = 0
     started = time.monotonic()
+    deadline = started + timeout
     while True:
-        remaining = timeout - (time.monotonic() - started)
+        remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("local service probe exceeded its total timeout")
         parsed, addresses = _validate_target(current_url)
-        remaining = timeout - (time.monotonic() - started)
+        remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("local service probe exceeded its total timeout")
         status, headers, body, truncated = _request_once(
-            parsed, addresses, method, remaining,
+            parsed, addresses, method, remaining, deadline=deadline,
         )
         if status in _REDIRECT_CODES:
             if redirects >= MAX_REDIRECTS:

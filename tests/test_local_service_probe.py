@@ -72,7 +72,9 @@ def test_dns_is_rechecked_and_rebinding_is_refused_before_socket(monkeypatch):
     )
     parsed, approved = probe._validate_target("http://dev.local:8080/health")
     with pytest.raises(ValueError, match="exclusively"):
-        probe._connect_pinned(parsed.hostname, parsed.port, approved, 1.0)
+        probe._connect_pinned(
+            parsed.hostname, parsed.port, approved, probe.time.monotonic() + 1.0,
+        )
     assert answers == []
 
 
@@ -121,7 +123,7 @@ def test_direct_transport_ignores_proxy_env_and_sends_no_auth_or_cookies(
         200, "text/plain", b"ok", False,
     )
     assert fake.connected == ("127.0.0.1", 8080)
-    assert fake.timeout == 1.25
+    assert 0 < fake.timeout <= 1.25
     lowered = fake.sent.lower()
     assert b"proxy" not in lowered
     assert b"authorization" not in lowered
@@ -203,7 +205,13 @@ def test_loopback_redirect_and_secret_preview_are_safe_and_deterministic(monkeyp
             False,
         ),
     ]
-    monkeypatch.setattr(probe, "_request_once", lambda *args, **kwargs: responses.pop(0))
+    deadlines = []
+
+    def request(*_args, **kwargs):
+        deadlines.append(kwargs["deadline"])
+        return responses.pop(0)
+
+    monkeypatch.setattr(probe, "_request_once", request)
     monkeypatch.setattr(probe.time, "monotonic", lambda: 10.0)
 
     result = probe.probe("http://127.0.0.1:8080/start")
@@ -219,6 +227,7 @@ def test_loopback_redirect_and_secret_preview_are_safe_and_deterministic(monkeyp
         "redirects": 1,
         "status": 200,
     }
+    assert deadlines == [12.0, 12.0]
 
 
 @pytest.mark.parametrize("method", ["POST", "PUT", "DELETE", "OPTIONS"])
@@ -242,8 +251,53 @@ def test_socket_timeout_is_propagated_as_a_bounded_failure(monkeypatch):
     parsed, addresses = probe._validate_target("http://127.0.0.1:8080/")
     with pytest.raises(socket.timeout, match="timed out"):
         probe._request_once(parsed, addresses, "GET", 0.25)
-    assert fake.timeout == 0.25
+    assert 0 < fake.timeout <= 0.25
     assert fake.closed is True
+
+
+@pytest.mark.parametrize("slow_phase", ["headers", "body"])
+def test_absolute_deadline_stops_slow_drip_responses(monkeypatch, slow_phase):
+    clock = {"now": 100.0}
+    headers = b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n"
+
+    class SlowDripSocket(_FakeSocket):
+        def __init__(self):
+            super().__init__(headers + b"x" * 20)
+            self.recv_calls = 0
+            self.timeouts = []
+
+        def settimeout(self, value):
+            super().settimeout(value)
+            self.timeouts.append(value)
+
+        def recv(self, size):
+            self.recv_calls += 1
+            if slow_phase == "body" and self.recv_calls == 1:
+                data = bytes(self.response[:len(headers)])
+                del self.response[:len(headers)]
+            else:
+                data = bytes(self.response[:1])
+                del self.response[:1]
+            # Simulate a peer that always supplies a byte before the current
+            # socket timeout but consumes the shared wall-clock budget.
+            clock["now"] += 0.26
+            return data
+
+    fake = SlowDripSocket()
+    monkeypatch.setattr(probe.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(probe.socket, "socket", lambda *args, **kwargs: fake)
+    parsed, addresses = probe._validate_target("http://127.0.0.1:8080/")
+
+    with pytest.raises(TimeoutError, match="total timeout"):
+        probe._request_once(parsed, addresses, "GET", 1.0)
+
+    assert fake.closed is True
+    assert fake.recv_calls <= 4
+    assert all(
+        later <= earlier
+        for earlier, later in zip(fake.timeouts, fake.timeouts[1:])
+    )
+    assert fake.timeouts[-1] < fake.timeouts[0]
 
 
 def test_real_loopback_http_probe_end_to_end():

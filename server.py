@@ -11631,7 +11631,8 @@ _PROJECT_BOUND_AGENT_TOOLS = (
     _PROJECT_SCOPED_PATH_TOOLS
     | _PROJECT_SCOPED_EXECUTION_TOOLS
     | frozenset({
-        "ground_artifact", "program_search", "web_search", "web_fetch",
+        "ground_artifact", "program_search", "local_service_probe",
+        "web_search", "web_fetch",
         "weather_lookup", "approximate_location_lookup", "memory_search",
         "file_policy", "task_create", "task_list", "task_update", "task_show",
         "checklist_create", "checklist_update", "checklist_show",
