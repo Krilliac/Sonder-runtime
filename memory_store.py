@@ -8,7 +8,7 @@ import sqlite3
 import threading
 import time
 
-import process_liveness
+from sonder_runtime.adapters import process_liveness
 import reward
 
 
