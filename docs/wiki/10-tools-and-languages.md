@@ -53,7 +53,7 @@ file's *structure* without dumping raw bytes.
 ## Guarded filesystem tools
 
 `file_find`, `file_read`, `file_read_range`, `file_write`, `file_edit`,
-`file_copy`, `file_move`, `file_delete`, `directory_tree`, `directory_create`,
+`file_batch_write`, `file_copy`, `file_move`, `file_delete`, `directory_tree`, `directory_create`,
 `workspace_inventory`,
 `text_search`, `script_search`, `program_search`, `image_inspect`. All are
 confined to `SONDER_FILE_ROOTS`, honor the permission policy
@@ -71,6 +71,11 @@ the source, and deletes it only after publication. They never recurse and never
 invoke a shell or network service. Repository agents rebase and validate both
 paths against their exact assigned project root; autopilot accepts these tools
 only with overwrite disabled and no caller-supplied approval or extra root.
+
+`file_batch_write` accepts a JSON list of explicit `create` or `overwrite`
+operations. It prevalidates every target before writing, caps per-file and
+aggregate bytes, rejects duplicate/sensitive/symlink targets, and makes a
+best-effort rollback if any write fails.
 
 ## Other tool families
 
