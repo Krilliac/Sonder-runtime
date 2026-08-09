@@ -549,12 +549,101 @@ def test_launcher_accepts_bounded_context_sizes(value):
     assert sonder_launcher.normalize_context_size(value) == value
 
 
-def test_lan_binding_requires_strong_token():
+def test_nonloopback_binding_requires_strong_token_and_tls():
     with pytest.raises(ValueError, match="at least 24"):
         sonder_launcher.validate_configuration("0.0.0.0", "short")
-    sonder_launcher.validate_configuration("0.0.0.0", "x" * 24)
+    with pytest.raises(ValueError, match="requires TLS"):
+        sonder_launcher.validate_configuration("0.0.0.0", "x" * 24)
+    sonder_launcher.validate_configuration(
+        "0.0.0.0", "x" * 24, cert="cert.pem", key="key.pem"
+    )
+    sonder_launcher.validate_configuration(
+        "0.0.0.0",
+        "x" * 24,
+        allow_insecure_http_for_development=True,
+    )
+    with pytest.raises(ValueError, match="both TLS certificate and key"):
+        sonder_launcher.validate_configuration(
+            "0.0.0.0", "x" * 24, cert="cert.pem"
+        )
     sonder_launcher.validate_configuration("127.0.0.1", "")
     sonder_launcher.validate_configuration("::1", "")
+
+
+def test_loopback_validation_does_not_trust_dns_resolution(monkeypatch):
+    resolutions = []
+
+    def resolve(host):
+        resolutions.append(host)
+        return "127.0.0.1"
+
+    monkeypatch.setattr(sonder_launcher.socket, "gethostbyname", resolve)
+
+    with pytest.raises(ValueError, match="requires TLS"):
+        sonder_launcher.validate_configuration(
+            "attacker-controlled.example", "x" * 24
+        )
+    assert resolutions == []
+    sonder_launcher.validate_configuration("127.0.0.2", "")
+    sonder_launcher.validate_configuration("[::1]", "")
+
+
+def test_invalid_remote_transport_is_rejected_before_socket_construction(monkeypatch):
+    constructed = []
+    monkeypatch.setattr(
+        sonder_launcher,
+        "LauncherServer",
+        lambda *args, **kwargs: constructed.append((args, kwargs)),
+    )
+
+    with pytest.raises(ValueError, match="requires TLS"):
+        sonder_launcher.serve("0.0.0.0", 11436, "x" * 24)
+    with pytest.raises(ValueError, match="both TLS certificate and key"):
+        sonder_launcher.serve(
+            "0.0.0.0", 11436, "x" * 24, cert="cert.pem"
+        )
+    with pytest.raises(OSError):
+        sonder_launcher.serve(
+            "0.0.0.0",
+            11436,
+            "x" * 24,
+            cert="missing-cert.pem",
+            key="missing-key.pem",
+        )
+    assert constructed == []
+
+
+def test_main_forwards_explicit_insecure_development_override(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(sonder_launcher, "LauncherController", lambda **kwargs: object())
+    monkeypatch.setattr(
+        sonder_launcher,
+        "serve",
+        lambda *args: seen.setdefault("args", args),
+    )
+
+    assert sonder_launcher.main([
+        "--host",
+        "0.0.0.0",
+        "--token",
+        "x" * 24,
+        "--allow-insecure-http-for-development",
+    ]) == 0
+    assert seen["args"][-1] is True
+
+
+def test_main_rejects_remote_plaintext_before_controller_side_effects(monkeypatch):
+    constructed = []
+    monkeypatch.setattr(
+        sonder_launcher,
+        "LauncherController",
+        lambda **kwargs: constructed.append(kwargs),
+    )
+
+    assert sonder_launcher.main([
+        "--host", "0.0.0.0", "--token", "x" * 24,
+    ]) == 2
+    assert constructed == []
 
 
 def test_main_reports_controller_initialization_failure(monkeypatch):
@@ -577,6 +666,11 @@ def make_controller(tmp_path, **kwargs):
     )
 
 
+def test_controller_rejects_nonloopback_managed_runtime_host(tmp_path):
+    with pytest.raises(ValueError, match="managed Sonder API host must be loopback"):
+        make_controller(tmp_path, server_host="0.0.0.0")
+
+
 def test_controller_constructs_fixed_headless_command(monkeypatch, tmp_path):
     (tmp_path / "sonder_headless.py").write_text("# fixture", encoding="utf-8")
     seen = {}
@@ -590,7 +684,7 @@ def test_controller_constructs_fixed_headless_command(monkeypatch, tmp_path):
         sonder_launcher, "_process_start_identity", lambda pid: "test-process"
     )
     controller = make_controller(
-        tmp_path, python="python-test", server_host="0.0.0.0", server_port=11435,
+        tmp_path, python="python-test", server_host="127.0.0.1", server_port=11435,
     )
     def persist_before_release(*args):
         assert bytes(seen["process"].stdin.data) == b""
@@ -600,7 +694,7 @@ def test_controller_constructs_fixed_headless_command(monkeypatch, tmp_path):
     payload = controller.action("start", "8192")
     assert seen["command"] == [
         "python-test", str(tmp_path / "sonder_headless.py"), "start",
-        "--host", "0.0.0.0", "--port", "11435", "--context-size", "8192",
+        "--host", "127.0.0.1", "--port", "11435", "--context-size", "8192",
     ]
     assert "shell" not in seen["kwargs"]
     if os.name == "nt":
@@ -616,7 +710,7 @@ def test_controller_constructs_fixed_headless_command(monkeypatch, tmp_path):
     assert seen["kwargs"]["stdin"] is subprocess.PIPE
     assert seen["kwargs"]["stdout"] is subprocess.PIPE
     assert seen["kwargs"]["stderr"] is subprocess.STDOUT
-    assert seen["kwargs"]["env"]["SONDER_HOST"] == "0.0.0.0"
+    assert seen["kwargs"]["env"]["SONDER_HOST"] == "127.0.0.1"
     assert seen["kwargs"]["env"]["SONDER_PORT"] == "11435"
     assert seen["kwargs"]["env"][sonder_launcher.CONTROL_GATE_ENV] == "1"
     assert (
