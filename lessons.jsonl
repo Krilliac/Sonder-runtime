@@ -1,9 +1,6 @@
 {"id": "0022d0ce251c57c9", "text": "Use modular arithmetic to check divisibility and conditionally return results."}
-{"id": "003a0c899c7e9666", "text": "Use dynamic programming to build a DP table efficiently solving subproblems."}
-{"id": "037874c3e360ab5b", "text": "Use recursion to flatten any level of nesting in lists efficiently."}
 {"id": "09514dc15ee11d07", "text": "Use `collections.Counter` for frequency counting and `.most_common()` to find the most frequent item efficiently."}
 {"id": "0bee692733e1bd28", "text": "Use a dictionary to map numbers to their indices for quick lookup in two-pointer or hash-based solutions."}
-{"id": "0e9c513f092bd106", "text": "Use a loop to manage game objects like bricks, reducing memory usage and improving efficiency."}
 {"id": "10af526c9cff00fb", "text": "Use modular arithmetic to handle wrap-around in Caesar cipher shifts."}
 {"id": "214c326b7dccf1ba", "text": "Use simple heuristics for AI, check corners and center first; handle user input gracefully."}
 {"id": "242e97f31535e35b", "text": "Use modulo operator `%` to check divisibility for even/odd numbers efficiently."}
@@ -11,75 +8,37 @@
 {"id": "26e987e9a06d36f7", "text": "Use `re.search` to find matches efficiently and sum them with a generator expression."}
 {"id": "2a40d2ef374a2377", "text": "Sort by value then slice, use lambda for concise sorting."}
 {"id": "2ac6254cfb1845e3", "text": "Use os.environ to detect automated testing and adjust input/output accordingly."}
-{"id": "2e3abaac19e11ac1", "text": "Use list concatenation followed by sorting for merging two sorted lists efficiently."}
 {"id": "30a615b74a16be97", "text": "Use concise formula for Celsius to Fahrenheit conversion in Python."}
-{"id": "33d1e039048c94a5", "text": "Use memoization or iterative approach for efficient Fibonacci calculation."}
-{"id": "372bb21f8da9e7c0", "text": "Use dynamic programming to efficiently compute Levenshtein distance with optimal substructure."}
 {"id": "381399f9d69ee72c", "text": "Iterators are efficient for checking subsequences ensuring O(n) time complexity."}
-{"id": "431e81ea97e2efc1", "text": "Split and find max length word efficiently."}
 {"id": "47a57788bf16ab27", "text": "Use try-except to handle conversion errors elegantly."}
-{"id": "481439a814cd2186", "text": "Use a set to track seen elements for efficient lookup and maintain order with list comprehension."}
-{"id": "485504806d8363c2", "text": "Use list comprehension and string methods to convert between case types efficiently."}
-{"id": "4899411e66fb9561", "text": "Identify patterns, use a counter, and append results efficiently to avoid extra joins."}
 {"id": "4e468fa756b040df", "text": "Use `split()` to get words and `max()` with `key=len` for longest word."}
-{"id": "518e2be749d03562", "text": "Reuse Fibonacci pattern for sequence generation; use memoization or iterative approach for efficiency."}
 {"id": "55a2a65c05ddaefe", "text": "Use `json.dumps` inside a generator expression for efficient string joining."}
 {"id": "570cc5a36d74c268", "text": "Use a dictionary for mapping integers to Roman numerals for cleaner code."}
-{"id": "59aa5c2e9e1e2fe7", "text": "Use recursion to flatten nested dictionaries efficiently in Python."}
-{"id": "60b16074091b93fc", "text": "Use dynamic programming with a DP table to efficiently solve grid path problems."}
-{"id": "61a030f793878c42", "text": "Use modulo (%) to check divisibility efficiently in leap year logic."}
 {"id": "61ecd4ff832b5bd9", "text": "Use list comprehension and join for efficient string concatenation with JSON.dumps."}
-{"id": "61f4f5ea4706bbcd", "text": "Sort intervals, merge if start of next is <= end of last; use this logic efficiently for overlapping or touching intervals."}
 {"id": "69c3268ec0c65bac", "text": "Use procedural drawing and simple AI for paddle movement in Pygame games."}
 {"id": "69ea8bdc0febd120", "text": "Use a while loop for main game loop, manage events and player movement inside it."}
-{"id": "6affb56ac3c9c40e", "text": "Use int(str, base) to convert string binary to decimal efficiently."}
-{"id": "6bc5d9fb4d3b9bfe", "text": "Use modular arithmetic to handle wrap-around shifts efficiently."}
-{"id": "6f92521de3499333", "text": "Split strings efficiently using split() method for word counting."}
-{"id": "72062ba1f2b3a12a", "text": "Break down string into characters and counts, build result iteratively efficiently."}
-{"id": "75b083adf4b95be3", "text": "Use operator precedence and stack to handle arithmetic expressions correctly."}
 {"id": "762c21d6542bb937", "text": "Use clear naming, leverage built-ins like ** for simplicity in power operations."}
 {"id": "781eb098dd570f65", "text": "Identify and use the shortest string to reduce comparisons, optimize prefix search."}
 {"id": "7d2c87e33a15c763", "text": "Use split to separate words, capitalize each, then join back ensuring proper capitalization."}
 {"id": "7e6707fe94549c84", "text": "Use in-degree counts and a queue to process nodes with zero dependencies first ensuring no cycles are missed."}
 {"id": "817f2559969e4b3b", "text": "Use try-except to handle invalid inputs and ensure game continues smoothly."}
-{"id": "83f2d4baa7a4ac43", "text": "Use classes for game entities and manage their states, behaviors, and interactions efficiently."}
-{"id": "8b94cc9eba394ecc", "text": "Use list comprehension and str methods to split and parse strings efficiently."}
-{"id": "8d8236362185c192", "text": "Use sorted with slicing for k-th smallest efficiently avoiding sorting full list unnecessarily."}
-{"id": "8ec6dfb07d7c4928", "text": "Use simple AI for paddle movement and handle ball collisions efficiently."}
 {"id": "8f704ca0bc498711", "text": "Modular arithmetic is key to handling list rotation sizes larger than list length."}
 {"id": "925377e6a8ae2c35", "text": "Use `eval` judiciously; validate inputs and handle exceptions."}
 {"id": "9808dacb6fcff183", "text": "Use `capitalize` method on each word after splitting string; join with spaces."}
 {"id": "a11c911a5737bfe8", "text": "Use slicing to check if string reads the same backward, simplify with direct comparison."}
-{"id": "a207b83450885e81", "text": "Break down problem into manageable parts, use loops and conditions effectively."}
 {"id": "a7d152dab4059bcc", "text": "Use dictionary unpacking to safely override values in dicts without mutation."}
-{"id": "a89c17c043e58583", "text": "Split string on whitespace and count elements efficiently."}
-{"id": "aaa6850aab953705", "text": "Use regex to find all digit sequences and convert them to integers efficiently."}
 {"id": "acd05c805dbf467b", "text": "Use slicing for concise string reversal in Python."}
 {"id": "aef9ce37d0007fc0", "text": "Identify edge cases and optimize loop to check divisibility up to sqrt(n)."}
 {"id": "b1bc81ce99317efa", "text": "Check address length, validate each part as digit, ensure no negative/over 255."}
-{"id": "b237e58629154538", "text": "Use standard library effectively; manage game states with clear conditionals and loops."}
 {"id": "b322c71c971ce9d0", "text": "Use list comprehension for concise flattening of lists by one level."}
 {"id": "b323f68e5f5aa040", "text": "Use OrderedDict for efficient key ordering and eviction in LRU cache implementation."}
 {"id": "b9af29bd89280804", "text": "Iterate merging arrays efficiently, ensuring no extra space used; use two pointers for O(1) space complexity."}
 {"id": "bee01a4c91ecd8a5", "text": "Convert integers to binary, handling edge cases with simple logic and checks."}
-{"id": "c175ea1f9273932b", "text": "Use list slicing to efficiently create chunks of fixed size from a sequence."}
-{"id": "c2d858a68066a41e", "text": "Use reversed iteration and careful comparison to handle subtractive notation efficiently."}
-{"id": "c353d8b597300c56", "text": "Use split() to get words, then iterate with a dictionary to count occurrences efficiently."}
-{"id": "c38b7c980ceffd0b", "text": "Validate matrix dimensions and use nested loops for efficient multiplication."}
 {"id": "c432f587d984ad5d", "text": "Use dictionary unpacking to merge dictionaries with b's values taking precedence on conflicts."}
-{"id": "c7feb4ecd6a059fd", "text": "Use Kadane's algorithm for finding maximum subarray sum efficiently."}
 {"id": "c814b958e768c1e8", "text": "Use a dictionary to map Roman numerals, iterate from end to start for subtraction rule, and use one variable for previous value."}
 {"id": "cf4a9e638ed60555", "text": "Use modular arithmetic and iterate through values/symbols in reverse order for correct Roman numeral construction."}
-{"id": "d002268c0dd4bfc8", "text": "Always check divisibility by 2 first for efficiency; optimize prime factorization with early termination and odd number checks."}
-{"id": "d0f8be5345aa8fa0", "text": "Use Euclid's algorithm for finding GCD efficiently using recursion or iteration."}
 {"id": "d1bcc9e6a0ee0834", "text": "Use a set to track seen non-zero digits for quick duplicate checking."}
-{"id": "dbc11e0a63de8b76", "text": "Modulo operation is key to handle rotations beyond list size efficiently."}
-{"id": "e14258968bdd482d", "text": "Use string indexing and slicing effectively for decoding run-length encoded strings."}
 {"id": "e214e5fe974fe7aa", "text": "Use `reduce` from `functools` to apply a function of two arguments cumulatively to the items of an iterable."}
-{"id": "e617b53325a2008f", "text": "Use zip and list comprehensions for efficient matrix transposition."}
 {"id": "e6dbf25ec2aa8271", "text": "Identify common characters and use generator expressions for concise counting."}
-{"id": "e8213e63726ae06c", "text": "Break down encoding into chunks, handle padding efficiently, and use bitwise operations for integer manipulation."}
 {"id": "ef70b2c9390ea918", "text": "Review test cases to ensure correctness of logic not just output."}
-{"id": "f0e944074100cb3d", "text": "Use a dictionary comprehension with set to count unique occurrences efficiently."}
-{"id": "f1f5ab5d32b41ac9", "text": "Use a grid-based approach for snake game movement and collision detection efficiently."}
 {"id": "f3164a6ceaf36676", "text": "Use generator expression for concise even number filtering and sum calculation."}
