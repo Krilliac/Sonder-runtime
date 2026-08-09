@@ -160,6 +160,30 @@ def test_inspection_adapter_has_an_exact_read_only_legacy_dependency_set():
     }
 
 
+def test_preference_use_case_depends_only_on_narrow_application_ports():
+    use_case = (
+        _REPO_ROOT / "sonder_runtime" / "application" / "preferences"
+        / "use_cases.py"
+    )
+    tree = ast.parse(use_case.read_text(encoding="utf-8"), filename=str(use_case))
+    imports = {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+    assert imports == {"ports.preferences", "ports.tool_executor", "__future__"}
+
+    adapter = (
+        _REPO_ROOT / "sonder_runtime" / "adapters" / "legacy"
+        / "preferences.py"
+    ).read_text(encoding="utf-8")
+    assert "import server" not in adapter
+    assert "activity_tracker" not in adapter
+    assert "archive_" not in adapter
+    assert "task_" not in adapter
+    assert "checklist_" not in adapter
+
+
 def test_domain_modules_are_pure():
     # Importing domain modules must not touch the environment, filesystem,
     # or network. The AST checker covers imports; here we prove the
