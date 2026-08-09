@@ -55,14 +55,27 @@ _META_QUOTE_RE = re.compile(
     r"contains?|mentions?)\b[^\n]{0,100}[\"'“”‘’]",
     re.I,
 )
+_QUOTED_PREFERENCE_RE = re.compile(
+    r"(?:[\"“][^\"\n]{0,100}\b(?:i|we)\s+prefer\b[^\"\n]{0,100}[\"”]|"
+    r"(?:^|[\s(])'[^'\n]{0,100}\b(?:i|we)\s+prefer\b[^'\n]{0,100}')",
+    re.I,
+)
+_INSTRUCTION_OVERRIDE_RE = re.compile(
+    r"\b(?:ignore|disregard|override|bypass|forget)\b[^\n]{0,60}"
+    r"\b(?:previous|prior|system|developer|safety|security|instructions?|rules?|"
+    r"policy|policies|guardrails?)\b",
+    re.I,
+)
+_PROMPT_CONTROL_RE = re.compile(
+    r"<\/?(?:system|developer|assistant)\b|"
+    r"\[(?:system|developer|assistant)\]|"
+    r"\b(?:system|developer)\s+(?:prompt|message)\b|"
+    r"\b(?:jailbreak|prompt\s+injection)\b",
+    re.I,
+)
 
 _CATEGORY_PATTERNS = (
     ("identity", re.compile(r"\b(?:wants?\s+to\s+be\s+called|name\s+is)\b", re.I)),
-    ("response_style", re.compile(
-        r"\b(?:concise|brief|short|direct|detailed|verbose|bullets?|headings?|"
-        r"explain|explanation|tone|formal|casual|status\s+updates?|"
-        r"mention\s+what\s+changed|show\s+(?:your\s+)?progress)\b", re.I,
-    )),
     ("shell", re.compile(
         r"\b(?:powershell|pwsh|bash|zsh|cmd(?:\.exe)?|terminal|shell|"
         r"command\s+line|windows\s+commands?|linux\s+commands?)\b", re.I,
@@ -80,6 +93,11 @@ _CATEGORY_PATTERNS = (
         r"\b(?:ask\s+(?:me\s+)?before|confirm\s+before|approval|commit|push|"
         r"pull\s+request|changelog|documentation|docs|source\s+citations?)\b",
         re.I,
+    )),
+    ("response_style", re.compile(
+        r"\b(?:concise|brief|short|direct|detailed|verbose|bullets?|headings?|"
+        r"explain|explanation|tone|formal|casual|status\s+updates?|"
+        r"mention\s+what\s+changed|show\s+(?:your\s+)?progress)\b", re.I,
     )),
 )
 
@@ -124,6 +142,8 @@ _WORKFLOW_FAMILIES = (
 
 
 def _clean(text):
+    if not isinstance(text, str):
+        return ""
     text = _CODE_FENCE_RE.sub(" ", text or "")
     return _ASSIGN_RE.sub(" ", text).strip()
 
@@ -154,7 +174,15 @@ def preference_key(text):
 def preference_category(text):
     """Classify a durable behavior/default, or return empty when unsafe."""
     value = _clean(text)
-    if not value or _UNSAFE_CONTEXT_RE.search(value) or _META_QUOTE_RE.search(value):
+    if (
+        not value
+        or _UNSAFE_CONTEXT_RE.search(value)
+        or _META_QUOTE_RE.search(value)
+        or _QUOTED_PREFERENCE_RE.search(value)
+        or _INSTRUCTION_OVERRIDE_RE.search(value)
+        or _PROMPT_CONTROL_RE.search(value)
+        or any(ord(char) < 32 for char in value)
+    ):
         return ""
     for category, pattern in _CATEGORY_PATTERNS:
         if pattern.search(value):
@@ -165,18 +193,31 @@ def preference_category(text):
 def is_stable_preference(text, source_text=None):
     """True only for durable behavior/default text safe for future prompts."""
     source = str(source_text if source_text is not None else text or "")
-    if "```" in source or _UNSAFE_CONTEXT_RE.search(source):
+    if (
+        "```" in source
+        or _UNSAFE_CONTEXT_RE.search(source)
+        or _QUOTED_PREFERENCE_RE.search(source)
+        or _INSTRUCTION_OVERRIDE_RE.search(source)
+        or _PROMPT_CONTROL_RE.search(source)
+        or any(ord(char) < 32 and char not in "\t\r\n" for char in source)
+    ):
         return False
     if _META_QUOTE_RE.search(source):
         return False
     category = preference_category(text)
     if category == "identity":
+        source_match = re.search(
+            r"\b(?:call\s+me|my\s+name\s+is|wants?\s+to\s+be\s+called|"
+            r"user['’]s\s+name\s+is)\s+(.+?)\s*[!?]*$",
+            source,
+            re.I,
+        )
         match = re.search(
             r"\b(?:called|name\s+is)\s+([^.!?]+)", str(text or ""), re.I
         )
-        if not match:
+        if not match or not source_match:
             return False
-        name = match.group(1).strip()
+        name = source_match.group(1).strip().rstrip(".")
         words = name.split()
         if (
             not 1 <= len(words) <= 4
@@ -192,6 +233,8 @@ def is_stable_preference(text, source_text=None):
 
 def preference_applies(text, task):
     """Return whether a safe legacy preference is relevant to this task."""
+    if not is_stable_preference(text):
+        return False
     category = preference_category(text)
     if not category:
         return False
@@ -218,12 +261,17 @@ def preference_applies(text, task):
 
 def extract_preferences(text):
     """Return normalized preference strings found in a user turn."""
+    if not isinstance(text, str):
+        return []
     cleaned = _clean(text)
     if (
         not cleaned
         or _TASK_GUARD_RE.match(cleaned)
         or _UNSAFE_CONTEXT_RE.search(str(text or ""))
         or _META_QUOTE_RE.search(str(text or ""))
+        or _QUOTED_PREFERENCE_RE.search(text)
+        or _INSTRUCTION_OVERRIDE_RE.search(text)
+        or _PROMPT_CONTROL_RE.search(text)
     ):
         return []
     found = []
