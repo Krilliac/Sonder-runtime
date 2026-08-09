@@ -104,6 +104,7 @@ import code_improve
 import tier_router
 import project_scaffold
 import environment_probe
+import sonder_hardware
 import git_tools
 import eval_history
 
@@ -604,6 +605,7 @@ LIVE_RELOAD_MODULES = [
     "creative_router",
     "intents",
     "runtime_policy",
+    "sonder_hardware",
     # NPU accelerator host modules reload in dependency order; the broker and
     # service keep live worker/process state behind reload guards.
     "npu_contract",
@@ -11319,6 +11321,7 @@ def tool_manifest() -> str:
         "log_inspect": "Inspect one guarded text log with fixed level/timestamp/source extraction, failure clusters, repeats, and bounded context.",
         "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
         "environment_status": "Report the host OS, available shells (PowerShell/cmd/bash/wsl), and installed toolchains -- check before choosing a command shape or assuming a tool exists.",
+        "hardware_profile": "Detect cross-vendor accelerators and report conservative resident, unified-memory, and GPU+RAM-spill model plans without changing host settings.",
         "data_inspect/data_query/sqlite_mutate": "Preview structured data, run bounded read-only queries, or explicitly preview/apply one guarded parameterized SQLite DML statement.",
         "data_convert": "Preview or atomically create a non-overwriting JSON/JSONL/CSV/TSV conversion with explicit ordered fields.",
         "program_search/script_search/workspace_run/script_run/image_inspect": "Discover installed programs and workspace scripts, run bounded argv-only processes, and inspect image metadata.",
@@ -11404,6 +11407,7 @@ AGENT_TOOL_HELP = """Available tools:
 - file_delete: {"path": "notes.txt", "dry_run": true}
 - scaffold_project: {"kind": "cpp-msvc|cpp-cmake|csharp|rust|python|node|typescript|go|java-maven", "name": "MyApp", "root": "MyApp"} -- writes the full skeleton (.sln/.vcxproj/Cargo.toml/...); use this instead of hand-writing build/solution files
 - environment_status: {} -- host OS, shells, installed toolchains; check before choosing command shapes
+- hardware_profile: {"workload": "general|chat|coding|agentic|research", "refresh": false} -- cross-vendor device inventory and conservative local-model fit; detection is not backend readiness
 - script_search: {"query": "build", "root": ".", "max_results": 100}
 - program_search: {"query": "python", "max_results": 50}
 - workspace_run: {"program": "git", "args_json": ["status", "--short"], "cwd": ".", "timeout": 30}
@@ -11478,7 +11482,7 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "diagnostics", "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
     "evaluation_history_status",
     "memory_quality_report", "memory_privacy_review", "system_improvement_report", "master_status", "master_capacity",
-    "self_heal_check", "status", "system_profile_text", "environment_status",
+    "self_heal_check", "status", "system_profile_text", "environment_status", "hardware_profile",
     "emotion_vector_status", "preferences_status", "tool_manifest",
     "memory_search", "web_search", "web_fetch", "weather_lookup",
 })
@@ -11514,6 +11518,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - script_search: {"query": "<task-relevant script name>", "root": ".", "max_results": 100}
 - program_search: {"query": "<required program name>", "max_results": 50}
 - environment_status: {"refresh": false}
+- hardware_profile: {"workload": "general|chat|coding|agentic|research", "refresh": false}
 - image_inspect: {"path": "<task-relevant image path>"}
 - data_inspect: {"path": "<task-relevant data file>", "max_bytes": 256000}
 - data_query: {"path": "<task-relevant SQLite, JSON, JSONL, CSV, or TSV file>", "sql": "<SQLite SELECT/CTE only, otherwise empty>", "projection_json": ["<field or JSON pointer>"], "filters_json": {"<field or JSON pointer>": "<exact value>"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
@@ -12852,6 +12857,11 @@ def _agent_dispatch(
         )
     if tool_name == "environment_status":
         return environment_status(refresh=bool(args.get("refresh", False)))
+    if tool_name == "hardware_profile":
+        return hardware_profile(
+            workload=args.get("workload", "general"),
+            refresh=bool(args.get("refresh", False)),
+        )
     if tool_name == "file_edit":
         return file_edit(
             path=args.get("path", ""),
@@ -13192,7 +13202,7 @@ _PROJECT_BOUND_AGENT_TOOLS = (
         "system_improvement_report", "master_status",
         "master_capacity", "self_heal_check", "status", "system_profile_text",
         "emotion_vector_status", "preferences_status", "context_policy_status",
-        "environment_status",
+        "environment_status", "hardware_profile",
     })
 )
 _CLOUD_AGENT_NESTED_MODEL_TOOLS = frozenset({
@@ -13920,7 +13930,7 @@ _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "dependency_inventory",
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
     "data_inspect", "data_query", "text_search", "script_search",
-    "program_search", "image_inspect", "environment_status", "repo_status", "repo_diff", "project_detect",
+    "program_search", "image_inspect", "environment_status", "hardware_profile", "repo_status", "repo_diff", "project_detect",
     "repo_log", "repo_show", "repo_blame", "archive_list",
 })
 _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
@@ -16685,6 +16695,20 @@ def environment_status(refresh: bool = False) -> str:
     """
     _maybe_live_reload()
     return environment_probe.format_profile(refresh=refresh)
+
+
+@mcp.tool()
+def hardware_profile(workload: str = "general", refresh: bool = False) -> str:
+    """Report accelerator inventory and conservative local-model fit.
+
+    Enumerates NVIDIA, AMD, Intel, Apple, and unknown display accelerators with
+    bounded platform-native probes. Detection does not assert that an Ollama,
+    CUDA, ROCm, Vulkan, Metal, or other backend is usable. Recommendations are
+    read-only capacity plans; they never change drivers or runtime settings.
+    Set refresh=True after a hardware/driver change to bypass the process cache.
+    """
+    _maybe_live_reload()
+    return sonder_hardware.profile_text(workload=workload, refresh=refresh)
 
 
 @mcp.tool()

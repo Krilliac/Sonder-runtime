@@ -18,7 +18,7 @@ families that fill each role.
 ## 1. Size the collection to the machine
 
 ```bash
-python sonder_hardware.py          # reports CPU/RAM/GPU/VRAM + a recommended band
+python sonder_hardware.py          # cross-vendor inventory + resident/hybrid plans
 ```
 
 Use the reported band with the [Model Catalog](../wiki/18-model-catalog.md)
@@ -26,6 +26,13 @@ tables to choose one model per role. A minimal viable collection is **three**
 models: a `fast` router model, one `code`/`general` workhorse, and an
 **embedding** model (required for memory/recall). Add `reasoning` and `vision`
 only if the band supports keeping or swapping them.
+
+The report keeps the largest single accelerator separate from auxiliary GPUs
+and integrated graphics. It never sums mixed-vendor memory or treats an OS
+enumeration as proof that CUDA, ROCm, Vulkan, Metal, or another backend works.
+Use `ollama ps` and a real inference smoke test for runtime proof. A hybrid
+class is a capacity estimate: it reserves system headroom and assumes slow
+CPU/unified-memory spill, so prefer the resident class for interactive work.
 
 ## 2. Pull the collection
 
@@ -78,7 +85,7 @@ model per device when its backend supports that (for example,
 ## 5. Verify
 
 ```bash
-python sonder_hardware.py             # band + whether speculation is likely to engage
+python sonder_hardware.py             # inventory, fit classes, speculation guidance
 python sonder_doctor.py               # config, policy, Ollama reachability, memory health
 ollama ps                             # which models are currently resident
 ```
