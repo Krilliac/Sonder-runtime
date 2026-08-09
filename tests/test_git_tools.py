@@ -1,4 +1,5 @@
 import subprocess
+import sys
 
 import pytest
 
@@ -67,6 +68,24 @@ def test_repo_status_reports_detached_head(tmp_path):
     assert result["oid"] == oid
 
 
+def test_truncated_status_never_claims_the_worktree_is_clean(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    (repo / "tracked.txt").write_text("dirty\n", encoding="utf-8")
+    monkeypatch.setattr(git_tools, "_require_repository_root", lambda *a, **k: repo)
+    monkeypatch.setattr(git_tools, "_checked_git", lambda *a, **k: {
+        "stdout": "# branch.oid abc\n# branch.head main\n",
+        "stderr": "", "returncode": 0, "timed_out": False,
+        "elapsed_ms": 1, "truncated": True,
+        "output_bytes": 500, "output_limit": 40,
+    })
+
+    result = _status(repo, max_output=40)
+
+    assert result["truncated"] is True
+    assert result["complete"] is False
+    assert result["clean"] is None
+
+
 def test_repo_diff_separates_unstaged_staged_and_path_scope(tmp_path):
     repo = _repo(tmp_path)
     other = repo / "other.txt"
@@ -85,6 +104,63 @@ def test_repo_diff_separates_unstaged_staged_and_path_scope(tmp_path):
     assert "+staged" in staged["diff"]
     assert staged["context"] == 0
     assert staged["staged"] is True
+
+
+def test_repo_diff_preserves_tracked_symlink_pathspec(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / "a").write_text("a", encoding="utf-8")
+    (repo / "b").write_text("b", encoding="utf-8")
+    link = repo / "link"
+    try:
+        link.symlink_to("a")
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip("symlink creation unavailable: %s" % exc)
+    _git(repo, "add", "a", "b", "link")
+    _git(repo, "commit", "-m", "add symlink")
+    link.unlink()
+    link.symlink_to("../outside-target")
+
+    result = _diff(repo, path="link")
+
+    assert result["path"] == "link"
+    assert "diff --git a/link b/link" in result["diff"]
+    assert "outside-target" in result["diff"]
+
+    agent_output = server._agent_dispatch(
+        "repo_diff", {"root": ".", "path": "link"}, read_only=True,
+        repository_extra_roots=str(repo),
+    )
+    assert not agent_output.startswith("ERROR:")
+    assert "diff --git a/link b/link" in agent_output
+
+
+def test_repo_diff_neutralizes_repository_clean_filter(tmp_path):
+    repo = _repo(tmp_path)
+    attributes = repo / ".gitattributes"
+    attributes.write_text("*.txt filter=hostile\n", encoding="utf-8")
+    _git(repo, "add", ".gitattributes")
+    _git(repo, "commit", "-m", "attributes")
+
+    marker = tmp_path / "filter-ran.txt"
+    script = tmp_path / "filter.py"
+    script.write_text(
+        "import pathlib, sys\n"
+        "pathlib.Path(%r).write_text('ran', encoding='utf-8')\n"
+        "sys.stdout.buffer.write(sys.stdin.buffer.read())\n" % str(marker),
+        encoding="utf-8",
+    )
+    command = '"%s" "%s"' % (
+        str(sys.executable).replace("\\", "/"),
+        str(script).replace("\\", "/"),
+    )
+    _git(repo, "config", "filter.hostile.clean", command)
+    _git(repo, "config", "filter.hostile.required", "true")
+    (repo / "tracked.txt").write_text("changed\n", encoding="utf-8")
+
+    result = _diff(repo, path="tracked.txt")
+
+    assert "+changed" in result["diff"]
+    assert not marker.exists()
 
 
 def test_repo_diff_has_a_shared_hard_output_cap(tmp_path):
@@ -125,6 +201,9 @@ def test_git_processes_are_argv_only_noninteractive_and_lock_free(
     monkeypatch, tmp_path,
 ):
     repo = _repo(tmp_path)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "alias.status")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "!echo unsafe")
     real_popen = git_tools.subprocess.Popen
     calls = []
 
@@ -141,6 +220,8 @@ def test_git_processes_are_argv_only_noninteractive_and_lock_free(
         assert kwargs["stdin"] is subprocess.DEVNULL
         assert kwargs["env"]["GIT_OPTIONAL_LOCKS"] == "0"
         assert kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0"
+        assert "GIT_CONFIG_COUNT" not in kwargs["env"]
+        assert "GIT_CONFIG_KEY_0" not in kwargs["env"]
 
 
 def test_timeout_is_bounded_and_reported(monkeypatch, tmp_path):

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import subprocess
@@ -44,7 +45,13 @@ def _resolve_root(root, *, extra_roots="", bypass=False):
 
 
 def _git_environment():
-    env = sonder_logging.child_environment()
+    # Git's ambient environment can redirect the repository/config/index or
+    # inject command-line config entries. Start from a clean Git namespace and
+    # add back only explicit noninteractive safety controls.
+    env = {
+        key: value for key, value in sonder_logging.child_environment().items()
+        if not key.upper().startswith("GIT_")
+    }
     env.update({
         "GIT_OPTIONAL_LOCKS": "0",
         "GIT_PAGER": "cat",
@@ -259,7 +266,11 @@ def repo_status(root=".", *, timeout=DEFAULT_TIMEOUT,
         "truncated": result["truncated"],
         "output_bytes": result["output_bytes"],
         "output_limit": result["output_limit"],
+        "complete": not result["truncated"],
     })
+    if result["truncated"]:
+        # Absence of a change record in a truncated prefix proves nothing.
+        parsed["clean"] = None
     return parsed
 
 
@@ -273,17 +284,69 @@ def _resolve_diff_path(root, path, *, extra_roots):
     authorized_roots = str(root)
     if extra_roots:
         authorized_roots += os.pathsep + str(extra_roots)
-    resolved = file_ops.resolve_repository_read_path(
-        str(candidate),
-        allow_workspace_root=False,
+    # Validate the parent physically, but preserve the final lexical component.
+    # A tracked symlink is a Git entry in its own right: resolving its target
+    # changes the pathspec and can incorrectly reject a safe link to outside.
+    resolved_parent = file_ops.resolve_repository_read_path(
+        str(candidate.parent),
+        allow_workspace_root=True,
         reject_sensitive=True,
         extra_roots=authorized_roots,
     )
     try:
-        relative = resolved.relative_to(root)
+        parent_relative = resolved_parent.relative_to(root)
     except ValueError as exc:
         raise PermissionError("diff path is outside the repository root") from exc
+    basename = candidate.name
+    if not basename or basename in {".", ".."}:
+        raise ValueError("diff path must name a repository entry")
+    lowered = basename.casefold()
+    if (
+        file_ops._is_secret_path(Path(basename))
+        or lowered in {str(name).casefold() for name in file_ops.CONTROL_CONFIG_FILES}
+        or lowered in {"memory.db", "memory.db-wal", "memory.db-shm"}
+    ):
+        raise PermissionError("diff path is secret or control state")
+    relative = parent_relative / basename
     return relative.as_posix()
+
+
+_FILTER_COMMAND_RE = re.compile(r"^(filter\..*)\.(?:clean|process)$", re.IGNORECASE)
+
+
+def _neutralized_filter_arguments(root, *, timeout, max_output):
+    """Return command-line overrides for every configured clean/process driver."""
+    result = _run_git(
+        root,
+        ["config", "--null", "--name-only", "--get-regexp", r"^filter\..*\.(clean|process)$"],
+        timeout=timeout, max_output=min(max_output, 65_536),
+    )
+    if result["timed_out"]:
+        raise TimeoutError("git filter configuration probe timed out")
+    if result["returncode"] not in {0, 1}:
+        detail = (result["stderr"] or result["stdout"]).strip()
+        raise ValueError("git filter configuration probe failed: %s" % (detail or "no diagnostic"))
+    if result["truncated"]:
+        raise PermissionError("git filter configuration is too large to neutralize safely")
+    drivers = set()
+    for key in result["stdout"].split("\x00"):
+        key = key.strip()
+        if not key:
+            continue
+        match = _FILTER_COMMAND_RE.fullmatch(key)
+        if not match:
+            raise PermissionError("unexpected Git filter configuration key: %s" % key)
+        drivers.add(match.group(1))
+    overrides = []
+    for driver in sorted(drivers, key=lambda value: (value.casefold(), value)):
+        # `process=` disables the long-running protocol; the constant passthrough
+        # clean command replaces any repository-controlled shell command.
+        overrides.extend([
+            "-c", "%s.process=" % driver,
+            "-c", "%s.clean=cat" % driver,
+            "-c", "%s.required=false" % driver,
+        ])
+    return overrides
 
 
 def repo_diff(root=".", *, staged=False, path="", context=3,
@@ -295,6 +358,9 @@ def repo_diff(root=".", *, staged=False, path="", context=3,
     relative = _resolve_diff_path(top, path, extra_roots=extra_roots)
     context = _bounded_int(context, 3, 0, MAX_DIFF_CONTEXT)
     arguments = [
+        *_neutralized_filter_arguments(
+            top, timeout=timeout, max_output=max_output,
+        ),
         "-c", "color.ui=false", "-c", "core.pager=cat",
         "--no-pager", "--literal-pathspecs", "diff", "--no-ext-diff",
         "--no-textconv",
