@@ -4,7 +4,8 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-import tempfile
+import secrets
+import stat
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import file_ops
@@ -82,7 +83,8 @@ def _parse(patch: str) -> list[dict]:
                 int(match.group(3)), int(match.group(4) or 1),
             )
             i += 1; body = []
-            while i < len(lines) and not lines[i].startswith(("@@ ", "--- ")):
+            consumed_old = consumed_new = 0
+            while i < len(lines):
                 line = lines[i]
                 if line.startswith("\\ No newline at end of file"):
                     if line.rstrip("\r\n") != "\\ No newline at end of file" or not body:
@@ -90,14 +92,20 @@ def _parse(patch: str) -> list[dict]:
                     if not body[-1][1].endswith(("\n", "\r")):
                         raise ValueError("duplicate no-newline marker")
                     body[-1] = (body[-1][0], body[-1][1].rstrip("\r\n"))
-                elif line[:1] in {" ", "+", "-"}:
-                    body.append((line[0], line[1:]))
-                else:
+                    i += 1
+                    continue
+                if (consumed_old, consumed_new) == (old_count, new_count):
+                    break
+                if line[:1] not in {" ", "+", "-"}:
                     raise ValueError("invalid hunk body at line %d" % (i + 1))
+                tag = line[0]
+                consumed_old += tag != "+"
+                consumed_new += tag != "-"
+                if consumed_old > old_count or consumed_new > new_count:
+                    raise ValueError("hunk line counts do not match header")
+                body.append((tag, line[1:]))
                 i += 1
-            actual_old = sum(tag != "+" for tag, _ in body)
-            actual_new = sum(tag != "-" for tag, _ in body)
-            if (actual_old, actual_new) != (old_count, new_count):
+            if (consumed_old, consumed_new) != (old_count, new_count):
                 raise ValueError("hunk line counts do not match header")
             item["hunks"].append((old_start, old_count, new_start, new_count, body))
             hunk_count += 1
@@ -174,12 +182,34 @@ def _safe_relative(root: Path, relative: str, *, extra_roots: str, developer_aut
     return target
 
 
-def _stage(path: Path, data: bytes) -> Path:
-    fd, name = tempfile.mkstemp(prefix=".sonder-patch-", dir=str(path.parent))
-    staged = Path(name)
+def _stage(path: Path, data: bytes, mode: int | None) -> Path:
+    flags = (
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    )
+    fd = -1
+    staged = None
+    for _attempt in range(128):
+        staged = path.parent / (".sonder-patch-%s" % secrets.token_hex(12))
+        try:
+            # Creates intentionally use 0666 so the process umask determines
+            # their normal file mode. Modifications are fchmod'd to the exact
+            # original mode after their content is durable.
+            fd = os.open(staged, flags, 0o666 if mode is None else 0o600)
+            break
+        except FileExistsError:
+            continue
+    if fd < 0:
+        raise FileExistsError("could not allocate unique text patch staging file")
     try:
         with os.fdopen(fd, "wb") as handle:
-            handle.write(data); handle.flush(); os.fsync(handle.fileno())
+            handle.write(data)
+            handle.flush()
+            if mode is not None and hasattr(os, "fchmod"):
+                os.fchmod(handle.fileno(), mode)
+            os.fsync(handle.fileno())
+        if mode is not None and not hasattr(os, "fchmod"):
+            os.chmod(staged, mode)
         return staged
     except BaseException:
         try: staged.unlink()
@@ -224,11 +254,15 @@ def text_patch(root: str, patch: str, *, apply: bool = False,
         total_before += len(original); total_after += len(encoded)
         if total_before > MAX_TOTAL_BYTES or total_after > MAX_TOTAL_BYTES:
             raise ValueError("patch exceeds aggregate byte cap")
-        stat_sig = None if not exists else (target.stat().st_dev, target.stat().st_ino,
-                                             target.stat().st_size, target.stat().st_mtime_ns)
+        metadata = target.stat() if exists else None
+        stat_sig = None if metadata is None else (
+            metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns,
+            stat.S_IMODE(metadata.st_mode),
+        )
         prepared.append({**item, "target": target, "original": original, "output": encoded,
                          "before_sha256": _sha(original) if exists else None,
                          "after_sha256": _sha(encoded), "stat_sig": stat_sig,
+                         "mode": stat.S_IMODE(metadata.st_mode) if metadata is not None else None,
                          "additions": added, "deletions": removed})
     report_files = [{k: row[k] for k in ("path", "action", "before_sha256", "after_sha256",
                                           "additions", "deletions")} |
@@ -250,25 +284,34 @@ def text_patch(root: str, patch: str, *, apply: bool = False,
                 if target.exists(): raise RuntimeError("create target changed after preflight")
             else:
                 st = target.stat()
-                sig = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+                sig = (
+                    st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns,
+                    stat.S_IMODE(st.st_mode),
+                )
                 if sig != row["stat_sig"] or _sha(target.read_bytes()) != row["before_sha256"]:
                     raise RuntimeError("modify target changed after preflight")
-        for row in prepared: staged[row["path"]] = _stage(row["target"], row["output"])
+        for row in prepared:
+            staged[row["path"]] = _stage(row["target"], row["output"], row["mode"])
         for row in prepared:
             temp, target = staged[row["path"]], row["target"]
             if row["action"] == "create":
                 file_ops._require_no_reparse_components(target.parent)
-                os.link(temp, target); temp.unlink()
+                os.link(temp, target)
+                published.append(row)
+                temp.unlink()
             else:
                 file_ops._require_no_reparse_components(target)
                 if file_ops._is_reparse_point(target):
                     raise RuntimeError("modify target became a link before publication")
                 st = target.stat()
-                current_sig = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+                current_sig = (
+                    st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns,
+                    stat.S_IMODE(st.st_mode),
+                )
                 if current_sig != row["stat_sig"] or _sha(target.read_bytes()) != row["before_sha256"]:
                     raise RuntimeError("modify target changed before publication")
                 os.replace(temp, target)
-            published.append(row)
+                published.append(row)
         return {"ok": True, "applied": True, "root": str(project), "files": report_files,
                 "transaction": "committed"}
     except BaseException as exc:
@@ -279,7 +322,7 @@ def text_patch(root: str, patch: str, *, apply: bool = False,
                 if not target.is_file() or file_ops._is_reparse_point(target) or _sha(target.read_bytes()) != row["after_sha256"]:
                     raise RuntimeError("target changed; refusing unsafe rollback")
                 if row["action"] == "create": target.unlink()
-                else: os.replace(_stage(target, row["original"]), target)
+                else: os.replace(_stage(target, row["original"], row["mode"]), target)
             except BaseException as rollback_exc:
                 rollback_errors.append({"path": row["path"], "error": str(rollback_exc)})
         raise TextPatchError("text patch transaction failed: %s" % exc, {

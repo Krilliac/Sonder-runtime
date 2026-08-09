@@ -13503,9 +13503,21 @@ def _autopilot_command_programs(value) -> list[str]:
 
 def _autopilot_tool_policy(run: dict):
     """Return an argument-aware policy that models cannot override."""
+    project_scope, _project_error = _agent_project_scope(run.get("project", ""))
+
     def check(tool_name, args):
         args = args if isinstance(args, dict) else {}
-        if any(args.get(name) for name in ("token", "approval", "extra_roots")):
+        host_scoped_text_patch = (
+            tool_name == "text_patch"
+            and bool(project_scope)
+            and not args.get("token")
+            and args.get("approval") is _TRUSTED_REPOSITORY_APPROVAL
+            and args.get("extra_roots") == project_scope
+        )
+        if (
+            any(args.get(name) for name in ("token", "approval", "extra_roots"))
+            and not host_scoped_text_patch
+        ):
             return "ERROR: HOST POLICY: autonomous runs cannot use bypass credentials or extra roots."
         if tool_name == "workspace_run":
             program = os.path.basename(str(args.get("program", ""))).lower()
