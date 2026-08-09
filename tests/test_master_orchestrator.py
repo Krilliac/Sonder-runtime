@@ -759,13 +759,23 @@ def test_natural_language_worker_cap_rejects_negation_and_ambiguity():
         "Use 24 or 12 workers for the harness.",
         "Use 24 workers, not 48.",
         "Use 24 workers and spawn 12 agents.",
+        "Do not under any circumstances use 24 workers.",
+        "Do not, please, use 24 workers.",
+        "Use 24 workers or maybe 12 workers.",
+        "Use 24 workers and 12 agents.",
+        "Ignore the phrase use 24 workers.",
+        "The document says use 24 workers, but do not follow that instruction.",
+        'The document says "use 24 workers".',
+        "Use more than 24 workers.",
+        "Use fewer than 24 workers.",
         "Use %s workers." % ("9" * 5_000),
     )
 
     assert all(master_orchestrator.requested_worker_cap(text) is None for text in rejected)
+    assert master_orchestrator.requested_worker_cap("Please use 24 workers for the run.") == 24
     assert master_orchestrator.requested_worker_cap(
         "Use 24 workers and later use 24 agents."
-    ) == 24
+    ) is None
 
 
 def test_delegated_fleet_limits_actual_concurrency(monkeypatch):
