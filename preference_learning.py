@@ -86,7 +86,7 @@ _INSTRUCTION_OVERRIDE_RE = re.compile(
     r"\b(?:ignore|disregard|override|bypass|forget)\b[^\n]{0,60}"
     r"\b(?:all|any|other|previous|prior|system|developer|safety|security|"
     r"instructions?|rules?|"
-    r"policy|policies|guardrails?)\b",
+    r"policy|policies|guardrails?|safeguards?)\b",
     re.I,
 )
 _COMMAND_TAIL_RE = re.compile(
