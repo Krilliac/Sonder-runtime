@@ -1,6 +1,6 @@
 # Guarded external MCP bridge
 
-`sonder_runtime.application.external_mcp` defines the host-owned policy and
+`sonder_runtime.adapters.external_mcp` defines the host-owned policy and
 call boundary for future external MCP integrations. It is intentionally not a
 general HTTP client and is not exposed to agents or Sonder's MCP server.
 

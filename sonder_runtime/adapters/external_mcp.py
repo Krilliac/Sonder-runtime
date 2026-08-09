@@ -19,8 +19,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Mapping, Protocol
 
-from .context import OperationContext
-from .ports.event_sink import EventSink
+from sonder_runtime.application.context import OperationContext
+from sonder_runtime.application.ports.event_sink import EventSink
 
 
 _KNOWN_CAPABILITIES = frozenset({"read", "filesystem", "network", "mutate", "process"})
@@ -52,6 +52,8 @@ class ExternalMcpToolPolicy:
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not _SAFE_NAME.fullmatch(self.name):
             raise ValueError("external MCP tool names must be non-empty and canonical")
+        if type(self.read_only) is not bool:
+            raise ValueError("read_only must be a Boolean")
         capabilities = frozenset(self.capabilities)
         if len(capabilities) != len(self.capabilities):
             raise ValueError("external MCP tool capabilities must be unique")
@@ -79,6 +81,8 @@ class ExternalMcpServerPolicy:
             raise ValueError("external MCP server names must be non-empty and canonical")
         if self.transport != "streamable_http":
             raise ValueError("only the non-executable streamable_http transport is supported")
+        if type(self.allow_remote) is not bool:
+            raise ValueError("allow_remote must be a Boolean")
         if not self.tools:
             raise ValueError("external MCP servers require an explicit tool allowlist")
         names = [tool.name for tool in self.tools]
@@ -86,9 +90,17 @@ class ExternalMcpServerPolicy:
             raise ValueError("external MCP tool names must be unique per server")
         if self.credential_env is not None and not _ENV_NAME.fullmatch(self.credential_env):
             raise ValueError("credential_env must be a canonical environment variable name")
-        if not 0 < self.timeout_seconds <= _MAX_TIMEOUT_SECONDS:
+        if (
+            isinstance(self.timeout_seconds, bool)
+            or not isinstance(self.timeout_seconds, (int, float))
+            or not 0 < self.timeout_seconds <= _MAX_TIMEOUT_SECONDS
+        ):
             raise ValueError("external MCP timeout is outside the supported bound")
-        if not 0 < self.max_result_bytes <= _MAX_RESULT_BYTES:
+        if (
+            isinstance(self.max_result_bytes, bool)
+            or not isinstance(self.max_result_bytes, int)
+            or not 0 < self.max_result_bytes <= _MAX_RESULT_BYTES
+        ):
             raise ValueError("external MCP result limit is outside the supported bound")
         _parse_endpoint(self.endpoint)
 
@@ -228,21 +240,32 @@ class ExternalMcpBridge:
             if argument_bytes > _MAX_ARGUMENT_BYTES:
                 raise ExternalMcpError("ARGUMENTS_TOO_LARGE", "tool arguments exceed the limit")
 
-            parsed, addresses, remote = _resolve_endpoint(server.endpoint)
+            deadline = started + server.timeout_seconds
+            if context.deadline_monotonic is not None:
+                deadline = min(deadline, context.deadline_monotonic)
+            parsed, addresses, remote = await _await_stage(
+                asyncio.to_thread(_resolve_endpoint, server.endpoint),
+                context=context,
+                deadline=deadline,
+            )
             if remote and (not server.allow_remote or not context.cloud_allowed):
                 raise ExternalMcpError(
                     "REMOTE_NOT_CONSENTED", "remote MCP requires server policy and cloud consent"
                 )
-            timeout = server.timeout_seconds
-            if context.remaining_seconds is not None:
-                timeout = min(timeout, context.remaining_seconds)
+            timeout = deadline - time.monotonic()
             if timeout <= 0:
                 raise ExternalMcpError("CONTEXT_EXPIRED", "operation deadline has expired")
 
             credential = None
             if server.credential_env is not None:
                 try:
-                    credential = self._secret_resolver(server.credential_env)
+                    credential = await _await_stage(
+                        asyncio.to_thread(self._secret_resolver, server.credential_env),
+                        context=context,
+                        deadline=deadline,
+                    )
+                except ExternalMcpError:
+                    raise
                 except Exception as exc:
                     raise ExternalMcpError(
                         "CREDENTIAL_UNAVAILABLE", "external MCP credential is unavailable"
@@ -251,20 +274,25 @@ class ExternalMcpBridge:
                     raise ExternalMcpError(
                         "CREDENTIAL_UNAVAILABLE", "external MCP credential is unavailable"
                     )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ExternalMcpError("TIMEOUT", "external MCP call timed out")
             request = McpCallRequest(
                 endpoint=urllib.parse.urlunsplit(parsed),
                 resolved_addresses=addresses,
                 server_name=server.name,
                 tool_name=policy.name,
                 arguments=normalised_arguments,
-                timeout_seconds=timeout,
+                timeout_seconds=remaining,
                 max_result_bytes=server.max_result_bytes,
                 credential=credential,
             )
             try:
-                raw_result = await asyncio.wait_for(self._transport.invoke(request), timeout=timeout)
-            except asyncio.TimeoutError as exc:
-                raise ExternalMcpError("TIMEOUT", "external MCP call timed out") from exc
+                raw_result = await _await_stage(
+                    self._transport.invoke(request),
+                    context=context,
+                    deadline=deadline,
+                )
             except ExternalMcpError:
                 raise
             except Exception as exc:
@@ -376,6 +404,58 @@ def policies_from_mapping(raw: Mapping[str, Any]) -> tuple[ExternalMcpServerPoli
         values["tools"] = tuple(tools)
         servers.append(ExternalMcpServerPolicy(**values))
     return tuple(servers)
+
+
+async def _await_stage(
+    awaitable: Awaitable[Any],
+    *,
+    context: OperationContext,
+    deadline: float,
+) -> Any:
+    """Await one bridge stage under the call's absolute deadline and cancellation.
+
+    DNS and secret resolvers are synchronous host adapters, so callers wrap them
+    in ``asyncio.to_thread`` before entering here. Cancelling that await cannot
+    forcibly stop an operating-system resolver thread, but it does release the
+    request and event loop immediately. Transports are required to be ordinary
+    cancellation-cooperative async implementations.
+    """
+    task = asyncio.ensure_future(awaitable)
+
+    async def watch_cancellation() -> None:
+        while not context.cancellation.cancelled:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(0.01, remaining))
+
+    cancellation = asyncio.create_task(watch_cancellation())
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        task.cancel()
+        cancellation.cancel()
+        await asyncio.gather(task, cancellation, return_exceptions=True)
+        raise ExternalMcpError("TIMEOUT", "external MCP call timed out")
+    done, _pending = await asyncio.wait(
+        {task, cancellation}, timeout=remaining, return_when=asyncio.FIRST_COMPLETED,
+    )
+    if task in done:
+        cancellation.cancel()
+        await asyncio.gather(cancellation, return_exceptions=True)
+        if context.cancellation.cancelled:
+            await asyncio.gather(task, return_exceptions=True)
+            raise ExternalMcpError("CONTEXT_EXPIRED", "operation is cancelled or expired")
+        if time.monotonic() >= deadline:
+            await asyncio.gather(task, return_exceptions=True)
+            raise ExternalMcpError("TIMEOUT", "external MCP call timed out")
+        return await task
+
+    task.cancel()
+    cancellation.cancel()
+    await asyncio.gather(task, cancellation, return_exceptions=True)
+    if context.cancellation.cancelled:
+        raise ExternalMcpError("CONTEXT_EXPIRED", "operation is cancelled or expired")
+    raise ExternalMcpError("TIMEOUT", "external MCP call timed out")
 
 
 def _reject_secret_keys(value: Any) -> None:

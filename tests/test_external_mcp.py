@@ -1,15 +1,17 @@
 import asyncio
+import time
 
 import pytest
 
 from sonder_runtime.application.context import local_owner_context
-from sonder_runtime.application.external_mcp import (
+from sonder_runtime.adapters.external_mcp import (
     ExternalMcpBridge,
     ExternalMcpError,
     ExternalMcpServerPolicy,
     ExternalMcpToolPolicy,
     policies_from_mapping,
 )
+import sonder_runtime.adapters.external_mcp as external_mcp
 
 
 class RecordingEvents:
@@ -36,6 +38,14 @@ class RecordingTransport:
         if isinstance(result, BaseException):
             raise result
         return result
+
+
+class MutableCancellation:
+    def __init__(self):
+        self.cancelled = False
+
+    def wait(self, timeout=None):
+        return self.cancelled
 
 
 def _context(*, cloud_allowed=False, timeout_seconds=5):
@@ -216,6 +226,103 @@ def test_host_config_builds_only_the_explicit_allowlist():
     assert [server.name for server in policies] == ["docs"]
     assert [tool.name for tool in policies[0].tools] == ["lookup"]
     assert policies[0].credential_env == "SONDER_DOCS_MCP_TOKEN"
+
+
+@pytest.mark.parametrize("value", ["false", "true", 0, 1, None])
+def test_remote_consent_requires_an_actual_boolean(value):
+    with pytest.raises(ValueError, match="allow_remote must be a Boolean"):
+        _server(allow_remote=value)
+
+
+def test_deadline_covers_endpoint_and_credential_resolution(monkeypatch):
+    original_resolve = external_mcp._resolve_endpoint
+
+    def slow_resolve(endpoint):
+        time.sleep(0.04)
+        return original_resolve(endpoint)
+
+    monkeypatch.setattr(external_mcp, "_resolve_endpoint", slow_resolve)
+    transport = RecordingTransport([])
+    bridge = _bridge(
+        transport,
+        RecordingEvents(),
+        server=_server(timeout_seconds=0.01),
+    )
+    with pytest.raises(ExternalMcpError) as endpoint_failure:
+        asyncio.run(bridge.call("docs", "lookup", {}, context=_context()))
+    assert endpoint_failure.value.code == "TIMEOUT"
+    assert transport.requests == []
+
+    monkeypatch.setattr(external_mcp, "_resolve_endpoint", original_resolve)
+
+    def slow_secret(_name):
+        time.sleep(0.04)
+        return "eventual-secret"
+
+    bridge = ExternalMcpBridge(
+        (_server(credential_env="SONDER_TEST_MCP_TOKEN", timeout_seconds=0.01),),
+        transport=transport,
+        events=RecordingEvents(),
+        secret_resolver=slow_secret,
+    )
+    with pytest.raises(ExternalMcpError) as credential_failure:
+        asyncio.run(bridge.call("docs", "lookup", {}, context=_context()))
+    assert credential_failure.value.code == "TIMEOUT"
+    assert transport.requests == []
+
+
+def test_in_flight_transport_is_cancelled_when_context_token_trips():
+    cancellation = MutableCancellation()
+    transport_cancelled = {"value": False}
+
+    class BlockingTransport:
+        async def invoke(self, request):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                transport_cancelled["value"] = True
+                raise
+
+    bridge = _bridge(BlockingTransport(), RecordingEvents())
+
+    async def exercise():
+        context = local_owner_context(
+            correlation_id="cancel-test",
+            source="mcp",
+            timeout_seconds=2,
+            cancellation=cancellation,
+        )
+        call = asyncio.create_task(bridge.call("docs", "lookup", {}, context=context))
+        await asyncio.sleep(0.03)
+        cancellation.cancelled = True
+        with pytest.raises(ExternalMcpError) as failure:
+            await call
+        assert failure.value.code == "CONTEXT_EXPIRED"
+
+    asyncio.run(exercise())
+    assert transport_cancelled["value"] is True
+
+
+def test_result_is_discarded_when_transport_and_cancellation_finish_together():
+    cancellation = MutableCancellation()
+
+    class CancellingTransport:
+        async def invoke(self, request):
+            cancellation.cancelled = True
+            return {"structuredContent": {"must_not_escape": True}}
+
+    bridge = _bridge(CancellingTransport(), RecordingEvents())
+    context = local_owner_context(
+        correlation_id="cancel-race",
+        source="mcp",
+        timeout_seconds=2,
+        cancellation=cancellation,
+    )
+
+    with pytest.raises(ExternalMcpError) as failure:
+        asyncio.run(bridge.call("docs", "lookup", {}, context=context))
+
+    assert failure.value.code == "CONTEXT_EXPIRED"
 
 
 def test_observability_failure_does_not_change_completed_call_semantics():
