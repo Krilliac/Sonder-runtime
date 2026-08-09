@@ -773,25 +773,30 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
+    final primaryFeed = find.byType(LiveExecutionFeed).first;
+    Finder inPrimary(Finder matching) => find.descendant(
+          of: primaryFeed,
+          matching: matching,
+        );
     expect(find.text('bounded event 0'), findsNothing);
     expect(find.text('bounded event 1'), findsNothing);
     // SelectableText owns both a visible Text and an internal EditableText;
     // assert the single public widget instead of counting implementation
     // descendants as duplicate feed rows.
     expect(
-      find.widgetWithText(SelectableText, 'bounded event 2'),
+      inPrimary(find.widgetWithText(SelectableText, 'bounded event 2')),
       findsOneWidget,
     );
-    expect(find.text('edit harness.dart'), findsOneWidget);
-    expect(find.text('12/14 events'), findsOneWidget);
-    expect(find.text('Sequence gap'), findsOneWidget);
-    expect(find.text('window 0 → 16'), findsOneWidget);
-    expect(find.text('2 dropped'), findsOneWidget);
-    expect(find.text('History truncated'), findsOneWidget);
-    expect(find.text('Redaction applied'), findsOneWidget);
-    expect(find.textContaining('file edit'), findsOneWidget);
-    expect(find.textContaining('lines +4 ~0 -0'), findsOneWidget);
-    expect(find.textContaining('<redacted>'), findsOneWidget);
+    expect(inPrimary(find.text('edit harness.dart')), findsOneWidget);
+    expect(inPrimary(find.text('12/14 events')), findsOneWidget);
+    expect(inPrimary(find.text('Sequence gap')), findsOneWidget);
+    expect(inPrimary(find.text('window 0 → 16')), findsOneWidget);
+    expect(inPrimary(find.text('2 dropped')), findsOneWidget);
+    expect(inPrimary(find.text('History truncated')), findsOneWidget);
+    expect(inPrimary(find.text('Redaction applied')), findsOneWidget);
+    expect(inPrimary(find.textContaining('file edit')), findsOneWidget);
+    expect(inPrimary(find.textContaining('lines +4 ~0 -0')), findsOneWidget);
+    expect(inPrimary(find.textContaining('<redacted>')), findsOneWidget);
     expect(find.textContaining('private-value'), findsNothing);
     expect(find.byType(SelectableText), findsWidgets);
     expect(find.text('Unavailable'), findsNWidgets(2));
