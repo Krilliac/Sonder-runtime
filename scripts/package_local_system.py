@@ -114,6 +114,7 @@ REQUIRED_FILES = {
     "sonder-runtime.cmd",
     "sonder-runtime.sh",
     "web_intents.py",
+    "workflow_store.py",
     "sonder-serve.cmd",
     "sonder-serve.sh",
     "sonder_serve.py",
@@ -124,6 +125,12 @@ REQUIRED_FILES = {
     "migrations/operations/0001_baseline.py",
     "migrations/queued_actions/0001_baseline.py",
     "migrations/updates/0001_baseline.py",
+    "sonder_runtime/adapters/filesystem/workflow_store.py",
+    "sonder_runtime/adapters/legacy/workflows.py",
+    "sonder_runtime/application/ports/workflows.py",
+    "sonder_runtime/application/workflows/__init__.py",
+    "sonder_runtime/application/workflows/loop.py",
+    "sonder_runtime/application/workflows/use_cases.py",
 }
 EXACT_OUTPUTS = (
     Path("app/build/local-system"),
