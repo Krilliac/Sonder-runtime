@@ -31,7 +31,7 @@ from pathlib import Path
 
 import sonder_health
 import command_recovery
-from process_liveness import pid_alive as _process_pid_alive
+from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_alive
 from sonder_paths import state_path
 
 
@@ -363,6 +363,53 @@ def _process_matches(pid, identity):
     return bool(identity) and _pid_alive(pid) and _process_start_identity(pid) == identity
 
 
+def _linux_group_has_non_zombie_member(group_id, proc_root=Path("/proc")):
+    """Return whether a Linux process group has a non-zombie member.
+
+    ``killpg(gid, 0)`` also succeeds when the only remaining members are
+    unreaped zombies.  That is useful existence information, but it must not
+    keep a control-tree operation alive forever under a PID 1 that does not
+    reap promptly.  ``None`` means procfs was unavailable or unreadable and
+    callers should retain the portable killpg fallback.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        entries = list(proc_root.iterdir())
+    except OSError:
+        return None
+    inspected = False
+    ambiguous = False
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "stat").read_text(encoding="ascii")
+            end = raw.rfind(")")
+            fields = raw[end + 2:].split() if end >= 0 else []
+            if len(fields) < 3:
+                ambiguous = True
+                continue
+            state = fields[0]
+            process_group = int(fields[2])
+        except OSError as exc:
+            if isinstance(exc, FileNotFoundError) or exc.errno in (
+                errno.ENOENT, errno.ESRCH,
+            ):
+                continue
+            ambiguous = True
+            continue
+        except ValueError:
+            ambiguous = True
+            continue
+        inspected = True
+        if process_group == group_id and state not in ("Z", "X", "x"):
+            return True
+    if ambiguous or not inspected:
+        return None
+    return False
+
+
 def _posix_group_alive(group_id):
     try:
         group_id = int(group_id)
@@ -374,7 +421,8 @@ def _posix_group_alive(group_id):
         os.killpg(group_id, 0)
     except OSError as exc:
         return exc.errno == errno.EPERM
-    return True
+    linux_alive = _linux_group_has_non_zombie_member(group_id)
+    return True if linux_alive is None else linux_alive
 
 
 def _wait_until(predicate, timeout, interval=0.05):

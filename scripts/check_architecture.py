@@ -34,14 +34,19 @@ ROOT_PLATFORM_MODULES = {
     "sonder_config", "sonder_paths", "sonder_version", "sonder_metrics",
     "sonder_shutdown", "sonder_logging",
 }
-ROOT_LEGACY_MODULES = {
+BASELINE_ROOT_LEGACY_MODULES = frozenset({
     "server", "runtime_policy", "memory_store", "embeddings",
     "autopilot_store", "fleet_store", "sonder_operations_store",
     "sonder_migrations", "sonder_backup", "sonder_preflight",
     "sonder_lifecycle", "sonder_secrets", "sonder_serve", "sonder_repl",
     "sonder_updates", "sonder_update_engine", "model_transport",
-    "recall", "workbench", "file_ops", "process_liveness", "eval_history",
-}
+    "recall", "workbench", "file_ops", "eval_history",
+})
+ROOT_LEGACY_MODULES = set(BASELINE_ROOT_LEGACY_MODULES)
+# This is a ratchet, not a target.  Removing a legacy root dependency is
+# always allowed; adding one requires an explicit architecture-policy change
+# and must never happen as an accidental convenience import.
+ROOT_LEGACY_MODULE_LIMIT = 21
 
 LAYERS = ("domain", "application", "adapters", "platform", "bootstrap")
 
@@ -95,6 +100,17 @@ def resolve_relative(module: str, node: ast.ImportFrom) -> str:
 
 def check() -> list[str]:
     violations: list[str] = []
+    unexpected_legacy = ROOT_LEGACY_MODULES - BASELINE_ROOT_LEGACY_MODULES
+    if unexpected_legacy:
+        violations.append(
+            "ROOT_LEGACY_MODULES added non-baseline module(s): %s"
+            % ", ".join(sorted(unexpected_legacy))
+        )
+    if len(ROOT_LEGACY_MODULES) > ROOT_LEGACY_MODULE_LIMIT:
+        violations.append(
+            "ROOT_LEGACY_MODULES grew from its ratchet limit of %d to %d"
+            % (ROOT_LEGACY_MODULE_LIMIT, len(ROOT_LEGACY_MODULES))
+        )
     imports: dict[str, set[str]] = {}
     files = sorted(PACKAGE_ROOT.rglob("*.py"))
 
