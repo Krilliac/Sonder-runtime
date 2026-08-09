@@ -193,7 +193,7 @@ class LegacyAutomationRepository:
 
 
 class LegacyMemoryRepository:
-    """MemoryRepository over the memory adapter and root ``recall`` module.
+    """MemoryRepository over the migrated memory and recall adapters.
 
     Bound to a live SQLite connection owned by the UnitOfWork — all methods
     delegate against that one connection. Constructed by the UnitOfWork, not
@@ -239,7 +239,7 @@ class LegacyMemoryRepository:
         return memory_store.get_interaction(self._conn, interaction_id)
 
     def recall(self, task: str, *, k: int = 2, project: str | None = None, **options):
-        import recall as recall_module
+        import sonder_runtime.adapters.recall as recall_module
 
         return recall_module.recall(self._conn, task, k=k, project=project, **options)
 

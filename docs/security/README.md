@@ -8,6 +8,10 @@ holds up, and what does not.
   NEEDS-VERIFICATION, and WELL-DEFENDED sections, each with `file:line` anchors,
   a concrete failure scenario, and a remediation).
 
+See also **[ISOLATED_EXECUTION.md](./ISOLATED_EXECUTION.md)** for the optional
+Docker/Podman-backed `isolated_run` contract, fixed controls, availability, and
+external-runtime/kernel limitations.
+
 ## Scope
 
 The review targeted the surfaces where a local agent, an authenticated HTTP
