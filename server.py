@@ -11741,7 +11741,7 @@ _WORK_VALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_verify", "game_reference_suite", "game_generate_and_test",
     "game_generation_campaign", "self_heal_check", "workspace_inventory", "directory_tree", "file_find",
-    "project_detect", "file_read", "file_read_range", "text_search", "image_inspect",
+    "file_read", "file_read_range", "text_search", "image_inspect",
     "memory_quality_report", "memory_privacy_review", "learning_health_status",
 })
 
@@ -12960,7 +12960,7 @@ def _agent_impl(
                 successful_inspection_results[call_signature] = observation_text[:6000]
                 repeated_inspection_counts.pop(call_signature, None)
         if tool_name in {
-            "workspace_inventory", "directory_tree", "file_read", "file_read_range", "file_find",
+            "workspace_inventory", "project_detect", "directory_tree", "file_read", "file_read_range", "file_find",
             "text_search", "script_search", "image_inspect",
         } and tool_ok:
             file_evidence = True

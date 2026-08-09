@@ -377,12 +377,20 @@ def _parse_maven(root, path, cwd, collector):
     artifacts = []
     plugins = []
     for node in root.iter():
-        if _xml_local(node.tag) != "artifactid":
+        declaration = _xml_local(node.tag)
+        if declaration not in {"dependency", "plugin"}:
             continue
-        value = (node.text or "").strip()
+        value = next(
+            (
+                (child.text or "").strip()
+                for child in node
+                if _xml_local(child.tag) == "artifactid" and (child.text or "").strip()
+            ),
+            "",
+        )
         if value:
             artifacts.append(value)
-            if "plugin" in value.casefold():
+            if declaration == "plugin":
                 plugins.append(value)
     _declared_java_frameworks(collector, artifacts, "Java/Kotlin", path)
     collector.command("build", cwd, ["mvn", "package"], path, "pom.xml")
@@ -481,7 +489,8 @@ def _parse_manifest(kind, text, path, absolute, collector):
             collector.command("test", cwd, ["gradle", "test"], path, "Gradle manifest")
         declared = []
         declared_boot_plugin = False
-        for raw_line in text.splitlines():
+        uncommented = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+        for raw_line in uncommented.splitlines():
             line = raw_line.split("//", 1)[0]
             plugin = re.search(r"\bid\s*(?:\(\s*)?[\"']([^\"']+)[\"']", line)
             if plugin:
@@ -499,7 +508,12 @@ def _parse_manifest(kind, text, path, absolute, collector):
                 declared.append(dependency.group(1))
         _declared_java_frameworks(collector, declared, "Java/Kotlin", path)
         if declared_boot_plugin:
-            collector.command("runtime", cwd, (["./gradlew"] if posix_wrapper else ["gradlew.bat"] if windows_wrapper else ["gradle"]) + ["bootRun"], path, "declared Spring Boot plugin", "posix" if posix_wrapper else "windows" if windows_wrapper else "any")
+            if posix_wrapper:
+                collector.command("runtime", cwd, ["./gradlew", "bootRun"], path, "declared Spring Boot plugin", "posix")
+            if windows_wrapper:
+                collector.command("runtime", cwd, ["gradlew.bat", "bootRun"], path, "declared Spring Boot plugin", "windows")
+            if not (posix_wrapper or windows_wrapper):
+                collector.command("runtime", cwd, ["gradle", "bootRun"], path, "declared Spring Boot plugin", "any")
     elif kind == "dart-package":
         is_flutter = bool(re.search(r"(?m)^\s{0,4}flutter\s*:", text))
         collector.language("Dart", path)
