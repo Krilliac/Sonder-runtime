@@ -61,7 +61,9 @@ def autopilot_next_states(current: str) -> frozenset[str]:
 # --- Fleet -----------------------------------------------------------------
 
 FLEET_ACTIVE = ("queued", "running")
-FLEET_TERMINAL = ("done", "failed", "cancelled", "interrupted", "retried")
+FLEET_TERMINAL = (
+    "done", "failed", "task_drift", "cancelled", "interrupted", "retried",
+)
 FLEET_ALL = FLEET_ACTIVE + FLEET_TERMINAL
 
 # A fleet agent is claimed from queued, runs, and reaches a terminal state.
@@ -70,9 +72,12 @@ FLEET_ALL = FLEET_ACTIVE + FLEET_TERMINAL
 # retry path).
 _FLEET_TRANSITIONS: dict[str, frozenset[str]] = {
     "queued": frozenset({"running", "cancelled", "interrupted"}),
-    "running": frozenset({"done", "failed", "cancelled", "interrupted"}),
+    "running": frozenset({
+        "done", "failed", "task_drift", "cancelled", "interrupted",
+    }),
     "interrupted": frozenset({"queued", "retried"}),
     "failed": frozenset({"queued", "retried"}),
+    "task_drift": frozenset({"queued", "retried"}),
     "cancelled": frozenset({"queued", "retried"}),
     "done": frozenset(),
     "retried": frozenset(),
