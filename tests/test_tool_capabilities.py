@@ -13,7 +13,8 @@ def test_initial_shadow_registry_is_immutable_and_has_no_drift():
         "environment_status", "hardware_profile", "file_policy",
         "workspace_inventory", "directory_tree", "file_find", "file_read",
         "file_read_range", "file_digest", "text_search", "repo_status",
-        "repo_diff",
+        "repo_diff", "artifact_risk_inspect", "process_list",
+        "process_memory_risk_inspect",
     }
     with pytest.raises(TypeError):
         capabilities.CAPABILITIES["new"] = capabilities.CAPABILITIES["file_read"]
@@ -198,9 +199,15 @@ def test_local_agent_keeps_host_brief_and_all_twelve_tools(monkeypatch):
 
 def test_local_read_only_project_dedup_and_autopilot_sets_are_unchanged():
     names = set(capabilities.CAPABILITIES)
-    rootless = {"environment_status", "hardware_profile", "file_policy"}
+    process_tools = {"process_list", "process_memory_risk_inspect"}
+    repository_names = names - process_tools
+    rootless = {
+        "environment_status", "hardware_profile", "file_policy",
+        *process_tools,
+    }
     non_work = {"environment_status", "hardware_profile"}
-    assert names <= server.REPOSITORY_READ_ONLY_TOOLS
+    assert repository_names <= server.REPOSITORY_READ_ONLY_TOOLS
+    assert process_tools.isdisjoint(server.REPOSITORY_READ_ONLY_TOOLS)
     assert names <= server._PROJECT_BOUND_AGENT_TOOLS
     assert names - rootless <= server._PROJECT_SCOPED_PATH_TOOLS
     assert rootless.isdisjoint(server._PROJECT_SCOPED_PATH_TOOLS)
@@ -260,7 +267,7 @@ def test_descriptor_policy_invariants_are_checked():
 
 def test_diagnostics_exposes_shadow_result_without_startup_enforcement():
     report = server.tool_capability_shadow_report()
-    assert report == "ok (12 descriptors; shadow-only)"
+    assert report == "ok (15 descriptors; shadow-only)"
     # Prove diagnostics consumes the shadow report without running its unrelated
     # model, database, NPU, and filesystem checks in this focused unit test.
     source = inspect.getsource(server.diagnostics)

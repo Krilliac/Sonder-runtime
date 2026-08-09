@@ -108,6 +108,9 @@ detects available memory, starts Ollama, and selects a compatible local model.
   success is not treated as proof.
 - Remote access is powerful because Sonder can execute code and modify files.
   Never expose the convenience loopback service directly to a network.
+- Deliberately unrestricted model testing is available only through the
+  exact-acknowledgement [unsafe lab runbook](docs/runbooks/unsafe-lab.md). It
+  removes model-loop host-tool policy; it does not provide OS isolation.
 - NPU support is an optional utility path for compatible routing or embedding
   work; token generation remains on the model server's CPU/GPU path.
 
@@ -121,6 +124,7 @@ detects available memory, starts Ollama, and selects a compatible local model.
 - [Tools and languages](docs/wiki/10-tools-and-languages.md)
 - [Training](TRAINING.md)
 - [Client and private hosting](CLIENT.md)
+- [Unsafe lab model testing](docs/runbooks/unsafe-lab.md)
 - [Runbooks](docs/runbooks/README.md)
 - [Full wiki](docs/wiki/README.md)
 
@@ -129,6 +133,11 @@ detects available memory, starts Ollama, and selects a compatible local model.
 Read [SECURITY.md](SECURITY.md) before enabling remote access. Use the
 server-private profile behind TLS and report vulnerabilities privately through
 GitHub's Security tab.
+
+Optional direct MCP container execution is documented in
+[docs/security/ISOLATED_EXECUTION.md](docs/security/ISOLATED_EXECUTION.md). It
+uses a fixed Docker/Podman policy and is stronger than local `run_code`, but it
+still relies on the external runtime and host kernel and is not escape-proof.
 
 Contributions are welcome under the [Apache License 2.0](LICENSE). See
 [CONTRIBUTING.md](CONTRIBUTING.md) for the development and review workflow.
