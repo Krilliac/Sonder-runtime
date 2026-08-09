@@ -518,9 +518,14 @@ def restore_to_empty(
         raise BackupError(
             "backup failed verification: " + "; ".join(problems)
         )
-    dest = Path(destination).expanduser()
-    if dest.is_symlink():
+    dest_input = Path(destination).expanduser()
+    if dest_input.is_symlink():
         raise BackupError("restore destination must not be a symlink")
+    # Keep staging beside the destination even when the caller supplied a
+    # relative spelling such as ``.``.  Using Path(".").parent would place the
+    # staging directory inside the destination and make the later publication
+    # fail because the destination was no longer empty.
+    dest = Path(os.path.abspath(dest_input))
     dest.parent.mkdir(parents=True, exist_ok=True)
     existed = dest.exists()
     if existed and (not dest.is_dir() or any(dest.iterdir())):
