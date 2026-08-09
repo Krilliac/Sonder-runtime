@@ -140,6 +140,8 @@ Callers cannot supply regular expressions or executable parsing rules.
   a direct numeric-address connection. The probe ignores proxy environment,
   sends no cookies or authorization, rejects credential-bearing URLs and
   non-loopback redirects, and caps timeout, headers, body, and preview output.
+  It is intentionally direct-MCP-only: agents, repository sessions, loops, and
+  autopilot cannot invoke it because localhost responses may contain secrets.
 - **Web (opt-in):** `web_search`, `web_fetch`, `weather_lookup`,
   `approximate_location_lookup` — gated by `SONDER_WEB_TOOLS`.
 - **Artifacts:** `artifact_generate` / `artifact_verify` /

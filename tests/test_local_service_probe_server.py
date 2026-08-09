@@ -37,7 +37,7 @@ def test_direct_tool_records_deterministic_success(monkeypatch):
     assert calls[0][2]["output"] == output
 
 
-def test_agent_and_loop_dispatch_route_probe_without_public_web_gate(monkeypatch):
+def test_agent_and_loop_dispatch_deny_probe(monkeypatch):
     calls = []
     monkeypatch.setattr(
         server,
@@ -53,32 +53,29 @@ def test_agent_and_loop_dispatch_route_probe_without_public_web_gate(monkeypatch
     }
     assert server._agent_dispatch(
         "local_service_probe", args, allow_web=False, read_only=True,
-    ) == '{"status": 200}'
+    ).startswith("ERROR:")
     result = server._loop_dispatch({"type": "local_service_probe", **args})
-    assert result["ok"] is True
-    assert calls == [
-        (args["url"], "HEAD", 1.0),
-        (args["url"], "HEAD", 1.0),
-    ]
+    assert result["ok"] is False
+    assert calls == []
 
 
-def test_probe_is_registered_as_read_only_deduplicated_autopilot_observation():
-    assert "local_service_probe" in server.REPOSITORY_READ_ONLY_TOOLS
-    assert "local_service_probe" in server.REPOSITORY_AGENT_TOOL_HELP
-    assert "local_service_probe" in server.AGENT_TOOL_HELP
-    assert "local_service_probe" in server._WORK_INSPECTION_TOOLS
-    assert "local_service_probe" in server._AGENT_DEDUPLICATED_INSPECTION_TOOLS
-    assert "local_service_probe" in server._AUTOPILOT_OBSERVE_TOOLS
-    assert "local_service_probe" in server._PROJECT_BOUND_AGENT_TOOLS
+def test_probe_is_direct_only_not_an_autonomous_observation():
+    assert "local_service_probe" not in server.REPOSITORY_READ_ONLY_TOOLS
+    assert "local_service_probe" not in server.REPOSITORY_AGENT_TOOL_HELP
+    assert "local_service_probe" not in server.AGENT_TOOL_HELP
+    assert "local_service_probe" not in server._WORK_INSPECTION_TOOLS
+    assert "local_service_probe" not in server._AGENT_DEDUPLICATED_INSPECTION_TOOLS
+    assert "local_service_probe" not in server._AUTOPILOT_OBSERVE_TOOLS
+    assert "local_service_probe" not in server._PROJECT_BOUND_AGENT_TOOLS
     assert "local_service_probe" not in server._WORK_MUTATION_TOOLS
     assert server._repository_read_only_error(
         "local_service_probe",
         {"url": "http://127.0.0.1:8080/health", "method": "GET"},
-    ) == ""
+    ).startswith("ERROR:")
     assert server._autopilot_tool_policy({"policy": "observe"})(
         "local_service_probe",
         {"url": "http://127.0.0.1:8080/health"},
-    ) == ""
+    ).startswith("ERROR:")
 
 
 def test_manifest_and_activity_command_expose_local_only_contract():

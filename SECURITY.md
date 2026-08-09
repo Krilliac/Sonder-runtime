@@ -23,7 +23,8 @@ Sonder Runtime is not a chat wrapper. By design it will, on request:
   `workspace_run`, `run_project`)
 - **read, write, patch, and delete files** (`file_read`, `file_write`, `file_batch_write`, `file_edit`, `text_patch`,
   `file_delete`, `directory_create`, `archive_create`)
-- **fetch from the network** (`web_fetch`, `web_search`)
+- **fetch from the network** (`web_fetch`, `web_search`) and explicitly probe
+  loopback services (`local_service_probe`)
 - **run unattended** (`autopilot_start`, `master_orchestrate`, `loop`)
 - **modify its own source** when self-modification is enabled
 
@@ -71,6 +72,9 @@ Mitigations that are already in place and worth knowing about:
 - `log_inspect` rejects sensitive/control paths and reparse traversal, validates
   the already-open regular-file handle, and uses only fixed host parsers under
   hard file, byte, line, result, output, and time ceilings.
+- `local_service_probe` remains a direct, explicit MCP operation only. It is
+  excluded from agents, repository read-only sessions, loops, and autopilot
+  because arbitrary loopback response bodies can contain host-local secrets.
 - Cloud tiers are **opt-in**. Local tiers run against loopback Ollama, and a
   remote `OLLAMA_HOST` must be explicitly enabled.
 - Lessons are passed through a 20-rule privacy classifier before storage, so
