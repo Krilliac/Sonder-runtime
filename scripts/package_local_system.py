@@ -133,6 +133,7 @@ REQUIRED_FILES = {
     "sonder_runtime/application/evaluation_history/use_cases.py",
     "sonder_runtime/application/ports/evaluation_history.py",
     "tool_capabilities.py",
+    "unsafe_lab.py",
     "setup_alias.py",
     "sonder-headless.cmd",
     "sonder-headless.sh",
