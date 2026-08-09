@@ -1,4 +1,5 @@
 import json
+import inspect
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -245,6 +246,55 @@ def test_mcp_status_is_read_only_advertised_and_dispatchable(monkeypatch):
     assert "evaluation_history_status" in server.REPOSITORY_READ_ONLY_TOOLS
     assert "evaluation_history_status" in server.tool_manifest()
     assert "- evaluation_history_status:" in server._agent_tool_help(read_only=True)
+
+
+def test_mcp_status_signature_remains_legacy_compatible():
+    signature = inspect.signature(server.evaluation_history_status)
+
+    assert list(signature.parameters) == [
+        "model", "model_digest", "suite", "suite_version", "suite_digest",
+        "tolerance", "max_records",
+    ]
+    assert [parameter.default for parameter in signature.parameters.values()] == [
+        "", "", "", "", "", 0.0, 10000,
+    ]
+    assert signature.return_annotation in (str, "str")
+
+
+def test_mcp_status_maps_malformed_backend_exception_to_failed_activity(monkeypatch):
+    events = []
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server, "_record_direct_tool", lambda *a, **k: events.append((a, k)))
+
+    def fail_status(self, **_kwargs):
+        raise RuntimeError("malformed backend")
+
+    monkeypatch.setattr(
+        server.eval_history_adapter.LegacyEvaluationHistoryReader,
+        "status",
+        fail_status,
+    )
+
+    assert server.evaluation_history_status() == "ERROR: malformed backend"
+    assert events[-1][0][0] == "evaluation_history_status"
+    assert events[-1][1]["ok"] is False
+    assert events[-1][1]["summary"] == "malformed backend"
+
+
+def test_mcp_status_treats_error_prefixed_field_as_success(monkeypatch):
+    events = []
+    payload = {"groups": [], "path": "ERROR: legitimate stored path"}
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server, "_record_direct_tool", lambda *a, **k: events.append((a, k)))
+    monkeypatch.setattr(
+        server.eval_history_adapter.LegacyEvaluationHistoryReader,
+        "status",
+        lambda self, **_kwargs: payload,
+    )
+
+    assert json.loads(server.evaluation_history_status()) == payload
+    assert events[-1][1]["ok"] is True
+    assert events[-1][1]["summary"] == "0 identity group(s)"
 
 
 def test_eval_models_history_is_opt_in_and_does_not_replace_promotion_gate(

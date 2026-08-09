@@ -21,6 +21,7 @@ from ..adapters.legacy.services import (
     OperationsEventSink,
     SystemClock,
 )
+from ..adapters.legacy.evaluation_history import LegacyEvaluationHistoryReader
 from ..adapters.legacy.inspections import LegacyInspectionExecutor
 from ..adapters.legacy.preferences import (
     LegacyPreferenceCodec,
@@ -31,6 +32,7 @@ from ..adapters.legacy.workflows import LegacyLoopRunner, LegacyWorkflowReposito
 from ..adapters.local_observability import LocalObservabilitySink
 from ..adapters.ollama.gateway import OllamaGateway
 from ..application.chat.handle_chat import ChatService
+from ..application.evaluation_history import EvaluationHistoryService
 from ..application.inspection import InspectionService
 from ..application.preferences import PreferenceService
 from ..application.ports.preferences import (
@@ -62,6 +64,7 @@ class Application:
     events: EventSink
     clock: Clock
     inspections: InspectionService
+    evaluation_history: EvaluationHistoryService
     preferences: PreferenceService
     workflows: WorkflowService
 
@@ -119,6 +122,9 @@ def build_application(
         events=LocalObservabilitySink(OperationsEventSink()),
         clock=SystemClock(),
         inspections=InspectionService(LegacyInspectionExecutor()),
+        evaluation_history=EvaluationHistoryService(
+            LegacyEvaluationHistoryReader()
+        ),
         preferences=PreferenceService(
             LegacyPreferenceRepository(preference_connection_factory),
             LegacyPreferenceCodec(preference_module_provider),
