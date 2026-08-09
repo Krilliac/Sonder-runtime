@@ -27,6 +27,8 @@ DEFAULT_RULES = [
     {"pattern": "file_move", "action": "ask", "note": "moves one local file"},
     {"pattern": "file_delete", "action": "deny", "note": "destructive by default"},
     {"pattern": "run_*", "action": "ask", "note": "executes generated code"},
+    {"pattern": "isolated_run", "action": "ask",
+     "note": "executes an image through an external container runtime"},
     {"pattern": "web_*", "action": "ask", "note": "uses network access"},
     {"pattern": "local_service_probe", "action": "ask", "note": "reads one loopback HTTP endpoint"},
     {"pattern": "admin_private_chain_of_thought", "action": "deny",

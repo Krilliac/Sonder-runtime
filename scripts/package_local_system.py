@@ -103,6 +103,7 @@ REQUIRED_FILES = {
     "requirements-runtime.txt",
     "scripts/benchmark_repository_research.py",
     "runtime_policy.py",
+    "isolated_runner.py",
     "server.py",
     "sonder_backup.py",
     "sonder_hardware.py",
