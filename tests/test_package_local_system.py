@@ -66,6 +66,8 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     assert "runtime_policy.py" in entries
     assert "learning_health.py" in entries
     assert "sonder_health.py" in entries
+    assert "memory_store.py" in entries
+    assert "sonder_runtime/adapters/memory_store.py" in entries
     assert "process_liveness.py" in entries
     assert "artifact_grounding.py" in entries
     assert {"artifact_risk.py", "pdf_risk.py", "process_risk.py"} <= set(entries)
