@@ -298,7 +298,6 @@ def _query_sqlite(target, sql, *, max_rows, max_columns, max_output, timeout):
         conn.execute("PRAGMA temp_store=MEMORY")
         if hasattr(conn, "setlimit"):
             conn.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, MAX_SQL_BYTES)
-            conn.setlimit(sqlite3.SQLITE_LIMIT_COLUMN, max_columns)
             conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_CELL_BYTES)
         conn.set_progress_handler(
             lambda: 1 if time.monotonic() >= deadline else 0, 1000,
@@ -334,18 +333,28 @@ def _query_sqlite(target, sql, *, max_rows, max_columns, max_output, timeout):
         conn.close()
 
 
-def _iter_json(target, max_scan):
+def _check_deadline(deadline):
+    if time.monotonic() >= deadline:
+        raise DataQueryError("data query exceeded the timeout ceiling")
+
+
+def _iter_json(target, max_scan, deadline):
+    _check_deadline(deadline)
     if target.stat().st_size > max_scan:
         raise DataQueryError("JSON file exceeds the scan byte ceiling")
     try:
+        _check_deadline(deadline)
         with target.open("r", encoding="utf-8") as handle:
             payload = json.load(handle, parse_constant=_reject_json_constant)
     except (OSError, UnicodeError, ValueError, RecursionError) as exc:
+        _check_deadline(deadline)
         raise DataQueryError("malformed JSON input: %s" % exc) from exc
+    _check_deadline(deadline)
     return iter(payload if isinstance(payload, list) else [payload])
 
 
-def _iter_jsonl(target, max_scan):
+def _iter_jsonl(target, max_scan, deadline):
+    _check_deadline(deadline)
     if target.stat().st_size > max_scan:
         raise DataQueryError("JSONL file exceeds the scan byte ceiling")
 
@@ -353,21 +362,26 @@ def _iter_jsonl(target, max_scan):
         try:
             with target.open("r", encoding="utf-8") as handle:
                 for line_number, line in enumerate(handle, 1):
+                    _check_deadline(deadline)
                     if not line.strip():
                         continue
                     try:
-                        yield json.loads(line, parse_constant=_reject_json_constant)
+                        record = json.loads(line, parse_constant=_reject_json_constant)
                     except (ValueError, RecursionError) as exc:
+                        _check_deadline(deadline)
                         raise DataQueryError(
                             "malformed JSONL input at line %d: %s" % (line_number, exc)
                         ) from exc
+                    _check_deadline(deadline)
+                    yield record
         except UnicodeError as exc:
             raise DataQueryError("malformed UTF-8 JSONL input") from exc
 
     return records()
 
 
-def _iter_delimited(target, max_scan, delimiter):
+def _iter_delimited(target, max_scan, delimiter, deadline):
+    _check_deadline(deadline)
     if target.stat().st_size > max_scan:
         raise DataQueryError("delimited file exceeds the scan byte ceiling")
 
@@ -381,6 +395,7 @@ def _iter_delimited(target, max_scan, delimiter):
                 if len(fields) > MAX_COLUMNS:
                     raise DataQueryError("CSV/TSV input exceeds the column ceiling")
                 for row in reader:
+                    _check_deadline(deadline)
                     if None in row:
                         raise DataQueryError("CSV/TSV row has more fields than its header")
                     yield dict(row)
@@ -394,21 +409,22 @@ def _query_structured(
     target, kind, projection, filters, *, max_rows, max_columns,
     max_output, max_scan, timeout,
 ):
+    deadline = time.monotonic() + timeout
     if kind == "json":
-        records = _iter_json(target, max_scan)
+        records = _iter_json(target, max_scan, deadline)
     elif kind == "jsonl":
-        records = _iter_jsonl(target, max_scan)
+        records = _iter_jsonl(target, max_scan, deadline)
     else:
-        records = _iter_delimited(target, max_scan, "," if kind == "csv" else "\t")
+        records = _iter_delimited(
+            target, max_scan, "," if kind == "csv" else "\t", deadline,
+        )
     if len(projection) > max_columns:
         raise DataQueryError("projection exceeds the column ceiling")
-    deadline = time.monotonic() + timeout
     result = _base_result(target, kind, max_rows, max_columns, max_output)
     result["columns"] = list(projection)
     observed_columns = set(projection)
     for record in records:
-        if time.monotonic() >= deadline:
-            raise DataQueryError("data query exceeded the timeout ceiling")
+        _check_deadline(deadline)
         if not isinstance(record, dict):
             raise DataQueryError("structured query records must be JSON objects")
         if not _matches(record, filters):
