@@ -803,6 +803,7 @@ class SystemInfo {
   final LearningHealthInfo? learningHealth;
   final ActivityStatus? activity;
   final ExecutionStatus? execution;
+  final ExecutionFeed? executionFeed;
   final List<SystemModel> models;
 
   const SystemInfo({
@@ -821,6 +822,7 @@ class SystemInfo {
     this.learningHealth,
     required this.activity,
     required this.execution,
+    this.executionFeed,
     required this.models,
   });
 
@@ -868,6 +870,14 @@ class SystemInfo {
           : null,
       execution: json['execution'] is Map<String, dynamic>
           ? ExecutionStatus.fromJson(json['execution'] as Map<String, dynamic>)
+          : null,
+      executionFeed: json['execution'] is Map<String, dynamic> &&
+              (json['execution'] as Map<String, dynamic>)['feed']
+                  is Map<String, dynamic>
+          ? ExecutionFeed.fromJson(
+              (json['execution'] as Map<String, dynamic>)['feed']
+                  as Map<String, dynamic>,
+            )
           : null,
       models: models,
     );
@@ -1599,6 +1609,308 @@ class ActivityResponse {
     final labelText = label.isEmpty ? id : label;
     return '$labelText $status | model $modelCalls | tools $toolCalls | files +$fileCreates ~$fileEdits -$fileDeletes | lines +$linesAdded ~$linesEdited -$linesDeleted';
   }
+}
+
+class ExecutionFeed {
+  static const hardMaxEvents = 32;
+
+  final bool known;
+  final int schemaVersion;
+  final String runtimeId;
+  final int? activeResponses;
+  final bool truncated;
+  final bool redactionApplied;
+  final int eventLimit;
+  final int previewCharLimit;
+  final String error;
+  final int bytes;
+  final List<ExecutionFeedEvent> events;
+
+  const ExecutionFeed({
+    required this.known,
+    required this.schemaVersion,
+    required this.runtimeId,
+    required this.activeResponses,
+    required this.truncated,
+    required this.redactionApplied,
+    required this.eventLimit,
+    required this.previewCharLimit,
+    required this.error,
+    required this.bytes,
+    required this.events,
+  });
+
+  factory ExecutionFeed.fromJson(Map<String, dynamic> json) {
+    final limits = json['limits'] is Map<String, dynamic>
+        ? json['limits'] as Map<String, dynamic>
+        : const <String, dynamic>{};
+    final advertisedLimit = _asInt(limits['events']);
+    final eventLimit = advertisedLimit <= 0
+        ? 20
+        : advertisedLimit.clamp(1, hardMaxEvents).toInt();
+    final parsed = (json['events'] as List? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .map(ExecutionFeedEvent.fromJson)
+        .toList();
+    final events = parsed.length <= eventLimit
+        ? parsed
+        : parsed.sublist(parsed.length - eventLimit);
+    return ExecutionFeed(
+      known: json['known'] == true,
+      schemaVersion: _asInt(json['schema_version']),
+      runtimeId: json['runtime_id']?.toString() ?? '',
+      activeResponses: json['active_responses'] == null
+          ? null
+          : _asInt(json['active_responses']),
+      truncated: json['truncated'] == true || parsed.length > eventLimit,
+      redactionApplied: json['redaction_applied'] == true,
+      eventLimit: eventLimit,
+      previewCharLimit: _asInt(limits['preview_chars']),
+      error: json['error']?.toString() ?? '',
+      bytes: _asInt(json['bytes']),
+      events: events,
+    );
+  }
+
+  bool get hasGap {
+    final lastByResponse = <String, int>{};
+    for (final event in events) {
+      final previous = lastByResponse[event.responseId];
+      if (previous != null && event.seq > previous + 1) return true;
+      if (previous == null || event.seq > previous) {
+        lastByResponse[event.responseId] = event.seq;
+      }
+    }
+    return false;
+  }
+
+  bool get detailsDisabled =>
+      events.any((event) => event.previewState == 'disabled') &&
+      events.every((event) => event.previewState != 'available');
+}
+
+class ExecutionFeedEvent {
+  final String responseId;
+  final String responseStatus;
+  final int seq;
+  final DateTime? timestamp;
+  final String kind;
+  final String phase;
+  final int elapsedMs;
+  final String model;
+  final int promptChars;
+  final int historyMessages;
+  final int tokensIn;
+  final int tokensOut;
+  final String tool;
+  final String title;
+  final String fileOperation;
+  final String path;
+  final int linesAdded;
+  final int linesEdited;
+  final int linesDeleted;
+  final int bytes;
+  final bool dryRun;
+  final String previewKind;
+  final bool? ok;
+  final ExecutionPreview requestPreview;
+  final ExecutionPreview responsePreview;
+  final ExecutionPreview argsPreview;
+  final ExecutionPreview commandPreview;
+  final ExecutionPreview resultPreview;
+  final ExecutionPreview contentPreview;
+  final ExecutionPreview summaryPreview;
+
+  const ExecutionFeedEvent({
+    required this.responseId,
+    required this.responseStatus,
+    required this.seq,
+    required this.timestamp,
+    required this.kind,
+    required this.phase,
+    required this.elapsedMs,
+    required this.model,
+    required this.promptChars,
+    required this.historyMessages,
+    required this.tokensIn,
+    required this.tokensOut,
+    required this.tool,
+    required this.title,
+    required this.fileOperation,
+    required this.path,
+    required this.linesAdded,
+    required this.linesEdited,
+    required this.linesDeleted,
+    required this.bytes,
+    required this.dryRun,
+    required this.previewKind,
+    required this.ok,
+    required this.requestPreview,
+    required this.responsePreview,
+    required this.argsPreview,
+    required this.commandPreview,
+    required this.resultPreview,
+    required this.contentPreview,
+    required this.summaryPreview,
+  });
+
+  factory ExecutionFeedEvent.fromJson(Map<String, dynamic> json) {
+    return ExecutionFeedEvent(
+      responseId: json['response_id']?.toString() ?? '',
+      responseStatus: json['response_status']?.toString() ?? 'unknown',
+      seq: _asInt(json['seq']),
+      timestamp: _executionTimestamp(json['ts']),
+      kind: json['kind']?.toString().trim().isNotEmpty == true
+          ? json['kind'].toString()
+          : 'unknown',
+      phase: json['phase']?.toString() ?? '',
+      elapsedMs: _asInt(json['elapsed_ms']),
+      model: json['model']?.toString() ?? '',
+      promptChars: _asInt(json['prompt_chars']),
+      historyMessages: _asInt(json['history_messages']),
+      tokensIn: _asInt(json['tokens_in']),
+      tokensOut: _asInt(json['tokens_out']),
+      tool: json['tool']?.toString() ?? '',
+      title: _safeExecutionText(json['title']?.toString() ?? '', 160),
+      fileOperation: json['action']?.toString() ?? '',
+      path: _safeExecutionText(json['path']?.toString() ?? '', 200),
+      linesAdded: _asInt(json['lines_added']),
+      linesEdited: _asInt(json['lines_edited']),
+      linesDeleted: _asInt(json['lines_deleted']),
+      bytes: _asInt(json['bytes']),
+      dryRun: json['dry_run'] == true,
+      previewKind: json['preview_kind']?.toString() ?? '',
+      ok: json['ok'] is bool ? json['ok'] as bool : null,
+      requestPreview: ExecutionPreview.fromJson(json['request_preview']),
+      responsePreview: ExecutionPreview.fromJson(json['response_preview']),
+      argsPreview: ExecutionPreview.fromJson(json['args_preview']),
+      commandPreview: ExecutionPreview.fromJson(json['command_preview']),
+      resultPreview: ExecutionPreview.fromJson(json['result_preview']),
+      contentPreview: ExecutionPreview.fromJson(json['content_preview']),
+      summaryPreview: ExecutionPreview.fromJson(json['summary_preview']),
+    );
+  }
+
+  String get status {
+    if (ok == true) return 'ok';
+    if (ok == false) return 'error';
+    return phase.isEmpty ? responseStatus : phase;
+  }
+
+  String get deltaLabel {
+    if (linesAdded == 0 && linesEdited == 0 && linesDeleted == 0) return '';
+    return 'lines +$linesAdded ~$linesEdited -$linesDeleted';
+  }
+
+  List<ExecutionPreview> get previews => [
+        responsePreview,
+        resultPreview,
+        contentPreview,
+        commandPreview,
+        argsPreview,
+        requestPreview,
+        summaryPreview,
+      ];
+
+  ExecutionPreview get displayPreview => previews.firstWhere(
+        (preview) => preview.state == 'available' && preview.text.isNotEmpty,
+        orElse: () => previews.firstWhere(
+          (preview) => preview.state != 'unavailable',
+          orElse: () => ExecutionPreview.unavailable,
+        ),
+      );
+
+  String get previewState => displayPreview.state;
+  String get preview => displayPreview.text;
+
+  String get summary {
+    if (kind == 'model' && model.isNotEmpty) return 'Model $model';
+    if (kind == 'tool') return title.isNotEmpty ? title : tool;
+    if (kind == 'file') {
+      return [fileOperation, path].where((value) => value.isNotEmpty).join(' ');
+    }
+    return summaryPreview.text;
+  }
+}
+
+class ExecutionPreview {
+  static const maxTextRunes = 300;
+  static const unavailable = ExecutionPreview(
+    state: 'unavailable',
+    text: '',
+    chars: null,
+    truncated: false,
+    redacted: false,
+  );
+
+  final String state;
+  final String text;
+  final int? chars;
+  final bool truncated;
+  final bool redacted;
+
+  const ExecutionPreview({
+    required this.state,
+    required this.text,
+    required this.chars,
+    required this.truncated,
+    required this.redacted,
+  });
+
+  factory ExecutionPreview.fromJson(dynamic value) {
+    if (value is! Map<String, dynamic>) return unavailable;
+    final reportedState = value['state']?.toString() ?? 'unavailable';
+    final state = const {'available', 'unavailable', 'disabled'}
+            .contains(reportedState)
+        ? reportedState
+        : 'unavailable';
+    final rawText = value['text']?.toString() ?? '';
+    final text = state == 'available'
+        ? _safeExecutionText(rawText, maxTextRunes)
+        : '';
+    return ExecutionPreview(
+      state: state,
+      text: text,
+      chars: value['chars'] == null ? null : _asInt(value['chars']),
+      truncated: value['truncated'] == true || rawText.runes.length > maxTextRunes,
+      redacted: value['redacted'] == true,
+    );
+  }
+}
+
+DateTime? _executionTimestamp(dynamic value) {
+  if (value is num) {
+    final raw = value.toInt();
+    final milliseconds = raw.abs() < 100000000000 ? raw * 1000 : raw;
+    return DateTime.fromMillisecondsSinceEpoch(milliseconds, isUtc: true);
+  }
+  final raw = value?.toString().trim() ?? '';
+  return raw.isEmpty ? null : DateTime.tryParse(raw)?.toUtc();
+}
+
+String _safeExecutionText(String value, int maxRunes) {
+  var safe = value.replaceAll(RegExp(r'[\r\n\t]+'), ' ').trim();
+  safe = safe.replaceAllMapped(
+    RegExp(
+      r'\b(authorization\s*:\s*bearer|bearer|api[_-]?key|token|password|secret)\b(\s*[:=]\s*|\s+)[^\s,;]+',
+      caseSensitive: false,
+    ),
+    (match) => '${match.group(1)}=<redacted>',
+  );
+  safe = safe.replaceAll(
+    RegExp(r'\b(?:sk-proj|sk)-[A-Za-z0-9_-]{8,}\b'),
+    '<redacted>',
+  );
+  safe = safe.replaceAll(
+    RegExp(
+      r'(?:[A-Za-z]:\\Users\\|/home/)[^\\/\s]+',
+      caseSensitive: false,
+    ),
+    '<user-home>',
+  );
+  final runes = safe.runes.toList(growable: false);
+  if (runes.length <= maxRunes) return safe;
+  return '${String.fromCharCodes(runes.take(maxRunes - 1))}…';
 }
 
 class ActivityEvent {

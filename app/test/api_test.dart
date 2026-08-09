@@ -466,6 +466,173 @@ void main() {
     expect(response.checklist.map((item) => item.status), everyElement('done'));
   });
 
+  test('execution feed is bounded structured and client redacted', () {
+    final live = List<Map<String, dynamic>>.generate(
+      25,
+      (index) => {
+        'response_id': 'response-1',
+        'response_status': 'running',
+        'seq': index,
+        'ts': '2026-08-09T12:00:${(index % 60).toString().padLeft(2, '0')}Z',
+        'kind': 'other',
+        'phase': 'completed',
+        'summary_preview': {
+          'state': 'available',
+          'text': 'event $index',
+          'chars': 7,
+          'truncated': false,
+          'redacted': false,
+        },
+      },
+    );
+    live[22] = {
+      'response_id': 'response-1',
+      'response_status': 'running',
+      'seq': 22,
+      'ts': '2026-08-09T12:22:00Z',
+      'kind': 'model',
+      'phase': 'completed',
+      'model': 'sonder:latest',
+      'prompt_chars': 120,
+      'history_messages': 3,
+      'tokens_in': 40,
+      'tokens_out': 20,
+      'ok': true,
+      'request_preview': {'state': 'disabled'},
+      'response_preview': {'state': 'unavailable'},
+    };
+    live[23] = {
+      'response_id': 'response-1',
+      'response_status': 'running',
+      'seq': 23,
+      'ts': '2026-08-09T12:23:00Z',
+      'kind': 'tool',
+      'phase': 'completed',
+      'tool': 'file_edit',
+      'title': 'Edit file',
+      'ok': true,
+      'args_preview': {'state': 'disabled'},
+      'command_preview': {'state': 'disabled'},
+      'result_preview': {'state': 'unavailable'},
+    };
+    live[24] = {
+      'response_id': 'response-1',
+      'response_status': 'complete',
+      'seq': 25,
+      'ts': '2026-08-09T12:34:56Z',
+      'kind': 'file',
+      'phase': 'completed',
+      'ok': true,
+      'elapsed_ms': 42,
+      'action': 'edit',
+      'path': r'C:\Users\private-name\repo\harness.dart',
+      'lines_added': 8,
+      'lines_edited': 1,
+      'lines_deleted': 2,
+      'bytes': 512,
+      'dry_run': false,
+      'preview_kind': 'content',
+      'content_preview': {
+        'state': 'available',
+        'text':
+            'Authorization: Bearer top-secret-token ${List.filled(400, 'x').join()}',
+        'chars': 450,
+        'truncated': true,
+        'redacted': true,
+      },
+    };
+
+    final info = SystemInfo.fromJson({
+      'execution': {
+        'feed': {
+          'known': true,
+          'schema_version': 1,
+          'runtime_id': 'runtime-abc',
+          'active_responses': 2,
+          'truncated': false,
+          'redaction_applied': true,
+          'limits': {'events': 20, 'preview_chars': 1000},
+          'error': '',
+          'bytes': 4096,
+          'events': live,
+        },
+      },
+    });
+
+    final feed = info.executionFeed!;
+    expect(feed.events, hasLength(20));
+    expect(feed.events.first.summary, 'event 5');
+    expect(feed.runtimeId, 'runtime-abc');
+    expect(feed.activeResponses, 2);
+    expect(feed.eventLimit, 20);
+    expect(feed.previewCharLimit, 1000);
+    expect(feed.redactionApplied, isTrue);
+    expect(feed.hasGap, isTrue);
+    expect(feed.truncated, isTrue);
+    expect(feed.events[17].model, 'sonder:latest');
+    expect(feed.events[17].tokensOut, 20);
+    expect(feed.events[18].tool, 'file_edit');
+    expect(feed.events[18].title, 'Edit file');
+    final event = feed.events.last;
+    expect(event.timestamp, DateTime.utc(2026, 8, 9, 12, 34, 56));
+    expect(event.kind, 'file');
+    expect(event.fileOperation, 'edit');
+    expect(event.status, 'ok');
+    expect(event.deltaLabel, 'lines +8 ~1 -2');
+    expect(event.path, contains('<user-home>'));
+    expect(event.preview, contains('<redacted>'));
+    expect(event.preview, isNot(contains('top-secret-token')));
+    expect(event.preview.runes.length, lessThanOrEqualTo(300));
+    expect(event.displayPreview.redacted, isTrue);
+  });
+
+  test('execution feed is additive and suppresses preview when detail is off', () {
+    final oldInfo = SystemInfo.fromJson({
+      'activity': {
+        'events': ['legacy activity is not an execution feed'],
+      },
+    });
+    final info = SystemInfo.fromJson({
+      'execution': {
+        'feed': {
+          'known': true,
+          'schema_version': 1,
+          'runtime_id': 'runtime-old',
+          'active_responses': null,
+          'truncated': false,
+          'redaction_applied': false,
+          'limits': {'events': 20, 'preview_chars': 1000},
+          'error': '',
+          'bytes': 100,
+          'events': [
+            {
+              'response_id': 'r1',
+              'response_status': 'running',
+              'seq': 1,
+              'kind': 'unknown-new-kind',
+              'phase': 'completed',
+              'summary_preview': {
+                'state': 'disabled',
+                'text': 'must not be exposed',
+                'chars': null,
+                'truncated': false,
+                'redacted': false,
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    expect(oldInfo.executionFeed, isNull);
+    expect(info.executionFeed?.known, isTrue);
+    expect(info.executionFeed?.activeResponses, isNull);
+    expect(info.executionFeed?.schemaVersion, 1);
+    expect(info.executionFeed?.events.single.kind, 'unknown-new-kind');
+    expect(info.executionFeed?.events.single.preview, isEmpty);
+    expect(info.executionFeed?.events.single.previewState, 'disabled');
+  });
+
   test('agent status preserves scheduler capacity and cancellation state', () {
     final status = AgentStatus.fromJson({
       'active_agents': 12,
