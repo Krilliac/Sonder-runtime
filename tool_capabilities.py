@@ -97,6 +97,7 @@ class ShadowSurfaces:
     project_bound_agent_tools: frozenset[str]
     project_scoped_tools: frozenset[str]
     dispatch_tools: frozenset[str]
+    hosted_agent_tools: frozenset[str]
     deduplicated_inspection_tools: frozenset[str]
     work_inspection_tools: frozenset[str]
     full_agent_help: str
@@ -218,6 +219,10 @@ def validate_shadow(
         expected_direct = Visibility.DIRECT_MCP in row.visibility
         expected_repository = Visibility.REPOSITORY_AGENT in row.visibility
         expected_full = Visibility.FULL_AGENT in row.visibility
+        expected_hosted = (
+            (expected_repository or expected_full)
+            and row.cloud is not CloudRequirement.LOCAL_ONLY
+        )
         checks = (
             ("direct MCP registration", expected_direct, row.name in surfaces.direct_mcp_tools),
             ("repository read-only allow-list", expected_repository and row.effect is Effect.READ_ONLY,
@@ -228,6 +233,8 @@ def validate_shadow(
             ("repository help", expected_repository, _help_has(surfaces.repository_agent_help, row.name)),
             ("full-agent help", expected_full, _help_has(surfaces.full_agent_help, row.name)),
             ("agent dispatcher", expected_repository or expected_full, row.name in surfaces.dispatch_tools),
+            ("hosted-agent exposure", expected_hosted,
+             row.name in surfaces.hosted_agent_tools),
             ("deduplicated inspection set", row.deduplicated_inspection,
              row.name in surfaces.deduplicated_inspection_tools),
             ("work inspection set", row.counts_as_inspection,

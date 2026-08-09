@@ -8,7 +8,7 @@ import tool_capabilities as capabilities
 from scripts import package_local_system as package
 
 
-def test_initial_shadow_registry_is_immutable_and_aligned():
+def test_initial_shadow_registry_is_immutable_and_reports_hosted_privacy_drift():
     assert set(capabilities.CAPABILITIES) == {
         "environment_status", "hardware_profile", "file_policy",
         "workspace_inventory", "directory_tree", "file_find", "file_read",
@@ -18,7 +18,10 @@ def test_initial_shadow_registry_is_immutable_and_aligned():
     with pytest.raises(TypeError):
         capabilities.CAPABILITIES["new"] = capabilities.CAPABILITIES["file_read"]
     assert "tool_capabilities.py" in package.REQUIRED_FILES
-    capabilities.assert_shadow_valid(server._tool_capability_shadow_surfaces())
+    issues = capabilities.validate_shadow(server._tool_capability_shadow_surfaces())
+    assert len(issues) == len(capabilities.CAPABILITIES)
+    assert all("hosted-agent exposure is present" in issue for issue in issues)
+    assert all("descriptor expects absent" in issue for issue in issues)
 
 
 def test_shadow_validator_reports_allow_help_dispatch_and_metadata_drift():
@@ -48,7 +51,9 @@ def test_descriptor_policy_invariants_are_checked():
 
 
 def test_diagnostics_exposes_shadow_result_without_startup_enforcement():
-    assert server.tool_capability_shadow_report().startswith("ok (")
+    report = server.tool_capability_shadow_report()
+    assert report.startswith("ERROR ")
+    assert "hosted-agent exposure is present" in report
     # Prove diagnostics consumes the shadow report without running its unrelated
     # model, database, NPU, and filesystem checks in this focused unit test.
     source = inspect.getsource(server.diagnostics)

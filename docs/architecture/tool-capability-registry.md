@@ -10,6 +10,12 @@ prompt; it does not describe where the tool implementation executes. The
 initial descriptors are deliberately `local-only`, including host inventory,
 because repository contents and machine details are private by default.
 
+Hosted-agent eligibility is also captured from the authoritative dispatcher.
+Today that surface exposes this initial slice to consented hosted agents, so the
+shadow report deliberately returns `ERROR` for each `local-only` descriptor.
+This is a visible privacy-policy mismatch, not an enforcement change: callers
+must not interpret an `ERROR` report as proof that a tool was blocked.
+
 The registry is intentionally **not authoritative yet**. MCP decorators,
 `_agent_dispatch`, help text, and the existing policy sets continue to control
 runtime behavior. Importing the registry cannot register, allow, deny, or run a
