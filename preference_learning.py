@@ -6,6 +6,7 @@ handles clear first-person or imperative preference statements and ignores broad
 new tasks.
 """
 import re
+import unicodedata
 
 
 MAX_PREF_WORDS = 32
@@ -118,24 +119,30 @@ _SENSITIVE_DISCLOSURE_RE = re.compile(
     r"confidential\s+(?:data|details?|information))\b",
     re.I,
 )
-_SENSITIVE_RESOURCE_RE = re.compile(
-    r"\b(?:environment\s+variables?|env\s+vars?|process\s+environment\s+values?|"
-    r"secrets?|passwords?|credentials?|(?:api|access)\s+keys?|session\s+tokens?|"
-    r"bearer\s+values?|login\s+details?|connection\s+strings?|"
-    r"(?:system|developer)\s+(?:prompts?|messages?|instructions?)|"
-    r"hidden\s+(?:data|details?|instructions?)|configuration\s+files?|dotfiles?|"
-    r"(?:contents?\s+of\s+)?local\s+files?|local\s+file\s+contents?|"
-    r"(?:diagnostic\s+)?logs?|usage\s+data|telemetry(?:\s+identifiers?)?|"
-    r"machine\s+identifiers?|hostnames?|usernames?|browser\s+history|"
-    r"clipboard\s+contents?|database\s+rows?|webhooks?|command\s+output|"
-    r"private\s+(?:data|details?|information)|"
-    r"confidential\s+(?:data|details?|information))\b",
-    re.I,
+_SECURITY_SEPARATOR_RE = re.compile(r"[-_./\\\s]+")
+_SENSITIVE_RESOURCE_CANONICAL_RE = re.compile(
+    r"\b(?:environment variables?|env vars?|process environment values?|"
+    r"secrets?|passwords?|credentials?|(?:api|access) keys?(?: values?)?|"
+    r"auth(?:entication)? tokens?|authorization headers?|bearer (?:tokens?|values?)|"
+    r"service account tokens?|(?:private|ssh|encryption|wallet) keys?|"
+    r"(?:recovery|mfa|multi factor) codes?|cookies?|session (?:ids?|tokens?)|"
+    r"seed phrases?|pii|personal (?:data|details?|information)|"
+    r"(?:email|ip) addresses?|filesystem paths?|directory listings?|"
+    r"process (?:memory|dumps?|lists?)|cloud metadata|"
+    r"login details?|connection strings?|"
+    r"(?:system|developer) (?:prompts?|messages?|instructions?)|"
+    r"hidden (?:data|details?|instructions?)|configuration files?|dotfiles?|"
+    r"(?:contents? of )?local files?|local file contents?|"
+    r"(?:diagnostic )?logs?|usage data|telemetry(?: identifiers?)?|"
+    r"machine identifiers?|hostnames?|usernames?|browser history|"
+    r"clipboard contents?|database rows?|webhooks?|command output|"
+    r"private (?:data|details?|information)|"
+    r"confidential (?:data|details?|information))\b"
 )
-_BENIGN_RESOURCE_CONTEXT_RE = re.compile(
-    r"\b(?:(?:powershell|pwsh|bash|zsh|shell|windows|linux)\s+)?"
-    r"environment\s+variables?\s+(?:syntax|notation|naming|names|expansion)\b",
-    re.I,
+_BENIGN_RESOURCE_CANONICAL_RE = re.compile(
+    r"^(?:(?:i|we) prefer|user prefers) "
+    r"(?:powershell|pwsh|bash|zsh|windows|linux) environment variables? "
+    r"(?:syntax|notation|naming|names|expansion)\.?$"
 )
 
 _CATEGORY_PATTERNS = (
@@ -245,10 +252,21 @@ def _clean(text):
     return _ASSIGN_RE.sub(" ", text).strip()
 
 
+def _security_canonical(text):
+    """Canonicalize security-significant text before resource matching."""
+    value = unicodedata.normalize("NFKC", _clean(text)).casefold()
+    value = "".join(
+        char for char in value if unicodedata.category(char) != "Cf"
+    )
+    return _SECURITY_SEPARATOR_RE.sub(" ", value).strip()
+
+
 def _has_sensitive_resource(text):
     """Detect prompt-bearing resources, except narrow syntax-only discussion."""
-    value = _BENIGN_RESOURCE_CONTEXT_RE.sub(" ", _clean(text))
-    return bool(_SENSITIVE_RESOURCE_RE.search(value))
+    value = _security_canonical(text)
+    if _BENIGN_RESOURCE_CANONICAL_RE.fullmatch(value):
+        return False
+    return bool(_SENSITIVE_RESOURCE_CANONICAL_RE.search(value))
 
 
 def _trim_body(body):
@@ -289,6 +307,8 @@ def preference_category(text):
         or any(ord(char) < 32 for char in value)
     ):
         return ""
+    if _BENIGN_RESOURCE_CANONICAL_RE.fullmatch(_security_canonical(value)):
+        return "shell"
     if _topical_terms(value):
         return "topic"
     for category, pattern in _CATEGORY_PATTERNS:
