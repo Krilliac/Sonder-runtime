@@ -410,6 +410,31 @@ def test_corrupt_rows_do_not_starve_valid_bounded_candidates():
     assert page.candidates_examined == 2
 
 
+def test_noncanonical_or_non_numeric_rewards_fail_closed_before_the_cap():
+    c = _conn()
+    for interaction_id in ("valid", "text-reward", "wrong-reward"):
+        _store_good(
+            c, interaction_id, interaction_id + " task", "result", [1.0, 0.0],
+            embedding_model="embed-v2", embedding_revision="rev-v2",
+        )
+    c.execute(
+        "UPDATE outcomes SET reward='not-a-number' "
+        "WHERE interaction_id='text-reward'"
+    )
+    c.execute(
+        "UPDATE outcomes SET reward=0.99 WHERE interaction_id='wrong-reward'"
+    )
+    c.commit()
+
+    page = recall.recall_page(
+        c, "valid", qv=[1.0, 0.0], min_sim=0.9,
+        embedding_model="embed-v2", embedding_revision="rev-v2",
+    )
+
+    assert page.results == ("valid task -> result",)
+    assert page.candidates_examined == 1
+
+
 def test_candidate_byte_and_time_limits_are_explicit_and_connection_recovers():
     c = _conn()
     _bulk_good(c, [
@@ -565,6 +590,7 @@ def test_project_query_plan_uses_recall_index_without_temp_sort():
         row[3] for row in c.execute("EXPLAIN QUERY PLAN " + query).fetchall()
     )
     assert "idx_interactions_recall_project" in plan
+    assert "idx_outcomes_interaction_signal_reward" in plan
     assert "USE TEMP B-TREE" not in plan
 
 
@@ -589,6 +615,7 @@ def test_global_query_plan_uses_recall_index_without_temp_sort():
         row[3] for row in c.execute("EXPLAIN QUERY PLAN " + query).fetchall()
     )
     assert "idx_interactions_recall_global" in plan
+    assert "idx_outcomes_interaction_signal_reward" in plan
     assert "USE TEMP B-TREE" not in plan
 
 
