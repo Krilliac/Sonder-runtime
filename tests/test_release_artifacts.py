@@ -73,6 +73,10 @@ def test_generates_checksums_sbom_and_provenance(tmp_path):
         provenance["predicate"]["buildDefinition"]["internalParameters"]["revision"]
         == revision
     )
+    assert provenance["predicate"]["buildDefinition"]["buildType"] == (
+        "https://github.com/Krilliac/Sonder-runtime/"
+        ".github/workflows/build-apps.yml@" + revision
+    )
 
 
 def test_fails_closed_when_artifact_is_missing(tmp_path):
