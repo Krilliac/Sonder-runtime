@@ -803,6 +803,19 @@ an older startup-bound build still needs one reconnect so this reloadable kernel
 itself is loaded. Inspect convergence with `/mcp`, `mcp_runtime_status()`, or
 `live_reload_status()`.
 
+## MCP resources and prompts
+
+Sonder exposes passive MCP resources as well as model-controlled tools. Clients
+can attach `sonder://runtime/status`, `sonder://runtime/diagnostics`,
+`sonder://runtime/environment`, or `sonder://runtime/tools` without asking the
+model to spend a tool turn. These resources are read-only live views; they do
+not expose raw memory, credentials, prompts, or file contents.
+
+The prompt catalog provides `implement_repository_task`, `review_change`,
+`grounded_research`, and `debug_failure`. They encode the runtime's established
+verification, source-grounding, and honest-evidence workflows while keeping the
+objective, project, change, and evidence as explicit client-supplied arguments.
+
 ## Shared Runtime State
 
 Multiple installs can run the same system code, but they should not each own a
