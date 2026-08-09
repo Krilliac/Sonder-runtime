@@ -60,7 +60,7 @@ expressions or file content are executed.
 
 `file_find`, `file_read`, `file_read_range`, `file_write`, `file_batch_write`, `file_edit`, `text_patch`,
 `file_copy`, `file_move`, `file_delete`, `directory_tree`, `directory_create`, `workspace_inventory`,
-`text_search`, `script_search`, `program_search`, `image_inspect`, `archive_list`,
+`workspace_compare`, `text_search`, `script_search`, `program_search`, `image_inspect`, `archive_list`,
 `archive_extract`, `repo_log`,
 `repo_show`, `repo_blame`. All are
 confined to `SONDER_FILE_ROOTS`, honor the permission policy
@@ -103,6 +103,13 @@ directory. With `apply=true`, it performs an all-file transaction for create
 and modify operations only. Context must match exactly; deletes, renames,
 binary/non-UTF-8 data, sensitive paths, links, escapes, and over-budget input
 are rejected.
+
+`workspace_compare` compares two guarded files or directory trees without
+returning their contents. It emits a deterministic relative-path inventory of
+entry type, size, and SHA-256 plus exact added/removed/changed/same counts.
+Entry, file, aggregate-byte, detail, output, and time ceilings are enforced;
+sensitive/control paths, special files, and symlink or junction traversal are
+rejected.
 
 ## Other tool families
 
