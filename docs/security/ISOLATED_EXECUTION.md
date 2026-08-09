@@ -6,7 +6,10 @@ container image through Docker or Podman. It is **off by default**. Set
 cannot name an executable. Detection requires a responsive Linux engine through
 a local Unix socket, named pipe, loopback endpoint, or loopback Podman-machine
 connection. An installed but stopped engine is skipped and `auto` tries the
-other engine. Remote contexts are rejected.
+other engine. Remote contexts are rejected. The verified Docker endpoint is
+pinned into execution with `--host`; Podman-machine connections are pinned with
+the verified local `--url` and configured identity rather than re-resolving a
+mutable default at launch time.
 
 The local permission default is `ask`, but metadata is not the authorization
 boundary. Every call must also provide a valid developer token, the secret from
@@ -39,10 +42,15 @@ Every launch has:
 - PID, memory, CPU, wall-time, stdin, and combined-output caps;
 - one generated container name so timeout/output-limit cleanup can issue a
   bounded argv-only `docker|podman rm -f`, retry it, and verify the exact name
-  is absent. Uncertain removal is surfaced as an error;
-- memory plus swap set to the same limit, preventing extra swap allowance;
-- recursive read-only bind semantics requested explicitly. A runtime/kernel
-  that cannot guarantee recursive read-only mounting must reject the launch.
+  is absent through a successful exact-name container-list query. Command
+  failure is uncertainty, never evidence of absence;
+- memory plus swap set to the same total limit, preventing extra swap allowance.
+  Docker uses its fixed assignment form; Podman receives separate arguments and
+  must reject the launch if its cgroup/runtime cannot honor them;
+- nested mounts rejected before launch and recursion disabled in the actual
+  bind: Docker uses `bind-recursive=disabled`, while Podman uses
+  `bind-nonrecursive=true`. Read-only is then applied with the engine-specific
+  mount option.
 
 Defaults are 30 seconds, 512 MiB, 1 CPU, 64 PIDs, 64 KiB stdin, and 128 KiB
 combined output. Hard maxima are 120 seconds, 4096 MiB, 4 CPUs, 256 PIDs,
@@ -58,7 +66,10 @@ Windows drive roots, `/proc`, `/sys`, `/dev`, `/run`, submounts, symlinks,
 Windows reparse points, Unix sockets, FIFOs, devices, and other special entries
 are rejected before launch. This prevents a nominal project bind from exposing
 runtime sockets, devices, or writable nested mounts. The safety walk is bounded
-at 100,000 entries and fails closed when it cannot inspect an entry.
+at 100,000 entries and fails closed when it cannot inspect an entry. A project
+that is itself a mount must exactly equal an authorized root. Sonder captures
+its filesystem identity after scanning, rechecks the scan and identity directly
+before launch, and checks identity again immediately after starting the CLI.
 
 ## Security boundary and limitations
 
@@ -79,3 +90,8 @@ variables are scrubbed, so only already-installed images are supported.
 Do not mount the Docker socket into the project or place sensitive device nodes,
 sockets, or credentials in a writable workspace. The tool cannot distinguish a
 special file already present inside the one approved project bind.
+
+The Docker- and Podman-specific argv contracts are covered by unit tests. No
+ready container engine was present on the implementation host, so a live engine
+smoke test remains unverified; availability probes and the launch itself fail
+closed rather than weakening flags when an engine rejects an option.

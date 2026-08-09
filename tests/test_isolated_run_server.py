@@ -102,3 +102,37 @@ def test_writable_workspace_accepts_only_separate_matching_secret(monkeypatch, t
     )
     assert output.startswith("isolated status: ok")
     assert seen["writable_workspace"] is True
+
+
+def test_every_denial_records_secret_free_direct_tool_audit(monkeypatch, tmp_path):
+    records = []
+    monkeypatch.setattr(
+        server, "_record_direct_tool",
+        lambda name, args, **kwargs: records.append((name, args, kwargs)),
+    )
+    server.isolated_run(
+        "busybox", '["true"]', str(tmp_path),
+        token="token-secret-value", approval="execute-secret-value",
+    )
+    _authorize(monkeypatch)
+    server.isolated_run(
+        "busybox", '["true"]', str(tmp_path),
+        token="developer-token", approval="execute-secret",
+    )
+    server.isolated_run(
+        "busybox", '["true"]', str(tmp_path), writable_workspace=True,
+        token="developer-token", approval="execute-secret",
+        acknowledge_isolation_limits=True,
+        write_approval="wrong-write-secret-value",
+    )
+    assert [row[1]["denial"] for row in records] == [
+        "authorization-denied",
+        "risk-acknowledgement-denied",
+        "writable-authorization-denied",
+    ]
+    rendered = repr(records)
+    for secret in (
+        "token-secret-value", "execute-secret-value", "developer-token",
+        "execute-secret", "wrong-write-secret-value", "write-secret",
+    ):
+        assert secret not in rendered

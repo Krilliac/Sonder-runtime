@@ -9154,6 +9154,14 @@ def isolated_run(
     _maybe_live_reload()
     started = time.time()
     ok = False
+    def deny(code: str, message: str) -> str:
+        _record_direct_tool(
+            "isolated_run",
+            {"denial": code, "writable_workspace": writable_workspace is True},
+            ok=False, started=started, summary=code, output=message,
+        )
+        return message
+
     account = _admin_account_from_token(token) if token else None
     authorized, _message = admin_auth.require(account, "developer")
     expected = os.environ.get("SONDER_ISOLATED_APPROVAL_CODE", "")
@@ -9161,12 +9169,15 @@ def isolated_run(
         expected and approval and hmac.compare_digest(approval, expected)
     )
     if not authorized or not approval_ok:
-        return (
+        return deny("authorization-denied", (
             "ERROR: isolated_run requires a developer token and the host's "
             "SONDER_ISOLATED_APPROVAL_CODE."
-        )
+        ))
     if acknowledge_isolation_limits is not True:
-        return "ERROR: acknowledge_isolation_limits=true is required."
+        return deny(
+            "risk-acknowledgement-denied",
+            "ERROR: acknowledge_isolation_limits=true is required.",
+        )
     if writable_workspace is True:
         expected_write = os.environ.get("SONDER_ISOLATED_WRITE_APPROVAL_CODE", "")
         if not (
@@ -9174,10 +9185,10 @@ def isolated_run(
             and write_approval
             and hmac.compare_digest(write_approval, expected_write)
         ):
-            return (
+            return deny("writable-authorization-denied", (
                 "ERROR: writable_workspace requires the separate host "
                 "SONDER_ISOLATED_WRITE_APPROVAL_CODE."
-            )
+            ))
     try:
         result = isolated_runner.run_isolated(
             image=image,
