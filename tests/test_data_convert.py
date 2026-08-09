@@ -129,6 +129,43 @@ def test_nonfinite_and_duplicate_headers_are_rejected(project, name, payload, er
     assert not (project / "out.json").exists()
 
 
+@pytest.mark.parametrize(
+    ("name", "payload"),
+    [
+        ("duplicate.json", '[{"id":1,"id":2}]'),
+        ("duplicate.jsonl", '{"id":1,"id":2}\n'),
+    ],
+)
+def test_duplicate_json_object_keys_are_rejected(project, name, payload):
+    (project / name).write_text(payload, encoding="utf-8")
+
+    with pytest.raises(data_convert.DataConvertError, match="duplicate JSON object key: id"):
+        data_convert.convert_data(
+            project / name, project / "out.csv", ["id"], apply=True,
+        )
+
+    assert not (project / "out.csv").exists()
+
+
+@pytest.mark.parametrize(("suffix", "delimiter"), [("csv", ","), ("tsv", "\t")])
+def test_delimited_fields_can_use_configured_limit_above_csv_default(
+    project, suffix, delimiter,
+):
+    payload = "x" * 150_000
+    source = project / ("large." + suffix)
+    source.write_text("id%spayload\n1%s%s\n" % (delimiter, delimiter, payload), encoding="utf-8")
+    prior_parser_limit = data_convert.csv.field_size_limit()
+
+    report = data_convert.convert_data(
+        source, project / "out.json", ["id", "payload"],
+        max_field_bytes=200_000,
+    )
+
+    assert report["rows"] == 1
+    assert report["preview_rows"][0]["payload"] == payload
+    assert data_convert.csv.field_size_limit() == prior_parser_limit
+
+
 def test_invalid_utf8_is_rejected(project):
     (project / "bad.jsonl").write_bytes(b'{"id":1}\n\xff')
     with pytest.raises(data_convert.DataConvertError, match="UTF-8"):
