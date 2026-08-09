@@ -224,6 +224,40 @@ def test_status_labels_explicit_remote_endpoint(monkeypatch):
     assert "remote/cloud retries off" in result
 
 
+def test_cloud_status_label_is_ascii_and_not_mojibake(monkeypatch):
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    monkeypatch.setattr(server, "_get", lambda path: {"models": []})
+
+    result = server.status()
+
+    assert "[CLOUD - leaves machine]" in result
+    assert "â" not in result
+    assert "—" not in result
+
+
+def test_status_reports_stale_mcp_source_restart_action(monkeypatch):
+    monkeypatch.setattr(server, "_get", lambda path: {"models": []})
+    monkeypatch.setattr(
+        server,
+        "mcp_runtime_data",
+        lambda: {
+            "provenance": {
+                "issue": "stale_source_root",
+                "source_root": r"C:\deleted Sonder worktree",
+                "recovery_action": (
+                    r"Restart/reconnect from C:\canonical\sonder-runtime.cmd"
+                ),
+            },
+        },
+    )
+
+    result = server.status()
+
+    assert "mcp runtime: ERROR stale_source_root" in result
+    assert r"source root: C:\deleted Sonder worktree" in result
+    assert r"mcp ACTION: Restart/reconnect from C:\canonical" in result
+
+
 def test_cancellation_between_attempts_suppresses_retry(monkeypatch):
     calls = []
     cancelled = {"value": False}
