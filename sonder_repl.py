@@ -214,6 +214,23 @@ def _startup_banner(strict, persona, project, tier=None):
     )
     return "%s\n\n  %s\n" % (_banner(rows), hint)
 
+
+def _execution_prompt(status=None):
+    """Prompt suffix refreshed once per user turn, with no polling thread."""
+    if status is None:
+        try:
+            status = server.execution_status_data()
+        except Exception:
+            status = None
+    if not isinstance(status, dict) or not status.get("known"):
+        return _paint("[lanes ? | agents ?]", _Ansi.amber)
+    lanes = int(status.get("running_lanes") or 0)
+    running = int(status.get("running_agents") or 0)
+    queued = int(status.get("queued_agents") or 0)
+    agents = str(running) if queued == 0 else "%s+%sq" % (running, queued)
+    colour = _Ansi.green if lanes or running or queued else _Ansi.muted
+    return _paint("[lanes %s | agents %s]" % (lanes, agents), colour)
+
 HELP = """commands (slash forms are optional -- plain language works too, e.g.
 "show me your stats", "which model should handle X", "read file foo.py"):
   /help              show this help
@@ -707,8 +724,8 @@ def main():
 
     while True:
         try:
-            line = input(_paint("sonder", _Ansi.teal, _Ansi.bold) +
-                         _paint(" > ", _Ansi.muted))
+            line = input(_paint("sonder", _Ansi.teal, _Ansi.bold) + " " +
+                         _execution_prompt() + _paint(" > ", _Ansi.muted))
         except (EOFError, KeyboardInterrupt):
             print()
             break

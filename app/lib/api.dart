@@ -802,6 +802,7 @@ class SystemInfo {
   final McpRuntimeInfo? mcpRuntime;
   final LearningHealthInfo? learningHealth;
   final ActivityStatus? activity;
+  final ExecutionStatus? execution;
   final List<SystemModel> models;
 
   const SystemInfo({
@@ -819,6 +820,7 @@ class SystemInfo {
     this.mcpRuntime,
     this.learningHealth,
     required this.activity,
+    required this.execution,
     required this.models,
   });
 
@@ -864,8 +866,57 @@ class SystemInfo {
       activity: json['activity'] is Map<String, dynamic>
           ? ActivityStatus.fromJson(json['activity'] as Map<String, dynamic>)
           : null,
+      execution: json['execution'] is Map<String, dynamic>
+          ? ExecutionStatus.fromJson(json['execution'] as Map<String, dynamic>)
+          : null,
       models: models,
     );
+  }
+
+  String get executionSummary =>
+      execution?.summary ?? 'lanes unknown | agents unknown';
+}
+
+class ExecutionStatus {
+  final bool known;
+  final int? runningLanes;
+  final int? runningAgents;
+  final int? queuedAgents;
+  final int? activeAgents;
+  final String semantics;
+  final String error;
+
+  const ExecutionStatus({
+    required this.known,
+    required this.runningLanes,
+    required this.runningAgents,
+    required this.queuedAgents,
+    required this.activeAgents,
+    required this.semantics,
+    required this.error,
+  });
+
+  factory ExecutionStatus.fromJson(Map<String, dynamic> json) {
+    final known = json['known'] == true;
+    int? count(String key) =>
+        known && json[key] != null ? _asInt(json[key]) : null;
+    return ExecutionStatus(
+      known: known,
+      runningLanes: count('running_lanes'),
+      runningAgents: count('running_agents'),
+      queuedAgents: count('queued_agents'),
+      activeAgents: count('active_agents'),
+      semantics: json['semantics']?.toString() ?? '',
+      error: json['error']?.toString() ?? '',
+    );
+  }
+
+  String get summary {
+    if (!known || runningLanes == null || runningAgents == null) {
+      return 'lanes unknown | agents unknown';
+    }
+    final queued = (queuedAgents ?? 0) > 0 ? ' +$queuedAgents queued' : '';
+    return 'lanes $runningLanes | agents $runningAgents$queued';
   }
 }
 

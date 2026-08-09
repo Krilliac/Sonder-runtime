@@ -59,6 +59,7 @@ import memory_quality
 import learning_health
 import domain_grounding
 import master_orchestrator
+import execution_status
 import ollama_lifecycle
 import admin_auth
 import codegen_loop
@@ -6661,6 +6662,17 @@ def master_status(include_finished: bool = True, limit: int = 20) -> str:
     return master_orchestrator.format_snapshot(
         master_orchestrator.snapshot(include_finished=include_finished, limit=limit)
     )
+
+
+def execution_status_data(agent_snapshot: dict | None = None) -> dict:
+    """Return the shared terminal/app fleet concurrency contract."""
+    try:
+        snapshot = agent_snapshot
+        if snapshot is None:
+            snapshot = master_orchestrator.snapshot(include_finished=False, limit=1)
+        return execution_status.from_fleet_snapshot(snapshot)
+    except Exception as exc:
+        return execution_status.unavailable(type(exc).__name__)
 
 
 @mcp.tool()
