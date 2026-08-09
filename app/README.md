@@ -211,7 +211,7 @@ project scaffolding locally with `flutter create`, then build:
 ```bash
 cd app
 flutter create --org com.sonder.runtime --project-name sonder_runtime .
-python ../scripts/configure_flutter_networking.py . --allow-android-cleartext
+python ../scripts/configure_flutter_networking.py .
 python ../scripts/package_local_system.py --out app/build/local-system --zip app/assets/local-system.zip
 flutter pub get
 
@@ -221,6 +221,12 @@ flutter build linux --release  # Linux   → build/linux/x64/release/bundle/
 flutter build windows --release
 flutter build macos --release
 ```
+
+Android production builds deny cleartext traffic. For a local development
+build against a loopback or LAN server without HTTPS, opt in explicitly with
+`--allow-android-cleartext-for-development`. The PowerShell helper exposes the
+same development-only choice as `-AllowAndroidCleartextForDevelopment`; do not
+use either override for distributed APKs or when sending bearer credentials.
 
 Requires the [Flutter SDK](https://docs.flutter.dev/get-started/install)
 (stable channel). Android builds also need a JDK (17) and the Android SDK;

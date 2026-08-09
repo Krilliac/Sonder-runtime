@@ -100,6 +100,7 @@ REQUIRED_FILES = {
     "runtime_policy.py",
     "server.py",
     "sonder_hardware.py",
+    "tool_capabilities.py",
     "setup_alias.py",
     "sonder-headless.cmd",
     "sonder-headless.sh",

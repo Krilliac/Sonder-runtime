@@ -47,8 +47,8 @@ jobs:
           channel: ${{ env.FLUTTER_CHANNEL }}
           cache: true
       - run: flutter create --org $APP_ORG --project-name sonder_runtime --platforms=android .
-      - name: Configure explicit LAN networking
-        run: python ../scripts/configure_flutter_networking.py . --allow-android-cleartext
+      - name: Configure production networking
+        run: python ../scripts/configure_flutter_networking.py .
       - name: Bundle local system
         run: python ../scripts/package_local_system.py --out app/build/local-system --zip app/assets/local-system.zip
       - run: flutter pub get
@@ -76,8 +76,8 @@ jobs:
           channel: ${{ env.FLUTTER_CHANNEL }}
           cache: true
       - run: flutter create --org $APP_ORG --project-name sonder_runtime --platforms=android .
-      - name: Configure explicit LAN networking
-        run: python ../scripts/configure_flutter_networking.py . --allow-android-cleartext
+      - name: Configure production networking
+        run: python ../scripts/configure_flutter_networking.py .
       - name: Bundle local system
         run: python ../scripts/package_local_system.py --out app/build/local-system --zip app/assets/local-system.zip
       - run: flutter pub get
@@ -246,13 +246,27 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      - name: Require release-ready version identity
+        run: python scripts/check_release_version.py --require-release --json
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: dist
       - name: Publish release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
-          files: dist/**/*
+          files: |
+            dist/sonder-runtime-android-apk/sonder-runtime-android.apk
+            dist/sonder-runtime-linux-x64/sonder-runtime-linux-x64.tar.gz
+            dist/sonder-runtime-windows-x64/sonder-runtime-windows-x64.zip
+            dist/sonder-runtime-macos/sonder-runtime-macos.zip
+            dist/sonder-runtime-release-integrity/SHA256SUMS
+            dist/sonder-runtime-release-integrity/sonder-runtime-sbom.cdx.json
+            dist/sonder-runtime-release-integrity/sonder-runtime-provenance.intoto.json
+          fail_on_unmatched_files: true
           generate_release_notes: true
           body: |
             Sonder Runtime builds — install on your phone or desktop, then
