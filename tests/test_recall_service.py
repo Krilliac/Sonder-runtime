@@ -86,6 +86,17 @@ def test_service_preserves_successful_error_prefixed_data():
     ]
 
 
+def test_adapter_rejects_malformed_environment_threshold_without_echo(monkeypatch):
+    secret = "not-a-number-secret"
+    monkeypatch.setenv("SONDER_RECALL_MIN_SIM", secret)
+
+    with pytest.raises(InvalidInput) as raised:
+        recall_adapter.recall(None, "task", qv=[1.0, 0.0])
+
+    assert str(raised.value) == "recall similarity threshold is invalid"
+    assert secret not in str(raised.value)
+
+
 def test_legacy_gateway_maps_storage_errors_without_disclosing_details(monkeypatch):
     secret = r"C:\private\memory.db"
     replacement = SimpleNamespace(
