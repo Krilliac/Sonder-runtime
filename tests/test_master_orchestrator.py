@@ -712,6 +712,24 @@ def test_worker_cap_rejects_bool_nonfinite_fractional_and_negative(monkeypatch):
         assert report["worker_cap_error"]
 
 
+def test_worker_cap_rejects_huge_decimal_before_integer_conversion(monkeypatch):
+    _fake_hardware(monkeypatch, cpus=8, ram_avail_gib=2)
+    huge = "9" * 5_000
+
+    api = master_orchestrator.capacity(24, worker_cap=huge)
+    monkeypatch.setenv("SONDER_MAX_WORKER_CAP", huge)
+    operator = master_orchestrator.capacity(24, worker_cap=24)
+    monkeypatch.delenv("SONDER_MAX_WORKER_CAP")
+    monkeypatch.setenv("SONDER_PARALLEL_WORKERS", huge)
+    legacy = master_orchestrator.capacity(24)
+
+    assert "too many digits" in api["worker_cap_error"]
+    assert operator["worker_slots"] == master_orchestrator.STANDARD_MAX_WORKERS
+    assert "too many digits" in operator["operator_worker_error"]
+    assert legacy["source"] == "auto"
+    assert "too many digits" in legacy["worker_cap_error"]
+
+
 def test_invalid_operator_ceiling_fails_safe_and_is_visible(monkeypatch):
     _fake_hardware(monkeypatch, cpus=8, ram_avail_gib=10)
     monkeypatch.setenv("SONDER_MAX_WORKER_CAP", "true")
@@ -729,6 +747,25 @@ def test_natural_language_worker_cap_is_narrow_and_bounded():
     ) == 24
     assert master_orchestrator.requested_worker_cap("launch 999999 workers") == 64
     assert master_orchestrator.requested_worker_cap("research worker scheduling") is None
+
+
+def test_natural_language_worker_cap_rejects_negation_and_ambiguity():
+    rejected = (
+        "Do not use 24 workers for this research.",
+        "Don't spawn 24 agents.",
+        "Never use 24 workers.",
+        "Explain why we should not run 24 workers.",
+        "Use 24 not 48 workers for the harness.",
+        "Use 24 or 12 workers for the harness.",
+        "Use 24 workers, not 48.",
+        "Use 24 workers and spawn 12 agents.",
+        "Use %s workers." % ("9" * 5_000),
+    )
+
+    assert all(master_orchestrator.requested_worker_cap(text) is None for text in rejected)
+    assert master_orchestrator.requested_worker_cap(
+        "Use 24 workers and later use 24 agents."
+    ) == 24
 
 
 def test_delegated_fleet_limits_actual_concurrency(monkeypatch):

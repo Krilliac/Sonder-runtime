@@ -89,6 +89,31 @@ def test_explicit_worker_count_routes_as_bounded_per_run_fleet(monkeypatch):
     assert calls[0]["worker_cap"] == 24
 
 
+def test_negated_or_ambiguous_worker_counts_do_not_activate_fleet(monkeypatch):
+    master_calls = []
+    monkeypatch.setattr(
+        server,
+        "master_orchestrate",
+        lambda **kwargs: master_calls.append(kwargs) or "unexpected fleet",
+    )
+    monkeypatch.setattr(server, "workbench_agent", lambda **_kwargs: "foreground")
+
+    prompts = (
+        "Do not use 24 workers; inspect this AI harness.",
+        "Don't spawn 24 agents for this data run.",
+        "Never use 24 workers for this research.",
+        "Explain why we should not run 24 workers.",
+        "Use 24 not 48 workers for the data run.",
+        "Use 24 or 12 workers for the data run.",
+        "Use 24 workers, not 48, for the data run.",
+    )
+
+    outputs = [server.route_work_request(prompt) for prompt in prompts]
+
+    assert master_calls == []
+    assert all("hardware-bounded fleet" not in (output or "") for output in outputs)
+
+
 def test_simple_work_uses_foreground_without_model_triage(monkeypatch):
     calls = []
     monkeypatch.setattr(

@@ -55,6 +55,7 @@ DEFAULT_MAX_WORKERS = 8
 # runs opt-in without changing the conservative hardware-derived default.
 STANDARD_MAX_WORKERS = 16
 ABSOLUTE_MAX_WORKERS = 64
+_MAX_WORKER_COUNT_DIGITS = 64
 RAM_RESERVE_BYTES = int(1.5 * 1024 ** 3)
 # A "worker" is a Python thread that POSTs to Ollama and waits -- the model
 # weights live in the ollama server process (and in VRAM), NOT once per worker.
@@ -373,7 +374,12 @@ def _positive_int(value) -> tuple[int | None, str]:
     if isinstance(value, str):
         raw = value.strip()
         if raw.isdecimal():
-            parsed = int(raw)
+            if len(raw) > _MAX_WORKER_COUNT_DIGITS:
+                return None, "worker count has too many digits"
+            try:
+                parsed = int(raw)
+            except (ValueError, OverflowError):
+                return None, "worker count must be a positive decimal integer"
             return (parsed, "") if parsed > 0 else (None, "worker count must be positive")
         return None, "worker count must be a positive decimal integer"
     return None, "worker count must be a positive decimal integer"
@@ -403,19 +409,42 @@ def explicit_agent_ceiling() -> int:
     return max(1, min(ABSOLUTE_MAX_AGENTS, operator_ceiling))
 
 
-_EXPLICIT_WORKERS = re.compile(
+_EXPLICIT_WORKER_SPAN = re.compile(
     r"(?i)\b(?:use|with|run|spawn|launch|set(?:\s+the)?(?:\s+cap)?(?:\s+to)?)\s+"
-    r"(?P<count>[1-9]\d*)\s+(?:concurrent\s+)?(?:workers?|agents?)\b"
+    r"(?P<body>[^.!?;\r\n]{0,96}?)\b(?:workers?|agents?)\b"
+)
+_COUNT_TOKEN = re.compile(r"(?<!\d)[1-9]\d*(?!\d)")
+_NEGATED_WORKER_PREFIX = re.compile(
+    r"(?i)(?:\b(?:do\s+not|don't|never|not)(?:\s+\w+){0,2}\s+|"
+    r"\bwhy\b[^.!?;\r\n]{0,64})$"
+)
+_AMBIGUOUS_WORKER_TAIL = re.compile(
+    r"(?i)^\s*,?\s*(?:not|or|rather\s+than|instead\s+of)\s+"
+    r"(?P<count>[1-9]\d*)(?:\s+(?:workers?|agents?))?\b"
 )
 
 
 def requested_worker_cap(task: str) -> int | None:
-    """Extract only an unambiguous positive natural-language run override."""
-    match = _EXPLICIT_WORKERS.search(str(task or ""))
-    if not match:
+    """Extract one affirmative, unambiguous natural-language run override."""
+    text = str(task or "")
+    candidates = []
+    for match in _EXPLICIT_WORKER_SPAN.finditer(text):
+        clause_prefix = text[max(0, match.start() - 96):match.start()]
+        if _NEGATED_WORKER_PREFIX.search(clause_prefix):
+            continue
+        candidates.extend(token.group(0) for token in _COUNT_TOKEN.finditer(match.group("body")))
+        tail = _AMBIGUOUS_WORKER_TAIL.match(text[match.end():match.end() + 96])
+        if tail:
+            candidates.append(tail.group("count"))
+    parsed = set()
+    for candidate in candidates:
+        value, error = _positive_int(candidate)
+        if error:
+            return None
+        parsed.add(int(value))
+    if len(parsed) != 1:
         return None
-    value, error = _positive_int(match.group("count"))
-    return None if error else min(int(value), ABSOLUTE_MAX_WORKERS)
+    return min(parsed.pop(), ABSOLUTE_MAX_WORKERS)
 
 
 def capacity(
