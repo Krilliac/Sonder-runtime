@@ -64,6 +64,16 @@ def default_machine_home(*, env=None, platform_name=None) -> Path:
     return Path("/opt/sonder")
 
 
+def macos_default_home(user_home: Path | None = None) -> Path:
+    """Use the native macOS location without hiding an existing legacy store."""
+    root = Path.home() if user_home is None else Path(user_home)
+    native = root / "Library" / "Application Support" / "sonder"
+    legacy = root / ".local" / "share" / "sonder"
+    if legacy.exists() and not native.exists():
+        return legacy
+    return native
+
+
 def default_home() -> Path:
     override = os.environ.get("SONDER_HOME", "").strip()
     if override:
@@ -82,7 +92,7 @@ def default_home() -> Path:
         suffix = "" if drive.endswith(("\\", "/")) else os.sep
         return Path(drive + suffix) / "Sonder"
     if system == "Darwin":
-        return Path.home() / "Library" / "Application Support" / "sonder"
+        return macos_default_home()
     xdg = os.environ.get("XDG_DATA_HOME", "").strip()
     if xdg:
         return Path(xdg).expanduser() / "sonder"
