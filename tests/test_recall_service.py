@@ -3,14 +3,18 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import sqlite3
 import sys
 from types import SimpleNamespace
+
+import pytest
 
 import recall
 import server
 from sonder_runtime.adapters import recall as recall_adapter
 from sonder_runtime.adapters.legacy.recall import LegacyRecallGateway
 from sonder_runtime.application.recall import RecallService
+from sonder_runtime.domain.common.errors import DependencyUnavailable, InvalidInput
 
 
 class CapturingGateway:
@@ -42,6 +46,60 @@ def test_service_forwards_the_complete_typed_contract_without_reformatting():
         "include_all_projects": True, "embedding_model": "embed-v2",
         "embedding_revision": "revision",
     })]
+
+
+@pytest.mark.parametrize("limit", [True, 0, -1, 21, 2.5, "2"])
+def test_service_rejects_invalid_or_unbounded_limits(limit):
+    gateway = CapturingGateway()
+
+    with pytest.raises(InvalidInput, match="recall limit"):
+        RecallService(gateway).retrieve(None, "task", k=limit)
+
+    assert gateway.calls == []
+
+
+@pytest.mark.parametrize("threshold", [True, float("nan"), float("inf"), -1.1, 1.1])
+def test_service_rejects_invalid_similarity_thresholds(threshold):
+    gateway = CapturingGateway()
+
+    with pytest.raises(InvalidInput, match="similarity threshold"):
+        RecallService(gateway).retrieve(None, "task", min_sim=threshold)
+
+    assert gateway.calls == []
+
+
+def test_service_bounds_query_before_calling_gateway():
+    gateway = CapturingGateway()
+
+    with pytest.raises(InvalidInput, match="exceeds"):
+        RecallService(gateway).retrieve(None, "x" * 64_001)
+
+    assert gateway.calls == []
+
+
+def test_service_preserves_successful_error_prefixed_data():
+    gateway = CapturingGateway()
+    gateway.recall = lambda *_args, **_kwargs: ["ERROR: stored compiler output"]
+
+    assert RecallService(gateway).retrieve(None, "task") == [
+        "ERROR: stored compiler output"
+    ]
+
+
+def test_legacy_gateway_maps_storage_errors_without_disclosing_details(monkeypatch):
+    secret = r"C:\private\memory.db"
+    replacement = SimpleNamespace(
+        recall=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            sqlite3.DatabaseError(f"database corruption at {secret}")
+        )
+    )
+    monkeypatch.setitem(sys.modules, "sonder_runtime.adapters.recall", replacement)
+
+    with pytest.raises(DependencyUnavailable) as raised:
+        LegacyRecallGateway().recall(None, "task")
+
+    assert str(raised.value) == "semantic recall storage is unavailable"
+    assert secret not in str(raised.value)
 
 
 def test_root_recall_is_a_true_reload_safe_compatibility_alias():
