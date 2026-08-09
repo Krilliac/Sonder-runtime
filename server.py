@@ -63,6 +63,7 @@ import admin_auth
 import codegen_loop
 import file_ops
 import data_query as data_query_module
+import json_patch_tool
 import symbol_index
 import context_policy
 import command_registry
@@ -7595,6 +7596,53 @@ def file_batch_write(
 
 
 @mcp.tool()
+def json_patch(
+    path: str,
+    operations_json: str,
+    mode: str = "preview",
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Preview or atomically apply a bounded RFC 6902 subset to one JSON file."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "path": path, "mode": mode,
+        "input_chars": len(operations_json) if isinstance(operations_json, str) else 0,
+    }
+    try:
+        data = json_patch_tool.patch_json(
+            path, operations_json, mode=mode, extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except json_patch_tool.JsonPatchError as exc:
+        output = json.dumps(exc.report, indent=2, sort_keys=True, ensure_ascii=False)
+        _record_direct_tool(
+            "json_patch", args, ok=False, started=started,
+            summary=str(exc), output=output,
+        )
+        return "ERROR: %s" % output
+    except Exception as exc:
+        _record_direct_tool(
+            "json_patch", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False)
+    _record_direct_tool(
+        "json_patch", args, ok=True, started=started,
+        summary="%s %d operation(s)" % (data["mode"], data["operations"]),
+        output=output,
+    )
+    if data["applied"]:
+        _record_file_activity("json_patch", {
+            "action": "json_patch", "path": data["path"],
+            "bytes": data["bytes_after"], "lines_edited": data["operations"],
+        })
+    return output
+
+
+@mcp.tool()
 def file_edit(
     path: str,
     old: str,
@@ -10276,7 +10324,7 @@ def tool_manifest() -> str:
         "offload": "Route a self-contained task to a configured local/cloud tier.",
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
         "workspace_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace inventory, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
-        "file_policy/file_find/file_read/file_write/file_batch_write/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete, including bounded transactional multi-file create/overwrite.",
+        "file_policy/file_find/file_read/file_write/file_batch_write/json_patch/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete, including bounded transactional multi-file writes and atomic JSON patching.",
         "repository_symbol_index": "Build a deterministic bounded read-only declaration index with Python AST and conservative JS/TS/C/C++/C#/Rust/Go extraction.",
         "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
         "environment_status": "Report the host OS, available shells (PowerShell/cmd/bash/wsl), and installed toolchains -- check before choosing a command shape or assuming a tool exists.",
@@ -10342,6 +10390,7 @@ AGENT_TOOL_HELP = """Available tools:
 - text_search: {"query": "TODO", "root": ".", "glob": "*.py", "regex": false, "max_results": 100}
 - file_write: {"path": "notes.txt", "content": "...", "mode": "create|overwrite|append"}
 - file_batch_write: {"operations_json": [{"path": "a.txt", "content": "...", "mode": "create|overwrite"}]}
+- json_patch: {"path": "config.json", "operations_json": [{"op": "test", "path": "/version", "value": 1}, {"op": "replace", "path": "/version", "value": 2}], "mode": "preview|apply"}
 - file_edit: {"path": "notes.txt", "old": "before", "new": "after", "count": 1}
 - file_delete: {"path": "notes.txt", "dry_run": true}
 - scaffold_project: {"kind": "cpp-msvc|cpp-cmake|csharp|rust|python|node|typescript|go|java-maven", "name": "MyApp", "root": "MyApp"} -- writes the full skeleton (.sln/.vcxproj/Cargo.toml/...); use this instead of hand-writing build/solution files
@@ -11413,6 +11462,18 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "json_patch":
+        operations = args.get("operations_json", args.get("operations", []))
+        if not isinstance(operations, str):
+            operations = json.dumps(operations, ensure_ascii=False)
+        return json_patch(
+            path=args.get("path", ""),
+            operations_json=operations,
+            mode=args.get("mode", "preview"),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "scaffold_project":
         return scaffold_project(
             kind=args.get("kind", ""),
@@ -11713,7 +11774,7 @@ def _agent_activity_command(tool_name, args):
 
 _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "file_read", "file_read_range", "context_pack", "data_query", "image_inspect",
-    "file_write", "file_batch_write", "file_edit",
+    "file_write", "file_batch_write", "json_patch", "file_edit",
     "file_delete", "directory_create", "workspace_inventory", "directory_tree",
     "file_find", "repository_symbol_index", "text_search", "script_search", "artifact_verify",
     "artifact_ground", "scaffold_project",
@@ -11910,12 +11971,29 @@ def _agent_dispatch_observed(
 
 
 _WORK_MUTATION_TOOLS = frozenset({
-    "directory_create", "file_write", "file_batch_write", "file_edit", "file_delete",
+    "directory_create", "file_write", "file_batch_write", "json_patch", "file_edit", "file_delete",
     "scaffold_project",
     "artifact_generate", "game_generate_and_test", "game_generation_campaign",
     "memory_quality_repair", "memory_privacy_repair", "memory_embedding_backfill",
     "memory_interaction_embedding_backfill",
 })
+
+
+def _agent_tool_mutates(tool_name, args):
+    """True only when this invocation can change persistent workspace state."""
+    args = args if isinstance(args, dict) else {}
+    if tool_name not in _WORK_MUTATION_TOOLS:
+        return False
+    if tool_name == "file_delete":
+        return args.get("dry_run") is False
+    if tool_name == "json_patch":
+        return str(args.get("mode", "preview")).strip().lower() == "apply"
+    if tool_name in {
+        "memory_quality_repair", "memory_privacy_repair",
+        "memory_embedding_backfill", "memory_interaction_embedding_backfill",
+    }:
+        return args.get("apply") is True
+    return True
 
 # Read-only tools whose default (empty-args) invocation is meaningful, so a
 # name-only branch prediction yields a deterministic call signature that can
@@ -13030,7 +13108,7 @@ def _agent_impl(
             )
         if (
             auto_checklist
-            and tool_name in _WORK_MUTATION_TOOLS
+            and _agent_tool_mutates(tool_name, policy_tool_args)
             and not inspected
             and not policy_error
         ):
@@ -13182,37 +13260,12 @@ def _agent_impl(
             _agent_checklist_mark(
                 checklist_id, checklist_states, 2, "in_progress", "working from inspected evidence",
             )
-        mutation_happened = (
-            tool_name in _WORK_MUTATION_TOOLS
-            and tool_ok
-            and not (
-                tool_name == "file_delete"
-                and tool_args.get("dry_run") is not False
-            )
-            and not (
-                tool_name in {
-                    "memory_quality_repair", "memory_privacy_repair",
-                    "memory_embedding_backfill",
-                    "memory_interaction_embedding_backfill",
-                }
-                and tool_args.get("apply") is not True
-            )
-        )
+        mutation_happened = _agent_tool_mutates(
+            tool_name, policy_tool_args,
+        ) and tool_ok
         mutation_attempt_may_have_changed = (
             tool_dispatched
-            and tool_name in _WORK_MUTATION_TOOLS
-            and not (
-                tool_name == "file_delete"
-                and tool_args.get("dry_run") is not False
-            )
-            and not (
-                tool_name in {
-                    "memory_quality_repair", "memory_privacy_repair",
-                    "memory_embedding_backfill",
-                    "memory_interaction_embedding_backfill",
-                }
-                and tool_args.get("apply") is not True
-            )
+            and _agent_tool_mutates(tool_name, policy_tool_args)
         )
         if mutation_attempt_may_have_changed:
             # A failed mutator can still leave directories or partial output.
@@ -13455,7 +13508,7 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
 })
 _AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
-    "directory_create", "file_write", "file_batch_write", "file_edit", "workspace_run",
+    "directory_create", "file_write", "file_batch_write", "json_patch", "file_edit", "workspace_run",
     "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_generate", "artifact_verify", "game_reference_suite",
     "game_generate_and_test",
@@ -13469,7 +13522,7 @@ _AUTOPILOT_RUNNERS = frozenset({
 })
 _AUTOPILOT_SCRIPT_SUFFIXES = frozenset({".py", ".js", ".dart", ".exe", ".com"})
 _AUTOPILOT_MUTATION_EVIDENCE = frozenset({
-    "directory_create", "file_write", "file_batch_write", "file_edit", "artifact_generate",
+    "directory_create", "file_write", "file_batch_write", "json_patch", "file_edit", "artifact_generate",
     "game_generate_and_test",
 })
 
