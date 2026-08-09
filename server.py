@@ -14527,24 +14527,39 @@ def _agent_impl(
                 project_scope="",
             )
         return project_error
-    system = _build_system(
-        system or
-        "You are a local tool-using coding agent. Inspect real workspace evidence before making claims. "
-        "For action tasks, use tools instead of merely describing commands. Prefer workspace_inventory, directory_tree, "
-        "text_search, file_read_range, and program_search for discovery; use guarded file tools for "
-        "mutations; validate every mutation with workspace_run, script_run, file_read_range, "
-        "image_inspect, artifact_verify, or another path-specific checker before returning final. "
-        "After editing a script, run that exact path "
-        "with script_run; an equivalent run_code snippet does not validate the on-disk file. "
-        "Never invent tool results. "
-        "Use web tools for current external information and cite fetched URLs in the final answer. "
-        "Your final answer must lead with the outcome, mention changed paths and checks, and disclose failures. "
-        # One deterministic line about the host, so the model picks the right
-        # command shape (Windows vs POSIX, which build tool exists) instead of
-        # guessing and burning steps on `ls` under cmd or a missing toolchain.
-        + environment_probe.agent_brief(),
-        False,
-        "",
+    if cloud:
+        default_agent_system = (
+            "You are a hosted tool-using coding agent. Use only the tools listed "
+            "in the task transcript; host policy may withhold private machine or "
+            "workspace capabilities. Never invent tool results. Use web tools "
+            "for current external information and cite fetched URLs in the final "
+            "answer. Lead with the outcome and disclose failures."
+        )
+    else:
+        default_agent_system = (
+            "You are a local tool-using coding agent. Inspect real workspace evidence before making claims. "
+            "For action tasks, use tools instead of merely describing commands. Prefer workspace_inventory, directory_tree, "
+            "text_search, file_read_range, and program_search for discovery; use guarded file tools for "
+            "mutations; validate every mutation with workspace_run, script_run, file_read_range, "
+            "image_inspect, artifact_verify, or another path-specific checker before returning final. "
+            "After editing a script, run that exact path "
+            "with script_run; an equivalent run_code snippet does not validate the on-disk file. "
+            "Never invent tool results. "
+            "Use web tools for current external information and cite fetched URLs in the final answer. "
+            "Your final answer must lead with the outcome, mention changed paths and checks, and disclose failures. "
+            # One deterministic line about the host, so a local model picks the
+            # right command shape instead of guessing. Never send this private
+            # machine inventory to a hosted agent.
+            + environment_probe.agent_brief()
+        )
+    # Hosted agents receive only the explicitly supplied/default hosted
+    # system text. _build_system also appends mutable local profile, emotion,
+    # goal, and runtime-identity blocks; those are useful local context but
+    # are not part of the caller's cloud disclosure consent.
+    system = (
+        system or default_agent_system
+        if cloud
+        else _build_system(system or default_agent_system, False, "")
     )
     agent_num_predict = (
         _CLOUD_AGENT_NUM_PREDICT if cloud else _LOCAL_AGENT_NUM_PREDICT
@@ -14765,6 +14780,8 @@ def _agent_impl(
             )
         if not policy_error and tool_policy is not None:
             policy_error = str(tool_policy(tool_name, policy_tool_args) or "")
+        if not policy_error and cloud:
+            policy_error = _cloud_agent_tool_policy_error(tool_name)
         if not policy_error:
             policy_error = _repository_read_only_error(
                 tool_name,
@@ -15109,6 +15126,10 @@ def _agent_impl(
                 "this identical call.\n"
                 + successful_inspection_results[call_signature]
             )
+        elif cloud and tool_name == "tool_manifest":
+            # The direct/local manifest remains authoritative and complete,
+            # while a hosted model sees only the capabilities it may request.
+            observation = _agent_tool_help(read_only=read_only, cloud=True)
         elif read_only and tool_name in {"command_registry_list", "tool_manifest"}:
             observation = _agent_tool_help(read_only=True)
         else:
