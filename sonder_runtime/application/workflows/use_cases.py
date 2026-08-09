@@ -83,14 +83,18 @@ class WorkflowService:
         if workflow is None:
             return _failure("no workflow named '%s'." % name, "NOT_FOUND")
         try:
+            options = {
+                "max_iterations": max_iterations,
+                "stop_on_failure": stop_on_failure,
+                "stop_on_success": stop_on_success,
+                "delay_seconds": delay_seconds,
+            }
+            if cancel_check is not None:
+                options["cancel_check"] = cancel_check
             result = self._runner.run(
                 workflow["actions"],
                 dispatch,
-                max_iterations=max_iterations,
-                stop_on_failure=stop_on_failure,
-                stop_on_success=stop_on_success,
-                delay_seconds=delay_seconds,
-                cancel_check=cancel_check,
+                **options,
             )
         except (OSError, ValueError) as exc:
             return _failure(exc, "WORKFLOW_ERROR")
