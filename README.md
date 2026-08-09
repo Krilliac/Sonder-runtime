@@ -227,8 +227,8 @@ The learning loop above is *cross-task* memory. On top of it Sonder also has:
   and persistence finish, so no concurrent turn can consume a response still being
   repaired. After upgrading from a pre-claim runtime, reconnect/restart each runtime
   process once before concurrent use. Older turns are rolled into a running summary so a thread never
-  overflows the local context window. (The 7B is a ~32K-context model on a 6 GB GPU —
-  memory is *carrying the right turns + summarizing the rest*, not a giant window.)
+  overflows the selected model's native context window. Memory is *carrying the
+  right turns + summarizing the rest*, not pretending every backend has a giant window.
   List/resume threads with `sonder_sessions()` / REPL `/sessions` / `/resume`.
 - **Semantic recall.** Each call also surfaces the most similar *past good-outcome
   solutions* from the same project (vector search over prior interactions), not
@@ -456,9 +456,12 @@ manifest-verified package, install the
 
 **Local dev:**
 ```bash
-python -m venv venv && venv/Scripts/pip install -r requirements-dev.txt
-venv/Scripts/python -m pytest -q          # run the test suite
-python sonder_repl.py                  # interactive session
+python -m venv venv
+# Linux/macOS:
+./venv/bin/pip install -r requirements-dev.txt
+./venv/bin/python -m pytest -q
+./venv/bin/python sonder_repl.py
+# Windows PowerShell uses venv\Scripts\pip.exe and venv\Scripts\python.exe.
 ```
 
 **Bundled desktop engine setup:** run `bootstrap-engine.cmd` on Windows,
@@ -559,9 +562,10 @@ has one model compound the answers — agreements stated once, disagreements
 named rather than quietly resolved. `/ensemble tiers=fast,reasoning <question>`
 picks the panel explicitly.
 
-It is sequential on purpose. Only one model fits on a 6 GB card, so each is
-unloaded before the next loads, and the cost is one full load+generate cycle per
-model — expect tens of seconds, not one. Tiers are deduplicated by *resolved
+It is sequential on purpose: bounding resident models keeps peak RAM/VRAM
+predictable on CPU-only machines and across NVIDIA, AMD, Intel, and Apple
+accelerators. Each model may incur a load+generate cycle, so expect more than
+one ordinary response latency. Tiers are deduplicated by *resolved
 model*, so pointing two tiers at the same model does not ask it twice; cloud
 tiers are excluded so an ensemble cannot silently ship the prompt off-box; and
 the vision tier is skipped because a VLM handed a text-only prompt returns
@@ -607,7 +611,7 @@ env defaults are `SONDER_CONTEXT_SIZE`, `SONDER_NATIVE_CONTEXT_MAX`, and
 
 ---
 
-## GPU and thread tuning
+## Hardware and thread tuning
 
 Sonder sends Ollama local-runtime options on every local model call so it uses
 the machine instead of idling on conservative defaults:
@@ -621,11 +625,12 @@ the machine instead of idling on conservative defaults:
   hosted/cloud model tiers; those separately require `SONDER_ALLOW_CLOUD=1`.
   Prefer HTTPS or a trusted private LAN: opting into a remote `http://` origin
   acknowledges the destination but does not encrypt transport.
-- `SONDER_NUM_THREAD` - CPU threads per request. Defaults to all detected CPU
-  threads (`%NUMBER_OF_PROCESSORS%` on Windows, `nproc` on Linux).
-- `SONDER_NUM_GPU` - model layers to offload to GPU. Defaults to `999`, which
-  asks Ollama to place all supported layers on the GPU. Set `0` for CPU-only, or
-  `auto`/`none` to let Ollama decide.
+- `SONDER_NUM_THREAD` - CPU threads per request. Defaults to Python's detected
+  logical CPU count on Windows, Linux, and macOS.
+- `SONDER_NUM_GPU` - optional model-layer override. Unset/`auto`/`none` leaves
+  placement to Ollama's live capability detection (CPU, Apple Metal, AMD,
+  Intel, NVIDIA, or another backend it supports). Set `0` for CPU-only or an
+  explicit integer only after measuring that host.
 - `SONDER_NUM_BATCH` - inference batch size. Defaults to `512`.
 - `SONDER_MAX_AGENTS` - queued breadth cap for delegated orchestration.
   Defaults to two candidates per logical CPU (minimum 16), hard-bounded at 64.
@@ -798,12 +803,28 @@ an older startup-bound build still needs one reconnect so this reloadable kernel
 itself is loaded. Inspect convergence with `/mcp`, `mcp_runtime_status()`, or
 `live_reload_status()`.
 
+## MCP resources and prompts
+
+Sonder exposes passive MCP resources as well as model-controlled tools. Clients
+can attach `sonder://runtime/status`, `sonder://runtime/diagnostics`,
+`sonder://runtime/environment`, or `sonder://runtime/tools` without asking the
+model to spend a tool turn. These resources are read-only live views; they do
+not expose raw memory, credentials, prompts, or file contents.
+
+The prompt catalog provides `implement_repository_task`, `review_change`,
+`grounded_research`, and `debug_failure`. They encode the runtime's established
+verification, source-grounding, and honest-evidence workflows while keeping the
+objective, project, change, and evidence as explicit client-supplied arguments.
+
 ## Shared Runtime State
 
 Multiple installs can run the same system code, but they should not each own a
 separate memory database. Runtime state defaults to one per-user home directory:
 `%LOCALAPPDATA%\sonder` on Windows, `$XDG_DATA_HOME/sonder` or
-`~/.local/share/sonder` on Linux, and the matching app data home on macOS.
+`~/.local/share/sonder` on Linux, and
+`~/Library/Application Support/sonder` on macOS. Minimal Windows service
+environments fall back through `%USERPROFILE%`, then `%SystemDrive%\Sonder`
+(`C:\Sonder` only when `SystemDrive` is unavailable).
 Set `SONDER_HOME` to force a specific shared state folder, or `SONDER_DB`
 to point directly at a database file. If an older install has `memory.db` beside
 the code and the shared DB does not exist yet, sonder copies it into the
