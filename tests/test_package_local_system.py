@@ -68,6 +68,14 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     assert "sonder_health.py" in entries
     assert "sonder_runtime/adapters/legacy/inspections.py" in entries
     assert "sonder_runtime/adapters/git_discovery.py" in entries
+    assert {
+        "sonder_preflight.py",
+        "sonder_runtime/adapters/legacy/preflight.py",
+        "sonder_runtime/adapters/preflight.py",
+        "sonder_runtime/application/ports/preflight.py",
+        "sonder_runtime/application/preflight/__init__.py",
+        "sonder_runtime/application/preflight/use_cases.py",
+    } <= set(entries)
     assert "sonder_runtime/application/inspection/use_cases.py" in entries
     assert {
         "sonder_runtime/adapters/legacy/preferences.py",
