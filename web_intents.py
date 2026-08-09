@@ -283,6 +283,12 @@ _WEATHER_META_FRAME = re.compile(
     r"extractor|extraction|classifier|classification)\b[^\n]{0,80}"
     r"\b(?:weather|forecast|temperature)\b|"
     r"\b(?:this|that|the|a|an)\s+(?:weather\s+|forecast\s+)?query\b|"
+    r"^\s*(?:(?:can|could|would|will)\s+you\s+)?"
+    r"(?:explain|analyze|discuss)\b[^\n]{0,100}"
+    r"\b(?:parse|route|extract|classif)\w*\b|"
+    r"\b(?:document|article|page|file)\s+"
+    r"(?:says?|contains?|includes?|mentions?)\b[^\n]{0,100}"
+    r"\b(?:weather|forecast|temperature)\b|"
     r"^\s*why\b[^\n]{0,100}\b(?:parse|route|extract|classif)\w*\b|"
     r"\b(?:says?|said|asks?|asked|contains?|includes?|mentions?)\b[^\n]{0,80}"
     r"[\"'](?:[^\"'\n]{0,80})(?:weather|forecast|temperature)",
@@ -301,9 +307,19 @@ _WEATHER_LOCATION_SCAFFOLD = re.compile(
     re.IGNORECASE,
 )
 _WEATHER_LOCATION_AMBIGUOUS = re.compile(
-    r"\s+(?:or|versus|vs\.?)\s+|\s[/|]\s|\b(?:either|both)\b",
+    r"\s+(?:or|and|versus|vs\.?)\s+|\s[/|]\s|\b(?:either|both)\b",
     re.IGNORECASE,
 )
+_WEATHER_CONJUNCTION_PLACES = frozenset({
+    "antigua and barbuda",
+    "bosnia and herzegovina",
+    "brighton and hove",
+    "saint kitts and nevis",
+    "saint vincent and the grenadines",
+    "trinidad and tobago",
+    "turks and caicos islands",
+    "wallis and futuna",
+})
 _WEATHER_LOCATION_TIME_ONLY = re.compile(
     r"^(?:today(?:['’]s)?|tomorrow(?:['’]s)?|tonight|now|right\s+now|"
     r"current|currently|live|later|"
@@ -315,6 +331,13 @@ _WEATHER_NEGATED_ACTION = re.compile(
     r"\b(?:do\s+not|don't|don’t|never)\b[^\n,;:.!?]{0,24}"
     r"\b(?:check|fetch|get|give|look\s+up|need|report|show|tell|want)\b"
     r"[^\n,;:.!?]{0,60}\b(?:weather|forecast|temperature)\b",
+    re.IGNORECASE,
+)
+_WEATHER_PROVIDER_EXCLUSION = re.compile(
+    r"\b(?:do\s+not|don't|don’t|never)\s+use\s+"
+    r"(?:the\s+)?[A-Za-z0-9.-]{2,80}\b[^\n]{0,160}"
+    r"\b(?:check|fetch|get|look\s+up|report|show|tell)\b[^\n]{0,80}"
+    r"\b(?:weather|forecast|temperature)\b",
     re.IGNORECASE,
 )
 # Post-hoc guard: a generated reply that wrongly claims the assistant has no
@@ -774,7 +797,10 @@ def _weather_location(value: str) -> str:
     if (
         location.casefold() in {"a", "an", "the"}
         or _WEATHER_LOCATION_SCAFFOLD.search(location)
-        or _WEATHER_LOCATION_AMBIGUOUS.search(location)
+        or (
+            _WEATHER_LOCATION_AMBIGUOUS.search(location)
+            and location.casefold() not in _WEATHER_CONJUNCTION_PLACES
+        )
         or _WEATHER_LOCATION_TIME_ONLY.fullmatch(location)
         or _WEATHER_CORE.search(location)
     ):
@@ -888,6 +914,8 @@ def classify(prompt: str, history=None) -> dict | None:
     text = str(prompt or "").strip()
     if not text:
         return None
+    if _WEATHER_PROVIDER_EXCLUSION.search(text):
+        return {"kind": "research", "query": text}
     # Whole-turn framing outranks keywords found inside quotes, examples, code
     # requests, hypotheticals, or explicit instructions not to look anything up.
     if _non_live_frame(text):
