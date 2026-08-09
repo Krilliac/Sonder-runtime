@@ -44,6 +44,9 @@ if "_OWNER_ID" not in globals():
     _HEARTBEAT_STOP = threading.Event()
     _STORE_ERROR = ""
     _ATEXIT_REGISTERED = False
+if "_PRINCIPAL_ID" not in globals():
+    _PRINCIPAL_ID = ""
+    _PRINCIPAL_SECRET = ""
 _MAX_EVENTS = 80
 DEFAULT_MAX_AGENTS = 16
 ABSOLUTE_MAX_AGENTS = 64
@@ -158,7 +161,14 @@ def _heartbeat_loop() -> None:
 
 def _ensure_owner() -> None:
     global _OWNER_REGISTERED, _HEARTBEAT_THREAD, _ATEXIT_REGISTERED
+    global _PRINCIPAL_ID, _PRINCIPAL_SECRET
     with _OWNER_SERVICE_LOCK:
+        if not _PRINCIPAL_ID or not _PRINCIPAL_SECRET:
+            _PRINCIPAL_ID, _PRINCIPAL_SECRET = (
+                fleet_store.local_principal_credentials()
+            )
+        else:
+            fleet_store.register_principal(_PRINCIPAL_ID, _PRINCIPAL_SECRET)
         if not _OWNER_REGISTERED:
             fleet_store.register_owner(_OWNER_ID, os.getpid(), _OWNER_STARTED_TS)
             _OWNER_REGISTERED = True
@@ -769,7 +779,10 @@ def _new_agent(
         "retried_by": "",
     }
     try:
-        stored = fleet_store.create_agent(row, _OWNER_ID, os.getpid())
+        stored = fleet_store.create_agent(
+            row, _OWNER_ID, os.getpid(), principal_id=_PRINCIPAL_ID,
+            principal_secret=_PRINCIPAL_SECRET,
+        )
     except sqlite3.IntegrityError:
         # A 48-bit suffix collision is exceptionally unlikely; fail closed rather
         # than risk attaching work to another process's row.
@@ -1299,6 +1312,71 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
 def recovery_candidate(selector: str) -> dict | None:
     """Resolve one persisted master by exact ID or unambiguous prefix."""
     return fleet_store.get_agent(selector, role="master")
+
+
+def discover_retained_agents(
+    *, project: str = "", parent_id: str = "", include_finished: bool = True,
+    limit: int = 50,
+) -> list[dict]:
+    """Discover agents owned by this runtime inside one explicit scope."""
+    _ensure_owner()
+    scoped_project = canonical_project_root(project) if project else ""
+    if project and not scoped_project:
+        raise ValueError("project must name an existing directory or source file")
+    return fleet_store.list_agents_scoped(
+        _OWNER_ID,
+        project=scoped_project,
+        parent_id=parent_id,
+        include_finished=include_finished,
+        limit=limit,
+        principal_id=_PRINCIPAL_ID,
+        principal_secret=_PRINCIPAL_SECRET,
+    )
+
+
+def send_retained_agent_message(
+    sender_id: str, recipient_id: str, message: str, *, mode: str,
+    project: str = "",
+) -> dict:
+    """Queue a same-principal, same-project, same-tree follow-up or steer."""
+    _ensure_owner()
+    scoped_project = canonical_project_root(project) if project else ""
+    if project and not scoped_project:
+        raise ValueError("project must name an existing directory or source file")
+    receipt = fleet_store.queue_agent_message(
+        sender_id,
+        recipient_id,
+        _OWNER_ID,
+        project=scoped_project,
+        mode=mode,
+        body=message,
+        principal_id=_PRINCIPAL_ID,
+        principal_secret=_PRINCIPAL_SECRET,
+    )
+    _event(recipient_id, "%s message queued [%s]" % (receipt["mode"], receipt["message_id"]))
+    return receipt
+
+
+def receive_retained_agent_messages(
+    recipient_id: str, *, project: str = "", limit: int = 8,
+) -> list[dict]:
+    """Claim messages at a trusted cooperative worker checkpoint."""
+    _ensure_owner()
+    scoped_project = canonical_project_root(project) if project else ""
+    if project and not scoped_project:
+        raise ValueError("project must name an existing directory or source file")
+    receipts = fleet_store.claim_agent_messages(
+        recipient_id, _OWNER_ID, project=scoped_project, limit=limit,
+        principal_id=_PRINCIPAL_ID, principal_secret=_PRINCIPAL_SECRET,
+    )
+    for receipt in receipts:
+        _event(
+            recipient_id,
+            "%s message delivered [%s]" % (
+                receipt["mode"], receipt["message_id"],
+            ),
+        )
+    return receipts
 
 
 def format_capacity(data: dict | None = None) -> str:
