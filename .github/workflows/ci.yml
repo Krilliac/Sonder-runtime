@@ -22,5 +22,7 @@ jobs:
           from mcp.server.fastmcp.tools import ToolManager"
       - name: Enforce architecture boundaries (SPEC-3)
         run: python scripts/check_architecture.py
+      - name: Enforce legacy error-signal ratchet
+        run: python scripts/check_error_signals.py
       - name: Run test suite
         run: python -m pytest -q

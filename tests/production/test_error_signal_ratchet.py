@@ -89,3 +89,61 @@ def test_new_error_prefix_parser_is_also_rejected(tmp_path):
 
     assert len(problems) == 1
     assert "startswith_parser in parse" in problems[0]
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        'str.startswith(value, "ERROR:")',
+        'value.startswith(("OK:",) + ("ERROR:",))',
+        'value.startswith("ERROR" + ":")',
+        'value.startswith("ERROR:" * 1)',
+    ],
+)
+def test_equivalent_startswith_parser_variants_cannot_bypass_ratchet(
+    tmp_path, expression
+):
+    _write(tmp_path, "consumer.py", f"def parse(value):\n    return {expression}\n")
+
+    problems = checker.violations(checker.inventory(tmp_path), {})
+
+    assert len(problems) == 1
+    assert "startswith_parser in parse" in problems[0]
+
+
+def test_path_rename_is_growth_even_when_total_and_signal_are_unchanged(
+    tmp_path,
+):
+    _write(tmp_path, "alpha.py", 'def old():\n    return "ERROR: old"\n')
+    baseline_payload = checker.baseline_from(checker.inventory(tmp_path))
+    baseline = {
+        (row["path"], row["scope"], row["category"], row["signal"]):
+        row["max_count"]
+        for row in baseline_payload["entries"]
+    }
+    (tmp_path / "alpha.py").rename(tmp_path / "renamed.py")
+
+    problems = checker.violations(checker.inventory(tmp_path), baseline)
+
+    assert len(problems) == 1
+    assert "renamed.py:2" in problems[0]
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        'f"ERROR: {value}"',
+        '"ERROR: " + value',
+        '"ERROR: %s" % value',
+        '"ERROR: {}".format(value)',
+        '"ERROR: {value}".format_map({"value": value})',
+        '"ok" if value else "ERROR: fallback"',
+    ],
+)
+def test_literal_derived_return_shapes_are_in_scope(tmp_path, expression):
+    _write(tmp_path, "producer.py", f"def produce(value):\n    return {expression}\n")
+
+    problems = checker.violations(checker.inventory(tmp_path), {})
+
+    assert len(problems) == 1
+    assert "return_literal_prefix in produce" in problems[0]

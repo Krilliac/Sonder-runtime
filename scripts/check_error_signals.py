@@ -48,7 +48,7 @@ def _literal_error_prefix(node: ast.AST | None) -> bool:
     if (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "format"
+        and node.func.attr in {"format", "format_map"}
     ):
         return _literal_error_prefix(node.func.value)
     if isinstance(node, ast.IfExp):
@@ -63,15 +63,54 @@ def _exact_error_startswith(node: ast.Call) -> bool:
         and node.args
     ):
         return False
-    prefix = node.args[0]
-    if isinstance(prefix, ast.Constant):
-        return prefix.value == "ERROR:"
-    if isinstance(prefix, ast.Tuple):
-        return any(
-            isinstance(item, ast.Constant) and item.value == "ERROR:"
-            for item in prefix.elts
+    # Cover both ``value.startswith(prefix)`` and the equivalent unbound
+    # ``str.startswith(value, prefix)`` spelling. The latter otherwise gives
+    # a same-semantics escape because its first positional argument is the
+    # value being inspected rather than the prefix.
+    unbound = (
+        isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "str"
+    )
+    prefix_index = 1 if unbound else 0
+    if len(node.args) <= prefix_index:
+        return False
+    return _contains_error_prefix(node.args[prefix_index])
+
+
+def _contains_error_prefix(node: ast.AST) -> bool:
+    static_string = _bounded_static_string(node)
+    if static_string is not None:
+        return static_string == "ERROR:"
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        return any(_contains_error_prefix(item) for item in node.elts)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _contains_error_prefix(node.left) or _contains_error_prefix(
+            node.right
         )
     return False
+
+
+def _bounded_static_string(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _bounded_static_string(node.left)
+        right = _bounded_static_string(node.right)
+        if left is not None and right is not None and len(left) + len(right) <= 64:
+            return left + right
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+        pairs = ((node.left, node.right), (node.right, node.left))
+        for text_node, count_node in pairs:
+            text = _bounded_static_string(text_node)
+            if (
+                text is not None
+                and isinstance(count_node, ast.Constant)
+                and type(count_node.value) is int
+                and 0 <= count_node.value <= 16
+                and len(text) * count_node.value <= 64
+            ):
+                return text * count_node.value
+    return None
 
 
 class _Visitor(ast.NodeVisitor):
