@@ -22,6 +22,24 @@ def test_architecture_check_passes():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_legacy_root_allowlist_has_a_shrink_only_ratchet():
+    import importlib.util
+
+    path = _REPO_ROOT / "scripts" / "check_architecture.py"
+    spec = importlib.util.spec_from_file_location("architecture_check", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert len(module.ROOT_LEGACY_MODULES) <= module.ROOT_LEGACY_MODULE_LIMIT
+    assert module.ROOT_LEGACY_MODULES <= module.BASELINE_ROOT_LEGACY_MODULES
+
+    removed = next(iter(module.ROOT_LEGACY_MODULES))
+    module.ROOT_LEGACY_MODULES = (
+        module.ROOT_LEGACY_MODULES - {removed}
+    ) | {"new_accidental_legacy"}
+    violations = module.check()
+    assert any("new_accidental_legacy" in row for row in violations)
+
+
 def test_checker_detects_a_violation(tmp_path):
     # Prove the checker is not vacuously green: a domain module importing
     # an adapter must fail.
