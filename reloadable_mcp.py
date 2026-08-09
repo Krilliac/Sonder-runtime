@@ -9,14 +9,19 @@ isolation and swapped only after the updated server module executes cleanly.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
+import re
 import threading
 import time
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.resources import FunctionResource, ResourceManager
+from mcp.server.fastmcp.prompts import PromptManager
 from mcp.server.fastmcp.tools import ToolManager
+from mcp.server.fastmcp.utilities.context_injection import find_context_parameter
 from mcp.server.lowlevel.server import NotificationOptions
 
 
@@ -57,12 +62,28 @@ def _manager_signature(manager: ToolManager) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _model_signature(items: list) -> str:
+    rows = [item.model_dump(mode="json") for item in items]
+    payload = json.dumps(rows, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _resource_manager_signature(manager: ResourceManager) -> str:
+    return _model_signature(manager.list_resources() + manager.list_templates())
+
+
+def _prompt_manager_signature(manager: PromptManager) -> str:
+    return _model_signature(manager.list_prompts())
+
+
 class ReloadableFastMCP(FastMCP):
     """FastMCP with atomic in-process source and tool-surface refresh."""
 
     def __init__(self, *args, **kwargs):
         self._reload_lock = threading.RLock()
         self._staging_manager: ToolManager | None = None
+        self._staging_resource_manager: ResourceManager | None = None
+        self._staging_prompt_manager: PromptManager | None = None
         self._staging_source_state: dict | None = None
         self._reload_module_name = ""
         self._reload_source_path = ""
@@ -76,16 +97,21 @@ class ReloadableFastMCP(FastMCP):
         self._last_error = ""
         self._last_notification_error = ""
         super().__init__(*args, **kwargs)
-        self._advertise_tool_list_changes()
+        self._last_surface_changes = {
+            "tools": False,
+            "resources": False,
+            "prompts": False,
+        }
+        self._advertise_list_changes()
 
-    def _advertise_tool_list_changes(self) -> None:
+    def _advertise_list_changes(self) -> None:
         original = self._mcp_server.create_initialization_options
 
         def create_options(notification_options=None, experimental_capabilities=None):
             current = notification_options or NotificationOptions()
             options = NotificationOptions(
-                prompts_changed=bool(current.prompts_changed),
-                resources_changed=bool(current.resources_changed),
+                prompts_changed=True,
+                resources_changed=True,
                 tools_changed=True,
             )
             return original(options, experimental_capabilities)
@@ -97,11 +123,19 @@ class ReloadableFastMCP(FastMCP):
         with self._reload_lock:
             if self._staging_manager is None:
                 self._staging_manager = ToolManager(warn_on_duplicate_tools=False)
+                self._staging_resource_manager = ResourceManager(
+                    warn_on_duplicate_resources=False
+                )
+                self._staging_prompt_manager = PromptManager(
+                    warn_on_duplicate_prompts=False
+                )
 
     def abort_module_refresh(self, error: Exception | str) -> None:
         """Discard an incomplete registry and preserve the last known-good one."""
         with self._reload_lock:
             self._staging_manager = None
+            self._staging_resource_manager = None
+            self._staging_prompt_manager = None
             self._staging_source_state = None
             self._last_error = (
                 error
@@ -122,13 +156,23 @@ class ReloadableFastMCP(FastMCP):
                 # Read metadata before publishing the replacement manager so a
                 # disappearing source cannot produce a half-committed refresh.
                 state = _source_state(source_path)
-            changed = False
+            changes = {"tools": False, "resources": False, "prompts": False}
             if self._staging_manager is not None:
-                changed = _manager_signature(self._tool_manager) != _manager_signature(
+                changes["tools"] = _manager_signature(self._tool_manager) != _manager_signature(
                     self._staging_manager
                 )
+                changes["resources"] = _resource_manager_signature(
+                    self._resource_manager
+                ) != _resource_manager_signature(self._staging_resource_manager)
+                changes["prompts"] = _prompt_manager_signature(
+                    self._prompt_manager
+                ) != _prompt_manager_signature(self._staging_prompt_manager)
                 self._tool_manager = self._staging_manager
+                self._resource_manager = self._staging_resource_manager
+                self._prompt_manager = self._staging_prompt_manager
                 self._staging_manager = None
+                self._staging_resource_manager = None
+                self._staging_prompt_manager = None
                 # The low-level server separately caches MCP schemas for output
                 # validation. Clear it so changed/removed tools cannot retain a
                 # stale schema after the atomic manager swap.
@@ -142,9 +186,10 @@ class ReloadableFastMCP(FastMCP):
             self._loaded_mtime_ns = state["mtime_ns"]
             self._loaded_size = state["size"]
             self._active_namespace = namespace
-            self._last_surface_changed = changed
+            self._last_surface_changes = changes
+            self._last_surface_changed = any(changes.values())
             self._last_error = ""
-            return changed
+            return self._last_surface_changed
 
     def add_tool(self, fn, *args, **kwargs) -> None:
         with self._reload_lock:
@@ -161,6 +206,49 @@ class ReloadableFastMCP(FastMCP):
                 manager.remove_tool(name)
                 return
         super().remove_tool(name)
+
+    def add_resource(self, resource) -> None:
+        with self._reload_lock:
+            manager = self._staging_resource_manager
+            if manager is not None:
+                manager.add_resource(resource)
+                return
+        super().add_resource(resource)
+
+    def resource(self, uri: str, **kwargs):
+        """Register resources against the isolated manager during refresh."""
+        if callable(uri):
+            raise TypeError("Use @resource('uri') instead of @resource")
+
+        def decorator(fn):
+            signature = inspect.signature(fn)
+            has_uri_params = "{" in uri and "}" in uri
+            if has_uri_params or signature.parameters:
+                context_param = find_context_parameter(fn)
+                uri_params = set(re.findall(r"{(\w+)}", uri))
+                func_params = {p for p in signature.parameters if p != context_param}
+                if uri_params != func_params:
+                    raise ValueError(
+                        f"Mismatch between URI parameters {uri_params} "
+                        f"and function parameters {func_params}"
+                    )
+                with self._reload_lock:
+                    manager = self._staging_resource_manager or self._resource_manager
+                    manager.add_template(fn=fn, uri_template=uri, **kwargs)
+            else:
+                resource = FunctionResource.from_function(fn=fn, uri=uri, **kwargs)
+                self.add_resource(resource)
+            return fn
+
+        return decorator
+
+    def add_prompt(self, prompt) -> None:
+        with self._reload_lock:
+            manager = self._staging_prompt_manager
+            if manager is not None:
+                manager.add_prompt(prompt)
+                return
+        super().add_prompt(prompt)
 
     def _current_source_state(self) -> dict | None:
         if not self._reload_source_path:
@@ -242,22 +330,59 @@ class ReloadableFastMCP(FastMCP):
                 }
 
     async def list_tools(self):
-        self.refresh_if_changed()
+        refreshed = self.refresh_if_changed()
+        await self._notify_surface_changes(refreshed)
         return await super().list_tools()
 
     async def call_tool(self, name: str, arguments: dict):
         refreshed = self.refresh_if_changed()
-        if refreshed.get("surface_changed"):
-            try:
-                context = self.get_context()
-                await context.request_context.session.send_tool_list_changed()
-                self._last_notification_error = ""
-            except Exception as exc:  # pragma: no cover - transport/client specific
-                self._last_notification_error = "%s: %s" % (
-                    type(exc).__name__,
-                    exc,
-                )
+        await self._notify_surface_changes(refreshed)
         return await super().call_tool(name, arguments)
+
+    async def _notify_surface_changes(self, refreshed: dict) -> None:
+        if not refreshed.get("surface_changed"):
+            return
+        try:
+            context = self.get_context()
+            session = context.request_context.session
+            changes = self._last_surface_changes
+            if changes["tools"]:
+                await session.send_tool_list_changed()
+            if changes["resources"]:
+                await session.send_resource_list_changed()
+            if changes["prompts"]:
+                await session.send_prompt_list_changed()
+            self._last_notification_error = ""
+        except Exception as exc:  # pragma: no cover - transport/client specific
+            self._last_notification_error = "%s: %s" % (
+                type(exc).__name__,
+                exc,
+            )
+
+    async def list_resources(self):
+        refreshed = self.refresh_if_changed()
+        await self._notify_surface_changes(refreshed)
+        return await super().list_resources()
+
+    async def list_resource_templates(self):
+        refreshed = self.refresh_if_changed()
+        await self._notify_surface_changes(refreshed)
+        return await super().list_resource_templates()
+
+    async def read_resource(self, uri):
+        refreshed = self.refresh_if_changed()
+        await self._notify_surface_changes(refreshed)
+        return await super().read_resource(uri)
+
+    async def list_prompts(self):
+        refreshed = self.refresh_if_changed()
+        await self._notify_surface_changes(refreshed)
+        return await super().list_prompts()
+
+    async def get_prompt(self, name: str, arguments: dict | None = None):
+        refreshed = self.refresh_if_changed()
+        await self._notify_surface_changes(refreshed)
+        return await super().get_prompt(name, arguments)
 
     def runtime_snapshot(self) -> dict:
         current = self._current_source_state()
@@ -293,6 +418,7 @@ class ReloadableFastMCP(FastMCP):
             "refresh_count": self._refresh_count,
             "last_refresh_ts": self._last_refresh_ts,
             "last_surface_changed": self._last_surface_changed,
+            "last_surface_changes": dict(self._last_surface_changes),
             "last_error": self._last_error,
             "last_notification_error": self._last_notification_error,
             "protocol_list_changed": True,
