@@ -719,3 +719,52 @@ def test_sensitive_legacy_rows_never_apply_or_mutate():
         "FROM preferences ORDER BY id"
     ).fetchall()
     assert [tuple(row) for row in after] == [tuple(row) for row in before]
+
+
+def test_task_specific_negatives_are_not_captured_as_durable():
+    """Bare imperatives with task-specific context should not become durable."""
+    task_specific = (
+        "never mock the database in these tests",
+        "never skip validation during this migration",
+        "never deploy to production in this sprint",
+        "always run lint on these files before committing",
+        "never use raw SQL in those queries",
+        "never hardcode URLs in this build",
+        "always check types in this refactor",
+        "from now on, skip the review for this deploy",
+    )
+    for source in task_specific:
+        assert preferences.extract_preferences(source) == [], (
+            "task-specific directive should not be captured: %r" % source
+        )
+
+
+def test_capture_uses_project_scope_when_available(monkeypatch):
+    """Preferences captured in a project context should use project scope."""
+    connection = server.memory_store.connect(":memory:")
+    monkeypatch.setattr(server.embeddings, "embed", lambda _text: None)
+    monkeypatch.setattr(server.embeddings, "valid_vector", lambda _value: False)
+    monkeypatch.setattr(
+        server, "_make_generate",
+        lambda *_args, **kwargs: lambda _prompt: "response",
+    )
+
+    def fake_run(_conn, _task, _tier, _gen, **kwargs):
+        return "response", "iid"
+
+    monkeypatch.setattr(server.orchestrator, "run_with_learning", fake_run)
+    server.activity_tracker.reset_for_tests()
+
+    server._answer(
+        connection, "I prefer concise answers",
+        "model", "system", 0.2, 128, 2048,
+        "session", "myproject", [], trace=False,
+    )
+
+    rows = connection.execute(
+        "SELECT scope FROM preferences"
+    ).fetchall()
+    scopes = [row[0] for row in rows]
+    assert all(s == "project:myproject" for s in scopes), (
+        "expected project scope, got: %s" % scopes
+    )

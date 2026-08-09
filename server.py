@@ -2400,7 +2400,10 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
             task_embedding_revision=embedding_provenance.get("revision"),
             task_embedding_dim=embedding_provenance.get("dimension"),
         )
-        _capture_preferences(conn, prompt, source_interaction=iid)
+        _capture_preferences(
+            conn, prompt, source_interaction=iid,
+            scope="project:%s" % project if project else "global",
+        )
         return resp, iid, tctx
     resp, iid = orchestrator.run_with_learning(
         conn, prompt, tier, gen, retrieve_fn=retrieve_fn, history=history,
@@ -2411,7 +2414,10 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
         task_embedding_revision=embedding_provenance.get("revision"),
         task_embedding_dim=embedding_provenance.get("dimension"),
     )
-    _capture_preferences(conn, prompt, source_interaction=iid)
+    _capture_preferences(
+        conn, prompt, source_interaction=iid,
+        scope="project:%s" % project if project else "global",
+    )
     return resp, iid, None
 
 
