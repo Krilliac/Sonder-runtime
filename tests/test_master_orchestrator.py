@@ -4,6 +4,8 @@ import threading
 import time
 from types import SimpleNamespace
 
+import pytest
+
 import master_orchestrator
 import server
 
@@ -161,6 +163,34 @@ def test_retained_agent_service_wrappers_preserve_project_and_parent_scope(tmp_p
     assert queued["status"] == "queued"
     assert delivered[0]["message_id"] == queued["message_id"]
     assert delivered[0]["status"] == "delivered"
+
+
+def test_live_reload_with_legacy_fleet_store_preserves_ordinary_orchestration(
+    monkeypatch,
+):
+    original_create = master_orchestrator.fleet_store.create_agent
+
+    def legacy_create(row, owner_id, owner_pid):
+        return original_create(row, owner_id, owner_pid)
+
+    monkeypatch.setattr(master_orchestrator.fleet_store, "create_agent", legacy_create)
+    for name in (
+        "local_principal_credentials",
+        "register_principal",
+        "list_agents_scoped",
+        "queue_agent_message",
+        "claim_agent_messages",
+    ):
+        monkeypatch.delattr(master_orchestrator.fleet_store, name)
+    monkeypatch.setattr(master_orchestrator, "_PRINCIPAL_ID", "stale-principal")
+    monkeypatch.setattr(master_orchestrator, "_PRINCIPAL_SECRET", "stale-secret")
+
+    result = master_orchestrator.run_inline("after reload", lambda prompt: "ok")
+
+    assert result["output"] == "ok"
+    assert master_orchestrator._PRINCIPAL_ID == ""
+    with pytest.raises(RuntimeError, match="runtime restart"):
+        master_orchestrator.discover_retained_agents()
 
 
 def test_run_delegated_tracks_children_and_audit():

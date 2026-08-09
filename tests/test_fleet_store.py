@@ -442,7 +442,7 @@ def test_message_rate_size_discovery_and_pruning_are_bounded(monkeypatch, tmp_pa
     )
     monkeypatch.setattr(fleet_store.time, "time", lambda: 10_000.0)
     result = fleet_store.prune(
-        message_retention_seconds=3600, message_pending_ttl_seconds=60,
+        message_retention_seconds=3600,
     )
     assert result["messages"] == len(receipts)
     assert fleet_store.list_agent_messages(
@@ -551,9 +551,7 @@ def test_prune_preserves_unexpired_message_endpoints_and_ancestor_chain(
         )
     monkeypatch.setattr(fleet_store.time, "time", lambda: 2_000.0)
 
-    fleet_store.prune(
-        finished_retention=10, message_pending_ttl_seconds=7 * 24 * 60 * 60,
-    )
+    fleet_store.prune(finished_retention=10)
 
     assert fleet_store.get_agent(root["id"])["id"] == root["id"]
     assert fleet_store.get_agent(parent["id"])["parent_id"] == root["id"]
@@ -565,7 +563,7 @@ def test_prune_preserves_unexpired_message_endpoints_and_ancestor_chain(
         assert fleet_store._scope_root_id(conn, child["id"]) == root["id"]
 
 
-def test_legacy_parent_accepts_principal_adoption_but_keeps_exact_project(
+def test_legacy_parent_rejects_partial_principal_adoption(
     monkeypatch, tmp_path,
 ):
     _isolated_store(monkeypatch, tmp_path)
@@ -579,19 +577,32 @@ def test_legacy_parent_accepts_principal_adoption_but_keeps_exact_project(
     adopted = _row("adopted-child", parent_id=parent["id"])
     adopted["project"] = parent["project"]
 
-    created = fleet_store.create_agent(
-        adopted, "owner-legacy", 909, principal_id=principal,
-        principal_secret=secret,
-    )
-
-    assert created["principal_id"] == principal
-    wrong_project = _row("wrong-project-child", parent_id=parent["id"])
-    wrong_project["project"] = "project-b"
-    with pytest.raises(PermissionError, match="project"):
+    with pytest.raises(PermissionError, match="principal"):
         fleet_store.create_agent(
-            wrong_project, "owner-legacy", 909, principal_id=principal,
+            adopted, "owner-legacy", 909, principal_id=principal,
             principal_secret=secret,
         )
+
+
+def test_prune_honors_each_queued_messages_persisted_expiration(monkeypatch, tmp_path):
+    _isolated_store(monkeypatch, tmp_path)
+    master_id, child_id = _message_tree()
+    receipt = fleet_store.queue_agent_message(
+        master_id, child_id, "owner-messages", project="project-a",
+        mode="follow_up", body="later", now=1_000.0,
+        pending_ttl_seconds=7 * 24 * 60 * 60,
+    )
+    monkeypatch.setattr(
+        fleet_store.time, "time", lambda: 1_000.0 + 2 * 24 * 60 * 60,
+    )
+
+    fleet_store.prune()
+
+    messages = fleet_store.list_agent_messages(
+        child_id, "owner-messages", project="project-a",
+    )
+    assert messages[0]["message_id"] == receipt["message_id"]
+    assert messages[0]["status"] == "queued"
 
 
 def test_principal_parent_rejects_child_from_different_principal(monkeypatch, tmp_path):
