@@ -47,6 +47,21 @@ def _provenance_error(issue: str) -> str:
     }.get(issue, "")
 
 
+def _runtime_root_ready(root: Path | None) -> bool:
+    """Whether ``python -m sonder_runtime mcp`` is structurally available."""
+    if root is None:
+        return False
+    required = (
+        root / "server.py",
+        root / "sonder_runtime" / "__init__.py",
+        root / "sonder_runtime" / "__main__.py",
+    )
+    try:
+        return root.is_dir() and all(path.is_file() for path in required)
+    except OSError:
+        return False
+
+
 def _enabled() -> bool:
     return os.environ.get("SONDER_LIVE_RELOAD", "1").strip().lower() not in {
         "0",
@@ -304,7 +319,17 @@ class ReloadableFastMCP(FastMCP):
         source = Path(self._reload_source_path) if self._reload_source_path else None
         source_root = source.parent if source else None
         configured_text = os.environ.get("SONDER_RUNTIME_ROOT", "").strip()
-        configured = Path(configured_text).expanduser() if configured_text else None
+        configured = None
+        configured_path_error = False
+        if configured_text:
+            try:
+                configured = Path(configured_text).expanduser()
+            except (OSError, RuntimeError):
+                # Path.expanduser raises RuntimeError when the host cannot
+                # determine a home directory. Treat that like an unavailable
+                # configured root; never discard the active registry or expose
+                # the path/error detail.
+                configured_path_error = True
         source_exists = bool(source and source.is_file())
         source_root_exists = bool(source_root and source_root.is_dir())
         configured_exists = bool(configured and configured.is_dir())
@@ -317,13 +342,11 @@ class ReloadableFastMCP(FastMCP):
         issue = ""
         if source and not source_exists:
             issue = "stale_source_root"
-        elif configured and not configured_exists:
+        elif configured_text and (configured_path_error or not configured_exists):
             issue = "configured_root_missing"
         elif configured_exists and not same_root:
             issue = "root_mismatch"
-        configured_ready = bool(
-            configured_exists and (configured / "server.py").is_file()
-        )
+        configured_ready = _runtime_root_ready(configured)
         action = _recovery_action(configured_ready) if issue else ""
         try:
             os.getcwd()
@@ -337,7 +360,7 @@ class ReloadableFastMCP(FastMCP):
             "source_root": "(loaded source root)" if source_root else "",
             "source_exists": source_exists,
             "source_root_exists": source_root_exists,
-            "configured_runtime_root": "(set)" if configured else "",
+            "configured_runtime_root": "(set)" if configured_text else "",
             "configured_root_exists": configured_exists,
             "configured_root_ready": configured_ready,
             "root_matches_configured": same_root if configured else None,
