@@ -136,6 +136,22 @@ def test_duplicate_object_at_another_sensitive_path_is_growth():
     assert substitution["unexpected_count"] == 1
 
 
+def test_known_sensitive_object_cannot_hide_at_innocuous_path():
+    module = _module()
+    known_id, known_path = sorted(module.KNOWN_HISTORY_PRIVACY_DEBT)[0]
+
+    report = module.evaluate([
+        (known_id, known_path),
+        (known_id, "assets/archive.bin"),
+    ])
+
+    assert report["known_debt_count"] == 1
+    assert report["unexpected_count"] == 1
+    assert report["unexpected"] == [{
+        "object_id": known_id[:12], "path": "assets/archive.bin",
+    }]
+
+
 def test_shallow_history_fails_closed(tmp_path):
     source = _repo(tmp_path / "source")
     (source / "second.txt").write_text("second\n", encoding="utf-8")

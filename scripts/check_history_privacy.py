@@ -63,6 +63,9 @@ KNOWN_HISTORY_PRIVACY_DEBT = frozenset({
         f"{_FORMER_PRODUCT_NAME}-personal-lora/checkpoints/checkpoint-116/adapter_model.safetensors",
     ),
 })
+_KNOWN_DEBT_OBJECT_IDS = frozenset(
+    object_id for object_id, _path in KNOWN_HISTORY_PRIVACY_DEBT
+)
 
 _SENSITIVE_BASENAMES = frozenset({
     ".credentials.json",
@@ -217,7 +220,7 @@ def evaluate(objects: list[tuple[str, str]]) -> dict[str, object]:
     flagged = {
         (object_id, path)
         for object_id, path in objects
-        if _is_sensitive_path(path)
+        if _is_sensitive_path(path) or object_id in _KNOWN_DEBT_OBJECT_IDS
     }
     known = flagged & KNOWN_HISTORY_PRIVACY_DEBT
     unexpected = flagged - KNOWN_HISTORY_PRIVACY_DEBT
