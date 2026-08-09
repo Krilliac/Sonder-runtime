@@ -9790,10 +9790,12 @@ def _loop_dispatch(action):
             limit=action.get("limit", 20),
         ))
     if action_type in ("master_capacity", "agent_capacity"):
-        return _loop_text_result("master_capacity", master_capacity(
-            requested_agents=action.get("requested_agents", action.get("agents", 0)),
-            worker_cap=action.get("worker_cap", 0),
-        ))
+        capacity_args = {
+            "requested_agents": action.get("requested_agents", action.get("agents", 0)),
+        }
+        if "worker_cap" in action:
+            capacity_args["worker_cap"] = action.get("worker_cap")
+        return _loop_text_result("master_capacity", master_capacity(**capacity_args))
     if action_type in ("master_cancel", "agent_cancel"):
         return _loop_text_result("master_cancel", master_cancel(
             agent_id=action.get("agent_id", action.get("selector", "")),
@@ -13133,10 +13135,12 @@ def _agent_dispatch(
             limit=args.get("limit", 20),
         )
     if tool_name in ("master_capacity", "agent_capacity"):
-        return master_capacity(
-            requested_agents=args.get("requested_agents", args.get("agents", 0)),
-            worker_cap=args.get("worker_cap", 0),
-        )
+        capacity_args = {
+            "requested_agents": args.get("requested_agents", args.get("agents", 0)),
+        }
+        if "worker_cap" in args:
+            capacity_args["worker_cap"] = args.get("worker_cap")
+        return master_capacity(**capacity_args)
     if tool_name in ("master_cancel", "agent_cancel"):
         return master_cancel(
             agent_id=args.get("agent_id", args.get("selector", "")),
