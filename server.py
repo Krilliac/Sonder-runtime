@@ -7075,6 +7075,23 @@ def _file_bypass_allowed(token: str = "", approval: str = "") -> bool:
     return _file_developer_allowed(token)
 
 
+_GIT_IGNORE_DISCOVERY_TOOLS = frozenset({
+    "workspace_inventory", "directory_tree", "file_find", "text_search",
+    "script_search",
+})
+
+
+def _include_ignored_error(tool_name: str, include_ignored, token: str = "") -> str:
+    if not include_ignored:
+        return ""
+    if _file_developer_allowed(token):
+        return ""
+    return (
+        "ERROR: include_ignored=true for '%s' requires an explicitly "
+        "authenticated developer account." % tool_name
+    )
+
+
 def _format_file_result(title: str, data: dict) -> str:
     lines = [title]
     for key, value in data.items():
@@ -7264,10 +7281,14 @@ def file_find(
     token: str = "",
     approval: str = "",
     extra_roots: str = "",
+    include_ignored: bool = False,
 ) -> str:
-    """Find files under allowed roots. Use extra_roots or admin/dev bypass for broader search."""
+    """Find files under allowed roots; ignored paths require developer authentication."""
     _maybe_live_reload()
     started = time.time()
+    policy_error = _include_ignored_error("file_find", include_ignored, token)
+    if policy_error:
+        return policy_error
     try:
         data = file_ops.find_files(
             query=query,
@@ -7275,6 +7296,7 @@ def file_find(
             max_results=max_results,
             extra_roots=extra_roots,
             bypass=_file_bypass_allowed(token, approval),
+            include_ignored=include_ignored,
         )
     except Exception as e:
         _record_direct_tool("file_find", {"query": query, "root": root}, ok=False, started=started, summary=str(e))
@@ -8483,9 +8505,14 @@ def workspace_inventory(
     approval: str = "",
     extra_roots: str = "",
 ) -> str:
-    """Summarize a guarded workspace with explicit traversal budgets."""
+    """Summarize a guarded workspace; ignored paths require developer authentication."""
     _maybe_live_reload()
     started = time.time()
+    policy_error = _include_ignored_error(
+        "workspace_inventory", include_ignored, token,
+    )
+    if policy_error:
+        return policy_error
     args = {
         "path": path, "max_entries": max_entries,
         "timeout_seconds": timeout_seconds, "top_n": top_n,
@@ -8584,15 +8611,20 @@ def directory_tree(
     token: str = "",
     approval: str = "",
     extra_roots: str = "",
+    include_ignored: bool = False,
 ) -> str:
-    """List a bounded guarded folder tree with file sizes."""
+    """List a bounded guarded tree; ignored paths require developer authentication."""
     _maybe_live_reload()
     started = time.time()
+    policy_error = _include_ignored_error("directory_tree", include_ignored, token)
+    if policy_error:
+        return policy_error
     args = {"path": path, "depth": depth, "max_entries": max_entries}
     try:
         data = workbench.directory_tree(
             path, depth=depth, max_entries=max_entries,
-            include_hidden=include_hidden, extra_roots=extra_roots,
+            include_hidden=include_hidden, include_ignored=include_ignored,
+            extra_roots=extra_roots,
             bypass=_file_bypass_allowed(token, approval),
         )
     except Exception as exc:
@@ -8699,7 +8731,7 @@ def text_search(
     approval: str = "",
     extra_roots: str = "",
 ) -> str:
-    """Search text inside guarded workspace files with line evidence.
+    """Search guarded files; ignored paths require developer authentication.
 
     `query` is matched LITERALLY against file contents -- a substring, or a
     regular expression when regex=True. It is NOT a description of what you are
@@ -8718,6 +8750,9 @@ def text_search(
     """
     _maybe_live_reload()
     started = time.time()
+    policy_error = _include_ignored_error("text_search", include_ignored, token)
+    if policy_error:
+        return policy_error
     args = {
         "query": query, "root": root, "glob": glob, "regex": regex,
         "max_entries": max_entries, "timeout_seconds": timeout_seconds,
@@ -8766,9 +8801,12 @@ def script_search(
     approval: str = "",
     extra_roots: str = "",
 ) -> str:
-    """Find runnable scripts under guarded roots and identify their runner."""
+    """Find guarded scripts; ignored paths require developer authentication."""
     _maybe_live_reload()
     started = time.time()
+    policy_error = _include_ignored_error("script_search", include_ignored, token)
+    if policy_error:
+        return policy_error
     args = {
         "query": query, "root": root, "max_entries": max_entries,
         "timeout_seconds": timeout_seconds,
@@ -11976,6 +12014,11 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
         return "ERROR: repository read-only tool args must be a JSON object."
     if tool_name not in REPOSITORY_READ_ONLY_TOOLS:
         return "ERROR: tool '%s' is not allowed by the repository read-only policy." % tool_name
+    if tool_name in _GIT_IGNORE_DISCOVERY_TOOLS and args.get("include_ignored"):
+        return (
+            "ERROR: repository read-only tool '%s' forbids include_ignored=true."
+            % tool_name
+        )
     forbidden = sorted(
         name for name in REPOSITORY_READ_ONLY_FORBIDDEN_ARGS.intersection(args)
         if not (
@@ -12679,6 +12722,7 @@ def _agent_dispatch(
             depth=args.get("depth", 2),
             max_entries=args.get("max_entries", 200),
             include_hidden=args.get("include_hidden", False),
+            include_ignored=args.get("include_ignored", False),
             token=args.get("token", ""),
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
@@ -12696,6 +12740,7 @@ def _agent_dispatch(
             query=args.get("query", "*"),
             root=args.get("root", ""),
             max_results=args.get("max_results", 50),
+            include_ignored=args.get("include_ignored", False),
             token=args.get("token", ""),
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
@@ -15368,6 +15413,11 @@ def _autopilot_tool_policy(run: dict):
         args = args if isinstance(args, dict) else {}
         if tool_name not in allowed_tools:
             return "ERROR: HOST POLICY: tool '%s' is not allowed for this autonomous run." % tool_name
+        if tool_name in _GIT_IGNORE_DISCOVERY_TOOLS and args.get("include_ignored"):
+            return (
+                "ERROR: HOST POLICY: autonomous runs cannot set "
+                "include_ignored=true."
+            )
         host_scoped_text_patch = (
             tool_name == "text_patch"
             and bool(project_scope)
