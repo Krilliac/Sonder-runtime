@@ -145,6 +145,42 @@ def test_gradle_frameworks_require_declared_plugin_or_dependency(project):
     assert ("runtime", ".", ("gradle", "bootRun"), "any") in _commands(declared)
 
 
+def test_maven_frameworks_ignore_project_coordinates(project):
+    (project / "pom.xml").write_text(
+        """<project><modelVersion>4.0.0</modelVersion>
+<groupId>example</groupId><artifactId>spring-boot-sample</artifactId><version>1</version>
+<dependencies><dependency><groupId>org.junit.jupiter</groupId>
+<artifactId>junit-jupiter</artifactId></dependency></dependencies></project>""",
+        encoding="utf-8",
+    )
+
+    data = _detect(project)
+
+    assert {row["name"] for row in data["frameworks"]} == {"JUnit Jupiter"}
+
+
+def test_gradle_ignores_block_comments_and_emits_all_wrapper_runtimes(project):
+    manifest = project / "build.gradle.kts"
+    manifest.write_text(
+        '/* plugins { id("org.springframework.boot") }\n'
+        'dependencies { testImplementation("org.junit.jupiter:junit-jupiter:5") } */\n'
+        "plugins { java }\n",
+        encoding="utf-8",
+    )
+    assert _detect(project)["frameworks"] == []
+
+    (project / "gradlew").write_text("#!/bin/sh\n", encoding="utf-8")
+    (project / "gradlew.bat").write_text("@echo off\r\n", encoding="utf-8")
+    manifest.write_text(
+        'plugins { id("org.springframework.boot") version "3.4.0" }\n',
+        encoding="utf-8",
+    )
+
+    commands = _commands(_detect(project))
+    assert ("runtime", ".", ("./gradlew", "bootRun"), "posix") in commands
+    assert ("runtime", ".", ("gradlew.bat", "bootRun"), "windows") in commands
+
+
 def test_cmake_test_candidate_requires_declared_ctest(project):
     (project / "CMakeLists.txt").write_text("project(Demo)\nadd_executable(demo main.cpp)\n", encoding="utf-8")
     without = _detect(project)
@@ -231,6 +267,7 @@ def test_server_discovery_policy_activity_dedup_and_autopilot(project):
     assert "project_detect" in server.REPOSITORY_READ_ONLY_TOOLS
     assert "project_detect" in server._PROJECT_BOUND_AGENT_TOOLS
     assert "project_detect" in server._WORK_INSPECTION_TOOLS
+    assert "project_detect" not in server._WORK_VALIDATION_TOOLS
     assert "project_detect" in server._AGENT_DEDUPLICATED_INSPECTION_TOOLS
     assert "project_detect" in server._AUTOPILOT_OBSERVE_TOOLS
 

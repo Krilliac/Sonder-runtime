@@ -1158,6 +1158,37 @@ def test_agent_attaches_successful_file_evidence(monkeypatch):
     assert "tool=file_read" in out
 
 
+def test_agent_counts_project_detection_as_file_evidence(monkeypatch):
+    responses = [
+        '{"tool":"project_detect","args":{"path":"."},"reason":"inspect manifests"}',
+        '{"final":"Detected the project from its manifests."}',
+    ]
+    monkeypatch.setattr(
+        server,
+        "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: responses.pop(0),
+    )
+    monkeypatch.setattr(
+        server,
+        "_agent_dispatch_observed",
+        lambda tool, args, allow_web=True, read_only=False, project="", allow_location=False: (
+            '{"root":".","manifests":[{"path":"pyproject.toml"}],"errors":[]}'
+        ),
+    )
+
+    out = server._agent_impl(
+        "Review Repository: local",
+        tier="code",
+        max_steps=2,
+        require_file_evidence=True,
+        read_only=True,
+        include_evidence=True,
+    )
+
+    assert out.startswith("Detected the project")
+    assert "tool=project_detect" in out
+
+
 def test_project_scoped_agent_accepts_absolute_path_inside_host_root(
     monkeypatch, tmp_path,
 ):
