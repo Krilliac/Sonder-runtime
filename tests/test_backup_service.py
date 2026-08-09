@@ -7,6 +7,8 @@ import inspect
 import json
 import os
 import sys
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -229,6 +231,21 @@ def test_restore_is_published_only_after_every_copy_verifies(tmp_path, monkeypat
         backup_adapter.restore_to_empty(backup, destination)
     assert not destination.exists()
     assert not list(tmp_path.glob(".restored.restore-*"))
+
+
+def test_restore_relative_dot_stages_beside_destination(tmp_path, monkeypatch):
+    backup = tmp_path / "backup"
+    _write_fixture_backup(backup)
+    destination = tmp_path / "empty-destination"
+    destination.mkdir()
+    monkeypatch.chdir(destination)
+    def assert_sibling_staging(*, prefix, dir):
+        assert Path(dir) == tmp_path
+        raise OSError("stop after staging-location assertion")
+
+    monkeypatch.setattr(tempfile, "mkdtemp", assert_sibling_staging)
+    with pytest.raises(OSError, match="staging-location assertion"):
+        backup_adapter.restore_to_empty(backup, ".")
 
 
 @pytest.mark.parametrize("value", [True, 1.5, "2", -1, 0])
