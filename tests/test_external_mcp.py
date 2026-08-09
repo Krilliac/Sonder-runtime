@@ -274,9 +274,11 @@ def test_deadline_covers_endpoint_and_credential_resolution(monkeypatch):
 def test_in_flight_transport_is_cancelled_when_context_token_trips():
     cancellation = MutableCancellation()
     transport_cancelled = {"value": False}
+    transport_started = asyncio.Event()
 
     class BlockingTransport:
         async def invoke(self, request):
+            transport_started.set()
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
@@ -293,7 +295,7 @@ def test_in_flight_transport_is_cancelled_when_context_token_trips():
             cancellation=cancellation,
         )
         call = asyncio.create_task(bridge.call("docs", "lookup", {}, context=context))
-        await asyncio.sleep(0.03)
+        await asyncio.wait_for(transport_started.wait(), timeout=1)
         cancellation.cancelled = True
         with pytest.raises(ExternalMcpError) as failure:
             await call
