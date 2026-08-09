@@ -2288,9 +2288,48 @@ def _maybe_title(conn, session_id, first_prompt, internal_generate=None):
     memory_store.set_session_title(conn, session_id, title)
 
 
-def _preference_facts(conn, limit=12):
-    prefs = memory_store.preferences_for_scope(conn, "global", limit=limit)
-    return ["User preference: %s" % p["text"] for p in prefs]
+def _preference_facts(conn, task, project=None, limit=12):
+    """Return only enabled, scope-authorized preferences relevant to ``task``."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        return []
+    limit = min(limit, 12)
+    scopes = []
+    if isinstance(project, str) and project:
+        scopes.extend((str(project), "project:%s" % project))
+    scopes.append("global")
+    selected = []
+    seen_ids = set()
+    seen_keys = set()
+    # Scan the full bounded retrieval window so high-ranked but inapplicable
+    # legacy rows cannot starve a lower-ranked applicable preference.
+    candidate_limit = 200
+    for scope in scopes:
+        for pref in memory_store.preferences_for_scope(
+            conn, scope, limit=candidate_limit
+        ):
+            if not isinstance(pref, dict):
+                continue
+            text = pref.get("text", "")
+            if not isinstance(text, str):
+                continue
+            identity = pref.get("id")
+            if not isinstance(identity, (str, bytes, int, float)):
+                identity = (scope, str(pref.get("key")), text)
+            if identity in seen_ids:
+                continue
+            seen_ids.add(identity)
+            if not preference_learning.preference_applies(text, task):
+                continue
+            key = pref.get("key")
+            if not isinstance(key, str) or not key:
+                key = preference_learning.preference_key(text)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            selected.append("User preference: %s" % text)
+            if len(selected) >= limit:
+                return selected
+    return selected
 
 
 def _capture_preferences(conn, text, source_interaction=None, scope="global"):
@@ -2340,7 +2379,7 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
             )
             if project is not None else []
         )
-        facts = _preference_facts(conn)
+        facts = _preference_facts(conn, prompt, project=project)
         if project:
             facts.extend(f["text"] for f in memory_store.facts_for_project(conn, project))
         retrieve_fn = retriever.retrieve

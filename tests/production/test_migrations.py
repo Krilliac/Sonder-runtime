@@ -94,6 +94,41 @@ def test_edited_migration_history_rejected(tmp_path):
         migrate_store("operations", db)
 
 
+def test_read_only_status_does_not_create_missing_database(tmp_path):
+    db = tmp_path / "operations.db"
+
+    result = sonder_migrations.status_read_only("operations", str(db))
+
+    assert result.applied == ()
+    assert result.pending == ("0001_baseline",)
+    assert not db.exists()
+
+
+def test_read_only_status_does_not_create_missing_ledger(tmp_path):
+    db = tmp_path / "operations.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("CREATE TABLE existing_state (value TEXT)")
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = sonder_migrations.status_read_only("operations", str(db))
+
+    assert result.pending == ("0001_baseline",)
+    conn = sqlite3.connect(db)
+    try:
+        names = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    finally:
+        conn.close()
+    assert names == {"existing_state"}
+
+
 def test_all_registered_stores_report_status():
     statuses = sonder_migrations.status_all()
     assert set(statuses) == {
