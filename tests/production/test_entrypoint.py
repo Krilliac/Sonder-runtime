@@ -148,6 +148,48 @@ def test_doctor_json_skips_ollama(monkeypatch, capsys):
     assert called == ["config"]
 
 
+def test_doctor_json_fails_on_modified_migration_without_disclosure(
+    monkeypatch, capsys
+):
+    import sonder_doctor
+    import sonder_migrations
+    from types import SimpleNamespace
+
+    secret_path = "C:/Users/private/secret-memory.db"
+    secret_migration = "0001_private_name"
+    monkeypatch.setattr(
+        sonder_migrations,
+        "status_all",
+        lambda: {
+            "memory": SimpleNamespace(
+                applied=(secret_migration,), pending=(), unknown=(),
+                checksum_mismatches=(secret_migration,), db_path=secret_path,
+            )
+        },
+    )
+    monkeypatch.setattr(
+        sonder_doctor,
+        "default_checks",
+        lambda: [("schemas", sonder_doctor._check_schemas)],
+    )
+
+    assert main(["doctor", "--json", "--skip-ollama"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "overall": "fail",
+        "checks": [{
+            "name": "schemas",
+            "status": "fail",
+            "detail": (
+                "1 store(s); unhealthy history: modified=1 future=0; pending=0"
+            ),
+        }],
+    }
+    serialized = json.dumps(payload)
+    assert secret_path not in serialized
+    assert secret_migration not in serialized
+
+
 def test_doctor_text_failure_sets_exit_code(monkeypatch, capsys):
     import sonder_doctor
 
