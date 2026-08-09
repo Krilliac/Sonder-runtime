@@ -22,9 +22,11 @@ from .repositories import (
     UnitOfWork,
 )
 from .tool_executor import ToolCall, ToolExecutor, ToolResult
+from .task_state import ChecklistEventPort, TaskRepository
 
 __all__ = [
     "AutomationRepository",
+    "ChecklistEventPort",
     "Clock",
     "Embedding",
     "EventSink",
@@ -40,5 +42,6 @@ __all__ = [
     "ToolCall",
     "ToolExecutor",
     "ToolResult",
+    "TaskRepository",
     "UnitOfWork",
 ]

@@ -73,6 +73,27 @@ def test_checklist_lifecycle_persists_order_and_parent_status(monkeypatch, tmp_p
     assert final.index("Inspect files") < final.index("Run tests")
 
 
+def test_checklist_create_preserves_activity_projection_and_event_order(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "activity.db"))
+    activity_tracker.reset_for_tests()
+    with activity_tracker.response_span("checklist", "create visible plan"):
+        output = server.checklist_create("Visible", json.dumps(["inspect"]))
+
+    response = activity_tracker.latest()
+    assert output.startswith("sonder checklist ")
+    assert response["checklist"]["summary"] == "0/1 complete"
+    assert response["checklist"]["items"][0]["title"] == "inspect"
+    relevant = [
+        row["kind"] for row in response["events"]
+        if row["kind"] in ("tool_call", "checklist")
+    ]
+    assert relevant[-2:] == [
+        "tool_call", "checklist",
+    ]
+
+
 def test_checklist_rejects_all_invalid_items_before_writing(monkeypatch, tmp_path):
     db_path = tmp_path / "atomic.db"
     monkeypatch.setattr(server, "_DB_PATH", str(db_path))
@@ -83,6 +104,40 @@ def test_checklist_rejects_all_invalid_items_before_writing(monkeypatch, tmp_pat
     conn = memory_store.connect(str(db_path))
     try:
         assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_checklist_validation_still_precedes_database_open(monkeypatch):
+    opened = []
+    monkeypatch.setattr(server, "_open_db", lambda: opened.append(True))
+    result = server.checklist_create("Atomic", json.dumps(["valid", ""]))
+    assert result.startswith("ERROR: checklist item titles cannot be empty")
+    assert opened == []
+
+
+def test_checklist_late_write_failure_preserves_legacy_partial_rows(
+    monkeypatch, tmp_path,
+):
+    db_path = tmp_path / "partial.db"
+    monkeypatch.setattr(server, "_DB_PATH", str(db_path))
+    original = memory_store.create_task
+    calls = 0
+
+    def fail_third_create(conn, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise RuntimeError("injected child failure")
+        return original(conn, *args, **kwargs)
+
+    monkeypatch.setattr(memory_store, "create_task", fail_third_create)
+    result = server.checklist_create("Partial", json.dumps(["first", "second"]))
+    assert result == "ERROR: injected child failure"
+    conn = memory_store.connect(str(db_path))
+    try:
+        rows = conn.execute("SELECT title FROM tasks ORDER BY rowid").fetchall()
+        assert [row[0] for row in rows] == ["Partial", "first"]
     finally:
         conn.close()
 
