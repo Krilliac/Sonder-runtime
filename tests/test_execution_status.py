@@ -29,6 +29,12 @@ def test_incomplete_or_inconsistent_snapshot_is_unknown_not_false_zero():
         "queued_agents": 1,
         "active_model_calls": 0,
     })["known"] is False
+    assert execution_status.from_fleet_snapshot({
+        "active_agents": 2,
+        "running_agents": 1,
+        "queued_agents": 1,
+        "active_model_calls": 2,
+    })["known"] is False
 
 
 def test_server_contract_reuses_the_status_endpoint_agent_snapshot(monkeypatch):
@@ -37,12 +43,17 @@ def test_server_contract_reuses_the_status_endpoint_agent_snapshot(monkeypatch):
         "snapshot",
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("duplicate read")),
     )
-    result = server.execution_status_data({
-        "active_agents": 2,
-        "running_agents": 1,
-        "queued_agents": 1,
-        "active_model_calls": 1,
-    })
+    activity = server.activity_tracker.public_snapshot()
+    result = server.execution_status_data(
+        {
+            "active_agents": 2,
+            "running_agents": 1,
+            "queued_agents": 1,
+            "active_model_calls": 1,
+        },
+        activity,
+    )
 
     assert result["known"] is True
     assert result["running_lanes"] == 1
+    assert result["feed"]["known"] is True

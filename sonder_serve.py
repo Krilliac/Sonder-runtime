@@ -478,6 +478,15 @@ def _developer_authorized(context):
     return bool(context.get("api_key")) or role_ok
 
 
+def _execution_feed_detail_allowed(context):
+    """Evidence needs both the exact local flag and developer authority."""
+    return bool(
+        server.activity_tracker.detail_enabled()
+        and context.get("mode") != "local-open"
+        and _developer_authorized(context)
+    )
+
+
 def _admin_authorized(context):
     """Administrator authorization for privileged operations (SPEC-2).
 
@@ -1417,7 +1426,9 @@ def _chat_completion_object(content, model="sonder", iid=None, reasoning=""):
             "finish_reason": "stop",
         }],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-        "sonder_activity": server.activity_tracker.snapshot().get("latest"),
+        "sonder_activity": (
+            server.activity_tracker.public_snapshot() or {}
+        ).get("latest"),
     }
     # Mirrors sonder_activity: present only when there is something to show, so
     # clients can treat absence as "this deployment does not expose reasoning".
@@ -1742,6 +1753,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             account = context["account"]
             agents = server.master_orchestrator.snapshot()
+            activity_source = server.activity_tracker.snapshot()
+            detail_allowed = _execution_feed_detail_allowed(context)
+            activity = server.activity_tracker.public_snapshot(
+                activity_source, include_detail=detail_allowed,
+            )
             payload = {
                 "status": server.status(),
                 "stats": server.sonder_stats(),
@@ -1750,13 +1766,15 @@ class Handler(BaseHTTPRequestHandler):
                 "context": server.context_health_data(),
                 "context_policy": server.context_policy.policy(server.SESSION_NUM_CTX),
                 "agents": agents,
-                "execution": server.execution_status_data(agents),
+                "execution": server.execution_status_data(
+                    agents, activity_source, include_detail=detail_allowed,
+                ),
                 "autopilot": server.autopilot_controller.snapshot(),
                 "runtime_policy": server.runtime_policy_data(),
                 "selfmod": server.selfmod.status_data(),
                 "mcp_runtime": server.mcp_runtime_data(),
                 "learning_health": server.learning_health_data(),
-                "activity": server.activity_tracker.snapshot(),
+                "activity": activity,
                 "db_path": getattr(server, "_DB_PATH", ""),
                 "state_home": str(server.sonder_paths.default_home()),
                 "account": account or {},

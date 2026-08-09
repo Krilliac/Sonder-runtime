@@ -10,15 +10,23 @@ from __future__ import annotations
 import contextlib
 import itertools
 import json
+import os
 import re
 import threading
 import time
+import uuid
 from copy import deepcopy
 
 
 MAX_EVENTS = 80
 MAX_ACTIVE = 20
 MAX_EVENT_BLOCK = 4000
+MAX_PUBLIC_PREVIEW = 1000
+MAX_FEED_EVENTS = 20
+MAX_FEED_BYTES = 64 * 1024
+MAX_PUBLIC_EVENTS = 20
+MAX_PUBLIC_RESPONSE_BYTES = 64 * 1024
+MAX_EVENT_RING = 512
 # Keep active response spans intact when this helper is refreshed at a request
 # boundary. Function definitions may reload; live response ownership may not.
 if "_LOCK" not in globals():
@@ -33,6 +41,14 @@ if "_LATEST" not in globals():
     _LATEST = None
 if "_TOTAL_TOOL_CALLS" not in globals():
     _TOTAL_TOOL_CALLS = 0
+if "_NEXT_EVENT_SEQUENCE" not in globals():
+    _NEXT_EVENT_SEQUENCE = 1
+if "_RUNTIME_ID" not in globals():
+    _RUNTIME_ID = "rt-%s" % uuid.uuid4().hex[:12]
+if "_EVENT_RING" not in globals():
+    _EVENT_RING = []
+if "_DROPPED_EVENTS" not in globals():
+    _DROPPED_EVENTS = 0
 # Model reasoning is kept OUT of the response span on purpose. Spans flow into
 # snapshot() and from there into the sonder_activity field every client
 # receives; reasoning is gated separately and must not ride along.
@@ -97,18 +113,64 @@ _KEY_SHAPE_RE = re.compile(
 )
 _JWT_RE = re.compile(r"\bey[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\b")
 _URI_CREDENTIAL_RE = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/@\s:]+:[^/@\s]+@")
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
 def _redact_text(value):
-    text = str(value or "")
-    # Bearer first: the assignment rule now matches `Authorization:` too, and it
-    # consumes only up to the next space -- so running it first would eat the
-    # word "Bearer" and leave the token itself behind, unmatchable.
-    text = _BEARER_RE.sub("Bearer <redacted>", text)
-    text = _URI_CREDENTIAL_RE.sub(r"\1<redacted>@", text)
-    text = _SECRET_ASSIGNMENT_RE.sub(lambda match: "%s=<redacted>" % match.group(1), text)
-    text = _JWT_RE.sub("<redacted-token>", text)
-    return _KEY_SHAPE_RE.sub("<redacted-key>", text)
+    try:
+        text = str(value or "")
+        # Bearer first: the assignment rule now matches `Authorization:` too, and it
+        # consumes only up to the next space -- so running it first would eat the
+        # word "Bearer" and leave the token itself behind, unmatchable.
+        text = _BEARER_RE.sub("Bearer <redacted>", text)
+        text = _URI_CREDENTIAL_RE.sub(r"\1<redacted>@", text)
+        text = _SECRET_ASSIGNMENT_RE.sub(
+            lambda match: "%s=<redacted>" % match.group(1), text,
+        )
+        text = _JWT_RE.sub("<redacted-token>", text)
+        return _CONTROL_RE.sub("?", _KEY_SHAPE_RE.sub("<redacted-key>", text))
+    except Exception:
+        return "<redaction-failed>"
+
+
+def _preview_descriptor(value=None, *, limit=MAX_PUBLIC_PREVIEW, available=True):
+    """Return an explicit bounded/redacted preview contract.
+
+    ``chars`` describes the original value while ``text`` is always the safe
+    projection. Callers can therefore distinguish empty, unavailable,
+    truncated, and redacted values without receiving the unbounded source.
+    """
+    if not available:
+        return {
+            "state": "unavailable", "text": "", "chars": None,
+            "truncated": False, "redacted": False,
+        }
+    try:
+        raw = str(value or "").replace("\x00", "\\0")
+    except Exception:
+        raw = "<redaction-failed>"
+    safe = _redact_text(raw)
+    bounded = max(80, min(MAX_EVENT_BLOCK, int(limit or MAX_PUBLIC_PREVIEW)))
+    truncated = len(safe) > bounded
+    return {
+        "state": "available",
+        "text": safe[:bounded] + ("\n... (truncated)" if truncated else ""),
+        "chars": len(raw),
+        "truncated": truncated,
+        "redacted": safe != raw,
+    }
+
+
+def detail_enabled():
+    return os.environ.get("SONDER_EXECUTION_FEED_DETAIL", "") == "1"
+
+
+def _safe_path(value):
+    text = _block(_redact_text(value), 1000)
+    if re.match(r"^[A-Za-z]:[\\/]", text) or text.startswith(("/", "\\\\")):
+        parts = [part for part in re.split(r"[\\/]+", text) if part]
+        return parts[-1] if parts else "<root>"
+    return text
 
 
 def _safe_command(value):
@@ -156,7 +218,7 @@ def _safe_args(value, depth=0):
             if any(part in lowered for part in ("password", "secret", "token", "approval", "api_key")):
                 out[name] = "<redacted>"
             elif lowered in {"content", "code", "files_json", "stdin"}:
-                out[name] = "<%d chars>" % len(str(item or ""))
+                out[name] = _preview_descriptor(item)
             else:
                 out[name] = _safe_args(item, depth + 1)
         return out
@@ -165,6 +227,43 @@ def _safe_args(value, depth=0):
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return _block(_redact_text(value), 1000)
+
+
+def _json_text(value):
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _safe_value_descriptor(raw, safe):
+    safe_text = safe if isinstance(safe, str) else _json_text(safe)
+    descriptor = _preview_descriptor(safe_text)
+    raw_text = raw if isinstance(raw, str) else _json_text(raw)
+
+    def flags(value):
+        if isinstance(value, dict):
+            own = bool(value.get("redacted")), bool(value.get("truncated"))
+            nested = [flags(item) for item in value.values()]
+        elif isinstance(value, (list, tuple)):
+            own = False, False
+            nested = [flags(item) for item in value]
+        else:
+            own = False, False
+            nested = []
+        return (
+            own[0] or any(item[0] for item in nested),
+            own[1] or any(item[1] for item in nested),
+        )
+
+    nested_redacted, nested_truncated = flags(safe)
+    descriptor["redacted"] = (
+        descriptor["redacted"]
+        or nested_redacted
+        or _redact_text(raw_text) != raw_text
+    )
+    descriptor["truncated"] = descriptor["truncated"] or nested_truncated
+    return descriptor
 
 
 ACTION_TITLES = {
@@ -240,13 +339,26 @@ def bind_response(response_id):
 
 
 def _event(response, kind, **fields):
+    global _NEXT_EVENT_SEQUENCE, _DROPPED_EVENTS
     elapsed_ms = int((time.time() - response["started_at"]) * 1000)
-    event = {"ts": _now(), "elapsed_ms": elapsed_ms, "kind": kind}
+    event = {
+        "seq": _NEXT_EVENT_SEQUENCE,
+        "ts": _now(), "elapsed_ms": elapsed_ms, "kind": kind,
+    }
+    _NEXT_EVENT_SEQUENCE += 1
     event.update({k: v for k, v in fields.items() if v not in (None, "")})
     response["events"].append(event)
     if len(response["events"]) > MAX_EVENTS:
         del response["events"][:-MAX_EVENTS]
     response["last_event"] = event
+    ring_event = _public_event(event, include_detail=True)
+    ring_event["response_id"] = _short(response.get("id", ""), 80)
+    ring_event["response_status"] = _short(response.get("status", "unknown"), 40)
+    _EVENT_RING.append(ring_event)
+    if len(_EVENT_RING) > MAX_EVENT_RING:
+        dropped = len(_EVENT_RING) - MAX_EVENT_RING
+        del _EVENT_RING[:dropped]
+        _DROPPED_EVENTS += dropped
     return event
 
 
@@ -391,7 +503,8 @@ def current_reasoning():
 
 def record_model_call(
     model="", prompt_chars=0, history_messages=0, ok=True, elapsed_ms=0,
-    tokens_in=0, tokens_out=0, token_source="",
+    tokens_in=0, tokens_out=0, token_source="", request_preview=None,
+    response_preview=None,
 ):
     response = _current()
     if response is None:
@@ -409,6 +522,12 @@ def record_model_call(
             tokens_in=int(tokens_in or 0),
             tokens_out=int(tokens_out or 0),
             token_source=_short(token_source, 40),
+            request_preview=_preview_descriptor(
+                request_preview, available=request_preview is not None,
+            ),
+            response_preview=_preview_descriptor(
+                response_preview, available=response_preview is not None,
+            ),
             ok=bool(ok),
             elapsed_ms=int(elapsed_ms or 0),
         )
@@ -422,12 +541,14 @@ def record_tool_call(name, args=None, *, ok=True, elapsed_ms=0, summary=""):
         global _TOTAL_TOOL_CALLS
         response["tool_calls"] += 1
         _TOTAL_TOOL_CALLS += 1
+        safe_args = _safe_args(args or {})
         _event(
             response,
             "tool_call",
             tool=_short(name, 80),
             title=action_title(name),
-            args=_safe_args(args or {}),
+            args=safe_args,
+            args_preview=_safe_value_descriptor(args or {}, safe_args),
             ok=bool(ok),
             elapsed_ms=int(elapsed_ms or 0),
             summary=_short(_redact_text(summary), 220),
@@ -445,14 +566,28 @@ def record_tool_result(
         global _TOTAL_TOOL_CALLS
         response["tool_calls"] += 1
         _TOTAL_TOOL_CALLS += 1
+        safe_args = _safe_args(args or {})
+        safe_command = _safe_command(command)
+        safe_output = _block(_redact_text(output), MAX_EVENT_BLOCK)
+        result_source = output if output not in (None, "") else summary
+        safe_result = _block(_redact_text(result_source), MAX_EVENT_BLOCK)
         _event(
             response,
             "tool_call",
             tool=_short(name, 80),
             title=action_title(name),
-            args=_safe_args(args or {}),
-            command=_safe_command(command),
-            output=_block(_redact_text(output), MAX_EVENT_BLOCK),
+            args=safe_args,
+            args_preview=_safe_value_descriptor(args or {}, safe_args),
+            command=safe_command,
+            command_preview=(
+                _safe_value_descriptor(command, safe_command)
+                if command not in (None, "") else _preview_descriptor(available=False)
+            ),
+            output=safe_output,
+            result_preview=(
+                _safe_value_descriptor(result_source, safe_result)
+                if result_source not in (None, "") else _preview_descriptor(available=False)
+            ),
             ok=bool(ok),
             elapsed_ms=int(elapsed_ms or 0),
             summary=_short(_redact_text(summary), 220),
@@ -505,6 +640,8 @@ def record_file_change(
     bytes_written=0,
     dry_run=False,
     summary="",
+    preview=None,
+    preview_kind="",
 ):
     response = _current()
     if response is None:
@@ -512,13 +649,15 @@ def record_file_change(
     action = (action or "").lower()
     item = {
         "action": action,
-        "path": str(path or ""),
+        "path": _block(_redact_text(path), 1000),
         "lines_added": int(lines_added or 0),
         "lines_edited": int(lines_edited or 0),
         "lines_deleted": int(lines_deleted or 0),
         "bytes": int(bytes_written or 0),
         "dry_run": bool(dry_run),
-        "summary": _short(summary, 160),
+        "summary": _short(_redact_text(summary), 160),
+        "preview_kind": _short(preview_kind, 40),
+        "preview": _preview_descriptor(preview, available=preview is not None),
     }
     with _LOCK:
         if not item["dry_run"]:
@@ -548,7 +687,368 @@ def snapshot():
             "active": active,
             "latest": deepcopy(_LATEST),
             "total_tool_calls": _TOTAL_TOOL_CALLS,
+            "event_ring": deepcopy(_EVENT_RING),
+            "next_seq": _NEXT_EVENT_SEQUENCE,
+            "dropped_events": _DROPPED_EVENTS,
         }
+
+
+def _public_descriptor(value):
+    if isinstance(value, dict) and value.get("state") == "disabled":
+        return {
+            "state": "disabled", "text": "", "chars": value.get("chars"),
+            "truncated": bool(value.get("truncated")),
+            "redacted": bool(value.get("redacted")),
+        }
+    if not isinstance(value, dict) or value.get("state") != "available":
+        return _preview_descriptor(available=False)
+    projected = _preview_descriptor(value.get("text", ""))
+    chars = value.get("chars")
+    projected["chars"] = int(chars) if isinstance(chars, int) and chars >= 0 else None
+    projected["truncated"] = bool(value.get("truncated")) or projected["truncated"]
+    projected["redacted"] = bool(value.get("redacted")) or projected["redacted"]
+    return projected
+
+
+def _disabled_descriptor(value=None):
+    chars = None
+    if isinstance(value, dict) and isinstance(value.get("chars"), int):
+        chars = max(0, value["chars"])
+    return {
+        "state": "disabled", "text": "", "chars": chars,
+        "truncated": bool(isinstance(value, dict) and value.get("truncated")),
+        "redacted": bool(isinstance(value, dict) and value.get("redacted")),
+    }
+
+
+def _public_event(event, *, include_detail=False):
+    event = event if isinstance(event, dict) else {}
+    kind = _short(event.get("kind", "event"), 80)
+    if kind == "response_start":
+        phase = "started"
+    elif kind == "file_change":
+        phase = "previewed" if event.get("dry_run") else "applied"
+    elif kind == "response_error" or event.get("ok") is False:
+        phase = "failed"
+    else:
+        phase = "completed"
+    out = {
+        "ts": _short(event.get("ts", ""), 40),
+        "elapsed_ms": max(0, int(event.get("elapsed_ms") or 0)),
+        "kind": kind,
+        "seq": max(0, int(event.get("seq") or 0)),
+        "phase": phase,
+    }
+    for key in ("tool", "title", "model", "action", "preview_kind"):
+        if event.get(key) not in (None, ""):
+            out[key] = _short(_redact_text(event.get(key)), 160)
+    for key in (
+        "prompt_chars", "history_messages", "tokens_in", "tokens_out",
+        "lines_added", "lines_edited", "lines_deleted", "bytes",
+    ):
+        if key in event:
+            try:
+                out[key] = max(0, int(event.get(key) or 0))
+            except (TypeError, ValueError):
+                out[key] = 0
+    for key in ("ok", "dry_run"):
+        if key in event:
+            out[key] = bool(event.get(key))
+    if event.get("path") not in (None, ""):
+        out["path"] = _safe_path(event.get("path"))
+    if out["kind"] != "response_start" and event.get("summary") not in (None, ""):
+        out["summary"] = _block(_redact_text(event.get("summary")), 1000)
+    if include_detail and "args" in event:
+        out["args"] = _safe_args(event.get("args"))
+    if include_detail and event.get("command") not in (None, ""):
+        out["command"] = _safe_command(event.get("command"))
+    if include_detail and event.get("output") not in (None, ""):
+        out["output"] = _preview_descriptor(event.get("output"))["text"]
+    for key in (
+        "args_preview", "command_preview", "result_preview",
+        "request_preview", "response_preview", "preview",
+    ):
+        if key in event:
+            out[key] = (
+                _public_descriptor(event.get(key))
+                if include_detail else _disabled_descriptor(event.get(key))
+            )
+    return out
+
+
+def _public_file(item, *, include_detail=False):
+    item = item if isinstance(item, dict) else {}
+    out = {
+        "action": _short(item.get("action", "file"), 80),
+        "path": _safe_path(item.get("path", "")),
+        "lines_added": max(0, int(item.get("lines_added") or 0)),
+        "lines_edited": max(0, int(item.get("lines_edited") or 0)),
+        "lines_deleted": max(0, int(item.get("lines_deleted") or 0)),
+        "bytes": max(0, int(item.get("bytes") or 0)),
+        "dry_run": bool(item.get("dry_run")),
+        "summary": _short(_redact_text(item.get("summary", "")), 160),
+        "preview_kind": _short(item.get("preview_kind", ""), 40),
+        "preview": (
+            _public_descriptor(item.get("preview"))
+            if include_detail else _disabled_descriptor(item.get("preview"))
+        ),
+    }
+    return out
+
+
+def _public_response(response, *, include_detail=False):
+    if not isinstance(response, dict):
+        return None
+    out = {}
+    for key in ("id", "label", "surface", "model", "status", "started_ts"):
+        out[key] = _short(_redact_text(response.get(key, "")), 160)
+    for key in (
+        "elapsed_ms", "tool_calls", "model_calls", "tokens_in", "tokens_out",
+        "file_creates", "file_edits", "file_deletes", "lines_added",
+        "lines_edited", "lines_deleted",
+    ):
+        out[key] = max(0, int(response.get(key) or 0))
+    out["result_summary"] = _block(
+        _redact_text(response.get("result_summary", "")), 1000,
+    )
+    source_events = response.get("events") or []
+    source_files = response.get("files") or []
+    out["events"] = [
+        _public_event(row, include_detail=include_detail)
+        for row in source_events[-MAX_PUBLIC_EVENTS:]
+    ]
+    out["files"] = [
+        _public_file(row, include_detail=include_detail)
+        for row in source_files[-30:]
+    ]
+    checklist = response.get("checklist")
+    if isinstance(checklist, dict):
+        out["checklist"] = {
+            "id": _short(checklist.get("id", ""), 100),
+            "title": _short(_redact_text(checklist.get("title", "")), 220),
+            "status": _short(checklist.get("status", ""), 40),
+            "summary": _short(_redact_text(checklist.get("summary", "")), 220),
+            "items": [
+                {
+                    "id": _short(row.get("id", ""), 100),
+                    "title": _short(_redact_text(row.get("title", "")), 220),
+                    "status": _short(row.get("status", ""), 40),
+                }
+                for row in (checklist.get("items") or [])[:80]
+                if isinstance(row, dict)
+            ],
+        }
+    else:
+        out["checklist"] = None
+    out["last_event"] = out["events"][-1] if out["events"] else None
+    out["truncated"] = len(source_events) > len(out["events"]) or len(source_files) > len(out["files"])
+    while len(json.dumps(out, ensure_ascii=False).encode("utf-8")) > MAX_PUBLIC_RESPONSE_BYTES:
+        out["truncated"] = True
+        if out["events"]:
+            out["events"].pop(0)
+        elif out["files"]:
+            out["files"].pop(0)
+        elif (out.get("checklist") or {}).get("items"):
+            out["checklist"]["items"].pop()
+        else:
+            out["result_summary"] = _short(out.get("result_summary", ""), 220)
+            break
+    out["last_event"] = out["events"][-1] if out["events"] else None
+    return out
+
+
+def public_snapshot(source=None, *, include_detail=None):
+    """App-safe activity shape compatible with the historical status payload."""
+    source = snapshot() if source is None else source
+    if not isinstance(source, dict):
+        return None
+    detail = detail_enabled() if include_detail is None else bool(include_detail)
+    active = [
+        projected for projected in (
+            _public_response(row, include_detail=detail)
+            for row in (source.get("active") or [])[-MAX_ACTIVE:]
+        ) if projected is not None
+    ]
+    latest = _public_response(source.get("latest"), include_detail=detail)
+    return {
+        "active_count": max(0, int(source.get("active_count") or 0)),
+        "active": active,
+        "latest": latest,
+        "total_tool_calls": max(0, int(source.get("total_tool_calls") or 0)),
+        "projected": True,
+        "detail_enabled": detail,
+    }
+
+
+def _feed_preview(value, *, available=True):
+    if isinstance(value, dict) and "state" in value:
+        return _public_descriptor(value)
+    return _preview_descriptor(value, available=available)
+
+
+def execution_feed(
+    source=None,
+    max_events=MAX_FEED_EVENTS,
+    *,
+    include_detail=None,
+):
+    """Flatten projected activity into the shared bounded execution feed."""
+    raw_source = snapshot() if source is None else source
+    detail = detail_enabled() if include_detail is None else bool(include_detail)
+    public = public_snapshot(raw_source, include_detail=detail)
+    if public is None:
+        return {
+            "schema_version": 1, "runtime_id": _RUNTIME_ID,
+            "known": False, "active_responses": None, "events": [],
+            "truncated": False, "redaction_applied": False,
+            "oldest_seq": None, "next_seq": None, "dropped_events": None,
+            "sequence_gap": None,
+            "limits": {"events": MAX_FEED_EVENTS, "preview_chars": MAX_PUBLIC_PREVIEW},
+            "error": "activity snapshot is unavailable",
+        }
+    ring = raw_source.get("event_ring") if isinstance(raw_source, dict) else None
+    if isinstance(ring, list):
+        responses = [
+            {
+                "id": _short(event.get("response_id", ""), 80),
+                "status": _short(event.get("response_status", "unknown"), 40),
+                "events": [_public_event(event, include_detail=detail)],
+            }
+            for event in ring
+            if isinstance(event, dict)
+        ]
+    else:
+        responses = list(public.get("active") or [])
+        latest = public.get("latest")
+        if latest and not any(row.get("id") == latest.get("id") for row in responses):
+            responses.append(latest)
+    rows = []
+    for response in responses:
+        for event in response.get("events") or []:
+            row = {
+                "response_id": response.get("id", ""),
+                "response_status": response.get("status", "unknown"),
+                "seq": max(0, int(event.get("seq") or 0)),
+                "ts": event.get("ts", ""),
+                "elapsed_ms": event.get("elapsed_ms", 0),
+                "kind": event.get("kind", "event"),
+                "phase": event.get("phase", "completed"),
+            }
+            kind = row["kind"]
+            if kind == "model_call":
+                row.update({
+                    key: event.get(key) for key in (
+                        "model", "prompt_chars", "history_messages", "tokens_in",
+                        "tokens_out", "ok",
+                    ) if key in event
+                })
+                row["request_preview"] = _feed_preview(event.get("request_preview"))
+                row["response_preview"] = _feed_preview(event.get("response_preview"))
+            elif kind == "tool_call":
+                row.update({
+                    key: event.get(key) for key in ("tool", "title", "ok") if key in event
+                })
+                row["args_preview"] = _feed_preview(event.get("args_preview"))
+                row["command_preview"] = _feed_preview(event.get("command_preview"))
+                row["result_preview"] = _feed_preview(event.get("result_preview"))
+            elif kind == "file_change":
+                row.update({
+                    key: event.get(key) for key in (
+                        "action", "path", "lines_added", "lines_edited",
+                        "lines_deleted", "bytes", "dry_run", "preview_kind",
+                    ) if key in event
+                })
+                row["content_preview"] = _feed_preview(event.get("preview"))
+            else:
+                summary = event.get("summary")
+                row["summary_preview"] = _feed_preview(
+                    summary, available=summary not in (None, ""),
+                )
+            rows.append(row)
+    bounded = max(1, min(MAX_FEED_EVENTS, int(max_events or MAX_FEED_EVENTS)))
+    selected = rows[-bounded:]
+    descriptors = [
+        value for row in selected for key, value in row.items()
+        if key.endswith("_preview") and isinstance(value, dict)
+    ]
+    dropped_events = max(0, int(raw_source.get("dropped_events") or 0))
+    next_seq = max(1, int(raw_source.get("next_seq") or _NEXT_EVENT_SEQUENCE))
+    oldest_seq = (
+        min((int(row.get("seq") or 0) for row in rows if int(row.get("seq") or 0) > 0), default=next_seq)
+    )
+    result = {
+        "schema_version": 1,
+        "runtime_id": _RUNTIME_ID,
+        "known": True,
+        "active_responses": public["active_count"],
+        "events": selected,
+        "truncated": (
+            len(rows) > len(selected) or dropped_events > 0
+            or any(row.get("truncated") for row in descriptors)
+        ),
+        "redaction_applied": any(row.get("redacted") for row in descriptors),
+        "oldest_seq": oldest_seq,
+        "next_seq": next_seq,
+        "dropped_events": dropped_events,
+        "sequence_gap": dropped_events,
+        "limits": {"events": bounded, "preview_chars": MAX_PUBLIC_PREVIEW},
+        "error": "",
+    }
+    result["bytes"] = 0
+    while True:
+        for _ in range(3):
+            result["bytes"] = len(
+                json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            )
+        if result["bytes"] <= MAX_FEED_BYTES or not result["events"]:
+            break
+        result["events"].pop(0)
+        result["truncated"] = True
+    return result
+
+
+_TERMINAL_CONTROL_RE = _CONTROL_RE
+
+
+def _terminal_safe(value):
+    return _TERMINAL_CONTROL_RE.sub("?", str(value or ""))
+
+
+def format_execution_feed(feed):
+    if not isinstance(feed, dict) or not feed.get("known"):
+        return "live execution feed: unknown"
+    lines = [
+        "live execution feed: %d event(s)%s" % (
+            len(feed.get("events") or []),
+            " (truncated)" if feed.get("truncated") else "",
+        )
+    ]
+    if feed.get("oldest_seq") is not None and feed.get("next_seq") is not None:
+        lines.append(
+            "  seq: %s..%s | dropped before window: %s" % (
+                feed.get("oldest_seq"), max(0, int(feed.get("next_seq") or 1) - 1),
+                feed.get("dropped_events", 0),
+            )
+        )
+    for event in (feed.get("events") or [])[-12:]:
+        kind = event.get("kind", "event")
+        detail = event.get("tool") or event.get("model") or event.get("path") or ""
+        lines.append("  +%sms %s %s" % (
+            event.get("elapsed_ms", 0), _terminal_safe(kind), _terminal_safe(detail),
+        ))
+        preview = (
+            event.get("response_preview") or event.get("result_preview")
+            or event.get("content_preview") or event.get("summary_preview")
+        )
+        if isinstance(preview, dict):
+            state = preview.get("state", "unavailable")
+            text = preview.get("text", "")
+            suffix = " [truncated]" if preview.get("truncated") else ""
+            suffix += " [redacted]" if preview.get("redacted") else ""
+            lines.append("    preview: %s%s" % (
+                _terminal_safe(text if state == "available" else state), suffix,
+            ))
+    return "\n".join(lines)
 
 
 def latest():
@@ -697,9 +1197,13 @@ def format_response(response=None):
 def reset_for_tests():
     with _LOCK:
         global _LATEST, _TOTAL_TOOL_CALLS, _LATEST_REASONING
+        global _NEXT_EVENT_SEQUENCE, _DROPPED_EVENTS
         _ACTIVE.clear()
         _LATEST = None
         _TOTAL_TOOL_CALLS = 0
+        _EVENT_RING.clear()
+        _NEXT_EVENT_SEQUENCE = 1
+        _DROPPED_EVENTS = 0
         _REASONING.clear()
         _LATEST_REASONING = None
     _LOCAL.response_id = None

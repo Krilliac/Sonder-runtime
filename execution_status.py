@@ -31,7 +31,11 @@ def from_fleet_snapshot(snapshot: dict | None) -> dict:
         lanes = int(snapshot["active_model_calls"])
     except (KeyError, TypeError, ValueError) as exc:
         return unavailable("fleet snapshot is incomplete: %s" % exc)
-    if min(active, running, queued, lanes) < 0 or running + queued != active:
+    if (
+        min(active, running, queued, lanes) < 0
+        or running + queued != active
+        or lanes > running
+    ):
         return unavailable("fleet snapshot counts are inconsistent")
     return {
         "known": True,
@@ -42,3 +46,32 @@ def from_fleet_snapshot(snapshot: dict | None) -> dict:
         "semantics": "fleet model-call lanes and durable fleet agents",
         "error": "",
     }
+
+
+def with_feed(fleet_snapshot: dict | None, feed: dict | None) -> dict:
+    """Compose fleet counts and the independently truthful activity feed."""
+    result = (
+        dict(fleet_snapshot)
+        if isinstance(fleet_snapshot, dict) and fleet_snapshot.get("known") is False
+        else from_fleet_snapshot(fleet_snapshot)
+    )
+    if isinstance(feed, dict):
+        result["feed"] = feed
+    else:
+        result["feed"] = {
+            "known": False,
+            "active_responses": None,
+            "events": [],
+            "truncated": False,
+            "redaction_applied": False,
+            "schema_version": 1,
+            "runtime_id": "",
+            "oldest_seq": None,
+            "next_seq": None,
+            "dropped_events": None,
+            "sequence_gap": None,
+            "bytes": 0,
+            "limits": {"events": 20, "preview_chars": 1000},
+            "error": "activity feed is unavailable",
+        }
+    return result
