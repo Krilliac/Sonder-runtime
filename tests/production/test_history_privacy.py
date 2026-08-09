@@ -89,6 +89,36 @@ def test_new_sensitive_history_fails_even_after_tip_deletion(tmp_path):
     assert report["unexpected"][0]["path"] == ".env"
 
 
+def test_sensitive_file_added_only_by_merge_resolution_fails(tmp_path):
+    repo = _repo(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "feature")
+    (repo / "README.md").write_text("feature\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-q", "-m", "feature side")
+    _git(repo, "checkout", "-q", "-")
+    (repo / "README.md").write_text("main\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-q", "-m", "main side")
+
+    merge = subprocess.run(
+        ["git", "merge", "--no-ff", "feature"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert merge.returncode != 0
+    (repo / "README.md").write_text("resolved safely\n", encoding="utf-8")
+    (repo / ".env").write_text("SYNTHETIC_TEST_VALUE=fixture\n", encoding="utf-8")
+    _git(repo, "add", "README.md", ".env")
+    _git(repo, "commit", "-q", "-m", "merge with synthetic fixture")
+
+    result = _run(repo)
+    assert result.returncode == 1
+    report = json.loads(result.stdout)
+    assert report["unexpected_count"] == 1
+    assert report["unexpected"][0]["path"] == ".env"
+
+
 def test_ambient_git_redirects_cannot_hide_sensitive_history(tmp_path, monkeypatch):
     clean = _repo(tmp_path / "clean")
     dirty = _repo(tmp_path / "dirty")
