@@ -13,10 +13,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
-
 import sonder_logging
 import sonder_paths
+from sonder_runtime.application.workflows import loop as workflow_loop
 
 
 SUPPORTED_LANGUAGES = {
@@ -518,19 +517,11 @@ def _compile_csharp_for_window(path, run_dir, timeout):
 
 
 def _clamp_iterations(max_iterations):
-    try:
-        value = int(max_iterations)
-    except (TypeError, ValueError):
-        value = DEFAULT_LOOP_ITERATIONS
-    return max(1, min(value, MAX_LOOP_ITERATIONS))
+    return workflow_loop.clamp_iterations(max_iterations)
 
 
 def _clamp_delay(delay_seconds):
-    try:
-        value = float(delay_seconds)
-    except (TypeError, ValueError):
-        value = 0.0
-    return max(0.0, min(value, MAX_LOOP_DELAY_SECONDS))
+    return workflow_loop.clamp_delay(delay_seconds)
 
 
 def run_code(code, language="python", stdin="", timeout=DEFAULT_TIMEOUT, cwd=None):
@@ -846,97 +837,16 @@ def run_loop(
     stop_on_success=False,
     delay_seconds=0,
 ):
-    """Run a bounded action loop using an injected action dispatcher.
-
-    `dispatch_action(action)` must return a dict containing at least `ok`.
-    The loop stops when a requested condition is met or max_iterations is reached.
-    """
-    if not isinstance(actions, list) or not actions:
-        raise ValueError("actions must be a non-empty JSON list")
-    max_iterations = _clamp_iterations(max_iterations)
-    delay_seconds = _clamp_delay(delay_seconds)
-
-    iterations = []
-    stop_reason = "max_iterations reached"
-    for iteration in range(1, max_iterations + 1):
-        action_rows = []
-        iteration_ok = True
-        failed_index = None
-        for index, action in enumerate(actions, start=1):
-            if not isinstance(action, dict):
-                result = {
-                    "ok": False,
-                    "type": "(invalid)",
-                    "summary": "action must be an object",
-                    "output": repr(action),
-                }
-            else:
-                try:
-                    result = dispatch_action(action)
-                except Exception as exc:
-                    result = {
-                        "ok": False,
-                        "type": action.get("type", "(unknown)"),
-                        "summary": "%s: %s" % (exc.__class__.__name__, exc),
-                        "output": "",
-                    }
-            if not result.get("ok"):
-                iteration_ok = False
-                failed_index = index
-            action_rows.append({"index": index, "result": result})
-            if failed_index is not None and stop_on_failure:
-                break
-
-        iterations.append({
-            "iteration": iteration,
-            "ok": iteration_ok,
-            "actions": action_rows,
-        })
-
-        if stop_on_failure and not iteration_ok:
-            stop_reason = "action %d failed in iteration %d" % (failed_index, iteration)
-            break
-        if stop_on_success and iteration_ok:
-            stop_reason = "iteration %d succeeded" % iteration
-            break
-        if iteration < max_iterations and delay_seconds:
-            time.sleep(delay_seconds)
-
-    return {
-        "ok": iterations[-1]["ok"] if iterations else False,
-        "iterations": iterations,
-        "stop_reason": stop_reason,
-        "max_iterations": max_iterations,
-        "delay_seconds": delay_seconds,
-    }
+    """Compatibility delegate to the package application use case."""
+    return workflow_loop.run_loop(
+        actions,
+        dispatch_action,
+        max_iterations=max_iterations,
+        stop_on_failure=stop_on_failure,
+        stop_on_success=stop_on_success,
+        delay_seconds=delay_seconds,
+    )
 
 
 def format_loop_result(loop_result):
-    iterations = loop_result.get("iterations") or []
-    lines = [
-        "loop status: %s" % ("ok" if loop_result.get("ok") else "failed"),
-        "iterations: %d/%d" % (len(iterations), loop_result.get("max_iterations")),
-        "stop reason: %s" % loop_result.get("stop_reason"),
-    ]
-    for iteration in iterations:
-        lines.append("")
-        lines.append(
-            "iteration %d: %s"
-            % (iteration["iteration"], "ok" if iteration.get("ok") else "failed")
-        )
-        for row in iteration.get("actions", []):
-            result = row["result"]
-            action_type = result.get("type") or "(unknown)"
-            status = "ok" if result.get("ok") else "failed"
-            summary = result.get("summary") or ""
-            lines.append("  [%d] %s: %s%s" % (
-                row["index"],
-                action_type,
-                status,
-                (" - " + summary) if summary else "",
-            ))
-            output = _trim_output(result.get("output") or "", 3000)
-            if output:
-                for line in output.splitlines():
-                    lines.append("      " + line)
-    return "\n".join(lines)
+    return workflow_loop.format_loop_result(loop_result)

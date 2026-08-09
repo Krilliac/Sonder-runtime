@@ -1,6 +1,7 @@
 import json
 
 import workflow_store
+from sonder_runtime.adapters.filesystem import workflow_store as packaged_workflow_store
 
 
 def test_ensure_workflows_creates_defaults(monkeypatch, tmp_path):
@@ -38,7 +39,7 @@ def test_invalid_workflow_name_rejected():
 def test_server_workflow_save_and_run(monkeypatch, tmp_path):
     import server
 
-    monkeypatch.setattr(server.workflow_store, "workspace_root", lambda: str(tmp_path))
+    monkeypatch.setattr(workflow_store, "workspace_root", lambda: str(tmp_path))
     monkeypatch.delenv("SONDER_WORKFLOWS", raising=False)
     actions = json.dumps([{"type": "code", "language": "python", "code": "print('wf')"}])
     assert "Saved workflow" in server.workflow_save("demo_flow", actions, "demo")
@@ -50,7 +51,11 @@ def test_server_workflow_save_and_run(monkeypatch, tmp_path):
 def test_server_workflow_list(monkeypatch, tmp_path):
     import server
 
-    monkeypatch.setattr(server.workflow_store, "workspace_root", lambda: str(tmp_path))
+    monkeypatch.setattr(workflow_store, "workspace_root", lambda: str(tmp_path))
     monkeypatch.delenv("SONDER_WORKFLOWS", raising=False)
     out = server.workflow_list()
     assert "status_sweep" in out
+
+
+def test_root_workflow_store_is_package_compatibility_alias():
+    assert workflow_store is packaged_workflow_store
