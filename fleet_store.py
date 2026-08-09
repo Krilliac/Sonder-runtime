@@ -99,7 +99,12 @@ CREATE TABLE IF NOT EXISTS fleet_agents (
     tier TEXT DEFAULT '',
     project TEXT DEFAULT '',
     retry_of TEXT DEFAULT '',
-    retried_by TEXT DEFAULT ''
+    retried_by TEXT DEFAULT '',
+    master_task_digest TEXT DEFAULT '',
+    delegated_task_digest TEXT DEFAULT '',
+    objective_ids_json TEXT DEFAULT '[]',
+    task_drift INTEGER DEFAULT 0,
+    drift_metrics_json TEXT DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_fleet_agents_status
     ON fleet_agents(status, updated_ts DESC);
@@ -114,6 +119,10 @@ CREATE TABLE IF NOT EXISTS fleet_events (
     ts REAL NOT NULL,
     stamp TEXT NOT NULL,
     message TEXT NOT NULL,
+    master_task_digest TEXT DEFAULT '',
+    delegated_task_digest TEXT DEFAULT '',
+    objective_ids_json TEXT DEFAULT '[]',
+    task_drift INTEGER DEFAULT 0,
     FOREIGN KEY(agent_id) REFERENCES fleet_agents(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_fleet_events_agent
@@ -268,6 +277,28 @@ def _files_json(value) -> str:
     return json.dumps([_clamp_text(item, 2000) for item in parsed[:100]])
 
 
+def _objective_ids_json(value) -> str:
+    values = value if isinstance(value, (list, tuple)) else []
+    return json.dumps(
+        [_clamp_text(item, 64) for item in values[:32]],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+
+
+def _drift_metrics_json(value) -> str:
+    metrics = value if isinstance(value, dict) else {}
+    encoded = json.dumps(
+        metrics, sort_keys=True, ensure_ascii=True, separators=(",", ":"),
+    )
+    if len(encoded.encode("utf-8")) <= 4000:
+        return encoded
+    return json.dumps({
+        "audit_truncated": True,
+        "sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+    }, sort_keys=True, separators=(",", ":"))
+
+
 def _ensure_schema(path: str) -> None:
     resolved = str(Path(path).expanduser().resolve())
     with _SCHEMA_LOCK:
@@ -288,26 +319,23 @@ def _ensure_schema(path: str) -> None:
                         "PRAGMA table_info(fleet_agents)"
                     ).fetchall()
                 }
-                if "retry_of" not in columns:
+                agent_columns = {
+                    "retry_of": "TEXT DEFAULT ''",
+                    "retried_by": "TEXT DEFAULT ''",
+                    "project": "TEXT DEFAULT ''",
+                    "master_task_digest": "TEXT DEFAULT ''",
+                    "delegated_task_digest": "TEXT DEFAULT ''",
+                    "objective_ids_json": "TEXT DEFAULT '[]'",
+                    "task_drift": "INTEGER DEFAULT 0",
+                    "drift_metrics_json": "TEXT DEFAULT '{}'",
+                }
+                for name, definition in agent_columns.items():
+                    if name in columns:
+                        continue
                     try:
                         conn.execute(
-                            "ALTER TABLE fleet_agents ADD COLUMN retry_of TEXT DEFAULT ''"
-                        )
-                    except sqlite3.OperationalError as exc:
-                        if "duplicate column" not in str(exc).lower():
-                            raise
-                if "retried_by" not in columns:
-                    try:
-                        conn.execute(
-                            "ALTER TABLE fleet_agents ADD COLUMN retried_by TEXT DEFAULT ''"
-                        )
-                    except sqlite3.OperationalError as exc:
-                        if "duplicate column" not in str(exc).lower():
-                            raise
-                if "project" not in columns:
-                    try:
-                        conn.execute(
-                            "ALTER TABLE fleet_agents ADD COLUMN project TEXT DEFAULT ''"
+                            "ALTER TABLE fleet_agents ADD COLUMN %s %s"
+                            % (name, definition)
                         )
                     except sqlite3.OperationalError as exc:
                         if "duplicate column" not in str(exc).lower():
@@ -320,6 +348,26 @@ def _ensure_schema(path: str) -> None:
                     except sqlite3.OperationalError as exc:
                         if "duplicate column" not in str(exc).lower():
                             raise
+                event_columns = {
+                    row[1] for row in conn.execute(
+                        "PRAGMA table_info(fleet_events)"
+                    ).fetchall()
+                }
+                for name, definition in {
+                    "master_task_digest": "TEXT DEFAULT ''",
+                    "delegated_task_digest": "TEXT DEFAULT ''",
+                    "objective_ids_json": "TEXT DEFAULT '[]'",
+                    "task_drift": "INTEGER DEFAULT 0",
+                }.items():
+                    if name not in event_columns:
+                        try:
+                            conn.execute(
+                                "ALTER TABLE fleet_events ADD COLUMN %s %s"
+                                % (name, definition)
+                            )
+                        except sqlite3.OperationalError as exc:
+                            if "duplicate column" not in str(exc).lower():
+                                raise
                 conn.commit()
                 if os.name != "nt":
                     with contextlib.suppress(OSError):
@@ -372,6 +420,29 @@ def _row_dict(row) -> dict | None:
         data["files"] = []
     data["cancel_requested"] = bool(data.get("cancel_requested"))
     data["in_model_call"] = bool(data.get("in_model_call"))
+    data["task_drift"] = bool(data.get("task_drift"))
+    for column, public_name, fallback in (
+        ("objective_ids_json", "objective_ids", []),
+        ("drift_metrics_json", "drift_metrics", {}),
+    ):
+        try:
+            data[public_name] = json.loads(data.pop(column, "") or json.dumps(fallback))
+        except (TypeError, ValueError):
+            data[public_name] = fallback
+        if not isinstance(data[public_name], type(fallback)):
+            data[public_name] = fallback
+    return data
+
+
+def _event_dict(row) -> dict:
+    data = dict(row)
+    try:
+        data["objective_ids"] = json.loads(data.pop("objective_ids_json", "[]") or "[]")
+    except (TypeError, ValueError):
+        data["objective_ids"] = []
+    if not isinstance(data["objective_ids"], list):
+        data["objective_ids"] = []
+    data["task_drift"] = bool(data.get("task_drift"))
     return data
 
 
@@ -540,9 +611,12 @@ def create_agent(
                 activity, started_ts, updated_ts, finished_ts, tool_calls,
                 tokens_in, tokens_out, files_json, summary, output, error,
                 cancel_requested, in_model_call, requested_agents,
-                worker_slots, mode, tier, project, retry_of, retried_by
+                worker_slots, mode, tier, project, retry_of, retried_by,
+                master_task_digest, delegated_task_digest, objective_ids_json,
+                task_drift, drift_metrics_json
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?
             )
             """,
             (
@@ -559,6 +633,11 @@ def create_agent(
                 str(row.get("tier") or ""), str(row.get("project") or ""),
                 str(row.get("retry_of") or ""),
                 str(row.get("retried_by") or ""),
+                _clamp_text(row.get("master_task_digest"), 64),
+                _clamp_text(row.get("delegated_task_digest"), 64),
+                _objective_ids_json(row.get("objective_ids")),
+                int(bool(row.get("task_drift"))),
+                _drift_metrics_json(row.get("drift_metrics")),
             ),
         )
         stored = conn.execute(
@@ -664,6 +743,7 @@ def update_agent(agent_id: str, owner_id: str, **changes) -> dict | None:
 
 def finish_agent(
     agent_id: str, owner_id: str, *, output: str = "", error: str = "",
+    task_drift: bool = False, drift_metrics: dict | None = None,
 ) -> tuple[dict | None, str]:
     now = time.time()
     with _write_transaction() as conn:
@@ -684,11 +764,19 @@ def finish_agent(
             final_error = ""
             marker = "CANCELLED"
             tokens_out = 0
-        elif current["status"] in ("done", "failed"):
+        elif current["status"] in ("done", "failed", "task_drift"):
             marker = current.get("output") or (
                 "ERROR: %s" % current.get("error") if current.get("error") else ""
             )
             return current, marker
+        elif task_drift:
+            status = "task_drift"
+            activity = "task drift; result rejected before aggregation"
+            summary = "task drift; authoritative objective coverage failed"
+            final_output = ""
+            final_error = _clamp_text(error or summary, MAX_ERROR_CHARS)
+            marker = "TASK_DRIFT"
+            tokens_out = 0
         else:
             status = "failed" if error else "done"
             activity = "failed: %s" % _clamp_text(error, 160) if error else "finished"
@@ -701,12 +789,15 @@ def finish_agent(
             """
             UPDATE fleet_agents
             SET status=?, activity=?, summary=?, output=?, error=?,
-                tokens_out=?, in_model_call=0, finished_ts=?, updated_ts=?
+                tokens_out=?, in_model_call=0, finished_ts=?, updated_ts=?,
+                task_drift=?, drift_metrics_json=?
             WHERE id=? AND owner_id=?
             """,
             (
                 status, activity, summary, final_output, final_error, tokens_out,
-                now, now, agent_id, owner_id,
+                now, now, int(bool(task_drift)),
+                _drift_metrics_json(drift_metrics),
+                agent_id, owner_id,
             ),
         )
         # Steering is meaningful only while an agent can reach a cooperative
@@ -731,7 +822,7 @@ def finish_agent(
                 UPDATE fleet_agents
                 SET status='retried', retried_by=?,
                     activity=?, updated_ts=?
-                WHERE id=? AND status IN ('interrupted', 'failed', 'cancelled')
+                WHERE id=? AND status IN ('interrupted', 'failed', 'cancelled', 'task_drift')
                 """,
                 (
                     agent_id, "retried successfully as %s" % agent_id,
@@ -1190,14 +1281,28 @@ def list_agent_messages(
 
 def add_event(agent_id: str, owner_id: str, stamp: str, message: str) -> None:
     with _write_transaction() as conn:
+        agent = conn.execute(
+            """
+            SELECT master_task_digest, delegated_task_digest,
+                   objective_ids_json, task_drift
+            FROM fleet_agents WHERE id=?
+            """,
+            (agent_id,),
+        ).fetchone()
         conn.execute(
             """
-            INSERT INTO fleet_events(agent_id, owner_id, ts, stamp, message)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO fleet_events(
+                agent_id, owner_id, ts, stamp, message, master_task_digest,
+                delegated_task_digest, objective_ids_json, task_drift
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 agent_id, owner_id, time.time(), _clamp_text(stamp, 40),
                 _clamp_text(message, 2000),
+                agent["master_task_digest"] if agent else "",
+                agent["delegated_task_digest"] if agent else "",
+                agent["objective_ids_json"] if agent else "[]",
+                int(agent["task_drift"] if agent else 0),
             ),
         )
 
@@ -1226,6 +1331,7 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
                     THEN 1 ELSE 0 END) AS active_model_calls,
                 SUM(CASE WHEN status='running' AND cancel_requested=1 THEN 1 ELSE 0 END) AS cancel_pending,
                 SUM(CASE WHEN status='interrupted' THEN 1 ELSE 0 END) AS interrupted_agents,
+                SUM(CASE WHEN status='task_drift' THEN 1 ELSE 0 END) AS task_drift_agents,
                 COALESCE(SUM(tokens_in), 0) AS tokens_in,
                 COALESCE(SUM(tokens_out), 0) AS tokens_out
             FROM fleet_agents
@@ -1240,7 +1346,8 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
         ).fetchone()
         events = conn.execute(
             """
-            SELECT stamp AS ts, agent_id, message
+            SELECT stamp AS ts, agent_id, message, master_task_digest,
+                   delegated_task_digest, objective_ids_json, task_drift
             FROM fleet_events ORDER BY event_id DESC LIMIT 80
             """
         ).fetchall()
@@ -1251,10 +1358,11 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
             "active_model_calls": int(totals["active_model_calls"] or 0),
             "cancel_pending": int(totals["cancel_pending"] or 0),
             "interrupted_agents": int(totals["interrupted_agents"] or 0),
+            "task_drift_agents": int(totals["task_drift_agents"] or 0),
             "total_agents": int(totals["total_agents"] or 0),
             "total_listed": len(rows),
             "agents": [_row_dict(row) for row in rows],
-            "events": [dict(row) for row in reversed(events)],
+            "events": [_event_dict(row) for row in reversed(events)],
             "tokens_in": int(totals["tokens_in"] or 0),
             "tokens_out": int(totals["tokens_out"] or 0),
             # Keep the scalar for API compatibility, but also return identity
