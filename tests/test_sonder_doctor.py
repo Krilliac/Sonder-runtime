@@ -184,8 +184,8 @@ def test_schema_check_reports_healthy_counts(monkeypatch):
 
     monkeypatch.setattr(
         sonder_migrations,
-        "status_all",
-        lambda: {
+        "status_all_read_only",
+        lambda home: {
             "memory": SimpleNamespace(
                 applied=("0001",), pending=(), unknown=(),
                 checksum_mismatches=(), db_path="C:/private/memory.db",
@@ -197,7 +197,8 @@ def test_schema_check_reports_healthy_counts(monkeypatch):
         },
     )
 
-    assert sonder_doctor._check_schemas() == {
+    config = SimpleNamespace(state=SimpleNamespace(home="C:/selected/home"))
+    assert sonder_doctor.schema_check(config)() == {
         "status": "ok",
         "detail": "2 store(s) current; applied migrations=3",
     }
@@ -211,8 +212,8 @@ def test_schema_check_fails_safely_for_modified_history(monkeypatch):
     secret_migration = "0001_private_name"
     monkeypatch.setattr(
         sonder_migrations,
-        "status_all",
-        lambda: {
+        "status_all_read_only",
+        lambda home: {
             "memory": SimpleNamespace(
                 applied=(secret_migration,), pending=("0002",), unknown=(),
                 checksum_mismatches=(secret_migration,), db_path=secret_path,
@@ -220,7 +221,8 @@ def test_schema_check_fails_safely_for_modified_history(monkeypatch):
         },
     )
 
-    result = sonder_doctor._check_schemas()
+    config = SimpleNamespace(state=SimpleNamespace(home="C:/selected/home"))
+    result = sonder_doctor.schema_check(config)()
     assert result == {
         "status": "fail",
         "detail": (
@@ -229,5 +231,7 @@ def test_schema_check_fails_safely_for_modified_history(monkeypatch):
     }
     assert secret_path not in result["detail"]
     assert secret_migration not in result["detail"]
-    report = sonder_doctor.run_doctor([("schemas", sonder_doctor._check_schemas)])
+    report = sonder_doctor.run_doctor([
+        ("schemas", sonder_doctor.schema_check(config))
+    ])
     assert report["overall"] == "fail"
