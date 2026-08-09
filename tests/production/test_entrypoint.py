@@ -129,6 +129,31 @@ def test_doctor_text_failure_sets_exit_code(monkeypatch, capsys):
     )
 
 
+def test_doctor_storage_probe_is_explicit(monkeypatch, isolated_home, capsys):
+    import sonder_doctor
+
+    seen = []
+    monkeypatch.setattr(
+        sonder_doctor,
+        "default_checks",
+        lambda: [("storage_state", lambda: ("ok", "automatic"))],
+    )
+    monkeypatch.setattr(
+        sonder_doctor,
+        "storage_checks",
+        lambda config, throughput=False: [
+            ("storage_state", lambda: seen.append(throughput) or ("ok", "probe"))
+        ],
+    )
+
+    assert main(["doctor", "--json"]) == 0
+    capsys.readouterr()
+    assert seen == [False]
+    assert main(["doctor", "--json", "--storage-probe"]) == 0
+    capsys.readouterr()
+    assert seen == [False, True]
+
+
 def test_diagnostics_redacts_all_known_secrets(isolated_home, capsys, monkeypatch):
     secret = "diagnostic-secret-abcdef-9988"
     monkeypatch.setenv("SONDER_API_KEY", secret)
