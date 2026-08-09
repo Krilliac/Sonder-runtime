@@ -67,15 +67,25 @@ def _emit(payload: dict, *, as_json: bool) -> None:
     walk(payload)
 
 
-def cmd_preflight(args) -> int:
-    import sonder_preflight
+def _run_preflight(config, *, check_ollama=True, ollama_timeout=5.0):
+    """Resolve the host adapter only when an entry-point command needs it."""
+    from .adapters.legacy.preflight import LegacyPreflightExecutor
+    from .application.preflight import PreflightService
 
+    return PreflightService(LegacyPreflightExecutor()).run(
+        config,
+        check_ollama=check_ollama,
+        ollama_timeout=ollama_timeout,
+    )
+
+
+def cmd_preflight(args) -> int:
     try:
         config = _load_config(args)
     except sonder_config.ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    report = sonder_preflight.run_preflight(
+    report = _run_preflight(
         config, check_ollama=not args.skip_ollama
     )
     _emit(report.as_dict(), as_json=args.json)
@@ -86,7 +96,24 @@ def cmd_doctor(args) -> int:
     """Run the consolidated read-only health report."""
     import sonder_doctor
 
+    try:
+        config = _load_config(args)
+    except sonder_config.ConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     checks = sonder_doctor.default_checks()
+    replacements = dict(sonder_doctor.storage_checks(
+        config, throughput=args.storage_probe
+    ))
+    checks = [
+        (
+            name,
+            sonder_doctor.validated_config_check(config)
+            if name == "config" and check is sonder_doctor._check_config
+            else replacements.get(name, check),
+        )
+        for name, check in checks
+    ]
     if args.skip_ollama:
         checks = [(name, check) for name, check in checks if name != "ollama"]
     report = sonder_doctor.run_doctor(checks)
@@ -107,6 +134,14 @@ def cmd_status(args) -> int:
         payload["profile"] = config.profile
         payload["config_sources"] = list(config.sources)
         _export_runtime_environment(config)
+        try:
+            from sonder_runtime.adapters import storage
+            payload["storage"] = storage.inspect_config(config)
+        except Exception as exc:  # status remains available on probe defects
+            payload["storage_error"] = (
+                "%s while inspecting storage (detail suppressed)"
+                % exc.__class__.__name__
+            )
     except sonder_config.ConfigError as exc:
         payload["config_errors"] = list(exc.errors)
     try:
@@ -126,13 +161,12 @@ def cmd_status(args) -> int:
 
 def cmd_diagnostics(args) -> int:
     import sonder_migrations
-    import sonder_preflight
 
     payload: dict = {"build": sonder_version.build_info().as_dict()}
     try:
         config = _load_config(args)
         payload["config"] = config.as_redacted_dict()
-        payload["preflight"] = sonder_preflight.run_preflight(
+        payload["preflight"] = _run_preflight(
             config, check_ollama=not args.skip_ollama
         ).as_dict()
         _export_runtime_environment(config)
@@ -309,7 +343,6 @@ def cmd_restore(args) -> int:
 def cmd_smoke(args) -> int:
     """Minimal end-to-end: config, migrations, operations write/read."""
     import sonder_migrations
-    import sonder_preflight
     from sonder_operations_store import OperationsStore
 
     try:
@@ -318,7 +351,7 @@ def cmd_smoke(args) -> int:
         print(str(exc), file=sys.stderr)
         return 2
     failures = []
-    report = sonder_preflight.run_preflight(config, check_ollama=not args.skip_ollama)
+    report = _run_preflight(config, check_ollama=not args.skip_ollama)
     if not report.ok:
         failures.extend(
             f"preflight: {c.name}: {c.detail}"
@@ -391,15 +424,13 @@ def _export_runtime_environment(config) -> None:
 
 
 def cmd_serve(args) -> int:
-    import sonder_preflight
-
     try:
         config = _load_config(args)
     except sonder_config.ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
     if not args.skip_preflight:
-        report = sonder_preflight.run_preflight(
+        report = _run_preflight(
             config, check_ollama=not args.skip_ollama
         )
         if not report.ok:
@@ -575,7 +606,7 @@ def cmd_eval_history(args) -> int:
 
     This command never runs an evaluation and never calls a model.
     """
-    import eval_history
+    from .adapters import evaluation_history_store as eval_history
 
     try:
         if args.eval_history_command == "status":
@@ -638,10 +669,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_preflight)
 
     p = sub.add_parser("doctor", help="consolidated read-only health report")
-    p.add_argument("--json", action="store_true", help="JSON output")
+    common(p)
     p.add_argument(
         "--skip-ollama", action="store_true",
         help="do not probe the Ollama endpoint",
+    )
+    p.add_argument(
+        "--storage-probe", action="store_true",
+        help="explicitly run an 8 MiB/5 second state-storage throughput probe",
     )
     p.set_defaults(func=cmd_doctor)
 

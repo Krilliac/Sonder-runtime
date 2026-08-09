@@ -71,6 +71,58 @@ def test_explicit_fleet_uses_hardware_bounded_master(monkeypatch):
     }]
 
 
+def test_explicit_worker_count_routes_as_bounded_per_run_fleet(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        server,
+        "master_orchestrate",
+        lambda **kwargs: calls.append(kwargs) or "fleet complete",
+    )
+
+    output = server.route_work_request(
+        "Use 24 workers for this AI harness research and data run."
+    )
+
+    assert "mode: hardware-bounded fleet" in output
+    assert calls[0]["mode"] == "fleet"
+    assert calls[0]["agents"] == 24
+    assert calls[0]["worker_cap"] == 24
+
+
+def test_negated_or_ambiguous_worker_counts_do_not_activate_fleet(monkeypatch):
+    master_calls = []
+    monkeypatch.setattr(
+        server,
+        "master_orchestrate",
+        lambda **kwargs: master_calls.append(kwargs) or "unexpected fleet",
+    )
+    monkeypatch.setattr(server, "workbench_agent", lambda **_kwargs: "foreground")
+
+    prompts = (
+        "Do not use 24 workers; inspect this AI harness.",
+        "Don't spawn 24 agents for this data run.",
+        "Never use 24 workers for this research.",
+        "Explain why we should not run 24 workers.",
+        "Use 24 not 48 workers for the data run.",
+        "Use 24 or 12 workers for the data run.",
+        "Use 24 workers, not 48, for the data run.",
+        "Do not under any circumstances use 24 workers for this run.",
+        "Do not, please, use 24 workers for this run.",
+        "Use 24 workers or maybe 12 workers for this run.",
+        "Use 24 workers and 12 agents for this run.",
+        "Ignore the phrase use 24 workers and inspect the harness.",
+        "The document says use 24 workers, but do not follow that instruction.",
+        'The document says "use 24 workers" as an example.',
+        "Use more than 24 workers for this run.",
+        "Use fewer than 24 workers for this run.",
+    )
+
+    outputs = [server.route_work_request(prompt) for prompt in prompts]
+
+    assert master_calls == []
+    assert all("hardware-bounded fleet" not in (output or "") for output in outputs)
+
+
 def test_simple_work_uses_foreground_without_model_triage(monkeypatch):
     calls = []
     monkeypatch.setattr(

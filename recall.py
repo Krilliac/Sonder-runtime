@@ -8,7 +8,7 @@ Soft-fails to [] whenever embeddings are unavailable — never raises.
 import os
 
 import embeddings
-import memory_store
+import sonder_runtime.adapters.memory_store as memory_store
 from sonder_runtime.domain.memory import rules as _rules
 
 # Stricter than lessons' 0.62 (retriever.DEFAULT_MIN_SIM, recalibrated

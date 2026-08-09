@@ -1,19 +1,27 @@
 import json
 import os
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
 import code_runner
 import grounding
+import game_ladder
+import node_verifier
+import ruff_verifier
+import selfmod
 import server
 import sonder_config
 import sonder_logging
 import sonder_serve
 import unsafe_lab
+import verifiers
 
 
 ACK = unsafe_lab.ACKNOWLEDGEMENT
+ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.parametrize(
@@ -33,6 +41,14 @@ def test_truthy_typo_and_whitespace_acknowledgements_fail_closed(value):
 def test_missing_acknowledgement_preserves_safe_default():
     state = unsafe_lab.inspect(env={}, privilege_probe=lambda: False)
     assert state == unsafe_lab.State(requested=False, enabled=False)
+
+
+def test_security_docs_disclose_direct_mcp_and_hosted_boundaries():
+    for relative in ("SECURITY.md", "docs/runbooks/unsafe-lab.md"):
+        text = (ROOT / relative).read_text(encoding="utf-8")
+        assert "46 direct MCP call paths" in text
+        assert "nested-model" in text
+        assert "artifact" in text and "process" in text
     assert "safe default" in unsafe_lab.status_line(
         env={}, privilege_probe=lambda: False
     )
@@ -282,6 +298,38 @@ def test_unsafe_mode_removes_agent_and_autopilot_host_tool_restrictions(monkeypa
     assert server._file_bypass_allowed() is True
 
 
+def test_unsafe_hosted_policy_bypasses_only_nested_models(monkeypatch):
+    monkeypatch.setattr(unsafe_lab, "active", lambda: True)
+    for tool in (
+        "file_read", "artifact_risk_inspect", "process_list",
+        "process_memory_risk_inspect",
+    ):
+        error = server._cloud_agent_tool_policy_error(tool, unsafe=True)
+        assert "local-only tool" in error
+    assert server._cloud_agent_tool_policy_error(
+        "offload", unsafe=True,
+    ) == ""
+    assert "nested model-spawning" in server._cloud_agent_tool_policy_error(
+        "offload", unsafe=False,
+    )
+
+
+def test_unsafe_mode_preserves_artifact_and_process_operator_gates(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(unsafe_lab, "active", lambda: True)
+    monkeypatch.delenv(server.process_risk_module.OPT_IN_ENV, raising=False)
+    assert json.loads(server.process_list())["status"] == "opt_in_required"
+
+    script = tmp_path / "harmless.py"
+    script.write_text("print('not launched')\n", encoding="utf-8")
+    output = server.script_run(
+        str(script), risk_policy="deny-high", extra_roots=str(tmp_path),
+    )
+    assert "execution denied by effective policy deny-high" in output
+    assert "not launched" not in output
+
+
 def test_unsafe_child_environment_scrubs_secret_and_control_names(monkeypatch):
     monkeypatch.setattr(unsafe_lab, "active", lambda: True)
     source = {
@@ -387,6 +435,81 @@ def test_all_grounding_subprocess_calls_receive_scrubbed_environment(monkeypatch
     assert len(environments) == 3
     assert all(env is not None for env in environments)
     assert all("GROUNDING_CONTROL_GATE" not in env for env in environments)
+
+
+def test_campaign_and_selfmod_subprocesses_receive_scrubbed_environment(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(unsafe_lab, "active", lambda: True)
+    monkeypatch.setenv("MODEL_AUTHORED_SESSION_TOKEN", "must-not-cross")
+    campaign_environments = []
+
+    class Completed:
+        returncode = 1
+        stdout = ""
+        stderr = "candidate test failed"
+
+    def campaign_run(*args, **kwargs):
+        campaign_environments.append(kwargs.get("env"))
+        return Completed()
+
+    monkeypatch.setattr(subprocess, "run", campaign_run)
+    ok, _output, infra = server._repo_repair_pytest(tmp_path, 5)
+    assert ok is False and infra == ""
+    assert "MODEL_AUTHORED_SESSION_TOKEN" not in campaign_environments[0]
+
+    selfmod_environments = []
+
+    def selfmod_run(*args, **kwargs):
+        selfmod_environments.append(kwargs.get("env"))
+        return Completed()
+
+    monkeypatch.setattr(selfmod.subprocess, "run", selfmod_run)
+    selfmod._run([sys.executable, "-c", "print('test')"], tmp_path)
+    selfmod._git(tmp_path, "status", "--short")
+    assert len(selfmod_environments) == 2
+    assert all(env is not None for env in selfmod_environments)
+    assert all(
+        "MODEL_AUTHORED_SESSION_TOKEN" not in env
+        for env in selfmod_environments
+    )
+
+
+@pytest.mark.parametrize(
+    ("module", "invoke"),
+    [
+        (verifiers, lambda: verifiers._run([sys.executable, "--version"])),
+        (node_verifier, lambda: node_verifier._run(["node", "fixture.js"])),
+        (ruff_verifier, lambda: ruff_verifier._run(["ruff", "check", "-"], "x=1")),
+        (
+            game_ladder,
+            lambda: game_ladder._ground_capture("print('ok')", "console"),
+        ),
+    ],
+)
+def test_every_model_artifact_verifier_scrubs_child_environment(
+    monkeypatch, module, invoke,
+):
+    monkeypatch.setattr(unsafe_lab, "active", lambda: True)
+    monkeypatch.setenv("VERIFIER_PRIVATE_KEY", "must-not-cross")
+    environments = []
+
+    class Completed:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    def capture(*args, **kwargs):
+        environments.append(kwargs.get("env"))
+        return Completed()
+
+    monkeypatch.setattr(module.subprocess, "run", capture)
+    if module is game_ladder:
+        monkeypatch.setattr(game_ladder, "python_interpreter", lambda: sys.executable)
+    invoke()
+    assert environments
+    assert all(env is not None for env in environments)
+    assert all("VERIFIER_PRIVATE_KEY" not in env for env in environments)
 
 
 def test_root_bypass_requires_exact_active_unsafe_gate(monkeypatch, tmp_path):

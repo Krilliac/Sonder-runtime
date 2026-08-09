@@ -7,8 +7,15 @@ driver exceptions.
 """
 from .clock import Clock
 from .event_sink import EventSink
-from .model_gateway import Embedding, ModelGateway, ModelRequest, ModelResponse
+from .model_gateway import (
+    Embedding,
+    InferenceTelemetry,
+    ModelGateway,
+    ModelRequest,
+    ModelResponse,
+)
 from .process_probe import ProbeResult, ProcessIdentity, ProcessProbe
+from .preferences import PreferenceCodec, PreferenceEventSink, PreferenceRepository
 from .repositories import (
     AutomationRepository,
     MemoryRepository,
@@ -16,22 +23,32 @@ from .repositories import (
     UnitOfWork,
 )
 from .tool_executor import ToolCall, ToolExecutor, ToolResult
+from .task_state import ChecklistEventPort, TaskRepository
+from .workflows import LoopRunner, WorkflowRepository
 
 __all__ = [
     "AutomationRepository",
+    "ChecklistEventPort",
     "Clock",
     "Embedding",
     "EventSink",
+    "InferenceTelemetry",
     "MemoryRepository",
     "ModelGateway",
     "ModelRequest",
     "ModelResponse",
     "PolicyRepository",
+    "PreferenceCodec",
+    "PreferenceEventSink",
+    "PreferenceRepository",
     "ProbeResult",
     "ProcessIdentity",
     "ProcessProbe",
     "ToolCall",
     "ToolExecutor",
     "ToolResult",
+    "TaskRepository",
     "UnitOfWork",
+    "LoopRunner",
+    "WorkflowRepository",
 ]
