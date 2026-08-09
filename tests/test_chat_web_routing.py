@@ -43,6 +43,47 @@ def test_weather_my_area_requires_opt_in_or_manual_place(monkeypatch):
     assert "city/state or ZIP" in output
 
 
+def test_locationless_weather_question_never_calls_tool(monkeypatch):
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
+    calls = []
+    monkeypatch.setattr(
+        server, "weather_lookup", lambda location: calls.append(location) or "bad",
+    )
+
+    output = server.chat_web_response("whats the weather going to be like today")
+
+    assert "I need a location" in output
+    assert "city/state or ZIP" in output
+    assert calls == []
+
+
+def test_repl_chat_route_prompts_without_weather_tool_activity(monkeypatch):
+    monkeypatch.delenv("SONDER_LOCATION_CONSENT", raising=False)
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
+    monkeypatch.setattr(server, "_answer", _no_model)
+    calls = []
+    monkeypatch.setattr(
+        server, "weather_lookup", lambda location: calls.append(location) or "bad",
+    )
+
+    output = server.sonder(
+        "whats the weather going to be like today",
+        session="none",
+        project="none",
+    )
+    latest = server.activity_tracker.snapshot()["latest"]
+
+    assert "I need a location" in output
+    assert calls == []
+    assert latest["tool_calls"] == 0
+    assert not any(
+        event.get("title") == "Weather Lookup"
+        for event in latest.get("events", [])
+    )
+
+
 def test_explicit_weather_place_uses_tool_without_location_consent(monkeypatch):
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
