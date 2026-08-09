@@ -22,6 +22,7 @@ from .repositories import (
     UnitOfWork,
 )
 from .tool_executor import ToolCall, ToolExecutor, ToolResult
+from .workflows import LoopRunner, WorkflowRepository
 
 __all__ = [
     "AutomationRepository",
@@ -41,4 +42,6 @@ __all__ = [
     "ToolExecutor",
     "ToolResult",
     "UnitOfWork",
+    "LoopRunner",
+    "WorkflowRepository",
 ]
