@@ -7523,6 +7523,51 @@ def file_write(
 
 
 @mcp.tool()
+def file_batch_write(
+    operations_json: str,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Transactionally create/overwrite a bounded JSON list of project files."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"input_chars": len(operations_json) if isinstance(operations_json, str) else 0}
+    try:
+        data = file_ops.batch_write_files(
+            operations_json,
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except file_ops.BatchWriteError as exc:
+        output = json.dumps(exc.report, indent=2, sort_keys=True)
+        _record_direct_tool(
+            "file_batch_write", args, ok=False, started=started,
+            summary=str(exc), output=output,
+        )
+        return "ERROR: %s" % output
+    except Exception as exc:
+        _record_direct_tool(
+            "file_batch_write", args, ok=False, started=started,
+            summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = json.dumps(data, indent=2, sort_keys=True)
+    _record_direct_tool(
+        "file_batch_write", args, ok=True, started=started,
+        summary="%d file(s) committed" % data["count"], output=output,
+    )
+    for result in data["results"]:
+        for created_directory in result.get("created_directories", []):
+            activity_tracker.record_file_change(
+                "create_directory", created_directory,
+                summary="parent created by file_batch_write",
+            )
+        _record_file_activity(result.get("action", "write"), result)
+    return output
+
+
+@mcp.tool()
 def file_edit(
     path: str,
     old: str,
@@ -10205,7 +10250,7 @@ def tool_manifest() -> str:
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
         "workspace_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace inventory, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
         "archive_list/archive_extract": "Prevalidate bounded ZIP/TAR manifests or transactionally extract them to a new non-overwriting workspace directory.",
-        "file_policy/file_find/file_read/file_write/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete with approval bypass support.",
+        "file_policy/file_find/file_read/file_write/file_batch_write/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete, including bounded transactional multi-file create/overwrite.",
         "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
         "environment_status": "Report the host OS, available shells (PowerShell/cmd/bash/wsl), and installed toolchains -- check before choosing a command shape or assuming a tool exists.",
         "data_inspect": "Read-only structured preview of JSON/JSONL/TOML/YAML/CSV/TSV/SQLite/ZIP/TAR/INI data files inside allowed roots.",
@@ -10270,6 +10315,7 @@ AGENT_TOOL_HELP = """Available tools:
 - archive_extract: {"source": "bundle.zip", "destination": "unpacked", "max_entries": 2000, "max_total_bytes": 256000000, "max_ratio": 100} -- creates a new directory; never overwrites
 - text_search: {"query": "TODO", "root": ".", "glob": "*.py", "regex": false, "max_results": 100}
 - file_write: {"path": "notes.txt", "content": "...", "mode": "create|overwrite|append"}
+- file_batch_write: {"operations_json": [{"path": "a.txt", "content": "...", "mode": "create|overwrite"}]}
 - file_edit: {"path": "notes.txt", "old": "before", "new": "after", "count": 1}
 - file_delete: {"path": "notes.txt", "dry_run": true}
 - scaffold_project: {"kind": "cpp-msvc|cpp-cmake|csharp|rust|python|node|typescript|go|java-maven", "name": "MyApp", "root": "MyApp"} -- writes the full skeleton (.sln/.vcxproj/Cargo.toml/...); use this instead of hand-writing build/solution files
@@ -10427,6 +10473,15 @@ def _repository_scope_path_error(tool_name, args, project_root):
             targets = [("script path", args.get("path") or "")]
             if str(args.get("cwd") or "").strip():
                 targets.append(("working directory", args.get("cwd")))
+        elif tool_name == "file_batch_write":
+            operations = _batch_agent_operations(args)
+            if operations is None or not operations:
+                return "ERROR: agent project path rejected: operations must be a non-empty JSON list"
+            targets = []
+            for index, operation in enumerate(operations):
+                if not isinstance(operation, dict):
+                    return "ERROR: agent project path rejected: operation %d must be an object" % index
+                targets.append(("operation %d path" % index, operation.get("path") or ""))
         elif tool_name == "context_pack":
             targets = [
                 ("path", path)
@@ -11318,6 +11373,16 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "file_batch_write":
+        operations = args.get("operations_json", args.get("operations", []))
+        if not isinstance(operations, str):
+            operations = json.dumps(operations, ensure_ascii=False)
+        return file_batch_write(
+            operations_json=operations,
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "scaffold_project":
         return scaffold_project(
             kind=args.get("kind", ""),
@@ -11592,6 +11657,12 @@ def _agent_dispatch(
 
 def _agent_activity_command(tool_name, args):
     args = args if isinstance(args, dict) else {}
+    if tool_name == "file_batch_write":
+        operations = _batch_agent_operations(args) or []
+        return json.dumps(
+            [item.get("path", "") for item in operations if isinstance(item, dict)],
+            ensure_ascii=False,
+        )
     if tool_name == "workspace_run":
         return "%s %s" % (
             args.get("program", ""),
@@ -11611,7 +11682,8 @@ def _agent_activity_command(tool_name, args):
 
 
 _PROJECT_SCOPED_PATH_TOOLS = frozenset({
-    "file_read", "file_read_range", "context_pack", "archive_list", "archive_extract", "image_inspect", "file_write", "file_edit",
+    "file_read", "file_read_range", "context_pack", "archive_list", "archive_extract", "image_inspect",
+    "file_write", "file_batch_write", "file_edit",
     "file_delete", "directory_create", "workspace_inventory", "directory_tree",
     "file_find", "text_search", "script_search", "artifact_verify",
     "artifact_ground", "scaffold_project",
@@ -11665,6 +11737,16 @@ def _project_scoped_path_key(tool_name):
     return "path"
 
 
+def _batch_agent_operations(args):
+    value = args.get("operations_json", args.get("operations", []))
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return None
+    return value if isinstance(value, list) else None
+
+
 def _project_scope_args(tool_name, args, project):
     """Scope an agent file/inspection tool call to the run's project directory.
 
@@ -11690,6 +11772,27 @@ def _project_scope_args(tool_name, args, project):
     # the host-resolved path boundary; child processes remain user-level code,
     # not an operating-system sandbox.
     scoped["extra_roots"] = project
+
+    if tool_name == "file_batch_write":
+        operations = _batch_agent_operations(scoped)
+        if operations is None:
+            return scoped
+        rebased = []
+        for operation in operations:
+            if not isinstance(operation, dict):
+                rebased.append(operation)
+                continue
+            item = dict(operation)
+            raw_path = str(item.get("path") or "").strip()
+            is_abs = os.path.isabs(raw_path) or bool(
+                re.match(r"^[A-Za-z]:[\\/]", raw_path)
+            )
+            if raw_path and not is_abs:
+                item["path"] = os.path.normpath(os.path.join(project, raw_path))
+            rebased.append(item)
+        scoped["operations_json"] = json.dumps(rebased, ensure_ascii=False)
+        scoped.pop("operations", None)
+        return scoped
 
     if tool_name == "context_pack":
         try:
@@ -11789,7 +11892,7 @@ def _agent_dispatch_observed(
 
 
 _WORK_MUTATION_TOOLS = frozenset({
-    "directory_create", "file_write", "file_edit", "file_delete",
+    "directory_create", "file_write", "file_batch_write", "file_edit", "file_delete",
     "scaffold_project", "archive_extract",
     "artifact_generate", "game_generate_and_test", "game_generation_campaign",
     "memory_quality_repair", "memory_privacy_repair", "memory_embedding_backfill",
@@ -11896,8 +11999,14 @@ def _agent_call_signature(tool_name, args):
     )
 
 
-def _agent_mutation_record(tool_name, args):
+def _agent_mutation_records(tool_name, args):
     args = args if isinstance(args, dict) else {}
+    if tool_name == "file_batch_write":
+        operations = _batch_agent_operations(args) or []
+        return [
+            {"tool": tool_name, "path": _agent_normalized_path(item.get("path", ""))}
+            for item in operations if isinstance(item, dict)
+        ]
     path = args.get("path", "")
     if tool_name == "archive_extract":
         path = args.get("destination", "")
@@ -11907,10 +12016,16 @@ def _agent_mutation_record(tool_name, args):
         )
     elif tool_name in {"game_generate_and_test", "game_generation_campaign"}:
         path = os.path.join("games", str(args.get("name", "generated-game")))
-    return {
+    return [{
         "tool": tool_name,
         "path": _agent_normalized_path(path),
-    }
+    }]
+
+
+def _agent_mutation_record(tool_name, args):
+    """Compatibility helper for callers that expect one mutation record."""
+    records = _agent_mutation_records(tool_name, args)
+    return records[0] if records else {"tool": tool_name, "path": ""}
 
 
 def _agent_path_within(path, root):
@@ -13000,6 +13115,15 @@ def _agent_impl(
                         "\nHOST AUTO-PROMOTE: mode=create was replaced with "
                         "mode=overwrite because this run created the file."
                     )
+            elif tool_name == "file_batch_write":
+                for item in _batch_agent_operations(policy_tool_args) or []:
+                    if (
+                        isinstance(item, dict)
+                        and str(item.get("mode") or "").lower() == "create"
+                    ):
+                        run_created_paths.add(
+                            _agent_created_path_key(item.get("path"))
+                        )
         else:
             failed_call_counts[call_signature] = prior_identical_failures + 1
             recovery = (
@@ -13114,9 +13238,9 @@ def _agent_impl(
                 if current_failure_count:
                     failed_call_counts[call_signature] = current_failure_count
         if mutation_attempt_may_have_changed:
-            record = _agent_mutation_record(tool_name, policy_tool_args)
-            if record not in mutations:
-                mutations.append(record)
+            for record in _agent_mutation_records(tool_name, policy_tool_args):
+                if record not in mutations:
+                    mutations.append(record)
             if auto_checklist and mutated:
                 _agent_checklist_mark(
                     checklist_id, checklist_states, 1, "done", "inspection completed before mutation",
@@ -13328,7 +13452,7 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
 })
 _AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
-    "directory_create", "file_write", "file_edit", "archive_extract", "workspace_run",
+    "directory_create", "file_write", "file_batch_write", "file_edit", "archive_extract", "workspace_run",
     "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_generate", "artifact_verify", "game_reference_suite",
     "game_generate_and_test",
@@ -13342,7 +13466,7 @@ _AUTOPILOT_RUNNERS = frozenset({
 })
 _AUTOPILOT_SCRIPT_SUFFIXES = frozenset({".py", ".js", ".dart", ".exe", ".com"})
 _AUTOPILOT_MUTATION_EVIDENCE = frozenset({
-    "directory_create", "file_write", "file_edit", "archive_extract", "artifact_generate",
+    "directory_create", "file_write", "file_batch_write", "file_edit", "archive_extract", "artifact_generate",
     "game_generate_and_test",
 })
 
