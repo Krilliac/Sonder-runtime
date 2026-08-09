@@ -106,6 +106,21 @@ def _parse_pyproject(path, text, evidence):
             if name.lower() != "python":
                 rendered = version if isinstance(version, str) else json.dumps(version, sort_keys=True, separators=(",", ":"))
                 out.append(_item("python", name, rendered, "declared", scope, evidence))
+    for group_name, group in (poetry.get("group", {}) or {}).items():
+        if not isinstance(group, dict):
+            raise ValueError("Poetry group %s must be a table" % group_name)
+        dependencies = group.get("dependencies", {}) or {}
+        if not isinstance(dependencies, dict):
+            raise ValueError("Poetry group %s dependencies must be a table" % group_name)
+        for name, version in dependencies.items():
+            if name.lower() != "python":
+                rendered = version if isinstance(version, str) else json.dumps(
+                    version, sort_keys=True, separators=(",", ":"),
+                )
+                out.append(_item(
+                    "python", name, rendered, "declared",
+                    "group:%s" % group_name, evidence,
+                ))
     return out
 
 
@@ -219,7 +234,10 @@ def _parse_pnpm_lock(path, text, evidence):
             continue
         key = match.group(2).lstrip("/")
         name = version = ""
-        if "/" in key and not key.startswith("@"):
+        if key.startswith("@") and key.count("/") >= 2:
+            scope, package, version = key.split("/", 2)
+            name = "%s/%s" % (scope, package)
+        elif "/" in key and not key.startswith("@"):
             name, version = key.rsplit("/", 1)
         elif "@" in key[1:]:
             name, version = key.rsplit("@", 1)
@@ -231,14 +249,21 @@ def _parse_pnpm_lock(path, text, evidence):
     return out
 
 
-def _cargo_dep_table(data, prefix=""):
+def _cargo_dep_table(data, inside_target=False):
     for key, value in data.items():
         if not isinstance(value, dict):
             continue
         if key in {"dependencies", "dev-dependencies", "build-dependencies"}:
             yield key, value
-        if key in {"target", "workspace"}:
-            yield from _cargo_dep_table(value, prefix + key + ".")
+            continue
+        if key == "target":
+            yield from _cargo_dep_table(value, inside_target=True)
+        elif key == "workspace":
+            yield from _cargo_dep_table(value, inside_target=inside_target)
+        elif inside_target:
+            # A target table contains arbitrary selectors such as cfg(unix)
+            # or a target triple before its dependency tables.
+            yield from _cargo_dep_table(value, inside_target=True)
 
 
 def _parse_cargo_toml(path, text, evidence):
@@ -441,6 +466,11 @@ def dependency_inventory(path=".", *, max_depth=DEFAULT_MAX_DEPTH,
     if not root.is_dir():
         raise ValueError("dependency inventory path must be a directory")
     file_ops._require_no_reparse_components(root)
+    if any(
+        part.casefold() in file_ops.SENSITIVE_READ_DIRECTORIES
+        for part in root.parts
+    ):
+        raise PermissionError("dependency inventory root is sensitive or control state")
 
     candidates, errors, entries = [], [], 0
     stack = [(root, 0)]

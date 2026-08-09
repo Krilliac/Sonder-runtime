@@ -132,6 +132,18 @@ def test_skips_sensitive_and_ignored_trees(tmp_path):
     assert [row["name"] for row in result["items"]] == ["good"]
 
 
+def test_rejects_sensitive_directory_as_inventory_root(tmp_path):
+    sensitive_root = tmp_path / ".git"
+    sensitive_root.mkdir()
+    (sensitive_root / "package.json").write_text(
+        '{"dependencies":{"credential-url":"https://token@example.invalid/pkg"}}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PermissionError, match="sensitive or control state"):
+        _run(sensitive_root)
+
+
 def test_rejects_directory_symlink_and_does_not_follow_manifest_symlink(tmp_path):
     target = tmp_path / "target-project"
     target.mkdir()
@@ -173,3 +185,52 @@ def test_pnpm_lock_versions_are_read_without_yaml_dependency(tmp_path):
     assert [(row["name"], row["version"]) for row in result["items"]] == [
         ("@scope/pkg", "2.3.4"), ("lodash", "4.17.21"),
     ]
+
+
+def test_pnpm_v5_scoped_package_keys_are_parsed(tmp_path):
+    (tmp_path / "pnpm-lock.yaml").write_text(
+        "lockfileVersion: 5.4\npackages:\n  /@scope/pkg/2.3.4: {}\n",
+        encoding="utf-8",
+    )
+
+    result = _run(tmp_path)
+
+    assert [(row["name"], row["version"]) for row in result["items"]] == [
+        ("@scope/pkg", "2.3.4"),
+    ]
+
+
+def test_cargo_target_specific_dependency_tables_are_traversed(tmp_path):
+    (tmp_path / "Cargo.toml").write_text(
+        "[target.'cfg(unix)'.dependencies]\nlibc = \"0.2\"\n"
+        "[target.x86_64-pc-windows-msvc.build-dependencies]\ncc = { version = \"1.1\" }\n",
+        encoding="utf-8",
+    )
+
+    result = _run(tmp_path)
+    dependencies = {
+        (row["name"], row["version"], row["scope"])
+        for row in result["items"]
+    }
+
+    assert ("libc", "0.2", "dependencies") in dependencies
+    assert ("cc", "1.1", "build-dependencies") in dependencies
+
+
+def test_modern_poetry_dependency_groups_are_included(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.poetry.group.test.dependencies]\npytest = \"^8.3\"\n"
+        "[tool.poetry.group.docs.dependencies]\nmkdocs = { version = \"^1.6\", extras = [\"i18n\"] }\n",
+        encoding="utf-8",
+    )
+
+    result = _run(tmp_path)
+    dependencies = {
+        (row["name"], row["version"], row["scope"])
+        for row in result["items"]
+    }
+
+    assert ("pytest", "^8.3", "group:test") in dependencies
+    assert (
+        "mkdocs", '{"extras":["i18n"],"version":"^1.6"}', "group:docs",
+    ) in dependencies
