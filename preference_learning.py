@@ -182,7 +182,7 @@ _SAFE_WORKFLOW_CANONICAL_RE = re.compile(
     r"user does not want sonder to) "
     r"(?:ask (?:me )?before (?:deleting|removing|overwriting|committing|pushing)|"
     r"confirm before (?:deleting|removing|overwriting|committing|pushing)|"
-    r"include source citations|use source citations|"
+    r"source citations|include source citations|use source citations|"
     r"update (?:documentation|docs|the changelog)|"
     r"mention documentation changes)\.?$"
 )
