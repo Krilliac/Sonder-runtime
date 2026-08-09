@@ -12147,6 +12147,11 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",
     "status", "diagnostics",
 })
+_AGENT_FILE_EVIDENCE_TOOLS = frozenset({
+    "workspace_inventory", "directory_tree", "file_read", "file_read_range",
+    "file_digest", "directory_digest", "file_find", "text_search",
+    "script_search", "image_inspect",
+})
 _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "directory_digest", "file_find",
     "file_read", "file_digest", "file_read_range", "context_pack", "text_search", "script_search",
@@ -13004,10 +13009,7 @@ def _agent_impl(
             ):
                 successful_inspection_results[call_signature] = observation_text[:6000]
                 repeated_inspection_counts.pop(call_signature, None)
-        if tool_name in {
-            "workspace_inventory", "directory_tree", "file_read", "file_read_range", "file_find",
-            "text_search", "script_search", "image_inspect",
-        } and tool_ok:
+        if tool_name in _AGENT_FILE_EVIDENCE_TOOLS and tool_ok:
             file_evidence = True
         if auto_checklist and tool_name in _WORK_INSPECTION_TOOLS and tool_ok:
             inspected = True

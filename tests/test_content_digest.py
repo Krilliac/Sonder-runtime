@@ -193,6 +193,65 @@ def test_symlink_file_and_directory_roots_are_rejected(project, tmp_path):
         content_digest.digest_directory(str(dir_link))
 
 
+def test_file_replaced_by_symlink_immediately_before_open_is_not_hashed(
+    project, tmp_path, monkeypatch,
+):
+    target = project / "race.bin"
+    target.write_bytes(b"safe")
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"sensitive outside bytes")
+    original = content_digest._stream_sha256
+
+    def race(path, max_bytes, extra_roots=""):
+        target.unlink()
+        try:
+            target.symlink_to(outside)
+        except (OSError, NotImplementedError) as exc:
+            pytest.skip("symlink creation unavailable: %s" % exc)
+        return original(path, max_bytes, extra_roots)
+
+    monkeypatch.setattr(content_digest, "_stream_sha256", race)
+
+    with pytest.raises((OSError, PermissionError)):
+        content_digest.digest_file(str(target))
+
+
+def test_directory_membership_change_during_hashing_fails_complete_merkle(
+    project, monkeypatch,
+):
+    (project / "first.bin").write_bytes(b"first")
+    original = content_digest._stream_sha256
+    changed = False
+
+    def mutate(path, max_bytes, extra_roots=""):
+        nonlocal changed
+        if not changed:
+            changed = True
+            (project / "late.bin").write_bytes(b"late")
+        return original(path, max_bytes, extra_roots)
+
+    monkeypatch.setattr(content_digest, "_stream_sha256", mutate)
+
+    data = _directory(project)
+
+    assert changed
+    assert data["complete"] is False
+    assert data["merkle_sha256"] is None
+    assert any("membership changed" in row["error"] for row in data["errors"])
+
+
+def test_manifest_digest_escapes_surrogate_filenames_deterministically():
+    rows = [{"path": "bad-\udcff.bin", "bytes": 1, "sha256": "0" * 64}]
+
+    first = content_digest._manifest_digest(rows)
+    second = content_digest._manifest_digest(rows)
+    rendered = content_digest.format_digest({"manifest": rows})
+
+    assert first == second
+    assert len(first) == 64
+    assert "\\udcff" in rendered
+
+
 def test_containment_sensitive_and_foreign_absolute_paths(project, tmp_path):
     outside = tmp_path / "outside.bin"
     outside.write_bytes(b"outside")
@@ -223,6 +282,7 @@ def test_server_discovery_policy_activity_dedup_and_autopilot(project):
         assert tool in server._WORK_INSPECTION_TOOLS
         assert tool in server._AGENT_DEDUPLICATED_INSPECTION_TOOLS
         assert tool in server._AUTOPILOT_OBSERVE_TOOLS
+        assert tool in server._AGENT_FILE_EVIDENCE_TOOLS
 
     with activity_tracker.response_span("test", "digest artifact"):
         file_output = server._agent_dispatch_observed(
