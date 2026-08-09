@@ -79,11 +79,14 @@ Mitigations that are already in place and worth knowing about:
 - `script_run` applies `SONDER_EXECUTION_RISK_POLICY` before launching an exact
   guarded script. The default is `report`; operators may choose `deny-high`,
   `deny-medium`, or `deny-unknown`. A caller may strengthen but cannot weaken
-  the configured policy. This is defense in depth, not an OS sandbox.
+  the configured policy. Enforcing `deny-*` modes currently fail closed for
+  every launch because a portable exact inspected-handle-to-interpreter handoff
+  is not yet available; `report` remains advisory. This avoids a pathname-swap
+  bypass and is defense in depth, not an OS sandbox.
 - Process inventory and memory-risk inspection are disabled unless the operator
   sets `SONDER_PROCESS_INSPECTION=enabled:bounded-read-only`. The Windows-only
   scanner requests read/query rights for one exact PID and returns only fixed
-  indicator names/counts plus aggregate accounting—never command lines, module
+  indicator names/counts from private readable memory plus aggregate accounting—never command lines, module
   paths, addresses, strings, or memory bytes. It does not enable debug privilege,
   suspend, write, inject, or bypass normal OS access checks. Heuristic matches
   can be wrong and bounded scans can miss data.

@@ -74,6 +74,18 @@ def test_script_run_deny_high_prevents_execution(tmp_path, monkeypatch):
     assert calls == []
 
 
+def test_enforcing_policy_refuses_below_threshold_path_handoff(tmp_path, monkeypatch):
+    root = _root(tmp_path, monkeypatch)
+    path = root / "safe.py"
+    path.write_text("print('safe')", encoding="utf-8")
+    monkeypatch.setenv("SONDER_EXECUTION_RISK_POLICY", "deny-high")
+    calls = []
+    monkeypatch.setattr(server.workbench, "run_script", lambda *a, **k: calls.append((a, k)))
+    output = server.script_run(str(path))
+    assert "exact_execution_handoff_unavailable" in output
+    assert calls == []
+
+
 def test_script_run_report_includes_risk_before_execution(tmp_path, monkeypatch):
     root = _root(tmp_path, monkeypatch)
     path = root / "safe.py"

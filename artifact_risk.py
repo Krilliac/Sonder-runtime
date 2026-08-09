@@ -144,19 +144,20 @@ def _parse_pe(data, source_size, indicators, deadline):
     for index in range(section_count):
         _check(deadline)
         off = table + index * 40
-        name = data[off:off + 8].split(b"\x00", 1)[0].decode("ascii", errors="replace")
         virtual_size, virtual_address, raw_size, raw_offset = struct.unpack_from("<IIII", data, off + 8)
         flags = struct.unpack_from("<I", data, off + 36)[0]
+        if raw_size and (raw_offset >= source_size or raw_size > source_size - raw_offset):
+            raise ArtifactRiskError("PE section raw range is outside the file")
         sample = data[raw_offset:min(len(data), raw_offset + raw_size, raw_offset + 1024 * 1024)]
         entropy = round(_entropy(sample), 3)
         executable = bool(flags & 0x20000000)
         writable = bool(flags & 0x80000000)
         if executable and writable:
-            _add_indicator(indicators, "writable_executable_section", "high", evidence=name or str(index))
+            _add_indicator(indicators, "writable_executable_section", "high", evidence="section:%d" % index)
         if executable and len(sample) >= 4096 and entropy >= 7.5:
-            _add_indicator(indicators, "high_entropy_executable_section", "medium", evidence=name or str(index))
+            _add_indicator(indicators, "high_entropy_executable_section", "medium", evidence="section:%d" % index)
         sections.append({
-            "name": name, "virtual_size": virtual_size, "virtual_address": virtual_address,
+            "index": index, "virtual_size": virtual_size, "virtual_address": virtual_address,
             "raw_size": raw_size, "raw_offset": raw_offset, "characteristics": flags,
             "entropy": entropy,
         })
@@ -206,8 +207,14 @@ def _parse_pe(data, source_size, indicators, deadline):
     overlay = max(0, source_size - max_raw_end) if max_raw_end else 0
     if overlay > 1024 * 1024:
         _add_indicator(indicators, "large_pe_overlay", "medium", evidence="bytes:%d" % overlay)
+    public_sections = [
+        {"index": row["index"], "virtual_size": row["virtual_size"],
+         "raw_size": row["raw_size"], "characteristics": row["characteristics"],
+         "entropy": row["entropy"]}
+        for row in sections
+    ]
     return {
-        "machine": machine, "sections": sections, "entry_rva": entry_rva,
+        "machine": machine, "sections": public_sections,
         "characteristics": characteristics, "imports_count": len(imports),
         "certificate_table_present": cert_present, "overlay_bytes": overlay,
     }
@@ -230,6 +237,8 @@ def _parse_elf(data, indicators, deadline):
         e_type, machine = struct.unpack_from(endian + "HH", data, 16)
         entry, phoff = struct.unpack_from(endian + "II", data, 24)
         phentsize, phnum = struct.unpack_from(endian + "HH", data, 42)
+    if e_type == 0 or machine == 0 or phnum == 0:
+        raise ArtifactRiskError("ELF header lacks required executable metadata")
     if phnum > 4096 or phentsize < (56 if bits == 2 else 32):
         raise ArtifactRiskError("invalid ELF program-header table")
     wx_segments = 0
@@ -271,6 +280,7 @@ def _parse_macho(data, indicators, deadline):
     if ncmds > 4096 or header_size + sizeofcmds > len(data):
         raise ArtifactRiskError("truncated Mach-O load commands")
     offset = header_size
+    command_end = header_size + sizeofcmds
     dylibs = 0
     code_signature = False
     wx_segments = 0
@@ -279,7 +289,7 @@ def _parse_macho(data, indicators, deadline):
         if offset + 8 > len(data):
             raise ArtifactRiskError("truncated Mach-O load command")
         command, command_size = struct.unpack_from(endian + "II", data, offset)
-        if command_size < 8 or offset + command_size > len(data):
+        if command_size < 8 or offset + command_size > command_end:
             raise ArtifactRiskError("invalid Mach-O load-command size")
         base_command = command & 0x7FFFFFFF
         if base_command == 0x1 and bits == 32 and command_size >= 56:
@@ -293,6 +303,8 @@ def _parse_macho(data, indicators, deadline):
         elif base_command == 0x1D:
             code_signature = True
         offset += command_size
+    if offset != command_end:
+        raise ArtifactRiskError("Mach-O load commands do not match declared size")
     if wx_segments:
         _add_indicator(indicators, "writable_executable_segment", "high", wx_segments)
     return {"bits": bits, "byte_order": "little" if endian == "<" else "big",
@@ -337,17 +349,20 @@ def inspect_artifact(path, *, max_scan_bytes=DEFAULT_MAX_SCAN_BYTES,
         complete = size <= scan_cap
         if complete:
             data = prefix + handle.read(size - len(prefix))
+            scan_regions = [data]
             ranges = [[0, size]]
         else:
             suffix_size = scan_cap - len(prefix)
             handle.seek(size - suffix_size)
             suffix_start = handle.tell()
             data = prefix + handle.read(suffix_size)
+            scan_regions = [prefix, data[len(prefix):]]
             ranges = [[0, len(prefix)], [suffix_start, size]]
         _check(deadline)
         digest = hashlib.sha256(data).hexdigest() if complete else None
     indicators = {}
-    _scan_patterns(data, indicators)
+    for region in scan_regions:
+        _scan_patterns(region, indicators)
     details = {}
     incomplete = [] if complete else ["file_exceeds_scan_budget"]
     try:

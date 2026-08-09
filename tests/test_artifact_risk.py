@@ -77,7 +77,7 @@ def test_pe_without_high_risk_flags_reports_structural_details(project):
     result = artifact_risk.inspect_artifact(path)
     assert result["scan_complete"] is True
     assert result["risk"] == "none_detected"
-    assert result["details"]["sections"][0]["name"] == ".text"
+    assert result["details"]["sections"][0]["index"] == 0
     assert result["details"]["certificate_table_present"] is False
 
 
@@ -133,6 +133,40 @@ def test_partial_executable_does_not_parse_across_scan_gap(project):
     assert result["scan_complete"] is False
     assert result["details"] == {"structural_parse_skipped": True}
     assert "structural_parse_requires_complete_file" in result["incomplete_reasons"]
+
+
+def test_partial_script_does_not_match_across_unscanned_gap(project):
+    path = project / "large.ps1"
+    prefix = b"A" * (512 - len(b"powershell ")) + b"powershell "
+    path.write_bytes(prefix + b"X" * 1976 + b"-EncodedCommand" + b"Y" * 497)
+    result = artifact_risk.inspect_artifact(path, max_scan_bytes=1024)
+    assert "encoded_powershell" not in _indicators(result)
+    assert result["risk"] == "unknown"
+
+
+def test_malformed_executable_structures_never_report_clean(project):
+    pe = bytearray(_pe())
+    section = 0x98 + 240
+    pe[section:section + 8] = b"SECRET!!"
+    struct.pack_into("<I", pe, section + 20, 0xFFFFFF00)
+    pe_path = project / "bad.exe"
+    pe_path.write_bytes(pe)
+    pe_result = artifact_risk.inspect_artifact(pe_path)
+    assert pe_result["risk"] == "unknown"
+    assert "SECRET!!" not in artifact_risk.format_result(pe_result)
+
+    elf = bytearray(64)
+    elf[:7] = b"\x7fELF\x02\x01\x01"
+    struct.pack_into("<H", elf, 54, 56)
+    elf_path = project / "bad.elf"
+    elf_path.write_bytes(elf)
+    assert artifact_risk.inspect_artifact(elf_path)["risk"] == "unknown"
+
+    macho = bytearray(_macho64())
+    struct.pack_into("<I", macho, 20, 8)
+    macho_path = project / "bad.macho"
+    macho_path.write_bytes(macho)
+    assert artifact_risk.inspect_artifact(macho_path)["risk"] == "unknown"
 
 
 def test_pdf_dispatch_preserves_pdf_active_content_findings(project):
