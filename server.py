@@ -2272,21 +2272,34 @@ def _preference_facts(conn, task, project=None, limit=12):
         scopes.extend((str(project), "project:%s" % project))
     scopes.append("global")
     selected = []
-    seen = set()
-    candidate_limit = min(200, max(limit * 8, 100))
+    seen_ids = set()
+    seen_keys = set()
+    # Scan the full bounded retrieval window so high-ranked but inapplicable
+    # legacy rows cannot starve a lower-ranked applicable preference.
+    candidate_limit = 200
     for scope in scopes:
         for pref in memory_store.preferences_for_scope(
             conn, scope, limit=candidate_limit
         ):
-            identity = pref.get("id") or (scope, pref.get("key"), pref.get("text"))
-            if identity in seen:
+            if not isinstance(pref, dict):
                 continue
-            seen.add(identity)
             text = pref.get("text", "")
             if not isinstance(text, str):
                 continue
+            identity = pref.get("id")
+            if not isinstance(identity, (str, bytes, int, float)):
+                identity = (scope, str(pref.get("key")), text)
+            if identity in seen_ids:
+                continue
+            seen_ids.add(identity)
             if not preference_learning.preference_applies(text, task):
                 continue
+            key = pref.get("key")
+            if not isinstance(key, str) or not key:
+                key = preference_learning.preference_key(text)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
             selected.append("User preference: %s" % text)
             if len(selected) >= limit:
                 return selected

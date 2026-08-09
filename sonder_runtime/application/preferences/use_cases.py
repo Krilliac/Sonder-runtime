@@ -28,6 +28,8 @@ def _storage_failure() -> ToolResult:
 
 
 def _bounded_limit(value: object, default: int = 50, maximum: int = 200) -> int:
+    if isinstance(value, bool):
+        return default
     try:
         parsed = int(value)
     except (TypeError, ValueError, OverflowError):
@@ -95,7 +97,7 @@ class PreferenceService:
         try:
             rows = self._repository.list(
                 limit=_bounded_limit(limit, 50, 200),
-                include_disabled=bool(include_disabled),
+                include_disabled=include_disabled is True,
             )
         except Exception:
             return _storage_failure()
