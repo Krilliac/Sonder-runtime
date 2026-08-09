@@ -167,10 +167,15 @@ def detail_enabled():
 
 def _safe_path(value):
     text = _block(_redact_text(value), 1000)
-    if re.match(r"^[A-Za-z]:[\\/]", text) or text.startswith(("/", "\\\\")):
-        parts = [part for part in re.split(r"[\\/]+", text) if part]
-        return parts[-1] if parts else "<root>"
-    return text
+    parts = [
+        part for part in re.split(r"[\\/]+", text)
+        if part not in ("", ".", "..")
+    ]
+    leaf = parts[-1] if parts else ""
+    # ``C:foo`` is a drive-relative Windows path, not a harmless basename.
+    if re.match(r"^[A-Za-z]:", leaf):
+        leaf = leaf[2:]
+    return leaf or (text if text and not re.search(r"[\\/:]", text) else "<path>")
 
 
 def _safe_command(value):

@@ -1776,30 +1776,32 @@ class ExecutionFeedEvent {
 
   factory ExecutionFeedEvent.fromJson(Map<String, dynamic> json) {
     return ExecutionFeedEvent(
-      responseId: json['response_id']?.toString() ?? '',
-      responseStatus: json['response_status']?.toString() ?? 'unknown',
+      responseId: _safeExecutionText(json['response_id']?.toString() ?? '', 128),
+      responseStatus: _safeExecutionText(
+          json['response_status']?.toString() ?? 'unknown', 64),
       seq: _asInt(json['seq']),
       timestamp: _executionTimestamp(json['ts']),
-      kind: json['kind']?.toString().trim().isNotEmpty == true
-          ? json['kind'].toString()
+      kind: _safeExecutionText(json['kind']?.toString() ?? '', 64).isNotEmpty
+          ? _safeExecutionText(json['kind']?.toString() ?? '', 64)
           : 'unknown',
-      phase: json['phase']?.toString() ?? '',
+      phase: _safeExecutionText(json['phase']?.toString() ?? '', 64),
       elapsedMs: _asInt(json['elapsed_ms']),
-      model: json['model']?.toString() ?? '',
+      model: _safeExecutionText(json['model']?.toString() ?? '', 160),
       promptChars: _asInt(json['prompt_chars']),
       historyMessages: _asInt(json['history_messages']),
       tokensIn: _asInt(json['tokens_in']),
       tokensOut: _asInt(json['tokens_out']),
-      tool: json['tool']?.toString() ?? '',
+      tool: _safeExecutionText(json['tool']?.toString() ?? '', 160),
       title: _safeExecutionText(json['title']?.toString() ?? '', 160),
-      fileOperation: json['action']?.toString() ?? '',
+      fileOperation: _safeExecutionText(json['action']?.toString() ?? '', 80),
       path: _safeExecutionText(json['path']?.toString() ?? '', 200),
       linesAdded: _asInt(json['lines_added']),
       linesEdited: _asInt(json['lines_edited']),
       linesDeleted: _asInt(json['lines_deleted']),
       bytes: _asInt(json['bytes']),
       dryRun: json['dry_run'] == true,
-      previewKind: json['preview_kind']?.toString() ?? '',
+      previewKind: _safeExecutionText(
+          json['preview_kind']?.toString() ?? '', 80),
       ok: json['ok'] is bool ? json['ok'] as bool : null,
       requestPreview: ExecutionPreview.fromJson(json['request_preview']),
       responsePreview: ExecutionPreview.fromJson(json['response_preview']),
@@ -1913,7 +1915,12 @@ DateTime? _executionTimestamp(dynamic value) {
 }
 
 String _safeExecutionText(String value, int maxRunes) {
-  var safe = value.replaceAll(RegExp(r'[\r\n\t]+'), ' ').trim();
+  var safe = value
+      .replaceAll(
+        RegExp(r'[\x00-\x1F\x7F-\x9F\u202A-\u202E\u2066-\u2069]+'),
+        ' ',
+      )
+      .trim();
   safe = safe.replaceAllMapped(
     RegExp(
       r'\b(authorization\s*:\s*bearer|bearer|api[_-]?key|token|password|secret)\b(\s*[:=]\s*|\s+)[^\s,;]+',

@@ -594,6 +594,43 @@ void main() {
     expect(event.displayPreview.redacted, isTrue);
   });
 
+  test('execution feed sanitizes every displayed scalar and preview', () {
+    final feed = ExecutionFeed.fromJson({
+      'schema_version': 1,
+      'runtime_id': 'rt-test',
+      'known': true,
+      'events': [
+        {
+          'response_id': 'r\nFAKE',
+          'response_status': 'running\u202e',
+          'seq': 1,
+          'kind': 'future\nkind\u202e',
+          'phase': 'done\u2066',
+          'model': 'model\u202e',
+          'tool': 'tool\x00name',
+          'title': 'title\x9b31m',
+          'action': 'edit\rdelete',
+          'path': 'file\tname.py',
+          'preview_kind': 'content\u2069',
+          'summary_preview': {
+            'state': 'available',
+            'text': 'safe\u202ePREVIEW\x1b[31m',
+          },
+        },
+      ],
+    });
+    final event = feed.events.single;
+    final rendered = [
+      event.responseId, event.responseStatus, event.kind, event.phase,
+      event.model, event.tool, event.title, event.fileOperation, event.path,
+      event.previewKind, event.preview,
+    ].join('|');
+    expect(rendered, isNot(contains(RegExp(
+      r'[\x00-\x1F\x7F-\x9F\u202A-\u202E\u2066-\u2069]',
+    ))));
+    expect(event.kind.length, lessThanOrEqualTo(64));
+  });
+
   test('execution feed is additive and suppresses preview when detail is off', () {
     final oldInfo = SystemInfo.fromJson({
       'activity': {

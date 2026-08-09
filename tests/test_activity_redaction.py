@@ -121,6 +121,19 @@ def test_public_activity_defaults_to_metadata_only_and_basename_paths(monkeypatc
     assert file_event["phase"] == "applied"
 
 
+def test_public_paths_never_disclose_relative_directory_components():
+    cases = {
+        r"private\customer-name\secret-project\foo.py": "foo.py",
+        "private/customer-name/secret-project/foo.py": "foo.py",
+        r"private/mixed\secret/foo.py": "foo.py",
+        r"..\private\foo.py": "foo.py",
+        r"C:private\foo.py": "foo.py",
+        "foo.py": "foo.py",
+    }
+    for source, expected in cases.items():
+        assert at._safe_path(source) == expected
+
+
 def test_metadata_projection_suppresses_all_free_text_summaries(monkeypatch):
     monkeypatch.delenv("SONDER_EXECUTION_FEED_DETAIL", raising=False)
     at.reset_for_tests()
