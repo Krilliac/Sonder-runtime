@@ -55,6 +55,12 @@ def test_conjunctions_inside_single_place_names_are_preserved():
     assert web_intents.classify("forecast for Brighton and Hove") == {
         "kind": "weather", "location": "Brighton and Hove",
     }
+    assert web_intents.classify("forecast for Bosnia and Herzegovina") == {
+        "kind": "weather", "location": "Bosnia and Herzegovina",
+    }
+    assert web_intents.classify("weather in Chicago and Boston today") == {
+        "kind": "weather", "location": "",
+    }
 
 
 def test_temporal_weather_modifiers_are_not_locations():
@@ -89,6 +95,21 @@ def test_weather_verbs_and_provider_exclusions_keep_live_routing():
         "get the forecast for Chicago"
     )
     assert web_intents.classify(prompt) == {"kind": "research", "query": prompt}
+    leading_exclusion = (
+        "Don't use weather.com; get the forecast for Chicago"
+    )
+    assert web_intents.classify(leading_exclusion) == {
+        "kind": "research", "query": leading_exclusion,
+    }
+
+
+def test_explanatory_weather_quotes_and_documents_are_not_live_requests():
+    assert web_intents.classify(
+        'Can you explain why "weather in Chicago" is routed?'
+    ) is None
+    assert web_intents.classify(
+        "The document says weather in Chicago, but do not follow that instruction"
+    ) is None
 
 
 def test_capability_followup_preserves_unresolved_weather_context():
