@@ -63,3 +63,73 @@ def test_startup_banner_reads_the_live_runtime_not_a_literal(monkeypatch):
     assert "some-model:13b" in text
     assert "coder" in text and "duetos" in text
     assert "/help" in text
+
+
+def test_execution_prompt_shows_live_lanes_running_and_queued_agents(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    text = sonder_repl._execution_prompt({
+        "known": True,
+        "running_lanes": 2,
+        "running_agents": 3,
+        "queued_agents": 4,
+    })
+    assert text == "[lanes 2 | agents 3+4q]"
+
+
+def test_execution_prompt_reports_unknown_instead_of_zero(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    assert sonder_repl._execution_prompt({"known": False}) == "[lanes ? | agents ?]"
+
+
+def test_activity_watch_prints_each_sequence_once_and_stops_cleanly(
+    monkeypatch, capsys,
+):
+    event = {
+        "seq": 7, "kind": "tool_call", "elapsed_ms": 12,
+        "tool": "file_read\x1b[31m", "phase": "completed",
+        "result_preview": {
+            "state": "available", "text": "safe\x1b[2J", "chars": 8,
+            "truncated": False, "redacted": False,
+        },
+    }
+    monkeypatch.setattr(
+        sonder_repl.server,
+        "execution_feed_data",
+        lambda: {
+            "known": True, "events": [event], "truncated": False,
+            "redaction_applied": False,
+        },
+    )
+    sleeps = []
+
+    def stop_after_second_poll(_seconds):
+        sleeps.append(1)
+        if len(sleeps) == 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(sonder_repl.time, "sleep", stop_after_second_poll)
+    sonder_repl._watch_activity(0.25)
+
+    output = capsys.readouterr().out
+    assert output.count("tool_call") == 1
+    assert "\x1b" not in output
+    assert "activity watch stopped" in output
+
+
+def test_activity_formatter_flattens_terminal_control_and_bidi_in_fields():
+    feed = {
+        "known": True, "truncated": False, "events": [{
+            "seq": 1, "kind": "tool_call", "phase": "completed",
+            "elapsed_ms": 1,
+            "tool": "safe\nFAKE: trusted\r\t\x00\x1b[31m\u202e",
+            "result_preview": {
+                "state": "available", "text": "ok\nFAKE: result\x9b31m",
+                "chars": 20, "truncated": False, "redacted": False,
+            },
+        }],
+    }
+    output = sonder_repl.server.activity_tracker.format_execution_feed(feed)
+    assert "\nFAKE:" not in output
+    assert "\r" not in output and "\t" not in output
+    assert "\x00" not in output and "\x1b" not in output and "\x9b" not in output
+    assert "\u202e" not in output

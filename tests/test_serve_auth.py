@@ -48,6 +48,35 @@ def test_authorized_accepts_account_when_flag_set(monkeypatch):
     assert ts._authorized("Bearer token") is True
 
 
+def test_execution_feed_detail_requires_flag_developer_and_non_local_open(
+    monkeypatch,
+):
+    monkeypatch.setenv("SONDER_EXECUTION_FEED_DETAIL", "1")
+    ordinary = {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": {"role": "user"},
+    }
+    developer = {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": {"role": "developer"},
+    }
+    owner_key = {
+        "mode": "api-key", "authorized": True, "api_key": True,
+        "account": None,
+    }
+    local_open = {
+        "mode": "local-open", "authorized": True, "api_key": False,
+        "account": None,
+    }
+
+    assert ts._execution_feed_detail_allowed(ordinary) is False
+    assert ts._execution_feed_detail_allowed(developer) is True
+    assert ts._execution_feed_detail_allowed(owner_key) is True
+    assert ts._execution_feed_detail_allowed(local_open) is False
+    monkeypatch.setenv("SONDER_EXECUTION_FEED_DETAIL", "true")
+    assert ts._execution_feed_detail_allowed(developer) is False
+
+
 @contextmanager
 def _http_server(monkeypatch):
     monkeypatch.setattr(ts, "_maybe_live_reload", lambda: None)
@@ -70,6 +99,65 @@ def _request(port, method, path, body=None, headers=None):
     result = response.status, dict(response.getheaders()), payload
     conn.close()
     return result
+
+
+def test_system_status_uses_projected_activity_and_shared_feed(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setenv("SONDER_EXECUTION_FEED_DETAIL", "1")
+    ts.server.activity_tracker.reset_for_tests()
+    response_ids = []
+    for label in ("first", "second"):
+        with ts.server.activity_tracker.response_span(
+            "http-" + label, "private prose token=prompt-secret",
+        ) as response:
+            response_ids.append(response["id"])
+            ts.server.activity_tracker.record_tool_result(
+                "file_write",
+                {"path": str(tmp_path / "private" / (label + ".txt")),
+                 "content": "api_key=argument-secret"},
+                output="CLIENT_SECRET=output-secret",
+            )
+    monkeypatch.setattr(ts.server, "status", lambda: "ready")
+    monkeypatch.setattr(ts.server, "sonder_stats", lambda: "stats")
+    monkeypatch.setattr(ts.server, "learn_tiers", lambda: "tiers")
+    monkeypatch.setattr(ts.server, "system_improvement_report", lambda: "ok")
+    monkeypatch.setattr(ts.server, "context_health_data", lambda: {})
+    monkeypatch.setattr(ts.server.context_policy, "policy", lambda *_: {})
+    monkeypatch.setattr(ts.server.master_orchestrator, "snapshot", lambda: {
+        "active_agents": 0, "running_agents": 0, "queued_agents": 0,
+        "active_model_calls": 0,
+    })
+    monkeypatch.setattr(ts.server.autopilot_controller, "snapshot", lambda: {})
+    monkeypatch.setattr(ts.server, "runtime_policy_data", lambda: {})
+    monkeypatch.setattr(ts.server.selfmod, "status_data", lambda: {})
+    monkeypatch.setattr(ts.server, "mcp_runtime_data", lambda: {})
+    monkeypatch.setattr(ts.server, "learning_health_data", lambda: {})
+    monkeypatch.setattr(ts.server.sonder_paths, "default_home", lambda: tmp_path)
+    monkeypatch.setattr(ts.server, "available_tiers", lambda: {})
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(port, "GET", "/v1/sonder/status")
+
+    text = body.decode("utf-8")
+    payload = json.loads(text)
+    assert status == 200
+    assert payload["activity"]["projected"] is True
+    assert payload["activity"]["detail_enabled"] is False
+    assert payload["execution"]["feed"]["schema_version"] == 1
+    assert payload["execution"]["feed"]["events"]
+    feed_response_ids = {
+        row["response_id"] for row in payload["execution"]["feed"]["events"]
+    }
+    assert set(response_ids).issubset(feed_response_ids)
+    for secret in (
+        "private prose", "prompt-secret", "argument-secret", "output-secret",
+        str(tmp_path / "private"),
+    ):
+        assert secret not in text
 
 
 @pytest.mark.parametrize(("messages", "message"), [
