@@ -27,6 +27,8 @@ from ...application.ports.model_gateway import (
     ModelRequest,
     ModelResponse,
 )
+from ...platform.metrics import default_registry
+from ..inference_telemetry import from_ollama
 from ...domain.common.errors import (
     Cancelled,
     DeadlineExceeded,
@@ -145,14 +147,19 @@ class OllamaGateway:
         except model_transport.ModelCallError as exc:
             raise _map_model_error(exc) from exc
         usage = getattr(gen, "last_usage", None) or {}
-        return ModelResponse(
+        response_meta = getattr(gen, "last_response_meta", None) or {}
+        telemetry = from_ollama(response_meta)
+        response = ModelResponse(
             text=text,
             model=model,
             tier=tier_label,
             duration_ms=int((time.monotonic() - started) * 1000),
-            tokens_in=usage.get("prompt_eval_count"),
-            tokens_out=usage.get("eval_count"),
+            tokens_in=usage.get("tokens_in", usage.get("prompt_eval_count")),
+            tokens_out=usage.get("tokens_out", usage.get("eval_count")),
+            telemetry=telemetry,
         )
+        default_registry().observe_inference("ollama", telemetry)
+        return response
 
     def embed(
         self, texts: Sequence[str], context: OperationContext
