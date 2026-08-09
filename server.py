@@ -109,7 +109,7 @@ import environment_probe
 import sonder_hardware
 import tool_capabilities
 import git_tools
-import eval_history
+import sonder_runtime.adapters.evaluation_history_store as eval_history
 import artifact_risk as artifact_risk_module
 import process_risk as process_risk_module
 
@@ -576,7 +576,7 @@ LIVE_RELOAD_MODULES = [
     "self_heal",
     "memory_quality",
     "learning_health",
-    "eval_history",
+    "sonder_runtime.adapters.evaluation_history_store",
     "domain_grounding",
     "master_orchestrator",
     "ollama_lifecycle",
@@ -11244,7 +11244,7 @@ def evaluation_history_status(
         "tolerance": tolerance, "max_records": max_records,
     }
     try:
-        data = eval_history.history_status(
+        data = _application().evaluation_history.status(
             model=model,
             model_digest=model_digest,
             suite=suite,

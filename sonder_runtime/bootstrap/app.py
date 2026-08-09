@@ -22,11 +22,13 @@ from ..adapters.legacy.services import (
     SystemClock,
 )
 from ..adapters.legacy.inspections import LegacyInspectionExecutor
+from ..adapters.legacy.evaluation_history import LegacyEvaluationHistoryReader
 from ..adapters.legacy.workflows import LegacyLoopRunner, LegacyWorkflowRepository
 from ..adapters.local_observability import LocalObservabilitySink
 from ..adapters.ollama.gateway import OllamaGateway
 from ..application.chat.handle_chat import ChatService
 from ..application.inspection import InspectionService
+from ..application.evaluation_history import EvaluationHistoryService
 from ..application.ports.clock import Clock
 from ..application.ports.event_sink import EventSink
 from ..application.ports.model_gateway import ModelGateway
@@ -52,6 +54,7 @@ class Application:
     events: EventSink
     clock: Clock
     inspections: InspectionService
+    evaluation_history: EvaluationHistoryService
     workflows: WorkflowService
 
 
@@ -103,6 +106,9 @@ def build_application(profile: str = "workstation-local") -> Application:
         events=LocalObservabilitySink(OperationsEventSink()),
         clock=SystemClock(),
         inspections=InspectionService(LegacyInspectionExecutor()),
+        evaluation_history=EvaluationHistoryService(
+            LegacyEvaluationHistoryReader()
+        ),
         workflows=WorkflowService(LegacyWorkflowRepository(), LegacyLoopRunner()),
     )
 

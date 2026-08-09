@@ -28,7 +28,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import eval_history
+import sonder_runtime.adapters.evaluation_history_store as eval_history
 
 
 RECORD_SCHEMA = "sonder.adaptive-checkpoint.v1"
