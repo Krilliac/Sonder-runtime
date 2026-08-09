@@ -48,6 +48,7 @@ def test_agent_lifecycle_is_durable_and_queryable(monkeypatch, tmp_path):
         created["id"], "owner-a", "running inline", in_model_call=True,
         tool_calls=1, mode="inline", tier="code",
     )
+    live_snap = fleet_store.snapshot(include_finished=False)
     finished, marker = fleet_store.finish_agent(
         created["id"], "owner-a", output="done",
     )
@@ -55,6 +56,9 @@ def test_agent_lifecycle_is_durable_and_queryable(monkeypatch, tmp_path):
 
     assert running["status"] == "running"
     assert running["in_model_call"] is True
+    assert live_snap["running_agents"] == 1
+    assert live_snap["queued_agents"] == 0
+    assert live_snap["active_model_calls"] == 1
     assert marker == "done"
     assert finished["status"] == "done"
     assert finished["mode"] == "inline"

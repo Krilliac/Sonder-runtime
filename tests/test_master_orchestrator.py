@@ -383,6 +383,7 @@ def test_repeated_cached_search_evidence_reaches_master_audit(
     guard.  That is a valid early failure, but the first text_search still
     produced scoped host evidence which the master can audit and salvage.
     """
+    monkeypatch.setenv("SONDER_SPECULATION", "0")
     monkeypatch.setattr(master_orchestrator, "parallel_worker_slots", lambda count: 1)
     decisions = [
         '{"tool":"text_search","args":{"query":"needle"},"reason":"inspect"}',
@@ -901,6 +902,7 @@ def test_cancelled_queued_worker_cannot_transition_to_running():
 def test_active_model_call_count_tracks_only_live_http_lanes():
     active = master_orchestrator._new_agent("agent", "active model")
     queued = master_orchestrator._new_agent("agent", "queued without model")
+    backlog = master_orchestrator._new_agent("agent", "waiting for worker")
     assert master_orchestrator._start_agent(
         active, "calling model", in_model_call=True,
     )
@@ -909,6 +911,11 @@ def test_active_model_call_count_tracks_only_live_http_lanes():
     )
 
     assert master_orchestrator.active_model_call_count() == 1
+    snap = master_orchestrator.snapshot(include_finished=False)
+    assert snap["running_agents"] == 2
+    assert snap["queued_agents"] == 1
+    assert snap["active_agents"] == 3
+    assert snap["active_model_calls"] == 1
 
     master_orchestrator.request_cancel("all")
     # Cancellation is cooperative: the HTTP lane remains owned until its

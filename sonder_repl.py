@@ -7,6 +7,7 @@ teach outcomes back, and surface stats/lessons. Stdlib only + server/memory_stor
 import os
 import re
 import sys
+import time
 
 import server
 import memory_store
@@ -214,6 +215,47 @@ def _startup_banner(strict, persona, project, tier=None):
     )
     return "%s\n\n  %s\n" % (_banner(rows), hint)
 
+
+def _execution_prompt(status=None):
+    """Prompt suffix refreshed once per user turn, with no polling thread."""
+    if status is None:
+        try:
+            status = server.execution_status_data()
+        except Exception:
+            status = None
+    if not isinstance(status, dict) or not status.get("known"):
+        return _paint("[lanes ? | agents ?]", _Ansi.amber)
+    lanes = int(status.get("running_lanes") or 0)
+    running = int(status.get("running_agents") or 0)
+    queued = int(status.get("queued_agents") or 0)
+    agents = str(running) if queued == 0 else "%s+%sq" % (running, queued)
+    colour = _Ansi.green if lanes or running or queued else _Ansi.muted
+    return _paint("[lanes %s | agents %s]" % (lanes, agents), colour)
+
+
+def _watch_activity(poll_seconds=1.0):
+    """Blocking feed tail; never interleaves with the normal input prompt."""
+    last_seq = -1
+    print("watching projected activity; Ctrl+C to return to the prompt")
+    try:
+        while True:
+            feed = server.execution_feed_data()
+            if not feed.get("known"):
+                print("live execution feed: unknown (%s)" % feed.get("error", ""))
+            else:
+                events = [
+                    row for row in (feed.get("events") or [])
+                    if int(row.get("seq") or 0) > last_seq
+                ]
+                if events:
+                    print(server.activity_tracker.format_execution_feed({
+                        **feed, "events": events, "truncated": False,
+                    }))
+                    last_seq = max(int(row.get("seq") or 0) for row in events)
+            time.sleep(max(0.25, min(5.0, float(poll_seconds))))
+    except KeyboardInterrupt:
+        print("\nactivity watch stopped")
+
 HELP = """commands (slash forms are optional -- plain language works too, e.g.
 "show me your stats", "which model should handle X", "read file foo.py"):
   /help              show this help
@@ -232,7 +274,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /contextsize [N]   show/set requested context (8k..1m; native num_ctx is clamped)
   /compact           preview context compaction/rollover recommendations
   /commands [filter] list available commands by category, name, or risk
-  /activity          show active/latest tool calls and file changes
+  /activity [watch]  show once, or poll projected new events until Ctrl+C
   /work <task>       execute a guarded tool-using workflow with checklist/report
   /autopilot ...     persistent plan/run/status/resume/pause/cancel autonomy
   /runtime ...       shared local model mappings and execution-lane tiers
@@ -707,8 +749,8 @@ def main():
 
     while True:
         try:
-            line = input(_paint("sonder", _Ansi.teal, _Ansi.bold) +
-                         _paint(" > ", _Ansi.muted))
+            line = input(_paint("sonder", _Ansi.teal, _Ansi.bold) + " " +
+                         _execution_prompt() + _paint(" > ", _Ansi.muted))
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -853,7 +895,10 @@ def main():
             elif cmd in ("/agentretry", "/retryagent"):
                 print(server.control_command(line, session=session_id, project=project))
             elif cmd in ("/activity", "/tools"):
-                print(server.activity_status())
+                if arg.strip().lower() in ("watch", "tail"):
+                    _watch_activity()
+                else:
+                    print(server.activity_status())
             elif cmd in ("/autopilot", "/auto"):
                 print(server.control_command(
                     line, session=session_id, project=project,
