@@ -211,7 +211,7 @@ def _git_objects(repo: Path) -> list[tuple[str, str]]:
 
     output = run_git(
         "-c", "core.quotePath=false", "log", "--all", "--raw",
-        "--format=format:", "--no-renames", "--no-abbrev", "-z",
+        "-m", "--format=format:", "--no-renames", "--no-abbrev", "-z",
     )
     return _parse_raw_changes(output)
 
