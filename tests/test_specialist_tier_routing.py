@@ -56,11 +56,11 @@ def test_optional_tiers_are_disjoint_from_base_tiers():
 # --- binding -------------------------------------------------------------
 
 
-def test_default_policy_binds_reasoning_and_vision():
+def test_default_policy_leaves_optional_specialists_unbound():
     policy = runtime_policy.default_policy(env={})
 
-    assert policy["local_models"]["reasoning"] == "deepseek-r1:7b"
-    assert policy["local_models"]["vision"] == "moondream"
+    assert policy["local_models"]["reasoning"] == ""
+    assert policy["local_models"]["vision"] == ""
 
 
 def test_environment_overrides_the_specialist_tiers():
@@ -77,7 +77,7 @@ def test_environment_can_leave_a_specialist_tier_unset():
     policy = runtime_policy.default_policy(env={"SONDER_VISION": "none"})
 
     assert policy["local_models"]["vision"] == ""
-    assert policy["local_models"]["reasoning"] == "deepseek-r1:7b"
+    assert policy["local_models"]["reasoning"] == ""
     # The unset token is a specialist affordance only; a base tier keeps its
     # default rather than becoming unbound.
     base = runtime_policy.default_policy(env={"SONDER_GENERAL": "none"})
@@ -90,8 +90,7 @@ def test_specialist_tiers_still_refuse_cloud_models():
     assert policy["local_models"]["reasoning"] == rules.DEFAULT_MODELS["reasoning"]
 
 
-def test_older_policy_file_gains_the_new_tiers_on_load():
-    """A three-tier file predates this change; loading it must not unbind."""
+def test_older_policy_file_gains_safe_unbound_specialist_tiers_on_load():
     legacy = {
         "version": 1,
         "revision": 4,
@@ -106,8 +105,8 @@ def test_older_policy_file_gains_the_new_tiers_on_load():
 
     normalized = runtime_policy.normalize(legacy)
 
-    assert normalized["local_models"]["reasoning"] == "deepseek-r1:7b"
-    assert normalized["local_models"]["vision"] == "moondream"
+    assert normalized["local_models"]["reasoning"] == ""
+    assert normalized["local_models"]["vision"] == ""
 
 
 # --- lanes stay on always-bound tiers ------------------------------------
@@ -131,7 +130,10 @@ def test_execution_lanes_cannot_pin_to_an_optional_tier(tier):
 # --- the router actually selects the new tiers ---------------------------
 
 
-def test_reasoning_prompt_selects_the_reasoning_tier(isolated_runtime_policy):
+def test_reasoning_prompt_selects_the_reasoning_tier(
+    isolated_runtime_policy, monkeypatch,
+):
+    monkeypatch.setenv("SONDER_REASONING", "deepseek-r1:7b")
     policy = server._refresh_runtime_policy(create=True)
     available = runtime_policy.bound_tiers(policy)
     assert "reasoning" in available
@@ -143,7 +145,10 @@ def test_reasoning_prompt_selects_the_reasoning_tier(isolated_runtime_policy):
     assert server.TIERS["reasoning"] == "deepseek-r1:7b"
 
 
-def test_vision_prompt_selects_the_vision_tier(isolated_runtime_policy):
+def test_vision_prompt_selects_the_vision_tier(
+    isolated_runtime_policy, monkeypatch,
+):
+    monkeypatch.setenv("SONDER_VISION", "moondream")
     policy = server._refresh_runtime_policy(create=True)
     available = runtime_policy.bound_tiers(policy)
 
@@ -154,7 +159,10 @@ def test_vision_prompt_selects_the_vision_tier(isolated_runtime_policy):
     assert server.TIERS["vision"] == "moondream"
 
 
-def test_capability_refinement_upgrades_the_lane_tier(isolated_runtime_policy):
+def test_capability_refinement_upgrades_the_lane_tier(
+    isolated_runtime_policy, monkeypatch,
+):
+    monkeypatch.setenv("SONDER_REASONING", "deepseek-r1:7b")
     server._refresh_runtime_policy(create=True)
 
     tier, reason = server._capability_refined_tier(
@@ -166,7 +174,7 @@ def test_capability_refinement_upgrades_the_lane_tier(isolated_runtime_policy):
 
 
 def test_capability_refinement_needs_a_real_image_for_the_vision_tier(
-    isolated_runtime_policy,
+    isolated_runtime_policy, monkeypatch,
 ):
     """A keyword-only vision guess must not hand the run to a VLM.
 
@@ -174,6 +182,7 @@ def test_capability_refinement_needs_a_real_image_for_the_vision_tier(
     vision-language model answers a text-only prompt with an immediate
     end-of-sequence -- so the run would silently produce nothing.
     """
+    monkeypatch.setenv("SONDER_VISION", "moondream")
     server._refresh_runtime_policy(create=True)
     prompt = "summarize what this chart of build times shows"
     assert cr.classify_task(prompt)[0] == "vision"
@@ -199,7 +208,11 @@ def test_capability_refinement_leaves_ordinary_work_alone(isolated_runtime_polic
     assert reason == "lane default"
 
 
-def test_specialist_tiers_are_offered_as_serve_targets(isolated_runtime_policy):
+def test_bound_specialist_tiers_are_offered_as_serve_targets(
+    isolated_runtime_policy, monkeypatch,
+):
+    monkeypatch.setenv("SONDER_REASONING", "deepseek-r1:7b")
+    monkeypatch.setenv("SONDER_VISION", "moondream")
     server._refresh_runtime_policy(create=True)
 
     model, cloud, _augment, label = server._serve_target("reasoning", False)

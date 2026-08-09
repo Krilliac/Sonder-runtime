@@ -26,11 +26,14 @@ ROUTING_LANES = ("router", "workbench", "autopilot", "fleet", "review")
 # Environment values that explicitly leave an optional tier unbound.
 UNSET_TOKENS = frozenset({"none", "off", "disabled", "-"})
 DEFAULT_MODELS = {
-    "fast": "qwen2.5:3b",
+    # setup_alias/bootstrap_engine owns hardware-aware base-model selection.
+    # Runtime policy targets its stable alias rather than assuming a model
+    # family or that several models fit concurrently on a new host.
+    "fast": "sonder:latest",
     "code": "sonder:latest",
     "general": "sonder:latest",
-    "reasoning": "deepseek-r1:7b",
-    "vision": "moondream",
+    "reasoning": "",
+    "vision": "",
 }
 RESERVED_PERSONAL_MODEL = "sonder-personal:latest"
 DEFAULT_ROUTING = {
@@ -69,11 +72,13 @@ def validate_model(value, fallback: str, *, allow_unset: bool = False) -> str:
     """Validate one tier's model name.
 
     ``allow_unset`` (optional tiers only) lets an explicit empty value mean
-    "this tier is not bound". A *missing* value (``None``) still falls back to
-    the tier default, so an older policy file gains the new tiers on load
-    instead of silently unbinding them.
+    "this tier is not bound". A missing value falls back to that tier's
+    built-in default; hardware-agnostic specialist defaults are themselves
+    empty, so an older policy file gains the tier without assuming a model.
     """
     if allow_unset and value is not None and not str(value).strip():
+        return ""
+    if allow_unset and value is None and not str(fallback or "").strip():
         return ""
     model = str(value or fallback).strip()
     if not _MODEL_RE.fullmatch(model):
