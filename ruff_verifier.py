@@ -20,6 +20,7 @@ with python_exec/pytest_run rather than replacing them (e.g. run ruff_check
 first as a cheap pre-filter, then the expensive real-execution verifier).
 """
 import subprocess
+import sonder_logging
 
 # Reuse the registry's OWN Verdict/VerifierUnavailable rather than declaring
 # same-named local copies. A local `class VerifierUnavailable(RuntimeError)` is a
@@ -40,7 +41,8 @@ def _run(cmd, input_text, timeout=30):
     it the same way tests/test_verifiers.py monkeypatches typecheck's _run —
     no real `ruff` binary is required to exercise ruff_check's logic."""
     p = subprocess.run(cmd, input=(input_text or "").encode("utf-8"),
-                        capture_output=True, timeout=timeout)
+                        capture_output=True, timeout=timeout,
+                        env=sonder_logging.child_environment())
     out = ((p.stdout or b"").decode("utf-8", "replace")
            + (p.stderr or b"").decode("utf-8", "replace"))
     return p.returncode, out

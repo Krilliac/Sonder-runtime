@@ -17,6 +17,7 @@ every other backend in verifiers.py).
 import os
 import subprocess
 import tempfile
+import sonder_logging
 
 from verifiers import Verdict, VerifierUnavailable
 
@@ -44,7 +45,7 @@ def _run(cmd, cwd=None, timeout=15):
     subprocess.TimeoutExpired — node_run() translates both."""
     p = subprocess.run(
         cmd, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True,
-        timeout=timeout,
+        timeout=timeout, env=sonder_logging.child_environment(),
     )
     out = ((p.stdout or b"").decode("utf-8", "replace")
            + (p.stderr or b"").decode("utf-8", "replace"))
