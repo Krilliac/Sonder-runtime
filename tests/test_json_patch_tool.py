@@ -34,6 +34,23 @@ def test_preview_supports_strict_rfc_subset_without_writing(tmp_path):
     assert json.loads(target.read_text(encoding="utf-8")) == original
 
 
+def test_reused_python_operations_are_not_mutated_by_preview(tmp_path):
+    target = tmp_path / "data.json"
+    _write(target, {})
+    operations = [
+        {"op": "add", "path": "/nested", "value": {"a": 1}},
+        {"op": "test", "path": "/nested", "value": {"a": 1}},
+        {"op": "replace", "path": "/nested/a", "value": 2},
+    ]
+
+    first = _patch(target, operations)
+    second = _patch(target, operations)
+
+    assert first == second
+    assert first["document"] == {"nested": {"a": 2}}
+    assert operations[0]["value"] == {"a": 1}
+
+
 def test_apply_is_deterministically_formatted_and_root_replace_is_allowed(tmp_path):
     target = tmp_path / "data.json"
     _write(target, {"z": 1})
@@ -153,6 +170,19 @@ def test_sensitive_outside_and_symlink_targets_are_rejected(monkeypatch, tmp_pat
         pytest.skip("symlink creation unavailable: %s" % exc)
     with pytest.raises(PermissionError, match="symlink|junction"):
         patcher.patch_json("linked.json", [{"op": "add", "path": "/x", "value": 1}])
+
+
+def test_sensitive_authorized_root_itself_is_rejected(tmp_path):
+    sensitive_root = tmp_path / ".azure"
+    sensitive_root.mkdir()
+    target = sensitive_root / "credentials.json"
+    _write(target, {"token": "secret"})
+    operations = [{"op": "test", "path": "/token", "value": "secret"}]
+
+    with pytest.raises(PermissionError, match="secret or control state"):
+        patcher.patch_json(
+            str(target), operations, extra_roots=str(sensitive_root), bypass=True,
+        )
 
 
 def test_post_replace_failure_atomically_restores_original(monkeypatch, tmp_path):
