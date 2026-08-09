@@ -106,8 +106,10 @@ through Sonder Runtime's bounded authenticated launcher. See
 
 ## Download a pre-built app (no toolchain needed)
 
-Every push builds all four platforms in CI. Grab a build without installing
-anything:
+Every push to `main`, every pull request, and every manual `build-apps` run
+builds all four platforms in CI. These are CI artifacts, not releases; GitHub
+may require sign-in to download them and expires them according to repository
+retention policy. Grab a recent build without installing anything:
 
 1. Open the repo's **Actions → build-apps** and click the latest green run.
 2. Download the artifact for your platform from the run's **Summary** page:
@@ -116,13 +118,15 @@ anything:
    - `sonder-runtime-windows-x64` → `sonder-runtime-windows-x64.zip`
    - `sonder-runtime-macos` → `sonder-runtime-macos.zip`
 
-For **permanent download links**, push a tag and CI publishes a GitHub Release
-with the four files attached:
-
-```bash
-git tag app-v1.0.0
-git push origin app-v1.0.0
-```
+The README's `app-latest` links are a mutable prerelease snapshot and may lag
+`main`. A permanent versioned release is published only from an
+`app-vMAJOR.MINOR.PATCH` tag after the runtime, Flutter, tag, and full Git SHA
+pass the release policy. This checkout is currently a development identity
+(`0.9.0.dev0` runtime versus `1.0.0+1` Flutter) and is intentionally not
+release-ready. Maintainers must follow the
+[release version policy](../docs/runbooks/release-version-policy.md) and
+[publication runbook](../docs/runbooks/publish-release.md); do not create a
+release tag merely to obtain permanent links.
 
 ## Bundled system
 
@@ -177,9 +181,11 @@ uses the authenticated launcher already running on the configured computer.
 
 ## First run
 
-1. Configure the host launcher by following
-   [Mobile host control](../MOBILE_HOST_CONTROL.md), or start the server manually
-   with `bash deploy_sonder.sh --serve`.
+1. On the same desktop, start the loopback service with
+   `bash deploy_sonder.sh --serve`. For Android or another remote client, use
+   the [server-private installer](../docs/runbooks/install-server-private.md),
+   a TLS reverse proxy, and [Mobile host control](../MOBILE_HOST_CONTROL.md);
+   the loopback development service must never be port-forwarded.
 2. Open the app → **Settings** (gear icon).
 3. Enter the **Server URL** and API key, plus the **Host launcher URL** and its
    separate token. Tap **Test connection**, then **Save**.

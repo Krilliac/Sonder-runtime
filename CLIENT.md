@@ -21,11 +21,11 @@ weights because those stay on the host.
    no Ollama, no repo needed on the client side.
 2. **Fully local.** Clone the repo and run Sonder Runtime on your own
    machine — the `sonder` REPL / `sonder.cmd` (Windows). See
-   [README.md → Install / run](README.md#install--run).
+   [README.md → Quick start](README.md#quick-start).
 3. **Integrated with Claude Code, via MCP.** `server.py` is registered as
    the `sonder-runtime` MCP server; Claude Code calls `sonder(...)`,
    `offload(...)`, etc. directly as tools. See [README.md →
-   Interfaces](README.md#interfaces).
+   Why Sonder](README.md#why-sonder).
 
 This doc covers #1.
 
