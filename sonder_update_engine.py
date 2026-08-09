@@ -312,7 +312,9 @@ class UpdateManager:
                         plan, "failed", error_code="BACKUP_FAILED",
                         error_detail=type(exc).__name__,
                     )
-                    raise UpdateError(f"backup failed: {exc}") from exc
+                    raise UpdateError(
+                        "backup failed; inspect local update diagnostics"
+                    ) from exc
             plan = self.repository.advance(plan, "draining", backup_id=backup_id)
 
             # Drain the runtime (hook provided by the caller when a live
