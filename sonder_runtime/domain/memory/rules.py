@@ -2,9 +2,9 @@
 
 The scoring, ranking, and thresholding logic that governs learning
 outcomes and retrieval — with no I/O, no embedding transport, no SQLite.
-The root modules (``reward.py``, ``mmr_rerank.py``, ``recall.py``)
-delegate here and keep identical behavior; similarity is always an
-injected function so this module stays free of the embedding adapter.
+The legacy reward/MMR modules and migrated recall adapter delegate here
+and keep identical behavior; similarity is always an injected function
+so this module stays free of the embedding adapter.
 """
 from __future__ import annotations
 
