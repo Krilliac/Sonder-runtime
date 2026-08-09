@@ -80,6 +80,13 @@ Mitigations that are already in place and worth knowing about:
   guarded script. The default is `report`; operators may choose `deny-high`,
   `deny-medium`, or `deny-unknown`. A caller may strengthen but cannot weaken
   the configured policy. This is defense in depth, not an OS sandbox.
+- Process inventory and memory-risk inspection are disabled unless the operator
+  sets `SONDER_PROCESS_INSPECTION=enabled:bounded-read-only`. The Windows-only
+  scanner requests read/query rights for one exact PID and returns only fixed
+  indicator names/counts plus aggregate accounting—never command lines, module
+  paths, addresses, strings, or memory bytes. It does not enable debug privilege,
+  suspend, write, inject, or bypass normal OS access checks. Heuristic matches
+  can be wrong and bounded scans can miss data.
 - `local_service_probe` remains a direct, explicit MCP operation only. It is
   excluded from agents, repository read-only sessions, loops, and autopilot
   because arbitrary loopback response bodies can contain host-local secrets.

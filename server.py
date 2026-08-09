@@ -109,6 +109,7 @@ import tool_capabilities
 import git_tools
 import eval_history
 import artifact_risk as artifact_risk_module
+import process_risk as process_risk_module
 
 BASE = ollama_endpoint.normalize()
 OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
@@ -622,6 +623,7 @@ LIVE_RELOAD_MODULES = [
     "autopilot_controller",
     "pdf_risk",
     "artifact_risk",
+    "process_risk",
 ]
 
 def _prime_live_reload_modules():
@@ -684,6 +686,9 @@ def _maybe_live_reload():
             continue
         if name == "artifact_risk":
             globals()["artifact_risk_module"] = module
+            continue
+        if name == "process_risk":
+            globals()["process_risk_module"] = module
             continue
         if name == "sqlite_mutate":
             globals()["sqlite_mutate_module"] = module
@@ -8919,6 +8924,63 @@ def workspace_run(
 
 
 @mcp.tool()
+def process_list(max_processes: int = 128, max_seconds: float = 0.5) -> str:
+    """List bounded process metadata when host inspection is explicitly enabled."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"max_processes": max_processes, "max_seconds": max_seconds}
+    try:
+        data = process_risk_module.list_processes(
+            max_processes=max_processes, max_seconds=max_seconds,
+        )
+    except Exception as exc:
+        _record_direct_tool("process_list", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = json.dumps(data, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    _record_direct_tool(
+        "process_list", args, ok=bool(data.get("ok")), started=started,
+        summary="%s; %d process(es)" % (data.get("status"), data.get("process_count", 0)),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def process_memory_risk_inspect(
+    pid: int,
+    max_bytes: int = 4 * 1024 * 1024,
+    max_regions: int = 256,
+    max_seconds: float = 1.0,
+) -> str:
+    """Inspect one PID for fixed memory-risk indicators without returning content."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "pid": pid, "max_bytes": max_bytes, "max_regions": max_regions,
+        "max_seconds": max_seconds,
+    }
+    try:
+        data = process_risk_module.inspect_process_memory(
+            pid, max_bytes=max_bytes, max_regions=max_regions,
+            max_seconds=max_seconds,
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "process_memory_risk_inspect", args, ok=False, started=started,
+            summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = json.dumps(data, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    _record_direct_tool(
+        "process_memory_risk_inspect", args, ok=bool(data.get("ok")),
+        started=started,
+        summary="%s; %s risk" % (data.get("status"), data.get("risk", "unknown")),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
 def artifact_risk_inspect(
     path: str,
     max_scan_bytes: int = 16 * 1024 * 1024,
@@ -9970,6 +10032,20 @@ def _loop_dispatch(action):
             approval=action.get("approval", ""),
             extra_roots=action.get("extra_roots", ""),
         ))
+    if action_type == "process_list":
+        return _loop_text_result("process_list", process_list(
+            max_processes=action.get("max_processes", 128),
+            max_seconds=action.get("max_seconds", 0.5),
+        ))
+    if action_type == "process_memory_risk_inspect":
+        return _loop_text_result(
+            "process_memory_risk_inspect", process_memory_risk_inspect(
+                pid=action.get("pid", 0),
+                max_bytes=action.get("max_bytes", 4 * 1024 * 1024),
+                max_regions=action.get("max_regions", 256),
+                max_seconds=action.get("max_seconds", 1.0),
+            ),
+        )
     if action_type == "image_inspect":
         return _loop_text_result("image_inspect", image_inspect(
             path=action.get("path", ""),
@@ -11416,6 +11492,7 @@ def tool_manifest() -> str:
         "archive_list/archive_extract": "Prevalidate bounded ZIP/TAR manifests or transactionally extract them to a new non-overwriting workspace directory.",
         "archive_create": "Transactionally create a bounded deterministic ZIP/TAR from explicit guarded project inputs without overwriting.",
         "artifact_risk_inspect": "Statically inspect guarded PDFs, PE/ELF/Mach-O executables, scripts, or opaque binaries for bounded risk indicators without executing or returning content.",
+        "process_list/process_memory_risk_inspect": "Opt-in bounded Windows process metadata and fixed-indicator memory-risk inspection; never returns command lines, paths, addresses, strings, or raw bytes.",
         "log_inspect": "Inspect one guarded text log with fixed level/timestamp/source extraction, failure clusters, repeats, and bounded context.",
         "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
         "environment_status": "Report the host OS, available shells (PowerShell/cmd/bash/wsl), and installed toolchains -- check before choosing a command shape or assuming a tool exists.",
@@ -11494,6 +11571,8 @@ AGENT_TOOL_HELP = """Available tools:
 - archive_extract: {"source": "bundle.zip", "destination": "unpacked", "max_entries": 2000, "max_total_bytes": 256000000, "max_ratio": 100} -- creates a new directory; never overwrites
 - archive_create: {"root": ".", "inputs_json": ["src", "README.md"], "destination": "release.zip", "archive_format": "zip|tar", "deterministic": true} -- destination must be new and outside input directories
 - artifact_risk_inspect: {"path": "artifact.exe", "max_scan_bytes": 16777216, "max_seconds": 5} -- static indicators only; no content execution or raw content return
+- process_list: {"max_processes": 128, "max_seconds": 0.5} -- requires exact host opt-in; names/PIDs/counts only
+- process_memory_risk_inspect: {"pid": 1234, "max_bytes": 4194304, "max_regions": 256, "max_seconds": 1} -- fixed aggregate indicators only; never raw memory
 - log_inspect: {"path": "logs/app.log", "tail_lines": 0, "context_lines": 2, "max_file_bytes": 64000000, "max_scan_bytes": 4000000, "max_lines": 10000, "max_line_bytes": 4096, "max_results": 100, "max_output_bytes": 256000, "timeout": 5}
 - text_search: {"query": "TODO", "root": ".", "glob": "*.py", "regex": false, "max_results": 100}
 - file_write: {"path": "notes.txt", "content": "...", "mode": "create|overwrite|append"}
@@ -13063,6 +13142,18 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "process_list":
+        return process_list(
+            max_processes=args.get("max_processes", 128),
+            max_seconds=args.get("max_seconds", 0.5),
+        )
+    if tool_name == "process_memory_risk_inspect":
+        return process_memory_risk_inspect(
+            pid=args.get("pid", 0),
+            max_bytes=args.get("max_bytes", 4 * 1024 * 1024),
+            max_regions=args.get("max_regions", 256),
+            max_seconds=args.get("max_seconds", 1.0),
+        )
     if tool_name == "image_inspect":
         return image_inspect(
             path=args.get("path", ""),
@@ -13296,6 +13387,10 @@ def _agent_activity_command(tool_name, args):
         return "%s %s" % (
             str(args.get("method", "GET")).upper(), args.get("url", ""),
         )
+    if tool_name == "process_memory_risk_inspect":
+        return "pid=%s" % args.get("pid", "")
+    if tool_name == "process_list":
+        return "max_processes=%s" % args.get("max_processes", 128)
     path = args.get("path") or args.get("root") or ""
     if path:
         return str(path)
@@ -13342,6 +13437,7 @@ _PROJECT_BOUND_AGENT_TOOLS = (
         "master_capacity", "self_heal_check", "status", "system_profile_text",
         "emotion_vector_status", "preferences_status", "context_policy_status",
         "environment_status", "hardware_profile",
+        "process_list", "process_memory_risk_inspect",
     })
 )
 _CLOUD_AGENT_NESTED_MODEL_TOOLS = frozenset({
@@ -14055,7 +14151,7 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "memory_search", "learning_health_status", "evaluation_history_status",
     "memory_quality_report", "memory_privacy_review", "artifact_ground",
     "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",
-    "status", "diagnostics",
+    "status", "diagnostics", "process_list", "process_memory_risk_inspect",
 })
 _AGENT_FILE_EVIDENCE_TOOLS = frozenset({
     "workspace_inventory", "workspace_compare", "directory_tree", "file_read", "file_read_range",
@@ -14071,6 +14167,7 @@ _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "data_inspect", "data_query", "text_search", "script_search",
     "program_search", "image_inspect", "environment_status", "hardware_profile", "repo_status", "repo_diff", "project_detect",
     "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
+    "process_list", "process_memory_risk_inspect",
 })
 _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "workflow_run",
@@ -15218,7 +15315,7 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "data_inspect", "data_query", "text_search", "script_search",
     "project_detect",
     "repo_status", "repo_diff", "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
-    "program_search", "image_inspect", "memory_search", "web_search",
+    "program_search", "image_inspect", "memory_search", "process_list", "process_memory_risk_inspect", "web_search",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
 })

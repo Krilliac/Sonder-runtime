@@ -128,6 +128,16 @@ For exact script execution, `SONDER_EXECUTION_RISK_POLICY` selects `off`,
 setting. Program execution without an exact inspectable file remains outside
 this static gate and should be isolated separately.
 
+`process_list` and `process_memory_risk_inspect` are host-observation tools for
+defensive analysis on Windows. Both require the exact operator opt-in
+`SONDER_PROCESS_INSPECTION=enabled:bounded-read-only`. Inventory exposes only
+bounded PID, parent PID, executable-name, and thread-count metadata. Memory
+inspection accepts one PID and returns only fixed risk-indicator names/counts
+and aggregate scan accounting under hard byte, region, and time ceilings. It
+does not return memory content, discovered strings, paths, addresses, or command
+lines and never requests write/injection/debug rights. Unsupported platforms,
+protected processes, access denial, and incomplete scans fail explicitly.
+
 `text_patch` previews strict unified diffs rooted at an explicit project
 directory. With `apply=true`, it performs an all-file transaction for create
 and modify operations only. Context must match exactly; deletes, renames,
