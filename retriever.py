@@ -6,7 +6,7 @@ import re
 
 import embeddings
 import mmr_rerank
-import memory_store
+import sonder_runtime.adapters.memory_store as memory_store
 
 # Recalibrated 2026-07-06 against the 557-lesson corpus via tune_min_sim.py
 # (nomic-embed-text). Over 22 natural-language coding intents vs 15 off-domain
