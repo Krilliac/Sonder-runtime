@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import struct
+import time
 from pathlib import Path
 
 import pytest
@@ -88,6 +89,8 @@ def test_elf_wx_segment_is_high_risk(project):
     assert result["kind"] == "elf"
     assert result["risk"] == "high"
     assert result["details"]["writable_executable_segments"] == 1
+    assert "entry" not in result["details"]
+    assert "4194304" not in artifact_risk.format_result(result)
 
 
 def test_macho_wx_segment_is_high_risk(project):
@@ -221,6 +224,20 @@ def test_module_has_no_execution_or_network_dependencies():
     assert "subprocess" not in source
     assert "socket" not in source
     assert "urllib" not in source
+
+
+def test_pattern_scan_deadline_overrun_cannot_report_complete(project, monkeypatch):
+    path = project / "slow.py"
+    path.write_text("print('safe')", encoding="utf-8")
+    original = artifact_risk._scan_patterns
+
+    def slow_scan(*args, **kwargs):
+        time.sleep(0.06)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(artifact_risk, "_scan_patterns", slow_scan)
+    with pytest.raises(TimeoutError):
+        artifact_risk.inspect_artifact(path, max_seconds=0.05)
 
 
 @pytest.mark.parametrize("value", [True, 1.5, "1024", float("inf")])
