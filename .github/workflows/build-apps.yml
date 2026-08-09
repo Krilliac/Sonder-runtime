@@ -242,36 +242,6 @@ jobs:
             dist/sonder-runtime-provenance.intoto.json
           if-no-files-found: error
 
-  update-readme-artifacts:
-    # GitHub Actions artifacts are per-run URLs. Refreshing the README badge
-    # block is intentionally manual-only; auto-committing on every main build
-    # races local GUI pushes and forces constant rebases.
-    needs: [android, linux, windows, macos]
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v7
-      - name: Update README artifact badges
-        run: python .github/scripts/update_ci_artifact_badges.py
-        env:
-          ANDROID_ARTIFACT_URL: ${{ needs.android.outputs.artifact_url }}
-          LINUX_ARTIFACT_URL: ${{ needs.linux.outputs.artifact_url }}
-          WINDOWS_ARTIFACT_URL: ${{ needs.windows.outputs.artifact_url }}
-          MACOS_ARTIFACT_URL: ${{ needs.macos.outputs.artifact_url }}
-      - name: Commit README artifact links
-        run: |
-          if git diff --quiet README.md; then
-            echo "README artifact badges already current."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add README.md
-          git commit -m "Update CI artifact download links [skip ci]"
-          git push
-
   release:
     # Only when a tag like app-v1.0.0 is pushed: gather every platform build
     # and publish a GitHub Release with permanent download links.
