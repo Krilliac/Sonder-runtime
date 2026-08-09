@@ -43,6 +43,7 @@ _MAX_TEXT = 240
 _MAX_NODES = 256
 _MAX_BYTES = 8_192
 _UNSAFE_VALUE = "[UNSAFE_VALUE]"
+_TRUNCATED_VALUE = "[TRUNCATED_VALUE]"
 _BUDGET_EXHAUSTED = "[BUDGET_EXHAUSTED]"
 
 
@@ -169,17 +170,23 @@ def _sanitize_value(
     if type(value) is not str:
         accounting["rejected_values"] += 1
         return _UNSAFE_VALUE
-    truncated = len(value) > _MAX_TEXT
-    candidate = value[:_MAX_TEXT + 1].replace("\x00", "\\0")
+    if len(value) > _MAX_TEXT:
+        # Never retain a prefix that may be part of a configured secret.  This
+        # also keeps adversarial values bounded without asking the redactor to
+        # allocate over an arbitrarily large string.
+        accounting["truncated_fields"] += 1
+        return _TRUNCATED_VALUE
     try:
-        text = redactor.redact(candidate)
+        # Redact the original value before display-only normalization so exact
+        # secret matching still works for values containing NUL characters.
+        text = redactor.redact(value).replace("\x00", "\\0")
     except Exception:
         text = REDACTION_FAILED
     if text == REDACTION_FAILED:
         accounting["redaction_failures"] += 1
         return REDACTION_FAILED
     encoded = text.encode("utf-8")
-    if truncated or len(encoded) > _MAX_TEXT:
+    if len(encoded) > _MAX_TEXT:
         accounting["truncated_fields"] += 1
         encoded = encoded[:_MAX_TEXT]
         text = encoded.decode("utf-8", errors="ignore") + "..."
