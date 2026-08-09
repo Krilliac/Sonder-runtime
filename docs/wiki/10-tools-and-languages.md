@@ -59,7 +59,7 @@ expressions or file content are executed.
 ## Guarded filesystem tools
 
 `file_find`, `file_read`, `file_read_range`, `file_write`, `file_batch_write`, `file_edit`,
-`file_delete`, `directory_tree`, `directory_create`, `workspace_inventory`,
+`file_copy`, `file_move`, `file_delete`, `directory_tree`, `directory_create`, `workspace_inventory`,
 `text_search`, `script_search`, `program_search`, `image_inspect`, `repo_log`,
 `repo_show`, `repo_blame`. All are
 confined to `SONDER_FILE_ROOTS`, honor the permission policy
@@ -74,6 +74,17 @@ external diff/text-conversion helpers, and enforce count, byte, and time caps.
 `repo_show` additionally requires one contained non-sensitive regular file,
 both in the worktree and at the requested revision, before it returns patch
 content; an unfiltered commit can never expose unrelated files.
+
+`file_copy` and `file_move` transfer exactly one regular file between explicit
+source and destination paths. They are binary-safe, refuse overwrite by
+default, reject symlink/junction and sensitive-control-state paths at both
+ends, and cap each transfer at 64 MiB. Copy commits through a same-directory
+temporary file; no-overwrite publication is atomic and never replaces a
+competitor. Move stages the same bounded copy at the destination, revalidates
+the source, and deletes it only after publication. They never recurse and never
+invoke a shell or network service. Repository agents rebase and validate both
+paths against their exact assigned project root; autopilot accepts these tools
+only with overwrite disabled and no caller-supplied approval or extra root.
 
 `file_batch_write` accepts a JSON list of explicit `create` or `overwrite`
 operations. It prevalidates every target before writing, caps per-file and
