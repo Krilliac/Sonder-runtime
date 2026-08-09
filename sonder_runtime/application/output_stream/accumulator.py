@@ -11,7 +11,7 @@ import hashlib
 import re
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Callable
 
@@ -162,6 +162,7 @@ class BoundedOutputAccumulator:
         self._preview_source = bytearray()
         self._terminal_preview: tuple[str, bool] | None = None
         self._failure_code: str | None = None
+        self._redaction_state = threading.local()
 
     def snapshot(self) -> OutputSnapshot:
         with self._lock:
@@ -173,17 +174,28 @@ class BoundedOutputAccumulator:
             raise InvalidSequenceError("chunk sequence must be a non-negative integer")
         if not isinstance(chunk, str):
             raise TypeError("output chunks must be text")
-        try:
-            encoded = chunk.encode("utf-8", errors="strict")
-        except UnicodeEncodeError as exc:
-            raise ValueError("output chunk is not valid Unicode text") from exc
-
-        encoded_digest = hashlib.sha256(encoded).digest()
+        # Every Unicode code point requires at least one UTF-8 byte.  Reject a
+        # definitely oversized value before allocating/scanning its encoded
+        # representation; accepted replay payloads can never satisfy this case.
+        character_limit_exceeded = len(chunk) > self._limits.max_chunk_bytes
+        encoded: bytes | None = None
+        encoded_digest: bytes | None = None
+        if not character_limit_exceeded:
+            try:
+                encoded = chunk.encode("utf-8", errors="strict")
+            except UnicodeEncodeError as exc:
+                raise ValueError("output chunk is not valid Unicode text") from exc
+            encoded_digest = hashlib.sha256(encoded).digest()
         terminal_event = None
         replayed = False
         with self._lock:
             existing = self._chunks.get(sequence)
             if existing is not None:
+                if character_limit_exceeded:
+                    raise ConflictingReplayError(
+                        "chunk sequence was replayed with different bytes"
+                    )
+                assert encoded is not None and encoded_digest is not None
                 if existing != (len(encoded), encoded_digest):
                     raise ConflictingReplayError("chunk sequence was replayed with different bytes")
                 seed = self._snapshot_seed_locked()
@@ -195,7 +207,11 @@ class BoundedOutputAccumulator:
                 if sequence != len(self._chunks):
                     raise InvalidSequenceError("chunk sequence is not the next monotonic value")
 
-                failure_code = self._limit_failure(encoded)
+                if character_limit_exceeded:
+                    failure_code = "CHUNK_BYTES_LIMIT"
+                else:
+                    assert encoded is not None
+                    failure_code = self._limit_failure(encoded)
                 if failure_code is not None:
                     self._state = OutputStreamState.FAILED
                     self._failure_code = failure_code
@@ -203,6 +219,7 @@ class BoundedOutputAccumulator:
                     seed = self._snapshot_seed_locked()
                     terminal_event = "OUTPUT_STREAM_FAILED"
                 else:
+                    assert encoded is not None and encoded_digest is not None
                     self._chunks[sequence] = (len(encoded), encoded_digest)
                     self._total_bytes += len(encoded)
                     self._digest.update(encoded)
@@ -218,7 +235,7 @@ class BoundedOutputAccumulator:
 
         snapshot = self._render_snapshot(seed)
         if terminal_event is not None:
-            self._seal_terminal_preview(snapshot)
+            snapshot = self._seal_terminal_preview(snapshot)
             self._emit_terminal(terminal_event, snapshot)
             raise TerminalStateError("output stream limit exceeded")
         return AppendResult(snapshot, replayed=replayed)
@@ -237,7 +254,7 @@ class BoundedOutputAccumulator:
                 seed = self._snapshot_seed_locked()
                 emit = True
         snapshot = self._render_snapshot(seed)
-        self._seal_terminal_preview(snapshot)
+        snapshot = self._seal_terminal_preview(snapshot)
         if emit:
             self._emit_terminal("OUTPUT_STREAM_FINALIZED", snapshot)
         return snapshot
@@ -261,7 +278,7 @@ class BoundedOutputAccumulator:
                 seed = self._snapshot_seed_locked()
                 emit = True
         snapshot = self._render_snapshot(seed)
-        self._seal_terminal_preview(snapshot)
+        snapshot = self._seal_terminal_preview(snapshot)
         if emit:
             self._emit_terminal("OUTPUT_STREAM_FAILED", snapshot)
         return snapshot
@@ -305,10 +322,18 @@ class BoundedOutputAccumulator:
             preview_truncated = seed.terminal_preview_truncated
         else:
             preview = (seed.preview_source or b"").decode("utf-8", errors="ignore")
-            try:
-                redacted = self._redactor(preview)
-            except Exception:
-                redacted = "<preview redaction failed>"
+            if getattr(self._redaction_state, "active", False):
+                # A host redactor may call snapshot().  Fail the nested preview
+                # closed without recursively invoking the same callback.
+                redacted = "<preview redaction in progress>"
+            else:
+                self._redaction_state.active = True
+                try:
+                    redacted = self._redactor(preview)
+                except Exception:
+                    redacted = "<preview redaction failed>"
+                finally:
+                    self._redaction_state.active = False
             if not isinstance(redacted, str):
                 redacted = "<preview redaction failed>"
             redacted, redactor_truncated = _truncate_utf8(
@@ -330,12 +355,20 @@ class BoundedOutputAccumulator:
             failure_code=seed.failure_code,
         )
 
-    def _seal_terminal_preview(self, snapshot: OutputSnapshot) -> None:
+    def _seal_terminal_preview(self, snapshot: OutputSnapshot) -> OutputSnapshot:
         """Retain only redacted terminal display state, never raw preview bytes."""
         with self._lock:
             if self._state is not OutputStreamState.OPEN and self._terminal_preview is None:
                 self._terminal_preview = (snapshot.preview, snapshot.preview_truncated)
                 self._preview_source.clear()
+            terminal = self._terminal_preview
+        if terminal is None:
+            return snapshot
+        return replace(
+            snapshot,
+            preview=terminal[0],
+            preview_truncated=terminal[1],
+        )
 
     def _emit_terminal(self, event_code: str, snapshot: OutputSnapshot) -> None:
         try:
