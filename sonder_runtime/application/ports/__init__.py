@@ -16,6 +16,7 @@ from .model_gateway import (
     ModelResponse,
 )
 from .process_probe import ProbeResult, ProcessIdentity, ProcessProbe
+from .preferences import PreferenceCodec, PreferenceEventSink, PreferenceRepository
 from .repositories import (
     AutomationRepository,
     MemoryRepository,
@@ -41,6 +42,9 @@ __all__ = [
     "ModelRequest",
     "ModelResponse",
     "PolicyRepository",
+    "PreferenceCodec",
+    "PreferenceEventSink",
+    "PreferenceRepository",
     "ProbeResult",
     "ProcessIdentity",
     "ProcessProbe",
