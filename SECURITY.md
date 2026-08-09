@@ -59,6 +59,9 @@ Mitigations that are already in place and worth knowing about:
   UTF-8 text files. Preview is the default. Apply prevalidates the entire patch,
   rejects deletes/renames/binary/sensitive/link targets, publishes staged files,
   and uses digest-guarded rollback that will not overwrite a concurrent change.
+- `workspace_compare` exposes metadata and SHA-256 digests, never file content;
+  it fails closed on sensitive/control state, reparse points, special files,
+  identity races, or any scan/time/output ceiling.
 - Cloud tiers are **opt-in**. Local tiers run against loopback Ollama, and a
   remote `OLLAMA_HOST` must be explicitly enabled.
 - Lessons are passed through a 20-rule privacy classifier before storage, so
