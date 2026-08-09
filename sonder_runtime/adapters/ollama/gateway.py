@@ -33,6 +33,7 @@ from ...application.ports.model_gateway import (
 )
 from ...platform.metrics import default_registry
 from ..inference_telemetry import from_ollama
+from ..model_transport import ModelCallError
 from ...domain.common.errors import (
     Cancelled,
     DeadlineExceeded,
@@ -104,7 +105,6 @@ class OllamaGateway:
     def generate(
         self, request: ModelRequest, context: OperationContext
     ) -> ModelResponse:
-        import model_transport
         import server
 
         if not (request.prompt or "").strip():
@@ -151,7 +151,7 @@ class OllamaGateway:
         started = time.monotonic()
         try:
             text = gen(request.prompt, list(request.history) or None)
-        except model_transport.ModelCallError as exc:
+        except ModelCallError as exc:
             raise _map_model_error(exc) from exc
         usage = getattr(gen, "last_usage", None)
         if usage is None:
