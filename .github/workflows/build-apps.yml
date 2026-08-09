@@ -17,15 +17,10 @@ on:
   push:
     branches: [main, claude/mobile-desktop-app-gui-gzlhn5]
     tags: ["app-v*"]
+  # These job names are required branch-protection checks. Run on every PR so
+  # documentation or nested-script changes cannot wait forever for statuses
+  # that a path filter prevented GitHub from creating.
   pull_request:
-    paths:
-      - "app/**"
-      - "scripts/package_local_system.py"
-      - "scripts/release_artifacts.py"
-      - "*.py"
-      - "*.cmd"
-      - "*.sh"
-      - ".github/workflows/build-apps.yml"
   workflow_dispatch:
 
 permissions:
