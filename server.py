@@ -43,6 +43,7 @@ import personas
 import recall
 import summarizer
 import code_runner
+import isolated_runner
 import live_reload
 import system_profile
 import emotion_vectors
@@ -559,6 +560,7 @@ LIVE_RELOAD_MODULES = [
     "recall",
     "summarizer",
     "code_runner",
+    "isolated_runner",
     "system_profile",
     "emotion_vectors",
     "preference_learning",
@@ -9114,6 +9116,67 @@ def run_project(
 
 
 @mcp.tool()
+def isolated_run(
+    image: str,
+    argv_json: str,
+    project: str,
+    stdin: str = "",
+    writable_workspace: bool = False,
+    timeout: int = 30,
+    memory_mb: int = 512,
+    cpus: float = 1.0,
+    pids: int = 64,
+    output_bytes: int = 131072,
+) -> str:
+    """Run an installed Linux container image under a fixed isolation policy.
+
+    This direct MCP tool is subject to the local ``ask`` permission policy and
+    is intentionally unavailable to Sonder agents and autopilot. ``argv_json``
+    must be a JSON string array. The exact absolute ``project`` directory is the
+    only host bind and is read-only unless the host explicitly sets
+    ``writable_workspace=true``. Docker/Podman flags, mounts, devices, user,
+    environment, sockets, and privileges are not caller-configurable.
+
+    The fixed policy disables networking, uses a read-only root filesystem,
+    drops all capabilities, enables no-new-privileges, scrubs the process
+    environment, and caps time, output, memory, CPU, PIDs, stdin, and /tmp.
+    This relies on the external runtime and host kernel and is not escape-proof.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    ok = False
+    try:
+        result = isolated_runner.run_isolated(
+            image=image,
+            argv_json=argv_json,
+            project=project,
+            stdin=stdin,
+            writable_workspace=writable_workspace,
+            timeout=timeout,
+            memory_mb=memory_mb,
+            cpus=cpus,
+            pids=pids,
+            output_bytes=output_bytes,
+        )
+        ok = bool(result.get("ok"))
+    except (OSError, ValueError) as exc:
+        _record_direct_tool(
+            "isolated_run", {"image": image, "project": project},
+            ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = isolated_runner.format_result(result)
+    _record_direct_tool(
+        "isolated_run",
+        {"image": image, "project": project,
+         "writable_workspace": writable_workspace is True},
+        ok=ok, started=started, summary=("ok" if ok else "failed"),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
 def artifact_generate(
     name: str,
     brief: str,
@@ -11329,6 +11392,7 @@ def tool_manifest() -> str:
         "permission_policy/permission_rule_set": "Inspect or guarded-edit local permission rules for tool actions.",
         "context_compaction_plan": "Preview when to summarize, split sessions, or reduce live context.",
         "run_code": "Run a bounded snippet: Python, JS/TypeScript, Bash, Ruby, Perl, PHP, Lua, R, Go, Java, Rust, PowerShell, C++, C#.",
+        "isolated_run": "Direct MCP-only Docker/Podman execution with a fixed no-network, read-only-by-default, resource-capped isolation policy; local permission default is ask.",
         "ground_artifact": "Validate in-memory non-code content with exact/contains/regex/JSON checks.",
         "artifact_ground": "Validate files or bundles with inferred writing, data, editable Office/media/timelines, UI, image, audio, and static or animated humanoid model recipes.",
         "run_project": "Run a bounded temporary multi-file project with optional build commands.",

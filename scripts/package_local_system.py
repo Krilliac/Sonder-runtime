@@ -98,6 +98,7 @@ REQUIRED_FILES = {
     "refinement_transactions.py",
     "requirements-runtime.txt",
     "runtime_policy.py",
+    "isolated_runner.py",
     "server.py",
     "sonder_hardware.py",
     "setup_alias.py",
