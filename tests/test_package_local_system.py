@@ -68,6 +68,7 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     assert "sonder_health.py" in entries
     assert "process_liveness.py" in entries
     assert "artifact_grounding.py" in entries
+    assert {"artifact_risk.py", "pdf_risk.py", "process_risk.py"} <= set(entries)
     assert "media_assets.py" in entries
     assert "model_transport.py" in entries
     assert "ollama_endpoint.py" in entries
