@@ -10,14 +10,15 @@ from __future__ import annotations
 
 import json
 import os
-import queue
 import re
 import shutil
+import stat
 import subprocess
-import threading
+import tempfile
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 DEFAULT_TIMEOUT = 30
@@ -34,6 +35,8 @@ MAX_STDIN_BYTES = 64 * 1024
 MAX_ARGV_ITEMS = 64
 MAX_ARG_BYTES = 4096
 RUNTIME_ENV = "SONDER_ISOLATED_RUNTIME"
+ROOTS_ENV = "SONDER_ISOLATED_ROOTS"
+MAX_PROJECT_ENTRIES = 100_000
 
 _IMAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@:+-]{0,254}$")
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
@@ -61,12 +64,13 @@ def _clamp_float(value, default, minimum, maximum):
 def detect_runtime():
     """Return ``(name, absolute_executable)`` or ``(None, None)``.
 
-    ``SONDER_ISOLATED_RUNTIME`` may be ``auto`` (default), ``docker``,
-    ``podman``, or ``off``.  It never accepts a caller-selected executable path.
+    ``SONDER_ISOLATED_RUNTIME`` defaults to ``off`` and may be explicitly set
+    to ``auto``, ``docker``, or ``podman``. It never accepts a caller-selected
+    executable path.
     On Windows, batch/shim files are rejected because they would reintroduce a
     command interpreter beneath an apparently argv-only launch.
     """
-    selected = os.environ.get(RUNTIME_ENV, "auto").strip().lower() or "auto"
+    selected = os.environ.get(RUNTIME_ENV, "off").strip().lower() or "off"
     if selected in {"off", "none", "0", "false"}:
         return None, None
     if selected not in {"auto", "docker", "podman"}:
@@ -85,8 +89,85 @@ def detect_runtime():
             continue
         if os.name != "nt" and not os.access(resolved, os.X_OK):
             continue
-        return name, resolved
+        if _runtime_ready(name, resolved):
+            return name, resolved
     return None, None
+
+
+def _runtime_environment():
+    """Minimal host bootstrap state for local Desktop/machine runtimes."""
+    env = {}
+    keys = (
+        ("SystemRoot", "WINDIR", "USERPROFILE", "APPDATA", "LOCALAPPDATA")
+        if os.name == "nt"
+        else ("HOME", "XDG_RUNTIME_DIR")
+    )
+    for key in keys:
+        if os.environ.get(key):
+            env[key] = os.environ[key]
+    return env
+
+
+def _probe(argv, timeout=5):
+    try:
+        return subprocess.run(
+            argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            timeout=timeout, env=_runtime_environment(), shell=False, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _local_endpoint(uri):
+    value = str(uri or "").strip().strip('"')
+    if value.startswith(("unix://", "npipe://")):
+        return True
+    parsed = urlparse(value)
+    return parsed.scheme in {"tcp", "http", "https", "ssh"} and (
+        parsed.hostname or ""
+    ).casefold() in {"localhost", "127.0.0.1", "::1"}
+
+
+def _runtime_ready(name, path):
+    """Verify a responsive Linux engine reached only through a local endpoint."""
+    if name == "docker":
+        context = _probe([
+            path, "context", "inspect", "--format",
+            "{{json .Endpoints.docker.Host}}",
+        ])
+        if not context or context.returncode != 0 or not _local_endpoint(context.stdout):
+            return False
+        info = _probe([path, "info", "--format", "{{.OSType}}"])
+        return bool(info and info.returncode == 0 and info.stdout.strip() == "linux")
+    connections = _probe([path, "system", "connection", "list", "--format", "json"])
+    if not connections or connections.returncode != 0:
+        return False
+    try:
+        rows = json.loads(connections.stdout or "[]")
+    except (TypeError, ValueError):
+        return False
+    def field(row, wanted):
+        return next(
+            (value for key, value in row.items() if str(key).casefold() == wanted),
+            None,
+        )
+
+    defaults = [
+        row for row in rows
+        if isinstance(row, dict) and field(row, "default") is True
+    ]
+    if rows and not defaults:
+        return False
+    if defaults and not all(_local_endpoint(field(row, "uri")) for row in defaults):
+        return False
+    info = _probe([path, "info", "--format", "json"])
+    if not info or info.returncode != 0:
+        return False
+    try:
+        payload = json.loads(info.stdout or "{}")
+    except (TypeError, ValueError):
+        return False
+    return str(payload.get("host", {}).get("os", "")).casefold() == "linux"
 
 
 def _parse_argv(argv_json):
@@ -119,6 +200,88 @@ def _validate_image(image):
     return image
 
 
+def _is_inside(path, root):
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _prohibited_root(path):
+    if path == Path(path.anchor):
+        return True
+    if os.name != "nt":
+        prohibited = tuple(Path(item) for item in ("/proc", "/sys", "/dev", "/run"))
+        if any(_is_inside(path, item) for item in prohibited):
+            return True
+    return False
+
+
+def authorized_roots():
+    raw = os.environ.get(ROOTS_ENV, "").strip()
+    if not raw:
+        return []
+    roots = []
+    for item in raw.split(os.pathsep):
+        item = item.strip()
+        if not item:
+            continue
+        path = Path(item).expanduser().resolve(strict=True)
+        if not path.is_dir() or _prohibited_root(path):
+            raise ValueError("isolated authorized root is unsafe: %s" % path)
+        if path not in roots:
+            roots.append(path)
+    return roots
+
+
+def _reject_special_project_entries(project):
+    """Reject submounts, reparse points, links, sockets, and device-like files."""
+    stack = [Path(project)]
+    seen = 0
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    isjunction = getattr(os.path, "isjunction", lambda _path: False)
+    while stack:
+        directory = stack.pop()
+        try:
+            entries = os.scandir(directory)
+        except OSError as exc:
+            raise ValueError("cannot safely inspect project tree: %s" % exc) from exc
+        with entries:
+            for entry in entries:
+                seen += 1
+                if seen > MAX_PROJECT_ENTRIES:
+                    raise ValueError(
+                        "project safety scan exceeds %d entries" % MAX_PROJECT_ENTRIES
+                    )
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                except OSError as exc:
+                    raise ValueError(
+                        "cannot safely inspect project entry: %s" % entry.path
+                    ) from exc
+                mode = info.st_mode
+                if (
+                    entry.is_symlink()
+                    or isjunction(entry.path)
+                    or (
+                        reparse_flag
+                        and getattr(info, "st_file_attributes", 0) & reparse_flag
+                    )
+                    or os.path.ismount(entry.path)
+                ):
+                    raise ValueError(
+                        "project contains a link, reparse point, or submount: %s"
+                        % entry.path
+                    )
+                if stat.S_ISDIR(mode):
+                    stack.append(Path(entry.path))
+                elif not stat.S_ISREG(mode):
+                    raise ValueError(
+                        "project contains a socket or special entry: %s" % entry.path
+                    )
+
+
 def resolve_project(project):
     raw = str(project or "").strip()
     if not raw:
@@ -135,6 +298,13 @@ def resolve_project(project):
     path = Path(raw).resolve(strict=True)
     if not path.is_dir():
         raise ValueError("project is not a directory: %s" % path)
+    if _prohibited_root(path):
+        raise ValueError("project root is a filesystem/runtime/device root")
+    roots = authorized_roots()
+    if not roots:
+        raise ValueError("no isolated project roots configured in %s" % ROOTS_ENV)
+    if not any(_is_inside(path, root) for root in roots):
+        raise ValueError("project is outside configured isolated roots")
     rendered = str(path)
     if os.name == "nt" and (
         rendered.startswith(("\\\\", "//"))
@@ -143,6 +313,7 @@ def resolve_project(project):
         raise ValueError("resolved Windows project path is ambiguous")
     if "," in rendered or _CONTROL_RE.search(rendered):
         raise ValueError("resolved project path is unsafe for a bind mount")
+    _reject_special_project_entries(path)
     return rendered
 
 
@@ -172,13 +343,17 @@ def build_runtime_argv(
         raise ValueError("invalid internal container name")
     mount = "type=bind,src=%s,dst=/workspace" % project
     if not writable_workspace:
-        mount += ",readonly"
+        # This explicit recursive-read-only request must fail on runtimes or
+        # kernels that cannot make submounts read-only; silently accepting a
+        # top-level-only read-only bind would expose writable nested mounts.
+        mount += ",readonly,bind-recursive=readonly"
     argv = [
         str(runtime_path), "run", "--rm", "--pull=never",
         "--name", container_name,
         "--network=none", "--read-only", "--cap-drop=ALL",
         "--security-opt=no-new-privileges", "--pids-limit=%d" % pids,
-        "--memory=%dm" % memory_mb, "--cpus=%g" % cpus,
+        "--memory=%dm" % memory_mb, "--memory-swap=%dm" % memory_mb,
+        "--cpus=%g" % cpus,
         "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=64m",
         "--user=65534:65534", "--workdir=/workspace",
         "--mount", mount,
@@ -191,123 +366,81 @@ def build_runtime_argv(
 
 
 def _child_environment():
-    # The CLI gets only OS bootstrap state.  In particular it cannot inherit
-    # Docker configuration overrides, registry credentials, proxies, or Sonder
-    # secrets from the MCP process.
-    env = {}
-    if os.name == "nt":
-        for key in ("SystemRoot", "WINDIR"):
-            if os.environ.get(key):
-                env[key] = os.environ[key]
-    return env
+    return _runtime_environment()
 
 
 def _cleanup(runtime_path, container_name):
-    try:
-        subprocess.run(
-            [runtime_path, "rm", "-f", container_name],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=5,
-            env=_child_environment(),
-            shell=False,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        pass
+    """Retry removal and positively verify that the generated name is absent."""
+    for _attempt in range(3):
+        _probe([runtime_path, "rm", "-f", container_name])
+        inspected = _probe([runtime_path, "inspect", container_name])
+        if inspected is not None and inspected.returncode != 0:
+            return "verified-absent"
+    return "uncertain-container-removal"
 
 
 def _run_bounded(argv, runtime_path, container_name, stdin, timeout, output_limit):
-    proc = subprocess.Popen(
-        argv,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=_child_environment(),
-        shell=False,
-    )
-    # Bound unread pipe data as well as returned output.  An unbounded queue
-    # would let a fast child consume arbitrary host memory before the main
-    # thread noticed that the output cap had been crossed.
-    events = queue.Queue(maxsize=8)
+    # Regular files avoid pipe-reader/writer threads entirely.  This makes
+    # timeout and output-limit teardown deterministic on Windows as well as
+    # POSIX: there are no background readers to leak or block on a full queue.
+    with tempfile.TemporaryFile() as input_file, tempfile.TemporaryFile() as out_file, tempfile.TemporaryFile() as err_file:
+        input_file.write(stdin)
+        input_file.seek(0)
+        proc = subprocess.Popen(
+            argv, stdin=input_file, stdout=out_file, stderr=err_file,
+            env=_child_environment(), shell=False,
+        )
+        reason = ""
+        deadline = time.monotonic() + timeout
+        while proc.poll() is None:
+            total = os.fstat(out_file.fileno()).st_size + os.fstat(err_file.fileno()).st_size
+            if total > output_limit:
+                reason = "combined stdout/stderr exceeded %d bytes" % output_limit
+                break
+            if time.monotonic() >= deadline:
+                reason = "timed out after %ss" % timeout
+                break
+            time.sleep(0.01)
 
-    def read_stream(label, stream):
-        try:
-            while True:
-                chunk = stream.read(4096)
-                if not chunk:
-                    break
-                events.put((label, chunk))
-        finally:
-            events.put((label, None))
+        final_total = (
+            os.fstat(out_file.fileno()).st_size
+            + os.fstat(err_file.fileno()).st_size
+        )
+        if not reason and final_total > output_limit:
+            reason = "combined stdout/stderr exceeded %d bytes" % output_limit
 
-    def write_stdin():
-        try:
-            if stdin:
-                proc.stdin.write(stdin)
-                proc.stdin.flush()
-        except (BrokenPipeError, OSError):
-            pass
-        finally:
+        cleanup_status = "not-required"
+        if reason:
             try:
-                proc.stdin.close()
+                proc.kill()
             except OSError:
                 pass
+            try:
+                returncode = proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                returncode = None
+                reason += "; container CLI did not exit after kill"
+            # The CLI is reaped before daemon cleanup.  Removal is retried and
+            # then independently verified by exact generated container name.
+            cleanup_status = _cleanup(runtime_path, container_name)
+            if cleanup_status != "verified-absent":
+                reason += "; container removal could not be verified"
+        else:
+            returncode = proc.wait(timeout=3)
 
-    for label, stream in (("stdout", proc.stdout), ("stderr", proc.stderr)):
-        threading.Thread(target=read_stream, args=(label, stream), daemon=True).start()
-    threading.Thread(target=write_stdin, daemon=True).start()
-
-    chunks = {"stdout": [], "stderr": []}
-    total = 0
-    closed = set()
-    reason = ""
-    deadline = time.monotonic() + timeout
-    while len(closed) < 2:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            reason = "timed out after %ss" % timeout
-            break
-        try:
-            label, chunk = events.get(timeout=min(0.1, remaining))
-        except queue.Empty:
-            if proc.poll() is not None and len(closed) == 2:
-                break
-            continue
-        if chunk is None:
-            closed.add(label)
-            continue
-        kept = chunk[: max(0, output_limit - total)]
-        if kept:
-            chunks[label].append(kept)
-            total += len(kept)
-        if len(kept) < len(chunk):
-            reason = "combined stdout/stderr exceeded %d bytes" % output_limit
-            break
-    if reason:
-        try:
-            proc.kill()
-        except OSError:
-            pass
-        _cleanup(runtime_path, container_name)
-    try:
-        returncode = proc.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        try:
-            proc.kill()
-        except OSError:
-            pass
-        _cleanup(runtime_path, container_name)
-        returncode = None
-        reason = reason or "container client did not exit"
-    return {
-        "ok": not reason and returncode == 0,
-        "returncode": returncode,
-        "stdout": b"".join(chunks["stdout"]).decode("utf-8", "replace"),
-        "stderr": b"".join(chunks["stderr"]).decode("utf-8", "replace"),
-        "error": reason,
-    }
+        out_file.seek(0)
+        stdout = out_file.read(output_limit)
+        remaining = max(0, output_limit - len(stdout))
+        err_file.seek(0)
+        stderr = err_file.read(remaining)
+        return {
+            "ok": not reason and returncode == 0,
+            "returncode": returncode,
+            "stdout": stdout.decode("utf-8", "replace"),
+            "stderr": stderr.decode("utf-8", "replace"),
+            "error": reason,
+            "cleanup": cleanup_status,
+        }
 
 
 def run_isolated(
@@ -327,7 +460,10 @@ def run_isolated(
     if not runtime_path:
         return {
             "ok": False, "returncode": None, "stdout": "", "stderr": "",
-            "error": "isolated execution unavailable: Docker or Podman was not detected",
+            "error": (
+                "isolated execution unavailable: explicitly enable a ready local "
+                "Docker or Podman engine with %s" % RUNTIME_ENV
+            ),
             "runtime": "", "project": "", "writable_workspace": False,
         }
     timeout = _clamp_int(timeout, DEFAULT_TIMEOUT, 1, MAX_TIMEOUT)
@@ -368,6 +504,8 @@ def format_result(result):
             if result.get("writable_workspace") else "read-only"
         ),
     ]
+    if result.get("cleanup"):
+        lines.append("  cleanup: %s" % result["cleanup"])
     if result.get("error"):
         lines.append("  error: %s" % result["error"])
     if result.get("stdout"):

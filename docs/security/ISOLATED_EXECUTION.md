@@ -1,15 +1,23 @@
 # Optional isolated execution
 
 `isolated_run` is a direct MCP-only tool for running an already-installed Linux
-container image through Docker or Podman. It is disabled when neither runtime is
-detected and can be forced off with `SONDER_ISOLATED_RUNTIME=off`. The setting
-also accepts only `auto`, `docker`, or `podman`; it cannot name an executable.
+container image through Docker or Podman. It is **off by default**. Set
+`SONDER_ISOLATED_RUNTIME=auto|docker|podman` to enable it explicitly; the setting
+cannot name an executable. Detection requires a responsive Linux engine through
+a local Unix socket, named pipe, loopback endpoint, or loopback Podman-machine
+connection. An installed but stopped engine is skipped and `auto` tries the
+other engine. Remote contexts are rejected.
 
-The local permission default is `ask`. The tool is deliberately absent from the
+The local permission default is `ask`, but metadata is not the authorization
+boundary. Every call must also provide a valid developer token, the secret from
+`SONDER_ISOLATED_APPROVAL_CODE`, and `acknowledge_isolation_limits=true`.
+Writable execution additionally requires the distinct secret configured in
+`SONDER_ISOLATED_WRITE_APPROVAL_CODE`. The tool is deliberately absent from the
 Sonder agent, project-agent, workbench, and autopilot tool lists. This preserves
 a host decision boundary for the only integrity-expanding option:
 `writable_workspace=true`. The exact absolute project directory is the only host
-bind. It is read-only by default.
+bind. It is read-only by default. `SONDER_ISOLATED_ROOTS` must explicitly list
+one or more authorized parent directories; arbitrary host paths are rejected.
 
 ## Fixed policy
 
@@ -30,7 +38,11 @@ Every launch has:
 - a minimal environment created by `/usr/bin/env -i`;
 - PID, memory, CPU, wall-time, stdin, and combined-output caps;
 - one generated container name so timeout/output-limit cleanup can issue a
-  bounded argv-only `docker|podman rm -f`.
+  bounded argv-only `docker|podman rm -f`, retry it, and verify the exact name
+  is absent. Uncertain removal is surfaced as an error;
+- memory plus swap set to the same limit, preventing extra swap allowance;
+- recursive read-only bind semantics requested explicitly. A runtime/kernel
+  that cannot guarantee recursive read-only mounting must reject the launch.
 
 Defaults are 30 seconds, 512 MiB, 1 CPU, 64 PIDs, 64 KiB stdin, and 128 KiB
 combined output. Hard maxima are 120 seconds, 4096 MiB, 4 CPUs, 256 PIDs,
@@ -41,11 +53,19 @@ paths, relative paths, control characters, and the comma delimiter used by the
 runtime mount syntax fail closed. The resolved path is mounted directly; Sonder
 does not translate it through WSL/MSYS conventions.
 
+The selected project must be inside `SONDER_ISOLATED_ROOTS`. Filesystem roots,
+Windows drive roots, `/proc`, `/sys`, `/dev`, `/run`, submounts, symlinks,
+Windows reparse points, Unix sockets, FIFOs, devices, and other special entries
+are rejected before launch. This prevents a nominal project bind from exposing
+runtime sockets, devices, or writable nested mounts. The safety walk is bounded
+at 100,000 entries and fails closed when it cannot inspect an entry.
+
 ## Security boundary and limitations
 
 This is defense in depth, not an escape-proof sandbox. Its guarantees depend on
 the external Docker/Podman CLI, daemon or Podman machine, OCI runtime, image,
-virtualization layer, and host kernel being correctly configured and patched.
+virtualization layer, bind-recursion implementation, and host kernel being
+correctly configured and patched.
 A compromised daemon or kernel defeats these controls. Docker Desktop and
 Podman machine may also implement the bind through a VM/filesharing layer.
 
