@@ -102,12 +102,15 @@ class FakeController:
 
 
 @pytest.fixture
-def launcher_server():
+def launcher_server(tmp_path):
     token = "a" * 32
     controller = FakeController()
     server = sonder_launcher.LauncherServer(
         ("127.0.0.1", 0), sonder_launcher.LauncherHandler,
         controller=controller, token=token,
+        command_journal=sonder_launcher.command_recovery.CommandJournal(
+            tmp_path / "launcher-commands.jsonl"
+        ),
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -230,6 +233,181 @@ def test_launcher_accepts_and_forwards_idempotency_key(launcher_server):
     )
     assert status == 202
     assert controller.idempotency_keys == ["mobile-request-1234"]
+
+
+def test_tracked_command_rejects_a_second_idempotency_identity(launcher_server):
+    base, token, controller = launcher_server
+    with pytest.raises(urllib.error.HTTPError) as error:
+        request(
+            base + "/v1/launcher/start",
+            token,
+            "POST",
+            {},
+            {
+                "X-Sonder-Client-Id": "phone-1",
+                "X-Sonder-Command-Id": "start-1",
+                "Idempotency-Key": "legacy-key-1234",
+            },
+        )
+    assert error.value.code == 400
+    assert controller.actions == []
+
+
+def test_launcher_command_journal_replays_then_acknowledges(launcher_server):
+    base, token, controller = launcher_server
+    headers = {
+        "X-Sonder-Client-Id": "phone-1",
+        "X-Sonder-Command-Id": "restart-1",
+    }
+    first_status, first = request(
+        base + "/v1/launcher/restart", token, "POST", {}, headers,
+    )
+    replay_status, replay = request(
+        base + "/v1/launcher/restart", token, "POST", {}, headers,
+    )
+
+    assert first_status == replay_status == 202
+    assert first == replay
+    assert controller.actions == [("restart", "8192")]
+    assert controller.idempotency_keys[0].startswith("command:")
+
+    ack_status, ack = request(
+        base + "/v1/launcher/commands/ack", token, "POST", {}, headers,
+    )
+    assert ack_status == 200
+    assert ack["state"] == "acknowledged"
+
+
+def test_tracked_conflict_is_a_replayable_known_negative(launcher_server, monkeypatch):
+    base, token, controller = launcher_server
+    attempts = []
+
+    def conflict(*_args):
+        attempts.append(True)
+        raise sonder_launcher.LauncherConflictError("already active")
+
+    monkeypatch.setattr(controller, "submit", conflict)
+    headers = {
+        "X-Sonder-Client-Id": "phone-1",
+        "X-Sonder-Command-Id": "conflict-1",
+    }
+    payloads = []
+    for _ in range(2):
+        with pytest.raises(urllib.error.HTTPError) as error:
+            request(base + "/v1/launcher/start", token, "POST", {}, headers)
+        assert error.value.code == 409
+        payloads.append(json.loads(error.value.read()))
+
+    assert payloads[0] == payloads[1]
+    assert attempts == [True]
+
+
+def test_conflict_replay_persistence_failure_is_reported_uncertain(
+    launcher_server, monkeypatch,
+):
+    base, token, controller = launcher_server
+    monkeypatch.setattr(
+        controller,
+        "submit",
+        lambda *_args: (_ for _ in ()).throw(
+            sonder_launcher.LauncherConflictError("already active")
+        ),
+    )
+    monkeypatch.setattr(
+        sonder_launcher.command_recovery.CommandJournal,
+        "complete",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("fsync failed")),
+    )
+    headers = {
+        "X-Sonder-Client-Id": "phone-1",
+        "X-Sonder-Command-Id": "conflict-fsync-1",
+    }
+
+    with pytest.raises(urllib.error.HTTPError) as error:
+        request(base + "/v1/launcher/start", token, "POST", {}, headers)
+
+    assert error.value.code == 503
+    payload = json.loads(error.value.read())
+    assert payload["command_state"] == "uncertain"
+    assert payload["dispatch_allowed"] is False
+
+
+def test_response_construction_failure_after_submit_is_durably_uncertain(
+    launcher_server, monkeypatch,
+):
+    base, token, controller = launcher_server
+    monkeypatch.setattr(
+        controller,
+        "operation_payload",
+        lambda _operation: (_ for _ in ()).throw(OSError("status unavailable")),
+    )
+    headers = {
+        "X-Sonder-Client-Id": "phone-1",
+        "X-Sonder-Command-Id": "payload-failure-1",
+    }
+    with pytest.raises(urllib.error.HTTPError) as first_error:
+        request(base + "/v1/launcher/start", token, "POST", {}, headers)
+    assert first_error.value.code == 503
+    assert json.loads(first_error.value.read())["command_state"] == "uncertain"
+
+    with pytest.raises(urllib.error.HTTPError) as retry_error:
+        request(base + "/v1/launcher/start", token, "POST", {}, headers)
+    assert retry_error.value.code == 409
+    assert json.loads(retry_error.value.read())["command_state"] == "uncertain"
+    assert controller.actions == [("start", "8192")]
+
+
+def test_result_persistence_failure_becomes_durably_uncertain(
+    launcher_server, monkeypatch,
+):
+    base, token, controller = launcher_server
+    original = sonder_launcher.command_recovery.CommandJournal.complete
+
+    def fail_complete(self, *args, **kwargs):
+        raise OSError("result fsync failed")
+
+    monkeypatch.setattr(
+        sonder_launcher.command_recovery.CommandJournal, "complete", fail_complete,
+    )
+    headers = {
+        "X-Sonder-Client-Id": "phone-1",
+        "X-Sonder-Command-Id": "uncertain-1",
+    }
+    with pytest.raises(urllib.error.HTTPError) as first_error:
+        request(base + "/v1/launcher/start", token, "POST", {}, headers)
+    assert first_error.value.code == 503
+    assert json.loads(first_error.value.read())["command_state"] == "uncertain"
+
+    monkeypatch.setattr(
+        sonder_launcher.command_recovery.CommandJournal, "complete", original,
+    )
+    with pytest.raises(urllib.error.HTTPError) as retry_error:
+        request(base + "/v1/launcher/start", token, "POST", {}, headers)
+    assert retry_error.value.code == 409
+    assert json.loads(retry_error.value.read())["command_state"] == "uncertain"
+    assert controller.actions == [("start", "8192")]
+
+
+def test_invalid_stored_replay_fails_closed(launcher_server, monkeypatch):
+    base, token, controller = launcher_server
+    monkeypatch.setattr(
+        sonder_launcher.command_recovery.CommandJournal,
+        "receive",
+        lambda *_args, **_kwargs: {
+            "state": "completed",
+            "dispatch": False,
+            "result": {"status": "202", "payload": [], "headers": {"X": "bad\r\nY: z"}},
+        },
+    )
+    headers = {
+        "X-Sonder-Client-Id": "phone-1",
+        "X-Sonder-Command-Id": "bad-replay-1",
+    }
+    with pytest.raises(urllib.error.HTTPError) as error:
+        request(base + "/v1/launcher/start", token, "POST", {}, headers)
+    assert error.value.code == 503
+    assert json.loads(error.value.read())["error"] == "stored command result is invalid"
+    assert controller.actions == []
 
 
 def test_launcher_rejects_unsafe_http_body_framing(launcher_server):
