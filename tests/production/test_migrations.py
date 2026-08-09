@@ -97,7 +97,8 @@ def test_edited_migration_history_rejected(tmp_path):
 def test_all_registered_stores_report_status():
     statuses = sonder_migrations.status_all()
     assert set(statuses) == {
-        "memory", "autopilot", "fleet", "operations", "updates"
+        "memory", "autopilot", "fleet", "operations", "queued_actions",
+        "updates",
     }
     for store_status in statuses.values():
         assert not store_status.unknown
