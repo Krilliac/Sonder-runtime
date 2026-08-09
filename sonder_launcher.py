@@ -31,7 +31,7 @@ from pathlib import Path
 
 import sonder_health
 import command_recovery
-from process_liveness import pid_alive as _process_pid_alive
+from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_alive
 from sonder_paths import state_path
 
 
