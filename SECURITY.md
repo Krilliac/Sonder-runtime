@@ -42,6 +42,9 @@ Mitigations that are already in place and worth knowing about:
 - `file_batch_write` never targets secrets/control state or traverses symlinks,
   requires explicit create-versus-overwrite intent, and rolls back completed
   writes on a later failure when restoration remains possible.
+- `log_inspect` rejects sensitive/control paths and reparse traversal, validates
+  the already-open regular-file handle, and uses only fixed host parsers under
+  hard file, byte, line, result, output, and time ceilings.
 - Cloud tiers are **opt-in**. Local tiers run against loopback Ollama, and a
   remote `OLLAMA_HOST` must be explicitly enabled.
 - Lessons are passed through a 20-rule privacy classifier before storage, so
