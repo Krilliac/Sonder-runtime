@@ -119,10 +119,18 @@ def test_autopilot_transfer_policy_is_workspace_bounded():
     assert "exact source and destination" in check(
         "file_move", {"source": "a.bin"}
     )
-    assert "cannot overwrite" in check(
+    assert "boolean false" in check(
         "file_move",
         {"source": "a.bin", "destination": "b.bin", "overwrite": True},
     )
+    for effective_true in (1, "true", "false", None):
+        assert "boolean false" in check(
+            "file_copy",
+            {
+                "source": "a.bin", "destination": "b.bin",
+                "overwrite": effective_true,
+            },
+        )
     assert "bypass" in check(
         "file_copy",
         {"source": "a", "destination": "b", "extra_roots": "outside"},

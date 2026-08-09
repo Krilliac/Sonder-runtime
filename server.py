@@ -7451,13 +7451,15 @@ def file_copy(
     started = time.time()
     args = {
         "source": source, "destination": destination,
-        "overwrite": bool(overwrite),
+        "overwrite": overwrite,
     }
     try:
+        if type(overwrite) is not bool:
+            raise ValueError("overwrite must be a boolean")
         data = file_ops.copy_file(
             source,
             destination,
-            overwrite=bool(overwrite),
+            overwrite=overwrite,
             extra_roots=extra_roots,
             bypass=_file_bypass_allowed(token, approval),
             developer_authorized=_file_developer_allowed(token),
@@ -7489,13 +7491,15 @@ def file_move(
     started = time.time()
     args = {
         "source": source, "destination": destination,
-        "overwrite": bool(overwrite),
+        "overwrite": overwrite,
     }
     try:
+        if type(overwrite) is not bool:
+            raise ValueError("overwrite must be a boolean")
         data = file_ops.move_file(
             source,
             destination,
-            overwrite=bool(overwrite),
+            overwrite=overwrite,
             extra_roots=extra_roots,
             bypass=_file_bypass_allowed(token, approval),
             developer_authorized=_file_developer_allowed(token),
@@ -13379,8 +13383,11 @@ def _autopilot_tool_policy(run: dict):
                 args.get("destination") or ""
             ).strip():
                 return "ERROR: HOST POLICY: autonomous file transfers require exact source and destination paths."
-            if args.get("overwrite") is True:
-                return "ERROR: HOST POLICY: autonomous file transfers cannot overwrite existing files."
+            if "overwrite" in args and args.get("overwrite") is not False:
+                return (
+                    "ERROR: HOST POLICY: autonomous file transfers require "
+                    "overwrite to be the boolean false."
+                )
         if tool_name == "workspace_run":
             program = os.path.basename(str(args.get("program", ""))).lower()
             if program not in _AUTOPILOT_RUNNERS:

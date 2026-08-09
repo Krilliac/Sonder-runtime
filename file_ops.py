@@ -8,9 +8,9 @@ server layer.
 from __future__ import annotations
 
 import fnmatch
-import errno
 import hashlib
 import os
+import secrets
 import stat
 import tempfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -743,6 +743,307 @@ def _resolve_transfer_path(
     return resolved
 
 
+def _stat_identity(value: os.stat_result) -> tuple[int, int, int]:
+    return (int(value.st_dev), int(value.st_ino), stat.S_IFMT(value.st_mode))
+
+
+def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return _stat_identity(left) == _stat_identity(right)
+
+
+class _DirectoryAnchor:
+    """Keep an allowed directory anchored while names below it are changed.
+
+    POSIX operations use descriptor-relative syscalls. Windows' stdlib exposes
+    no dir-fd operations, so the fallback verifies the directory file identity
+    immediately before and after each path operation and fails closed if the
+    name was rebound. Holding source file descriptors still anchors all bytes
+    read on every platform.
+    """
+
+    def __init__(self, path: Path, expected: os.stat_result):
+        self.path = path
+        self.expected = expected
+        self.fd: int | None = None
+        self._windows_handle = None
+
+    def __enter__(self):
+        if os.name == "nt":
+            import ctypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            create_file = kernel32.CreateFileW
+            create_file.argtypes = [
+                ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32,
+                ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+                ctypes.c_void_p,
+            ]
+            create_file.restype = ctypes.c_void_p
+            handle = create_file(
+                str(self.path),
+                0,
+                0x00000001 | 0x00000002,  # share read/write, never delete
+                None,
+                3,  # OPEN_EXISTING
+                0x02000000 | 0x00200000,  # BACKUP_SEMANTICS | OPEN_REPARSE_POINT
+                None,
+            )
+            if handle == ctypes.c_void_p(-1).value:
+                raise ctypes.WinError(ctypes.get_last_error())
+            self._windows_handle = (kernel32, handle)
+        try:
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_DIRECTORY", 0)
+            )
+            try:
+                fd = os.open(self.path, flags)
+            except PermissionError:
+                if os.name != "nt":
+                    raise
+            else:
+                actual = os.fstat(fd)
+                if not _same_identity(actual, self.expected):
+                    os.close(fd)
+                    raise PermissionError(
+                        "validated transfer directory changed before use"
+                    )
+                self.fd = fd
+            self.validate()
+        except Exception:
+            self.__exit__()
+            raise
+        return self
+
+    def __exit__(self, *_args):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+        if self._windows_handle is not None:
+            kernel32, handle = self._windows_handle
+            kernel32.CloseHandle(handle)
+            self._windows_handle = None
+
+    @property
+    def descriptor_relative(self) -> bool:
+        required = (os.open, os.unlink, os.link, os.replace)
+        return self.fd is not None and all(
+            operation in os.supports_dir_fd for operation in required
+        )
+
+    def validate(self) -> None:
+        _require_no_reparse_components(self.path)
+        current = self.path.lstat()
+        if not stat.S_ISDIR(current.st_mode) or not _same_identity(current, self.expected):
+            raise PermissionError("validated transfer directory changed during operation")
+        if self.fd is not None and not _same_identity(os.fstat(self.fd), current):
+            raise PermissionError("validated transfer directory handle no longer matches path")
+
+    def create_temp(self, destination_name: str) -> tuple[int, str, Path]:
+        prefix = ".%s.sonder-transfer-" % destination_name
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_CLOEXEC", 0)
+        if self.descriptor_relative:
+            for _ in range(100):
+                name = prefix + secrets.token_hex(8)
+                try:
+                    fd = os.open(name, flags, 0o600, dir_fd=self.fd)
+                except FileExistsError:
+                    continue
+                try:
+                    self.validate()
+                except Exception:
+                    os.close(fd)
+                    os.unlink(name, dir_fd=self.fd)
+                    raise
+                return fd, name, self.path / name
+            raise FileExistsError("could not allocate a unique transfer temporary file")
+        self.validate()
+        fd, raw_path = tempfile.mkstemp(prefix=prefix, dir=str(self.path))
+        path = Path(raw_path)
+        try:
+            self.validate()
+        except Exception:
+            os.close(fd)
+            try:
+                self.validate()
+                path.unlink()
+            except (OSError, PermissionError):
+                pass
+            raise
+        return fd, path.name, path
+
+    def chmod(self, name: str, mode: int) -> None:
+        if self.fd is not None and os.chmod in os.supports_dir_fd:
+            os.chmod(name, mode, dir_fd=self.fd)
+            self.validate()
+            return
+        self.validate()
+        os.chmod(self.path / name, mode)
+        self.validate()
+
+    def unlink(self, name: str) -> None:
+        if self.descriptor_relative:
+            os.unlink(name, dir_fd=self.fd)
+            self.validate()
+            return
+        self.validate()
+        (self.path / name).unlink()
+        self.validate()
+
+    def link_name(self, source_name: str, destination_name: str) -> None:
+        if self.descriptor_relative:
+            os.link(
+                source_name, destination_name,
+                src_dir_fd=self.fd, dst_dir_fd=self.fd,
+                follow_symlinks=False,
+            )
+            self.validate()
+            return
+        self.validate()
+        os.link(
+            self.path / source_name,
+            self.path / destination_name,
+            follow_symlinks=False,
+        )
+        self.validate()
+
+    def replace_name(self, source_name: str, destination_name: str) -> None:
+        if self.descriptor_relative:
+            os.replace(
+                source_name, destination_name,
+                src_dir_fd=self.fd, dst_dir_fd=self.fd,
+            )
+            self.validate()
+            return
+        self.validate()
+        os.replace(self.path / source_name, self.path / destination_name)
+        self.validate()
+
+    def publish(self, temp_name: str, destination_name: str, *, overwrite: bool) -> None:
+        if self.descriptor_relative:
+            if overwrite:
+                os.replace(
+                    temp_name, destination_name,
+                    src_dir_fd=self.fd, dst_dir_fd=self.fd,
+                )
+            else:
+                os.link(
+                    temp_name, destination_name,
+                    src_dir_fd=self.fd, dst_dir_fd=self.fd,
+                    follow_symlinks=False,
+                )
+                os.unlink(temp_name, dir_fd=self.fd)
+            self.validate()
+            return
+        self.validate()
+        temp_path = self.path / temp_name
+        destination = self.path / destination_name
+        if overwrite:
+            os.replace(temp_path, destination)
+        else:
+            # Hard-link publication is atomic and fails with EEXIST. Unlike a
+            # closed reservation followed by replace, it never clobbers a name
+            # another process installed during the copy.
+            os.link(temp_path, destination, follow_symlinks=False)
+            temp_path.unlink()
+        self.validate()
+
+
+def _windows_open_source(source: Path) -> int:
+    import ctypes
+    import msvcrt
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32,
+        ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+        ctypes.c_void_p,
+    ]
+    create_file.restype = ctypes.c_void_p
+    handle = create_file(
+        str(source),
+        0x80000000,  # GENERIC_READ
+        0x00000001,  # FILE_SHARE_READ; deny writes, deletes, and renames
+        None,
+        3,  # OPEN_EXISTING
+        0x00200000 | 0x08000000,  # OPEN_REPARSE_POINT | SEQUENTIAL_SCAN
+        None,
+    )
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return msvcrt.open_osfhandle(
+            handle, os.O_RDONLY | getattr(os, "O_BINARY", 0),
+        )
+    except Exception:
+        kernel32.CloseHandle(handle)
+        raise
+
+
+def _open_validated_source(
+    source: Path,
+    expected: os.stat_result,
+    anchor: _DirectoryAnchor | None = None,
+):
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    if os.name == "nt":
+        fd = _windows_open_source(source)
+    elif anchor is not None and anchor.fd is not None and os.open in os.supports_dir_fd:
+        fd = os.open(source.name, flags, dir_fd=anchor.fd)
+    else:
+        fd = os.open(source, flags)
+    try:
+        actual = os.fstat(fd)
+        if not stat.S_ISREG(actual.st_mode) or not _same_identity(actual, expected):
+            raise PermissionError("validated transfer source changed before open")
+        if actual.st_size > MAX_TRANSFER_BYTES:
+            raise ValueError(
+                "source exceeds max transfer bytes (%d): %s"
+                % (MAX_TRANSFER_BYTES, source)
+            )
+        return os.fdopen(fd, "rb", closefd=True), actual
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _require_source_identity(source: Path, expected: os.stat_result) -> None:
+    _require_no_reparse_components(source)
+    current = source.lstat()
+    if (
+        not stat.S_ISREG(current.st_mode)
+        or not _same_identity(current, expected)
+        or current.st_size != expected.st_size
+        or current.st_mtime_ns != expected.st_mtime_ns
+    ):
+        raise PermissionError("validated transfer source changed during operation")
+    if current.st_size > MAX_TRANSFER_BYTES:
+        raise ValueError(
+            "source changed and exceeds max transfer bytes (%d): %s"
+            % (MAX_TRANSFER_BYTES, source)
+        )
+
+
+def _require_open_source_unchanged(
+    source_stream,
+    source: Path,
+    expected: os.stat_result,
+    bytes_read: int,
+) -> None:
+    current = os.fstat(source_stream.fileno())
+    if (
+        not _same_identity(current, expected)
+        or current.st_size != bytes_read
+        or current.st_size > MAX_TRANSFER_BYTES
+        or current.st_mtime_ns != expected.st_mtime_ns
+    ):
+        raise PermissionError("validated transfer source changed while it was read")
+    _require_source_identity(source, expected)
+
+
 def _prepare_transfer(
     source: str,
     destination: str,
@@ -752,7 +1053,10 @@ def _prepare_transfer(
     extra_roots: str,
     bypass: bool,
     developer_authorized: bool,
-) -> tuple[Path, Path, int, bool]:
+) -> tuple[
+    Path, Path, os.stat_result, os.stat_result, os.stat_result,
+    os.stat_result | None, bool,
+]:
     src = _resolve_transfer_path(
         source, label="source", extra_roots=extra_roots, bypass=bypass,
     )
@@ -769,15 +1073,18 @@ def _prepare_transfer(
         raise ValueError("source must be a regular file: %s" % src)
     if src == dst:
         raise ValueError("source and destination must be different files")
-    size = src.stat().st_size
-    if size > MAX_TRANSFER_BYTES:
+    source_stat = src.lstat()
+    source_parent_stat = src.parent.lstat()
+    if source_stat.st_size > MAX_TRANSFER_BYTES:
         raise ValueError(
             "source exceeds max transfer bytes (%d): %s" % (MAX_TRANSFER_BYTES, src)
         )
     if not dst.parent.exists() or not dst.parent.is_dir():
         raise FileNotFoundError("destination parent directory does not exist: %s" % dst.parent)
     _require_no_reparse_components(dst.parent)
+    destination_parent_stat = dst.parent.lstat()
     destination_exists = dst.exists()
+    destination_stat = dst.lstat() if destination_exists else None
     if destination_exists:
         if not dst.is_file():
             raise ValueError("destination must be a regular file: %s" % dst)
@@ -790,31 +1097,30 @@ def _prepare_transfer(
             raise FileExistsError(
                 "destination exists (set overwrite=true to replace): %s" % dst
             )
-    return src, dst, size, destination_exists
+    return (
+        src, dst, source_stat, source_parent_stat,
+        destination_parent_stat, destination_stat, destination_exists,
+    )
 
 
-def _atomic_copy_bytes(source: Path, destination: Path, *, overwrite: bool) -> str:
-    reserved_destination = False
-    temp_path = None
+def _atomic_copy_bytes(
+    source_stream,
+    source_stat: os.stat_result,
+    destination: Path,
+    destination_anchor: _DirectoryAnchor,
+    *,
+    overwrite: bool,
+    pre_publish=None,
+) -> tuple[str, int]:
+    temp_name = None
     digest = hashlib.sha256()
     try:
-        if not overwrite:
-            reserve_fd = os.open(
-                destination,
-                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-                0o600,
-            )
-            os.close(reserve_fd)
-            reserved_destination = True
-        temp_fd, temp_name = tempfile.mkstemp(
-            prefix=".%s.sonder-copy-" % destination.name,
-            dir=str(destination.parent),
-        )
-        temp_path = Path(temp_name)
-        with source.open("rb") as incoming, os.fdopen(temp_fd, "wb") as outgoing:
+        temp_fd, temp_name, _temp_path = destination_anchor.create_temp(destination.name)
+        source_stream.seek(0)
+        with os.fdopen(temp_fd, "wb") as outgoing:
             total = 0
             while True:
-                chunk = incoming.read(SNAPSHOT_CHUNK_BYTES)
+                chunk = source_stream.read(SNAPSHOT_CHUNK_BYTES)
                 if not chunk:
                     break
                 total += len(chunk)
@@ -824,30 +1130,20 @@ def _atomic_copy_bytes(source: Path, destination: Path, *, overwrite: bool) -> s
                 outgoing.write(chunk)
             outgoing.flush()
             os.fsync(outgoing.fileno())
-        os.chmod(temp_path, stat.S_IMODE(source.stat().st_mode))
-        os.replace(temp_path, destination)
-        temp_path = None
-        reserved_destination = False
-        return digest.hexdigest()
+        destination_anchor.chmod(temp_name, stat.S_IMODE(source_stat.st_mode))
+        if pre_publish is not None:
+            pre_publish(total)
+        destination_anchor.publish(
+            temp_name, destination.name, overwrite=overwrite,
+        )
+        temp_name = None
+        return digest.hexdigest(), total
     finally:
-        if temp_path is not None:
+        if temp_name is not None:
             try:
-                temp_path.unlink()
-            except FileNotFoundError:
+                destination_anchor.unlink(temp_name)
+            except (FileNotFoundError, PermissionError):
                 pass
-        if reserved_destination:
-            try:
-                destination.unlink()
-            except FileNotFoundError:
-                pass
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(SNAPSHOT_CHUNK_BYTES), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def copy_file(
@@ -859,7 +1155,12 @@ def copy_file(
     bypass: bool = False,
     developer_authorized: bool = False,
 ) -> dict:
-    src, dst, _source_size, destination_exists = _prepare_transfer(
+    if type(overwrite) is not bool:
+        raise ValueError("overwrite must be a boolean")
+    (
+        src, dst, source_stat, _source_parent_stat,
+        destination_parent_stat, _destination_stat, destination_exists,
+    ) = _prepare_transfer(
         source,
         destination,
         overwrite=bool(overwrite),
@@ -868,10 +1169,27 @@ def copy_file(
         bypass=bypass,
         developer_authorized=developer_authorized,
     )
-    digest = _atomic_copy_bytes(src, dst, overwrite=bool(overwrite))
+    with (
+        _DirectoryAnchor(src.parent, _source_parent_stat) as source_anchor,
+        _DirectoryAnchor(dst.parent, destination_parent_stat) as destination_anchor,
+    ):
+        source_stream, opened_stat = _open_validated_source(
+            src, source_stat, source_anchor,
+        )
+        with source_stream:
+            digest, total = _atomic_copy_bytes(
+                source_stream,
+                opened_stat,
+                dst,
+                destination_anchor,
+                overwrite=bool(overwrite),
+                pre_publish=lambda bytes_read: _require_open_source_unchanged(
+                    source_stream, src, opened_stat, bytes_read,
+                ),
+            )
     return {
         "action": "copy",
-        "bytes": dst.stat().st_size,
+        "bytes": total,
         "destination": str(dst),
         "overwrite": bool(overwrite),
         "path": str(dst),
@@ -881,23 +1199,41 @@ def copy_file(
     }
 
 
-def _move_backup(destination: Path) -> Path:
-    fd, name = tempfile.mkstemp(
-        prefix=".%s.sonder-move-backup-" % destination.name,
-        dir=str(destination.parent),
-    )
-    os.close(fd)
-    backup = Path(name)
-    backup.unlink()
-    os.replace(destination, backup)
-    return backup
+def _move_backup(anchor: _DirectoryAnchor, destination_name: str) -> str:
+    prefix = ".%s.sonder-move-backup-" % destination_name
+    for _ in range(100):
+        backup_name = prefix + secrets.token_hex(8)
+        try:
+            anchor.link_name(destination_name, backup_name)
+        except FileExistsError:
+            continue
+        return backup_name
+    raise FileExistsError("could not allocate a unique move rollback name")
 
 
-def _rollback_move(destination: Path, backup: Path | None) -> None:
-    if destination.exists() and not _is_reparse_point(destination):
-        destination.unlink()
-    if backup is not None and backup.exists():
-        os.replace(backup, destination)
+def _rollback_move(
+    anchor: _DirectoryAnchor,
+    destination_name: str,
+    backup_name: str | None,
+) -> None:
+    try:
+        anchor.unlink(destination_name)
+    except FileNotFoundError:
+        pass
+    if backup_name is not None:
+        anchor.replace_name(backup_name, destination_name)
+
+
+def _require_destination_identity(
+    destination: Path,
+    expected: os.stat_result | None,
+) -> None:
+    if expected is None:
+        return
+    _require_no_reparse_components(destination)
+    current = destination.lstat()
+    if not stat.S_ISREG(current.st_mode) or not _same_identity(current, expected):
+        raise PermissionError("validated transfer destination changed during operation")
 
 
 def move_file(
@@ -909,7 +1245,12 @@ def move_file(
     bypass: bool = False,
     developer_authorized: bool = False,
 ) -> dict:
-    src, dst, _source_size, destination_exists = _prepare_transfer(
+    if type(overwrite) is not bool:
+        raise ValueError("overwrite must be a boolean")
+    (
+        src, dst, source_stat, source_parent_stat,
+        destination_parent_stat, destination_stat, destination_exists,
+    ) = _prepare_transfer(
         source,
         destination,
         overwrite=bool(overwrite),
@@ -918,61 +1259,86 @@ def move_file(
         bypass=bypass,
         developer_authorized=developer_authorized,
     )
-    digest = _sha256_file(src)
-    backup = _move_backup(dst) if destination_exists else None
-    method = "rename"
-    rollback_complete = False
-    try:
+    backup_name = None
+    with (
+        _DirectoryAnchor(src.parent, source_parent_stat) as source_anchor,
+        _DirectoryAnchor(dst.parent, destination_parent_stat) as destination_anchor,
+    ):
+        published = False
+        if destination_exists:
+            _require_destination_identity(dst, destination_stat)
+            backup_name = _move_backup(destination_anchor, dst.name)
         try:
-            if overwrite:
-                os.replace(src, dst)
-            else:
-                os.link(src, dst, follow_symlinks=False)
+            source_stream, opened_stat = _open_validated_source(
+                src, source_stat, source_anchor,
+            )
+            with source_stream:
+                digest, total = _atomic_copy_bytes(
+                    source_stream,
+                    opened_stat,
+                    dst,
+                    destination_anchor,
+                    overwrite=destination_exists,
+                    pre_publish=lambda bytes_read: (
+                        _require_open_source_unchanged(
+                            source_stream, src, opened_stat, bytes_read,
+                        ),
+                        _require_destination_identity(dst, destination_stat),
+                    ),
+                )
+                published = True
                 try:
-                    src.unlink()
+                    _require_open_source_unchanged(
+                        source_stream, src, opened_stat, total,
+                    )
                 except Exception:
-                    dst.unlink()
+                    _rollback_move(destination_anchor, dst.name, backup_name)
+                    backup_name = None
+                    published = False
                     raise
-                method = "link"
-        except OSError as exc:
-            if exc.errno not in {
-                errno.EXDEV, errno.EPERM, errno.EACCES,
-                getattr(errno, "ENOTSUP", errno.EPERM),
-            }:
-                raise
-            method = "copy-delete"
-            _atomic_copy_bytes(src, dst, overwrite=False)
             try:
-                src.unlink()
+                _require_source_identity(src, opened_stat)
+                source_anchor.unlink(src.name)
             except Exception:
-                _rollback_move(dst, backup)
-                backup = None
-                rollback_complete = True
+                _rollback_move(destination_anchor, dst.name, backup_name)
+                backup_name = None
                 raise
-        if backup is not None:
-            try:
-                backup.unlink()
-            except OSError:
-                # The requested move committed but the replaced destination's
-                # rollback copy could not be removed. Restore the source and
-                # old destination rather than leave secret backup debris.
-                _atomic_copy_bytes(dst, src, overwrite=False)
-                dst.unlink()
-                os.replace(backup, dst)
-                backup = None
-                rollback_complete = True
-                raise
-            backup = None
-    except Exception:
-        if src.exists() and not rollback_complete:
-            _rollback_move(dst, backup)
-            backup = None
-        raise
+            if backup_name is not None:
+                try:
+                    destination_anchor.unlink(backup_name)
+                except OSError:
+                    # Restore both names if even rollback-backup cleanup fails.
+                    destination_source_stat = dst.lstat()
+                    restore_stream, restore_stat = _open_validated_source(
+                        dst, destination_source_stat, destination_anchor,
+                    )
+                    with restore_stream:
+                        _atomic_copy_bytes(
+                            restore_stream,
+                            restore_stat,
+                            src,
+                            source_anchor,
+                            overwrite=False,
+                            pre_publish=lambda bytes_read: _require_open_source_unchanged(
+                                restore_stream, dst, restore_stat, bytes_read,
+                            ),
+                        )
+                    _rollback_move(destination_anchor, dst.name, backup_name)
+                    backup_name = None
+                    raise
+                backup_name = None
+        except Exception:
+            if backup_name is not None and not published:
+                try:
+                    destination_anchor.unlink(backup_name)
+                except OSError:
+                    pass
+            raise
     return {
         "action": "move",
-        "bytes": dst.stat().st_size,
+        "bytes": total,
         "destination": str(dst),
-        "method": method,
+        "method": "copy-delete",
         "overwrite": bool(overwrite),
         "path": str(dst),
         "replaced": destination_exists,
