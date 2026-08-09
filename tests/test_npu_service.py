@@ -1,6 +1,7 @@
 """Host-side accelerator service: policy gating, host validation of scores,
 provenance-gated embedding acceleration, and redacted status."""
 import json
+import threading
 
 import pytest
 
@@ -313,6 +314,158 @@ def test_route_decide_falls_back_on_broker_unavailable(npu_env, monkeypatch):
     fake = FakeBroker(error=npu_broker.NpuUnavailable("timeout"))
     monkeypatch.setattr(npu_service.npu_broker, "get_broker", lambda: fake)
     assert npu_service.route_decide("inspect, fix, and validate") is None
+
+
+def test_fallback_projection_reports_ram_gate_and_execution_handler(
+    npu_env, monkeypatch,
+):
+    _set_mode("shadow", embeddings="prefer")
+    fake = FakeBroker()
+    broker_status = fake.status()
+    broker_status["fallbacks"] = {"ram_gate": 1}
+    broker_status["last_error"] = (
+        r"available RAM below spawn gate at C:\private\models; token=secret"
+    )
+    monkeypatch.setattr(fake, "status", lambda: broker_status)
+    monkeypatch.setattr(npu_service.npu_broker, "get_broker", lambda: fake)
+
+    state = npu_service.status()
+    projection = npu_service.fallback_projection(state)
+
+    assert projection["schema_version"] == 1
+    assert projection["capabilities"]["routing"] == {
+        "policy_mode": "shadow",
+        "role": "observer",
+        "local_fallback_handler": "ollama",
+    }
+    assert projection["capabilities"]["embeddings"] == {
+        "policy_mode": "prefer",
+        "role": "executor",
+        "local_fallback_handler": "ollama",
+    }
+    assert projection["reason_counts"] == {"ram_gate": 1}
+    assert projection["last_fallback"] == {
+        "capability": "unknown",
+        "reason": "ram_gate",
+        "operation_mode": "unknown",
+        "fallback_handler": "unknown",
+        "handler_state": "observed",
+        "count": 1,
+    }
+    assert "available RAM" not in json.dumps(projection)
+
+
+def test_unknown_broker_reason_is_collapsed_before_human_status(
+    npu_env, monkeypatch,
+):
+    _set_mode("prefer")
+    fake = FakeBroker()
+    broker_status = fake.status()
+    hostile = r"C:\private\weights\model.onnx token=secret\x1b[2J"
+    broker_status["fallbacks"] = {hostile: 3}
+    broker_status["last_error"] = hostile
+    monkeypatch.setattr(fake, "status", lambda: broker_status)
+    monkeypatch.setattr(npu_service.npu_broker, "get_broker", lambda: fake)
+
+    state = npu_service.status()
+    rendered = npu_service.format_status(state)
+    projection = npu_service.fallback_projection(state)
+
+    assert projection["reason_counts"] == {"unknown": 3}
+    assert projection["last_fallback"]["reason"] == "unknown"
+    assert "unknown=3" in rendered
+    assert hostile not in rendered
+    assert "private" not in rendered and "token=secret" not in rendered
+
+
+def test_activity_feed_distinguishes_execution_fallback_from_shadow(npu_env):
+    activity_tracker.reset_for_tests()
+    with activity_tracker.response_span("npu-observability", "safe request"):
+        npu_service._record_capability_event(
+            "npu_route_shadow", "routing", reason="ram_gate", ok=False,
+        )
+        npu_service._record_fallback("embeddings", "ram_gate")
+        npu_service.record_fallback_handler("embeddings", "ollama", True)
+
+    feed = activity_tracker.execution_feed(include_detail=False)
+    assert feed["schema_version"] == 1
+    events = [row for row in feed["events"] if row["kind"].startswith("npu_")]
+    shadow = next(row for row in events if row["kind"] == "npu_route_shadow")
+    pending = next(row for row in events if row["kind"] == "npu_fallback")
+    handled = next(
+        row for row in events if row["kind"] == "npu_fallback_handled"
+    )
+    assert (shadow["capability"], shadow["operation_mode"]) == (
+        "routing", "shadow",
+    )
+    assert (shadow["fallback_handler"], shadow["handler_state"]) == (
+        "ollama", "observed",
+    )
+    assert (pending["capability"], pending["operation_mode"]) == (
+        "embeddings", "execution",
+    )
+    assert pending["handler_state"] == "pending"
+    assert (handled["fallback_handler"], handled["handler_state"]) == (
+        "ollama", "handled",
+    )
+    assert npu_service.fallback_projection()["last_fallback"][
+        "handler_state"
+    ] == "handled"
+
+
+def test_hostile_runtime_reason_never_enters_activity_or_status(npu_env):
+    activity_tracker.reset_for_tests()
+    hostile = r"C:\private\weights\model.onnx api_key=secret"
+    with activity_tracker.response_span("npu-hostile", "safe request"):
+        npu_service._record_fallback("embeddings", hostile)
+
+    raw = activity_tracker.snapshot()
+    feed = activity_tracker.execution_feed(raw, include_detail=True)
+    projection = npu_service.fallback_projection()
+    serialized = json.dumps({"raw": raw, "feed": feed, "status": projection})
+
+    assert hostile not in serialized
+    event = next(row for row in feed["events"] if row["kind"] == "npu_fallback")
+    assert event["reason"] == "unknown"
+    assert projection["last_fallback"]["reason"] == "unknown"
+
+
+def test_concurrent_fallback_handlers_keep_their_own_reason(npu_env):
+    activity_tracker.reset_for_tests()
+    first_recorded = threading.Event()
+    second_handled = threading.Event()
+
+    def first():
+        with activity_tracker.response_span("first-fallback", "safe"):
+            npu_service._record_fallback("embeddings", "ram_gate")
+            first_recorded.set()
+            assert second_handled.wait(timeout=3)
+            npu_service.record_fallback_handler("embeddings", "ollama", True)
+
+    def second():
+        assert first_recorded.wait(timeout=3)
+        with activity_tracker.response_span("second-fallback", "safe"):
+            npu_service._record_fallback("embeddings", "timeout")
+            npu_service.record_fallback_handler("embeddings", "ollama", False)
+        second_handled.set()
+
+    threads = [threading.Thread(target=first), threading.Thread(target=second)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+    feed = activity_tracker.execution_feed(include_detail=False)
+    handled = [
+        row for row in feed["events"]
+        if row["kind"] == "npu_fallback_handled"
+    ]
+    assert {(row["reason"], row["handler_state"]) for row in handled} == {
+        ("ram_gate", "handled"), ("timeout", "failed"),
+    }
+    latest = npu_service.fallback_projection()["last_fallback"]
+    assert (latest["reason"], latest["handler_state"]) == ("timeout", "failed")
 
 
 def test_route_decide_rejects_invalid_scores(npu_env, monkeypatch):

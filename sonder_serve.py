@@ -1773,6 +1773,7 @@ class Handler(BaseHTTPRequestHandler):
                 "runtime_policy": server.runtime_policy_data(),
                 "selfmod": server.selfmod.status_data(),
                 "mcp_runtime": server.mcp_runtime_data(),
+                "npu_fallback": server.npu_fallback_status_data(),
                 "learning_health": server.learning_health_data(),
                 "activity": activity,
                 "db_path": getattr(server, "_DB_PATH", ""),
