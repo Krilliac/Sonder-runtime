@@ -63,6 +63,7 @@ import admin_auth
 import codegen_loop
 import file_ops
 import data_query as data_query_module
+import sqlite_mutate as sqlite_mutate_module
 import symbol_index
 import context_policy
 import command_registry
@@ -7517,6 +7518,55 @@ def data_query(
 
 
 @mcp.tool()
+def sqlite_mutate(
+    path: str,
+    sql: str,
+    parameters_json: str,
+    mode: str = "preview",
+    max_rows: int = 1000,
+    timeout: float = 2.0,
+    max_db_bytes: int = 67108864,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Preview-rollback or atomically apply one parameterized SQLite DML statement."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "path": path, "statement_chars": len(sql) if isinstance(sql, str) else 0,
+        "parameters_chars": len(parameters_json) if isinstance(parameters_json, str) else 0,
+        "mode": mode, "max_rows": max_rows, "timeout": timeout,
+        "max_db_bytes": max_db_bytes,
+    }
+    try:
+        data = sqlite_mutate_module.mutate_sqlite(
+            path, sql, parameters_json, mode=mode, max_rows=max_rows,
+            timeout=timeout, max_db_bytes=max_db_bytes, extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "sqlite_mutate", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False)
+    _record_direct_tool(
+        "sqlite_mutate", args, ok=True, started=started,
+        summary="%s %s %d row(s)" % (
+            data["mode"], data["statement"], data["rows_affected"],
+        ), output=output,
+    )
+    if data["applied"]:
+        _record_file_activity("sqlite_mutate", {
+            "action": "sqlite_mutate", "path": data["path"],
+            "bytes": data["database_bytes_after"],
+            "lines_edited": data["rows_affected"],
+        })
+    return output
+
+
+@mcp.tool()
 def file_write(
     path: str,
     content: str,
@@ -10280,7 +10330,7 @@ def tool_manifest() -> str:
         "repository_symbol_index": "Build a deterministic bounded read-only declaration index with Python AST and conservative JS/TS/C/C++/C#/Rust/Go extraction.",
         "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
         "environment_status": "Report the host OS, available shells (PowerShell/cmd/bash/wsl), and installed toolchains -- check before choosing a command shape or assuming a tool exists.",
-        "data_inspect/data_query": "Preview structured data or run bounded read-only SQLite SELECT/CTE and exact-filter JSON/JSONL/CSV/TSV queries inside allowed roots.",
+        "data_inspect/data_query/sqlite_mutate": "Preview structured data, run bounded read-only queries, or explicitly preview/apply one guarded parameterized SQLite DML statement.",
         "program_search/script_search/workspace_run/script_run/image_inspect": "Discover installed programs and workspace scripts, run bounded argv-only processes, and inspect image metadata.",
         "task_create/task_list/task_update/task_show/checklist_create/checklist_update/checklist_show": "Visible todo and ordered checklist state shared by console, app, agents, and MCP.",
         "workbench_agent": "Run an autonomous local tool loop with a guaranteed checklist, exact action transcript, validation gate, and end report.",
@@ -10353,6 +10403,7 @@ AGENT_TOOL_HELP = """Available tools:
 - image_inspect: {"path": "artifacts/generated/demo/icon.png"}
 - data_inspect: {"path": "data/records.jsonl", "max_bytes": 256000}
 - data_query: {"path": "data/records.jsonl", "sql": "", "projection_json": ["id", "/nested/name"], "filters_json": {"status": "active"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
+- sqlite_mutate: {"path": "data/app.db", "sql": "UPDATE records SET status = ? WHERE id = ?", "parameters_json": ["done", 42], "mode": "preview|apply", "max_rows": 1000, "timeout": 2, "max_db_bytes": 67108864}
 - task_create: {"title": "...", "detail": "...", "priority": 2, "project": "...", "owner": "..."}
 - task_list: {"status": "pending|in_progress|blocked|done|canceled", "project": "", "include_done": false, "limit": 50}
 - task_update: {"task_id": "...", "status": "in_progress|blocked|done", "note": "..."}
@@ -11370,6 +11421,18 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "sqlite_mutate":
+        parameters = args.get("parameters_json", args.get("parameters", []))
+        if not isinstance(parameters, str):
+            parameters = json.dumps(parameters, ensure_ascii=False)
+        return sqlite_mutate(
+            path=args.get("path", ""), sql=args.get("sql", ""),
+            parameters_json=parameters, mode=args.get("mode", "preview"),
+            max_rows=args.get("max_rows", 1000), timeout=args.get("timeout", 2.0),
+            max_db_bytes=args.get("max_db_bytes", 67108864),
+            token=args.get("token", ""), approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "text_search":
         return text_search(
             query=args.get("query", args.get("pattern", "")),
@@ -11712,7 +11775,7 @@ def _agent_activity_command(tool_name, args):
 
 
 _PROJECT_SCOPED_PATH_TOOLS = frozenset({
-    "file_read", "file_read_range", "context_pack", "data_query", "image_inspect",
+    "file_read", "file_read_range", "context_pack", "data_query", "sqlite_mutate", "image_inspect",
     "file_write", "file_batch_write", "file_edit",
     "file_delete", "directory_create", "workspace_inventory", "directory_tree",
     "file_find", "repository_symbol_index", "text_search", "script_search", "artifact_verify",
@@ -11910,12 +11973,29 @@ def _agent_dispatch_observed(
 
 
 _WORK_MUTATION_TOOLS = frozenset({
-    "directory_create", "file_write", "file_batch_write", "file_edit", "file_delete",
+    "directory_create", "file_write", "file_batch_write", "sqlite_mutate", "file_edit", "file_delete",
     "scaffold_project",
     "artifact_generate", "game_generate_and_test", "game_generation_campaign",
     "memory_quality_repair", "memory_privacy_repair", "memory_embedding_backfill",
     "memory_interaction_embedding_backfill",
 })
+
+
+def _agent_tool_mutates(tool_name, args):
+    """True only when this invocation can change persistent workspace state."""
+    args = args if isinstance(args, dict) else {}
+    if tool_name not in _WORK_MUTATION_TOOLS:
+        return False
+    if tool_name == "file_delete":
+        return args.get("dry_run") is False
+    if tool_name == "sqlite_mutate":
+        return str(args.get("mode", "preview")).strip().lower() == "apply"
+    if tool_name in {
+        "memory_quality_repair", "memory_privacy_repair",
+        "memory_embedding_backfill", "memory_interaction_embedding_backfill",
+    }:
+        return args.get("apply") is True
+    return True
 
 # Read-only tools whose default (empty-args) invocation is meaningful, so a
 # name-only branch prediction yields a deterministic call signature that can
@@ -13030,7 +13110,7 @@ def _agent_impl(
             )
         if (
             auto_checklist
-            and tool_name in _WORK_MUTATION_TOOLS
+            and _agent_tool_mutates(tool_name, policy_tool_args)
             and not inspected
             and not policy_error
         ):
@@ -13182,37 +13262,12 @@ def _agent_impl(
             _agent_checklist_mark(
                 checklist_id, checklist_states, 2, "in_progress", "working from inspected evidence",
             )
-        mutation_happened = (
-            tool_name in _WORK_MUTATION_TOOLS
-            and tool_ok
-            and not (
-                tool_name == "file_delete"
-                and tool_args.get("dry_run") is not False
-            )
-            and not (
-                tool_name in {
-                    "memory_quality_repair", "memory_privacy_repair",
-                    "memory_embedding_backfill",
-                    "memory_interaction_embedding_backfill",
-                }
-                and tool_args.get("apply") is not True
-            )
-        )
+        mutation_happened = _agent_tool_mutates(
+            tool_name, policy_tool_args,
+        ) and tool_ok
         mutation_attempt_may_have_changed = (
             tool_dispatched
-            and tool_name in _WORK_MUTATION_TOOLS
-            and not (
-                tool_name == "file_delete"
-                and tool_args.get("dry_run") is not False
-            )
-            and not (
-                tool_name in {
-                    "memory_quality_repair", "memory_privacy_repair",
-                    "memory_embedding_backfill",
-                    "memory_interaction_embedding_backfill",
-                }
-                and tool_args.get("apply") is not True
-            )
+            and _agent_tool_mutates(tool_name, policy_tool_args)
         )
         if mutation_attempt_may_have_changed:
             # A failed mutator can still leave directories or partial output.
