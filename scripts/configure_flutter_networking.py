@@ -1,8 +1,9 @@
 """Configure generated Flutter projects for Sonder Runtime identity/networking.
 
 The repository intentionally does not commit Flutter's generated native trees.
-Run this after ``flutter create``. Cleartext Android LAN access is an explicit
-build-time choice because HTTPS is preferable whenever bearer tokens are used.
+Run this after ``flutter create``. Production Android builds deny cleartext
+traffic. A local development build may opt in explicitly when testing against
+a loopback or LAN server that does not terminate HTTPS.
 """
 from __future__ import annotations
 
@@ -261,9 +262,13 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("app_root", nargs="?", default="app")
     parser.add_argument(
-        "--allow-android-cleartext",
+        "--allow-android-cleartext-for-development",
+        dest="allow_android_cleartext",
         action="store_true",
-        help="Allow user-configured http:// LAN endpoints in the Android build.",
+        help=(
+            "Development only: allow user-configured http:// loopback or LAN "
+            "endpoints in the generated Android manifest."
+        ),
     )
     args = parser.parse_args(argv)
     for path in configure(Path(args.app_root), args.allow_android_cleartext):
