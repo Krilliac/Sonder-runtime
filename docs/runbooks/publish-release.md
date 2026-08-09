@@ -72,6 +72,29 @@ medium. The mirror is never trusted — metadata and hashes establish
 trust, so a hostile mirror can at worst withhold or corrupt a release
 (which the client rejects), never forge one.
 
+## Desktop application artifacts
+
+The `build-apps` workflow gates its Android, Linux, Windows, and macOS
+artifacts through `scripts/release_artifacts.py` before a tagged release can
+publish. The gate requires exactly one artifact for every supported platform,
+opens each archive (including the Android APK's nested local-system payload),
+and refuses the release if `LICENSE` is absent.
+
+The integrity artifact contains:
+
+- `SHA256SUMS`, a portable SHA-256 manifest covering all four applications,
+  the SBOM, and the provenance statement;
+- `sonder-runtime-sbom.cdx.json`, CycloneDX 1.5 metadata for the distributed
+  files; and
+- `sonder-runtime-provenance.intoto.json`, an unsigned in-toto statement with
+  SLSA provenance fields tying those hashes to the workflow and full Git SHA.
+
+This metadata is evidence, not a signature. Verify `SHA256SUMS` after download
+and use the existing TUF ceremony above for cryptographic release trust. The
+local-system payload also contains `sonder_build.json`; runtime `/version` and
+diagnostics therefore report the source version and full commit from which the
+desktop artifact was assembled.
+
 ## Freshness and freeze protection
 
 `timestamp` expires in 1 day and `snapshot` in 7 by design: an attacker
