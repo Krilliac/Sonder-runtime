@@ -9,16 +9,22 @@ Ownership and concurrency contract:
   conditional ``BEGIN IMMEDIATE`` transactions. Callers never write rows directly.
 * The module is intentionally not hot-reloaded. Its database survives process
   replacement; callers may reload while continuing to use this stable API.
+* Once stable principal authentication is supplied, ``owner_id`` is only the
+  process lease/logging identity. It is retained for legacy callers and stale
+  owner reconciliation, but it is not an authorization boundary.
 """
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
+import secrets
 import socket
 import sqlite3
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import sonder_paths
@@ -37,6 +43,14 @@ MAX_OUTPUT_CHARS = 128_000
 MAX_ERROR_CHARS = 8_000
 MAX_SUMMARY_CHARS = 2_000
 MAX_ACTIVITY_CHARS = 500
+MAX_MESSAGE_CHARS = 8_000
+MAX_PENDING_MESSAGES_PER_AGENT = 32
+MAX_PENDING_MESSAGES_PER_SCOPE = 128
+MAX_MESSAGES_PER_RATE_WINDOW = 10
+MESSAGE_RATE_WINDOW_SECONDS = 60
+DEFAULT_MESSAGE_RETENTION_SECONDS = 7 * 24 * 60 * 60
+DEFAULT_MESSAGE_PENDING_TTL_SECONDS = 24 * 60 * 60
+MESSAGE_MODES = frozenset(("follow_up", "steer"))
 
 _SCHEMA_LOCK = threading.RLock()
 _INITIALIZED_PATHS: set[str] = set()
@@ -51,10 +65,17 @@ CREATE TABLE IF NOT EXISTS fleet_owners (
     stale_seen_ts REAL,
     closed_ts REAL
 );
+CREATE TABLE IF NOT EXISTS fleet_principals (
+    principal_id TEXT PRIMARY KEY,
+    secret_hash TEXT NOT NULL,
+    created_ts REAL NOT NULL,
+    last_seen_ts REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS fleet_agents (
     id TEXT PRIMARY KEY,
     owner_id TEXT NOT NULL,
     owner_pid INTEGER NOT NULL,
+    principal_id TEXT DEFAULT '',
     role TEXT NOT NULL,
     parent_id TEXT DEFAULT '',
     task TEXT DEFAULT '',
@@ -97,11 +118,136 @@ CREATE TABLE IF NOT EXISTS fleet_events (
 );
 CREATE INDEX IF NOT EXISTS idx_fleet_events_agent
     ON fleet_events(agent_id, event_id DESC);
+CREATE TABLE IF NOT EXISTS fleet_messages (
+    message_id TEXT PRIMARY KEY,
+    sender_id TEXT NOT NULL,
+    recipient_id TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    principal_id TEXT DEFAULT '',
+    project_scope TEXT DEFAULT '',
+    scope_root_id TEXT NOT NULL,
+    mode TEXT NOT NULL CHECK(mode IN ('follow_up', 'steer')),
+    body TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('queued', 'delivered', 'expired')),
+    queued_ts REAL NOT NULL,
+    delivered_ts REAL,
+    expires_ts REAL NOT NULL,
+    FOREIGN KEY(sender_id) REFERENCES fleet_agents(id) ON DELETE CASCADE,
+    FOREIGN KEY(recipient_id) REFERENCES fleet_agents(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_fleet_messages_recipient
+    ON fleet_messages(recipient_id, status, queued_ts);
+CREATE INDEX IF NOT EXISTS idx_fleet_messages_scope
+    ON fleet_messages(principal_id, project_scope, scope_root_id, status, queued_ts);
 """
 
 
 def database_path() -> str:
     return sonder_paths.state_path("fleet.db", "SONDER_FLEET_DB")
+
+
+def principal_credentials_path() -> str:
+    return sonder_paths.state_path(
+        "fleet-principal.json", "SONDER_FLEET_PRINCIPAL_FILE"
+    )
+
+
+def _principal_secret_hash(secret: str) -> str:
+    return hashlib.sha256(str(secret).encode("utf-8")).hexdigest()
+
+
+def register_principal(principal_id: str, secret: str) -> None:
+    """Register or authenticate one stable local fleet authority."""
+    principal = str(principal_id or "").strip()
+    token = str(secret or "")
+    if not principal.startswith("principal-") or len(principal) > 96:
+        raise ValueError("invalid fleet principal id")
+    if len(token) < 32 or len(token) > 256:
+        raise ValueError("invalid fleet principal secret")
+    digest = _principal_secret_hash(token)
+    now = time.time()
+    with _write_transaction() as conn:
+        row = conn.execute(
+            "SELECT secret_hash FROM fleet_principals WHERE principal_id=?",
+            (principal,),
+        ).fetchone()
+        if row is not None and not secrets.compare_digest(row["secret_hash"], digest):
+            raise PermissionError("fleet principal authentication failed")
+        conn.execute(
+            """
+            INSERT INTO fleet_principals(
+                principal_id, secret_hash, created_ts, last_seen_ts
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(principal_id) DO UPDATE SET last_seen_ts=excluded.last_seen_ts
+            """,
+            (principal, digest, now, now),
+        )
+
+
+def _authenticate_principal(
+    conn: sqlite3.Connection, principal_id: str, secret: str,
+) -> str:
+    principal = str(principal_id or "").strip()
+    token = str(secret or "")
+    row = conn.execute(
+        "SELECT secret_hash FROM fleet_principals WHERE principal_id=?",
+        (principal,),
+    ).fetchone()
+    if (
+        row is None
+        or not token
+        or not secrets.compare_digest(
+            str(row["secret_hash"]), _principal_secret_hash(token)
+        )
+    ):
+        raise PermissionError("fleet principal authentication failed")
+    return principal
+
+
+def local_principal_credentials() -> tuple[str, str]:
+    """Load or atomically publish the per-user stable fleet credential."""
+    path = Path(principal_credentials_path()).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for _ in range(3):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            principal = str(payload.get("principal_id") or "")
+            secret = str(payload.get("secret") or "")
+            register_principal(principal, secret)
+            return principal, secret
+        except FileNotFoundError:
+            payload = {
+                "principal_id": "principal-%s" % uuid.uuid4().hex,
+                "secret": secrets.token_hex(32),
+            }
+            temporary = path.with_name(
+                ".%s.%s.tmp" % (path.name, uuid.uuid4().hex)
+            )
+            try:
+                with temporary.open("x", encoding="utf-8", newline="\n") as handle:
+                    json.dump(payload, handle, sort_keys=True)
+                    handle.write("\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                if os.name != "nt":
+                    with contextlib.suppress(OSError):
+                        os.chmod(temporary, 0o600)
+                # A hard-link publishes a fully-written inode atomically while
+                # failing if another process won the destination name. Unlike
+                # os.replace(), it cannot clobber an established credential.
+                os.link(temporary, path)
+            except FileExistsError:
+                continue
+            finally:
+                with contextlib.suppress(FileNotFoundError):
+                    temporary.unlink()
+            register_principal(payload["principal_id"], payload["secret"])
+            return payload["principal_id"], payload["secret"]
+        except PermissionError:
+            raise
+        except (json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
+            raise RuntimeError("invalid fleet principal credential file") from exc
+    raise RuntimeError("could not establish fleet principal credentials")
 
 
 def _clamp_text(value, limit: int) -> str:
@@ -162,6 +308,14 @@ def _ensure_schema(path: str) -> None:
                     try:
                         conn.execute(
                             "ALTER TABLE fleet_agents ADD COLUMN project TEXT DEFAULT ''"
+                        )
+                    except sqlite3.OperationalError as exc:
+                        if "duplicate column" not in str(exc).lower():
+                            raise
+                if "principal_id" not in columns:
+                    try:
+                        conn.execute(
+                            "ALTER TABLE fleet_agents ADD COLUMN principal_id TEXT DEFAULT ''"
                         )
                     except sqlite3.OperationalError as exc:
                         if "duplicate column" not in str(exc).lower():
@@ -340,20 +494,33 @@ def reconcile_stale_owners(
     return {"suspect_owners": suspects, "interrupted": interrupted, "owners": owners}
 
 
-def create_agent(row: dict, owner_id: str, owner_pid: int) -> dict:
+def create_agent(
+    row: dict, owner_id: str, owner_pid: int, *, principal_id: str = "",
+    principal_secret: str = "",
+) -> dict:
     now = float(row.get("updated_ts") or time.time())
     status = str(row.get("status") or "queued")
     activity = _clamp_text(row.get("activity") or status, MAX_ACTIVITY_CHARS)
     summary = _clamp_text(row.get("summary"), MAX_SUMMARY_CHARS)
     cancel_requested = bool(row.get("cancel_requested"))
     finished_ts = row.get("finished_ts")
+    principal = str(principal_id or row.get("principal_id") or "")
     with _write_transaction() as conn:
+        if principal:
+            _authenticate_principal(conn, principal, principal_secret)
         parent_id = str(row.get("parent_id") or "")
         if parent_id:
             parent = conn.execute(
-                "SELECT status, cancel_requested FROM fleet_agents WHERE id=?",
+                "SELECT status, cancel_requested, principal_id, project "
+                "FROM fleet_agents WHERE id=?",
                 (parent_id,),
             ).fetchone()
+            if parent:
+                parent_principal = str(parent["principal_id"] or "")
+                if parent_principal != principal:
+                    raise PermissionError("child principal must match its parent tree")
+                if str(parent["project"] or "") != str(row.get("project") or ""):
+                    raise PermissionError("child project must match its parent tree")
             inherited = bool(
                 parent and (
                     parent["cancel_requested"]
@@ -369,17 +536,17 @@ def create_agent(row: dict, owner_id: str, owner_pid: int) -> dict:
         conn.execute(
             """
             INSERT INTO fleet_agents(
-                id, owner_id, owner_pid, role, parent_id, task, status,
+                id, owner_id, owner_pid, principal_id, role, parent_id, task, status,
                 activity, started_ts, updated_ts, finished_ts, tool_calls,
                 tokens_in, tokens_out, files_json, summary, output, error,
                 cancel_requested, in_model_call, requested_agents,
                 worker_slots, mode, tier, project, retry_of, retried_by
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             (
-                row["id"], owner_id, int(owner_pid), row.get("role", "agent"),
+                row["id"], owner_id, int(owner_pid), principal, row.get("role", "agent"),
                 parent_id, _clamp_text(row.get("task"), MAX_TASK_CHARS), status,
                 activity, float(row.get("started_ts") or now), now, finished_ts,
                 int(row.get("tool_calls") or 0), int(row.get("tokens_in") or 0),
@@ -542,6 +709,13 @@ def finish_agent(
                 now, now, agent_id, owner_id,
             ),
         )
+        # Steering is meaningful only while an agent can reach a cooperative
+        # checkpoint. Follow-ups remain retained for an explicit resumed turn.
+        conn.execute(
+            "UPDATE fleet_messages SET status='expired' "
+            "WHERE recipient_id=? AND mode='steer' AND status='queued'",
+            (agent_id,),
+        )
         stored = conn.execute(
             "SELECT * FROM fleet_agents WHERE id=?", (agent_id,)
         ).fetchone()
@@ -692,6 +866,328 @@ def get_agent(selector: str, *, role: str = "") -> dict | None:
         conn.close()
 
 
+def _message_dict(row) -> dict | None:
+    if row is None:
+        return None
+    return dict(row)
+
+
+def _scope_root_id(conn: sqlite3.Connection, agent_id: str) -> str:
+    """Return the persisted root of one agent tree, rejecting corrupt cycles."""
+    current = str(agent_id or "")
+    seen = set()
+    for _ in range(64):
+        if not current or current in seen:
+            raise ValueError("agent parent chain is invalid")
+        seen.add(current)
+        row = conn.execute(
+            "SELECT id, parent_id FROM fleet_agents WHERE id=?", (current,)
+        ).fetchone()
+        if row is None:
+            raise ValueError("agent does not exist")
+        parent_id = str(row["parent_id"] or "")
+        if not parent_id:
+            return str(row["id"])
+        current = parent_id
+    raise ValueError("agent parent chain exceeds safety limit")
+
+
+def list_agents_scoped(
+    owner_id: str = "", *, project: str = "", parent_id: str = "",
+    include_finished: bool = True, limit: int = 50, principal_id: str = "",
+    principal_secret: str = "",
+) -> list[dict]:
+    """Discover retained agents without crossing owner or project boundaries.
+
+    ``project`` is matched exactly. An empty project therefore means the
+    explicitly unscoped fleet, not every project owned by the caller.
+    ``parent_id`` selects one persisted agent tree and must itself be in the
+    requested owner/project scope.
+    """
+    owner = str(owner_id or "").strip()
+    if not owner and not principal_id:
+        raise ValueError("owner_id or authenticated principal is required")
+    scoped_project = str(project or "")
+    capped_limit = max(1, min(int(limit or 50), 200))
+    conn = _connect()
+    try:
+        principal = ""
+        if principal_id:
+            principal = _authenticate_principal(
+                conn, principal_id, principal_secret,
+            )
+        scope_column = "principal_id" if principal else "owner_id"
+        scope_value = principal or owner
+        subtree_id = ""
+        if parent_id:
+            parent = conn.execute(
+                "SELECT owner_id, principal_id, project FROM fleet_agents WHERE id=?",
+                (str(parent_id),),
+            ).fetchone()
+            if (
+                parent is None
+                or str(parent[scope_column] or "") != scope_value
+                or str(parent["project"] or "") != scoped_project
+            ):
+                raise PermissionError("parent agent is outside the requested scope")
+            # Discovery anchored at a child returns that child and descendants,
+            # not siblings elsewhere in the same authorized root tree.
+            subtree_id = str(parent_id)
+        if subtree_id:
+            status_clause = "" if include_finished else (
+                " AND a.status IN ('queued', 'running')"
+            )
+            rows = conn.execute(
+                """
+                WITH RECURSIVE scoped(id) AS (
+                    SELECT ?
+                    UNION ALL
+                    SELECT child.id FROM fleet_agents AS child
+                    JOIN scoped ON child.parent_id=scoped.id
+                    WHERE child.%s=? AND child.project=?
+                )
+                SELECT a.* FROM fleet_agents AS a
+                JOIN scoped ON scoped.id=a.id
+                WHERE a.%s=? AND a.project=?
+                """ % (scope_column, scope_column)
+                + status_clause + " ORDER BY a.updated_ts DESC LIMIT ?",
+                (
+                    subtree_id, scope_value, scoped_project, scope_value, scoped_project,
+                    capped_limit,
+                ),
+            ).fetchall()
+        else:
+            status_clause = "" if include_finished else (
+                " AND status IN ('queued', 'running')"
+            )
+            rows = conn.execute(
+                "SELECT * FROM fleet_agents WHERE %s=? AND project=?" % scope_column
+                + status_clause + " ORDER BY updated_ts DESC LIMIT ?",
+                (scope_value, scoped_project, capped_limit),
+            ).fetchall()
+        return [_row_dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def queue_agent_message(
+    sender_id: str, recipient_id: str, owner_id: str, *, project: str = "",
+    mode: str, body: str, now: float | None = None,
+    pending_ttl_seconds: int = DEFAULT_MESSAGE_PENDING_TTL_SECONDS,
+    principal_id: str = "", principal_secret: str = "",
+) -> dict:
+    """Queue a bounded message inside one retained agent tree.
+
+    ``steer`` is accepted only while the recipient is queued/running and is a
+    cooperative instruction for its next safe checkpoint. ``follow_up`` is a
+    separate retained turn request and may target active or terminal agents.
+    Delivery means a consumer atomically claimed the message; it does not imply
+    that a model accepted or completed the instruction.
+    """
+    sender = str(sender_id or "").strip()
+    recipient = str(recipient_id or "").strip()
+    owner = str(owner_id or "").strip()
+    scoped_project = str(project or "")
+    message_mode = str(mode or "").strip().lower().replace("-", "_")
+    message_body = str(body or "").strip()
+    if not sender or not recipient or not owner:
+        raise ValueError("sender_id, recipient_id, and owner_id are required")
+    if message_mode not in MESSAGE_MODES:
+        raise ValueError("mode must be follow_up or steer")
+    if not message_body:
+        raise ValueError("message body is required")
+    if len(message_body) > MAX_MESSAGE_CHARS:
+        raise ValueError("message body exceeds %s characters" % MAX_MESSAGE_CHARS)
+    current = float(now if now is not None else time.time())
+    ttl = max(60, min(int(pending_ttl_seconds), 7 * 24 * 60 * 60))
+    with _write_transaction() as conn:
+        principal = ""
+        if principal_id:
+            principal = _authenticate_principal(
+                conn, principal_id, principal_secret,
+            )
+        rows = conn.execute(
+            "SELECT id, owner_id, principal_id, project, status FROM fleet_agents "
+            "WHERE id IN (?, ?)",
+            (sender, recipient),
+        ).fetchall()
+        agents = {str(row["id"]): row for row in rows}
+        if sender not in agents or recipient not in agents:
+            raise ValueError("sender or recipient agent does not exist")
+        for row in agents.values():
+            if (
+                (
+                    str(row["principal_id"] or "") != principal
+                    if principal else row["owner_id"] != owner
+                )
+                or str(row["project"] or "") != scoped_project
+            ):
+                raise PermissionError("agent is outside the requested owner/project scope")
+        sender_root = _scope_root_id(conn, sender)
+        recipient_root = _scope_root_id(conn, recipient)
+        if sender_root != recipient_root:
+            raise PermissionError("agents do not belong to the same parent scope")
+        if message_mode == "steer" and agents[recipient]["status"] not in ACTIVE_STATUSES:
+            raise ValueError("steer requires a queued or running recipient")
+        conn.execute(
+            "UPDATE fleet_messages SET status='expired' "
+            "WHERE status='queued' AND expires_ts<=?", (current,)
+        )
+        recipient_pending = conn.execute(
+            "SELECT COUNT(*) FROM fleet_messages "
+            "WHERE recipient_id=? AND status='queued'",
+            (recipient,),
+        ).fetchone()[0]
+        if int(recipient_pending) >= MAX_PENDING_MESSAGES_PER_AGENT:
+            raise RuntimeError("recipient pending-message limit reached")
+        message_scope_column = "principal_id" if principal else "owner_id"
+        scope_pending = conn.execute(
+            "SELECT COUNT(*) FROM fleet_messages WHERE %s=? AND project_scope=? "
+            "AND scope_root_id=? AND status='queued'" % message_scope_column,
+            (principal or owner, scoped_project, sender_root),
+        ).fetchone()[0]
+        if int(scope_pending) >= MAX_PENDING_MESSAGES_PER_SCOPE:
+            raise RuntimeError("parent scope pending-message limit reached")
+        recent = conn.execute(
+            "SELECT COUNT(*) FROM fleet_messages WHERE sender_id=? AND queued_ts>?",
+            (sender, current - MESSAGE_RATE_WINDOW_SECONDS),
+        ).fetchone()[0]
+        if int(recent) >= MAX_MESSAGES_PER_RATE_WINDOW:
+            raise RuntimeError("sender message rate limit reached")
+        message_id = "msg-%s" % uuid.uuid4().hex
+        expires = current + ttl
+        conn.execute(
+            """
+            INSERT INTO fleet_messages(
+                message_id, sender_id, recipient_id, owner_id, principal_id, project_scope,
+                scope_root_id, mode, body, status, queued_ts, delivered_ts,
+                expires_ts
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, NULL, ?)
+            """,
+            (
+                message_id, sender, recipient, owner, principal, scoped_project,
+                sender_root, message_mode, message_body, current, expires,
+            ),
+        )
+        row = conn.execute(
+            "SELECT * FROM fleet_messages WHERE message_id=?", (message_id,)
+        ).fetchone()
+    return _message_dict(row)
+
+
+def claim_agent_messages(
+    recipient_id: str, owner_id: str, *, project: str = "", limit: int = 8,
+    now: float | None = None, principal_id: str = "",
+    principal_secret: str = "",
+) -> list[dict]:
+    """Atomically claim queued messages and return explicit delivery receipts."""
+    recipient = str(recipient_id or "").strip()
+    owner = str(owner_id or "").strip()
+    scoped_project = str(project or "")
+    if not recipient or not owner:
+        raise ValueError("recipient_id and owner_id are required")
+    capped_limit = max(1, min(int(limit or 8), 32))
+    current = float(now if now is not None else time.time())
+    with _write_transaction() as conn:
+        principal = ""
+        if principal_id:
+            principal = _authenticate_principal(
+                conn, principal_id, principal_secret,
+            )
+        agent = conn.execute(
+            "SELECT owner_id, principal_id, project FROM fleet_agents WHERE id=?",
+            (recipient,),
+        ).fetchone()
+        if (
+            agent is None
+            or (
+                str(agent["principal_id"] or "") != principal
+                if principal else agent["owner_id"] != owner
+            )
+            or str(agent["project"] or "") != scoped_project
+        ):
+            raise PermissionError("recipient is outside the requested scope")
+        conn.execute(
+            "UPDATE fleet_messages SET status='expired' "
+            "WHERE recipient_id=? AND status='queued' AND expires_ts<=?",
+            (recipient, current),
+        )
+        inactive_placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
+        conn.execute(
+            "UPDATE fleet_messages SET status='expired' "
+            "WHERE recipient_id=? AND mode='steer' AND status='queued' "
+            "AND EXISTS (SELECT 1 FROM fleet_agents WHERE id=? "
+            "AND status NOT IN (%s))" % inactive_placeholders,
+            (recipient, recipient, *sorted(ACTIVE_STATUSES)),
+        )
+        message_scope_column = "principal_id" if principal else "owner_id"
+        ids = [
+            row[0] for row in conn.execute(
+                "SELECT message_id FROM fleet_messages WHERE recipient_id=? "
+                "AND %s=? AND project_scope=? AND status='queued' "
+                "ORDER BY queued_ts, message_id LIMIT ?" % message_scope_column,
+                (
+                    recipient, principal or owner, scoped_project, capped_limit,
+                ),
+            ).fetchall()
+        ]
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        conn.execute(
+            "UPDATE fleet_messages SET status='delivered', delivered_ts=? "
+            "WHERE status='queued' AND message_id IN (%s)" % placeholders,
+            [current, *ids],
+        )
+        rows = conn.execute(
+            "SELECT * FROM fleet_messages WHERE message_id IN (%s) "
+            "ORDER BY queued_ts, message_id" % placeholders,
+            ids,
+        ).fetchall()
+    return [_message_dict(row) for row in rows]
+
+
+def list_agent_messages(
+    agent_id: str, owner_id: str, *, project: str = "", limit: int = 50,
+    principal_id: str = "", principal_secret: str = "",
+) -> list[dict]:
+    """List message receipts for one agent as sender or recipient."""
+    agent = str(agent_id or "").strip()
+    owner = str(owner_id or "").strip()
+    scoped_project = str(project or "")
+    if not agent or not owner:
+        raise ValueError("agent_id and owner_id are required")
+    capped_limit = max(1, min(int(limit or 50), 200))
+    conn = _connect()
+    try:
+        principal = ""
+        if principal_id:
+            principal = _authenticate_principal(
+                conn, principal_id, principal_secret,
+            )
+        scope_column = "principal_id" if principal else "owner_id"
+        scope_value = principal or owner
+        scoped = conn.execute(
+            "SELECT owner_id, principal_id, project FROM fleet_agents WHERE id=?",
+            (agent,),
+        ).fetchone()
+        if (
+            scoped is None
+            or str(scoped[scope_column] or "") != scope_value
+            or str(scoped["project"] or "") != scoped_project
+        ):
+            raise PermissionError("agent is outside the requested scope")
+        rows = conn.execute(
+            "SELECT * FROM fleet_messages WHERE %s=? AND project_scope=? "
+            "AND (sender_id=? OR recipient_id=?) "
+            "ORDER BY queued_ts DESC, message_id DESC LIMIT ?" % scope_column,
+            (scope_value, scoped_project, agent, agent, capped_limit),
+        ).fetchall()
+        return [_message_dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
 def add_event(agent_id: str, owner_id: str, stamp: str, message: str) -> None:
     with _write_transaction() as conn:
         conn.execute(
@@ -777,10 +1273,27 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
 def prune(
     finished_retention: int = DEFAULT_FINISHED_RETENTION,
     event_retention: int = DEFAULT_EVENT_RETENTION,
+    message_retention_seconds: int = DEFAULT_MESSAGE_RETENTION_SECONDS,
 ) -> dict:
     finished_retention = max(10, min(int(finished_retention), 10_000))
     event_retention = max(100, min(int(event_retention), 50_000))
+    message_retention_seconds = max(
+        3600, min(int(message_retention_seconds), 90 * 24 * 60 * 60)
+    )
+    now = time.time()
     with _write_transaction() as conn:
+        conn.execute(
+            "UPDATE fleet_messages SET status='expired' "
+            "WHERE status='queued' AND expires_ts<=?",
+            (now,),
+        )
+        before = conn.total_changes
+        conn.execute(
+            "DELETE FROM fleet_messages WHERE status IN ('delivered', 'expired') "
+            "AND COALESCE(delivered_ts, queued_ts)<?",
+            (now - message_retention_seconds,),
+        )
+        deleted_messages = conn.total_changes - before
         before = conn.total_changes
         conn.execute(
             """
@@ -790,6 +1303,19 @@ def prune(
                 WHERE status NOT IN ('queued', 'running')
                 ORDER BY updated_ts DESC LIMIT -1 OFFSET ?
             )
+              AND id NOT IN (
+                WITH RECURSIVE protected(id) AS (
+                    SELECT sender_id FROM fleet_messages WHERE status='queued'
+                    UNION
+                    SELECT recipient_id FROM fleet_messages WHERE status='queued'
+                    UNION
+                    SELECT parent.parent_id
+                    FROM fleet_agents AS parent
+                    JOIN protected ON parent.id=protected.id
+                    WHERE parent.parent_id<>''
+                )
+                SELECT id FROM protected
+              )
             """,
             (finished_retention,),
         )
@@ -813,11 +1339,16 @@ def prune(
               AND owner_id NOT IN (SELECT DISTINCT owner_id FROM fleet_agents)
             """
         )
-    return {"agents": deleted_agents, "events": deleted_events}
+    return {
+        "agents": deleted_agents,
+        "events": deleted_events,
+        "messages": deleted_messages,
+    }
 
 
 def clear_all() -> None:
     with _write_transaction() as conn:
+        conn.execute("DELETE FROM fleet_messages")
         conn.execute("DELETE FROM fleet_events")
         conn.execute("DELETE FROM fleet_agents")
         conn.execute("DELETE FROM fleet_owners")
