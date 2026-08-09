@@ -10,27 +10,27 @@ class LegacyTaskRepository:
         self._connection = connection
 
     def create(self, **fields) -> dict:
-        import memory_store
+        import sonder_runtime.adapters.memory_store as memory_store
         return memory_store.create_task(self._connection, **fields)
 
     def list(self, **filters) -> list[dict]:
-        import memory_store
+        import sonder_runtime.adapters.memory_store as memory_store
         return memory_store.list_tasks(self._connection, **filters)
 
     def update(self, task_id: str, **changes) -> dict:
-        import memory_store
+        import sonder_runtime.adapters.memory_store as memory_store
         return memory_store.update_task(self._connection, task_id, **changes)
 
     def get(self, task_id: str) -> dict | None:
-        import memory_store
+        import sonder_runtime.adapters.memory_store as memory_store
         return memory_store.get_task(self._connection, task_id)
 
     def events(self, task_id: str, limit: int = 20) -> list[dict]:
-        import memory_store
+        import sonder_runtime.adapters.memory_store as memory_store
         return memory_store.task_events(self._connection, task_id, limit=limit)
 
     def children(self, task_id: str) -> list[dict]:
-        import memory_store
+        import sonder_runtime.adapters.memory_store as memory_store
         return memory_store.task_children(self._connection, task_id)
 
 
