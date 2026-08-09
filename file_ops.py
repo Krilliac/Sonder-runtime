@@ -8,8 +8,11 @@ server layer.
 from __future__ import annotations
 
 import fnmatch
+import errno
+import hashlib
 import os
 import stat
+import tempfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import sonder_paths
@@ -17,6 +20,7 @@ import sonder_paths
 
 MAX_READ_BYTES = 256_000
 MAX_WRITE_BYTES = 1_000_000
+MAX_TRANSFER_BYTES = 64 * 1024 * 1024
 MAX_FIND_RESULTS = 200
 # Ceiling on the pre-write/pre-delete snapshot decode (see _read_text_if_file).
 MAX_SNAPSHOT_BYTES = MAX_WRITE_BYTES
@@ -478,8 +482,8 @@ def _require_no_reparse_components(path: Path) -> None:
     while True:
         if _is_reparse_point(current):
             raise PermissionError(
-                "refusing recursive delete through a symlink or junction without "
-                "an authenticated developer token: %s" % current
+                "refusing file operation through a symlink or junction: %s"
+                % current
             )
         parent = current.parent
         if parent == current:
@@ -593,6 +597,7 @@ def policy_text(*, bypass: bool = False, extra_roots: str = "") -> str:
         "  delete default: dry-run unless confirm matches DELETE <path>",
         "  max read bytes: %d" % MAX_READ_BYTES,
         "  max write bytes: %d" % MAX_WRITE_BYTES,
+        "  max transfer bytes: %d" % MAX_TRANSFER_BYTES,
         "  roots:",
     ]
     for root in allowed_roots(extra_roots if bypass else ""):
@@ -689,6 +694,290 @@ def make_directory(
         "lines_added": 0,
         "lines_edited": 0,
         "lines_deleted": 0,
+    }
+
+
+def _resolve_transfer_path(
+    raw_path: str,
+    *,
+    label: str,
+    extra_roots: str,
+    bypass: bool,
+) -> Path:
+    if not isinstance(raw_path, str) or not raw_path.strip() or "\x00" in raw_path:
+        raise ValueError("%s must be an explicit non-empty file path" % label)
+    raw_path = raw_path.strip()
+    if _foreign_absolute(raw_path):
+        raise PermissionError("%s uses a foreign absolute path form" % label)
+    requested = _requested_path(raw_path)
+    _require_no_reparse_components(requested)
+    resolved = resolve_path(raw_path, extra_roots=extra_roots, bypass=bypass)
+    _require_no_reparse_components(resolved)
+    roots = allowed_roots(extra_roots if bypass else "")
+    root = next(
+        (
+            _resolve_best_effort(candidate)
+            for candidate in roots
+            if resolved == _resolve_best_effort(candidate)
+            or _is_inside(resolved, _resolve_best_effort(candidate))
+        ),
+        None,
+    )
+    if root is None:
+        raise PermissionError("%s is outside every allowed root" % label)
+    relative = resolved.relative_to(root) if resolved != root else Path(".")
+    sensitive_component = next(
+        (
+            part
+            for part in relative.parts
+            if part.lower() in SENSITIVE_READ_DIRECTORIES
+        ),
+        None,
+    )
+    if sensitive_component is not None:
+        raise PermissionError(
+            "%s may not access sensitive directory %s" % (label, sensitive_component)
+        )
+    if _is_sensitive_control_path(resolved):
+        raise PermissionError("%s is sensitive Sonder control state" % label)
+    return resolved
+
+
+def _prepare_transfer(
+    source: str,
+    destination: str,
+    *,
+    overwrite: bool,
+    moving: bool,
+    extra_roots: str,
+    bypass: bool,
+    developer_authorized: bool,
+) -> tuple[Path, Path, int, bool]:
+    src = _resolve_transfer_path(
+        source, label="source", extra_roots=extra_roots, bypass=bypass,
+    )
+    dst = _resolve_transfer_path(
+        destination, label="destination", extra_roots=extra_roots, bypass=bypass,
+    )
+    _require_read_access(src, developer_authorized or bypass)
+    _require_mutation_access(dst, developer_authorized)
+    if moving:
+        _require_mutation_access(src, developer_authorized)
+    if not src.exists():
+        raise FileNotFoundError("source file not found: %s" % src)
+    if not src.is_file():
+        raise ValueError("source must be a regular file: %s" % src)
+    if src == dst:
+        raise ValueError("source and destination must be different files")
+    size = src.stat().st_size
+    if size > MAX_TRANSFER_BYTES:
+        raise ValueError(
+            "source exceeds max transfer bytes (%d): %s" % (MAX_TRANSFER_BYTES, src)
+        )
+    if not dst.parent.exists() or not dst.parent.is_dir():
+        raise FileNotFoundError("destination parent directory does not exist: %s" % dst.parent)
+    _require_no_reparse_components(dst.parent)
+    destination_exists = dst.exists()
+    if destination_exists:
+        if not dst.is_file():
+            raise ValueError("destination must be a regular file: %s" % dst)
+        try:
+            if os.path.samefile(src, dst):
+                raise ValueError("source and destination identify the same file")
+        except OSError:
+            pass
+        if not overwrite:
+            raise FileExistsError(
+                "destination exists (set overwrite=true to replace): %s" % dst
+            )
+    return src, dst, size, destination_exists
+
+
+def _atomic_copy_bytes(source: Path, destination: Path, *, overwrite: bool) -> str:
+    reserved_destination = False
+    temp_path = None
+    digest = hashlib.sha256()
+    try:
+        if not overwrite:
+            reserve_fd = os.open(
+                destination,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+            )
+            os.close(reserve_fd)
+            reserved_destination = True
+        temp_fd, temp_name = tempfile.mkstemp(
+            prefix=".%s.sonder-copy-" % destination.name,
+            dir=str(destination.parent),
+        )
+        temp_path = Path(temp_name)
+        with source.open("rb") as incoming, os.fdopen(temp_fd, "wb") as outgoing:
+            total = 0
+            while True:
+                chunk = incoming.read(SNAPSHOT_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_TRANSFER_BYTES:
+                    raise ValueError("source changed and exceeded max transfer bytes")
+                digest.update(chunk)
+                outgoing.write(chunk)
+            outgoing.flush()
+            os.fsync(outgoing.fileno())
+        os.chmod(temp_path, stat.S_IMODE(source.stat().st_mode))
+        os.replace(temp_path, destination)
+        temp_path = None
+        reserved_destination = False
+        return digest.hexdigest()
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+        if reserved_destination:
+            try:
+                destination.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(SNAPSHOT_CHUNK_BYTES), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def copy_file(
+    source: str,
+    destination: str,
+    *,
+    overwrite: bool = False,
+    extra_roots: str = "",
+    bypass: bool = False,
+    developer_authorized: bool = False,
+) -> dict:
+    src, dst, _source_size, destination_exists = _prepare_transfer(
+        source,
+        destination,
+        overwrite=bool(overwrite),
+        moving=False,
+        extra_roots=extra_roots,
+        bypass=bypass,
+        developer_authorized=developer_authorized,
+    )
+    digest = _atomic_copy_bytes(src, dst, overwrite=bool(overwrite))
+    return {
+        "action": "copy",
+        "bytes": dst.stat().st_size,
+        "destination": str(dst),
+        "overwrite": bool(overwrite),
+        "path": str(dst),
+        "replaced": destination_exists,
+        "sha256": digest,
+        "source": str(src),
+    }
+
+
+def _move_backup(destination: Path) -> Path:
+    fd, name = tempfile.mkstemp(
+        prefix=".%s.sonder-move-backup-" % destination.name,
+        dir=str(destination.parent),
+    )
+    os.close(fd)
+    backup = Path(name)
+    backup.unlink()
+    os.replace(destination, backup)
+    return backup
+
+
+def _rollback_move(destination: Path, backup: Path | None) -> None:
+    if destination.exists() and not _is_reparse_point(destination):
+        destination.unlink()
+    if backup is not None and backup.exists():
+        os.replace(backup, destination)
+
+
+def move_file(
+    source: str,
+    destination: str,
+    *,
+    overwrite: bool = False,
+    extra_roots: str = "",
+    bypass: bool = False,
+    developer_authorized: bool = False,
+) -> dict:
+    src, dst, _source_size, destination_exists = _prepare_transfer(
+        source,
+        destination,
+        overwrite=bool(overwrite),
+        moving=True,
+        extra_roots=extra_roots,
+        bypass=bypass,
+        developer_authorized=developer_authorized,
+    )
+    digest = _sha256_file(src)
+    backup = _move_backup(dst) if destination_exists else None
+    method = "rename"
+    rollback_complete = False
+    try:
+        try:
+            if overwrite:
+                os.replace(src, dst)
+            else:
+                os.link(src, dst, follow_symlinks=False)
+                try:
+                    src.unlink()
+                except Exception:
+                    dst.unlink()
+                    raise
+                method = "link"
+        except OSError as exc:
+            if exc.errno not in {
+                errno.EXDEV, errno.EPERM, errno.EACCES,
+                getattr(errno, "ENOTSUP", errno.EPERM),
+            }:
+                raise
+            method = "copy-delete"
+            _atomic_copy_bytes(src, dst, overwrite=False)
+            try:
+                src.unlink()
+            except Exception:
+                _rollback_move(dst, backup)
+                backup = None
+                rollback_complete = True
+                raise
+        if backup is not None:
+            try:
+                backup.unlink()
+            except OSError:
+                # The requested move committed but the replaced destination's
+                # rollback copy could not be removed. Restore the source and
+                # old destination rather than leave secret backup debris.
+                _atomic_copy_bytes(dst, src, overwrite=False)
+                dst.unlink()
+                os.replace(backup, dst)
+                backup = None
+                rollback_complete = True
+                raise
+            backup = None
+    except Exception:
+        if src.exists() and not rollback_complete:
+            _rollback_move(dst, backup)
+            backup = None
+        raise
+    return {
+        "action": "move",
+        "bytes": dst.stat().st_size,
+        "destination": str(dst),
+        "method": method,
+        "overwrite": bool(overwrite),
+        "path": str(dst),
+        "replaced": destination_exists,
+        "sha256": digest,
+        "source": str(src),
     }
 
 
