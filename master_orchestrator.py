@@ -571,6 +571,15 @@ def resolve_repository_project_root(task: str, project: str = "") -> str:
 
 def repository_worker_result(receipt, expected_project: str) -> RepositoryWorkerResult:
     """Validate a guarded host receipt before it can enter fleet aggregation."""
+    # Preserve a host-generated failure from legacy adapters and focused test
+    # doubles that never produced a receipt at all.  A real HostTaskResult may
+    # also begin with ERROR after collecting valid evidence; that case must
+    # continue through the scope/tool/ledger checks below instead of being
+    # discarded solely because of its prose prefix.
+    if not hasattr(receipt, "project_scope"):
+        raw = str(receipt or "")
+        if raw.startswith("ERROR:"):
+            raise RuntimeError(raw[:800])
     expected = canonical_project_root(expected_project)
     actual = canonical_project_root(getattr(receipt, "project_scope", ""))
     if not expected or not actual or not same_project_root(actual, expected):
@@ -582,7 +591,7 @@ def repository_worker_result(receipt, expected_project: str) -> RepositoryWorker
     if not REPOSITORY_EVIDENCE_TOOLS.intersection(tools):
         raise RuntimeError("repository worker produced no host-observed file evidence")
     output = str(getattr(receipt, "output", "") or "")
-    if "=== TOOL EVIDENCE ===" not in output:
+    if output.count("=== TOOL EVIDENCE ===") != 1:
         raise RuntimeError("repository worker omitted its guarded tool-evidence ledger")
     return RepositoryWorkerResult(output=output, project=expected, tools=tools)
 
@@ -596,7 +605,7 @@ def _validate_repository_result(
         raise RuntimeError("repository worker result escaped its assigned project scope")
     if not REPOSITORY_EVIDENCE_TOOLS.intersection(result.tools):
         raise RuntimeError("repository worker scope receipt has no file-evidence tool")
-    if "=== TOOL EVIDENCE ===" not in result.output:
+    if result.output.count("=== TOOL EVIDENCE ===") != 1:
         raise RuntimeError("repository worker scope receipt has no tool-evidence ledger")
     return result
 
@@ -645,9 +654,6 @@ def _repository_worker(prompt: str, project: str = "") -> RepositoryWorkerResult
         return_host_receipt=True,
         cancel_check=current_worker_cancel_requested,
     )
-    output = str(getattr(receipt, "output", receipt) or "")
-    if output.startswith("ERROR:"):
-        raise RuntimeError(output[:800])
     return repository_worker_result(receipt, project_scope)
 
 
