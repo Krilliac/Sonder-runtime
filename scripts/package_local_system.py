@@ -74,6 +74,7 @@ REQUIRED_FILES = {
     "bootstrap-engine.sh",
     "bootstrap_engine.py",
     "creative_router.py",
+    "command_recovery.py",
     "engine_bundle.py",
     "endless-train.sh",
     "game_forge.py",

@@ -106,6 +106,41 @@ terminal operation records and are never reported as success. Requested context
 sizes must resolve to 1–1,000,000 whole tokens (`8192`, `32k`, and `1m` are
 examples).
 
+### Durable command acknowledgement protocol
+
+Clients that need recovery across a lost HTTP response may send both
+`X-Sonder-Client-Id` and `X-Sonder-Command-Id` on a Start, Stop, or Restart
+request. Identifiers contain 1-64 and 1-128 ASCII letters, numbers, `.`, `_`,
+`:`, or `-`, respectively, and a command ID must never be reused by that
+client. Legacy requests without either header continue to use the existing
+`Idempotency-Key` behavior.
+
+The launcher fsyncs a receipt before queueing the operation and fsyncs the
+bounded HTTP result before returning it. Repeating the same client/command pair
+and exact request replays that completed result without queueing another
+operation. Reusing the pair for different content is rejected. A receipt that
+has no completed result after a launcher restart is reported as `uncertain`;
+the launcher never automatically retries it. Inspect the durable launcher
+operation ledger and reconcile it manually.
+
+After receiving and storing a completed response, acknowledge it with an empty
+JSON object and the same two headers:
+
+```sh
+curl -X POST -H "Authorization: Bearer LAUNCHER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "X-Sonder-Client-Id: phone-1" \
+  -H "X-Sonder-Command-Id: restart-2026-08-08-1" \
+  -d '{}' http://HOST:11436/v1/launcher/commands/ack
+```
+
+Acknowledgement makes old result records eligible for bounded compaction. The
+journal defaults beside the launcher operation database as
+`sonder-launcher-command-journal.jsonl`; `SONDER_LAUNCHER_COMMAND_JOURNAL` may
+override it. This protocol is an admission/replay journal, not a replacement
+for polling `/v1/launcher/operations/OPERATION_ID` to observe the operation's
+actual terminal state.
+
 ## Transport and mobile packaging
 
 HTTPS is recommended because bearer credentials sent over plain HTTP can be
