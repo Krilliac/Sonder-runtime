@@ -63,6 +63,7 @@ import admin_auth
 import codegen_loop
 import file_ops
 import data_query as data_query_module
+import data_convert as data_convert_module
 import symbol_index
 import context_policy
 import command_registry
@@ -560,6 +561,7 @@ LIVE_RELOAD_MODULES = [
     "admin_auth",
     "file_ops",
     "data_query",
+    "data_convert",
     "symbol_index",
     "context_policy",
     "command_registry",
@@ -7517,6 +7519,73 @@ def data_query(
 
 
 @mcp.tool()
+def data_convert(
+    input_path: str,
+    output_path: str,
+    fields_json: str,
+    output_format: str = "",
+    apply: bool = False,
+    max_input_bytes: int = 16000000,
+    max_output_bytes: int = 16000000,
+    max_rows: int = 10000,
+    max_columns: int = 100,
+    max_fields: int = 50,
+    max_field_bytes: int = 64000,
+    max_depth: int = 16,
+    preview_rows: int = 5,
+    timeout: float = 10.0,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Preview or atomically create a deterministic structured-data conversion."""
+    _maybe_live_reload()
+    started = time.time()
+    apply = apply is True
+    args = {
+        "input_path": input_path, "output_path": output_path,
+        "output_format": output_format, "apply": apply,
+        "max_input_bytes": max_input_bytes, "max_output_bytes": max_output_bytes,
+        "max_rows": max_rows, "max_columns": max_columns,
+        "max_fields": max_fields, "max_field_bytes": max_field_bytes,
+        "max_depth": max_depth, "preview_rows": preview_rows,
+        "timeout": timeout,
+    }
+    try:
+        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
+        report = data_convert_module.convert_data(
+            input_path, output_path, fields_json,
+            output_format=output_format, apply=apply,
+            max_input_bytes=max_input_bytes, max_output_bytes=max_output_bytes,
+            max_rows=max_rows, max_columns=max_columns, max_fields=max_fields,
+            max_field_bytes=max_field_bytes, max_depth=max_depth,
+            preview_rows=preview_rows, timeout=timeout,
+            extra_roots=trusted_roots,
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "data_convert", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = data_convert_module.encode_result(report)
+    summary = "%s %d row(s), %d byte(s)" % (
+        report["mode"], report["rows"], report["converted_bytes"],
+    )
+    _record_direct_tool(
+        "data_convert", args, ok=True, started=started, summary=summary,
+    )
+    activity_tracker.record_event(
+        "data_convert", summary=summary, path=report["output_path"],
+    )
+    if report["applied"]:
+        _record_file_activity("create", {
+            "action": "create", "path": report["output_path"],
+            "bytes": report["converted_bytes"],
+        })
+    return output
+
+
+@mcp.tool()
 def file_write(
     path: str,
     content: str,
@@ -10281,6 +10350,7 @@ def tool_manifest() -> str:
         "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
         "environment_status": "Report the host OS, available shells (PowerShell/cmd/bash/wsl), and installed toolchains -- check before choosing a command shape or assuming a tool exists.",
         "data_inspect/data_query": "Preview structured data or run bounded read-only SQLite SELECT/CTE and exact-filter JSON/JSONL/CSV/TSV queries inside allowed roots.",
+        "data_convert": "Preview or atomically create a non-overwriting JSON/JSONL/CSV/TSV conversion with explicit ordered fields.",
         "program_search/script_search/workspace_run/script_run/image_inspect": "Discover installed programs and workspace scripts, run bounded argv-only processes, and inspect image metadata.",
         "task_create/task_list/task_update/task_show/checklist_create/checklist_update/checklist_show": "Visible todo and ordered checklist state shared by console, app, agents, and MCP.",
         "workbench_agent": "Run an autonomous local tool loop with a guaranteed checklist, exact action transcript, validation gate, and end report.",
@@ -10353,6 +10423,7 @@ AGENT_TOOL_HELP = """Available tools:
 - image_inspect: {"path": "artifacts/generated/demo/icon.png"}
 - data_inspect: {"path": "data/records.jsonl", "max_bytes": 256000}
 - data_query: {"path": "data/records.jsonl", "sql": "", "projection_json": ["id", "/nested/name"], "filters_json": {"status": "active"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
+- data_convert: {"input_path": "data/records.jsonl", "output_path": "data/records.csv", "fields_json": ["id", "name"], "output_format": "csv", "apply": false, "max_input_bytes": 16000000, "max_output_bytes": 16000000, "max_rows": 10000, "max_columns": 100, "max_fields": 50, "max_field_bytes": 64000, "max_depth": 16, "preview_rows": 5, "timeout": 10}
 - task_create: {"title": "...", "detail": "...", "priority": 2, "project": "...", "owner": "..."}
 - task_list: {"status": "pending|in_progress|blocked|done|canceled", "project": "", "include_done": false, "limit": 50}
 - task_update: {"task_id": "...", "status": "in_progress|blocked|done", "note": "..."}
@@ -10502,6 +10573,11 @@ def _repository_scope_path_error(tool_name, args, project_root):
             targets = [("script path", args.get("path") or "")]
             if str(args.get("cwd") or "").strip():
                 targets.append(("working directory", args.get("cwd")))
+        elif tool_name == "data_convert":
+            targets = [
+                ("input path", args.get("input_path") or ""),
+                ("output path", args.get("output_path") or ""),
+            ]
         elif tool_name == "file_batch_write":
             operations = _batch_agent_operations(args)
             if operations is None or not operations:
@@ -11370,6 +11446,26 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "data_convert":
+        return data_convert(
+            input_path=args.get("input_path", ""),
+            output_path=args.get("output_path", ""),
+            fields_json=args.get("fields_json", args.get("fields", [])),
+            output_format=args.get("output_format", ""),
+            apply=args.get("apply", False),
+            max_input_bytes=args.get("max_input_bytes", 16_000_000),
+            max_output_bytes=args.get("max_output_bytes", 16_000_000),
+            max_rows=args.get("max_rows", 10_000),
+            max_columns=args.get("max_columns", 100),
+            max_fields=args.get("max_fields", 50),
+            max_field_bytes=args.get("max_field_bytes", 64_000),
+            max_depth=args.get("max_depth", 16),
+            preview_rows=args.get("preview_rows", 5),
+            timeout=args.get("timeout", 10.0),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "text_search":
         return text_search(
             query=args.get("query", args.get("pattern", "")),
@@ -11693,6 +11789,10 @@ def _agent_activity_command(tool_name, args):
             [item.get("path", "") for item in operations if isinstance(item, dict)],
             ensure_ascii=False,
         )
+    if tool_name == "data_convert":
+        return "%s -> %s" % (
+            args.get("input_path", ""), args.get("output_path", ""),
+        )
     if tool_name == "workspace_run":
         return "%s %s" % (
             args.get("program", ""),
@@ -11712,7 +11812,7 @@ def _agent_activity_command(tool_name, args):
 
 
 _PROJECT_SCOPED_PATH_TOOLS = frozenset({
-    "file_read", "file_read_range", "context_pack", "data_query", "image_inspect",
+    "file_read", "file_read_range", "context_pack", "data_query", "data_convert", "image_inspect",
     "file_write", "file_batch_write", "file_edit",
     "file_delete", "directory_create", "workspace_inventory", "directory_tree",
     "file_find", "repository_symbol_index", "text_search", "script_search", "artifact_verify",
@@ -11800,6 +11900,16 @@ def _project_scope_args(tool_name, args, project):
     # the host-resolved path boundary; child processes remain user-level code,
     # not an operating-system sandbox.
     scoped["extra_roots"] = project
+
+    if tool_name == "data_convert":
+        for key in ("input_path", "output_path"):
+            raw_path = str(scoped.get(key) or "").strip()
+            is_abs = os.path.isabs(raw_path) or bool(
+                re.match(r"^[A-Za-z]:[\\/]", raw_path)
+            )
+            if raw_path and not is_abs:
+                scoped[key] = os.path.normpath(os.path.join(project, raw_path))
+        return scoped
 
     if tool_name == "file_batch_write":
         operations = _batch_agent_operations(scoped)
@@ -11910,7 +12020,7 @@ def _agent_dispatch_observed(
 
 
 _WORK_MUTATION_TOOLS = frozenset({
-    "directory_create", "file_write", "file_batch_write", "file_edit", "file_delete",
+    "directory_create", "file_write", "file_batch_write", "file_edit", "file_delete", "data_convert",
     "scaffold_project",
     "artifact_generate", "game_generate_and_test", "game_generation_campaign",
     "memory_quality_repair", "memory_privacy_repair", "memory_embedding_backfill",
@@ -11989,7 +12099,9 @@ def _agent_call_signature(tool_name, args):
     canonical = dict(args) if isinstance(args, dict) else args
     if isinstance(canonical, dict):
         path_keys = []
-        if tool_name in _PROJECT_SCOPED_PATH_TOOLS:
+        if tool_name == "data_convert":
+            path_keys.extend(("input_path", "output_path"))
+        elif tool_name in _PROJECT_SCOPED_PATH_TOOLS:
             path_keys.append(_project_scoped_path_key(tool_name))
         elif tool_name == "workspace_run":
             path_keys.append("cwd")
@@ -12018,6 +12130,13 @@ def _agent_mutation_records(tool_name, args):
             {"tool": tool_name, "path": _agent_normalized_path(item.get("path", ""))}
             for item in operations if isinstance(item, dict)
         ]
+    if tool_name == "data_convert":
+        if args.get("apply") is not True:
+            return []
+        return [{
+            "tool": tool_name,
+            "path": _agent_normalized_path(args.get("output_path", "")),
+        }]
     path = args.get("path", "")
     if tool_name == "artifact_generate":
         path = args.get("output_dir") or os.path.join(
@@ -13127,6 +13246,10 @@ def _agent_impl(
                         run_created_paths.add(
                             _agent_created_path_key(item.get("path"))
                         )
+            elif tool_name == "data_convert" and policy_tool_args.get("apply") is True:
+                run_created_paths.add(
+                    _agent_created_path_key(policy_tool_args.get("output_path"))
+                )
         else:
             failed_call_counts[call_signature] = prior_identical_failures + 1
             recovery = (
@@ -13190,6 +13313,10 @@ def _agent_impl(
                 and tool_args.get("dry_run") is not False
             )
             and not (
+                tool_name == "data_convert"
+                and tool_args.get("apply") is not True
+            )
+            and not (
                 tool_name in {
                     "memory_quality_repair", "memory_privacy_repair",
                     "memory_embedding_backfill",
@@ -13204,6 +13331,10 @@ def _agent_impl(
             and not (
                 tool_name == "file_delete"
                 and tool_args.get("dry_run") is not False
+            )
+            and not (
+                tool_name == "data_convert"
+                and tool_args.get("apply") is not True
             )
             and not (
                 tool_name in {
@@ -13455,7 +13586,7 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
 })
 _AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
-    "directory_create", "file_write", "file_batch_write", "file_edit", "workspace_run",
+    "directory_create", "file_write", "file_batch_write", "file_edit", "data_convert", "workspace_run",
     "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_generate", "artifact_verify", "game_reference_suite",
     "game_generate_and_test",
@@ -13469,7 +13600,7 @@ _AUTOPILOT_RUNNERS = frozenset({
 })
 _AUTOPILOT_SCRIPT_SUFFIXES = frozenset({".py", ".js", ".dart", ".exe", ".com"})
 _AUTOPILOT_MUTATION_EVIDENCE = frozenset({
-    "directory_create", "file_write", "file_batch_write", "file_edit", "artifact_generate",
+    "directory_create", "file_write", "file_batch_write", "file_edit", "data_convert", "artifact_generate",
     "game_generate_and_test",
 })
 
