@@ -52,7 +52,7 @@ file's *structure* without dumping raw bytes.
 
 ## Guarded filesystem tools
 
-`file_find`, `file_read`, `file_read_range`, `file_write`, `file_batch_write`, `file_edit`,
+`file_find`, `file_read`, `file_read_range`, `file_write`, `file_batch_write`, `file_edit`, `text_patch`,
 `file_delete`, `directory_tree`, `directory_create`, `workspace_inventory`,
 `text_search`, `script_search`, `program_search`, `image_inspect`. All are
 confined to `SONDER_FILE_ROOTS`, honor the permission policy
@@ -64,6 +64,12 @@ confirm string matches.
 operations. It prevalidates every target before writing, caps per-file and
 aggregate bytes, rejects duplicate/sensitive/symlink targets, and makes a
 best-effort rollback if any write fails.
+
+`text_patch` previews strict unified diffs rooted at an explicit project
+directory. With `apply=true`, it performs an all-file transaction for create
+and modify operations only. Context must match exactly; deletes, renames,
+binary/non-UTF-8 data, sensitive paths, links, escapes, and over-budget input
+are rejected.
 
 ## Other tool families
 
