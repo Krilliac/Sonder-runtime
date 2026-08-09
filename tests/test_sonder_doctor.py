@@ -167,6 +167,7 @@ def test_default_checks_registry_is_read_only_pairs_and_stable():
         "config",
         "storage_state",
         "storage_models",
+        "schemas",
         "self_heal",
         "memory_quality",
         "runtime_policy",
@@ -175,3 +176,58 @@ def test_default_checks_registry_is_read_only_pairs_and_stable():
     assert all(callable(fn) for _, fn in first)
     first.append(("extra", lambda: "ok"))
     assert len(sonder_doctor.default_checks()) == len(second)
+
+
+def test_schema_check_reports_healthy_counts(monkeypatch):
+    import sonder_migrations
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        sonder_migrations,
+        "status_all",
+        lambda: {
+            "memory": SimpleNamespace(
+                applied=("0001",), pending=(), unknown=(),
+                checksum_mismatches=(), db_path="C:/private/memory.db",
+            ),
+            "fleet": SimpleNamespace(
+                applied=("0001", "0002"), pending=(), unknown=(),
+                checksum_mismatches=(), db_path="C:/private/fleet.db",
+            ),
+        },
+    )
+
+    assert sonder_doctor._check_schemas() == {
+        "status": "ok",
+        "detail": "2 store(s) current; applied migrations=3",
+    }
+
+
+def test_schema_check_fails_safely_for_modified_history(monkeypatch):
+    import sonder_migrations
+    from types import SimpleNamespace
+
+    secret_path = "C:/Users/private/secret-memory.db"
+    secret_migration = "0001_private_name"
+    monkeypatch.setattr(
+        sonder_migrations,
+        "status_all",
+        lambda: {
+            "memory": SimpleNamespace(
+                applied=(secret_migration,), pending=("0002",), unknown=(),
+                checksum_mismatches=(secret_migration,), db_path=secret_path,
+            )
+        },
+    )
+
+    result = sonder_doctor._check_schemas()
+    assert result == {
+        "status": "fail",
+        "detail": (
+            "1 store(s); unhealthy history: modified=1 future=0; pending=1"
+        ),
+    }
+    assert secret_path not in result["detail"]
+    assert secret_migration not in result["detail"]
+    report = sonder_doctor.run_doctor([("schemas", sonder_doctor._check_schemas)])
+    assert report["overall"] == "fail"
