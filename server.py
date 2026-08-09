@@ -65,6 +65,7 @@ import codegen_loop
 import file_ops
 import data_query as data_query_module
 import json_patch_tool
+import text_patch as text_patch_ops
 import symbol_index
 import project_detect as project_detector
 import git_history
@@ -574,6 +575,7 @@ LIVE_RELOAD_MODULES = [
     "git_tools",
     "content_digest",
     "archive_tools",
+    "text_patch",
     "context_policy",
     "command_registry",
     "permission_rules",
@@ -638,6 +640,9 @@ def _maybe_live_reload():
             continue
         if name == "data_query":
             globals()["data_query_module"] = module
+            continue
+        if name == "text_patch":
+            globals()["text_patch_ops"] = module
             continue
         if name in globals():
             globals()[name] = module
@@ -7916,6 +7921,47 @@ def json_patch(
 
 
 @mcp.tool()
+def text_patch(
+    root: str,
+    patch: str,
+    apply: bool = False,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Strictly preview or transactionally apply a bounded unified text diff."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "patch_bytes": len(patch.encode("utf-8")) if isinstance(patch, str) else 0,
+            "apply": bool(apply)}
+    try:
+        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
+        data = text_patch_ops.text_patch(
+            root, patch, apply=bool(apply), extra_roots=trusted_roots,
+            developer_authorized=_file_developer_allowed(token),
+        )
+    except text_patch_ops.TextPatchError as exc:
+        output = json.dumps(exc.report, indent=2, sort_keys=True)
+        _record_direct_tool("text_patch", args, ok=False, started=started, summary=str(exc), output=output)
+        return "ERROR: %s" % output
+    except Exception as exc:
+        _record_direct_tool("text_patch", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = json.dumps(data, indent=2, sort_keys=True)
+    _record_direct_tool("text_patch", args, ok=True, started=started,
+                        summary="%s %d file(s)" % ("applied" if apply else "previewed", len(data["files"])),
+                        output=output)
+    if apply:
+        for row in data["files"]:
+            activity_tracker.record_file_change(
+                "create" if row["action"] == "create" else "edit",
+                str(Path(data["root"]) / Path(*row["path"].split("/"))),
+                summary="text_patch %s" % row["action"],
+            )
+    return output
+
+
+@mcp.tool()
 def file_edit(
     path: str,
     old: str,
@@ -10945,7 +10991,7 @@ def tool_manifest() -> str:
         "workspace_inventory/dependency_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace and dependency inventory, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
         "repo_status/repo_diff": "Inspect bounded read-only Git branch, worktree, staged, and unstaged state without shell execution.",
         "project_detect": "Inventory guarded build/test/runtime manifests and return deterministic evidence-backed language, framework, and cross-platform argv candidates without executing them.",
-        "file_policy/file_find/file_read/file_write/file_batch_write/json_patch/file_edit/file_copy/file_move/file_delete": "Guarded filesystem find/read/create/edit/transactional batch write/atomic JSON patch/single-file transfer/delete.",
+        "file_policy/file_find/file_read/file_write/file_batch_write/json_patch/file_edit/file_copy/file_move/file_delete/text_patch": "Guarded filesystem find/read/create/edit/transactional batch write/atomic JSON patch/single-file transfer/delete and strict unified-diff preview/apply.",
         "repository_symbol_index": "Build a deterministic bounded read-only declaration index with Python AST and conservative JS/TS/C/C++/C#/Rust/Go extraction.",
         "repo_log/repo_show/repo_blame": "Read bounded structured Git history, patches, and line attribution from an exact project repository without shell execution or upward discovery.",
         "file_digest/directory_digest": "Stream guarded files into SHA-256 and build deterministic relative-path manifests with fail-closed complete or explicitly partial directory Merkle roots.",
@@ -11027,6 +11073,7 @@ AGENT_TOOL_HELP = """Available tools:
 - file_write: {"path": "notes.txt", "content": "...", "mode": "create|overwrite|append"}
 - file_batch_write: {"operations_json": [{"path": "a.txt", "content": "...", "mode": "create|overwrite"}]}
 - json_patch: {"path": "config.json", "operations_json": [{"op": "test", "path": "/version", "value": 1}, {"op": "replace", "path": "/version", "value": 2}], "mode": "preview|apply"}
+- text_patch: {"root": ".", "patch": "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n", "apply": false}
 - file_edit: {"path": "notes.txt", "old": "before", "new": "after", "count": 1}
 - file_copy: {"source": "assets/input.bin", "destination": "build/input.bin", "overwrite": false}
 - file_move: {"source": "build/draft.bin", "destination": "dist/final.bin", "overwrite": false}
@@ -11236,6 +11283,15 @@ def _repository_scope_path_error(tool_name, args, project_root):
                 ("archive source", args.get("source") or ""),
                 ("archive destination", args.get("destination") or ""),
             ]
+        elif tool_name == "text_patch":
+            targets = [("root", args.get("root") or ".")]
+            try:
+                targets.extend(
+                    ("patch path", item["path"])
+                    for item in text_patch_ops._parse(args.get("patch", ""))
+                )
+            except (TypeError, ValueError, PermissionError) as exc:
+                return "ERROR: agent project path rejected: invalid patch: %s" % exc
         else:
             key = _project_scoped_path_key(tool_name)
             targets = [("path", args.get(key) or ".")]
@@ -12330,6 +12386,13 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "text_patch":
+        return text_patch(
+            root=args.get("root", "."), patch=args.get("patch", ""),
+            apply=args.get("apply") is True, token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "scaffold_project":
         return scaffold_project(
             kind=args.get("kind", ""),
@@ -12639,7 +12702,7 @@ def _agent_activity_command(tool_name, args):
 _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "file_read", "file_digest", "directory_digest", "file_read_range", "context_pack",
     "repo_log", "repo_show", "repo_blame",
-    "data_query", "image_inspect", "file_write", "file_batch_write", "json_patch", "file_edit",
+    "data_query", "image_inspect", "file_write", "file_batch_write", "json_patch", "file_edit", "text_patch",
     "archive_list", "archive_extract",
     "file_delete", "directory_create", "workspace_inventory", "dependency_inventory", "directory_tree",
     "file_find", "repository_symbol_index", "text_search", "script_search", "artifact_verify",
@@ -12692,7 +12755,7 @@ def _project_scoped_path_key(tool_name):
         return "destination"
     if tool_name in {
         "file_find", "text_search", "script_search", "scaffold_project",
-        "repo_status", "repo_diff",
+        "repo_status", "repo_diff", "text_patch",
     }:
         return "root"
     return "path"
@@ -12733,6 +12796,10 @@ def _project_scope_args(tool_name, args, project):
     # the host-resolved path boundary; child processes remain user-level code,
     # not an operating-system sandbox.
     scoped["extra_roots"] = project
+    if tool_name == "text_patch":
+        # This sentinel is injected only after the host binds the call to its
+        # selected project. A model-supplied approval never reaches this path.
+        scoped["approval"] = _TRUSTED_REPOSITORY_APPROVAL
 
     if tool_name == "file_batch_write":
         operations = _batch_agent_operations(scoped)
@@ -12853,7 +12920,7 @@ def _agent_dispatch_observed(
 
 
 _WORK_MUTATION_TOOLS = frozenset({
-    "directory_create", "file_write", "file_batch_write", "json_patch", "file_edit", "file_copy", "file_move", "file_delete",
+    "directory_create", "file_write", "file_batch_write", "json_patch", "file_edit", "file_copy", "file_move", "file_delete", "text_patch",
     "scaffold_project", "archive_extract",
     "artifact_generate", "game_generate_and_test", "game_generation_campaign",
     "memory_quality_repair", "memory_privacy_repair", "memory_embedding_backfill",
@@ -12870,6 +12937,8 @@ def _agent_tool_mutates(tool_name, args):
         return args.get("dry_run") is False
     if tool_name == "json_patch":
         return str(args.get("mode", "preview")).strip().lower() == "apply"
+    if tool_name == "text_patch":
+        return args.get("apply") is True
     if tool_name in {
         "memory_quality_repair", "memory_privacy_repair",
         "memory_embedding_backfill", "memory_interaction_embedding_backfill",
@@ -12985,6 +13054,15 @@ def _agent_mutation_records(tool_name, args):
             {"tool": tool_name, "path": _agent_normalized_path(item.get("path", ""))}
             for item in operations if isinstance(item, dict)
         ]
+    if tool_name == "text_patch":
+        try:
+            root = args.get("root") or "."
+            return [
+                {"tool": tool_name, "path": _agent_normalized_path(os.path.join(root, *item["path"].split("/")))}
+                for item in text_patch_ops._parse(args.get("patch", ""))
+            ]
+        except (TypeError, ValueError, PermissionError):
+            return [{"tool": tool_name, "path": _agent_normalized_path(args.get("root", ""))}]
     path = args.get("path", "")
     if tool_name == "archive_extract":
         path = args.get("destination", "")
@@ -14426,7 +14504,7 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
 })
 _AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
-    "directory_create", "file_write", "file_batch_write", "json_patch", "file_edit", "file_copy", "file_move", "archive_extract", "workspace_run",
+    "directory_create", "file_write", "file_batch_write", "json_patch", "file_edit", "file_copy", "file_move", "archive_extract", "text_patch", "workspace_run",
     "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_generate", "artifact_verify", "game_reference_suite",
     "game_generate_and_test",
@@ -14440,7 +14518,7 @@ _AUTOPILOT_RUNNERS = frozenset({
 })
 _AUTOPILOT_SCRIPT_SUFFIXES = frozenset({".py", ".js", ".dart", ".exe", ".com"})
 _AUTOPILOT_MUTATION_EVIDENCE = frozenset({
-    "directory_create", "file_write", "file_batch_write", "json_patch", "file_edit", "file_copy", "file_move", "archive_extract", "artifact_generate",
+    "directory_create", "file_write", "file_batch_write", "json_patch", "file_edit", "file_copy", "file_move", "archive_extract", "text_patch", "artifact_generate",
     "game_generate_and_test",
 })
 

@@ -58,7 +58,7 @@ expressions or file content are executed.
 
 ## Guarded filesystem tools
 
-`file_find`, `file_read`, `file_read_range`, `file_write`, `file_batch_write`, `file_edit`,
+`file_find`, `file_read`, `file_read_range`, `file_write`, `file_batch_write`, `file_edit`, `text_patch`,
 `file_copy`, `file_move`, `file_delete`, `directory_tree`, `directory_create`, `workspace_inventory`,
 `text_search`, `script_search`, `program_search`, `image_inspect`, `archive_list`,
 `archive_extract`, `repo_log`,
@@ -97,6 +97,12 @@ best-effort rollback if any write fails.
 sibling staging directory, and promotes only to a new non-overwriting project
 destination. Traversal, absolute paths, links/devices, encrypted entries,
 collisions, nested archives, sensitive paths, and archive bombs are rejected.
+
+`text_patch` previews strict unified diffs rooted at an explicit project
+directory. With `apply=true`, it performs an all-file transaction for create
+and modify operations only. Context must match exactly; deletes, renames,
+binary/non-UTF-8 data, sensitive paths, links, escapes, and over-budget input
+are rejected.
 
 ## Other tool families
 
