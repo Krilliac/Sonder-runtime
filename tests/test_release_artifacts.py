@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import re
 import tarfile
 import zipfile
 from pathlib import Path
@@ -73,6 +74,10 @@ def test_generates_checksums_sbom_and_provenance(tmp_path):
         provenance["predicate"]["buildDefinition"]["internalParameters"]["revision"]
         == revision
     )
+    assert provenance["predicate"]["buildDefinition"]["buildType"] == (
+        "https://github.com/Krilliac/Sonder-runtime/"
+        ".github/workflows/build-apps.yml@" + revision
+    )
 
 
 def test_fails_closed_when_artifact_is_missing(tmp_path):
@@ -131,3 +136,17 @@ def test_release_workflow_stamps_and_gates_artifacts():
     for output in release.OUTPUTS:
         assert f"dist/{output}" in workflow
         assert output in release_block
+
+
+def test_every_external_workflow_action_is_pinned_to_a_full_sha():
+    workflows = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+    uses = []
+    for path in sorted(workflows.glob("*.y*ml")):
+        for line_number, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), 1
+        ):
+            match = re.search(r"\buses:\s*([^\s#]+)", line)
+            if match and not match.group(1).startswith("./"):
+                uses.append((path.name, line_number, match.group(1)))
+    assert uses
+    assert [item for item in uses if not re.search(r"@[0-9a-f]{40}$", item[2])] == []

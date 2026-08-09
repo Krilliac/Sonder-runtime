@@ -11,8 +11,16 @@ if not defined SONDER_LAUNCHER_TOKEN (
   echo Example token generator: py "%~dp0sonder_launcher.py" --generate-token
   exit /b 2
 )
+if not defined SONDER_LAUNCHER_CERT (
+  echo ERROR: Remote launcher autostart requires SONDER_LAUNCHER_CERT.
+  exit /b 2
+)
+if not defined SONDER_LAUNCHER_KEY (
+  echo ERROR: Remote launcher autostart requires SONDER_LAUNCHER_KEY.
+  exit /b 2
+)
 >"%TARGET%" echo @echo off
 >>"%TARGET%" echo start "" /min "%~dp0sonder-launcher.cmd" --host 0.0.0.0
 echo Installed: %TARGET%
-echo The token remains in your user environment and was not copied into the startup file.
+echo The token and TLS paths remain in your user environment and were not copied into the startup file.
 exit /b 0

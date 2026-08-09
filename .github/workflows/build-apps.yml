@@ -2,11 +2,10 @@ name: build-apps
 
 # Compiles Sonder Runtime for Android, Linux, Windows, and macOS. Every run
 # uploads installable artifacts (downloadable from the run's
-# "Summary" page). Manual workflow runs can refresh the README's direct
-# artifact download badges; normal push builds avoid bot commits so local GUI
-# pushes are not rejected by surprise README updates. Pushing a tag like
-# `app-v1.0.0` additionally publishes a GitHub Release with permanent download
-# links.
+# "Summary" page). The README's `app-latest` links are a separate mutable
+# prerelease snapshot; ordinary and manual runs do not publish or refresh it.
+# A matching, release-ready `app-vX.Y.Z` tag additionally publishes a versioned
+# GitHub Release with permanent download links.
 #
 # The repo keeps only the Dart sources (app/lib, app/pubspec.yaml, app/test).
 # The native project scaffolding (android/, linux/, windows/, macos/) is
@@ -15,7 +14,7 @@ name: build-apps
 
 on:
   push:
-    branches: [main, claude/mobile-desktop-app-gui-gzlhn5]
+    branches: [main]
     tags: ["app-v*"]
   # These job names are required branch-protection checks. Run on every PR so
   # documentation or nested-script changes cannot wait forever for statuses
