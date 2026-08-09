@@ -644,12 +644,26 @@ def find_files(
     pattern = (query or "*").strip() or "*"
     limit = max(1, min(MAX_FIND_RESULTS, int(max_results or 50)))
     results = []
-    visible = None if include_ignored else git_discovery.visible_paths(root_path)
+    enforce_git_visibility = not include_ignored
+    visible = (
+        git_discovery.visible_paths(root_path)
+        if enforce_git_visibility else None
+    )
+
+    def finish(truncated: bool) -> dict:
+        if enforce_git_visibility:
+            git_discovery.require_unchanged(root_path, visible)
+        return {
+            "root": str(root_path), "query": pattern, "results": results,
+            "truncated": truncated, "limit": limit,
+        }
+
     for base, dirs, files in os.walk(root_path):
         base_path = Path(base)
         dirs[:] = [
             name for name in dirs
             if name not in {".git", ".pytest_cache", "venv", "__pycache__"}
+            and not _is_reparse_point(base_path / name)
             and (
                 visible is None
                 or os.path.normcase(
@@ -659,24 +673,24 @@ def find_files(
         ]
         names = dirs + files
         for name in names:
-            rel = str((Path(base) / name).relative_to(root_path))
+            path = Path(base) / name
+            rel = str(path.relative_to(root_path))
             if visible is not None and os.path.normcase(rel) not in visible:
                 continue
+            if _is_reparse_point(path):
+                continue
             if fnmatch.fnmatch(name, pattern) or fnmatch.fnmatch(rel, pattern) or pattern.lower() in rel.lower():
-                p = Path(base) / name
                 results.append({
-                    "path": str(p),
+                    "path": str(path),
                     "relative": rel,
-                    "type": "dir" if p.is_dir() else "file",
-                    "bytes": p.stat().st_size if p.is_file() else 0,
+                    "type": "dir" if path.is_dir() else "file",
+                    "bytes": path.stat().st_size if path.is_file() else 0,
                 })
                 if len(results) >= limit:
                     # Hit the cap with the walk unfinished: more may match.
                     # Signal it so counting callers don't silently undercount.
-                    return {"root": str(root_path), "query": pattern,
-                            "results": results, "truncated": True, "limit": limit}
-    return {"root": str(root_path), "query": pattern, "results": results,
-            "truncated": False, "limit": limit}
+                    return finish(True)
+    return finish(False)
 
 
 def read_file(

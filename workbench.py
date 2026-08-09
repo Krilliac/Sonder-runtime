@@ -139,9 +139,16 @@ def _bounded_walk(
         timeout_seconds, DEFAULT_WALK_SECONDS, 0.01, MAX_WALK_SECONDS,
     )
     state = _new_walk_state(root, max_entries, timeout_seconds)
-    visible = None if include_ignored else git_discovery.visible_paths(
-        root, timeout_seconds=min(timeout_seconds, git_discovery.DEFAULT_TIMEOUT_SECONDS),
-    )
+    state["enforce_git_visibility"] = not include_ignored
+    visible = None
+    if state["enforce_git_visibility"]:
+        visible = git_discovery.visible_paths(
+            root,
+            timeout_seconds=min(
+                timeout_seconds, git_discovery.DEFAULT_TIMEOUT_SECONDS,
+            ),
+        )
+    state["git_visible"] = visible
     started = time.monotonic()
     deadline = started + timeout_seconds
 
@@ -235,6 +242,13 @@ def _finish_walk(iterator, state):
     close = getattr(iterator, "close", None)
     if close:
         close()
+    if state["enforce_git_visibility"]:
+        git_discovery.require_unchanged(
+            Path(state["root"]), state["git_visible"],
+            timeout_seconds=min(
+                state["timeout_seconds"], git_discovery.DEFAULT_TIMEOUT_SECONDS,
+            ),
+        )
     return {
         "entries_scanned": state["entries_scanned"],
         "files_seen": state["files_seen"],
@@ -377,6 +391,8 @@ def directory_tree(
                 visit(candidate, level + 1)
 
     visit(root, 1)
+    if not include_ignored:
+        git_discovery.require_unchanged(root, visible)
     return {
         "root": str(root),
         "depth": depth,

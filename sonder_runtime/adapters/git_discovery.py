@@ -151,11 +151,15 @@ def visible_paths(
         raise GitDiscoveryError("Git metadata exists but the Git executable is unavailable")
     git = str(Path(git).resolve())
     prefix = _git_argv(git)
-    metadata = _run_bounded(
+    raw_metadata = _run_bounded(
         prefix + ["-C", str(root), "rev-parse", "--show-toplevel", "--absolute-git-dir"],
         timeout_seconds=timeout_seconds,
         output_limit=16_384,
-    ).decode("utf-8", errors="strict").splitlines()
+    )
+    try:
+        metadata = raw_metadata.decode("utf-8", errors="strict").splitlines()
+    except UnicodeDecodeError as exc:
+        raise GitDiscoveryError("Git repository identity was not valid UTF-8") from exc
     if len(metadata) != 2:
         raise GitDiscoveryError("Git repository identity was incomplete")
     repo_root = Path(metadata[0]).resolve()
@@ -215,3 +219,13 @@ def visible_paths(
             if str(parent) != ".":
                 visible.add(os.path.normcase(str(Path(*parent.parts))))
     return frozenset(visible)
+
+
+def require_unchanged(
+    root: Path, initial: frozenset[str] | None, *,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+) -> None:
+    """Reject a scan if its Git/non-Git visibility boundary changed."""
+    current = visible_paths(root, timeout_seconds=timeout_seconds)
+    if current != initial:
+        raise GitDiscoveryError("Git visibility changed during filesystem scan")
