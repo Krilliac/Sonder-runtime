@@ -155,3 +155,22 @@ def test_loop_rejects_unbounded_actions_and_invalid_dispatch_results():
     row = invalid["iterations"][0]["actions"][0]["result"]
     assert invalid["ok"] is False
     assert row["summary"] == "dispatcher returned an invalid result"
+
+
+def test_service_does_not_send_new_cancel_keyword_to_legacy_runner_by_default():
+    class StrictLegacyRunner:
+        def run(
+            self, actions, dispatch, *, max_iterations, stop_on_failure,
+            stop_on_success, delay_seconds,
+        ):
+            return {"ok": True, "cancelled": False}
+
+        def format(self, _result):
+            return "done"
+
+    repository = Repository()
+    repository.save("demo", [{"type": "status"}])
+    result = WorkflowService(repository, StrictLegacyRunner()).run(
+        "demo", lambda _action: {"ok": True}
+    )
+    assert result.ok is True

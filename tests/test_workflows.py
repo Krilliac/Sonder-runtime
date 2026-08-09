@@ -153,3 +153,15 @@ def test_server_reports_corrupt_workflow_storage_as_typed_error(monkeypatch, tmp
     output = server.workflow_list()
     assert output.startswith("ERROR: ")
     assert "Expecting property name" in output
+
+
+def test_server_failed_workflow_preserves_legacy_wire_text(monkeypatch, tmp_path):
+    import server
+
+    monkeypatch.setattr(workflow_store, "workspace_root", lambda: str(tmp_path))
+    monkeypatch.delenv("SONDER_WORKFLOWS", raising=False)
+    server.workflow_save("failing_flow", '[{"type":"not_a_real_action"}]')
+    output = server.workflow_run("failing_flow")
+    assert output.startswith("workflow: failing_flow\n")
+    assert "loop status: failed" in output
+    assert not output.startswith("ERROR: ")
