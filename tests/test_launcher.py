@@ -33,6 +33,52 @@ def test_linux_group_liveness_ignores_zombie_only_groups(monkeypatch, tmp_path):
     assert sonder_launcher._linux_group_has_non_zombie_member(4242, tmp_path) is True
 
 
+@pytest.mark.parametrize("state", ["Z", "X", "x"])
+def test_linux_group_liveness_treats_dead_states_as_stopped(
+    monkeypatch, tmp_path, state,
+):
+    monkeypatch.setattr(sonder_launcher.sys, "platform", "linux")
+    process = tmp_path / "101"
+    process.mkdir()
+    (process / "stat").write_text(
+        "101 (worker) %s 1 4242 4242\n" % state, encoding="ascii",
+    )
+    assert sonder_launcher._linux_group_has_non_zombie_member(4242, tmp_path) is False
+
+
+def test_linux_group_liveness_is_unknown_on_unreadable_or_malformed_entries(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(sonder_launcher.sys, "platform", "linux")
+    unrelated = tmp_path / "100"
+    unrelated.mkdir()
+    (unrelated / "stat").write_text(
+        "100 (other) S 1 9999 9999\n", encoding="ascii",
+    )
+    unreadable = tmp_path / "101"
+    unreadable.mkdir()
+    (unreadable / "stat").mkdir()
+    assert sonder_launcher._linux_group_has_non_zombie_member(4242, tmp_path) is None
+
+    (unreadable / "stat").rmdir()
+    (unreadable / "stat").write_text("malformed\n", encoding="ascii")
+    assert sonder_launcher._linux_group_has_non_zombie_member(4242, tmp_path) is None
+
+
+def test_linux_group_liveness_ignores_entries_that_vanish_during_scan(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(sonder_launcher.sys, "platform", "linux")
+    unrelated = tmp_path / "100"
+    unrelated.mkdir()
+    (unrelated / "stat").write_text(
+        "100 (other) S 1 9999 9999\n", encoding="ascii",
+    )
+    vanished = tmp_path / "101"
+    vanished.mkdir()
+    assert sonder_launcher._linux_group_has_non_zombie_member(4242, tmp_path) is False
+
+
 @pytest.mark.parametrize("proc_result,expected", [(False, False), (True, True), (None, True)])
 def test_posix_group_liveness_uses_procfs_when_available(
     monkeypatch, proc_result, expected,
