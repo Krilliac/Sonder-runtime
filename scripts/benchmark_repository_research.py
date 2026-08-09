@@ -44,8 +44,14 @@ DEFAULT_CASES: tuple[dict[str, Any], ...] = (
         "question": "Locate record construction and aggregate history status.",
         "implementation_exists": True,
         "required_evidence": (
-            ("eval_history.py", "make_record"),
-            ("eval_history.py", "history_status"),
+            (
+                "sonder_runtime/adapters/evaluation_history_store.py",
+                "make_record",
+            ),
+            (
+                "sonder_runtime/adapters/evaluation_history_store.py",
+                "history_status",
+            ),
         ),
     },
     {
