@@ -118,6 +118,25 @@ _SENSITIVE_DISCLOSURE_RE = re.compile(
     r"confidential\s+(?:data|details?|information))\b",
     re.I,
 )
+_SENSITIVE_RESOURCE_RE = re.compile(
+    r"\b(?:environment\s+variables?|env\s+vars?|process\s+environment\s+values?|"
+    r"secrets?|passwords?|credentials?|(?:api|access)\s+keys?|session\s+tokens?|"
+    r"bearer\s+values?|login\s+details?|connection\s+strings?|"
+    r"(?:system|developer)\s+(?:prompts?|messages?|instructions?)|"
+    r"hidden\s+(?:data|details?|instructions?)|configuration\s+files?|dotfiles?|"
+    r"(?:contents?\s+of\s+)?local\s+files?|local\s+file\s+contents?|"
+    r"(?:diagnostic\s+)?logs?|usage\s+data|telemetry(?:\s+identifiers?)?|"
+    r"machine\s+identifiers?|hostnames?|usernames?|browser\s+history|"
+    r"clipboard\s+contents?|database\s+rows?|webhooks?|command\s+output|"
+    r"private\s+(?:data|details?|information)|"
+    r"confidential\s+(?:data|details?|information))\b",
+    re.I,
+)
+_BENIGN_RESOURCE_CONTEXT_RE = re.compile(
+    r"\b(?:(?:powershell|pwsh|bash|zsh|shell|windows|linux)\s+)?"
+    r"environment\s+variables?\s+(?:syntax|notation|naming|names|expansion)\b",
+    re.I,
+)
 
 _CATEGORY_PATTERNS = (
     ("identity", re.compile(r"\b(?:wants?\s+to\s+be\s+called|name\s+is)\b", re.I)),
@@ -226,6 +245,12 @@ def _clean(text):
     return _ASSIGN_RE.sub(" ", text).strip()
 
 
+def _has_sensitive_resource(text):
+    """Detect prompt-bearing resources, except narrow syntax-only discussion."""
+    value = _BENIGN_RESOURCE_CONTEXT_RE.sub(" ", _clean(text))
+    return bool(_SENSITIVE_RESOURCE_RE.search(value))
+
+
 def _trim_body(body):
     body = _clean(body).strip(" ,;:-")
     words = body.split()
@@ -260,6 +285,7 @@ def preference_category(text):
         or _INSTRUCTION_OVERRIDE_RE.search(value)
         or _PROMPT_CONTROL_RE.search(value)
         or _SENSITIVE_DISCLOSURE_RE.search(value)
+        or _has_sensitive_resource(value)
         or any(ord(char) < 32 for char in value)
     ):
         return ""
@@ -309,6 +335,7 @@ def is_stable_preference(text, source_text=None):
         or _COMMAND_TAIL_RE.search(source)
         or _PROMPT_CONTROL_RE.search(source)
         or _SENSITIVE_DISCLOSURE_RE.search(source)
+        or _has_sensitive_resource(source)
         or any(ord(char) < 32 and char not in "\t\r\n" for char in source)
     ):
         return False
@@ -406,6 +433,7 @@ def extract_preferences(text):
         or _COMMAND_TAIL_RE.search(text)
         or _PROMPT_CONTROL_RE.search(text)
         or _SENSITIVE_DISCLOSURE_RE.search(text)
+        or _has_sensitive_resource(text)
     ):
         return []
     found = []
