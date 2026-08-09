@@ -517,7 +517,7 @@ def create_agent(
             ).fetchone()
             if parent:
                 parent_principal = str(parent["principal_id"] or "")
-                if parent_principal and parent_principal != principal:
+                if parent_principal != principal:
                     raise PermissionError("child principal must match its parent tree")
                 if str(parent["project"] or "") != str(row.get("project") or ""):
                     raise PermissionError("child project must match its parent tree")
@@ -1274,22 +1274,18 @@ def prune(
     finished_retention: int = DEFAULT_FINISHED_RETENTION,
     event_retention: int = DEFAULT_EVENT_RETENTION,
     message_retention_seconds: int = DEFAULT_MESSAGE_RETENTION_SECONDS,
-    message_pending_ttl_seconds: int = DEFAULT_MESSAGE_PENDING_TTL_SECONDS,
 ) -> dict:
     finished_retention = max(10, min(int(finished_retention), 10_000))
     event_retention = max(100, min(int(event_retention), 50_000))
     message_retention_seconds = max(
         3600, min(int(message_retention_seconds), 90 * 24 * 60 * 60)
     )
-    message_pending_ttl_seconds = max(
-        60, min(int(message_pending_ttl_seconds), 7 * 24 * 60 * 60)
-    )
     now = time.time()
     with _write_transaction() as conn:
         conn.execute(
             "UPDATE fleet_messages SET status='expired' "
-            "WHERE status='queued' AND (expires_ts<=? OR queued_ts<=?)",
-            (now, now - message_pending_ttl_seconds),
+            "WHERE status='queued' AND expires_ts<=?",
+            (now,),
         )
         before = conn.total_changes
         conn.execute(

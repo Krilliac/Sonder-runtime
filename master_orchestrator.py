@@ -166,14 +166,37 @@ def _heartbeat_loop() -> None:
             _remember_store_error(exc)
 
 
+def _retained_messaging_available() -> bool:
+    """Return whether the process-stable store has the new messaging API.
+
+    ``fleet_store`` deliberately is not live-reloaded. During a source update,
+    a reloaded orchestrator can therefore coexist with the previously imported
+    store until the operator restarts the runtime.
+    """
+    return all(
+        callable(getattr(fleet_store, name, None))
+        for name in (
+            "local_principal_credentials",
+            "register_principal",
+            "list_agents_scoped",
+            "queue_agent_message",
+            "claim_agent_messages",
+        )
+    )
+
+
 def _ensure_owner() -> None:
     global _OWNER_REGISTERED, _HEARTBEAT_THREAD, _ATEXIT_REGISTERED
     global _PRINCIPAL_ID, _PRINCIPAL_SECRET
     with _OWNER_SERVICE_LOCK:
-        if not _PRINCIPAL_ID or not _PRINCIPAL_SECRET:
-            _PRINCIPAL_ID, _PRINCIPAL_SECRET = (
-                fleet_store.local_principal_credentials()
-            )
+        if not _retained_messaging_available():
+            # Ordinary orchestration remains available during a live source
+            # reload. Messaging itself requires the stable store to be loaded
+            # from the updated source by restarting the runtime.
+            _PRINCIPAL_ID = ""
+            _PRINCIPAL_SECRET = ""
+        elif not _PRINCIPAL_ID or not _PRINCIPAL_SECRET:
+            _PRINCIPAL_ID, _PRINCIPAL_SECRET = fleet_store.local_principal_credentials()
         else:
             fleet_store.register_principal(_PRINCIPAL_ID, _PRINCIPAL_SECRET)
         if not _OWNER_REGISTERED:
@@ -905,10 +928,13 @@ def _new_agent(
         "retried_by": "",
     }
     try:
-        stored = fleet_store.create_agent(
-            row, _OWNER_ID, os.getpid(), principal_id=_PRINCIPAL_ID,
-            principal_secret=_PRINCIPAL_SECRET,
-        )
+        if _PRINCIPAL_ID:
+            stored = fleet_store.create_agent(
+                row, _OWNER_ID, os.getpid(), principal_id=_PRINCIPAL_ID,
+                principal_secret=_PRINCIPAL_SECRET,
+            )
+        else:
+            stored = fleet_store.create_agent(row, _OWNER_ID, os.getpid())
     except sqlite3.IntegrityError:
         # A 48-bit suffix collision is exceptionally unlikely; fail closed rather
         # than risk attaching work to another process's row.
@@ -1472,6 +1498,10 @@ def discover_retained_agents(
 ) -> list[dict]:
     """Discover agents owned by this runtime inside one explicit scope."""
     _ensure_owner()
+    if not _retained_messaging_available():
+        raise RuntimeError(
+            "retained agent messaging requires a runtime restart after this update"
+        )
     scoped_project = canonical_project_root(project) if project else ""
     if project and not scoped_project:
         raise ValueError("project must name an existing directory or source file")
@@ -1492,6 +1522,10 @@ def send_retained_agent_message(
 ) -> dict:
     """Queue a same-principal, same-project, same-tree follow-up or steer."""
     _ensure_owner()
+    if not _retained_messaging_available():
+        raise RuntimeError(
+            "retained agent messaging requires a runtime restart after this update"
+        )
     scoped_project = canonical_project_root(project) if project else ""
     if project and not scoped_project:
         raise ValueError("project must name an existing directory or source file")
@@ -1514,6 +1548,10 @@ def receive_retained_agent_messages(
 ) -> list[dict]:
     """Claim messages at a trusted cooperative worker checkpoint."""
     _ensure_owner()
+    if not _retained_messaging_available():
+        raise RuntimeError(
+            "retained agent messaging requires a runtime restart after this update"
+        )
     scoped_project = canonical_project_root(project) if project else ""
     if project and not scoped_project:
         raise ValueError("project must name an existing directory or source file")
