@@ -46,6 +46,9 @@ class FakeCodec:
     def key(self, text):
         return "preference-key"
 
+    def is_stable(self, text, source_text=None):
+        return bool(text)
+
     def format(self, rows):
         return "\n".join(row["text"] for row in rows)
 
@@ -111,11 +114,13 @@ def test_status_bounds_match_legacy_and_event_failures_do_not_change_success():
     )
     service.status(False, 999999)
     service.status(False, -10)
+    service.status("false", True)
 
-    assert repository.calls[-3:] == [
+    assert repository.calls[-4:] == [
         ("list", {"limit": 50, "include_disabled": True}),
         ("list", {"limit": 200, "include_disabled": False}),
         ("list", {"limit": 1, "include_disabled": False}),
+        ("list", {"limit": 50, "include_disabled": False}),
     ]
 
 
@@ -223,6 +228,7 @@ def test_legacy_codec_resolves_the_injected_live_module_identity():
         extract_preferences=lambda text: ["extracted"],
         normalize_preference=lambda text: "normalized",
         preference_key=lambda text: "key",
+        is_stable_preference=lambda text, source_text=None: True,
         format_preferences=lambda rows: "formatted",
     )
     codec = LegacyPreferenceCodec(lambda: replacement)
