@@ -1,6 +1,7 @@
 """SPEC-3 R-M12: the architecture checker holds and stays enforceable."""
 from __future__ import annotations
 
+import ast
 import subprocess
 import sys
 from pathlib import Path
@@ -39,6 +40,25 @@ def test_legacy_root_allowlist_has_a_shrink_only_ratchet():
     ) | {"new_accidental_legacy"}
     violations = module.check()
     assert any("new_accidental_legacy" in row for row in violations)
+
+
+def test_production_callers_use_the_memory_adapter():
+    offenders = []
+    for path in _REPO_ROOT.rglob("*.py"):
+        relative = path.relative_to(_REPO_ROOT)
+        if relative == Path("memory_store.py") or relative.parts[0] == "tests":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import) and any(
+                alias.name == "memory_store" for alias in node.names
+            ):
+                offenders.append(str(relative))
+                break
+            if isinstance(node, ast.ImportFrom) and node.module == "memory_store":
+                offenders.append(str(relative))
+                break
+    assert offenders == []
 
 
 def test_checker_detects_a_violation(tmp_path):

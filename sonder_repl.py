@@ -9,7 +9,7 @@ import re
 import sys
 
 import server
-import memory_store
+import sonder_runtime.adapters.memory_store as memory_store
 import grounding
 import code_runner
 import training_tasks
@@ -321,7 +321,7 @@ TRAIN_MAX_N = max(1, _env_int("SONDER_TRAIN_MAX_N", 500))
 
 LIVE_RELOAD_MODULES = [
     "server",
-    "memory_store",
+    "sonder_runtime.adapters.memory_store",
     "grounding",
     "training_tasks",
     "intents",
@@ -339,7 +339,9 @@ def _maybe_live_reload():
     global server, memory_store, grounding, training_tasks, intents, feedback, personas, debug_dump
     modules = live_reload.reload_changed_modules(LIVE_RELOAD_MODULES)
     server = modules.get("server", server)
-    memory_store = modules.get("memory_store", memory_store)
+    memory_store = modules.get(
+        "sonder_runtime.adapters.memory_store", memory_store
+    )
     grounding = modules.get("grounding", grounding)
     training_tasks = modules.get("training_tasks", training_tasks)
     intents = modules.get("intents", intents)

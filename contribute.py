@@ -18,7 +18,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
-import memory_store  # noqa
+import sonder_runtime.adapters.memory_store as memory_store  # noqa
 
 MAX_LEN = 300
 
