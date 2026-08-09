@@ -622,6 +622,11 @@ _prime_live_reload_modules()
 def _maybe_live_reload():
     modules = live_reload.reload_changed_modules(LIVE_RELOAD_MODULES)
     for name, module in modules.items():
+        if name == "log_inspect":
+            # The public MCP wrapper below owns the `log_inspect` global;
+            # refresh only the aliased implementation module.
+            globals()["log_inspect_module"] = module
+            continue
         if name in globals():
             globals()[name] = module
     _refresh_runtime_policy(create=True)

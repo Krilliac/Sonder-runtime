@@ -85,6 +85,20 @@ def test_tail_reads_from_end_under_scan_cap(project):
     assert report["scan_truncated"] is True
 
 
+def test_tail_preserves_complete_record_at_scan_boundary(project):
+    path = project / "boundary.log"
+    path.write_bytes(b"old!\nERROR\n")
+
+    report = log_inspect.inspect_log(
+        path, tail_lines=1, max_scan_bytes=6, max_file_bytes=100,
+    )
+
+    assert report["window"]["window_start_byte"] == 5
+    assert report["summary"]["lines_inspected"] == 1
+    assert report["summary"]["error_lines"] == 1
+    assert report["first_failure"]["message"] == "ERROR"
+
+
 def test_json_log_fields_are_extracted(project):
     path = project / "json.log"
     path.write_text(

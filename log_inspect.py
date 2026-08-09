@@ -244,12 +244,19 @@ def _read_window(handle, size, max_scan_bytes, tail_lines, max_lines, deadline):
     _check_deadline(deadline)
     tail_mode = tail_lines > 0
     start = max(0, size - max_scan_bytes) if tail_mode else 0
+    begins_after_newline = False
+    if tail_mode and start:
+        # A bounded tail can begin either inside a record or exactly at a
+        # record boundary. Inspect the preceding byte before reading the
+        # window so a complete first record is not silently discarded.
+        handle.seek(start - 1)
+        begins_after_newline = handle.read(1) == b"\n"
     handle.seek(start)
     raw = handle.read(min(max_scan_bytes, size - start))
     _check_deadline(deadline)
     if b"\x00" in raw:
         raise LogInspectError("log window contains NUL bytes and is not text")
-    if tail_mode and start:
+    if tail_mode and start and not begins_after_newline:
         newline = raw.find(b"\n")
         raw = b"" if newline < 0 else raw[newline + 1:]
     elif not tail_mode and start + len(raw) < size:
