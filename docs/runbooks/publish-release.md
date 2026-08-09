@@ -78,7 +78,11 @@ The `build-apps` workflow gates its Android, Linux, Windows, and macOS
 artifacts through `scripts/release_artifacts.py` before a tagged release can
 publish. The gate requires exactly one artifact for every supported platform,
 opens each archive (including the Android APK's nested local-system payload),
-and refuses the release if `LICENSE` is absent.
+and refuses the release if `LICENSE` is absent. The release job depends on
+that integrity job and then runs
+`scripts/check_release_version.py --require-release --json` before invoking
+the GitHub Release publisher. A tag, runtime version, Flutter version, or full
+commit mismatch therefore cannot publish assets.
 
 The integrity artifact contains:
 
@@ -94,6 +98,9 @@ and use the existing TUF ceremony above for cryptographic release trust. The
 local-system payload also contains `sonder_build.json`; runtime `/version` and
 diagnostics therefore report the source version and full commit from which the
 desktop artifact was assembled.
+
+All three metadata files are explicit required GitHub Release assets alongside
+the four platform packages; publication fails if any named file is absent.
 
 ## Freshness and freeze protection
 
