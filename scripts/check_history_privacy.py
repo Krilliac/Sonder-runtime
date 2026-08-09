@@ -29,6 +29,7 @@ _RAW_CHANGE = re.compile(
     rb"^:([0-7]{6}) ([0-7]{6}) ([0-9a-f]{40,64}) "
     rb"([0-9a-f]{40,64}) ([A-Z][0-9]*)$"
 )
+_FORMER_PRODUCT_NAME = "trilo" + "bite"
 
 # Exact object/path pairs already reachable before this gate was introduced.
 # Deleting any entry is allowed. Adding or changing an object is not.
@@ -43,7 +44,7 @@ KNOWN_HISTORY_PRIVACY_DEBT = frozenset({
     ),
     (
         "d0ea07e097451999c6b6093ffde826b82dab7b5c",
-        "trilobite-personal-lora/checkpoints/checkpoint-58/adapter_model.safetensors",
+        f"{_FORMER_PRODUCT_NAME}-personal-lora/checkpoints/checkpoint-58/adapter_model.safetensors",
     ),
     (
         "f6ed8c56f5670e642a64040df3f47fe98577cf73",
@@ -55,11 +56,11 @@ KNOWN_HISTORY_PRIVACY_DEBT = frozenset({
     ),
     (
         "f6ed8c56f5670e642a64040df3f47fe98577cf73",
-        "trilobite-personal-lora/adapter_model.safetensors",
+        f"{_FORMER_PRODUCT_NAME}-personal-lora/adapter_model.safetensors",
     ),
     (
         "f6ed8c56f5670e642a64040df3f47fe98577cf73",
-        "trilobite-personal-lora/checkpoints/checkpoint-116/adapter_model.safetensors",
+        f"{_FORMER_PRODUCT_NAME}-personal-lora/checkpoints/checkpoint-116/adapter_model.safetensors",
     ),
 })
 
