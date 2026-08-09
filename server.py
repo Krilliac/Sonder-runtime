@@ -48,7 +48,6 @@ import system_profile
 import emotion_vectors
 import preference_learning
 import process_liveness
-import workflow_store
 import web_tools
 import local_service_probe as local_probe
 import web_intents
@@ -684,6 +683,10 @@ def _maybe_live_reload():
             continue
         if name == "archive_create":
             globals()["archive_create_tool"] = module
+            continue
+        if name == "workflow_store":
+            # The workflow adapter resolves this watched legacy module lazily.
+            # Do not recreate a direct server dependency during live reload.
             continue
         if name == "artifact_risk":
             globals()["artifact_risk_module"] = module
@@ -10428,8 +10431,9 @@ def loop(
 def workflow_list() -> str:
     """List reusable named workflows stored in workflows.json."""
     _maybe_live_reload()
-    workflows, path = workflow_store.ensure_workflows()
-    return "workflows: %s\n\n%s" % (path, workflow_store.format_workflows(workflows))
+    from sonder_runtime.application.workflows import render_workflow_result
+
+    return render_workflow_result(_application().workflows.list())
 
 
 @mcp.tool()
@@ -10439,17 +10443,11 @@ def workflow_save(name: str, actions_json: str, description: str = "") -> str:
     `actions_json` may be a JSON list or {"actions": [...]}.
     """
     _maybe_live_reload()
-    try:
-        parsed = json.loads(actions_json)
-    except json.JSONDecodeError as e:
-        return "ERROR: actions_json is not valid JSON: %s" % e
-    actions = parsed.get("actions") if isinstance(parsed, dict) else parsed
-    try:
-        workflow, path = workflow_store.save_workflow(name, actions, description)
-    except ValueError as e:
-        return "ERROR: %s" % e
-    return "Saved workflow '%s' to %s (%d actions)." % (
-        workflow_store.normalize_name(name), path, len(workflow["actions"]))
+    from sonder_runtime.application.workflows import render_workflow_result
+
+    return render_workflow_result(
+        _application().workflows.save(name, actions_json, description)
+    )
 
 
 @mcp.tool()
@@ -10462,38 +10460,26 @@ def workflow_run(
 ) -> str:
     """Run a saved workflow through the bounded loop engine."""
     _maybe_live_reload()
-    try:
-        workflow = workflow_store.get_workflow(name)
-    except ValueError as e:
-        return "ERROR: %s" % e
-    if workflow is None:
-        return "ERROR: no workflow named '%s'." % name
-    result = code_runner.run_loop(
-        workflow["actions"],
+    from sonder_runtime.application.workflows import render_workflow_result
+
+    result = _application().workflows.run(
+        name,
         _loop_dispatch,
         max_iterations=max_iterations,
         stop_on_failure=stop_on_failure,
         stop_on_success=stop_on_success,
         delay_seconds=delay_seconds,
     )
-    header = "workflow: %s\n%s\n" % (
-        workflow_store.normalize_name(name),
-        workflow.get("description") or "(no description)",
-    )
-    return header + code_runner.format_loop_result(result)
+    return render_workflow_result(result)
 
 
 @mcp.tool()
 def workflow_delete(name: str) -> str:
     """Delete a saved workflow from workflows.json."""
     _maybe_live_reload()
-    try:
-        existed, path = workflow_store.delete_workflow(name)
-    except ValueError as e:
-        return "ERROR: %s" % e
-    if not existed:
-        return "No workflow named '%s' existed. File unchanged except normalization: %s" % (name, path)
-    return "Deleted workflow '%s' from %s." % (workflow_store.normalize_name(name), path)
+    from sonder_runtime.application.workflows import render_workflow_result
+
+    return render_workflow_result(_application().workflows.delete(name))
 
 
 @mcp.tool()

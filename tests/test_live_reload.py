@@ -104,6 +104,25 @@ def test_server_rebinds_reloaded_modules(monkeypatch):
         server.personas = original
 
 
+def test_workflow_live_reload_stays_behind_package_adapter(monkeypatch, tmp_path):
+    import server
+    import workflow_store
+    from sonder_runtime.adapters.filesystem import workflow_store as packaged
+
+    assert workflow_store is packaged
+    monkeypatch.setattr(packaged, "workspace_root", lambda: str(tmp_path))
+    monkeypatch.delenv("SONDER_WORKFLOWS", raising=False)
+    monkeypatch.setattr(
+        server.live_reload,
+        "reload_changed_modules",
+        lambda names: {"workflow_store": packaged},
+    )
+
+    server._maybe_live_reload()
+    assert "status_sweep" in server.workflow_list()
+    assert "workflow_store" not in server.__dict__
+
+
 def test_server_rebinds_log_inspect_alias_without_replacing_tool(monkeypatch):
     import server
 
