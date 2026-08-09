@@ -48,6 +48,15 @@ def test_ambiguous_weather_locations_require_clarification():
     }
 
 
+def test_conjunctions_inside_single_place_names_are_preserved():
+    assert web_intents.classify("weather in Trinidad and Tobago today") == {
+        "kind": "weather", "location": "Trinidad and Tobago",
+    }
+    assert web_intents.classify("forecast for Brighton and Hove") == {
+        "kind": "weather", "location": "Brighton and Hove",
+    }
+
+
 def test_temporal_weather_modifiers_are_not_locations():
     for prompt in (
         "what is the current weather?", "What's today's weather?", "current weather",
@@ -69,6 +78,17 @@ def test_meta_and_negated_weather_phrases_do_not_route():
     assert web_intents.classify(
         "I said don't tell me Chicago weather"
     ) is None
+
+
+def test_weather_verbs_and_provider_exclusions_keep_live_routing():
+    assert web_intents.classify("Please query the weather in Chicago") == {
+        "kind": "weather", "location": "Chicago",
+    }
+    prompt = (
+        "Search the web, but do not use weather.com; "
+        "get the forecast for Chicago"
+    )
+    assert web_intents.classify(prompt) == {"kind": "research", "query": prompt}
 
 
 def test_capability_followup_preserves_unresolved_weather_context():

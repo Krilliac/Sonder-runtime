@@ -279,8 +279,10 @@ _TRAILING_TIME = re.compile(
     re.IGNORECASE,
 )
 _WEATHER_META_FRAME = re.compile(
-    r"\b(?:phrase|query|prompt|sentence|string|text|literal|example|regex|parser|router|routing|"
-    r"extractor|extraction|classifier|classification)\b|"
+    r"\b(?:phrase|prompt|sentence|string|text|literal|example|regex|parser|router|routing|"
+    r"extractor|extraction|classifier|classification)\b[^\n]{0,80}"
+    r"\b(?:weather|forecast|temperature)\b|"
+    r"\b(?:this|that|the|a|an)\s+(?:weather\s+|forecast\s+)?query\b|"
     r"^\s*why\b[^\n]{0,100}\b(?:parse|route|extract|classif)\w*\b|"
     r"\b(?:says?|said|asks?|asked|contains?|includes?|mentions?)\b[^\n]{0,80}"
     r"[\"'](?:[^\"'\n]{0,80})(?:weather|forecast|temperature)",
@@ -299,7 +301,7 @@ _WEATHER_LOCATION_SCAFFOLD = re.compile(
     re.IGNORECASE,
 )
 _WEATHER_LOCATION_AMBIGUOUS = re.compile(
-    r"\s+(?:or|and|versus|vs\.?)\s+|\s[/|]\s|\b(?:either|both)\b",
+    r"\s+(?:or|versus|vs\.?)\s+|\s[/|]\s|\b(?:either|both)\b",
     re.IGNORECASE,
 )
 _WEATHER_LOCATION_TIME_ONLY = re.compile(
@@ -310,8 +312,9 @@ _WEATHER_LOCATION_TIME_ONLY = re.compile(
     re.IGNORECASE,
 )
 _WEATHER_NEGATED_ACTION = re.compile(
-    r"\b(?:do\s+not|don't|don’t|never)\b[^\n]{0,80}"
-    r"\b(?:weather|forecast|temperature)\b",
+    r"\b(?:do\s+not|don't|don’t|never)\b[^\n,;:.!?]{0,24}"
+    r"\b(?:check|fetch|get|give|look\s+up|need|report|show|tell|want)\b"
+    r"[^\n,;:.!?]{0,60}\b(?:weather|forecast|temperature)\b",
     re.IGNORECASE,
 )
 # Post-hoc guard: a generated reply that wrongly claims the assistant has no
