@@ -86,7 +86,16 @@ def cmd_doctor(args) -> int:
     """Run the consolidated read-only health report."""
     import sonder_doctor
 
+    try:
+        config = _load_config(args)
+    except sonder_config.ConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     checks = sonder_doctor.default_checks()
+    storage = dict(sonder_doctor.storage_checks(
+        config, throughput=args.storage_probe
+    ))
+    checks = [(name, storage.get(name, check)) for name, check in checks]
     if args.skip_ollama:
         checks = [(name, check) for name, check in checks if name != "ollama"]
     report = sonder_doctor.run_doctor(checks)
@@ -107,6 +116,11 @@ def cmd_status(args) -> int:
         payload["profile"] = config.profile
         payload["config_sources"] = list(config.sources)
         _export_runtime_environment(config)
+        try:
+            import sonder_storage
+            payload["storage"] = sonder_storage.inspect_config(config)
+        except (OSError, ValueError) as exc:
+            payload["storage_error"] = str(exc)
     except sonder_config.ConfigError as exc:
         payload["config_errors"] = list(exc.errors)
     try:
@@ -638,10 +652,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_preflight)
 
     p = sub.add_parser("doctor", help="consolidated read-only health report")
-    p.add_argument("--json", action="store_true", help="JSON output")
+    common(p)
     p.add_argument(
         "--skip-ollama", action="store_true",
         help="do not probe the Ollama endpoint",
+    )
+    p.add_argument(
+        "--storage-probe", action="store_true",
+        help="explicitly run an 8 MiB/5 second state-storage throughput probe",
     )
     p.set_defaults(func=cmd_doctor)
 
