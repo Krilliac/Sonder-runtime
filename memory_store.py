@@ -179,10 +179,37 @@ CREATE TABLE IF NOT EXISTS preferences (
     confidence REAL DEFAULT 0.5,
     evidence_count INTEGER DEFAULT 1,
     enabled INTEGER DEFAULT 1,
+    revision INTEGER NOT NULL DEFAULT 1 CHECK(revision >= 1),
     created_ts TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_ts TEXT DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(scope, key)
 );
+CREATE TABLE IF NOT EXISTS refinement_history (
+    id TEXT PRIMARY KEY,
+    target_kind TEXT NOT NULL CHECK(target_kind = 'preference'),
+    target_id TEXT NOT NULL,
+    operation TEXT NOT NULL CHECK(operation IN ('apply', 'rollback')),
+    parent_refinement_id TEXT,
+    execution_scope TEXT NOT NULL DEFAULT 'local' CHECK(execution_scope = 'local'),
+    expected_version INTEGER NOT NULL CHECK(expected_version >= 1),
+    before_version INTEGER NOT NULL CHECK(before_version >= 1),
+    after_version INTEGER NOT NULL CHECK(after_version > before_version),
+    before_digest TEXT NOT NULL CHECK(length(before_digest) = 64),
+    after_digest TEXT NOT NULL CHECK(length(after_digest) = 64),
+    before_json TEXT NOT NULL CHECK(length(before_json) <= 16384),
+    after_json TEXT NOT NULL CHECK(length(after_json) <= 16384),
+    evidence_json TEXT NOT NULL CHECK(length(evidence_json) <= 16384),
+    expected_outcome TEXT NOT NULL CHECK(length(expected_outcome) BETWEEN 1 AND 2048),
+    created_ts TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TRIGGER IF NOT EXISTS refinement_history_no_update
+BEFORE UPDATE ON refinement_history BEGIN
+    SELECT RAISE(ABORT, 'refinement history is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS refinement_history_no_delete
+BEFORE DELETE ON refinement_history BEGIN
+    SELECT RAISE(ABORT, 'refinement history is append-only');
+END;
 """
 
 
@@ -322,6 +349,12 @@ def _migrate(conn):
             "UPDATE lessons SET embedding_dim=length(embedding)/4 "
             "WHERE embedding IS NOT NULL AND embedding_dim IS NULL "
             "AND length(embedding) > 0 AND length(embedding) % 4 = 0"
+        )
+    preference_cols = _column_names(conn, "preferences")
+    if "revision" not in preference_cols:
+        conn.execute(
+            "ALTER TABLE preferences ADD COLUMN revision INTEGER NOT NULL "
+            "DEFAULT 1 CHECK(revision >= 1)"
         )
     usage_cols = _column_names(conn, "lesson_usage")
     if "outcome_ts" not in usage_cols:
@@ -2645,6 +2678,7 @@ def upsert_preference(conn, pref_id, scope, key, text, source_interaction=None,
         "confidence=MIN(1.0, MAX(preferences.confidence, excluded.confidence) + 0.05), "
         "evidence_count=preferences.evidence_count + 1, "
         "enabled=1, "
+        "revision=preferences.revision + 1, "
         "updated_ts=CURRENT_TIMESTAMP",
         (pref_id, scope, key, text, source_interaction, float(confidence)),
     )
@@ -2659,7 +2693,7 @@ def preferences_for_scope(conn, scope="global", limit=20, include_disabled=False
         where += " AND enabled=1"
     rows = conn.execute(
         "SELECT id, scope, key, text, source_interaction, confidence, "
-        "evidence_count, enabled, created_ts, updated_ts "
+        "evidence_count, enabled, revision, created_ts, updated_ts "
         "FROM preferences WHERE %s "
         "ORDER BY confidence DESC, evidence_count DESC, updated_ts DESC LIMIT ?"
         % where,
@@ -2683,7 +2717,7 @@ def all_preferences(conn, limit=50, include_disabled=False):
     where = "" if include_disabled else "WHERE enabled=1"
     rows = conn.execute(
         "SELECT id, scope, key, text, source_interaction, confidence, "
-        "evidence_count, enabled, created_ts, updated_ts "
+        "evidence_count, enabled, revision, created_ts, updated_ts "
         "FROM preferences %s "
         "ORDER BY scope ASC, confidence DESC, evidence_count DESC, updated_ts DESC LIMIT ?"
         % where,
@@ -2695,7 +2729,8 @@ def all_preferences(conn, limit=50, include_disabled=False):
 def set_preference_enabled(conn, pref_id_or_key, enabled, scope="global"):
     scope = (scope or "global").strip() or "global"
     cur = conn.execute(
-        "UPDATE preferences SET enabled=?, updated_ts=CURRENT_TIMESTAMP "
+        "UPDATE preferences SET enabled=?, revision=revision + 1, "
+        "updated_ts=CURRENT_TIMESTAMP "
         "WHERE id=? OR (scope=? AND key=?)",
         (1 if enabled else 0, pref_id_or_key, scope, pref_id_or_key),
     )

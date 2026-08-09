@@ -87,12 +87,13 @@ def format_preferences(rows):
     for row in rows:
         status = "on" if int(row.get("enabled", 1)) else "off"
         lines.append(
-            "- %s [%s, confidence %.2f, evidence %s]"
+            "- %s [%s, confidence %.2f, evidence %s, revision %s]"
             % (
                 row.get("text", ""),
                 status,
                 float(row.get("confidence") or 0.0),
                 row.get("evidence_count", 0),
+                row.get("revision", 1),
             )
         )
     return "\n".join(lines)
