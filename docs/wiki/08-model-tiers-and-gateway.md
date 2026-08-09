@@ -8,11 +8,11 @@ quality/speed/privacy knobs.
 
 | Tier | Default | Typical use |
 |---|---|---|
-| `fast` | small (3–4B) | router, titling, summaries, mechanical work |
-| `code` | coder 7B | workbench, autopilot, code generation |
-| `general` | 7B instruct | general chat |
-| `reasoning` | `deepseek-r1:7b` | proofs, derivations, "think carefully" work |
-| `vision` | `moondream` | images, screenshots, diagrams, OCR |
+| `fast` | `sonder:latest` | router, titling, summaries, mechanical work |
+| `code` | `sonder:latest` | workbench, autopilot, code generation |
+| `general` | `sonder:latest` | general chat |
+| `reasoning` | unbound | optional proofs, derivations, "think carefully" work |
+| `vision` | unbound | optional images, screenshots, diagrams, OCR |
 | `cloud-*` | Ollama-hosted | metered, leaves the machine (consent-gated) |
 
 Set with `SONDER_FAST` / `SONDER_CODE` / `SONDER_GENERAL` /
@@ -21,9 +21,10 @@ Set with `SONDER_FAST` / `SONDER_CODE` / `SONDER_GENERAL` /
 memory-augmented (facts + lessons); cloud tiers answer without
 augmentation but are still captured for learning.
 
-`fast`, `code`, and `general` are **base tiers** — always bound, and the
+`fast`, `code`, and `general` are **base tiers** — always bound to the stable
+alias created from the model selected for this host, and the
 fallback floor for everything else. `reasoning` and `vision` are **specialist
-tiers**: bound by default, but an operator may leave either unset
+tiers**: unbound by default; an operator may bind either to an installed model
 (`SONDER_VISION=none`, or `/runtime set vision=` with an empty value). An
 unset tier is not offered at all — it disappears from `/v1/models` and from
 `_serve_target`, and the capability router degrades that work to a base tier.

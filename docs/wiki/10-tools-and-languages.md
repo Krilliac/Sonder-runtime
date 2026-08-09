@@ -16,7 +16,7 @@ the workspace cwd. It is a convenience runner, **not** a security sandbox.
 |---|---|
 | Scripting | Python, JavaScript (Node), TypeScript (`node --experimental-strip-types`), Bash/sh/zsh, Ruby, Perl, PHP, Lua, R |
 | Compiled | C++ (g++/clang++/MSVC), C#, Go (`go run`), Java (JDK 11 single-file), Rust (rustc compile+run) |
-| Shell | PowerShell |
+| Shell | PowerShell on Windows; Bash/sh/zsh on POSIX hosts |
 
 Language is chosen by fence: ```` ```rust ```` / ```` ```go ```` /
 ```` ```bash ```` etc., with common aliases (`rs`, `golang`, `ts`, `sh`,
