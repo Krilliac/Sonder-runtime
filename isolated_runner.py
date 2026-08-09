@@ -237,7 +237,26 @@ def authorized_roots():
 
 def _reject_special_project_entries(project):
     """Reject submounts, reparse points, links, sockets, and device-like files."""
-    stack = [Path(project)]
+    project = Path(project)
+    if os.name != "nt" and Path("/proc/self/mountinfo").is_file():
+        try:
+            mount_lines = Path("/proc/self/mountinfo").read_text(
+                encoding="utf-8", errors="strict"
+            ).splitlines()
+        except OSError as exc:
+            raise ValueError("cannot inspect host mount table") from exc
+        escapes = {"\\040": " ", "\\011": "\t", "\\012": "\n", "\\134": "\\"}
+        for line in mount_lines:
+            fields = line.split(" - ", 1)[0].split()
+            if len(fields) < 5:
+                raise ValueError("host mount table contains an ambiguous entry")
+            rendered = fields[4]
+            for encoded, decoded in escapes.items():
+                rendered = rendered.replace(encoded, decoded)
+            mount_point = Path(rendered)
+            if mount_point != project and _is_inside(mount_point, project):
+                raise ValueError("project contains a nested host mount: %s" % mount_point)
+    stack = [project]
     seen = 0
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
     isjunction = getattr(os.path, "isjunction", lambda _path: False)
