@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
+import numbers
 from typing import Protocol, Sequence
 
 from ..context import OperationContext
+from ...domain.common.errors import DependencyUnavailable
 
 
 @dataclass(frozen=True)
@@ -50,6 +53,50 @@ class ModelResponse:
 class Embedding:
     vector: tuple[float, ...]
     model: str
+
+
+def require_model_text(value: object) -> str:
+    """Validate provider output before it crosses the gateway boundary."""
+    if not isinstance(value, str) or not value.strip():
+        raise DependencyUnavailable("model provider returned no usable text")
+    return value
+
+
+def optional_token_count(value: object, field_name: str) -> int | None:
+    """Return a trustworthy optional usage count, rejecting coercion.
+
+    Provider usage is accounting data.  Accepting strings, booleans, or
+    negative values would make a malformed response look authoritative.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise DependencyUnavailable(
+            "model provider returned invalid %s" % field_name
+        )
+    return value
+
+
+def require_embedding_vector(value: object) -> tuple[float, ...]:
+    """Normalize a non-empty, finite numeric embedding vector."""
+    if isinstance(value, (str, bytes)):
+        raise DependencyUnavailable("model provider returned an invalid embedding")
+    try:
+        items = tuple(value)  # type: ignore[arg-type]
+    except TypeError as exc:
+        raise DependencyUnavailable(
+            "model provider returned an invalid embedding"
+        ) from exc
+    if not items:
+        raise DependencyUnavailable("model provider returned an empty embedding")
+    if any(
+        isinstance(item, bool)
+        or not isinstance(item, numbers.Real)
+        or not math.isfinite(float(item))
+        for item in items
+    ):
+        raise DependencyUnavailable("model provider returned an invalid embedding")
+    return tuple(float(item) for item in items)
 
 
 class ModelGateway(Protocol):
