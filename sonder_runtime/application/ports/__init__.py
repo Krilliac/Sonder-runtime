@@ -23,6 +23,7 @@ from .repositories import (
 )
 from .tool_executor import ToolCall, ToolExecutor, ToolResult
 from .task_state import ChecklistEventPort, TaskRepository
+from .workflows import LoopRunner, WorkflowRepository
 
 __all__ = [
     "AutomationRepository",
@@ -44,4 +45,6 @@ __all__ = [
     "ToolResult",
     "TaskRepository",
     "UnitOfWork",
+    "LoopRunner",
+    "WorkflowRepository",
 ]
