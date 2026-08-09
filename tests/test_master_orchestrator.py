@@ -138,6 +138,31 @@ def test_run_inline_tracks_master_agent():
     assert any(a["id"] == result["master_id"] and a["status"] == "done" for a in snap["agents"])
 
 
+def test_retained_agent_service_wrappers_preserve_project_and_parent_scope(tmp_path):
+    project = str(tmp_path.resolve())
+    master_id = master_orchestrator._new_agent(
+        "master", "coordinate", metadata={"project": project},
+    )
+    child_id = master_orchestrator._new_agent(
+        "agent", "inspect", parent_id=master_id, metadata={"project": project},
+    )
+
+    discovered = master_orchestrator.discover_retained_agents(
+        project=project, parent_id=master_id,
+    )
+    queued = master_orchestrator.send_retained_agent_message(
+        master_id, child_id, "check the boundary", mode="steer", project=project,
+    )
+    delivered = master_orchestrator.receive_retained_agent_messages(
+        child_id, project=project,
+    )
+
+    assert {row["id"] for row in discovered} == {master_id, child_id}
+    assert queued["status"] == "queued"
+    assert delivered[0]["message_id"] == queued["message_id"]
+    assert delivered[0]["status"] == "delivered"
+
+
 def test_run_delegated_tracks_children_and_audit():
     def worker(prompt):
         return "worker saw " + prompt.splitlines()[-1]
