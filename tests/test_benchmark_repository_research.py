@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts import benchmark_repository_research as research
 
@@ -84,6 +86,21 @@ class RepositoryResearchBenchmarkTests(unittest.TestCase):
         self.assertEqual(1, case["false_negative_count"])
         self.assertFalse(case["passed"])
 
+    def test_common_false_negative_wording_is_detected(self) -> None:
+        phrases = (
+            "This implementation does not exist.",
+            "The implementation is absent.",
+            "I cannot locate any implementation.",
+            "I couldn't find the implementation.",
+        )
+        for phrase in phrases:
+            with self.subTest(phrase=phrase):
+                submission = _good_submission()
+                submission["cases"][0]["answer"] = phrase
+                case = research.evaluate(submission)["cases"][0]
+                self.assertEqual(1, case["false_negative_count"])
+                self.assertFalse(case["passed"])
+
     def test_invented_path_and_symbol_make_claim_unsupported(self) -> None:
         submission = _good_submission()
         target = submission["cases"][1]
@@ -148,6 +165,25 @@ class RepositoryResearchBenchmarkTests(unittest.TestCase):
         self.assertEqual(3, case["max_identical_tool_run"])
         self.assertNotIn("repeated_tool", case)
 
+    def test_equivalent_integral_json_numbers_cannot_evade_tool_loop(self) -> None:
+        submission = _good_submission()
+        submission["cases"][2]["tool_calls"] = [
+            {"tool": "search", "arguments": {"page": 1}},
+            {"tool": "search", "arguments": {"page": 1.0}},
+            {"tool": "search", "arguments": {"page": -0.0 + 1.0}},
+        ]
+        case = research.evaluate(submission)["cases"][2]
+        self.assertTrue(case["repeated_identical_tool_loop"])
+        self.assertEqual(3, case["max_identical_tool_run"])
+
+    def test_programmatic_tool_arguments_must_be_strict_nested_json(self) -> None:
+        submission = _good_submission()
+        submission["cases"][0]["tool_calls"] = [
+            {"tool": "search", "arguments": {"nested": ("not", "json")}}
+        ]
+        with self.assertRaisesRegex(research.ResearchBenchmarkError, "JSON value"):
+            research.evaluate(submission)
+
     def test_interleaved_calls_are_not_a_consecutive_loop(self) -> None:
         submission = _good_submission()
         submission["cases"][2]["tool_calls"] = [
@@ -160,9 +196,12 @@ class RepositoryResearchBenchmarkTests(unittest.TestCase):
 
     def test_unknown_duplicate_and_oversized_inputs_are_rejected(self) -> None:
         unknown = _good_submission()
-        unknown["cases"][0]["id"] = "invented-case"
-        with self.assertRaisesRegex(research.ResearchBenchmarkError, "unknown case"):
+        private_id = "private-customer-alpha"
+        unknown["cases"][0]["id"] = private_id
+        with self.assertRaisesRegex(research.ResearchBenchmarkError, "unknown case") as caught:
             research.evaluate(unknown)
+        self.assertNotIn(private_id, str(caught.exception))
+        self.assertIn(research._opaque_evidence_id(private_id), str(caught.exception))
 
         duplicate = _good_submission()
         duplicate["cases"].append(duplicate["cases"][0])
@@ -173,6 +212,31 @@ class RepositoryResearchBenchmarkTests(unittest.TestCase):
         oversized["cases"][0]["answer"] = "x" * (research.MAX_TEXT_CHARS + 1)
         with self.assertRaisesRegex(research.ResearchBenchmarkError, "exceeds"):
             research.evaluate(oversized)
+
+    def test_required_fields_and_tool_names_are_strict(self) -> None:
+        unknown = _good_submission()
+        private_field = "private-customer-prose"
+        unknown["cases"][0][private_field] = "not copied"
+        with self.assertRaisesRegex(research.ResearchBenchmarkError, "unknown field") as caught:
+            research.evaluate(unknown)
+        self.assertNotIn(private_field, str(caught.exception))
+
+        missing = _good_submission()
+        del missing["cases"][0]["claims"]
+        with self.assertRaisesRegex(research.ResearchBenchmarkError, "missing fields"):
+            research.evaluate(missing)
+
+        missing_arguments = _good_submission()
+        missing_arguments["cases"][0]["tool_calls"] = [{"tool": "search"}]
+        with self.assertRaisesRegex(research.ResearchBenchmarkError, "missing fields"):
+            research.evaluate(missing_arguments)
+
+        unsafe_tool = _good_submission()
+        unsafe_tool["cases"][0]["tool_calls"] = [
+            {"tool": "private tool name", "arguments": {}}
+        ]
+        with self.assertRaisesRegex(research.ResearchBenchmarkError, "safe name"):
+            research.evaluate(unsafe_tool)
 
     def test_markdown_contains_metrics_but_not_candidate_prose(self) -> None:
         submission = _good_submission()
@@ -210,6 +274,16 @@ class RepositoryResearchBenchmarkTests(unittest.TestCase):
             self.assertEqual(research.REPORT_SCHEMA, json.loads(json_output.read_text())["schema"])
             self.assertIn("Repository research benchmark", markdown.read_text(encoding="utf-8"))
 
+    def test_atomic_write_failure_preserves_destination_and_cleans_temporary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "report.json"
+            destination.write_text("original", encoding="utf-8")
+            with mock.patch.object(research.os, "replace", side_effect=OSError("fail")):
+                with self.assertRaises(OSError):
+                    research._atomic_write(destination, "replacement")
+            self.assertEqual("original", destination.read_text(encoding="utf-8"))
+            self.assertEqual([destination], list(Path(temporary).iterdir()))
+
     def test_cli_prints_public_suite_without_submission(self) -> None:
         completed = subprocess.run(
             [
@@ -235,6 +309,13 @@ class RepositoryResearchBenchmarkTests(unittest.TestCase):
                 research.main(
                     ["--submission", str(submission), "--json", str(submission)]
                 )
+
+            hardlink = Path(temporary) / "submission-hardlink.json"
+            os.link(submission, hardlink)
+            with self.assertRaisesRegex(
+                research.ResearchBenchmarkError, "must be distinct"
+            ):
+                research._distinct_paths((submission, hardlink))
 
             huge = Path(temporary) / "huge.json"
             huge.write_bytes(b" " * (research.MAX_INPUT_BYTES + 1))
