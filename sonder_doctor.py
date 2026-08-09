@@ -259,10 +259,18 @@ def _check_config() -> dict:
         return {"status": STATUS_FAIL, "detail": "config invalid: %s" % exc}
     except Exception as exc:
         return _skip("config load failed (%s)" % exc)
-    detail = "ollama=%s" % getattr(
-        getattr(config, "ollama", None), "url", "?"
-    )
-    return {"status": STATUS_OK, "detail": detail}
+    return validated_config_check(config)()
+
+
+def validated_config_check(config):
+    """Return a check bound to the exact config already validated by the CLI."""
+    def check():
+        detail = "ollama=%s" % getattr(
+            getattr(config, "ollama", None), "url", "?"
+        )
+        return {"status": STATUS_OK, "detail": detail}
+
+    return check
 
 
 def _check_self_heal() -> dict:
@@ -299,7 +307,7 @@ def _check_memory_quality() -> dict:
         return _skip("SONDER_DB not set")
     try:
         import memory_quality
-        import memory_store
+        import sonder_runtime.adapters.memory_store as memory_store
     except Exception as exc:
         return _skip("memory quality surfaces unavailable (%s)" % exc)
     try:
@@ -393,6 +401,55 @@ def _check_ollama(*, timeout: float = 5.0) -> dict:
         return {"status": STATUS_FAIL, "detail": "%s: %s" % (host, exc)}
 
 
+def storage_checks(config=None, *, throughput: bool = False):
+    """Build storage checks for a validated config without running them yet."""
+    def loaded_config():
+        if config is not None:
+            return config
+        loaded = _load_config_or_none()
+        if loaded is None:
+            raise RuntimeError("configuration unavailable")
+        return loaded
+
+    def state_check():
+        import sonder_storage
+
+        cfg = loaded_config()
+        record = sonder_storage.inspect_root(
+            cfg.state.home,
+            minimum_free_bytes=cfg.state.minimum_free_disk_bytes,
+            role="state",
+        )
+        status = STATUS_WARN if record["warnings"] else STATUS_OK
+        detail = sonder_storage.summarize(record)
+        if throughput:
+            probe = sonder_storage.throughput_probe(record["path"])
+            detail += "; explicit probe write=%.1f MiB/s read=%.1f MiB/s" % (
+                probe["write_mib_s"], probe["read_mib_s"]
+            )
+        return {"status": status, "detail": detail}
+
+    def models_check():
+        import sonder_storage
+
+        cfg = loaded_config()
+        records = [
+            sonder_storage.inspect_root(
+                root,
+                minimum_free_bytes=cfg.state.minimum_free_disk_bytes,
+                role="models",
+            )
+            for root in sonder_storage.model_roots()
+        ]
+        status = STATUS_WARN if any(r["warnings"] for r in records) else STATUS_OK
+        return {
+            "status": status,
+            "detail": " | ".join(sonder_storage.summarize(r) for r in records),
+        }
+
+    return [("storage_state", state_check), ("storage_models", models_check)]
+
+
 def default_checks() -> list[tuple[str, CheckCallable]]:
     """The ordered, read-only checks used when no registry is injected.
 
@@ -402,6 +459,7 @@ def default_checks() -> list[tuple[str, CheckCallable]]:
     """
     return [
         ("config", _check_config),
+        *storage_checks(),
         ("self_heal", _check_self_heal),
         ("memory_quality", _check_memory_quality),
         ("runtime_policy", _check_runtime_policy),

@@ -72,6 +72,24 @@ Mitigations that are already in place and worth knowing about:
 - `log_inspect` rejects sensitive/control paths and reparse traversal, validates
   the already-open regular-file handle, and uses only fixed host parsers under
   hard file, byte, line, result, output, and time ceilings.
+- `artifact_risk_inspect` never renders or executes its input and never returns
+  raw file content. It reports bounded static indicators for PDFs, PE/ELF/Mach-O
+  executables, scripts, and opaque binaries. Static findings are evidence, not
+  a malware verdict; incomplete or unsupported scans are never labelled clean.
+- `script_run` applies `SONDER_EXECUTION_RISK_POLICY` before launching an exact
+  guarded script. The default is `report`; operators may choose `deny-high`,
+  `deny-medium`, or `deny-unknown`. A caller may strengthen but cannot weaken
+  the configured policy. Enforcing `deny-*` modes currently fail closed for
+  every launch because a portable exact inspected-handle-to-interpreter handoff
+  is not yet available; `report` remains advisory. This avoids a pathname-swap
+  bypass and is defense in depth, not an OS sandbox.
+- Process inventory and memory-risk inspection are disabled unless the operator
+  sets `SONDER_PROCESS_INSPECTION=enabled:bounded-read-only`. The Windows-only
+  scanner requests read/query rights for one exact PID and returns only fixed
+  indicator names/counts from private readable memory plus aggregate accounting—never command lines, module
+  paths, addresses, strings, or memory bytes. It does not enable debug privilege,
+  suspend, write, inject, or bypass normal OS access checks. Heuristic matches
+  can be wrong and bounded scans can miss data.
 - `local_service_probe` remains a direct, explicit MCP operation only. It is
   excluded from agents, repository read-only sessions, loops, and autopilot
   because arbitrary loopback response bodies can contain host-local secrets.
@@ -86,11 +104,19 @@ Mitigations that are already in place and worth knowing about:
 ### Unsafe lab mode (disposable isolated hosts only)
 
 Sonder has a deliberately dangerous model-evaluation override. It is **not an
-OS sandbox and provides no containment**. It removes the model agent and
+OS sandbox and provides no containment**. It removes the local model agent and
 autopilot host-tool allowlists, project scoping, read-only gate, web/location
 gate, and file approval gate so an untrusted or unguarded model can exercise
-the host-native tool surface. Direct tool time/output bounds still exist, but
-they are reliability controls, not a security boundary.
+the host-native tool surface. The shared file-approval bypass also affects the
+46 direct MCP call paths that consult it; direct MCP is therefore part of the
+blast radius, not an unchanged boundary. Direct tool time/output bounds still
+exist, but they are reliability controls, not a security boundary.
+
+Hosted agents remain unable to use local-only or host-data inspection tools,
+including artifact and process-risk inspection, even when the unsafe gate is
+active. Unsafe mode bypasses only the hosted nested-model restriction. The
+operator artifact-execution risk policy and the exact process-inspection
+opt-in remain enforced; unsafe mode does not silently rewrite either policy.
 
 The override is off unless `SONDER_UNSAFE_LAB_ACK` exactly equals:
 
@@ -104,7 +130,8 @@ closed. Even with the exact acknowledgement, Sonder refuses activation when
 appends and flushes a durable JSONL warning under
 `$SONDER_HOME/audit/unsafe-lab.jsonl` (override only with
 `SONDER_UNSAFE_LAB_AUDIT_PATH`), and status/diagnostics display the mode.
-Model-directed children receive a scrubbed environment that removes
+All model-authored subprocess boundaries, including repair campaigns and
+self-modification validation/Git calls, receive a scrubbed environment that removes
 secret-, credential-, token-, session-, approval-, bypass-, and control-like
 variables. That reduces accidental credential inheritance; it does not make
 the host safe.

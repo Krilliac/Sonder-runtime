@@ -124,6 +124,121 @@ regex, and integer-parse checks — see
 passes every arm and the moat delta is honestly `0` rather than an artifact of
 grading the prompt back to itself.
 
+## Comparing grounded-history checkpoints without running a model
+
+`scripts/benchmark_adaptive.py` fills a different evidence gap. It never calls a
+model, retrieval system, network, or GPU. Instead, it validates and compares two
+bounded records produced by the same external task runner:
+
+- a `fresh` checkpoint with zero grounded-history records and the SHA-256 digest
+  of empty history;
+- an `accumulated` checkpoint with one or more grounded-history records and the
+  digest of that exact checkpoint.
+
+The records are comparable only when the model name and digest, suite name,
+version and digest, hardware label and digest, and task-name set all match
+exactly. Each task records only `name`, `completed`, `retries`, `tokens_in`, and
+`tokens_out`. Summaries and IDs are derived and tamper-checked. Inputs are capped
+at 256 tasks and 512 KiB; counters are bounded non-negative integers.
+
+Create `fresh-tasks.json` and `accumulated-tasks.json` as arrays such as:
+
+```json
+[
+  {"name":"task-a","completed":true,"retries":0,"tokens_in":120,"tokens_out":40}
+]
+```
+
+Then create and compare the checkpoint records:
+
+```bash
+python scripts/benchmark_adaptive.py record \
+  --model sonder:latest --model-digest MODEL_SHA256 \
+  --suite adaptive-core --suite-version 1 --suite-digest SUITE_SHA256 \
+  --hardware host-a/gpu-a/driver-a --hardware-digest HARDWARE_SHA256 \
+  --checkpoint fresh --checkpoint-label clean --grounded-records 0 \
+  --grounded-history-digest e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 \
+  --tasks fresh-tasks.json --output fresh.json
+
+python scripts/benchmark_adaptive.py record \
+  --model sonder:latest --model-digest MODEL_SHA256 \
+  --suite adaptive-core --suite-version 1 --suite-digest SUITE_SHA256 \
+  --hardware host-a/gpu-a/driver-a --hardware-digest HARDWARE_SHA256 \
+  --checkpoint accumulated --checkpoint-label after-100 \
+  --grounded-records 100 --grounded-history-digest HISTORY_SHA256 \
+  --tasks accumulated-tasks.json --output accumulated.json
+
+python scripts/benchmark_adaptive.py compare --fresh fresh.json \
+  --accumulated accumulated.json --json comparison.json \
+  --markdown comparison.md
+```
+
+The report gives completion, retry, and token deltas plus the exact improved and
+regressed task names. A task swap is reported as `mixed` even when aggregate
+completion is unchanged, preventing an aggregate score from hiding a regression.
+Per-task retry and token regressions are also listed even when the aggregate
+direction improves. Retry and token directions remain separate from completion
+rather than being collapsed into an unsupported single score. Record IDs bind
+the report to both inputs, and the deterministic report has its own content ID.
+The CLI refuses output/input path collisions and writes reports atomically.
+
+This path compares supplied observations; it does not create them and does not
+claim causation. For credible adaptive-improvement evidence, the external runner
+must execute the same task suite with the same model settings and hardware, vary
+only the grounded-history checkpoint, and preserve the generated records.
+
+## Checking repository-research evidence without running a model
+
+`scripts/benchmark_repository_research.py` is a complementary, model-free gate
+for research-agent output. Its fixed public fixture suite covers known paths and
+symbols in the moat benchmark, evaluation history, promotion evaluator, and
+model-gateway contract. It requires exact `path` plus `symbol` citations and
+reports false claims that no implementation exists, unsupported or invented
+evidence, missing fixture coverage, and runs of three or more identical
+consecutive tool calls.
+
+The input is bounded to 512 KiB. Candidate answers and tool arguments are never
+copied into either report. Unsafe or absolute citation paths are represented by
+a redacted marker, while other non-fixture paths and symbols appear only as
+SHA-256 identifiers. The JSON and Markdown outputs contain per-case and
+aggregate metrics, a digest of the public fixture suite, and a deterministic
+report ID. The evaluator does not call a model, inspect private files, or claim
+that a passing answer is generally correct beyond the exact fixtures.
+
+The submission contract is:
+
+```json
+{
+  "schema": "sonder.repository-research-submission.v1",
+  "cases": [{
+    "id": "benchmark-moat",
+    "answer": "The entry points are present.",
+    "claims": [{
+      "text": "The benchmark function exists.",
+      "status": "exists",
+      "citations": [{"path": "scripts/benchmark_moat.py", "symbol": "benchmark"}]
+    }],
+    "tool_calls": [{"tool": "search", "arguments": {"query": "benchmark"}}]
+  }]
+}
+```
+
+Each built-in case and every required citation must be present for a passing
+report. Print the fixture contract or evaluate a captured submission with:
+
+```bash
+python scripts/benchmark_repository_research.py --print-suite
+python scripts/benchmark_repository_research.py --submission result.json \
+  --json research-report.json --markdown research-report.md
+```
+
+Keep this report separate from adaptive benchmark identity. A controlled runner
+may use the research case pass/fail result when it creates the same named task in
+fresh and accumulated observations, but it must still supply retries and token
+counts and satisfy every model, suite, hardware, task-set, and grounded-history
+identity check in `benchmark_adaptive.py`. This harness neither mutates those
+records nor changes their comparability rules.
+
 ## Related
 
 - [Memory & Learning](06-memory-and-learning.md) — how lessons and facts are

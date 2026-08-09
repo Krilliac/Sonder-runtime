@@ -12,7 +12,7 @@ never touches the database.
 import argparse
 
 import embeddings
-import memory_store
+import sonder_runtime.adapters.memory_store as memory_store
 import sonder_paths
 
 # Similarity floor for "near-duplicate". Deliberately conservative (well above

@@ -37,6 +37,25 @@ def test_status_json(isolated_home, capsys):
     assert "schemas" in payload
 
 
+def test_status_storage_failure_is_resilient_and_redacted(
+    isolated_home, monkeypatch, capsys
+):
+    from sonder_runtime.adapters import storage
+
+    secret = "storage-secret-must-not-leak"
+    monkeypatch.setattr(
+        storage, "inspect_config",
+        lambda config: (_ for _ in ()).throw(RuntimeError(secret)),
+    )
+    assert main(["status", "--json"]) == 0
+    output = capsys.readouterr().out
+    assert secret not in output
+    payload = json.loads(output)
+    assert payload["storage_error"] == (
+        "RuntimeError while inspecting storage (detail suppressed)"
+    )
+
+
 def test_config_show_is_redacted(isolated_home, capsys, monkeypatch):
     monkeypatch.setenv("SONDER_API_KEY", "super-secret-key-value-000111")
     assert main(["config", "--json"]) == 0
@@ -142,6 +161,53 @@ def test_doctor_text_failure_sets_exit_code(monkeypatch, capsys):
     assert capsys.readouterr().out == (
         "sonder doctor: FAIL\n  [FAIL] config  invalid\n"
     )
+
+
+def test_doctor_storage_probe_is_explicit(monkeypatch, isolated_home, capsys):
+    import sonder_doctor
+
+    seen = []
+    monkeypatch.setattr(
+        sonder_doctor,
+        "default_checks",
+        lambda: [("storage_state", lambda: ("ok", "automatic"))],
+    )
+    monkeypatch.setattr(
+        sonder_doctor,
+        "storage_checks",
+        lambda config, throughput=False: [
+            ("storage_state", lambda: seen.append(throughput) or ("ok", "probe"))
+        ],
+    )
+
+    assert main(["doctor", "--json"]) == 0
+    capsys.readouterr()
+    assert seen == [False]
+    assert main(["doctor", "--json", "--storage-probe"]) == 0
+    capsys.readouterr()
+    assert seen == [False, True]
+
+
+def test_doctor_config_check_uses_exact_cli_config(
+    isolated_home, tmp_path, capsys
+):
+    config = tmp_path / "sonder.toml"
+    config.write_text(
+        "[ollama]\nurl = 'http://127.0.0.1:11599'\n",
+        encoding="utf-8",
+    )
+    assert main([
+        "doctor", "--json", "--skip-ollama", "--config", str(config),
+        "--set", "ollama.url=http://127.0.0.1:11600",
+    ]) in (0, 1)
+    payload = json.loads(capsys.readouterr().out)
+    config_check = next(
+        item for item in payload["checks"] if item["name"] == "config"
+    )
+    assert config_check == {
+        "name": "config", "status": "ok",
+        "detail": "ollama=http://127.0.0.1:11600",
+    }
 
 
 def test_diagnostics_redacts_all_known_secrets(isolated_home, capsys, monkeypatch):

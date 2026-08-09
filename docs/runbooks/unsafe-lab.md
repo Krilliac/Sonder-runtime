@@ -53,12 +53,18 @@ credential or source directory.
 
 ## What changes
 
-Within the acknowledged process, model-driven agent and autopilot runs are no
+Within the acknowledged process, local model-driven agent and autopilot runs are no
 longer confined by their normal tool allowlist, project root, read-only mode,
 web/location consent flag, argument-aware executable/language list, or file
-approval token. Model-directed subprocesses still receive a secret/control
-scrubbed environment. Direct tool timeout/output limits and operating-system
-permissions remain, but neither is a security guarantee.
+approval token. That shared approval bypass reaches 46 direct MCP call paths,
+so direct MCP callers are inside the unsafe-mode blast radius too. Hosted
+agents still cannot invoke local-only workspace, artifact-risk, or process-risk
+tools; unsafe mode bypasses only their nested-model restriction. The configured
+artifact-execution risk policy and exact process-inspection opt-in remain in
+force. Every model-authored subprocess boundary, including campaign repair and
+selfmod validation/Git calls, receives a secret/control-scrubbed environment.
+Direct tool timeout/output limits and operating-system permissions remain, but
+neither is a security guarantee.
 
 When the variable is absent, all normal policies are unchanged.
 

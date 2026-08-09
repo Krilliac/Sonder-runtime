@@ -17,6 +17,7 @@ Acceptance properties (SPEC-3 Phase 3):
 from __future__ import annotations
 
 import ipaddress
+import math
 import time
 import urllib.parse
 from typing import Sequence
@@ -26,7 +27,13 @@ from ...application.ports.model_gateway import (
     Embedding,
     ModelRequest,
     ModelResponse,
+    optional_token_count,
+    require_embedding_vector,
+    require_model_text,
 )
+from ...platform.metrics import default_registry
+from ..inference_telemetry import from_ollama
+from ..model_transport import ModelCallError
 from ...domain.common.errors import (
     Cancelled,
     DeadlineExceeded,
@@ -98,7 +105,6 @@ class OllamaGateway:
     def generate(
         self, request: ModelRequest, context: OperationContext
     ) -> ModelResponse:
-        import model_transport
         import server
 
         if not (request.prompt or "").strip():
@@ -133,7 +139,10 @@ class OllamaGateway:
             int(options.get("num_predict", 1024)),
             int(options.get("num_ctx", server.SESSION_NUM_CTX)),
             cloud=cloud,
-            timeout=int(timeout) if timeout else None,
+            # Keep a positive sub-second deadline bounded.  ``int(0.5)`` used
+            # to become zero and the legacy transport interpreted zero as no
+            # timeout at all.
+            timeout=max(1, math.ceil(timeout)) if timeout is not None else None,
             cancel_check=(
                 (lambda: context.cancellation.cancelled)
                 if context.cancellation is not None else None
@@ -142,17 +151,32 @@ class OllamaGateway:
         started = time.monotonic()
         try:
             text = gen(request.prompt, list(request.history) or None)
-        except model_transport.ModelCallError as exc:
+        except ModelCallError as exc:
             raise _map_model_error(exc) from exc
-        usage = getattr(gen, "last_usage", None) or {}
-        return ModelResponse(
-            text=text,
+        usage = getattr(gen, "last_usage", None)
+        if usage is None:
+            usage = {}
+        if not isinstance(usage, dict):
+            raise DependencyUnavailable("model provider returned an invalid usage object")
+        response_meta = getattr(gen, "last_response_meta", None) or {}
+        telemetry = from_ollama(response_meta)
+        prompt_count = usage.get("tokens_in")
+        if prompt_count is None:
+            prompt_count = usage.get("prompt_eval_count")
+        output_count = usage.get("tokens_out")
+        if output_count is None:
+            output_count = usage.get("eval_count")
+        response = ModelResponse(
+            text=require_model_text(text),
             model=model,
             tier=tier_label,
             duration_ms=int((time.monotonic() - started) * 1000),
-            tokens_in=usage.get("prompt_eval_count"),
-            tokens_out=usage.get("eval_count"),
+            tokens_in=optional_token_count(prompt_count, "prompt token count"),
+            tokens_out=optional_token_count(output_count, "completion token count"),
+            telemetry=telemetry,
         )
+        default_registry().observe_inference("ollama", telemetry)
+        return response
 
     def embed(
         self, texts: Sequence[str], context: OperationContext
@@ -164,11 +188,10 @@ class OllamaGateway:
         for text in texts:
             _check_liveness(context)
             vector = embeddings.embed(text)
-            if not vector:
-                raise DependencyUnavailable(
-                    "the local embedding model returned no vector"
-                )
             results.append(
-                Embedding(vector=tuple(vector), model=embeddings.EMBED_MODEL)
+                Embedding(
+                    vector=require_embedding_vector(vector),
+                    model=embeddings.EMBED_MODEL,
+                )
             )
         return results

@@ -18,7 +18,8 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__))
 import contribute  # noqa: E402
 import embeddings  # noqa: E402
-import memory_store  # noqa
+import sonder_runtime.adapters.memory_store as memory_store  # noqa
+import reflection  # noqa: E402
 
 
 def merge_lessons(conn, lessons, embed_fn=None):
@@ -29,7 +30,11 @@ def merge_lessons(conn, lessons, embed_fn=None):
     added = 0
     for lesson in lessons:
         text = lesson.get("text")
-        if not isinstance(text, str) or not contribute.is_shareable(text):
+        if (
+            not isinstance(text, str)
+            or reflection._looks_vague(text)
+            or not contribute.is_shareable(text)
+        ):
             continue
         key = text.strip().lower()
         if key in existing:
@@ -52,6 +57,14 @@ def merge_lessons(conn, lessons, embed_fn=None):
             embeddings.trusted_provenance(vector, embed_fn)
             if vector is not None else {}
         )
+        if vector is not None and reflection.is_duplicate(
+            vector,
+            conn,
+            embedding_model=provenance.get("model"),
+            embedding_revision=provenance.get("revision"),
+            embedding_dim=provenance.get("dimension"),
+        ):
+            continue
         memory_store.add_lesson(
             conn, memory_store.new_id(), text, embedding, "community",
             embedding_model=provenance.get("model"),

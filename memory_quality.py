@@ -3,7 +3,7 @@ import collections
 import re
 
 import contribute
-import memory_store
+import sonder_runtime.adapters.memory_store as memory_store
 
 LONG_LESSON_CHARS = 220
 

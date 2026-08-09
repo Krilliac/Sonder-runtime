@@ -66,14 +66,46 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     assert "runtime_policy.py" in entries
     assert "learning_health.py" in entries
     assert "sonder_health.py" in entries
+    assert "sonder_runtime/adapters/legacy/inspections.py" in entries
+    assert "sonder_runtime/adapters/git_discovery.py" in entries
+    assert {
+        "sonder_preflight.py",
+        "sonder_runtime/adapters/legacy/preflight.py",
+        "sonder_runtime/adapters/preflight.py",
+        "sonder_runtime/application/ports/preflight.py",
+        "sonder_runtime/application/preflight/__init__.py",
+        "sonder_runtime/application/preflight/use_cases.py",
+    } <= set(entries)
+    assert "sonder_runtime/application/inspection/use_cases.py" in entries
+    assert {
+        "sonder_runtime/adapters/legacy/preferences.py",
+        "sonder_runtime/application/ports/preferences.py",
+        "sonder_runtime/application/preferences/__init__.py",
+        "sonder_runtime/application/preferences/use_cases.py",
+    } <= set(entries)
+    assert "memory_store.py" in entries
+    assert "sonder_runtime/adapters/memory_store.py" in entries
     assert "process_liveness.py" in entries
     assert "artifact_grounding.py" in entries
+    assert {
+        "artifact_risk.py", "pdf_risk.py", "process_risk.py", "unsafe_lab.py",
+    } <= set(entries)
     assert "media_assets.py" in entries
     assert "model_transport.py" in entries
+    assert "sonder_runtime/adapters/model_transport.py" in entries
     assert "ollama_endpoint.py" in entries
     assert "model_assets.py" in entries
     assert "ooxml_assets.py" in entries
     assert "requirements-runtime.txt" in entries
+    assert {
+        "workflow_store.py",
+        "sonder_runtime/adapters/filesystem/workflow_store.py",
+        "sonder_runtime/adapters/legacy/workflows.py",
+        "sonder_runtime/application/ports/workflows.py",
+        "sonder_runtime/application/workflows/__init__.py",
+        "sonder_runtime/application/workflows/loop.py",
+        "sonder_runtime/application/workflows/use_cases.py",
+    } <= set(entries)
     assert "BUNDLED_SYSTEM_README.txt" in entries
     assert {
         "sonder-headless.cmd",
