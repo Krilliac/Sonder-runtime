@@ -5,7 +5,8 @@ param(
     [switch]$SkipTests,
     [string]$EngineBundle = "",
     [switch]$AssembleOfflineEngine,
-    [switch]$CodeOnly
+    [switch]$CodeOnly,
+    [switch]$AllowAndroidCleartextForDevelopment
 )
 
 $ErrorActionPreference = "Stop"
@@ -93,8 +94,14 @@ try {
                         --platforms $PlatformList .
                 }
                 Invoke-NativeStep "Configure Sonder Runtime identity and networking" {
-                    & $Python "$RepoRoot\scripts\configure_flutter_networking.py" `
-                        . --allow-android-cleartext
+                    $NetworkArgs = @(
+                        "$RepoRoot\scripts\configure_flutter_networking.py",
+                        "."
+                    )
+                    if ($AllowAndroidCleartextForDevelopment) {
+                        $NetworkArgs += "--allow-android-cleartext-for-development"
+                    }
+                    & $Python @NetworkArgs
                 }
             }
             Invoke-NativeStep "Resolve Flutter packages" { & $Flutter pub get }
