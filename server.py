@@ -33,9 +33,9 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-import memory_store
 import sonder_runtime.adapters.legacy.task_state as task_state_adapter
 import sonder_runtime.application.tasks.use_cases as task_use_cases
+import sonder_runtime.adapters.memory_store as memory_store
 import orchestrator
 import retriever
 import reward
@@ -555,7 +555,7 @@ _SESSION_TURN_CLAIM_WAIT_SECONDS = max(
 LIVE_RELOAD_MODULES = [
     "sonder_runtime.adapters.legacy.task_state",
     "sonder_runtime.application.tasks.use_cases",
-    "memory_store",
+    "sonder_runtime.adapters.memory_store",
     "process_liveness",
     "orchestrator",
     "retriever",
@@ -667,6 +667,9 @@ def _maybe_live_reload():
             continue
         if name == "sonder_runtime.application.tasks.use_cases":
             globals()["task_use_cases"] = module
+            continue
+        if name == "sonder_runtime.adapters.memory_store":
+            globals()["memory_store"] = module
             continue
         if name == "local_service_probe":
             globals()["local_probe"] = module
