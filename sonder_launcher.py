@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from decimal import Decimal, InvalidOperation
 import errno
+import hashlib
 import hmac
 import json
 import os
@@ -29,6 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import sonder_health
+import command_recovery
 from process_liveness import pid_alive as _process_pid_alive
 from sonder_paths import state_path
 
@@ -59,6 +61,8 @@ TERMINAL_PHASES = ("succeeded", "failed", "cancelled", "interrupted")
 _CONTEXT_SIZE = re.compile(r"^(\d{1,7})(?:\.(\d{1,3}))?([km]?)$")
 _OPERATION_ID = re.compile(r"^[0-9a-f]{32}$")
 _IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
+_REPLAY_HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$")
+_REPLAY_HEADER_VALUE = re.compile(r"^[\x20-\x7e]{0,1024}$")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sonder_launcher_operations (
@@ -532,6 +536,27 @@ def _normalize_idempotency_key(value):
             "Idempotency-Key must be 8-128 letters, numbers, or . _ : -"
         )
     return key
+
+
+def _valid_command_replay(value):
+    """Validate a durable response before it reaches BaseHTTPRequestHandler."""
+    if not isinstance(value, dict) or not set(value) <= {"status", "payload", "headers"}:
+        return False
+    status = value.get("status")
+    if isinstance(status, bool) or not isinstance(status, int) or not 100 <= status <= 599:
+        return False
+    if not isinstance(value.get("payload"), dict):
+        return False
+    headers = value.get("headers", {})
+    if not isinstance(headers, dict) or len(headers) > 16:
+        return False
+    return all(
+        isinstance(name, str)
+        and isinstance(header_value, str)
+        and _REPLAY_HEADER_NAME.fullmatch(name)
+        and _REPLAY_HEADER_VALUE.fullmatch(header_value)
+        for name, header_value in headers.items()
+    )
 
 
 def _write_private_file(path, value):
@@ -1884,10 +1909,22 @@ class LauncherServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, handler, *, controller, token):
+    def __init__(
+        self, address, handler, *, controller, token, command_journal=None
+    ):
         super().__init__(address, handler)
         self.controller = controller
         self.token = token
+        if command_journal is None and getattr(controller, "db_path", None):
+            journal_path = os.environ.get(
+                "SONDER_LAUNCHER_COMMAND_JOURNAL", ""
+            ).strip() or str(
+                Path(controller.db_path).with_name(
+                    "sonder-launcher-command-journal.jsonl"
+                )
+            )
+            command_journal = command_recovery.CommandJournal(journal_path)
+        self.command_journal = command_journal
 
 
 class LauncherHandler(BaseHTTPRequestHandler):
@@ -1926,6 +1963,26 @@ class LauncherHandler(BaseHTTPRequestHandler):
         self._send({"ok": False, "error": "launcher authentication required"}, 401)
         return False
 
+    def _command_identity(self, *, required=False):
+        client_id = self.headers.get("X-Sonder-Client-Id", "").strip()
+        command_id = self.headers.get("X-Sonder-Command-Id", "").strip()
+        if bool(client_id) != bool(command_id):
+            raise ValueError(
+                "X-Sonder-Client-Id and X-Sonder-Command-Id must be sent together"
+            )
+        if required and not client_id:
+            raise ValueError(
+                "X-Sonder-Client-Id and X-Sonder-Command-Id are required"
+            )
+        return client_id, command_id
+
+    @staticmethod
+    def _command_idempotency_key(client_id, command_id):
+        digest = hashlib.sha256(
+            (client_id + "\0" + command_id).encode("utf-8")
+        ).hexdigest()
+        return "command:" + digest
+
     def do_GET(self):
         path = self.path.split("?", 1)[0].rstrip("/")
         is_status = path in {"", "/v1/launcher/status"}
@@ -1952,7 +2009,8 @@ class LauncherHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split("?", 1)[0].rstrip("/")
         action = path.rsplit("/", 1)[-1]
-        if path not in {
+        is_ack = path == "/v1/launcher/commands/ack"
+        if not is_ack and path not in {
             "/v1/launcher/start", "/v1/launcher/stop", "/v1/launcher/restart",
         }:
             self._send({"ok": False, "error": "not found"}, 404)
@@ -2001,7 +2059,7 @@ class LauncherHandler(BaseHTTPRequestHandler):
         if not isinstance(body, dict):
             self._send({"ok": False, "error": "JSON body must be an object"}, 400)
             return
-        unexpected = sorted(set(body) - {"context_size"})
+        unexpected = sorted(set(body) - (set() if is_ack else {"context_size"}))
         if unexpected:
             self._send(
                 {
@@ -2013,13 +2071,101 @@ class LauncherHandler(BaseHTTPRequestHandler):
             )
             return
         try:
+            client_id, command_id = self._command_identity(required=is_ack)
             context_size = normalize_context_size(body.get("context_size") or "8192")
             idempotency_key = _normalize_idempotency_key(
                 self.headers.get("Idempotency-Key", "")
             )
+            if client_id and idempotency_key:
+                raise ValueError(
+                    "tracked commands must not also send Idempotency-Key"
+                )
         except ValueError as exc:
             self._send({"ok": False, "error": str(exc)}, 400)
             return
+        journal = self.server.command_journal
+        if is_ack:
+            if journal is None:
+                self._send(
+                    {"ok": False, "error": "command recovery is unavailable"},
+                    503,
+                )
+                return
+            try:
+                acknowledged = journal.acknowledge(client_id, command_id)
+            except (ValueError, OSError, command_recovery.CommandJournalError) as exc:
+                self._send({"ok": False, "error": str(exc)}, 409)
+                return
+            self._send({"ok": True, **acknowledged})
+            return
+
+        command_tracked = bool(client_id)
+        if command_tracked:
+            if journal is None:
+                self._send(
+                    {"ok": False, "error": "command recovery is unavailable"},
+                    503,
+                )
+                return
+            try:
+                receipt = journal.receive(
+                    client_id,
+                    command_id,
+                    {"action": action, "context_size": context_size},
+                )
+            except command_recovery.CommandConflict as exc:
+                self._send({"ok": False, "error": str(exc)}, 409)
+                return
+            except (ValueError, OSError, command_recovery.CommandJournalError) as exc:
+                self._send(
+                    {"ok": False, "error": "command was not dispatched: %s" % exc},
+                    503,
+                )
+                return
+            if receipt["state"] == "completed":
+                replay = receipt["result"]
+                if not _valid_command_replay(replay):
+                    self._send(
+                        {
+                            "ok": False,
+                            "command_state": "completed",
+                            "dispatch_allowed": False,
+                            "error": "stored command result is invalid",
+                        },
+                        503,
+                    )
+                    return
+                self._send(
+                    replay["payload"], replay["status"], replay.get("headers")
+                )
+                return
+            if not receipt["dispatch"]:
+                uncertain = receipt["state"] == "uncertain"
+                acknowledged = receipt["state"] == "acknowledged"
+                self._send(
+                    {
+                        "ok": False,
+                        "command_state": receipt["state"],
+                        "dispatch_allowed": False,
+                        "error": (
+                            "command outcome is uncertain after recovery; inspect the "
+                            "launcher operation ledger before issuing a new command"
+                            if uncertain
+                            else (
+                                "command result was already acknowledged"
+                                if acknowledged
+                                else "command is already pending"
+                            )
+                        ),
+                    },
+                    409 if uncertain or acknowledged else 202,
+                    {"Retry-After": "1"},
+                )
+                return
+            if not idempotency_key:
+                idempotency_key = self._command_idempotency_key(
+                    client_id, command_id
+                )
         try:
             operation, created = self.server.controller.submit(
                 action, context_size, idempotency_key
@@ -2033,25 +2179,111 @@ class LauncherHandler(BaseHTTPRequestHandler):
                     "operation_phase": exc.operation["phase"],
                     "operation": exc.operation,
                 })
+            if command_tracked:
+                try:
+                    journal.complete(
+                        client_id,
+                        command_id,
+                        {"status": 409, "payload": payload, "headers": {}},
+                    )
+                except (ValueError, OSError, command_recovery.CommandJournalError):
+                    # Dispatch is known not to have happened, but retaining an
+                    # uncertain receipt still prevents an unsafe automatic
+                    # retry if the replay result itself could not be stored.
+                    try:
+                        journal.mark_uncertain(client_id, command_id)
+                    except (ValueError, OSError, command_recovery.CommandJournalError):
+                        pass
+                    self._send(
+                        {
+                            "ok": False,
+                            "command_state": "uncertain",
+                            "dispatch_allowed": False,
+                            "error": (
+                                "launcher conflict was not dispatched, but its "
+                                "replay result could not be made durable"
+                            ),
+                        },
+                        503,
+                    )
+                    return
             self._send(payload, 409)
             return
         except (OSError, RuntimeError, sqlite3.Error) as exc:
+            if command_tracked:
+                try:
+                    journal.mark_uncertain(client_id, command_id)
+                except (ValueError, OSError, command_recovery.CommandJournalError):
+                    pass
             self._send(
                 {"ok": False, "error": "launcher operation could not be queued: %s" % exc},
                 503,
             )
             return
-        payload = self.server.controller.operation_payload(operation)
-        payload.update({
-            "accepted": created,
-            "idempotent_replay": not created,
-        })
+        try:
+            payload = self.server.controller.operation_payload(operation)
+            payload.update({
+                "accepted": created,
+                "idempotent_replay": not created,
+            })
+        except (OSError, RuntimeError, sqlite3.Error):
+            if command_tracked:
+                try:
+                    journal.mark_uncertain(client_id, command_id)
+                except (ValueError, OSError, command_recovery.CommandJournalError):
+                    pass
+            self._send(
+                {
+                    "ok": False,
+                    "operation_id": operation.get("id", ""),
+                    "command_state": "uncertain" if command_tracked else "untracked",
+                    "dispatch_allowed": False,
+                    "error": (
+                        "launcher operation was queued but its response could not "
+                        "be constructed"
+                    ),
+                },
+                503,
+            )
+            return
         terminal = operation["phase"] in TERMINAL_PHASES
-        self._send(
-            payload,
-            200 if terminal else 202,
-            {"Location": "/v1/launcher/operations/%s" % operation["id"]},
-        )
+        status_code = 200 if terminal else 202
+        response_headers = {
+            "Location": "/v1/launcher/operations/%s" % operation["id"]
+        }
+        if command_tracked:
+            try:
+                journal.complete(
+                    client_id,
+                    command_id,
+                    {
+                        "status": status_code,
+                        "payload": payload,
+                        "headers": response_headers,
+                    },
+                )
+            except (ValueError, OSError, command_recovery.CommandJournalError) as exc:
+                try:
+                    journal.mark_uncertain(client_id, command_id)
+                except (ValueError, OSError, command_recovery.CommandJournalError):
+                    pass
+                self._send(
+                    {
+                        "ok": False,
+                        "operation_id": operation["id"],
+                        "operation_phase": operation["phase"],
+                        "command_state": "uncertain",
+                        "dispatch_allowed": False,
+                        "error": (
+                            "launcher operation was queued but its replay result could "
+                            "not be made durable: %s" % exc
+                        ),
+                    },
+                    503,
+                    response_headers,
+                )
+                return
+        self._send(payload, status_code, response_headers)
 
 
 def generate_token():
