@@ -19,6 +19,7 @@ Tiers (escalation ladder, cheapest first):
 """
 
 import contextlib
+import hmac
 import importlib
 import http.client
 import json
@@ -9127,11 +9128,17 @@ def isolated_run(
     cpus: float = 1.0,
     pids: int = 64,
     output_bytes: int = 131072,
+    acknowledge_isolation_limits: bool = False,
+    token: str = "",
+    approval: str = "",
+    write_approval: str = "",
 ) -> str:
     """Run an installed Linux container image under a fixed isolation policy.
 
-    This direct MCP tool is subject to the local ``ask`` permission policy and
-    is intentionally unavailable to Sonder agents and autopilot. ``argv_json``
+    This direct MCP tool requires developer authentication, a host approval
+    secret, and explicit risk acknowledgement in addition to the local ``ask``
+    policy. Writable binds require a second host secret. It is intentionally
+    unavailable to Sonder agents and autopilot. ``argv_json``
     must be a JSON string array. The exact absolute ``project`` directory is the
     only host bind and is read-only unless the host explicitly sets
     ``writable_workspace=true``. Docker/Podman flags, mounts, devices, user,
@@ -9145,6 +9152,30 @@ def isolated_run(
     _maybe_live_reload()
     started = time.time()
     ok = False
+    account = _admin_account_from_token(token) if token else None
+    authorized, _message = admin_auth.require(account, "developer")
+    expected = os.environ.get("SONDER_ISOLATED_APPROVAL_CODE", "")
+    approval_ok = bool(
+        expected and approval and hmac.compare_digest(approval, expected)
+    )
+    if not authorized or not approval_ok:
+        return (
+            "ERROR: isolated_run requires a developer token and the host's "
+            "SONDER_ISOLATED_APPROVAL_CODE."
+        )
+    if acknowledge_isolation_limits is not True:
+        return "ERROR: acknowledge_isolation_limits=true is required."
+    if writable_workspace is True:
+        expected_write = os.environ.get("SONDER_ISOLATED_WRITE_APPROVAL_CODE", "")
+        if not (
+            expected_write
+            and write_approval
+            and hmac.compare_digest(write_approval, expected_write)
+        ):
+            return (
+                "ERROR: writable_workspace requires the separate host "
+                "SONDER_ISOLATED_WRITE_APPROVAL_CODE."
+            )
     try:
         result = isolated_runner.run_isolated(
             image=image,
@@ -11392,7 +11423,7 @@ def tool_manifest() -> str:
         "permission_policy/permission_rule_set": "Inspect or guarded-edit local permission rules for tool actions.",
         "context_compaction_plan": "Preview when to summarize, split sessions, or reduce live context.",
         "run_code": "Run a bounded snippet: Python, JS/TypeScript, Bash, Ruby, Perl, PHP, Lua, R, Go, Java, Rust, PowerShell, C++, C#.",
-        "isolated_run": "Direct MCP-only Docker/Podman execution with a fixed no-network, read-only-by-default, resource-capped isolation policy; local permission default is ask.",
+        "isolated_run": "Direct MCP-only, explicitly enabled and developer-authorized Docker/Podman execution with approved roots, separate writable approval, and a fixed resource-capped isolation policy.",
         "ground_artifact": "Validate in-memory non-code content with exact/contains/regex/JSON checks.",
         "artifact_ground": "Validate files or bundles with inferred writing, data, editable Office/media/timelines, UI, image, audio, and static or animated humanoid model recipes.",
         "run_project": "Run a bounded temporary multi-file project with optional build commands.",

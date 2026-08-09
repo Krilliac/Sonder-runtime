@@ -1,6 +1,21 @@
 import server
 
 
+def _authorize(monkeypatch):
+    monkeypatch.setenv("SONDER_ISOLATED_APPROVAL_CODE", "execute-secret")
+    monkeypatch.setenv("SONDER_ISOLATED_WRITE_APPROVAL_CODE", "write-secret")
+    monkeypatch.setattr(server, "_admin_account_from_token", lambda _token: {"role": "developer"})
+    monkeypatch.setattr(server.admin_auth, "require", lambda _account, _role: (True, ""))
+
+
+def _authorized_args():
+    return {
+        "token": "developer-token",
+        "approval": "execute-secret",
+        "acknowledge_isolation_limits": True,
+    }
+
+
 def test_isolated_run_is_direct_mcp_only_and_defaults_to_ask(tmp_path):
     assert "isolated_run" in server.tool_manifest()
     assert "isolated_run" not in server._agent_tool_help()
@@ -11,6 +26,7 @@ def test_isolated_run_is_direct_mcp_only_and_defaults_to_ask(tmp_path):
 
 
 def test_server_forwards_only_the_fixed_isolated_contract(monkeypatch, tmp_path):
+    _authorize(monkeypatch)
     seen = {}
     def fake_run(**kwargs):
         seen.update(kwargs)
@@ -20,7 +36,10 @@ def test_server_forwards_only_the_fixed_isolated_contract(monkeypatch, tmp_path)
             "writable_workspace": False,
         }
     monkeypatch.setattr(server.isolated_runner, "run_isolated", fake_run)
-    output = server.isolated_run("busybox:1.36", '["true"]', str(tmp_path), timeout=7)
+    output = server.isolated_run(
+        "busybox:1.36", '["true"]', str(tmp_path), timeout=7,
+        **_authorized_args(),
+    )
     assert output.startswith("isolated status: ok")
     assert seen == {
         "image": "busybox:1.36", "argv_json": '["true"]', "project": str(tmp_path),
@@ -30,8 +49,56 @@ def test_server_forwards_only_the_fixed_isolated_contract(monkeypatch, tmp_path)
 
 
 def test_server_rejects_bad_request_without_launch(monkeypatch, tmp_path):
+    _authorize(monkeypatch)
     monkeypatch.setattr(
         server.isolated_runner, "run_isolated",
         lambda **_kwargs: (_ for _ in ()).throw(ValueError("bad argv")),
     )
-    assert server.isolated_run("busybox", "[]", str(tmp_path)) == "ERROR: bad argv"
+    assert server.isolated_run(
+        "busybox", "[]", str(tmp_path), **_authorized_args()
+    ) == "ERROR: bad argv"
+
+
+def test_direct_mcp_call_requires_developer_approval_and_ack(monkeypatch, tmp_path):
+    launched = []
+    monkeypatch.setattr(server.isolated_runner, "run_isolated", lambda **kwargs: launched.append(kwargs))
+    denied = server.isolated_run("busybox", '["true"]', str(tmp_path))
+    assert "developer token" in denied
+    _authorize(monkeypatch)
+    denied = server.isolated_run(
+        "busybox", '["true"]', str(tmp_path),
+        token="developer-token", approval="execute-secret",
+    )
+    assert "acknowledge_isolation_limits=true" in denied
+    assert launched == []
+
+
+def test_writable_workspace_requires_separate_host_secret(monkeypatch, tmp_path):
+    _authorize(monkeypatch)
+    launched = []
+    monkeypatch.setattr(server.isolated_runner, "run_isolated", lambda **kwargs: launched.append(kwargs))
+    denied = server.isolated_run(
+        "busybox", '["true"]', str(tmp_path), writable_workspace=True,
+        **_authorized_args(),
+    )
+    assert "separate host" in denied
+    assert launched == []
+
+
+def test_writable_workspace_accepts_only_separate_matching_secret(monkeypatch, tmp_path):
+    _authorize(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(
+        server.isolated_runner, "run_isolated",
+        lambda **kwargs: seen.update(kwargs) or {
+            "ok": True, "returncode": 0, "stdout": "", "stderr": "",
+            "error": "", "runtime": "docker", "project": str(tmp_path),
+            "writable_workspace": True,
+        },
+    )
+    output = server.isolated_run(
+        "busybox", '["true"]', str(tmp_path), writable_workspace=True,
+        write_approval="write-secret", **_authorized_args(),
+    )
+    assert output.startswith("isolated status: ok")
+    assert seen["writable_workspace"] is True
