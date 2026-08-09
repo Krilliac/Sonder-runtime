@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import secrets
 import stat
+import threading
 import time
 
 import file_ops
@@ -41,6 +42,7 @@ DEFAULT_TIMEOUT_SECONDS = 10.0
 HARD_MAX_TIMEOUT_SECONDS = 30.0
 HARD_MAX_FIELD_NAME_CHARS = 256
 HARD_MAX_REPORT_BYTES = 256_000
+_CSV_FIELD_LIMIT_LOCK = threading.RLock()
 
 
 class DataConvertError(RuntimeError):
@@ -72,6 +74,15 @@ def _check_deadline(deadline):
 
 def _reject_constant(value):
     raise ValueError("non-finite JSON number is not supported: %s" % value)
+
+
+def _reject_duplicate_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key: %s" % key)
+        result[key] = value
+    return result
 
 
 def parse_fields(value, *, max_fields=DEFAULT_MAX_FIELDS):
@@ -262,7 +273,10 @@ def _selected_record(record, fields, limits):
 def _input_records(text, input_format, limits, deadline):
     if input_format == "json":
         try:
-            payload = json.loads(text, parse_constant=_reject_constant)
+            payload = json.loads(
+                text, parse_constant=_reject_constant,
+                object_pairs_hook=_reject_duplicate_object,
+            )
         except (TypeError, ValueError, RecursionError) as exc:
             _check_deadline(deadline)
             raise DataConvertError("malformed JSON input: %s" % exc) from exc
@@ -278,32 +292,46 @@ def _input_records(text, input_format, limits, deadline):
             if not line.strip():
                 continue
             try:
-                yield json.loads(line, parse_constant=_reject_constant)
+                yield json.loads(
+                    line, parse_constant=_reject_constant,
+                    object_pairs_hook=_reject_duplicate_object,
+                )
             except (TypeError, ValueError, RecursionError) as exc:
                 raise DataConvertError(
                     "malformed JSONL input at line %d: %s" % (line_number, exc)
                 ) from exc
         return
-    reader = csv.DictReader(stream, delimiter="," if input_format == "csv" else "\t")
-    headers = reader.fieldnames or []
-    if not headers or any(not header for header in headers):
-        raise DataConvertError("delimited input has an empty header")
-    if len(headers) != len(set(headers)):
-        raise DataConvertError("delimited input has duplicate headers")
-    if any("\x00" in header or len(header) > HARD_MAX_FIELD_NAME_CHARS for header in headers):
-        raise DataConvertError("delimited input has an invalid or oversized header")
-    if len(headers) > limits["max_columns"]:
-        raise DataConvertError("delimited input exceeds the column ceiling")
-    try:
-        for row_number, row in enumerate(reader, 2):
-            _check_deadline(deadline)
-            if None in row or any(value is None for value in row.values()):
-                raise DataConvertError(
-                    "delimited input row %d does not match its header" % row_number
-                )
-            yield dict(row)
-    except csv.Error as exc:
-        raise DataConvertError("malformed delimited input: %s" % exc) from exc
+    # csv.field_size_limit is process-global. Serialize this scoped override
+    # and restore it when the records generator closes so concurrent
+    # conversions cannot weaken or unexpectedly lower each other's parser cap.
+    with _CSV_FIELD_LIMIT_LOCK:
+        prior_field_limit = csv.field_size_limit()
+        csv.field_size_limit(limits["max_field_bytes"])
+        try:
+            reader = csv.DictReader(
+                stream, delimiter="," if input_format == "csv" else "\t",
+            )
+            headers = reader.fieldnames or []
+            if not headers or any(not header for header in headers):
+                raise DataConvertError("delimited input has an empty header")
+            if len(headers) != len(set(headers)):
+                raise DataConvertError("delimited input has duplicate headers")
+            if any("\x00" in header or len(header) > HARD_MAX_FIELD_NAME_CHARS for header in headers):
+                raise DataConvertError("delimited input has an invalid or oversized header")
+            if len(headers) > limits["max_columns"]:
+                raise DataConvertError("delimited input exceeds the column ceiling")
+            try:
+                for row_number, row in enumerate(reader, 2):
+                    _check_deadline(deadline)
+                    if None in row or any(value is None for value in row.values()):
+                        raise DataConvertError(
+                            "delimited input row %d does not match its header" % row_number
+                        )
+                    yield dict(row)
+            except csv.Error as exc:
+                raise DataConvertError("malformed delimited input: %s" % exc) from exc
+        finally:
+            csv.field_size_limit(prior_field_limit)
 
 
 def _delimited_value(value):
@@ -509,10 +537,14 @@ def convert_data(
             if "\x00" in text:
                 raise DataConvertError("input contains NUL bytes and is not accepted as text data")
             sink = _OutputSink(binary, limits["max_output_bytes"])
-            row_count, rows = _convert_records(
-                _input_records(text, input_format, limits, deadline),
-                selected_fields, selected_output_format, sink, limits, deadline,
-            )
+            records = _input_records(text, input_format, limits, deadline)
+            try:
+                row_count, rows = _convert_records(
+                    records, selected_fields, selected_output_format, sink,
+                    limits, deadline,
+                )
+            finally:
+                records.close()
         if binary is not None:
             binary.flush()
             os.fsync(binary.fileno())
