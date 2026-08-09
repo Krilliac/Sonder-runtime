@@ -45,6 +45,42 @@ def windows_program_files(*, x86=False, env=None) -> str:
     return ntpath.join(windows_system_drive(values), "\\", leaf)
 
 
+def bash_executable(*, env=None, platform_name=None, which=None) -> str | None:
+    """Return a Bash that accepts native paths, excluding Windows' WSL shim."""
+    values = os.environ if env is None else env
+    system = os.name if platform_name is None else platform_name
+    finder = shutil.which if which is None else which
+    if system == "nt":
+        candidates = [
+            Path(windows_program_files(env=values)) / "Git" / "bin" / "bash.exe",
+            Path(windows_program_files(env=values)) / "Git" / "usr" / "bin" / "bash.exe",
+        ]
+        local = str(values.get("LOCALAPPDATA", "")).strip()
+        if local:
+            candidates.extend([
+                Path(local) / "Programs" / "Git" / "bin" / "bash.exe",
+                Path(local) / "Programs" / "Git" / "usr" / "bin" / "bash.exe",
+            ])
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+        resolved = finder("bash") or finder("sh")
+        if not resolved:
+            return None
+        normalized = os.path.normcase(os.path.abspath(resolved))
+        system_root = str(values.get("SystemRoot", "")).strip()
+        blocked_roots = [
+            os.path.normcase(os.path.abspath(os.path.join(system_root, "System32")))
+            if system_root else "",
+            os.path.normcase(os.path.abspath(os.path.join(local, "Microsoft", "WindowsApps")))
+            if local else "",
+        ]
+        if any(root and os.path.commonpath([normalized, root]) == root for root in blocked_roots):
+            return None
+        return resolved
+    return finder("bash") or finder("sh")
+
+
 def default_machine_home(*, env=None, platform_name=None) -> Path:
     """Return the machine-wide Sonder root for the current operating system."""
     values = os.environ if env is None else env

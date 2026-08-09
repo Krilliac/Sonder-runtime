@@ -3,6 +3,23 @@ from pathlib import Path
 import sonder_paths
 
 
+def test_bash_executable_rejects_windows_wsl_shims(tmp_path):
+    system_root = tmp_path / "Windows"
+    shim = system_root / "System32" / "bash.exe"
+    shim.parent.mkdir(parents=True)
+    shim.write_bytes(b"")
+
+    assert sonder_paths.bash_executable(
+        env={
+            "SystemRoot": str(system_root),
+            "SystemDrive": "C:",
+            "ProgramFiles": str(tmp_path / "ProgramFiles"),
+        },
+        platform_name="nt",
+        which=lambda _name: str(shim),
+    ) is None
+
+
 def test_memory_db_uses_sonder_home(monkeypatch, tmp_path):
     home = tmp_path / "state"
     monkeypatch.setenv("SONDER_HOME", str(home))

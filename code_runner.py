@@ -51,7 +51,7 @@ SUPPORTED_LANGUAGES = {
     "bash": {
         "aliases": {"bash", "sh", "shell", "zsh"},
         "suffix": ".sh",
-        "cmd": lambda path: [shutil.which("bash") or shutil.which("sh") or "bash", path],
+        "cmd": lambda path: [sonder_paths.bash_executable() or "bash", path],
         "missing": "bash/sh executable not found on PATH",
     },
     "ruby": {
@@ -233,6 +233,8 @@ def _timeout_result(language, cwd, timeout, exc):
 
 
 def _run_process(cmd, cwd, stdin, timeout, language):
+    if language == "bash" and not sonder_paths.bash_executable():
+        return _error_result(language, cwd, timeout, SUPPORTED_LANGUAGES[language]["missing"])
     try:
         proc = subprocess.run(
             cmd,
