@@ -105,6 +105,20 @@ if "_SHADOW" not in globals():
 if "_LEDGER" not in globals():
     _LEDGER = {"loaded": False, "recent": [], "agree": 0, "disagree": 0,
                "errors": 0}
+if "_LAST_FALLBACK" not in globals():
+    _LAST_FALLBACK = {
+        "known": False,
+        "capability": "unknown",
+        "reason": "unknown",
+        "operation_mode": "unknown",
+        "fallback_handler": "unknown",
+        "handler_state": "unknown",
+        "count": 0,
+    }
+if "_SERVICE_FALLBACKS" not in globals():
+    _SERVICE_FALLBACKS = {}
+if "_FALLBACK_LOCAL" not in globals():
+    _FALLBACK_LOCAL = threading.local()
 
 # Promoting routing to prefer is an operator decision; these thresholds only
 # gate the ADVISORY that live evidence supports it. The ledger survives
@@ -120,6 +134,17 @@ def reset_for_tests():
         _MANIFEST_CACHE["rows"] = []
         _SHADOW.update(agree=0, disagree=0, errors=0)
         _LEDGER.update(loaded=False, recent=[], agree=0, disagree=0, errors=0)
+        _LAST_FALLBACK.update(
+            known=False,
+            capability="unknown",
+            reason="unknown",
+            operation_mode="unknown",
+            fallback_handler="unknown",
+            handler_state="unknown",
+            count=0,
+        )
+        _SERVICE_FALLBACKS.clear()
+        _FALLBACK_LOCAL.pending = {}
 
 
 def _ledger_path() -> str:
@@ -231,6 +256,102 @@ def _event(kind, **fields):
         activity_tracker.record_event(kind, **fields)
     except Exception:
         pass
+
+
+def _handler_for_execution(provider="", accelerated=False) -> str:
+    if accelerated is True:
+        return "npu"
+    if str(provider or "").strip().lower() in {"cpu", "cpu-sim"}:
+        return "cpu"
+    return "host"
+
+
+def _record_fallback(
+    capability, reason, *, handler="ollama", broker_counted=False,
+) -> dict:
+    projected = {
+        "known": True,
+        "capability": npu_contract.fallback_capability(capability),
+        "reason": npu_contract.fallback_reason(reason),
+        "operation_mode": "execution",
+        "fallback_handler": npu_contract.fallback_handler(handler),
+        "handler_state": "pending",
+    }
+    with _STATE_LOCK:
+        count = int(_LAST_FALLBACK.get("count") or 0) + 1
+        _LAST_FALLBACK.update(projected, count=count)
+        if broker_counted is not True:
+            bounded_reason = projected["reason"]
+            _SERVICE_FALLBACKS[bounded_reason] = min(
+                2_147_483_647,
+                _safe_fallback_count(_SERVICE_FALLBACKS.get(bounded_reason)) + 1,
+            )
+    pending = dict(getattr(_FALLBACK_LOCAL, "pending", {}))
+    pending[projected["capability"]] = dict(projected, count=count)
+    _FALLBACK_LOCAL.pending = pending
+    _event("npu_fallback", **projected)
+    return dict(projected, count=count)
+
+
+def record_fallback_handler(capability, handler, handled) -> None:
+    """Record the bounded result of the host fallback, never its content."""
+    capability = npu_contract.fallback_capability(capability)
+    handler = npu_contract.fallback_handler(handler)
+    state = "handled" if handled is True else "failed"
+    pending = dict(getattr(_FALLBACK_LOCAL, "pending", {}))
+    fallback = pending.pop(capability, None)
+    _FALLBACK_LOCAL.pending = pending
+    reason = (fallback or {}).get("reason", "unknown")
+    with _STATE_LOCK:
+        if (
+            fallback is not None
+            and _LAST_FALLBACK.get("capability") == capability
+            and _LAST_FALLBACK.get("count") == fallback.get("count")
+        ):
+            _LAST_FALLBACK.update(
+                fallback_handler=handler,
+                handler_state=state,
+            )
+    _event(
+        "npu_fallback_handled",
+        capability=capability,
+        reason=npu_contract.fallback_reason(reason),
+        operation_mode="execution",
+        fallback_handler=handler,
+        handler_state=state,
+        ok=handled is True,
+    )
+
+
+def _record_capability_event(
+    kind, capability, *, reason="unknown", handler=None, **fields
+):
+    provider = fields.get("provider", "")
+    accelerated = fields.get("accelerated") is True
+    operation_mode = "shadow" if kind.endswith("_shadow") else "execution"
+    if handler is None:
+        handler = (
+            "unknown"
+            if operation_mode == "shadow"
+            else _handler_for_execution(provider, accelerated)
+        )
+    handler = npu_contract.fallback_handler(handler)
+    _event(
+        kind,
+        capability=npu_contract.fallback_capability(capability),
+        reason=npu_contract.fallback_reason(reason),
+        operation_mode=operation_mode,
+        fallback_handler=handler,
+        handler_state=(
+            "observed" if operation_mode == "shadow" else "handled"
+        ),
+        **fields,
+    )
+
+
+def routing_active() -> str:
+    """Effective routing accelerator policy: off, shadow, or prefer."""
+    return _mode("routing")
 
 
 def _manifest_signature(base):
@@ -417,35 +538,35 @@ def _execution_provenance(response, manifest) -> dict:
 
 
 def _routing_call(prompt):
-    """Shared prefer/shadow path: returns (decision, provider) or (None, why)."""
+    """Return (decision, reason, broker_counted) for prefer/shadow routing."""
     manifest = _active("routing")
     if manifest is None:
-        return None, "no_manifest"
+        return None, "no_manifest", False
     declared = manifest.get("input") or {}
     contract = FEATURE_CONTRACTS.get(str(declared.get("identity") or ""))
     if contract is None:
-        return None, "identity_mismatch"
+        return None, "identity_mismatch", False
     dimension, feature_fn = contract
     features = feature_fn(prompt)
     if declared.get("dimension") != dimension or len(features) != dimension:
-        return None, "identity_mismatch"
+        return None, "identity_mismatch", False
     broker = npu_broker.get_broker()
     try:
         response = broker.call(
             manifest, {"kind": "routing", "features": features},
         )
     except npu_broker.NpuUnavailable as exc:
-        return None, exc.reason
+        return None, exc.reason, True
     except Exception:
-        return None, "internal"
+        return None, "internal", False
     try:
         validated = npu_contract.validate_route_scores(response)
     except ValueError:
-        return None, "invalid"
+        return None, "invalid", False
     try:
         execution = _execution_provenance(response, manifest)
     except ValueError:
-        return None, "invalid"
+        return None, "invalid", False
     scores = validated["scores"]
     winner = max(npu_contract.ROUTE_MODES, key=lambda mode: scores[mode])
     margin = abs(scores["autopilot"] - scores["workbench"])
@@ -456,7 +577,7 @@ def _routing_call(prompt):
         **execution,
         "reason_code": validated["reason_code"],
     }
-    return decision, ""
+    return decision, "", False
 
 
 def route_decide(prompt):
@@ -469,9 +590,9 @@ def route_decide(prompt):
     policy = _policy()
     if _mode("routing", policy) != "prefer":
         return None
-    decision, why = _routing_call(prompt)
+    decision, why, broker_counted = _routing_call(prompt)
     if decision is None:
-        _event("npu_fallback", capability="routing", reason=why)
+        _record_fallback("routing", why, broker_counted=broker_counted)
         return None
     score = decision["scores"][decision["winner"]]
     if (
@@ -479,10 +600,11 @@ def route_decide(prompt):
         or decision["margin"] < MIN_PREFER_MARGIN
         or score < MIN_PREFER_SCORE
     ):
-        _event("npu_fallback", capability="routing", reason="low_confidence")
+        _record_fallback("routing", "low_confidence")
         return None
-    _event(
+    _record_capability_event(
         "npu_route",
+        "routing",
         mode=decision["winner"],
         provider=decision["provider"],
         accelerated=decision["accelerated"],
@@ -515,20 +637,28 @@ def route_shadow(prompt, baseline):
     """Shadow-mode comparison; never changes behavior, returns None always."""
     if _mode("routing") != "shadow":
         return None
-    decision, why = _routing_call(prompt)
+    baseline_handler = npu_contract.fallback_handler(
+        (baseline or {}).get("handler")
+    )
+    decision, why, _broker_counted = _routing_call(prompt)
     if decision is None:
         with _STATE_LOCK:
             _SHADOW["errors"] += 1
         _ledger_record("error")
-        _event("npu_route_shadow", ok=False, reason=why)
+        _record_capability_event(
+            "npu_route_shadow", "routing", ok=False, reason=why,
+            handler=baseline_handler,
+        )
         return None
     baseline_mode = str((baseline or {}).get("mode") or "")
     agree = baseline_mode == decision["winner"]
     with _STATE_LOCK:
         _SHADOW["agree" if agree else "disagree"] += 1
     _ledger_record("agree" if agree else "disagree")
-    _event(
+    _record_capability_event(
         "npu_route_shadow",
+        "routing",
+        handler=baseline_handler,
         ok=True,
         agree=agree,
         npu_mode=decision["winner"],
@@ -580,9 +710,11 @@ def embed_for_space(text, model_identity, revision, expected_dimension=None):
         return None
     manifest = _active("embedding")
     if manifest is None:
+        _record_fallback("embeddings", "no_manifest")
         return None
     space = manifest.get("space")
     if not space:
+        _record_fallback("embeddings", "space_unpinned")
         return None
     if (
         isinstance(expected_dimension, bool)
@@ -591,41 +723,42 @@ def embed_for_space(text, model_identity, revision, expected_dimension=None):
         or manifest.get("dimension") != expected_dimension
         or space.get("dimension") != expected_dimension
     ):
-        _event("npu_fallback", capability="embeddings", reason="dimension_mismatch")
+        _record_fallback("embeddings", "dimension_mismatch")
         return None
     if (
         space.get("model") != str(model_identity or "")
         or space.get("revision") != str(revision or "")
     ):
-        _event("npu_fallback", capability="embeddings", reason="space_mismatch")
+        _record_fallback("embeddings", "space_mismatch")
         return None
     try:
         result = _embedding_call(manifest, text)
     except npu_broker.NpuUnavailable as exc:
-        _event("npu_fallback", capability="embeddings", reason=exc.reason)
+        _record_fallback("embeddings", exc.reason, broker_counted=True)
         return None
     except (TypeError, ValueError):
-        _event("npu_fallback", capability="embeddings", reason="invalid")
+        _record_fallback("embeddings", "invalid")
         return None
     except Exception:
-        _event("npu_fallback", capability="embeddings", reason="internal")
+        _record_fallback("embeddings", "internal")
         return None
     if result.get("simulated"):
-        _event("npu_fallback", capability="embeddings", reason="simulated_provider")
+        _record_fallback("embeddings", "simulated_provider")
         return None
     if result.get("provider") != "cpu" and not result.get("accelerated"):
         # VitisAI spans NPU and non-NPU target classes. Until the effective
         # device can be attested, it may participate in shadow/routing work but
         # cannot substitute a production embedding vector.
-        _event("npu_fallback", capability="embeddings", reason="target_unattested")
+        _record_fallback("embeddings", "target_unattested")
         return None
     result.update(
         model=space["model"],
         revision=space["revision"],
         dimension=space["dimension"],
     )
-    _event(
+    _record_capability_event(
         "npu_embed",
+        "embeddings",
         provider=result["provider"],
         accelerated=result["accelerated"],
         ep_fallback=result["ep_fallback"],
@@ -645,13 +778,21 @@ def embed_shadow(text, model_identity, revision):
     try:
         result = _embedding_call(manifest, text)
     except npu_broker.NpuUnavailable as exc:
-        _event("npu_embed_shadow", ok=False, reason=exc.reason)
+        _record_capability_event(
+            "npu_embed_shadow", "embeddings", ok=False, reason=exc.reason,
+            handler="ollama",
+        )
         return None
     except Exception:
-        _event("npu_embed_shadow", ok=False, reason="invalid")
+        _record_capability_event(
+            "npu_embed_shadow", "embeddings", ok=False, reason="invalid",
+            handler="ollama",
+        )
         return None
-    _event(
+    _record_capability_event(
         "npu_embed_shadow",
+        "embeddings",
+        handler="ollama",
         ok=True,
         provider=result["provider"],
         accelerated=result["accelerated"],
@@ -681,6 +822,152 @@ def _manifest_summary(manifest):
             (manifest.get("input") or {}).get("identity") or ""
         )
     return summary
+
+
+def _safe_fallback_count(value) -> int:
+    try:
+        if isinstance(value, bool):
+            return 0
+        return min(2_147_483_647, max(0, int(value or 0)))
+    except Exception:
+        return 0
+
+
+def _public_fallback_projection(raw) -> dict:
+    raw = raw if isinstance(raw, dict) else {}
+    raw_capabilities = raw.get("capabilities")
+    raw_capabilities = (
+        raw_capabilities if isinstance(raw_capabilities, dict) else {}
+    )
+    capabilities = {}
+    for capability in ("routing", "embeddings"):
+        row = raw_capabilities.get(capability)
+        row = row if isinstance(row, dict) else {}
+        policy_mode = npu_contract.controlled_value(
+            row.get("policy_mode"), frozenset({"off", "shadow", "prefer"}),
+        )
+        capabilities[capability] = {
+            "policy_mode": policy_mode,
+            "role": (
+                "observer" if policy_mode == "shadow"
+                else "executor" if policy_mode == "prefer"
+                else "disabled" if policy_mode == "off"
+                else "unknown"
+            ),
+            "local_fallback_handler": (
+                "ollama" if policy_mode in {"shadow", "prefer"}
+                else "unknown"
+            ),
+        }
+    reason_counts = {}
+    raw_counts = raw.get("reason_counts")
+    if isinstance(raw_counts, dict):
+        for raw_reason, raw_count in raw_counts.items():
+            reason = npu_contract.fallback_reason(raw_reason)
+            reason_counts[reason] = min(
+                2_147_483_647,
+                reason_counts.get(reason, 0) + _safe_fallback_count(raw_count),
+            )
+    latest = raw.get("last_fallback")
+    latest = latest if isinstance(latest, dict) else {}
+    return {
+        "schema_version": 1,
+        "known": raw.get("known") is True,
+        "capabilities": capabilities,
+        "last_fallback": {
+            "capability": npu_contract.fallback_capability(
+                latest.get("capability")
+            ),
+            "reason": npu_contract.fallback_reason(latest.get("reason")),
+            "operation_mode": npu_contract.fallback_operation_mode(
+                latest.get("operation_mode")
+            ),
+            "fallback_handler": npu_contract.fallback_handler(
+                latest.get("fallback_handler")
+            ),
+            "handler_state": npu_contract.fallback_handler_state(
+                latest.get("handler_state")
+            ),
+            "count": _safe_fallback_count(latest.get("count")),
+        },
+        "reason_counts": reason_counts,
+    }
+
+
+def _fallback_status(modes, broker_status) -> dict:
+    modes = modes if isinstance(modes, dict) else {}
+    broker_status = broker_status if isinstance(broker_status, dict) else {}
+    capabilities = {}
+    for capability in ("routing", "embeddings"):
+        policy_mode = str(modes.get(capability) or "").strip().lower()
+        if policy_mode not in {"off", "shadow", "prefer"}:
+            policy_mode = "unknown"
+        capabilities[capability] = {
+            "policy_mode": policy_mode,
+            "role": (
+                "observer" if policy_mode == "shadow"
+                else "executor" if policy_mode == "prefer"
+                else "disabled" if policy_mode == "off"
+                else "unknown"
+            ),
+            "local_fallback_handler": (
+                "ollama" if policy_mode in {"shadow", "prefer"} else "unknown"
+            ),
+        }
+    reason_counts = {}
+    raw_fallbacks = broker_status.get("fallbacks")
+    if isinstance(raw_fallbacks, dict):
+        for raw_reason, raw_count in raw_fallbacks.items():
+            reason = npu_contract.fallback_reason(raw_reason)
+            reason_counts[reason] = min(
+                2_147_483_647,
+                reason_counts.get(reason, 0)
+                + _safe_fallback_count(raw_count),
+            )
+    with _STATE_LOCK:
+        latest = dict(_LAST_FALLBACK)
+        service_fallbacks = dict(_SERVICE_FALLBACKS)
+    for raw_reason, raw_count in service_fallbacks.items():
+        reason = npu_contract.fallback_reason(raw_reason)
+        reason_counts[reason] = min(
+            2_147_483_647,
+            reason_counts.get(reason, 0) + _safe_fallback_count(raw_count),
+        )
+    known = bool(latest.get("known"))
+    if not known and any(reason_counts.values()):
+        observed = [reason for reason, count in reason_counts.items() if count]
+        latest = {
+            "known": True,
+            "capability": "unknown",
+            "reason": observed[0] if len(observed) == 1 else "unknown",
+            "operation_mode": "unknown",
+            "fallback_handler": "unknown",
+            "handler_state": "observed",
+            "count": sum(reason_counts.values()),
+        }
+        known = True
+    return _public_fallback_projection({
+        "schema_version": 1,
+        "known": known,
+        "capabilities": capabilities,
+        "last_fallback": {
+            "capability": npu_contract.fallback_capability(
+                latest.get("capability")
+            ),
+            "reason": npu_contract.fallback_reason(latest.get("reason")),
+            "operation_mode": npu_contract.fallback_operation_mode(
+                latest.get("operation_mode")
+            ),
+            "fallback_handler": npu_contract.fallback_handler(
+                latest.get("fallback_handler")
+            ),
+            "handler_state": npu_contract.fallback_handler_state(
+                latest.get("handler_state")
+            ),
+            "count": _safe_fallback_count(latest.get("count")),
+        },
+        "reason_counts": reason_counts,
+    })
 
 
 def status(probe=False) -> dict:
@@ -815,6 +1102,7 @@ def status(probe=False) -> dict:
     )
     with _STATE_LOCK:
         shadow = dict(_SHADOW)
+    fallback_status = _fallback_status(modes, broker_status)
     return {
         "modes": modes,
         "enabled": enabled,
@@ -833,13 +1121,27 @@ def status(probe=False) -> dict:
         },
         "shadow": shadow,
         "broker": broker_status,
+        "fallback_projection": fallback_status,
     }
+
+
+def fallback_projection(state=None) -> dict:
+    """Public enum-only fallback/capability state for status consumers."""
+    state = status() if state is None else state
+    projection = (
+        state.get("fallback_projection") if isinstance(state, dict) else None
+    )
+    return _public_fallback_projection(projection)
 
 
 def _flag(value):
     if value is None:
         return "unknown"
     return "yes" if value else "no"
+
+
+def _status_enum(value, allowed) -> str:
+    return npu_contract.controlled_value(value, frozenset(allowed))
 
 
 def diagnostics_line(state=None) -> str:
@@ -852,7 +1154,7 @@ def diagnostics_line(state=None) -> str:
             "detected=%s" % _flag(state["detected"]) if probed else "not probed"
         )
     broker_state = state["broker"]
-    return (
+    line = (
         "routing=%s embeddings=%s detected=%s utility-ready=%s "
         "npu-runtime-ready=%s healthy=%s "
         "worker=%s circuit=%s p95=%sms"
@@ -863,11 +1165,28 @@ def diagnostics_line(state=None) -> str:
             _flag(state["utility_ready"]),
             _flag(state["runtime_ready"]),
             _flag(state["healthy"]),
-            (broker_state.get("worker") or {}).get("state", "cold"),
-            (broker_state.get("circuit") or {}).get("state", "closed"),
-            (broker_state.get("latency_ms") or {}).get("p95", 0),
+            _status_enum(
+                (broker_state.get("worker") or {}).get("state"),
+                {"cold", "warming", "ready", "busy"},
+            ),
+            _status_enum(
+                (broker_state.get("circuit") or {}).get("state"),
+                {"closed", "half_open", "open"},
+            ),
+            _safe_fallback_count(
+                (broker_state.get("latency_ms") or {}).get("p95")
+            ),
         )
     )
+    fallback = (state.get("fallback_projection") or {}).get("last_fallback") or {}
+    if (state.get("fallback_projection") or {}).get("known"):
+        line += " fallback=%s/%s->%s:%s" % (
+            fallback.get("capability", "unknown"),
+            fallback.get("reason", "unknown"),
+            fallback.get("fallback_handler", "unknown"),
+            fallback.get("handler_state", "unknown"),
+        )
+    return line
 
 
 def format_status(state=None) -> str:
@@ -892,21 +1211,31 @@ def format_status(state=None) -> str:
             "yes" if state["enabled"] else "no", _flag(state["healthy"]),
         ),
         "  worker: %s (spawns=%s idle-unloads=%s rss-evictions=%s rss=%sMB)" % (
-            worker.get("state", "cold"), worker.get("spawns", 0),
-            worker.get("idle_unloads", 0), worker.get("rss_evictions", 0),
-            worker.get("rss_mb", 0),
+            _status_enum(
+                worker.get("state"), {"cold", "warming", "ready", "busy"},
+            ),
+            _safe_fallback_count(worker.get("spawns")),
+            _safe_fallback_count(worker.get("idle_unloads")),
+            _safe_fallback_count(worker.get("rss_evictions")),
+            _safe_fallback_count(worker.get("rss_mb")),
         ),
         "  circuit: %s (opens=%s cooldown=%ss)" % (
-            circuit.get("state", "closed"), circuit.get("opens", 0),
-            circuit.get("cooldown_remaining_s", 0),
+            _status_enum(
+                circuit.get("state"), {"closed", "half_open", "open"},
+            ),
+            _safe_fallback_count(circuit.get("opens")),
+            _safe_fallback_count(circuit.get("cooldown_remaining_s")),
         ),
         "  latency: last=%sms p50=%sms p95=%sms over %s call(s)" % (
-            latency.get("last", 0), latency.get("p50", 0),
-            latency.get("p95", 0), latency.get("count", 0),
+            _safe_fallback_count(latency.get("last")),
+            _safe_fallback_count(latency.get("p50")),
+            _safe_fallback_count(latency.get("p95")),
+            _safe_fallback_count(latency.get("count")),
         ),
         "  shadow: agree=%s disagree=%s errors=%s" % (
-            state["shadow"].get("agree", 0), state["shadow"].get("disagree", 0),
-            state["shadow"].get("errors", 0),
+            _safe_fallback_count(state["shadow"].get("agree")),
+            _safe_fallback_count(state["shadow"].get("disagree")),
+            _safe_fallback_count(state["shadow"].get("errors")),
         ),
         "  shadow-live: %s over %s decision(s) — %s" % (
             (
@@ -919,18 +1248,17 @@ def format_status(state=None) -> str:
         ),
     ]
     if hello.get("ort_version"):
-        lines.append("  onnxruntime: %s" % hello["ort_version"])
+        lines.append("  onnxruntime: available")
     elif hello.get("ort_error"):
-        lines.append("  onnxruntime: unavailable (%s)" % hello["ort_error"])
+        lines.append("  onnxruntime: unavailable")
     providers = broker_state.get("providers") or []
     if providers:
         lines.append("  providers:")
         for row in providers:
             lines.append(
-                "    %-8s detected=%s ready=%s %s" % (
+                "    %-8s detected=%s ready=%s" % (
                     row.get("id", "?"), _flag(bool(row.get("detected"))),
                     _flag(bool(row.get("runtime_ready"))),
-                    str(row.get("reason") or "")[:80],
                 )
             )
     else:
@@ -944,11 +1272,12 @@ def format_status(state=None) -> str:
             summary["hash8"], ",".join(summary["providers"]),
         )
         if summary.get("error"):
-            detail += " ERROR: %s" % summary["error"]
-        lines.append("  %s model: %s (%s)" % (
-            operation, summary["name"], detail,
-        ))
-    fallbacks = broker_state.get("fallbacks") or {}
+            detail += " ERROR"
+        lines.append("  %s model: configured (%s)" % (operation, detail))
+    projection = state.get("fallback_projection") or {}
+    # Only render the controlled projection. Broker error/counter keys are an
+    # internal diagnostic surface and may contain arbitrary provider text.
+    fallbacks = projection.get("reason_counts") or {}
     if fallbacks:
         rendered = ", ".join(
             "%s=%s" % (key, fallbacks[key]) for key in sorted(fallbacks)
@@ -970,8 +1299,21 @@ def format_status(state=None) -> str:
                 "Tune SONDER_NPU_MIN_FREE_RAM_GB (default 2) or free RAM to "
                 "let the accelerator take them." % gated
             )
-    if broker_state.get("last_error"):
-        lines.append("  last error: %s" % broker_state["last_error"])
+    last_fallback = projection.get("last_fallback") or {}
+    lines.append(
+        "  fallback projection: %s"
+        % (
+            "%s/%s mode=%s handler=%s state=%s"
+            % (
+                last_fallback.get("capability", "unknown"),
+                last_fallback.get("reason", "unknown"),
+                last_fallback.get("operation_mode", "unknown"),
+                last_fallback.get("fallback_handler", "unknown"),
+                last_fallback.get("handler_state", "unknown"),
+            )
+            if projection.get("known") else "none observed"
+        )
+    )
     lines.append(
         "  boundary: NPU failure falls back to existing local behavior; "
         "cloud is never a fallback"
