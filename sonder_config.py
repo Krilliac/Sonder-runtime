@@ -29,6 +29,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import sonder_paths
+import unsafe_lab
 
 PROFILES = ("workstation-local", "server-private")
 
@@ -546,6 +547,13 @@ def load_config(
     if overrides:
         sources.append("command-line")
         config = _apply_overrides(config, overrides, errors)
+
+    # Check the final effective listener host, including the highest-precedence
+    # CLI overrides. Otherwise an exact unsafe acknowledgement plus
+    # --host=0.0.0.0 could evade the lab's stricter loopback-only rule.
+    lab_state = unsafe_lab.inspect(env=merged_env, host=config.server.host)
+    if lab_state.error:
+        errors.append(lab_state.error)
 
     if not config.state.home:
         config = replace(

@@ -38,6 +38,7 @@ import debug_dump
 import sonder_health
 import sonder_lifecycle
 import sonder_secrets
+import unsafe_lab
 
 DEFAULT_PORT = 11435
 
@@ -509,6 +510,9 @@ def _is_loopback_host(host):
 
 
 def _validate_bind_security(host, api_key=None, auth_mode=None, auth_secret=None):
+    # Unsafe lab acknowledgement tightens exposure: unlike normal served mode,
+    # there is deliberately no authenticated non-loopback topology available.
+    unsafe_lab.require_startup(host=host)
     api_key = API_KEY if api_key is None else api_key
     mode = _effective_auth_mode() if auth_mode is None else auth_mode
     auth_secret = os.environ.get("SONDER_AUTH_SECRET", "") if auth_secret is None else auth_secret

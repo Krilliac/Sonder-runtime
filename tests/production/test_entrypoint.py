@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import unsafe_lab
 
 from sonder_runtime.__main__ import main
 
@@ -52,6 +53,20 @@ def test_invalid_security_config_fails_before_bind(isolated_home, capsys):
     assert rc == 2
     err = capsys.readouterr().err
     assert "tls_terminated_by_proxy" in err
+
+
+def test_mcp_entrypoint_runs_unsafe_gate_before_adapter(monkeypatch):
+    import server
+    from sonder_runtime.__main__ import cmd_mcp
+
+    calls = []
+    monkeypatch.setattr(
+        unsafe_lab, "require_startup", lambda: calls.append("gate") or False
+    )
+    monkeypatch.setattr(server.mcp, "run", lambda: calls.append("mcp"))
+
+    assert cmd_mcp(SimpleNamespace()) == 0
+    assert calls == ["gate", "mcp"]
 
 
 def test_migrate_and_smoke(isolated_home, capsys):
