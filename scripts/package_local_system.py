@@ -105,6 +105,7 @@ REQUIRED_FILES = {
     "server.py",
     "sonder_hardware.py",
     "sonder_runtime/adapters/legacy/inspections.py",
+    "sonder_runtime/adapters/git_discovery.py",
     "sonder_runtime/application/inspection/__init__.py",
     "sonder_runtime/application/inspection/use_cases.py",
     "sonder_runtime/adapters/memory_store.py",
