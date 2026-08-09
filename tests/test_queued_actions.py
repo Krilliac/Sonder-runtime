@@ -92,6 +92,22 @@ def test_cas_invalid_transitions_and_exact_replay_are_safe():
     assert queue.get_action(conn, action.id) == current
 
 
+def test_caller_transition_ids_cannot_collide_with_proposal_namespace():
+    conn = queue.connect(":memory:")
+    action, _ = _proposed(conn, "existing-action")
+    with pytest.raises(queue.QueueValidation, match="reserved proposal"):
+        _move(
+            conn, action, "proposal:future-request",
+            queue.ActionState.PENDING_APPROVAL, queue.Actor.HOST,
+        )
+
+    proposed, _ = _proposed(conn, "future-request")
+    assert proposed.id == "future-request"
+    assert queue.history(conn, proposed.id)[0].transition_id == (
+        "proposal:future-request"
+    )
+
+
 def test_full_lifecycle_is_append_only_and_terminal():
     conn = queue.connect(":memory:")
     action, _ = _proposed(conn)

@@ -21,6 +21,7 @@ import sonder_paths
 
 MAX_REQUEST_ID = 128
 MAX_TRANSITION_ID = 160
+PROPOSAL_TRANSITION_PREFIX = "proposal:"
 MAX_ACTION_TYPE = 80
 MAX_PAYLOAD_CHARS = 16384
 MAX_PAYLOAD_DEPTH = 8
@@ -417,7 +418,7 @@ def propose(conn, request: ActionRequest) -> ActionRecord:
                 proposed_by.value, scope, ActionState.PROPOSED.value, now, now,
             ),
         )
-        transition_id = "proposal:" + request_id
+        transition_id = PROPOSAL_TRANSITION_PREFIX + request_id
         conn.execute(
             "INSERT INTO queued_action_transitions(transition_id, action_id, "
             "from_state, to_state, expected_version, after_version, actor, "
@@ -464,6 +465,10 @@ def transition(conn, request: TransitionRequest) -> TransitionRecord:
     if not isinstance(request, TransitionRequest):
         raise QueueValidation("request must be a TransitionRequest")
     transition_id = _text(request.transition_id, "transition_id", MAX_TRANSITION_ID)
+    if transition_id.startswith(PROPOSAL_TRANSITION_PREFIX):
+        raise QueueValidation(
+            "transition_id uses the reserved proposal: namespace"
+        )
     action_id = _text(request.action_id, "action_id", MAX_REQUEST_ID)
     expected = _version(request.expected_version)
     to_state = _state(request.to_state)
