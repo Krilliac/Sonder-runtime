@@ -517,11 +517,59 @@ def test_candidate_cursor_rejects_malformed_and_noncanonical_values():
     canonical = ms._encode_recall_cursor("00000000000000000001", "one")
     for invalid in (
         1, "", "r1.", "r1.not-base64!", canonical + "=", "r2." + canonical[3:],
-        "r1." + "a" * 1025,
+        "r1." + "a" * (ms.RECALL_CURSOR_MAX_CHARS + 1),
     ):
         with pytest.raises(ValueError, match="cursor is invalid"):
             ms.good_interaction_candidate_page(c, cursor=invalid)
     assert valid.incomplete is False
+
+
+def test_candidate_cursor_round_trips_maximum_unicode_ordering_keys():
+    c = _conn()
+    pathological_id = "\U0001f642" * 256
+    pathological_ts = "\U0001f642" * 64
+    _bulk_good(c, [
+        ("older", "task", "result", [1.0, 0.0], None, "embed-v2", "rev-v2"),
+        (
+            pathological_id, "task", "result", [1.0, 0.0], None,
+            "embed-v2", "rev-v2",
+        ),
+    ])
+    c.execute(
+        "UPDATE interactions SET ts=? WHERE id=?",
+        (pathological_ts, pathological_id),
+    )
+    c.commit()
+
+    first = ms.good_interaction_candidate_page(
+        c, embedding_model="embed-v2", embedding_revision="rev-v2",
+        embedding_dim=2, row_limit=1,
+    )
+    assert first.incomplete is True
+    assert first.rows[0]["id"] == pathological_id
+    assert first.next_cursor is not None
+    assert len(first.next_cursor) <= ms.RECALL_CURSOR_MAX_CHARS + 3
+
+    second = ms.good_interaction_candidate_page(
+        c, embedding_model="embed-v2", embedding_revision="rev-v2",
+        embedding_dim=2, cursor=first.next_cursor, row_limit=1,
+    )
+    assert tuple(row["id"] for row in second.rows) == ("older",)
+
+
+def test_empty_corrupt_interaction_id_is_not_a_cursor_candidate():
+    c = _conn()
+    _bulk_good(c, [(
+        "", "task", "result", [1.0, 0.0], None, "embed-v2", "rev-v2",
+    )])
+
+    page = ms.good_interaction_candidate_page(
+        c, embedding_model="embed-v2", embedding_revision="rev-v2",
+        embedding_dim=2,
+    )
+
+    assert page.rows == ()
+    assert page.rows_examined == 0
 
 
 def test_timestamp_id_cursor_is_safe_when_sqlite_reuses_rowids():
@@ -592,6 +640,27 @@ def test_project_query_plan_uses_recall_index_without_temp_sort():
     assert "idx_interactions_recall_project" in plan
     assert "idx_outcomes_interaction_signal_reward" in plan
     assert "USE TEMP B-TREE" not in plan
+
+
+def test_existing_database_stamp_installs_recall_indexes_idempotently():
+    c = _conn()
+    c.execute("DROP INDEX idx_interactions_recall_project")
+    c.execute("DROP INDEX idx_interactions_recall_global")
+    c.execute("PRAGMA user_version=1")
+    c.commit()
+
+    ms.init_db(c)
+    ms.init_db(c)
+
+    indexes = {
+        row[0]
+        for row in c.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        ).fetchall()
+    }
+    assert "idx_interactions_recall_project" in indexes
+    assert "idx_interactions_recall_global" in indexes
+    assert c.execute("PRAGMA user_version").fetchone()[0] == ms._schema_stamp()
 
 
 def test_global_query_plan_uses_recall_index_without_temp_sort():
