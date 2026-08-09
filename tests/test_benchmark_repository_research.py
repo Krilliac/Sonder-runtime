@@ -110,7 +110,10 @@ class RepositoryResearchBenchmarkTests(unittest.TestCase):
                 "status": "exists",
                 "citations": [
                     {"path": "scripts/not_real.py", "symbol": "history_status"},
-                    {"path": "eval_history.py", "symbol": "invented_symbol"},
+                    {
+                        "path": "sonder_runtime/adapters/evaluation_history_store.py",
+                        "symbol": "invented_symbol",
+                    },
                 ],
             }
         )

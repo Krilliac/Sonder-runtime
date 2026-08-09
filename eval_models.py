@@ -11,7 +11,7 @@ import argparse
 import json
 import secrets
 
-import eval_history
+import sonder_runtime.adapters.evaluation_history_store as eval_history
 import promotion_eval
 
 
