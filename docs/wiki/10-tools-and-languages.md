@@ -52,13 +52,18 @@ file's *structure* without dumping raw bytes.
 
 ## Guarded filesystem tools
 
-`file_find`, `file_read`, `file_read_range`, `file_write`, `file_edit`,
+`file_find`, `file_read`, `file_read_range`, `file_write`, `file_batch_write`, `file_edit`,
 `file_delete`, `directory_tree`, `directory_create`, `workspace_inventory`,
 `text_search`, `script_search`, `program_search`, `image_inspect`. All are
 confined to `SONDER_FILE_ROOTS`, honor the permission policy
 ([Security Model](09-security-model.md)), and record byte/line accounting
 into the activity trail. `file_delete` is dry-run unless an explicit
 confirm string matches.
+
+`file_batch_write` accepts a JSON list of explicit `create` or `overwrite`
+operations. It prevalidates every target before writing, caps per-file and
+aggregate bytes, rejects duplicate/sensitive/symlink targets, and makes a
+best-effort rollback if any write fails.
 
 ## Other tool families
 
