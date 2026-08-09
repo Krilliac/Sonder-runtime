@@ -66,6 +66,7 @@ import ollama_lifecycle
 import admin_auth
 import codegen_loop
 import file_ops
+import archive_tools
 import context_policy
 import command_registry
 import adaptive_training
@@ -557,6 +558,7 @@ LIVE_RELOAD_MODULES = [
     "ollama_lifecycle",
     "admin_auth",
     "file_ops",
+    "archive_tools",
     "context_policy",
     "command_registry",
     "permission_rules",
@@ -7364,6 +7366,89 @@ def context_pack(
 
 
 @mcp.tool()
+def archive_list(
+    path: str,
+    max_entries: int = archive_tools.DEFAULT_MAX_ENTRIES,
+    max_file_bytes: int = archive_tools.DEFAULT_MAX_FILE_BYTES,
+    max_total_bytes: int = archive_tools.DEFAULT_MAX_TOTAL_BYTES,
+    max_ratio: float = archive_tools.DEFAULT_MAX_RATIO,
+    max_path_depth: int = archive_tools.DEFAULT_MAX_PATH_DEPTH,
+    max_results: int = archive_tools.DEFAULT_MAX_RESULTS,
+    max_seconds: float = archive_tools.DEFAULT_MAX_SECONDS,
+    token: str = "", approval: str = "", extra_roots: str = "",
+) -> str:
+    """Prevalidate and list a bounded ZIP/TAR without extracting it."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"path": path, "max_entries": max_entries, "max_results": max_results}
+    try:
+        data = archive_tools.list_archive(
+            path, max_entries=max_entries, max_file_bytes=max_file_bytes,
+            max_total_bytes=max_total_bytes, max_ratio=max_ratio,
+            max_path_depth=max_path_depth, max_results=max_results,
+            max_seconds=max_seconds, extra_roots=extra_roots,
+        )
+    except Exception as exc:
+        _record_direct_tool("archive_list", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = archive_tools.format_result(data)
+    _record_direct_tool(
+        "archive_list", args, ok=data.get("valid", False), started=started,
+        summary=("%d entries" % data.get("entry_count", 0)) if data.get("valid") else data.get("errors", ["rejected"])[0],
+        output=output,
+    )
+    activity_tracker.record_event(
+        "archive_list", summary="%s: %s" % (
+            "valid" if data.get("valid") else "rejected",
+            data.get("entry_count", 0),
+        ), path=data.get("source", ""),
+    )
+    return output
+
+
+@mcp.tool()
+def archive_extract(
+    source: str, destination: str,
+    max_entries: int = archive_tools.DEFAULT_MAX_ENTRIES,
+    max_file_bytes: int = archive_tools.DEFAULT_MAX_FILE_BYTES,
+    max_total_bytes: int = archive_tools.DEFAULT_MAX_TOTAL_BYTES,
+    max_ratio: float = archive_tools.DEFAULT_MAX_RATIO,
+    max_path_depth: int = archive_tools.DEFAULT_MAX_PATH_DEPTH,
+    max_seconds: float = archive_tools.DEFAULT_MAX_SECONDS,
+    token: str = "", approval: str = "", extra_roots: str = "",
+) -> str:
+    """Transactionally extract a prevalidated ZIP/TAR to a new directory.
+
+    Never overwrites an existing destination. All members are prevalidated,
+    streamed into a sibling staging directory, verified, then promoted.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    args = {"source": source, "destination": destination, "max_entries": max_entries}
+    try:
+        data = archive_tools.extract_archive(
+            source, destination, max_entries=max_entries,
+            max_file_bytes=max_file_bytes, max_total_bytes=max_total_bytes,
+            max_ratio=max_ratio, max_path_depth=max_path_depth,
+            max_seconds=max_seconds, extra_roots=extra_roots,
+            developer_authorized=_file_developer_allowed(token),
+        )
+    except Exception as exc:
+        _record_direct_tool("archive_extract", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = archive_tools.format_result(data)
+    _record_direct_tool(
+        "archive_extract", args, ok=True, started=started,
+        summary="%d entries, %d bytes" % (data["entries"], data["bytes"]), output=output,
+    )
+    activity_tracker.record_file_change(
+        "create_directory", data["destination"], bytes_written=data["bytes"],
+        summary="archive_extract: %d entries" % data["entries"],
+    )
+    return output
+
+
+@mcp.tool()
 def data_inspect(
     path: str,
     max_bytes: int = 256000,
@@ -10119,6 +10204,7 @@ def tool_manifest() -> str:
         "offload": "Route a self-contained task to a configured local/cloud tier.",
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
         "workspace_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace inventory, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
+        "archive_list/archive_extract": "Prevalidate bounded ZIP/TAR manifests or transactionally extract them to a new non-overwriting workspace directory.",
         "file_policy/file_find/file_read/file_write/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete with approval bypass support.",
         "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
         "environment_status": "Report the host OS, available shells (PowerShell/cmd/bash/wsl), and installed toolchains -- check before choosing a command shape or assuming a tool exists.",
@@ -10180,6 +10266,8 @@ AGENT_TOOL_HELP = """Available tools:
 - file_read: {"path": "README.md"}
 - file_read_range: {"path": "server.py", "start_line": 1, "end_line": 200}
 - context_pack: {"paths_json": ["README.md", "src/main.py"], "max_files": 12, "max_total_bytes": 256000, "max_bytes_per_file": 64000}
+- archive_list: {"path": "bundle.zip", "max_entries": 2000, "max_total_bytes": 256000000, "max_ratio": 100, "max_results": 2500}
+- archive_extract: {"source": "bundle.zip", "destination": "unpacked", "max_entries": 2000, "max_total_bytes": 256000000, "max_ratio": 100} -- creates a new directory; never overwrites
 - text_search: {"query": "TODO", "root": ".", "glob": "*.py", "regex": false, "max_results": 100}
 - file_write: {"path": "notes.txt", "content": "...", "mode": "create|overwrite|append"}
 - file_edit: {"path": "notes.txt", "old": "before", "new": "after", "count": 1}
@@ -10246,7 +10334,7 @@ or
 
 
 REPOSITORY_READ_ONLY_TOOLS = frozenset({
-    "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range", "context_pack",
+    "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range", "context_pack", "archive_list",
     "data_inspect",
     "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
@@ -10272,6 +10360,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - file_read: {"path": "<task-relevant relative path>", "max_bytes": 256000}
 - file_read_range: {"path": "<task-relevant relative path>", "start_line": 1, "end_line": 200}
 - context_pack: {"paths_json": ["<task-relevant relative path>", "<another task-relevant relative path>"], "max_files": 12, "max_total_bytes": 256000, "max_bytes_per_file": 64000}
+- archive_list: {"path": "<task-relevant ZIP or TAR>", "max_entries": 2000, "max_total_bytes": 256000000, "max_ratio": 100, "max_results": 2500}
 - text_search: {"query": "<exact task symbol or anchor>", "root": ".", "glob": "<task-relevant glob>", "max_results": 100}
 - script_search: {"query": "<task-relevant script name>", "root": ".", "max_results": 100}
 - program_search: {"query": "<required program name>", "max_results": 50}
@@ -10344,6 +10433,11 @@ def _repository_scope_path_error(tool_name, args, project_root):
                 for path in _context_pack_paths(
                     args.get("paths_json", args.get("paths", []))
                 )
+            ]
+        elif tool_name == "archive_extract":
+            targets = [
+                ("archive source", args.get("source") or ""),
+                ("archive destination", args.get("destination") or ""),
             ]
         else:
             key = _project_scoped_path_key(tool_name)
@@ -10535,6 +10629,11 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
                     reject_sensitive=True,
                     extra_roots=trusted_extra_roots,
                 )
+        elif tool_name == "archive_list":
+            file_ops.resolve_repository_read_path(
+                args.get("path", ""), allow_workspace_root=False,
+                reject_sensitive=True, extra_roots=trusted_extra_roots,
+            )
         elif tool_name in {"workspace_inventory", "directory_tree", "file_find", "text_search", "script_search"}:
             file_ops.resolve_repository_read_path(
                 args.get("path", "") or args.get("root", "") or ".",
@@ -11161,6 +11260,31 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "archive_list":
+        return archive_list(
+            path=args.get("path", ""),
+            max_entries=args.get("max_entries", archive_tools.DEFAULT_MAX_ENTRIES),
+            max_file_bytes=args.get("max_file_bytes", archive_tools.DEFAULT_MAX_FILE_BYTES),
+            max_total_bytes=args.get("max_total_bytes", archive_tools.DEFAULT_MAX_TOTAL_BYTES),
+            max_ratio=args.get("max_ratio", archive_tools.DEFAULT_MAX_RATIO),
+            max_path_depth=args.get("max_path_depth", archive_tools.DEFAULT_MAX_PATH_DEPTH),
+            max_results=args.get("max_results", archive_tools.DEFAULT_MAX_RESULTS),
+            max_seconds=args.get("max_seconds", archive_tools.DEFAULT_MAX_SECONDS),
+            token=args.get("token", ""), approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "archive_extract":
+        return archive_extract(
+            source=args.get("source", ""), destination=args.get("destination", ""),
+            max_entries=args.get("max_entries", archive_tools.DEFAULT_MAX_ENTRIES),
+            max_file_bytes=args.get("max_file_bytes", archive_tools.DEFAULT_MAX_FILE_BYTES),
+            max_total_bytes=args.get("max_total_bytes", archive_tools.DEFAULT_MAX_TOTAL_BYTES),
+            max_ratio=args.get("max_ratio", archive_tools.DEFAULT_MAX_RATIO),
+            max_path_depth=args.get("max_path_depth", archive_tools.DEFAULT_MAX_PATH_DEPTH),
+            max_seconds=args.get("max_seconds", archive_tools.DEFAULT_MAX_SECONDS),
+            token=args.get("token", ""), approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "text_search":
         return text_search(
             query=args.get("query", args.get("pattern", "")),
@@ -11487,7 +11611,7 @@ def _agent_activity_command(tool_name, args):
 
 
 _PROJECT_SCOPED_PATH_TOOLS = frozenset({
-    "file_read", "file_read_range", "context_pack", "image_inspect", "file_write", "file_edit",
+    "file_read", "file_read_range", "context_pack", "archive_list", "archive_extract", "image_inspect", "file_write", "file_edit",
     "file_delete", "directory_create", "workspace_inventory", "directory_tree",
     "file_find", "text_search", "script_search", "artifact_verify",
     "artifact_ground", "scaffold_project",
@@ -11534,6 +11658,8 @@ def _canonical_agent_tool_name(tool_name):
 
 
 def _project_scoped_path_key(tool_name):
+    if tool_name == "archive_extract":
+        return "destination"
     if tool_name in {"file_find", "text_search", "script_search", "scaffold_project"}:
         return "root"
     return "path"
@@ -11583,6 +11709,16 @@ def _project_scope_args(tool_name, args, project):
             rebased.append(raw_path if is_abs else os.path.join(project, raw_path))
         scoped["paths_json"] = rebased
         scoped.pop("paths", None)
+        return scoped
+
+    if tool_name == "archive_extract":
+        for key in ("source", "destination"):
+            raw_path = str(scoped.get(key) or "").strip()
+            is_abs = os.path.isabs(raw_path) or bool(
+                re.match(r"^[A-Za-z]:[\\/]", raw_path)
+            )
+            if raw_path and not is_abs:
+                scoped[key] = os.path.join(project, raw_path)
         return scoped
 
     if tool_name == "workspace_run":
@@ -11654,7 +11790,7 @@ def _agent_dispatch_observed(
 
 _WORK_MUTATION_TOOLS = frozenset({
     "directory_create", "file_write", "file_edit", "file_delete",
-    "scaffold_project",
+    "scaffold_project", "archive_extract",
     "artifact_generate", "game_generate_and_test", "game_generation_campaign",
     "memory_quality_repair", "memory_privacy_repair", "memory_embedding_backfill",
     "memory_interaction_embedding_backfill",
@@ -11671,7 +11807,7 @@ _WORK_VALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_verify", "game_reference_suite", "game_generate_and_test",
     "game_generation_campaign", "self_heal_check", "workspace_inventory", "directory_tree", "file_find",
-    "file_read", "file_read_range", "text_search", "image_inspect",
+    "file_read", "file_read_range", "archive_extract", "text_search", "image_inspect",
     "memory_quality_report", "memory_privacy_review", "learning_health_status",
 })
 
@@ -11695,6 +11831,11 @@ def _agent_tool_observation_ok(tool_name, observation):
         return False
     if not _agent_observation_ok(observation):
         return False
+    if str(tool_name or "") == "archive_list":
+        try:
+            return bool(json.loads(str(observation or "")).get("valid"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
     if str(tool_name or "") != "web_fetch":
         return True
     # A transport-level success with an empty page is not grounding. Require
@@ -11732,7 +11873,9 @@ def _agent_call_signature(tool_name, args):
     canonical = dict(args) if isinstance(args, dict) else args
     if isinstance(canonical, dict):
         path_keys = []
-        if tool_name in _PROJECT_SCOPED_PATH_TOOLS:
+        if tool_name == "archive_extract":
+            path_keys.extend(("source", "destination"))
+        elif tool_name in _PROJECT_SCOPED_PATH_TOOLS:
             path_keys.append(_project_scoped_path_key(tool_name))
         elif tool_name == "workspace_run":
             path_keys.append("cwd")
@@ -11756,7 +11899,9 @@ def _agent_call_signature(tool_name, args):
 def _agent_mutation_record(tool_name, args):
     args = args if isinstance(args, dict) else {}
     path = args.get("path", "")
-    if tool_name == "artifact_generate":
+    if tool_name == "archive_extract":
+        path = args.get("destination", "")
+    elif tool_name == "artifact_generate":
         path = args.get("output_dir") or os.path.join(
             "artifacts", "generated", str(args.get("name", "generated-artifact")),
         )
@@ -11835,6 +11980,14 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
             return True
     paths = [record["path"] for record in records if record.get("path")]
     target = _agent_normalized_path(args.get("path", args.get("artifact", "")))
+
+    if tool_name == "archive_extract":
+        destination = _agent_normalized_path(args.get("destination", ""))
+        return bool(destination) and all(
+            record["tool"] == "archive_extract"
+            and record.get("path") == destination
+            for record in records
+        ) and '"validation_passed": true' in str(observation or "").lower()
 
     if tool_name in {
         "game_reference_suite", "game_generate_and_test", "game_generation_campaign",
@@ -12025,7 +12178,7 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
     # persistent files just edited. self_heal_check is likewise unrelated.
     return False
 _WORK_INSPECTION_TOOLS = frozenset({
-    "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range", "context_pack",
+    "file_policy", "workspace_inventory", "directory_tree", "file_find", "file_read", "file_read_range", "context_pack", "archive_list",
     "text_search", "script_search", "program_search", "image_inspect",
     "memory_search", "learning_health_status", "evaluation_history_status",
     "memory_quality_report", "memory_privacy_review", "artifact_ground",
@@ -12034,7 +12187,7 @@ _WORK_INSPECTION_TOOLS = frozenset({
 })
 _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find",
-    "file_read", "file_read_range", "context_pack", "text_search", "script_search",
+    "file_read", "file_read_range", "context_pack", "archive_list", "text_search", "script_search",
     "program_search", "image_inspect", "environment_status",
 })
 _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
@@ -13169,13 +13322,13 @@ def workbench_agent(
 
 _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find",
-    "file_read", "file_read_range", "text_search", "script_search",
+    "file_read", "file_read_range", "archive_list", "text_search", "script_search",
     "program_search", "image_inspect", "memory_search", "web_search",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
 })
 _AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
-    "directory_create", "file_write", "file_edit", "workspace_run",
+    "directory_create", "file_write", "file_edit", "archive_extract", "workspace_run",
     "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_generate", "artifact_verify", "game_reference_suite",
     "game_generate_and_test",
@@ -13189,7 +13342,7 @@ _AUTOPILOT_RUNNERS = frozenset({
 })
 _AUTOPILOT_SCRIPT_SUFFIXES = frozenset({".py", ".js", ".dart", ".exe", ".com"})
 _AUTOPILOT_MUTATION_EVIDENCE = frozenset({
-    "directory_create", "file_write", "file_edit", "artifact_generate",
+    "directory_create", "file_write", "file_edit", "archive_extract", "artifact_generate",
     "game_generate_and_test",
 })
 
