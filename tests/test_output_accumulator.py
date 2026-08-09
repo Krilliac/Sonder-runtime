@@ -99,6 +99,23 @@ def test_caps_fail_terminally_without_accepting_the_offending_chunk(
     assert events.items[-1][0] == "OUTPUT_STREAM_FAILED"
 
 
+def test_character_preflight_rejects_definitely_oversized_chunk_without_encoding():
+    class EncodingTrap(str):
+        def encode(self, *_args, **_kwargs):
+            raise AssertionError("oversized chunk must not be encoded")
+
+    stream, _ = _accumulator(
+        limits=OutputLimits(max_chunk_bytes=4, max_total_bytes=8),
+    )
+
+    with pytest.raises(TerminalStateError, match="limit exceeded"):
+        stream.append(0, EncodingTrap("abcde"), expected_revision=0)
+
+    snapshot = stream.snapshot()
+    assert snapshot.state is OutputStreamState.FAILED
+    assert snapshot.failure_code == "CHUNK_BYTES_LIMIT"
+
+
 def test_finalize_and_fail_are_explicit_idempotent_terminal_transitions():
     finalized, events = _accumulator()
     finalized.append(0, "done", expected_revision=0)
@@ -192,6 +209,25 @@ def test_redactor_failure_fails_preview_closed():
     assert snapshot.preview == "<preview redaction failed>"
 
 
+def test_redactor_can_reenter_snapshot_without_recursive_callback_invocation():
+    calls = 0
+    nested = []
+    stream = None
+
+    def redactor(value):
+        nonlocal calls
+        calls += 1
+        nested.append(stream.snapshot())
+        return value
+
+    stream, _ = _accumulator(redactor=redactor)
+    snapshot = stream.append(0, "safe output", expected_revision=0).snapshot
+
+    assert calls == 1
+    assert snapshot.preview == "safe output"
+    assert nested[0].preview == "<preview redaction in progress>"
+
+
 def test_blocked_redactor_does_not_hold_stream_lock():
     entered = threading.Event()
     release = threading.Event()
@@ -260,6 +296,38 @@ def test_event_sink_failure_does_not_change_terminal_success():
 
     assert snapshot.state is OutputStreamState.FINALIZED
     assert stream.snapshot() == snapshot
+
+
+@pytest.mark.parametrize("transition", ["finalize", "fail"])
+def test_concurrent_idempotent_terminal_calls_return_the_winning_preview(transition):
+    barrier = threading.Barrier(2)
+    calls_lock = threading.Lock()
+    calls = 0
+
+    def redactor(_value):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+            call = calls
+        barrier.wait(timeout=2)
+        return f"render-{call}"
+
+    events = RecordingEvents()
+    stream, _ = _accumulator(redactor=redactor, events=events)
+
+    def terminate():
+        if transition == "finalize":
+            return stream.finalize(expected_revision=0)
+        return stream.fail("UPSTREAM_FAILED", expected_revision=0)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        snapshots = [future.result(timeout=3) for future in (
+            pool.submit(terminate), pool.submit(terminate),
+        )]
+
+    assert calls == 2
+    assert snapshots[0] == snapshots[1] == stream.snapshot()
+    assert events.items[0][1]["detail"]["preview_truncated"] == snapshots[0].preview_truncated
 
 
 def test_append_racing_finalize_has_one_cas_winner_and_consistent_state():
