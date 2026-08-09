@@ -249,6 +249,30 @@ def test_chat_accepts_valid_text_messages_and_forwards_history(monkeypatch):
     )]
 
 
+def test_http_todo_command_preserves_task_text_contract(monkeypatch, tmp_path):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "_DB_PATH", str(tmp_path / "http-task.db"))
+    monkeypatch.setattr(ts.admin_auth, "rate_limit", lambda conn, account: (True, ""))
+    monkeypatch.setattr(ts.server, "prewarm_model", lambda *args, **kwargs: None)
+    request = json.dumps({
+        "model": "sonder",
+        "messages": [{"role": "user", "content": "/todo add HTTP visible task"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    content = json.loads(body)["choices"][0]["message"]["content"]
+    assert status == 200
+    assert content.startswith("task created\n  ")
+    assert "HTTP visible task" in content
+
+
 @pytest.mark.parametrize(
     ("error", "expected_status", "expected_type", "retry_after"),
     [

@@ -13,6 +13,20 @@ def test_read_only_denies_mutation_before_handler(monkeypatch):
     assert calls == []
 
 
+def test_read_only_denies_checklist_mutation_before_handler(monkeypatch):
+    calls = []
+    monkeypatch.setattr(server, "checklist_create", lambda *a, **k: calls.append((a, k)))
+    monkeypatch.setattr(server, "checklist_update", lambda *a, **k: calls.append((a, k)))
+    assert server._agent_dispatch(
+        "checklist_create", {"title": "x", "items_json": ["one"]}, read_only=True,
+    ).startswith("ERROR:")
+    assert server._agent_dispatch(
+        "checklist_update", {"checklist_id": "x", "item": "1", "status": "done"},
+        read_only=True,
+    ).startswith("ERROR:")
+    assert calls == []
+
+
 def test_read_only_denies_bypass_args(monkeypatch):
     calls = []
     monkeypatch.setattr(server, "file_read", lambda *a, **k: calls.append((a, k)))
