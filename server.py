@@ -953,7 +953,10 @@ def _application():
     with _APP_GRAPH_LOCK:
         if _APP_GRAPH is None:
             from sonder_runtime.bootstrap import app as _bootstrap_app
-            _APP_GRAPH = _bootstrap_app.build_application()
+            _APP_GRAPH = _bootstrap_app.build_application(
+                preference_connection_factory=_open_db,
+                preference_module_provider=lambda: preference_learning,
+            )
         return _APP_GRAPH
 
 
@@ -11039,45 +11042,20 @@ def learn_preference(text: str, scope: str = "global") -> str:
     prompts and apply without restarting.
     """
     _maybe_live_reload()
-    extracted = preference_learning.extract_preferences(text)
-    text = extracted[0] if extracted else preference_learning.normalize_preference(text)
-    if not text:
-        return "ERROR: preference text is empty."
-    key = preference_learning.preference_key(text)
-    conn = _open_db()
-    try:
-        memory_store.upsert_preference(
-            conn,
-            memory_store.new_id(),
-            scope or "global",
-            key,
-            text,
-            confidence=0.8,
-        )
-        rows = memory_store.preferences_for_scope(conn, scope or "global", limit=20)
-    finally:
-        conn.close()
-    return "Learned preference: %s\n\n%s" % (
-        text,
-        preference_learning.format_preferences(rows),
-    )
+    from sonder_runtime.application.preferences import render_preference_result
+
+    return render_preference_result(_application().preferences.learn(text, scope))
 
 
 @mcp.tool()
 def preferences_status(include_disabled: bool = False, limit: int = 50) -> str:
     """List learned user preferences that shape future responses."""
     _maybe_live_reload()
-    limit = _safe_limit(limit, 50, 200)
-    conn = _open_db()
-    try:
-        rows = memory_store.all_preferences(
-            conn,
-            limit=limit,
-            include_disabled=bool(include_disabled),
-        )
-    finally:
-        conn.close()
-    return "learned preferences\n%s" % preference_learning.format_preferences(rows)
+    from sonder_runtime.application.preferences import render_preference_result
+
+    return render_preference_result(
+        _application().preferences.status(include_disabled, limit)
+    )
 
 
 def preference_command(arg: str = "") -> str:
@@ -11089,12 +11067,11 @@ def preference_command(arg: str = "") -> str:
         target = text[7:].strip()
         if not target:
             return "usage: /prefer forget <id-or-key>"
-        conn = _open_db()
-        try:
-            changed = memory_store.set_preference_enabled(conn, target, False)
-        finally:
-            conn.close()
-        return "forgot %d matching preference(s)" % changed
+        from sonder_runtime.application.preferences import render_preference_result
+
+        return render_preference_result(
+            _application().preferences.disable(target)
+        )
     if lower.startswith("learn "):
         text = text[6:].strip()
     return learn_preference(text)
