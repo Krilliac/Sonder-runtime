@@ -54,25 +54,17 @@ None of these are required; the defaults are safe and local.
 | `SONDER_LEARN_TIERS` | Which tiers participate in the lesson loop, e.g. `fast,code,general`. |
 | `SONDER_FAST` / `SONDER_CODE` / `SONDER_GENERAL` | Pin a base tier to a specific Ollama model. |
 | `SONDER_REASONING` / `SONDER_VISION` | Pin the specialist tiers the capability router prefers for proofs and image work. `none` leaves one unbound, and that work falls back to a base tier. |
-| `SONDER_NUM_GPU` | Layers to offload to GPU. **`999` means "all of them"** and is what you want if the model fits in VRAM — see the note below. |
-| `SONDER_KEEP_ALIVE` | How long a model stays resident, e.g. `30m` on a GPU box, shorter if RAM-tight. |
+| `SONDER_NUM_GPU` | Optional layer-placement override. Leave unset for Ollama capability detection; `0` forces CPU-only. |
+| `SONDER_KEEP_ALIVE` | How long a model stays resident, e.g. `30m` on a roomy host, shorter if RAM-tight. |
 
 ### About `SONDER_NUM_GPU`
 
-Set it to `999` unless you have a reason not to. Ollama's default offload
-heuristic is conservative: on a 6 GB card it will leave a chunk of a 7B on the
-CPU and cost you roughly a third of your throughput, while reporting nothing
-unusual. Forcing all layers, on that same card:
-
-```
-qwen2.5-coder:7b @ 32k ctx   num_gpu default -> ~24 tok/s, ~30% on CPU
-qwen2.5-coder:7b @ 32k ctx   num_gpu=999     -> 36.4 tok/s, 100% GPU
-```
-
-If the model genuinely does not fit, Ollama falls back rather than failing, so
-this is a safe default. `status` shows current residency, and if you benchmark
-Sonder yourself, replicate its options — measuring the raw Ollama API without
-`num_gpu` measures a configuration Sonder never uses.
+Leave it unset initially. Ollama detects the usable CPU and any supported
+Apple Metal, AMD, Intel, NVIDIA, or other accelerator backend on the live host.
+Use `status` to inspect residency and benchmark the actual workload before
+pinning an integer. `0` is an explicit CPU-only choice; a large positive value
+requests aggressive layer offload but is not a portable default and can create
+memory pressure on small or shared accelerators.
 
 ## Then add the guidance
 
