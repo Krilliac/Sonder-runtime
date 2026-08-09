@@ -27,6 +27,7 @@ import tempfile
 
 import grounding
 import code_runner
+import sonder_logging
 
 Verdict = collections.namedtuple("Verdict", ["passed", "reason", "detail"])
 
@@ -61,7 +62,10 @@ def _last_line(text):
 
 
 def _run(cmd, cwd=None, timeout=180, shell=False):
-    p = subprocess.run(cmd, cwd=cwd, capture_output=True, timeout=timeout, shell=shell)
+    p = subprocess.run(
+        cmd, cwd=cwd, capture_output=True, timeout=timeout, shell=shell,
+        env=sonder_logging.child_environment(),
+    )
     out = ((p.stdout or b"").decode("utf-8", "replace")
            + (p.stderr or b"").decode("utf-8", "replace"))
     return p.returncode, out

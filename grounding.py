@@ -14,6 +14,8 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import sonder_logging
+
 _CODE_BLOCK_RE = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
 _FILE_INFO_RE = re.compile(r"(?:^|\s)(?:file|path)\s*[:=]\s*([^\s`]+)", re.IGNORECASE)
 _FILE_FIRST_LINE_RE = re.compile(
@@ -267,6 +269,7 @@ def run_code_detail(
                     text=True,
                     timeout=timeout,
                     cwd=scratch,
+                    env=sonder_logging.child_environment(),
                 )
             finally:
                 shutil.rmtree(scratch, ignore_errors=True)
@@ -376,6 +379,7 @@ def compile_code(code, timeout=8, interp=None):
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                env=sonder_logging.child_environment(),
             )
             if c.returncode == 0:
                 return True, "compiled"
@@ -405,6 +409,7 @@ def _run_cmd(cmd, timeout, cwd=None):
         p = subprocess.run(
             cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
             timeout=timeout, cwd=cwd or disposable,
+            env=sonder_logging.child_environment(),
         )
         return p.returncode == 0, _combine(p)
     except FileNotFoundError:
