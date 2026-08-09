@@ -35,7 +35,12 @@ from ...application.ports.model_gateway import (
     Embedding,
     ModelRequest,
     ModelResponse,
+    optional_token_count,
+    require_embedding_vector,
+    require_model_text,
 )
+from ...platform.metrics import default_registry
+from ..inference_telemetry import from_openai_compatible
 from ...domain.common.errors import (
     Cancelled,
     DeadlineExceeded,
@@ -136,15 +141,30 @@ class OpenAICompatibleGateway:
         started = time.monotonic()
         data = self._post("/v1/chat/completions", payload, cfg, timeout)
         text = self._extract_text(data)
-        usage = data.get("usage") or {}
-        return ModelResponse(
-            text=text,
+        usage = data.get("usage")
+        if usage is None:
+            usage = {}
+        if not isinstance(usage, dict):
+            raise DependencyUnavailable("endpoint returned an invalid usage object")
+        timings = data.get("timings") if isinstance(data.get("timings"), dict) else {}
+        telemetry = from_openai_compatible(data)
+        prompt_count = usage.get("prompt_tokens")
+        if prompt_count is None:
+            prompt_count = timings.get("prompt_n")
+        output_count = usage.get("completion_tokens")
+        if output_count is None:
+            output_count = timings.get("predicted_n")
+        response = ModelResponse(
+            text=require_model_text(text),
             model=model,
             tier=request.tier or "openai",
             duration_ms=int((time.monotonic() - started) * 1000),
-            tokens_in=usage.get("prompt_tokens"),
-            tokens_out=usage.get("completion_tokens"),
+            tokens_in=optional_token_count(prompt_count, "prompt token count"),
+            tokens_out=optional_token_count(output_count, "completion token count"),
+            telemetry=telemetry,
         )
+        default_registry().observe_inference("openai_compatible", telemetry)
+        return response
 
     # -- embed -------------------------------------------------------------
 
@@ -160,6 +180,8 @@ class OpenAICompatibleGateway:
             "/v1/embeddings", {"model": model, "input": items}, cfg, timeout
         )
         rows = data.get("data") or []
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise DependencyUnavailable("endpoint returned invalid embedding data")
         if len(rows) != len(items):
             raise DependencyUnavailable(
                 "endpoint returned %d embeddings for %d inputs"
@@ -175,10 +197,8 @@ class OpenAICompatibleGateway:
             rows = sorted(rows, key=lambda row: row["index"])
         results = []
         for row in rows:
-            vector = row.get("embedding") or ()
-            if not vector:
-                raise DependencyUnavailable("endpoint returned an empty embedding")
-            results.append(Embedding(vector=tuple(vector), model=model))
+            vector = require_embedding_vector(row.get("embedding"))
+            results.append(Embedding(vector=vector, model=model))
         return results
 
     # -- helpers -----------------------------------------------------------
@@ -199,13 +219,15 @@ class OpenAICompatibleGateway:
     @staticmethod
     def _extract_text(data: dict) -> str:
         choices = data.get("choices") or []
-        if not choices:
+        if not isinstance(choices, list) or not choices:
             raise DependencyUnavailable("endpoint returned no choices")
+        if not isinstance(choices[0], dict):
+            raise DependencyUnavailable("endpoint returned an invalid choice")
         message = choices[0].get("message") or {}
+        if not isinstance(message, dict):
+            raise DependencyUnavailable("endpoint returned an invalid message")
         text = message.get("content")
-        if text is None:
-            raise DependencyUnavailable("endpoint returned no message content")
-        return str(text)
+        return require_model_text(text)
 
     def _headers(self, cfg: OpenAICompatibleConfig) -> dict:
         headers = {"Content-Type": "application/json"}

@@ -22,6 +22,7 @@ proxy for remote access) unless it says otherwise.
 - [disk-exhaustion.md](disk-exhaustion.md)
 - [training-failure.md](training-failure.md)
 - [suspected-secret-exposure.md](suspected-secret-exposure.md)
+- [unsafe-lab.md](unsafe-lab.md) — disposable isolated-host testing with model tool policy deliberately removed
 
 For conceptual, in-depth documentation of each subsystem, see the
 [Wiki](../wiki/README.md).

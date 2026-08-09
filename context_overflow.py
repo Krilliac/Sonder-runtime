@@ -147,14 +147,49 @@ _OVERFLOW_PHRASES: tuple[str, ...] = (
 # Every quantifier is explicitly bounded so match cost stays linear in the
 # already-bounded input.
 _OVERFLOW_PATTERNS: tuple[re.Pattern[str], ...] = (
-    # "maximum context length is 8192 tokens", "max context window of 4096"
-    re.compile(r"\b(?:maximum|max) context (?:length|window|size)\b(?:[a-z ]{0,24}\b\d{1,9}\b)?"),
-    # "requested 9000 tokens but the model context is 8192"
-    re.compile(r"\brequested \d{1,9} token[s]?\b[a-z0-9 ]{0,40}\bcontext\b"),
+    # "max context window of 4096 was exceeded"
+    re.compile(
+        r"\b(?:maximum|max) context (?:length|window|size)\b"
+        r"[a-z ]{0,16}\b\d{1,9}\b[a-z ]{0,24}\b(?:exceeded|overflowed)\b"
+    ),
     # "12000 tokens exceeds the 8192 token context"
     re.compile(r"\b\d{1,9} token[s]?\b[a-z0-9 ]{0,40}\b(?:exceed|exceeds|greater than|larger than)\b[a-z0-9 ]{0,40}\bcontext\b"),
     # llama.cpp style: "n_ctx (4096) is less than n_tokens (5000)"
     re.compile(r"\bn ctx\b[a-z0-9 ]{0,24}\b(?:less than|smaller than|exceeded)\b"),
+)
+
+# Numeric provider forms are only positive when the requested count is
+# demonstrably larger than the advertised limit. Merely mentioning a maximum
+# context size in an unrelated error is not enough to spend another request.
+_LIMIT_THEN_REQUEST = re.compile(
+    r"\b(?:maximum|max) context (?:length|window|size)\b[a-z ]{0,16}"
+    r"\b(?P<limit>\d{1,9})\b(?: token[s]?)?[a-z ]{0,40}"
+    r"\b(?:(?:you |your messages )?request(?:ed|s|ing)?|"
+    r"your messages resulted in)\b[a-z ]{0,12}"
+    r"\b(?P<requested>\d{1,9})\b"
+)
+_REQUEST_THEN_LIMIT = re.compile(
+    r"\brequest(?:ed|s|ing)?\b[a-z ]{0,12}\b(?P<requested>\d{1,9})\b"
+    r"(?: token[s]?)?[a-z ]{0,40}\b(?:model )?context\b[a-z ]{0,16}"
+    r"\b(?P<limit>\d{1,9})\b"
+)
+
+# Error bodies sometimes quote or negate the phrase while explaining another
+# failure. Normalization deliberately removes punctuation, so recognize the
+# bounded semantic markers instead of treating echoed prose as positive proof.
+_NEGATED_OR_META = (
+    re.compile(
+        r"\b(?:not|never|without)\b[a-z0-9 ]{0,24}"
+        r"\b(?:context (?:length|window|size) exceeded|prompt (?:is )?too long)\b"
+    ),
+    re.compile(
+        r"\b(?:context (?:length|window|size) exceeded|prompt (?:is )?too long)\b"
+        r"[a-z0-9 ]{0,12}\b(?:false|not|never)\b"
+    ),
+    re.compile(
+        r"\b(?:example|literal|quoted|phrase)\b[a-z0-9 ]{0,24}"
+        r"\b(?:context (?:length|window|size) exceeded|prompt (?:is )?too long)\b"
+    ),
 )
 
 # Negative controls. Each entry is (control name, normalized phrases). These are
@@ -212,6 +247,21 @@ def _first_control(text: str) -> str:
     return CONTROL_NONE
 
 
+def _numeric_limit_evidence(text: str) -> str:
+    for pattern in (_LIMIT_THEN_REQUEST, _REQUEST_THEN_LIMIT):
+        found = pattern.search(text)
+        if not found:
+            continue
+        try:
+            requested = int(found.group("requested"))
+            limit = int(found.group("limit"))
+        except (TypeError, ValueError):  # pragma: no cover - regex guarantees digits
+            continue
+        if requested > limit:
+            return found.group(0)
+    return ""
+
+
 def classify(detail, *, status=None) -> ContextOverflowMatch:
     """Decide whether one failed model call overflowed the context window.
 
@@ -232,8 +282,16 @@ def classify(detail, *, status=None) -> ContextOverflowMatch:
 
     control = _first_control(text)
 
+    if any(pattern.search(text) for pattern in _NEGATED_OR_META):
+        return ContextOverflowMatch(
+            False, control=control, status=code, truncated=truncated,
+        )
+
     evidence = _first_phrase(text, _OVERFLOW_PHRASES)
     reason = REASON_CONTEXT_PHRASE if evidence else REASON_NONE
+    if not evidence:
+        evidence = _numeric_limit_evidence(text)
+        reason = REASON_CONTEXT_LIMIT if evidence else REASON_NONE
     if not evidence:
         for pattern in _OVERFLOW_PATTERNS:
             found = pattern.search(text)
@@ -279,6 +337,12 @@ def _is_system(message) -> bool:
     return isinstance(message, dict) and str(message.get("role", "")).strip().casefold() == "system"
 
 
+def _role(message) -> str:
+    if not isinstance(message, dict):
+        return ""
+    return str(message.get("role", "")).strip().casefold()
+
+
 def compact_messages(messages, *, keep_recent: int = 0):
     """Drop the oldest droppable turns from a chat message list.
 
@@ -316,9 +380,31 @@ def compact_messages(messages, *, keep_recent: int = 0):
         if _COMPACTION_NOTE_MARK in folded:
             return None
 
-    keep = max(int(keep_recent or 0), len(body) // 2)
-    keep = min(keep, len(body) - 1)
-    dropped = len(body) - keep
+    try:
+        minimum_keep = max(0, int(keep_recent or 0))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+    # Cut only immediately before a user message, which is the start of a
+    # complete conversation turn. Cutting an arbitrary message can retain a
+    # tool result without its assistant tool call (or an assistant response
+    # without its user request), producing an invalid retry payload. If no
+    # complete historical turn can be retained, dropping all history is safer
+    # than keeping an orphaned fragment.
+    target_drop = max(1, len(body) // 2)
+    boundaries = [
+        index for index in range(1, len(body))
+        if _role(body[index]) == "user" and len(body) - index >= minimum_keep
+    ]
+    at_or_after = [index for index in boundaries if index >= target_drop]
+    if at_or_after:
+        dropped = at_or_after[0]
+    elif boundaries:
+        dropped = boundaries[-1]
+    elif minimum_keep == 0:
+        dropped = len(body)
+    else:
+        return None
     if dropped < 1:
         return None
 

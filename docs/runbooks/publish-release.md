@@ -78,7 +78,23 @@ The `build-apps` workflow gates its Android, Linux, Windows, and macOS
 artifacts through `scripts/release_artifacts.py` before a tagged release can
 publish. The gate requires exactly one artifact for every supported platform,
 opens each archive (including the Android APK's nested local-system payload),
-and refuses the release if `LICENSE` is absent.
+and refuses the release if `LICENSE` is absent. The release job depends on
+that integrity job and then runs
+`scripts/check_release_version.py --require-release --json` before invoking
+the GitHub Release publisher. A tag, runtime version, Flutter version, or full
+commit mismatch therefore cannot publish assets.
+
+Tagged publishing also runs
+`scripts/check_history_privacy.py --require-clean --json` against a complete,
+blob-filtered, complete (non-shallow) Git history. Normal CI pins the currently
+known seven object/path pairs across three unique blobs and fails if an object
+is reused at a new sensitive path, a path is substituted, or any new flagged
+object appears; deleting known pairs is always allowed. The release form is
+stricter and refuses to publish while even a pinned pair remains reachable.
+The checker reads only object identities and NUL-delimited paths, never blob
+contents. Clearing this gate requires
+the separately authorized history-rewrite and remote-ref cleanup procedure;
+deleting a file only at `HEAD` is intentionally insufficient.
 
 The integrity artifact contains:
 
@@ -94,6 +110,9 @@ and use the existing TUF ceremony above for cryptographic release trust. The
 local-system payload also contains `sonder_build.json`; runtime `/version` and
 diagnostics therefore report the source version and full commit from which the
 desktop artifact was assembled.
+
+All three metadata files are explicit required GitHub Release assets alongside
+the four platform packages; publication fails if any named file is absent.
 
 ## Freshness and freeze protection
 

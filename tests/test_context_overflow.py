@@ -73,6 +73,7 @@ def test_exact_overflow_phrases_classify(detail):
 
 @pytest.mark.parametrize("detail", [
     "This model's maximum context length is 8192 tokens, however you requested 9000",
+    "maximum context length is 8192 tokens; your messages resulted in 9000 tokens",
     "max context window of 4096 exceeded",
     "requested 9000 tokens but the model context is only 8192",
     "12000 tokens exceeds the model context",
@@ -108,7 +109,7 @@ def test_overflow_phrase_wins_under_a_misleading_rate_limit_status():
 
 def test_overflow_phrase_wins_over_a_co_reported_rate_limit():
     verdict = context_overflow.classify(
-        "rate limit hit; also the maximum context length is 8192 tokens",
+        "rate limit hit; maximum context length is 8192 tokens, however you requested 9000",
         status=429,
     )
 
@@ -121,6 +122,25 @@ def test_malformed_status_is_ignored_rather_than_fatal():
 
     assert verdict.overflow is True
     assert verdict.status is None
+
+
+@pytest.mark.parametrize("detail", [
+    "this is not a context length exceeded failure",
+    'diagnostic says "context_length_exceeded": false',
+    "the literal phrase context length exceeded is forbidden in this field",
+    "an example of context length exceeded is shown in the documentation",
+])
+def test_negated_or_meta_mentions_do_not_authorize_a_retry(detail):
+    assert context_overflow.classify(detail, status=400).overflow is False
+
+
+@pytest.mark.parametrize("detail", [
+    "This model's maximum context length is 8192 tokens",
+    "requested 100 tokens but the model context is 8192",
+    "maximum context length is 8192 tokens, however you requested 100",
+])
+def test_limit_mentions_without_a_demonstrated_overflow_are_conservative(detail):
+    assert context_overflow.classify(detail, status=400).overflow is False
 
 
 # --- classifier: negative controls ------------------------------------------
@@ -150,7 +170,7 @@ def test_negative_controls_are_named_and_not_overflow(detail, control):
 ])
 def test_vetoing_controls_override_overflow_wording(prefix):
     verdict = context_overflow.classify(
-        prefix + "; maximum context length is 8192 tokens", status=400,
+        prefix + "; maximum context length of 8192 was exceeded", status=400,
     )
 
     assert verdict.overflow is False
@@ -186,6 +206,32 @@ def test_compaction_drops_the_oldest_turns_and_keeps_content_verbatim():
     assert "q3" in kept and "a3" in kept
     # Nothing that survives is rewritten or truncated.
     assert all(len(m["content"]) < 200 for m in compacted[2:])
+
+
+def test_compaction_never_orphans_tool_results_or_assistant_messages():
+    messages = [
+        {"role": "system", "content": "be terse"},
+        {"role": "user", "content": "old request"},
+        {"role": "assistant", "content": "old response"},
+        {"role": "user", "content": "newer request"},
+        {"role": "assistant", "content": "calling tool", "tool_calls": [{"id": "1"}]},
+        {"role": "tool", "content": "tool result"},
+        {"role": "assistant", "content": "newer response"},
+        {"role": "user", "content": "live request"},
+    ]
+
+    compacted = context_overflow.compact_messages(messages)
+
+    assert compacted[2]["role"] == "user"
+    assert compacted[2]["content"] == "newer request"
+    assert compacted[-1] == {"role": "user", "content": "live request"}
+
+
+@pytest.mark.parametrize("keep_recent", ["bad", object()])
+def test_malformed_keep_recent_is_conservative(keep_recent):
+    assert context_overflow.compact_messages(
+        _conversation(4), keep_recent=keep_recent,
+    ) is None
 
 
 def test_a_single_oversized_request_is_uncompactable():
@@ -309,7 +355,10 @@ def test_compaction_retry_shares_the_original_timeout_budget(monkeypatch):
 def test_misleading_rate_limit_status_still_compacts_locally(monkeypatch):
     def responder(call):
         if call == 1:
-            raise _http_error(429, b'{"error":"maximum context length is 8192 tokens"}')
+            raise _http_error(
+                429,
+                b'{"error":"maximum context length is 8192 tokens, however you requested 9000"}',
+            )
         return {"message": {"content": "recovered"}}
 
     seen = _recording_post(monkeypatch, responder)
@@ -318,6 +367,32 @@ def test_misleading_rate_limit_status_still_compacts_locally(monkeypatch):
 
     assert content == "recovered"
     assert len(seen[1]["messages"]) < len(seen[0]["messages"])
+
+
+def test_compaction_activity_does_not_disclose_provider_error_text(monkeypatch):
+    secret = "tenant-secret-123"
+    events = []
+
+    def responder(call):
+        if call == 1:
+            raise _http_error(
+                400,
+                ('{"error":"requested 9000 tokens ' + secret
+                 + ' but model context is only 8192"}').encode(),
+            )
+        return {"message": {"content": "recovered"}}
+
+    monkeypatch.setattr(
+        server.activity_tracker, "record_event",
+        lambda event, **fields: events.append((event, fields)),
+    )
+    _recording_post(monkeypatch, responder)
+
+    server._chat_request(_payload(), model="local", timeout=30)
+
+    assert events and events[-1][0] == "model_context_compaction"
+    assert "evidence" not in events[-1][1]
+    assert secret not in repr(events)
 
 
 def test_in_band_overflow_error_on_a_200_also_compacts(monkeypatch):

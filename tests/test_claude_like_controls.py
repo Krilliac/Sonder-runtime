@@ -1,4 +1,24 @@
+import inspect
+
 import server
+
+
+def test_task_and_checklist_mcp_signatures_remain_compatible():
+    expected = {
+        server.task_create: ["title", "detail", "priority", "project", "owner", "parent_id"],
+        server.task_list: ["status", "project", "owner", "include_done", "limit"],
+        server.task_update: [
+            "task_id", "status", "title", "detail", "priority", "project", "owner", "note",
+        ],
+        server.task_show: ["task_id", "events"],
+        server.checklist_create: ["title", "items_json", "project", "owner", "priority"],
+        server.checklist_show: ["checklist_id"],
+        server.checklist_update: ["checklist_id", "item", "status", "note"],
+    }
+    for function, names in expected.items():
+        assert list(inspect.signature(function).parameters) == names
+        registered = server.mcp._tool_manager._tools[function.__name__]
+        assert registered.fn is function
 
 
 def test_task_tools_round_trip(monkeypatch, tmp_path):

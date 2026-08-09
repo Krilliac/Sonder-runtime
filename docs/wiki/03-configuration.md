@@ -107,6 +107,13 @@ Serving/auth: `SONDER_API_KEY`, `SONDER_HOST`, `SONDER_PORT`,
 `SONDER_AUTH_MODE`, `SONDER_AUTH_SECRET`, `SONDER_MAX_REQUEST_BYTES`,
 `SONDER_MAX_CONCURRENT_REQUESTS`, `SONDER_QUEUE_DEPTH`, `SONDER_CORS_ORIGINS`.
 
+Orchestration: `SONDER_MAX_WORKER_CAP` lowers the absolute ceiling for explicit
+per-run `worker_cap` requests. It accepts a positive decimal integer only and
+is clamped to the compiled ceiling of 64. Invalid, boolean, fractional,
+non-finite, zero, or negative values fail safe to the historical 16-worker
+ceiling and are visible in `master_capacity`. Without a per-run `worker_cap`,
+the conservative hardware-derived worker width is unchanged.
+
 Consent gates: `SONDER_ALLOW_CLOUD`, `SONDER_WEB_TOOLS`,
 `SONDER_ALLOW_REMOTE_OLLAMA`, `SONDER_FILE_ROOTS`, `SONDER_LOCATION_CONSENT`.
 
