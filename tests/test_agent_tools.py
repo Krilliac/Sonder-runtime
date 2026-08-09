@@ -83,6 +83,9 @@ def test_repository_worker_result_still_fails_closed_on_real_scope_mismatch(
 
 
 def test_host_receipt_uses_latest_validator_result(monkeypatch):
+    # Keep the test about validator ordering: a predictor trained by an earlier
+    # test may otherwise schedule an additional speculative inspection first.
+    monkeypatch.setenv("SONDER_SPECULATION", "0")
     responses = [
         '{"tool":"workspace_run","args":{"program":"python","args":["-m","pytest"]}}',
         '{"tool":"workspace_run","args":{"program":"python","args":["-m","pytest","tests"]}}',
@@ -165,8 +168,13 @@ def test_agent_dispatch_requires_host_verified_location_consent(monkeypatch):
 
 
 def test_agent_dispatch_routes_fleet_capacity_and_cancellation(monkeypatch):
+    capacity_calls = []
     monkeypatch.setattr(
-        server, "master_capacity", lambda requested_agents=0: f"capacity:{requested_agents}",
+        server, "master_capacity",
+        lambda requested_agents=0, **kwargs: (
+            capacity_calls.append((requested_agents, kwargs))
+            or f"capacity:{requested_agents}:{kwargs.get('worker_cap', 0)}"
+        ),
     )
     monkeypatch.setattr(
         server, "master_cancel", lambda agent_id: f"cancel:{agent_id}",
@@ -177,7 +185,13 @@ def test_agent_dispatch_routes_fleet_capacity_and_cancellation(monkeypatch):
 
     assert server._agent_dispatch(
         "master_capacity", {"requested_agents": 12}, read_only=True,
-    ) == "capacity:12"
+    ) == "capacity:12:0"
+    assert capacity_calls[-1] == (12, {})
+    assert server._agent_dispatch(
+        "master_capacity", {"requested_agents": 12, "worker_cap": 24},
+        read_only=True,
+    ) == "capacity:12:24"
+    assert capacity_calls[-1] == (12, {"worker_cap": 24})
     assert server._agent_dispatch(
         "master_cancel", {"agent_id": "master-abc"}, read_only=False,
     ) == "cancel:master-abc"

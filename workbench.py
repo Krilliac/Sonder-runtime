@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 
 import file_ops
+from sonder_runtime.adapters import git_discovery
 
 
 MAX_TREE_ENTRIES = 500
@@ -112,11 +113,11 @@ def _new_walk_state(root: Path, max_entries: int, timeout_seconds: float):
     }
 
 
-def _note_skip(state, path, reason):
+def _note_skip(state, path, reason, *, expose_path=True):
     state["skipped_entries"] += 1
     counts = state["skipped_by_reason"]
     counts[reason] = counts.get(reason, 0) + 1
-    if len(state["skipped_examples"]) < 20:
+    if expose_path and len(state["skipped_examples"]) < 20:
         state["skipped_examples"].append({"path": str(path), "reason": reason})
 
 
@@ -138,6 +139,16 @@ def _bounded_walk(
         timeout_seconds, DEFAULT_WALK_SECONDS, 0.01, MAX_WALK_SECONDS,
     )
     state = _new_walk_state(root, max_entries, timeout_seconds)
+    state["enforce_git_visibility"] = not include_ignored
+    visible = None
+    if state["enforce_git_visibility"]:
+        visible = git_discovery.visible_paths(
+            root,
+            timeout_seconds=min(
+                timeout_seconds, git_discovery.DEFAULT_TIMEOUT_SECONDS,
+            ),
+        )
+    state["git_visible"] = visible
     started = time.monotonic()
     deadline = started + timeout_seconds
 
@@ -182,6 +193,12 @@ def _bounded_walk(
                         stop("timeout")
                         return
                     path = Path(child.path)
+                    relative = str(path.relative_to(root))
+                    if visible is not None and os.path.normcase(relative) not in visible:
+                        _note_skip(
+                            state, path, "git_ignored", expose_path=False,
+                        )
+                        continue
                     try:
                         if child.is_symlink():
                             _note_skip(state, path, "symlink")
@@ -197,7 +214,6 @@ def _bounded_walk(
                     except (OSError, PermissionError):
                         _note_skip(state, path, "unreadable_entry")
                         continue
-                    relative = str(path.relative_to(root))
                     item = {
                         "path": str(path),
                         "relative": relative,
@@ -226,6 +242,13 @@ def _finish_walk(iterator, state):
     close = getattr(iterator, "close", None)
     if close:
         close()
+    if state["enforce_git_visibility"]:
+        git_discovery.require_unchanged(
+            Path(state["root"]), state["git_visible"],
+            timeout_seconds=min(
+                state["timeout_seconds"], git_discovery.DEFAULT_TIMEOUT_SECONDS,
+            ),
+        )
     return {
         "entries_scanned": state["entries_scanned"],
         "files_seen": state["files_seen"],
@@ -311,6 +334,7 @@ def workspace_inventory(
 
 def directory_tree(
     path=".", *, depth=2, max_entries=200, include_hidden=False,
+    include_ignored=False,
     extra_roots="", bypass=False,
 ):
     root = _resolve(path, extra_roots=extra_roots, bypass=bypass)
@@ -322,6 +346,7 @@ def directory_tree(
     limit = _bounded_int(max_entries, 200, 1, MAX_TREE_ENTRIES)
     entries = []
     skipped = 0
+    visible = None if include_ignored else git_discovery.visible_paths(root)
 
     def visit(base: Path, level: int):
         nonlocal skipped
@@ -335,6 +360,11 @@ def directory_tree(
         for child in children:
             if len(entries) >= limit:
                 break
+            candidate = Path(child.path)
+            relative = str(candidate.relative_to(root))
+            if visible is not None and os.path.normcase(relative) not in visible:
+                skipped += 1
+                continue
             if child.is_symlink():
                 skipped += 1
                 continue
@@ -342,17 +372,16 @@ def directory_tree(
                 skipped += 1
                 continue
             is_dir = child.is_dir(follow_symlinks=False)
-            if is_dir and child.name in SKIP_DIRS:
+            if is_dir and _skip_dir(child.name, include_ignored):
                 skipped += 1
                 continue
-            candidate = Path(child.path)
             try:
                 size = child.stat(follow_symlinks=False).st_size if not is_dir else 0
             except OSError:
                 size = 0
             entries.append({
                 "path": str(candidate),
-                "relative": str(candidate.relative_to(root)) or ".",
+                "relative": relative or ".",
                 "name": child.name,
                 "type": "dir" if is_dir else "file",
                 "depth": level,
@@ -362,6 +391,8 @@ def directory_tree(
                 visit(candidate, level + 1)
 
     visit(root, 1)
+    if not include_ignored:
+        git_discovery.require_unchanged(root, visible)
     return {
         "root": str(root),
         "depth": depth,

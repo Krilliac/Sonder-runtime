@@ -158,7 +158,11 @@ def generate_metadata(
         "predicateType": "https://slsa.dev/provenance/v1",
         "predicate": {
             "buildDefinition": {
-                "buildType": "https://github.com/Krilliac/Sonder-runtime/.github/workflows/build-apps.yml@v1",
+                "buildType": (
+                    source_uri.rstrip("/")
+                    + "/.github/workflows/build-apps.yml@"
+                    + revision
+                ),
                 "externalParameters": {"version": version, "source": source_uri},
                 "internalParameters": {"revision": revision, "workflow": workflow_uri},
                 "resolvedDependencies": [
