@@ -8,8 +8,10 @@ server layer.
 from __future__ import annotations
 
 import fnmatch
+import json
 import os
 import stat
+import threading
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import sonder_paths
@@ -17,6 +19,10 @@ import sonder_paths
 
 MAX_READ_BYTES = 256_000
 MAX_WRITE_BYTES = 1_000_000
+MAX_BATCH_FILES = 32
+MAX_BATCH_BYTES = 4_000_000
+MAX_BATCH_SNAPSHOT_BYTES = 4_000_000
+MAX_BATCH_JSON_BYTES = MAX_BATCH_BYTES + 128_000
 MAX_FIND_RESULTS = 200
 # Ceiling on the pre-write/pre-delete snapshot decode (see _read_text_if_file).
 MAX_SNAPSHOT_BYTES = MAX_WRITE_BYTES
@@ -42,6 +48,15 @@ SENSITIVE_READ_DIRECTORIES = {".git", ".ssh", ".aws", ".azure", ".kube"}
 # execution in the runtime process at the next start, which is exactly what the
 # root-level clause exists to prevent.
 RUNTIME_PACKAGE_DIRS = ("sonder_runtime",)
+_BATCH_WRITE_LOCK = threading.RLock()
+
+
+class BatchWriteError(RuntimeError):
+    """A rejected or rolled-back multi-file write with structured details."""
+
+    def __init__(self, message: str, report: dict):
+        super().__init__(message)
+        self.report = report
 
 
 def _line_count(text: str) -> int:
@@ -743,9 +758,10 @@ def write_file(
         lines_deleted = max(0, before_lines - after_lines)
         lines_edited = min(before_lines, after_lines) if before != (content or "") else 0
         action = "overwrite"
+    written_bytes = p.stat().st_size if mode == "append" else len(data)
     return {
         "path": str(p),
-        "bytes": p.stat().st_size,
+        "bytes": written_bytes,
         "mode": mode,
         "action": action,
         "lines_before": before_lines,
@@ -754,6 +770,318 @@ def write_file(
         "lines_edited": lines_edited,
         "lines_deleted": lines_deleted,
         "created_directories": list(reversed(missing_parents)),
+    }
+
+
+def _batch_payload(operations):
+    if isinstance(operations, str):
+        if (
+            len(operations) > MAX_BATCH_JSON_BYTES
+            or len(operations.encode("utf-8")) > MAX_BATCH_JSON_BYTES
+        ):
+            raise ValueError("operations JSON exceeds max batch input bytes")
+        try:
+            operations = json.loads(operations)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("operations_json must be valid JSON") from exc
+    if not isinstance(operations, list):
+        raise ValueError("operations must be a JSON list")
+    if not operations:
+        raise ValueError("operations list must not be empty")
+    if len(operations) > MAX_BATCH_FILES:
+        raise ValueError("operations exceeds max file count (%d)" % MAX_BATCH_FILES)
+    return operations
+
+
+def _batch_requested_path(path: str) -> Path:
+    """Return the lexical requested path used for reparse-point checks."""
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = workspace_root() / candidate
+    return candidate.absolute()
+
+
+def _batch_preflight(
+    operations,
+    *,
+    extra_roots: str,
+    bypass: bool,
+) -> tuple[list[dict], int]:
+    prepared = []
+    results = []
+    seen = set()
+    seen_existing_identities = set()
+    aggregate_bytes = 0
+    snapshot_bytes = 0
+    for index, operation in enumerate(operations):
+        row = {"index": index, "status": "rejected"}
+        try:
+            if not isinstance(operation, dict):
+                raise ValueError("operation must be an object")
+            unknown = sorted(set(operation) - {"path", "content", "mode"})
+            if unknown:
+                raise ValueError(
+                    "unsupported operation field(s): %s" % ", ".join(unknown)
+                )
+            path = operation.get("path")
+            content = operation.get("content")
+            mode = operation.get("mode")
+            if not isinstance(path, str) or not path.strip():
+                raise ValueError("path must be a non-empty string")
+            if _foreign_absolute(path.strip()):
+                raise PermissionError("path uses a non-native absolute form")
+            if not isinstance(content, str):
+                raise ValueError("content must be a string")
+            if mode not in {"create", "overwrite"}:
+                raise ValueError("mode must explicitly be create or overwrite")
+            encoded = content.encode("utf-8")
+            if len(encoded) > MAX_WRITE_BYTES:
+                raise ValueError("content exceeds max write bytes")
+            aggregate_bytes += len(encoded)
+            if aggregate_bytes > MAX_BATCH_BYTES:
+                raise ValueError(
+                    "aggregate content exceeds max batch bytes (%d)"
+                    % MAX_BATCH_BYTES
+                )
+            requested = _batch_requested_path(path)
+            _require_no_reparse_components(requested)
+            resolved = resolve_path(
+                path, extra_roots=extra_roots, bypass=bypass,
+            )
+            authorized_roots = allowed_roots(extra_roots if bypass else "")
+            authorized_root = next((
+                root for root in authorized_roots
+                if resolved == root or _is_inside(resolved, root)
+            ), None)
+            if authorized_root is None:
+                raise PermissionError("path is outside every authorized root")
+            # Batch writes are intended for ordinary project files.  Unlike the
+            # developer-token escape hatch on the single-file tools, a batch
+            # can never include runtime control state or credential material.
+            relative = resolved.relative_to(authorized_root)
+            if (
+                _is_protected_mutation_path(resolved)
+                or any(
+                    part.lower() in SENSITIVE_READ_DIRECTORIES
+                    for part in relative.parts
+                )
+            ):
+                raise PermissionError("batch target is secret or control state")
+            key = os.path.normcase(os.path.normpath(str(resolved)))
+            if key in seen:
+                raise ValueError("duplicate batch target")
+            seen.add(key)
+            exists = resolved.exists()
+            metadata = None
+            if exists:
+                metadata = resolved.stat()
+                if not resolved.is_file() or _is_reparse_point(resolved):
+                    raise ValueError("batch target exists but is not a regular file")
+                identity = (metadata.st_dev, metadata.st_ino)
+                if metadata.st_ino and identity in seen_existing_identities:
+                    raise ValueError("duplicate batch target by file identity")
+                if metadata.st_ino:
+                    seen_existing_identities.add(identity)
+            if mode == "create" and exists:
+                raise FileExistsError("file exists; use mode=overwrite")
+            if mode == "overwrite" and not exists:
+                raise FileNotFoundError("overwrite target does not exist")
+            original = b""
+            if exists:
+                size = metadata.st_size
+                if size > MAX_WRITE_BYTES:
+                    raise ValueError("existing file exceeds rollback snapshot bytes")
+                snapshot_bytes += size
+                if snapshot_bytes > MAX_BATCH_SNAPSHOT_BYTES:
+                    raise ValueError(
+                        "existing files exceed aggregate rollback snapshot bytes (%d)"
+                        % MAX_BATCH_SNAPSHOT_BYTES
+                    )
+                original = resolved.read_bytes()
+            missing_parents = []
+            cursor = resolved.parent
+            while not cursor.exists():
+                missing_parents.append(cursor)
+                if cursor.parent == cursor:
+                    break
+                cursor = cursor.parent
+            row.update({
+                "path": str(resolved), "mode": mode, "status": "ready",
+                "bytes": len(encoded),
+            })
+            prepared.append({
+                "index": index,
+                "path": resolved,
+                "requested_path": path,
+                "content": content,
+                "mode": mode,
+                "existed": exists,
+                "original": original,
+                "identity": (
+                    (metadata.st_dev, metadata.st_ino)
+                    if metadata is not None and metadata.st_ino else None
+                ),
+                "missing_parents": missing_parents,
+            })
+        except (OSError, TypeError, ValueError) as exc:
+            row["error"] = str(exc)
+        results.append(row)
+    rejected = [row for row in results if row["status"] == "rejected"]
+    if rejected:
+        report = {
+            "ok": False,
+            "transaction": "not_started",
+            "count": len(operations),
+            "aggregate_bytes": aggregate_bytes,
+            "snapshot_bytes": snapshot_bytes,
+            "results": results,
+        }
+        raise BatchWriteError(
+            "batch prevalidation rejected %d operation(s)" % len(rejected), report,
+        )
+    return prepared, aggregate_bytes, snapshot_bytes
+
+
+def _rollback_batch(prepared: list[dict]) -> list[dict]:
+    rollback = []
+    for item in reversed(prepared):
+        path = item["path"]
+        row = {"index": item["index"], "path": str(path), "restored": False}
+        try:
+            _require_no_reparse_components(path)
+            if _resolve_best_effort(path) != path:
+                raise OSError("rollback target resolution changed")
+            if item["existed"]:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(item["original"])
+                row.update({"restored": True, "action": "restore"})
+            elif path.exists():
+                if not path.is_file() or _is_reparse_point(path):
+                    raise OSError("created target is no longer a regular file")
+                path.unlink()
+                row.update({"restored": True, "action": "remove_created"})
+            else:
+                row.update({"restored": True, "action": "already_absent"})
+        except OSError as exc:
+            row["error"] = str(exc)
+        rollback.append(row)
+    directories = {
+        directory
+        for item in prepared
+        for directory in item["missing_parents"]
+    }
+    for directory in sorted(directories, key=lambda path: len(path.parts), reverse=True):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+    rollback.sort(key=lambda row: row["index"])
+    return rollback
+
+
+def batch_write_files(
+    operations,
+    *,
+    extra_roots: str = "",
+    bypass: bool = False,
+) -> dict:
+    """Apply a bounded create/overwrite list with best-effort rollback.
+
+    Every target, payload, mode, and rollback snapshot is validated before the
+    first call to ``write_file``.  This function never permits append semantics,
+    protected control/secret targets, duplicate targets, or reparse components.
+    """
+    payload = _batch_payload(operations)
+    with _BATCH_WRITE_LOCK:
+        prepared, aggregate_bytes, snapshot_bytes = _batch_preflight(
+            payload, extra_roots=extra_roots, bypass=bypass,
+        )
+        results = []
+        attempted_count = 0
+        try:
+            for item in prepared:
+                _require_no_reparse_components(
+                    _batch_requested_path(item["requested_path"])
+                )
+                if resolve_path(
+                    item["requested_path"],
+                    extra_roots=extra_roots,
+                    bypass=bypass,
+                ) != item["path"]:
+                    raise PermissionError("batch target resolution changed after preflight")
+                if item["identity"] is not None:
+                    current = item["path"].stat()
+                    if (current.st_dev, current.st_ino) != item["identity"]:
+                        raise PermissionError("batch target identity changed after preflight")
+                result = write_file(
+                    item["requested_path"],
+                    item["content"],
+                    mode=item["mode"],
+                    extra_roots=extra_roots,
+                    bypass=bypass,
+                    developer_authorized=False,
+                )
+                results.append({
+                    "index": item["index"],
+                    "path": result["path"],
+                    "mode": item["mode"],
+                    "status": "written",
+                    "action": result["action"],
+                    "bytes": result["bytes"],
+                    "lines_added": result.get("lines_added", 0),
+                    "lines_edited": result.get("lines_edited", 0),
+                    "lines_deleted": result.get("lines_deleted", 0),
+                    "created_directories": result.get("created_directories", []),
+                })
+                attempted_count += 1
+        except Exception as exc:
+            attempted = prepared[:attempted_count]
+            rollback = _rollback_batch(attempted)
+            complete = all(row["restored"] for row in rollback)
+            rolled_back = {row["index"]: row for row in rollback}
+            transaction_results = []
+            written_by_index = {row["index"]: row for row in results}
+            failed_index = prepared[attempted_count]["index"]
+            for item in prepared:
+                index = item["index"]
+                if index in written_by_index:
+                    row = dict(written_by_index[index])
+                    row["status"] = (
+                        "rolled_back"
+                        if rolled_back.get(index, {}).get("restored")
+                        else "rollback_failed"
+                    )
+                elif index == failed_index:
+                    row = {
+                        "index": index, "path": str(item["path"]),
+                        "mode": item["mode"], "status": "failed",
+                        "error": str(exc),
+                    }
+                else:
+                    row = {
+                        "index": index, "path": str(item["path"]),
+                        "mode": item["mode"], "status": "not_attempted",
+                    }
+                transaction_results.append(row)
+            report = {
+                "ok": False,
+                "transaction": "rolled_back" if complete else "rollback_incomplete",
+                "count": len(prepared),
+                "aggregate_bytes": aggregate_bytes,
+                "snapshot_bytes": snapshot_bytes,
+                "failed_index": failed_index,
+                "error": str(exc),
+                "results": transaction_results,
+                "rollback": rollback,
+            }
+            raise BatchWriteError("batch write failed: %s" % exc, report) from exc
+    return {
+        "ok": True,
+        "transaction": "committed",
+        "count": len(results),
+        "aggregate_bytes": aggregate_bytes,
+        "snapshot_bytes": snapshot_bytes,
+        "results": results,
     }
 
 
