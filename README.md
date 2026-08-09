@@ -134,5 +134,10 @@ Read [SECURITY.md](SECURITY.md) before enabling remote access. Use the
 server-private profile behind TLS and report vulnerabilities privately through
 GitHub's Security tab.
 
+Optional direct MCP container execution is documented in
+[docs/security/ISOLATED_EXECUTION.md](docs/security/ISOLATED_EXECUTION.md). It
+uses a fixed Docker/Podman policy and is stronger than local `run_code`, but it
+still relies on the external runtime and host kernel and is not escape-proof.
+
 Contributions are welcome under the [Apache License 2.0](LICENSE). See
 [CONTRIBUTING.md](CONTRIBUTING.md) for the development and review workflow.

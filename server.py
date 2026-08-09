@@ -19,6 +19,7 @@ Tiers (escalation ladder, cheapest first):
 """
 
 import contextlib
+import hmac
 import importlib
 import http.client
 import json
@@ -47,6 +48,7 @@ import personas
 import recall
 import summarizer
 import code_runner
+import isolated_runner
 import live_reload
 import system_profile
 import emotion_vectors
@@ -572,6 +574,7 @@ LIVE_RELOAD_MODULES = [
     "recall",
     "summarizer",
     "code_runner",
+    "isolated_runner",
     "system_profile",
     "emotion_vectors",
     "preference_learning",
@@ -9270,6 +9273,110 @@ def run_project(
 
 
 @mcp.tool()
+def isolated_run(
+    image: str,
+    argv_json: str,
+    project: str,
+    stdin: str = "",
+    writable_workspace: bool = False,
+    timeout: int = 30,
+    memory_mb: int = 512,
+    cpus: float = 1.0,
+    pids: int = 64,
+    output_bytes: int = 131072,
+    acknowledge_isolation_limits: bool = False,
+    token: str = "",
+    approval: str = "",
+    write_approval: str = "",
+) -> str:
+    """Run an installed Linux container image under a fixed isolation policy.
+
+    This direct MCP tool requires developer authentication, a host approval
+    secret, and explicit risk acknowledgement in addition to the local ``ask``
+    policy. Writable binds require a second host secret. It is intentionally
+    unavailable to Sonder agents and autopilot. ``argv_json``
+    must be a JSON string array. The exact absolute ``project`` directory is the
+    only host bind and is read-only unless the host explicitly sets
+    ``writable_workspace=true``. Docker/Podman flags, mounts, devices, user,
+    environment, sockets, and privileges are not caller-configurable.
+
+    The fixed policy disables networking, uses a read-only root filesystem,
+    drops all capabilities, enables no-new-privileges, scrubs the process
+    environment, and caps time, output, memory, CPU, PIDs, stdin, and /tmp.
+    This relies on the external runtime and host kernel and is not escape-proof.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    ok = False
+    def deny(code: str, message: str) -> str:
+        _record_direct_tool(
+            "isolated_run",
+            {"denial": code, "writable_workspace": writable_workspace is True},
+            ok=False, started=started, summary=code, output=message,
+        )
+        return message
+
+    account = _admin_account_from_token(token) if token else None
+    authorized, _message = admin_auth.require(account, "developer")
+    expected = os.environ.get("SONDER_ISOLATED_APPROVAL_CODE", "")
+    approval_ok = bool(
+        expected and approval and hmac.compare_digest(approval, expected)
+    )
+    if not authorized or not approval_ok:
+        return deny("authorization-denied", (
+            "ERROR: isolated_run requires a developer token and the host's "
+            "SONDER_ISOLATED_APPROVAL_CODE."
+        ))
+    if acknowledge_isolation_limits is not True:
+        return deny(
+            "risk-acknowledgement-denied",
+            "ERROR: acknowledge_isolation_limits=true is required.",
+        )
+    if writable_workspace is True:
+        expected_write = os.environ.get("SONDER_ISOLATED_WRITE_APPROVAL_CODE", "")
+        if not (
+            expected_write
+            and write_approval
+            and hmac.compare_digest(write_approval, expected_write)
+        ):
+            return deny("writable-authorization-denied", (
+                "ERROR: writable_workspace requires the separate host "
+                "SONDER_ISOLATED_WRITE_APPROVAL_CODE."
+            ))
+    try:
+        result = isolated_runner.run_isolated(
+            image=image,
+            argv_json=argv_json,
+            project=project,
+            stdin=stdin,
+            writable_workspace=writable_workspace,
+            timeout=timeout,
+            memory_mb=memory_mb,
+            cpus=cpus,
+            pids=pids,
+            output_bytes=output_bytes,
+        )
+        ok = bool(result.get("ok"))
+    except (OSError, ValueError) as exc:
+        _record_direct_tool(
+            "isolated_run",
+            {"failure": "policy-or-runtime-error",
+             "writable_workspace": writable_workspace is True},
+            ok=False, started=started, summary="isolated runner rejected request",
+        )
+        return "ERROR: %s" % exc
+    output = isolated_runner.format_result(result)
+    _record_direct_tool(
+        "isolated_run",
+        {"image": image, "project": project,
+         "writable_workspace": writable_workspace is True},
+        ok=ok, started=started, summary=("ok" if ok else "failed"),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
 def artifact_generate(
     name: str,
     brief: str,
@@ -11474,6 +11581,7 @@ def tool_manifest() -> str:
         "permission_policy/permission_rule_set": "Inspect or guarded-edit local permission rules for tool actions.",
         "context_compaction_plan": "Preview when to summarize, split sessions, or reduce live context.",
         "run_code": "Run a bounded snippet: Python, JS/TypeScript, Bash, Ruby, Perl, PHP, Lua, R, Go, Java, Rust, PowerShell, C++, C#.",
+        "isolated_run": "Direct MCP-only, explicitly enabled and developer-authorized Docker/Podman execution with approved roots, separate writable approval, and a fixed resource-capped isolation policy.",
         "ground_artifact": "Validate in-memory non-code content with exact/contains/regex/JSON checks.",
         "artifact_ground": "Validate files or bundles with inferred writing, data, editable Office/media/timelines, UI, image, audio, and static or animated humanoid model recipes.",
         "run_project": "Run a bounded temporary multi-file project with optional build commands.",
