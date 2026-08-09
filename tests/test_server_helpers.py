@@ -1853,6 +1853,7 @@ def test_master_orchestrate_schema_marks_zero_as_automatic_agent_count():
     schema = server.mcp._tool_manager.get_tool("master_orchestrate").parameters
 
     assert schema["properties"]["agents"]["default"] == 0
+    assert schema["properties"]["worker_cap"]["default"] == 0
     assert schema["properties"]["project"]["default"] == ""
 
 
