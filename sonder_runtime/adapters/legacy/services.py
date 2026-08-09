@@ -389,7 +389,7 @@ class SystemClock:
 
 
 class LegacyProcessProbe:
-    """ProcessProbe over the root ``process_liveness`` module.
+    """ProcessProbe over the adapter ``process_liveness`` module.
 
     ``process_liveness`` encodes start-time / boot-id into one opaque identity
     string rather than a separate float, so ``started_at`` stays 0.0 and the
@@ -398,7 +398,7 @@ class LegacyProcessProbe:
     """
 
     def identity(self, pid: int) -> ProcessIdentity | None:
-        import process_liveness
+        import sonder_runtime.adapters.process_liveness as process_liveness
 
         state, fingerprint = process_liveness.probe_process(pid)
         if state == process_liveness.PROCESS_DEAD or not fingerprint:
@@ -408,7 +408,7 @@ class LegacyProcessProbe:
         )
 
     def is_same_live_process(self, identity: ProcessIdentity) -> ProbeResult:
-        import process_liveness
+        import sonder_runtime.adapters.process_liveness as process_liveness
 
         state, _observed = process_liveness.probe_process(
             identity.pid, expected_identity=identity.fingerprint or None
