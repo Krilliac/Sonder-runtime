@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -159,8 +160,8 @@ def test_doctor_json_fails_on_modified_migration_without_disclosure(
     secret_migration = "0001_private_name"
     monkeypatch.setattr(
         sonder_migrations,
-        "status_all",
-        lambda: {
+        "status_all_read_only",
+        lambda home: {
             "memory": SimpleNamespace(
                 applied=(secret_migration,), pending=(), unknown=(),
                 checksum_mismatches=(secret_migration,), db_path=secret_path,
@@ -170,7 +171,7 @@ def test_doctor_json_fails_on_modified_migration_without_disclosure(
     monkeypatch.setattr(
         sonder_doctor,
         "default_checks",
-        lambda: [("schemas", sonder_doctor._check_schemas)],
+        lambda: [("schemas", sonder_doctor.schema_check())],
     )
 
     assert main(["doctor", "--json", "--skip-ollama"]) == 1
@@ -249,6 +250,59 @@ def test_doctor_config_check_uses_exact_cli_config(
     assert config_check == {
         "name": "config", "status": "ok",
         "detail": "ollama=http://127.0.0.1:11600",
+    }
+
+
+@pytest.mark.parametrize("selection", ["config", "set"])
+def test_doctor_schema_check_uses_exact_cli_home(
+    isolated_home, tmp_path, monkeypatch, capsys, selection
+):
+    import sonder_doctor
+    import sonder_migrations
+
+    configured_home = tmp_path / f"selected-{selection}"
+    configured_home.mkdir()
+    db = configured_home / "operations.db"
+    sonder_migrations.migrate_store("operations", str(db))
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            "UPDATE schema_migrations SET checksum_sha256 = 'tampered' "
+            "WHERE migration_id = '0001_baseline'"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        sonder_doctor,
+        "default_checks",
+        lambda: [("schemas", sonder_doctor.schema_check())],
+    )
+    args = ["doctor", "--json", "--skip-ollama"]
+    if selection == "config":
+        monkeypatch.delenv("SONDER_HOME", raising=False)
+        config_path = tmp_path / "selected.toml"
+        escaped_home = str(configured_home).replace("\\", "\\\\")
+        config_path.write_text(
+            f'[state]\nhome = "{escaped_home}"\n', encoding="utf-8"
+        )
+        args.extend(["--config", str(config_path)])
+    else:
+        args.extend(["--set", f"state.home={configured_home}"])
+
+    assert main(args) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "overall": "fail",
+        "checks": [{
+            "name": "schemas",
+            "status": "fail",
+            "detail": (
+                "6 store(s); unhealthy history: modified=1 future=0; "
+                "pending=5"
+            ),
+        }],
     }
 
 

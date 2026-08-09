@@ -366,44 +366,52 @@ def _check_runtime_policy() -> dict:
     }
 
 
-def _check_schemas() -> dict:
-    """Summarize migration health without exposing store paths or identifiers."""
-    try:
-        import sonder_migrations
+def schema_check(config=None):
+    """Bind a non-mutating, non-disclosing migration-health check."""
+    def check():
+        try:
+            import sonder_migrations
 
-        statuses = sonder_migrations.status_all()
-    except Exception as exc:
-        return {
-            "status": STATUS_FAIL,
-            "detail": "schema inspection failed (%s)" % exc.__class__.__name__,
-        }
+            cfg = config if config is not None else _load_config_or_none()
+            if cfg is None:
+                return _skip("config unavailable for schema inspection")
+            statuses = sonder_migrations.status_all_read_only(cfg.state.home)
+        except Exception as exc:
+            return {
+                "status": STATUS_FAIL,
+                "detail": (
+                    "schema inspection failed (%s)" % exc.__class__.__name__
+                ),
+            }
 
-    records = tuple(statuses.values())
-    modified = sum(len(record.checksum_mismatches) for record in records)
-    future = sum(len(record.unknown) for record in records)
-    pending = sum(len(record.pending) for record in records)
-    applied = sum(len(record.applied) for record in records)
-    if modified or future:
+        records = tuple(statuses.values())
+        modified = sum(len(record.checksum_mismatches) for record in records)
+        future = sum(len(record.unknown) for record in records)
+        pending = sum(len(record.pending) for record in records)
+        applied = sum(len(record.applied) for record in records)
+        if modified or future:
+            return {
+                "status": STATUS_FAIL,
+                "detail": (
+                    "%d store(s); unhealthy history: modified=%d future=%d; "
+                    "pending=%d"
+                ) % (len(records), modified, future, pending),
+            }
+        if pending:
+            return {
+                "status": STATUS_WARN,
+                "detail": "%d store(s); pending migrations=%d" % (
+                    len(records), pending
+                ),
+            }
         return {
-            "status": STATUS_FAIL,
-            "detail": (
-                "%d store(s); unhealthy history: modified=%d future=%d; "
-                "pending=%d"
-            ) % (len(records), modified, future, pending),
-        }
-    if pending:
-        return {
-            "status": STATUS_WARN,
-            "detail": "%d store(s); pending migrations=%d" % (
-                len(records), pending
+            "status": STATUS_OK,
+            "detail": "%d store(s) current; applied migrations=%d" % (
+                len(records), applied
             ),
         }
-    return {
-        "status": STATUS_OK,
-        "detail": "%d store(s) current; applied migrations=%d" % (
-            len(records), applied
-        ),
-    }
+
+    return check
 
 
 def _check_ollama(*, timeout: float = 5.0) -> dict:
@@ -500,7 +508,7 @@ def default_checks() -> list[tuple[str, CheckCallable]]:
     return [
         ("config", _check_config),
         *storage_checks(),
-        ("schemas", _check_schemas),
+        ("schemas", schema_check()),
         ("self_heal", _check_self_heal),
         ("memory_quality", _check_memory_quality),
         ("runtime_policy", _check_runtime_policy),

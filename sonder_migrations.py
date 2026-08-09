@@ -209,6 +209,62 @@ def status(store: str, db_path: str | None = None) -> StoreStatus:
     return StoreStatus(store, path, applied, pending, unknown, mismatched)
 
 
+def status_read_only(store: str, db_path: str) -> StoreStatus:
+    """Inspect one migration ledger without creating a database or table."""
+    path = Path(db_path).expanduser()
+    migrations = discover_migrations(store)
+    known = {migration.migration_id: migration for migration in migrations}
+    if not path.is_file():
+        return StoreStatus(store, str(path), (), tuple(known), (), ())
+
+    uri = path.resolve(strict=True).as_uri() + "?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        has_ledger = conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='schema_migrations'"
+        ).fetchone()
+        recorded = (
+            {
+                row[0]: row[1]
+                for row in conn.execute(
+                    "SELECT migration_id, checksum_sha256 "
+                    "FROM schema_migrations"
+                )
+            }
+            if has_ledger
+            else {}
+        )
+    finally:
+        conn.close()
+    applied = tuple(mid for mid in known if mid in recorded)
+    pending = tuple(mid for mid in known if mid not in recorded)
+    unknown = tuple(sorted(mid for mid in recorded if mid not in known))
+    mismatched = tuple(
+        mid for mid in applied if recorded[mid] != known[mid].checksum
+    )
+    return StoreStatus(
+        store, str(path), applied, pending, unknown, mismatched
+    )
+
+
+def status_all_read_only(home: str) -> dict[str, StoreStatus]:
+    """Inspect all configured stores below *home* without mutating state."""
+    root = Path(home).expanduser()
+    names = {
+        "memory": "memory.db",
+        "autopilot": "autopilot.db",
+        "fleet": "fleet.db",
+        "operations": "operations.db",
+        "queued_actions": "queued_actions.db",
+        "updates": "updates.db",
+    }
+    return {
+        store: status_read_only(store, str(root / filename))
+        for store, filename in names.items()
+    }
+
+
 class _FileLock:
     """Cross-process advisory lock (fcntl on POSIX, msvcrt on Windows)."""
 
