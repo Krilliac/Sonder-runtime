@@ -13,6 +13,16 @@ pytestmark = pytest.mark.unit
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def _architecture_module():
+    import importlib.util
+
+    path = _REPO_ROOT / "scripts" / "check_architecture.py"
+    spec = importlib.util.spec_from_file_location("architecture_check", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_architecture_check_passes():
     result = subprocess.run(
         [sys.executable, str(_REPO_ROOT / "scripts" / "check_architecture.py")],
@@ -47,22 +57,10 @@ def test_legacy_root_allowlist_has_a_shrink_only_ratchet():
 
 
 def test_production_callers_use_the_memory_adapter():
-    offenders = []
-    for path in _REPO_ROOT.rglob("*.py"):
-        relative = path.relative_to(_REPO_ROOT)
-        if relative == Path("memory_store.py") or relative.parts[0] == "tests":
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import) and any(
-                alias.name == "memory_store" for alias in node.names
-            ):
-                offenders.append(str(relative))
-                break
-            if isinstance(node, ast.ImportFrom) and node.module == "memory_store":
-                offenders.append(str(relative))
-                break
-    assert offenders == []
+    module = _architecture_module()
+    assert module.compatibility_import_offenders(
+        "memory_store", Path("memory_store.py")
+    ) == ()
 
 
 def test_recall_root_module_is_compatibility_only_and_ratchet_shrank():
@@ -75,26 +73,9 @@ def test_recall_root_module_is_compatibility_only_and_ratchet_shrank():
     assert "recall" not in module.ROOT_LEGACY_MODULES
     assert module.ROOT_LEGACY_MODULE_LIMIT == 16
 
-    offenders = []
-    for path in _REPO_ROOT.rglob("*.py"):
-        relative = path.relative_to(_REPO_ROOT)
-        if relative == Path("recall.py") or relative.parts[0] == "tests":
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import) and any(
-                alias.name == "recall" for alias in node.names
-            ):
-                offenders.append(str(relative))
-                break
-            if (
-                isinstance(node, ast.ImportFrom)
-                and node.level == 0
-                and node.module == "recall"
-            ):
-                offenders.append(str(relative))
-                break
-    assert offenders == []
+    assert module.compatibility_import_offenders(
+        "recall", Path("recall.py")
+    ) == ()
 
 
 def test_recall_use_case_depends_only_on_its_narrow_port():
@@ -230,19 +211,35 @@ def test_evaluation_history_application_service_has_no_persistence_dependency():
 
 
 def test_production_callers_use_the_evaluation_history_adapter():
-    offenders = []
-    for path in _REPO_ROOT.rglob("*.py"):
-        relative = path.relative_to(_REPO_ROOT)
-        if relative == Path("eval_history.py") or relative.parts[0] == "tests":
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import) and any(
-                alias.name == "eval_history" for alias in node.names
-            ):
-                offenders.append(str(relative))
-                break
-            if isinstance(node, ast.ImportFrom) and node.module == "eval_history":
-                offenders.append(str(relative))
-                break
-    assert offenders == []
+    module = _architecture_module()
+    assert module.compatibility_import_offenders(
+        "eval_history", Path("eval_history.py")
+    ) == ()
+
+
+def test_production_inventory_ignores_generated_tree_but_catches_tracked_offender(
+    tmp_path,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".gitignore").write_text("app/build/\n", encoding="utf-8")
+    offender = repo / "real_offender.py"
+    offender.write_text("import memory_store\n", encoding="utf-8")
+    generated = repo / "app" / "build" / "local-system" / "server.py"
+    generated.parent.mkdir(parents=True)
+    generated.write_text("import memory_store\nimport recall\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(repo), "add", ".gitignore", "real_offender.py"],
+        check=True,
+    )
+
+    module = _architecture_module()
+    inventory = {
+        path.relative_to(repo)
+        for path in module.tracked_production_python_files(repo)
+    }
+    assert inventory == {Path("real_offender.py")}
+    assert module.compatibility_import_offenders(
+        "memory_store", Path("memory_store.py"), repo
+    ) == (Path("real_offender.py"),)
