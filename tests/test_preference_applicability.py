@@ -342,6 +342,27 @@ def test_unknown_language_name_is_not_a_durable_general_default():
     assert not preferences.preference_applies(legacy, "Explain photosynthesis")
 
 
+def test_source_citations_workflow_spelling_is_safe_and_task_scoped():
+    normalized = "User prefers source citations."
+
+    assert preferences.extract_preferences("I prefer source citations") == [
+        normalized
+    ]
+    assert preferences.preference_category(normalized) == "workflow"
+    assert preferences.preference_applies(
+        normalized, "Research this claim and provide source citations"
+    )
+    assert not preferences.preference_applies(
+        normalized, "Explain photosynthesis briefly"
+    )
+    assert preferences.extract_preferences(
+        "I prefer source citations about gardening"
+    ) == []
+    assert preferences.extract_preferences(
+        "I prefer source citations containing OAuth tokens"
+    ) == []
+
+
 def test_topical_durable_imperatives_are_not_persisted_as_preferences():
     source = "Always explain photosynthesis"
     normalized = "User wants Sonder to always explain photosynthesis."
