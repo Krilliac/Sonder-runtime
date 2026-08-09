@@ -689,6 +689,11 @@ class LauncherController:
     ):
         self.root = Path(root).resolve()
         self.python = str(python)
+        if not _loopback(server_host):
+            raise ValueError(
+                "managed Sonder API host must be loopback; use a TLS reverse proxy "
+                "for remote access"
+            )
         self.server_host = str(server_host)
         self.server_port = int(server_port)
         self.db_path = Path(
@@ -2339,22 +2344,46 @@ def generate_token():
     return secrets.token_urlsafe(32)
 
 
-def validate_configuration(host, token):
-    if not _loopback(host) and len(token) < 24:
+def validate_configuration(
+    host, token, cert="", key="", allow_insecure_http_for_development=False
+):
+    loopback = _loopback(host)
+    if not loopback and len(token) < 24:
         raise ValueError("LAN launcher binding requires SONDER_LAUNCHER_TOKEN with at least 24 characters")
+    if bool(cert) != bool(key):
+        raise ValueError("both TLS certificate and key are required")
+    if (
+        not loopback
+        and not cert
+        and not allow_insecure_http_for_development
+    ):
+        raise ValueError(
+            "non-loopback launcher binding requires TLS; use --cert and --key "
+            "or the explicit development-only insecure HTTP override"
+        )
 
 
-def serve(host, port, token, controller=None, cert="", key=""):
-    validate_configuration(host, token)
+def serve(
+    host,
+    port,
+    token,
+    controller=None,
+    cert="",
+    key="",
+    allow_insecure_http_for_development=False,
+):
+    validate_configuration(
+        host, token, cert, key, allow_insecure_http_for_development
+    )
+    context = None
+    if cert:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(cert, key)
     server = LauncherServer(
         (host, int(port)), LauncherHandler,
         controller=controller or LauncherController(), token=token,
     )
-    if cert or key:
-        if not cert or not key:
-            raise ValueError("both TLS certificate and key are required")
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(cert, key)
+    if context is not None:
         server.socket = context.wrap_socket(server.socket, server_side=True)
     print("Sonder launcher listening on %s://%s:%s" % ("https" if cert else "http", host, port))
     server.serve_forever()
@@ -2371,16 +2400,36 @@ def main(argv=None):
     parser.add_argument("--server-port", type=int, default=int(os.environ.get("SONDER_PORT", SERVER_PORT)))
     parser.add_argument("--cert", default=os.environ.get("SONDER_LAUNCHER_CERT", ""))
     parser.add_argument("--key", default=os.environ.get("SONDER_LAUNCHER_KEY", ""))
+    parser.add_argument(
+        "--allow-insecure-http-for-development",
+        action="store_true",
+        help="allow plaintext HTTP on a non-loopback development network",
+    )
     parser.add_argument("--generate-token", action="store_true")
     args = parser.parse_args(argv)
     if args.generate_token:
         print(generate_token())
         return 0
     try:
+        validate_configuration(
+            args.host,
+            args.token,
+            args.cert,
+            args.key,
+            args.allow_insecure_http_for_development,
+        )
         controller = LauncherController(
             server_host=args.server_host, server_port=args.server_port
         )
-        serve(args.host, args.port, args.token, controller, args.cert, args.key)
+        serve(
+            args.host,
+            args.port,
+            args.token,
+            controller,
+            args.cert,
+            args.key,
+            args.allow_insecure_http_for_development,
+        )
     except (OSError, ValueError, sqlite3.Error) as exc:
         print("ERROR: %s" % exc, file=sys.stderr)
         return 2
