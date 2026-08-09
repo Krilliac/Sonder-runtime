@@ -54,7 +54,7 @@ file's *structure* without dumping raw bytes.
 
 `file_find`, `file_read`, `file_read_range`, `file_write`, `file_batch_write`, `file_edit`,
 `file_delete`, `directory_tree`, `directory_create`, `workspace_inventory`,
-`text_search`, `script_search`, `program_search`, `image_inspect`. All are
+`text_search`, `script_search`, `program_search`, `image_inspect`, `log_inspect`. All are
 confined to `SONDER_FILE_ROOTS`, honor the permission policy
 ([Security Model](09-security-model.md)), and record byte/line accounting
 into the activity trail. `file_delete` is dry-run unless an explicit
@@ -64,6 +64,13 @@ confirm string matches.
 operations. It prevalidates every target before writing, caps per-file and
 aggregate bytes, rejects duplicate/sensitive/symlink targets, and makes a
 best-effort rollback if any write fails.
+
+`log_inspect` reads one guarded UTF-8 text log through a validated no-follow
+file handle. Fixed host parsers extract common text and JSON-log timestamps,
+levels, and sources; the result summarizes error/warning clusters, repeated
+messages, and bounded first/last-failure context. Prefix or tail inspection is
+available under file, scan-byte, line, per-line, result, output, and time caps.
+Callers cannot supply regular expressions or executable parsing rules.
 
 ## Other tool families
 
@@ -81,6 +88,7 @@ best-effort rollback if any write fails.
 ## Read-only tool set & speculation
 
 The read-only subset (inventory, tree, find, read, search, `data_inspect`,
+`log_inspect`,
 image inspect, memory search, status) is what the speculation engine may
 run speculatively while the model thinks — never a mutating or executing
 tool ([Speculation & Prediction](11-speculation-and-prediction.md)).

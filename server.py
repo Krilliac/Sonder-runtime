@@ -63,6 +63,7 @@ import admin_auth
 import codegen_loop
 import file_ops
 import symbol_index
+import log_inspect as log_inspect_module
 import context_policy
 import command_registry
 import adaptive_training
@@ -559,6 +560,7 @@ LIVE_RELOAD_MODULES = [
     "admin_auth",
     "file_ops",
     "symbol_index",
+    "log_inspect",
     "context_policy",
     "command_registry",
     "permission_rules",
@@ -7208,6 +7210,63 @@ def repository_symbol_index(
 
 
 @mcp.tool()
+def log_inspect(
+    path: str,
+    tail_lines: int = 0,
+    context_lines: int = 2,
+    max_file_bytes: int = 64000000,
+    max_scan_bytes: int = 4000000,
+    max_lines: int = 10000,
+    max_line_bytes: int = 4096,
+    max_results: int = 100,
+    max_output_bytes: int = 256000,
+    timeout: float = 5.0,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Inspect one guarded text log without execution or caller expressions."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "path": path, "tail_lines": tail_lines, "context_lines": context_lines,
+        "max_file_bytes": max_file_bytes, "max_scan_bytes": max_scan_bytes,
+        "max_lines": max_lines, "max_line_bytes": max_line_bytes,
+        "max_results": max_results, "max_output_bytes": max_output_bytes,
+        "timeout": timeout,
+    }
+    try:
+        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
+        report = log_inspect_module.inspect_log(
+            path, tail_lines=tail_lines, context_lines=context_lines,
+            max_file_bytes=max_file_bytes, max_scan_bytes=max_scan_bytes,
+            max_lines=max_lines, max_line_bytes=max_line_bytes,
+            max_results=max_results, max_output_bytes=max_output_bytes,
+            timeout=timeout, extra_roots=trusted_roots,
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "log_inspect", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = log_inspect_module.encode_result(report)
+    summary = report["summary"]
+    activity_summary = "%d line(s), %d error(s), %d warning(s)%s" % (
+        summary["lines_inspected"], summary["error_lines"],
+        summary["warning_lines"],
+        ", truncated" if report["scan_truncated"] or report["details_truncated"] else "",
+    )
+    _record_direct_tool(
+        "log_inspect", args, ok=True, started=started,
+        summary=activity_summary,
+    )
+    activity_tracker.record_event(
+        "log_inspect", summary=activity_summary, path=report["path"],
+    )
+    return output
+
+
+@mcp.tool()
 def file_read(path: str, max_bytes: int = 256000, token: str = "", approval: str = "", extra_roots: str = "") -> str:
     """Read a UTF-8-ish text file inside allowed roots."""
     _maybe_live_reload()
@@ -10218,6 +10277,7 @@ def tool_manifest() -> str:
         "workspace_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace inventory, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
         "file_policy/file_find/file_read/file_write/file_batch_write/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete, including bounded transactional multi-file create/overwrite.",
         "repository_symbol_index": "Build a deterministic bounded read-only declaration index with Python AST and conservative JS/TS/C/C++/C#/Rust/Go extraction.",
+        "log_inspect": "Inspect one guarded text log with fixed level/timestamp/source extraction, failure clusters, repeats, and bounded context.",
         "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
         "environment_status": "Report the host OS, available shells (PowerShell/cmd/bash/wsl), and installed toolchains -- check before choosing a command shape or assuming a tool exists.",
         "data_inspect": "Read-only structured preview of JSON/JSONL/TOML/YAML/CSV/TSV/SQLite/ZIP/TAR/INI data files inside allowed roots.",
@@ -10276,6 +10336,7 @@ AGENT_TOOL_HELP = """Available tools:
 - directory_create: {"path": "output/reports", "parents": true}
 - file_find: {"query": "*.py", "root": ".", "max_results": 50}
 - repository_symbol_index: {"path": ".", "glob": "*", "language": "auto|python|javascript|typescript|c|cpp|csharp|rust|go", "max_files": 200, "max_total_bytes": 2000000, "max_file_bytes": 256000, "max_symbols": 2000}
+- log_inspect: {"path": "logs/app.log", "tail_lines": 0, "context_lines": 2, "max_file_bytes": 64000000, "max_scan_bytes": 4000000, "max_lines": 10000, "max_line_bytes": 4096, "max_results": 100, "max_output_bytes": 256000, "timeout": 5}
 - file_read: {"path": "README.md"}
 - file_read_range: {"path": "server.py", "start_line": 1, "end_line": 200}
 - context_pack: {"paths_json": ["README.md", "src/main.py"], "max_files": 12, "max_total_bytes": 256000, "max_bytes_per_file": 64000}
@@ -10347,7 +10408,7 @@ or
 
 REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find",
-    "repository_symbol_index", "file_read", "file_read_range", "context_pack",
+    "repository_symbol_index", "log_inspect", "file_read", "file_read_range", "context_pack",
     "data_inspect",
     "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
@@ -10371,6 +10432,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - directory_tree: {"path": ".", "depth": 2, "max_entries": 200}
 - file_find: {"query": "<task-relevant filename or glob>", "root": ".", "max_results": 50}
 - repository_symbol_index: {"path": ".", "glob": "<task-relevant source glob>", "language": "auto|python|javascript|typescript|c|cpp|csharp|rust|go", "max_files": 200, "max_total_bytes": 2000000, "max_file_bytes": 256000, "max_symbols": 2000}
+- log_inspect: {"path": "<task-relevant log file>", "tail_lines": 0, "context_lines": 2, "max_file_bytes": 64000000, "max_scan_bytes": 4000000, "max_lines": 10000, "max_line_bytes": 4096, "max_results": 100, "max_output_bytes": 256000, "timeout": 5}
 - file_read: {"path": "<task-relevant relative path>", "max_bytes": 256000}
 - file_read_range: {"path": "<task-relevant relative path>", "start_line": 1, "end_line": 200}
 - context_pack: {"paths_json": ["<task-relevant relative path>", "<another task-relevant relative path>"], "max_files": 12, "max_total_bytes": 256000, "max_bytes_per_file": 64000}
@@ -10631,7 +10693,7 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
     if scope_error:
         return scope_error
     try:
-        if tool_name in {"file_read", "file_read_range", "image_inspect", "data_inspect"}:
+        if tool_name in {"file_read", "file_read_range", "image_inspect", "data_inspect", "log_inspect"}:
             file_ops.resolve_repository_read_path(
                 args.get("path", ""),
                 allow_workspace_root=False,
@@ -11266,6 +11328,22 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "log_inspect":
+        return log_inspect(
+            path=args.get("path", ""),
+            tail_lines=args.get("tail_lines", 0),
+            context_lines=args.get("context_lines", 2),
+            max_file_bytes=args.get("max_file_bytes", 64_000_000),
+            max_scan_bytes=args.get("max_scan_bytes", 4_000_000),
+            max_lines=args.get("max_lines", 10_000),
+            max_line_bytes=args.get("max_line_bytes", 4_096),
+            max_results=args.get("max_results", 100),
+            max_output_bytes=args.get("max_output_bytes", 256_000),
+            timeout=args.get("timeout", 5.0),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "file_read_range":
         return file_read_range(
             path=args.get("path", ""),
@@ -11627,7 +11705,7 @@ def _agent_activity_command(tool_name, args):
 
 
 _PROJECT_SCOPED_PATH_TOOLS = frozenset({
-    "file_read", "file_read_range", "context_pack", "image_inspect",
+    "file_read", "file_read_range", "context_pack", "image_inspect", "log_inspect",
     "file_write", "file_batch_write", "file_edit",
     "file_delete", "directory_create", "workspace_inventory", "directory_tree",
     "file_find", "repository_symbol_index", "text_search", "script_search", "artifact_verify",
@@ -12210,7 +12288,7 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
     return False
 _WORK_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find",
-    "repository_symbol_index", "file_read", "file_read_range", "context_pack",
+    "repository_symbol_index", "log_inspect", "file_read", "file_read_range", "context_pack",
     "text_search", "script_search", "program_search", "image_inspect",
     "memory_search", "learning_health_status", "evaluation_history_status",
     "memory_quality_report", "memory_privacy_review", "artifact_ground",
@@ -12219,7 +12297,7 @@ _WORK_INSPECTION_TOOLS = frozenset({
 })
 _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find",
-    "repository_symbol_index", "file_read", "file_read_range", "context_pack",
+    "repository_symbol_index", "log_inspect", "file_read", "file_read_range", "context_pack",
     "text_search", "script_search",
     "program_search", "image_inspect", "environment_status",
 })
@@ -13085,7 +13163,7 @@ def _agent_impl(
                 successful_inspection_results[call_signature] = observation_text[:6000]
                 repeated_inspection_counts.pop(call_signature, None)
         if tool_name in {
-            "workspace_inventory", "directory_tree", "file_read", "file_read_range", "file_find",
+            "workspace_inventory", "directory_tree", "file_read", "file_read_range", "file_find", "log_inspect",
             "text_search", "script_search", "image_inspect",
         } and tool_ok:
             file_evidence = True
@@ -13364,7 +13442,7 @@ def workbench_agent(
 
 _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find",
-    "repository_symbol_index", "file_read", "file_read_range", "text_search", "script_search",
+    "repository_symbol_index", "log_inspect", "file_read", "file_read_range", "text_search", "script_search",
     "program_search", "image_inspect", "memory_search", "web_search",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
