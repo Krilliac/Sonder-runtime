@@ -3,7 +3,7 @@ import re
 
 import contribute
 import embeddings
-import memory_store
+import sonder_runtime.adapters.memory_store as memory_store
 
 DUP_THRESHOLD = 0.92
 DISTILL_SYSTEM = (

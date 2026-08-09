@@ -307,7 +307,7 @@ def _check_memory_quality() -> dict:
         return _skip("SONDER_DB not set")
     try:
         import memory_quality
-        import memory_store
+        import sonder_runtime.adapters.memory_store as memory_store
     except Exception as exc:
         return _skip("memory quality surfaces unavailable (%s)" % exc)
     try:
