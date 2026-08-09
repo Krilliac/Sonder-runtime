@@ -50,6 +50,12 @@ are refused by a byte budget. This fills the gap between raw `file_read`
 and image `image_inspect` — the model can understand a database or a data
 file's *structure* without dumping raw bytes.
 
+`data_query` adds bounded read-only retrieval for SQLite, JSON, JSONL, CSV,
+and TSV. SQLite accepts exactly one `SELECT` or CTE through a read-only URI,
+with an authorizer plus row, column, byte, and time ceilings. Text formats use
+only structured exact-equality filters and field/JSON-pointer projections; no
+expressions or file content are executed.
+
 ## Guarded filesystem tools
 
 `file_find`, `file_read`, `file_read_range`, `file_write`, `file_edit`,
