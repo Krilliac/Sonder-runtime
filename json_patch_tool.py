@@ -87,11 +87,13 @@ def _guard_target(path: str, *, extra_roots: str, bypass: bool, apply: bool):
     root = next((item for item in roots if resolved == item or file_ops._is_inside(resolved, item)), None)
     if root is None:
         raise PermissionError("JSON patch target is outside every authorized root")
-    relative = resolved.relative_to(root)
     if (
         file_ops._is_protected_read_path(resolved)
         or file_ops._is_protected_mutation_path(resolved)
-        or any(part.casefold() in file_ops.SENSITIVE_READ_DIRECTORIES for part in relative.parts)
+        or any(
+            part.casefold() in file_ops.SENSITIVE_READ_DIRECTORIES
+            for part in resolved.parts
+        )
     ):
         raise PermissionError("JSON patch target is secret or control state")
     if apply:
@@ -135,9 +137,19 @@ def _parse_operations(operations):
             raise ValueError("patch operations exceed max input bytes (%d)" % MAX_OPERATIONS_BYTES)
         operations = _loads_strict(operations, "operations_json")
     else:
-        encoded = json.dumps(operations, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        try:
+            encoded = json.dumps(
+                operations, ensure_ascii=False, separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("patch operations must be strict JSON: %s" % exc) from exc
         if len(encoded) > MAX_OPERATIONS_BYTES:
             raise ValueError("patch operations exceed max input bytes (%d)" % MAX_OPERATIONS_BYTES)
+        # A caller may reuse a Python-list patch. Parse the serialized form so
+        # nested values are owned by this invocation instead of being inserted
+        # into the document by reference and mutated by later operations.
+        operations = _loads_strict(encoded.decode("utf-8"), "operations_json")
     if not isinstance(operations, list) or not operations:
         raise ValueError("patch operations must be a non-empty JSON array")
     if len(operations) > MAX_OPERATIONS:
