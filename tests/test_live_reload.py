@@ -307,3 +307,26 @@ def test_server_watches_package_owned_evaluation_history_store():
         in server.LIVE_RELOAD_MODULES
     )
     assert "eval_history" not in server.LIVE_RELOAD_MODULES
+
+
+def test_server_live_reload_rebinds_evaluation_history_modules(monkeypatch):
+    import server
+
+    service_module = object()
+    adapter_module = object()
+    monkeypatch.setattr(
+        server.live_reload,
+        "reload_changed_modules",
+        lambda names: {
+            "sonder_runtime.application.evaluation_history.use_cases": (
+                service_module
+            ),
+            "sonder_runtime.adapters.legacy.evaluation_history": adapter_module,
+        },
+    )
+    monkeypatch.setattr(server, "_refresh_runtime_policy", lambda **kwargs: None)
+
+    server._maybe_live_reload()
+
+    assert server.eval_history_use_cases is service_module
+    assert server.eval_history_adapter is adapter_module
