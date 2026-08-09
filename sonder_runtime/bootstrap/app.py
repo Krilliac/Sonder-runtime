@@ -21,9 +21,11 @@ from ..adapters.legacy.services import (
     OperationsEventSink,
     SystemClock,
 )
+from ..adapters.legacy.inspections import LegacyInspectionExecutor
 from ..adapters.local_observability import LocalObservabilitySink
 from ..adapters.ollama.gateway import OllamaGateway
 from ..application.chat.handle_chat import ChatService
+from ..application.inspection import InspectionService
 from ..application.ports.clock import Clock
 from ..application.ports.event_sink import EventSink
 from ..application.ports.model_gateway import ModelGateway
@@ -47,6 +49,7 @@ class Application:
     process_probe: ProcessProbe
     events: EventSink
     clock: Clock
+    inspections: InspectionService
 
 
 def _build_model_gateway() -> ModelGateway:
@@ -96,6 +99,7 @@ def build_application(profile: str = "workstation-local") -> Application:
         # operations.db sink; they never replace its audit authority.
         events=LocalObservabilitySink(OperationsEventSink()),
         clock=SystemClock(),
+        inspections=InspectionService(LegacyInspectionExecutor()),
     )
 
 

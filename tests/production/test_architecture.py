@@ -1,6 +1,7 @@
 """SPEC-3 R-M12: the architecture checker holds and stays enforceable."""
 from __future__ import annotations
 
+import ast
 import subprocess
 import sys
 from pathlib import Path
@@ -63,6 +64,35 @@ def test_checker_detects_a_violation(tmp_path):
         violation.unlink()
     assert result.returncode == 1
     assert "domain may not import" in result.stdout
+
+
+def test_inspection_adapter_has_an_exact_read_only_legacy_dependency_set():
+    path = (
+        _REPO_ROOT / "sonder_runtime" / "adapters" / "legacy"
+        / "inspections.py"
+    )
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    resolved = {
+        node.args[0].value
+        for node in ast.walk(tree)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_legacy_module"
+            and len(node.args) == 1
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        )
+    }
+    assert resolved == {
+        "archive_tools", "content_digest", "data_query",
+        "dependency_inventory", "file_ops", "log_inspect", "project_detect",
+        "workspace_compare",
+    }
+    assert not resolved & {
+        "archive_extract", "archive_create", "data_convert", "json_patch_tool",
+        "sqlite_mutate", "text_patch", "workbench",
+    }
 
 
 def test_domain_modules_are_pure():
