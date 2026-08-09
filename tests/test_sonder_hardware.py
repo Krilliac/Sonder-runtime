@@ -90,6 +90,272 @@ def test_detect_hardware_partial_injection_and_bad_gpu_shape():
     assert hw["total_ram_gb"] == 32.0
 
 
+def test_detect_profile_adds_inventory_without_changing_legacy_shape(monkeypatch):
+    def _boom(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("host subprocess must not run with injected accelerators")
+
+    monkeypatch.setattr(sonder_hardware.subprocess, "run", _boom)
+    probes = {
+        "cpu_count": lambda: 24,
+        "total_ram_gb": lambda: 32.0,
+        "platform": lambda: "Windows",
+        "accelerators": lambda: [sonder_hardware._accelerator(
+            name="Radeon 780M", vendor="AMD", memory_gb=0.5,
+            memory_kind="reported adapter memory", integrated=True,
+            probe="fixture",
+        ), sonder_hardware._accelerator(
+            name="GeForce RTX", vendor="NVIDIA", memory_gb=16.0,
+            memory_kind="dedicated VRAM", probe="fixture",
+        )],
+    }
+    profile = sonder_hardware.detect_profile(probes)
+    legacy = sonder_hardware.detect_hardware(probes)
+    assert profile["accelerator_count"] == 2
+    assert profile["vram_gb"] == 16.0
+    assert profile["runtime_readiness"] == "not-probed"
+    assert set(legacy) == {
+        "cpu_count", "total_ram_gb", "gpu_present", "vram_gb", "platform",
+    }
+
+
+def test_windows_registry_probe_reads_qword_and_skips_denied_entry():
+    class FakeRegistry:
+        HKEY_LOCAL_MACHINE = object()
+        rows = {
+            "0000": [
+                ("DriverDesc", "AMD Radeon 780M", 1),
+                ("ProviderName", "Advanced Micro Devices, Inc.", 1),
+                ("HardwareInformation.qwMemorySize", 512 * 1024 ** 2, 11),
+            ],
+            "0001": [
+                ("DriverDesc", "Intel Arc B580", 1),
+                ("MatchingDeviceId", "PCI\\VEN_8086&DEV_E20B", 1),
+                ("HardwareInformation.qwMemorySize", 12 * 1024 ** 3, 11),
+            ],
+        }
+
+        @staticmethod
+        def OpenKey(parent, child):
+            if parent is FakeRegistry.HKEY_LOCAL_MACHINE:
+                return "root"
+            if child == "0002":
+                raise OSError("access denied")
+            return child
+
+        @staticmethod
+        def QueryInfoKey(handle):
+            if handle == "root":
+                return (4, 0, 0)
+            if handle == "0003":
+                raise OSError("corrupt registry child")
+            return (0, len(FakeRegistry.rows[handle]), 0)
+
+        @staticmethod
+        def EnumKey(_handle, index):
+            return ("0000", "0001", "0002", "0003")[index]
+
+        @staticmethod
+        def EnumValue(handle, index):
+            return FakeRegistry.rows[handle][index]
+
+        @staticmethod
+        def CloseKey(_handle):
+            pass
+
+    rows = sonder_hardware._probe_windows_accelerators(FakeRegistry)
+    assert [(row["vendor"], row["memory_gb"], row["integrated"]) for row in rows] == [
+        ("AMD", 0.5, True),
+        ("Intel", 12.0, False),
+    ]
+    assert all(row["runtime_ready"] is None for row in rows)
+    assert all(row["presence_verified"] is None for row in rows)
+
+
+def test_linux_sysfs_probe_is_bounded_and_handles_missing_vram(tmp_path):
+    drm = tmp_path / "drm"
+    amd = drm / "card0" / "device"
+    intel = drm / "card1" / "device"
+    amd.mkdir(parents=True)
+    intel.mkdir(parents=True)
+    (amd / "vendor").write_text("0x1002\n", encoding="utf-8")
+    (amd / "mem_info_vram_total").write_text(str(8 * 1024 ** 3), encoding="utf-8")
+    (intel / "vendor").write_text("0x8086\n", encoding="utf-8")
+    rows = sonder_hardware._probe_linux_accelerators(
+        drm, nvidia_probe=lambda: [],
+    )
+    assert [(row["vendor"], row["memory_gb"]) for row in rows] == [
+        ("AMD", 8.0), ("Intel", None),
+    ]
+    assert [row["integrated"] for row in rows] == [None, None]
+
+
+def test_linux_nvidia_smi_supplements_generic_sysfs(tmp_path):
+    drm = tmp_path / "drm"
+    device = drm / "card0" / "device"
+    device.mkdir(parents=True)
+    (device / "vendor").write_text("0x10de", encoding="utf-8")
+    nvidia = sonder_hardware._accelerator(
+        name="NVIDIA RTX 5070 Ti", vendor="NVIDIA", memory_gb=16.0,
+        memory_kind="dedicated VRAM", probe="fixture",
+    )
+    rows = sonder_hardware._probe_linux_accelerators(
+        drm, nvidia_probe=lambda: [nvidia],
+    )
+    assert rows == [nvidia]
+
+
+def test_macos_apple_gpu_uses_unified_memory_without_fake_vram():
+    class Result:
+        returncode = 0
+        stdout = '{"SPDisplaysDataType":[{"sppci_model":"Apple M4 GPU","spdisplays_vendor":"Apple","spdisplays_vram_shared":"Apple M4"}]}'
+
+    rows = sonder_hardware._probe_macos_accelerators(runner=lambda *a, **k: Result())
+    assert rows[0]["memory_kind"] == "unified system memory"
+    assert rows[0]["memory_gb"] is None
+    profile = {
+        "cpu_count": 12, "total_ram_gb": 32.0, "gpu_present": True,
+        "vram_gb": None, "platform": "Darwin", "accelerators": rows,
+    }
+    rec = sonder_hardware.recommend(profile)
+    assert rec["execution_mode"] == "unified-memory"
+    assert rec["resident_usable_gb"] == 22.4
+    assert rec["hybrid_usable_gb"] == 22.4
+
+
+def test_hybrid_plan_uses_largest_gpu_not_mixed_vendor_sum():
+    accelerators = [
+        sonder_hardware._accelerator(
+            name="GeForce", vendor="NVIDIA", memory_gb=16.0,
+            memory_kind="dedicated VRAM", probe="fixture",
+        ),
+        sonder_hardware._accelerator(
+            name="Arc", vendor="Intel", memory_gb=12.0,
+            memory_kind="dedicated VRAM", probe="fixture",
+        ),
+    ]
+    hw = _hw(cpu=24, ram=32.0, gpu=True, vram=16.0)
+    hw["accelerators"] = accelerators
+    rec = sonder_hardware.recommend(hw, workload="coding")
+    assert rec["resident_usable_gb"] == 13.6
+    assert rec["hybrid_usable_gb"] == 37.6
+    assert rec["resident_model_class"] == "14B"
+    assert rec["hybrid_model_class"] == "32B"
+    assert rec["primary_accelerator"]["vendor"] == "NVIDIA"
+    assert rec["auxiliary_accelerators"][0]["vendor"] == "Intel"
+
+
+def test_integrated_only_adapter_sizes_from_system_ram():
+    integrated = sonder_hardware._accelerator(
+        name="AMD Radeon 780M", vendor="AMD", memory_gb=0.5,
+        memory_kind="reported adapter memory", integrated=True, probe="fixture",
+    )
+    hw = _hw(cpu=16, ram=32.0, gpu=True, vram=0.5)
+    hw["accelerators"] = [integrated]
+    rec = sonder_hardware.recommend(hw)
+    assert rec["basis"] == "ram"
+    assert rec["model_band"] == "13-34B"
+    assert rec["execution_mode"] == "cpu"
+
+
+def test_topology_unknown_adapter_does_not_override_system_ram():
+    unknown = sonder_hardware._accelerator(
+        name="AMD display adapter", vendor="AMD", memory_gb=0.5,
+        memory_kind="dedicated VRAM", integrated=None, probe="linux-drm-sysfs",
+    )
+    hw = _hw(cpu=16, ram=32.0, gpu=True, vram=0.5)
+    hw["accelerators"] = [unknown]
+    rec = sonder_hardware.recommend(hw)
+    assert rec["basis"] == "ram"
+    assert rec["execution_mode"] == "cpu"
+
+
+def test_six_gb_gpu_does_not_overclaim_resident_7b_with_context():
+    gpu = sonder_hardware._accelerator(
+        name="GeForce RTX", vendor="NVIDIA", memory_gb=6.0,
+        memory_kind="dedicated VRAM", integrated=False, probe="fixture",
+    )
+    hw = _hw(cpu=16, ram=16.0, gpu=True, vram=6.0)
+    hw["accelerators"] = [gpu]
+    rec = sonder_hardware.recommend(hw, workload="coding")
+    assert rec["model_band"] == "3-4B"
+    assert rec["resident_model_class"] == "3-4B"
+    assert rec["hybrid_model_class"] == "14B"
+
+
+def test_non_string_workload_falls_back_to_general():
+    rec = sonder_hardware.recommend(_hw(cpu=8, ram=16.0), workload=["coding"])
+    assert rec["workload"] == "general"
+
+
+def test_nvidia_inventory_parser_handles_name_and_memory():
+    class Result:
+        returncode = 0
+        stdout = "0, GPU-abc, NVIDIA GeForce RTX 5070 Ti, 16303\nmalformed\n"
+
+    rows = sonder_hardware._probe_nvidia_accelerators(
+        runner=lambda *args, **kwargs: Result(),
+    )
+    assert len(rows) == 1
+    assert rows[0]["name"] == "NVIDIA GeForce RTX 5070 Ti"
+    assert rows[0]["memory_gb"] == 15.9
+    assert rows[0]["device_id"] == "GPU-abc"
+
+
+def test_nvidia_inventory_retries_a_cold_gpu():
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = "0, GPU-cold, NVIDIA RTX, 6141\n"
+
+    def runner(command, **kwargs):
+        calls.append(command)
+        if len(calls) == 1:
+            raise sonder_hardware.subprocess.TimeoutExpired(
+                command, kwargs.get("timeout"),
+            )
+        return Result()
+
+    rows = sonder_hardware._probe_nvidia_accelerators(runner=runner)
+    assert len(calls) == 2
+    assert rows[0]["device_id"] == "GPU-cold"
+
+
+def test_nvidia_inventory_keeps_identical_physical_gpus():
+    class Result:
+        returncode = 0
+        stdout = (
+            "0, GPU-one, NVIDIA RTX 5070 Ti, 16303\n"
+            "1, GPU-two, NVIDIA RTX 5070 Ti, 16303\n"
+        )
+
+    rows = sonder_hardware._probe_nvidia_accelerators(
+        runner=lambda *args, **kwargs: Result(),
+    )
+    assert [row["device_id"] for row in rows] == ["GPU-one", "GPU-two"]
+    assert len(sonder_hardware._dedupe_accelerators(rows)) == 2
+
+
+def test_profile_cache_refreshes_only_when_requested(monkeypatch):
+    calls = []
+    fixture = {
+        "cpu_count": 8, "total_ram_gb": 16.0, "gpu_present": False,
+        "vram_gb": None, "platform": "Linux", "accelerators": [],
+        "accelerator_count": 0, "runtime_readiness": "not-probed",
+    }
+
+    def fake_detect():
+        calls.append(1)
+        return dict(fixture)
+
+    monkeypatch.setattr(sonder_hardware, "_PROFILE_CACHE", None)
+    monkeypatch.setattr(sonder_hardware, "detect_profile", fake_detect)
+    assert sonder_hardware.get_profile(workload="chat")["recommendation"]["workload"] == "chat"
+    sonder_hardware.get_profile(workload="coding")
+    sonder_hardware.get_profile(refresh=True)
+    assert len(calls) == 2
+
+
 # --- recommend: across the hardware spectrum ----------------------------------
 
 def _hw(cpu=4, ram=None, gpu=False, vram=None, plat="Linux"):
@@ -204,6 +470,7 @@ def test_render_contains_key_fields():
     assert "13-34B" in text
     assert "24 GB VRAM" in text
     assert "coding" in text
+    assert "runtime hint:" in text
     # Every rationale line is surfaced.
     for note in rec["rationale"]:
         assert note in text
@@ -213,7 +480,7 @@ def test_render_handles_unknown_fields():
     hw = _hw(cpu=None, ram=None)
     rec = sonder_hardware.recommend(hw)
     text = sonder_hardware.render(hw, rec)
-    assert "cpu cores  : unknown" in text
+    assert "logical CPUs: unknown" in text
     assert "system ram : unknown" in text
     assert "gpu memory : not detected (Ollama may still accelerate)" in text
 

@@ -37,9 +37,10 @@ backups, and a signed update path. It is not a foundation model.
 
 - `python -m sonder_runtime doctor` — one consolidated read-only health report
   (config, self-heal, memory quality, runtime policy, Ollama reachability).
-- `python sonder_hardware.py [workload]` — detect CPU/RAM/GPU/VRAM and get a
-  model-band / context / keep-alive recommendation, including whether the
-  adaptive speculation cost model is likely to engage on the current host.
+- `python sonder_hardware.py [workload]` or MCP `hardware_profile` — enumerate
+  Windows/Linux/macOS NVIDIA, AMD, Intel, Apple, and unknown display adapters,
+  then report resident and conservative GPU+RAM/unified-memory model plans.
+  Enumeration is not a claim that an Ollama/backend path is runtime-ready.
 - `python scripts/benchmark_moat.py` — run the moat benchmark and emit a
   scorecard ([Benchmarking](17-benchmarking.md)).
 

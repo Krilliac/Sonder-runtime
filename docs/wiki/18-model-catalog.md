@@ -165,6 +165,10 @@ not apply there.
   large speed penalty. Useful for a slow, private `oracle` used for
   overnight/batch work (see the teacher→student loop in [Training](15-training.md)),
   not for interactive use.
+- **Auxiliary iGPU/GPU** — keep an integrated or second-vendor adapter on
+  displays, or verify it independently for a separate embedding, routing, or
+  draft-model service. Do not assume unlike adapters can pool memory for one
+  model; the backend and topology decide that.
 
 ## 8. How the router chooses
 

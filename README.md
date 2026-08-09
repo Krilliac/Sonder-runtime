@@ -386,7 +386,10 @@ Use Sonder Runtime to orchestrate a local junior implementer, not as the final
 authority:
 
 1. Start substantial work with `status()` or `diagnostics()` so you know model,
-   VRAM, context, and memory-quality state before launching a batch.
+   VRAM, context, and memory-quality state before launching a batch. Use the
+   read-only `hardware_profile(workload="coding")` tool for cross-vendor device
+   inventory plus resident and conservative RAM-spill sizing; detection alone
+   does not prove a backend is usable.
 2. Prefer `offload(tier="code")` for one self-contained coding draft,
    `run_code` / `parallel_generate_run` for bounded experiments, and
    `master_orchestrate` only when independent perspectives are actually useful.
