@@ -50,6 +50,7 @@ import preference_learning
 import process_liveness
 import workflow_store
 import web_tools
+import local_service_probe as local_probe
 import web_intents
 import self_heal
 import grounding
@@ -9566,6 +9567,12 @@ def _loop_dispatch(action):
             url=action.get("url", ""),
             max_chars=action.get("max_chars", 8000),
         ))
+    if action_type == "local_service_probe":
+        return _loop_text_result("local_service_probe", local_service_probe(
+            url=action.get("url", ""),
+            method=action.get("method", "GET"),
+            timeout=action.get("timeout", 2.0),
+        ))
     if action_type == "weather_lookup":
         return _loop_text_result("weather_lookup", weather_lookup(
             location=action.get("location", ""),
@@ -9592,7 +9599,7 @@ def _loop_dispatch(action):
         "ok": False,
         "type": action_type or "(unknown)",
         "summary": "unknown action type",
-        "output": "Valid action types: code, project, artifact_generate, artifact_ground, game_reference_suite, game_generate_and_test, game_generation_campaign, offload, sonder, master_orchestrate, master_status, master_capacity, master_cancel, master_retry, file_policy, workspace_inventory, directory_tree, text_search, script_search, program_search, workspace_run, script_run, image_inspect, file_find, file_read, file_write, file_edit, file_copy, file_move, file_delete, status, diagnostics, context_health, learning_health, memory_quality_report, memory_quality_repair, memory_privacy_review, memory_privacy_repair, memory_embedding_backfill, memory_interaction_embedding_backfill, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, weather_lookup, approximate_location_lookup, unload, sleep.",
+        "output": "Valid action types: code, project, artifact_generate, artifact_ground, game_reference_suite, game_generate_and_test, game_generation_campaign, offload, sonder, master_orchestrate, master_status, master_capacity, master_cancel, master_retry, file_policy, workspace_inventory, directory_tree, text_search, script_search, program_search, workspace_run, script_run, image_inspect, file_find, file_read, file_write, file_edit, file_copy, file_move, file_delete, status, diagnostics, context_health, learning_health, memory_quality_report, memory_quality_repair, memory_privacy_review, memory_privacy_repair, memory_embedding_backfill, memory_interaction_embedding_backfill, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, local_service_probe, weather_lookup, approximate_location_lookup, unload, sleep.",
     }
 
 
@@ -9630,6 +9637,7 @@ def loop(
       - {"type":"file_delete","path":"notes.txt","dry_run":true}
       - {"type":"web_search","query":"...","limit":5}
       - {"type":"web_fetch","url":"https://...","max_chars":8000}
+      - {"type":"local_service_probe","url":"http://127.0.0.1:8080/health","method":"GET","timeout":2}
       - {"type":"weather_lookup","location":"Chicago, IL","forecast_days":3}
       - {"type":"approximate_location_lookup","consent":true}
       - {"type":"memory_search","query":"..."}
@@ -9798,6 +9806,35 @@ def web_fetch(url: str, max_chars: int = 8000) -> str:
         output=out,
     )
     return out
+
+
+@mcp.tool()
+def local_service_probe(
+    url: str,
+    method: str = "GET",
+    timeout: float = 2.0,
+) -> str:
+    """Probe an unauthenticated HTTP service that resolves only to loopback."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"url": url, "method": method, "timeout": timeout}
+    try:
+        result = local_probe.probe(url, method=method, timeout=timeout)
+    except Exception as exc:
+        _record_direct_tool(
+            "local_service_probe", args, ok=False, started=started,
+            summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = json.dumps(result, ensure_ascii=False, sort_keys=True)
+    _record_direct_tool(
+        "local_service_probe", args, ok=True, started=started,
+        summary="HTTP %s in %sms" % (
+            result.get("status", "?"), result.get("latency_ms", "?"),
+        ),
+        output=output,
+    )
+    return output
 
 
 @mcp.tool()
@@ -10811,6 +10848,7 @@ def tool_manifest() -> str:
         "sonder": "Ask through Sonder Runtime's local learning loop.",
         "offload": "Route a self-contained task to a configured local/cloud tier.",
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
+        "local_service_probe": "Bounded unauthenticated GET/HEAD health probe for an explicit-port HTTP/HTTPS service resolving exclusively to loopback.",
         "workspace_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace inventory, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
         "repo_status/repo_diff": "Inspect bounded read-only Git branch, worktree, staged, and unstaged state without shell execution.",
         "project_detect": "Inventory guarded build/test/runtime manifests and return deterministic evidence-backed language, framework, and cross-platform argv candidates without executing them.",
@@ -10869,6 +10907,7 @@ AGENT_TOOL_HELP = """Available tools:
 - game_generation_campaign: {"name": "game-fleet", "concept": "action roguelite", "total": 6, "language": "", "dimension": "", "theme": "arcane", "max_workers": 2, "repair_rounds": 1}
 - web_search: {"query": "...", "limit": 5}
 - web_fetch: {"url": "https://...", "max_chars": 8000}
+- local_service_probe: {"url": "http://127.0.0.1:8080/health", "method": "GET|HEAD", "timeout": 2}
 - weather_lookup: {"location": "Chicago, IL|60601", "forecast_days": 3, "units": "auto|metric|imperial"}
 - approximate_location_lookup: {"consent": true} (only after the user explicitly enables or requests IP location)
 - file_policy: {}
@@ -10974,6 +11013,7 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "self_heal_check", "status", "system_profile_text", "environment_status",
     "emotion_vector_status", "preferences_status", "tool_manifest",
     "memory_search", "web_search", "web_fetch", "weather_lookup",
+    "local_service_probe",
 })
 REPOSITORY_READ_ONLY_FORBIDDEN_ARGS = frozenset({
     "token", "approval", "extra_roots",
@@ -11010,6 +11050,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - memory_search: {"query": "...", "limit": 10}
 - web_search: {"query": "...", "limit": 5}
 - web_fetch: {"url": "https://...", "max_chars": 8000}
+- local_service_probe: {"url": "http://127.0.0.1:8080/health", "method": "GET|HEAD", "timeout": 2}
 - weather_lookup: {"location": "Chicago, IL|60601", "forecast_days": 3, "units": "auto|metric|imperial"}
 - command_registry_list: {"filter_text": "filesystem|context|status"}
 - activity_status: {}
@@ -11869,6 +11910,12 @@ def _agent_dispatch(
         if not allow_web:
             return "ERROR: web access disabled for this agent run"
         return web_fetch(args.get("url", ""), args.get("max_chars", 8000))
+    if tool_name == "local_service_probe":
+        return local_service_probe(
+            args.get("url", ""),
+            args.get("method", "GET"),
+            args.get("timeout", 2.0),
+        )
     if tool_name == "weather_lookup":
         if not allow_web:
             return "ERROR: web access disabled for this agent run"
@@ -12457,6 +12504,10 @@ def _agent_activity_command(tool_name, args):
         return "%s -> %s" % (
             args.get("source", ""), args.get("destination", ""),
         )
+    if tool_name == "local_service_probe":
+        return "%s %s" % (
+            str(args.get("method", "GET")).upper(), args.get("url", ""),
+        )
     path = args.get("path") or args.get("root") or ""
     if path:
         return str(path)
@@ -12490,7 +12541,8 @@ _PROJECT_BOUND_AGENT_TOOLS = (
     _PROJECT_SCOPED_PATH_TOOLS
     | _PROJECT_SCOPED_EXECUTION_TOOLS
     | frozenset({
-        "ground_artifact", "program_search", "web_search", "web_fetch",
+        "ground_artifact", "program_search", "local_service_probe",
+        "web_search", "web_fetch",
         "weather_lookup", "approximate_location_lookup", "memory_search",
         "file_policy", "task_create", "task_list", "task_update", "task_show",
         "checklist_create", "checklist_update", "checklist_show",
@@ -13096,7 +13148,7 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "data_query", "project_detect", "archive_list",
     "memory_search", "learning_health_status", "evaluation_history_status",
     "memory_quality_report", "memory_privacy_review", "artifact_ground",
-    "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",
+    "web_search", "web_fetch", "local_service_probe", "weather_lookup", "approximate_location_lookup",
     "status", "diagnostics",
 })
 _AGENT_FILE_EVIDENCE_TOOLS = frozenset({
@@ -13110,7 +13162,7 @@ _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "repository_symbol_index", "file_read", "file_digest", "file_read_range", "context_pack",
     "data_query", "text_search", "script_search",
     "program_search", "image_inspect", "environment_status", "repo_status", "repo_diff", "project_detect",
-    "repo_log", "repo_show", "repo_blame", "archive_list",
+    "repo_log", "repo_show", "repo_blame", "archive_list", "local_service_probe",
 })
 _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "workflow_run",
@@ -14254,7 +14306,7 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "project_detect",
     "repo_log", "repo_show", "repo_blame", "archive_list",
     "program_search", "image_inspect", "memory_search", "web_search",
-    "web_fetch", "weather_lookup", "status", "diagnostics",
+    "web_fetch", "local_service_probe", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
 })
 _AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
