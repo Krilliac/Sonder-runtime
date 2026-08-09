@@ -758,6 +758,20 @@ def _public_event(event, *, include_detail=False):
         "seq": max(0, int(event.get("seq") or 0)),
         "phase": phase,
     }
+    is_npu = kind.startswith("npu_")
+    if is_npu:
+        if "ok" in event:
+            out["ok"] = bool(event.get("ok"))
+        for key, allowed in _NPU_PUBLIC_ENUMS.items():
+            try:
+                value = str(event.get(key) or "").strip().lower()
+            except Exception:
+                value = "unknown"
+            out[key] = value if value in allowed else "unknown"
+        # NPU observability is intentionally enum-only in both summary and
+        # detail mode. A future provider error accidentally attached as a
+        # path, preview, command, model, or summary must fail closed here.
+        return out
     for key in ("tool", "title", "model", "action", "preview_kind"):
         if event.get(key) not in (None, ""):
             out[key] = _short(_redact_text(event.get(key)), 160)
@@ -773,10 +787,6 @@ def _public_event(event, *, include_detail=False):
     for key in ("ok", "dry_run"):
         if key in event:
             out[key] = bool(event.get(key))
-    if kind.startswith("npu_"):
-        for key, allowed in _NPU_PUBLIC_ENUMS.items():
-            value = str(event.get(key) or "").strip().lower()
-            out[key] = value if value in allowed else "unknown"
     if event.get("path") not in (None, ""):
         out["path"] = _safe_path(event.get("path"))
     if (

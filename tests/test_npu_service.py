@@ -364,6 +364,12 @@ def test_unknown_broker_reason_is_collapsed_before_human_status(
     hostile = r"C:\private\weights\model.onnx token=secret\x1b[2J"
     broker_status["fallbacks"] = {hostile: 3}
     broker_status["last_error"] = hostile
+    broker_status["hello"]["ort_error"] = "private prompt payload " + hostile
+    broker_status["providers"][0]["reason"] = "private prompt payload " + hostile
+    broker_status["worker"]["state"] = "private prompt payload " + hostile
+    broker_status["worker"]["spawns"] = "private prompt payload " + hostile
+    broker_status["circuit"]["state"] = "private prompt payload " + hostile
+    broker_status["latency_ms"]["p95"] = "private prompt payload " + hostile
     monkeypatch.setattr(fake, "status", lambda: broker_status)
     monkeypatch.setattr(npu_service.npu_broker, "get_broker", lambda: fake)
 
@@ -376,6 +382,8 @@ def test_unknown_broker_reason_is_collapsed_before_human_status(
     assert "unknown=3" in rendered
     assert hostile not in rendered
     assert "private" not in rendered and "token=secret" not in rendered
+    assert "prompt payload" not in rendered
+    assert "prompt payload" not in npu_service.diagnostics_line(state)
 
 
 def test_activity_feed_distinguishes_execution_fallback_from_shadow(npu_env):
@@ -383,6 +391,7 @@ def test_activity_feed_distinguishes_execution_fallback_from_shadow(npu_env):
     with activity_tracker.response_span("npu-observability", "safe request"):
         npu_service._record_capability_event(
             "npu_route_shadow", "routing", reason="ram_gate", ok=False,
+            handler="ollama",
         )
         npu_service._record_fallback("embeddings", "ram_gate")
         npu_service.record_fallback_handler("embeddings", "ollama", True)
@@ -427,6 +436,63 @@ def test_hostile_runtime_reason_never_enters_activity_or_status(npu_env):
     assert hostile not in serialized
     event = next(row for row in feed["events"] if row["kind"] == "npu_fallback")
     assert event["reason"] == "unknown"
+    assert projection["last_fallback"]["reason"] == "unknown"
+
+
+def test_public_fallback_projection_revalidates_supplied_state(npu_env):
+    secret = r"C:\private\model.onnx token=secret"
+    projection = npu_service.fallback_projection({
+        "fallback_projection": {
+            "schema_version": 999,
+            "known": True,
+            "capabilities": {
+                "routing": {
+                    "policy_mode": secret,
+                    "role": secret,
+                    "local_fallback_handler": secret,
+                },
+                "embeddings": {
+                    "policy_mode": "prefer",
+                    "role": "administrator",
+                    "local_fallback_handler": secret,
+                },
+                secret: {"policy_mode": "prefer"},
+            },
+            "last_fallback": {
+                "capability": secret, "reason": secret,
+                "operation_mode": secret, "fallback_handler": secret,
+                "handler_state": secret, "count": True,
+                "raw_error": secret,
+            },
+            "reason_counts": {secret: True, "ram_gate": "999999999999"},
+            "raw_error": secret,
+        },
+    })
+
+    assert projection["schema_version"] == 1
+    assert projection["capabilities"]["routing"]["policy_mode"] == "unknown"
+    assert projection["capabilities"]["embeddings"] == {
+        "policy_mode": "prefer", "role": "executor",
+        "local_fallback_handler": "ollama",
+    }
+    assert projection["last_fallback"] == {
+        "capability": "unknown", "reason": "unknown",
+        "operation_mode": "unknown", "fallback_handler": "unknown",
+        "handler_state": "unknown", "count": 0,
+    }
+    assert projection["reason_counts"] == {
+        "unknown": 0, "ram_gate": 2_147_483_647,
+    }
+    assert secret not in json.dumps(projection)
+
+
+def test_malformed_fallback_counter_container_is_unknown_not_error(npu_env):
+    projection = npu_service._fallback_status(
+        {"routing": "shadow", "embeddings": "prefer"},
+        {"fallbacks": [r"C:\private\model token=secret"]},
+    )
+    assert projection["known"] is False
+    assert projection["reason_counts"] == {}
     assert projection["last_fallback"]["reason"] == "unknown"
 
 
