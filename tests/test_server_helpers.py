@@ -828,9 +828,9 @@ def test_kimi_k3_extra_usage_402_falls_back_once(monkeypatch):
 
     def fake_chat(
         payload, *, model, cloud, timeout=None, cancel_check=None,
-        accept_native_tool_calls=False,
+        accept_native_tool_calls=False, idempotent=False,
     ):
-        calls.append((model, payload.get("think")))
+        calls.append((model, payload.get("think"), idempotent))
         if model == "kimi-k3:cloud":
             raise server.ModelCallError(
                 "http", "extra usage balance is empty", status=402, cloud=True,
@@ -852,8 +852,8 @@ def test_kimi_k3_extra_usage_402_falls_back_once(monkeypatch):
     assert content == "fallback-ok"
     assert used_model == "kimi-k2.7-code:cloud"
     assert calls == [
-        ("kimi-k3:cloud", True),
-        ("kimi-k2.7-code:cloud", True),
+        ("kimi-k3:cloud", True, True),
+        ("kimi-k2.7-code:cloud", True, True),
     ]
     assert payload["model"] == "kimi-k3:cloud"
     assert payload["think"] is True
@@ -864,9 +864,11 @@ def test_kimi_k3_agent_fallback_preserves_compact_native_tool_flags(monkeypatch)
 
     def fake_chat(
         payload, *, model, cloud, timeout=None, cancel_check=None,
-        accept_native_tool_calls=False,
+        accept_native_tool_calls=False, idempotent=False,
     ):
-        calls.append((model, payload.get("think"), accept_native_tool_calls))
+        calls.append((
+            model, payload.get("think"), accept_native_tool_calls, idempotent,
+        ))
         if model == "kimi-k3:cloud":
             raise server.ModelCallError(
                 "http", "extra usage balance is empty", status=402, cloud=True,
@@ -892,8 +894,8 @@ def test_kimi_k3_agent_fallback_preserves_compact_native_tool_flags(monkeypatch)
     assert content == "fallback-ok"
     assert used_model == "kimi-k2.7-code:cloud"
     assert calls == [
-        ("kimi-k3:cloud", True, True),
-        ("kimi-k2.7-code:cloud", False, True),
+        ("kimi-k3:cloud", True, True, True),
+        ("kimi-k2.7-code:cloud", False, True, True),
     ]
 
 
@@ -903,9 +905,9 @@ def test_kimi_k3_non_402_failure_never_falls_back(monkeypatch, status):
 
     def fake_chat(
         payload, *, model, cloud, timeout=None, cancel_check=None,
-        accept_native_tool_calls=False,
+        accept_native_tool_calls=False, idempotent=False,
     ):
-        calls.append(model)
+        calls.append((model, idempotent))
         raise server.ModelCallError("http", "rejected", status=status, cloud=True)
 
     monkeypatch.setattr(server, "_chat_request", fake_chat)
@@ -914,7 +916,7 @@ def test_kimi_k3_non_402_failure_never_falls_back(monkeypatch, status):
             {"model": "kimi-k3:cloud"}, model="kimi-k3:cloud", timeout=30,
         )
     assert caught.value.status == status
-    assert calls == ["kimi-k3:cloud"]
+    assert calls == [("kimi-k3:cloud", True)]
 
 
 def test_live_cloud_model_rewrites_known_retired_model():
@@ -1484,6 +1486,110 @@ def test_improvement_report_flags_failed_closed_mcp_refresh(monkeypatch, tmp_pat
     assert "failed closed" in issue["title"]
     assert report["mcp_runtime"]["last_error"].startswith("SyntaxError")
     assert "mcp: error" in server.format_improvement_report(report)
+
+
+def test_mcp_runtime_format_redacts_paths_and_exposes_safe_restart_action():
+    state = server.mcp_runtime_data()
+    state.update({
+        "status": "error",
+        "last_error": "stale runtime source: loaded MCP file no longer exists",
+        "provenance": {
+            "pid": 42,
+            "python": r"C:\Python\python.exe",
+            "cwd": r"C:\deleted-worktree",
+            "source_root": r"C:\deleted-worktree",
+            "source_root_exists": False,
+            "configured_runtime_root": r"C:\canonical\sonder-runtime",
+            "configured_root_exists": True,
+            "configured_root_ready": True,
+            "issue": "stale_source_root",
+            "recovery_action": (
+                r"Restart/reconnect this process from the configured canonical root: "
+                r"C:\canonical\sonder-runtime\sonder-runtime.cmd"
+            ),
+        },
+    })
+
+    text = server.format_mcp_runtime(state)
+
+    assert "pid=42" in text
+    assert "source root: missing" in text
+    assert "provenance ERROR: stale_source_root" in text
+    assert r"ACTION: Restart/reconnect" in text
+    assert "SONDER_RUNTIME_ROOT" in text
+    assert r"C:\deleted-worktree" not in text
+    assert r"C:\canonical" not in text
+    assert r"C:\Python" not in text
+
+
+def test_debug_inspect_includes_full_mcp_provenance(monkeypatch):
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server, "admin_status", lambda token="": "admin status")
+    monkeypatch.setattr(server, "master_status", lambda limit=10: "master status")
+    monkeypatch.setattr(server, "system_improvement_report", lambda: "improvements")
+    monkeypatch.setattr(server, "memory_quality_report", lambda sample_limit=3: "quality")
+    monkeypatch.setattr(server, "status", lambda: "runtime status")
+    monkeypatch.setattr(
+        server,
+        "format_mcp_runtime",
+        lambda: "sonder MCP runtime\n  provenance ERROR: stale_source_root\n  ACTION: restart canonical",
+    )
+
+    text = server.debug_inspect()
+
+    assert "sonder MCP runtime" in text
+    assert "provenance ERROR: stale_source_root" in text
+    assert "ACTION: restart canonical" in text
+
+
+def test_mcp_refresh_command_reports_unavailable_source(monkeypatch):
+    monkeypatch.setattr(
+        server.mcp,
+        "refresh_if_changed",
+        lambda: {
+            "reloaded": False,
+            "surface_changed": False,
+            "error": "stale runtime source: loaded MCP file is unavailable",
+        },
+    )
+    monkeypatch.setattr(server, "format_mcp_runtime", lambda: "runtime detail")
+
+    text = server._mcp_command("refresh")
+
+    assert text.startswith(
+        "MCP refresh failed closed: stale runtime source: "
+        "loaded MCP file is unavailable"
+    )
+    assert text.endswith("runtime detail")
+
+
+def test_mcp_runtime_format_never_echoes_injected_paths_or_credentials():
+    secret = "credential-token-should-not-appear"
+    state = {
+        "status": "error",
+        "enabled": True,
+        "path": rf"C:\Users\secret\{secret}\server.py",
+        "last_error": rf"OSError: C:\private\{secret}",
+        "provenance": {
+            "pid": 7,
+            "python": rf"C:\private\{secret}\python.exe",
+            "cwd": rf"C:\private\{secret}",
+            "source_root": rf"C:\private\{secret}",
+            "source_root_exists": False,
+            "configured_runtime_root": rf"C:\private\{secret}",
+            "configured_root_exists": False,
+            "configured_root_ready": False,
+            "issue": "stale_source_root",
+            "recovery_action": rf"restart C:\private\{secret}",
+        },
+    }
+
+    text = server.format_mcp_runtime(state)
+
+    assert secret not in text
+    assert "C:\\private" not in text
+    assert "OSError: source refresh failed" in text
+    assert all(ord(char) < 128 for char in text)
 
 
 def test_master_orchestrate_asks_for_execution_mode():
