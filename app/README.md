@@ -67,7 +67,8 @@ through Sonder Runtime's bounded authenticated launcher. See
 - **Live execution feed contract**: the existing `/status` response may add
   `execution.feed` with schema v1 fields `runtime_id`, `known`,
   `active_responses`, bounded `events`, `truncated`, `redaction_applied`,
-  `limits`, `error`, and `bytes`. Common event fields are `response_id`,
+  `oldest_seq`, `next_seq`, `dropped_events`, `sequence_gap`, `limits`, `error`,
+  and `bytes`. Common event fields are `response_id`,
   `response_status`, `seq`, `ts`, `elapsed_ms`, `kind`, and `phase`; model,
   tool, file, and other events add their documented typed fields. Preview
   descriptors use `state` (`available`, `unavailable`, or `disabled`), `text`,
@@ -75,7 +76,9 @@ through Sonder Runtime's bounded authenticated launcher. See
   limit up to a hard maximum of 32, renders at most 12, and re-redacts/truncates
   preview text to 300 characters. It never infers this projection from raw
   activity or starts another poll; older servers show the feed as unavailable.
-  Preview text is plain selectable text, never Markdown.
+  Available `sequence_gap` or `dropped_events` metadata is authoritative; older
+  payloads fall back to per-response sequence inference. Preview text is plain
+  selectable text, never Markdown.
 - **Persistent Autopilot workspace**: compose a high-level goal, choose guarded
   workspace or observe-only policy, enable/disable public web access, plan or run
   it with adaptive review or a static plan, then inspect its persisted success

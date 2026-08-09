@@ -1620,6 +1620,10 @@ class ExecutionFeed {
   final int? activeResponses;
   final bool truncated;
   final bool redactionApplied;
+  final int? oldestSeq;
+  final int? nextSeq;
+  final int? droppedEvents;
+  final int? sequenceGap;
   final int eventLimit;
   final int previewCharLimit;
   final String error;
@@ -1633,6 +1637,10 @@ class ExecutionFeed {
     required this.activeResponses,
     required this.truncated,
     required this.redactionApplied,
+    required this.oldestSeq,
+    required this.nextSeq,
+    required this.droppedEvents,
+    required this.sequenceGap,
     required this.eventLimit,
     required this.previewCharLimit,
     required this.error,
@@ -1664,6 +1672,15 @@ class ExecutionFeed {
           : _asInt(json['active_responses']),
       truncated: json['truncated'] == true || parsed.length > eventLimit,
       redactionApplied: json['redaction_applied'] == true,
+      oldestSeq:
+          json['oldest_seq'] == null ? null : _asInt(json['oldest_seq']),
+      nextSeq: json['next_seq'] == null ? null : _asInt(json['next_seq']),
+      droppedEvents: json['dropped_events'] == null
+          ? null
+          : _asInt(json['dropped_events']),
+      sequenceGap: json['sequence_gap'] == null
+          ? null
+          : _asInt(json['sequence_gap']),
       eventLimit: eventLimit,
       previewCharLimit: _asInt(limits['preview_chars']),
       error: json['error']?.toString() ?? '',
@@ -1673,6 +1690,9 @@ class ExecutionFeed {
   }
 
   bool get hasGap {
+    if (sequenceGap != null || droppedEvents != null) {
+      return (sequenceGap ?? 0) > 0 || (droppedEvents ?? 0) > 0;
+    }
     final lastByResponse = <String, int>{};
     for (final event in events) {
       final previous = lastByResponse[event.responseId];

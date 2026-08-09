@@ -715,6 +715,10 @@ void main() {
       'active_responses': 1,
       'truncated': true,
       'redaction_applied': true,
+      'oldest_seq': 0,
+      'next_seq': 16,
+      'dropped_events': 2,
+      'sequence_gap': 1,
       'limits': {'events': 20, 'preview_chars': 1000},
       'error': '',
       'bytes': 2048,
@@ -775,6 +779,8 @@ void main() {
     expect(find.text('edit harness.dart'), findsOneWidget);
     expect(find.text('12/14 events'), findsOneWidget);
     expect(find.text('Sequence gap'), findsOneWidget);
+    expect(find.text('window 0 → 16'), findsOneWidget);
+    expect(find.text('2 dropped'), findsOneWidget);
     expect(find.text('History truncated'), findsOneWidget);
     expect(find.text('Redaction applied'), findsOneWidget);
     expect(find.textContaining('file edit'), findsOneWidget);

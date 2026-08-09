@@ -551,6 +551,10 @@ void main() {
           'active_responses': 2,
           'truncated': false,
           'redaction_applied': true,
+          'oldest_seq': 5,
+          'next_seq': 26,
+          'dropped_events': 5,
+          'sequence_gap': 2,
           'limits': {'events': 20, 'preview_chars': 1000},
           'error': '',
           'bytes': 4096,
@@ -567,6 +571,10 @@ void main() {
     expect(feed.eventLimit, 20);
     expect(feed.previewCharLimit, 1000);
     expect(feed.redactionApplied, isTrue);
+    expect(feed.oldestSeq, 5);
+    expect(feed.nextSeq, 26);
+    expect(feed.droppedEvents, 5);
+    expect(feed.sequenceGap, 2);
     expect(feed.hasGap, isTrue);
     expect(feed.truncated, isTrue);
     expect(feed.events[17].model, 'sonder:latest');
@@ -631,6 +639,30 @@ void main() {
     expect(info.executionFeed?.events.single.kind, 'unknown-new-kind');
     expect(info.executionFeed?.events.single.preview, isEmpty);
     expect(info.executionFeed?.events.single.previewState, 'disabled');
+
+    final authoritativeNoGap = ExecutionFeed.fromJson({
+      'known': true,
+      'dropped_events': 0,
+      'sequence_gap': 0,
+      'events': [
+        {'response_id': 'r1', 'seq': 1},
+        {'response_id': 'r1', 'seq': 3},
+      ],
+    });
+    expect(authoritativeNoGap.hasGap, isFalse);
+    expect(authoritativeNoGap.oldestSeq, isNull);
+    expect(authoritativeNoGap.droppedEvents, 0);
+
+    final inferredLegacyGap = ExecutionFeed.fromJson({
+      'known': true,
+      'events': [
+        {'response_id': 'legacy-r1', 'seq': 1},
+        {'response_id': 'legacy-r1', 'seq': 3},
+      ],
+    });
+    expect(inferredLegacyGap.sequenceGap, isNull);
+    expect(inferredLegacyGap.droppedEvents, isNull);
+    expect(inferredLegacyGap.hasGap, isTrue);
   });
 
   test('agent status preserves scheduler capacity and cancellation state', () {
