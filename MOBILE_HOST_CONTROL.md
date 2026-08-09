@@ -12,13 +12,15 @@ Sonder is the orchestration runtime, not the model being served. On the host,
 Ollama stores and loads the configured base or deployed model weights and runs
 local inference. `sonder_headless.py` supervises Ollama and the Sonder Runtime
 API, where memory, tools, grounding, policy, training, and deployment are
-orchestrated. The main Sonder API remains on port `11435`. Use a different
-strong credential for each service:
+orchestrated. The managed Sonder API remains loopback-only on port `11435`;
+remote clients reach it through the documented TLS reverse proxy. Use a
+different strong credential for each service:
 
 - `SONDER_API_KEY` authenticates chat and System API requests.
 - `SONDER_LAUNCHER_TOKEN` authenticates host process control.
 
-Both must contain at least 24 characters for a LAN bind.
+Both must contain at least 24 characters for a remote endpoint. Distributed
+mobile apps require HTTPS for both services.
 
 ## Windows host setup
 
@@ -30,26 +32,31 @@ py sonder_launcher.py --generate-token
 setx SONDER_LAUNCHER_TOKEN "PASTE_THE_LAUNCHER_TOKEN"
 setx SONDER_API_KEY "PASTE_A_DIFFERENT_MAIN_API_KEY"
 setx SONDER_AUTH_MODE "api-key"
-sonder-launcher-autostart.cmd
+setx SONDER_LAUNCHER_CERT "C:\path\fullchain.pem"
+setx SONDER_LAUNCHER_KEY "C:\path\privkey.pem"
 ```
 
-Sign out and back in so the user environment is refreshed, or set the same
-variables in the current terminal for the first run. Then launch:
+`setx` updates future command windows, not this one. Close this terminal and
+open a new terminal in the repository (or set the same variables in the
+current terminal), then install autostart and launch:
 
 ```bat
-sonder-launcher.cmd --host 0.0.0.0
+sonder-launcher-autostart.cmd
+sonder-launcher.cmd --host 0.0.0.0 --cert C:\path\fullchain.pem --key C:\path\privkey.pem
 ```
 
-The autostart installer creates a per-user Startup entry. It does not copy the
-token into that entry. Remove it with:
+The autostart installer creates a per-user Startup entry only after the token
+and both TLS paths name existing files. It does not copy those values into the
+entry. Remove it with:
 
 ```bat
 sonder-launcher-autostart.cmd uninstall
 ```
 
-Open TCP ports `11435` and `11436` in the host firewall only for the trusted
-private network or VPN. Sonder Runtime does not change the operating-system
-firewall automatically.
+Open the TLS reverse-proxy port (normally `443`) and TLS launcher port `11436`
+only for the trusted private network or VPN. Never open or port-forward the
+loopback runtime port `11435`. Sonder Runtime does not change the
+operating-system firewall automatically.
 
 ## Linux or macOS host setup
 
@@ -57,13 +64,19 @@ Set the same three environment variables in the account that will run the
 launcher, then run:
 
 ```sh
-SONDER_LAUNCHER_HOST=0.0.0.0 ./sonder-launcher.sh
+SONDER_LAUNCHER_HOST=0.0.0.0 \
+SONDER_LAUNCHER_CERT=/path/fullchain.pem \
+SONDER_LAUNCHER_KEY=/path/privkey.pem \
+./sonder-launcher.sh
 ```
 
 Use the operating system's normal per-user service manager to start this script
 at login. Keep the environment file readable only by that user. The launcher
 also accepts `--cert` and `--key`, or `SONDER_LAUNCHER_CERT` and
-`SONDER_LAUNCHER_KEY`, for TLS.
+`SONDER_LAUNCHER_KEY`, for TLS. A non-loopback launcher refuses to start
+without both. An intentionally isolated development build may opt into
+plaintext with `--allow-insecure-http-for-development`; never use that override
+with a distributed app or bearer credentials on an untrusted network.
 
 ## App setup
 
