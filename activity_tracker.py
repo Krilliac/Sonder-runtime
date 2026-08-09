@@ -756,7 +756,11 @@ def _public_event(event, *, include_detail=False):
             out[key] = bool(event.get(key))
     if event.get("path") not in (None, ""):
         out["path"] = _safe_path(event.get("path"))
-    if out["kind"] != "response_start" and event.get("summary") not in (None, ""):
+    if (
+        include_detail
+        and out["kind"] != "response_start"
+        and event.get("summary") not in (None, "")
+    ):
         out["summary"] = _block(_redact_text(event.get("summary")), 1000)
     if include_detail and "args" in event:
         out["args"] = _safe_args(event.get("args"))
@@ -786,7 +790,10 @@ def _public_file(item, *, include_detail=False):
         "lines_deleted": max(0, int(item.get("lines_deleted") or 0)),
         "bytes": max(0, int(item.get("bytes") or 0)),
         "dry_run": bool(item.get("dry_run")),
-        "summary": _short(_redact_text(item.get("summary", "")), 160),
+        "summary": (
+            _short(_redact_text(item.get("summary", "")), 160)
+            if include_detail else ""
+        ),
         "preview_kind": _short(item.get("preview_kind", ""), 40),
         "preview": (
             _public_descriptor(item.get("preview"))
@@ -808,8 +815,9 @@ def _public_response(response, *, include_detail=False):
         "lines_edited", "lines_deleted",
     ):
         out[key] = max(0, int(response.get(key) or 0))
-    out["result_summary"] = _block(
-        _redact_text(response.get("result_summary", "")), 1000,
+    out["result_summary"] = (
+        _block(_redact_text(response.get("result_summary", "")), 1000)
+        if include_detail else ""
     )
     source_events = response.get("events") or []
     source_files = response.get("files") or []
@@ -825,13 +833,22 @@ def _public_response(response, *, include_detail=False):
     if isinstance(checklist, dict):
         out["checklist"] = {
             "id": _short(checklist.get("id", ""), 100),
-            "title": _short(_redact_text(checklist.get("title", "")), 220),
+            "title": (
+                _short(_redact_text(checklist.get("title", "")), 220)
+                if include_detail else ""
+            ),
             "status": _short(checklist.get("status", ""), 40),
-            "summary": _short(_redact_text(checklist.get("summary", "")), 220),
+            "summary": (
+                _short(_redact_text(checklist.get("summary", "")), 220)
+                if include_detail else ""
+            ),
             "items": [
                 {
                     "id": _short(row.get("id", ""), 100),
-                    "title": _short(_redact_text(row.get("title", "")), 220),
+                    "title": (
+                        _short(_redact_text(row.get("title", "")), 220)
+                        if include_detail else ""
+                    ),
                     "status": _short(row.get("status", ""), 40),
                 }
                 for row in (checklist.get("items") or [])[:80]
@@ -1007,7 +1024,9 @@ def execution_feed(
     return result
 
 
-_TERMINAL_CONTROL_RE = _CONTROL_RE
+_TERMINAL_CONTROL_RE = re.compile(
+    r"[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]"
+)
 
 
 def _terminal_safe(value):

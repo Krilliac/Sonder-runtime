@@ -2736,6 +2736,7 @@ class _ExecutionEventCard extends StatelessWidget {
         return Icons.build_outlined;
       case 'file':
       case 'file_op':
+      case 'file_change':
         return Icons.description_outlined;
       default:
         return Icons.bolt_outlined;

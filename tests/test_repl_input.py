@@ -114,3 +114,22 @@ def test_activity_watch_prints_each_sequence_once_and_stops_cleanly(
     assert output.count("tool_call") == 1
     assert "\x1b" not in output
     assert "activity watch stopped" in output
+
+
+def test_activity_formatter_flattens_terminal_control_and_bidi_in_fields():
+    feed = {
+        "known": True, "truncated": False, "events": [{
+            "seq": 1, "kind": "tool_call", "phase": "completed",
+            "elapsed_ms": 1,
+            "tool": "safe\nFAKE: trusted\r\t\x00\x1b[31m\u202e",
+            "result_preview": {
+                "state": "available", "text": "ok\nFAKE: result\x9b31m",
+                "chars": 20, "truncated": False, "redacted": False,
+            },
+        }],
+    }
+    output = sonder_repl.server.activity_tracker.format_execution_feed(feed)
+    assert "\nFAKE:" not in output
+    assert "\r" not in output and "\t" not in output
+    assert "\x00" not in output and "\x1b" not in output and "\x9b" not in output
+    assert "\u202e" not in output

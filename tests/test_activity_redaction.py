@@ -121,6 +121,38 @@ def test_public_activity_defaults_to_metadata_only_and_basename_paths(monkeypatc
     assert file_event["phase"] == "applied"
 
 
+def test_metadata_projection_suppresses_all_free_text_summaries(monkeypatch):
+    monkeypatch.delenv("SONDER_EXECUTION_FEED_DETAIL", raising=False)
+    at.reset_for_tests()
+    with at.response_span("work", "private prompt"):
+        at.record_event("notice", summary="SUMMARY_CANARY")
+        at.record_file_change(
+            "edit", "report.txt", summary="FILE_SUMMARY_CANARY",
+        )
+        at.set_checklist({
+            "id": "check-1", "title": "CHECKLIST_TITLE_CANARY",
+            "status": "running", "summary": "CHECKLIST_SUMMARY_CANARY",
+            "items": [{
+                "id": "item-1", "title": "CHECKLIST_ITEM_CANARY",
+                "status": "pending",
+            }],
+        })
+        at.set_result_summary("RESULT_CANARY")
+
+    encoded = json.dumps(at.public_snapshot(include_detail=False))
+    for canary in (
+        "SUMMARY_CANARY", "FILE_SUMMARY_CANARY", "RESULT_CANARY",
+        "CHECKLIST_TITLE_CANARY", "CHECKLIST_SUMMARY_CANARY",
+        "CHECKLIST_ITEM_CANARY",
+    ):
+        assert canary not in encoded
+
+    monkeypatch.setenv("SONDER_EXECUTION_FEED_DETAIL", "1")
+    detailed = json.dumps(at.public_snapshot(include_detail=True))
+    assert "SUMMARY_CANARY" in detailed
+    assert "RESULT_CANARY" in detailed
+
+
 def test_detailed_execution_feed_is_bounded_redacted_and_versioned(monkeypatch):
     monkeypatch.setenv("SONDER_EXECUTION_FEED_DETAIL", "1")
     at.reset_for_tests()

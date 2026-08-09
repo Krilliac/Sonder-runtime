@@ -383,6 +383,7 @@ def test_repeated_cached_search_evidence_reaches_master_audit(
     guard.  That is a valid early failure, but the first text_search still
     produced scoped host evidence which the master can audit and salvage.
     """
+    monkeypatch.setenv("SONDER_SPECULATION", "0")
     monkeypatch.setattr(master_orchestrator, "parallel_worker_slots", lambda count: 1)
     decisions = [
         '{"tool":"text_search","args":{"query":"needle"},"reason":"inspect"}',
