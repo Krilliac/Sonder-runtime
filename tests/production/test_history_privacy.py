@@ -15,6 +15,11 @@ _ROOT = Path(__file__).resolve().parents[2]
 _SCRIPT = _ROOT / "scripts" / "check_history_privacy.py"
 
 
+def test_checker_source_does_not_restore_deprecated_product_identifier():
+    deprecated = b"trilo" + b"bite"
+    assert deprecated not in _SCRIPT.read_bytes().lower()
+
+
 def _module():
     spec = importlib.util.spec_from_file_location("history_privacy", _SCRIPT)
     module = importlib.util.module_from_spec(spec)
