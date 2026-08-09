@@ -836,6 +836,7 @@ def run_loop(
     stop_on_failure=True,
     stop_on_success=False,
     delay_seconds=0,
+    cancel_check=None,
 ):
     """Compatibility delegate to the package application use case."""
     return workflow_loop.run_loop(
@@ -845,6 +846,7 @@ def run_loop(
         stop_on_failure=stop_on_failure,
         stop_on_success=stop_on_success,
         delay_seconds=delay_seconds,
+        cancel_check=cancel_check,
     )
 
 

@@ -123,6 +123,17 @@ def test_workflow_live_reload_stays_behind_package_adapter(monkeypatch, tmp_path
     assert "workflow_store" not in server.__dict__
 
 
+def test_workflow_compatibility_alias_keeps_identity_through_real_reload():
+    import workflow_store
+    from sonder_runtime.adapters.filesystem import workflow_store as packaged
+
+    assert workflow_store is packaged
+    refreshed = importlib.reload(workflow_store)
+    assert refreshed is packaged
+    assert sys.modules["workflow_store"] is packaged
+    assert sys.modules[packaged.__spec__.name] is packaged
+
+
 def test_server_rebinds_log_inspect_alias_without_replacing_tool(monkeypatch):
     import server
 
