@@ -56,11 +56,19 @@ with an authorizer plus row, column, byte, and time ceilings. Text formats use
 only structured exact-equality filters and field/JSON-pointer projections; no
 expressions or file content are executed.
 
+`data_convert` deterministically converts JSON arrays, JSONL, CSV, and TSV
+using an explicit ordered list of exact top-level fields. Preview mode fully
+validates and sizes the conversion without touching disk. Apply mode writes a
+same-directory staging file and atomically publishes it only if the destination
+does not exist. UTF-8, headers, finite values, nesting, fields, rows, columns,
+input bytes, and output bytes are all validated under hard ceilings; no
+expressions, implicit type inference, or overwrite mode are available.
+
 ## Guarded filesystem tools
 
 `file_find`, `file_read`, `file_read_range`, `file_write`, `file_batch_write`, `file_edit`, `text_patch`,
 `file_copy`, `file_move`, `file_delete`, `directory_tree`, `directory_create`, `workspace_inventory`,
-`workspace_compare`, `text_search`, `script_search`, `program_search`, `image_inspect`, `log_inspect`, `archive_list`,
+`workspace_compare`, `text_search`, `script_search`, `program_search`, `image_inspect`, `log_inspect`, `data_convert`, `archive_list`,
 `archive_extract`, `repo_log`,
 `repo_show`, `repo_blame`. All are
 confined to `SONDER_FILE_ROOTS`, honor the permission policy
