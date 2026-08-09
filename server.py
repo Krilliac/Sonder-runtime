@@ -16129,7 +16129,7 @@ def route_work_request(prompt: str, project: str = "") -> str | None:
                 if npu_fallback_attempted:
                     with contextlib.suppress(Exception):
                         npu_service.record_fallback_handler(
-                            "routing", "ollama", False,
+                            "routing", "host", True,
                         )
                 mode = "autopilot"
                 selected_tier = runtime_policy.route_tier(
