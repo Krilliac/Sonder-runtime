@@ -167,6 +167,29 @@ def test_project_outside_explicit_authorized_roots_is_rejected(monkeypatch, tmp_
         isolated_runner.resolve_project(str(outside))
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Linux mountinfo fixture is POSIX-only")
+def test_nested_mount_table_entry_is_rejected(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    nested = project / "mounted"
+    nested.mkdir()
+    original_is_file = isolated_runner.Path.is_file
+    original_read_text = isolated_runner.Path.read_text
+    monkeypatch.setattr(
+        isolated_runner.Path, "is_file",
+        lambda path: True if str(path) == "/proc/self/mountinfo" else original_is_file(path),
+    )
+    monkeypatch.setattr(
+        isolated_runner.Path, "read_text",
+        lambda path, **kwargs: (
+            "1 0 0:1 / %s rw - ext4 /dev/x rw\n" % nested
+            if str(path) == "/proc/self/mountinfo" else original_read_text(path, **kwargs)
+        ),
+    )
+    with pytest.raises(ValueError, match="nested host mount"):
+        isolated_runner.resolve_project(str(project))
+
+
 def test_filesystem_root_cannot_be_authorized(monkeypatch):
     monkeypatch.setenv(isolated_runner.ROOTS_ENV, os.path.abspath(os.sep))
     with pytest.raises(ValueError, match="authorized root is unsafe"):
