@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -144,6 +145,38 @@ def test_install_happy_path_commits_and_activates(env):
     import sonder_backup
 
     assert sonder_backup.list_backups(env / "backups")
+
+
+def test_backup_failure_blocks_install_without_disclosing_adapter_detail(
+    env, monkeypatch
+):
+    from sonder_runtime.bootstrap import app as bootstrap_app
+
+    manager = _manager(env)
+    plan = _import_ok(manager, env, version="2.0.0-backup-failure")
+    secret = str(env / "private" / "credential.txt")
+
+    class FailingBackup:
+        def create(self, _target):
+            raise OSError(secret)
+
+    monkeypatch.setattr(
+        bootstrap_app,
+        "default_app",
+        lambda: SimpleNamespace(backup=FailingBackup()),
+    )
+    with pytest.raises(sonder_updates.UpdateError) as caught:
+        manager.install(
+            plan["update_id"],
+            confirm=confirm_nonce_for(plan),
+            allow_unverified=True,
+        )
+
+    assert secret not in str(caught.value)
+    failed = manager.repository.get_plan(plan["update_id"])
+    assert failed["status"] == "failed"
+    assert failed["error_code"] == "BACKUP_FAILED"
+    assert not (env / "current").exists()
 
 
 def test_install_requires_confirmation_nonce(env):

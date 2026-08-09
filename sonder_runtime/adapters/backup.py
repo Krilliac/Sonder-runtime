@@ -36,6 +36,9 @@ import sonder_version
 from sonder_operations_store import OperationsStore
 
 MANIFEST_FORMAT_VERSION = 1
+MAX_MANIFEST_BYTES = 1 << 20
+MAX_MANIFEST_FILES = 64
+MAX_MANIFEST_PATH_CHARS = 256
 
 
 class BackupError(RuntimeError):
@@ -239,11 +242,17 @@ def _verify_directory(backup_dir: Path) -> list[str]:
     problems: list[str] = []
     manifest_path = backup_dir / "manifest.json"
     if not manifest_path.exists():
-        return [f"missing manifest.json in {backup_dir}"]
+        return ["missing manifest.json"]
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        return ["manifest.json is not a regular file"]
     try:
+        if manifest_path.stat().st_size > MAX_MANIFEST_BYTES:
+            return ["manifest.json exceeds the size limit"]
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except ValueError as exc:
-        return [f"manifest.json unreadable: {exc}"]
+    except (OSError, UnicodeError, ValueError) as exc:
+        return [f"manifest.json unreadable: {type(exc).__name__}"]
+    if not isinstance(manifest, dict):
+        return ["manifest.json root must be an object"]
     if manifest.get("format_version") != MANIFEST_FORMAT_VERSION:
         problems.append(
             f"unsupported manifest format_version {manifest.get('format_version')!r}"
@@ -253,23 +262,75 @@ def _verify_directory(backup_dir: Path) -> list[str]:
     if not isinstance(files, list) or not files:
         problems.append("manifest lists no files")
         return problems
+    if len(files) > MAX_MANIFEST_FILES:
+        return ["manifest lists too many files"]
+    expected_checksums: list[str] = []
+    restored_names: set[str] = set()
     for entry in files:
-        rel = entry.get("path", "")
-        member = backup_dir / rel
-        if ".." in Path(rel).parts or Path(rel).is_absolute():
+        if not isinstance(entry, dict):
+            problems.append("manifest file entry must be an object")
+            continue
+        rel = entry.get("path")
+        if not isinstance(rel, str) or not rel or len(rel) > MAX_MANIFEST_PATH_CHARS:
+            problems.append("manifest contains an invalid file path")
+            continue
+        rel_path = Path(rel)
+        member = backup_dir / rel_path
+        if (
+            ".." in rel_path.parts
+            or rel_path.is_absolute()
+            or len(rel_path.parts) != 2
+            or rel_path.parts[0] != "state"
+        ):
             problems.append(f"manifest path escapes backup: {rel!r}")
             continue
+        if rel_path.name in restored_names:
+            problems.append(f"duplicate restore filename {rel_path.name!r}")
+            continue
+        restored_names.add(rel_path.name)
         if not member.exists():
             problems.append(f"missing file {rel}")
             continue
-        size = member.stat().st_size
-        if size != entry.get("size"):
-            problems.append(
-                f"size mismatch for {rel}: {size} != {entry.get('size')}"
-            )
+        if member.is_symlink() or not member.is_file():
+            problems.append(f"backup member is not a regular file: {rel}")
             continue
-        if _sha256_file(member) != entry.get("sha256"):
+        expected_size = entry.get("size")
+        expected_hash = entry.get("sha256")
+        if (
+            isinstance(expected_size, bool)
+            or not isinstance(expected_size, int)
+            or expected_size < 0
+            or not isinstance(expected_hash, str)
+            or len(expected_hash) != 64
+            or any(ch not in "0123456789abcdef" for ch in expected_hash)
+        ):
+            problems.append(f"invalid metadata for {rel}")
+            continue
+        size = member.stat().st_size
+        if size != expected_size:
+            problems.append(f"size mismatch for {rel}")
+            continue
+        if _sha256_file(member) != expected_hash:
             problems.append(f"checksum mismatch for {rel}")
+            continue
+        expected_checksums.append(f"{expected_hash}  {rel}\n")
+    checksums_path = backup_dir / "checksums.sha256"
+    if checksums_path.is_symlink() or not checksums_path.is_file():
+        problems.append("checksums.sha256 is missing or not a regular file")
+    else:
+        try:
+            if checksums_path.stat().st_size > MAX_MANIFEST_BYTES:
+                problems.append("checksums.sha256 exceeds the size limit")
+            else:
+                expected_checksums.append(
+                    f"{_sha256_file(manifest_path)}  manifest.json\n"
+                )
+                if checksums_path.read_text(encoding="utf-8") != "".join(
+                    expected_checksums
+                ):
+                    problems.append("checksums.sha256 does not match manifest")
+        except (OSError, UnicodeError):
+            problems.append("checksums.sha256 is unreadable")
     return problems
 
 
@@ -312,7 +373,7 @@ def prune_backups(target: str | os.PathLike, *, keep: int) -> list[str]:
     """Remove oldest backups beyond ``keep``; never removes the newest
     verified backup.  Tiered daily/weekly/monthly retention arrives with
     the WP7 scheduler; this primitive is deliberately conservative."""
-    if keep < 1:
+    if isinstance(keep, bool) or not isinstance(keep, int) or keep < 1:
         raise BackupError("retention must keep at least one backup")
     backups = list_backups(target)
     verified_newest: str | None = None
@@ -342,7 +403,13 @@ def prune_backups_tiered(
     of each of the last ``weekly`` ISO weeks, and the newest of each of the
     last ``monthly`` months.  The newest verified backup is always kept.
     """
-    if min(daily, weekly, monthly) < 1:
+    tiers = (daily, weekly, monthly)
+    if any(
+        isinstance(value, bool) or not isinstance(value, int)
+        for value in tiers
+    ):
+        raise BackupError("retention tiers must be integers")
+    if min(tiers) < 1:
         raise BackupError("every retention tier must keep at least one backup")
     backups = list_backups(target)
     if not backups:
@@ -452,17 +519,35 @@ def restore_to_empty(
             "backup failed verification: " + "; ".join(problems)
         )
     dest = Path(destination).expanduser()
-    dest.mkdir(parents=True, exist_ok=True)
-    if any(dest.iterdir()):
-        raise BackupError(f"restore destination {dest} is not empty")
+    if dest.is_symlink():
+        raise BackupError("restore destination must not be a symlink")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    existed = dest.exists()
+    if existed and (not dest.is_dir() or any(dest.iterdir())):
+        raise BackupError("restore destination is not empty")
     manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
-    restored = []
-    for entry in manifest["files"]:
-        rel = Path(entry["path"])
-        # verified above: relative, no traversal
-        target_path = dest / rel.name
-        shutil.copy2(source / rel, target_path)
-        if _sha256_file(target_path) != entry["sha256"]:
-            raise BackupError(f"restored file corrupt: {rel.name}")
-        restored.append(str(target_path))
-    return restored
+    import tempfile
+
+    staging = Path(
+        tempfile.mkdtemp(prefix=f".{dest.name}.restore-", dir=dest.parent)
+    )
+    removed_existing = False
+    try:
+        restored = []
+        for entry in manifest["files"]:
+            rel = Path(entry["path"])
+            target_path = staging / rel.name
+            shutil.copy2(source / rel, target_path)
+            if _sha256_file(target_path) != entry["sha256"]:
+                raise BackupError(f"restored file corrupt: {rel.name}")
+            restored.append(str(dest / rel.name))
+        if existed:
+            dest.rmdir()
+            removed_existing = True
+        os.rename(staging, dest)
+        return restored
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        if removed_existing and not dest.exists():
+            dest.mkdir()
+        raise

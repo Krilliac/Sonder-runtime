@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import importlib
+import hashlib
 import inspect
+import json
+import os
 import sys
 from types import SimpleNamespace
 
@@ -118,3 +121,117 @@ def test_update_engine_routes_backup_through_application_service():
     source = inspect.getsource(sonder_update_engine.UpdateManager.install)
     assert "default_app().backup.create(target)" in source
     assert "sonder_backup.create_backup" not in source
+
+
+def _write_fixture_backup(root, *, rel="state/memory.db", content=b"safe"):
+    member = root / rel
+    member.parent.mkdir(parents=True, exist_ok=True)
+    member.write_bytes(content)
+    digest = hashlib.sha256(content).hexdigest()
+    manifest = {
+        "format_version": backup_adapter.MANIFEST_FORMAT_VERSION,
+        "files": [{"path": rel, "size": len(content), "sha256": digest}],
+    }
+    manifest_path = root / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    (root / "checksums.sha256").write_text(
+        f"{digest}  {rel}\n{manifest_digest}  manifest.json\n",
+        encoding="utf-8",
+    )
+    return member
+
+
+def test_verify_rejects_symlinked_member_and_restore_destination(tmp_path):
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks unavailable")
+    backup = tmp_path / "backup"
+    outside = tmp_path / "private.db"
+    outside.write_bytes(b"safe")
+    member = _write_fixture_backup(backup)
+    member.unlink()
+    try:
+        member.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlink creation unavailable")
+
+    assert any(
+        "regular file" in problem
+        for problem in backup_adapter.verify_backup(backup)
+    )
+
+    member.unlink()
+    member.write_bytes(b"safe")
+    real_destination = tmp_path / "real-destination"
+    real_destination.mkdir()
+    destination_link = tmp_path / "destination-link"
+    destination_link.symlink_to(real_destination, target_is_directory=True)
+    with pytest.raises(backup_adapter.BackupError, match="must not be a symlink"):
+        backup_adapter.restore_to_empty(backup, destination_link)
+    assert list(real_destination.iterdir()) == []
+
+
+def test_verify_bounds_and_validates_untrusted_manifest(tmp_path):
+    backup = tmp_path / "backup"
+    _write_fixture_backup(backup)
+    (backup / "manifest.json").write_bytes(
+        b"{" + b" " * backup_adapter.MAX_MANIFEST_BYTES + b"}"
+    )
+    assert backup_adapter.verify_backup(backup) == [
+        "manifest.json exceeds the size limit"
+    ]
+
+    _write_fixture_backup(backup)
+    manifest_path = backup / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"][0]["size"] = True
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert any(
+        "invalid metadata" in problem
+        for problem in backup_adapter.verify_backup(backup)
+    )
+
+
+def test_verify_rejects_checksum_index_tampering_and_flattening_collision(tmp_path):
+    backup = tmp_path / "backup"
+    _write_fixture_backup(backup)
+    (backup / "checksums.sha256").write_text("forged\n", encoding="utf-8")
+    assert "checksums.sha256 does not match manifest" in (
+        backup_adapter.verify_backup(backup)
+    )
+
+    _write_fixture_backup(backup)
+    manifest_path = backup / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"].append(
+        {**manifest["files"][0], "path": "state/nested/memory.db"}
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert any(
+        "escapes backup" in problem
+        for problem in backup_adapter.verify_backup(backup)
+    )
+
+
+def test_restore_is_published_only_after_every_copy_verifies(tmp_path, monkeypatch):
+    backup = tmp_path / "backup"
+    _write_fixture_backup(backup)
+    destination = tmp_path / "restored"
+    real_hash = backup_adapter._sha256_file
+
+    def corrupt_staged_copy(path):
+        if ".restore-" in str(path):
+            return "0" * 64
+        return real_hash(path)
+
+    monkeypatch.setattr(backup_adapter, "_sha256_file", corrupt_staged_copy)
+    with pytest.raises(backup_adapter.BackupError, match="restored file corrupt"):
+        backup_adapter.restore_to_empty(backup, destination)
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".restored.restore-*"))
+
+
+@pytest.mark.parametrize("value", [True, 1.5, "2", -1, 0])
+def test_retention_rejects_non_integer_and_non_positive_keep(tmp_path, value):
+    with pytest.raises(backup_adapter.BackupError):
+        backup_adapter.prune_backups(tmp_path, keep=value)
