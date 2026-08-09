@@ -53,6 +53,13 @@ tools. See [autopilot-interruption](../runbooks/autopilot-interruption.md).
 ## Fleet
 
 Parallel worker execution (`fleet.db`, `fleet_store.py`) for fan-out work.
+The default worker width remains hardware-derived (CPU, available RAM, VRAM,
+and Ollama batch width). AI harness/research/data runs can opt into a wider
+single run with `master_orchestrate(..., agents=24, worker_cap=24)` or the clear
+task phrase `use 24 workers`. The override is shown in `master_status` and
+`master_capacity`, ends with that run, and is clamped to the operator ceiling.
+`SONDER_MAX_WORKER_CAP` may lower that ceiling; the compiled absolute ceiling is
+64, so malformed or enormous values cannot create unbounded threads.
 Statuses `queued → running → done | failed | cancelled | interrupted`, with
 `interrupted`/`failed`/`cancelled` re-dispatchable to `queued`. Claims use
 compare-and-set; heartbeats detect stale owners. Two model instances (e.g.
