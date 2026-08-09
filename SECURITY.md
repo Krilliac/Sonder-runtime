@@ -42,6 +42,9 @@ Mitigations that are already in place and worth knowing about:
 - `file_batch_write` never targets secrets/control state or traverses symlinks,
   requires explicit create-versus-overwrite intent, and rolls back completed
   writes on a later failure when restoration remains possible.
+- `workspace_compare` exposes metadata and SHA-256 digests, never file content;
+  it fails closed on sensitive/control state, reparse points, special files,
+  identity races, or any scan/time/output ceiling.
 - Cloud tiers are **opt-in**. Local tiers run against loopback Ollama, and a
   remote `OLLAMA_HOST` must be explicitly enabled.
 - Lessons are passed through a 20-rule privacy classifier before storage, so
