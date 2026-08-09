@@ -5,7 +5,7 @@ import os
 
 import embeddings
 import sonder_runtime.adapters.memory_store as memory_store
-from sonder_runtime.application.recall.use_cases import validate_recall_request
+from sonder_runtime.application.ports.recall import validate_recall_request
 from sonder_runtime.domain.common.errors import InvalidInput
 from sonder_runtime.domain.memory import rules as _rules
 
