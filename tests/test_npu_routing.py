@@ -179,7 +179,15 @@ def test_incomplete_npu_decision_falls_back_locally(
 
 def test_prefer_miss_falls_back_to_local_ollama_router(monkeypatch):
     calls = []
+    handled = []
+    monkeypatch.setattr(server.npu_service, "routing_active", lambda: "prefer")
     monkeypatch.setattr(server.npu_service, "route_decide", lambda prompt: None)
+    monkeypatch.setattr(
+        server.npu_service, "record_fallback_handler",
+        lambda capability, handler, ok: handled.append(
+            (capability, handler, ok)
+        ),
+    )
     monkeypatch.setattr(
         server,
         "_execution_route_model",
@@ -199,6 +207,7 @@ def test_prefer_miss_falls_back_to_local_ollama_router(monkeypatch):
 
     assert "source: bounded local mode model" in output
     assert calls
+    assert handled == [("routing", "ollama", True)]
 
 
 def test_shadow_observes_baseline_without_changing_it(monkeypatch):
@@ -226,7 +235,10 @@ def test_shadow_observes_baseline_without_changing_it(monkeypatch):
     output = server.route_work_request(AMBIGUOUS)
 
     assert "source: bounded local mode model" in output
-    assert shadows == [(AMBIGUOUS, {"mode": "workbench", "tier": "code"})]
+    assert shadows == [(
+        AMBIGUOUS,
+        {"mode": "workbench", "tier": "code", "handler": "ollama"},
+    )]
 
 
 def test_accelerator_crash_never_breaks_routing(monkeypatch):
@@ -270,7 +282,16 @@ def test_npu_failure_fallback_stays_local_never_cloud(monkeypatch):
     """The prefer-miss fallback chain is the local router, then Autopilot."""
     _no_active(monkeypatch)
     starts = []
+    shadows = []
+    handled = []
+    monkeypatch.setattr(server.npu_service, "routing_active", lambda: "prefer")
     monkeypatch.setattr(server.npu_service, "route_decide", lambda prompt: None)
+    monkeypatch.setattr(
+        server.npu_service, "record_fallback_handler",
+        lambda capability, handler, ok: handled.append(
+            (capability, handler, ok)
+        ),
+    )
     monkeypatch.setattr(
         server,
         "_execution_route_model",
@@ -282,12 +303,21 @@ def test_npu_failure_fallback_stays_local_never_cloud(monkeypatch):
         server, "autopilot_start",
         lambda **kwargs: starts.append(kwargs) or "autopilot started",
     )
+    monkeypatch.setattr(
+        server.npu_service, "route_shadow",
+        lambda prompt, baseline: shadows.append((prompt, baseline)),
+    )
 
     output = server.route_work_request(AMBIGUOUS)
 
     assert "source: host fallback" in output
     assert "mode: persistent Autopilot" in output
     assert starts
+    assert handled == [("routing", "host", True)]
+    assert shadows == [(
+        AMBIGUOUS,
+        {"mode": "autopilot", "tier": "code", "handler": "host"},
+    )]
 
 
 def test_npu_status_tool_reports_accelerator(monkeypatch):
@@ -305,6 +335,38 @@ def test_npu_status_tool_reports_accelerator(monkeypatch):
     output = server.npu_status()
 
     assert "sonder npu accelerator" in output
+
+
+def test_npu_status_and_diagnostics_hide_status_exception(monkeypatch):
+    secret = r"C:\private\model.onnx token=npu-secret"
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(server.npu_service, "status", fail)
+    output = server.npu_status()
+    assert "unknown (status unavailable)" in output
+    assert secret not in output and "private" not in output
+
+    monkeypatch.setattr(server.npu_service, "diagnostics_line", fail)
+    output = server.diagnostics()
+    assert "npu accelerator: unknown (status unavailable)" in output
+    assert secret not in output and "npu-secret" not in output
+
+
+def test_public_fallback_status_failure_is_structured_unknown(monkeypatch):
+    secret = r"C:\private\model.onnx token=npu-secret"
+
+    def fail():
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(server.npu_service, "fallback_projection", fail)
+    projection = server.npu_fallback_status_data()
+    assert projection["schema_version"] == 1
+    assert projection["known"] is False
+    assert projection["capabilities"]["routing"]["policy_mode"] == "unknown"
+    assert projection["last_fallback"]["reason"] == "unknown"
+    assert secret not in str(projection)
 
 
 def test_diagnostics_includes_npu_line(monkeypatch):

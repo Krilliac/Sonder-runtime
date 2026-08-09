@@ -133,3 +133,22 @@ def test_activity_formatter_flattens_terminal_control_and_bidi_in_fields():
     assert "\r" not in output and "\t" not in output
     assert "\x00" not in output and "\x1b" not in output and "\x9b" not in output
     assert "\u202e" not in output
+
+
+def test_activity_formatter_explains_npu_fallback_without_raw_diagnostics():
+    feed = {
+        "known": True, "truncated": False, "events": [{
+            "seq": 2, "kind": "npu_fallback_handled", "phase": "completed",
+            "elapsed_ms": 8, "capability": "embeddings",
+            "reason": "ram_gate", "operation_mode": "execution",
+            "fallback_handler": "ollama", "handler_state": "handled",
+            "raw_error": "C:\\private\\model token=secret\x1b[2J",
+        }],
+    }
+    output = sonder_repl.server.activity_tracker.format_execution_feed(feed)
+    assert (
+        "npu_fallback_handled embeddings reason=ram_gate mode=execution "
+        "handler=ollama/handled"
+    ) in output
+    assert "private" not in output and "token=secret" not in output
+    assert "\x1b" not in output
