@@ -100,6 +100,7 @@ REQUIRED_FILES = {
     "reloadable_mcp.py",
     "refinement_transactions.py",
     "requirements-runtime.txt",
+    "scripts/benchmark_repository_research.py",
     "runtime_policy.py",
     "server.py",
     "sonder_hardware.py",
