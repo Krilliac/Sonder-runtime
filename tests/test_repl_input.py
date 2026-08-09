@@ -79,3 +79,38 @@ def test_execution_prompt_shows_live_lanes_running_and_queued_agents(monkeypatch
 def test_execution_prompt_reports_unknown_instead_of_zero(monkeypatch):
     monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
     assert sonder_repl._execution_prompt({"known": False}) == "[lanes ? | agents ?]"
+
+
+def test_activity_watch_prints_each_sequence_once_and_stops_cleanly(
+    monkeypatch, capsys,
+):
+    event = {
+        "seq": 7, "kind": "tool_call", "elapsed_ms": 12,
+        "tool": "file_read\x1b[31m", "phase": "completed",
+        "result_preview": {
+            "state": "available", "text": "safe\x1b[2J", "chars": 8,
+            "truncated": False, "redacted": False,
+        },
+    }
+    monkeypatch.setattr(
+        sonder_repl.server,
+        "execution_feed_data",
+        lambda: {
+            "known": True, "events": [event], "truncated": False,
+            "redaction_applied": False,
+        },
+    )
+    sleeps = []
+
+    def stop_after_second_poll(_seconds):
+        sleeps.append(1)
+        if len(sleeps) == 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(sonder_repl.time, "sleep", stop_after_second_poll)
+    sonder_repl._watch_activity(0.25)
+
+    output = capsys.readouterr().out
+    assert output.count("tool_call") == 1
+    assert "\x1b" not in output
+    assert "activity watch stopped" in output
