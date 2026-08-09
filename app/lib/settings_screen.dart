@@ -271,7 +271,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             decoration: const InputDecoration(
               labelText: 'Server URL',
               hintText: 'https://your-host.example',
-              helperText: 'Where the Sonder Runtime server listens',
+              helperText:
+                  'HTTPS is required off-device; HTTP is for loopback development only',
               prefixIcon: Icon(Icons.dns_outlined),
               border: OutlineInputBorder(),
             ),
@@ -303,7 +304,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               labelText: 'Host launcher URL (optional)',
               hintText: 'https://your-host:11436',
               helperText:
-                  'Explicit control endpoint for remote/mobile Start, Stop, and Restart. Never derived from the server URL.',
+                  'Explicit HTTPS control endpoint for remote/mobile Start, Stop, and Restart. Never derived from the server URL.',
               prefixIcon: Icon(Icons.power_settings_new_outlined),
               border: OutlineInputBorder(),
             ),
