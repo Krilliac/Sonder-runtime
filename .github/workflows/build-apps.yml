@@ -21,6 +21,7 @@ on:
     paths:
       - "app/**"
       - "scripts/package_local_system.py"
+      - "scripts/release_artifacts.py"
       - "*.py"
       - "*.cmd"
       - "*.sh"
@@ -33,6 +34,7 @@ permissions:
 env:
   FLUTTER_CHANNEL: stable
   APP_ORG: com.sonder.runtime
+  SONDER_BUILD_REVISION: ${{ github.sha }}
 
 jobs:
   analyze:
@@ -209,6 +211,37 @@ jobs:
           path: app/sonder-runtime-macos.zip
           if-no-files-found: error
 
+  integrity:
+    needs: [android, linux, windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+      - name: Resolve authoritative runtime version
+        id: runtime-version
+        run: python -c "import sonder_version; print('version=' + sonder_version.VERSION)" >> "$GITHUB_OUTPUT"
+      - name: Verify artifacts and generate integrity metadata
+        run: |
+          python scripts/release_artifacts.py dist \
+            --version "${{ steps.runtime-version.outputs.version }}" \
+            --revision "${{ github.sha }}" \
+            --source-uri "${{ github.server_url }}/${{ github.repository }}" \
+            --workflow-uri "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --invocation-id "${{ github.run_id }}-${{ github.run_attempt }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sonder-runtime-release-integrity
+          path: |
+            dist/SHA256SUMS
+            dist/sonder-runtime-sbom.cdx.json
+            dist/sonder-runtime-provenance.intoto.json
+          if-no-files-found: error
+
   update-readme-artifacts:
     # GitHub Actions artifacts are per-run URLs. Refreshing the README badge
     # block is intentionally manual-only; auto-committing on every main build
@@ -242,7 +275,7 @@ jobs:
   release:
     # Only when a tag like app-v1.0.0 is pushed: gather every platform build
     # and publish a GitHub Release with permanent download links.
-    needs: [android, linux, windows, macos]
+    needs: [integrity]
     if: startsWith(github.ref, 'refs/tags/app-v')
     runs-on: ubuntu-latest
     permissions:
@@ -266,3 +299,6 @@ jobs:
             | Linux    | `sonder-runtime-linux-x64.tar.gz` |
             | Windows  | `sonder-runtime-windows-x64.zip` |
             | macOS    | `sonder-runtime-macos.zip` |
+            | Checksums | `SHA256SUMS` |
+            | SBOM | `sonder-runtime-sbom.cdx.json` |
+            | Provenance | `sonder-runtime-provenance.intoto.json` |
