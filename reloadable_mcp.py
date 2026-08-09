@@ -13,6 +13,7 @@ import inspect
 import json
 import os
 import re
+import sys
 import threading
 import time
 from pathlib import Path
@@ -260,6 +261,7 @@ class ReloadableFastMCP(FastMCP):
                 int(stat.st_mtime_ns) == self._loaded_mtime_ns
                 and int(stat.st_size) == self._loaded_size
             ):
+                self._last_error = ""
                 return {
                     "path": str(path),
                     "mtime_ns": self._loaded_mtime_ns,
@@ -268,16 +270,83 @@ class ReloadableFastMCP(FastMCP):
                     "source": None,
                 }
             return _source_state(path)
-        except OSError as exc:
-            self._last_error = "%s: %s" % (type(exc).__name__, exc)
+        except FileNotFoundError:
+            self._last_error = (
+                "stale runtime source: loaded MCP file no longer exists: %s"
+                % self._reload_source_path
+            )
             return None
+        except OSError as exc:
+            self._last_error = "source access %s: %s" % (type(exc).__name__, exc)
+            return None
+
+    def _runtime_provenance(self) -> dict:
+        source = Path(self._reload_source_path) if self._reload_source_path else None
+        source_root = source.parent if source else None
+        configured_text = os.environ.get("SONDER_RUNTIME_ROOT", "").strip()
+        configured = Path(configured_text).expanduser() if configured_text else None
+        source_exists = bool(source and source.is_file())
+        source_root_exists = bool(source_root and source_root.is_dir())
+        configured_exists = bool(configured and configured.is_dir())
+        same_root = bool(
+            source_root
+            and configured
+            and os.path.normcase(str(source_root.resolve()))
+            == os.path.normcase(str(configured.resolve()))
+        )
+        issue = ""
+        if source and not source_exists:
+            issue = "stale_source_root"
+        elif configured and not configured_exists:
+            issue = "configured_root_missing"
+        elif configured_exists and not same_root:
+            issue = "root_mismatch"
+        action = ""
+        if issue:
+            if configured_exists and (configured / "server.py").is_file():
+                launcher = configured / (
+                    "sonder-runtime.cmd" if os.name == "nt" else "sonder-runtime.sh"
+                )
+                action = (
+                    "Restart/reconnect this process from the configured canonical root: %s"
+                    % launcher
+                )
+            else:
+                action = (
+                    "Restart/reconnect from an existing canonical checkout; set "
+                    "SONDER_RUNTIME_ROOT=<canonical-root>, then run "
+                    "<canonical-root>\\sonder-runtime.cmd on Windows."
+                )
+        try:
+            cwd = os.getcwd()
+        except OSError:
+            cwd = "(deleted or unavailable)"
+        return {
+            "pid": os.getpid(),
+            "python": sys.executable,
+            "cwd": cwd,
+            "source_root": str(source_root or ""),
+            "source_exists": source_exists,
+            "source_root_exists": source_root_exists,
+            "configured_runtime_root": str(configured or ""),
+            "configured_root_exists": configured_exists,
+            "root_matches_configured": same_root if configured else None,
+            "issue": issue,
+            "recovery_action": action,
+        }
 
     def refresh_if_changed(self) -> dict:
         """Load changed source into a fresh namespace and swap on full success."""
         if not _enabled() or not self._reload_source_path:
             return {"reloaded": False, "surface_changed": False}
         current = self._current_source_state()
-        if current is None or current["digest"] == self._loaded_digest:
+        if current is None:
+            return {
+                "reloaded": False,
+                "surface_changed": False,
+                "error": self._last_error or "MCP source is unavailable",
+            }
+        if current["digest"] == self._loaded_digest:
             if current is not None:
                 self._loaded_mtime_ns = current["mtime_ns"]
                 self._loaded_size = current["size"]
@@ -386,6 +455,7 @@ class ReloadableFastMCP(FastMCP):
 
     def runtime_snapshot(self) -> dict:
         current = self._current_source_state()
+        provenance = self._runtime_provenance()
         current_digest = current["digest"] if current is not None else ""
         source_changed = bool(
             current_digest
@@ -422,4 +492,5 @@ class ReloadableFastMCP(FastMCP):
             "last_error": self._last_error,
             "last_notification_error": self._last_notification_error,
             "protocol_list_changed": True,
+            "provenance": provenance,
         }

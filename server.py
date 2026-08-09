@@ -6236,11 +6236,19 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
             "Inspect /autopilot status, then deliberately resume, cancel, or revise the goal.",
         )
     if mcp_state.get("last_error"):
+        provenance = mcp_state.get("provenance") or {}
         add(
             "runtime",
             "high",
-            "The latest MCP source refresh failed closed.",
-            "Run /mcp status, fix the reported source error, then use /mcp refresh; the last known-good tools remain active.",
+            (
+                "The MCP process is attached to a stale runtime source root."
+                if provenance.get("issue") == "stale_source_root"
+                else "The latest MCP source refresh failed closed."
+            ),
+            provenance.get("recovery_action") or (
+                "Run /mcp status, fix the reported source error, then use "
+                "/mcp refresh; the last known-good tools remain active."
+            ),
         )
     elif mcp_state.get("source_changed"):
         add(
@@ -7019,6 +7027,8 @@ def debug_inspect(token: str = "", include_status: bool = True) -> str:
         "  note: private hidden chain-of-thought is not exposed; use trace/tool/activity logs instead.",
         "",
         admin_status(token),
+        "",
+        format_mcp_runtime(),
         "",
         master_status(limit=10),
         "",
@@ -10748,6 +10758,27 @@ def format_mcp_runtime(data: dict | None = None) -> str:
         "  source: %s" % (data.get("path") or "(unknown)"),
         "  loaded/current: %s / %s" % (loaded, current),
     ]
+    provenance = data.get("provenance") or {}
+    if provenance:
+        lines.extend([
+            "  process: pid=%s | python=%s"
+            % (provenance.get("pid", "unknown"), provenance.get("python", "unknown")),
+            "  process cwd: %s" % provenance.get("cwd", "unknown"),
+            "  source root: %s (%s)"
+            % (
+                provenance.get("source_root") or "(unknown)",
+                "present" if provenance.get("source_root_exists") else "missing",
+            ),
+            "  configured runtime root: %s (%s)"
+            % (
+                provenance.get("configured_runtime_root") or "(not set)",
+                "present" if provenance.get("configured_root_exists") else "missing/not set",
+            ),
+        ])
+        if provenance.get("issue"):
+            lines.append("  provenance ERROR: %s" % provenance["issue"])
+        if provenance.get("recovery_action"):
+            lines.append("  ACTION: %s" % provenance["recovery_action"])
     if data.get("last_refresh_ts"):
         lines.append("  last refresh unix time: %s" % data["last_refresh_ts"])
     if data.get("last_error"):
@@ -16557,7 +16588,7 @@ def status() -> str:
     installed = sorted(m.get("name", "?") for m in tags)
     loaded = [str(m.get("name")) for m in ps if m.get("name")]
     tier_lines = [
-        f"  {k}={v}" + ("  [CLOUD — leaves machine]" if _is_cloud_tier(k, v) else "  [local Ollama]")
+        f"  {k}={v}" + ("  [CLOUD - leaves machine]" if _is_cloud_tier(k, v) else "  [local Ollama]")
         for k, v in available_tiers(include_disabled=cloud_allowed()).items()
     ]
     if not ollama_endpoint.is_loopback(BASE):
@@ -16580,6 +16611,18 @@ def status() -> str:
             **_local_runtime_summary()
         ),
     ]
+    mcp_state = mcp_runtime_data()
+    provenance = mcp_state.get("provenance") or {}
+    if provenance.get("issue"):
+        lines.append(
+            "mcp runtime: ERROR %s (source root: %s)"
+            % (
+                provenance["issue"],
+                provenance.get("source_root") or "unknown",
+            )
+        )
+        if provenance.get("recovery_action"):
+            lines.append("mcp ACTION: %s" % provenance["recovery_action"])
     try:
         auto = _application().automation.snapshot(include_finished=False, limit=20)
         lines.append(

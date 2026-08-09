@@ -1,6 +1,7 @@
 import asyncio
 import importlib
 import os
+import shutil
 import sys
 import time
 from types import SimpleNamespace
@@ -168,6 +169,65 @@ def test_broken_refresh_preserves_last_known_good_registry(monkeypatch, tmp_path
         assert state["loaded_digest"] == loaded
         assert state["source_changed"] is True
         assert state["status"] == "error"
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_deleted_windows_source_root_reports_restart_provenance(monkeypatch, tmp_path):
+    monkeypatch.setenv("SONDER_LIVE_RELOAD", "1")
+    runtime_root = tmp_path / "Deleted Sonder Worktree"
+    runtime_root.mkdir()
+    module_name = "reloadable_mcp_deleted_root_sample"
+    module_path = runtime_root / (module_name + ".py")
+    module_path.write_text(_module_source("stable"), encoding="utf-8")
+    monkeypatch.setenv("SONDER_RUNTIME_ROOT", str(runtime_root))
+    monkeypatch.syspath_prepend(str(runtime_root))
+    try:
+        mcp = importlib.import_module(module_name).mcp
+        shutil.rmtree(runtime_root)
+
+        refreshed = mcp.refresh_if_changed()
+        state = mcp.runtime_snapshot()
+
+        assert refreshed["reloaded"] is False
+        assert refreshed["error"] == (
+            "stale runtime source: loaded MCP file no longer exists: %s"
+            % module_path.resolve()
+        )
+        assert state["status"] == "error"
+        assert state["provenance"]["issue"] == "stale_source_root"
+        assert state["provenance"]["source_root"] == str(runtime_root.resolve())
+        assert state["provenance"]["source_root_exists"] is False
+        assert state["provenance"]["configured_root_exists"] is False
+        assert "SONDER_RUNTIME_ROOT=<canonical-root>" in (
+            state["provenance"]["recovery_action"]
+        )
+        assert "<canonical-root>\\sonder-runtime.cmd" in (
+            state["provenance"]["recovery_action"]
+        )
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_runtime_provenance_detects_configured_root_mismatch(monkeypatch, tmp_path):
+    monkeypatch.setenv("SONDER_LIVE_RELOAD", "1")
+    source_root = tmp_path / "old-worktree"
+    canonical_root = tmp_path / "canonical-runtime"
+    source_root.mkdir()
+    canonical_root.mkdir()
+    (canonical_root / "server.py").write_text("# canonical\n", encoding="utf-8")
+    module_name = "reloadable_mcp_root_mismatch_sample"
+    module_path = source_root / (module_name + ".py")
+    module_path.write_text(_module_source("stable"), encoding="utf-8")
+    monkeypatch.setenv("SONDER_RUNTIME_ROOT", str(canonical_root))
+    monkeypatch.syspath_prepend(str(source_root))
+    try:
+        state = importlib.import_module(module_name).mcp.runtime_snapshot()
+
+        assert state["provenance"]["issue"] == "root_mismatch"
+        assert state["provenance"]["root_matches_configured"] is False
+        assert str(canonical_root) in state["provenance"]["recovery_action"]
+        assert "sonder-runtime.cmd" in state["provenance"]["recovery_action"]
     finally:
         sys.modules.pop(module_name, None)
 
