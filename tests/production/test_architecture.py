@@ -44,9 +44,13 @@ def test_legacy_root_allowlist_has_a_shrink_only_ratchet():
 
 def test_production_callers_use_the_memory_adapter():
     offenders = []
+    immutable_baseline = Path("migrations/memory/0001_baseline.py")
     for path in _REPO_ROOT.rglob("*.py"):
         relative = path.relative_to(_REPO_ROOT)
-        if relative == Path("memory_store.py") or relative.parts[0] == "tests":
+        if (
+            relative in {Path("memory_store.py"), immutable_baseline}
+            or relative.parts[0] == "tests"
+        ):
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
@@ -59,6 +63,12 @@ def test_production_callers_use_the_memory_adapter():
                 offenders.append(str(relative))
                 break
     assert offenders == []
+
+    # Never rewrite an already-applied migration merely to satisfy the
+    # strangler import rule. The root module is a true compatibility alias.
+    source = (_REPO_ROOT / immutable_baseline).read_text(encoding="utf-8")
+    assert "import memory_store" in source
+    assert "sonder_runtime.adapters.memory_store" not in source
 
 
 def test_checker_detects_a_violation(tmp_path):
