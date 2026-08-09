@@ -101,6 +101,7 @@ REQUIRED_FILES = {
     "isolated_runner.py",
     "server.py",
     "sonder_hardware.py",
+    "tool_capabilities.py",
     "setup_alias.py",
     "sonder-headless.cmd",
     "sonder-headless.sh",
