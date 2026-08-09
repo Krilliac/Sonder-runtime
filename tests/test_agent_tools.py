@@ -165,8 +165,13 @@ def test_agent_dispatch_requires_host_verified_location_consent(monkeypatch):
 
 
 def test_agent_dispatch_routes_fleet_capacity_and_cancellation(monkeypatch):
+    capacity_calls = []
     monkeypatch.setattr(
-        server, "master_capacity", lambda requested_agents=0: f"capacity:{requested_agents}",
+        server, "master_capacity",
+        lambda requested_agents=0, **kwargs: (
+            capacity_calls.append((requested_agents, kwargs))
+            or f"capacity:{requested_agents}:{kwargs.get('worker_cap', 0)}"
+        ),
     )
     monkeypatch.setattr(
         server, "master_cancel", lambda agent_id: f"cancel:{agent_id}",
@@ -177,7 +182,13 @@ def test_agent_dispatch_routes_fleet_capacity_and_cancellation(monkeypatch):
 
     assert server._agent_dispatch(
         "master_capacity", {"requested_agents": 12}, read_only=True,
-    ) == "capacity:12"
+    ) == "capacity:12:0"
+    assert capacity_calls[-1] == (12, {})
+    assert server._agent_dispatch(
+        "master_capacity", {"requested_agents": 12, "worker_cap": 24},
+        read_only=True,
+    ) == "capacity:12:24"
+    assert capacity_calls[-1] == (12, {"worker_cap": 24})
     assert server._agent_dispatch(
         "master_cancel", {"agent_id": "master-abc"}, read_only=False,
     ) == "cancel:master-abc"

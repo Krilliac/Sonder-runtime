@@ -191,8 +191,13 @@ def test_loop_dispatch_supports_weather_and_consent_gated_location(monkeypatch):
 
 
 def test_loop_dispatch_supports_fleet_capacity_and_cancellation(monkeypatch):
+    capacity_calls = []
     monkeypatch.setattr(
-        server, "master_capacity", lambda requested_agents=0: f"capacity:{requested_agents}",
+        server, "master_capacity",
+        lambda requested_agents=0, **kwargs: (
+            capacity_calls.append((requested_agents, kwargs))
+            or f"capacity:{requested_agents}:{kwargs.get('worker_cap', 0)}"
+        ),
     )
     monkeypatch.setattr(
         server, "master_cancel", lambda agent_id: f"cancel:{agent_id}",
@@ -204,6 +209,9 @@ def test_loop_dispatch_supports_fleet_capacity_and_cancellation(monkeypatch):
     capacity = server._loop_dispatch({
         "type": "master_capacity", "requested_agents": 20,
     })
+    capped_capacity = server._loop_dispatch({
+        "type": "master_capacity", "requested_agents": 20, "worker_cap": 24,
+    })
     cancelled = server._loop_dispatch({
         "type": "master_cancel", "agent_id": "all",
     })
@@ -212,7 +220,10 @@ def test_loop_dispatch_supports_fleet_capacity_and_cancellation(monkeypatch):
     })
 
     assert capacity["ok"] is True
-    assert capacity["output"] == "capacity:20"
+    assert capacity["output"] == "capacity:20:0"
+    assert capacity_calls[0] == (20, {})
+    assert capped_capacity["output"] == "capacity:20:24"
+    assert capacity_calls[1] == (20, {"worker_cap": 24})
     assert cancelled["ok"] is True
     assert cancelled["output"] == "cancel:all"
     assert retried["ok"] is True
