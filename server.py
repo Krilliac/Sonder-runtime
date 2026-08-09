@@ -6650,6 +6650,13 @@ def master_orchestrate(
         or bool(explicit_project)
         or master_orchestrator.requires_repository_tools(task)
     )
+    if protected_objectives and (
+        _is_cloud_tier(tier) or _is_cloud_tier(audit_tier)
+    ):
+        return (
+            "ERROR: protected fleet objective contracts require local worker "
+            "and audit tiers so repository evidence cannot leave the host."
+        )
     project_scope = ""
     if needs_repo_tools:
         try:
@@ -6845,6 +6852,31 @@ def master_retry(agent_id: str, tier: str = "") -> str:
     task = (candidate.get("task") or "").strip()
     if not task:
         return "ERROR: persisted master %s has no recoverable task text." % candidate["id"]
+    try:
+        objectives = master_orchestrator.fleet_provenance.parse_objectives(task)
+    except master_orchestrator.fleet_provenance.ProvenanceError as exc:
+        return "ERROR: persisted master provenance is invalid: %s" % exc
+    stored_digest = str(candidate.get("master_task_digest") or "")
+    recovered_digest = master_orchestrator.fleet_provenance.task_digest(task)
+    stored_objective_ids = list(candidate.get("objective_ids") or ())
+    recovered_objective_ids = [
+        objective.objective_id for objective in objectives
+    ]
+    if stored_digest and stored_digest != recovered_digest:
+        return (
+            "ERROR: persisted master task text no longer matches its immutable digest; "
+            "start a fresh orchestration instead of retrying changed work."
+        )
+    if stored_objective_ids != recovered_objective_ids:
+        return (
+            "ERROR: persisted master objective IDs no longer match the task contract; "
+            "start a fresh orchestration instead of retrying ambiguous work."
+        )
+    if objectives and not stored_digest:
+        return (
+            "ERROR: protected legacy master has no immutable task digest; start a "
+            "fresh orchestration instead of retrying unverifiable work."
+        )
     mode = (candidate.get("mode") or "delegated").lower()
     if mode not in (
         "inline", "master", "delegate", "delegated", "agents", "parallel",

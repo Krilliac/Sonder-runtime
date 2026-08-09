@@ -1038,6 +1038,7 @@ def _run_worker(
     master_task_digest: str = "",
     delegated_task_digest: str = "",
 ):
+    pre_call_metrics = None
     if objectives:
         if not _start_agent(agent_id, "validating delegated task provenance"):
             return "CANCELLED"
@@ -1057,6 +1058,7 @@ def _run_worker(
                 drift_metrics=metrics,
             )
             return _WORKER_FAILED
+        pre_call_metrics = metrics
         if not _begin_model_call(
             agent_id, "calling model for provenance-validated task", tool_calls=1,
         ):
@@ -1082,6 +1084,24 @@ def _run_worker(
         if isinstance(output, RepositoryWorkerResult) else str(output or "")
     )
     if objectives:
+        post_call = fleet_provenance.validate_delegation(
+            master_task,
+            prompt,
+            objectives,
+            expected_master_digest=master_task_digest,
+            expected_delegated_digest=delegated_task_digest,
+            project=project_scope,
+            expected_target_digests=pre_call_metrics["target_digests"],
+        )
+        post_call["phase"] = "post_call"
+        if post_call["task_drift"]:
+            _finish(
+                agent_id,
+                error="delegated target changed during model call",
+                task_drift=True,
+                drift_metrics=post_call,
+            )
+            return _WORKER_FAILED
         metrics = fleet_provenance.validate_result(stored_output, objectives)
         if metrics["task_drift"]:
             _finish(
@@ -1112,24 +1132,64 @@ def run_inline(
     metadata = dict(metadata or {})
     metadata.setdefault("mode", "inline")
     digest = fleet_provenance.task_digest(task)
-    metadata.setdefault("master_task_digest", digest)
-    metadata.setdefault("delegated_task_digest", digest)
-    metadata.setdefault("objective_ids", [
+    execution_task = task
+    if objectives:
+        execution_task = "%s\n\n=== AUTHORITATIVE MASTER TASK ===\n%s" % (
+            fleet_provenance.objective_contract(objectives), task,
+        )
+    delegated_digest = fleet_provenance.task_digest(execution_task)
+    metadata["master_task_digest"] = digest
+    metadata["delegated_task_digest"] = delegated_digest
+    metadata["objective_ids"] = [
         objective.objective_id
         for objective in objectives
-    ])
+    ]
     if project_scope:
         metadata["project"] = project_scope
     master_id = _new_agent("master", task, metadata=metadata)
-    if not _start_agent(
-        master_id, "running inline as master", tool_calls=1, in_model_call=True,
-    ):
+    start_activity = (
+        "validating inline task provenance" if objectives
+        else "running inline as master"
+    )
+    if not _start_agent(master_id, start_activity, tool_calls=1):
         return {"mode": "inline", "master_id": master_id, "output": "CANCELLED"}
+    pre_call_metrics = None
+    if objectives:
+        pre_call_metrics = fleet_provenance.validate_delegation(
+            task,
+            execution_task,
+            objectives,
+            expected_master_digest=digest,
+            expected_delegated_digest=delegated_digest,
+            project=project_scope,
+        )
+        if pre_call_metrics["task_drift"]:
+            _finish(
+                master_id,
+                error="inline task provenance changed before model call",
+                task_drift=True,
+                drift_metrics=pre_call_metrics,
+            )
+            return {
+                "mode": "inline", "master_id": master_id,
+                "output": "TASK_DRIFT: inline objective validation failed",
+                "task_drift": True, "drift_metrics": pre_call_metrics,
+            }
+        if not _begin_model_call(
+            master_id, "calling model for provenance-validated inline task",
+            tool_calls=1,
+        ):
+            return {"mode": "inline", "master_id": master_id, "output": "CANCELLED"}
+    else:
+        if not _begin_model_call(
+            master_id, "running inline as master", tool_calls=1,
+        ):
+            return {"mode": "inline", "master_id": master_id, "output": "CANCELLED"}
     with _bind_worker_agent(master_id):
         try:
             output = (
-                worker_fn(task, project_scope)
-                if project_scope else worker_fn(task)
+                worker_fn(execution_task, project_scope)
+                if project_scope else worker_fn(execution_task)
             )
             if project_scope:
                 output = _validate_repository_result(output, project_scope)
@@ -1144,6 +1204,33 @@ def run_inline(
         _render_repository_result(output)
         if isinstance(output, RepositoryWorkerResult) else str(output or "")
     )
+    if objectives:
+        post_call = fleet_provenance.validate_delegation(
+            task,
+            execution_task,
+            objectives,
+            expected_master_digest=digest,
+            expected_delegated_digest=delegated_digest,
+            project=project_scope,
+            expected_target_digests=pre_call_metrics["target_digests"],
+        )
+        post_call["phase"] = "post_call"
+        result_metrics = fleet_provenance.validate_result(
+            stored_output, objectives,
+        )
+        metrics = post_call if post_call["task_drift"] else result_metrics
+        if metrics["task_drift"]:
+            _finish(
+                master_id,
+                error="inline result missed authoritative objective coverage",
+                task_drift=True,
+                drift_metrics=metrics,
+            )
+            return {
+                "mode": "inline", "master_id": master_id,
+                "output": "TASK_DRIFT: inline result failed objective validation",
+                "task_drift": True, "drift_metrics": metrics,
+            }
     final = _finish(master_id, output=stored_output)
     return {"mode": "inline", "master_id": master_id, "output": final}
 
