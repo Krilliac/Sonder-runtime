@@ -9205,8 +9205,10 @@ def isolated_run(
         ok = bool(result.get("ok"))
     except (OSError, ValueError) as exc:
         _record_direct_tool(
-            "isolated_run", {"image": image, "project": project},
-            ok=False, started=started, summary=str(exc),
+            "isolated_run",
+            {"failure": "policy-or-runtime-error",
+             "writable_workspace": writable_workspace is True},
+            ok=False, started=started, summary="isolated runner rejected request",
         )
         return "ERROR: %s" % exc
     output = isolated_runner.format_result(result)

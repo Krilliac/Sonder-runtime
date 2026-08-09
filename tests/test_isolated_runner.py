@@ -11,6 +11,7 @@ import isolated_runner
 
 
 DOCKER_PREFIX = ("--host", "npipe:////./pipe/docker_engine")
+IMAGE_ID = "sha256:" + "a" * 64
 
 
 def _build(runtime, image, command, project, **kwargs):
@@ -115,6 +116,7 @@ def test_fixed_argv_has_guards_total_memory_and_recursive_readonly(tmp_path):
         "--security-opt=no-new-privileges", "--pids-limit=64",
         "--memory=512m", "--memory-swap=512m", "--cpus=1",
         "--user=65534:65534", "--entrypoint=/usr/bin/env", "--pull=never",
+        "--log-driver=none", "--no-healthcheck",
     ):
         assert guard in argv
     mount = argv[argv.index("--mount") + 1]
@@ -298,9 +300,101 @@ def test_podman_argv_uses_pinned_connection_nonrecursive_bind_and_total_cap(tmp_
     mount = argv[argv.index("--mount") + 1]
     assert mount.endswith("bind-nonrecursive=true,ro=true")
     assert "bind-recursive" not in mount
+    assert "--log-driver=none" in argv
+    assert "--no-healthcheck" in argv
+    assert "--image-volume=ignore" in argv
     memory = argv.index("--memory")
     swap = argv.index("--memory-swap")
     assert argv[memory + 1] == argv[swap + 1] == "512m"
+
+
+def test_bounded_pinned_image_inspection_returns_immutable_id(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        isolated_runner, "_bounded_probe",
+        lambda argv, **_kwargs: calls.append(argv) or subprocess.CompletedProcess(
+            argv, 0, stdout=json.dumps({"id": IMAGE_ID, "volumes": None}), stderr=""
+        ),
+    )
+    assert isolated_runner._inspect_image_policy(
+        r"C:\docker.exe", DOCKER_PREFIX, "busybox:1.36"
+    ) == IMAGE_ID
+    assert calls[0][:4] == [r"C:\docker.exe", *DOCKER_PREFIX, "image"]
+    assert calls[0][-1] == "busybox:1.36"
+
+
+@pytest.mark.parametrize("volumes", [{"/data": {}}, {"/cache": None}])
+def test_docker_and_podman_image_volumes_are_rejected(monkeypatch, volumes):
+    monkeypatch.setattr(
+        isolated_runner, "_bounded_probe",
+        lambda argv, **_kwargs: subprocess.CompletedProcess(
+            argv, 0, stdout=json.dumps({"id": IMAGE_ID, "volumes": volumes}), stderr=""
+        ),
+    )
+    prefixes = [
+        DOCKER_PREFIX,
+        ("--url", "ssh://core@127.0.0.1:2222/run/podman.sock"),
+    ]
+    for prefix in prefixes:
+        with pytest.raises(ValueError, match="declaring OCI volumes"):
+            isolated_runner._inspect_image_policy("runtime.exe", prefix, "image:tag")
+
+
+def test_image_inspection_error_and_oversize_fail_closed(monkeypatch):
+    monkeypatch.setattr(
+        isolated_runner, "_bounded_probe",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 1, stdout="", stderr="daemon unavailable"
+        ),
+    )
+    with pytest.raises(ValueError, match="inspection failed"):
+        isolated_runner._inspect_image_policy("runtime", (), "image")
+    monkeypatch.setattr(isolated_runner, "_bounded_probe", lambda *_a, **_k: None)
+    with pytest.raises(ValueError, match="safety bound"):
+        isolated_runner._inspect_image_policy("runtime", (), "image")
+
+
+def test_metadata_probe_hard_caps_output_without_thread_leak(monkeypatch):
+    class FakeProc:
+        def __init__(self):
+            self.returncode = None
+            self.stdout = io.BytesIO(b"x" * (8 * 1024 * 1024))
+            self.stderr = io.BytesIO()
+        def poll(self): return self.returncode
+        def wait(self, timeout=None): return self.returncode
+        def kill(self): self.returncode = -9
+    monkeypatch.setattr(
+        isolated_runner.subprocess, "Popen", lambda *_a, **_k: FakeProc()
+    )
+    before = threading.active_count()
+    assert isolated_runner._bounded_probe(
+        ["runtime", "image", "inspect"], output_limit=1024
+    ) is None
+    assert threading.active_count() == before
+
+
+def test_run_uses_inspected_image_id_not_mutable_tag(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    captured = {}
+    monkeypatch.setattr(
+        isolated_runner, "detect_runtime",
+        lambda: ("docker", str((tmp_path / "docker.exe").resolve()), DOCKER_PREFIX),
+    )
+    monkeypatch.setattr(isolated_runner, "_inspect_image_policy", lambda *_a: IMAGE_ID)
+    monkeypatch.setattr(
+        isolated_runner, "_run_bounded",
+        lambda argv, *_args: captured.update(argv=argv) or {
+            "ok": True, "returncode": 0, "stdout": "", "stderr": "",
+            "error": "", "cleanup": "not-required",
+        },
+    )
+    result = isolated_runner.run_isolated(
+        "busybox:latest", '["true"]', str(project)
+    )
+    assert result["ok"] is True
+    assert IMAGE_ID in captured["argv"]
+    assert "busybox:latest" not in captured["argv"]
 
 
 def test_process_launch_is_argv_only_with_minimal_bootstrap_environment(monkeypatch):
