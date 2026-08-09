@@ -26,7 +26,8 @@ block from the previous response.
 
 Related: `run_project` (bounded multi-file temp project with optional
 build), `parallel_run_code` (many snippets concurrently), `script_run` /
-`workspace_run` (argv-only execution of a real script/program).
+`workspace_run` (argv-only execution of a real script/program). `script_run`
+first applies the operator's static artifact-risk policy to its exact file.
 
 ## Structured data — `data_inspect`
 
@@ -68,7 +69,7 @@ expressions, implicit type inference, or overwrite mode are available.
 
 `file_find`, `file_read`, `file_read_range`, `file_write`, `file_batch_write`, `file_edit`, `text_patch`,
 `file_copy`, `file_move`, `file_delete`, `directory_tree`, `directory_create`, `workspace_inventory`,
-`workspace_compare`, `text_search`, `script_search`, `program_search`, `image_inspect`, `log_inspect`, `data_convert`, `archive_create`, `archive_list`,
+`workspace_compare`, `text_search`, `script_search`, `program_search`, `image_inspect`, `log_inspect`, `artifact_risk_inspect`, `data_convert`, `archive_create`, `archive_list`,
 `archive_extract`, `repo_log`,
 `repo_show`, `repo_blame`. All are
 confined to `SONDER_FILE_ROOTS`, honor the permission policy
@@ -111,6 +112,36 @@ supports ZIP and TAR, and defaults to reproducible metadata. It performs a full
 bounded preflight, refuses links and sensitive/control state, streams stable file
 handles, revalidates input mutation, and publishes through a non-overwriting
 sibling staging file.
+
+`artifact_risk_inspect` performs non-executing static inspection of guarded
+PDFs, Windows PE files, ELF and Mach-O executables, scripts, and opaque binary
+artifacts. Results contain only format metadata and named indicator counts—not
+embedded strings, URLs, memory addresses, or raw bytes. Scan/source/decode/time
+ceilings are hard, and partial, encrypted, malformed, or unsupported analysis
+is explicit. A high-risk result means the file contains suspicious static
+evidence; it is not a proof of malware, and no-finding is not a guarantee of
+safety.
+
+For exact script execution, `SONDER_EXECUTION_RISK_POLICY` selects `off`,
+`report` (default), `deny-high`, `deny-medium`, or `deny-unknown`. Per-call
+`risk_policy` can make enforcement stricter but never weaker than the operator
+setting. Current `deny-*` modes conservatively refuse every launch, including a
+below-threshold file, because the runner cannot portably guarantee that an
+interpreter opens the same file handle that was inspected. `report` is advisory.
+Program execution without an exact inspectable file remains outside this static
+gate and should be isolated separately.
+
+`process_list` and `process_memory_risk_inspect` are host-observation tools for
+defensive analysis on Windows. Both require the exact operator opt-in
+`SONDER_PROCESS_INSPECTION=enabled:bounded-read-only`. Inventory exposes only
+bounded PID, parent PID, executable-name, and thread-count metadata. Memory
+inspection accepts one PID and returns only fixed risk-indicator names/counts
+from private readable memory and aggregate scan accounting under hard byte,
+region, and time ceilings. Read failures and partial reads make the result
+explicitly incomplete rather than clean. It
+does not return memory content, discovered strings, paths, addresses, or command
+lines and never requests write/injection/debug rights. Unsupported platforms,
+protected processes, access denial, and incomplete scans fail explicitly.
 
 `text_patch` previews strict unified diffs rooted at an explicit project
 directory. With `apply=true`, it performs an all-file transaction for create
