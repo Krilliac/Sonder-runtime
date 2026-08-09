@@ -104,6 +104,27 @@ def test_server_rebinds_reloaded_modules(monkeypatch):
         server.personas = original
 
 
+def test_server_rebinds_log_inspect_alias_without_replacing_tool(monkeypatch):
+    import server
+
+    original_module = server.log_inspect_module
+    original_tool = server.log_inspect
+    replacement = object()
+    monkeypatch.setattr(
+        server.live_reload,
+        "reload_changed_modules",
+        lambda names: {"log_inspect": replacement},
+    )
+    try:
+        server._maybe_live_reload()
+        assert server.log_inspect_module is replacement
+        assert server.log_inspect is original_tool
+        assert callable(server.log_inspect)
+    finally:
+        server.log_inspect_module = original_module
+        server.log_inspect = original_tool
+
+
 def test_server_prime_live_reload_upgrades_legacy_helper(monkeypatch):
     import server
 

@@ -62,6 +62,9 @@ Mitigations that are already in place and worth knowing about:
 - `workspace_compare` exposes metadata and SHA-256 digests, never file content;
   it fails closed on sensitive/control state, reparse points, special files,
   identity races, or any scan/time/output ceiling.
+- `log_inspect` rejects sensitive/control paths and reparse traversal, validates
+  the already-open regular-file handle, and uses only fixed host parsers under
+  hard file, byte, line, result, output, and time ceilings.
 - Cloud tiers are **opt-in**. Local tiers run against loopback Ollama, and a
   remote `OLLAMA_HOST` must be explicitly enabled.
 - Lessons are passed through a 20-rule privacy classifier before storage, so
