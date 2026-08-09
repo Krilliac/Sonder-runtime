@@ -1488,6 +1488,110 @@ def test_improvement_report_flags_failed_closed_mcp_refresh(monkeypatch, tmp_pat
     assert "mcp: error" in server.format_improvement_report(report)
 
 
+def test_mcp_runtime_format_redacts_paths_and_exposes_safe_restart_action():
+    state = server.mcp_runtime_data()
+    state.update({
+        "status": "error",
+        "last_error": "stale runtime source: loaded MCP file no longer exists",
+        "provenance": {
+            "pid": 42,
+            "python": r"C:\Python\python.exe",
+            "cwd": r"C:\deleted-worktree",
+            "source_root": r"C:\deleted-worktree",
+            "source_root_exists": False,
+            "configured_runtime_root": r"C:\canonical\sonder-runtime",
+            "configured_root_exists": True,
+            "configured_root_ready": True,
+            "issue": "stale_source_root",
+            "recovery_action": (
+                r"Restart/reconnect this process from the configured canonical root: "
+                r"C:\canonical\sonder-runtime\sonder-runtime.cmd"
+            ),
+        },
+    })
+
+    text = server.format_mcp_runtime(state)
+
+    assert "pid=42" in text
+    assert "source root: missing" in text
+    assert "provenance ERROR: stale_source_root" in text
+    assert r"ACTION: Restart/reconnect" in text
+    assert "SONDER_RUNTIME_ROOT" in text
+    assert r"C:\deleted-worktree" not in text
+    assert r"C:\canonical" not in text
+    assert r"C:\Python" not in text
+
+
+def test_debug_inspect_includes_full_mcp_provenance(monkeypatch):
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server, "admin_status", lambda token="": "admin status")
+    monkeypatch.setattr(server, "master_status", lambda limit=10: "master status")
+    monkeypatch.setattr(server, "system_improvement_report", lambda: "improvements")
+    monkeypatch.setattr(server, "memory_quality_report", lambda sample_limit=3: "quality")
+    monkeypatch.setattr(server, "status", lambda: "runtime status")
+    monkeypatch.setattr(
+        server,
+        "format_mcp_runtime",
+        lambda: "sonder MCP runtime\n  provenance ERROR: stale_source_root\n  ACTION: restart canonical",
+    )
+
+    text = server.debug_inspect()
+
+    assert "sonder MCP runtime" in text
+    assert "provenance ERROR: stale_source_root" in text
+    assert "ACTION: restart canonical" in text
+
+
+def test_mcp_refresh_command_reports_unavailable_source(monkeypatch):
+    monkeypatch.setattr(
+        server.mcp,
+        "refresh_if_changed",
+        lambda: {
+            "reloaded": False,
+            "surface_changed": False,
+            "error": "stale runtime source: loaded MCP file is unavailable",
+        },
+    )
+    monkeypatch.setattr(server, "format_mcp_runtime", lambda: "runtime detail")
+
+    text = server._mcp_command("refresh")
+
+    assert text.startswith(
+        "MCP refresh failed closed: stale runtime source: "
+        "loaded MCP file is unavailable"
+    )
+    assert text.endswith("runtime detail")
+
+
+def test_mcp_runtime_format_never_echoes_injected_paths_or_credentials():
+    secret = "credential-token-should-not-appear"
+    state = {
+        "status": "error",
+        "enabled": True,
+        "path": rf"C:\Users\secret\{secret}\server.py",
+        "last_error": rf"OSError: C:\private\{secret}",
+        "provenance": {
+            "pid": 7,
+            "python": rf"C:\private\{secret}\python.exe",
+            "cwd": rf"C:\private\{secret}",
+            "source_root": rf"C:\private\{secret}",
+            "source_root_exists": False,
+            "configured_runtime_root": rf"C:\private\{secret}",
+            "configured_root_exists": False,
+            "configured_root_ready": False,
+            "issue": "stale_source_root",
+            "recovery_action": rf"restart C:\private\{secret}",
+        },
+    }
+
+    text = server.format_mcp_runtime(state)
+
+    assert secret not in text
+    assert "C:\\private" not in text
+    assert "OSError: source refresh failed" in text
+    assert all(ord(char) < 128 for char in text)
+
+
 def test_master_orchestrate_asks_for_execution_mode():
     out = server.master_orchestrate("build a parser", mode="ask", agents=2)
 
