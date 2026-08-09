@@ -211,6 +211,8 @@ def _flate_decode(data, limit):
     except zlib.error as exc:
         raise PdfRiskError("invalid FlateDecode stream") from exc
     output += tail
+    if decoder.unused_data.strip(b"\x00\t\r\n\x0c "):
+        raise PdfRiskError("concatenated FlateDecode members are unsupported")
     return output[:limit], bool(decoder.eof and len(output) <= limit)
 
 
@@ -258,6 +260,7 @@ def inspect_pdf(
     findings = {}
     for region in scan_regions:
         _merge_features(findings, _feature_counts(region), "raw")
+        _deadline_check(deadline)
     incomplete_reasons = [] if complete else ["file_exceeds_scan_budget"]
     if any(
         re.search(br"/Encrypt(?![A-Za-z0-9])", _normalize_names(region))
@@ -267,7 +270,7 @@ def inspect_pdf(
     streams_seen = 0
     streams_decoded = 0
     decoded_total = 0
-    unsupported_filters = set()
+    unsupported_filter_count = 0
     malformed_streams = 0
     stream_matches = (
         (region, match)
@@ -297,14 +300,17 @@ def inspect_pdf(
             except PdfRiskError:
                 malformed_streams += 1
                 incomplete_reasons.append("malformed_flate_stream")
+                _deadline_check(deadline)
                 continue
+            _deadline_check(deadline)
             streams_decoded += 1
         else:
-            unsupported_filters.update(filters)
+            unsupported_filter_count += max(1, len(filters))
             incomplete_reasons.append("unsupported_stream_filter")
             continue
         decoded_total += len(decoded)
         _merge_features(findings, _feature_counts(decoded), "decoded_stream")
+        _deadline_check(deadline)
         if not decoded_ok:
             incomplete_reasons.append("decoded_byte_limit")
         if decoded_total >= decode_cap:
@@ -339,7 +345,7 @@ def inspect_pdf(
         "streams_seen": streams_seen,
         "streams_decoded": streams_decoded,
         "decoded_bytes": decoded_total,
-        "unsupported_filters": sorted(unsupported_filters),
+        "unsupported_filter_count": unsupported_filter_count,
         "malformed_streams": malformed_streams,
         "execution": "none",
     }

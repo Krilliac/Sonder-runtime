@@ -19,6 +19,7 @@ OPT_IN_VALUE = "enabled:bounded-read-only"
 
 _MAX_PROCESSES = 512
 _MAX_REGIONS = 512
+_MAX_REGION_QUERIES = 4096
 _MAX_BYTES = 16 * 1024 * 1024
 _MAX_SECONDS = 3.0
 _READ_CHUNK = 64 * 1024
@@ -181,13 +182,30 @@ def _risk_summary(counts: dict[str, int]) -> tuple[str, list[str]]:
         "remote_executable_allocation_primitive",
     }
     matched = len(injection.intersection(present))
-    if matched == 3 or "credential_dump_marker" in present:
+    if (
+        matched == 3
+        or "credential_dump_marker" in present
+        or "private_writable_executable_region" in present
+    ):
         return "high", present
     if matched >= 2 or "reflective_loader_marker" in present:
         return "medium", present
     if present:
         return "low", present
     return "none", present
+
+
+def _count_new_matches(haystack: bytes, marker: bytes, new_start: int) -> int:
+    """Count matches that include at least one byte from the newest chunk."""
+    count = 0
+    offset = 0
+    while True:
+        found = haystack.find(marker, offset)
+        if found < 0:
+            return count
+        if found + len(marker) > new_start:
+            count += 1
+        offset = found + 1
 
 
 def inspect_process_memory(
@@ -253,9 +271,9 @@ def inspect_process_memory(
     kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
     kernel32.CloseHandle.restype = wintypes.BOOL
 
-    # PROCESS_VM_READ | PROCESS_QUERY_LIMITED_INFORMATION.  No write, operation,
+    # PROCESS_VM_READ | PROCESS_QUERY_INFORMATION. No write, operation,
     # create-thread, suspend, or all-access rights are requested.
-    handle = kernel32.OpenProcess(0x0010 | 0x1000, False, parsed_pid)
+    handle = kernel32.OpenProcess(0x0010 | 0x0400, False, parsed_pid)
     if not handle:
         return {
             "ok": False,
@@ -266,18 +284,27 @@ def inspect_process_memory(
         }
 
     counts = {name: 0 for name, _ in _INDICATORS}
+    counts["private_writable_executable_region"] = 0
     bytes_scanned = 0
     regions_examined = 0
+    region_queries = 0
     regions_read = 0
+    read_failures = 0
+    partial_reads = 0
     timed_out = False
     address = 0
     max_address = (1 << (ctypes.sizeof(ctypes.c_void_p) * 8)) - 1
     readable = {0x02, 0x04, 0x20, 0x40}
     max_marker = max(len(marker) for _, markers in _INDICATORS for marker in markers)
+    candidate_regions = []
     try:
+        # Enumerate first, then inspect higher-address private allocations first.
+        # Recently created heaps/buffers (including the defensive fixture and
+        # common injected allocations) otherwise sit behind many MiB of older
+        # runtime state and can be starved by the hard byte cap.
         while (
-            regions_examined < region_limit
-            and bytes_scanned < byte_limit
+            len(candidate_regions) < region_limit
+            and region_queries < _MAX_REGION_QUERIES
             and address < max_address
         ):
             if time.monotonic() >= deadline:
@@ -289,22 +316,32 @@ def inspect_process_memory(
             )
             if not queried:
                 break
+            region_queries += 1
             base = int(mbi.BaseAddress or 0)
             size = int(mbi.RegionSize)
             next_address = base + max(size, 1)
             if next_address <= address:
                 break
             address = next_address
-            regions_examined += 1
-
             protection = int(mbi.Protect)
             if (
                 int(mbi.State) != 0x1000
+                or int(mbi.Type) != 0x20000  # MEM_PRIVATE only
                 or (protection & 0xFF) not in readable
                 or protection & (0x100 | 0x01)
             ):
                 continue
+            if (protection & 0xFF) == 0x40:
+                counts["private_writable_executable_region"] = min(
+                    255, counts["private_writable_executable_region"] + 1,
+                )
+            candidate_regions.append((base, size))
 
+        regions_examined = len(candidate_regions)
+
+        for base, size in reversed(candidate_regions):
+            if bytes_scanned >= byte_limit:
+                break
             region_read = False
             offset = 0
             tail = b""
@@ -324,12 +361,20 @@ def inspect_process_memory(
                 )
                 got = int(received.value)
                 if not success and got == 0:
+                    read_failures += 1
                     break
+                if got < requested:
+                    partial_reads += 1
                 chunk = buffer.raw[:got]
                 haystack = tail + chunk
                 for name, markers in _INDICATORS:
                     for marker in markers:
-                        counts[name] = min(255, counts[name] + haystack.count(marker))
+                        counts[name] = min(
+                            255,
+                            counts[name] + _count_new_matches(
+                                haystack, marker, len(tail),
+                            ),
+                        )
                 tail = haystack[-(max_marker - 1) :] if max_marker > 1 else b""
                 bytes_scanned += got
                 offset += max(got, requested)
@@ -346,19 +391,41 @@ def inspect_process_memory(
         timed_out
         or bytes_scanned >= byte_limit
         or regions_examined >= region_limit
+        or region_queries >= _MAX_REGION_QUERIES
     )
+    incomplete = bool(bounded or read_failures or partial_reads)
+    incomplete_reasons = []
+    if timed_out:
+        incomplete_reasons.append("time_limit")
+    if bytes_scanned >= byte_limit:
+        incomplete_reasons.append("byte_limit")
+    if regions_examined >= region_limit:
+        incomplete_reasons.append("region_limit")
+    if region_queries >= _MAX_REGION_QUERIES:
+        incomplete_reasons.append("region_query_limit")
+    if read_failures:
+        incomplete_reasons.append("read_failure")
+    if partial_reads:
+        incomplete_reasons.append("partial_read")
+    if incomplete and risk == "none":
+        risk = "unknown"
     return {
         "ok": True,
         "operation": "process_memory_inspect",
-        "status": "bounded" if bounded else "complete",
+        "status": "incomplete" if incomplete else "complete",
         "pid": parsed_pid,
         "risk": risk,
         "indicators": present,
         "indicator_counts": {name: counts[name] for name in present},
         "bytes_scanned": bytes_scanned,
         "regions_examined": regions_examined,
+        "region_queries": region_queries,
         "regions_read": regions_read,
+        "read_failures": read_failures,
+        "partial_reads": partial_reads,
         "timed_out": timed_out,
+        "scan_complete": not incomplete,
+        "incomplete_reasons": incomplete_reasons,
         "limits": {
             "max_bytes": byte_limit,
             "max_regions": region_limit,

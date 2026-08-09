@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import zlib
 
 import pytest
@@ -85,8 +86,48 @@ def test_unsupported_filter_makes_clean_result_unknown(project):
     result = pdf_risk.inspect_pdf(path)
     assert result["scan_complete"] is False
     assert result["risk"] == "unknown"
-    assert result["unsupported_filters"] == ["LZWDecode"]
+    assert result["unsupported_filter_count"] == 1
     assert "unsupported_stream_filter" in result["incomplete_reasons"]
+
+
+def test_unsupported_filter_name_is_never_returned(project):
+    canary = "TOPSECRETFILTERCANARY"
+    path = project / "private-filter.pdf"
+    path.write_bytes(_pdf(
+        b"<< /Filter /" + canary.encode() + b" >>\nstream\nopaque\nendstream"
+    ))
+    output = pdf_risk.format_result(pdf_risk.inspect_pdf(path))
+    assert canary not in output
+    assert '"unsupported_filter_count":1' in output
+
+
+def test_concatenated_flate_members_never_report_clean(project):
+    compressed = zlib.compress(b"benign") + zlib.compress(b"/JavaScript /OpenAction")
+    path = project / "concat.pdf"
+    path.write_bytes(_pdf(
+        b"<< /Filter /FlateDecode >>\nstream\n" + compressed + b"\nendstream"
+    ))
+    result = pdf_risk.inspect_pdf(path)
+    assert result["scan_complete"] is False
+    assert result["risk"] == "unknown"
+    assert "malformed_flate_stream" in result["incomplete_reasons"]
+
+
+def test_deadline_overrun_cannot_report_complete(project, monkeypatch):
+    compressed = zlib.compress(b"benign")
+    path = project / "slow.pdf"
+    path.write_bytes(_pdf(
+        b"<< /Filter /FlateDecode >>\nstream\n" + compressed + b"\nendstream"
+    ))
+    original = pdf_risk._flate_decode
+
+    def slow_decode(*args, **kwargs):
+        time.sleep(0.06)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(pdf_risk, "_flate_decode", slow_decode)
+    with pytest.raises(TimeoutError):
+        pdf_risk.inspect_pdf(path, max_seconds=0.05)
 
 
 def test_encryption_never_reports_clean(project):

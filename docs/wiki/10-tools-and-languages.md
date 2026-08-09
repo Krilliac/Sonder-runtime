@@ -125,15 +125,20 @@ safety.
 For exact script execution, `SONDER_EXECUTION_RISK_POLICY` selects `off`,
 `report` (default), `deny-high`, `deny-medium`, or `deny-unknown`. Per-call
 `risk_policy` can make enforcement stricter but never weaker than the operator
-setting. Program execution without an exact inspectable file remains outside
-this static gate and should be isolated separately.
+setting. Current `deny-*` modes conservatively refuse every launch, including a
+below-threshold file, because the runner cannot portably guarantee that an
+interpreter opens the same file handle that was inspected. `report` is advisory.
+Program execution without an exact inspectable file remains outside this static
+gate and should be isolated separately.
 
 `process_list` and `process_memory_risk_inspect` are host-observation tools for
 defensive analysis on Windows. Both require the exact operator opt-in
 `SONDER_PROCESS_INSPECTION=enabled:bounded-read-only`. Inventory exposes only
 bounded PID, parent PID, executable-name, and thread-count metadata. Memory
 inspection accepts one PID and returns only fixed risk-indicator names/counts
-and aggregate scan accounting under hard byte, region, and time ceilings. It
+from private readable memory and aggregate scan accounting under hard byte,
+region, and time ceilings. Read failures and partial reads make the result
+explicitly incomplete rather than clean. It
 does not return memory content, discovered strings, paths, addresses, or command
 lines and never requests write/injection/debug rights. Unsupported platforms,
 protected processes, access denial, and incomplete scans fail explicitly.
