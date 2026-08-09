@@ -12,19 +12,20 @@ args = ['<SONDER_DIR>/server.py']
 startup_timeout_sec = 120.0
 
 [mcp_servers.sonder.env]
-# --- tier -> model. Point these at models you have actually pulled. ---
-SONDER_FAST = "qwen2.5:3b"
-SONDER_CODE = "qwen2.5-coder:7b"
-SONDER_GENERAL = "qwen2.5:7b-instruct"
+# --- tier -> model. setup_alias.py creates this hardware-sized stable alias. ---
+SONDER_FAST = "sonder:latest"
+SONDER_CODE = "sonder:latest"
+SONDER_GENERAL = "sonder:latest"
+# Optional specialist tiers stay unbound until you configure installed models.
+# SONDER_REASONING = "<installed reasoning model>"
+# SONDER_VISION = "<installed vision model>"
 
 # --- serving ---
-# 999 = offload every layer to the GPU. Ollama's default heuristic is
-# conservative and will silently leave part of a 7B on the CPU, costing
-# roughly a third of throughput. If the model does not fit, Ollama falls
-# back, so this is a safe default.
-SONDER_NUM_GPU = "999"
-# Match your core count.
-SONDER_NUM_THREAD = "8"
+# Leave placement unset for Ollama's CPU/Metal/AMD/Intel/NVIDIA capability
+# detection. Pin only after measuring this host; 0 explicitly means CPU-only.
+# SONDER_NUM_GPU = "0"
+# Sonder detects logical CPU count; optionally cap it for a shared machine.
+# SONDER_NUM_THREAD = "8"
 SONDER_NUM_BATCH = "512"
 # Longer keeps models resident between turns; shorten it if RAM is tight.
 SONDER_KEEP_ALIVE = "5m"

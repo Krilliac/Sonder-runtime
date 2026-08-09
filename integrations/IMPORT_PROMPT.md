@@ -43,9 +43,10 @@ Do this:
    reorder or drop anything already in that file. If a Sonder section is
    already present, show me a diff instead of duplicating it.
 
-5. Default to private: do not enable the cloud tiers. Set SONDER_NUM_GPU=999
-   unless you have a specific reason not to, and say why if you deviate.
-   Set SONDER_NUM_THREAD to this machine's core count.
+5. Default to private: do not enable the cloud tiers. Leave SONDER_NUM_GPU
+   unset so Ollama detects this host's CPU/Metal/AMD/Intel/NVIDIA backend.
+   Pin a numeric override only after measuring it. Let Sonder detect CPU thread
+   count unless this machine has an operator-chosen limit.
 
 6. Verify rather than assume. Restart or reload so the server is picked up,
    then call status and diagnostics and show me the output. If a tier points
