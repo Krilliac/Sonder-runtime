@@ -102,6 +102,7 @@ import reloadable_mcp
 import autopilot_store
 import autopilot_controller
 from model_transport import ModelCallError
+import context_overflow
 import ollama_endpoint
 import sonder_speculation
 import consult as consult_flow
@@ -435,6 +436,7 @@ def _chat_request_with_cloud_fallback(
             timeout=timeout,
             cancel_check=cancel_check,
             accept_native_tool_calls=accept_native_tool_calls,
+            idempotent=True,
         )
         return out, content, model
     except ModelCallError as error:
@@ -455,6 +457,7 @@ def _chat_request_with_cloud_fallback(
         timeout=timeout,
         cancel_check=cancel_check,
         accept_native_tool_calls=accept_native_tool_calls,
+        idempotent=True,
     )
     return out, content, fallback
 
@@ -898,6 +901,7 @@ def _make_generate(
                     timeout=timeout,
                     cancel_check=cancel_check,
                     accept_native_tool_calls=accept_native_tool_calls,
+                    idempotent=True,
                 )
             tokens_in = _model_usage_count(out.get("prompt_eval_count"))
             tokens_out = _model_usage_count(out.get("eval_count"))
@@ -1585,7 +1589,9 @@ def _mcp_command(arg: str) -> str:
             else "MCP source already current."
         )
         if refreshed.get("error"):
-            prefix = "MCP refresh failed closed: %s" % refreshed["error"]
+            prefix = "MCP refresh failed closed: %s" % _safe_mcp_error(
+                refreshed["error"]
+            )
         return "%s\n\n%s" % (prefix, format_mcp_runtime())
     if action in {"help", "?"}:
         return (
@@ -2975,6 +2981,59 @@ def _local_model_retries() -> int:
     return max(0, min(value, _MAX_LOCAL_MODEL_RETRIES))
 
 
+def _hosted_overflow_retry_enabled() -> bool:
+    """Operator opt-in for compaction retries on hosted/remote model routes.
+
+    Off by default. Even when on it is not sufficient: the calling site must also
+    declare the request idempotent, because a hosted retry is metered work that
+    may duplicate a side effect.
+    """
+    return os.environ.get("SONDER_HOSTED_OVERFLOW_RETRY", "").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+
+
+def _overflow_retry_allowed(*, cloud: bool, remote: bool, idempotent: bool) -> bool:
+    """Whether this route may spend one extra attempt on a compacted prompt.
+
+    Loopback Ollama is free and side-effect-free, so it may always take the one
+    retry. Anything that leaves the machine - a hosted tier or a remote Ollama -
+    keeps the existing "no retries" posture unless the request was explicitly
+    declared idempotent *and* the operator opted in.
+    """
+    if not (cloud or remote):
+        return True
+    return bool(idempotent) and _hosted_overflow_retry_enabled()
+
+
+def _embedded_model_error(result) -> str:
+    """Error text from a 2xx body that reports failure in-band, else ""."""
+    if not isinstance(result, dict):
+        return ""
+    embedded = result.get("error")
+    if not embedded:
+        return ""
+    return _safe_model_error_detail(embedded)
+
+
+def _compacted_overflow_payload(payload, verdict):
+    """One bounded compaction of `payload` for a classified context overflow.
+
+    Returns a new payload, or None when there is nothing safe to drop. Only the
+    message list changes: `options` (and therefore `num_ctx`) is carried through
+    untouched, so recovery never silently widens the context window behind the
+    context policy's back.
+    """
+    if not verdict.overflow or not isinstance(payload, dict):
+        return None
+    compacted = context_overflow.compact_messages(payload.get("messages"))
+    if compacted is None:
+        return None
+    updated = dict(payload)
+    updated["messages"] = compacted
+    return updated
+
+
 def _local_retry_delay(attempt: int) -> float:
     raw = os.environ.get("SONDER_LOCAL_RETRY_DELAY_MS", "150").strip()
     try:
@@ -3017,7 +3076,9 @@ def _safe_model_error_detail(value, limit: int = 600) -> str:
     # tokens or API keys accidentally echoed by an upstream proxy.
     if not structured:
         text = re.sub(
-            r"(?i)\b(bearer|token|secret|api[-_]?key)\b\s*[:=]?\s*\S+",
+            r"(?i)\b(bearer|token|secret|api[-_]?key)\b\s*[:=]?\s*"
+            r"(?!(?:limit|count|budget|window|usage|quota|length|context|maximum|minimum)\b)"
+            r"\S+",
             r"\1=<redacted>",
             text,
         )
@@ -3080,6 +3141,7 @@ def _post_model(
     cloud: bool = False,
     timeout: int | None = None,
     cancel_check=None,
+    idempotent: bool = False,
 ) -> tuple[dict, int]:
     """POST one logical model request with a narrow loopback-only retry policy.
 
@@ -3087,6 +3149,14 @@ def _post_model(
     retry only transport failures and explicitly transient HTTP statuses, using
     the original timeout as one total monotonic budget. The endpoint, model, and
     payload never change between attempts.
+
+    The single exception is a *classified* context overflow. When the failure
+    text itself says the prompt did not fit, this function may spend exactly one
+    extra attempt on a compacted prompt - within the same monotonic deadline and
+    behind the same cancellation gate as every other attempt. `idempotent` is the
+    caller's declaration that repeating this request is safe; it is required (on
+    top of an operator opt-in) before a hosted or remote route will take even
+    that one retry.
     """
     cloud = bool(cloud or _is_cloud_model_name(model))
     if cloud and not cloud_allowed():
@@ -3104,7 +3174,11 @@ def _post_model(
         1 if cloud or remote_endpoint else 1 + _local_model_retries()
     )
 
-    for attempt_index in range(max_attempts):
+    # Bumped by exactly one if a classified context overflow earns a compaction
+    # retry, so that recovery cannot eat the ordinary transient retry budget.
+    compaction_spent = False
+    attempt_index = 0
+    while attempt_index < max_attempts:
         attempt = attempt_index + 1
         if _cancel_requested(cancel_check):
             raise ModelCallError(
@@ -3122,13 +3196,21 @@ def _post_model(
                 attempts=attempt_index,
                 cloud=cloud,
             )
+        attempt_index = attempt
+        failure = None
+        embedded_detail = ""
         try:
             if timeout is None and attempt == 1:
                 result = _post(path, payload)
             else:
                 call_timeout = request_timeout if attempt == 1 else max(1, int(remaining))
                 result = _post(path, payload, timeout=call_timeout)
-            return result, attempt
+            # Ollama can report a refusal in-band on a 200. That is the same
+            # failure surface as an HTTP error body, so it gets classified too
+            # rather than being handed upward as an opaque success.
+            embedded_detail = "" if compaction_spent else _embedded_model_error(result)
+            if not embedded_detail:
+                return result, attempt
         except ModelCallError as error:
             raise ModelCallError(
                 error.kind,
@@ -3170,6 +3252,38 @@ def _post_model(
                 attempts=attempt,
                 cloud=cloud,
             ) from error
+
+        if not compaction_spent:
+            detail = embedded_detail or failure.detail
+            status = None if embedded_detail else failure.status
+            verdict = context_overflow.classify(detail, status=status)
+            compacted = None
+            if verdict.overflow and _overflow_retry_allowed(
+                cloud=cloud, remote=remote_endpoint, idempotent=idempotent,
+            ):
+                compacted = _compacted_overflow_payload(payload, verdict)
+            if compacted is not None:
+                remaining = deadline - time.monotonic()
+                if remaining >= 1.0 and not _cancel_requested(cancel_check):
+                    # One extra attempt, inside the same deadline. num_ctx is
+                    # deliberately not raised: the prompt shrinks instead.
+                    payload = compacted
+                    compaction_spent = True
+                    max_attempts += 1
+                    activity_tracker.record_event(
+                        "model_context_compaction",
+                        model=str(model or "")[:80],
+                        attempt=attempt + 1,
+                        reason=verdict.reason,
+                        status=verdict.status,
+                        control=verdict.control,
+                    )
+                    continue
+
+        if embedded_detail:
+            # Not an overflow we can act on; hand the in-band error upward
+            # exactly as before so the caller raises its own typed failure.
+            return result, attempt
 
         if cloud or not failure.transient or attempt >= max_attempts:
             raise failure
@@ -3268,6 +3382,7 @@ def _chat_request(
     timeout: int | None = None,
     cancel_check=None,
     accept_native_tool_calls: bool = False,
+    idempotent: bool = False,
     _budget_retried: bool = False,
 ) -> tuple[dict, str]:
     if not cloud and _known_thinking_model(model):
@@ -3288,6 +3403,7 @@ def _chat_request(
         cloud=cloud,
         timeout=timeout,
         cancel_check=cancel_check,
+        idempotent=idempotent,
     )
     if not isinstance(out, dict):
         raise ModelCallError(
@@ -3325,6 +3441,7 @@ def _chat_request(
                 timeout=timeout,
                 cancel_check=cancel_check,
                 accept_native_tool_calls=accept_native_tool_calls,
+                idempotent=idempotent,
                 _budget_retried=True,
             )
         raise ModelCallError(
@@ -3552,6 +3669,7 @@ def _offload_impl(
                     cloud=False,
                     timeout=request_timeout,
                     cancel_check=cancel_check,
+                    idempotent=True,
                 )
             tokens_in = _model_usage_count(out.get("prompt_eval_count"))
             tokens_out = _model_usage_count(out.get("eval_count"))
@@ -6302,11 +6420,19 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
             "Inspect /autopilot status, then deliberately resume, cancel, or revise the goal.",
         )
     if mcp_state.get("last_error"):
+        provenance = mcp_state.get("provenance") or {}
         add(
             "runtime",
             "high",
-            "The latest MCP source refresh failed closed.",
-            "Run /mcp status, fix the reported source error, then use /mcp refresh; the last known-good tools remain active.",
+            (
+                "The MCP process is attached to a stale runtime source root."
+                if provenance.get("issue") == "stale_source_root"
+                else "The latest MCP source refresh failed closed."
+            ),
+            _safe_mcp_recovery_action(provenance) or (
+                "Run /mcp status, fix the reported source error, then use "
+                "/mcp refresh; the last known-good tools remain active."
+            ),
         )
     elif mcp_state.get("source_changed"):
         add(
@@ -7128,6 +7254,8 @@ def debug_inspect(token: str = "", include_status: bool = True) -> str:
         "  note: private hidden chain-of-thought is not exposed; use trace/tool/activity logs instead.",
         "",
         admin_status(token),
+        "",
+        format_mcp_runtime(),
         "",
         master_status(limit=10),
         "",
@@ -10943,6 +11071,29 @@ def mcp_runtime_data() -> dict:
     return mcp.runtime_snapshot()
 
 
+def _safe_mcp_recovery_action(provenance: dict) -> str:
+    if not provenance.get("issue"):
+        return ""
+    return reloadable_mcp._recovery_action(
+        bool(provenance.get("configured_root_ready"))
+    )
+
+
+def _safe_mcp_error(value) -> str:
+    text = str(value or "")
+    safe_messages = {
+        "stale runtime source: loaded MCP file is unavailable",
+        "configured runtime root is unavailable",
+        "loaded MCP source does not match configured runtime root",
+    }
+    if text in safe_messages:
+        return text
+    error_type = text.partition(":")[0]
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}(?:Error|Exception)", error_type):
+        return "%s: source refresh failed" % error_type
+    return "runtime source refresh failed"
+
+
 def format_mcp_runtime(data: dict | None = None) -> str:
     data = mcp_runtime_data() if data is None else data
     loaded = str(data.get("loaded_digest") or "")[:12] or "unknown"
@@ -10962,17 +11113,47 @@ def format_mcp_runtime(data: dict | None = None) -> str:
         ),
         "  MCP tool-list updates: %s"
         % ("advertised" if data.get("protocol_list_changed") else "not advertised"),
-        "  source: %s" % (data.get("path") or "(unknown)"),
+        "  source registration: %s"
+        % ("available" if data.get("path") else "unknown"),
         "  loaded/current: %s / %s" % (loaded, current),
     ]
+    provenance = data.get("provenance") or {}
+    if provenance:
+        lines.extend([
+            "  process: pid=%s | python=%s"
+            % (
+                provenance.get("pid", "unknown"),
+                "python" if provenance.get("python") else "unknown",
+            ),
+            "  process cwd: %s"
+            % (
+                "unavailable"
+                if provenance.get("cwd") == "(deleted or unavailable)"
+                else "available"
+            ),
+            "  source root: %s"
+            % ("present" if provenance.get("source_root_exists") else "missing"),
+            "  configured runtime root: %s"
+            % (
+                "present"
+                if provenance.get("configured_root_exists")
+                else "missing/not set"
+            ),
+        ])
+        if provenance.get("issue"):
+            lines.append("  provenance ERROR: %s" % provenance["issue"])
+        action = _safe_mcp_recovery_action(provenance)
+        if action:
+            lines.append("  ACTION: %s" % action)
     if data.get("last_refresh_ts"):
         lines.append("  last refresh unix time: %s" % data["last_refresh_ts"])
     if data.get("last_error"):
         lines.append(
-            "  ERROR: %s (last known-good registry remains active)" % data["last_error"]
+            "  ERROR: %s (last known-good registry remains active)"
+            % _safe_mcp_error(data["last_error"])
         )
     if data.get("last_notification_error"):
-        lines.append("  notification warning: %s" % data["last_notification_error"])
+        lines.append("  notification warning: MCP list-change notification failed")
     return "\n".join(lines)
 
 
@@ -16792,7 +16973,7 @@ def status() -> str:
     installed = sorted(m.get("name", "?") for m in tags)
     loaded = [str(m.get("name")) for m in ps if m.get("name")]
     tier_lines = [
-        f"  {k}={v}" + ("  [CLOUD — leaves machine]" if _is_cloud_tier(k, v) else "  [local Ollama]")
+        f"  {k}={v}" + ("  [CLOUD - leaves machine]" if _is_cloud_tier(k, v) else "  [local Ollama]")
         for k, v in available_tiers(include_disabled=cloud_allowed()).items()
     ]
     if not ollama_endpoint.is_loopback(BASE):
@@ -16816,6 +16997,19 @@ def status() -> str:
             **_local_runtime_summary()
         ),
     ]
+    mcp_state = mcp_runtime_data()
+    provenance = mcp_state.get("provenance") or {}
+    if provenance.get("issue"):
+        lines.append(
+            "mcp runtime: ERROR %s (source root: %s)"
+            % (
+                provenance["issue"],
+                "present" if provenance.get("source_root_exists") else "missing",
+            )
+        )
+        action = _safe_mcp_recovery_action(provenance)
+        if action:
+            lines.append("mcp ACTION: %s" % action)
     try:
         auto = _application().automation.snapshot(include_finished=False, limit=20)
         lines.append(
