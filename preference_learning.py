@@ -15,20 +15,111 @@ _ASSIGN_RE = re.compile(r"\s+")
 _KEY_RE = re.compile(r"[^a-z0-9]+")
 
 _PATTERNS = [
-    (re.compile(r"\b(?:i|we)\s+prefer(?:\s+that)?\s+(?P<body>[^.!?\n]+)", re.I), "User prefers %s."),
+    (re.compile(r"\b(?:i|we)\s+prefer(?:\s+that)?\s+(?!not\b)(?P<body>[^.!?\n]+)", re.I), "User prefers %s."),
+    (re.compile(r"\b(?:i|we)\s+prefer\s+not\s+to\s+(?P<body>[^.!?\n]+)", re.I), "User does not want Sonder to %s."),
+    (re.compile(r"\b(?:i|we)\s+(?:do\s+not|don't)\s+like\s+(?P<body>[^.!?\n]+)", re.I), "User does not like %s."),
     (re.compile(r"\b(?:i|we)\s+like\s+it\s+when\s+(?P<body>[^.!?\n]+)", re.I), "User likes it when %s."),
     (re.compile(r"\bplease\s+always\s+(?P<body>[^.!?\n]+)", re.I), "User wants Sonder to always %s."),
     (re.compile(r"\balways\s+(?P<body>[^.!?\n]+)", re.I), "User wants Sonder to always %s."),
     (re.compile(r"\bfrom\s+now\s+on,?\s+(?P<body>[^.!?\n]+)", re.I), "From now on, %s."),
-    (re.compile(r"\b(?:do\s+not|don't)\s+(?P<body>[^.!?\n]+)", re.I), "User does not want Sonder to %s."),
+    (re.compile(r"\bplease\s+never\s+(?P<body>[^.!?\n]+)", re.I), "User does not want Sonder to %s."),
     (re.compile(r"\bcall\s+me\s+(?P<body>[^.!?\n]+)", re.I), "User wants to be called %s."),
     (re.compile(r"\bmy\s+name\s+is\s+(?P<body>[^.!?\n]+)", re.I), "User's name is %s."),
-    (re.compile(r"\bremember\s+that\s+(?P<body>[^.!?\n]+)", re.I), "Remember that %s."),
 ]
 
 _TASK_GUARD_RE = re.compile(
-    r"^(make|create|build|fix|run|compile|generate|write|implement|add|remove|delete)\b",
+    r"^(?:(?:please|help\s+me)\s+)?"
+    r"(?:(?:can|could|would|will)\s+you\s+)?"
+    r"(?:make|create|build|fix|run|compile|generate|write|implement|add|"
+    r"remove|delete|review|analyze)\b",
     re.I,
+)
+
+_UNSAFE_CONTEXT_RE = re.compile(
+    r"(?:^|\s)[A-Za-z]:[\\/]|(?:^|\s)(?:~|\.{1,2})[\\/]|"
+    r"\b(?:audit|canary|marker|secret|password|credential|auth\s+token|"
+    r"confidential|private\s+(?:data|detail|constraint|project))\b|"
+    r"\b(?:issue|pr|pull\s+request)\s*#?\d+\b|"
+    r"\b(?:this|that|current|specific)\s+(?:task|turn|request|answer|audit|"
+    r"project|repo(?:sitory)?|branch|issue|file|session)\b|"
+    r"\b(?:for|during|only\s+for)\s+(?:this|the\s+current)\s+"
+    r"(?:task|turn|request|answer|audit|project|repo(?:sitory)?|branch|session)\b|"
+    r"\b(?:for|in|on)\s+(?:the\s+)?(?:project|repo(?:sitory)?|branch)\s+"
+    r"[A-Za-z0-9_.-]+\b|"
+    r"\b(?:right\s+now|just\s+this\s+once|one[- ]time|temporar(?:y|ily))\b",
+    re.I,
+)
+_META_QUOTE_RE = re.compile(
+    r"\b(?:audit|test|example|parser|extractor|prompt|quoted?|says?|said|"
+    r"tell|explain|analyze|review|"
+    r"contains?|mentions?)\b[^\n]{0,100}[\"'“”‘’]",
+    re.I,
+)
+
+_CATEGORY_PATTERNS = (
+    ("identity", re.compile(r"\b(?:wants?\s+to\s+be\s+called|name\s+is)\b", re.I)),
+    ("response_style", re.compile(
+        r"\b(?:concise|brief|short|direct|detailed|verbose|bullets?|headings?|"
+        r"explain|explanation|tone|formal|casual|status\s+updates?|"
+        r"mention\s+what\s+changed|show\s+(?:your\s+)?progress)\b", re.I,
+    )),
+    ("shell", re.compile(
+        r"\b(?:powershell|pwsh|bash|zsh|cmd(?:\.exe)?|terminal|shell|"
+        r"command\s+line|windows\s+commands?|linux\s+commands?)\b", re.I,
+    )),
+    ("code", re.compile(
+        r"(?:\b(?:code|coding|programming|python|javascript|typescript|rust|java|"
+        r"cpp|msvc|clang|gcc|cmake|ninja|tests?|pytest|unittest|tabs?|spaces?|"
+        r"indentation|type\s+hints?|docstrings?)\b|c\+\+|c#)", re.I,
+    )),
+    ("ui", re.compile(
+        r"\b(?:dark\s+mode|light\s+mode|theme|color\s+scheme|layout|ui|ux)\b",
+        re.I,
+    )),
+    ("workflow", re.compile(
+        r"\b(?:ask\s+(?:me\s+)?before|confirm\s+before|approval|commit|push|"
+        r"pull\s+request|changelog|documentation|docs|source\s+citations?)\b",
+        re.I,
+    )),
+)
+
+_TASK_CATEGORY_PATTERNS = {
+    "shell": re.compile(
+        r"\b(?:powershell|pwsh|bash|zsh|cmd|terminal|shell|command|script|"
+        r"windows|linux|wsl|environment\s+variable)\b", re.I,
+    ),
+    "code": re.compile(
+        r"(?:\b(?:code|implement|build|compile|debug|refactor|function|class|api|"
+        r"python|javascript|typescript|rust|java|cpp|msvc|clang|gcc|cmake|ninja|"
+        r"test|pytest|repository|repo|module|package)\b|c\+\+|c#)", re.I,
+    ),
+    "ui": re.compile(
+        r"\b(?:ui|ux|interface|page|app|website|theme|color|layout|design)\b",
+        re.I,
+    ),
+    "workflow": re.compile(
+        r"\b(?:file|delete|modify|commit|push|pull\s+request|release|deploy|"
+        r"source|research|document|docs|workflow|project|repo)\b", re.I,
+    ),
+}
+
+_TECH_FAMILIES = (
+    re.compile(r"(?:\bc\+\+|\b(?:cpp|msvc|clang|gcc|cmake|ninja)\b)", re.I),
+    re.compile(r"\bpython|pytest\b", re.I),
+    re.compile(r"\b(?:javascript|typescript|node(?:\.js)?)\b", re.I),
+    re.compile(r"\brust|cargo\b", re.I),
+    re.compile(r"(?:\bc#|\.net\b)", re.I),
+)
+_SHELL_FAMILIES = (
+    re.compile(r"\b(?:powershell|pwsh)\b", re.I),
+    re.compile(r"\b(?:bash|zsh|linux|wsl)\b", re.I),
+    re.compile(r"\b(?:cmd(?:\.exe)?|windows\s+commands?)\b", re.I),
+)
+_WORKFLOW_FAMILIES = (
+    re.compile(r"\b(?:delete|remove|overwrite|destructive)\b", re.I),
+    re.compile(r"\b(?:commit|push|pull\s+request|changelog|release|deploy)\b", re.I),
+    re.compile(r"\b(?:source|citation|research)\b", re.I),
+    re.compile(r"\b(?:documentation|docs)\b", re.I),
 )
 
 
@@ -60,10 +151,80 @@ def preference_key(text):
     return base[:80] or "preference"
 
 
+def preference_category(text):
+    """Classify a durable behavior/default, or return empty when unsafe."""
+    value = _clean(text)
+    if not value or _UNSAFE_CONTEXT_RE.search(value) or _META_QUOTE_RE.search(value):
+        return ""
+    for category, pattern in _CATEGORY_PATTERNS:
+        if pattern.search(value):
+            return category
+    return ""
+
+
+def is_stable_preference(text, source_text=None):
+    """True only for durable behavior/default text safe for future prompts."""
+    source = str(source_text if source_text is not None else text or "")
+    if "```" in source or _UNSAFE_CONTEXT_RE.search(source):
+        return False
+    if _META_QUOTE_RE.search(source):
+        return False
+    category = preference_category(text)
+    if category == "identity":
+        match = re.search(
+            r"\b(?:called|name\s+is)\s+([^.!?]+)", str(text or ""), re.I
+        )
+        if not match:
+            return False
+        name = match.group(1).strip()
+        words = name.split()
+        if (
+            not 1 <= len(words) <= 4
+            or re.fullmatch(r"[A-Za-zÀ-ɏ'\-’ ]+", name) is None
+            or any(word.casefold() in {
+                "after", "before", "when", "while", "if", "for", "during",
+                "later", "tomorrow", "today",
+            } for word in words)
+        ):
+            return False
+    return bool(category)
+
+
+def preference_applies(text, task):
+    """Return whether a safe legacy preference is relevant to this task."""
+    category = preference_category(text)
+    if not category:
+        return False
+    if category in {"identity", "response_style"}:
+        return True
+    task = str(task or "")
+    task_pattern = _TASK_CATEGORY_PATTERNS.get(category)
+    if task_pattern is None or not task_pattern.search(task):
+        return False
+    if category == "code":
+        families = [family for family in _TECH_FAMILIES if family.search(text)]
+        if families and not any(family.search(task) for family in families):
+            return False
+    if category == "shell":
+        families = [family for family in _SHELL_FAMILIES if family.search(text)]
+        if families and not any(family.search(task) for family in families):
+            return False
+    if category == "workflow":
+        families = [family for family in _WORKFLOW_FAMILIES if family.search(text)]
+        if families and not any(family.search(task) for family in families):
+            return False
+    return True
+
+
 def extract_preferences(text):
     """Return normalized preference strings found in a user turn."""
     cleaned = _clean(text)
-    if not cleaned or _TASK_GUARD_RE.match(cleaned):
+    if (
+        not cleaned
+        or _TASK_GUARD_RE.match(cleaned)
+        or _UNSAFE_CONTEXT_RE.search(str(text or ""))
+        or _META_QUOTE_RE.search(str(text or ""))
+    ):
         return []
     found = []
     seen = set()
@@ -73,6 +234,8 @@ def extract_preferences(text):
             if not body:
                 continue
             pref = normalize_preference(template % body)
+            if not is_stable_preference(pref, source_text=text):
+                continue
             key = preference_key(pref)
             if key not in seen:
                 seen.add(key)

@@ -46,6 +46,9 @@ class FakeCodec:
     def key(self, text):
         return "preference-key"
 
+    def is_stable(self, text, source_text=None):
+        return bool(text)
+
     def format(self, rows):
         return "\n".join(row["text"] for row in rows)
 
@@ -223,6 +226,7 @@ def test_legacy_codec_resolves_the_injected_live_module_identity():
         extract_preferences=lambda text: ["extracted"],
         normalize_preference=lambda text: "normalized",
         preference_key=lambda text: "key",
+        is_stable_preference=lambda text, source_text=None: True,
         format_preferences=lambda rows: "formatted",
     )
     codec = LegacyPreferenceCodec(lambda: replacement)
