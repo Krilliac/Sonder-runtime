@@ -278,6 +278,68 @@ _TRAILING_TIME = re.compile(
     r"this weekend|next week)\b.*$",
     re.IGNORECASE,
 )
+_WEATHER_META_FRAME = re.compile(
+    r"\b(?:phrase|prompt|sentence|string|text|literal|example|regex|parser|router|routing|"
+    r"extractor|extraction|classifier|classification)\b[^\n]{0,80}"
+    r"\b(?:weather|forecast|temperature)\b|"
+    r"\b(?:this|that|the|a|an)\s+(?:weather\s+|forecast\s+)?query\b|"
+    r"^\s*(?:(?:can|could|would|will)\s+you\s+)?"
+    r"(?:explain|analyze|discuss)\b[^\n]{0,100}"
+    r"\b(?:parse|route|extract|classif)\w*\b|"
+    r"\b(?:document|article|page|file)\s+"
+    r"(?:says?|contains?|includes?|mentions?)\b[^\n]{0,100}"
+    r"\b(?:weather|forecast|temperature)\b|"
+    r"^\s*why\b[^\n]{0,100}\b(?:parse|route|extract|classif)\w*\b|"
+    r"\b(?:says?|said|asks?|asked|contains?|includes?|mentions?)\b[^\n]{0,80}"
+    r"[\"'](?:[^\"'\n]{0,80})(?:weather|forecast|temperature)",
+    re.IGNORECASE,
+)
+_WEATHER_FULLY_QUOTED = re.compile(
+    r"^\s*(?:\"[^\n\"]*(?:weather|forecast|temperature)[^\n\"]*\"|"
+    r"“[^\n”]*(?:weather|forecast|temperature)[^\n”]*”|"
+    r"'[^\n']*(?:weather|forecast|temperature)[^\n']*')\s*[?!.]*\s*$",
+    re.IGNORECASE,
+)
+_WEATHER_LOCATION_SCAFFOLD = re.compile(
+    r"^\s*(?:what(?:'s|s|\s+is)?|how(?:'s|s|\s+is)?|who|when|why|"
+    r"tell(?:\s+me)?|show(?:\s+me)?|check|give(?:\s+me)?|please|"
+    r"can|could|would|will|do|does|did|is|are|going\s+to|be\s+like)\b",
+    re.IGNORECASE,
+)
+_WEATHER_LOCATION_AMBIGUOUS = re.compile(
+    r"\s+(?:or|and|versus|vs\.?)\s+|\s[/|]\s|\b(?:either|both)\b",
+    re.IGNORECASE,
+)
+_WEATHER_CONJUNCTION_PLACES = frozenset({
+    "antigua and barbuda",
+    "bosnia and herzegovina",
+    "brighton and hove",
+    "saint kitts and nevis",
+    "saint vincent and the grenadines",
+    "trinidad and tobago",
+    "turks and caicos islands",
+    "wallis and futuna",
+})
+_WEATHER_LOCATION_TIME_ONLY = re.compile(
+    r"^(?:today(?:['’]s)?|tomorrow(?:['’]s)?|tonight|now|right\s+now|"
+    r"current|currently|live|later|"
+    r"this\s+(?:morning|afternoon|evening|week|weekend)|next\s+week|"
+    r"the\s+(?:morning|afternoon|evening)|\d{1,2}(?::\d{2})?\s*[ap]m)$",
+    re.IGNORECASE,
+)
+_WEATHER_NEGATED_ACTION = re.compile(
+    r"\b(?:do\s+not|don't|don’t|never)\b[^\n,;:.!?]{0,24}"
+    r"\b(?:check|fetch|get|give|look\s+up|need|report|show|tell|want)\b"
+    r"[^\n,;:.!?]{0,60}\b(?:weather|forecast|temperature)\b",
+    re.IGNORECASE,
+)
+_WEATHER_PROVIDER_EXCLUSION = re.compile(
+    r"\b(?:do\s+not|don't|don’t|never)\s+use\s+"
+    r"(?:the\s+)?[A-Za-z0-9.-]{2,80}\b[^\n]{0,160}"
+    r"\b(?:check|fetch|get|look\s+up|report|show|tell)\b[^\n]{0,80}"
+    r"\b(?:weather|forecast|temperature)\b",
+    re.IGNORECASE,
+)
 # Post-hoc guard: a generated reply that wrongly claims the assistant has no
 # internet/web/real-time access. Deliberately narrow (see denies_web_access);
 # phrases like "web tools are disabled" intentionally do NOT match.
@@ -727,10 +789,31 @@ def _clean_location(value: str) -> str:
     return location
 
 
+def _weather_location(value: str) -> str:
+    """Accept an explicit place, never question scaffolding or alternatives."""
+    location = _clean_location(value)
+    if not location:
+        return ""
+    if (
+        location.casefold() in {"a", "an", "the"}
+        or _WEATHER_LOCATION_SCAFFOLD.search(location)
+        or (
+            _WEATHER_LOCATION_AMBIGUOUS.search(location)
+            and location.casefold() not in _WEATHER_CONJUNCTION_PLACES
+        )
+        or _WEATHER_LOCATION_TIME_ONLY.fullmatch(location)
+        or _WEATHER_CORE.search(location)
+    ):
+        return ""
+    return location
+
+
 def extract_weather_location(text: str) -> str:
     text = str(text or "").strip()
     postal = re.search(r"(?<!\d)\d{5}(?:-\d{4})?(?!\d)", text)
     if postal:
+        if _WEATHER_LOCATION_AMBIGUOUS.search(text):
+            return ""
         return postal.group(0)
     match = re.search(
         r"^\s*how\s+much\s+(?:rain|snow)\s+will\s+(.{2,80}?)\s+"
@@ -739,21 +822,29 @@ def extract_weather_location(text: str) -> str:
         re.IGNORECASE,
     )
     if match:
-        return _clean_location(match.group(1))
+        return _weather_location(match.group(1))
     match = re.search(
         r"\b(?:in|for|near|around)\s+(.+)$",
         text,
         re.IGNORECASE,
     )
     if match:
-        return _clean_location(match.group(1))
+        return _weather_location(match.group(1))
+    match = re.search(
+        r"^\s*(?:what(?:['’]s|s|\s+is)?|how(?:['’]s|s|\s+is)?)\s+"
+        r"(?:the\s+)?(.{2,80}?)\s+(?:weather|forecast|temperature)\b",
+        text,
+        re.IGNORECASE,
+    )
+    if match:
+        return _weather_location(match.group(1))
     match = re.search(
         r"^\s*(.{2,80}?)\s+(?:weather|forecast|temperature)\b",
         text,
         re.IGNORECASE,
     )
-    if match and not re.search(r"\b(?:what|how|tell|show|check|current)\b", match.group(1), re.I):
-        return _clean_location(match.group(1))
+    if match:
+        return _weather_location(match.group(1))
     return ""
 
 
@@ -823,9 +914,18 @@ def classify(prompt: str, history=None) -> dict | None:
     text = str(prompt or "").strip()
     if not text:
         return None
+    if _WEATHER_PROVIDER_EXCLUSION.search(text):
+        return {"kind": "research", "query": text}
     # Whole-turn framing outranks keywords found inside quotes, examples, code
     # requests, hypotheticals, or explicit instructions not to look anything up.
     if _non_live_frame(text):
+        return None
+    if _WEATHER_NEGATED_ACTION.search(text):
+        return None
+    if (
+        _weather_signal(text)
+        and (_WEATHER_META_FRAME.search(text) or _WEATHER_FULLY_QUOTED.match(text))
+    ):
         return None
     previous_weather = _recent_weather_context(history)
     if (
