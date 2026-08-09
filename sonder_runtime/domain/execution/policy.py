@@ -26,6 +26,7 @@ DEFAULT_RULES = [
     {"pattern": "file_delete", "action": "deny", "note": "destructive by default"},
     {"pattern": "run_*", "action": "ask", "note": "executes generated code"},
     {"pattern": "web_*", "action": "ask", "note": "uses network access"},
+    {"pattern": "local_service_probe", "action": "ask", "note": "reads one loopback HTTP endpoint"},
     {"pattern": "admin_private_chain_of_thought", "action": "deny",
      "note": "private chain-of-thought is never exposed"},
 ]
