@@ -562,6 +562,7 @@ LIVE_RELOAD_MODULES = [
     "preference_learning",
     "workflow_store",
     "web_tools",
+    "local_service_probe",
     "web_intents",
     "self_heal",
     "memory_quality",
@@ -573,6 +574,8 @@ LIVE_RELOAD_MODULES = [
     "admin_auth",
     "file_ops",
     "data_query",
+    "json_patch_tool",
+    "dependency_inventory",
     "symbol_index",
     "project_detect",
     "git_history",
@@ -643,6 +646,12 @@ _prime_live_reload_modules()
 def _maybe_live_reload():
     modules = live_reload.reload_changed_modules(LIVE_RELOAD_MODULES)
     for name, module in modules.items():
+        if name == "local_service_probe":
+            globals()["local_probe"] = module
+            continue
+        if name == "dependency_inventory":
+            globals()["dependency_inventory_tool"] = module
+            continue
         if name == "project_detect":
             globals()["project_detector"] = module
             continue
@@ -11394,7 +11403,6 @@ AGENT_TOOL_HELP = """Available tools:
 - self_heal_repair: {"apply": false}
 - status: {}
 - system_profile_text: {}
-- environment_status: {}
 - emotion_vector_status: {}
 - update_emotion_vectors: {"vectors_json": {"warmth": 0.5, "brevity": 0.2}, "mode": "merge|replace|clear|reset"}
 - tune_emotion_vectors: {"feedback_text": "be warmer but more concise", "step": 0.1}
@@ -11470,7 +11478,6 @@ an exact symbol named by the task; do not default to Python or server.py.
 - weather_lookup: {"location": "Chicago, IL|60601", "forecast_days": 3, "units": "auto|metric|imperial"}
 - command_registry_list: {"filter_text": "filesystem|context|status"}
 - activity_status: {}
-- environment_status: {"refresh": false}
 - permission_policy: {"tool_name": "file_read"}
 - context_compaction_plan: {"session": "", "project": ""}
 - diagnostics: {}
@@ -11486,9 +11493,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - master_capacity: {"requested_agents": 0}
 - self_heal_check: {}
 - status: {}
-- environment_status: {}
 - system_profile_text: {}
-- environment_status: {}
 - emotion_vector_status: {}
 - preferences_status: {"include_disabled": false, "limit": 20}
 - tool_manifest: {}
@@ -12524,6 +12529,14 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "data_inspect":
+        return data_inspect(
+            path=args.get("path", ""),
+            max_bytes=args.get("max_bytes", 256000),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "data_query":
         return data_query(
             path=args.get("path", ""),
@@ -13094,7 +13107,7 @@ def _agent_activity_command(tool_name, args):
 _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "file_read", "file_digest", "directory_digest", "file_read_range", "context_pack", "workspace_compare",
     "repo_log", "repo_show", "repo_blame",
-    "data_query", "data_convert", "image_inspect", "log_inspect", "file_write", "file_batch_write", "json_patch", "file_edit", "text_patch",
+    "data_inspect", "data_query", "data_convert", "image_inspect", "log_inspect", "file_write", "file_batch_write", "json_patch", "file_edit", "text_patch",
     "archive_list", "archive_extract",
     "file_delete", "directory_create", "workspace_inventory", "dependency_inventory", "directory_tree",
     "file_find", "repository_symbol_index", "text_search", "script_search", "artifact_verify",
@@ -13833,7 +13846,7 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
     "text_search", "script_search", "program_search", "image_inspect", "repo_status", "repo_diff",
     "repo_log", "repo_show", "repo_blame",
-    "data_query", "project_detect", "archive_list",
+    "data_inspect", "data_query", "project_detect", "archive_list",
     "memory_search", "learning_health_status", "evaluation_history_status",
     "memory_quality_report", "memory_privacy_review", "artifact_ground",
     "web_search", "web_fetch", "local_service_probe", "weather_lookup", "approximate_location_lookup",
@@ -13842,7 +13855,7 @@ _WORK_INSPECTION_TOOLS = frozenset({
 _AGENT_FILE_EVIDENCE_TOOLS = frozenset({
     "workspace_inventory", "workspace_compare", "directory_tree", "file_read", "file_read_range",
     "file_digest", "directory_digest", "file_find", "text_search",
-    "script_search", "image_inspect", "log_inspect", "data_query", "project_detect",
+    "script_search", "image_inspect", "log_inspect", "data_inspect", "data_query", "project_detect",
     "context_pack", "repo_log", "repo_show", "repo_blame", "archive_list",
     "dependency_inventory",
 })
@@ -13850,7 +13863,7 @@ _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "directory_digest", "file_find",
     "dependency_inventory",
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
-    "data_query", "text_search", "script_search",
+    "data_inspect", "data_query", "text_search", "script_search",
     "program_search", "image_inspect", "environment_status", "repo_status", "repo_diff", "project_detect",
     "repo_log", "repo_show", "repo_blame", "archive_list", "local_service_probe",
 })
@@ -14972,9 +14985,9 @@ def workbench_agent(
 _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "directory_digest", "file_find",
     "dependency_inventory",
-    "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "data_query", "text_search", "script_search",
+    "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "data_inspect", "data_query", "text_search", "script_search",
     "project_detect",
-    "repo_log", "repo_show", "repo_blame", "archive_list",
+    "repo_status", "repo_diff", "repo_log", "repo_show", "repo_blame", "archive_list",
     "program_search", "image_inspect", "memory_search", "web_search",
     "web_fetch", "local_service_probe", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",

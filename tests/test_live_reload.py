@@ -125,6 +125,47 @@ def test_server_rebinds_log_inspect_alias_without_replacing_tool(monkeypatch):
         server.log_inspect = original_tool
 
 
+def test_server_rebinds_capability_aliases_without_replacing_tools(monkeypatch):
+    import server
+
+    replacements = {
+        "local_service_probe": object(),
+        "dependency_inventory": object(),
+        "json_patch_tool": object(),
+    }
+    originals = {
+        "local_probe": server.local_probe,
+        "dependency_inventory_tool": server.dependency_inventory_tool,
+        "json_patch_tool": server.json_patch_tool,
+    }
+    wrappers = {
+        "local_service_probe": server.local_service_probe,
+        "dependency_inventory": server.dependency_inventory,
+        "json_patch": server.json_patch,
+    }
+    monkeypatch.setattr(
+        server.live_reload,
+        "reload_changed_modules",
+        lambda names: replacements,
+    )
+    try:
+        server._maybe_live_reload()
+        assert server.local_probe is replacements["local_service_probe"]
+        assert server.dependency_inventory_tool is replacements["dependency_inventory"]
+        assert server.json_patch_tool is replacements["json_patch_tool"]
+        assert server.local_service_probe is wrappers["local_service_probe"]
+        assert server.dependency_inventory is wrappers["dependency_inventory"]
+        assert server.json_patch is wrappers["json_patch"]
+        assert all(callable(value) for value in wrappers.values())
+        assert {
+            "local_service_probe", "dependency_inventory", "json_patch_tool",
+        }.issubset(server.LIVE_RELOAD_MODULES)
+    finally:
+        server.local_probe = originals["local_probe"]
+        server.dependency_inventory_tool = originals["dependency_inventory_tool"]
+        server.json_patch_tool = originals["json_patch_tool"]
+
+
 def test_server_prime_live_reload_upgrades_legacy_helper(monkeypatch):
     import server
 
