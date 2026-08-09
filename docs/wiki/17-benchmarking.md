@@ -124,6 +124,66 @@ regex, and integer-parse checks — see
 passes every arm and the moat delta is honestly `0` rather than an artifact of
 grading the prompt back to itself.
 
+## Comparing grounded-history checkpoints without running a model
+
+`scripts/benchmark_adaptive.py` fills a different evidence gap. It never calls a
+model, retrieval system, network, or GPU. Instead, it validates and compares two
+bounded records produced by the same external task runner:
+
+- a `fresh` checkpoint with zero grounded-history records and the SHA-256 digest
+  of empty history;
+- an `accumulated` checkpoint with one or more grounded-history records and the
+  digest of that exact checkpoint.
+
+The records are comparable only when the model name and digest, suite name,
+version and digest, hardware label and digest, and task-name set all match
+exactly. Each task records only `name`, `completed`, `retries`, `tokens_in`, and
+`tokens_out`. Summaries and IDs are derived and tamper-checked. Inputs are capped
+at 256 tasks and 512 KiB; counters are bounded non-negative integers.
+
+Create `fresh-tasks.json` and `accumulated-tasks.json` as arrays such as:
+
+```json
+[
+  {"name":"task-a","completed":true,"retries":0,"tokens_in":120,"tokens_out":40}
+]
+```
+
+Then create and compare the checkpoint records:
+
+```bash
+python scripts/benchmark_adaptive.py record \
+  --model sonder:latest --model-digest MODEL_SHA256 \
+  --suite adaptive-core --suite-version 1 --suite-digest SUITE_SHA256 \
+  --hardware host-a/gpu-a/driver-a --hardware-digest HARDWARE_SHA256 \
+  --checkpoint fresh --checkpoint-label clean --grounded-records 0 \
+  --grounded-history-digest e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 \
+  --tasks fresh-tasks.json --output fresh.json
+
+python scripts/benchmark_adaptive.py record \
+  --model sonder:latest --model-digest MODEL_SHA256 \
+  --suite adaptive-core --suite-version 1 --suite-digest SUITE_SHA256 \
+  --hardware host-a/gpu-a/driver-a --hardware-digest HARDWARE_SHA256 \
+  --checkpoint accumulated --checkpoint-label after-100 \
+  --grounded-records 100 --grounded-history-digest HISTORY_SHA256 \
+  --tasks accumulated-tasks.json --output accumulated.json
+
+python scripts/benchmark_adaptive.py compare --fresh fresh.json \
+  --accumulated accumulated.json --json comparison.json \
+  --markdown comparison.md
+```
+
+The report gives completion, retry, and token deltas plus the exact improved and
+regressed task names. A task swap is reported as `mixed` even when aggregate
+completion is unchanged, preventing an aggregate score from hiding a regression.
+Retry and token directions remain separate from completion rather than being
+collapsed into an unsupported single score.
+
+This path compares supplied observations; it does not create them and does not
+claim causation. For credible adaptive-improvement evidence, the external runner
+must execute the same task suite with the same model settings and hardware, vary
+only the grounded-history checkpoint, and preserve the generated records.
+
 ## Related
 
 - [Memory & Learning](06-memory-and-learning.md) — how lessons and facts are
