@@ -32,6 +32,7 @@ def test_legacy_root_allowlist_has_a_shrink_only_ratchet():
     spec.loader.exec_module(module)
     assert len(module.ROOT_LEGACY_MODULES) <= module.ROOT_LEGACY_MODULE_LIMIT
     assert "memory_store" not in module.ROOT_LEGACY_MODULES
+    assert "model_transport" not in module.ROOT_LEGACY_MODULES
     assert "eval_history" not in module.ROOT_LEGACY_MODULES
     assert module.ROOT_LEGACY_MODULES <= module.BASELINE_ROOT_LEGACY_MODULES
 

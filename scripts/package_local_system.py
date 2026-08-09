@@ -108,6 +108,7 @@ REQUIRED_FILES = {
     "sonder_runtime/adapters/legacy/inspections.py",
     "sonder_runtime/adapters/git_discovery.py",
     "sonder_runtime/adapters/legacy/preferences.py",
+    "sonder_runtime/adapters/model_transport.py",
     "sonder_runtime/application/inspection/__init__.py",
     "sonder_runtime/application/inspection/use_cases.py",
     "sonder_runtime/application/ports/preferences.py",
