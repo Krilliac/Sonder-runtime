@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import server
 from sonder_runtime.adapters.legacy.preferences import (
     LegacyPreferenceCodec,
+    LegacyPreferenceRepository,
     NullPreferenceEventSink,
 )
 from sonder_runtime.application.ports.tool_executor import ToolResult
@@ -126,13 +127,95 @@ def test_empty_and_storage_failures_are_typed_with_exact_wire_rendering():
     assert render_preference_result(empty) == "ERROR: preference text is empty."
 
     def fail(**kwargs):
-        raise OSError("database unavailable")
+        raise OSError("database unavailable at C:/private/preferences.db")
 
     repository.list = fail
     failed = service.status()
     assert failed.ok is False
     assert failed.error_code == "PREFERENCE_STORAGE_ERROR"
-    assert render_preference_result(failed) == "ERROR: database unavailable"
+    assert failed.output == "preference storage is unavailable."
+    assert render_preference_result(failed) == (
+        "ERROR: preference storage is unavailable."
+    )
+    assert "C:/private" not in repr(failed)
+
+
+def test_codec_failures_are_distinct_and_never_disclose_input_or_exception():
+    service, _, _ = _service()
+    secret = "private preference text"
+
+    def fail(_value):
+        raise UnicodeError("codec rejected %s" % secret)
+
+    service._codec.extract = fail
+    result = service.learn(secret)
+    assert result == ToolResult(
+        ok=False,
+        output="preference processing failed.",
+        error_code="PREFERENCE_CODEC_ERROR",
+    )
+    assert secret not in repr(result)
+    assert render_preference_result(result) == (
+        "ERROR: preference processing failed."
+    )
+
+
+def test_successful_error_prefixed_content_is_not_reclassified():
+    result = ToolResult(ok=True, output="ERROR: legitimate stored content")
+    assert render_preference_result(result) == "ERROR: legitimate stored content"
+
+    service, _, _ = _service()
+    service._codec.format = lambda _rows: "ERROR: legitimate stored content"
+    status = service.status()
+    assert status.ok is True
+    assert status.error_code == ""
+    assert render_preference_result(status) == (
+        "learned preferences\nERROR: legitimate stored content"
+    )
+
+
+def test_legacy_repository_closes_connection_and_service_sanitizes_db_failure(
+    monkeypatch,
+):
+    class Connection:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    connection = Connection()
+    repository = LegacyPreferenceRepository(lambda: connection)
+
+    def fail(*_args, **_kwargs):
+        raise OSError("C:/private/preferences.db contains secret-user-text")
+
+    monkeypatch.setattr(server.memory_store, "all_preferences", fail)
+    service = PreferenceService(repository, FakeCodec(), CapturingEvents())
+    result = service.status()
+    assert result.error_code == "PREFERENCE_STORAGE_ERROR"
+    assert result.output == "preference storage is unavailable."
+    assert connection.closed is True
+    assert "private" not in repr(result)
+    assert "secret-user-text" not in repr(result)
+
+
+def test_server_wire_uses_typed_status_not_error_prefix_heuristics(monkeypatch):
+    service, repository, _ = _service()
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(
+        server, "_APP_GRAPH", SimpleNamespace(preferences=service),
+    )
+    service._codec.format = lambda _rows: "ERROR: legitimate stored preference"
+    assert server.preferences_status() == (
+        "learned preferences\nERROR: legitimate stored preference"
+    )
+
+    repository.list = lambda **_kwargs: (_ for _ in ()).throw(
+        OSError("C:/private/preferences.db")
+    )
+    assert server.preferences_status() == (
+        "ERROR: preference storage is unavailable."
+    )
 
 
 def test_legacy_codec_resolves_the_injected_live_module_identity():
