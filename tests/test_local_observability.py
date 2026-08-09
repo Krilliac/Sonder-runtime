@@ -177,6 +177,42 @@ def test_huge_recursive_and_hostile_values_are_bounded_without_conversion_hooks(
     assert sink.snapshot()["drops"]["truncated_fields"] > 0
 
 
+def test_long_secret_values_are_replaced_wholesale_before_prefix_truncation():
+    secret = "secret-" + "x" * 300
+    sink = LocalObservabilitySink(
+        redactor=Redactor(secret_values=(secret,), env={}), clock=lambda: 3.5,
+    )
+    sink.emit(
+        "SAFE",
+        summary="SAFE",
+        detail={"ordinary": "near-boundary-prefix:" + secret},
+    )
+
+    event = sink.recent_events()[0]
+    dumped = json.dumps(event)
+    assert event["fields"]["ordinary"] == "[TRUNCATED_VALUE]"
+    assert secret not in dumped
+    assert secret[:240] not in dumped
+    assert sink.snapshot()["drops"]["truncated_fields"] == 1
+
+
+def test_redaction_precedes_nul_display_normalization():
+    secret = "credential\x00with-secret-material"
+    sink = LocalObservabilitySink(
+        redactor=Redactor(secret_values=(secret,), env={}), clock=lambda: 3.5,
+    )
+    sink.emit(
+        "SAFE",
+        summary="SAFE",
+        detail={"ordinary": "prefix:" + secret + ":suffix"},
+    )
+
+    dumped = json.dumps(sink.recent_events()[0])
+    assert secret.replace("\x00", "\\0") not in dumped
+    assert "with-secret-material" not in dumped
+    assert "[REDACTED]" in dumped
+
+
 def test_secret_identifier_values_fall_back_before_retention():
     secret = "SecretIdentifier1234"
     sink = LocalObservabilitySink(
