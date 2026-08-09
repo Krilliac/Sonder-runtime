@@ -1844,9 +1844,13 @@ class ExecutionFeedEvent {
   String get preview => displayPreview.text;
 
   String get summary {
-    if (kind == 'model' && model.isNotEmpty) return 'Model $model';
-    if (kind == 'tool') return title.isNotEmpty ? title : tool;
-    if (kind == 'file') {
+    if ((kind == 'model' || kind == 'model_call') && model.isNotEmpty) {
+      return 'Model $model';
+    }
+    if (kind == 'tool' || kind == 'tool_call') {
+      return title.isNotEmpty ? title : tool;
+    }
+    if (kind == 'file' || kind == 'file_op' || kind == 'file_change') {
       return [fileOperation, path].where((value) => value.isNotEmpty).join(' ');
     }
     return summaryPreview.text;

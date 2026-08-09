@@ -1427,7 +1427,7 @@ def _chat_completion_object(content, model="sonder", iid=None, reasoning=""):
         }],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         "sonder_activity": (
-            server.activity_tracker.public_snapshot() or {}
+            server.activity_tracker.public_snapshot(include_detail=False) or {}
         ).get("latest"),
     }
     # Mirrors sonder_activity: present only when there is something to show, so

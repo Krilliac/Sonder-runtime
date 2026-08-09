@@ -694,7 +694,7 @@ void main() {
           'redacted': false,
         },
         if (index == 13) ...{
-          'kind': 'file',
+          'kind': 'file_change',
           'action': 'edit',
           'path': 'harness.dart',
           'lines_added': 4,
@@ -739,7 +739,7 @@ void main() {
           'response_id': 'r-disabled',
           'response_status': 'running',
           'seq': 99,
-          'kind': 'model',
+          'kind': 'model_call',
           'phase': 'completed',
           'model': 'sonder:latest',
           'response_preview': {'state': 'disabled'},

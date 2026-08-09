@@ -490,7 +490,7 @@ void main() {
       'response_status': 'running',
       'seq': 22,
       'ts': '2026-08-09T12:22:00Z',
-      'kind': 'model',
+      'kind': 'model_call',
       'phase': 'completed',
       'model': 'sonder:latest',
       'prompt_chars': 120,
@@ -506,7 +506,7 @@ void main() {
       'response_status': 'running',
       'seq': 23,
       'ts': '2026-08-09T12:23:00Z',
-      'kind': 'tool',
+      'kind': 'tool_call',
       'phase': 'completed',
       'tool': 'file_edit',
       'title': 'Edit file',
@@ -520,7 +520,7 @@ void main() {
       'response_status': 'complete',
       'seq': 25,
       'ts': '2026-08-09T12:34:56Z',
-      'kind': 'file',
+      'kind': 'file_change',
       'phase': 'completed',
       'ok': true,
       'elapsed_ms': 42,
@@ -583,7 +583,7 @@ void main() {
     expect(feed.events[18].title, 'Edit file');
     final event = feed.events.last;
     expect(event.timestamp, DateTime.utc(2026, 8, 9, 12, 34, 56));
-    expect(event.kind, 'file');
+    expect(event.kind, 'file_change');
     expect(event.fileOperation, 'edit');
     expect(event.status, 'ok');
     expect(event.deltaLabel, 'lines +8 ~1 -2');
