@@ -618,8 +618,11 @@ _prime_live_reload_modules()
 def _maybe_live_reload():
     modules = live_reload.reload_changed_modules(LIVE_RELOAD_MODULES)
     for name, module in modules.items():
-        if name in globals():
-            globals()[name] = module
+        target = {
+            "workspace_compare": "workspace_compare_module",
+        }.get(name, name)
+        if target in globals():
+            globals()[target] = module
     _refresh_runtime_policy(create=True)
 
 

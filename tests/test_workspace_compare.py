@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import time
 
 import pytest
 
@@ -127,6 +128,46 @@ def test_output_and_detail_caps_preserve_exact_summary(workspace):
     assert report["output_bytes"] == len(output)
 
 
+def test_output_fitting_uses_logarithmic_serialization_and_deadline(monkeypatch):
+    rows = [
+        {
+            "path": "file-%05d.txt" % number, "type": "file", "size": 1,
+            "sha256": "a" * 64,
+        }
+        for number in range(10_000)
+    ]
+    report = {
+        "ok": True, "left": {}, "right": {},
+        "summary": {"added": len(rows), "removed": 0, "changed": 0, "same": 0},
+        "added": rows, "removed": [], "changed": [], "same": [],
+        "details_truncated": False, "scan": {}, "limits": {}, "output_bytes": 0,
+    }
+    original = workspace_compare._encoded
+    calls = []
+
+    def counted(value):
+        calls.append(1)
+        return original(value)
+
+    monkeypatch.setattr(workspace_compare, "_encoded", counted)
+    fitted = workspace_compare._fit_output(
+        report, 1024, time.monotonic() + 5,
+    )
+    assert len(workspace_compare.encode_result(fitted).encode("utf-8")) <= 1024
+    assert fitted["details_truncated"] is True
+    assert len(calls) < 100
+    with pytest.raises(workspace_compare.WorkspaceCompareError, match="timeout ceiling"):
+        workspace_compare._fit_output(report, 1024, time.monotonic() - 1)
+
+    def slow_encode(value):
+        time.sleep(0.06)
+        return original(value)
+
+    monkeypatch.setattr(workspace_compare, "_encoded", slow_encode)
+    with pytest.raises(workspace_compare.WorkspaceCompareError, match="timeout ceiling"):
+        workspace_compare._fit_output(report, 1024, time.monotonic() + 0.05)
+
+
 @pytest.mark.parametrize("name", [".env", "credentials.json", "private.pem"])
 def test_sensitive_descendant_rejects_entire_comparison(workspace, name):
     left = workspace / "left"
@@ -148,6 +189,46 @@ def test_control_directory_rejects_entire_comparison(workspace):
     (metadata / "config").write_text("secret", encoding="utf-8")
     with pytest.raises(workspace_compare.WorkspaceCompareError, match="secret|control"):
         workspace_compare.compare_workspaces(left, right)
+
+
+@pytest.mark.parametrize("root_name", [".git", ".ssh"])
+def test_sensitive_allowed_root_itself_is_rejected(tmp_path, monkeypatch, root_name):
+    sensitive_root = tmp_path / root_name
+    home = tmp_path / "home"
+    sensitive_root.mkdir()
+    home.mkdir()
+    left = sensitive_root / "left.txt"
+    right = sensitive_root / "right.txt"
+    left.write_text("left", encoding="utf-8")
+    right.write_text("right", encoding="utf-8")
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: sensitive_root)
+    monkeypatch.setattr(file_ops.sonder_paths, "default_home", lambda: home)
+    with pytest.raises(workspace_compare.WorkspaceCompareError, match="secret|control"):
+        workspace_compare.compare_workspaces(left, right)
+
+
+def test_directory_child_added_during_hashing_rejects_exact_report(workspace, monkeypatch):
+    left = workspace / "left"
+    right = workspace / "right"
+    left.mkdir()
+    right.mkdir()
+    (left / "a.txt").write_text("same", encoding="utf-8")
+    (right / "a.txt").write_text("same", encoding="utf-8")
+    original = workspace_compare._hash_file
+    mutated = False
+
+    def mutate_after_hash(path, budget):
+        nonlocal mutated
+        result = original(path, budget)
+        if path.parent == left and not mutated:
+            (left / "late.txt").write_text("late", encoding="utf-8")
+            mutated = True
+        return result
+
+    monkeypatch.setattr(workspace_compare, "_hash_file", mutate_after_hash)
+    with pytest.raises(workspace_compare.WorkspaceCompareError, match="directory.*changed"):
+        workspace_compare.compare_workspaces(left, right)
+    assert mutated
 
 
 def test_symlink_root_and_descendant_are_rejected(workspace, tmp_path):
@@ -260,3 +341,23 @@ def test_project_scope_rejects_either_side_escape(tmp_path):
     assert "outside" in server._repository_scope_path_error(
         "workspace_compare", scoped, str(project),
     )
+
+
+def test_live_reload_rebinds_helper_alias_without_replacing_tool(monkeypatch):
+    original_tool = server.workspace_compare
+    original_module = server.workspace_compare_module
+    replacement_module = object()
+
+    class ReloadStub:
+        @staticmethod
+        def reload_changed_modules(names):
+            assert "workspace_compare" in names
+            return {"workspace_compare": replacement_module}
+
+    monkeypatch.setattr(server, "live_reload", ReloadStub)
+    monkeypatch.setattr(server, "workspace_compare_module", original_module)
+    monkeypatch.setattr(server, "_refresh_runtime_policy", lambda create=True: None)
+    server._maybe_live_reload()
+
+    assert server.workspace_compare is original_tool
+    assert server.workspace_compare_module is replacement_module
