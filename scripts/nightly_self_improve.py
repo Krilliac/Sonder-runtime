@@ -153,7 +153,7 @@ def main() -> int:
     log("=== nightly self-improvement start ===")
     import server
     import lesson_pruner
-    import memory_store
+    import sonder_runtime.adapters.memory_store as memory_store
 
     rounds = max(1, min(int(args.rounds or 1), 12))
     for round_index in range(rounds):
