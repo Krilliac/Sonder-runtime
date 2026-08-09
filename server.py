@@ -45,7 +45,6 @@ import reward
 import reflection
 import embeddings
 import personas
-import recall
 import summarizer
 import code_runner
 import isolated_runner
@@ -571,7 +570,7 @@ LIVE_RELOAD_MODULES = [
     "embeddings",
     "ollama_endpoint",
     "personas",
-    "recall",
+    "sonder_runtime.adapters.recall",
     "summarizer",
     "code_runner",
     "isolated_runner",
@@ -670,6 +669,14 @@ _prime_live_reload_modules()
 def _maybe_live_reload():
     modules = live_reload.reload_changed_modules(LIVE_RELOAD_MODULES)
     for name, module in modules.items():
+        if name == "sonder_runtime.adapters.recall":
+            # Recall resolves its migrated adapter lazily through the
+            # application gateway. Keep the root compatibility alias on the
+            # same live module object without restoring a production import.
+            sys.modules[name] = module
+            if "recall" in sys.modules:
+                sys.modules["recall"] = module
+            continue
         if name == "sonder_runtime.adapters.legacy.task_state":
             globals()["task_state_adapter"] = module
             continue
@@ -2321,7 +2328,7 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
     embedding_provenance = embeddings.provenance(qv) if qv else {}
     if augment:
         recalls = (
-            recall.recall(
+            _application().recall.retrieve(
                 conn, prompt, qv=qv, exclude_session=session_id,
                 project=project,
                 embedding_model=embedding_provenance.get("model"),
