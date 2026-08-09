@@ -3035,7 +3035,7 @@ def _safe_model_error_detail(value, limit: int = 600) -> str:
     if not structured:
         text = re.sub(
             r"(?i)\b(bearer|token|secret|api[-_]?key)\b\s*[:=]?\s*"
-            r"(?!(?:limit|count|budget|window|usage|quota|length|maximum|minimum)\b)"
+            r"(?!(?:limit|count|budget|window|usage|quota|length|context|maximum|minimum)\b)"
             r"\S+",
             r"\1=<redacted>",
             text,
