@@ -62,6 +62,7 @@ import ollama_lifecycle
 import admin_auth
 import codegen_loop
 import file_ops
+import data_query as data_query_module
 import symbol_index
 import log_inspect as log_inspect_module
 import context_policy
@@ -559,6 +560,7 @@ LIVE_RELOAD_MODULES = [
     "ollama_lifecycle",
     "admin_auth",
     "file_ops",
+    "data_query",
     "symbol_index",
     "log_inspect",
     "context_policy",
@@ -7516,6 +7518,64 @@ def data_inspect(
 
 
 @mcp.tool()
+def data_query(
+    path: str,
+    sql: str = "",
+    projection_json: str = "[]",
+    filters_json: str = "{}",
+    max_rows: int = 100,
+    max_columns: int = 50,
+    max_output_bytes: int = 256000,
+    max_scan_bytes: int = 4000000,
+    timeout: float = 5.0,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Run a bounded read-only SQLite or structured text data query."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "path": path, "sql": sql, "projection_json": projection_json,
+        "filters_json": filters_json, "max_rows": max_rows,
+        "max_columns": max_columns, "max_output_bytes": max_output_bytes,
+        "max_scan_bytes": max_scan_bytes, "timeout": timeout,
+    }
+    try:
+        result = data_query_module.query_data(
+            path,
+            sql=sql,
+            projection=projection_json,
+            filters=filters_json,
+            max_rows=max_rows,
+            max_columns=max_columns,
+            max_output_bytes=max_output_bytes,
+            max_scan_bytes=max_scan_bytes,
+            timeout=timeout,
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+            developer_authorized=_file_developer_allowed(token),
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "data_query", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    output = data_query_module.encode_result(result)
+    _record_direct_tool(
+        "data_query", args, ok=True, started=started,
+        summary="%s %d row(s)" % (result["kind"], result["count"]),
+        output=output,
+    )
+    activity_tracker.record_event(
+        "data_query",
+        summary="%s (%d row(s))" % (result["kind"], result["count"]),
+        path=result["path"],
+    )
+    return output
+
+
+@mcp.tool()
 def file_write(
     path: str,
     content: str,
@@ -10280,7 +10340,7 @@ def tool_manifest() -> str:
         "log_inspect": "Inspect one guarded text log with fixed level/timestamp/source extraction, failure clusters, repeats, and bounded context.",
         "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
         "environment_status": "Report the host OS, available shells (PowerShell/cmd/bash/wsl), and installed toolchains -- check before choosing a command shape or assuming a tool exists.",
-        "data_inspect": "Read-only structured preview of JSON/JSONL/TOML/YAML/CSV/TSV/SQLite/ZIP/TAR/INI data files inside allowed roots.",
+        "data_inspect/data_query": "Preview structured data or run bounded read-only SQLite SELECT/CTE and exact-filter JSON/JSONL/CSV/TSV queries inside allowed roots.",
         "program_search/script_search/workspace_run/script_run/image_inspect": "Discover installed programs and workspace scripts, run bounded argv-only processes, and inspect image metadata.",
         "task_create/task_list/task_update/task_show/checklist_create/checklist_update/checklist_show": "Visible todo and ordered checklist state shared by console, app, agents, and MCP.",
         "workbench_agent": "Run an autonomous local tool loop with a guaranteed checklist, exact action transcript, validation gate, and end report.",
@@ -10353,6 +10413,7 @@ AGENT_TOOL_HELP = """Available tools:
 - script_run: {"path": "scripts/check.py", "args_json": [], "cwd": ".", "timeout": 30}
 - image_inspect: {"path": "artifacts/generated/demo/icon.png"}
 - data_inspect: {"path": "data/records.jsonl", "max_bytes": 256000}
+- data_query: {"path": "data/records.jsonl", "sql": "", "projection_json": ["id", "/nested/name"], "filters_json": {"status": "active"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
 - task_create: {"title": "...", "detail": "...", "priority": 2, "project": "...", "owner": "..."}
 - task_list: {"status": "pending|in_progress|blocked|done|canceled", "project": "", "include_done": false, "limit": 50}
 - task_update: {"task_id": "...", "status": "in_progress|blocked|done", "note": "..."}
@@ -10409,7 +10470,7 @@ or
 REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find",
     "repository_symbol_index", "log_inspect", "file_read", "file_read_range", "context_pack",
-    "data_inspect",
+    "data_inspect", "data_query",
     "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
     "diagnostics", "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
@@ -10441,6 +10502,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - program_search: {"query": "<required program name>", "max_results": 50}
 - image_inspect: {"path": "<task-relevant image path>"}
 - data_inspect: {"path": "<task-relevant data file>", "max_bytes": 256000}
+- data_query: {"path": "<task-relevant SQLite, JSON, JSONL, CSV, or TSV file>", "sql": "<SQLite SELECT/CTE only, otherwise empty>", "projection_json": ["<field or JSON pointer>"], "filters_json": {"<field or JSON pointer>": "<exact value>"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
 - memory_search: {"query": "...", "limit": 10}
 - web_search: {"query": "...", "limit": 5}
 - web_fetch: {"url": "https://...", "max_chars": 8000}
@@ -10693,7 +10755,10 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
     if scope_error:
         return scope_error
     try:
-        if tool_name in {"file_read", "file_read_range", "image_inspect", "data_inspect", "log_inspect"}:
+        if tool_name in {
+            "file_read", "file_read_range", "image_inspect", "data_inspect",
+            "data_query", "log_inspect",
+        }:
             file_ops.resolve_repository_read_path(
                 args.get("path", ""),
                 allow_workspace_root=False,
@@ -11363,6 +11428,29 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "data_query":
+        return data_query(
+            path=args.get("path", ""),
+            sql=args.get("sql", ""),
+            projection_json=(
+                json.dumps(args.get("projection_json"))
+                if not isinstance(args.get("projection_json", "[]"), str)
+                else args.get("projection_json", "[]")
+            ),
+            filters_json=(
+                json.dumps(args.get("filters_json"))
+                if not isinstance(args.get("filters_json", "{}"), str)
+                else args.get("filters_json", "{}")
+            ),
+            max_rows=args.get("max_rows", 100),
+            max_columns=args.get("max_columns", 50),
+            max_output_bytes=args.get("max_output_bytes", 256000),
+            max_scan_bytes=args.get("max_scan_bytes", 4000000),
+            timeout=args.get("timeout", 5.0),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "text_search":
         return text_search(
             query=args.get("query", args.get("pattern", "")),
@@ -11705,7 +11793,8 @@ def _agent_activity_command(tool_name, args):
 
 
 _PROJECT_SCOPED_PATH_TOOLS = frozenset({
-    "file_read", "file_read_range", "context_pack", "image_inspect", "log_inspect",
+    "file_read", "file_read_range", "context_pack", "data_query",
+    "image_inspect", "log_inspect",
     "file_write", "file_batch_write", "file_edit",
     "file_delete", "directory_create", "workspace_inventory", "directory_tree",
     "file_find", "repository_symbol_index", "text_search", "script_search", "artifact_verify",
@@ -12289,7 +12378,7 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
 _WORK_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find",
     "repository_symbol_index", "log_inspect", "file_read", "file_read_range", "context_pack",
-    "text_search", "script_search", "program_search", "image_inspect",
+    "text_search", "script_search", "program_search", "image_inspect", "data_query",
     "memory_search", "learning_health_status", "evaluation_history_status",
     "memory_quality_report", "memory_privacy_review", "artifact_ground",
     "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",
@@ -12298,7 +12387,7 @@ _WORK_INSPECTION_TOOLS = frozenset({
 _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find",
     "repository_symbol_index", "log_inspect", "file_read", "file_read_range", "context_pack",
-    "text_search", "script_search",
+    "data_query", "text_search", "script_search",
     "program_search", "image_inspect", "environment_status",
 })
 _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
@@ -13164,7 +13253,7 @@ def _agent_impl(
                 repeated_inspection_counts.pop(call_signature, None)
         if tool_name in {
             "workspace_inventory", "directory_tree", "file_read", "file_read_range", "file_find", "log_inspect",
-            "text_search", "script_search", "image_inspect",
+            "data_query", "text_search", "script_search", "image_inspect",
         } and tool_ok:
             file_evidence = True
         if auto_checklist and tool_name in _WORK_INSPECTION_TOOLS and tool_ok:
@@ -13442,7 +13531,8 @@ def workbench_agent(
 
 _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find",
-    "repository_symbol_index", "log_inspect", "file_read", "file_read_range", "text_search", "script_search",
+    "repository_symbol_index", "log_inspect", "file_read", "file_read_range",
+    "data_query", "text_search", "script_search",
     "program_search", "image_inspect", "memory_search", "web_search",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
