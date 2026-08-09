@@ -9,8 +9,37 @@ import server
 def test_read_only_denies_mutation_before_handler(monkeypatch):
     calls = []
     monkeypatch.setattr(server, "task_create", lambda *a, **k: calls.append((a, k)))
-    assert server._agent_dispatch("task_create", {"title": "x"}, read_only=True).startswith("ERROR:")
+    monkeypatch.setattr(server, "task_update", lambda *a, **k: calls.append((a, k)))
+    assert server._agent_dispatch(
+        "task_create", {"title": "x"}, read_only=True,
+    ).startswith("ERROR:")
+    assert server._agent_dispatch(
+        "task_update", {"task_id": "x", "status": "done"}, read_only=True,
+    ).startswith("ERROR:")
     assert calls == []
+
+
+def test_read_only_denies_checklist_mutation_before_handler(monkeypatch):
+    calls = []
+    monkeypatch.setattr(server, "checklist_create", lambda *a, **k: calls.append((a, k)))
+    monkeypatch.setattr(server, "checklist_update", lambda *a, **k: calls.append((a, k)))
+    assert server._agent_dispatch(
+        "checklist_create", {"title": "x", "items_json": ["one"]}, read_only=True,
+    ).startswith("ERROR:")
+    assert server._agent_dispatch(
+        "checklist_update", {"checklist_id": "x", "item": "1", "status": "done"},
+        read_only=True,
+    ).startswith("ERROR:")
+    assert calls == []
+
+
+def test_project_bound_and_read_only_task_routing_is_explicit():
+    task_tools = {
+        "task_create", "task_list", "task_update", "task_show",
+        "checklist_create", "checklist_show", "checklist_update",
+    }
+    assert task_tools <= server._PROJECT_BOUND_AGENT_TOOLS
+    assert task_tools.isdisjoint(server.REPOSITORY_READ_ONLY_TOOLS)
 
 
 def test_read_only_denies_bypass_args(monkeypatch):
