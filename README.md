@@ -48,6 +48,55 @@ Ollama
 model storage + CPU/GPU inference
 ```
 
+- **Retrieval** — hybrid lexical (SQLite FTS5) + semantic (local embeddings), with a **relevance threshold** so only genuinely on-topic lessons are injected (irrelevant lessons hurt, so it injects nothing when nothing fits).
+- **Capture** — every learning call is logged locally to `memory.db`.
+- **Grounding** — you (or your fleet) call `record_outcome` with a real signal; execution outcomes are the reward.
+- **Reflection** — a good outcome distills a deduped one-line lesson future prompts can retrieve.
+
+The loop is model-agnostic: point it at a compatible Ollama model. The selected
+local `code` model is memory-augmented; a stronger paid/cloud model can answer
+without local-lesson injection while its grounded good outcomes are distilled into
+lessons and fine-tuning data the local model retrieves later. Which
+tiers learn is configurable (`SONDER_LEARN_TIERS`, default local aliases:
+`fast,code,general`). Memory, capture, and distillation stay on the runtime host.
+A cloud-tier prompt leaves only after `SONDER_ALLOW_CLOUD=1`. The `fast`, `code`,
+and `general` aliases use loopback Ollama by default; pointing `OLLAMA_HOST` at a
+non-loopback server is blocked unless `SONDER_ALLOW_REMOTE_OLLAMA=1` explicitly
+acknowledges that prompts and embeddings leave this machine. Remote Ollama and
+hosted/cloud consent are separate gates. Their shared mappings
+and each execution lane's preferred alias live in the hot-reloadable runtime
+policy described below. Environment values seed the first policy file; cloud
+aliases and cloud opt-in remain separate host-owned configuration.
+
+Loopback model requests use one bounded, same-model retry by default for narrowly
+transient transport failures and HTTP 408/429/502/503/504 responses. The retry
+shares the original timeout budget, checks fleet cancellation before resending,
+and never changes endpoint, model, or tier. Hosted/cloud calls are always
+single-attempt to avoid silently duplicating metered work. Set
+`SONDER_LOCAL_RETRIES=0..2` and `SONDER_LOCAL_RETRY_DELAY_MS=0..1000` to tune the
+loopback policy. Explicit remote Ollama and hosted/cloud calls are single-attempt.
+
+One extra attempt exists on top of that policy, and only for a *classified*
+context overflow. The gateway reads the failure text - never the HTTP status,
+which providers and proxies get wrong often enough that a real overflow can
+arrive as a 429 - and if it says the prompt did not fit, a loopback call may
+compact the prompt once and resend it inside the same timeout and cancellation
+budget. Compaction drops the oldest turns and leaves a short in-band note, the
+same discipline the session live-turn window already uses; it never rewrites or
+truncates a message, and it never raises `num_ctx` behind the context policy's
+back. A request that is one oversized turn has nothing safe to drop and is
+reported rather than retried. Body-too-large, device out-of-memory, plain rate
+limits, and missing models are recognised as explicitly *not* overflow and are
+never retried this way. Hosted and remote routes keep their single-attempt
+posture unless the call site declares the request idempotent **and**
+`SONDER_HOSTED_OVERFLOW_RETRY=1` is set.
+Good-outcome lesson reflection does not queue another model request behind an
+active fleet: the outcome is committed immediately and its lesson remains
+retryable. When the fleet is idle, reflection uses a separate shared generation
+and embedding budget (`SONDER_DISTILLATION_TIMEOUT`, default `20` seconds,
+bounded by `SONDER_TIMEOUT`) so `record_outcome` cannot inherit the normal
+five-minute model-call ceiling.
+
 Sonder is a runtime, not a foundation model. Names such as
 `sonder:latest` are local Ollama aliases; the underlying weights remain managed
 by Ollama. Ollama is the local model server.
