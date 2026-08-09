@@ -94,6 +94,24 @@ def test_direct_project_dispatch_rebases_relative_path_before_file_handler(
     assert "wrong cwd evidence" not in out
 
 
+def test_project_scoped_data_inspect_rebases_and_dispatches_read_only(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "records.json").write_text('{"ok": true}\n', encoding="utf-8")
+
+    out = server._agent_dispatch_observed(
+        "data_inspect", {"path": "records.json", "max_bytes": 1024},
+        read_only=True, project=str(project),
+    )
+
+    assert not out.startswith("ERROR:")
+    assert "json" in out.lower()
+    assert "data_inspect" in server._PROJECT_SCOPED_PATH_TOOLS
+    assert "data_inspect" in server._WORK_INSPECTION_TOOLS
+    assert "data_inspect" in server._AGENT_FILE_EVIDENCE_TOOLS
+    assert "data_inspect" in server._AGENT_DEDUPLICATED_INSPECTION_TOOLS
+
+
 def test_project_scoped_read_rejects_sonder_workspace_even_when_normally_authorized(
     monkeypatch, tmp_path,
 ):

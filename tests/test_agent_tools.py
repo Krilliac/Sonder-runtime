@@ -1851,3 +1851,13 @@ def test_stdin_as_data_to_a_named_script_stays_allowed(tmp_path):
     assert server._agent_project_execution_argument_error(
         "workspace_run", scoped_m, str(project),
     ) == ""
+
+
+def test_agent_help_tool_names_are_unique():
+    for help_text in (server.AGENT_TOOL_HELP, server.REPOSITORY_AGENT_TOOL_HELP):
+        names = [
+            line[2:].split(":", 1)[0]
+            for line in help_text.splitlines()
+            if line.startswith("- ")
+        ]
+        assert len(names) == len(set(names))
