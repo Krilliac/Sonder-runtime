@@ -132,8 +132,8 @@ def _probe_gpu() -> tuple[bool, float | None]:
     The timeout is generous and one retry follows a timeout. On a laptop with
     switchable graphics the discrete GPU idles powered down, and the first
     ``nvidia-smi`` after an idle stretch blocks while the driver wakes it --
-    measured well over 2s on an RTX 4050 Laptop, with the very next call
-    returning in milliseconds. A tight timeout therefore fails exactly when
+    can take several seconds, with the next call returning quickly. A tight
+    timeout therefore fails exactly when
     the GPU is cold, which is precisely when nothing else has warmed it: the
     host then reports "no GPU", sizes the band for CPU inference, and advises
     a short keep_alive with speculation dormant -- all on a machine with a
@@ -281,8 +281,9 @@ def recommend(hw: dict, *, workload: str = "general") -> dict:
     else:
         ram_note = f"~{capacity_gb:g} GB" if capacity_gb else "unknown"
         rationale.append(
-            f"No usable GPU detected; {ram_note} system RAM sizes the band "
-            f"to {band} on CPU inference."
+            f"No accelerator memory was detected; {ram_note} system RAM "
+            f"conservatively sizes the band to {band}. Ollama may still use "
+            "a Metal, AMD, Intel, or other backend it detects."
         )
 
     # Context window: start from the band default, widen for tool-heavy work
@@ -380,7 +381,7 @@ def render(hw: dict, rec: dict) -> str:
             f"  gpu        : present ({f'{vram:g} GB VRAM' if vram else 'VRAM unknown'})"
         )
     else:
-        lines.append("  gpu        : none detected")
+        lines.append("  gpu memory : not detected (Ollama may still accelerate)")
 
     lines.append("")
     lines.append("Recommendation")
