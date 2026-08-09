@@ -34,6 +34,10 @@ privileged mode. Images are never pulled implicitly (`--pull=never`).
 Every launch has:
 
 - networking disabled;
+- daemon logging disabled with `--log-driver=none`, so engine/journald storage
+  cannot grow independently of the MCP output cap;
+- image health checks disabled with `--no-healthcheck`, preventing an image
+  metadata command from becoming a second execution path;
 - a read-only root filesystem;
 - all capabilities dropped and `no-new-privileges` enabled;
 - a fixed unprivileged UID/GID (`65534:65534`);
@@ -51,6 +55,13 @@ Every launch has:
   bind: Docker uses `bind-recursive=disabled`, while Podman uses
   `bind-nonrecursive=true`. Read-only is then applied with the engine-specific
   mount option.
+
+Before launch, Sonder runs a pinned-endpoint, five-second, 64 KiB-capped local
+`image inspect`. It rejects missing images, malformed metadata, and every image
+whose OCI `Config.Volumes` is non-empty. The immutable inspected image ID—not
+the caller's mutable tag—is passed to `run`. Podman additionally receives
+`--image-volume=ignore` as defense in depth. Inspection never pulls an image;
+the eventual run remains fixed at `--pull=never` and `--network=none`.
 
 Defaults are 30 seconds, 512 MiB, 1 CPU, 64 PIDs, 64 KiB stdin, and 128 KiB
 combined output. Hard maxima are 120 seconds, 4096 MiB, 4 CPUs, 256 PIDs,

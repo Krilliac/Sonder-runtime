@@ -50,13 +50,24 @@ def test_server_forwards_only_the_fixed_isolated_contract(monkeypatch, tmp_path)
 
 def test_server_rejects_bad_request_without_launch(monkeypatch, tmp_path):
     _authorize(monkeypatch)
+    records = []
+    monkeypatch.setattr(
+        server, "_record_direct_tool",
+        lambda name, args, **kwargs: records.append((name, args, kwargs)),
+    )
     monkeypatch.setattr(
         server.isolated_runner, "run_isolated",
         lambda **_kwargs: (_ for _ in ()).throw(ValueError("bad argv")),
     )
     assert server.isolated_run(
-        "busybox", "[]", str(tmp_path), **_authorized_args()
+        "secret-image-name", "[]", str(tmp_path / "secret-project-name"),
+        **_authorized_args()
     ) == "ERROR: bad argv"
+    assert records[0][1] == {
+        "failure": "policy-or-runtime-error", "writable_workspace": False,
+    }
+    assert "secret-image-name" not in repr(records)
+    assert "secret-project-name" not in repr(records)
 
 
 def test_direct_mcp_call_requires_developer_approval_and_ack(monkeypatch, tmp_path):

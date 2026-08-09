@@ -35,6 +35,7 @@ MAX_OUTPUT_BYTES = 256 * 1024
 MAX_STDIN_BYTES = 64 * 1024
 MAX_ARGV_ITEMS = 64
 MAX_ARG_BYTES = 4096
+MAX_PROBE_OUTPUT_BYTES = 64 * 1024
 RUNTIME_ENV = "SONDER_ISOLATED_RUNTIME"
 ROOTS_ENV = "SONDER_ISOLATED_ROOTS"
 MAX_PROJECT_ENTRIES = 100_000
@@ -118,6 +119,105 @@ def _probe(argv, timeout=5):
         )
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+def _bounded_probe(argv, timeout=5, output_limit=MAX_PROBE_OUTPUT_BYTES):
+    """Run one metadata-only CLI query with hard combined output/time caps."""
+    try:
+        proc = subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, env=_runtime_environment(), shell=False,
+        )
+    except OSError:
+        return None
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+    total = [0]
+    lock = threading.Lock()
+    exceeded = threading.Event()
+
+    def drain(label, stream):
+        while True:
+            chunk = stream.read(4096)
+            if not chunk:
+                return
+            with lock:
+                remaining = max(0, output_limit - total[0])
+                kept = chunk[:remaining]
+                if kept:
+                    buffers[label].extend(kept)
+                    total[0] += len(kept)
+                if len(kept) < len(chunk):
+                    exceeded.set()
+                    return
+
+    readers = [
+        threading.Thread(target=drain, args=(label, stream), daemon=False)
+        for label, stream in (("stdout", proc.stdout), ("stderr", proc.stderr))
+    ]
+    for reader in readers:
+        reader.start()
+    deadline = time.monotonic() + timeout
+    failed = False
+    while proc.poll() is None:
+        if exceeded.is_set() or time.monotonic() >= deadline:
+            failed = True
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            break
+        time.sleep(0.01)
+    try:
+        returncode = proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        returncode = None
+        failed = True
+    for reader in readers:
+        reader.join(timeout=3)
+    if any(reader.is_alive() for reader in readers):
+        for stream in (proc.stdout, proc.stderr):
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+        for reader in readers:
+            reader.join(timeout=1)
+    if exceeded.is_set() or any(reader.is_alive() for reader in readers):
+        failed = True
+    if failed or returncode is None:
+        return None
+    return subprocess.CompletedProcess(
+        argv, returncode,
+        stdout=bytes(buffers["stdout"]).decode("utf-8", "replace"),
+        stderr=bytes(buffers["stderr"]).decode("utf-8", "replace"),
+    )
+
+
+def _inspect_image_policy(runtime_path, runtime_prefix, image):
+    """Return immutable image ID after rejecting any OCI-declared volume."""
+    result = _bounded_probe([
+        runtime_path, *runtime_prefix, "image", "inspect", "--format",
+        '{"id":{{json .Id}},"volumes":{{json .Config.Volumes}}}', image,
+    ])
+    if result is None:
+        raise ValueError("container image inspection exceeded a safety bound")
+    if result.returncode != 0:
+        raise ValueError(
+            "container image inspection failed; the image must already be installed"
+        )
+    try:
+        metadata = json.loads((result.stdout or "").strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError("container image volume metadata is invalid") from exc
+    if not isinstance(metadata, dict) or set(metadata) != {"id", "volumes"}:
+        raise ValueError("container image inspection returned incomplete metadata")
+    image_id = str(metadata.get("id") or "").strip().lower()
+    if not re.fullmatch(r"(?:sha256:)?[a-f0-9]{64}", image_id):
+        raise ValueError("container image inspection returned an invalid image ID")
+    volumes = metadata.get("volumes")
+    if volumes is None or volumes == {}:
+        return image_id
+    raise ValueError("container images declaring OCI volumes are not allowed")
 
 
 def _local_endpoint(uri):
@@ -438,8 +538,10 @@ def build_runtime_argv(
         if runtime_name == "docker"
         else ["--memory", "%dm" % memory_mb, "--memory-swap", "%dm" % memory_mb]
     )
+    image_volume_args = ["--image-volume=ignore"] if runtime_name == "podman" else []
     argv = [
         str(runtime_path), *runtime_prefix, "run", "--rm", "--pull=never",
+        "--log-driver=none", "--no-healthcheck", *image_volume_args,
         "--name", container_name,
         "--network=none", "--read-only", "--cap-drop=ALL",
         "--security-opt=no-new-privileges", "--pids-limit=%d" % pids,
@@ -615,6 +717,8 @@ def run_isolated(
     if len(stdin_bytes) > MAX_STDIN_BYTES:
         raise ValueError("stdin exceeds %d bytes" % MAX_STDIN_BYTES)
     command = _parse_argv(argv_json)
+    image = _validate_image(image)
+    image = _inspect_image_policy(runtime_path, runtime_prefix, image)
     resolved_project = resolve_project(project)
     argv, name = build_runtime_argv(
         runtime_name, runtime_path, runtime_prefix,
