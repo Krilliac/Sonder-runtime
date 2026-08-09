@@ -187,3 +187,11 @@ def test_module_has_no_execution_or_network_dependencies():
     assert "subprocess" not in source
     assert "socket" not in source
     assert "urllib" not in source
+
+
+@pytest.mark.parametrize("value", [True, 1.5, "1024", float("inf")])
+def test_malformed_scan_limits_fail_closed(project, value):
+    path = project / "sample.bin"
+    path.write_bytes(b"opaque")
+    with pytest.raises(artifact_risk.ArtifactRiskError):
+        artifact_risk.inspect_artifact(path, max_scan_bytes=value)

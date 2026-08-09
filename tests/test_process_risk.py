@@ -14,6 +14,13 @@ def test_memory_inspection_requires_exact_opt_in(monkeypatch):
     result = process_risk.inspect_process_memory(12345)
     assert result["status"] == "opt_in_required"
 
+
+def test_process_list_requires_exact_opt_in(monkeypatch):
+    monkeypatch.delenv(process_risk.OPT_IN_ENV, raising=False)
+    assert process_risk.list_processes()["status"] == "opt_in_required"
+    monkeypatch.setenv(process_risk.OPT_IN_ENV, "1")
+    assert process_risk.list_processes()["status"] == "opt_in_required"
+
     monkeypatch.setenv(process_risk.OPT_IN_ENV, "1")
     result = process_risk.inspect_process_memory(12345)
     assert result["status"] == "opt_in_required"
@@ -32,7 +39,8 @@ def test_memory_inspection_rejects_self(monkeypatch):
     assert result["status"] == "protected_pid"
 
 
-def test_process_list_is_bounded_and_has_no_sensitive_fields():
+def test_process_list_is_bounded_and_has_no_sensitive_fields(monkeypatch):
+    monkeypatch.setenv(process_risk.OPT_IN_ENV, process_risk.OPT_IN_VALUE)
     result = process_risk.list_processes(max_processes=2, max_seconds=0.25)
     if os.name != "nt":
         assert result["status"] == "unsupported_platform"
@@ -69,6 +77,13 @@ def test_limits_are_clamped(monkeypatch):
     finally:
         child.terminate()
         child.wait(timeout=5)
+
+
+@pytest.mark.parametrize("value", [True, 1.5, "4096", float("inf")])
+def test_malformed_memory_limits_fail_closed(monkeypatch, value):
+    monkeypatch.setenv(process_risk.OPT_IN_ENV, process_risk.OPT_IN_VALUE)
+    with pytest.raises(ValueError):
+        process_risk.inspect_process_memory(1234, max_bytes=value)
 
 def test_harmless_synthetic_injection_markers_are_detected_without_content(
     monkeypatch,

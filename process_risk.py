@@ -48,26 +48,23 @@ _INDICATORS: tuple[tuple[str, tuple[bytes, ...]], ...] = (
 
 
 def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
-    if isinstance(value, bool):
-        return default
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError, OverflowError):
-        return default
-    return max(minimum, min(parsed, maximum))
+    if value is None:
+        value = default
+    if type(value) is not int:
+        raise ValueError("integer limits must be exact JSON integers")
+    return max(minimum, min(value, maximum))
 
 
 def _bounded_float(
     value: Any, default: float, minimum: float, maximum: float
 ) -> float:
-    if isinstance(value, bool):
-        return default
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return default
+    if value is None:
+        value = default
+    if type(value) not in (int, float):
+        raise ValueError("time limits must be exact JSON numbers")
+    parsed = float(value)
     if parsed != parsed or parsed in (float("inf"), float("-inf")):
-        return default
+        raise ValueError("time limits must be finite")
     return max(minimum, min(parsed, maximum))
 
 
@@ -83,6 +80,13 @@ def list_processes(
     *, max_processes: int = 128, max_seconds: float = 0.5
 ) -> dict[str, Any]:
     """Return a bounded Windows process inventory without command lines/paths."""
+    if os.environ.get(OPT_IN_ENV) != OPT_IN_VALUE:
+        return {
+            "ok": False,
+            "operation": "process_list",
+            "status": "opt_in_required",
+            "required_environment": OPT_IN_ENV,
+        }
     limit = _bounded_int(max_processes, 128, 1, _MAX_PROCESSES)
     deadline = time.monotonic() + _bounded_float(
         max_seconds, 0.5, 0.05, _MAX_SECONDS
@@ -201,13 +205,7 @@ def inspect_process_memory(
             "status": "opt_in_required",
             "required_environment": OPT_IN_ENV,
         }
-    if isinstance(pid, bool):
-        parsed_pid = -1
-    else:
-        try:
-            parsed_pid = int(pid)
-        except (TypeError, ValueError, OverflowError):
-            parsed_pid = -1
+    parsed_pid = pid if type(pid) is int else -1
     if parsed_pid <= 0 or parsed_pid in (4, os.getpid()):
         return {
             "ok": False,

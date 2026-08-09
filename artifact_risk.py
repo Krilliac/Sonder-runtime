@@ -48,22 +48,15 @@ class ArtifactRiskDenied(PermissionError):
 
 
 def _clamp_int(value, low, high):
-    if isinstance(value, bool):
-        raise ArtifactRiskError("numeric limits must not be booleans")
-    try:
-        number = int(value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ArtifactRiskError("numeric limit is invalid") from exc
-    return max(low, min(number, high))
+    if type(value) is not int:
+        raise ArtifactRiskError("numeric limits must be exact JSON integers")
+    return max(low, min(value, high))
 
 
 def _clamp_seconds(value):
-    if isinstance(value, bool):
-        raise ArtifactRiskError("max_seconds must be numeric")
-    try:
-        number = float(value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ArtifactRiskError("max_seconds is invalid") from exc
+    if type(value) not in (int, float):
+        raise ArtifactRiskError("max_seconds must be an exact JSON number")
+    number = float(value)
     if not math.isfinite(number) or number <= 0:
         raise ArtifactRiskError("max_seconds must be finite and positive")
     return min(number, MAX_SECONDS)

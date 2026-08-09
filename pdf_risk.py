@@ -5,6 +5,7 @@ import contextlib
 import ctypes
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -50,23 +51,18 @@ class PdfRiskError(ValueError):
 
 
 def _clamp_int(value, default, low, high):
-    if isinstance(value, bool):
-        raise PdfRiskError("numeric limits must not be booleans")
-    try:
-        number = int(value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise PdfRiskError("numeric limit is invalid") from exc
-    return max(low, min(number if value is not None else default, high))
+    if value is None:
+        value = default
+    if type(value) is not int:
+        raise PdfRiskError("numeric limits must be exact JSON integers")
+    return max(low, min(value, high))
 
 
 def _clamp_seconds(value):
-    if isinstance(value, bool):
-        raise PdfRiskError("max_seconds must be numeric")
-    try:
-        number = float(value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise PdfRiskError("max_seconds is invalid") from exc
-    if not (number > 0.0) or number == float("inf"):
+    if type(value) not in (int, float):
+        raise PdfRiskError("max_seconds must be an exact JSON number")
+    number = float(value)
+    if not (number > 0.0) or not math.isfinite(number):
         raise PdfRiskError("max_seconds must be finite and positive")
     return min(number, MAX_SECONDS)
 
