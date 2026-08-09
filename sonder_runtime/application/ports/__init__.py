@@ -7,7 +7,13 @@ driver exceptions.
 """
 from .clock import Clock
 from .event_sink import EventSink
-from .model_gateway import Embedding, ModelGateway, ModelRequest, ModelResponse
+from .model_gateway import (
+    Embedding,
+    InferenceTelemetry,
+    ModelGateway,
+    ModelRequest,
+    ModelResponse,
+)
 from .process_probe import ProbeResult, ProcessIdentity, ProcessProbe
 from .repositories import (
     AutomationRepository,
@@ -22,6 +28,7 @@ __all__ = [
     "Clock",
     "Embedding",
     "EventSink",
+    "InferenceTelemetry",
     "MemoryRepository",
     "ModelGateway",
     "ModelRequest",
