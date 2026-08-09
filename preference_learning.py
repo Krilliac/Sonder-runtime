@@ -67,9 +67,9 @@ _PREFERENCE_CAPTURE_SYNTAX = (
     r"from\s+now\s+on\b|call\s+me\b|my\s+name\s+is\b)"
 )
 _QUOTED_PREFERENCE_RE = re.compile(
-    rf"(?:[\"“][^\"\n]{{0,100}}{_PREFERENCE_CAPTURE_SYNTAX}"
-    rf"[^\"\n]{{0,100}}[\"”]|(?:^|[\s(])'[^'\n]{{0,100}}"
-    rf"{_PREFERENCE_CAPTURE_SYNTAX}[^'\n]{{0,100}}')",
+    rf"(?:[\"“][^\"”\n]{{0,300}}{_PREFERENCE_CAPTURE_SYNTAX}"
+    rf"[^\"”\n]{{0,300}}[\"”]|(?:^|[\s(])['‘][^'’\n]{{0,300}}"
+    rf"{_PREFERENCE_CAPTURE_SYNTAX}[^'’\n]{{0,300}}['’])",
     re.I,
 )
 _META_REFERENCE_RE = re.compile(
@@ -90,7 +90,8 @@ _INSTRUCTION_OVERRIDE_RE = re.compile(
     re.I,
 )
 _COMMAND_TAIL_RE = re.compile(
-    r"(?:[.;]|--|\b(?:and|then)\b)\s*(?:please\s+)?"
+    r"(?:[.;:]|--|&|\b(?:and|then)\b)\s*(?:please\s+)?"
+    r"(?:(?:also|automatically|directly|immediately|silently)\s+){0,2}"
     r"(?:ignore|disregard|override|bypass|forget|reveal|expose|leak|send|"
     r"upload|run|execute|delete|read|write|call|use|print|show)\b",
     re.I,
