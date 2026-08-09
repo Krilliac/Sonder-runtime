@@ -35,6 +35,7 @@ def test_legacy_root_allowlist_has_a_shrink_only_ratchet():
     assert "sonder_preflight" not in module.ROOT_LEGACY_MODULES
     assert "model_transport" not in module.ROOT_LEGACY_MODULES
     assert "eval_history" not in module.ROOT_LEGACY_MODULES
+    assert "unsafe_lab" not in module.ROOT_LEGACY_MODULES
     assert module.ROOT_LEGACY_MODULES <= module.BASELINE_ROOT_LEGACY_MODULES
 
     removed = next(iter(module.ROOT_LEGACY_MODULES))
