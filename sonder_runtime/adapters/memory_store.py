@@ -2726,6 +2726,12 @@ def good_interaction_candidate_page(
         if memory_rules.reward_is_good(signal)
     ))
     placeholders = ",".join("?" for _ in good_signals)
+    reward_case = " ".join("WHEN ? THEN ?" for _ in good_signals)
+    canonical_rewards = tuple(
+        value
+        for signal in good_signals
+        for value in (signal, memory_rules.reward_score(signal))
+    )
     sql = (
         "SELECT CAST(i.ts AS BLOB) AS candidate_ts, "
         "CAST(i.id AS BLOB) AS candidate_cursor_id, "
@@ -2760,20 +2766,23 @@ def good_interaction_candidate_page(
         "AND length(i.task_embedding)=i.task_embedding_dim*4 "
         "AND EXISTS (SELECT 1 FROM outcomes good "
         "WHERE good.interaction_id=i.id AND good.signal IN (%s) "
-        "AND good.reward>=?) "
+        "AND typeof(good.reward) IN ('integer','real') "
+        "AND good.reward=CASE good.signal %s END) "
         "AND NOT EXISTS (SELECT 1 FROM outcomes bad "
         "WHERE bad.interaction_id=i.id AND "
         "(bad.signal NOT IN (%s) OR bad.signal IS NULL "
-        "OR bad.reward IS NULL OR bad.reward<?))"
-        % (placeholders, placeholders)
+        "OR typeof(bad.reward) NOT IN ('integer','real') "
+        "OR bad.reward!=CASE bad.signal %s END OR bad.reward<?))"
+        % (placeholders, reward_case, placeholders, reward_case)
     )
     params = [
         RECALL_RESPONSE_PREFIX_CHARS,
         RECALL_MAX_STORED_TASK_CHARS,
         RECALL_MAX_EMBEDDING_BYTES,
         *good_signals,
-        memory_rules.GOOD_THRESHOLD,
+        *canonical_rewards,
         *good_signals,
+        *canonical_rewards,
         memory_rules.GOOD_THRESHOLD,
     ]
     if exclude_session:

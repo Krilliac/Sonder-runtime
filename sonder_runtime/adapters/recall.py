@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 
 import embeddings
 import sonder_runtime.adapters.memory_store as memory_store
@@ -12,6 +13,16 @@ from sonder_runtime.domain.memory import rules as _rules
 
 DEFAULT_MIN_SIM = _rules.DEFAULT_RECALL_MIN_SIM
 MAX_RESP_CHARS = 400
+
+
+@dataclass(frozen=True)
+class RecallPage:
+    results: tuple[str, ...]
+    incomplete: bool
+    next_cursor: str | None
+    termination: str
+    candidates_examined: int
+    candidates_scored: int
 
 
 def _fence_count(text):
@@ -29,11 +40,11 @@ def _format(task, response, max_len=MAX_RESP_CHARS):
     return line
 
 
-def recall(conn, task, k=2, embed_fn=None, min_sim=None,
-           qv=None, exclude_session=None, project=None,
-           include_all_projects=False, embedding_model=None,
-           embedding_revision=None):
-    """Return project-scoped good outcomes similar to ``task``."""
+def recall_page(conn, task, k=2, embed_fn=None, min_sim=None,
+                qv=None, exclude_session=None, project=None,
+                include_all_projects=False, embedding_model=None,
+                embedding_revision=None, candidate_cursor=None):
+    """Return bounded recall results with truthful enumeration evidence."""
     include_all_projects = include_all_projects is True
     if min_sim is None:
         try:
@@ -48,20 +59,26 @@ def recall(conn, task, k=2, embed_fn=None, min_sim=None,
     if qv is None:
         qv = embed_fn(task)
     if qv is None or not embeddings.valid_vector(qv):
-        return []
+        return RecallPage((), False, None, "no_query_embedding", 0, 0)
     query_provenance = embeddings.trusted_provenance(qv, embed_fn, runtime_default)
     if embedding_model is None:
         embedding_model = query_provenance.get("model")
     if embedding_revision is None:
         embedding_revision = query_provenance.get("revision")
 
-    scored = []
-    for row in memory_store.good_interactions_with_embeddings(
+    candidates = memory_store.good_interaction_candidate_page(
         conn,
         exclude_session,
         project=project,
         include_all_projects=include_all_projects,
-    ):
+        embedding_model=embedding_model,
+        embedding_revision=embedding_revision,
+        embedding_dim=len(qv),
+        cursor=candidate_cursor,
+    )
+    scored = []
+    scored_count = 0
+    for candidate_rank, row in enumerate(candidates.rows):
         emb = row.get("task_embedding")
         if not emb or not isinstance(row.get("task"), str):
             continue
@@ -93,7 +110,33 @@ def recall(conn, task, k=2, embed_fn=None, min_sim=None,
         ):
             continue
         sim = embeddings.cosine(qv, stored)
+        scored_count += 1
         if _rules.passes_similarity(sim, min_sim):
-            scored.append((sim, row))
-    scored.sort(key=lambda item: -item[0])
-    return [_format(row["task"], row["response"]) for _, row in scored[:k]]
+            scored.append((sim, candidate_rank, row))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return RecallPage(
+        results=tuple(
+            _format(row["task"], row["response"])
+            for _, _, row in scored[:k]
+        ),
+        incomplete=candidates.incomplete,
+        next_cursor=candidates.next_cursor,
+        termination=candidates.termination,
+        candidates_examined=candidates.rows_examined,
+        candidates_scored=scored_count,
+    )
+
+
+def recall(conn, task, k=2, embed_fn=None, min_sim=None,
+           qv=None, exclude_session=None, project=None,
+           include_all_projects=False, embedding_model=None,
+           embedding_revision=None):
+    """Compatibility list API over the bounded semantic-recall page."""
+    page = recall_page(
+        conn, task, k=k, embed_fn=embed_fn, min_sim=min_sim, qv=qv,
+        exclude_session=exclude_session, project=project,
+        include_all_projects=include_all_projects,
+        embedding_model=embedding_model,
+        embedding_revision=embedding_revision,
+    )
+    return list(page.results)
