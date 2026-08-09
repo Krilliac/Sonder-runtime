@@ -11,16 +11,20 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
+from ...domain.common.errors import InvalidInput, NotFound
 from ..ports.task_state import ChecklistEventPort, TaskRepository
 
 
 def normalize_checklist_items(items_json) -> list[tuple[str, str]]:
     """Validate the complete checklist before any repository write occurs."""
-    items = json.loads(items_json) if isinstance(items_json, str) else items_json
+    try:
+        items = json.loads(items_json) if isinstance(items_json, str) else items_json
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise InvalidInput(str(exc)) from exc
     if not isinstance(items, list) or not items:
-        raise ValueError("items_json must be a non-empty JSON list")
+        raise InvalidInput("items_json must be a non-empty JSON list")
     if len(items) > 20:
-        raise ValueError("a checklist supports at most 20 items")
+        raise InvalidInput("a checklist supports at most 20 items")
     normalized = []
     for item in items:
         if isinstance(item, dict):
@@ -30,7 +34,7 @@ def normalize_checklist_items(items_json) -> list[tuple[str, str]]:
             item_title = str(item).strip()
             detail = ""
         if not item_title:
-            raise ValueError("checklist item titles cannot be empty")
+            raise InvalidInput("checklist item titles cannot be empty")
         normalized.append((item_title, detail))
     return normalized
 
@@ -117,7 +121,7 @@ class TaskService:
     def checklist(self, checklist_id: str) -> ChecklistView:
         parent = self._repository.get(checklist_id)
         if not parent:
-            raise ValueError("no checklist '%s'" % checklist_id)
+            raise NotFound("no checklist '%s'" % checklist_id)
         items = tuple(
             TaskView.from_raw(row) for row in self._repository.children(parent["id"])
         )
@@ -158,7 +162,7 @@ class TaskService:
             if len(matches) == 1:
                 selected = matches[0]
         if not selected:
-            raise ValueError("no unique checklist item '%s'" % item)
+            raise NotFound("no unique checklist item '%s'" % item)
         self._repository.update(
             selected.id, status=status, note=note or "checklist update"
         )

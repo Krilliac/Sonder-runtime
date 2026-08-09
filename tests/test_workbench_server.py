@@ -94,6 +94,34 @@ def test_checklist_create_preserves_activity_projection_and_event_order(
     ]
 
 
+def test_checklist_show_and_update_preserve_legacy_activity_order(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "activity-order.db"))
+    created = server.checklist_create("Visible", json.dumps(["inspect"]))
+    checklist_id = created.split("\n", 1)[0].split()[-1]
+
+    activity_tracker.reset_for_tests()
+    with activity_tracker.response_span("checklist", "show visible plan"):
+        shown = server.checklist_show(checklist_id)
+    show_events = [
+        row["kind"] for row in activity_tracker.latest()["events"]
+        if row["kind"] in ("tool_call", "checklist")
+    ]
+    assert shown.startswith("sonder checklist ")
+    assert show_events[-2:] == ["checklist", "tool_call"]
+
+    activity_tracker.reset_for_tests()
+    with activity_tracker.response_span("checklist", "update visible plan"):
+        updated = server.checklist_update(checklist_id, "1", "done")
+    update_events = [
+        row["kind"] for row in activity_tracker.latest()["events"]
+        if row["kind"] in ("tool_call", "checklist")
+    ]
+    assert "1/1 complete" in updated
+    assert update_events[-2:] == ["tool_call", "checklist"]
+
+
 def test_checklist_rejects_all_invalid_items_before_writing(monkeypatch, tmp_path):
     db_path = tmp_path / "atomic.db"
     monkeypatch.setattr(server, "_DB_PATH", str(db_path))
