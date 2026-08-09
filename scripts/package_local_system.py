@@ -79,6 +79,7 @@ REQUIRED_FILES = {
     "engine_bundle.py",
     "endless-train.sh",
     "game_forge.py",
+    "fleet_provenance.py",
     "fleet_store.py",
     "learning_health.py",
     "sonder_health.py",

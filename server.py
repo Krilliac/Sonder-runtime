@@ -574,6 +574,7 @@ LIVE_RELOAD_MODULES = [
     "learning_health",
     "eval_history",
     "domain_grounding",
+    "fleet_provenance",
     "master_orchestrator",
     "ollama_lifecycle",
     "admin_auth",
@@ -6549,6 +6550,10 @@ def master_orchestrate(
     """
     _maybe_live_reload()
     task = (task or "").strip()
+    try:
+        protected_objectives = master_orchestrator.fleet_provenance.parse_objectives(task)
+    except master_orchestrator.fleet_provenance.ProvenanceError as exc:
+        return "ERROR: invalid fleet objective contract: %s" % exc
     inferred_worker_cap = master_orchestrator.requested_worker_cap(task)
     raw_worker_cap = worker_cap
     if (worker_cap is None or worker_cap == 0) and not isinstance(worker_cap, bool):
@@ -6627,7 +6632,11 @@ def master_orchestrate(
         return _master_scope_error(
             "project must name an existing directory or source file"
         )
-    needs_repo_tools = bool(explicit_project) or master_orchestrator.requires_repository_tools(task)
+    needs_repo_tools = (
+        bool(protected_objectives)
+        or bool(explicit_project)
+        or master_orchestrator.requires_repository_tools(task)
+    )
     project_scope = ""
     if needs_repo_tools:
         try:
@@ -6646,7 +6655,10 @@ def master_orchestrate(
         if needs_repo_tools
         else _orchestrator_worker(
             tier,
-            learn=learn,
+            # Protected objective runs are never captured as learnable
+            # interactions. This guarantees a drifted result cannot later be
+            # promoted through record_outcome, even after a restart.
+            learn=learn and not protected_objectives,
             timeout=_master_timeout("SONDER_MASTER_AGENT_TIMEOUT", 150),
         )
     )
@@ -6813,8 +6825,8 @@ def master_retry(agent_id: str, tier: str = "") -> str:
     if not candidate:
         return "ERROR: no unambiguous persisted master matched %r." % selector
     status = candidate.get("status") or ""
-    if status not in ("interrupted", "failed", "cancelled"):
-        return "ERROR: master %s is %s; only interrupted/failed/cancelled work can be retried." % (
+    if status not in ("interrupted", "failed", "task_drift", "cancelled"):
+        return "ERROR: master %s is %s; only interrupted/failed/cancelled work or task_drift work can be retried." % (
             candidate["id"], status or "unknown",
         )
     task = (candidate.get("task") or "").strip()
