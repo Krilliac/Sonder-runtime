@@ -52,9 +52,9 @@ Portable/offline instead? Import a GGUF directly (including from a USB) with
 ```
 
 `reasoning` and `vision` are first-class optional tiers in the policy. They are
-bound by default (`deepseek-r1:7b` / `moondream`); repoint them with
+unbound by default; bind models suited to the live host with
 `/runtime set reasoning=<model> vision=<model>`, or leave one **unset** with an
-empty value (`/runtime set vision=`) if you have not pulled that model. An
+empty value (`/runtime set vision=`). An
 unset tier is not offered at all and the router degrades to `general`/`code`
 automatically — nothing breaks. `oracle` is still consent-gated escalation
 only, not a policy tier. Inspect the live mapping with `/runtime` or
@@ -70,8 +70,9 @@ export OLLAMA_MAX_LOADED_MODELS=2     # if memory allows more than one resident
 ```
 
 Rule of thumb: `fast` + `embed` + your most-used heavy tier stay resident; the
-rest load on demand. On a multi-GPU machine you can instead pin one model per
-card (e.g. `CUDA_VISIBLE_DEVICES`) to eliminate swapping entirely — see
+rest load on demand. On a multi-accelerator machine you may instead pin one
+model per device when its backend supports that (for example,
+`CUDA_VISIBLE_DEVICES` on NVIDIA) to eliminate swapping entirely — see
 "Scaling up: multi-GPU" in the [Model Catalog](../wiki/18-model-catalog.md).
 
 ## 5. Verify
