@@ -16008,8 +16008,12 @@ def runtime_policy_update(
         if local_models:
             installed = _runtime_installed_models()
             missing = [
-                str(model) for model in local_models.values()
-                if not _runtime_model_is_installed(model, installed)
+                str(model) for tier, model in local_models.items()
+                if not (
+                    tier in runtime_policy.OPTIONAL_LOCAL_TIERS
+                    and not str(model or "").strip()
+                )
+                and not _runtime_model_is_installed(model, installed)
             ]
             if missing:
                 raise ValueError(
