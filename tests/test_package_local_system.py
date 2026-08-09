@@ -67,6 +67,14 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     assert "learning_health.py" in entries
     assert "sonder_health.py" in entries
     assert "sonder_runtime/adapters/legacy/inspections.py" in entries
+    assert "recall.py" in entries
+    assert {
+        "sonder_runtime/adapters/legacy/recall.py",
+        "sonder_runtime/adapters/recall.py",
+        "sonder_runtime/application/ports/recall.py",
+        "sonder_runtime/application/recall/__init__.py",
+        "sonder_runtime/application/recall/use_cases.py",
+    } <= set(entries)
     assert "sonder_runtime/adapters/git_discovery.py" in entries
     assert {
         "sonder_preflight.py",
