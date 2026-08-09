@@ -160,14 +160,14 @@ def test_partial_failure_restores_overwrites_and_removes_creates(
     real_write = file_ops.write_file
     calls = []
 
-    def fail_after_second_write(*args, **kwargs):
+    def fail_before_third_write(*args, **kwargs):
+        if len(calls) == 2:
+            raise OSError("injected pre-write failure")
         result = real_write(*args, **kwargs)
         calls.append(str(args[0]))
-        if len(calls) == 2:
-            raise OSError("injected post-write failure")
         return result
 
-    monkeypatch.setattr(file_ops, "write_file", fail_after_second_write)
+    monkeypatch.setattr(file_ops, "write_file", fail_before_third_write)
     with pytest.raises(file_ops.BatchWriteError) as caught:
         file_ops.batch_write_files([
             _operation("new/created.txt", "created", "create"),
@@ -177,9 +177,9 @@ def test_partial_failure_restores_overwrites_and_removes_creates(
 
     report = caught.value.report
     assert report["transaction"] == "rolled_back"
-    assert report["failed_index"] == 1
+    assert report["failed_index"] == 2
     assert [row["status"] for row in report["results"]] == [
-        "rolled_back", "failed", "not_attempted",
+        "rolled_back", "rolled_back", "failed",
     ]
     assert [row["index"] for row in report["rollback"]] == [0, 1]
     assert all(row["restored"] for row in report["rollback"])
@@ -187,6 +187,46 @@ def test_partial_failure_restores_overwrites_and_removes_creates(
     assert not (tmp_path / "new").exists()
     assert existing.read_bytes() == original
     assert untouched.read_text(encoding="utf-8") == "unchanged"
+
+
+def test_failed_create_does_not_remove_concurrently_created_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: tmp_path)
+    real_write = file_ops.write_file
+
+    def concurrent_create(path, content, **kwargs):
+        target = tmp_path / str(path)
+        target.write_text("other process", encoding="utf-8")
+        return real_write(path, content, **kwargs)
+
+    monkeypatch.setattr(file_ops, "write_file", concurrent_create)
+    with pytest.raises(file_ops.BatchWriteError) as caught:
+        file_ops.batch_write_files([
+            _operation("raced.txt", "batch", "create"),
+        ])
+
+    assert caught.value.report["rollback"] == []
+    assert (tmp_path / "raced.txt").read_text(encoding="utf-8") == "other process"
+
+
+def test_hard_link_aliases_are_rejected(monkeypatch, tmp_path):
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: tmp_path)
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("original", encoding="utf-8")
+    try:
+        second.hardlink_to(first)
+    except OSError as exc:
+        pytest.skip("hard links unavailable: %s" % exc)
+
+    with pytest.raises(file_ops.BatchWriteError) as caught:
+        file_ops.batch_write_files([
+            _operation("first.txt", "one", "overwrite"),
+            _operation("second.txt", "two", "overwrite"),
+        ])
+
+    assert "file identity" in caught.value.report["results"][1]["error"]
+    assert first.read_text(encoding="utf-8") == "original"
+    assert second.read_text(encoding="utf-8") == "original"
 
 
 def test_mcp_manifest_help_dispatch_and_activity(monkeypatch, tmp_path):

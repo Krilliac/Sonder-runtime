@@ -758,9 +758,10 @@ def write_file(
         lines_deleted = max(0, before_lines - after_lines)
         lines_edited = min(before_lines, after_lines) if before != (content or "") else 0
         action = "overwrite"
+    written_bytes = p.stat().st_size if mode == "append" else len(data)
     return {
         "path": str(p),
-        "bytes": p.stat().st_size,
+        "bytes": written_bytes,
         "mode": mode,
         "action": action,
         "lines_before": before_lines,
@@ -809,6 +810,7 @@ def _batch_preflight(
     prepared = []
     results = []
     seen = set()
+    seen_existing_identities = set()
     aggregate_bytes = 0
     snapshot_bytes = 0
     for index, operation in enumerate(operations):
@@ -870,15 +872,23 @@ def _batch_preflight(
                 raise ValueError("duplicate batch target")
             seen.add(key)
             exists = resolved.exists()
-            if exists and (not resolved.is_file() or _is_reparse_point(resolved)):
-                raise ValueError("batch target exists but is not a regular file")
+            metadata = None
+            if exists:
+                metadata = resolved.stat()
+                if not resolved.is_file() or _is_reparse_point(resolved):
+                    raise ValueError("batch target exists but is not a regular file")
+                identity = (metadata.st_dev, metadata.st_ino)
+                if metadata.st_ino and identity in seen_existing_identities:
+                    raise ValueError("duplicate batch target by file identity")
+                if metadata.st_ino:
+                    seen_existing_identities.add(identity)
             if mode == "create" and exists:
                 raise FileExistsError("file exists; use mode=overwrite")
             if mode == "overwrite" and not exists:
                 raise FileNotFoundError("overwrite target does not exist")
             original = b""
             if exists:
-                size = resolved.stat().st_size
+                size = metadata.st_size
                 if size > MAX_WRITE_BYTES:
                     raise ValueError("existing file exceeds rollback snapshot bytes")
                 snapshot_bytes += size
@@ -907,6 +917,10 @@ def _batch_preflight(
                 "mode": mode,
                 "existed": exists,
                 "original": original,
+                "identity": (
+                    (metadata.st_dev, metadata.st_ino)
+                    if metadata is not None and metadata.st_ino else None
+                ),
                 "missing_parents": missing_parents,
             })
         except (OSError, TypeError, ValueError) as exc:
@@ -986,7 +1000,6 @@ def batch_write_files(
         attempted_count = 0
         try:
             for item in prepared:
-                attempted_count += 1
                 _require_no_reparse_components(
                     _batch_requested_path(item["requested_path"])
                 )
@@ -996,6 +1009,10 @@ def batch_write_files(
                     bypass=bypass,
                 ) != item["path"]:
                     raise PermissionError("batch target resolution changed after preflight")
+                if item["identity"] is not None:
+                    current = item["path"].stat()
+                    if (current.st_dev, current.st_ino) != item["identity"]:
+                        raise PermissionError("batch target identity changed after preflight")
                 result = write_file(
                     item["requested_path"],
                     item["content"],
@@ -1016,6 +1033,7 @@ def batch_write_files(
                     "lines_deleted": result.get("lines_deleted", 0),
                     "created_directories": result.get("created_directories", []),
                 })
+                attempted_count += 1
         except Exception as exc:
             attempted = prepared[:attempted_count]
             rollback = _rollback_batch(attempted)
@@ -1023,7 +1041,7 @@ def batch_write_files(
             rolled_back = {row["index"]: row for row in rollback}
             transaction_results = []
             written_by_index = {row["index"]: row for row in results}
-            failed_index = attempted[-1]["index"]
+            failed_index = prepared[attempted_count]["index"]
             for item in prepared:
                 index = item["index"]
                 if index in written_by_index:
