@@ -15303,6 +15303,116 @@ def unload(tier: str = "all") -> str:
     return "\n".join(lines)
 
 
+# MCP is more than model-controlled tools. These small, passive resources let
+# clients attach live runtime facts without spending a tool turn, while prompts
+# make the safest high-value workflows discoverable in every MCP client.
+@mcp.resource(
+    "sonder://runtime/status",
+    name="runtime-status",
+    title="Sonder Runtime Status",
+    description="Live local model tiers, residency, and controller state.",
+    mime_type="text/plain",
+)
+def _resource_runtime_status() -> str:
+    return status()
+
+
+@mcp.resource(
+    "sonder://runtime/diagnostics",
+    name="runtime-diagnostics",
+    title="Sonder Runtime Diagnostics",
+    description="Read-only health checks for policy, memory, models, and MCP state.",
+    mime_type="text/plain",
+)
+def _resource_runtime_diagnostics() -> str:
+    return diagnostics()
+
+
+@mcp.resource(
+    "sonder://runtime/environment",
+    name="host-environment",
+    title="Host Environment",
+    description="Detected OS, shells, interpreters, and build toolchains.",
+    mime_type="text/plain",
+)
+def _resource_host_environment() -> str:
+    return environment_status()
+
+
+@mcp.resource(
+    "sonder://runtime/tools",
+    name="tool-manifest",
+    title="Sonder Tool Manifest",
+    description="Compact deterministic index of Sonder's model-callable tools.",
+    mime_type="text/plain",
+)
+def _resource_tool_manifest() -> str:
+    return tool_manifest()
+
+
+@mcp.prompt(
+    name="implement_repository_task",
+    title="Implement a Repository Task Safely",
+    description="A verification-first workflow for bounded repository changes.",
+)
+def _prompt_implement_repository_task(objective: str, project: str = ".") -> str:
+    return (
+        "Work on this repository task: %s\n\n"
+        "Host-selected project root: %s\n"
+        "First inspect the relevant code, repository status, and local instructions. "
+        "State the narrow file ownership boundary, preserve unrelated changes, and use "
+        "guarded repository tools only. Implement the smallest complete change, add the "
+        "test that would have caught the defect, run focused verification, then report "
+        "exact files changed, evidence, and anything still unverified. Never claim a "
+        "build or test that did not run." % (objective, project)
+    )
+
+
+@mcp.prompt(
+    name="review_change",
+    title="Adversarial Change Review",
+    description="Review a proposed change for correctness, security, and missing tests.",
+)
+def _prompt_review_change(change: str, focus: str = "correctness, security, tests") -> str:
+    return (
+        "Review the following proposed change adversarially. Focus on %s. Trace concrete "
+        "inputs through changed branches, identify API/ownership/concurrency/security "
+        "regressions, distinguish verified facts from inference, and return prioritized "
+        "findings with exact evidence. If there are no findings, say what you inspected "
+        "and which runtime boundaries remain unverified.\n\nCHANGE:\n%s" % (focus, change)
+    )
+
+
+@mcp.prompt(
+    name="grounded_research",
+    title="Grounded Multi-Source Research",
+    description="Research a question with source, freshness, and uncertainty discipline.",
+)
+def _prompt_grounded_research(question: str, constraints: str = "") -> str:
+    return (
+        "Research this question: %s\n\nConstraints: %s\n"
+        "Prefer primary/current sources, separate sourced facts from inference, record "
+        "dates for drift-prone claims, expose disagreement, and do not fill missing facts "
+        "from model recall. End with the answer, direct source links, and unresolved "
+        "uncertainty." % (question, constraints or "none")
+    )
+
+
+@mcp.prompt(
+    name="debug_failure",
+    title="Evidence-First Failure Debugging",
+    description="Trace the first failing invariant before proposing a repair.",
+)
+def _prompt_debug_failure(symptom: str, evidence: str = "") -> str:
+    return (
+        "Debug this failure: %s\n\nAvailable evidence:\n%s\n\n"
+        "Preserve the first failure, reproduce with the smallest safe check, trace the "
+        "first violated invariant rather than downstream errors, compare with the last "
+        "known-good path when available, and propose a fix only after the cause is "
+        "supported. Report the verification boundary explicitly." % (symptom, evidence)
+    )
+
+
 mcp.finish_module_refresh(__name__, __file__, globals())
 
 
