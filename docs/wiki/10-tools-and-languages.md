@@ -53,12 +53,23 @@ file's *structure* without dumping raw bytes.
 ## Guarded filesystem tools
 
 `file_find`, `file_read`, `file_read_range`, `file_write`, `file_edit`,
-`file_delete`, `directory_tree`, `directory_create`, `workspace_inventory`,
+`file_copy`, `file_move`, `file_delete`, `directory_tree`, `directory_create`,
+`workspace_inventory`,
 `text_search`, `script_search`, `program_search`, `image_inspect`. All are
 confined to `SONDER_FILE_ROOTS`, honor the permission policy
 ([Security Model](09-security-model.md)), and record byte/line accounting
 into the activity trail. `file_delete` is dry-run unless an explicit
 confirm string matches.
+
+`file_copy` and `file_move` transfer exactly one regular file between explicit
+source and destination paths. They are binary-safe, refuse overwrite by
+default, reject symlink/junction and sensitive-control-state paths at both
+ends, and cap each transfer at 64 MiB. Copy commits through a same-directory
+temporary file; move uses an atomic rename/link where the filesystem supports
+it and a guarded copy-delete fallback otherwise. They never recurse and never
+invoke a shell or network service. Repository agents rebase and validate both
+paths against their exact assigned project root; autopilot accepts these tools
+only with overwrite disabled and no caller-supplied approval or extra root.
 
 ## Other tool families
 

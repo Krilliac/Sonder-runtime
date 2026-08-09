@@ -7438,6 +7438,86 @@ def file_write(
 
 
 @mcp.tool()
+def file_copy(
+    source: str,
+    destination: str,
+    overwrite: bool = False,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Copy one bounded binary-safe file inside allowed roots."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "source": source, "destination": destination,
+        "overwrite": bool(overwrite),
+    }
+    try:
+        data = file_ops.copy_file(
+            source,
+            destination,
+            overwrite=bool(overwrite),
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+            developer_authorized=_file_developer_allowed(token),
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "file_copy", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    _record_direct_tool(
+        "file_copy", args, ok=True, started=started,
+        summary="%s bytes" % data.get("bytes", 0),
+    )
+    _record_file_activity("copy", data)
+    return _format_file_result("file copy", data)
+
+
+@mcp.tool()
+def file_move(
+    source: str,
+    destination: str,
+    overwrite: bool = False,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Move one bounded binary-safe file inside allowed roots."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "source": source, "destination": destination,
+        "overwrite": bool(overwrite),
+    }
+    try:
+        data = file_ops.move_file(
+            source,
+            destination,
+            overwrite=bool(overwrite),
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+            developer_authorized=_file_developer_allowed(token),
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "file_move", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    _record_direct_tool(
+        "file_move", args, ok=True, started=started,
+        summary="%s bytes" % data.get("bytes", 0),
+    )
+    activity_tracker.record_file_change(
+        "move_source", data.get("source", ""),
+        summary="moved to %s" % data.get("destination", ""),
+    )
+    _record_file_activity("move", data)
+    return _format_file_result("file move", data)
+
+
+@mcp.tool()
 def file_edit(
     path: str,
     old: str,
@@ -8930,6 +9010,24 @@ def _loop_dispatch(action):
             approval=action.get("approval", ""),
             extra_roots=action.get("extra_roots", ""),
         ))
+    if action_type == "file_copy":
+        return _loop_text_result("file_copy", file_copy(
+            source=action.get("source", ""),
+            destination=action.get("destination", ""),
+            overwrite=action.get("overwrite", False),
+            token=action.get("token", ""),
+            approval=action.get("approval", ""),
+            extra_roots=action.get("extra_roots", ""),
+        ))
+    if action_type == "file_move":
+        return _loop_text_result("file_move", file_move(
+            source=action.get("source", ""),
+            destination=action.get("destination", ""),
+            overwrite=action.get("overwrite", False),
+            token=action.get("token", ""),
+            approval=action.get("approval", ""),
+            extra_roots=action.get("extra_roots", ""),
+        ))
     if action_type == "file_edit":
         return _loop_text_result("file_edit", file_edit(
             path=action.get("path", ""),
@@ -9032,7 +9130,7 @@ def _loop_dispatch(action):
         "ok": False,
         "type": action_type or "(unknown)",
         "summary": "unknown action type",
-        "output": "Valid action types: code, project, artifact_generate, artifact_ground, game_reference_suite, game_generate_and_test, game_generation_campaign, offload, sonder, master_orchestrate, master_status, master_capacity, master_cancel, master_retry, file_policy, workspace_inventory, directory_tree, text_search, script_search, program_search, workspace_run, script_run, image_inspect, file_find, file_read, file_write, file_edit, file_delete, status, diagnostics, context_health, learning_health, memory_quality_report, memory_quality_repair, memory_privacy_review, memory_privacy_repair, memory_embedding_backfill, memory_interaction_embedding_backfill, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, weather_lookup, approximate_location_lookup, unload, sleep.",
+        "output": "Valid action types: code, project, artifact_generate, artifact_ground, game_reference_suite, game_generate_and_test, game_generation_campaign, offload, sonder, master_orchestrate, master_status, master_capacity, master_cancel, master_retry, file_policy, workspace_inventory, directory_tree, text_search, script_search, program_search, workspace_run, script_run, image_inspect, file_find, file_read, file_write, file_edit, file_copy, file_move, file_delete, status, diagnostics, context_health, learning_health, memory_quality_report, memory_quality_repair, memory_privacy_review, memory_privacy_repair, memory_embedding_backfill, memory_interaction_embedding_backfill, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, weather_lookup, approximate_location_lookup, unload, sleep.",
     }
 
 
@@ -10119,7 +10217,7 @@ def tool_manifest() -> str:
         "offload": "Route a self-contained task to a configured local/cloud tier.",
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
         "workspace_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace inventory, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
-        "file_policy/file_find/file_read/file_write/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete with approval bypass support.",
+        "file_policy/file_find/file_read/file_write/file_edit/file_copy/file_move/file_delete": "Guarded filesystem find/read/create/edit/single-file transfer/delete with approval bypass support.",
         "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
         "environment_status": "Report the host OS, available shells (PowerShell/cmd/bash/wsl), and installed toolchains -- check before choosing a command shape or assuming a tool exists.",
         "data_inspect": "Read-only structured preview of JSON/JSONL/TOML/YAML/CSV/TSV/SQLite/ZIP/TAR/INI data files inside allowed roots.",
@@ -10183,6 +10281,8 @@ AGENT_TOOL_HELP = """Available tools:
 - text_search: {"query": "TODO", "root": ".", "glob": "*.py", "regex": false, "max_results": 100}
 - file_write: {"path": "notes.txt", "content": "...", "mode": "create|overwrite|append"}
 - file_edit: {"path": "notes.txt", "old": "before", "new": "after", "count": 1}
+- file_copy: {"source": "assets/input.bin", "destination": "build/input.bin", "overwrite": false}
+- file_move: {"source": "build/draft.bin", "destination": "dist/final.bin", "overwrite": false}
 - file_delete: {"path": "notes.txt", "dry_run": true}
 - scaffold_project: {"kind": "cpp-msvc|cpp-cmake|csharp|rust|python|node|typescript|go|java-maven", "name": "MyApp", "root": "MyApp"} -- writes the full skeleton (.sln/.vcxproj/Cargo.toml/...); use this instead of hand-writing build/solution files
 - environment_status: {} -- host OS, shells, installed toolchains; check before choosing command shapes
@@ -10344,6 +10444,11 @@ def _repository_scope_path_error(tool_name, args, project_root):
                 for path in _context_pack_paths(
                     args.get("paths_json", args.get("paths", []))
                 )
+            ]
+        elif tool_name in {"file_copy", "file_move"}:
+            targets = [
+                ("source", args.get("source") or ""),
+                ("destination", args.get("destination") or ""),
             ]
         else:
             key = _project_scoped_path_key(tool_name)
@@ -11194,6 +11299,24 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "file_copy":
+        return file_copy(
+            source=args.get("source", ""),
+            destination=args.get("destination", ""),
+            overwrite=args.get("overwrite", False),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "file_move":
+        return file_move(
+            source=args.get("source", ""),
+            destination=args.get("destination", ""),
+            overwrite=args.get("overwrite", False),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "scaffold_project":
         return scaffold_project(
             kind=args.get("kind", ""),
@@ -11478,6 +11601,10 @@ def _agent_activity_command(tool_name, args):
             args.get("path", ""),
             json.dumps(args.get("args_json", args.get("args", [])), ensure_ascii=False),
         )
+    if tool_name in {"file_copy", "file_move"}:
+        return "%s -> %s" % (
+            args.get("source", ""), args.get("destination", ""),
+        )
     path = args.get("path") or args.get("root") or ""
     if path:
         return str(path)
@@ -11488,7 +11615,7 @@ def _agent_activity_command(tool_name, args):
 
 _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "file_read", "file_read_range", "context_pack", "image_inspect", "file_write", "file_edit",
-    "file_delete", "directory_create", "workspace_inventory", "directory_tree",
+    "file_copy", "file_move", "file_delete", "directory_create", "workspace_inventory", "directory_tree",
     "file_find", "text_search", "script_search", "artifact_verify",
     "artifact_ground", "scaffold_project",
 })
@@ -11585,6 +11712,16 @@ def _project_scope_args(tool_name, args, project):
         scoped.pop("paths", None)
         return scoped
 
+    if tool_name in {"file_copy", "file_move"}:
+        for key in ("source", "destination"):
+            raw_path = str(scoped.get(key) or "").strip()
+            is_abs = os.path.isabs(raw_path) or bool(
+                re.match(r"^[A-Za-z]:[\\/]", raw_path)
+            )
+            if raw_path and not is_abs:
+                scoped[key] = os.path.join(project, raw_path)
+        return scoped
+
     if tool_name == "workspace_run":
         raw_cwd = str(scoped.get("cwd") or ".").strip()
         is_abs = os.path.isabs(raw_cwd) or bool(
@@ -11653,7 +11790,7 @@ def _agent_dispatch_observed(
 
 
 _WORK_MUTATION_TOOLS = frozenset({
-    "directory_create", "file_write", "file_edit", "file_delete",
+    "directory_create", "file_write", "file_edit", "file_copy", "file_move", "file_delete",
     "scaffold_project",
     "artifact_generate", "game_generate_and_test", "game_generation_campaign",
     "memory_quality_repair", "memory_privacy_repair", "memory_embedding_backfill",
@@ -11732,7 +11869,9 @@ def _agent_call_signature(tool_name, args):
     canonical = dict(args) if isinstance(args, dict) else args
     if isinstance(canonical, dict):
         path_keys = []
-        if tool_name in _PROJECT_SCOPED_PATH_TOOLS:
+        if tool_name in {"file_copy", "file_move"}:
+            path_keys.extend(("source", "destination"))
+        elif tool_name in _PROJECT_SCOPED_PATH_TOOLS:
             path_keys.append(_project_scoped_path_key(tool_name))
         elif tool_name == "workspace_run":
             path_keys.append("cwd")
@@ -11762,10 +11901,15 @@ def _agent_mutation_record(tool_name, args):
         )
     elif tool_name in {"game_generate_and_test", "game_generation_campaign"}:
         path = os.path.join("games", str(args.get("name", "generated-game")))
-    return {
+    elif tool_name in {"file_copy", "file_move"}:
+        path = args.get("destination", "")
+    record = {
         "tool": tool_name,
         "path": _agent_normalized_path(path),
     }
+    if tool_name == "file_move":
+        record["source"] = _agent_normalized_path(args.get("source", ""))
+    return record
 
 
 def _agent_path_within(path, root):
@@ -12007,7 +12151,9 @@ def _agent_validation_covers(tool_name, args, mutations, observation=""):
             and (
                 (
                     tool_name in {"workspace_inventory", "directory_tree", "file_find"}
-                    and record["tool"] == "directory_create"
+                    and record["tool"] in {
+                        "directory_create", "file_copy", "file_move",
+                    }
                 )
                 or (
                     tool_name == "text_search"
@@ -13175,7 +13321,7 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
 })
 _AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
-    "directory_create", "file_write", "file_edit", "workspace_run",
+    "directory_create", "file_write", "file_edit", "file_copy", "file_move", "workspace_run",
     "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_generate", "artifact_verify", "game_reference_suite",
     "game_generate_and_test",
@@ -13189,7 +13335,7 @@ _AUTOPILOT_RUNNERS = frozenset({
 })
 _AUTOPILOT_SCRIPT_SUFFIXES = frozenset({".py", ".js", ".dart", ".exe", ".com"})
 _AUTOPILOT_MUTATION_EVIDENCE = frozenset({
-    "directory_create", "file_write", "file_edit", "artifact_generate",
+    "directory_create", "file_write", "file_edit", "file_copy", "file_move", "artifact_generate",
     "game_generate_and_test",
 })
 
@@ -13228,6 +13374,13 @@ def _autopilot_tool_policy(run: dict):
         args = args if isinstance(args, dict) else {}
         if any(args.get(name) for name in ("token", "approval", "extra_roots")):
             return "ERROR: HOST POLICY: autonomous runs cannot use bypass credentials or extra roots."
+        if tool_name in {"file_copy", "file_move"}:
+            if not str(args.get("source") or "").strip() or not str(
+                args.get("destination") or ""
+            ).strip():
+                return "ERROR: HOST POLICY: autonomous file transfers require exact source and destination paths."
+            if args.get("overwrite") is True:
+                return "ERROR: HOST POLICY: autonomous file transfers cannot overwrite existing files."
         if tool_name == "workspace_run":
             program = os.path.basename(str(args.get("program", ""))).lower()
             if program not in _AUTOPILOT_RUNNERS:
