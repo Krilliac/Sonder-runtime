@@ -33,6 +33,12 @@ actual base-model files remain managed by Ollama rather than this repository.
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the complete component and model
 lifecycle boundary.
 
+For intentionally unguarded model experiments, the exact-acknowledgement
+**unsafe lab mode** removes agent/autopilot host-tool policy only on a
+loopback, unprivileged process. It is not a sandbox and must run inside a
+credential-free disposable VM or hardened container; see the
+[unsafe lab runbook](docs/runbooks/unsafe-lab.md).
+
 ---
 
 ## The honest pitch (what this is, and isn't)

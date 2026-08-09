@@ -83,6 +83,39 @@ Mitigations that are already in place and worth knowing about:
 
 ## Deployment guidance
 
+### Unsafe lab mode (disposable isolated hosts only)
+
+Sonder has a deliberately dangerous model-evaluation override. It is **not an
+OS sandbox and provides no containment**. It removes the model agent and
+autopilot host-tool allowlists, project scoping, read-only gate, web/location
+gate, and file approval gate so an untrusted or unguarded model can exercise
+the host-native tool surface. Direct tool time/output bounds still exist, but
+they are reliability controls, not a security boundary.
+
+The override is off unless `SONDER_UNSAFE_LAB_ACK` exactly equals:
+
+```text
+I UNDERSTAND SONDER UNSAFE LAB MODE GIVES MODELS UNRESTRICTED HOST TOOL ACCESS AND I AM RUNNING IN A DISPOSABLE ISOLATED ENVIRONMENT
+```
+
+Boolean/truthy, abbreviated, case-changed, or whitespace-modified values fail
+closed. Even with the exact acknowledgement, Sonder refuses activation when
+`SONDER_HOST` is not loopback or when the process is root/elevated. Activation
+appends and flushes a durable JSONL warning under
+`$SONDER_HOME/audit/unsafe-lab.jsonl` (override only with
+`SONDER_UNSAFE_LAB_AUDIT_PATH`), and status/diagnostics display the mode.
+Model-directed children receive a scrubbed environment that removes
+secret-, credential-, token-, session-, approval-, bypass-, and control-like
+variables. That reduces accidental credential inheritance; it does not make
+the host safe.
+
+Use this only in a disposable VM or hardened disposable container, under a
+dedicated unprivileged account, with no host filesystem mounts, no Docker or
+other container-management socket, no device passthrough, no credential
+stores, no SSH agent, no cloud metadata access, and restricted network egress.
+Take a clean snapshot first and destroy the environment after the test. See
+[the unsafe lab runbook](docs/runbooks/unsafe-lab.md).
+
 ### Loopback (default, recommended)
 
 The default posture binds Ollama to `127.0.0.1` and keeps the runtime local.
