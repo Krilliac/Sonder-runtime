@@ -64,6 +64,7 @@ import codegen_loop
 import file_ops
 import data_query as data_query_module
 import symbol_index
+import project_detect as project_detector
 import context_policy
 import command_registry
 import adaptive_training
@@ -562,6 +563,7 @@ LIVE_RELOAD_MODULES = [
     "file_ops",
     "data_query",
     "symbol_index",
+    "project_detect",
     "context_policy",
     "command_registry",
     "permission_rules",
@@ -7419,6 +7421,59 @@ def context_pack(
 
 
 @mcp.tool()
+def project_detect(
+    path: str = ".",
+    max_depth: int = 8,
+    max_files: int = 200,
+    max_total_bytes: int = 2_000_000,
+    max_file_bytes: int = 256_000,
+    max_results: int = 500,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Inventory guarded project manifests and evidence-backed command candidates.
+
+    Returns deterministic JSON describing languages, declared frameworks, and
+    build/test/runtime argv candidates. Repository content is never executed;
+    the detector does not invoke shells, toolchains, package managers, or the
+    network and does not invent undeclared dependencies.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "path": path, "max_depth": max_depth, "max_files": max_files,
+        "max_total_bytes": max_total_bytes, "max_file_bytes": max_file_bytes,
+        "max_results": max_results,
+    }
+    try:
+        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
+        data = project_detector.detect_project(
+            path=path, max_depth=max_depth, max_files=max_files,
+            max_total_bytes=max_total_bytes, max_file_bytes=max_file_bytes,
+            max_results=max_results, extra_roots=trusted_roots,
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "project_detect", args, ok=False, started=started, summary=str(exc),
+        )
+        return "ERROR: %s" % exc
+    summary = "%d manifest(s), %d command candidate(s)%s" % (
+        len(data["manifests"]), len(data["commands"]),
+        ", truncated" if data["truncated"] else "",
+    )
+    output = project_detector.format_detection(data)
+    _record_direct_tool(
+        "project_detect", args, ok=not data["errors"], started=started,
+        summary=summary, output=output,
+    )
+    activity_tracker.record_event(
+        "project_detect", summary=summary, path=data["root"],
+    )
+    return output
+
+
+@mcp.tool()
 def data_inspect(
     path: str,
     max_bytes: int = 256000,
@@ -10392,6 +10447,7 @@ def tool_manifest() -> str:
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
         "workspace_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace inventory, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
         "repo_status/repo_diff": "Inspect bounded read-only Git branch, worktree, staged, and unstaged state without shell execution.",
+        "project_detect": "Inventory guarded build/test/runtime manifests and return deterministic evidence-backed language, framework, and cross-platform argv candidates without executing them.",
         "file_policy/file_find/file_read/file_write/file_batch_write/file_edit/file_delete": "Guarded filesystem find/read/create/edit/delete, including bounded transactional multi-file create/overwrite.",
         "repository_symbol_index": "Build a deterministic bounded read-only declaration index with Python AST and conservative JS/TS/C/C++/C#/Rust/Go extraction.",
         "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
@@ -10450,6 +10506,7 @@ AGENT_TOOL_HELP = """Available tools:
 - workspace_inventory: {"path": ".", "max_entries": 20000, "timeout_seconds": 10, "top_n": 15}
 - repo_status: {"root": ".", "timeout": 10, "max_output": 128000}
 - repo_diff: {"root": ".", "staged": false, "path": "", "context": 3, "timeout": 10, "max_output": 128000}
+- project_detect: {"path": ".", "max_depth": 8, "max_files": 200, "max_total_bytes": 2000000, "max_file_bytes": 256000, "max_results": 500}
 - directory_tree: {"path": ".", "depth": 2, "max_entries": 200}
 - directory_create: {"path": "output/reports", "parents": true}
 - file_find: {"query": "*.py", "root": ".", "max_results": 50}
@@ -10528,7 +10585,7 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find",
     "repository_symbol_index", "file_read", "file_read_range", "context_pack",
     "repo_status", "repo_diff",
-    "data_inspect", "data_query",
+    "project_detect", "data_inspect", "data_query",
     "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
     "diagnostics", "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
@@ -10550,6 +10607,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - workspace_inventory: {"path": ".", "max_entries": 20000, "timeout_seconds": 10, "top_n": 15}
 - repo_status: {"root": ".", "timeout": 10, "max_output": 128000}
 - repo_diff: {"root": ".", "staged": false, "path": "", "context": 3, "timeout": 10, "max_output": 128000}
+- project_detect: {"path": ".", "max_depth": 8, "max_files": 200, "max_total_bytes": 2000000, "max_file_bytes": 256000, "max_results": 500}
 - directory_tree: {"path": ".", "depth": 2, "max_entries": 200}
 - file_find: {"query": "<task-relevant filename or glob>", "root": ".", "max_results": 50}
 - repository_symbol_index: {"path": ".", "glob": "<task-relevant source glob>", "language": "auto|python|javascript|typescript|c|cpp|csharp|rust|go", "max_files": 200, "max_total_bytes": 2000000, "max_file_bytes": 256000, "max_symbols": 2000}
@@ -10853,7 +10911,7 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
                     reject_sensitive=True,
                     extra_roots=trusted_extra_roots,
                 )
-        elif tool_name in {"workspace_inventory", "directory_tree", "file_find", "repository_symbol_index", "text_search", "script_search"}:
+        elif tool_name in {"workspace_inventory", "project_detect", "directory_tree", "file_find", "repository_symbol_index", "text_search", "script_search"}:
             file_ops.resolve_repository_read_path(
                 args.get("path", "") or args.get("root", "") or ".",
                 allow_workspace_root=True,
@@ -10941,7 +10999,7 @@ _AGENT_NEGATIVE_CLAIM_RE = re.compile(
     re.IGNORECASE,
 )
 _AGENT_CLAIM_REVIEW_TOOLS = frozenset({
-    "text_search", "file_read_range", "file_find", "repository_symbol_index",
+    "text_search", "file_read_range", "file_find", "repository_symbol_index", "project_detect",
 })
 _AGENT_QUOTED_ANCHOR_RE = re.compile(
     r"`([^`\r\n]{2,120})`|\"([^\"\r\n]{2,120})\"|\'([^\'\r\n]{2,120})\'"
@@ -11454,6 +11512,18 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "project_detect":
+        return project_detect(
+            path=args.get("path", args.get("root", ".")),
+            max_depth=args.get("max_depth", 8),
+            max_files=args.get("max_files", 200),
+            max_total_bytes=args.get("max_total_bytes", 2_000_000),
+            max_file_bytes=args.get("max_file_bytes", 256_000),
+            max_results=args.get("max_results", 500),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "directory_tree":
         return directory_tree(
             path=args.get("path", args.get("root", ".")),
@@ -11882,7 +11952,7 @@ _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "file_write", "file_batch_write", "file_edit",
     "file_delete", "directory_create", "workspace_inventory", "directory_tree",
     "file_find", "repository_symbol_index", "text_search", "script_search", "artifact_verify",
-    "artifact_ground", "scaffold_project", "repo_status", "repo_diff",
+    "artifact_ground", "scaffold_project", "repo_status", "repo_diff", "project_detect",
 })
 _PROJECT_SCOPED_EXECUTION_TOOLS = frozenset({"workspace_run", "script_run"})
 _AGENT_TOOL_ALIASES = {
@@ -12466,7 +12536,7 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find",
     "repository_symbol_index", "file_read", "file_read_range", "context_pack",
     "text_search", "script_search", "program_search", "image_inspect", "repo_status", "repo_diff",
-    "data_query",
+    "data_query", "project_detect",
     "memory_search", "learning_health_status", "evaluation_history_status",
     "memory_quality_report", "memory_privacy_review", "artifact_ground",
     "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",
@@ -12476,7 +12546,7 @@ _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find",
     "repository_symbol_index", "file_read", "file_read_range", "context_pack",
     "data_query", "text_search", "script_search",
-    "program_search", "image_inspect", "environment_status", "repo_status", "repo_diff",
+    "program_search", "image_inspect", "environment_status", "repo_status", "repo_diff", "project_detect",
 })
 _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "workflow_run",
@@ -13342,6 +13412,7 @@ def _agent_impl(
         if tool_name in {
             "workspace_inventory", "directory_tree", "file_read", "file_read_range", "file_find",
             "data_query", "text_search", "script_search", "image_inspect",
+            "project_detect",
         } and tool_ok:
             file_evidence = True
         if auto_checklist and tool_name in _WORK_INSPECTION_TOOLS and tool_ok:
@@ -13620,6 +13691,7 @@ def workbench_agent(
 _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "directory_tree", "file_find",
     "repository_symbol_index", "file_read", "file_read_range", "data_query", "text_search", "script_search",
+    "project_detect",
     "program_search", "image_inspect", "memory_search", "web_search",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
