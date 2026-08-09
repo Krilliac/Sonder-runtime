@@ -7553,7 +7553,8 @@ def repo_status(
             data["upstream"] or "(none)", data["ahead"], data["behind"],
         ),
         "  clean: %s | changes: %d | elapsed_ms: %d" % (
-            data["clean"], data["change_count"], data["elapsed_ms"],
+            "unknown" if data["clean"] is None else str(data["clean"]).lower(),
+            data["change_count"], data["elapsed_ms"],
         ),
     ]
     lines.extend("  %s" % entry for entry in data["entries"])
@@ -10476,7 +10477,12 @@ def _repository_scope_path_error(tool_name, args, project_root):
             target = Path(raw).expanduser()
             if not target.is_absolute():
                 target = root / target
-            target = target.resolve(strict=False)
+            if label == "diff path":
+                # Preserve a tracked symlink as the lexical Git pathspec while
+                # still resolving and confining every parent component.
+                target = target.parent.resolve(strict=False) / target.name
+            else:
+                target = target.resolve(strict=False)
             try:
                 target.relative_to(root)
             except ValueError:
@@ -10658,13 +10664,8 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
             )
             diff_path = str(args.get("path") or "").strip()
             if tool_name == "repo_diff" and diff_path:
-                candidate = Path(diff_path).expanduser()
-                if not candidate.is_absolute():
-                    candidate = resolved_root / candidate
-                file_ops.resolve_repository_read_path(
-                    str(candidate),
-                    allow_workspace_root=False,
-                    reject_sensitive=True,
+                git_tools._resolve_diff_path(
+                    resolved_root, diff_path,
                     extra_roots=trusted_extra_roots,
                 )
         elif tool_name == "context_pack":
