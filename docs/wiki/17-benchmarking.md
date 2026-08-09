@@ -187,6 +187,58 @@ claim causation. For credible adaptive-improvement evidence, the external runner
 must execute the same task suite with the same model settings and hardware, vary
 only the grounded-history checkpoint, and preserve the generated records.
 
+## Checking repository-research evidence without running a model
+
+`scripts/benchmark_repository_research.py` is a complementary, model-free gate
+for research-agent output. Its fixed public fixture suite covers known paths and
+symbols in the moat benchmark, evaluation history, promotion evaluator, and
+model-gateway contract. It requires exact `path` plus `symbol` citations and
+reports false claims that no implementation exists, unsupported or invented
+evidence, missing fixture coverage, and runs of three or more identical
+consecutive tool calls.
+
+The input is bounded to 512 KiB. Candidate answers and tool arguments are never
+copied into either report. Unsafe or absolute citation paths are represented by
+a redacted marker, while other non-fixture paths and symbols appear only as
+SHA-256 identifiers. The JSON and Markdown outputs contain per-case and
+aggregate metrics, a digest of the public fixture suite, and a deterministic
+report ID. The evaluator does not call a model, inspect private files, or claim
+that a passing answer is generally correct beyond the exact fixtures.
+
+The submission contract is:
+
+```json
+{
+  "schema": "sonder.repository-research-submission.v1",
+  "cases": [{
+    "id": "benchmark-moat",
+    "answer": "The entry points are present.",
+    "claims": [{
+      "text": "The benchmark function exists.",
+      "status": "exists",
+      "citations": [{"path": "scripts/benchmark_moat.py", "symbol": "benchmark"}]
+    }],
+    "tool_calls": [{"tool": "search", "arguments": {"query": "benchmark"}}]
+  }]
+}
+```
+
+Each built-in case and every required citation must be present for a passing
+report. Print the fixture contract or evaluate a captured submission with:
+
+```bash
+python scripts/benchmark_repository_research.py --print-suite
+python scripts/benchmark_repository_research.py --submission result.json \
+  --json research-report.json --markdown research-report.md
+```
+
+Keep this report separate from adaptive benchmark identity. A controlled runner
+may use the research case pass/fail result when it creates the same named task in
+fresh and accumulated observations, but it must still supply retries and token
+counts and satisfy every model, suite, hardware, task-set, and grounded-history
+identity check in `benchmark_adaptive.py`. This harness neither mutates those
+records nor changes their comparability rules.
+
 ## Related
 
 - [Memory & Learning](06-memory-and-learning.md) — how lessons and facts are
