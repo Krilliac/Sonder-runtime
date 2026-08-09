@@ -22,7 +22,7 @@ _PATTERNS = [
     (re.compile(r"\bplease\s+always\s+(?P<body>[^.!?\n]+)", re.I), "User wants Sonder to always %s."),
     (re.compile(r"\balways\s+(?P<body>[^.!?\n]+)", re.I), "User wants Sonder to always %s."),
     (re.compile(r"\bfrom\s+now\s+on,?\s+(?P<body>[^.!?\n]+)", re.I), "From now on, %s."),
-    (re.compile(r"\bplease\s+never\s+(?P<body>[^.!?\n]+)", re.I), "User does not want Sonder to %s."),
+    (re.compile(r"\b(?:please\s+)?never\s+(?P<body>[^.!?\n]+)", re.I), "User does not want Sonder to %s."),
     (re.compile(r"\bcall\s+me\s+(?P<body>[^.!?\n]+)", re.I), "User wants to be called %s."),
     (re.compile(r"\bmy\s+name\s+is\s+(?P<body>[^.!?\n]+)", re.I), "User's name is %s."),
 ]
@@ -37,16 +37,22 @@ _TASK_GUARD_RE = re.compile(
 
 _UNSAFE_CONTEXT_RE = re.compile(
     r"(?:^|\s)[A-Za-z]:[\\/]|(?:^|\s)(?:~|\.{1,2})[\\/]|"
-    r"\b(?:audit|canary|marker|secret|password|credential|auth\s+token|"
+    r"(?:^|\s)\\\\[^\\\s]+[\\/]|"
+    r"(?:^|\s)/(?:home|Users|etc|var|tmp)/|"
+    r"\b(?:canary|marker|secret|password|credential|auth\s+token|"
     r"confidential|private\s+(?:data|detail|constraint|project))\b|"
     r"\b(?:issue|pr|pull\s+request)\s*#?\d+\b|"
     r"\b(?:this|that|current|specific)\s+(?:task|turn|request|answer|audit|"
-    r"project|repo(?:sitory)?|branch|issue|file|session)\b|"
+    r"response|message|conversation|chat|project|repo(?:sitory)?|branch|issue|"
+    r"file|session)\b|"
     r"\b(?:for|during|only\s+for)\s+(?:this|the\s+current)\s+"
     r"(?:task|turn|request|answer|audit|project|repo(?:sitory)?|branch|session)\b|"
     r"\b(?:for|in|on)\s+(?:the\s+)?(?:project|repo(?:sitory)?|branch)\s+"
     r"[A-Za-z0-9_.-]+\b|"
-    r"\b(?:right\s+now|just\s+this\s+once|one[- ]time|temporar(?:y|ily))\b",
+    r"\b(?:right\s+now|for\s+now|today|tomorrow|yesterday|"
+    r"just\s+this\s+once|one[- ]time|temporar(?:y|ily)|"
+    r"this\s+(?:conversation|chat)|until\s+\S+|"
+    r"(?:the\s+)?next\s+(?:answer|response|message|turn))\b",
     re.I,
 )
 _META_QUOTE_RE = re.compile(
@@ -60,10 +66,30 @@ _QUOTED_PREFERENCE_RE = re.compile(
     r"(?:^|[\s(])'[^'\n]{0,100}\b(?:i|we)\s+prefer\b[^'\n]{0,100}')",
     re.I,
 )
+_META_REFERENCE_RE = re.compile(
+    r"\b(?:phrase|sentence|text|document|example|prompt|input)\b[^\n]{0,100}"
+    r"\b(?:i|we)\s+prefer\b|"
+    r"\b(?:never|(?:(?:did|do|does)\s+)?not)\s+"
+    r"(?:say|said|write|wrote)\b[^\n]{0,100}\b(?:i|we)\s+prefer\b|"
+    r"\b(?:he|she|they|you|user|document)\s+"
+    r"(?:say|says|said|write|writes|wrote|claim|claims|claimed)\b"
+    r"[^\n]{0,100}\b(?:i|we)\s+prefer\b",
+    re.I,
+)
 _INSTRUCTION_OVERRIDE_RE = re.compile(
     r"\b(?:ignore|disregard|override|bypass|forget)\b[^\n]{0,60}"
-    r"\b(?:previous|prior|system|developer|safety|security|instructions?|rules?|"
+    r"\b(?:all|any|other|previous|prior|system|developer|safety|security|"
+    r"instructions?|rules?|"
     r"policy|policies|guardrails?)\b",
+    re.I,
+)
+_COMMAND_TAIL_RE = re.compile(
+    r"(?:[.;]|--)\s*(?:please\s+)?"
+    r"(?:ignore|disregard|override|bypass|forget|reveal|expose|leak|send|"
+    r"upload|run|execute|delete|read|write|call|use|print|show)\b|"
+    r"\b(?:and|then)\s+(?:please\s+)?"
+    r"(?:ignore|disregard|override|bypass|forget|reveal|expose|leak|send|"
+    r"upload|execute|delete)\b",
     re.I,
 )
 _PROMPT_CONTROL_RE = re.compile(
@@ -96,7 +122,8 @@ _CATEGORY_PATTERNS = (
     )),
     ("response_style", re.compile(
         r"\b(?:concise|brief|short|direct|detailed|verbose|bullets?|headings?|"
-        r"explain|explanation|tone|formal|casual|status\s+updates?|"
+        r"markdown|emojis?|explain|explanation|tone|formal|casual|"
+        r"status\s+updates?|"
         r"mention\s+what\s+changed|show\s+(?:your\s+)?progress)\b", re.I,
     )),
 )
@@ -196,8 +223,11 @@ def is_stable_preference(text, source_text=None):
     if (
         "```" in source
         or _UNSAFE_CONTEXT_RE.search(source)
+        or "?" in source
+        or _META_REFERENCE_RE.search(source)
         or _QUOTED_PREFERENCE_RE.search(source)
         or _INSTRUCTION_OVERRIDE_RE.search(source)
+        or _COMMAND_TAIL_RE.search(source)
         or _PROMPT_CONTROL_RE.search(source)
         or any(ord(char) < 32 and char not in "\t\r\n" for char in source)
     ):
@@ -246,11 +276,29 @@ def preference_applies(text, task):
         return False
     if category == "code":
         families = [family for family in _TECH_FAMILIES if family.search(text)]
-        if families and not any(family.search(task) for family in families):
+        task_families = [family for family in _TECH_FAMILIES if family.search(task)]
+        task_shell_families = [
+            family for family in _SHELL_FAMILIES if family.search(task)
+        ]
+        conditional = re.search(r"\b(?:for|when|while|in)\b", text, re.I)
+        if families and (
+            (task_families and not any(family.search(task) for family in families))
+            or (task_shell_families and not task_families)
+            or (conditional and not task_families)
+        ):
             return False
     if category == "shell":
         families = [family for family in _SHELL_FAMILIES if family.search(text)]
-        if families and not any(family.search(task) for family in families):
+        task_families = [family for family in _SHELL_FAMILIES if family.search(task)]
+        task_code_families = [
+            family for family in _TECH_FAMILIES if family.search(task)
+        ]
+        conditional = re.search(r"\b(?:for|when|while|in)\b", text, re.I)
+        if families and (
+            (task_families and not any(family.search(task) for family in families))
+            or (task_code_families and not task_families)
+            or (conditional and not task_families)
+        ):
             return False
     if category == "workflow":
         families = [family for family in _WORKFLOW_FAMILIES if family.search(text)]
@@ -268,9 +316,12 @@ def extract_preferences(text):
         not cleaned
         or _TASK_GUARD_RE.match(cleaned)
         or _UNSAFE_CONTEXT_RE.search(str(text or ""))
+        or "?" in text
+        or _META_REFERENCE_RE.search(text)
         or _META_QUOTE_RE.search(str(text or ""))
         or _QUOTED_PREFERENCE_RE.search(text)
         or _INSTRUCTION_OVERRIDE_RE.search(text)
+        or _COMMAND_TAIL_RE.search(text)
         or _PROMPT_CONTROL_RE.search(text)
     ):
         return []
