@@ -968,6 +968,8 @@ import subprocess
 import sys
 import time
 
+if sys.stdin.buffer.read(2) != b"\\x01":
+    raise SystemExit(2)
 child = subprocess.Popen(
     [sys.executable, "-c", "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)"],
     stdin=subprocess.DEVNULL,
@@ -1006,6 +1008,8 @@ def test_successful_control_command_does_not_kill_detached_child(tmp_path):
 import subprocess
 import sys
 
+if sys.stdin.buffer.read(2) != b"\\x01":
+    raise SystemExit(2)
 child = subprocess.Popen(
     [sys.executable, "-c", "import time; time.sleep(30)"],
     stdin=subprocess.DEVNULL,
@@ -1039,6 +1043,8 @@ def test_nonzero_control_exit_terminates_delayed_grandchild(monkeypatch, tmp_pat
 import subprocess
 import sys
 
+if sys.stdin.buffer.read(2) != b"\\x01":
+    raise SystemExit(2)
 child = subprocess.Popen(
     [sys.executable, "-c", "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)"],
     stdin=subprocess.DEVNULL,
