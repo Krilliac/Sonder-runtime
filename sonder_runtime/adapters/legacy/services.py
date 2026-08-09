@@ -15,10 +15,12 @@ from ...application.ports.model_gateway import (
     Embedding,
     ModelRequest,
     ModelResponse,
+    require_embedding_vector,
+    require_model_text,
 )
 from ...application.ports.process_probe import ProbeResult, ProcessIdentity
 from ...application.ports.tool_executor import ToolCall, ToolResult
-from ...domain.common.errors import Cancelled, DeadlineExceeded
+from ...domain.common.errors import Cancelled, DeadlineExceeded, InvalidInput
 
 
 def _check_context_liveness(context: OperationContext) -> None:
@@ -311,6 +313,8 @@ class LegacyModelGateway:
     ) -> ModelResponse:
         import server
 
+        if not (request.prompt or "").strip():
+            raise InvalidInput("model request prompt is empty")
         _check_context_liveness(context)
         started = time.monotonic()
         text = server.sonder(
@@ -319,7 +323,7 @@ class LegacyModelGateway:
             tier=request.tier or None,
         )
         return ModelResponse(
-            text=text,
+            text=require_model_text(text),
             model=request.tier or "sonder",
             tier=request.tier or "general",
             duration_ms=int((time.monotonic() - started) * 1000),
@@ -333,9 +337,10 @@ class LegacyModelGateway:
             # Cancellation used to be ignored, so adapter swaps could keep doing
             # model work after the application had abandoned the operation.
             _check_context_liveness(context)
-            results.append(
-                Embedding(vector=tuple(embeddings.embed(text) or ()), model="local")
-            )
+            results.append(Embedding(
+                vector=require_embedding_vector(embeddings.embed(text)),
+                model="local",
+            ))
         return results
 
 
