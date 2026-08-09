@@ -1,5 +1,6 @@
 import json
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -96,6 +97,54 @@ def test_caps_duplicates_and_malformed_counts(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="max patch bytes"): run(tmp_path, MODIFY)
 
 
+def test_deleted_content_resembling_file_header_is_parsed_as_hunk_body(tmp_path):
+    target = tmp_path / "a.txt"
+    target.write_text("-- option\nkeep\n", encoding="utf-8")
+    patch = (
+        "--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n"
+        "--- option\n+enabled\n keep\n"
+    )
+
+    run(tmp_path, patch, True)
+
+    assert target.read_text(encoding="utf-8") == "enabled\nkeep\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode and umask semantics")
+def test_apply_preserves_modify_mode_and_uses_umask_for_create(tmp_path):
+    target = tmp_path / "a.txt"
+    target.write_text("one\ntwo\n", encoding="utf-8")
+    target.chmod(0o751)
+    original_umask = os.umask(0o027)
+    try:
+        run(tmp_path, MODIFY, True)
+        run(tmp_path, CREATE, True)
+    finally:
+        os.umask(original_umask)
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o751
+    assert stat.S_IMODE((tmp_path / "new.txt").stat().st_mode) == 0o640
+
+
+def test_create_cleanup_failure_rolls_back_published_target(tmp_path, monkeypatch):
+    real_unlink = Path.unlink
+    failed = {"value": False}
+
+    def fail_first_stage_cleanup(path, *args, **kwargs):
+        if path.name.startswith(".sonder-patch-") and not failed["value"]:
+            failed["value"] = True
+            raise OSError("injected staging cleanup failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_first_stage_cleanup)
+    with pytest.raises(text_patch.TextPatchError) as raised:
+        run(tmp_path, CREATE, True)
+
+    assert raised.value.report["transaction"] == "rolled_back"
+    assert not (tmp_path / "new.txt").exists()
+    assert list(tmp_path.glob(".sonder-patch-*")) == []
+
+
 def test_public_and_agent_integration(tmp_path, monkeypatch):
     (tmp_path / "a.txt").write_text("one\ntwo\n")
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
@@ -119,6 +168,23 @@ def test_project_scope_checks_every_patch_target(tmp_path):
     assert not server._repository_scope_path_error("text_patch", scoped, str(project))
     bad = dict(scoped); bad["patch"] = "--- a/../escape\n+++ b/../escape\n@@ -1 +1 @@\n-a\n+b\n"
     assert "rejected" in server._repository_scope_path_error("text_patch", bad, str(project))
+
+
+def test_autopilot_accepts_only_host_scoped_text_patch_authority(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    check = server._autopilot_tool_policy({"policy": "workspace", "project": str(project)})
+    scoped = server._project_scope_args(
+        "text_patch", {"root": ".", "patch": MODIFY, "apply": True}, str(project),
+    )
+
+    assert check("text_patch", scoped) == ""
+    assert "bypass" in check("text_patch", {
+        **scoped, "approval": "model-supplied", "extra_roots": str(project),
+    })
+    assert "bypass" in check("text_patch", {
+        **scoped, "extra_roots": str(tmp_path),
+    })
 
 
 def test_second_publication_failure_rolls_back(tmp_path, monkeypatch):
