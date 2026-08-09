@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -66,7 +67,15 @@ def test_production_callers_use_the_memory_adapter():
 
     # Never rewrite an already-applied migration merely to satisfy the
     # strangler import rule. The root module is a true compatibility alias.
-    source = (_REPO_ROOT / immutable_baseline).read_text(encoding="utf-8")
+    baseline_path = _REPO_ROOT / immutable_baseline
+    raw = baseline_path.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() in {
+        # Git/Linux LF checkout and Windows CRLF checkout of the exact same
+        # immutable migration source.
+        "d13776e3ce5318049242f060fc4b6cbd17c4c8e5edf0dce920b12e9defeffb07",
+        "ba186cc59bd9d50b23648b446748d4b6fb7155a9408685c5b252c32db75d3624",
+    }
+    source = raw.decode("utf-8")
     assert "import memory_store" in source
     assert "sonder_runtime.adapters.memory_store" not in source
 
