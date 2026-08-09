@@ -22,7 +22,7 @@ Sonder Runtime is not a chat wrapper. By design it will, on request:
 - **execute code and shell commands** (`run_code`, `script_run`,
   `workspace_run`, `run_project`)
 - **read, write, patch, and delete files** (`file_read`, `file_write`, `file_batch_write`, `file_edit`, `text_patch`,
-  `file_delete`, `directory_create`)
+  `file_delete`, `directory_create`, `archive_create`)
 - **fetch from the network** (`web_fetch`, `web_search`)
 - **run unattended** (`autopilot_start`, `master_orchestrate`, `loop`)
 - **modify its own source** when self-modification is enabled
@@ -58,6 +58,9 @@ Mitigations that are already in place and worth knowing about:
   Absolute/traversal paths, links/devices, encrypted ZIPs, collisions, nested
   archives, sensitive state, and existing destinations are rejected before a
   staged non-overwriting extraction is promoted.
+- `archive_create` prevalidates every explicit input and directory membership,
+  refuses sensitive paths, links, special files, caps/escapes, and overwrites,
+  then revalidates mutations before atomically publishing a staged ZIP/TAR.
 - `text_patch` accepts a narrow unified-diff grammar for explicit relative
   UTF-8 text files. Preview is the default. Apply prevalidates the entire patch,
   rejects deletes/renames/binary/sensitive/link targets, publishes staged files,

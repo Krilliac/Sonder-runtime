@@ -68,7 +68,7 @@ expressions, implicit type inference, or overwrite mode are available.
 
 `file_find`, `file_read`, `file_read_range`, `file_write`, `file_batch_write`, `file_edit`, `text_patch`,
 `file_copy`, `file_move`, `file_delete`, `directory_tree`, `directory_create`, `workspace_inventory`,
-`workspace_compare`, `text_search`, `script_search`, `program_search`, `image_inspect`, `log_inspect`, `data_convert`, `archive_list`,
+`workspace_compare`, `text_search`, `script_search`, `program_search`, `image_inspect`, `log_inspect`, `data_convert`, `archive_create`, `archive_list`,
 `archive_extract`, `repo_log`,
 `repo_show`, `repo_blame`. All are
 confined to `SONDER_FILE_ROOTS`, honor the permission policy
@@ -105,6 +105,12 @@ best-effort rollback if any write fails.
 sibling staging directory, and promotes only to a new non-overwriting project
 destination. Traversal, absolute paths, links/devices, encrypted entries,
 collisions, nested archives, sensitive paths, and archive bombs are rejected.
+
+`archive_create` accepts explicit project-contained inputs and a new destination,
+supports ZIP and TAR, and defaults to reproducible metadata. It performs a full
+bounded preflight, refuses links and sensitive/control state, streams stable file
+handles, revalidates input mutation, and publishes through a non-overwriting
+sibling staging file.
 
 `text_patch` previews strict unified diffs rooted at an explicit project
 directory. With `apply=true`, it performs an all-file transaction for create
