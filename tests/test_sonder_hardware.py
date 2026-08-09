@@ -215,7 +215,7 @@ def test_render_handles_unknown_fields():
     text = sonder_hardware.render(hw, rec)
     assert "cpu cores  : unknown" in text
     assert "system ram : unknown" in text
-    assert "gpu        : none detected" in text
+    assert "gpu memory : not detected (Ollama may still accelerate)" in text
 
 
 # --- cold discrete GPU ---------------------------------------------------------

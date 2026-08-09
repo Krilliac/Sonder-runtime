@@ -5,6 +5,7 @@ import setup_alias
 
 def test_offline_missing_model_never_pulls(monkeypatch):
     calls = []
+    monkeypatch.setattr(setup_alias, "default_base_model", lambda: "sized:model")
 
     def fake_run(command, **kwargs):
         calls.append(command)
@@ -12,7 +13,18 @@ def test_offline_missing_model_never_pulls(monkeypatch):
 
     monkeypatch.setattr(setup_alias.subprocess, "run", fake_run)
     assert setup_alias.main(["--offline", "--ollama", "ollama-test"]) == 2
-    assert calls == [["ollama-test", "show", setup_alias.DEFAULT_BASE_MODEL]]
+    assert calls == [["ollama-test", "show", "sized:model"]]
+
+
+def test_default_base_model_uses_live_ram_selection(monkeypatch):
+    monkeypatch.delenv("SONDER_BASE_MODEL", raising=False)
+    monkeypatch.setattr(
+        setup_alias.bootstrap_engine, "choose_model", lambda: "ram-sized:model",
+    )
+    assert setup_alias.default_base_model() == "ram-sized:model"
+
+    monkeypatch.setenv("SONDER_BASE_MODEL", "operator:model")
+    assert setup_alias.default_base_model() == "operator:model"
 
 
 def test_online_pulls_only_missing_models_and_creates_alias(monkeypatch):
