@@ -105,6 +105,7 @@ def cmd_doctor(args) -> int:
     replacements = dict(sonder_doctor.storage_checks(
         config, throughput=args.storage_probe
     ))
+    replacements["schemas"] = sonder_doctor.schema_check(config)
     checks = [
         (
             name,
