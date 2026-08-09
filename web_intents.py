@@ -279,11 +279,17 @@ _TRAILING_TIME = re.compile(
     re.IGNORECASE,
 )
 _WEATHER_META_FRAME = re.compile(
-    r"\b(?:phrase|query|prompt|sentence|example|regex|parser|router|routing|"
+    r"\b(?:phrase|query|prompt|sentence|string|text|literal|example|regex|parser|router|routing|"
     r"extractor|extraction|classifier|classification)\b|"
     r"^\s*why\b[^\n]{0,100}\b(?:parse|route|extract|classif)\w*\b|"
-    r"\b(?:says?|said|contains?|includes?|mentions?)\b[^\n]{0,80}"
+    r"\b(?:says?|said|asks?|asked|contains?|includes?|mentions?)\b[^\n]{0,80}"
     r"[\"'](?:[^\"'\n]{0,80})(?:weather|forecast|temperature)",
+    re.IGNORECASE,
+)
+_WEATHER_FULLY_QUOTED = re.compile(
+    r"^\s*(?:\"[^\n\"]*(?:weather|forecast|temperature)[^\n\"]*\"|"
+    r"“[^\n”]*(?:weather|forecast|temperature)[^\n”]*”|"
+    r"'[^\n']*(?:weather|forecast|temperature)[^\n']*')\s*[?!.]*\s*$",
     re.IGNORECASE,
 )
 _WEATHER_LOCATION_SCAFFOLD = re.compile(
@@ -297,9 +303,15 @@ _WEATHER_LOCATION_AMBIGUOUS = re.compile(
     re.IGNORECASE,
 )
 _WEATHER_LOCATION_TIME_ONLY = re.compile(
-    r"^(?:today|tomorrow|tonight|now|right\s+now|currently|later|"
+    r"^(?:today(?:['’]s)?|tomorrow(?:['’]s)?|tonight|now|right\s+now|"
+    r"current|currently|live|later|"
     r"this\s+(?:morning|afternoon|evening|week|weekend)|next\s+week|"
     r"the\s+(?:morning|afternoon|evening)|\d{1,2}(?::\d{2})?\s*[ap]m)$",
+    re.IGNORECASE,
+)
+_WEATHER_NEGATED_ACTION = re.compile(
+    r"\b(?:do\s+not|don't|don’t|never)\b[^\n]{0,80}"
+    r"\b(?:weather|forecast|temperature)\b",
     re.IGNORECASE,
 )
 # Post-hoc guard: a generated reply that wrongly claims the assistant has no
@@ -771,6 +783,8 @@ def extract_weather_location(text: str) -> str:
     text = str(text or "").strip()
     postal = re.search(r"(?<!\d)\d{5}(?:-\d{4})?(?!\d)", text)
     if postal:
+        if _WEATHER_LOCATION_AMBIGUOUS.search(text):
+            return ""
         return postal.group(0)
     match = re.search(
         r"^\s*how\s+much\s+(?:rain|snow)\s+will\s+(.{2,80}?)\s+"
@@ -788,7 +802,7 @@ def extract_weather_location(text: str) -> str:
     if match:
         return _weather_location(match.group(1))
     match = re.search(
-        r"^\s*(?:what(?:'s|s|\s+is)?|how(?:'s|s|\s+is)?)\s+"
+        r"^\s*(?:what(?:['’]s|s|\s+is)?|how(?:['’]s|s|\s+is)?)\s+"
         r"(?:the\s+)?(.{2,80}?)\s+(?:weather|forecast|temperature)\b",
         text,
         re.IGNORECASE,
@@ -875,7 +889,12 @@ def classify(prompt: str, history=None) -> dict | None:
     # requests, hypotheticals, or explicit instructions not to look anything up.
     if _non_live_frame(text):
         return None
-    if _WEATHER_META_FRAME.search(text) and _weather_signal(text):
+    if _WEATHER_NEGATED_ACTION.search(text):
+        return None
+    if (
+        _weather_signal(text)
+        and (_WEATHER_META_FRAME.search(text) or _WEATHER_FULLY_QUOTED.match(text))
+    ):
         return None
     previous_weather = _recent_weather_context(history)
     if (

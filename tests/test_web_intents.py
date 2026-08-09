@@ -27,10 +27,32 @@ def test_question_form_can_still_name_an_explicit_location():
     }
 
 
+def test_weather_locations_preserve_straight_and_curly_apostrophes():
+    assert web_intents.classify("What's St. John's weather tomorrow?") == {
+        "kind": "weather", "location": "St. John's",
+    }
+    assert web_intents.classify(
+        "What\u2019s O\u2019Fallon weather tomorrow?"
+    ) == {"kind": "weather", "location": "O\u2019Fallon"}
+
+
 def test_ambiguous_weather_locations_require_clarification():
     assert web_intents.classify("weather in Chicago or Boston today") == {
         "kind": "weather", "location": "",
     }
+    assert web_intents.classify("weather in 60601 or 10001") == {
+        "kind": "weather", "location": "",
+    }
+    assert web_intents.classify("weather in Chicago or 60601") == {
+        "kind": "weather", "location": "",
+    }
+
+
+def test_temporal_weather_modifiers_are_not_locations():
+    for prompt in (
+        "what is the current weather?", "What's today's weather?", "current weather",
+    ):
+        assert web_intents.classify(prompt) == {"kind": "weather", "location": ""}
 
 
 def test_meta_and_negated_weather_phrases_do_not_route():
@@ -38,6 +60,15 @@ def test_meta_and_negated_weather_phrases_do_not_route():
         'Why did the parser extract "whats the" from this weather query?'
     ) is None
     assert web_intents.classify("Do not check the weather in Chicago") is None
+    assert web_intents.classify("I said do not check the weather in Chicago") is None
+    assert web_intents.classify(
+        "Is the string 'weather in Chicago' routed?"
+    ) is None
+    assert web_intents.classify('"weather in Chicago"') is None
+    assert web_intents.classify("He asked 'weather in Chicago'") is None
+    assert web_intents.classify(
+        "I said don't tell me Chicago weather"
+    ) is None
 
 
 def test_capability_followup_preserves_unresolved_weather_context():
