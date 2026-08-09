@@ -79,6 +79,13 @@ COMPATIBILITY_ROOT_MODULES = {
     "recall": Path("recall.py"),
 }
 
+# Applied migrations are immutable historical artifacts. They may retain an
+# import that production code has since moved behind a compatibility adapter;
+# rewriting one would invalidate its recorded checksum on deployed systems.
+COMPATIBILITY_ROOT_IMPORT_EXCEPTIONS = {
+    "memory_store": frozenset({Path("migrations/memory/0001_baseline.py")}),
+}
+
 
 def tracked_production_python_files(
     repo_root: Path = REPO_ROOT,
@@ -124,12 +131,14 @@ def compatibility_import_offenders(
     module: str,
     compatibility_path: Path,
     repo_root: Path = REPO_ROOT,
+    *,
+    allowed_paths: frozenset[Path] = frozenset(),
 ) -> tuple[Path, ...]:
     """Find production callers that bypass a compatibility module's adapter."""
     offenders: list[Path] = []
     for path in tracked_production_python_files(repo_root):
         relative = path.relative_to(repo_root)
-        if relative == compatibility_path:
+        if relative == compatibility_path or relative in allowed_paths:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
@@ -267,7 +276,13 @@ def check() -> list[str]:
 
     violations.extend(find_cycles(imports))
     for module, compatibility_path in COMPATIBILITY_ROOT_MODULES.items():
-        for offender in compatibility_import_offenders(module, compatibility_path):
+        for offender in compatibility_import_offenders(
+            module,
+            compatibility_path,
+            allowed_paths=COMPATIBILITY_ROOT_IMPORT_EXCEPTIONS.get(
+                module, frozenset()
+            ),
+        ):
             violations.append(
                 f"{offender}: production caller imports compatibility root "
                 f"module {module!r}"

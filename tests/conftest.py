@@ -17,6 +17,9 @@ _FLEET_TEST_ROOT = Path(tempfile.mkdtemp(prefix="sonder-pytest-fleet-"))
 # importlib.reload().  The old suite called reset_for_tests() against the live
 # database and could cancel an operator's active fleet.
 os.environ["SONDER_FLEET_DB"] = str(_FLEET_TEST_ROOT / "fleet.db")
+os.environ["SONDER_FLEET_PRINCIPAL_FILE"] = str(
+    _FLEET_TEST_ROOT / "fleet-principal.json"
+)
 
 
 def _cleanup_test_fleet_root():

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -59,7 +60,9 @@ def test_legacy_root_allowlist_has_a_shrink_only_ratchet():
 def test_production_callers_use_the_memory_adapter():
     module = _architecture_module()
     assert module.compatibility_import_offenders(
-        "memory_store", Path("memory_store.py")
+        "memory_store",
+        Path("memory_store.py"),
+        allowed_paths=module.COMPATIBILITY_ROOT_IMPORT_EXCEPTIONS["memory_store"],
     ) == ()
 
 
@@ -134,6 +137,28 @@ def test_backup_use_case_depends_only_on_its_narrow_port():
         if isinstance(node, ast.ImportFrom) and node.module
     }
     assert imports == {"__future__", "ports.backup"}
+
+
+def test_applied_memory_baseline_remains_byte_for_byte_immutable():
+    immutable_baseline = Path("migrations/memory/0001_baseline.py")
+    module = _architecture_module()
+    assert module.COMPATIBILITY_ROOT_IMPORT_EXCEPTIONS == {
+        "memory_store": frozenset({immutable_baseline}),
+    }
+
+    # Never rewrite an already-applied migration merely to satisfy the
+    # strangler import rule. The root module is a true compatibility alias.
+    baseline_path = _REPO_ROOT / immutable_baseline
+    raw = baseline_path.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() in {
+        # Git/Linux LF checkout and Windows CRLF checkout of the exact same
+        # immutable migration source.
+        "d13776e3ce5318049242f060fc4b6cbd17c4c8e5edf0dce920b12e9defeffb07",
+        "ba186cc59bd9d50b23648b446748d4b6fb7155a9408685c5b252c32db75d3624",
+    }
+    source = raw.decode("utf-8")
+    assert "import memory_store" in source
+    assert "sonder_runtime.adapters.memory_store" not in source
 
 
 def test_checker_detects_a_violation(tmp_path):
