@@ -39,6 +39,9 @@ Mitigations that are already in place and worth knowing about:
   a developer-authorization check.
 - File operations are constrained to configured roots; escaping them takes an
   explicit `extra_roots` or a bypass token.
+- Structured `data_query` reads are bounded and side-effect-free: SQLite uses
+  a read-only URI and deny-by-default authorizer, while JSON/JSONL/CSV/TSV use
+  exact structured filters and projections without expression evaluation.
 - `file_batch_write` never targets secrets/control state or traverses symlinks,
   requires explicit create-versus-overwrite intent, and rolls back completed
   writes on a later failure when restoration remains possible.
