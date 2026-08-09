@@ -35,7 +35,7 @@ ROOT_PLATFORM_MODULES = {
     "sonder_shutdown", "sonder_logging",
 }
 ROOT_LEGACY_MODULES = {
-    "server", "runtime_policy", "memory_store", "embeddings",
+    "server", "runtime_policy", "embeddings",
     "autopilot_store", "fleet_store", "sonder_operations_store",
     "sonder_migrations", "sonder_backup", "sonder_preflight",
     "sonder_lifecycle", "sonder_secrets", "sonder_serve", "sonder_repl",
@@ -45,7 +45,7 @@ ROOT_LEGACY_MODULES = {
 # This is a ratchet, not a target.  Removing a legacy root dependency is
 # always allowed; adding one requires an explicit architecture-policy change
 # and must never happen as an accidental convenience import.
-ROOT_LEGACY_MODULE_LIMIT = 21
+ROOT_LEGACY_MODULE_LIMIT = 20
 
 LAYERS = ("domain", "application", "adapters", "platform", "bootstrap")
 
