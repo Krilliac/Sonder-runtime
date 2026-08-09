@@ -2554,6 +2554,13 @@ class LiveExecutionFeed extends StatelessWidget {
                     ? 'active unknown'
                     : '${feed!.activeResponses} active'),
               ),
+              if (feed!.oldestSeq != null && feed!.nextSeq != null)
+                Chip(
+                  label: Text(
+                      'window ${feed!.oldestSeq} → ${feed!.nextSeq}'),
+                ),
+              if ((feed!.droppedEvents ?? 0) > 0)
+                Chip(label: Text('${feed!.droppedEvents} dropped')),
               if (feed!.detailsDisabled)
                 const Chip(label: Text('Details disabled')),
               if (feed!.hasGap)
