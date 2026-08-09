@@ -52,7 +52,7 @@ file's *structure* without dumping raw bytes.
 
 ## Guarded filesystem tools
 
-`file_find`, `file_read`, `file_read_range`, `file_write`, `file_edit`,
+`file_find`, `file_read`, `file_read_range`, `file_write`, `file_batch_write`, `file_edit`,
 `file_delete`, `directory_tree`, `directory_create`, `workspace_inventory`,
 `text_search`, `script_search`, `program_search`, `image_inspect`, `repo_log`,
 `repo_show`, `repo_blame`. All are
@@ -68,6 +68,11 @@ external diff/text-conversion helpers, and enforce count, byte, and time caps.
 `repo_show` additionally requires one contained non-sensitive regular file,
 both in the worktree and at the requested revision, before it returns patch
 content; an unfiltered commit can never expose unrelated files.
+
+`file_batch_write` accepts a JSON list of explicit `create` or `overwrite`
+operations. It prevalidates every target before writing, caps per-file and
+aggregate bytes, rejects duplicate/sensitive/symlink targets, and makes a
+best-effort rollback if any write fails.
 
 ## Other tool families
 

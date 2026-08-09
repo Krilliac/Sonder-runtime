@@ -21,7 +21,7 @@ Sonder Runtime is not a chat wrapper. By design it will, on request:
 
 - **execute code and shell commands** (`run_code`, `script_run`,
   `workspace_run`, `run_project`)
-- **read, write, and delete files** (`file_read`, `file_write`, `file_edit`,
+- **read, write, and delete files** (`file_read`, `file_write`, `file_batch_write`, `file_edit`,
   `file_delete`, `directory_create`)
 - **fetch from the network** (`web_fetch`, `web_search`)
 - **run unattended** (`autopilot_start`, `master_orchestrate`, `loop`)
@@ -44,6 +44,9 @@ Mitigations that are already in place and worth knowing about:
   external diffs, and text-conversion helpers. Gitfile targets must remain in
   authorized roots, and `repo_show` requires a contained path before returning
   patch content.
+- `file_batch_write` never targets secrets/control state or traverses symlinks,
+  requires explicit create-versus-overwrite intent, and rolls back completed
+  writes on a later failure when restoration remains possible.
 - Cloud tiers are **opt-in**. Local tiers run against loopback Ollama, and a
   remote `OLLAMA_HOST` must be explicitly enabled.
 - Lessons are passed through a 20-rule privacy classifier before storage, so
