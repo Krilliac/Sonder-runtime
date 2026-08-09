@@ -12,7 +12,7 @@ compatibility surfaces and delegate here.
 | `mcp` | Run the MCP adapter (tool surface for MCP clients). |
 | `repl` | Interactive REPL with slash commands. |
 | `preflight` | Run startup checks and report; opens no listener. |
-| `doctor` | Consolidated read-only health report for config, self-heal, memory quality, runtime policy, and Ollama reachability. |
+| `doctor` | Consolidated health report for config, state/model storage, self-heal, memory quality, runtime policy, and Ollama reachability. Storage inspection is read-only unless the explicit probe flag is supplied. |
 | `status` | Local build / config / schema status. |
 | `diagnostics` | Redacted diagnostic bundle (config, schemas, preflight). |
 | `config` | Print the effective, redacted configuration. |
@@ -40,11 +40,28 @@ python -m sonder_runtime serve    --config /etc/sonder/sonder.toml
 python -m sonder_runtime status --json
 python -m sonder_runtime doctor --json
 python -m sonder_runtime doctor --skip-ollama  # fully local checks only
+python -m sonder_runtime doctor --storage-probe # explicit bounded state-volume benchmark
 python -m sonder_runtime backup create --json
 python -m sonder_runtime restore smoke /var/backups/sonder/<dir>
 python -m sonder_runtime rotate-key --secrets /etc/sonder/sonder.env --overlap-seconds 86400
 python -m sonder_runtime drain     # asks the running server to drain
 ```
+
+The automatic storage checks report free space for the configured state home
+and the configured or platform-native Ollama model root. They use native volume
+metadata where safely available and warn on network, removable, or potentially
+slow filesystems. Paths derive from configuration, environment, and the current
+user profile; no drive letter or machine-specific layout is assumed.
+
+`--storage-probe` is never implied by `doctor`, `status`, preflight, or service
+startup. When explicitly selected it probes only the existing configured state
+directory. The probe is capped at 8 MiB and 5 seconds and uses one worker-owned
+anonymous handle on supporting systems or delete-on-close handle on Windows. It
+never exposes or reopens a generated pathname. A scrubbed, isolated worker owns
+the handle; a fixed-size result pipe is the only output, and the parent kills
+the worker at the five-second wall deadline so process teardown cleans up
+blocked setup, I/O, sync, or close. The probe does not scan files, alter model
+data, or probe every mounted volume.
 
 ## Exit codes
 
