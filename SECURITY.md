@@ -50,6 +50,11 @@ Mitigations that are already in place and worth knowing about:
 - `file_batch_write` never targets secrets/control state or traverses symlinks,
   requires explicit create-versus-overwrite intent, and rolls back completed
   writes on a later failure when restoration remains possible.
+- `archive_list` and `archive_extract` accept ZIP/TAR only and prevalidate every
+  member under hard entry, byte, ratio, depth, result, and time ceilings.
+  Absolute/traversal paths, links/devices, encrypted ZIPs, collisions, nested
+  archives, sensitive state, and existing destinations are rejected before a
+  staged non-overwriting extraction is promoted.
 - Cloud tiers are **opt-in**. Local tiers run against loopback Ollama, and a
   remote `OLLAMA_HOST` must be explicitly enabled.
 - Lessons are passed through a 20-rule privacy classifier before storage, so

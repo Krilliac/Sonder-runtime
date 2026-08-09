@@ -60,7 +60,8 @@ expressions or file content are executed.
 
 `file_find`, `file_read`, `file_read_range`, `file_write`, `file_batch_write`, `file_edit`,
 `file_copy`, `file_move`, `file_delete`, `directory_tree`, `directory_create`, `workspace_inventory`,
-`text_search`, `script_search`, `program_search`, `image_inspect`, `repo_log`,
+`text_search`, `script_search`, `program_search`, `image_inspect`, `archive_list`,
+`archive_extract`, `repo_log`,
 `repo_show`, `repo_blame`. All are
 confined to `SONDER_FILE_ROOTS`, honor the permission policy
 ([Security Model](09-security-model.md)), and record byte/line accounting
@@ -90,6 +91,12 @@ only with overwrite disabled and no caller-supplied approval or extra root.
 operations. It prevalidates every target before writing, caps per-file and
 aggregate bytes, rejects duplicate/sensitive/symlink targets, and makes a
 best-effort rollback if any write fails.
+
+`archive_list` prevalidates bounded ZIP/TAR manifests without extraction.
+`archive_extract` uses the same fail-closed validation, streams members into a
+sibling staging directory, and promotes only to a new non-overwriting project
+destination. Traversal, absolute paths, links/devices, encrypted entries,
+collisions, nested archives, sensitive paths, and archive bombs are rejected.
 
 ## Other tool families
 
