@@ -102,6 +102,7 @@ import reloadable_mcp
 import autopilot_store
 import autopilot_controller
 from model_transport import ModelCallError
+import context_overflow
 import ollama_endpoint
 import sonder_speculation
 import consult as consult_flow
@@ -435,6 +436,7 @@ def _chat_request_with_cloud_fallback(
             timeout=timeout,
             cancel_check=cancel_check,
             accept_native_tool_calls=accept_native_tool_calls,
+            idempotent=True,
         )
         return out, content, model
     except ModelCallError as error:
@@ -455,6 +457,7 @@ def _chat_request_with_cloud_fallback(
         timeout=timeout,
         cancel_check=cancel_check,
         accept_native_tool_calls=accept_native_tool_calls,
+        idempotent=True,
     )
     return out, content, fallback
 
@@ -897,6 +900,7 @@ def _make_generate(
                     timeout=timeout,
                     cancel_check=cancel_check,
                     accept_native_tool_calls=accept_native_tool_calls,
+                    idempotent=True,
                 )
             tokens_in = _model_usage_count(out.get("prompt_eval_count"))
             tokens_out = _model_usage_count(out.get("eval_count"))
@@ -2974,6 +2978,59 @@ def _local_model_retries() -> int:
     return max(0, min(value, _MAX_LOCAL_MODEL_RETRIES))
 
 
+def _hosted_overflow_retry_enabled() -> bool:
+    """Operator opt-in for compaction retries on hosted/remote model routes.
+
+    Off by default. Even when on it is not sufficient: the calling site must also
+    declare the request idempotent, because a hosted retry is metered work that
+    may duplicate a side effect.
+    """
+    return os.environ.get("SONDER_HOSTED_OVERFLOW_RETRY", "").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+
+
+def _overflow_retry_allowed(*, cloud: bool, remote: bool, idempotent: bool) -> bool:
+    """Whether this route may spend one extra attempt on a compacted prompt.
+
+    Loopback Ollama is free and side-effect-free, so it may always take the one
+    retry. Anything that leaves the machine - a hosted tier or a remote Ollama -
+    keeps the existing "no retries" posture unless the request was explicitly
+    declared idempotent *and* the operator opted in.
+    """
+    if not (cloud or remote):
+        return True
+    return bool(idempotent) and _hosted_overflow_retry_enabled()
+
+
+def _embedded_model_error(result) -> str:
+    """Error text from a 2xx body that reports failure in-band, else ""."""
+    if not isinstance(result, dict):
+        return ""
+    embedded = result.get("error")
+    if not embedded:
+        return ""
+    return _safe_model_error_detail(embedded)
+
+
+def _compacted_overflow_payload(payload, verdict):
+    """One bounded compaction of `payload` for a classified context overflow.
+
+    Returns a new payload, or None when there is nothing safe to drop. Only the
+    message list changes: `options` (and therefore `num_ctx`) is carried through
+    untouched, so recovery never silently widens the context window behind the
+    context policy's back.
+    """
+    if not verdict.overflow or not isinstance(payload, dict):
+        return None
+    compacted = context_overflow.compact_messages(payload.get("messages"))
+    if compacted is None:
+        return None
+    updated = dict(payload)
+    updated["messages"] = compacted
+    return updated
+
+
 def _local_retry_delay(attempt: int) -> float:
     raw = os.environ.get("SONDER_LOCAL_RETRY_DELAY_MS", "150").strip()
     try:
@@ -3016,7 +3073,9 @@ def _safe_model_error_detail(value, limit: int = 600) -> str:
     # tokens or API keys accidentally echoed by an upstream proxy.
     if not structured:
         text = re.sub(
-            r"(?i)\b(bearer|token|secret|api[-_]?key)\b\s*[:=]?\s*\S+",
+            r"(?i)\b(bearer|token|secret|api[-_]?key)\b\s*[:=]?\s*"
+            r"(?!(?:limit|count|budget|window|usage|quota|length|context|maximum|minimum)\b)"
+            r"\S+",
             r"\1=<redacted>",
             text,
         )
@@ -3079,6 +3138,7 @@ def _post_model(
     cloud: bool = False,
     timeout: int | None = None,
     cancel_check=None,
+    idempotent: bool = False,
 ) -> tuple[dict, int]:
     """POST one logical model request with a narrow loopback-only retry policy.
 
@@ -3086,6 +3146,14 @@ def _post_model(
     retry only transport failures and explicitly transient HTTP statuses, using
     the original timeout as one total monotonic budget. The endpoint, model, and
     payload never change between attempts.
+
+    The single exception is a *classified* context overflow. When the failure
+    text itself says the prompt did not fit, this function may spend exactly one
+    extra attempt on a compacted prompt - within the same monotonic deadline and
+    behind the same cancellation gate as every other attempt. `idempotent` is the
+    caller's declaration that repeating this request is safe; it is required (on
+    top of an operator opt-in) before a hosted or remote route will take even
+    that one retry.
     """
     cloud = bool(cloud or _is_cloud_model_name(model))
     if cloud and not cloud_allowed():
@@ -3103,7 +3171,11 @@ def _post_model(
         1 if cloud or remote_endpoint else 1 + _local_model_retries()
     )
 
-    for attempt_index in range(max_attempts):
+    # Bumped by exactly one if a classified context overflow earns a compaction
+    # retry, so that recovery cannot eat the ordinary transient retry budget.
+    compaction_spent = False
+    attempt_index = 0
+    while attempt_index < max_attempts:
         attempt = attempt_index + 1
         if _cancel_requested(cancel_check):
             raise ModelCallError(
@@ -3121,13 +3193,21 @@ def _post_model(
                 attempts=attempt_index,
                 cloud=cloud,
             )
+        attempt_index = attempt
+        failure = None
+        embedded_detail = ""
         try:
             if timeout is None and attempt == 1:
                 result = _post(path, payload)
             else:
                 call_timeout = request_timeout if attempt == 1 else max(1, int(remaining))
                 result = _post(path, payload, timeout=call_timeout)
-            return result, attempt
+            # Ollama can report a refusal in-band on a 200. That is the same
+            # failure surface as an HTTP error body, so it gets classified too
+            # rather than being handed upward as an opaque success.
+            embedded_detail = "" if compaction_spent else _embedded_model_error(result)
+            if not embedded_detail:
+                return result, attempt
         except ModelCallError as error:
             raise ModelCallError(
                 error.kind,
@@ -3169,6 +3249,38 @@ def _post_model(
                 attempts=attempt,
                 cloud=cloud,
             ) from error
+
+        if not compaction_spent:
+            detail = embedded_detail or failure.detail
+            status = None if embedded_detail else failure.status
+            verdict = context_overflow.classify(detail, status=status)
+            compacted = None
+            if verdict.overflow and _overflow_retry_allowed(
+                cloud=cloud, remote=remote_endpoint, idempotent=idempotent,
+            ):
+                compacted = _compacted_overflow_payload(payload, verdict)
+            if compacted is not None:
+                remaining = deadline - time.monotonic()
+                if remaining >= 1.0 and not _cancel_requested(cancel_check):
+                    # One extra attempt, inside the same deadline. num_ctx is
+                    # deliberately not raised: the prompt shrinks instead.
+                    payload = compacted
+                    compaction_spent = True
+                    max_attempts += 1
+                    activity_tracker.record_event(
+                        "model_context_compaction",
+                        model=str(model or "")[:80],
+                        attempt=attempt + 1,
+                        reason=verdict.reason,
+                        status=verdict.status,
+                        control=verdict.control,
+                    )
+                    continue
+
+        if embedded_detail:
+            # Not an overflow we can act on; hand the in-band error upward
+            # exactly as before so the caller raises its own typed failure.
+            return result, attempt
 
         if cloud or not failure.transient or attempt >= max_attempts:
             raise failure
@@ -3267,6 +3379,7 @@ def _chat_request(
     timeout: int | None = None,
     cancel_check=None,
     accept_native_tool_calls: bool = False,
+    idempotent: bool = False,
     _budget_retried: bool = False,
 ) -> tuple[dict, str]:
     if not cloud and _known_thinking_model(model):
@@ -3287,6 +3400,7 @@ def _chat_request(
         cloud=cloud,
         timeout=timeout,
         cancel_check=cancel_check,
+        idempotent=idempotent,
     )
     if not isinstance(out, dict):
         raise ModelCallError(
@@ -3324,6 +3438,7 @@ def _chat_request(
                 timeout=timeout,
                 cancel_check=cancel_check,
                 accept_native_tool_calls=accept_native_tool_calls,
+                idempotent=idempotent,
                 _budget_retried=True,
             )
         raise ModelCallError(
@@ -3551,6 +3666,7 @@ def _offload_impl(
                     cloud=False,
                     timeout=request_timeout,
                     cancel_check=cancel_check,
+                    idempotent=True,
                 )
             tokens_in = _model_usage_count(out.get("prompt_eval_count"))
             tokens_out = _model_usage_count(out.get("eval_count"))
