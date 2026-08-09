@@ -58,10 +58,16 @@ class PreferenceService:
             extracted = self._codec.extract(text)
             normalized = extracted[0] if extracted else self._codec.normalize(text)
             key = self._codec.key(normalized) if normalized else ""
+            stable = self._codec.is_stable(normalized, source_text=text)
         except Exception:
             return _codec_failure()
         if not normalized:
             return _failure("INVALID_INPUT", "preference text is empty.")
+        if not stable:
+            return _failure(
+                "INVALID_INPUT",
+                "preference must describe a stable behavior or default.",
+            )
         selected_scope = scope or "global"
         try:
             rows = self._repository.upsert_and_list(

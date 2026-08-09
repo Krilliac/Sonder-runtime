@@ -2262,9 +2262,30 @@ def _maybe_title(conn, session_id, first_prompt, internal_generate=None):
     memory_store.set_session_title(conn, session_id, title)
 
 
-def _preference_facts(conn, limit=12):
-    prefs = memory_store.preferences_for_scope(conn, "global", limit=limit)
-    return ["User preference: %s" % p["text"] for p in prefs]
+def _preference_facts(conn, task, project=None, limit=12):
+    """Return only enabled, scope-authorized preferences relevant to ``task``."""
+    scopes = []
+    if project:
+        scopes.extend((str(project), "project:%s" % project))
+    scopes.append("global")
+    selected = []
+    seen = set()
+    candidate_limit = min(200, max(limit * 8, 100))
+    for scope in scopes:
+        for pref in memory_store.preferences_for_scope(
+            conn, scope, limit=candidate_limit
+        ):
+            identity = pref.get("id") or (scope, pref.get("key"), pref.get("text"))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            text = pref.get("text", "")
+            if not preference_learning.preference_applies(text, task):
+                continue
+            selected.append("User preference: %s" % text)
+            if len(selected) >= limit:
+                return selected
+    return selected
 
 
 def _capture_preferences(conn, text, source_interaction=None, scope="global"):
@@ -2314,7 +2335,7 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
             )
             if project is not None else []
         )
-        facts = _preference_facts(conn)
+        facts = _preference_facts(conn, prompt, project=project)
         if project:
             facts.extend(f["text"] for f in memory_store.facts_for_project(conn, project))
         retrieve_fn = retriever.retrieve
