@@ -104,6 +104,96 @@ def test_existing_fleet_ledger_migrates_project_scope_column(monkeypatch, tmp_pa
     assert "project" in columns
 
 
+def test_pre_provenance_ledger_migrates_all_agent_and_event_columns(
+    monkeypatch, tmp_path,
+):
+    database = tmp_path / "pre-provenance-fleet.db"
+    agent_tail = """    retried_by TEXT DEFAULT '',
+    master_task_digest TEXT DEFAULT '',
+    delegated_task_digest TEXT DEFAULT '',
+    objective_ids_json TEXT DEFAULT '[]',
+    task_drift INTEGER DEFAULT 0,
+    drift_metrics_json TEXT DEFAULT '{}'
+"""
+    event_columns = """    master_task_digest TEXT DEFAULT '',
+    delegated_task_digest TEXT DEFAULT '',
+    objective_ids_json TEXT DEFAULT '[]',
+    task_drift INTEGER DEFAULT 0,
+"""
+    legacy_schema = fleet_store._SCHEMA.replace(
+        agent_tail, "    retried_by TEXT DEFAULT ''\n",
+    ).replace(event_columns, "")
+    with sqlite3.connect(database) as conn:
+        conn.executescript(legacy_schema)
+    monkeypatch.setenv("SONDER_FLEET_DB", str(database))
+    fleet_store.reset_schema_cache_for_tests()
+
+    fleet_store.register_owner("owner-provenance-migration", 113, 100.0)
+
+    with sqlite3.connect(database) as conn:
+        agents = {
+            row[1] for row in conn.execute("PRAGMA table_info(fleet_agents)")
+        }
+        events = {
+            row[1] for row in conn.execute("PRAGMA table_info(fleet_events)")
+        }
+    assert {
+        "master_task_digest", "delegated_task_digest", "objective_ids_json",
+        "task_drift", "drift_metrics_json",
+    } <= agents
+    assert {
+        "master_task_digest", "delegated_task_digest", "objective_ids_json",
+        "task_drift",
+    } <= events
+
+
+def test_oversized_drift_metrics_remain_valid_auditable_json(monkeypatch, tmp_path):
+    _isolated_store(monkeypatch, tmp_path)
+    fleet_store.register_owner("owner-drift-json", 114, 100.0)
+    fleet_store.create_agent(_row("agent-drift-json"), "owner-drift-json", 114)
+    fleet_store.start_agent("agent-drift-json", "owner-drift-json", "run")
+
+    stored, _marker = fleet_store.finish_agent(
+        "agent-drift-json", "owner-drift-json",
+        error="drift", task_drift=True,
+        drift_metrics={"evidence": "x" * 10_000},
+    )
+
+    assert stored["status"] == "task_drift"
+    assert stored["drift_metrics"]["audit_truncated"] is True
+    assert len(stored["drift_metrics"]["sha256"]) == 64
+
+
+def test_provenance_fields_cannot_be_rewritten_by_generic_updates(
+    monkeypatch, tmp_path,
+):
+    _isolated_store(monkeypatch, tmp_path)
+    fleet_store.register_owner("owner-immutable", 115, 100.0)
+    row = _row("agent-immutable")
+    row.update({
+        "master_task_digest": "a" * 64,
+        "delegated_task_digest": "b" * 64,
+        "objective_ids": ["one"],
+    })
+    fleet_store.create_agent(row, "owner-immutable", 115)
+
+    updated = fleet_store.update_agent(
+        "agent-immutable", "owner-immutable",
+        master_task_digest="c" * 64,
+        delegated_task_digest="d" * 64,
+        objective_ids=[],
+        task_drift=True,
+        drift_metrics={"forged": True},
+        activity="still queued",
+    )
+
+    assert updated["master_task_digest"] == "a" * 64
+    assert updated["delegated_task_digest"] == "b" * 64
+    assert updated["objective_ids"] == ["one"]
+    assert updated["task_drift"] is False
+    assert updated["drift_metrics"] == {}
+
+
 def test_cancellation_prevents_queued_start_and_inherits_to_late_child(
     monkeypatch, tmp_path,
 ):
