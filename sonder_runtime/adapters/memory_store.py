@@ -2604,6 +2604,7 @@ RECALL_CANDIDATE_TIME_LIMIT_S = 0.5
 RECALL_MAX_STORED_TASK_CHARS = 64_000
 RECALL_RESPONSE_PREFIX_CHARS = 401
 RECALL_MAX_EMBEDDING_BYTES = 64 * 1024
+RECALL_CURSOR_MAX_CHARS = 6144
 
 
 @dataclass(frozen=True)
@@ -2665,7 +2666,7 @@ def _decode_recall_cursor(value):
     if not isinstance(value, str) or not value.startswith("r1."):
         raise ValueError("recall candidate cursor is invalid")
     token = value[3:]
-    if not token or len(token) > 1024:
+    if not token or len(token) > RECALL_CURSOR_MAX_CHARS:
         raise ValueError("recall candidate cursor is invalid")
     try:
         padded = token + "=" * (-len(token) % 4)
@@ -2745,7 +2746,7 @@ def good_interaction_candidate_page(
         "i.task_embedding_dim, CASE WHEN NULLIF(i.project,'') IS NULL "
         "THEN NULL ELSE CAST(i.project AS BLOB) END AS project "
         "FROM interactions i WHERE i.task_embedding IS NOT NULL "
-        "AND typeof(i.id)='text' AND length(i.id)<=256 "
+        "AND typeof(i.id)='text' AND length(i.id) BETWEEN 1 AND 256 "
         "AND typeof(i.ts)='text' AND length(i.ts) BETWEEN 1 AND 64 "
         "AND typeof(i.task)='text' AND length(i.task)<=? "
         "AND (i.response IS NULL OR typeof(i.response)='text') "
