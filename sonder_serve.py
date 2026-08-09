@@ -791,7 +791,7 @@ def _server_side_history(storage_session, limit=SERVER_SIDE_HISTORY_TURNS):
     if not (storage_session or "").strip():
         return []
     try:
-        import memory_store
+        import sonder_runtime.adapters.memory_store as memory_store
 
         session_id = server._resolve_session(storage_session)
         conn = server._open_db()

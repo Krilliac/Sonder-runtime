@@ -5,7 +5,7 @@ import time
 
 import emotion_vectors
 import live_reload
-import memory_store
+import sonder_runtime.adapters.memory_store as memory_store
 import store_integrity
 import system_profile
 import workflow_store
