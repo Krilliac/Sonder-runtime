@@ -94,6 +94,51 @@ def test_recall_use_case_depends_only_on_its_narrow_port():
     assert imports == {"__future__", "ports.recall"}
 
 
+def test_backup_root_module_is_compatibility_only_and_ratchet_shrank():
+    import importlib.util
+
+    checker = _REPO_ROOT / "scripts" / "check_architecture.py"
+    spec = importlib.util.spec_from_file_location("backup_architecture", checker)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert "sonder_backup" not in module.ROOT_LEGACY_MODULES
+    assert module.ROOT_LEGACY_MODULE_LIMIT == 16
+
+    offenders = []
+    for path in _REPO_ROOT.rglob("*.py"):
+        relative = path.relative_to(_REPO_ROOT)
+        if relative == Path("sonder_backup.py") or relative.parts[0] == "tests":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import) and any(
+                alias.name == "sonder_backup" for alias in node.names
+            ):
+                offenders.append(str(relative))
+                break
+            if (
+                isinstance(node, ast.ImportFrom)
+                and node.level == 0
+                and node.module == "sonder_backup"
+            ):
+                offenders.append(str(relative))
+                break
+    assert offenders == []
+
+
+def test_backup_use_case_depends_only_on_its_narrow_port():
+    service = (
+        _REPO_ROOT / "sonder_runtime" / "application" / "backup" / "use_cases.py"
+    )
+    tree = ast.parse(service.read_text(encoding="utf-8"), filename=str(service))
+    imports = {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+    assert imports == {"__future__", "ports.backup"}
+
+
 def test_applied_memory_baseline_remains_byte_for_byte_immutable():
     immutable_baseline = Path("migrations/memory/0001_baseline.py")
     module = _architecture_module()
