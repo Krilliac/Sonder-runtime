@@ -78,6 +78,31 @@ def _fsync_path(path: Path) -> None:
         os.close(fd)
 
 
+def _is_link_or_junction(path: Path) -> bool:
+    """Reject indirections that can move a backup member or restore target."""
+    try:
+        if path.is_symlink():
+            return True
+        is_junction = getattr(path, "is_junction", None)
+        return bool(is_junction and is_junction())
+    except OSError:
+        return True
+
+
+def _contained_member(root: Path, relative: Path) -> Path | None:
+    """Return a resolved member only when it remains below ``root``."""
+    try:
+        resolved_root = root.resolve(strict=True)
+        resolved_member = (root / relative).resolve(strict=True)
+        if os.path.commonpath((str(resolved_root), str(resolved_member))) != str(
+            resolved_root
+        ):
+            return None
+        return resolved_member
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
 def _online_backup_sqlite(source: str, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     src = sqlite3.connect(source)
@@ -107,8 +132,12 @@ def create_backup(
     operations: OperationsStore | None = None,
 ) -> BackupResult:
     """Run the full SPEC-2 backup algorithm against the live state."""
-    target_dir = Path(target).expanduser()
-    target_dir.mkdir(parents=True, exist_ok=True)
+    target_input = Path(target).expanduser()
+    target_input.mkdir(parents=True, exist_ok=True)
+    # Anchor all later staging, verification, publication, and cleanup to the
+    # canonical directory.  A stable symlink/junction spelling is fine, but a
+    # later swap of that alias cannot redirect the already-derived paths.
+    target_dir = target_input.resolve(strict=True)
 
     build = sonder_version.build_info()
     ops = operations or OperationsStore()
@@ -266,6 +295,9 @@ def _verify_directory(backup_dir: Path) -> list[str]:
         return ["manifest lists too many files"]
     expected_checksums: list[str] = []
     restored_names: set[str] = set()
+    state_dir = backup_dir / "state"
+    if _is_link_or_junction(state_dir) or not state_dir.is_dir():
+        return ["state directory is missing or indirect"]
     for entry in files:
         if not isinstance(entry, dict):
             problems.append("manifest file entry must be an object")
@@ -284,6 +316,13 @@ def _verify_directory(backup_dir: Path) -> list[str]:
         ):
             problems.append(f"manifest path escapes backup: {rel!r}")
             continue
+        if _is_link_or_junction(member):
+            problems.append(f"backup member is not a regular file: {rel}")
+            continue
+        contained_member = _contained_member(backup_dir, rel_path)
+        if contained_member is None:
+            problems.append(f"backup member escapes backup: {rel}")
+            continue
         if rel_path.name in restored_names:
             problems.append(f"duplicate restore filename {rel_path.name!r}")
             continue
@@ -291,7 +330,7 @@ def _verify_directory(backup_dir: Path) -> list[str]:
         if not member.exists():
             problems.append(f"missing file {rel}")
             continue
-        if member.is_symlink() or not member.is_file():
+        if not member.is_file():
             problems.append(f"backup member is not a regular file: {rel}")
             continue
         expected_size = entry.get("size")
@@ -345,24 +384,43 @@ def list_backups(target: str | os.PathLike) -> list[dict]:
         return []
     entries = []
     for child in sorted(target_dir.iterdir()):
-        if child.name.startswith(".staging-") or not child.is_dir():
+        if (
+            child.name.startswith(".staging-")
+            or _is_link_or_junction(child)
+            or not child.is_dir()
+        ):
             continue
         manifest_path = child / "manifest.json"
-        if not manifest_path.exists():
+        if (
+            _is_link_or_junction(manifest_path)
+            or not manifest_path.is_file()
+        ):
             continue
         try:
+            if manifest_path.stat().st_size > MAX_MANIFEST_BYTES:
+                continue
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except ValueError:
+        except (OSError, UnicodeError, ValueError):
             continue
+        if not isinstance(manifest, dict):
+            continue
+        files = manifest.get("files")
+        backup_id = manifest.get("backup_id")
+        created_at = manifest.get("created_at_utc")
+        application_version = manifest.get("application_version")
         entries.append(
             {
                 "path": str(child),
-                "backup_id": manifest.get("backup_id", "unknown"),
-                "created_at_utc": manifest.get("created_at_utc", "unknown"),
-                "application_version": manifest.get(
-                    "application_version", "unknown"
+                "backup_id": backup_id if isinstance(backup_id, str) else "unknown",
+                "created_at_utc": (
+                    created_at if isinstance(created_at, str) else "unknown"
                 ),
-                "files": len(manifest.get("files") or []),
+                "application_version": (
+                    application_version
+                    if isinstance(application_version, str)
+                    else "unknown"
+                ),
+                "files": len(files) if isinstance(files, list) else 0,
             }
         )
     entries.sort(key=lambda e: e["created_at_utc"], reverse=True)
@@ -385,7 +443,10 @@ def prune_backups(target: str | os.PathLike, *, keep: int) -> list[str]:
     for entry in backups[keep:]:
         if entry["path"] == verified_newest:
             continue
-        shutil.rmtree(entry["path"])
+        candidate = Path(entry["path"])
+        if _is_link_or_junction(candidate) or not candidate.is_dir():
+            continue
+        shutil.rmtree(candidate)
         removed.append(entry["path"])
     return removed
 
@@ -449,7 +510,10 @@ def prune_backups_tiered(
     for entry in backups:
         if entry["path"] in keep:
             continue
-        shutil.rmtree(entry["path"])
+        candidate = Path(entry["path"])
+        if _is_link_or_junction(candidate) or not candidate.is_dir():
+            continue
+        shutil.rmtree(candidate)
         removed.append(entry["path"])
     return removed
 
@@ -512,47 +576,91 @@ def restore_to_empty(
     this function refuses a non-empty destination so it can never clobber
     a live SONDER_HOME.
     """
-    source = Path(backup_dir).expanduser()
+    try:
+        source = Path(backup_dir).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise BackupError(
+            "backup failed verification: backup directory is unavailable"
+        ) from exc
+    manifest_path = source / "manifest.json"
+    try:
+        if manifest_path.stat().st_size > MAX_MANIFEST_BYTES:
+            raise BackupError(
+                "backup failed verification: manifest.json exceeds the size limit"
+            )
+        manifest_bytes = manifest_path.read_bytes()
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except BackupError:
+        raise
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise BackupError(
+            "backup failed verification: manifest unreadable: "
+            + type(exc).__name__
+        ) from exc
     problems = verify_backup(source)
     if problems:
         raise BackupError(
             "backup failed verification: " + "; ".join(problems)
         )
+    try:
+        if manifest_path.read_bytes() != manifest_bytes:
+            raise BackupError("backup changed during verification")
+    except OSError as exc:
+        raise BackupError("backup changed during verification") from exc
     dest_input = Path(destination).expanduser()
-    if dest_input.is_symlink():
-        raise BackupError("restore destination must not be a symlink")
+    if _is_link_or_junction(dest_input):
+        raise BackupError("restore destination must not be a symlink or junction")
     # Keep staging beside the destination even when the caller supplied a
     # relative spelling such as ``.``.  Using Path(".").parent would place the
     # staging directory inside the destination and make the later publication
     # fail because the destination was no longer empty.
-    dest = Path(os.path.abspath(dest_input))
+    dest = dest_input.resolve(strict=False)
     dest.parent.mkdir(parents=True, exist_ok=True)
     existed = dest.exists()
     if existed and (not dest.is_dir() or any(dest.iterdir())):
         raise BackupError("restore destination is not empty")
-    manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
     import tempfile
 
     staging = Path(
         tempfile.mkdtemp(prefix=f".{dest.name}.restore-", dir=dest.parent)
     )
     removed_existing = False
+    cwd_was_destination = False
     try:
         restored = []
         for entry in manifest["files"]:
             rel = Path(entry["path"])
+            source_member = _contained_member(source, rel)
+            if source_member is None or _is_link_or_junction(source / rel):
+                raise BackupError(f"backup member changed: {rel.name}")
             target_path = staging / rel.name
-            shutil.copy2(source / rel, target_path)
+            shutil.copy2(source_member, target_path)
             if _sha256_file(target_path) != entry["sha256"]:
                 raise BackupError(f"restored file corrupt: {rel.name}")
             restored.append(str(dest / rel.name))
-        if existed:
-            dest.rmdir()
-            removed_existing = True
-        os.rename(staging, dest)
+        try:
+            cwd_was_destination = Path.cwd().resolve() == dest
+        except OSError:
+            pass
+        if cwd_was_destination:
+            # Windows refuses to remove the process CWD.  The restore command
+            # is synchronous, so briefly anchor it in the already-resolved
+            # parent while atomically replacing the empty destination, then
+            # return it to the newly published directory.
+            os.chdir(dest.parent)
+        try:
+            if existed:
+                dest.rmdir()
+                removed_existing = True
+            os.rename(staging, dest)
+        finally:
+            if cwd_was_destination and dest.is_dir():
+                os.chdir(dest)
         return restored
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         if removed_existing and not dest.exists():
             dest.mkdir()
+        if cwd_was_destination and dest.is_dir():
+            os.chdir(dest)
         raise

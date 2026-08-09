@@ -248,6 +248,142 @@ def test_restore_relative_dot_stages_beside_destination(tmp_path, monkeypatch):
         backup_adapter.restore_to_empty(backup, ".")
 
 
+def test_restore_relative_dot_publishes_and_restores_cwd(tmp_path, monkeypatch):
+    backup = tmp_path / "backup"
+    _write_fixture_backup(backup)
+    destination = tmp_path / "empty-destination"
+    destination.mkdir()
+    monkeypatch.chdir(destination)
+
+    restored = backup_adapter.restore_to_empty(backup, ".")
+
+    assert Path.cwd().resolve() == destination.resolve()
+    assert (destination / "memory.db").read_bytes() == b"safe"
+    assert restored == [str(destination.resolve() / "memory.db")]
+    assert not list(tmp_path.glob(".empty-destination.restore-*"))
+
+
+def test_verify_rejects_indirect_state_directory(tmp_path):
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks unavailable")
+    backup = tmp_path / "backup"
+    outside_state = tmp_path / "outside-state"
+    outside_state.mkdir()
+    (outside_state / "memory.db").write_bytes(b"safe")
+    backup.mkdir()
+    try:
+        (backup / "state").symlink_to(outside_state, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlink creation unavailable")
+    digest = hashlib.sha256(b"safe").hexdigest()
+    manifest = {
+        "format_version": backup_adapter.MANIFEST_FORMAT_VERSION,
+        "files": [{
+            "path": "state/memory.db", "size": 4, "sha256": digest,
+        }],
+    }
+    manifest_path = backup / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    (backup / "checksums.sha256").write_text(
+        f"{digest}  state/memory.db\n{manifest_digest}  manifest.json\n",
+        encoding="utf-8",
+    )
+
+    assert backup_adapter.verify_backup(backup) == [
+        "state directory is missing or indirect"
+    ]
+
+
+def test_restore_rejects_manifest_change_after_verification(
+    tmp_path, monkeypatch,
+):
+    backup = tmp_path / "backup"
+    _write_fixture_backup(backup)
+    destination = tmp_path / "restored"
+    real_verify = backup_adapter.verify_backup
+
+    def mutate_after_verify(path):
+        result = real_verify(path)
+        (backup / "manifest.json").write_text("{}", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(backup_adapter, "verify_backup", mutate_after_verify)
+    with pytest.raises(backup_adapter.BackupError, match="changed during verification"):
+        backup_adapter.restore_to_empty(backup, destination)
+    assert not destination.exists()
+
+
+def test_restore_publication_failure_restores_empty_destination(
+    tmp_path, monkeypatch,
+):
+    backup = tmp_path / "backup"
+    _write_fixture_backup(backup)
+    destination = tmp_path / "restored"
+    destination.mkdir()
+
+    def fail_publication(_source, _destination):
+        raise OSError("publication failed")
+
+    monkeypatch.setattr(backup_adapter.os, "rename", fail_publication)
+    with pytest.raises(OSError, match="publication failed"):
+        backup_adapter.restore_to_empty(backup, destination)
+    assert destination.is_dir()
+    assert list(destination.iterdir()) == []
+    assert not list(tmp_path.glob(".restored.restore-*"))
+
+
+def test_list_and_prune_ignore_indirect_backup_directories(tmp_path):
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks unavailable")
+    target = tmp_path / "backups"
+    outside = tmp_path / "outside"
+    target.mkdir()
+    _write_fixture_backup(outside)
+    indirect = target / "apparently-valid-backup"
+    try:
+        indirect.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlink creation unavailable")
+
+    assert backup_adapter.list_backups(target) == []
+    assert backup_adapter.prune_backups(target, keep=1) == []
+    assert (outside / "manifest.json").is_file()
+
+
+@pytest.mark.parametrize("manifest", [[], "not-an-object", None])
+def test_list_ignores_non_object_manifests(tmp_path, manifest):
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / "manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+
+    assert backup_adapter.list_backups(tmp_path) == []
+
+
+def test_list_normalizes_malformed_sort_and_display_metadata(tmp_path):
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / "manifest.json").write_text(
+        json.dumps({
+            "backup_id": [],
+            "created_at_utc": {"invalid": True},
+            "application_version": 7,
+            "files": "not-a-list",
+        }),
+        encoding="utf-8",
+    )
+
+    assert backup_adapter.list_backups(tmp_path) == [{
+        "path": str(candidate),
+        "backup_id": "unknown",
+        "created_at_utc": "unknown",
+        "application_version": "unknown",
+        "files": 0,
+    }]
+
+
 @pytest.mark.parametrize("value", [True, 1.5, "2", -1, 0])
 def test_retention_rejects_non_integer_and_non_positive_keep(tmp_path, value):
     with pytest.raises(backup_adapter.BackupError):
