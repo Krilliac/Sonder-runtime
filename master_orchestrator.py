@@ -190,11 +190,15 @@ def _ensure_owner() -> None:
     global _PRINCIPAL_ID, _PRINCIPAL_SECRET
     with _OWNER_SERVICE_LOCK:
         if not _retained_messaging_available():
-            # Ordinary orchestration remains available during a live source
-            # reload. Messaging itself requires the stable store to be loaded
-            # from the updated source by restarting the runtime.
-            _PRINCIPAL_ID = ""
-            _PRINCIPAL_SECRET = ""
+            # The orchestrator can hot-reload while the deliberately stable
+            # fleet store is still the previous version.  Creating a row
+            # through that mixed-version boundary would permanently omit the
+            # principal scope, making it invisible after restart.  Keep
+            # already-running work intact, but fail new orchestration before
+            # any durable row is created.
+            raise RuntimeError(
+                "fleet orchestration requires a runtime restart after this update"
+            )
         elif not _PRINCIPAL_ID or not _PRINCIPAL_SECRET:
             _PRINCIPAL_ID, _PRINCIPAL_SECRET = fleet_store.local_principal_credentials()
         else:
