@@ -44,7 +44,9 @@ class AdaptiveBenchmarkError(ValueError):
 
 
 def _text(value, label, limit):
-    text = str(value or "").strip()
+    if not isinstance(value, str):
+        raise AdaptiveBenchmarkError("%s must be text" % label)
+    text = value.strip()
     if not text or len(text) > limit or any(c in text for c in "\r\n\x00"):
         raise AdaptiveBenchmarkError(
             "%s is required and must not exceed %d characters" % (label, limit)
@@ -53,6 +55,8 @@ def _text(value, label, limit):
 
 
 def _digest(value, label):
+    if not isinstance(value, str):
+        raise AdaptiveBenchmarkError("%s must be a 64-character SHA-256 digest" % label)
     try:
         return eval_history.make_identity(
             "digest-check", value, "digest-check", "1", value,
@@ -77,6 +81,14 @@ def _canonical_digest(value):
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _reject_unknown_keys(value, allowed, label):
+    unknown = sorted(repr(key) for key in value if key not in allowed)
+    if unknown:
+        raise AdaptiveBenchmarkError(
+            "%s contains unsupported fields: %s" % (label, ", ".join(unknown))
+        )
+
+
 def _normalize_tasks(tasks):
     if not isinstance(tasks, list) or not tasks or len(tasks) > MAX_TASKS:
         raise AdaptiveBenchmarkError(
@@ -87,6 +99,11 @@ def _normalize_tasks(tasks):
     for index, task in enumerate(tasks):
         if not isinstance(task, dict):
             raise AdaptiveBenchmarkError("task %d must be an object" % index)
+        _reject_unknown_keys(
+            task,
+            {"name", "completed", "retries", "tokens_in", "tokens_out"},
+            "task %d" % index,
+        )
         name = _text(task.get("name"), "task name", 128)
         if name in seen:
             raise AdaptiveBenchmarkError("duplicate task name: %s" % name)
@@ -131,6 +148,11 @@ def make_record(
     hardware, hardware_digest, checkpoint, checkpoint_label,
     grounded_records, grounded_history_digest, tasks, source="manual",
 ):
+    model = _text(model, "model", 256)
+    model_digest = _digest(model_digest, "model_digest")
+    suite = _text(suite, "suite", 128)
+    suite_version = _text(suite_version, "suite_version", 128)
+    suite_digest = _digest(suite_digest, "suite_digest")
     try:
         base_identity, _ = eval_history.make_identity(
             model, model_digest, suite, suite_version, suite_digest,
@@ -181,10 +203,31 @@ def make_record(
 def validate_record(value):
     if not isinstance(value, dict) or value.get("schema") != RECORD_SCHEMA:
         raise AdaptiveBenchmarkError("unsupported or missing checkpoint schema")
+    _reject_unknown_keys(
+        value,
+        {
+            "schema", "identity", "identity_key", "checkpoint", "tasks",
+            "summary", "source", "record_id",
+        },
+        "checkpoint record",
+    )
     identity = value.get("identity")
     checkpoint = value.get("checkpoint")
     if not isinstance(identity, dict) or not isinstance(checkpoint, dict):
         raise AdaptiveBenchmarkError("record identity and checkpoint must be objects")
+    _reject_unknown_keys(
+        identity,
+        {
+            "model", "model_digest", "suite", "suite_version", "suite_digest",
+            "hardware", "hardware_digest",
+        },
+        "record identity",
+    )
+    _reject_unknown_keys(
+        checkpoint,
+        {"kind", "label", "grounded_records", "grounded_history_digest"},
+        "record checkpoint",
+    )
     normalized = make_record(
         model=identity.get("model"),
         model_digest=identity.get("model_digest"),
@@ -211,12 +254,15 @@ def validate_record(value):
 
 def load_record(path):
     path = Path(path)
-    size = path.stat().st_size
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise AdaptiveBenchmarkError("cannot inspect checkpoint JSON: %s" % exc) from exc
     if size <= 0 or size > MAX_JSON_BYTES:
         raise AdaptiveBenchmarkError("checkpoint JSON is empty or exceeds byte ceiling")
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, RecursionError, ValueError) as exc:
         raise AdaptiveBenchmarkError("cannot read checkpoint JSON: %s" % exc) from exc
     return validate_record(value)
 
@@ -246,6 +292,8 @@ def compare_records(fresh, accumulated):
     per_task = []
     improved_tasks = []
     regressed_tasks = []
+    retry_regressed_tasks = []
+    token_regressed_tasks = []
     for name in sorted(fresh_tasks):
         before = fresh_tasks[name]
         after = accumulated_tasks[name]
@@ -257,18 +305,24 @@ def compare_records(fresh, accumulated):
             regressed_tasks.append(name)
         else:
             completion_change = "unchanged"
+        retries_delta = after["retries"] - before["retries"]
+        tokens_total_delta = (
+            after["tokens_in"] + after["tokens_out"]
+            - before["tokens_in"] - before["tokens_out"]
+        )
+        if retries_delta > 0:
+            retry_regressed_tasks.append(name)
+        if tokens_total_delta > 0:
+            token_regressed_tasks.append(name)
         per_task.append({
             "name": name,
             "fresh_completed": before["completed"],
             "accumulated_completed": after["completed"],
             "completion_change": completion_change,
-            "retries_delta": after["retries"] - before["retries"],
+            "retries_delta": retries_delta,
             "tokens_in_delta": after["tokens_in"] - before["tokens_in"],
             "tokens_out_delta": after["tokens_out"] - before["tokens_out"],
-            "tokens_total_delta": (
-                after["tokens_in"] + after["tokens_out"]
-                - before["tokens_in"] - before["tokens_out"]
-            ),
+            "tokens_total_delta": tokens_total_delta,
         })
     before = fresh["summary"]
     after = accumulated["summary"]
@@ -288,14 +342,19 @@ def compare_records(fresh, accumulated):
         completion_assessment = "improved"
     else:
         completion_assessment = "unchanged"
-    return {
+    report = {
         "schema": REPORT_SCHEMA,
         "model_free": True,
         "causal_claim": False,
         "identity": fresh["identity"],
         "identity_key": fresh["identity_key"],
-        "fresh": {"checkpoint": fresh["checkpoint"], "summary": before},
+        "fresh": {
+            "record_id": fresh["record_id"], "source": fresh["source"],
+            "checkpoint": fresh["checkpoint"], "summary": before,
+        },
         "accumulated": {
+            "record_id": accumulated["record_id"],
+            "source": accumulated["source"],
             "checkpoint": accumulated["checkpoint"], "summary": after,
         },
         "deltas": deltas,
@@ -306,9 +365,13 @@ def compare_records(fresh, accumulated):
             "any_completion_regression": bool(regressed_tasks),
             "improved_tasks": improved_tasks,
             "regressed_tasks": regressed_tasks,
+            "retry_regressed_tasks": retry_regressed_tasks,
+            "token_regressed_tasks": token_regressed_tasks,
         },
         "tasks": per_task,
     }
+    report["report_id"] = _canonical_digest(report)
+    return report
 
 
 def render_report(report):
@@ -353,32 +416,43 @@ def render_report(report):
         "",
         "Regressed tasks: %s" % (", ".join(assessment["regressed_tasks"]) or "none"),
         "",
+        "Tasks with more retries: %s"
+        % (", ".join(assessment["retry_regressed_tasks"]) or "none"),
+        "",
+        "Tasks with more tokens: %s"
+        % (", ".join(assessment["token_regressed_tasks"]) or "none"),
+        "",
     ]
     return "\n".join(lines)
 
 
 def _read_tasks(path):
     path = Path(path)
-    if path.stat().st_size > MAX_JSON_BYTES:
-        raise AdaptiveBenchmarkError("task JSON exceeds byte ceiling")
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise AdaptiveBenchmarkError("cannot inspect task JSON: %s" % exc) from exc
+    if size <= 0 or size > MAX_JSON_BYTES:
+        raise AdaptiveBenchmarkError("task JSON is empty or exceeds byte ceiling")
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, RecursionError, ValueError) as exc:
         raise AdaptiveBenchmarkError("cannot read task JSON: %s" % exc) from exc
 
 
-def _write_json(path, value):
+def _atomic_write(path, encoded):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    encoded = (
-        json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
-    ).encode("utf-8")
     if len(encoded) > MAX_JSON_BYTES:
-        raise AdaptiveBenchmarkError("output JSON exceeds byte ceiling")
+        raise AdaptiveBenchmarkError("output exceeds byte ceiling")
     descriptor, temporary = tempfile.mkstemp(
         prefix=path.name + ".", suffix=".tmp", dir=str(path.parent),
     )
     try:
+        try:
+            os.chmod(temporary, 0o600)
+        except OSError:
+            pass
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(encoded)
             handle.flush()
@@ -390,6 +464,34 @@ def _write_json(path, value):
         except OSError:
             pass
         raise
+
+
+def _write_json(path, value):
+    encoded = (
+        json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    ).encode("utf-8")
+    _atomic_write(path, encoded)
+
+
+def _write_text(path, value):
+    _atomic_write(path, (value + "\n").encode("utf-8"))
+
+
+def _path_key(path):
+    return os.path.normcase(str(Path(path).expanduser().resolve()))
+
+
+def _reject_path_collisions(named_paths):
+    seen = {}
+    for label, path in named_paths:
+        if not path:
+            continue
+        key = _path_key(path)
+        if key in seen:
+            raise AdaptiveBenchmarkError(
+                "%s path must differ from %s path" % (label, seen[key])
+            )
+        seen[key] = label
 
 
 def _add_identity_arguments(parser):
@@ -424,6 +526,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.command == "record":
+            _reject_path_collisions([
+                ("tasks", args.tasks), ("output", args.output),
+            ])
             result = make_record(
                 model=args.model, model_digest=args.model_digest,
                 suite=args.suite, suite_version=args.suite_version,
@@ -437,12 +542,16 @@ def main(argv=None):
             _write_json(args.output, result)
             print(json.dumps(result, sort_keys=True))
             return 0
+        _reject_path_collisions([
+            ("fresh", args.fresh), ("accumulated", args.accumulated),
+            ("json", args.json), ("markdown", args.markdown),
+        ])
         result = compare_records(load_record(args.fresh), load_record(args.accumulated))
         report = render_report(result)
         if args.json:
             _write_json(args.json, result)
         if args.markdown:
-            Path(args.markdown).write_text(report + "\n", encoding="utf-8")
+            _write_text(args.markdown, report)
         print(json.dumps(result, sort_keys=True) if args.json_stdout else report)
         return 0
     except (AdaptiveBenchmarkError, OSError) as exc:

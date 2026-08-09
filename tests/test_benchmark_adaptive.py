@@ -61,6 +61,7 @@ def test_comparison_tracks_completion_retries_tokens_and_identity():
     fresh = _record("fresh")
     accumulated = _record("accumulated", _tasks(solve_second=True))
     report = adaptive.compare_records(fresh, accumulated)
+    assert report == adaptive.compare_records(fresh, accumulated)
 
     assert report["model_free"] is True
     assert report["causal_claim"] is False
@@ -78,6 +79,12 @@ def test_comparison_tracks_completion_retries_tokens_and_identity():
     assert report["assessment"]["tokens"] == "unchanged"
     assert report["assessment"]["improved_tasks"] == ["task-b"]
     assert report["assessment"]["regressed_tasks"] == []
+    assert report["fresh"]["record_id"] == fresh["record_id"]
+    assert report["accumulated"]["record_id"] == accumulated["record_id"]
+    assert len(report["report_id"]) == 64
+    unsigned_report = dict(report)
+    report_id = unsigned_report.pop("report_id")
+    assert adaptive._canonical_digest(unsigned_report) == report_id
     assert "does not run a model" in adaptive.render_report(report)
 
 
@@ -92,6 +99,20 @@ def test_task_swap_reports_regression_even_when_aggregate_completion_is_equal():
     assert report["assessment"]["any_completion_regression"] is True
     assert report["assessment"]["improved_tasks"] == ["task-b"]
     assert report["assessment"]["regressed_tasks"] == ["task-a"]
+    assert report["assessment"]["retry_regressed_tasks"] == ["task-a"]
+
+
+def test_per_task_token_regression_is_not_hidden_by_better_aggregate():
+    fresh = _record("fresh")
+    tasks = _tasks()
+    tasks[0]["tokens_in"] = 150
+    tasks[1]["tokens_in"] = 20
+    accumulated = _record("accumulated", tasks)
+    report = adaptive.compare_records(fresh, accumulated)
+    assert report["deltas"]["tokens_total"] == -10
+    assert report["assessment"]["tokens"] == "improved"
+    assert report["assessment"]["token_regressed_tasks"] == ["task-a"]
+    assert "Tasks with more tokens: task-a" in adaptive.render_report(report)
 
 
 def test_exact_hardware_model_and_suite_identity_is_required():
@@ -122,6 +143,14 @@ def test_records_are_deterministic_bounded_and_tamper_evident():
     with pytest.raises(adaptive.AdaptiveBenchmarkError, match="summary"):
         adaptive.validate_record(tampered)
 
+    extended = json.loads(json.dumps(first))
+    extended["untracked_claim"] = "improved"
+    with pytest.raises(adaptive.AdaptiveBenchmarkError, match="unsupported fields"):
+        adaptive.validate_record(extended)
+    extended[1] = "non-text key"
+    with pytest.raises(adaptive.AdaptiveBenchmarkError, match="unsupported fields"):
+        adaptive.validate_record(extended)
+
     too_many = [_tasks()[0] | {"name": "task-%03d" % i}
                 for i in range(adaptive.MAX_TASKS + 1)]
     with pytest.raises(adaptive.AdaptiveBenchmarkError, match="at most"):
@@ -135,6 +164,8 @@ def test_records_are_deterministic_bounded_and_tamper_evident():
         ("grounded_records", -1, "non-negative integer"),
         ("grounded_records", adaptive.MAX_COUNTER + 1, "no greater"),
         ("grounded_history_digest", "short", "64-character"),
+        ("model", 7, "must be text"),
+        ("model_digest", 7, "64-character"),
     ],
 )
 def test_invalid_checkpoint_evidence_is_rejected(field, value, match):
@@ -182,3 +213,67 @@ def test_cli_creates_records_and_report_without_a_model(tmp_path, capsys):
     assert "Adaptive improvement checkpoint comparison" in stdout
     assert json.loads(json_path.read_text(encoding="utf-8"))["model_free"] is True
     assert "Regressed tasks: none" in markdown_path.read_text(encoding="utf-8")
+
+    fresh_before = fresh_path.read_bytes()
+    assert adaptive.main([
+        "compare", "--fresh", str(fresh_path),
+        "--accumulated", str(warm_path), "--json", str(fresh_path),
+    ]) == 2
+    assert "must differ" in capsys.readouterr().err
+    assert fresh_path.read_bytes() == fresh_before
+
+
+def test_path_collisions_are_rejected_without_overwriting_evidence(tmp_path, capsys):
+    tasks_path = tmp_path / "tasks.json"
+    original = json.dumps(_tasks())
+    tasks_path.write_text(original, encoding="utf-8")
+    result = adaptive.main([
+        "record", "--model", "sonder:latest", "--model-digest", DIGEST_A,
+        "--suite", "adaptive-core", "--suite-version", "1",
+        "--suite-digest", DIGEST_B, "--hardware", "host-a",
+        "--hardware-digest", DIGEST_A, "--checkpoint", "fresh",
+        "--checkpoint-label", "clean", "--grounded-records", "0",
+        "--grounded-history-digest", EMPTY_DIGEST,
+        "--tasks", str(tasks_path), "--output", str(tasks_path),
+    ])
+    assert result == 2
+    assert "must differ" in capsys.readouterr().err
+    assert tasks_path.read_text(encoding="utf-8") == original
+
+
+def test_atomic_output_failure_preserves_existing_file(monkeypatch, tmp_path):
+    output = tmp_path / "report.json"
+    output.write_bytes(b"prior evidence\n")
+
+    def fail_replace(_source, _destination):
+        raise OSError("replace blocked")
+
+    monkeypatch.setattr(adaptive.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="replace blocked"):
+        adaptive._write_json(output, {"replacement": True})
+    assert output.read_bytes() == b"prior evidence\n"
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "[" * 2000 + "]" * 2000,
+        '{"number":' + "9" * 5000 + "}",
+    ],
+)
+def test_pathological_json_is_reported_as_bounded_input_error(tmp_path, payload):
+    path = tmp_path / "bad.json"
+    path.write_text(payload, encoding="utf-8")
+    with pytest.raises(
+        adaptive.AdaptiveBenchmarkError,
+        match="cannot read|unsupported or missing",
+    ):
+        adaptive.load_record(path)
+
+
+def test_oversize_json_is_rejected_before_parsing(tmp_path):
+    path = tmp_path / "huge.json"
+    path.write_bytes(b" " * (adaptive.MAX_JSON_BYTES + 1))
+    with pytest.raises(adaptive.AdaptiveBenchmarkError, match="byte ceiling"):
+        adaptive.load_record(path)

@@ -176,8 +176,11 @@ python scripts/benchmark_adaptive.py compare --fresh fresh.json \
 The report gives completion, retry, and token deltas plus the exact improved and
 regressed task names. A task swap is reported as `mixed` even when aggregate
 completion is unchanged, preventing an aggregate score from hiding a regression.
-Retry and token directions remain separate from completion rather than being
-collapsed into an unsupported single score.
+Per-task retry and token regressions are also listed even when the aggregate
+direction improves. Retry and token directions remain separate from completion
+rather than being collapsed into an unsupported single score. Record IDs bind
+the report to both inputs, and the deterministic report has its own content ID.
+The CLI refuses output/input path collisions and writes reports atomically.
 
 This path compares supplied observations; it does not create them and does not
 claim causation. For credible adaptive-improvement evidence, the external runner
