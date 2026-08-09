@@ -15870,7 +15870,16 @@ def _capability_refined_tier(
 def route_work_request(prompt: str, project: str = "") -> str | None:
     """Transparently route eligible natural work to a bounded execution lane."""
     _maybe_live_reload()
-    decision = intents.classify_execution(prompt)
+    explicit_worker_cap = master_orchestrator.requested_worker_cap(prompt)
+    decision = (
+        {
+            "mode": "fleet",
+            "reason": "explicit bounded worker-count request",
+            "plan_only": False,
+            "actions": [],
+        }
+        if explicit_worker_cap else intents.classify_execution(prompt)
+    )
     if not decision:
         return None
     mode = decision["mode"]
@@ -15959,10 +15968,9 @@ def route_work_request(prompt: str, project: str = "") -> str | None:
             "task": prompt, "mode": "fleet", "tier": selected_tier,
             "learn": False,
         }
-        requested_cap = master_orchestrator.requested_worker_cap(prompt)
-        if requested_cap:
-            master_kwargs["agents"] = requested_cap
-            master_kwargs["worker_cap"] = requested_cap
+        if explicit_worker_cap:
+            master_kwargs["agents"] = explicit_worker_cap
+            master_kwargs["worker_cap"] = explicit_worker_cap
         if isinstance(resolved_project, str) and os.path.isdir(resolved_project):
             master_kwargs["project"] = resolved_project
         output = master_orchestrate(**master_kwargs)

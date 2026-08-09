@@ -121,7 +121,6 @@ _EXECUTION_NO_BACKGROUND_RE = re.compile(
 )
 _EXECUTION_FLEET_RE = re.compile(
     r"\b(?:fleet|swarm|fan[- ]?out|paral+el (?:sub)?agents?|paral+el workflow|"
-    r"(?:use|with|run|spawn|launch)\s+[1-9]\d*\s+(?:concurrent\s+)?(?:workers?|agents?)|"
     r"multiple subagents?|spawn (?:as many|as much|all|the maximum|maximum|max)?\s*"
     r"(?:sub)?agents?|"
     r"as many (?:sub)?agents? as (?:possible|the hardware allows))\b"
