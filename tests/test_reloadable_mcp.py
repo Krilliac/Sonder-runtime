@@ -45,6 +45,52 @@ def _write_new_source(path, text):
     os.utime(path, (future, future))
 
 
+def _primitive_source(version, *, include_extra=False, fail=False):
+    extra = (
+        '''
+@mcp.resource("sonder://extra")
+def extra_resource() -> str:
+    return "extra"
+
+@mcp.prompt("extra_prompt")
+def extra_prompt() -> str:
+    return "extra"
+'''
+        if include_extra
+        else ""
+    )
+    failure = 'raise RuntimeError("refresh failed")' if fail else ""
+    return f'''from reloadable_mcp import ReloadableFastMCP
+
+existing = globals().get("_PERSISTENT_MCP")
+if isinstance(existing, ReloadableFastMCP):
+    mcp = existing
+    mcp.begin_module_refresh()
+else:
+    mcp = ReloadableFastMCP("sample")
+_PERSISTENT_MCP = mcp
+
+@mcp.tool()
+def alpha() -> str:
+    return "{version}"
+
+@mcp.resource("sonder://state")
+def state_resource() -> str:
+    return "{version}"
+
+@mcp.resource("sonder://item/{{name}}")
+def item_resource(name: str) -> str:
+    return name
+
+@mcp.prompt("state_prompt")
+def state_prompt() -> str:
+    return "{version}"
+{extra}
+{failure}
+mcp.finish_module_refresh(__name__, __file__, globals())
+'''
+
+
 def _stdio_source(version, *, include_beta=False):
     return (
         _module_source(version, include_beta=include_beta)
@@ -122,6 +168,102 @@ def test_broken_refresh_preserves_last_known_good_registry(monkeypatch, tmp_path
         assert state["loaded_digest"] == loaded
         assert state["source_changed"] is True
         assert state["status"] == "error"
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_refresh_atomically_replaces_resources_prompts_and_templates(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("SONDER_LIVE_RELOAD", "1")
+    module_name = "reloadable_mcp_primitives_sample"
+    module_path = tmp_path / (module_name + ".py")
+    module_path.write_text(_primitive_source("v1", include_extra=True), encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    try:
+        mcp = importlib.import_module(module_name).mcp
+        assert len(mcp._resource_manager.list_resources()) == 2
+        assert len(mcp._resource_manager.list_templates()) == 1
+        assert len(mcp._prompt_manager.list_prompts()) == 2
+
+        _write_new_source(module_path, _primitive_source("v2"))
+        refreshed = mcp.refresh_if_changed()
+
+        assert refreshed == {"reloaded": True, "surface_changed": True}
+        assert [str(r.uri) for r in mcp._resource_manager.list_resources()] == [
+            "sonder://state",
+        ]
+        assert len(mcp._resource_manager.list_templates()) == 1
+        assert [p.name for p in mcp._prompt_manager.list_prompts()] == [
+            "state_prompt"
+        ]
+        assert mcp.runtime_snapshot()["last_surface_changes"] == {
+            "tools": False,
+            "resources": True,
+            "prompts": True,
+        }
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_failed_refresh_does_not_publish_resources_or_prompts(monkeypatch, tmp_path):
+    monkeypatch.setenv("SONDER_LIVE_RELOAD", "1")
+    module_name = "reloadable_mcp_primitive_failure_sample"
+    module_path = tmp_path / (module_name + ".py")
+    module_path.write_text(_primitive_source("stable"), encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    try:
+        mcp = importlib.import_module(module_name).mcp
+        _write_new_source(
+            module_path,
+            _primitive_source("partial", include_extra=True, fail=True),
+        )
+
+        refreshed = mcp.refresh_if_changed()
+
+        assert refreshed["reloaded"] is False
+        assert [str(r.uri) for r in mcp._resource_manager.list_resources()] == [
+            "sonder://state",
+        ]
+        assert [p.name for p in mcp._prompt_manager.list_prompts()] == [
+            "state_prompt"
+        ]
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_primitive_refresh_advertises_and_sends_list_changed(monkeypatch, tmp_path):
+    monkeypatch.setenv("SONDER_LIVE_RELOAD", "1")
+    module_name = "reloadable_mcp_primitive_notification_sample"
+    module_path = tmp_path / (module_name + ".py")
+    module_path.write_text(_primitive_source("before"), encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    try:
+        mcp = importlib.import_module(module_name).mcp
+        capabilities = mcp._mcp_server.create_initialization_options().capabilities
+        assert capabilities.resources.listChanged is True
+        assert capabilities.prompts.listChanged is True
+        notifications = []
+
+        class Session:
+            async def send_tool_list_changed(self):
+                notifications.append("tools")
+
+            async def send_resource_list_changed(self):
+                notifications.append("resources")
+
+            async def send_prompt_list_changed(self):
+                notifications.append("prompts")
+
+        context = SimpleNamespace(
+            request_context=SimpleNamespace(session=Session()),
+        )
+        monkeypatch.setattr(mcp, "get_context", lambda: context)
+        _write_new_source(module_path, _primitive_source("after", include_extra=True))
+
+        asyncio.run(mcp.list_resources())
+
+        assert notifications == ["resources", "prompts"]
     finally:
         sys.modules.pop(module_name, None)
 
