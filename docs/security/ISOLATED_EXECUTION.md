@@ -72,6 +72,9 @@ combined output. Docker's default effective memory-plus-swap total is 512 MiB;
 Podman's is 513 MiB (512 MiB RAM plus 1 MiB swap). The hard effective total is
 4096 MiB, so Podman's maximum RAM request is 4095 MiB. Other hard maxima are
 120 seconds, 4 CPUs, 256 PIDs, 64 KiB stdin, and 256 KiB combined output.
+Resource fields accept only their declared finite JSON integer/number types;
+booleans, strings, decimals, NaN, infinities, conversion objects, and fractional
+values for integer fields are rejected and audited rather than coerced.
 
 Windows paths must be absolute, drive-qualified local paths. UNC paths, device
 paths, relative paths, control characters, and the comma delimiter used by the
