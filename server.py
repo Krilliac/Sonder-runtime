@@ -1,25 +1,21 @@
 """
 sonder-runtime MCP server
 ---------------------
-Bridges Claude Code to a local Ollama instance running on the RTX 4050 (6 GB VRAM).
+Bridges MCP clients to a local Ollama instance on operator-controlled hardware.
 
 Design goals:
-  * Claude decides WHEN to offload (tools are opt-in), so VRAM is idle until used.
-  * Tiered models: only one sits in VRAM at a time; short keep_alive frees it fast.
+  * The caller decides WHEN to offload, so local compute is idle until used.
+  * Tiered models can share one stable alias; bounded keep_alive limits memory use.
   * Zero third-party HTTP deps (stdlib urllib) -> only `mcp` is required.
 
 Tiers (escalation ladder, cheapest first):
-  LOCAL BASE (private, free, offline, runs on the 6 GB 4050; always bound):
-    fast        -> qwen2.5:3b            (~2 GB, fully GPU-resident, snappy)
-    code        -> qwen2.5-coder:7b      (~4.7 GB Q4, strong coding model)
-    general     -> qwen2.5:7b-instruct   (~4.7 GB Q4, general text grunt-work)
+  LOCAL BASE (private, free, offline; always bound):
+    fast/code/general -> sonder:latest (hardware-sized by setup, operator-owned)
   LOCAL SPECIALIST (capability-routed; either may be left unset by the operator,
                     in which case that work degrades to a base tier):
-    reasoning   -> deepseek-r1:7b        (~4.7 GB Q4, proofs/derivations/planning)
-    vision      -> moondream             (~1.7 GB, images/screenshots/OCR)
+    reasoning/vision -> unbound until configured with installed models
   CLOUD  (Ollama-hosted, huge, metered; prompt leaves this machine):
-    cloud-code  -> kimi-k2.7-code:cloud   (plan-covered coding, no local VRAM cost)
-    cloud-general -> glm-5.2:cloud        (long-context reasoning, no local VRAM cost)
+    cloud-code/cloud-general -> configured hosted defaults (no local memory cost)
 """
 
 import contextlib
@@ -103,7 +99,7 @@ OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
 KEEP_ALIVE = os.environ.get("SONDER_KEEP_ALIVE", "2m")
 TIMEOUT = int(os.environ.get("SONDER_TIMEOUT", "300"))
 SONDER_STABLE_ALIAS = "sonder:latest"
-LOCAL_CODE_MODEL = os.environ.get("SONDER_CODE_LOCAL", "qwen2.5-coder:7b")
+LOCAL_CODE_MODEL = os.environ.get("SONDER_CODE_LOCAL", SONDER_STABLE_ALIAS)
 DEFAULT_CLOUD_CODE_MODEL = "kimi-k2.7-code:cloud"
 DEFAULT_CLOUD_GENERAL_MODEL = "glm-5.2:cloud"
 CLOUD_EXTRA_USAGE_FALLBACK_MODEL = "kimi-k2.7-code:cloud"
@@ -156,7 +152,11 @@ def _local_model_options(temperature, num_predict, num_ctx):
     }
     runtime = {
         "num_thread": _env_int_option("SONDER_NUM_THREAD", _cpu_thread_default()),
-        "num_gpu": _env_int_option("SONDER_NUM_GPU", 999),
+        # Omit num_gpu unless the operator explicitly pins it. Ollama can then
+        # select CPU, Metal, ROCm, CUDA, Vulkan, or another supported backend
+        # from live host capabilities instead of inheriting an NVIDIA-shaped
+        # default from the maintainer's workstation.
+        "num_gpu": _env_int_option("SONDER_NUM_GPU"),
         "num_batch": _env_int_option("SONDER_NUM_BATCH", 512),
     }
     for key, value in runtime.items():
@@ -185,15 +185,15 @@ def _context_native(value=None):
 
 
 TIERS = {
-    "fast": os.environ.get("SONDER_FAST", "qwen2.5:3b"),
-    "code": os.environ.get("SONDER_CODE", "qwen2.5-coder:7b"),
-    "general": os.environ.get("SONDER_GENERAL", "qwen2.5:7b-instruct"),
+    "fast": os.environ.get("SONDER_FAST", SONDER_STABLE_ALIAS),
+    "code": os.environ.get("SONDER_CODE", SONDER_STABLE_ALIAS),
+    "general": os.environ.get("SONDER_GENERAL", SONDER_STABLE_ALIAS),
     # Specialist local tiers the capability router prefers for reasoning and
     # vision work. `_refresh_runtime_policy` drops either one when the shared
     # policy leaves it unbound, so an unset tier is simply not offered and
     # routing degrades to a base tier exactly as it did before they existed.
-    "reasoning": os.environ.get("SONDER_REASONING", "deepseek-r1:7b"),
-    "vision": os.environ.get("SONDER_VISION", "moondream"),
+    "reasoning": os.environ.get("SONDER_REASONING", ""),
+    "vision": os.environ.get("SONDER_VISION", ""),
     "cloud-code": _live_cloud_model(
         os.environ.get("SONDER_CLOUD_CODE"), DEFAULT_CLOUD_CODE_MODEL
     ),
@@ -511,7 +511,7 @@ _STRICT_DEFAULT = os.environ.get("SONDER_STRICT", "").strip().lower() in ("1", "
 # (single-turn), or a distinct id to isolate a thread. Same idea for project facts.
 DEFAULT_SESSION = os.environ.get("SONDER_DEFAULT_SESSION", "default")
 DEFAULT_PROJECT = os.environ.get("SONDER_DEFAULT_PROJECT", "default")
-# Sessioned calls get a roomier context (fits easily on the 6 GB 4050) and keep the
+# Sessioned calls use the context policy selected for the live model and keep the
 # last MAX_TURNS turns live; older turns are rolled into a summary.
 SESSION_NUM_CTX = context_policy.default_requested()
 MAX_TURNS = int(os.environ.get("SONDER_MAX_TURNS", "12"))
@@ -3319,12 +3319,9 @@ def _offload_impl(
     # 0 means "ask the context policy", which the session path already does.
     # This path hardcoded 4096 and so ignored the policy and its env knobs,
     # which cost real capability: an autopilot run inspecting a 524 KB source
-    # file looped on search because the file was 32x its window. Measured on a
-    # 6 GiB RTX 4050 with a 7B q4 model resident, VRAM at 4096/8192/12288/16384
-    # was 4849/5301/5753/5881 MiB, so the policy default of 8192 doubles the
-    # window and still leaves ~840 MiB for the display and other processes.
-    # Past that the card is tight enough that another GPU consumer pushes
-    # llama.cpp into CPU offload, which costs more than the context is worth.
+    # file looped on search because the file was 32x its window. Defer the
+    # actual native size to context policy: CPU, Metal, AMD, Intel, NVIDIA, and
+    # remote Ollama hosts have different KV-cache and memory ceilings.
     num_ctx = num_ctx or context_policy.native()
     _refresh_live_cloud_tiers()
     request_timeout = _bounded_timeout(timeout)
@@ -3465,11 +3462,12 @@ def offload(
     learn: bool = True,
     timeout: int = TIMEOUT,
 ) -> str:
-    """Offload a self-contained subtask to a local-GPU or Ollama-cloud model.
+    """Offload a self-contained subtask to a local or Ollama-cloud model.
 
     Local aliases (fast/code/general, plus reasoning/vision when the operator
-    binds them) run privately on the loopback 6 GB 4050 by
-    default; an explicitly opted-in remote OLLAMA_HOST leaves this machine. The learning tiers
+    binds them) run privately through loopback Ollama by default on CPU or any
+    accelerator Ollama supports; an explicitly opted-in remote OLLAMA_HOST
+    leaves this machine. The learning tiers
     (SONDER_LEARN_TIERS, default: every configured local tier) participate in the
     lesson loop: with learn=True (default) the call is captured and the response ends
     with a '[interaction_id: <id>]' footer you can pass to record_outcome once you know
@@ -9102,7 +9100,7 @@ def loop(
       - {"type":"offload","prompt":"...","tier":"fast|code|general|reasoning|vision|cloud-code|cloud-general"}
       - {"type":"sonder","prompt":"...","session":"none"}
       - {"type":"sonder","prompt":"...","context_size":"1m"}
-      - {"type":"master_orchestrate","task":"...","mode":"inline|delegate|fleet","agents":3,"project":"C:\\repo"}
+      - {"type":"master_orchestrate","task":"...","mode":"inline|delegate|fleet","agents":3,"project":"/path/to/repo"}
       - {"type":"master_status"}
       - {"type":"master_capacity","requested_agents":32}
       - {"type":"master_cancel","agent_id":"master-id|prefix|all"}
@@ -10266,7 +10264,7 @@ AGENT_TOOL_HELP = """Available tools:
 - memory_embedding_backfill: {"limit": 25, "apply": false}
 - memory_interaction_embedding_backfill: {"limit": 25, "apply": false}
 - system_improvement_report: {}
-- master_orchestrate: {"task": "...", "mode": "ask|inline|delegate|fleet", "agents": 3, "tier": "code", "project": "C:\\repo"}
+- master_orchestrate: {"task": "...", "mode": "ask|inline|delegate|fleet", "agents": 3, "tier": "code", "project": "/path/to/repo"}
 - master_status: {}
 - master_capacity: {"requested_agents": 0}
 - master_cancel: {"agent_id": "master-id|prefix|all"}
@@ -14450,16 +14448,14 @@ def status() -> str:
         return f"ERROR contacting Ollama at {_ollama_display()}: {e}"
 
     installed = sorted(m.get("name", "?") for m in tags)
-    loaded = [
-        f"{m.get('name')} (VRAM ~{round(m.get('size_vram', 0)/1e9, 1)} GB)" for m in ps
-    ]
+    loaded = [str(m.get("name")) for m in ps if m.get("name")]
     tier_lines = [
-        f"  {k}={v}" + ("  [CLOUD — leaves machine]" if _is_cloud_tier(k, v) else "  [local GPU]")
+        f"  {k}={v}" + ("  [CLOUD — leaves machine]" if _is_cloud_tier(k, v) else "  [local Ollama]")
         for k, v in available_tiers(include_disabled=cloud_allowed()).items()
     ]
     if not ollama_endpoint.is_loopback(BASE):
         tier_lines = [
-            line.replace("  [local GPU]", "  [REMOTE OLLAMA - leaves machine]")
+            line.replace("  [local Ollama]", "  [REMOTE OLLAMA - leaves machine]")
             for line in tier_lines
         ]
     lines = [
@@ -14468,7 +14464,7 @@ def status() -> str:
         *tier_lines,
         f"Learning tiers: {', '.join(sorted(LEARN_TIERS)) if LEARN_TIERS else '(none)'}",
         f"Installed/registered models: {', '.join(installed) if installed else '(none)'}",
-        f"In VRAM now: {', '.join(loaded) if loaded else '(none — GPU idle)'}",
+        f"Resident in Ollama now: {', '.join(loaded) if loaded else '(none loaded)'}",
         f"local keep_alive: {KEEP_ALIVE}",
         "loopback retry: %d transient retry(s), %dms base delay; remote/cloud retries off" % (
             _local_model_retries(), int(_local_retry_delay(1) * 1000),
@@ -14509,10 +14505,9 @@ def status() -> str:
 
 # Ensemble ("ask several models, compound one answer") -------------------------
 #
-# Sequential by construction. On a 6 GB card only one model is resident at a
-# time, so polling N models costs N load+generate cycles; running them
-# concurrently would just thrash. Each model is unloaded after it answers so the
-# next one has room.
+# Sequential by construction. This keeps peak RAM/VRAM predictable on CPU-only
+# and accelerated hosts; concurrent model loads can otherwise thrash shared or
+# discrete memory. Each model is unloaded after it answers so the next has room.
 ENSEMBLE_MAX_MODELS = 4
 # Vision needs an image channel this path does not have, and a VLM handed a
 # text-only prompt answers with an immediate end-of-sequence.
@@ -14799,8 +14794,8 @@ def consult(
     tier fails; if the judge fails, a token-overlap fallback is labeled
     unknown-confidence.
 
-    By default it contrasts two LOCAL models (code=sonder:latest,
-    reasoning=deepseek-r1:7b) AND joins a cloud model (cloud-general) whenever
+    By default it contrasts configured LOCAL base/specialist models and joins a
+    cloud model (cloud-general) whenever
     cloud is enabled (SONDER_ALLOW_CLOUD=1) -- so the cloud is used when
     available but a disabled cloud never blocks the second opinion.
 
