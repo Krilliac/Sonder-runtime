@@ -62,6 +62,12 @@ confirm string matches.
 
 ## Other tool families
 
+- **Local service probe:** `local_service_probe` performs bounded,
+  unauthenticated `GET`/`HEAD` checks against explicit-port HTTP/HTTPS URLs.
+  Every DNS answer must be loopback (`127/8` or `::1`) and is rechecked before
+  a direct numeric-address connection. The probe ignores proxy environment,
+  sends no cookies or authorization, rejects credential-bearing URLs and
+  non-loopback redirects, and caps timeout, headers, body, and preview output.
 - **Web (opt-in):** `web_search`, `web_fetch`, `weather_lookup`,
   `approximate_location_lookup` — gated by `SONDER_WEB_TOOLS`.
 - **Artifacts:** `artifact_generate` / `artifact_verify` /
