@@ -11644,8 +11644,17 @@ or
 """
 
 
-def _agent_tool_help(read_only=False):
-    return REPOSITORY_AGENT_TOOL_HELP if read_only else AGENT_TOOL_HELP
+def _agent_tool_help(read_only=False, cloud=False):
+    help_text = REPOSITORY_AGENT_TOOL_HELP if read_only else AGENT_TOOL_HELP
+    if not cloud:
+        return help_text
+    return "\n".join(
+        line for line in help_text.splitlines()
+        if not any(
+            line.lstrip().startswith("- %s:" % name)
+            for name in _CLOUD_AGENT_LOCAL_ONLY_TOOLS
+        )
+    )
 
 
 def _tool_capability_shadow_surfaces():
@@ -11656,19 +11665,21 @@ def _tool_capability_shadow_surfaces():
     dispatch_tools = tool_capabilities.dispatch_names(_agent_dispatch)
     return tool_capabilities.ShadowSurfaces(
         direct_mcp_tools=direct_names,
+        tool_manifest=tool_manifest(),
         repository_read_only_tools=REPOSITORY_READ_ONLY_TOOLS,
         project_bound_agent_tools=_PROJECT_BOUND_AGENT_TOOLS,
         project_scoped_tools=_PROJECT_SCOPED_PATH_TOOLS | _PROJECT_SCOPED_EXECUTION_TOOLS,
         dispatch_tools=dispatch_tools,
-        # Hosted agents currently inherit the ordinary dispatch surface except
-        # for the explicit nested-model deny-list.  This snapshot is
-        # descriptive only: capability metadata must report privacy drift
-        # without silently becoming an authorization mechanism.
-        hosted_agent_tools=dispatch_tools - _CLOUD_AGENT_NESTED_MODEL_TOOLS,
+        hosted_agent_tools=(
+            dispatch_tools
+            - _CLOUD_AGENT_NESTED_MODEL_TOOLS
+            - _CLOUD_AGENT_LOCAL_ONLY_TOOLS
+        ),
         deduplicated_inspection_tools=_AGENT_DEDUPLICATED_INSPECTION_TOOLS,
         work_inspection_tools=_WORK_INSPECTION_TOOLS,
         full_agent_help=AGENT_TOOL_HELP,
         repository_agent_help=REPOSITORY_AGENT_TOOL_HELP,
+        hosted_agent_help=_agent_tool_help(cloud=True),
     )
 
 
@@ -13358,6 +13369,28 @@ _CLOUD_AGENT_NESTED_MODEL_TOOLS = frozenset({
     "offload", "master_orchestrate", "master_retry", "workflow_run",
     "game_reference_suite", "game_generate_and_test", "game_generation_campaign",
 })
+_CLOUD_AGENT_LOCAL_ONLY_TOOLS = frozenset({
+    "environment_status", "hardware_profile", "file_policy",
+    "workspace_inventory", "directory_tree", "file_find", "file_read",
+    "file_read_range", "file_digest", "text_search", "repo_status",
+    "repo_diff",
+})
+
+
+def _cloud_agent_tool_policy_error(tool_name):
+    if tool_name in _CLOUD_AGENT_LOCAL_ONLY_TOOLS:
+        return (
+            "ERROR: HOST POLICY: local-only tool '%s' is disabled inside a "
+            "hosted agent so private workspace or machine data cannot enter "
+            "the hosted model transcript." % tool_name
+        )
+    if tool_name in _CLOUD_AGENT_NESTED_MODEL_TOOLS:
+        return (
+            "ERROR: HOST POLICY: nested model-spawning tool '%s' is disabled "
+            "inside a hosted agent so all hosted output remains in one "
+            "bounded ledger." % tool_name
+        )
+    return ""
 
 
 def _canonical_agent_tool_name(tool_name):
@@ -14287,24 +14320,39 @@ def _agent_impl(
                 project_scope="",
             )
         return project_error
-    system = _build_system(
-        system or
-        "You are a local tool-using coding agent. Inspect real workspace evidence before making claims. "
-        "For action tasks, use tools instead of merely describing commands. Prefer workspace_inventory, directory_tree, "
-        "text_search, file_read_range, and program_search for discovery; use guarded file tools for "
-        "mutations; validate every mutation with workspace_run, script_run, file_read_range, "
-        "image_inspect, artifact_verify, or another path-specific checker before returning final. "
-        "After editing a script, run that exact path "
-        "with script_run; an equivalent run_code snippet does not validate the on-disk file. "
-        "Never invent tool results. "
-        "Use web tools for current external information and cite fetched URLs in the final answer. "
-        "Your final answer must lead with the outcome, mention changed paths and checks, and disclose failures. "
-        # One deterministic line about the host, so the model picks the right
-        # command shape (Windows vs POSIX, which build tool exists) instead of
-        # guessing and burning steps on `ls` under cmd or a missing toolchain.
-        + environment_probe.agent_brief(),
-        False,
-        "",
+    if cloud:
+        default_agent_system = (
+            "You are a hosted tool-using coding agent. Use only the tools listed "
+            "in the task transcript; host policy may withhold private machine or "
+            "workspace capabilities. Never invent tool results. Use web tools "
+            "for current external information and cite fetched URLs in the final "
+            "answer. Lead with the outcome and disclose failures."
+        )
+    else:
+        default_agent_system = (
+            "You are a local tool-using coding agent. Inspect real workspace evidence before making claims. "
+            "For action tasks, use tools instead of merely describing commands. Prefer workspace_inventory, directory_tree, "
+            "text_search, file_read_range, and program_search for discovery; use guarded file tools for "
+            "mutations; validate every mutation with workspace_run, script_run, file_read_range, "
+            "image_inspect, artifact_verify, or another path-specific checker before returning final. "
+            "After editing a script, run that exact path "
+            "with script_run; an equivalent run_code snippet does not validate the on-disk file. "
+            "Never invent tool results. "
+            "Use web tools for current external information and cite fetched URLs in the final answer. "
+            "Your final answer must lead with the outcome, mention changed paths and checks, and disclose failures. "
+            # One deterministic line about the host, so a local model picks the
+            # right command shape instead of guessing. Never send this private
+            # machine inventory to a hosted agent.
+            + environment_probe.agent_brief()
+        )
+    # Hosted agents receive only the explicitly supplied/default hosted
+    # system text. _build_system also appends mutable local profile, emotion,
+    # goal, and runtime-identity blocks; those are useful local context but
+    # are not part of the caller's cloud disclosure consent.
+    system = (
+        system or default_agent_system
+        if cloud
+        else _build_system(system or default_agent_system, False, "")
     )
     agent_num_predict = (
         _CLOUD_AGENT_NUM_PREDICT if cloud else _LOCAL_AGENT_NUM_PREDICT
@@ -14385,7 +14433,9 @@ def _agent_impl(
     # A clear bare namespace label such as "default" remains checklist-only;
     # path-like typos were rejected above rather than failing open to Sonder's
     # own workspace.
-    transcript = "Task:\n%s\n\n%s" % (prompt, _agent_tool_help(read_only=read_only))
+    transcript = "Task:\n%s\n\n%s" % (
+        prompt, _agent_tool_help(read_only=read_only, cloud=cloud)
+    )
     if project_scope:
         transcript += (
             "\n\nPROJECT ROOT: %s\nYour file/inspection tools are rooted at this "
@@ -14523,6 +14573,8 @@ def _agent_impl(
             )
         if not policy_error and tool_policy is not None:
             policy_error = str(tool_policy(tool_name, policy_tool_args) or "")
+        if not policy_error and cloud:
+            policy_error = _cloud_agent_tool_policy_error(tool_name)
         if not policy_error:
             policy_error = _repository_read_only_error(
                 tool_name,
@@ -14795,16 +14847,8 @@ def _agent_impl(
             )
         if not policy_error and tool_policy is not None:
             policy_error = str(tool_policy(tool_name, policy_tool_args) or "")
-        if (
-            not policy_error
-            and cloud
-            and tool_name in _CLOUD_AGENT_NESTED_MODEL_TOOLS
-        ):
-            policy_error = (
-                "ERROR: HOST POLICY: nested model-spawning tool '%s' is disabled "
-                "inside a hosted agent so all hosted output remains in one "
-                "bounded ledger." % tool_name
-            )
+        if not policy_error and cloud:
+            policy_error = _cloud_agent_tool_policy_error(tool_name)
         if not policy_error and project_scope:
             policy_error = _repository_scope_path_error(
                 tool_name, policy_tool_args, project_scope,
@@ -14875,6 +14919,10 @@ def _agent_impl(
                 "this identical call.\n"
                 + successful_inspection_results[call_signature]
             )
+        elif cloud and tool_name == "tool_manifest":
+            # The direct/local manifest remains authoritative and complete,
+            # while a hosted model sees only the capabilities it may request.
+            observation = _agent_tool_help(read_only=read_only, cloud=True)
         elif read_only and tool_name in {"command_registry_list", "tool_manifest"}:
             observation = _agent_tool_help(read_only=True)
         else:
