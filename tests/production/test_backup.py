@@ -19,6 +19,9 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setenv("SONDER_AUTOPILOT_DB", str(state / "autopilot.db"))
     monkeypatch.setenv("SONDER_FLEET_DB", str(state / "fleet.db"))
     monkeypatch.setenv("SONDER_OPERATIONS_DB", str(state / "operations.db"))
+    monkeypatch.setenv(
+        "SONDER_QUEUED_ACTION_DB", str(state / "queued_actions.db")
+    )
     monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(state / "runtime_policy.json"))
     conn = sqlite3.connect(str(state / "memory.db"))
     conn.execute("CREATE TABLE facts (id INTEGER PRIMARY KEY, body TEXT)")
@@ -58,6 +61,26 @@ def test_backup_taken_while_db_open_is_consistent(isolated_state, monkeypatch):
     finally:
         copy.close()
     assert count == 3
+
+
+def test_backup_includes_migrated_queued_action_ledger(isolated_state):
+    import queued_actions
+
+    conn = queued_actions.connect()
+    try:
+        queued_actions.propose(conn, queued_actions.ActionRequest.create(
+            "backup-action", "inspect", {"target": "local"},
+            proposed_by=queued_actions.Actor.USER,
+        ))
+    finally:
+        conn.close()
+    result = sonder_backup.create_backup(isolated_state / "backups")
+    copied = sqlite3.connect(str(result.path / "state" / "queued_actions.db"))
+    try:
+        count = copied.execute("SELECT COUNT(*) FROM queued_actions").fetchone()[0]
+    finally:
+        copied.close()
+    assert count == 1
 
 
 def test_tampered_backup_fails_verification(isolated_state):
