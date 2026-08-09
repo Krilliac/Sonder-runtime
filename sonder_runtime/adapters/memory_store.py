@@ -1,5 +1,6 @@
 """SQLite-backed memory adapter for the Sonder learning loop. Stdlib only."""
 import array
+from dataclasses import dataclass
 import hashlib
 import math
 import os
@@ -2586,6 +2587,261 @@ def find_session(conn, prefix):
 
 # --- semantic recall over past interactions --------------------------------
 
+RECALL_CANDIDATE_ROW_LIMIT = 512
+RECALL_CANDIDATE_BYTE_LIMIT = 8 * 1024 * 1024
+RECALL_CANDIDATE_TIME_LIMIT_S = 0.5
+RECALL_MAX_STORED_TASK_CHARS = 64_000
+RECALL_RESPONSE_PREFIX_CHARS = 401
+RECALL_MAX_EMBEDDING_BYTES = 64 * 1024
+
+
+@dataclass(frozen=True)
+class InteractionCandidatePage:
+    """One bounded, newest-first keyset page for semantic scoring."""
+
+    rows: tuple[dict, ...]
+    incomplete: bool
+    next_cursor: int | None
+    termination: str
+    rows_examined: int
+    bytes_loaded: int
+
+
+def _recall_row_bytes(row):
+    total = 0
+    for key in (
+        "id", "task", "response", "session_id", "task_embedding_model",
+        "task_embedding_revision", "project",
+    ):
+        value = row[key]
+        if isinstance(value, str):
+            total += len(value.encode("utf-8", errors="replace"))
+        elif isinstance(value, (bytes, bytearray, memoryview)):
+            total += len(value)
+    embedding = row["task_embedding"]
+    if isinstance(embedding, (bytes, bytearray, memoryview)):
+        total += len(embedding)
+    return total
+
+
+def _decode_recall_candidate(row):
+    decoded = dict(row)
+    for key in (
+        "id", "task", "response", "session_id", "task_embedding_model",
+        "task_embedding_revision", "project",
+    ):
+        value = decoded.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, (bytes, bytearray, memoryview)):
+            return None
+        try:
+            decoded[key] = bytes(value).decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            return None
+    return decoded
+
+
+def good_interaction_candidate_page(
+    conn, exclude_session=None, project=None, include_all_projects=False,
+    *, embedding_model=None, embedding_revision=None, embedding_dim=None,
+    before_rowid=None, row_limit=RECALL_CANDIDATE_ROW_LIMIT,
+    byte_limit=RECALL_CANDIDATE_BYTE_LIMIT,
+    time_limit_s=RECALL_CANDIDATE_TIME_LIMIT_S, cancel_check=None,
+):
+    """Return a bounded deterministic recall-candidate page.
+
+    The quality policy is a newest-first window: recent successful solutions
+    are most likely to match the current code, model revision, and operational
+    constraints. Older windows remain reachable with the exclusive rowid
+    cursor. Project/session/outcome/embedding-space filters run in SQLite
+    *before* the window, so unrelated rows cannot consume its budget.
+
+    ``incomplete`` is explicit whenever rows, decoded bytes, or elapsed time
+    stop enumeration. The query uses existing rowid and outcome indexes; no
+    schema migration or embedding backfill is required.
+    """
+    include_all_projects = include_all_projects is True
+    if isinstance(row_limit, bool) or not isinstance(row_limit, int):
+        raise ValueError("recall candidate row limit must be an integer")
+    if isinstance(byte_limit, bool) or not isinstance(byte_limit, int):
+        raise ValueError("recall candidate byte limit must be an integer")
+    if isinstance(time_limit_s, bool) or not isinstance(time_limit_s, (int, float)):
+        raise ValueError("recall candidate time limit must be numeric")
+    row_limit = max(1, min(RECALL_CANDIDATE_ROW_LIMIT, row_limit))
+    byte_limit = max(1, min(RECALL_CANDIDATE_BYTE_LIMIT, byte_limit))
+    time_limit_s = max(0.0, min(RECALL_CANDIDATE_TIME_LIMIT_S, float(time_limit_s)))
+    if before_rowid is not None:
+        if (
+            isinstance(before_rowid, bool)
+            or not isinstance(before_rowid, int)
+            or before_rowid <= 0
+        ):
+            raise ValueError("recall candidate cursor must be a positive integer")
+
+    good_signals = tuple(sorted(
+        signal
+        for signal in memory_rules.VALID_SIGNALS
+        if memory_rules.reward_is_good(signal)
+    ))
+    placeholders = ",".join("?" for _ in good_signals)
+    sql = (
+        "SELECT i.rowid AS candidate_rowid, CAST(i.id AS BLOB) AS id, "
+        "CAST(i.task AS BLOB) AS task, "
+        "CASE WHEN i.response IS NULL THEN NULL "
+        "ELSE CAST(substr(i.response,1,?) AS BLOB) END AS response, "
+        "i.task_embedding, CAST(i.session_id AS BLOB) AS session_id, "
+        "CAST(i.task_embedding_model AS BLOB) AS task_embedding_model, "
+        "CAST(i.task_embedding_revision AS BLOB) AS task_embedding_revision, "
+        "i.task_embedding_dim, CASE WHEN NULLIF(i.project,'') IS NULL "
+        "THEN NULL ELSE CAST(i.project AS BLOB) END AS project "
+        "FROM interactions i WHERE i.task_embedding IS NOT NULL "
+        "AND typeof(i.id)='text' AND length(i.id)<=256 "
+        "AND typeof(i.task)='text' AND length(i.task)<=? "
+        "AND (i.response IS NULL OR typeof(i.response)='text') "
+        "AND (i.session_id IS NULL OR "
+        "(typeof(i.session_id)='text' AND length(i.session_id)<=256)) "
+        "AND (i.project IS NULL OR "
+        "(typeof(i.project)='text' AND length(i.project)<=4096)) "
+        "AND (i.task_embedding_model IS NULL OR "
+        "(typeof(i.task_embedding_model)='text' "
+        "AND length(i.task_embedding_model)<=256)) "
+        "AND (i.task_embedding_revision IS NULL OR "
+        "(typeof(i.task_embedding_revision)='text' "
+        "AND length(i.task_embedding_revision)<=256)) "
+        "AND typeof(i.task_embedding)='blob' "
+        "AND length(i.task_embedding) BETWEEN 4 AND ? "
+        "AND typeof(i.task_embedding_dim)='integer' "
+        "AND i.task_embedding_dim>0 "
+        "AND length(i.task_embedding)=i.task_embedding_dim*4 "
+        "AND EXISTS (SELECT 1 FROM outcomes good "
+        "WHERE good.interaction_id=i.id AND good.signal IN (%s) "
+        "AND good.reward>=?) "
+        "AND NOT EXISTS (SELECT 1 FROM outcomes bad "
+        "WHERE bad.interaction_id=i.id AND "
+        "(bad.signal NOT IN (%s) OR bad.signal IS NULL "
+        "OR bad.reward IS NULL OR bad.reward<?))"
+        % (placeholders, placeholders)
+    )
+    params = [
+        RECALL_RESPONSE_PREFIX_CHARS,
+        RECALL_MAX_STORED_TASK_CHARS,
+        RECALL_MAX_EMBEDDING_BYTES,
+        *good_signals,
+        memory_rules.GOOD_THRESHOLD,
+        *good_signals,
+        memory_rules.GOOD_THRESHOLD,
+    ]
+    if exclude_session:
+        sql += " AND (i.session_id IS NULL OR i.session_id != ?)"
+        params.append(exclude_session)
+    if not include_all_projects:
+        if project is None:
+            sql += (
+                " AND NULLIF(i.project,'') IS NULL "
+                "AND (i.project_explicit=1 OR i.session_id IS NULL)"
+            )
+        else:
+            sql += " AND NULLIF(i.project,'')=?"
+            params.append(project)
+    if embedding_model:
+        sql += " AND i.task_embedding_model=?"
+        params.append(embedding_model)
+    if embedding_revision is not None:
+        sql += " AND NULLIF(i.task_embedding_revision,'') IS ?"
+        params.append(embedding_revision or None)
+    if embedding_dim is not None:
+        sql += " AND i.task_embedding_dim=?"
+        params.append(embedding_dim)
+    if before_rowid is not None:
+        sql += " AND i.rowid<?"
+        params.append(before_rowid)
+    sql += " ORDER BY i.rowid DESC LIMIT ?"
+    params.append(row_limit + 1)
+
+    deadline = time.monotonic() + time_limit_s
+    timed_out = False
+    cancelled = False
+
+    def _deadline_reached():
+        nonlocal cancelled
+        if cancel_check is not None:
+            try:
+                cancelled = cancel_check() is True
+            except Exception:
+                cancelled = True
+            if cancelled:
+                return 1
+        return 1 if time.monotonic() >= deadline else 0
+
+    rows = []
+    loaded_bytes = 0
+    examined = 0
+    last_cursor = before_rowid
+    termination = "complete"
+    previous_busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    request_busy_timeout = max(1, int(time_limit_s * 1000))
+    conn.execute("PRAGMA busy_timeout=%d" % min(
+        int(previous_busy_timeout), request_busy_timeout,
+    ))
+    conn.set_progress_handler(_deadline_reached, 1000)
+    try:
+        cursor = conn.execute(sql, tuple(params))
+        while True:
+            if _deadline_reached():
+                if cancelled:
+                    termination = "cancelled"
+                else:
+                    timed_out = True
+                    termination = "time_limit"
+                break
+            row = cursor.fetchone()
+            if row is None:
+                break
+            raw_candidate = dict(row)
+            rowid = int(raw_candidate.pop("candidate_rowid"))
+            if examined >= row_limit:
+                termination = "row_limit"
+                break
+            row_bytes = _recall_row_bytes(raw_candidate)
+            if loaded_bytes + row_bytes > byte_limit:
+                termination = "byte_limit"
+                if loaded_bytes == 0:
+                    # This row can never fit this request budget. Advance past
+                    # it so pagination cannot loop forever on malformed data.
+                    examined += 1
+                    last_cursor = rowid
+                break
+            loaded_bytes += row_bytes
+            examined += 1
+            last_cursor = rowid
+            candidate = _decode_recall_candidate(raw_candidate)
+            if candidate is None:
+                continue
+            rows.append(candidate)
+    except sqlite3.OperationalError as exc:
+        normalized_error = str(exc).lower()
+        if "interrupted" not in normalized_error and "locked" not in normalized_error:
+            raise
+        if cancelled:
+            termination = "cancelled"
+        else:
+            timed_out = True
+            termination = "time_limit"
+    finally:
+        conn.set_progress_handler(None, 0)
+        conn.execute("PRAGMA busy_timeout=%d" % int(previous_busy_timeout))
+
+    incomplete = timed_out or cancelled or termination != "complete"
+    return InteractionCandidatePage(
+        rows=tuple(rows),
+        incomplete=incomplete,
+        next_cursor=last_cursor if incomplete else None,
+        termination=termination,
+        rows_examined=examined,
+        bytes_loaded=loaded_bytes,
+    )
+
 def good_interactions_with_embeddings(
     conn, exclude_session=None, project=None, include_all_projects=False,
 ):
@@ -2597,49 +2853,12 @@ def good_interactions_with_embeddings(
     inheriting a mutable session label. Cross-project recall requires the
     explicit ``include_all_projects`` override.
     """
-    include_all_projects = include_all_projects is True
-    good_signals = tuple(sorted(
-        signal
-        for signal in memory_rules.VALID_SIGNALS
-        if memory_rules.reward_is_good(signal)
-    ))
-    placeholders = ",".join("?" for _ in good_signals)
-    sql = (
-        "SELECT DISTINCT i.id, i.task, i.response, i.task_embedding, i.session_id, "
-        "i.task_embedding_model, i.task_embedding_revision, i.task_embedding_dim, "
-        "NULLIF(i.project,'') AS project "
-        "FROM interactions i JOIN outcomes o ON o.interaction_id = i.id "
-        "WHERE o.signal IN (%s) AND o.reward >= ? "
-        "AND i.task_embedding IS NOT NULL "
-        "AND NOT EXISTS (SELECT 1 FROM outcomes bad "
-        "WHERE bad.interaction_id=i.id AND "
-        "(bad.signal NOT IN (%s) OR bad.signal IS NULL "
-        "OR bad.reward IS NULL OR bad.reward < ?))"
-        % (placeholders, placeholders)
-    )
-    clauses = []
-    params = (
-        list(good_signals) + [memory_rules.GOOD_THRESHOLD]
-        + list(good_signals) + [memory_rules.GOOD_THRESHOLD]
-    )
-    if exclude_session:
-        clauses.append("(i.session_id IS NULL OR i.session_id != ?)")
-        params.append(exclude_session)
-    if not include_all_projects:
-        effective_project = "NULLIF(i.project,'')"
-        if project is None:
-            clauses.append(
-                "%s IS NULL AND (i.project_explicit=1 OR i.session_id IS NULL)"
-                % effective_project
-            )
-        else:
-            clauses.append("%s = ?" % effective_project)
-            params.append(project)
-    if clauses:
-        sql += " AND " + " AND ".join(clauses)
-    sql += " ORDER BY i.rowid ASC"
-    rows = conn.execute(sql, tuple(params)).fetchall()
-    return [dict(r) for r in rows]
+    return list(good_interaction_candidate_page(
+        conn,
+        exclude_session,
+        project=project,
+        include_all_projects=include_all_projects,
+    ).rows)
 
 
 # --- project facts ---------------------------------------------------------
