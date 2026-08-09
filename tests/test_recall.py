@@ -1,6 +1,7 @@
 import embeddings
 import memory_store as ms
 import recall
+import time
 
 
 def _conn():
@@ -18,6 +19,28 @@ def _store_good(
                        task_embedding_revision=embedding_revision,
                        task_embedding_dim=len(vec))
     ms.record_outcome_row(c, iid, "tests_passed", 1.0)
+
+
+def _bulk_good(c, rows):
+    c.executemany(
+        "INSERT INTO interactions("
+        "id,task,response,tier,project,project_explicit,session_id,task_embedding,"
+        "task_embedding_model,task_embedding_revision,task_embedding_dim) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        [
+            (
+                row[0], row[1], row[2], "code", row[4], 1,
+                row[7] if len(row) > 7 else None,
+                embeddings.to_blob(row[3]), row[5], row[6], len(row[3]),
+            )
+            for row in rows
+        ],
+    )
+    c.executemany(
+        "INSERT INTO outcomes(interaction_id,signal,reward) VALUES(?,?,?)",
+        [(row[0], "tests_passed", 1.0) for row in rows],
+    )
+    c.commit()
 
 
 def test_recall_returns_similar_good_solution():
@@ -247,3 +270,227 @@ def test_recall_does_not_open_a_fence_the_prefix_already_neutralized():
     assert not out[0].rstrip().endswith("```")
     fences = [line for line in out[0].splitlines() if line.lstrip().startswith("```")]
     assert fences == []
+
+
+def test_recall_window_is_bounded_newest_first_with_truthful_cursor():
+    c = _conn()
+    rows = [
+        ("old-best", "old exact task", "old result", [1.0, 0.0], None,
+         "embed-v2", "rev-v2"),
+        ("older-far", "older far", "far", [0.0, 1.0], None,
+         "embed-v2", "rev-v2"),
+        ("window-edge", "window edge exact", "edge result", [1.0, 0.0], None,
+         "embed-v2", "rev-v2"),
+    ]
+    rows.extend(
+        ("far-%03d" % index, "far", "far", [0.0, 1.0], None,
+         "embed-v2", "rev-v2")
+        for index in range(ms.RECALL_CANDIDATE_ROW_LIMIT - 1)
+    )
+    _bulk_good(c, rows)
+
+    first = recall.recall_page(
+        c, "exact", k=5, qv=[1.0, 0.0], min_sim=0.9,
+        embedding_model="embed-v2", embedding_revision="rev-v2",
+    )
+    assert first.results == ("window edge exact -> edge result",)
+    assert first.incomplete is True
+    assert first.termination == "row_limit"
+    assert first.candidates_examined == ms.RECALL_CANDIDATE_ROW_LIMIT
+    assert first.candidates_scored == ms.RECALL_CANDIDATE_ROW_LIMIT
+    assert isinstance(first.next_cursor, int)
+
+    second = recall.recall_page(
+        c, "exact", k=5, qv=[1.0, 0.0], min_sim=0.9,
+        embedding_model="embed-v2", embedding_revision="rev-v2",
+        candidate_cursor=first.next_cursor,
+    )
+    assert second.results == ("old exact task -> old result",)
+    assert second.incomplete is False
+    assert second.next_cursor is None
+
+    # The compatibility API remains a plain list and never implies that the
+    # older global best was scored.
+    assert recall.recall(
+        c, "exact", k=5, qv=[1.0, 0.0], min_sim=0.9,
+        embedding_model="embed-v2", embedding_revision="rev-v2",
+    ) == ["window edge exact -> edge result"]
+
+
+def test_project_and_embedding_filters_apply_before_candidate_cap():
+    c = _conn()
+    _bulk_good(c, [(
+        "target", "target task", "target result", [1.0, 0.0], "project-b",
+        "embed-v2", "rev-v2",
+    )])
+    _bulk_good(c, [
+        (
+            "noise-%04d" % index, "noise", "noise", [0.0, 1.0],
+            "project-a", "wrong-model", "wrong-revision",
+        )
+        for index in range(ms.RECALL_CANDIDATE_ROW_LIMIT + 100)
+    ])
+
+    page = recall.recall_page(
+        c, "target", qv=[1.0, 0.0], min_sim=0.9, project="project-b",
+        embedding_model="embed-v2", embedding_revision="rev-v2",
+    )
+    assert page.results == ("target task -> target result",)
+    assert page.incomplete is False
+    assert page.candidates_examined == 1
+
+
+def test_excluded_session_applies_before_candidate_cap():
+    c = _conn()
+    _bulk_good(c, [(
+        "target", "target task", "target result", [1.0, 0.0], "project",
+        "embed-v2", "rev-v2", "other-session",
+    )])
+    _bulk_good(c, [
+        (
+            "current-%04d" % index, "target task", "current", [1.0, 0.0],
+            "project", "embed-v2", "rev-v2", "current-session",
+        )
+        for index in range(ms.RECALL_CANDIDATE_ROW_LIMIT + 25)
+    ])
+
+    page = recall.recall_page(
+        c, "target", qv=[1.0, 0.0], min_sim=0.9, project="project",
+        exclude_session="current-session",
+        embedding_model="embed-v2", embedding_revision="rev-v2",
+    )
+    assert page.results == ("target task -> target result",)
+    assert page.incomplete is False
+    assert page.candidates_examined == 1
+
+
+def test_corrupt_rows_do_not_starve_valid_bounded_candidates():
+    c = _conn()
+    _store_good(
+        c, "valid", "valid task", "valid result", [1.0, 0.0],
+        embedding_model="embed-v2", embedding_revision="rev-v2",
+    )
+    c.execute(
+        "INSERT INTO interactions("
+        "id,task,response,tier,task_embedding,task_embedding_model,"
+        "task_embedding_revision,task_embedding_dim) VALUES(?,?,?,?,?,?,?,?)",
+        (
+            "corrupt", b"not text", b"not text", "code", b"x" * 100_000,
+            "embed-v2", "rev-v2", 25_000,
+        ),
+    )
+    c.execute(
+        "INSERT INTO outcomes(interaction_id,signal,reward) VALUES(?,?,?)",
+        ("corrupt", "tests_passed", 1.0),
+    )
+    c.execute(
+        "INSERT INTO interactions("
+        "id,task,response,tier,task_embedding,task_embedding_model,"
+        "task_embedding_revision,task_embedding_dim) "
+        "VALUES('invalid-utf8',CAST(x'80' AS TEXT),'response','code',?,?,?,?)",
+        (
+            embeddings.to_blob([1.0, 0.0]), "embed-v2", "rev-v2", 2,
+        ),
+    )
+    c.execute(
+        "INSERT INTO outcomes(interaction_id,signal,reward) VALUES(?,?,?)",
+        ("invalid-utf8", "tests_passed", 1.0),
+    )
+    c.commit()
+
+    page = recall.recall_page(
+        c, "valid", qv=[1.0, 0.0], min_sim=0.9,
+        embedding_model="embed-v2", embedding_revision="rev-v2",
+    )
+    assert page.results == ("valid task -> valid result",)
+    assert page.candidates_examined == 2
+
+
+def test_candidate_byte_and_time_limits_are_explicit_and_connection_recovers():
+    c = _conn()
+    _bulk_good(c, [
+        (
+            "row-%02d" % index, "task-" + "x" * 100, "response", [1.0, 0.0],
+            None, "embed-v2", "rev-v2",
+        )
+        for index in range(10)
+    ])
+
+    byte_page = ms.good_interaction_candidate_page(
+        c, embedding_model="embed-v2", embedding_revision="rev-v2",
+        embedding_dim=2, byte_limit=300,
+    )
+    assert byte_page.incomplete is True
+    assert byte_page.termination == "byte_limit"
+    assert byte_page.bytes_loaded <= 300
+    assert byte_page.next_cursor is not None
+
+    timed_page = ms.good_interaction_candidate_page(
+        c, embedding_model="embed-v2", embedding_revision="rev-v2",
+        embedding_dim=2, time_limit_s=0,
+    )
+    assert timed_page.incomplete is True
+    assert timed_page.termination == "time_limit"
+    assert timed_page.rows == ()
+    assert c.execute("SELECT COUNT(*) FROM interactions").fetchone()[0] == 10
+
+    cancelled_page = ms.good_interaction_candidate_page(
+        c, embedding_model="embed-v2", embedding_revision="rev-v2",
+        embedding_dim=2, cancel_check=lambda: True,
+    )
+    assert cancelled_page.incomplete is True
+    assert cancelled_page.termination == "cancelled"
+    assert cancelled_page.rows == ()
+    assert c.execute("PRAGMA busy_timeout").fetchone()[0] == 30_000
+
+
+def test_candidate_cursor_pages_are_exclusive_stable_and_non_overlapping():
+    c = _conn()
+    _bulk_good(c, [
+        (
+            "page-%02d" % index, "task", "result", [1.0, 0.0], None,
+            "embed-v2", "rev-v2",
+        )
+        for index in range(8)
+    ])
+    cursor = None
+    seen = []
+    terminations = []
+    while True:
+        page = ms.good_interaction_candidate_page(
+            c, embedding_model="embed-v2", embedding_revision="rev-v2",
+            embedding_dim=2, before_rowid=cursor, row_limit=3,
+        )
+        seen.extend(row["id"] for row in page.rows)
+        terminations.append(page.termination)
+        if not page.incomplete:
+            break
+        assert page.next_cursor is not None
+        cursor = page.next_cursor
+
+    assert seen == ["page-%02d" % index for index in reversed(range(8))]
+    assert len(seen) == len(set(seen)) == 8
+    assert terminations == ["row_limit", "row_limit", "complete"]
+
+
+def test_large_store_request_stays_within_declared_row_and_time_budget():
+    c = _conn()
+    _bulk_good(c, [
+        (
+            "large-%05d" % index, "task", "result", [1.0, 0.0], None,
+            "embed-v2", "rev-v2",
+        )
+        for index in range(10_000)
+    ])
+    started = time.monotonic()
+    page = ms.good_interaction_candidate_page(
+        c, embedding_model="embed-v2", embedding_revision="rev-v2",
+        embedding_dim=2,
+    )
+    elapsed = time.monotonic() - started
+
+    assert page.incomplete is True
+    assert page.termination in {"row_limit", "time_limit"}
+    assert len(page.rows) <= ms.RECALL_CANDIDATE_ROW_LIMIT
+    assert page.bytes_loaded <= ms.RECALL_CANDIDATE_BYTE_LIMIT
+    assert elapsed < 2.0
