@@ -88,8 +88,11 @@ def test_run_feeds_stdin_and_captures_output(monkeypatch):
         stdout = b"hello\n"
         stderr = b""
 
-    def fake_subprocess_run(cmd, input=None, capture_output=None, timeout=None):
+    def fake_subprocess_run(
+        cmd, input=None, capture_output=None, timeout=None, env=None,
+    ):
         assert input == b"hi"
+        assert env is not None
         return FakeCompleted()
 
     monkeypatch.setattr(subprocess, "run", fake_subprocess_run)

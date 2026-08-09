@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..context import OperationContext
-from ..ports.model_gateway import ModelGateway, ModelRequest
+from ..ports.model_gateway import InferenceTelemetry, ModelGateway, ModelRequest
 
 
 @dataclass(frozen=True)
@@ -34,6 +34,7 @@ class ChatResult:
     duration_ms: int = 0
     tokens_in: int | None = None
     tokens_out: int | None = None
+    telemetry: InferenceTelemetry | None = None
 
 
 class ChatService:
@@ -65,4 +66,5 @@ class ChatService:
             duration_ms=response.duration_ms,
             tokens_in=response.tokens_in,
             tokens_out=response.tokens_out,
+            telemetry=getattr(response, "telemetry", None),
         )

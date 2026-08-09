@@ -38,6 +38,7 @@ import debug_dump
 import sonder_health
 import sonder_lifecycle
 import sonder_secrets
+import unsafe_lab
 
 DEFAULT_PORT = 11435
 
@@ -478,6 +479,15 @@ def _developer_authorized(context):
     return bool(context.get("api_key")) or role_ok
 
 
+def _execution_feed_detail_allowed(context):
+    """Evidence needs both the exact local flag and developer authority."""
+    return bool(
+        server.activity_tracker.detail_enabled()
+        and context.get("mode") != "local-open"
+        and _developer_authorized(context)
+    )
+
+
 def _admin_authorized(context):
     """Administrator authorization for privileged operations (SPEC-2).
 
@@ -509,6 +519,9 @@ def _is_loopback_host(host):
 
 
 def _validate_bind_security(host, api_key=None, auth_mode=None, auth_secret=None):
+    # Unsafe lab acknowledgement tightens exposure: unlike normal served mode,
+    # there is deliberately no authenticated non-loopback topology available.
+    unsafe_lab.require_startup(host=host)
     api_key = API_KEY if api_key is None else api_key
     mode = _effective_auth_mode() if auth_mode is None else auth_mode
     auth_secret = os.environ.get("SONDER_AUTH_SECRET", "") if auth_secret is None else auth_secret
@@ -791,7 +804,7 @@ def _server_side_history(storage_session, limit=SERVER_SIDE_HISTORY_TURNS):
     if not (storage_session or "").strip():
         return []
     try:
-        import memory_store
+        import sonder_runtime.adapters.memory_store as memory_store
 
         session_id = server._resolve_session(storage_session)
         conn = server._open_db()
@@ -1417,7 +1430,9 @@ def _chat_completion_object(content, model="sonder", iid=None, reasoning=""):
             "finish_reason": "stop",
         }],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-        "sonder_activity": server.activity_tracker.snapshot().get("latest"),
+        "sonder_activity": (
+            server.activity_tracker.public_snapshot(include_detail=False) or {}
+        ).get("latest"),
     }
     # Mirrors sonder_activity: present only when there is something to show, so
     # clients can treat absence as "this deployment does not expose reasoning".
@@ -1741,6 +1756,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_auth_error()
                 return
             account = context["account"]
+            agents = server.master_orchestrator.snapshot()
+            activity_source = server.activity_tracker.snapshot()
+            detail_allowed = _execution_feed_detail_allowed(context)
+            activity = server.activity_tracker.public_snapshot(
+                activity_source, include_detail=detail_allowed,
+            )
             payload = {
                 "status": server.status(),
                 "stats": server.sonder_stats(),
@@ -1748,13 +1769,16 @@ class Handler(BaseHTTPRequestHandler):
                 "improvements": server.system_improvement_report(),
                 "context": server.context_health_data(),
                 "context_policy": server.context_policy.policy(server.SESSION_NUM_CTX),
-                "agents": server.master_orchestrator.snapshot(),
+                "agents": agents,
+                "execution": server.execution_status_data(
+                    agents, activity_source, include_detail=detail_allowed,
+                ),
                 "autopilot": server.autopilot_controller.snapshot(),
                 "runtime_policy": server.runtime_policy_data(),
                 "selfmod": server.selfmod.status_data(),
                 "mcp_runtime": server.mcp_runtime_data(),
                 "learning_health": server.learning_health_data(),
-                "activity": server.activity_tracker.snapshot(),
+                "activity": activity,
                 "db_path": getattr(server, "_DB_PATH", ""),
                 "state_home": str(server.sonder_paths.default_home()),
                 "account": account or {},
