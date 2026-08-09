@@ -1,7 +1,14 @@
 """Typed application-service tests for task/checklist behavior."""
 import pytest
 
+from sonder_runtime.adapters import memory_store
+from sonder_runtime.adapters.legacy.task_state import LegacyTaskRepository
 from sonder_runtime.application.tasks.use_cases import TaskService
+from sonder_runtime.domain.common.errors import (
+    DependencyUnavailable,
+    InvalidInput,
+    NotFound,
+)
 
 
 class RecordingRepository:
@@ -49,7 +56,7 @@ class RecordingEvents:
 def test_checklist_validates_every_item_before_first_write():
     repository = RecordingRepository()
     service = TaskService(repository, RecordingEvents())
-    with pytest.raises(ValueError, match="titles cannot be empty"):
+    with pytest.raises(InvalidInput, match="titles cannot be empty"):
         service.create_checklist("invalid", ["valid", ""])
     assert repository.create_calls == 0
     assert repository.rows == []
@@ -71,3 +78,29 @@ def test_checklist_publication_is_explicit_and_typed():
     assert events.rows == []
     service.publish_checklist(checklist)
     assert events.rows[0]["summary"] == "0/2 complete"
+
+
+def test_application_validation_and_not_found_errors_are_typed():
+    service = TaskService(RecordingRepository(), RecordingEvents())
+    with pytest.raises(InvalidInput, match="Expecting value") as invalid:
+        service.create_checklist("invalid", "not-json")
+    assert invalid.value.code == "INVALID_INPUT"
+
+    with pytest.raises(NotFound, match="no checklist 'missing'") as missing:
+        service.checklist("missing")
+    assert missing.value.code == "NOT_FOUND"
+
+
+def test_legacy_repository_maps_validation_and_storage_errors(tmp_path):
+    connection = memory_store.connect(str(tmp_path / "typed-errors.db"))
+    repository = LegacyTaskRepository(connection)
+    try:
+        with pytest.raises(InvalidInput, match="task title is required"):
+            repository.create(title="")
+        with pytest.raises(NotFound, match="no unique task 'missing'"):
+            repository.update("missing", status="done")
+    finally:
+        connection.close()
+
+    with pytest.raises(DependencyUnavailable):
+        repository.list()

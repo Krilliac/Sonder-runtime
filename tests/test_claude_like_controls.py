@@ -17,6 +17,8 @@ def test_task_and_checklist_mcp_signatures_remain_compatible():
     }
     for function, names in expected.items():
         assert list(inspect.signature(function).parameters) == names
+        registered = server.mcp._tool_manager._tools[function.__name__]
+        assert registered.fn is function
 
 
 def test_task_tools_round_trip(monkeypatch, tmp_path):
