@@ -66,6 +66,8 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     assert "runtime_policy.py" in entries
     assert "learning_health.py" in entries
     assert "sonder_health.py" in entries
+    assert "sonder_runtime/adapters/legacy/inspections.py" in entries
+    assert "sonder_runtime/application/inspection/use_cases.py" in entries
     assert "memory_store.py" in entries
     assert "sonder_runtime/adapters/memory_store.py" in entries
     assert "process_liveness.py" in entries
@@ -77,6 +79,15 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     assert "model_assets.py" in entries
     assert "ooxml_assets.py" in entries
     assert "requirements-runtime.txt" in entries
+    assert {
+        "workflow_store.py",
+        "sonder_runtime/adapters/filesystem/workflow_store.py",
+        "sonder_runtime/adapters/legacy/workflows.py",
+        "sonder_runtime/application/ports/workflows.py",
+        "sonder_runtime/application/workflows/__init__.py",
+        "sonder_runtime/application/workflows/loop.py",
+        "sonder_runtime/application/workflows/use_cases.py",
+    } <= set(entries)
     assert "BUNDLED_SYSTEM_README.txt" in entries
     assert {
         "sonder-headless.cmd",
