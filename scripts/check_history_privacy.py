@@ -1,9 +1,9 @@
 """Fail closed when sensitive Git-history debt grows.
 
 The repository has a small, explicitly pinned set of already-public historical
-objects that require a coordinated history rewrite.  Normal CI permits only
-that exact object set so the debt can shrink but cannot grow.  Tagged release
-jobs use ``--require-clean`` and remain blocked until every flagged object is
+object/path pairs that require a coordinated history rewrite. Normal CI permits
+only that exact set so the debt can shrink but cannot grow. Tagged release jobs
+use ``--require-clean`` and remain blocked until every flagged pair is
 unreachable.
 
 This checker examines names and object identities only.  It never reads or
@@ -12,26 +12,55 @@ prints blob contents.
 from __future__ import annotations
 
 import argparse
-import ast
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 
 MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 GIT_TIMEOUT_SECONDS = 30
-_OBJECT_LINE = re.compile(r"^([0-9a-f]{40,64})(?: (.*))?$")
+_RAW_CHANGE = re.compile(
+    rb"^:([0-7]{6}) ([0-7]{6}) ([0-9a-f]{40,64}) "
+    rb"([0-9a-f]{40,64}) ([A-Z][0-9]*)$"
+)
 
-# Exact object identities already reachable before this gate was introduced.
+# Exact object/path pairs already reachable before this gate was introduced.
 # Deleting any entry is allowed. Adding or changing an object is not.
 KNOWN_HISTORY_PRIVACY_DEBT = frozenset({
-    "a47e45360ed2eb3e11e1a2700a505cc511b53017",
-    "d0ea07e097451999c6b6093ffde826b82dab7b5c",
-    "f6ed8c56f5670e642a64040df3f47fe98577cf73",
+    (
+        "a47e45360ed2eb3e11e1a2700a505cc511b53017",
+        "combined_personal.jsonl",
+    ),
+    (
+        "d0ea07e097451999c6b6093ffde826b82dab7b5c",
+        "sonder-personal-lora/checkpoints/checkpoint-58/adapter_model.safetensors",
+    ),
+    (
+        "d0ea07e097451999c6b6093ffde826b82dab7b5c",
+        "trilobite-personal-lora/checkpoints/checkpoint-58/adapter_model.safetensors",
+    ),
+    (
+        "f6ed8c56f5670e642a64040df3f47fe98577cf73",
+        "sonder-personal-lora/adapter_model.safetensors",
+    ),
+    (
+        "f6ed8c56f5670e642a64040df3f47fe98577cf73",
+        "sonder-personal-lora/checkpoints/checkpoint-116/adapter_model.safetensors",
+    ),
+    (
+        "f6ed8c56f5670e642a64040df3f47fe98577cf73",
+        "trilobite-personal-lora/adapter_model.safetensors",
+    ),
+    (
+        "f6ed8c56f5670e642a64040df3f47fe98577cf73",
+        "trilobite-personal-lora/checkpoints/checkpoint-116/adapter_model.safetensors",
+    ),
 })
 
 _SENSITIVE_BASENAMES = frozenset({
@@ -48,18 +77,6 @@ class HistoryPrivacyError(RuntimeError):
     """History could not be inspected completely and safely."""
 
 
-def _decode_git_path(raw: str) -> str:
-    if raw.startswith('"'):
-        try:
-            value = ast.literal_eval(raw)
-        except (SyntaxError, ValueError) as exc:
-            raise HistoryPrivacyError("Git returned a malformed quoted path") from exc
-        if not isinstance(value, str):
-            raise HistoryPrivacyError("Git returned a non-text path")
-        return value
-    return raw
-
-
 def _is_sensitive_path(path: str) -> bool:
     normalized = path.replace("\\", "/").strip("/")
     lowered = normalized.casefold()
@@ -67,6 +84,33 @@ def _is_sensitive_path(path: str) -> bool:
     if basename in _SENSITIVE_BASENAMES:
         return True
     return "personal-lora/" in lowered and lowered.endswith(".safetensors")
+
+
+def _parse_raw_changes(output: bytes) -> list[tuple[str, str]]:
+    objects: list[tuple[str, str]] = []
+    fields = output.split(b"\0")
+    index = 0
+    while index < len(fields):
+        header = fields[index].lstrip(b"\r\n")
+        index += 1
+        if not header:
+            continue
+        match = _RAW_CHANGE.fullmatch(header)
+        if match is None or index >= len(fields):
+            raise HistoryPrivacyError("Git history inventory is malformed")
+        raw_path = fields[index]
+        index += 1
+        try:
+            path = raw_path.decode("utf-8", "strict")
+        except UnicodeDecodeError as exc:
+            raise HistoryPrivacyError("Git history path is not UTF-8") from exc
+        if not path or "\0" in path:
+            raise HistoryPrivacyError("Git history path is malformed")
+        zero = b"0" * len(match.group(3))
+        for object_id in (match.group(3), match.group(4)):
+            if object_id != zero:
+                objects.append((object_id.decode("ascii"), path))
+    return objects
 
 
 def _git_objects(repo: Path) -> list[tuple[str, str]]:
@@ -83,14 +127,18 @@ def _git_objects(repo: Path) -> list[tuple[str, str]]:
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_NO_LAZY_FETCH": "1",
+        "GIT_TERMINAL_PROMPT": "0",
         "GIT_PAGER": "cat",
         "LC_ALL": "C",
         "LANG": "C",
     })
+    inspection_deadline = time.monotonic() + GIT_TIMEOUT_SECONDS
 
     def run_git(*arguments: str) -> bytes:
-        try:
-            process = subprocess.run(
+        with tempfile.TemporaryFile() as output:
+            try:
+                process = subprocess.Popen(
                 [
                     executable, "--no-pager", "--no-replace-objects", "-C",
                     str(repo), *arguments,
@@ -98,18 +146,34 @@ def _git_objects(repo: Path) -> list[tuple[str, str]]:
                 cwd=repo,
                 env=environment,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
+                stdout=output,
                 stderr=subprocess.DEVNULL,
-                timeout=GIT_TIMEOUT_SECONDS,
-                check=False,
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise HistoryPrivacyError("Git history inspection failed") from exc
-        if process.returncode != 0:
-            raise HistoryPrivacyError("Git history inspection failed")
-        if len(process.stdout) > MAX_OUTPUT_BYTES:
-            raise HistoryPrivacyError("Git history inventory exceeds the safety limit")
-        return process.stdout
+            except OSError as exc:
+                raise HistoryPrivacyError("Git history inspection failed") from exc
+            while process.poll() is None:
+                if time.monotonic() >= inspection_deadline:
+                    process.kill()
+                    process.wait()
+                    raise HistoryPrivacyError("Git history inspection timed out")
+                if output.tell() > MAX_OUTPUT_BYTES:
+                    process.kill()
+                    process.wait()
+                    raise HistoryPrivacyError(
+                        "Git history inventory exceeds the safety limit"
+                    )
+                time.sleep(0.01)
+            if process.returncode != 0:
+                raise HistoryPrivacyError("Git history inspection failed")
+            if time.monotonic() >= inspection_deadline:
+                raise HistoryPrivacyError("Git history inspection timed out")
+            size = output.tell()
+            if size > MAX_OUTPUT_BYTES:
+                raise HistoryPrivacyError(
+                    "Git history inventory exceeds the safety limit"
+                )
+            output.seek(0)
+            return output.read()
 
     top_level_raw = run_git("rev-parse", "--show-toplevel")
     try:
@@ -121,45 +185,55 @@ def _git_objects(repo: Path) -> list[tuple[str, str]]:
     if os.path.normcase(str(top_level)) != os.path.normcase(str(repo)):
         raise HistoryPrivacyError("repository root is not the exact Git top level")
 
-    output = run_git("-c", "core.quotePath=true", "rev-list", "--objects", "--all")
-    try:
-        text = output.decode("utf-8", "strict")
-    except UnicodeDecodeError as exc:
-        raise HistoryPrivacyError("Git history inventory is not UTF-8") from exc
+    shallow = run_git("rev-parse", "--is-shallow-repository")
+    if shallow.strip() != b"false":
+        raise HistoryPrivacyError("complete Git history is required")
 
-    objects: list[tuple[str, str]] = []
-    for line in text.splitlines():
-        match = _OBJECT_LINE.fullmatch(line)
-        if match is None:
-            raise HistoryPrivacyError("Git history inventory is malformed")
-        raw_path = match.group(2)
-        if raw_path is None:
-            continue
-        objects.append((match.group(1), _decode_git_path(raw_path)))
-    return objects
+    graft_path_raw = run_git("rev-parse", "--git-path", "info/grafts")
+    try:
+        graft_path_text = graft_path_raw.decode("utf-8", "strict").strip()
+    except UnicodeDecodeError as exc:
+        raise HistoryPrivacyError("Git metadata path is invalid") from exc
+    if not graft_path_text or "\0" in graft_path_text:
+        raise HistoryPrivacyError("Git metadata path is invalid")
+    graft_path = Path(graft_path_text)
+    if not graft_path.is_absolute():
+        graft_path = repo / graft_path
+    try:
+        if graft_path.is_file() and graft_path.stat().st_size:
+            raise HistoryPrivacyError("Git grafts may not replace history")
+    except OSError as exc:
+        raise HistoryPrivacyError("Git graft state could not be inspected") from exc
+
+    output = run_git(
+        "-c", "core.quotePath=false", "log", "--all", "--raw",
+        "--format=format:", "--no-renames", "--no-abbrev", "-z",
+    )
+    return _parse_raw_changes(output)
 
 
 def evaluate(objects: list[tuple[str, str]]) -> dict[str, object]:
     flagged = {
-        object_id: path
+        (object_id, path)
         for object_id, path in objects
         if _is_sensitive_path(path)
     }
-    observed = set(flagged)
-    known = observed & KNOWN_HISTORY_PRIVACY_DEBT
-    unexpected = observed - KNOWN_HISTORY_PRIVACY_DEBT
-    removed = KNOWN_HISTORY_PRIVACY_DEBT - observed
+    known = flagged & KNOWN_HISTORY_PRIVACY_DEBT
+    unexpected = flagged - KNOWN_HISTORY_PRIVACY_DEBT
+    removed = KNOWN_HISTORY_PRIVACY_DEBT - flagged
     return {
         "schema": 1,
         "ok": not unexpected,
-        "clean": not observed,
+        "clean": not flagged,
         "known_debt_count": len(known),
         "unexpected_count": len(unexpected),
         "removed_from_baseline_count": len(removed),
-        "known_object_ids": sorted(object_id[:12] for object_id in known),
+        "known_object_ids": sorted({
+            object_id[:12] for object_id, _path in known
+        }),
         "unexpected": [
-            {"object_id": object_id[:12], "path": flagged[object_id]}
-            for object_id in sorted(unexpected)
+            {"object_id": object_id[:12], "path": path}
+            for object_id, path in sorted(unexpected)
         ],
     }
 
@@ -196,7 +270,8 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(
                 "Git history privacy: known debt only "
-                f"({report['known_debt_count']} object(s)); release remains blocked"
+                f"({report['known_debt_count']} object/path pair(s)); "
+                "release remains blocked"
             )
     else:
         print("Git history privacy: FAILED", file=sys.stderr)
@@ -205,12 +280,14 @@ def main(argv: list[str] | None = None) -> int:
         elif report.get("unexpected"):
             for row in report["unexpected"]:
                 print(
-                    f"unexpected sensitive object {row['object_id']} {row['path']}",
+                    "unexpected sensitive object %s %s"
+                    % (row["object_id"], json.dumps(row["path"])),
                     file=sys.stderr,
                 )
         elif args.require_clean:
             print(
-                f"{report.get('known_debt_count', 0)} known sensitive object(s) "
+                f"{report.get('known_debt_count', 0)} known sensitive "
+                "object/path pair(s) "
                 "remain reachable",
                 file=sys.stderr,
             )

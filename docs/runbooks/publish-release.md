@@ -86,11 +86,13 @@ commit mismatch therefore cannot publish assets.
 
 Tagged publishing also runs
 `scripts/check_history_privacy.py --require-clean --json` against a complete,
-blob-filtered Git object inventory. Normal CI pins the currently known
-historical privacy debt and fails if any new flagged object appears; deleting
-known objects is always allowed. The release form is stricter and refuses to
-publish while even a pinned object remains reachable. The checker reads only
-object identities and paths, never blob contents. Clearing this gate requires
+blob-filtered, complete (non-shallow) Git history. Normal CI pins the currently
+known seven object/path pairs across three unique blobs and fails if an object
+is reused at a new sensitive path, a path is substituted, or any new flagged
+object appears; deleting known pairs is always allowed. The release form is
+stricter and refuses to publish while even a pinned pair remains reachable.
+The checker reads only object identities and NUL-delimited paths, never blob
+contents. Clearing this gate requires
 the separately authorized history-rewrite and remote-ref cleanup procedure;
 deleting a file only at `HEAD` is intentionally insufficient.
 
