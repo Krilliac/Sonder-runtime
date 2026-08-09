@@ -561,6 +561,7 @@ LIVE_RELOAD_MODULES = [
     "admin_auth",
     "file_ops",
     "data_query",
+    "sqlite_mutate",
     "symbol_index",
     "context_policy",
     "command_registry",
@@ -621,7 +622,9 @@ _prime_live_reload_modules()
 def _maybe_live_reload():
     modules = live_reload.reload_changed_modules(LIVE_RELOAD_MODULES)
     for name, module in modules.items():
-        if name in globals():
+        if name == "sqlite_mutate":
+            globals()["sqlite_mutate_module"] = module
+        elif name in globals():
             globals()[name] = module
     _refresh_runtime_policy(create=True)
 
@@ -11946,6 +11949,13 @@ def _agent_dispatch_observed(
     ok = False
     observation = ""
     args = _project_scope_args(tool_name, args, project)
+    dispatch_args = args
+    if project and tool_name == "sqlite_mutate":
+        # Project scope is selected by the host. Grant only that exact root
+        # through the unforgeable in-process approval sentinel, while keeping
+        # credentials out of the activity record and model-visible arguments.
+        dispatch_args = dict(args)
+        dispatch_args["approval"] = _TRUSTED_REPOSITORY_APPROVAL
     try:
         with activity_tracker.tool_dispatch_context():
             dispatch_options = {"allow_web": allow_web}
@@ -11953,11 +11963,11 @@ def _agent_dispatch_observed(
                 dispatch_options["allow_location"] = True
             if read_only:
                 observation = _agent_dispatch(
-                    tool_name, args, read_only=True,
+                    tool_name, dispatch_args, read_only=True,
                     repository_extra_roots=project, **dispatch_options,
                 )
             else:
-                observation = _agent_dispatch(tool_name, args, **dispatch_options)
+                observation = _agent_dispatch(tool_name, dispatch_args, **dispatch_options)
         ok = not str(observation).startswith("ERROR:")
         return observation
     finally:

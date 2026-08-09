@@ -51,7 +51,6 @@ def test_agent_project_mutation_validation_and_autopilot_exclusion(monkeypatch, 
     project.mkdir()
     path = project / "records.db"
     _database(path)
-    monkeypatch.setenv("SONDER_FILE_ROOTS", str(project))
     output = server._agent_dispatch_observed(
         "sqlite_mutate", {
             "path": "records.db", "sql": "UPDATE records SET value = ? WHERE id = ?",
@@ -63,3 +62,18 @@ def test_agent_project_mutation_validation_and_autopilot_exclusion(monkeypatch, 
         "sqlite_mutate", {"path": str(path), "mode": "apply"},
     )
     assert records[0]["path"] == server._agent_normalized_path(str(path))
+
+
+def test_sqlite_module_participates_in_live_reload(monkeypatch):
+    original = server.sqlite_mutate_module
+    replacement = object()
+    monkeypatch.setattr(
+        server.live_reload, "reload_changed_modules",
+        lambda names: {"sqlite_mutate": replacement},
+    )
+    try:
+        assert "sqlite_mutate" in server.LIVE_RELOAD_MODULES
+        server._maybe_live_reload()
+        assert server.sqlite_mutate_module is replacement
+    finally:
+        server.sqlite_mutate_module = original

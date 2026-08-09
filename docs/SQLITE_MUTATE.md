@@ -2,10 +2,10 @@
 
 `sqlite_mutate` executes exactly one parameterized `INSERT`, `UPDATE`, or
 `DELETE` against an existing guarded SQLite database. It never accepts DDL,
-PRAGMA, ATTACH/DETACH, functions, virtual tables, triggers, `RETURNING`, named
-parameters, numbered parameters, `move`-style multi-statements, or replacement
-upserts. Values are supplied only as a positional JSON array matching bare `?`
-placeholders.
+PRAGMA, ATTACH/DETACH, functions, triggers, `RETURNING`, named
+parameters, numbered parameters, `move`-style multi-statements, replacement
+conflict actions, virtual tables, or their implementation shadow tables. Values
+are supplied only as a positional JSON array matching bare `?` placeholders.
 
 ```json
 {
@@ -26,9 +26,11 @@ a statement requiring a denied cross-table cascade fails and rolls back.
 
 The connection uses zero busy timeout, a monotonic progress deadline, SQLite
 statement/parameter limits, row and database-size ceilings, and identity/path
-revalidation before completion. The target and journal/WAL sidecars must be
-regular non-symlink files inside authorized roots and outside sensitive or
-control-state trees.
+revalidation before completion. WAL-mode apply uses a fail-closed worst-case
+commit-frame projection and rolls back before commit when the combined storage
+ceiling could be exceeded. The target and journal/WAL sidecars must be regular
+non-symlink files inside authorized roots and outside sensitive or control-state
+trees.
 
 Defaults and hard maxima are: 1,000/10,000 affected rows, 2/5 seconds,
 64/256 MiB database storage, 32,768 SQL bytes, 999 positional parameters,

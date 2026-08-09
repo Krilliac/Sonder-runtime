@@ -79,6 +79,7 @@ def test_apply_commits_one_parameterized_dml_statement(database, sql, params, ex
         ("UPDATE records SET name = 'literal' WHERE id = 1", [], "non-empty"),
         ("UPDATE records SET name = ? WHERE id = ?", ["x"], "placeholder count"),
         ("INSERT OR REPLACE INTO records VALUES (?, ?, ?)", [1, "x", 1], "REPLACE"),
+        ("UPDATE OR REPLACE records SET id = ? WHERE id = ?", [1, 2], "REPLACE"),
         ("UPDATE records SET name = ? WHERE id = ? RETURNING id", ["x", 1], "RETURNING"),
     ],
 )
@@ -134,11 +135,26 @@ def test_virtual_table_mutation_is_denied(tmp_path, monkeypatch):
             conn.execute("CREATE VIRTUAL TABLE docs USING fts5(body)")
         except sqlite3.OperationalError as exc:
             pytest.skip("FTS5 unavailable: %s" % exc)
+        conn.execute("INSERT INTO docs(body) VALUES ('safe')")
         conn.commit()
+        shadow_before = conn.execute(
+            "SELECT id, block FROM docs_data ORDER BY id"
+        ).fetchall()
     finally:
         conn.close()
     with pytest.raises(mutate.SqliteMutateError, match="rejected"):
         mutate.mutate_sqlite(path, "INSERT INTO docs(body) VALUES (?)", ["no"], mode="apply")
+    with pytest.raises(mutate.SqliteMutateError, match="rejected"):
+        mutate.mutate_sqlite(
+            path, "DELETE FROM docs_data WHERE id = ?", [1], mode="apply",
+        )
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute(
+            "SELECT id, block FROM docs_data ORDER BY id"
+        ).fetchall() == shadow_before
+    finally:
+        conn.close()
 
 
 def test_row_cap_rolls_back_before_commit(database):
@@ -181,12 +197,67 @@ def test_database_parameter_and_statement_caps(database, monkeypatch):
         mutate.mutate_sqlite(
             database, "DELETE FROM records WHERE id = ?", [1], max_db_bytes=1024,
         )
+    with pytest.raises(mutate.SqliteMutateError, match="signed 64-bit"):
+        mutate.mutate_sqlite(
+            database, "DELETE FROM records WHERE id = ?", [1 << 63],
+        )
     monkeypatch.setattr(mutate, "MAX_PARAMETER_BYTES", 2)
     with pytest.raises(mutate.SqliteMutateError, match="parameter 0"):
         mutate.mutate_sqlite(database, "UPDATE records SET name = ?", ["long"])
     monkeypatch.setattr(mutate, "MAX_SQL_BYTES", 10)
     with pytest.raises(mutate.SqliteMutateError, match="statement bytes"):
         mutate.mutate_sqlite(database, "DELETE FROM records WHERE id = ?", [1])
+
+
+def test_existing_large_row_is_not_limited_by_parameter_cap(tmp_path, monkeypatch):
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path))
+    path = tmp_path / "large-row.db"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE records (id INTEGER PRIMARY KEY, payload TEXT, active INTEGER)")
+    conn.execute("INSERT INTO records VALUES (1, ?, 0)", ("x" * 70_000,))
+    conn.commit()
+    conn.close()
+
+    result = mutate.mutate_sqlite(
+        path, "UPDATE records SET active = ? WHERE id = ?", [1, 1], mode="apply",
+    )
+
+    assert result["rows_affected"] == 1
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute(
+            "SELECT length(payload), active FROM records WHERE id = 1"
+        ).fetchone() == (70_000, 1)
+    finally:
+        conn.close()
+
+
+def test_wal_growth_is_projected_and_rejected_before_commit(tmp_path, monkeypatch):
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path))
+    path = tmp_path / "wal.db"
+    keeper = sqlite3.connect(path)
+    try:
+        assert keeper.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        keeper.execute("PRAGMA wal_autocheckpoint=0")
+        keeper.execute("CREATE TABLE records (id INTEGER PRIMARY KEY, payload TEXT, active INTEGER)")
+        keeper.execute("INSERT INTO records VALUES (1, ?, 0)", ("x" * 32_000,))
+        keeper.commit()
+        keeper.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        storage_before = mutate._storage_bytes(path)
+        max_db_bytes = storage_before + 4096
+
+        with pytest.raises(mutate.SqliteMutateError, match="projected WAL"):
+            mutate.mutate_sqlite(
+                path, "UPDATE records SET active = ? WHERE id = ?", [1, 1],
+                mode="apply", max_db_bytes=max_db_bytes,
+            )
+
+        assert keeper.execute(
+            "SELECT active FROM records WHERE id = 1"
+        ).fetchone() == (0,)
+        assert mutate._storage_bytes(path) <= max_db_bytes
+    finally:
+        keeper.close()
 
 
 def test_resolution_identity_and_sidecar_reparse_are_revalidated(database, monkeypatch):
