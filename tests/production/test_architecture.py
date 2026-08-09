@@ -158,3 +158,12 @@ def test_domain_modules_are_pure():
         assert "import sqlite3" not in source
         assert "import urllib" not in source
         assert "import subprocess" not in source
+
+
+def test_task_application_service_has_no_legacy_or_sqlite_dependency():
+    service = _REPO_ROOT / "sonder_runtime" / "application" / "tasks" / "use_cases.py"
+    source = service.read_text(encoding="utf-8")
+    assert "import memory_store" not in source
+    assert "import sqlite3" not in source
+    assert "import activity_tracker" not in source
+    assert "import server" not in source

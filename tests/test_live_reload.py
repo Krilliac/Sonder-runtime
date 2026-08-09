@@ -274,3 +274,26 @@ def test_unchanged_module_is_not_reported_as_changed(monkeypatch, tmp_path):
         sys.modules.pop(module_name, None)
         live_reload._MTIMES.pop(module_name, None)
         live_reload._SIGNATURES.pop(module_name, None)
+
+
+def test_server_live_reload_rebinds_task_application_modules(monkeypatch):
+    import server
+
+    service_module = object()
+    adapter_module = object()
+    monkeypatch.setattr(server, "task_use_cases", server.task_use_cases)
+    monkeypatch.setattr(server, "task_state_adapter", server.task_state_adapter)
+    monkeypatch.setattr(server, "_refresh_runtime_policy", lambda **kwargs: None)
+    monkeypatch.setattr(
+        server.live_reload,
+        "reload_changed_modules",
+        lambda names: {
+            "sonder_runtime.application.tasks.use_cases": service_module,
+            "sonder_runtime.adapters.legacy.task_state": adapter_module,
+        },
+    )
+
+    server._maybe_live_reload()
+
+    assert server.task_use_cases is service_module
+    assert server.task_state_adapter is adapter_module
