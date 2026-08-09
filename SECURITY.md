@@ -42,6 +42,9 @@ Mitigations that are already in place and worth knowing about:
 - Structured `data_query` reads are bounded and side-effect-free: SQLite uses
   a read-only URI and deny-by-default authorizer, while JSON/JSONL/CSV/TSV use
   exact structured filters and projections without expression evaluation.
+- `data_convert` rejects sensitive/control and reparse paths, validates input
+  through a no-follow opened handle, and can only atomically create a new
+  destination after a complete bounded conversion; it never overwrites.
 - `file_batch_write` never targets secrets/control state or traverses symlinks,
   requires explicit create-versus-overwrite intent, and rolls back completed
   writes on a later failure when restoration remains possible.
