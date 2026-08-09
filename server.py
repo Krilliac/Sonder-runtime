@@ -19,6 +19,7 @@ Tiers (escalation ladder, cheapest first):
 """
 
 import contextlib
+import hmac
 import importlib
 import http.client
 import json
@@ -44,9 +45,9 @@ import reward
 import reflection
 import embeddings
 import personas
-import recall
 import summarizer
 import code_runner
+import isolated_runner
 import live_reload
 import system_profile
 import emotion_vectors
@@ -109,11 +110,13 @@ import tier_router
 import project_scaffold
 import environment_probe
 import sonder_hardware
+import sonder_logging
 import tool_capabilities
 import git_tools
 import sonder_runtime.adapters.evaluation_history_store as eval_history
 import artifact_risk as artifact_risk_module
 import process_risk as process_risk_module
+import unsafe_lab
 
 BASE = ollama_endpoint.normalize()
 OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
@@ -567,9 +570,10 @@ LIVE_RELOAD_MODULES = [
     "embeddings",
     "ollama_endpoint",
     "personas",
-    "recall",
+    "sonder_runtime.adapters.recall",
     "summarizer",
     "code_runner",
+    "isolated_runner",
     "system_profile",
     "emotion_vectors",
     "preference_learning",
@@ -666,6 +670,14 @@ _prime_live_reload_modules()
 def _maybe_live_reload():
     modules = live_reload.reload_changed_modules(LIVE_RELOAD_MODULES)
     for name, module in modules.items():
+        if name == "sonder_runtime.adapters.recall":
+            # Recall resolves its migrated adapter lazily through the
+            # application gateway. Keep the root compatibility alias on the
+            # same live module object without restoring a production import.
+            sys.modules[name] = module
+            if "recall" in sys.modules:
+                sys.modules["recall"] = module
+            continue
         if name == "sonder_runtime.adapters.legacy.task_state":
             globals()["task_state_adapter"] = module
             continue
@@ -2317,7 +2329,7 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
     embedding_provenance = embeddings.provenance(qv) if qv else {}
     if augment:
         recalls = (
-            recall.recall(
+            _application().recall.retrieve(
                 conn, prompt, qv=qv, exclude_session=session_id,
                 project=project,
                 embedding_model=embedding_provenance.get("model"),
@@ -4933,6 +4945,7 @@ def _repo_repair_pytest(workdir, timeout):
             # identical call from a child process took 0.8s.
             stdin=subprocess.DEVNULL,
             timeout=max(5, timeout),
+            env=sonder_logging.child_environment(),
         )
     except subprocess.TimeoutExpired:
         return False, "pytest timed out", "pytest timed out"
@@ -7111,6 +7124,10 @@ _TRUSTED_REPOSITORY_APPROVAL = object()
 
 
 def _file_bypass_allowed(token: str = "", approval: str = "") -> bool:
+    if unsafe_lab.active():
+        # The exact acknowledgement substitutes for every model-visible file
+        # approval only in this deliberately unrestricted process.
+        return True
     # Repository agents may receive one host-authorized project root.  The
     # unforgeable in-process sentinel is injected only after the read-only
     # policy has validated the tool and path; an MCP caller can supply strings,
@@ -9307,6 +9324,110 @@ def run_project(
 
 
 @mcp.tool()
+def isolated_run(
+    image: str,
+    argv_json: str,
+    project: str,
+    stdin: str = "",
+    writable_workspace: bool = False,
+    timeout: int = 30,
+    memory_mb: int = 512,
+    cpus: float = 1.0,
+    pids: int = 64,
+    output_bytes: int = 131072,
+    acknowledge_isolation_limits: bool = False,
+    token: str = "",
+    approval: str = "",
+    write_approval: str = "",
+) -> str:
+    """Run an installed Linux container image under a fixed isolation policy.
+
+    This direct MCP tool requires developer authentication, a host approval
+    secret, and explicit risk acknowledgement in addition to the local ``ask``
+    policy. Writable binds require a second host secret. It is intentionally
+    unavailable to Sonder agents and autopilot. ``argv_json``
+    must be a JSON string array. The exact absolute ``project`` directory is the
+    only host bind and is read-only unless the host explicitly sets
+    ``writable_workspace=true``. Docker/Podman flags, mounts, devices, user,
+    environment, sockets, and privileges are not caller-configurable.
+
+    The fixed policy disables networking, uses a read-only root filesystem,
+    drops all capabilities, enables no-new-privileges, scrubs the process
+    environment, and caps time, output, memory, CPU, PIDs, stdin, and /tmp.
+    This relies on the external runtime and host kernel and is not escape-proof.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    ok = False
+    def deny(code: str, message: str) -> str:
+        _record_direct_tool(
+            "isolated_run",
+            {"denial": code, "writable_workspace": writable_workspace is True},
+            ok=False, started=started, summary=code, output=message,
+        )
+        return message
+
+    account = _admin_account_from_token(token) if token else None
+    authorized, _message = admin_auth.require(account, "developer")
+    expected = os.environ.get("SONDER_ISOLATED_APPROVAL_CODE", "")
+    approval_ok = bool(
+        expected and approval and hmac.compare_digest(approval, expected)
+    )
+    if not authorized or not approval_ok:
+        return deny("authorization-denied", (
+            "ERROR: isolated_run requires a developer token and the host's "
+            "SONDER_ISOLATED_APPROVAL_CODE."
+        ))
+    if acknowledge_isolation_limits is not True:
+        return deny(
+            "risk-acknowledgement-denied",
+            "ERROR: acknowledge_isolation_limits=true is required.",
+        )
+    if writable_workspace is True:
+        expected_write = os.environ.get("SONDER_ISOLATED_WRITE_APPROVAL_CODE", "")
+        if not (
+            expected_write
+            and write_approval
+            and hmac.compare_digest(write_approval, expected_write)
+        ):
+            return deny("writable-authorization-denied", (
+                "ERROR: writable_workspace requires the separate host "
+                "SONDER_ISOLATED_WRITE_APPROVAL_CODE."
+            ))
+    try:
+        result = isolated_runner.run_isolated(
+            image=image,
+            argv_json=argv_json,
+            project=project,
+            stdin=stdin,
+            writable_workspace=writable_workspace,
+            timeout=timeout,
+            memory_mb=memory_mb,
+            cpus=cpus,
+            pids=pids,
+            output_bytes=output_bytes,
+        )
+        ok = bool(result.get("ok"))
+    except (OSError, ValueError) as exc:
+        _record_direct_tool(
+            "isolated_run",
+            {"failure": "policy-or-runtime-error",
+             "writable_workspace": writable_workspace is True},
+            ok=False, started=started, summary="isolated runner rejected request",
+        )
+        return "ERROR: %s" % exc
+    output = isolated_runner.format_result(result)
+    _record_direct_tool(
+        "isolated_run",
+        {"image": image, "project": project,
+         "writable_workspace": writable_workspace is True},
+        ok=ok, started=started, summary=("ok" if ok else "failed"),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
 def artifact_generate(
     name: str,
     brief: str,
@@ -11475,7 +11596,7 @@ def repo_blame(
 def tool_manifest() -> str:
     """List the sonder-runtime MCP tools and what they are for."""
     tools = {
-        "agent": "Run a Claude-like tool-calling loop that can use local tools and web tools.",
+        "agent": "Run a Claude-like tool-calling loop that can use local tools and web tools. Exact-ack unsafe lab mode removes its host tool policy only on a loopback, unprivileged process.",
         "autopilot_start/autopilot_status/autopilot_resume/autopilot_pause/autopilot_cancel": "Run a restart-persistent local goal with evidence-aware checkpoints, bounded replans, host tool gates, and explicit lifecycle control.",
         "runtime_policy_status/runtime_policy_update": "Inspect or guarded-edit shared hot-reloadable local model mappings and execution-lane tiers; cloud opt-in stays separate.",
         "mcp_runtime_status/live_reload_status": "Audit atomic MCP source/tool convergence, refresh history, list-change signaling, and fail-closed reload errors.",
@@ -11511,6 +11632,7 @@ def tool_manifest() -> str:
         "permission_policy/permission_rule_set": "Inspect or guarded-edit local permission rules for tool actions.",
         "context_compaction_plan": "Preview when to summarize, split sessions, or reduce live context.",
         "run_code": "Run a bounded snippet: Python, JS/TypeScript, Bash, Ruby, Perl, PHP, Lua, R, Go, Java, Rust, PowerShell, C++, C#.",
+        "isolated_run": "Direct MCP-only, explicitly enabled and developer-authorized Docker/Podman execution with approved roots, separate writable approval, and a fixed resource-capped isolation policy.",
         "ground_artifact": "Validate in-memory non-code content with exact/contains/regex/JSON checks.",
         "artifact_ground": "Validate files or bundles with inferred writing, data, editable Office/media/timelines, UI, image, audio, and static or animated humanoid model recipes.",
         "run_project": "Run a bounded temporary multi-file project with optional build commands.",
@@ -12559,6 +12681,14 @@ def _agent_dispatch(
     tool_name, args, allow_web=True, read_only=False, allow_location=False,
     repository_extra_roots="",
 ):
+    unsafe = unsafe_lab.active()
+    if unsafe:
+        # The acknowledgement is specifically permission to remove model-loop
+        # policy.  Direct MCP tool contracts remain explicit and unchanged.
+        allow_web = True
+        read_only = False
+        allow_location = True
+        repository_extra_roots = ""
     tool_name = (tool_name or "").strip()
     args = args or {}
     if not isinstance(args, dict):
@@ -13474,11 +13604,13 @@ _CLOUD_AGENT_LOCAL_ONLY_TOOLS = frozenset({
     "environment_status", "hardware_profile", "file_policy",
     "workspace_inventory", "directory_tree", "file_find", "file_read",
     "file_read_range", "file_digest", "text_search", "repo_status",
-    "repo_diff",
+    "repo_diff", "artifact_risk_inspect", "process_list",
+    "process_memory_risk_inspect",
 })
 
 
-def _cloud_agent_tool_policy_error(tool_name):
+def _cloud_agent_tool_policy_error(tool_name, *, unsafe=False):
+    """Keep host-data denial absolute; unsafe bypasses nested models only."""
     if tool_name in _CLOUD_AGENT_LOCAL_ONLY_TOOLS:
         return (
             "ERROR: HOST POLICY: local-only tool '%s' is disabled inside a "
@@ -13486,6 +13618,8 @@ def _cloud_agent_tool_policy_error(tool_name):
             "the hosted model transcript." % tool_name
         )
     if tool_name in _CLOUD_AGENT_NESTED_MODEL_TOOLS:
+        if unsafe is True:
+            return ""
         return (
             "ERROR: HOST POLICY: nested model-spawning tool '%s' is disabled "
             "inside a hosted agent so all hosted output remains in one "
@@ -14405,6 +14539,20 @@ def _agent_impl(
     public web search/fetch/weather when allow_web=True and web tools are on.
     """
     _maybe_live_reload()
+    unsafe = unsafe_lab.active()
+    if unsafe:
+        # Unsafe lab mode is for a disposable host where the model is the
+        # adversary under test. Remove all model-loop tool/root/read-only gates;
+        # bounded execution time and the direct MCP tool implementations remain.
+        allow_web = True
+        allow_location = True
+        read_only = False
+        require_file_evidence = False
+        project = ""
+        required_tool_names = ()
+        tool_allowlist = None
+        tool_policy = None
+        auto_checklist = False
     max_steps = _safe_limit(max_steps, 6, 20)
     model, cloud, augment, tier_label = _serve_target(tier, None)
     if tier_label == "cloud-disabled":
@@ -14537,6 +14685,8 @@ def _agent_impl(
     transcript = "Task:\n%s\n\n%s" % (
         prompt, _agent_tool_help(read_only=read_only, cloud=cloud)
     )
+    if unsafe:
+        transcript = "%s\n\n%s" % (unsafe_lab.WARNING, transcript)
     if project_scope:
         transcript += (
             "\n\nPROJECT ROOT: %s\nYour file/inspection tools are rooted at this "
@@ -14819,7 +14969,7 @@ def _agent_impl(
                     "Run or retry an exact validator now."
                 )
                 continue
-            if _AGENT_NEGATIVE_CLAIM_RE.search(final):
+            if not unsafe and _AGENT_NEGATIVE_CLAIM_RE.search(final):
                 claim_review = _agent_negative_claim_review(
                     prompt, final, observations, model, cloud=cloud,
                     cancel_check=cancel_check,
@@ -14949,7 +15099,9 @@ def _agent_impl(
         if not policy_error and tool_policy is not None:
             policy_error = str(tool_policy(tool_name, policy_tool_args) or "")
         if not policy_error and cloud:
-            policy_error = _cloud_agent_tool_policy_error(tool_name)
+            policy_error = _cloud_agent_tool_policy_error(
+                tool_name, unsafe=unsafe,
+            )
         if not policy_error and project_scope:
             policy_error = _repository_scope_path_error(
                 tool_name, policy_tool_args, project_scope,
@@ -15402,7 +15554,9 @@ _AUTOPILOT_MUTATION_EVIDENCE = frozenset({
 })
 
 
-def _autopilot_allowed_tools(run: dict) -> frozenset:
+def _autopilot_allowed_tools(run: dict) -> frozenset | None:
+    if unsafe_lab.active():
+        return None
     return (
         _AUTOPILOT_OBSERVE_TOOLS
         if run.get("policy") == "observe"
@@ -15432,6 +15586,8 @@ def _autopilot_command_programs(value) -> list[str]:
 
 def _autopilot_tool_policy(run: dict):
     """Return an argument-aware policy that models cannot override."""
+    if unsafe_lab.active():
+        return None
     project_scope, _project_error = _agent_project_scope(run.get("project", ""))
     allowed_tools = _autopilot_allowed_tools(run)
 
@@ -15536,7 +15692,12 @@ def _autopilot_json_model(run: dict, role: str, prompt: str, validator) -> dict:
 
 
 def _autopilot_plan_model(run: dict) -> dict:
-    allowed = sorted(_autopilot_allowed_tools(run))
+    allowed_set = _autopilot_allowed_tools(run)
+    allowed = (
+        sorted(allowed_set)
+        if allowed_set is not None
+        else ["UNRESTRICTED HOST-NATIVE AGENT TOOLS (UNSAFE LAB MODE)"]
+    )
     max_tasks = int(run.get("max_tasks") or 12)
     reserve = (
         min(int(run.get("max_replans") or 0), max(0, max_tasks - 3))
@@ -15585,7 +15746,7 @@ def _autopilot_plan_model(run: dict) -> dict:
         normalized = autopilot_controller.normalize_plan(
             payload, run.get("objective", ""), max_tasks,
         )
-        if run.get("policy") == "observe" and any(
+        if not unsafe_lab.active() and run.get("policy") == "observe" and any(
             task.get("kind") == "implement" for task in normalized["tasks"]
         ):
             raise ValueError("observe policy cannot contain implementation tasks")
@@ -15745,13 +15906,14 @@ def _autopilot_work_model(
         criteria="\n".join("- " + item for item in (run.get("criteria") or [])),
         prior=prior or "(none yet)",
     )
+    unsafe = unsafe_lab.active()
     output = _agent_impl(
         prompt,
         tier=run.get("tier", "code"),
         max_steps=12,
         allow_web=bool(run.get("allow_web")),
         require_file_evidence=False,
-        read_only=run.get("policy") == "observe",
+        read_only=(run.get("policy") == "observe" and not unsafe),
         include_evidence=True,
         auto_checklist=True,
         project=run.get("project", ""),
@@ -16420,6 +16582,7 @@ def diagnostics() -> str:
     """Run lightweight health checks for the local Sonder Runtime installation."""
     _maybe_live_reload()
     lines = ["sonder diagnostics"]
+    lines.append("  unsafe lab mode: %s" % unsafe_lab.status_line())
     lines.append("  live reload: %s" % ("on" if live_reload.enabled() else "off"))
     lines.append(
         "  ollama endpoint: %s (%s; remote opt-in %s)"
@@ -16599,6 +16762,7 @@ def status() -> str:
             for line in tier_lines
         ]
     lines = [
+        "Unsafe lab mode: %s" % unsafe_lab.status_line(),
         f"Ollama @ {_ollama_display()} ({ollama_endpoint.locality(BASE)})",
         "Tiers:",
         *tier_lines,
@@ -17565,5 +17729,11 @@ def _prompt_debug_failure(symptom: str, evidence: str = "") -> str:
 mcp.finish_module_refresh(__name__, __file__, globals())
 
 
-if __name__ == "__main__" and not globals().get("_MCP_HOT_RELOAD_EXEC"):
+def run_mcp() -> None:
+    """Run the MCP adapter only after the process-level lab gate succeeds."""
+    unsafe_lab.require_startup()
     mcp.run()
+
+
+if __name__ == "__main__" and not globals().get("_MCP_HOT_RELOAD_EXEC"):
+    run_mcp()
