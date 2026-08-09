@@ -151,6 +151,26 @@ def test_chat_service_forwards_num_ctx_into_request_options():
     assert seen["options"]["num_ctx"] == 2048
 
 
+def test_chat_service_preserves_optional_inference_telemetry():
+    from sonder_runtime.application.chat.handle_chat import ChatCommand, ChatService
+    from sonder_runtime.application.context import local_owner_context
+    from sonder_runtime.application.ports.model_gateway import (
+        InferenceTelemetry, ModelResponse,
+    )
+
+    expected = InferenceTelemetry(eval_ms=125.0, output_tokens_per_second=32.0)
+
+    class _Gateway:
+        def generate(self, request, context):
+            return ModelResponse("x", "m", "code", telemetry=expected)
+
+    result = ChatService(_Gateway()).complete(
+        ChatCommand(content="p", tier="code"),
+        local_owner_context(correlation_id="telemetry", source="test"),
+    )
+    assert result.telemetry is expected
+
+
 def test_lesson_distillation_routes_through_gateway(monkeypatch):
     import reflection
 

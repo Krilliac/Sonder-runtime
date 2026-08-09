@@ -861,8 +861,21 @@ def _make_generate(
                 "token_source": source,
             }
             gen.last_usage = dict(usage)
+            # Keep only the backend's bounded, non-content inference metadata.
+            # Gateways can expose measured phase timing without retaining prompts,
+            # responses, or arbitrary provider fields.
             gen.last_response_meta = {
                 "done_reason": str(out.get("done_reason") or "").strip().casefold(),
+                **{
+                    key: out.get(key)
+                    for key in (
+                        "total_duration", "load_duration",
+                        "prompt_eval_count", "prompt_eval_duration",
+                        "eval_count", "eval_duration",
+                        "load_state", "cold_start",
+                    )
+                    if key in out
+                },
             }
             ok = True
         finally:

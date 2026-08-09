@@ -18,6 +18,24 @@ class ModelRequest:
 
 
 @dataclass(frozen=True)
+class InferenceTelemetry:
+    """Optional backend-measured inference phases.
+
+    Every value is absent unless the serving backend reported enough evidence
+    to measure it.  In particular, rates are never estimated from text length
+    and ``load_state`` is not inferred from an arbitrary duration threshold.
+    """
+
+    backend_total_ms: float | None = None
+    load_ms: float | None = None
+    prompt_eval_ms: float | None = None
+    eval_ms: float | None = None
+    prompt_tokens_per_second: float | None = None
+    output_tokens_per_second: float | None = None
+    load_state: str | None = None
+
+
+@dataclass(frozen=True)
 class ModelResponse:
     text: str
     model: str
@@ -25,6 +43,7 @@ class ModelResponse:
     duration_ms: int = 0
     tokens_in: int | None = None
     tokens_out: int | None = None
+    telemetry: InferenceTelemetry | None = None
 
 
 @dataclass(frozen=True)
