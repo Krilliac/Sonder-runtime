@@ -600,7 +600,7 @@ def cmd_eval_history(args) -> int:
 
     This command never runs an evaluation and never calls a model.
     """
-    import eval_history
+    from .adapters import evaluation_history_store as eval_history
 
     try:
         if args.eval_history_command == "status":
