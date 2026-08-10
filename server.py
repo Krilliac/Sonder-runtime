@@ -3752,20 +3752,133 @@ def _parse_schema_arg(schema):
     )
 
 
+# The complete set of keywords `json_schema_verifier` enforces. Coverage below
+# is the *complement* of this set rather than a list of unsupported keywords
+# somebody remembered to enumerate: a keyword nobody anticipated is reported as
+# unchecked by default instead of being assumed harmless. `tests/
+# test_offload_schema.py` pins both halves against the verifier's real
+# behaviour, so this cannot quietly drift out of step with it.
+_VERIFIED_SCHEMA_KEYWORDS = frozenset({"type", "required", "properties", "items"})
+
+# How many gaps a disclosure names before it summarizes the rest.
+_MAX_REPORTED_SCHEMA_GAPS = 8
+
+
+def _schema_coverage(value, schema, path, gaps):
+    """Mirror `json_schema_verifier._validate`'s descent, recording what it skips.
+
+    Deliberately walks the *data* as well as the schema, because the verifier's
+    descent is data-dependent: it only enters `properties[key]` when the key is
+    actually present and only applies `items` to elements that exist. A report
+    derived from the schema alone would claim coverage of branches nothing ever
+    walked.
+
+    The two cases that matter most are absences rather than keywords, and a
+    static list of unsupported keywords would score both as fully covered:
+
+    * a node with no ``type`` -- which includes every ``$ref`` node -- defaults
+      to ``"any"`` in the verifier, accepts literally any value, and never
+      applies its own ``required``/``properties`` either, so the whole subtree
+      goes unchecked;
+    * ``properties``/``required`` written without an explicit ``"type":
+      "object"`` are skipped for the same reason.
+    """
+    if not isinstance(schema, dict):
+        gaps.append((path, "schema node is not an object; nothing was checked"))
+        return gaps
+
+    declared = schema.get("type")
+    if declared is None:
+        reason = (
+            '"$ref" is not followed, so nothing at this node was checked'
+            if "$ref" in schema
+            else 'no "type", so any value is accepted and nothing was checked'
+        )
+        gaps.append((path, reason))
+        return gaps
+    if not isinstance(declared, str) or declared not in json_schema_verifier._TYPE_CHECKS:
+        # A type union -- legal JSON Schema, and honoured by Ollama's decoder --
+        # is not something this verifier can evaluate.
+        gaps.append((path, "type %r is not one this check understands" % (declared,)))
+        return gaps
+
+    unenforced = sorted(set(schema) - _VERIFIED_SCHEMA_KEYWORDS)
+    if unenforced:
+        gaps.append((path, "%s not checked" % ", ".join(unenforced)))
+
+    if declared == "object" and isinstance(value, dict):
+        for key, subschema in (schema.get("properties") or {}).items():
+            if key in value:
+                _schema_coverage(value[key], subschema, "%s.%s" % (path, key), gaps)
+    elif declared == "array" and isinstance(value, list):
+        items_schema = schema.get("items")
+        if items_schema is not None:
+            for index, item in enumerate(value):
+                _schema_coverage(item, items_schema, "%s[%d]" % (path, index), gaps)
+    return gaps
+
+
+def _schema_coverage_gaps(value, schema):
+    """Every part of `schema` the post-hoc check did not actually enforce.
+
+    Total by construction: a walker that raised would leave the caller with no
+    coverage information at all, which is the failure mode this exists to
+    prevent, so an unexpected error is itself reported as total non-coverage.
+    """
+    try:
+        return _schema_coverage(value, schema, "$", [])
+    except Exception as exc:
+        return [("$", "coverage could not be determined: %s" % exc)]
+
+
+def _format_schema_gaps(gaps):
+    shown = ["%s (%s)" % (path, reason) for path, reason in gaps[:_MAX_REPORTED_SCHEMA_GAPS]]
+    remaining = len(gaps) - len(shown)
+    if remaining > 0:
+        shown.append("and %d more" % remaining)
+    return "; ".join(shown)
+
+
+def _with_schema_coverage(text, gaps):
+    """Append what the check could not verify, or return `text` untouched.
+
+    A fully-checkable schema -- the common `type`/`required`/`properties`/
+    `items` case -- returns byte-for-byte clean JSON. Anything less carries the
+    shortfall with it, because a caller who cannot see that the check was
+    partial will read its silence as a pass.
+    """
+    if not gaps:
+        return text
+    return "%s\n[schema_unverified: %s]" % (text, _format_schema_gaps(gaps))
+
+
 def _require_schema_match(text, schema):
-    """Check a schema-constrained generation actually matches its schema.
+    """Re-check a schema-constrained generation, and report what that covered.
 
     Ollama's ``format`` is applied by the backend we asked, which makes it a
     claim rather than evidence: a stale server, a model that ignores the
     grammar, or a truncated decode all produce text that never went through the
-    constraint we think we imposed. Re-checking it here is cheap and makes the
-    guarantee ours.
+    constraint we think we imposed. Re-checking it here is cheap and catches
+    that.
 
-    A violation raises. It is deliberately not repaired, coerced, defaulted or
-    silently re-asked -- rejecting non-conforming output is the entire point of
-    requesting a schema, and a path that quietly fixes it up would return
-    something that looks validated and is not. The failure names every path
-    that did not validate so the caller can see what was wrong.
+    It does **not** make the whole schema ours to guarantee.
+    ``json_schema_verifier`` implements a strict subset -- ``type``,
+    ``required``, ``properties``, ``items`` -- while Ollama's decoder honours
+    full JSON Schema. So `enum`, `minimum`, `additionalProperties`, `$ref` and
+    roughly twenty more are constrained during decoding and *not* re-checked
+    here. Returning silence for those would be the more dangerous failure: it
+    reads as a clean bill of health. This returns ``(data, gaps)`` and the
+    caller discloses the gaps.
+
+    A violation still raises, and is deliberately not repaired, coerced,
+    defaulted or silently re-asked -- rejecting non-conforming output is the
+    entire point of requesting a schema. The failure names every path that did
+    not validate, and the coverage shortfall alongside it, because "at least
+    this was wrong" is not the same claim as "this is all that was wrong".
+
+    Raises only ModelCallError. A schema this check cannot traverse at all is a
+    coverage gap, not a rejection: the decoder still applied it, so refusing the
+    response would remove capability the caller legitimately has.
     """
     try:
         data = json.loads(text)
@@ -3774,12 +3887,17 @@ def _require_schema_match(text, schema):
             "protocol",
             "response is not valid JSON despite a schema constraint: %s" % exc,
         ) from exc
-    errors = json_schema_verifier.validate(data, schema)
+    gaps = _schema_coverage_gaps(data, schema)
+    try:
+        errors = json_schema_verifier.validate(data, schema)
+    except Exception as exc:
+        return data, gaps + [("$", "the check aborted on this schema: %s" % exc)]
     if errors:
-        raise ModelCallError(
-            "protocol", "schema violation: %s" % "; ".join(errors),
-        )
-    return data
+        detail = "schema violation: %s" % "; ".join(errors)
+        if gaps:
+            detail += ". Unverified: %s" % _format_schema_gaps(gaps)
+        raise ModelCallError("protocol", detail)
+    return data, gaps
 
 
 def _file_schema_rejection(interaction_id):
@@ -3910,12 +4028,20 @@ def _offload_impl(
                 "tokens_out": int(tokens_out or 0),
                 "token_source": source,
             }
-            if schema is not None:
-                # A response that did not honour the schema is a failed call,
-                # not a successful one with bad content -- so this runs before
-                # `ok`, and the tracker records the attempt as a failure.
-                _require_schema_match(msg, schema)
+            # `ok` describes the model call, which succeeded: the request was
+            # answered and tokens came back. A schema violation is a verdict on
+            # the content, and it is carried by the `rejected` outcome rather
+            # than by recording the transport as failed. The learning path
+            # cannot report otherwise anyway -- `gen` has already recorded
+            # ok=True by the time the check runs -- and an activity feed that
+            # says a schema violation failed on one path and succeeded on the
+            # other measures nothing. Keeping ok=True here also preserves
+            # `response_preview`, which is the offending text a schema failure
+            # most needs.
             ok = True
+            if schema is not None:
+                _, gaps = _require_schema_match(msg, schema)
+                return _with_schema_coverage(msg, gaps)
             return msg
         finally:
             activity_tracker.record_model_call(
@@ -3972,10 +4098,15 @@ def _offload_impl(
         conn.close()
     if schema is not None:
         try:
-            _require_schema_match(response, schema)
-        except ModelCallError:
+            _, gaps = _require_schema_match(response, schema)
+        except Exception:
+            # Any failure here means the generation did not deliver what was
+            # asked for, so it must reach the outcome store. Catching only
+            # ModelCallError let anything unforeseen skip the `rejected` write
+            # and go invisible to the exact population this feature feeds.
             _file_schema_rejection(iid)
             raise
+        response = _with_schema_coverage(response, gaps)
     return with_footer(response, iid)
 
 
@@ -4012,11 +4143,28 @@ def offload(
 
     schema: optional JSON Schema *as JSON text*, e.g.
     '{"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}}'.
-    Supplying it constrains the model's decoder to that shape AND re-checks the
-    returned text against it here. A response that does not match is REJECTED
-    with the failing path named -- it is never repaired into a passing one, and
-    there is no silent retry. Omit it (the default) and this call behaves
-    exactly as it always has: no format constraint, no validation, raw text back.
+    Full JSON Schema is accepted and is applied in full by the model's decoder.
+
+    It is then re-checked here, but only PARTIALLY: the in-process check covers
+    "type", "required", "properties" and "items". Everything else -- "enum",
+    "minimum", "additionalProperties", "$ref", "oneOf", and so on -- is
+    constrained during decoding and NOT re-checked. So is any node without an
+    explicit "type" (every "$ref" node, and "properties" written without
+    "type": "object"), which the check accepts unconditionally.
+
+    What that means for you:
+      - A response failing the re-checked part is REJECTED, with the failing
+        path named. It is never repaired into a passing one and never silently
+        retried.
+      - A response that passes gets back exactly the JSON text, and nothing
+        else, ONLY when the whole schema was re-checkable. Otherwise a
+        '[schema_unverified: <path> (<what went unchecked>)]' line follows the
+        JSON, so partial verification is never handed to you as complete.
+      - Stick to type/required/properties/items if you want the strongest
+        guarantee and clean parseable output.
+
+    Omit schema (the default) and this call behaves exactly as it always has:
+    no format constraint, no checking, raw text back.
     Small object shapes work far better than deep ones on a 3B/7B local tier.
     """
     _maybe_live_reload()

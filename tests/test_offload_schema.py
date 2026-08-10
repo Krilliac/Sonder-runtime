@@ -1,21 +1,31 @@
 """Schema-constrained offload.
 
-Two separate guarantees are under test here, and they are deliberately not the
+Three separate guarantees are under test here, and they are deliberately not the
 same mechanism:
 
-1. the schema is handed to Ollama as the decoder-side ``format`` constraint, and
+1. the schema is handed to Ollama as the decoder-side ``format`` constraint,
 2. the text that comes back is validated against that schema again, in-process,
    because a constraint applied by the backend we asked is a claim rather than
-   evidence.
+   evidence, and
+3. the *coverage* of (2) is reported, because the in-process verifier checks a
+   strict subset of JSON Schema and silence from a partial check must never read
+   as a clean bill of health.
 
 A violation of (2) is a hard failure. Nothing in this path may repair, coerce or
 silently re-ask for a response that did not match -- rejecting bad output is the
 entire value of asking for a schema in the first place.
+
+A *gap* in (2) is not a failure: Ollama's decoder still applied the whole schema,
+so the call keeps working. It is disclosed instead. The tests below pin the
+difference, and pin that the disclosure is derived from what the verifier
+actually traverses -- so that an absence (a `$ref`, a missing `"type"`) reports
+as unverified rather than as clean.
 """
 import json
 
 import pytest
 
+import json_schema_verifier
 import learning_health
 import reward
 import server
@@ -297,3 +307,251 @@ def test_a_blank_schema_argument_means_no_schema(monkeypatch, empty):
         "describe ada", tier="fast", learn=False, schema=empty,
     ) == "not json at all"
     assert "format" not in seen["payload"]
+
+
+# --- C1: a legal schema the verifier cannot traverse must not crash the tool ---
+
+UNION = {"type": ["string", "null"]}
+REF = {
+    "$ref": "#/$defs/Thing",
+    "$defs": {"Thing": {"type": "object", "required": ["name"]}},
+}
+
+
+def test_a_type_union_schema_does_not_escape_as_an_uncaught_exception(monkeypatch):
+    # {"type": ["string", "null"]} is legal JSON Schema and Ollama's `format`
+    # accepts it. The in-process verifier indexes its type table with the raw
+    # value, so a list used to raise TypeError straight out of the MCP tool --
+    # after the request had already been posted.
+    seen = _capture(monkeypatch, json.dumps("ada"))
+    out = server.offload(
+        "describe ada", tier="fast", learn=False, schema=json.dumps(UNION),
+    )
+    assert seen["payload"]["format"] == UNION
+    assert isinstance(out, str)
+
+
+def test_a_type_union_is_reported_as_unverified_rather_than_rejected(monkeypatch):
+    # Capability is kept: the decoder still constrained the whole schema, so the
+    # call succeeds. What changes is that it stops claiming to have checked it.
+    _capture(monkeypatch, json.dumps("ada"))
+    out = server.offload(
+        "describe ada", tier="fast", learn=False, schema=json.dumps(UNION),
+    )
+    assert not out.startswith("ERROR:")
+    assert "schema_unverified" in out
+    assert '"ada"' in out
+
+
+def test_a_verifier_that_cannot_traverse_at_all_never_escapes(monkeypatch):
+    def explode(data, schema):
+        raise TypeError("unhashable type: 'list'")
+
+    monkeypatch.setattr(json_schema_verifier, "validate", explode)
+    _capture(monkeypatch, json.dumps(GOOD))
+    out = server.offload(
+        "describe ada", tier="fast", learn=False, schema=json.dumps(SCHEMA),
+    )
+    assert isinstance(out, str)
+    assert "schema_unverified" in out
+
+
+def test_an_unexpected_check_failure_still_files_a_rejection(monkeypatch):
+    # The learning path caught only ModelCallError, so anything else skipped the
+    # `rejected` write -- making the failure invisible to the exact population
+    # this feature exists to feed.
+    rows = _outcomes(monkeypatch)
+
+    def explode(text, schema):
+        raise RuntimeError("something unforeseen")
+
+    monkeypatch.setattr(server, "_require_schema_match", explode)
+    _learning(monkeypatch, interaction_id="iid-unforeseen")
+    _capture(monkeypatch, json.dumps(GOOD))
+    with pytest.raises(RuntimeError):
+        server.offload(
+            "describe ada", tier="code", learn=True, schema=json.dumps(SCHEMA),
+        )
+    assert rows == [("iid-unforeseen", "rejected")]
+
+
+# --- I1: coverage is derived from what the verifier actually traversed --------
+
+def test_an_unfollowed_ref_is_reported_as_unverified_not_as_clean(monkeypatch):
+    # The end-to-end case: a $ref node carries no "type", the verifier's type
+    # defaults to "any", and a wholly wrong-shaped reply came back "verified".
+    _capture(monkeypatch, json.dumps("totally the wrong shape"))
+    out = server.offload(
+        "describe ada", tier="fast", learn=False, schema=json.dumps(REF),
+    )
+    assert "schema_unverified" in out
+    assert "$ref" in out
+
+
+def test_properties_without_an_explicit_object_type_are_unverified(monkeypatch):
+    # No "type" means the verifier accepts any value and never applies
+    # required/properties at all -- an absence, which a static keyword list
+    # would have scored as full coverage.
+    schema = {"required": ["name"], "properties": {"name": {"type": "string"}}}
+    _capture(monkeypatch, json.dumps(42))
+    out = server.offload(
+        "describe ada", tier="fast", learn=False, schema=json.dumps(schema),
+    )
+    assert "schema_unverified" in out
+
+
+def test_unsupported_keywords_are_named_at_the_node_that_carries_them(monkeypatch):
+    schema = {
+        "type": "object",
+        "required": ["color"],
+        "properties": {"color": {"type": "string", "enum": ["red", "green"]}},
+    }
+    _capture(monkeypatch, json.dumps({"color": "purple"}))
+    out = server.offload(
+        "pick one", tier="fast", learn=False, schema=json.dumps(schema),
+    )
+    assert "schema_unverified" in out
+    assert "$.color" in out
+    assert "enum" in out
+
+
+def test_an_unknown_keyword_is_unverified_by_default(monkeypatch):
+    # Coverage is the complement of what the verifier enforces, not a list of
+    # keywords someone remembered to enumerate, so a keyword nobody anticipated
+    # is reported rather than assumed safe.
+    schema = {"type": "string", "x-invented-by-nobody": True}
+    _capture(monkeypatch, json.dumps("ada"))
+    out = server.offload(
+        "describe ada", tier="fast", learn=False, schema=json.dumps(schema),
+    )
+    assert "x-invented-by-nobody" in out
+
+
+def test_a_gap_is_reported_at_its_nested_path(monkeypatch):
+    schema = {
+        "type": "object",
+        "required": ["rows"],
+        "properties": {
+            "rows": {
+                "type": "array",
+                "items": {"type": "integer", "minimum": 0},
+            },
+        },
+    }
+    _capture(monkeypatch, json.dumps({"rows": [-5]}))
+    out = server.offload(
+        "list them", tier="fast", learn=False, schema=json.dumps(schema),
+    )
+    assert "$.rows[0]" in out
+    assert "minimum" in out
+
+
+def test_a_fully_supported_schema_is_returned_byte_for_byte(monkeypatch):
+    # The common case must stay clean, parseable JSON with nothing appended.
+    _capture(monkeypatch, json.dumps(GOOD))
+    out = server.offload(
+        "describe ada", tier="fast", learn=False, schema=json.dumps(SCHEMA),
+    )
+    assert out == json.dumps(GOOD)
+    assert json.loads(out) == GOOD
+
+
+def test_a_violation_message_also_discloses_partial_coverage(monkeypatch):
+    # "At least this was wrong" is not the same as "this is all that was wrong".
+    schema = {
+        "type": "object",
+        "required": ["name"],
+        "properties": {"name": {"type": "string", "minLength": 3}},
+    }
+    _capture(monkeypatch, json.dumps({"name": 7}))
+    out = server.offload(
+        "describe ada", tier="fast", learn=False, schema=json.dumps(schema),
+    )
+    assert out.startswith("ERROR:")
+    assert "$.name: expected type string" in out
+    assert "unverified" in out.casefold()
+    assert "minLength not checked" in out
+
+
+def test_the_verifier_really_enforces_every_keyword_coverage_claims():
+    # Guards the mirror: if json_schema_verifier ever stops enforcing one of
+    # these, coverage would keep claiming it and this fails.
+    assert server._VERIFIED_SCHEMA_KEYWORDS == frozenset(
+        {"type", "required", "properties", "items"}
+    )
+    assert json_schema_verifier.validate(1, {"type": "string"})
+    assert json_schema_verifier.validate({}, {"type": "object", "required": ["a"]})
+    assert json_schema_verifier.validate(
+        {"a": 1}, {"type": "object", "properties": {"a": {"type": "string"}}},
+    )
+    assert json_schema_verifier.validate(
+        ["x"], {"type": "array", "items": {"type": "integer"}},
+    )
+
+
+@pytest.mark.parametrize(
+    "schema, datum",
+    [
+        ({"type": "string", "enum": ["red"]}, "purple"),
+        ({"type": "integer", "minimum": 0}, -5),
+        ({"type": "string", "minLength": 3}, "a"),
+        ({"type": "object", "additionalProperties": False}, {"a": 1}),
+        ({"type": "array", "uniqueItems": True}, [1, 1]),
+        ({"type": "string", "pattern": "^a$"}, "zzz"),
+    ],
+)
+def test_the_verifier_really_ignores_the_keywords_coverage_flags(schema, datum):
+    # The other half of the mirror: each of these passes the verifier despite
+    # violating the schema, which is exactly why coverage must disclose them.
+    assert json_schema_verifier.validate(datum, schema) == []
+    gaps = server._schema_coverage_gaps(datum, schema)
+    assert gaps, schema
+    unsupported = set(schema) - server._VERIFIED_SCHEMA_KEYWORDS
+    reported = " ".join(reason for _, reason in gaps)
+    assert all(keyword in reported for keyword in unsupported)
+
+
+def test_coverage_reports_rather_than_raises_on_a_malformed_schema_node():
+    assert server._schema_coverage_gaps(1, "not a schema node")
+
+
+# --- I2: both paths record a schema violation the same way --------------------
+
+def _model_calls(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        server.activity_tracker, "record_model_call",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    return calls
+
+
+def test_both_paths_record_a_schema_violation_identically(monkeypatch):
+    # The model call itself succeeded on both paths -- HTTP 200, tokens back.
+    # Recording it as failed on one path and successful on the other was an
+    # undisclosed asymmetry in the activity feed. The bad verdict is carried by
+    # the `rejected` outcome, not by lying about the transport.
+    bad = json.dumps({"name": "ada", "age": "thirty-six"})
+
+    plain = _model_calls(monkeypatch)
+    _capture(monkeypatch, bad)
+    assert server.offload(
+        "describe ada", tier="fast", learn=False, schema=json.dumps(SCHEMA),
+    ).startswith("ERROR:")
+
+    learned = _model_calls(monkeypatch)
+    _learning(monkeypatch)
+    _capture(monkeypatch, bad)
+    assert server.offload(
+        "describe ada", tier="code", learn=True, schema=json.dumps(SCHEMA),
+    ).startswith("ERROR:")
+
+    assert [call["ok"] for call in plain] == [call["ok"] for call in learned] == [True]
+
+
+def test_a_schema_violation_keeps_the_offending_text_visible_for_debugging(monkeypatch):
+    calls = _model_calls(monkeypatch)
+    bad = json.dumps({"name": "ada", "age": "thirty-six"})
+    _capture(monkeypatch, bad)
+    server.offload("describe ada", tier="fast", learn=False, schema=json.dumps(SCHEMA))
+    assert calls[0]["response_preview"] == bad
