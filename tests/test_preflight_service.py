@@ -9,7 +9,7 @@ from pathlib import Path
 
 import sonder_preflight
 from sonder_runtime.adapters import preflight as preflight_adapter
-from sonder_runtime.adapters.legacy.preflight import LegacyPreflightExecutor
+from sonder_runtime.adapters.preflight_executor import LegacyPreflightExecutor
 from sonder_runtime.application.ports.preflight import CheckResult, PreflightReport
 from sonder_runtime.application.preflight import PreflightService
 
@@ -77,7 +77,7 @@ def test_legacy_executor_import_is_lazy_in_fresh_process():
     code = "\n".join((
         "import sys",
         "import sonder_runtime.__main__",
-        "from sonder_runtime.adapters.legacy.preflight import LegacyPreflightExecutor",
+        "from sonder_runtime.adapters.preflight_executor import LegacyPreflightExecutor",
         "assert LegacyPreflightExecutor is not None",
         "assert 'sonder_runtime.adapters.preflight' not in sys.modules",
         "assert 'sonder_migrations' not in sys.modules",

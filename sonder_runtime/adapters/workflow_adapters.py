@@ -1,11 +1,11 @@
-"""Legacy saved-workflow persistence and loop-runner adapters."""
+"""Workflow adapters (SPEC-5 WP11, relocated from legacy)."""
 from __future__ import annotations
 
 
 class LegacyWorkflowRepository:
     @staticmethod
     def _module():
-        from ..filesystem import workflow_store
+        from .filesystem import workflow_store
 
         return workflow_store
 
@@ -31,7 +31,7 @@ class LegacyWorkflowRepository:
 class LegacyLoopRunner:
     @staticmethod
     def _module():
-        from ...application.workflows import loop
+        from ..application.workflows import loop
 
         return loop
 

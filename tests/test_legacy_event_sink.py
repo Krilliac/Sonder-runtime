@@ -1,7 +1,7 @@
 import sys
 from types import SimpleNamespace
 
-from sonder_runtime.adapters.legacy.services import OperationsEventSink
+from sonder_runtime.adapters.strangler_services import OperationsEventSink
 
 
 def test_event_store_failure_does_not_change_business_success(monkeypatch):

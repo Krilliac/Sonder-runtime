@@ -1,4 +1,4 @@
-"""Lazy compatibility executor for startup preflight."""
+"""Lazy preflight executor adapter (SPEC-5 WP11, replaces legacy)."""
 from __future__ import annotations
 
 from sonder_runtime.application.ports.preflight import (
@@ -7,7 +7,8 @@ from sonder_runtime.application.ports.preflight import (
 )
 
 
-class LegacyPreflightExecutor:
+class PreflightExecutor:
+    """Lazy preflight executor that delegates to the real implementation."""
     def run(
         self,
         config: PreflightConfig,
@@ -15,8 +16,6 @@ class LegacyPreflightExecutor:
         check_ollama: bool = True,
         ollama_timeout: float = 5.0,
     ) -> PreflightReport:
-        # Lazy so composing/importing the command surface performs no filesystem
-        # probes, migration imports, or network setup.
         import sonder_runtime.adapters.preflight as implementation
 
         return implementation.run_preflight(
@@ -24,6 +23,3 @@ class LegacyPreflightExecutor:
             check_ollama=check_ollama,
             ollama_timeout=ollama_timeout,
         )
-
-
-__all__ = ["LegacyPreflightExecutor"]

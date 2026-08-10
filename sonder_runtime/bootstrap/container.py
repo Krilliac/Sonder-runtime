@@ -45,7 +45,8 @@ def build_runtime(
     Placeholder during WP1 — will grow as each WP slice adds its domain
     services.  The important contract is: one call, explicit deps, no globals.
     """
-    from ..adapters.legacy.services import OperationsEventSink, SystemClock
+    from ..adapters.logging_event_sink import LoggingEventSink
+    from ..adapters.system_clock import SystemClock
     from ..adapters.local_observability import LocalObservabilitySink
 
     if config.model_backend in ("openai", "openai-compatible", "llamacpp", "vllm"):
@@ -59,6 +60,6 @@ def build_runtime(
         config=config,
         capabilities=capabilities,
         model_gateway=gateway,
-        events=LocalObservabilitySink(OperationsEventSink()),
+        events=LocalObservabilitySink(LoggingEventSink()),
         clock=SystemClock(),
     )

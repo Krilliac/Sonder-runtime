@@ -289,7 +289,7 @@ def test_server_live_reload_rebinds_task_application_modules(monkeypatch):
         "reload_changed_modules",
         lambda names: {
             "sonder_runtime.application.tasks.use_cases": service_module,
-            "sonder_runtime.adapters.legacy.task_state": adapter_module,
+            "sonder_runtime.adapters.task_store": adapter_module,
         },
     )
 
@@ -330,7 +330,7 @@ def test_server_live_reload_rebinds_evaluation_history_modules(monkeypatch):
             "sonder_runtime.application.evaluation_history.use_cases": (
                 service_module
             ),
-            "sonder_runtime.adapters.legacy.evaluation_history": adapter_module,
+            "sonder_runtime.adapters.eval_history_reader": adapter_module,
         },
     )
     monkeypatch.setattr(server, "_refresh_runtime_policy", lambda **kwargs: None)

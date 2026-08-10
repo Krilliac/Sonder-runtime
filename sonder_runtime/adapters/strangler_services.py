@@ -1,4 +1,4 @@
-"""Legacy adapters: root-module implementations behind SPEC-3 ports.
+"""Strangler adapters: root-module implementations behind SPEC-3 ports.
 
 The strangler strategy (SPEC-3 section 11) wraps the existing flat
 modules as adapters first, then moves implementations behind the ports
@@ -10,17 +10,17 @@ from __future__ import annotations
 
 import time
 
-from ...application.context import OperationContext
-from ...application.ports.model_gateway import (
+from ..application.context import OperationContext
+from ..application.ports.model_gateway import (
     Embedding,
     ModelRequest,
     ModelResponse,
     require_embedding_vector,
     require_model_text,
 )
-from ...application.ports.process_probe import ProbeResult, ProcessIdentity
-from ...application.ports.tool_executor import ToolCall, ToolResult
-from ...domain.common.errors import Cancelled, DeadlineExceeded, InvalidInput
+from ..application.ports.process_probe import ProbeResult, ProcessIdentity
+from ..application.ports.tool_executor import ToolCall, ToolResult
+from ..domain.common.errors import Cancelled, DeadlineExceeded, InvalidInput
 
 
 def _check_context_liveness(context: OperationContext) -> None:
@@ -334,8 +334,6 @@ class LegacyModelGateway:
 
         results = []
         for text in texts:
-            # Cancellation used to be ignored, so adapter swaps could keep doing
-            # model work after the application had abandoned the operation.
             _check_context_liveness(context)
             results.append(Embedding(
                 vector=require_embedding_vector(embeddings.embed(text)),
@@ -375,8 +373,6 @@ class OperationsEventSink:
                 operation_id=operation_id,
             )
         except Exception:
-            # Observability is explicitly non-authoritative; a locked or damaged
-            # operations DB used to turn successful business work into a failure.
             return
 
 
@@ -433,7 +429,6 @@ class LegacyToolExecutor:
     def execute(self, call: ToolCall, context: OperationContext) -> ToolResult:
         args = dict(call.arguments or {})
         if context.expired:
-            # A pre-expired request previously reached mutating file tools.
             return ToolResult(ok=False, error_code="DeadlineExceeded",
                               output="operation deadline exceeded")
         if context.cancellation is not None and context.cancellation.cancelled:

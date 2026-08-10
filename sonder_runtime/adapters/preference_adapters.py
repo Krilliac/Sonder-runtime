@@ -1,9 +1,9 @@
-"""Legacy storage and text adapters for typed preference use cases."""
+"""Preference adapters (SPEC-5 WP11, relocated from legacy)."""
 from __future__ import annotations
 
 import importlib
 
-from ...application.ports.preferences import (
+from ..application.ports.preferences import (
     ConnectionFactory,
     PreferenceModuleProvider,
 )
@@ -95,7 +95,5 @@ class LegacyPreferenceCodec:
 
 
 class NullPreferenceEventSink:
-    """Preserve the legacy surface, which emitted no preference activity."""
-
     def changed(self, operation, count):
         return None
