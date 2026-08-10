@@ -1,0 +1,850 @@
+"""Sonder developer-workflow tools.
+
+Provides test running, linting, formatting, type checking, dependency
+management, git mutations, refactoring helpers, build tools, and security
+scanning for Sonder's MCP tool surface.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import sonder_paths
+
+MAX_OUTPUT = 256_000
+MAX_TIMEOUT = 120
+DEFAULT_TIMEOUT = 30
+
+
+def _bounded_int(value, default, minimum, maximum):
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(v, maximum))
+
+
+def _trim(text, limit=MAX_OUTPUT):
+    text = str(text or "")
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    return text[:half] + "\n... [trimmed %d chars] ...\n" % (len(text) - limit) + text[-half:]
+
+
+def _resolve_root(root):
+    p = Path(root or ".").resolve()
+    if not p.is_dir():
+        raise ValueError("not a directory: %s" % p)
+    return p
+
+
+def _child_env():
+    env = os.environ.copy()
+    env.pop("CC", None)
+    env.pop("CXX", None)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
+
+
+def _run(cmd, *, cwd, timeout=DEFAULT_TIMEOUT, stdin_bytes=b"", env=None):
+    started = time.time()
+    timed_out = False
+    try:
+        proc = subprocess.run(
+            cmd, cwd=str(cwd), timeout=timeout,
+            capture_output=True, input=stdin_bytes,
+            env=env or _child_env(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        timed_out = True
+        return {
+            "ok": False, "returncode": -1, "timed_out": True,
+            "elapsed_ms": int((time.time() - started) * 1000),
+            "stdout": _trim(exc.stdout.decode("utf-8", errors="replace") if exc.stdout else ""),
+            "stderr": _trim(exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""),
+            "command": [str(c) for c in cmd],
+        }
+    except FileNotFoundError:
+        return {
+            "ok": False, "returncode": -1, "timed_out": False,
+            "elapsed_ms": int((time.time() - started) * 1000),
+            "stdout": "", "stderr": "command not found: %s" % cmd[0],
+            "command": [str(c) for c in cmd],
+        }
+    return {
+        "ok": proc.returncode == 0,
+        "returncode": proc.returncode,
+        "timed_out": False,
+        "elapsed_ms": int((time.time() - started) * 1000),
+        "stdout": _trim(proc.stdout.decode("utf-8", errors="replace")),
+        "stderr": _trim(proc.stderr.decode("utf-8", errors="replace")),
+        "command": [str(c) for c in cmd],
+    }
+
+
+def _format_result(title, data):
+    lines = [
+        title,
+        "  command: %s" % json.dumps(data.get("command", []), ensure_ascii=False),
+        "  ok: %s" % data.get("ok", False),
+        "  returncode: %s" % data.get("returncode"),
+        "  elapsed_ms: %s" % data.get("elapsed_ms", 0),
+    ]
+    if data.get("timed_out"):
+        lines.append("  timed_out: true")
+    if data.get("stdout"):
+        lines.extend(["stdout:", data["stdout"].rstrip()])
+    if data.get("stderr"):
+        lines.extend(["stderr:", data["stderr"].rstrip()])
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Git helpers
+# ---------------------------------------------------------------------------
+
+def _git():
+    return shutil.which("git") or "git"
+
+
+def _run_git(root, args, *, timeout=10):
+    env = _child_env()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return _run([_git()] + args, cwd=root, timeout=timeout, env=env)
+
+
+# ---------------------------------------------------------------------------
+# Test runner
+# ---------------------------------------------------------------------------
+
+_TEST_FRAMEWORKS = {
+    "pytest": {"cmd": [sys.executable, "-m", "pytest"], "marker_files": ["pytest.ini", "pyproject.toml", "setup.cfg", "conftest.py"]},
+    "unittest": {"cmd": [sys.executable, "-m", "unittest", "discover"], "marker_files": []},
+    "jest": {"cmd": ["npx", "jest"], "marker_files": ["jest.config.js", "jest.config.ts", "jest.config.mjs"]},
+    "vitest": {"cmd": ["npx", "vitest", "run"], "marker_files": ["vitest.config.ts", "vitest.config.js", "vitest.config.mts"]},
+    "mocha": {"cmd": ["npx", "mocha"], "marker_files": [".mocharc.yml", ".mocharc.json", ".mocharc.js"]},
+    "cargo": {"cmd": ["cargo", "test"], "marker_files": ["Cargo.toml"]},
+    "go": {"cmd": ["go", "test", "./..."], "marker_files": ["go.mod"]},
+    "dotnet": {"cmd": ["dotnet", "test"], "marker_files": ["*.csproj", "*.sln"]},
+}
+
+
+def _detect_test_framework(root):
+    root = Path(root)
+    for name, info in _TEST_FRAMEWORKS.items():
+        for marker in info["marker_files"]:
+            if "*" in marker:
+                if list(root.glob(marker)):
+                    return name
+            elif (root / marker).exists():
+                return name
+    if (root / "package.json").exists():
+        try:
+            pkg = json.loads((root / "package.json").read_text(encoding="utf-8"))
+            scripts = pkg.get("scripts", {})
+            if "test" in scripts:
+                test_cmd = scripts["test"]
+                for fw in ("vitest", "jest", "mocha"):
+                    if fw in test_cmd:
+                        return fw
+        except (json.JSONDecodeError, OSError):
+            pass
+    return "pytest"
+
+
+def test_discover(root=".", framework="auto"):
+    root = _resolve_root(root)
+    if framework == "auto":
+        framework = _detect_test_framework(root)
+
+    info = {"framework": framework, "root": str(root), "test_files": [], "test_count": 0}
+
+    if framework == "pytest":
+        result = _run(
+            [sys.executable, "-m", "pytest", "--collect-only", "-q", "--no-header"],
+            cwd=root, timeout=30,
+        )
+        if result["ok"]:
+            lines = result["stdout"].strip().splitlines()
+            tests = [l for l in lines if "::" in l]
+            info["test_files"] = sorted(set(t.split("::")[0] for t in tests))
+            info["test_count"] = len(tests)
+        else:
+            info["error"] = result["stderr"] or result["stdout"]
+    elif framework in ("jest", "vitest"):
+        result = _run(
+            ["npx", framework, "--listTests"] if framework == "jest"
+            else ["npx", "vitest", "list", "--reporter=json"],
+            cwd=root, timeout=30,
+        )
+        if result["ok"]:
+            files = [l.strip() for l in result["stdout"].splitlines() if l.strip()]
+            info["test_files"] = files
+            info["test_count"] = len(files)
+        else:
+            info["error"] = result["stderr"] or result["stdout"]
+    elif framework == "cargo":
+        result = _run(["cargo", "test", "--", "--list"], cwd=root, timeout=30)
+        if result["ok"]:
+            tests = [l.split(":")[0] for l in result["stdout"].splitlines() if ": test" in l]
+            info["test_count"] = len(tests)
+        else:
+            info["error"] = result["stderr"] or result["stdout"]
+    elif framework == "go":
+        result = _run(["go", "test", "./...", "-list", ".*"], cwd=root, timeout=30)
+        if result["ok"]:
+            tests = [l for l in result["stdout"].splitlines() if l.startswith("Test") or l.startswith("Benchmark")]
+            info["test_count"] = len(tests)
+        else:
+            info["error"] = result["stderr"] or result["stdout"]
+
+    return info
+
+
+def test_run(
+    root=".", framework="auto", path="", pattern="", verbose=False,
+    coverage=False, timeout=120, extra_args_json="[]",
+):
+    root = _resolve_root(root)
+    timeout = _bounded_int(timeout, 120, 5, MAX_TIMEOUT)
+    if framework == "auto":
+        framework = _detect_test_framework(root)
+
+    base = list(_TEST_FRAMEWORKS.get(framework, {}).get("cmd", []))
+    if not base:
+        return {"ok": False, "error": "unknown framework: %s" % framework, "framework": framework}
+
+    cmd = list(base)
+
+    if framework == "pytest":
+        if verbose:
+            cmd.append("-v")
+        if coverage:
+            cmd.extend(["--cov", "--cov-report=term-missing"])
+        if pattern:
+            cmd.extend(["-k", pattern])
+        if path:
+            cmd.append(path)
+        cmd.extend(["--tb=short", "--no-header", "-q"])
+    elif framework in ("jest", "vitest"):
+        if verbose:
+            cmd.append("--verbose")
+        if coverage:
+            cmd.append("--coverage")
+        if pattern:
+            cmd.extend(["-t", pattern])
+        if path:
+            cmd.append(path)
+    elif framework == "cargo":
+        if path:
+            cmd.extend(["--test", path])
+        if pattern:
+            cmd.extend(["--", pattern])
+    elif framework == "go":
+        if path:
+            cmd[-1] = path
+        if pattern:
+            cmd.extend(["-run", pattern])
+        if verbose:
+            cmd.append("-v")
+        if coverage:
+            cmd.append("-cover")
+
+    try:
+        extra = json.loads(extra_args_json)
+        if isinstance(extra, list):
+            cmd.extend(str(a) for a in extra)
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    result = _run(cmd, cwd=root, timeout=timeout)
+    result["framework"] = framework
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Lint / Format / Type check
+# ---------------------------------------------------------------------------
+
+_LINT_TOOLS = {
+    "ruff": {"check": ["ruff", "check"], "fix": ["ruff", "check", "--fix"]},
+    "flake8": {"check": ["flake8"], "fix": None},
+    "pylint": {"check": ["pylint"], "fix": None},
+    "eslint": {"check": ["npx", "eslint"], "fix": ["npx", "eslint", "--fix"]},
+    "clippy": {"check": ["cargo", "clippy"], "fix": ["cargo", "clippy", "--fix", "--allow-dirty"]},
+}
+
+_FORMATTERS = {
+    "ruff": ["ruff", "format"],
+    "black": ["black"],
+    "prettier": ["npx", "prettier", "--write"],
+    "rustfmt": ["cargo", "fmt"],
+    "gofmt": ["gofmt", "-w"],
+    "clang-format": ["clang-format", "-i"],
+}
+
+_TYPECHECKERS = {
+    "mypy": [sys.executable, "-m", "mypy"],
+    "pyright": ["npx", "pyright"],
+    "tsc": ["npx", "tsc", "--noEmit"],
+}
+
+
+def _detect_linter(root):
+    root = Path(root)
+    if shutil.which("ruff") and (root / "pyproject.toml").exists():
+        return "ruff"
+    if (root / ".eslintrc.js").exists() or (root / ".eslintrc.json").exists() or (root / "eslint.config.js").exists():
+        return "eslint"
+    if (root / "Cargo.toml").exists():
+        return "clippy"
+    if shutil.which("ruff"):
+        return "ruff"
+    if shutil.which("flake8"):
+        return "flake8"
+    return "ruff"
+
+
+def _detect_formatter(root):
+    root = Path(root)
+    if shutil.which("ruff") and (root / "pyproject.toml").exists():
+        return "ruff"
+    if shutil.which("black"):
+        return "black"
+    if (root / "package.json").exists():
+        return "prettier"
+    if (root / "Cargo.toml").exists():
+        return "rustfmt"
+    if (root / "go.mod").exists():
+        return "gofmt"
+    return "ruff"
+
+
+def _detect_typechecker(root):
+    root = Path(root)
+    if (root / "tsconfig.json").exists():
+        return "tsc"
+    if (root / "pyrightconfig.json").exists():
+        return "pyright"
+    if shutil.which("mypy"):
+        return "mypy"
+    return "mypy"
+
+
+def lint_run(root=".", tool="auto", path="", fix=False, timeout=60):
+    root = _resolve_root(root)
+    timeout = _bounded_int(timeout, 60, 5, MAX_TIMEOUT)
+    if tool == "auto":
+        tool = _detect_linter(root)
+    info = _LINT_TOOLS.get(tool)
+    if not info:
+        return {"ok": False, "error": "unknown linter: %s" % tool, "tool": tool}
+    if fix and info.get("fix"):
+        cmd = list(info["fix"])
+    else:
+        cmd = list(info["check"])
+    if path:
+        cmd.append(path)
+    elif tool in ("ruff", "flake8", "pylint"):
+        cmd.append(".")
+    result = _run(cmd, cwd=root, timeout=timeout)
+    result["tool"] = tool
+    result["mode"] = "fix" if fix else "check"
+    return result
+
+
+def format_code(root=".", tool="auto", path="", check_only=False, timeout=60):
+    root = _resolve_root(root)
+    timeout = _bounded_int(timeout, 60, 5, MAX_TIMEOUT)
+    if tool == "auto":
+        tool = _detect_formatter(root)
+    cmd_template = _FORMATTERS.get(tool)
+    if not cmd_template:
+        return {"ok": False, "error": "unknown formatter: %s" % tool, "tool": tool}
+    cmd = list(cmd_template)
+    if check_only:
+        if tool in ("ruff", "black"):
+            cmd.append("--check")
+        elif tool == "prettier":
+            cmd[-1] = "--check"
+        elif tool == "rustfmt":
+            cmd.append("--check")
+    if path:
+        cmd.append(path)
+    elif tool in ("ruff", "black"):
+        cmd.append(".")
+    result = _run(cmd, cwd=root, timeout=timeout)
+    result["tool"] = tool
+    result["mode"] = "check" if check_only else "format"
+    return result
+
+
+def typecheck_run(root=".", tool="auto", path="", timeout=120):
+    root = _resolve_root(root)
+    timeout = _bounded_int(timeout, 120, 5, MAX_TIMEOUT)
+    if tool == "auto":
+        tool = _detect_typechecker(root)
+    cmd_template = _TYPECHECKERS.get(tool)
+    if not cmd_template:
+        return {"ok": False, "error": "unknown type checker: %s" % tool, "tool": tool}
+    cmd = list(cmd_template)
+    if path:
+        cmd.append(path)
+    elif tool == "mypy":
+        cmd.append(".")
+    result = _run(cmd, cwd=root, timeout=timeout)
+    result["tool"] = tool
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Dependency management
+# ---------------------------------------------------------------------------
+
+def _detect_package_manager(root):
+    root = Path(root)
+    if (root / "Cargo.toml").exists():
+        return "cargo"
+    if (root / "go.mod").exists():
+        return "go"
+    if (root / "requirements.txt").exists() or (root / "pyproject.toml").exists():
+        return "pip"
+    if (root / "pnpm-lock.yaml").exists():
+        return "pnpm"
+    if (root / "yarn.lock").exists():
+        return "yarn"
+    if (root / "package.json").exists():
+        return "npm"
+    if (root / "Gemfile").exists():
+        return "bundler"
+    return "pip"
+
+
+def dependency_add(root=".", packages_json="[]", dev=False, timeout=60):
+    root = _resolve_root(root)
+    timeout = _bounded_int(timeout, 60, 5, MAX_TIMEOUT)
+    try:
+        packages = json.loads(packages_json)
+        if not isinstance(packages, list) or not packages:
+            return {"ok": False, "error": "packages_json must be a non-empty JSON array of package names"}
+    except json.JSONDecodeError:
+        return {"ok": False, "error": "invalid JSON in packages_json"}
+
+    mgr = _detect_package_manager(root)
+    if mgr == "pip":
+        cmd = [sys.executable, "-m", "pip", "install"] + packages
+    elif mgr == "npm":
+        cmd = ["npm", "install"] + (["--save-dev"] if dev else []) + packages
+    elif mgr == "pnpm":
+        cmd = ["pnpm", "add"] + (["-D"] if dev else []) + packages
+    elif mgr == "yarn":
+        cmd = ["yarn", "add"] + (["--dev"] if dev else []) + packages
+    elif mgr == "cargo":
+        cmd = ["cargo", "add"] + packages
+    elif mgr == "go":
+        cmd = ["go", "get"] + packages
+    else:
+        return {"ok": False, "error": "unsupported package manager: %s" % mgr}
+
+    result = _run(cmd, cwd=root, timeout=timeout)
+    result["manager"] = mgr
+    result["packages"] = packages
+    return result
+
+
+def dependency_remove(root=".", packages_json="[]", timeout=60):
+    root = _resolve_root(root)
+    timeout = _bounded_int(timeout, 60, 5, MAX_TIMEOUT)
+    try:
+        packages = json.loads(packages_json)
+        if not isinstance(packages, list) or not packages:
+            return {"ok": False, "error": "packages_json must be a non-empty JSON array"}
+    except json.JSONDecodeError:
+        return {"ok": False, "error": "invalid JSON"}
+
+    mgr = _detect_package_manager(root)
+    if mgr == "pip":
+        cmd = [sys.executable, "-m", "pip", "uninstall", "-y"] + packages
+    elif mgr == "npm":
+        cmd = ["npm", "uninstall"] + packages
+    elif mgr == "pnpm":
+        cmd = ["pnpm", "remove"] + packages
+    elif mgr == "yarn":
+        cmd = ["yarn", "remove"] + packages
+    elif mgr == "cargo":
+        cmd = ["cargo", "remove"] + packages
+    else:
+        return {"ok": False, "error": "unsupported for remove: %s" % mgr}
+
+    result = _run(cmd, cwd=root, timeout=timeout)
+    result["manager"] = mgr
+    result["packages"] = packages
+    return result
+
+
+def dependency_update(root=".", packages_json="[]", timeout=120):
+    root = _resolve_root(root)
+    timeout = _bounded_int(timeout, 120, 5, MAX_TIMEOUT)
+    try:
+        packages = json.loads(packages_json)
+        if not isinstance(packages, list):
+            packages = []
+    except json.JSONDecodeError:
+        packages = []
+
+    mgr = _detect_package_manager(root)
+    if mgr == "pip":
+        if packages:
+            cmd = [sys.executable, "-m", "pip", "install", "--upgrade"] + packages
+        else:
+            cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "-r", "requirements.txt"]
+    elif mgr == "npm":
+        cmd = ["npm", "update"] + packages
+    elif mgr == "pnpm":
+        cmd = ["pnpm", "update"] + packages
+    elif mgr == "yarn":
+        cmd = ["yarn", "upgrade"] + packages
+    elif mgr == "cargo":
+        cmd = ["cargo", "update"] + (["--package"] + packages if packages else [])
+    elif mgr == "go":
+        cmd = ["go", "get", "-u"] + (packages or ["./..."])
+    else:
+        return {"ok": False, "error": "unsupported for update: %s" % mgr}
+
+    result = _run(cmd, cwd=root, timeout=timeout)
+    result["manager"] = mgr
+    return result
+
+
+def dependency_audit(root=".", timeout=60):
+    root = _resolve_root(root)
+    timeout = _bounded_int(timeout, 60, 5, MAX_TIMEOUT)
+    mgr = _detect_package_manager(root)
+    if mgr == "pip":
+        cmd = [sys.executable, "-m", "pip", "audit"] if shutil.which("pip-audit") else [sys.executable, "-m", "pip", "check"]
+        result = _run(cmd, cwd=root, timeout=timeout)
+    elif mgr in ("npm", "pnpm", "yarn"):
+        cmd = ["npm", "audit", "--json"] if mgr == "npm" else [mgr, "audit"]
+        result = _run(cmd, cwd=root, timeout=timeout)
+    elif mgr == "cargo":
+        if shutil.which("cargo-audit"):
+            result = _run(["cargo", "audit"], cwd=root, timeout=timeout)
+        else:
+            result = {"ok": False, "error": "cargo-audit not installed; run: cargo install cargo-audit"}
+    else:
+        result = {"ok": False, "error": "no audit support for %s" % mgr}
+    result["manager"] = mgr
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Git mutations
+# ---------------------------------------------------------------------------
+
+def git_commit(root=".", message="", paths_json="[]", all_tracked=False, timeout=30):
+    root = _resolve_root(root)
+    if not message:
+        return {"ok": False, "error": "commit message is required"}
+    try:
+        paths = json.loads(paths_json)
+        if not isinstance(paths, list):
+            paths = []
+    except json.JSONDecodeError:
+        paths = []
+
+    if paths:
+        add_result = _run_git(root, ["add", "--"] + paths, timeout=timeout)
+        if not add_result["ok"]:
+            return add_result
+    elif all_tracked:
+        add_result = _run_git(root, ["add", "-u"], timeout=timeout)
+        if not add_result["ok"]:
+            return add_result
+
+    result = _run_git(root, ["commit", "-m", message], timeout=timeout)
+    return result
+
+
+def git_branch(root=".", name="", checkout=True, base="", timeout=10):
+    root = _resolve_root(root)
+    if not name:
+        return {"ok": False, "error": "branch name is required"}
+    if checkout:
+        cmd = ["checkout", "-b", name]
+        if base:
+            cmd.append(base)
+    else:
+        cmd = ["branch", name]
+        if base:
+            cmd.append(base)
+    return _run_git(root, cmd, timeout=timeout)
+
+
+def git_checkout(root=".", ref="", timeout=10):
+    root = _resolve_root(root)
+    if not ref:
+        return {"ok": False, "error": "ref is required (branch name, tag, or commit)"}
+    return _run_git(root, ["checkout", ref], timeout=timeout)
+
+
+def git_stash(root=".", action="push", message="", include_untracked=True, timeout=10):
+    root = _resolve_root(root)
+    if action == "push":
+        cmd = ["stash", "push"]
+        if include_untracked:
+            cmd.append("-u")
+        if message:
+            cmd.extend(["-m", message])
+    elif action == "pop":
+        cmd = ["stash", "pop"]
+    elif action == "list":
+        cmd = ["stash", "list"]
+    elif action == "drop":
+        cmd = ["stash", "drop"]
+    else:
+        return {"ok": False, "error": "unknown stash action: %s (use push/pop/list/drop)" % action}
+    return _run_git(root, cmd, timeout=timeout)
+
+
+def git_tag(root=".", name="", message="", delete=False, timeout=10):
+    root = _resolve_root(root)
+    if not name:
+        return {"ok": False, "error": "tag name is required"}
+    if delete:
+        cmd = ["tag", "-d", name]
+    elif message:
+        cmd = ["tag", "-a", name, "-m", message]
+    else:
+        cmd = ["tag", name]
+    return _run_git(root, cmd, timeout=timeout)
+
+
+def git_merge(root=".", branch="", no_ff=True, message="", timeout=30):
+    root = _resolve_root(root)
+    if not branch:
+        return {"ok": False, "error": "branch name is required"}
+    cmd = ["merge"]
+    if no_ff:
+        cmd.append("--no-ff")
+    if message:
+        cmd.extend(["-m", message])
+    cmd.append(branch)
+    return _run_git(root, cmd, timeout=timeout)
+
+
+def git_cherry_pick(root=".", commits_json="[]", timeout=30):
+    root = _resolve_root(root)
+    try:
+        commits = json.loads(commits_json)
+        if not isinstance(commits, list) or not commits:
+            return {"ok": False, "error": "commits_json must be a non-empty JSON array of commit SHAs"}
+    except json.JSONDecodeError:
+        return {"ok": False, "error": "invalid JSON"}
+    return _run_git(root, ["cherry-pick"] + commits, timeout=timeout)
+
+
+# ---------------------------------------------------------------------------
+# Build tools
+# ---------------------------------------------------------------------------
+
+def build_run(root=".", command="", timeout=120):
+    root = _resolve_root(root)
+    timeout = _bounded_int(timeout, 120, 5, MAX_TIMEOUT)
+
+    if command:
+        parts = command.split()
+        return _run(parts, cwd=root, timeout=timeout)
+
+    if (root / "Makefile").exists():
+        return _run(["make"], cwd=root, timeout=timeout)
+    if (root / "Cargo.toml").exists():
+        return _run(["cargo", "build"], cwd=root, timeout=timeout)
+    if (root / "CMakeLists.txt").exists():
+        return _run(["cmake", "--build", "build"], cwd=root, timeout=timeout)
+    if (root / "go.mod").exists():
+        return _run(["go", "build", "./..."], cwd=root, timeout=timeout)
+    if (root / "package.json").exists():
+        return _run(["npm", "run", "build"], cwd=root, timeout=timeout)
+    if (root / "build.gradle").exists() or (root / "build.gradle.kts").exists():
+        return _run(["./gradlew" if os.name != "nt" else "gradlew.bat", "build"], cwd=root, timeout=timeout)
+    if (root / "pom.xml").exists():
+        return _run(["mvn", "package", "-q"], cwd=root, timeout=timeout)
+
+    return {"ok": False, "error": "no recognized build system found at %s" % root}
+
+
+def build_clean(root=".", timeout=30):
+    root = _resolve_root(root)
+    timeout = _bounded_int(timeout, 30, 5, MAX_TIMEOUT)
+
+    if (root / "Makefile").exists():
+        return _run(["make", "clean"], cwd=root, timeout=timeout)
+    if (root / "Cargo.toml").exists():
+        return _run(["cargo", "clean"], cwd=root, timeout=timeout)
+    if (root / "go.mod").exists():
+        return _run(["go", "clean", "./..."], cwd=root, timeout=timeout)
+    return {"ok": False, "error": "no recognized build system for clean"}
+
+
+# ---------------------------------------------------------------------------
+# Refactoring helpers
+# ---------------------------------------------------------------------------
+
+def rename_symbol(root=".", old_name="", new_name="", glob="**/*.py", dry_run=True, timeout=30):
+    root = _resolve_root(root)
+    if not old_name or not new_name:
+        return {"ok": False, "error": "both old_name and new_name are required"}
+
+    files_changed = []
+    preview = []
+    pattern = re.compile(r'\b' + re.escape(old_name) + r'\b')
+
+    for path in root.glob(glob):
+        if not path.is_file() or path.stat().st_size > 2_000_000:
+            continue
+        rel = str(path.relative_to(root))
+        if any(part.startswith(".") for part in path.parts):
+            continue
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        matches = list(pattern.finditer(content))
+        if not matches:
+            continue
+        new_content = pattern.sub(new_name, content)
+        count = len(matches)
+        files_changed.append({"file": rel, "replacements": count})
+        for m in matches[:3]:
+            line_no = content[:m.start()].count("\n") + 1
+            line = content.splitlines()[line_no - 1].strip()
+            preview.append({"file": rel, "line": line_no, "text": line})
+
+        if not dry_run:
+            path.write_text(new_content, encoding="utf-8")
+
+    return {
+        "ok": True,
+        "dry_run": dry_run,
+        "old_name": old_name,
+        "new_name": new_name,
+        "files_changed": len(files_changed),
+        "total_replacements": sum(f["replacements"] for f in files_changed),
+        "details": files_changed,
+        "preview": preview[:20],
+    }
+
+
+def extract_references(root=".", symbol="", glob="**/*.py", timeout=30):
+    root = _resolve_root(root)
+    if not symbol:
+        return {"ok": False, "error": "symbol name is required"}
+
+    pattern = re.compile(r'\b' + re.escape(symbol) + r'\b')
+    refs = []
+    for path in root.glob(glob):
+        if not path.is_file() or path.stat().st_size > 2_000_000:
+            continue
+        rel = str(path.relative_to(root))
+        if any(part.startswith(".") for part in path.parts):
+            continue
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        lines = content.splitlines()
+        for i, line in enumerate(lines, 1):
+            if pattern.search(line):
+                refs.append({"file": rel, "line": i, "text": line.strip()})
+                if len(refs) >= 200:
+                    return {"ok": True, "symbol": symbol, "references": refs, "truncated": True}
+
+    return {"ok": True, "symbol": symbol, "references": refs, "truncated": False}
+
+
+# ---------------------------------------------------------------------------
+# Diff / patch helpers
+# ---------------------------------------------------------------------------
+
+def diff_files(root=".", left="", right="", context=3, timeout=10):
+    root = _resolve_root(root)
+    if not left or not right:
+        return {"ok": False, "error": "both left and right paths are required"}
+    left_path = root / left
+    right_path = root / right
+    if not left_path.is_file():
+        return {"ok": False, "error": "left file not found: %s" % left}
+    if not right_path.is_file():
+        return {"ok": False, "error": "right file not found: %s" % right}
+
+    result = _run(
+        [_git(), "diff", "--no-index", "-U%d" % context, "--", str(left_path), str(right_path)],
+        cwd=root, timeout=timeout,
+    )
+    result["ok"] = True
+    return result
+
+
+def apply_patch(root=".", patch_text="", check_only=False, timeout=10):
+    root = _resolve_root(root)
+    if not patch_text:
+        return {"ok": False, "error": "patch_text is required"}
+    cmd = [_git(), "apply"]
+    if check_only:
+        cmd.append("--check")
+    cmd.append("-")
+    return _run(cmd, cwd=root, timeout=timeout, stdin_bytes=patch_text.encode("utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# Security scanning
+# ---------------------------------------------------------------------------
+
+def secret_scan(root=".", timeout=30):
+    root = _resolve_root(root)
+    timeout = _bounded_int(timeout, 30, 5, MAX_TIMEOUT)
+
+    secret_patterns = [
+        (r'(?i)(api[_-]?key|apikey)\s*[:=]\s*["\']?[a-z0-9]{20,}', "API key"),
+        (r'(?i)(secret|password|passwd|pwd)\s*[:=]\s*["\'][^"\']{8,}', "Secret/password"),
+        (r'(?i)(aws_access_key_id|aws_secret_access_key)\s*[:=]\s*["\']?[A-Z0-9]{16,}', "AWS credential"),
+        (r'ghp_[a-zA-Z0-9]{36}', "GitHub PAT"),
+        (r'sk-[a-zA-Z0-9]{32,}', "OpenAI/Stripe key"),
+        (r'-----BEGIN (RSA |EC |DSA )?PRIVATE KEY-----', "Private key"),
+        (r'(?i)bearer\s+[a-z0-9._\-]{20,}', "Bearer token"),
+    ]
+
+    findings = []
+    scanned = 0
+    for path in root.rglob("*"):
+        if not path.is_file() or path.stat().st_size > 1_000_000:
+            continue
+        rel = str(path.relative_to(root))
+        if any(part.startswith(".") and part != "." for part in Path(rel).parts):
+            if not rel.startswith(".env"):
+                continue
+        if path.suffix.lower() in (".pyc", ".pyo", ".exe", ".dll", ".so", ".png", ".jpg", ".gif", ".ico", ".woff", ".woff2", ".ttf", ".zip", ".gz", ".tar", ".jar"):
+            continue
+        scanned += 1
+        try:
+            content = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for pattern_str, label in secret_patterns:
+            for m in re.finditer(pattern_str, content):
+                line_no = content[:m.start()].count("\n") + 1
+                findings.append({
+                    "file": rel, "line": line_no, "type": label,
+                    "match": m.group()[:40] + ("..." if len(m.group()) > 40 else ""),
+                })
+                if len(findings) >= 100:
+                    return {"ok": True, "findings": findings, "files_scanned": scanned, "truncated": True}
+
+    return {"ok": True, "findings": findings, "files_scanned": scanned, "truncated": False}

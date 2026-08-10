@@ -59,6 +59,7 @@ import web_intents
 import self_heal
 import grounding
 import sonder_paths
+import harness_tools
 import memory_quality
 import learning_health
 import domain_grounding
@@ -9142,6 +9143,577 @@ def workspace_run(
     return output
 
 
+# ── Sonder developer-workflow tools ──────────────────────────────────────
+
+
+@mcp.tool()
+def test_discover(
+    root: str = ".",
+    framework: str = "auto",
+) -> str:
+    """Discover tests in a project — detects the test framework (pytest, jest, vitest, cargo, go, dotnet) and lists test files and counts."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "framework": framework}
+    try:
+        data = harness_tools.test_discover(root=root, framework=framework)
+    except Exception as exc:
+        _record_direct_tool("test_discover", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    _record_direct_tool(
+        "test_discover", args, ok=True, started=started,
+        summary="%s: %d tests in %d files" % (data.get("framework"), data.get("test_count", 0), len(data.get("test_files", []))),
+    )
+    lines = ["test discovery: %s" % data.get("framework"), "  tests: %d" % data.get("test_count", 0)]
+    if data.get("test_files"):
+        lines.append("  files:")
+        for f in data["test_files"][:50]:
+            lines.append("    %s" % f)
+    if data.get("error"):
+        lines.append("  error: %s" % data["error"])
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def test_run(
+    root: str = ".",
+    framework: str = "auto",
+    path: str = "",
+    pattern: str = "",
+    verbose: bool = False,
+    coverage: bool = False,
+    timeout: int = 120,
+    extra_args_json: str = "[]",
+) -> str:
+    """Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet). Supports filtering by path/pattern, coverage, and extra args."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "framework": framework, "path": path, "pattern": pattern, "timeout": timeout}
+    try:
+        data = harness_tools.test_run(
+            root=root, framework=framework, path=path, pattern=pattern,
+            verbose=verbose, coverage=coverage, timeout=timeout,
+            extra_args_json=extra_args_json,
+        )
+    except Exception as exc:
+        _record_direct_tool("test_run", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = _format_run_result("test run (%s)" % data.get("framework", "?"), data)
+    _record_direct_tool(
+        "test_run", args, ok=data.get("ok", False), started=started,
+        summary="exit %s" % data.get("returncode"),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def lint_run(
+    root: str = ".",
+    tool: str = "auto",
+    path: str = "",
+    fix: bool = False,
+    timeout: int = 60,
+) -> str:
+    """Run a linter (ruff, flake8, pylint, eslint, clippy) with auto-detection. Set fix=true to auto-fix."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "tool": tool, "path": path, "fix": fix, "timeout": timeout}
+    try:
+        data = harness_tools.lint_run(root=root, tool=tool, path=path, fix=fix, timeout=timeout)
+    except Exception as exc:
+        _record_direct_tool("lint_run", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = _format_run_result("lint (%s, %s)" % (data.get("tool", "?"), data.get("mode", "check")), data)
+    _record_direct_tool(
+        "lint_run", args, ok=data.get("ok", False), started=started,
+        summary="exit %s" % data.get("returncode"),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def format_code(
+    root: str = ".",
+    tool: str = "auto",
+    path: str = "",
+    check_only: bool = False,
+    timeout: int = 60,
+) -> str:
+    """Format code (ruff, black, prettier, rustfmt, gofmt, clang-format) with auto-detection. Set check_only=true to verify without writing."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "tool": tool, "path": path, "check_only": check_only, "timeout": timeout}
+    try:
+        data = harness_tools.format_code(root=root, tool=tool, path=path, check_only=check_only, timeout=timeout)
+    except Exception as exc:
+        _record_direct_tool("format_code", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = _format_run_result("format (%s, %s)" % (data.get("tool", "?"), data.get("mode", "format")), data)
+    _record_direct_tool(
+        "format_code", args, ok=data.get("ok", False), started=started,
+        summary="exit %s" % data.get("returncode"),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def typecheck_run(
+    root: str = ".",
+    tool: str = "auto",
+    path: str = "",
+    timeout: int = 120,
+) -> str:
+    """Run a type checker (mypy, pyright, tsc) with auto-detection."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "tool": tool, "path": path, "timeout": timeout}
+    try:
+        data = harness_tools.typecheck_run(root=root, tool=tool, path=path, timeout=timeout)
+    except Exception as exc:
+        _record_direct_tool("typecheck_run", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = _format_run_result("typecheck (%s)" % data.get("tool", "?"), data)
+    _record_direct_tool(
+        "typecheck_run", args, ok=data.get("ok", False), started=started,
+        summary="exit %s" % data.get("returncode"),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def dependency_add(
+    root: str = ".",
+    packages_json: str = "[]",
+    dev: bool = False,
+    timeout: int = 60,
+) -> str:
+    """Install packages (pip, npm, pnpm, yarn, cargo, go) with auto-detected package manager. Pass packages as a JSON array."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "packages_json": packages_json, "dev": dev, "timeout": timeout}
+    try:
+        data = harness_tools.dependency_add(root=root, packages_json=packages_json, dev=dev, timeout=timeout)
+    except Exception as exc:
+        _record_direct_tool("dependency_add", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = _format_run_result("dependency add (%s)" % data.get("manager", "?"), data)
+    _record_direct_tool(
+        "dependency_add", args, ok=data.get("ok", False), started=started,
+        summary="%s: %s" % (data.get("manager"), data.get("packages", [])),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def dependency_remove(
+    root: str = ".",
+    packages_json: str = "[]",
+    timeout: int = 60,
+) -> str:
+    """Uninstall packages with auto-detected package manager. Pass packages as a JSON array."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "packages_json": packages_json, "timeout": timeout}
+    try:
+        data = harness_tools.dependency_remove(root=root, packages_json=packages_json, timeout=timeout)
+    except Exception as exc:
+        _record_direct_tool("dependency_remove", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = _format_run_result("dependency remove (%s)" % data.get("manager", "?"), data)
+    _record_direct_tool(
+        "dependency_remove", args, ok=data.get("ok", False), started=started,
+        summary="%s: %s" % (data.get("manager"), data.get("packages", [])),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def dependency_update(
+    root: str = ".",
+    packages_json: str = "[]",
+    timeout: int = 120,
+) -> str:
+    """Update packages (or all if empty array) with auto-detected package manager."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "packages_json": packages_json, "timeout": timeout}
+    try:
+        data = harness_tools.dependency_update(root=root, packages_json=packages_json, timeout=timeout)
+    except Exception as exc:
+        _record_direct_tool("dependency_update", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = _format_run_result("dependency update (%s)" % data.get("manager", "?"), data)
+    _record_direct_tool(
+        "dependency_update", args, ok=data.get("ok", False), started=started,
+        summary=data.get("manager"),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def dependency_audit(
+    root: str = ".",
+    timeout: int = 60,
+) -> str:
+    """Audit installed dependencies for known vulnerabilities (pip check, npm audit, cargo audit)."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "timeout": timeout}
+    try:
+        data = harness_tools.dependency_audit(root=root, timeout=timeout)
+    except Exception as exc:
+        _record_direct_tool("dependency_audit", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    if "command" in data:
+        output = _format_run_result("dependency audit (%s)" % data.get("manager", "?"), data)
+    else:
+        output = json.dumps(data, ensure_ascii=False)
+    _record_direct_tool(
+        "dependency_audit", args, ok=data.get("ok", False), started=started,
+        summary=data.get("manager"),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def git_commit(
+    root: str = ".",
+    message: str = "",
+    paths_json: str = "[]",
+    all_tracked: bool = False,
+    timeout: int = 30,
+) -> str:
+    """Create a git commit. Stage specific files via paths_json (JSON array) or set all_tracked=true for all modified tracked files. Never stages untracked files by default."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "message": message, "paths_json": paths_json, "all_tracked": all_tracked}
+    try:
+        data = harness_tools.git_commit(root=root, message=message, paths_json=paths_json, all_tracked=all_tracked, timeout=timeout)
+    except Exception as exc:
+        _record_direct_tool("git_commit", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = _format_run_result("git commit", data)
+    _record_direct_tool(
+        "git_commit", args, ok=data.get("ok", False), started=started,
+        summary="exit %s" % data.get("returncode"),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def git_branch(
+    root: str = ".",
+    name: str = "",
+    checkout: bool = True,
+    base: str = "",
+    timeout: int = 10,
+) -> str:
+    """Create a git branch, optionally checking it out and basing it on a ref."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "name": name, "checkout": checkout, "base": base}
+    try:
+        data = harness_tools.git_branch(root=root, name=name, checkout=checkout, base=base, timeout=timeout)
+    except Exception as exc:
+        _record_direct_tool("git_branch", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = _format_run_result("git branch", data)
+    _record_direct_tool("git_branch", args, ok=data.get("ok", False), started=started, summary="exit %s" % data.get("returncode"), output=output)
+    return output
+
+
+@mcp.tool()
+def git_checkout(
+    root: str = ".",
+    ref: str = "",
+    timeout: int = 10,
+) -> str:
+    """Switch to a branch, tag, or commit."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "ref": ref}
+    try:
+        data = harness_tools.git_checkout(root=root, ref=ref, timeout=timeout)
+    except Exception as exc:
+        _record_direct_tool("git_checkout", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = _format_run_result("git checkout", data)
+    _record_direct_tool("git_checkout", args, ok=data.get("ok", False), started=started, summary="exit %s" % data.get("returncode"), output=output)
+    return output
+
+
+@mcp.tool()
+def git_stash(
+    root: str = ".",
+    action: str = "push",
+    message: str = "",
+    include_untracked: bool = True,
+    timeout: int = 10,
+) -> str:
+    """Manage the git stash: push (save changes), pop (restore), list, or drop."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "action": action, "message": message}
+    try:
+        data = harness_tools.git_stash(root=root, action=action, message=message, include_untracked=include_untracked, timeout=timeout)
+    except Exception as exc:
+        _record_direct_tool("git_stash", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = _format_run_result("git stash %s" % action, data)
+    _record_direct_tool("git_stash", args, ok=data.get("ok", False), started=started, summary="exit %s" % data.get("returncode"), output=output)
+    return output
+
+
+@mcp.tool()
+def git_tag(
+    root: str = ".",
+    name: str = "",
+    message: str = "",
+    delete: bool = False,
+    timeout: int = 10,
+) -> str:
+    """Create or delete a git tag. Set message for an annotated tag."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "name": name, "message": message, "delete": delete}
+    try:
+        data = harness_tools.git_tag(root=root, name=name, message=message, delete=delete, timeout=timeout)
+    except Exception as exc:
+        _record_direct_tool("git_tag", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = _format_run_result("git tag", data)
+    _record_direct_tool("git_tag", args, ok=data.get("ok", False), started=started, summary="exit %s" % data.get("returncode"), output=output)
+    return output
+
+
+@mcp.tool()
+def git_merge(
+    root: str = ".",
+    branch: str = "",
+    no_ff: bool = True,
+    message: str = "",
+    timeout: int = 30,
+) -> str:
+    """Merge a branch into the current branch."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "branch": branch, "no_ff": no_ff, "message": message}
+    try:
+        data = harness_tools.git_merge(root=root, branch=branch, no_ff=no_ff, message=message, timeout=timeout)
+    except Exception as exc:
+        _record_direct_tool("git_merge", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = _format_run_result("git merge", data)
+    _record_direct_tool("git_merge", args, ok=data.get("ok", False), started=started, summary="exit %s" % data.get("returncode"), output=output)
+    return output
+
+
+@mcp.tool()
+def git_cherry_pick(
+    root: str = ".",
+    commits_json: str = "[]",
+    timeout: int = 30,
+) -> str:
+    """Cherry-pick one or more commits onto the current branch. Pass commit SHAs as a JSON array."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "commits_json": commits_json}
+    try:
+        data = harness_tools.git_cherry_pick(root=root, commits_json=commits_json, timeout=timeout)
+    except Exception as exc:
+        _record_direct_tool("git_cherry_pick", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = _format_run_result("git cherry-pick", data)
+    _record_direct_tool("git_cherry_pick", args, ok=data.get("ok", False), started=started, summary="exit %s" % data.get("returncode"), output=output)
+    return output
+
+
+@mcp.tool()
+def build_run(
+    root: str = ".",
+    command: str = "",
+    timeout: int = 120,
+) -> str:
+    """Run the project build system (auto-detects Make, Cargo, CMake, Go, npm, Gradle, Maven). Pass a custom command to override auto-detection."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "command": command, "timeout": timeout}
+    try:
+        data = harness_tools.build_run(root=root, command=command, timeout=timeout)
+    except Exception as exc:
+        _record_direct_tool("build_run", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = _format_run_result("build", data)
+    _record_direct_tool("build_run", args, ok=data.get("ok", False), started=started, summary="exit %s" % data.get("returncode"), output=output)
+    return output
+
+
+@mcp.tool()
+def build_clean(
+    root: str = ".",
+    timeout: int = 30,
+) -> str:
+    """Clean build artifacts (auto-detects Make, Cargo, Go)."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "timeout": timeout}
+    try:
+        data = harness_tools.build_clean(root=root, timeout=timeout)
+    except Exception as exc:
+        _record_direct_tool("build_clean", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = _format_run_result("build clean", data)
+    _record_direct_tool("build_clean", args, ok=data.get("ok", False), started=started, summary="exit %s" % data.get("returncode"), output=output)
+    return output
+
+
+@mcp.tool()
+def rename_symbol(
+    root: str = ".",
+    old_name: str = "",
+    new_name: str = "",
+    glob: str = "**/*.py",
+    dry_run: bool = True,
+) -> str:
+    """Rename a symbol across files matching a glob pattern. Returns a preview by default; set dry_run=false to apply."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "old_name": old_name, "new_name": new_name, "glob": glob, "dry_run": dry_run}
+    try:
+        data = harness_tools.rename_symbol(root=root, old_name=old_name, new_name=new_name, glob=glob, dry_run=dry_run)
+    except Exception as exc:
+        _record_direct_tool("rename_symbol", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    lines = [
+        "rename: %s → %s (%s)" % (old_name, new_name, "dry run" if dry_run else "applied"),
+        "  files: %d" % data.get("files_changed", 0),
+        "  replacements: %d" % data.get("total_replacements", 0),
+    ]
+    if data.get("preview"):
+        lines.append("  preview:")
+        for p in data["preview"]:
+            lines.append("    %s:%d  %s" % (p["file"], p["line"], p["text"]))
+    output = "\n".join(lines)
+    _record_direct_tool(
+        "rename_symbol", args, ok=data.get("ok", False), started=started,
+        summary="%d replacements in %d files" % (data.get("total_replacements", 0), data.get("files_changed", 0)),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def find_references(
+    root: str = ".",
+    symbol: str = "",
+    glob: str = "**/*.py",
+) -> str:
+    """Find all references to a symbol across files matching a glob. Returns file, line number, and context for each reference."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "symbol": symbol, "glob": glob}
+    try:
+        data = harness_tools.extract_references(root=root, symbol=symbol, glob=glob)
+    except Exception as exc:
+        _record_direct_tool("find_references", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    lines = ["references to '%s'" % symbol]
+    refs = data.get("references", [])
+    for r in refs:
+        lines.append("  %s:%d  %s" % (r["file"], r["line"], r["text"]))
+    if data.get("truncated"):
+        lines.append("  ... (truncated at 200 results)")
+    lines.insert(1, "  total: %d%s" % (len(refs), " (truncated)" if data.get("truncated") else ""))
+    output = "\n".join(lines)
+    _record_direct_tool(
+        "find_references", args, ok=data.get("ok", False), started=started,
+        summary="%d references" % len(refs),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def diff_files(
+    root: str = ".",
+    left: str = "",
+    right: str = "",
+    context: int = 3,
+) -> str:
+    """Compute a unified diff between two files in the workspace."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "left": left, "right": right, "context": context}
+    try:
+        data = harness_tools.diff_files(root=root, left=left, right=right, context=context)
+    except Exception as exc:
+        _record_direct_tool("diff_files", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = data.get("stdout", "") or data.get("stderr", "") or "(files are identical)"
+    _record_direct_tool("diff_files", args, ok=data.get("ok", False), started=started, summary="diff %s %s" % (left, right), output=output)
+    return output
+
+
+@mcp.tool()
+def apply_patch(
+    root: str = ".",
+    patch_text: str = "",
+    check_only: bool = False,
+) -> str:
+    """Apply a unified diff patch to the workspace. Set check_only=true to verify without writing."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "check_only": check_only}
+    try:
+        data = harness_tools.apply_patch(root=root, patch_text=patch_text, check_only=check_only)
+    except Exception as exc:
+        _record_direct_tool("apply_patch", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    output = _format_run_result("apply patch%s" % (" (check)" if check_only else ""), data)
+    _record_direct_tool("apply_patch", args, ok=data.get("ok", False), started=started, summary="exit %s" % data.get("returncode"), output=output)
+    return output
+
+
+@mcp.tool()
+def secret_scan(
+    root: str = ".",
+    timeout: int = 30,
+) -> str:
+    """Scan workspace files for leaked secrets (API keys, passwords, private keys, tokens). Returns findings with file, line, and type."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "timeout": timeout}
+    try:
+        data = harness_tools.secret_scan(root=root, timeout=timeout)
+    except Exception as exc:
+        _record_direct_tool("secret_scan", args, ok=False, started=started, summary=str(exc))
+        return "ERROR: %s" % exc
+    findings = data.get("findings", [])
+    lines = [
+        "secret scan: %d finding(s) in %d files scanned" % (len(findings), data.get("files_scanned", 0)),
+    ]
+    for f in findings:
+        lines.append("  %s:%d  [%s]  %s" % (f["file"], f["line"], f["type"], f["match"]))
+    if data.get("truncated"):
+        lines.append("  ... (truncated at 100 findings)")
+    output = "\n".join(lines)
+    _record_direct_tool(
+        "secret_scan", args, ok=data.get("ok", False), started=started,
+        summary="%d findings" % len(findings),
+        output=output,
+    )
+    return output
+
+
 @mcp.tool()
 def process_list(max_processes: int = 128, max_seconds: float = 0.5) -> str:
     """List bounded process metadata when host inspection is explicitly enabled."""
@@ -11942,6 +12514,29 @@ AGENT_TOOL_HELP = """Available tools:
 - program_search: {"query": "python", "max_results": 50}
 - workspace_run: {"program": "git", "args_json": ["status", "--short"], "cwd": ".", "timeout": 30}
 - script_run: {"path": "scripts/check.py", "args_json": [], "cwd": ".", "timeout": 30, "risk_policy": "off|report|deny-high|deny-medium|deny-unknown"} -- request may strengthen but never weaken operator policy
+- test_discover: {"root": ".", "framework": "auto"} -- discover tests; auto-detects pytest/jest/vitest/cargo/go/dotnet
+- test_run: {"root": ".", "framework": "auto", "path": "", "pattern": "", "verbose": false, "coverage": false, "timeout": 120, "extra_args_json": "[]"} -- run tests with filtering, coverage, extra args
+- lint_run: {"root": ".", "tool": "auto", "path": "", "fix": false, "timeout": 60} -- lint with ruff/flake8/eslint/clippy; fix=true to auto-fix
+- format_code: {"root": ".", "tool": "auto", "path": "", "check_only": false, "timeout": 60} -- format with ruff/black/prettier/rustfmt/gofmt
+- typecheck_run: {"root": ".", "tool": "auto", "path": "", "timeout": 120} -- type check with mypy/pyright/tsc
+- dependency_add: {"root": ".", "packages_json": "[\"requests\"]", "dev": false, "timeout": 60} -- install packages with auto-detected manager
+- dependency_remove: {"root": ".", "packages_json": "[\"requests\"]", "timeout": 60} -- uninstall packages
+- dependency_update: {"root": ".", "packages_json": "[]", "timeout": 120} -- update packages (empty = all)
+- dependency_audit: {"root": ".", "timeout": 60} -- audit for vulnerabilities
+- git_commit: {"root": ".", "message": "fix: description", "paths_json": "[\"src/main.py\"]", "all_tracked": false, "timeout": 30} -- commit staged or specified files
+- git_branch: {"root": ".", "name": "feature/x", "checkout": true, "base": "", "timeout": 10} -- create and checkout a branch
+- git_checkout: {"root": ".", "ref": "main", "timeout": 10} -- switch branch/tag/commit
+- git_stash: {"root": ".", "action": "push|pop|list|drop", "message": "", "include_untracked": true, "timeout": 10}
+- git_tag: {"root": ".", "name": "v1.0.0", "message": "", "delete": false, "timeout": 10}
+- git_merge: {"root": ".", "branch": "feature/x", "no_ff": true, "message": "", "timeout": 30}
+- git_cherry_pick: {"root": ".", "commits_json": "[\"abc123\"]", "timeout": 30}
+- build_run: {"root": ".", "command": "", "timeout": 120} -- auto-detects Make/Cargo/CMake/Go/npm/Gradle/Maven; command overrides
+- build_clean: {"root": ".", "timeout": 30} -- clean build artifacts
+- rename_symbol: {"root": ".", "old_name": "foo", "new_name": "bar", "glob": "**/*.py", "dry_run": true} -- rename across files; dry_run=false to apply
+- find_references: {"root": ".", "symbol": "MyClass", "glob": "**/*.py"} -- find all occurrences of a symbol
+- diff_files: {"root": ".", "left": "a.py", "right": "b.py", "context": 3} -- unified diff between two files
+- apply_patch: {"root": ".", "patch_text": "...", "check_only": false} -- apply a unified diff patch
+- secret_scan: {"root": ".", "timeout": 30} -- scan for leaked API keys, passwords, tokens, private keys
 - image_inspect: {"path": "artifacts/generated/demo/icon.png"}
 - data_inspect: {"path": "data/records.jsonl", "max_bytes": 256000}
 - data_query: {"path": "data/records.jsonl", "sql": "", "projection_json": ["id", "/nested/name"], "filters_json": {"status": "active"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
@@ -12015,6 +12610,7 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "self_heal_check", "status", "system_profile_text", "environment_status", "hardware_profile",
     "emotion_vector_status", "preferences_status", "tool_manifest",
     "memory_search", "web_search", "web_fetch", "weather_lookup",
+    "test_discover", "find_references", "diff_files", "secret_scan",
 })
 REPOSITORY_READ_ONLY_FORBIDDEN_ARGS = frozenset({
     "token", "approval", "extra_roots",
@@ -12078,6 +12674,10 @@ an exact symbol named by the task; do not default to Python or server.py.
 - emotion_vector_status: {}
 - preferences_status: {"include_disabled": false, "limit": 20}
 - tool_manifest: {}
+- test_discover: {"root": ".", "framework": "auto"} -- discover tests; auto-detects pytest/jest/vitest/cargo/go/dotnet
+- find_references: {"root": ".", "symbol": "MyClass", "glob": "**/*.py"} -- find all occurrences of a symbol
+- diff_files: {"root": ".", "left": "a.py", "right": "b.py", "context": 3} -- unified diff between two files
+- secret_scan: {"root": ".", "timeout": 30} -- scan for leaked API keys, passwords, tokens, private keys
 
 Reply with exactly one JSON object and no markdown:
 {"tool": "tool_name", "args": {...}, "reason": "short reason"}
@@ -13789,6 +14389,11 @@ _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "file_delete", "directory_create", "workspace_inventory", "dependency_inventory", "directory_tree",
     "file_find", "repository_symbol_index", "text_search", "script_search", "artifact_verify",
     "artifact_ground", "artifact_risk_inspect", "scaffold_project", "archive_create", "repo_status", "repo_diff", "project_detect", "file_copy", "file_move",
+    "test_discover", "test_run", "lint_run", "format_code", "typecheck_run",
+    "dependency_add", "dependency_remove", "dependency_update", "dependency_audit",
+    "git_commit", "git_branch", "git_checkout", "git_stash", "git_tag", "git_merge", "git_cherry_pick",
+    "build_run", "build_clean",
+    "rename_symbol", "find_references", "diff_files", "apply_patch", "secret_scan",
 })
 _PROJECT_SCOPED_EXECUTION_TOOLS = frozenset({"workspace_run", "script_run"})
 _AGENT_TOOL_ALIASES = {
@@ -14061,6 +14666,10 @@ _WORK_MUTATION_TOOLS = frozenset({
     "artifact_generate", "game_generate_and_test", "game_generation_campaign",
     "memory_quality_repair", "memory_privacy_repair", "memory_embedding_backfill",
     "memory_interaction_embedding_backfill",
+    "git_commit", "git_branch", "git_checkout", "git_stash", "git_tag",
+    "git_merge", "git_cherry_pick",
+    "dependency_add", "dependency_remove", "dependency_update",
+    "build_clean", "rename_symbol", "apply_patch",
 })
 
 
@@ -14075,6 +14684,8 @@ def _agent_tool_mutates(tool_name, args):
         return str(args.get("mode", "preview")).strip().lower() == "apply"
     if tool_name == "text_patch":
         return args.get("apply") is True
+    if tool_name == "rename_symbol":
+        return args.get("dry_run") is False
     if tool_name == "data_convert":
         return args.get("apply") is True
     if tool_name == "sqlite_mutate":
@@ -14560,6 +15171,9 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "memory_quality_report", "memory_privacy_review", "artifact_ground",
     "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",
     "status", "diagnostics", "process_list", "process_memory_risk_inspect",
+    "test_discover", "test_run", "lint_run", "format_code", "typecheck_run",
+    "dependency_audit", "find_references", "diff_files", "secret_scan",
+    "build_run",
 })
 _AGENT_FILE_EVIDENCE_TOOLS = frozenset({
     "workspace_inventory", "workspace_compare", "directory_tree", "file_read", "file_read_range",
@@ -15759,12 +16373,18 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "program_search", "image_inspect", "memory_search", "process_list", "process_memory_risk_inspect", "web_search",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
+    "test_discover", "find_references", "diff_files", "secret_scan",
+    "dependency_audit",
 })
 _AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
     "directory_create", "file_write", "file_batch_write", "json_patch", "file_edit", "file_copy", "file_move", "archive_extract", "archive_create", "text_patch", "data_convert", "workspace_run",
     "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_generate", "artifact_verify", "game_reference_suite",
     "game_generate_and_test",
+    "test_run", "lint_run", "format_code", "typecheck_run",
+    "dependency_add", "dependency_remove", "dependency_update",
+    "git_commit", "git_branch", "git_checkout", "git_stash", "git_tag", "git_merge", "git_cherry_pick",
+    "build_run", "build_clean", "rename_symbol", "apply_patch",
 })
 _AUTOPILOT_RUNNERS = frozenset({
     "python", "python.exe", "py", "py.exe", "pytest", "pytest.exe",
