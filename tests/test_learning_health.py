@@ -97,30 +97,49 @@ def test_learning_report_tracks_grounding_signals_sources_and_hygiene():
     ]
 
 
-def test_clean_grounded_learning_store_is_healthy_and_formats(monkeypatch):
+def _healthy_store(monkeypatch, judged=0):
+    """A store with nothing wrong with it except how much of its work anyone has
+    judged -- so the reviewed sample size is the only variable in these tests.
+
+    `judged` caller-accepted outcomes, one per interaction, each interaction
+    carrying a lesson grounded on it, so coverage and distillation yield stay
+    perfect however many are asked for. Outcomes are unique per
+    (interaction, signal), so a judged sample needs that many interactions.
+    Caller closes the connection.
+    """
     monkeypatch.setattr(learning_health.embeddings, "EXPECTED_DIMENSION", 1)
     conn = _conn()
-    try:
-        _interaction(conn, "i1")
+    for index in range(max(1, judged)):
+        interaction_id = "i%d" % index
+        _interaction(conn, interaction_id)
         memory_store.refresh_interaction_task_embedding(
             conn,
-            "i1",
+            interaction_id,
             learning_health.embeddings.to_blob([1.0]),
             learning_health.embeddings.EMBED_IDENTITY,
             revision=learning_health.embeddings.EMBED_REVISION,
             dimension=1,
         )
-        memory_store.record_outcome_row(conn, "i1", "accepted", 0.8)
         memory_store.add_lesson(
             conn,
-            "lesson-one",
-            "Pin the compiler before configuring CMake.",
+            "lesson-%d" % index,
+            "Pin the compiler before configuring CMake (case %d)." % index,
             b"\x01\x02\x03\x04",
-            "i1",
+            interaction_id,
             embedding_model=learning_health.embeddings.EMBED_IDENTITY,
             embedding_revision=learning_health.embeddings.EMBED_REVISION,
             embedding_dim=1,
         )
+        if index < judged:
+            memory_store.record_outcome_row(conn, interaction_id, "accepted", 0.8)
+    return conn
+
+
+def test_clean_grounded_learning_store_is_healthy_and_formats(monkeypatch):
+    # A measurable caller-judged sample: below _MIN_REVIEWED_SAMPLE the gate has
+    # nothing to believe and no store may read healthy, however clean it is.
+    conn = _healthy_store(monkeypatch, judged=learning_health._MIN_REVIEWED_SAMPLE)
+    try:
         report = learning_health.build_report(conn)
     finally:
         conn.close()
@@ -130,8 +149,8 @@ def test_clean_grounded_learning_store_is_healthy_and_formats(monkeypatch):
     assert report["distillation_yield"] == 1.0
     assert "sonder learning health" in text
     assert "outcome coverage: 100.0%" in text
-    assert "interaction=1" in text
-    assert "accepted=1" in text
+    assert "interaction=20" in text
+    assert "accepted=20" in text
     assert "legacy=0" in text
 
 
@@ -358,11 +377,16 @@ def test_status_gates_on_the_caller_judged_rate_not_the_blend():
     assert "blended, not an accuracy figure" in learning_health.format_report(report)
 
 
-def test_a_reviewed_sample_too_small_to_gate_on_falls_back_to_the_blend():
-    """Four judgements cannot carry a 60%/80% threshold; flipping to
-    "attention" on a single rejection would make the status meaningless. Below
-    _MIN_REVIEWED_SAMPLE the gate stays on the blend and the split stays
-    visible in the text, which is where the honest number lives."""
+def test_a_reviewed_sample_too_small_to_gate_on_is_unmeasured_not_blended():
+    """Four judgements cannot carry a 60%/80% threshold -- but the blend is not
+    a weaker version of that number, it is a different population, so falling
+    back to it answers a question nobody asked. Below _MIN_REVIEWED_SAMPLE the
+    gate has nothing to believe and says so; the split stays visible in the
+    text, which is where the honest number lives.
+
+    Flipping to "attention" on a single rejection would still make the status
+    meaningless, so unmeasured is not treated as measured-bad: it is its own
+    state, and it costs the store "healthy", not a red flag."""
     conn = _conn()
     try:
         for n in range(9):
@@ -377,7 +401,55 @@ def test_a_reviewed_sample_too_small_to_gate_on_falls_back_to_the_blend():
     assert report["reviewed_outcomes"] == 4
     assert report["reviewed_positive_percent"] == 25.0
     assert report["status"] != "attention"
-    assert learning_health._gating_positive_percent(report)[1] == "blended"
+    assert learning_health._gating_positive_percent(report) == (None, "unmeasured")
+
+
+def test_an_unmeasured_reviewed_sample_cannot_read_healthy(monkeypatch):
+    """The B2 defect, whole: a store with a large self-graded curriculum and no
+    caller judgements at all blended to ~100% positive, cleared both thresholds
+    and reported "healthy" -- a green check in the UI for a store that has never
+    once been judged. calibration.should_verify fails closed on exactly this
+    ignorance at exactly this threshold; the status gate now agrees."""
+    conn = _healthy_store(monkeypatch, judged=0)
+    try:
+        for n in range(500):
+            memory_store.record_outcome_row(conn, "auto%d" % n, "tests_passed", 1.0)
+        report = learning_health.build_report(conn)
+    finally:
+        conn.close()
+
+    assert report["reviewed_outcomes"] == 0
+    assert report["positive_percent"] > 99.0, "the blend alone clears every bar"
+    assert report["status"] == "watch"
+    assert "reviewed sample too small to gate on" in learning_health.format_report(report)
+
+
+def test_a_thin_reviewed_sample_costs_a_clean_store_its_healthy_verdict(monkeypatch):
+    """One judgement short of the sample is still ignorance. 19 perfect
+    outcomes are not a track record, exactly as 5 are not in calibration."""
+    conn = _healthy_store(monkeypatch, judged=learning_health._MIN_REVIEWED_SAMPLE - 1)
+    try:
+        report = learning_health.build_report(conn)
+    finally:
+        conn.close()
+
+    assert report["reviewed_outcomes"] == learning_health._MIN_REVIEWED_SAMPLE - 1
+    assert report["reviewed_positive_percent"] == 100.0
+    assert report["status"] == "watch"
+
+
+def test_a_measurable_reviewed_sample_can_still_read_healthy(monkeypatch):
+    """Fail-closed must not mean permanently pessimistic: once the sample can
+    carry the thresholds, a good record reads healthy again."""
+    conn = _healthy_store(monkeypatch, judged=learning_health._MIN_REVIEWED_SAMPLE)
+    try:
+        report = learning_health.build_report(conn)
+    finally:
+        conn.close()
+
+    assert report["reviewed_outcomes"] == learning_health._MIN_REVIEWED_SAMPLE
+    assert learning_health._gating_positive_percent(report) == (100.0, "reviewed")
+    assert report["status"] == "healthy"
 
 
 def test_loss_only_is_measured_against_its_own_reference_class():

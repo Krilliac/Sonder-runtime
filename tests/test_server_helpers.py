@@ -1114,7 +1114,11 @@ def test_learning_health_is_structured_and_routed(monkeypatch, tmp_path):
     data = server.learning_health_data()
     text = server.learning_health_status()
 
-    assert data["status"] == "healthy"
+    # The only outcome here is `tests_passed` -- the runtime grading its own
+    # work. No caller has judged anything, so the status fails closed at
+    # "watch": clean is not the same as measured good.
+    assert data["status"] == "watch"
+    assert data["reviewed_outcomes"] == 0
     assert data["outcome_coverage_percent"] == 100.0
     assert data["grounded_lessons"] == 1
     assert "sonder learning health" in text
