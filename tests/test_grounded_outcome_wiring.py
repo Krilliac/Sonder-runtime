@@ -70,6 +70,31 @@ def test_a_verification_that_never_ran_writes_no_outcome(
 
 
 @pytest.mark.parametrize("tool,harness_name", VERIFIERS)
+def test_a_verifier_that_raised_writes_no_outcome(
+    monkeypatch, ledger, tool, harness_name,
+):
+    """The wrapper's `except` branch is the one path where ok=False reaches the
+    ledger carrying no evidence at all.
+
+    `harness_tools._resolve_root` raises before anything is spawned when the
+    root is not a directory, and every wrapper turns that into
+    `_record_direct_tool(..., ok=False)`. Nothing ran, so there is nothing to
+    file -- but this path bypassed the unmeasured state entirely and kept
+    writing `failed` (-1.0) against the pending generation.
+    """
+    def _raise(**_kwargs):
+        raise ValueError("not a directory: /nope")
+
+    monkeypatch.setattr(server.harness_tools, harness_name, _raise)
+
+    out = getattr(server, tool)()
+
+    assert out.startswith("ERROR: "), "the caller is still told it went wrong"
+    assert ledger == [], "%s filed a verdict for a run that never started" % tool
+    assert go.pending_count() == 1, "the generation is still awaiting real evidence"
+
+
+@pytest.mark.parametrize("tool,harness_name", VERIFIERS)
 def test_a_verification_that_really_failed_still_writes_the_failure(
     monkeypatch, ledger, tool, harness_name,
 ):
