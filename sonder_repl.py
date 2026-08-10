@@ -25,6 +25,7 @@ import tier_router
 import code_improve
 import command_router
 import command_catalog
+import permission_modes
 import project_scaffold
 
 try:
@@ -70,11 +71,80 @@ def _read_input(prompt):
     return input(prompt)
 
 
+# The gate's own controls are never gated by it. `permission_mode` is risk
+# `ask`, which `plan` denies -- so gating it would trap whoever is at the
+# keyboard in `plan` with no console way back out. A human typing the command
+# is the authority the gate exists to serve; the agent path deliberately gets
+# no such exemption (a model must not be able to lift its own restraint, and
+# `_agent_dispatch` cannot reach this tool at all).
+GATE_EXEMPT_TOOLS = frozenset({"permission_mode"})
+
+
+def _confirm(question):
+    """Ask a y/N question, defaulting to no. Anything but an explicit yes is no.
+
+    Every non-answer -- EOF on piped stdin, a closed console, Ctrl-C -- is a
+    "no". A permission prompt that a missing terminal turns into a "yes" is
+    worse than no prompt, because it looks like it asked.
+    """
+    try:
+        answer = input("%s [y/N] " % question)
+    except (EOFError, OSError, KeyboardInterrupt):
+        return False
+    return str(answer or "").strip().lower() in ("y", "yes")
+
+
+def _permission_gate(tool):
+    """(may_run, refusal_text) for running ``tool`` from the console.
+
+    The console is the one surface with a human attached, so ``ask`` means
+    actually asking rather than degrading to allow the way a direct MCP call
+    does. ``deny`` prints why and runs nothing.
+    """
+    if tool in GATE_EXEMPT_TOOLS:
+        return True, ""
+    decision = permission_modes.decide(tool, interactive=True)
+    if decision.action == permission_modes.ALLOW:
+        return True, ""
+    if decision.action == permission_modes.DENY:
+        return False, "refused /%s: %s (mode: %s)" % (
+            tool, decision.reason, permission_modes.MODE_LABELS.get(
+                decision.mode, decision.mode),
+        )
+    if _confirm("run /%s? %s." % (tool, decision.reason)):
+        return True, ""
+    return False, "skipped /%s" % tool
+
+
+def _mode_command(argument):
+    """`/mode` -- show every mode, switch to one, or explain one.
+
+    Delegates to the `permission_mode` tool rather than reimplementing it, so
+    the console and the MCP surface cannot drift apart and a mode change made
+    from here is still recorded like any other tool call. It stays a REPL
+    branch (not a catalogued dispatch) so it can never be refused by the gate
+    it controls -- see GATE_EXEMPT_TOOLS.
+    """
+    wanted = str(argument or "").strip()
+    explain = False
+    for flag in ("--explain", "explain"):
+        if wanted.endswith(flag):
+            wanted = wanted[: -len(flag)].strip()
+            explain = True
+            break
+    return server.permission_mode(mode=wanted, explain=explain)
+
+
 def _run_catalogued(line, cmd):
     """Run any registered MCP tool typed as /<tool_name>, or explain the miss.
 
     Every tool is catalogued, so this is what makes the whole surface -- not
     just the branches written out above -- reachable from the console.
+
+    This is also where the permission gate applies to the console: the tool is
+    resolved first (so an unknown command still gets its suggestions rather
+    than a confusing refusal), then `permission_modes.decide` runs before the
+    handler is ever called.
     """
     try:
         parsed = command_catalog.parse_invocation(line)
@@ -84,6 +154,9 @@ def _run_catalogued(line, cmd):
         tool, kwargs = parsed
         handler = getattr(server, tool, None)
         if callable(handler):
+            may_run, refusal = _permission_gate(tool)
+            if not may_run:
+                return refusal
             try:
                 return str(handler(**kwargs))
             except TypeError as exc:
@@ -375,6 +448,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /debug             inspect safe debug state
   /cot               denied: hidden private chain-of-thought is not exposed
   /permissions [tool] show local permission rules or one matched rule
+  /mode [name]       show or set how much runs without asking (plan/manual/acceptEdits/auto)
   /filepolicy        show file access roots and bypass controls
   /files [query]     find files under guarded roots
   /read <path>       read a guarded file
@@ -896,6 +970,8 @@ def main():
                 do_dump(arg.strip() or "repl")
             elif cmd in ("/permissions", "/perms"):
                 print(server.permission_policy(arg.strip()))
+            elif cmd == "/mode":
+                print(_mode_command(arg.strip()))
             elif cmd in ("/todo", "/task", "/tasks"):
                 text = arg.strip()
                 if not text or text.lower() in ("list", "ls"):

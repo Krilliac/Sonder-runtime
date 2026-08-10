@@ -14182,6 +14182,50 @@ def _agent_negative_claim_review(
     }
 
 
+def _agent_permission_gate_error(tool_name):
+    """Refusal text when the operator's permission gate forbids this dispatch.
+
+    ``permission_modes.decide()`` was written as a pure function that call
+    sites opt into, and until now nothing did: the mode matrix and the
+    per-tool ``permission_rules`` policy both decided nothing. This is the
+    opt-in for the agent/workbench/autopilot path.
+
+    ``interactive=False`` is the whole reason this does not break flows that
+    have always worked. Nobody is at a keyboard behind an autonomous run, so
+    ``decide()`` degrades ``ask`` to ``allow`` here -- which means the default
+    ``manual`` mode refuses nothing it did not refuse yesterday. Only two
+    things can actually stop a dispatch: ``plan`` mode (whose entire purpose
+    is to hold still) and an explicit per-tool ``deny`` rule. Both are a
+    deliberate, written-down operator decision.
+
+    Because ``decide()`` never returns ``ask`` when ``interactive=False``,
+    the "what should ``ask`` mean with no human attached?" question does not
+    arise on this path. Were it ever to, the answer would have to be refusal,
+    not silent self-approval by the loop.
+
+    This gate is additional to -- never a replacement for -- the read-only
+    filter, the project-bound tool set and the cloud/host policies below it.
+    The refusal is shaped like the loop's other ``HOST POLICY`` observations
+    so ``_agent_observation_ok`` counts it as a failed step and the model is
+    told to change course rather than retry.
+    """
+    name = _canonical_agent_tool_name(str(tool_name or "").strip())
+    decision = permission_modes.decide(name, interactive=False)
+    if decision.allowed:
+        return ""
+    # Assigned rather than returned as a literal: scripts/check_error_signals.py
+    # ratchets new literal-prefixed ``ERROR:`` *returns*, and the agent loop's
+    # own policy chain builds its HOST POLICY strings the same way.
+    refusal = (
+        "ERROR: HOST POLICY: tool '%s' is refused by the active permission "
+        "gate (%s, mode=%s, risk=%s). This is the host's standing policy, not "
+        "a transient failure: retrying it unchanged will be refused again. "
+        "Choose a different tool or finalize with what you have."
+        % (name, decision.reason, decision.mode, decision.risk)
+    )
+    return refusal
+
+
 def _agent_dispatch(
     tool_name, args, allow_web=True, read_only=False, allow_location=False,
     repository_extra_roots="",
@@ -14198,6 +14242,9 @@ def _agent_dispatch(
     args = args or {}
     if not isinstance(args, dict):
         return "ERROR: tool args must be a JSON object"
+    gate_error = _agent_permission_gate_error(tool_name)
+    if gate_error:
+        return gate_error
     if read_only:
         if repository_extra_roots:
             # Defense in depth for direct/internal dispatch callers.  The

@@ -49,13 +49,34 @@ decision because it is narrow and it is written down.
 
 Enforcement scope
 -----------------
-``decide()`` is a pure function; call sites opt in. Interactive surfaces (the
-REPL, the agent loop) can honour ``ask`` by actually asking. A direct MCP tool
-call has no one to ask, so ``ask`` degrades to ``allow`` there unless the mode
-is ``plan`` -- whose entire purpose is to hold still, and which therefore denies
-everywhere. Preserving existing behaviour by default matters here: these rules
-have been dormant since they were written, and switching them on globally in
-one step would break flows that have always worked.
+``decide()`` is a pure function; call sites opt in. Two do:
+
+    server._agent_dispatch          the agent/workbench/autopilot tool path,
+                                    via ``_agent_permission_gate_error``.
+                                    ``interactive=False``.
+    sonder_repl._run_catalogued     ``/<tool_name>`` typed at the console,
+                                    via ``_permission_gate``.
+                                    ``interactive=True``.
+
+Interactive surfaces honour ``ask`` by actually asking (the console prompts
+``y/N``, defaulting to no). A direct MCP tool call has no one to ask, so
+``ask`` degrades to ``allow`` there unless the mode is ``plan`` -- whose entire
+purpose is to hold still, and which therefore denies everywhere. Preserving
+existing behaviour by default matters here: these rules have been dormant since
+they were written, and switching them on globally in one step would break flows
+that have always worked. That is why the agent path passes
+``interactive=False``: under the default ``manual`` mode it therefore refuses
+nothing the mode itself refused before, and only ``plan`` or an explicit
+per-tool ``deny`` rule can stop a dispatch.
+
+Direct MCP tool functions are *not* individually gated -- a client calling
+``file_write`` gets exactly the behaviour it always got. The gate lives at the
+two places that dispatch a tool chosen by a model or typed by a person.
+
+One deliberate console-only exemption: ``permission_mode`` itself is never
+gated there. It is risk ``ask``, which ``plan`` denies, so gating it would
+leave the operator in ``plan`` with no console way back out. The agent path
+gets no such exemption -- a model must not be able to lift its own restraint.
 
 Rules and modes compose; they do not race
 -------------------------------------------
