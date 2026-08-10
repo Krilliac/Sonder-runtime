@@ -49,10 +49,10 @@ def build_runtime(
     from ..adapters.local_observability import LocalObservabilitySink
 
     if config.model_backend in ("openai", "openai-compatible", "llamacpp", "vllm"):
-        from ..adapters.openai_compat.gateway import OpenAICompatibleGateway
+        from ..adapters.inference.openai_compat import OpenAICompatibleGateway
         gateway: ModelGateway = OpenAICompatibleGateway()
     else:
-        from ..adapters.ollama.gateway import OllamaGateway
+        from ..adapters.inference.ollama import OllamaGateway
         gateway = OllamaGateway()
 
     return Runtime(
