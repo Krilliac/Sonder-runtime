@@ -9647,7 +9647,12 @@ def test_run(
             extra_args_json=extra_args_json,
         )
     except Exception as exc:
-        _record_direct_tool("test_run", args, ok=False, started=started, summary=str(exc))
+        # Nothing ran, so there is no verdict to file against the pending
+        # generation. The predicate reads `error` first.
+        _record_direct_tool(
+            "test_run", args, ok=False, started=started, summary=str(exc),
+            evidence={"error": str(exc)},
+        )
         return "ERROR: %s" % exc
     output = _format_run_result("test run (%s)" % data.get("framework", "?"), data)
     _record_direct_tool(
@@ -9676,7 +9681,12 @@ def lint_run(
     try:
         data = harness_tools.lint_run(root=root, tool=tool, path=path, fix=fix, timeout=timeout)
     except Exception as exc:
-        _record_direct_tool("lint_run", args, ok=False, started=started, summary=str(exc))
+        # Nothing ran, so there is no verdict to file against the pending
+        # generation. The predicate reads `error` first.
+        _record_direct_tool(
+            "lint_run", args, ok=False, started=started, summary=str(exc),
+            evidence={"error": str(exc)},
+        )
         return "ERROR: %s" % exc
     output = _format_run_result("lint (%s, %s)" % (data.get("tool", "?"), data.get("mode", "check")), data)
     _record_direct_tool(
@@ -9728,7 +9738,12 @@ def typecheck_run(
     try:
         data = harness_tools.typecheck_run(root=root, tool=tool, path=path, timeout=timeout)
     except Exception as exc:
-        _record_direct_tool("typecheck_run", args, ok=False, started=started, summary=str(exc))
+        # Nothing ran, so there is no verdict to file against the pending
+        # generation. The predicate reads `error` first.
+        _record_direct_tool(
+            "typecheck_run", args, ok=False, started=started, summary=str(exc),
+            evidence={"error": str(exc)},
+        )
         return "ERROR: %s" % exc
     output = _format_run_result("typecheck (%s)" % data.get("tool", "?"), data)
     _record_direct_tool(
@@ -10006,7 +10021,12 @@ def build_run(
     try:
         data = harness_tools.build_run(root=root, command=command, timeout=timeout)
     except Exception as exc:
-        _record_direct_tool("build_run", args, ok=False, started=started, summary=str(exc))
+        # Nothing ran, so there is no verdict to file against the pending
+        # generation. The predicate reads `error` first.
+        _record_direct_tool(
+            "build_run", args, ok=False, started=started, summary=str(exc),
+            evidence={"error": str(exc)},
+        )
         return "ERROR: %s" % exc
     output = _format_run_result("build", data)
     _record_direct_tool(
