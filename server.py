@@ -7715,13 +7715,17 @@ def _record_outcome_signal(interaction_id: str, signal: str) -> None:
         conn.close()
 
 
-def _feed_grounded_outcome(name, ok, output, args=None) -> None:
+def _feed_grounded_outcome(name, ok, output, args=None, evidence=None) -> None:
     """Attribute execution evidence to the work it judges.
 
     The outcome store holds ~9,000 rows and only ~190 of them measure delegated
     work, because filing an outcome is a manual step and people file successes
     far more readily than failures. The verification tools already know the
     truth, so take it from them instead of asking anyone to remember.
+
+    `evidence` is the verifier's own result dict. `ok` alone cannot tell "the
+    tests failed" from "the tests never ran", and that difference decides
+    whether anything should be recorded at all.
     """
     project = ""
     if isinstance(args, dict):
@@ -7734,6 +7738,7 @@ def _feed_grounded_outcome(name, ok, output, args=None) -> None:
         elif name in grounded_outcomes.VERIFIERS:
             grounded_outcomes.attribute(
                 name, bool(ok), project, record_fn=_record_outcome_signal,
+                evidence=evidence,
             )
     except Exception:
         # Bookkeeping must never break the run it is observing.
@@ -7742,6 +7747,7 @@ def _feed_grounded_outcome(name, ok, output, args=None) -> None:
 
 def _record_direct_tool(
     name: str, args=None, ok=True, started=None, summary="", command="", output="",
+    evidence=None,
 ) -> None:
     if activity_tracker.inside_tool_call():
         return
@@ -7755,7 +7761,7 @@ def _record_direct_tool(
         command=command,
         output=output,
     )
-    _feed_grounded_outcome(name, ok, output, args)
+    _feed_grounded_outcome(name, ok, output, args, evidence=evidence)
 
 
 @mcp.tool()
@@ -9648,6 +9654,9 @@ def test_run(
         "test_run", args, ok=data.get("ok", False), started=started,
         summary="exit %s" % data.get("returncode"),
         output=output,
+        # `ok` cannot tell a failing suite from one that timed out or never
+        # started; the grounded-outcome ledger needs the difference.
+        evidence=data,
     )
     return output
 
@@ -9674,6 +9683,7 @@ def lint_run(
         "lint_run", args, ok=data.get("ok", False), started=started,
         summary="exit %s" % data.get("returncode"),
         output=output,
+        evidence=data,
     )
     return output
 
@@ -9725,6 +9735,7 @@ def typecheck_run(
         "typecheck_run", args, ok=data.get("ok", False), started=started,
         summary="exit %s" % data.get("returncode"),
         output=output,
+        evidence=data,
     )
     return output
 
@@ -9998,7 +10009,11 @@ def build_run(
         _record_direct_tool("build_run", args, ok=False, started=started, summary=str(exc))
         return "ERROR: %s" % exc
     output = _format_run_result("build", data)
-    _record_direct_tool("build_run", args, ok=data.get("ok", False), started=started, summary="exit %s" % data.get("returncode"), output=output)
+    _record_direct_tool(
+        "build_run", args, ok=data.get("ok", False), started=started,
+        summary="exit %s" % data.get("returncode"), output=output,
+        evidence=data,
+    )
     return output
 
 

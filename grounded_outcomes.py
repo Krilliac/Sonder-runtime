@@ -31,6 +31,12 @@ Deliberate limits
   recording nothing.
 * Only genuinely execution-grounded tools may attribute. A tool whose "success"
   means "it ran", not "the work was good", is not evidence.
+* A verification that never produced a verdict is not evidence either. A
+  timeout, a missing toolchain, or an unrecognised build system is a fact about
+  this machine, not about the work, and it is recorded as neither good nor bad
+  -- the third state is *unmeasured*. ``promotion_eval`` already refuses a
+  promotion decision on the same grounds and calls it
+  ``evaluation_infrastructure_error``; this is that idea, one layer down.
 
 Stdlib only.
 """
@@ -94,7 +100,35 @@ class _Pending:
 
 
 _PENDING: list[_Pending] = []
-_STATS = {"noted": 0, "attributed": 0, "expired": 0, "unlinked": 0}
+_STATS = {"noted": 0, "attributed": 0, "expired": 0, "unlinked": 0, "unmeasured": 0}
+
+
+def evaluation_infrastructure_error(evidence) -> str:
+    """Why this verification measured nothing, or "" when it really ran.
+
+    ``harness_tools`` already knows the difference and throws it away at the
+    call site. A timeout and a missing binary both come back as
+    ``returncode: -1`` (``MAX_TIMEOUT`` is a hard 120s clamp, so any suite
+    slower than two minutes always times out), and the build-system detector
+    returns an ``error`` without spawning anything at all. Each of those used to
+    reach the store as signal ``failed`` -- reward -1.0, the harshest in the
+    table -- against work that was never examined.
+
+    Silence when there is no evidence to read: a verifier that runs no process
+    (an artifact validator, say) passes none, and must keep attributing.
+    """
+    if not isinstance(evidence, dict):
+        return ""
+    if evidence.get("timed_out"):
+        return "the verification timed out before producing a verdict"
+    error = evidence.get("error")
+    if error:
+        return str(error)
+    if evidence.get("returncode") == -1:
+        stderr = str(evidence.get("stderr") or "").strip().splitlines()
+        detail = stderr[0] if stderr else "the verifier could not be run"
+        return detail
+    return ""
 
 
 def _now() -> float:
@@ -151,16 +185,30 @@ def _candidate(project: str, kind: str):
     return None
 
 
-def attribute(tool: str, ok: bool, project: str = "", record_fn=None) -> dict:
+def attribute(tool: str, ok: bool, project: str = "", record_fn=None,
+              evidence=None) -> dict:
     """Attribute a verification result to the generation it most likely judges.
 
     `record_fn(interaction_id, signal)` performs the write; injected so this
     module has no import cycle with the server and is trivially testable.
-    Returns a report describing what happened, including when nothing did.
+    `evidence` is the verifier's own result dict, read only to tell a verdict
+    from the absence of one. Returns a report describing what happened,
+    including when nothing did.
     """
     name = str(tool or "").strip().lstrip("/")
     if name not in VERIFIERS:
         return {"attributed": False, "reason": "%s is not execution-grounded evidence" % name}
+    # Checked before a pending generation is claimed: an unmeasured run must not
+    # consume the one chance that generation had to be judged for real.
+    infrastructure_error = evaluation_infrastructure_error(evidence)
+    if infrastructure_error:
+        with _LOCK:
+            _STATS["unmeasured"] += 1
+        return {
+            "attributed": False,
+            "reason": "%s produced no verdict, so there is nothing to attribute" % name,
+            "evaluation_infrastructure_error": infrastructure_error,
+        }
     _prune()
     pending = _candidate(project, name)
     if pending is None:
