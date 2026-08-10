@@ -145,7 +145,13 @@ letting it loosen a deny would mean a five-risk-class dial (or ``plan``'s
 "hold still") could be defeated by a rule that was written down for some
 unrelated tool's convenience. ``Decision.reason`` always says which of these
 layers actually decided, so an operator can tell a mode refusal from a rule
-refusal from an elevation refusal.
+refusal from an elevation refusal, and ``Decision.source`` says the same thing
+in one word (``rule``/``mode``/``privilege``/``non-interactive``) for anything
+that needs to branch on it rather than print it -- notably ``/permissions``,
+which must show *which* of the rule and the mode governs a tool. That answer is
+produced here, once, where the precedence above is implemented; re-deriving it
+at a display surface would be a second copy of this table, free to drift from
+the one that enforces.
 
 Why ``PRIVILEGED_TOOLS`` is empty
 ----------------------------------
@@ -267,11 +273,25 @@ _LOADED = False
 
 @dataclass(frozen=True)
 class Decision:
+    """One gate decision, including *which layer* actually made it.
+
+    ``reason`` is prose for a person; ``source`` is the same fact in a form
+    something else can branch on. It exists because ``/permissions`` has to
+    tell an operator whether a rule or the mode governs a tool, and the only
+    honest place to answer that is here, where the precedence is implemented.
+    A renderer that re-derived it from ``(rule, mode)`` would be a second copy
+    of the precedence table, free to drift from the one that enforces.
+    """
+
     action: str          # allow | ask | deny
     mode: str
     risk: str
     reason: str
     tool: str = ""
+    # rule | mode | privilege | non-interactive -- the layer that decided.
+    # Defaulted to the commonest case so the field cannot be forgotten into a
+    # crash, but every return site in decide() sets it explicitly.
+    source: str = "mode"
 
     @property
     def allowed(self) -> bool:
@@ -279,7 +299,7 @@ class Decision:
 
     def to_dict(self) -> dict:
         return {"action": self.action, "mode": self.mode, "risk": self.risk,
-                "reason": self.reason, "tool": self.tool}
+                "reason": self.reason, "tool": self.tool, "source": self.source}
 
 
 # --- persistence ----------------------------------------------------------
@@ -539,6 +559,7 @@ def decide(tool_name: str, *, interactive: bool = True,
             "rule denies this tool (pattern %r); an explicit deny outranks "
             "every mode, including auto" % (rule_pattern or name),
             name,
+            source="rule",
         )
 
     # 2. Privilege is a separate axis from both modes and rules; neither can
@@ -546,7 +567,8 @@ def decide(tool_name: str, *, interactive: bool = True,
     #    currently empty by design) or only for this one call
     #    (requires_elevation, set by the caller).
     if (name in PRIVILEGED_TOOLS or requires_elevation) and not elevated():
-        return Decision(DENY, active, risk, "needs elevation, which is off", name)
+        return Decision(DENY, active, risk, "needs elevation, which is off", name,
+                        source="privilege")
 
     mode_action = _MATRIX[active].get(risk, ASK)
 
@@ -560,6 +582,7 @@ def decide(tool_name: str, *, interactive: bool = True,
             "rule allows this tool (pattern %r), satisfying %s's ask"
             % (rule_pattern or name, MODE_LABELS.get(active, active)),
             name,
+            source="rule",
         )
 
     # 5. No rule applied (or it was inert): the mode alone decides, exactly as
@@ -571,13 +594,14 @@ def decide(tool_name: str, *, interactive: bool = True,
             "no interactive prompt available; %s tools are not blocked outside "
             "the console" % risk,
             name,
+            source="non-interactive",
         )
     reasons = {
         ALLOW: "%s allows %s tools" % (MODE_LABELS.get(active, active), risk),
         ASK: "%s asks before %s tools" % (MODE_LABELS.get(active, active), risk),
         DENY: "%s forbids %s tools" % (MODE_LABELS.get(active, active), risk),
     }
-    return Decision(action, active, risk, reasons[action], name)
+    return Decision(action, active, risk, reasons[action], name, source="mode")
 
 
 # --- presentation ---------------------------------------------------------

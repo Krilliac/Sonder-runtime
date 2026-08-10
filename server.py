@@ -6048,11 +6048,58 @@ def context_compaction_plan(session: str = "", project: str = "") -> str:
     return format_context_compaction_plan(context_compaction_plan_data(session, project))
 
 
+def _permission_mode_context(mode: str) -> str:
+    """The state a rule table cannot show: which mode is in force, and privilege."""
+    return "\n".join([
+        "permission mode: %s -- %s" % (
+            permission_modes.MODE_LABELS.get(mode, mode),
+            permission_modes.MODE_BLURBS.get(mode, ""),
+        ),
+        "  'ask' means a prompt at the console; a caller with nobody to ask "
+        "proceeds instead, except under plan.",
+        _elevation_status_text(),
+    ])
+
+
+def _permission_policy_text(tool_name: str = "") -> str:
+    """The effective policy: the rule, the mode, and which one governs.
+
+    Printing the rule alone was honest only while nothing enforced it. Now that
+    ``permission_modes.decide()`` combines rules with a mode, the rule column
+    can disagree with what happens -- ``status`` shows ``allow`` while ``plan``
+    is in force, and a ``deny`` rule beats ``auto``. So the mode is pinned and
+    the rules loaded exactly once here, and both are pushed into the renderer:
+
+    * once, so the whole table describes one consistent policy rather than
+      re-reading a file that can change between rows, and
+    * injected, so the render honours *this* home instead of the one
+      ``decide()``'s default lookup would resolve for itself.
+
+    ``interactive=True`` is the operator's view: ``ask`` means "you will be
+    asked". The line under the mode says what a caller with nobody to ask gets
+    instead, rather than silently rendering that caller's answer here.
+    """
+    home = sonder_paths.default_home()
+    rules, report = permission_rules.load_report(home)
+    mode = permission_modes.current_mode()
+    lookup = permission_rules.rule_lookup(rules)
+
+    def decide(name: str):
+        return permission_modes.decide(
+            name, interactive=True, mode=mode, rule_lookup=lookup,
+        )
+
+    table = permission_rules.format_policy(
+        home, tool_name, decide=decide, snapshot=(rules, report),
+    )
+    return "%s\n\n%s" % (table, _permission_mode_context(mode))
+
+
 @mcp.tool()
 def permission_policy(tool_name: str = "") -> str:
-    """Show local permission rules, or the matching rule for one tool."""
+    """Show the effective permission decision: the rule, the mode, and which wins."""
     _maybe_live_reload()
-    return permission_rules.format_policy(sonder_paths.default_home(), tool_name)
+    return _permission_policy_text(tool_name)
 
 
 @mcp.tool()
@@ -6078,7 +6125,9 @@ def permission_rule_set(
         permission_rules.add_rule(sonder_paths.default_home(), pattern, action, note)
     except Exception as e:
         return "ERROR: %s" % e
-    return permission_rules.format_policy(sonder_paths.default_home())
+    # Show the same effective view /permissions gives: a rule that was just
+    # written is exactly when someone needs to see whether it actually governs.
+    return _permission_policy_text()
 
 
 @mcp.tool()
@@ -13158,7 +13207,7 @@ def tool_manifest() -> str:
         "workbench_agent": "Run an autonomous local tool loop with a guaranteed checklist, exact action transcript, validation gate, and end report.",
         "command_registry_list": "Inspect available slash commands by category, name, or risk.",
         "activity_status": "Inspect active/latest response activity, tool calls, and file changes.",
-        "permission_policy/permission_rule_set": "Inspect or guarded-edit local permission rules for tool actions.",
+        "permission_policy/permission_rule_set": "Inspect the effective permission decision -- the rule, the active mode, and which one governs -- or guarded-edit a rule.",
         "context_compaction_plan": "Preview when to summarize, split sessions, or reduce live context.",
         "run_code": "Run a bounded snippet: Python, JS/TypeScript, Bash, Ruby, Perl, PHP, Lua, R, Go, Java, Rust, PowerShell, C++, C#.",
         "isolated_run": "Direct MCP-only, explicitly enabled and developer-authorized Docker/Podman execution with approved roots, separate writable approval, and a fixed resource-capped isolation policy.",
