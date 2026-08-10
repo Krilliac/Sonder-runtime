@@ -347,7 +347,7 @@ COMMANDS = [
         "name": "/permissions",
         "category": "security",
         "risk": "safe",
-        "summary": "Inspect local permission rules and matching behavior.",
+        "summary": "Show the effective permission decision: rule, active mode, and which governs.",
     },
     {
         "name": "/debug",

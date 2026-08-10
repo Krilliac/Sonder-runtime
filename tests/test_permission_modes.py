@@ -467,9 +467,13 @@ def test_decision_reason_names_the_mode_and_the_risk():
     decision = pm.decide("file_write", mode=pm.MANUAL)
     assert pm.MODE_LABELS[pm.MANUAL] in decision.reason
     assert decision.risk in decision.reason
+    # to_dict mirrors the dataclass exactly, ``source`` included: /permissions
+    # branches on it to say whether the rule or the mode governs a tool, so a
+    # field present on the object but missing from its dict form is a trap.
     assert decision.to_dict() == {
         "action": decision.action, "mode": decision.mode, "risk": decision.risk,
         "reason": decision.reason, "tool": decision.tool,
+        "source": decision.source,
     }
 
 
