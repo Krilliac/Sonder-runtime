@@ -66,26 +66,32 @@ chosen -- by a model, by a person, or by a protocol client -- does:
                                     branches and the ~25 forwarded to
                                     ``server.control_command``, at one choke
                                     point via ``_named_command_gate``.
-                                    ``interactive=True``.
+                                    ``interactive`` iff stdin is a terminal.
     sonder_repl._run_catalogued     ``/<tool_name>`` typed at the console --
                                     the fallback for everything without a
                                     hand-written branch, via
-                                    ``_permission_gate``. ``interactive=True``.
+                                    ``_permission_gate``. Same, via the same
+                                    ``_gate_tools`` seam.
 
 The console's two entries are disjoint by construction: a typed command is
 served by a named branch or by the catalogued fallback, never both, so nothing
 is prompted for twice.
 
+``interactive`` means "somebody is present to answer", which is why the console
+sites compute it (``sonder_repl._console_has_operator``) rather than assert it.
+`sonder < script.txt` is a console session with nobody at the keyboard, and
+there ``input()`` does not ask anyone anything -- it consumes the next line of
+the script. A piped console therefore degrades exactly like a protocol caller.
+
 Interactive surfaces honour ``ask`` by actually asking (the console prompts
-``y/N``, defaulting to no). A direct MCP tool call has no one to ask, so
-``ask`` degrades to ``allow`` there unless the mode is ``plan`` -- whose entire
-purpose is to hold still, and which therefore denies everywhere. Preserving
-existing behaviour by default matters here: these rules have been dormant since
-they were written, and switching them on globally in one step would break flows
-that have always worked. That is why every non-console site passes
-``interactive=False``: under the default ``manual`` mode they therefore refuse
-nothing the mode itself refused before, and only ``plan`` or an explicit
-per-tool ``deny`` rule can stop a call.
+``y/N``, defaulting to no). A caller with no one to ask degrades ``ask`` to
+``allow`` unless the mode is ``plan`` -- whose entire purpose is to hold still,
+and which therefore denies everywhere. Preserving existing behaviour by default
+matters here: these rules have been dormant since they were written, and
+switching them on globally in one step would break flows that have always
+worked. That is what ``interactive=False`` buys: under the default ``manual``
+mode such a caller refuses nothing the mode itself refused before, and only
+``plan`` or an explicit per-tool ``deny`` rule can stop a call.
 
 The gate sits at those entry points and *not* inside the tool functions
 themselves. An internal Python call to ``server.file_write`` is therefore
