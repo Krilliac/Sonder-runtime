@@ -96,6 +96,12 @@ def _run(monkeypatch, responses, observations=(), **kwargs):
 
 
 FINAL = '{"final":"the work is complete"}'
+# `auto_checklist` denies any mutation until the run has inspected something.
+# project_detect is a _WORK_INSPECTION_TOOLS member that is deliberately NOT a
+# _WORK_VALIDATION_TOOLS member, so it satisfies that requirement without
+# quietly setting the validation state the test is about.
+INSPECT = '{"tool":"project_detect","args":{"path":"."}}'
+INSPECTED = '{"root":".","manifests":[{"path":"pyproject.toml"}],"errors":[]}'
 PASSING_RUN = "test run (pytest)\n  ok: True\n  returncode: 0"
 FAILING_RUN = "test run (pytest)\n  ok: False\n  returncode: 1"
 
@@ -265,19 +271,44 @@ def test_a_verification_run_somewhere_else_does_not_cover_the_change(
     assert out.startswith(server._AGENT_UNVERIFIED_PREFIX)
 
 
-def test_every_verifier_task_2_made_reachable_can_satisfy_the_gate(monkeypatch):
-    """test_run/build_run/lint_run/typecheck_run were uncallable before Task 2."""
+def test_every_verifier_task_2_made_reachable_can_satisfy_the_gate(
+    monkeypatch, tmp_path,
+):
+    """test_run/build_run/lint_run/typecheck_run were uncallable before Task 2.
+
+    This drives the loop through the branch that would actually punish a
+    mis-classification: ``auto_checklist`` on, with a real mutation, so
+    ``server.py``'s ``VALIDATION_FAILED`` branch is *reachable*. If any of these
+    four names were in ``_WORK_VALIDATION_TOOLS``, ``_agent_validation_covers``
+    would fall through to False and running the verifier would be the thing that
+    stamped the run failed. Without the mutation the branch is unreachable and
+    the test proves nothing about the trap.
+    """
     assert server._AGENT_VERIFICATION_TOOLS == frozenset({
         "test_run", "build_run", "lint_run", "typecheck_run",
     })
     for name in sorted(server._AGENT_VERIFICATION_TOOLS):
         _record(monkeypatch, POOR_RECORD)
-        out = _run(
+        receipt = _run(
             monkeypatch,
-            ['{"tool":"%s","args":{"root":"."}}' % name, FINAL],
-            ["%s\n  ok: True\n  returncode: 0" % name],
+            [
+                INSPECT,
+                '{"tool":"file_write","args":{"path":"%s","content":"x",'
+                '"mode":"overwrite"}}' % (tmp_path / "a.py").as_posix(),
+                '{"tool":"%s","args":{"root":"%s"}}' % (name, tmp_path.as_posix()),
+                FINAL,
+            ],
+            [INSPECTED, "wrote 1 byte", "%s\n  ok: True\n  returncode: 0" % name],
+            auto_checklist=True,
+            return_host_receipt=True,
         )
-        assert out == "the work is complete", name
+        # Without this the test can pass vacuously: `auto_checklist` denies a
+        # mutation until something has been inspected, and a denied file_write
+        # leaves `mutated` False, which makes the VALIDATION_FAILED branch
+        # unreachable and the assertions below true under any implementation.
+        assert receipt.mutation_observed is True, name
+        assert not receipt.output.startswith("VALIDATION_FAILED:"), name
+        assert receipt.output == "the work is complete", name
 
 
 def test_the_verifiers_are_not_added_to_the_file_validation_set():
@@ -290,6 +321,173 @@ def test_the_verifiers_are_not_added_to_the_file_validation_set():
     assert not (
         server._AGENT_VERIFICATION_TOOLS & server._WORK_VALIDATION_TOOLS
     )
+
+
+# --- the standing must never displace an existing failure marker ---------
+#
+# `autopilot_controller._task_passed` matches `text.startswith(FAILURE_PREFIXES)`
+# and `_agent_observation_ok` reads the first line. Stacking a second prefix in
+# front of VALIDATION_FAILED moves it off position 0 and both consumers go
+# blind -- a mechanism built to make claims more honest would have made a
+# failure gate stop failing. The two statements are composed into one leading
+# block instead, with the failure marker still leading it.
+
+
+def _failed_validation_run(monkeypatch, tmp_path, counts=UNMEASURED_RECORD):
+    """A mutating run, checklist on, that never validates what it changed."""
+    _record(monkeypatch, counts)
+    return _run(
+        monkeypatch,
+        [
+            INSPECT,
+            '{"tool":"file_write","args":{"path":"%s","content":"x",'
+            '"mode":"overwrite"}}' % (tmp_path / "a.py").as_posix(),
+            FINAL,
+        ],
+        [INSPECTED, "wrote 1 byte"],
+        auto_checklist=True,
+        return_host_receipt=True,
+    )
+
+
+def test_a_failed_validation_still_leads_the_report(monkeypatch, tmp_path):
+    receipt = _failed_validation_run(monkeypatch, tmp_path)
+
+    assert receipt.output.startswith("VALIDATION_FAILED:")
+    # ...and the measured standing is still stated, in the same block.
+    assert "judged outcomes" in receipt.output.split("\n\n")[0]
+
+
+def test_the_failed_validation_first_line_is_byte_identical(monkeypatch, tmp_path):
+    """`_agent_observation_ok` and `set_result_summary` both read line one.
+
+    Spelled out as a literal rather than compared against
+    ``server._AGENT_VALIDATION_FAILED_LINE`` on purpose: this pins the text
+    consumers saw *before* this task existed, so editing the constant cannot
+    quietly take the test with it.
+    """
+    receipt = _failed_validation_run(monkeypatch, tmp_path)
+
+    assert receipt.output.splitlines()[0] == (
+        "VALIDATION_FAILED: workspace changes were not successfully validated."
+    )
+
+
+def test_both_statements_read_as_written_english(monkeypatch, tmp_path):
+    """The shared noun phrase must slot into both forms grammatically.
+
+    ``_AGENT_VERIFIERS_PHRASE`` starts with an article, so a composed clause
+    reading "cited no <phrase>" produced "no a passing verification". A shared
+    constant stops the two forms describing different things; it does not stop
+    one of them reading badly.
+    """
+    composed = _failed_validation_run(monkeypatch, tmp_path).output
+    _record(monkeypatch, UNMEASURED_RECORD)
+    standalone = _run(monkeypatch, [FINAL])
+
+    for text in (composed, standalone):
+        assert server._AGENT_VERIFIERS_PHRASE in text
+        assert "no a passing" not in text
+        assert "without a passing verification" in text
+
+
+def test_the_autopilot_gate_still_rejects_a_failed_validation(
+    monkeypatch, tmp_path,
+):
+    """Drive the real gate, not a string assertion standing in for it."""
+    receipt = _failed_validation_run(monkeypatch, tmp_path)
+
+    ok, why = autopilot_controller._task_passed(receipt, {"kind": "implement"})
+
+    assert ok is False
+    assert why.startswith("VALIDATION_FAILED:")
+
+
+def test_a_nested_failed_validation_still_reads_as_a_bad_observation(
+    monkeypatch, tmp_path,
+):
+    """A sub-agent's end report becomes its parent's observation text."""
+    receipt = _failed_validation_run(monkeypatch, tmp_path)
+
+    assert server._agent_observation_ok(receipt.output) is False
+
+
+def test_the_activity_summary_still_names_the_failure(monkeypatch, tmp_path):
+    captured = []
+    monkeypatch.setattr(
+        server.activity_tracker, "set_result_summary", captured.append,
+    )
+
+    _failed_validation_run(monkeypatch, tmp_path)
+
+    assert captured == [
+        "VALIDATION_FAILED: workspace changes were not successfully validated."
+    ]
+
+
+def test_a_covering_verification_satisfies_the_validation_gate_too(
+    monkeypatch, tmp_path,
+):
+    """Resolves the contradiction between the two gates.
+
+    ``validation_ok`` and ``verification_ok`` answer the same question -- was
+    the change actually checked -- over disjoint tool sets. Before Task 2 the
+    four verifiers were undispatchable, so the only way to validate a mutation
+    was to shell out through ``workspace_run``; leaving them out of the
+    validation gate now fails a run precisely *for using the purpose-built
+    tool*, while reporting the verification satisfied in the same breath.
+    """
+    _record(monkeypatch, POOR_RECORD)
+
+    receipt = _run(
+        monkeypatch,
+        [
+            INSPECT,
+            '{"tool":"file_write","args":{"path":"%s","content":"x",'
+            '"mode":"overwrite"}}' % (tmp_path / "a.py").as_posix(),
+            '{"tool":"test_run","args":{"root":"%s"}}' % tmp_path.as_posix(),
+            FINAL,
+        ],
+        [INSPECTED, "wrote 1 byte", PASSING_RUN],
+        auto_checklist=True,
+        return_host_receipt=True,
+    )
+
+    assert receipt.output == "the work is complete"
+    assert receipt.mutation_observed is True
+    # The receipt must agree with the report it accompanies, or a "validate"
+    # task is rejected with "ran no host-observed validator" while the report
+    # says nothing failed.
+    assert receipt.validation_attempted is True
+    assert receipt.validation_passed is True
+    ok, why = autopilot_controller._task_passed(receipt, {"kind": "validate"})
+    assert ok, why
+
+
+def test_a_failing_verification_does_not_satisfy_the_validation_gate(
+    monkeypatch, tmp_path,
+):
+    """The satisfying condition is a *passing*, covering verifier -- nothing less."""
+    _record(monkeypatch, POOR_RECORD)
+
+    receipt = _run(
+        monkeypatch,
+        [
+            INSPECT,
+            '{"tool":"file_write","args":{"path":"%s","content":"x",'
+            '"mode":"overwrite"}}' % (tmp_path / "a.py").as_posix(),
+            '{"tool":"test_run","args":{"root":"%s"}}' % tmp_path.as_posix(),
+            FINAL,
+        ],
+        [INSPECTED, "wrote 1 byte", FAILING_RUN],
+        auto_checklist=True,
+        return_host_receipt=True,
+    )
+
+    assert receipt.output.startswith("VALIDATION_FAILED:")
+    assert receipt.validation_passed is False
+    ok, _why = autopilot_controller._task_passed(receipt, {"kind": "implement"})
+    assert ok is False
 
 
 # --- the standing is a statement, not a failure ---------------------------
