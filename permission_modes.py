@@ -73,9 +73,10 @@ specific ``permissions.json``.
 The combination follows one explicit precedence, in this order:
 
     1. an explicit rule DENY   always wins -- over every mode, including auto.
-    2. privilege                (``PRIVILEGED_TOOLS`` + ``elevated()``) is
-                                 checked next; a rule cannot grant elevation,
-                                 the same way no mode can.
+    2. privilege                (``PRIVILEGED_TOOLS`` or a per-call
+                                 ``requires_elevation=True`` + ``elevated()``)
+                                 is checked next; a rule cannot grant
+                                 elevation, the same way no mode can.
     3. an explicit rule ALLOW  satisfies the mode's ASK -- it loosens an ask
                                  into an allow, but never touches a mode that
                                  already allows or (under ``plan``) denies.
@@ -97,6 +98,28 @@ letting it loosen a deny would mean a five-risk-class dial (or ``plan``'s
 unrelated tool's convenience. ``Decision.reason`` always says which of these
 layers actually decided, so an operator can tell a mode refusal from a rule
 refusal from an elevation refusal.
+
+Why ``PRIVILEGED_TOOLS`` is empty
+----------------------------------
+``workspace_run`` running ``dism`` genuinely failed with Windows error 740
+("elevated permissions are required"). That is evidence a *command* can need
+administrator rights -- it is not evidence that ``workspace_run``, or any
+other Sonder tool, is inherently privileged. The same ``workspace_run`` also
+runs ``dir``, ``git status``, a linter; none of those need anything, and that
+is true of every tool in ``EXECUTION_TOOLS``. Privilege here is a property of
+what the caller asks a general tool to do, not a fixed property of the tool,
+so no tool is named in ``PRIVILEGED_TOOLS``. Marking ``workspace_run`` (or
+any execution tool) privileged outright would deny the overwhelming majority
+of its ordinary, unprivileged calls -- training operators to route around
+the gate rather than trust it, which is the same "refusal nobody can act on"
+failure the ``dangerous`` class above exists to avoid. See
+``requires_elevation`` on ``decide()`` for how a specific invocation --
+rather than a tool name -- gates on privilege instead, and ``/elevate`` (the
+``elevate`` tool in ``server.py``) for how a person actually turns the axis
+on. ``PRIVILEGED_TOOLS`` is kept live and exercised by
+``test_privileged_tools_are_denied_without_elevation`` precisely so that the
+day a tool genuinely does require administrator rights just to be invoked,
+naming it here is a one-line change into an already-tested path.
 
 Stdlib only. ``command_catalog`` is imported lazily (it imports ``server``);
 ``permission_rules`` and ``sonder_paths`` are imported lazily for the same
@@ -167,7 +190,11 @@ EXECUTION_TOOLS = frozenset({
     "self_heal_repair", "scaffold_project",
 })
 
-# Tools that need OS administrator rights. Refused unless elevation is on.
+# Tools that need OS administrator rights UNCONDITIONALLY -- just being
+# invoked, regardless of what they are asked to do. Refused unless elevation
+# is on. Deliberately empty; see "Why PRIVILEGED_TOOLS is empty" above before
+# adding to this. A per-call need for elevation belongs in
+# ``requires_elevation=True`` at the ``decide()`` call site instead.
 PRIVILEGED_TOOLS = frozenset()
 
 _LOCK = threading.RLock()
@@ -408,7 +435,8 @@ def _rule_action_for(tool_name: str, rule_lookup) -> tuple[str | None, str]:
 
 
 def decide(tool_name: str, *, interactive: bool = True,
-           mode: str | None = None, rule_lookup=None) -> Decision:
+           mode: str | None = None, rule_lookup=None,
+           requires_elevation: bool = False) -> Decision:
     """Whether ``tool_name`` may run right now.
 
     ``interactive=False`` means nobody is present to answer a prompt (a direct
@@ -419,6 +447,15 @@ def decide(tool_name: str, *, interactive: bool = True,
     ``rule_lookup``, if given, overrides the module-level ``_rule_lookup``
     hook for this call only. See the module docstring for the precedence
     rules that combine a per-tool rule with the active mode.
+
+    ``requires_elevation``, if given, flags THIS invocation -- not the tool in
+    general -- as needing administrator rights, the same way a member of
+    ``PRIVILEGED_TOOLS`` would. It exists because privilege in Sonder is
+    usually a property of what a caller asks a general tool to do (see "Why
+    PRIVILEGED_TOOLS is empty" in the module docstring), not a fixed property
+    of the tool; a caller that already knows this particular call needs
+    administrator rights can say so without every future call to the same
+    tool being refused too.
     """
     active = mode or current_mode()
     if active not in _MATRIX:
@@ -442,8 +479,10 @@ def decide(tool_name: str, *, interactive: bool = True,
         )
 
     # 2. Privilege is a separate axis from both modes and rules; neither can
-    #    grant it.
-    if name in PRIVILEGED_TOOLS and not elevated():
+    #    grant it. A tool can need it unconditionally (PRIVILEGED_TOOLS,
+    #    currently empty by design) or only for this one call
+    #    (requires_elevation, set by the caller).
+    if (name in PRIVILEGED_TOOLS or requires_elevation) and not elevated():
         return Decision(DENY, active, risk, "needs elevation, which is off", name)
 
     mode_action = _MATRIX[active].get(risk, ASK)

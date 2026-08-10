@@ -490,6 +490,7 @@ DANGEROUS_HTTP_SLASH_COMMANDS = frozenset({
     "/agentretry", "/retryagent",
     "/runtime", "/models",
     "/selfmod", "/selfmodify",
+    "/elevate",
     # Spends several full model load+generate cycles per call.
     "/ensemble", "/council",
 })
