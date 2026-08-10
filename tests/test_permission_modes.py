@@ -56,6 +56,7 @@ def _guard_process_state():
     before_state = dict(pm._STATE)
     before_loaded = pm._LOADED
     before_path = pm._state_path
+    before_rule_lookup = pm._rule_lookup
     yield
     assert dict(pm._STATE) == before_state, (
         "permission_modes._STATE leaked out of this module: %r -> %r"
@@ -63,6 +64,7 @@ def _guard_process_state():
     )
     assert pm._LOADED == before_loaded, "permission_modes._LOADED leaked"
     assert pm._state_path is before_path, "_state_path monkeypatch was not undone"
+    assert pm._rule_lookup is before_rule_lookup, "_rule_lookup monkeypatch was not undone"
 
 
 @pytest.fixture(autouse=True)
@@ -83,6 +85,23 @@ def state_file(tmp_path, monkeypatch):
         with pm._LOCK:
             pm._STATE.update(saved)
         pm._LOADED = saved_loaded
+
+
+@pytest.fixture(autouse=True)
+def no_rule_by_default(monkeypatch):
+    """Neutralize decide()'s rule hook so every other test stays hermetic.
+
+    ``decide()``'s default rule source (``permission_modes._rule_lookup``,
+    normally ``_default_rule_lookup``) reads a real, machine-specific
+    ``permissions.json`` via ``sonder_paths.default_home()``. Leaving that
+    wired in during tests would make every test in this file depend on
+    whatever happens to be on the disk of whoever/whatever runs them --
+    exactly what the rule-lookup injection point exists to avoid. This makes
+    "no rule_lookup given" mean "no rule matched" here, i.e. decide() behaves
+    exactly as it did before rules were wired in, unless a test explicitly
+    monkeypatches ``pm._rule_lookup`` (or passes ``rule_lookup=``) again.
+    """
+    monkeypatch.setattr(pm, "_rule_lookup", lambda tool_name: None)
 
 
 @pytest.fixture(scope="module")
@@ -411,6 +430,191 @@ def test_execution_tools_are_classified_execution_not_whatever_the_catalog_says(
         assert pm.risk_of(tool) == "execution", tool
     assert pm.decide("workspace_run", mode=pm.ACCEPT_EDITS).action == pm.ASK
     assert pm.decide("workspace_run", mode=pm.AUTO).action == pm.ALLOW
+
+
+# --- rules and modes compose, they do not race -----------------------------
+#
+# permission_rules shipped per-tool allow/ask/deny rules that decide() never
+# consulted. These pin the precedence from the module docstring: an explicit
+# deny always wins (even over auto); an explicit allow only ever loosens an
+# ask (never touches an already-allowing mode, and never touches plan's
+# deny); anything else is inert and the mode alone decides, unchanged.
+
+
+def _rule(action, pattern="*", note="test rule"):
+    return lambda tool_name: {"pattern": pattern, "action": action, "note": note}
+
+
+def test_rule_deny_beats_every_mode_including_auto(monkeypatch):
+    monkeypatch.setattr(pm, "_rule_lookup", _rule(pm.DENY, pattern="file_write"))
+    for mode in pm.MODES:
+        decision = pm.decide("file_write", mode=mode)
+        assert decision.action == pm.DENY, "rule deny lost to mode %r" % mode
+        assert "rule" in decision.reason.lower()
+        assert "file_write" in decision.reason
+
+
+def test_rule_deny_outranks_auto_for_an_execution_tool(monkeypatch):
+    monkeypatch.setattr(pm, "_rule_lookup", _rule(pm.DENY, pattern="workspace_run"))
+    assert pm._MATRIX[pm.AUTO]["execution"] == pm.ALLOW, "test assumption changed upstream"
+    decision = pm.decide("workspace_run", mode=pm.AUTO)
+    assert decision.action == pm.DENY
+    assert decision.allowed is False
+
+
+def test_rule_deny_is_immune_to_the_non_interactive_degrade(monkeypatch):
+    monkeypatch.setattr(pm, "_rule_lookup", _rule(pm.DENY, pattern="file_write"))
+    decision = pm.decide("file_write", mode=pm.MANUAL, interactive=False)
+    assert decision.action == pm.DENY, (
+        "a rule deny must not be softened just because nobody can be asked"
+    )
+
+
+def test_rule_allow_satisfies_manuals_ask(monkeypatch):
+    monkeypatch.setattr(pm, "_rule_lookup", _rule(pm.ALLOW, pattern="workspace_run"))
+    assert pm._MATRIX[pm.MANUAL]["execution"] == pm.ASK, "test assumption changed upstream"
+    decision = pm.decide("workspace_run", mode=pm.MANUAL)
+    assert decision.action == pm.ALLOW
+    assert decision.allowed is True
+    assert "rule" in decision.reason.lower()
+    assert "manual" in decision.reason.lower()
+
+
+def test_rule_allow_does_not_override_plans_deny(monkeypatch):
+    monkeypatch.setattr(pm, "_rule_lookup", _rule(pm.ALLOW, pattern="file_write"))
+    decision = pm.decide("file_write", mode=pm.PLAN)
+    assert decision.action == pm.DENY, (
+        "plan's entire purpose is holding still; a rule must not undo that"
+    )
+    assert decision.mode == pm.PLAN
+
+
+def test_rule_allow_is_moot_and_unattributed_when_the_mode_already_allows(monkeypatch):
+    monkeypatch.setattr(pm, "_rule_lookup", _rule(pm.ALLOW, pattern="file_write"))
+    assert pm._MATRIX[pm.AUTO]["mutation"] == pm.ALLOW, "test assumption changed upstream"
+    decision = pm.decide("file_write", mode=pm.AUTO)
+    assert decision.action == pm.ALLOW
+    # The mode decided this on its own; the reason must say so, not credit a
+    # rule that had nothing to do with the outcome.
+    assert "rule" not in decision.reason.lower()
+    assert "auto allows" in decision.reason
+
+
+def test_no_matching_rule_falls_through_to_mode_behaviour_unchanged():
+    # The autouse no_rule_by_default fixture already makes "no rule_lookup
+    # configured" mean "no rule matched"; this asserts that is indistinguishable
+    # from passing an explicit lookup that finds nothing, across several modes
+    # and risk classes.
+    cases = [
+        ("file_write", pm.MANUAL),
+        ("workspace_run", pm.ACCEPT_EDITS),
+        ("file_delete", pm.AUTO),
+        ("status", pm.PLAN),
+        ("file_read", pm.AUTO),
+    ]
+    for tool, mode in cases:
+        implicit = pm.decide(tool, mode=mode)
+        explicit = pm.decide(tool, mode=mode, rule_lookup=lambda name: None)
+        assert implicit == explicit, (tool, mode)
+
+
+def test_rule_action_of_ask_is_inert_not_a_third_kind_of_restriction(monkeypatch):
+    monkeypatch.setattr(pm, "_rule_lookup", _rule(pm.ASK, pattern="workspace_run"))
+    # auto allows execution outright; an explicit "ask" rule must not
+    # retroactively invent a new, stricter behaviour the mode never had.
+    decision = pm.decide("workspace_run", mode=pm.AUTO)
+    assert decision.action == pm.ALLOW
+    assert "rule" not in decision.reason.lower()
+
+
+def test_rule_with_unrecognised_action_is_inert(monkeypatch):
+    monkeypatch.setattr(pm, "_rule_lookup", _rule("wat", pattern="file_write"))
+    decision = pm.decide("file_write", mode=pm.MANUAL)
+    assert decision.action == pm.ASK
+    assert "rule" not in decision.reason.lower()
+
+
+def test_rule_lookup_param_overrides_the_module_hook_for_one_call(monkeypatch):
+    monkeypatch.setattr(pm, "_rule_lookup", _rule(pm.DENY, pattern="file_write"))
+    decision = pm.decide("file_write", mode=pm.AUTO, rule_lookup=lambda name: None)
+    assert decision.action == pm.ALLOW, "the per-call rule_lookup must win over the module hook"
+
+
+def test_a_broken_rule_lookup_fails_closed_not_open(monkeypatch):
+    def boom(tool_name):
+        raise RuntimeError("disk exploded")
+
+    monkeypatch.setattr(pm, "_rule_lookup", boom)
+    decision = pm.decide("not_a_real_tool", mode=pm.MANUAL)
+    assert decision.action == pm.ASK
+    assert decision.risk == "ask"
+    decision_plan = pm.decide("not_a_real_tool", mode=pm.PLAN)
+    assert decision_plan.action == pm.DENY
+
+
+def test_a_lookup_returning_garbage_is_treated_as_no_rule(monkeypatch):
+    for garbage in (None, "deny", 42, ["deny"], {"pattern": "file_write"}):
+        # A dict with no recognised action (or not a dict at all) must be
+        # ignored, same as no rule matching. A dict WITH a recognised action
+        # (e.g. {"action": "deny"}) is covered separately -- that one should
+        # apply even with no pattern.
+        monkeypatch.setattr(pm, "_rule_lookup", lambda name, g=garbage: g)
+        decision = pm.decide("file_write", mode=pm.AUTO)
+        assert decision.action == pm.ALLOW, "garbage rule %r was not ignored" % (garbage,)
+
+
+def test_a_rule_with_a_recognised_action_but_no_pattern_still_applies(monkeypatch):
+    monkeypatch.setattr(pm, "_rule_lookup", lambda name: {"action": "deny"})
+    decision = pm.decide("file_write", mode=pm.AUTO)
+    assert decision.action == pm.DENY
+
+
+def test_privileged_check_outranks_a_rule_allow(monkeypatch):
+    monkeypatch.setattr(pm, "PRIVILEGED_TOOLS", frozenset({"file_read"}))
+    monkeypatch.setattr(pm, "_rule_lookup", _rule(pm.ALLOW, pattern="file_read"))
+    pm.set_elevated(False)
+    decision = pm.decide("file_read", mode=pm.AUTO)
+    assert decision.action == pm.DENY, "a rule must not be able to grant elevation"
+    assert "elevation" in decision.reason
+
+
+def test_default_rule_lookup_reads_the_real_on_disk_policy(tmp_path, monkeypatch):
+    import sonder_paths
+
+    monkeypatch.setattr(sonder_paths, "default_home", lambda: tmp_path)
+
+    # No permissions.json yet: permission_rules falls back to its built-in
+    # defaults, which include an explicit file_delete deny.
+    rule = pm._default_rule_lookup("file_delete")
+    assert rule is not None
+    assert rule["action"] == "deny"
+
+    # A tool nothing matches must come back as None ("no rule"), not the
+    # permissive NO_MATCH_RULE dict -- decide() only special-cases allow/deny,
+    # but a caller inspecting the rule directly should see "nothing matched".
+    assert pm._default_rule_lookup("totally_unregistered_tool_xyz") is None
+
+
+def test_decide_wires_to_the_real_policy_file_end_to_end(tmp_path, monkeypatch):
+    """Prove the production path, not just the injection point.
+
+    Restores the real ``_default_rule_lookup`` (the no_rule_by_default fixture
+    neutralizes it for every other test) and points ``sonder_paths.default_home``
+    at a tmp policy file, so this exercises exactly what a real dispatch would.
+    """
+    import sonder_paths
+
+    monkeypatch.setattr(sonder_paths, "default_home", lambda: tmp_path)
+    monkeypatch.setattr(pm, "_rule_lookup", pm._default_rule_lookup)
+    (tmp_path / "permissions.json").write_text(
+        json.dumps([{"pattern": "workspace_run", "action": "allow",
+                      "note": "trusted by the operator"}]),
+        encoding="utf-8",
+    )
+
+    decision = pm.decide("workspace_run", mode=pm.MANUAL)
+    assert decision.action == pm.ALLOW
+    assert "rule" in decision.reason.lower()
 
 
 # --- drift: EXECUTION_TOOLS vs the real surface ---------------------------
