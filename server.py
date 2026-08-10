@@ -7715,17 +7715,25 @@ def _record_outcome_signal(interaction_id: str, signal: str) -> None:
         conn.close()
 
 
-def _feed_grounded_outcome(name, ok, output, args=None) -> None:
+def _feed_grounded_outcome(name, ok, output, args=None, project=None) -> None:
     """Attribute execution evidence to the work it judges.
 
     The outcome store holds ~9,000 rows and only ~190 of them measure delegated
     work, because filing an outcome is a manual step and people file successes
     far more readily than failures. The verification tools already know the
     truth, so take it from them instead of asking anyone to remember.
+
+    `project` lets a caller that already knows the run's project (the agent
+    loop, which scopes every dispatched call to one explicit project root)
+    pass it straight through. Direct MCP calls have no such value, so they
+    leave it unset and it falls back to sniffing the tool's own arguments.
     """
-    project = ""
-    if isinstance(args, dict):
-        project = str(args.get("project") or args.get("root") or "")
+    if project is None:
+        project = ""
+        if isinstance(args, dict):
+            project = str(args.get("project") or args.get("root") or "")
+    else:
+        project = str(project or "")
     try:
         if name in grounded_outcomes.GENERATORS:
             match = _INTERACTION_ID_RE.search(str(output or ""))
@@ -15283,6 +15291,19 @@ def _agent_dispatch_observed(
             command=_agent_activity_command(tool_name, args),
             output=observation,
         )
+        # This is the agent-loop counterpart of _record_direct_tool's own feed.
+        # A tool dispatched from here runs inside tool_dispatch_context(), so
+        # any _record_direct_tool call the tool body makes on its own (e.g.
+        # file_write, file_edit, text_patch, which are both GENERATORS and
+        # direct MCP tools) sees inside_tool_call() = True and skips its feed
+        # -- this call is the only one that fires for it. That guard is why
+        # this call is unconditional rather than itself checking
+        # inside_tool_call(): a nested dispatch (a sub-agent tool call
+        # running its own tool loop) still has its own genuinely distinct
+        # tool calls to feed, one call site per tool_name/ok/observation, and
+        # grounded_outcomes.attribute() additionally refuses to judge the same
+        # pending generation twice with the same verification kind.
+        _feed_grounded_outcome(tool_name, ok, observation, args, project=project)
 
 
 _WORK_MUTATION_TOOLS = frozenset({
