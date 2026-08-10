@@ -16,7 +16,7 @@ import pytest
 import sonder_backup
 import sonder_update_engine
 from sonder_runtime.adapters import backup as backup_adapter
-from sonder_runtime.adapters.legacy.backup import LegacyBackupGateway
+from sonder_runtime.adapters.backup_gateway import LegacyBackupGateway
 from sonder_runtime.application.backup import BackupService
 
 

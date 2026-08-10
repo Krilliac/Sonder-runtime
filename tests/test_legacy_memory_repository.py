@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 import reward
-from sonder_runtime.adapters.legacy.services import (
+from sonder_runtime.adapters.strangler_services import (
     LegacyMemoryRepository,
     LegacyUnitOfWork,
 )

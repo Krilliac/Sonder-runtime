@@ -10,7 +10,7 @@ import server
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.inspection import INSPECTION_TOOLS, InspectionService
 from sonder_runtime.application.ports.tool_executor import ToolCall, ToolResult
-from sonder_runtime.adapters.legacy.inspections import LegacyInspectionExecutor
+from sonder_runtime.adapters.inspection_executor import LegacyInspectionExecutor
 
 
 EXPECTED_TOOLS = {
@@ -159,7 +159,7 @@ def test_exact_mcp_signatures_and_policy_classifications_are_stable():
 
 
 def test_legacy_adapter_has_no_server_dependency_or_mutator_names():
-    from sonder_runtime.adapters.legacy import inspections
+    from sonder_runtime.adapters import inspection_executor as inspections
 
     source = Path(inspections.__file__).read_text(encoding="utf-8")
     assert "import server" not in source

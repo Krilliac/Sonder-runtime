@@ -1,0 +1,62 @@
+{
+  "baseline_date": "2026-08-09",
+  "git_revision": "7d5aa62ab476c3307e6ffcda531302da29357557",
+  "test_baseline": {
+    "passed": 5076,
+    "skipped": 38,
+    "total": 5114
+  },
+  "architecture_check": "PASS",
+  "schema_epoch": 1,
+  "root_python_files": 157,
+  "baseline_root_legacy_modules": [
+    "server",
+    "runtime_policy",
+    "embeddings",
+    "autopilot_store",
+    "fleet_store",
+    "sonder_operations_store",
+    "sonder_migrations",
+    "sonder_lifecycle",
+    "sonder_secrets",
+    "sonder_serve",
+    "sonder_repl",
+    "sonder_updates",
+    "sonder_update_engine",
+    "workbench",
+    "file_ops"
+  ],
+  "adapters_legacy_files": [
+    "backup.py",
+    "evaluation_history.py",
+    "inspections.py",
+    "preferences.py",
+    "preflight.py",
+    "recall.py",
+    "services.py",
+    "task_state.py",
+    "workflows.py"
+  ],
+  "migration_stores": [
+    "autopilot",
+    "fleet",
+    "memory",
+    "operations",
+    "queued_actions",
+    "updates"
+  ],
+  "missing_spec5_packages": {
+    "domain": ["training", "selfmod", "updates"],
+    "application": ["agents", "execution", "automation", "training", "selfmod", "updates", "operations"],
+    "adapters": ["persistence/sqlite", "execution", "git", "web", "training", "updates", "accelerators/npu", "observability"],
+    "interfaces": ["http", "mcp", "cli", "repl"]
+  },
+  "spec5_targets": {
+    "root_legacy_module_target": 0,
+    "adapters_legacy_target": "deleted",
+    "interfaces_layer": "required",
+    "runtime_capabilities": "required",
+    "transactional_outbox": "required",
+    "schema_epoch_target": 2
+  }
+}
