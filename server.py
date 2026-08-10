@@ -13315,12 +13315,19 @@ def _tool_capability_shadow_surfaces():
         full_agent_help=AGENT_TOOL_HELP,
         repository_agent_help=REPOSITORY_AGENT_TOOL_HELP,
         hosted_agent_help=_agent_tool_help(cloud=True),
+        autopilot_observe_tools=_AUTOPILOT_OBSERVE_TOOLS,
+        autopilot_workspace_tools=_AUTOPILOT_WORKSPACE_TOOLS,
     )
 
 
 def tool_capability_shadow_report():
     """Validate descriptor drift without making descriptors authoritative."""
     return tool_capabilities.format_shadow_report(_tool_capability_shadow_surfaces())
+
+
+def tool_capability_coverage_report():
+    """How much of each advertised surface the shadow validator inspected."""
+    return tool_capabilities.format_coverage_report(_tool_capability_shadow_surfaces())
 
 
 def _repository_scope_path_error(tool_name, args, project_root):
@@ -18142,6 +18149,7 @@ def diagnostics() -> str:
         lines.append("  mcp refresh ERROR: %s" % mcp_state["last_error"])
     try:
         lines.append("  tool capability shadow: %s" % tool_capability_shadow_report())
+        lines.append("  tool capability coverage: %s" % tool_capability_coverage_report())
     except Exception as e:
         lines.append("  tool capability shadow: ERROR validator failed: %s" % e)
     lines.append(
