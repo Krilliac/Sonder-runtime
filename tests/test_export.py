@@ -73,7 +73,9 @@ def test_build_examples_normalizes_prompts_and_selects_strongest_then_newest():
     ms.log_interaction(c, "newer-weak", "same task", "", "newer weak response", "code")
     ms.log_interaction(c, "old-tie", "other task", "", "old tie", "code")
     ms.log_interaction(c, "new-tie", "OTHER   TASK", "", "new tie", "code")
-    ms.record_outcome_row(c, "strong", "tests_passed", 1.0)
+    # Same population on both sides of the duplicate, so this exercises the
+    # price ordering itself rather than the population tier above it.
+    ms.record_outcome_row(c, "strong", "used", 0.9)
     ms.record_outcome_row(c, "newer-weak", "edited", 0.75)
     ms.record_outcome_row(c, "old-tie", "tests_passed", 1.0)
     ms.record_outcome_row(c, "new-tie", "tests_passed", 1.0)
@@ -183,20 +185,60 @@ def test_export_stream_fails_closed_at_outcome_evidence_limit(monkeypatch):
         etd._select_examples(conn)
 
 
-def test_export_capacity_keeps_highest_quality_candidate(monkeypatch):
+def test_export_capacity_keeps_the_better_evidenced_candidate(monkeypatch):
+    """Under capacity pressure the corpus must shed self-graded rows first.
+
+    Before this was fixed, `tests_passed` (1.0) outranked every caller-judged
+    signal, so the row a human had actually edited and kept was evicted in
+    favour of one the runtime marked for itself.
+    """
     conn = _conn()
-    ms.log_interaction(conn, "weak", "weak task", "", "weak response", "code")
-    ms.log_interaction(conn, "strong", "strong task", "", "strong response", "code")
-    ms.record_outcome_row(conn, "weak", "edited", 0.75)
-    ms.record_outcome_row(conn, "strong", "tests_passed", 1.0)
+    ms.log_interaction(conn, "self", "self task", "", "self-graded response", "code")
+    ms.log_interaction(conn, "human", "human task", "", "caller-judged response", "code")
+    ms.record_outcome_row(conn, "self", "tests_passed", 1.0)
+    ms.record_outcome_row(conn, "human", "edited", 0.75)
     monkeypatch.setattr(etd, "MAX_TRAINING_EXAMPLES", 1)
 
     examples, stats = etd._select_examples(conn)
 
     assert [row["messages"][1]["content"] for row in examples] == [
-        "strong response"
+        "caller-judged response"
     ]
     assert stats["rejected_by_reason"]["selection_capacity"] == 1
+
+
+def test_a_caller_judged_row_outranks_a_self_graded_one_for_the_same_prompt():
+    """Duplicate prompts keep one row; it must be the human-validated one."""
+    conn = _conn()
+    ms.log_interaction(conn, "self", "same task", "", "self-graded response", "code")
+    ms.log_interaction(conn, "human", "SAME  task", "", "caller-judged response", "code")
+    ms.record_outcome_row(conn, "self", "tests_passed", 1.0)
+    ms.record_outcome_row(conn, "human", "edited", 0.75)
+
+    examples = etd.build_examples(conn)
+
+    assert [row["messages"][1]["content"] for row in examples] == [
+        "caller-judged response"
+    ]
+
+
+def test_the_manifest_counts_the_two_populations_apart_and_never_averages_them():
+    """~98% of the corpus is self-marked. That is only actionable if the
+    export says so; a single 'accepted' total hides it completely."""
+    conn = _conn()
+    ms.log_interaction(conn, "self1", "t1", "", "r1", "code")
+    ms.log_interaction(conn, "self2", "t2", "", "r2", "code")
+    ms.log_interaction(conn, "human", "t3", "", "r3", "code")
+    ms.record_outcome_row(conn, "self1", "tests_passed", 1.0)
+    ms.record_outcome_row(conn, "self2", "tests_passed", 1.0)
+    ms.record_outcome_row(conn, "human", "accepted", 0.8)
+
+    _examples, stats = etd._select_examples(conn)
+
+    assert stats["accepted_by_population"] == {"caller": 1, "execution": 2}
+    assert stats["accepted"] == 3
+    # No blended quality figure anywhere in the manifest.
+    assert "mean_reward" not in stats and "average_reward" not in stats
 
 
 def test_manifest_failure_never_leaves_a_stale_manifest_for_new_data(
