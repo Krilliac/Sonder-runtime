@@ -84,13 +84,49 @@ def _read_input(prompt):
 GATE_EXEMPT_TOOLS = permission_modes.GATE_CONTROL_TOOLS
 
 
+def _console_has_operator():
+    """Whether a person is actually at the console to answer a prompt.
+
+    This is the value ``permission_modes.decide(interactive=...)`` is asking
+    for -- it means "is somebody present to answer", not "is this the console
+    module". Passing a hardcoded ``True`` from here was simply the wrong
+    argument for `sonder < script.txt` or `echo /stats | sonder`, where nobody
+    is present and ``input()`` does not ask anybody anything: it reads the
+    next line of the script.
+
+    Deliberately narrower than ``slash_menu.available()``, which also consults
+    ``NO_COLOR``, ``TERM=dumb`` and ``SONDER_NO_MENU``. Those decide whether a
+    fancy prompt can be *drawn*; none of them is evidence about whether a
+    person is there, and letting ``NO_COLOR=1`` quietly change what the
+    permission gate enforces would be its own defect.
+    """
+    stream = getattr(sys, "stdin", None)
+    if stream is None:
+        return False
+    try:
+        return bool(stream.isatty())
+    except Exception:
+        # A stream that cannot answer is not evidence of an operator.
+        return False
+
+
 def _confirm(question):
     """Ask a y/N question, defaulting to no. Anything but an explicit yes is no.
 
     Every non-answer -- EOF on piped stdin, a closed console, Ctrl-C -- is a
     "no". A permission prompt that a missing terminal turns into a "yes" is
     worse than no prompt, because it looks like it asked.
+
+    With no operator present it does not read *at all*. Treating EOF as "no"
+    only ever covered the last line of a piped script; every earlier line
+    returns a real string, so the read succeeded and silently ate the next
+    command. Callers must not reach here without an operator anyway -- see
+    ``_gate_tools`` -- so this is the safety net rather than the seam: a
+    function whose whole job is asking a person has no business reading a
+    line nobody typed.
     """
+    if not _console_has_operator():
+        return False
     try:
         answer = input("%s [y/N] " % question)
     except (EOFError, OSError, KeyboardInterrupt):
@@ -119,9 +155,19 @@ def _severity(risk):
 def _gate_tools(tools, label):
     """Strictest decision across ``tools``; returns ``(may_run, refusal_text)``.
 
-    The console is the one surface with a human attached, so ``ask`` means
-    actually asking rather than degrading to allow the way a direct MCP call
-    does. ``deny`` prints why and runs nothing.
+    The console is the one surface that *can* have a human attached, so ``ask``
+    means actually asking rather than degrading to allow the way a direct MCP
+    call does -- but only when one actually is. ``deny`` prints why and runs
+    nothing, whoever is or is not watching.
+
+    ``interactive`` is therefore ``_console_has_operator()`` and not a
+    hardcoded ``True``. A piped session (`sonder < script.txt`) has nobody to
+    ask, so it degrades to allow exactly like every other non-interactive
+    caller: `manual` refuses nothing there that it did not refuse before this
+    gate existed, while a ``deny`` rule and ``plan`` still refuse. Asking
+    anyway was worse than useless -- ``input()`` read the next line of the
+    script as the answer, so one unseen prompt both denied the command and
+    swallowed the one after it.
 
     A named command can front several tools (``/todo`` reaches everything from
     ``task_list`` to ``task_delete``), and which one runs depends on an
@@ -131,11 +177,12 @@ def _gate_tools(tools, label):
     command that can delete at the risk of its most harmless sibling -- would
     be under-enforcement, which is the failure this whole change exists to fix.
     """
+    interactive = _console_has_operator()
     worst = None
     for tool in tools:
         if tool in GATE_EXEMPT_TOOLS:
             continue
-        decision = permission_modes.decide(tool, interactive=True)
+        decision = permission_modes.decide(tool, interactive=interactive)
         if decision.action == permission_modes.DENY:
             return False, "refused %s: %s (mode: %s)" % (
                 label, decision.reason, permission_modes.MODE_LABELS.get(

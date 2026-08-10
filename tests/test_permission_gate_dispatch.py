@@ -19,7 +19,9 @@ from __future__ import annotations
 import ast
 import asyncio
 import builtins
+import io
 import os
+import sys
 
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
@@ -79,6 +81,27 @@ def mode_sandbox(tmp_path, monkeypatch):
         with pm._LOCK:
             pm._STATE.update(saved)
         pm._LOADED = saved_loaded
+
+
+class _FakeTty(io.StringIO):
+    """A stdin that claims to be a terminal, so the console path stays live."""
+
+    def isatty(self):
+        return True
+
+
+@pytest.fixture(autouse=True)
+def console_has_an_operator(monkeypatch):
+    """Every test here runs as if a person were at the console, unless it says so.
+
+    The console gate asks whether stdin is a terminal to decide whether `ask`
+    means a prompt or degrades to allow. Under pytest stdin is captured and is
+    never a tty, so without this the console tests would silently exercise the
+    *piped* path: their prompts would stop being prompts and they would pass
+    while testing nothing. Patching the stream rather than the helper keeps the
+    real `_console_has_operator` in the path being tested.
+    """
+    monkeypatch.setattr(sys, "stdin", _FakeTty())
 
 
 @pytest.fixture(autouse=True)
@@ -824,6 +847,116 @@ def test_a_multi_tool_branch_is_gated_at_its_most_dangerous_member(monkeypatch):
     assert may_run
     assert len(asked) == 1
     assert "dangerous" in asked[0]
+
+
+# --- a piped console has nobody to prompt ---------------------------------
+#
+# `sonder < script.txt` and `echo /stats | sonder` are ordinary ways to drive
+# the REPL. There is no one at the keyboard, so `input()` does not ask anybody
+# anything -- it reads the next line of the script.
+
+
+def _piped_console(monkeypatch, script):
+    """Point stdin at `script` with no terminal behind it, and hand it back."""
+    piped = io.StringIO(script)
+    monkeypatch.setattr(sys, "stdin", piped)
+    return piped
+
+
+def test_a_piped_console_does_not_eat_the_next_command(monkeypatch):
+    """The prompt must not consume the line that follows it.
+
+    Piped, `input()` returns the next command in the script and the gate reads
+    it as the answer to a y/N question. `/stats` was skipped because the
+    operator "answered" `/exit`, and `/exit` was swallowed on the way past --
+    two commands lost to one prompt that nobody saw.
+    """
+    piped = _piped_console(monkeypatch, "/exit\n")
+    pm.set_mode(pm.MANUAL)
+
+    may_run, refusal = sonder_repl._named_command_gate("/stats")
+
+    assert (may_run, refusal) == (True, "")
+    assert piped.readline() == "/exit\n", "the next command was eaten by the prompt"
+
+
+def test_a_piped_console_does_not_silently_deny_a_read_under_manual(monkeypatch):
+    """`manual` is the default; piped reads have always worked and must keep working.
+
+    These are the plain reads a script is most likely to contain, and all of
+    them are risk `ask` -- the fail-closed default for anything the catalog has
+    not classified -- so all of them prompted, and piped, every prompt was a
+    silent denial.
+    """
+    _piped_console(monkeypatch, "")
+    pm.set_mode(pm.MANUAL)
+
+    for command in ("/stats", "/whoami", "/sessions", "/todo"):
+        assert sonder_repl._named_command_gate(command) == (True, ""), command
+
+
+def test_a_piped_console_is_not_an_open_door(monkeypatch):
+    """Degrading `ask` is not the same as degrading `deny`.
+
+    The fix must be "nobody is here to answer", not "skip the gate when
+    piped": an explicit deny rule and `plan` still refuse, exactly as they do
+    for every other non-interactive caller.
+    """
+    _piped_console(monkeypatch, "")
+
+    pm.set_mode(pm.MANUAL)
+    may_run, refusal = sonder_repl._named_command_gate("/delete")
+    assert not may_run
+    assert "rule denies this tool" in refusal
+
+    pm.set_mode(pm.PLAN)
+    may_run, refusal = sonder_repl._named_command_gate("/write")
+    assert not may_run
+    assert refusal.startswith("refused /write:")
+
+
+def test_the_catalogued_fallback_is_piped_the_same_way(monkeypatch):
+    """`/<tool_name>` degrades identically -- both console entries share a seam."""
+    piped = _piped_console(monkeypatch, "/exit\n")
+    monkeypatch.setattr(server, "file_write", lambda **_kwargs: "wrote it")
+    pm.set_mode(pm.MANUAL)
+
+    output = sonder_repl._run_catalogued("/file_write path=x content=y", "/file_write")
+
+    assert output == "wrote it"
+    assert piped.readline() == "/exit\n"
+
+
+def test_confirm_never_reads_a_line_nobody_typed(monkeypatch):
+    """The safety net under the seam above.
+
+    `_confirm` already treated EOF as "no", which covers the *last* line of a
+    script. It did not cover the lines before it: those return a real string,
+    so the read succeeds and the command vanishes. A function whose whole job
+    is asking a person must not read at all when there is no person.
+    """
+    piped = _piped_console(monkeypatch, "y\n/exit\n")
+    monkeypatch.setattr(
+        builtins, "input",
+        lambda *_a, **_k: pytest.fail("a piped session has nobody to prompt"),
+    )
+
+    assert sonder_repl._confirm("run it?") is False
+    assert piped.readline() == "y\n", "the prompt consumed a line anyway"
+
+
+def test_a_real_terminal_still_prompts(monkeypatch):
+    """The degrade must be conditional -- a tty keeps its y/N question."""
+    asked = []
+    monkeypatch.setattr(
+        sonder_repl, "_confirm", lambda question: asked.append(question) or False,
+    )
+    pm.set_mode(pm.MANUAL)
+
+    may_run, refusal = sonder_repl._named_command_gate("/stats")
+
+    assert (may_run, refusal) == (False, "skipped /stats")
+    assert len(asked) == 1
 
 
 def test_an_unrecognised_risk_class_does_not_crash_the_console_gate(monkeypatch):
