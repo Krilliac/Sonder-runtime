@@ -84,6 +84,7 @@ REQUIRED_FILES = {
     "fleet_store.py",
     "learning_health.py",
     "sonder_health.py",
+    "harness_tools.py",
     "media_assets.py",
     "memory_store.py",
     "model_transport.py",
