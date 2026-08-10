@@ -103,6 +103,7 @@ import npu_contract
 import npu_service
 import calibration
 import command_catalog
+import grounded_extraction
 import grounded_outcomes
 import permission_modes
 import reloadable_mcp
@@ -4179,6 +4180,188 @@ def offload(
             learn=learn,
             timeout=timeout,
             schema=schema,
+        )
+    except ModelCallError as error:
+        return _format_model_call_error(error)
+
+
+def _trailing_interaction_id(text):
+    """Read back the id `with_footer` appended, using the footer's own delimiters.
+
+    `parse_interaction_id` only matches the lowercase-hex ids the store happens
+    to mint today. Using it here would mean that the day an id gains a hyphen, a
+    rejection stops being filed -- silently, and in the direction that flatters
+    the numbers, since only negative outcomes are filed from this path.
+    """
+    body = (text or "").rstrip()
+    start = body.rfind(FOOTER_PREFIX)
+    if start < 0 or not body.endswith("]"):
+        return None
+    return body[start + len(FOOTER_PREFIX):-1].strip() or None
+
+
+def _leading_json_object(text):
+    """The JSON object a schema-constrained reply starts with.
+
+    A constrained response is JSON first and footers after -- the interaction-id
+    line, an activity block, a `[schema_unverified: ...]` disclosure. Decoding
+    the leading value instead of matching those trailers means this does not
+    have to know their formats, and cannot be broken by a new one.
+    """
+    body = (text or "").lstrip()
+    try:
+        data, _end = json.JSONDecoder().raw_decode(body)
+    except ValueError as exc:
+        raise ModelCallError(
+            "protocol",
+            "response did not begin with the JSON object the schema required: %s" % exc,
+        ) from exc
+    if not isinstance(data, dict):
+        raise ModelCallError(
+            "protocol",
+            "response was a JSON %s, not the object the schema required"
+            % type(data).__name__,
+        )
+    return data
+
+
+def _extract_grounded_impl(
+    source: str,
+    schema,
+    task: str = "",
+    tier: str = "fast",
+    temperature: float = 0.0,
+    num_predict: int = 1024,
+    num_ctx: int = 0,
+    learn: bool = True,
+    timeout: int = TIMEOUT,
+) -> str:
+    """Internal grounded-extraction path; model failures stay typed."""
+    if not isinstance(source, str) or not source.strip():
+        raise ModelCallError(
+            "configuration",
+            "source text is required: with nothing to ground against, every "
+            "field would be rejected and the call could only waste a generation.",
+        )
+    parsed = _parse_schema_arg(schema)
+    if parsed is None:
+        raise ModelCallError(
+            "configuration",
+            "a schema naming the fields to extract is required; without one there "
+            "is nothing to ground.",
+        )
+    if _is_cloud_tier(tier):
+        # This tool is handed whole source documents, so it stays on tiers that
+        # never leave the machine. `offload` still takes a cloud tier for work
+        # the caller has decided to send there -- nothing that would not already
+        # have gone to the cloud goes there because of this helper.
+        raise ModelCallError(
+            "configuration",
+            "extract_grounded runs on local tiers only (%s), because it sends the "
+            "whole source document to the model. Tier '%s' is a hosted tier."
+            % (", ".join(LOCAL_TIERS), tier),
+        )
+    try:
+        wrapped = grounded_extraction.grounded_schema(parsed)
+    except grounded_extraction.GroundingError as exc:
+        raise ModelCallError("configuration", str(exc)) from exc
+
+    text = _offload_impl(
+        prompt=grounded_extraction.extraction_prompt(source, task),
+        tier=tier,
+        system=grounded_extraction.EXTRACTION_SYSTEM,
+        temperature=temperature,
+        num_predict=num_predict,
+        num_ctx=num_ctx,
+        learn=learn,
+        timeout=timeout,
+        schema=wrapped,
+    )
+    interaction_id = _trailing_interaction_id(text)
+    try:
+        data = _leading_json_object(text)
+        fields = grounded_extraction.verify_grounding(data, source)
+    except grounded_extraction.GroundingError as exc:
+        _file_schema_rejection(interaction_id)
+        raise ModelCallError("protocol", str(exc)) from exc
+    except Exception:
+        _file_schema_rejection(interaction_id)
+        raise
+
+    result = {"fields": fields}
+    # The re-check that ran inside `_offload_impl` covers a subset of JSON
+    # Schema, and Task 1's rule is that a partial check never gets to look like
+    # a complete one. Recomputing the shortfall here -- with the same function
+    # the offload path uses -- keeps the disclosure inside the result object
+    # rather than trailing after it as prose.
+    gaps = _schema_coverage_gaps(data, wrapped)
+    if gaps:
+        result["schema_unverified"] = _format_schema_gaps(gaps)
+    body = json.dumps(result, indent=2, ensure_ascii=False)
+    return with_footer(body, interaction_id) if interaction_id else body
+
+
+@mcp.tool()
+def extract_grounded(
+    source: str,
+    schema: str,
+    task: str = "",
+    tier: str = "fast",
+    temperature: float = 0.0,
+    num_predict: int = 1024,
+    num_ctx: int = 0,
+    learn: bool = True,
+    timeout: int = TIMEOUT,
+) -> str:
+    """Extract fields from text you supply, with each one citing its source span.
+
+    Use this instead of `offload` whenever the answer is supposed to come out of
+    a document you already have. The local models are good at transforming facts
+    you give them and bad at supplying facts you did not: asked to recall, they
+    invent confidently and the output looks exactly like a correct one. A JSON
+    schema alone cannot see that -- an invented value is perfectly schema-valid.
+
+    So every field must come back with the span of `source` that states it, and
+    every span is checked here by literal substring against `source`. A field
+    citing text that is not in your document is REJECTED, by name. Nothing is
+    repaired, defaulted or silently re-asked.
+
+    source: the text to extract from, passed verbatim to a LOCAL tier only.
+      Hosted/cloud tiers are refused: this sends whole documents.
+    schema: JSON Schema text for the FIELDS you want, e.g.
+      '{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}'.
+      Only top-level "properties" are grounded, one citation per field. A field
+      you leave out of "required" may be omitted -- which is the right answer
+      when the source does not state it, and better than forcing an invention.
+
+    On success you get JSON: {"fields": {"<name>": {"value": ..., "quote": ...,
+    "quote_offset": N, "quote_occurrences": N}}}. The offset and the count are
+    computed here from your source, never taken from the model;
+    "quote_occurrences" above 1 means that span appears more than once and does
+    not pin down a single place.
+
+    WHAT THIS DOES NOT PROVE: that the quote supports the value. A model can cite
+    a genuine sentence and attach a wrong value to it, and that passes. This
+    guarantees the field points at text that really is in your source -- read the
+    quote before relying on the value. Comparison is exact, with no whitespace,
+    case or unicode folding, so an honest quote that was reflowed while copying
+    is also rejected; that error is the cheap direction.
+
+    A "schema_unverified" key appears when part of your schema was applied by the
+    decoder but not re-checked in process (see `offload` for which keywords).
+    """
+    _maybe_live_reload()
+    try:
+        return _extract_grounded_impl(
+            source=source,
+            schema=schema,
+            task=task,
+            tier=tier,
+            temperature=temperature,
+            num_predict=num_predict,
+            num_ctx=num_ctx,
+            learn=learn,
+            timeout=timeout,
         )
     except ModelCallError as error:
         return _format_model_call_error(error)
