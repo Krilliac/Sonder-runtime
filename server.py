@@ -3782,6 +3782,35 @@ def _require_schema_match(text, schema):
     return data
 
 
+def _file_schema_rejection(interaction_id):
+    """File a schema violation as a caller-judged `rejected` outcome.
+
+    A schema failure is the rare thing the outcome store is starved of: a
+    negative verdict on delegated work, produced without anyone having to
+    remember to file it. `grounded_outcomes` exists for exactly this -- taking
+    the verdict from the tool that knows the truth instead of asking a human --
+    and this writes through its own `record_fn` seam, `_record_outcome_signal`.
+    It does not go through `grounded_outcomes.attribute`, because that resolves
+    a *plausible* generation from a time-bounded ledger; here the failing
+    interaction id is known exactly, and guessing would be strictly worse.
+
+    `rejected` and not `failed`: `failed` is the machine-graded bucket that the
+    self-generated curriculum floods by more than an order of magnitude, where
+    a real caller-facing rejection is invisible to the only quality figure
+    worth trusting. A conforming response deliberately files nothing -- matching
+    a shape is not evidence that the answer was good, and recording `accepted`
+    for it would raise the reviewed rate on something that never measured
+    quality.
+    """
+    if not interaction_id:
+        return
+    try:
+        _record_outcome_signal(interaction_id, "rejected")
+    except Exception:
+        # Bookkeeping must never mask the schema failure it is describing.
+        pass
+
+
 def _offload_impl(
     prompt: str,
     tier: str = "fast",
@@ -3942,7 +3971,11 @@ def _offload_impl(
     finally:
         conn.close()
     if schema is not None:
-        _require_schema_match(response, schema)
+        try:
+            _require_schema_match(response, schema)
+        except ModelCallError:
+            _file_schema_rejection(iid)
+            raise
     return with_footer(response, iid)
 
 

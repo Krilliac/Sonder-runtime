@@ -16,6 +16,8 @@ import json
 
 import pytest
 
+import learning_health
+import reward
 import server
 
 
@@ -198,6 +200,94 @@ def test_a_non_object_schema_argument_is_refused(monkeypatch):
     )
     assert out.startswith("ERROR:")
     assert seen["payloads"] == []
+
+
+# --- a rejection is filed as caller-judged evidence ---------------------------
+
+def _outcomes(monkeypatch):
+    """Capture the outcome rows the offload path files."""
+    rows = []
+    monkeypatch.setattr(
+        server, "_record_outcome_signal",
+        lambda interaction_id, signal: rows.append((interaction_id, signal)),
+    )
+    return rows
+
+
+def test_rejected_lands_in_the_caller_judged_population(monkeypatch):
+    # The point of filing this at all: `failed` would bury a real caller-facing
+    # rejection in the self-graded curriculum's thousands of autograded rows,
+    # where the only quality figure anyone should trust cannot see it.
+    assert "rejected" in reward.VALID_SIGNALS
+    assert "rejected" not in learning_health._AUTOGRADED_SIGNALS
+    assert not reward.is_good("rejected")
+
+
+def test_a_schema_violation_is_filed_as_a_rejected_outcome(monkeypatch):
+    rows = _outcomes(monkeypatch)
+    _learning(monkeypatch, interaction_id="iid-violation")
+    _capture(monkeypatch, json.dumps({"name": "ada", "age": "thirty-six"}))
+    out = server.offload(
+        "describe ada", tier="code", learn=True, schema=json.dumps(SCHEMA),
+    )
+    assert out.startswith("ERROR:")
+    assert rows == [("iid-violation", "rejected")]
+
+
+def test_an_unparseable_response_is_filed_as_rejected_too(monkeypatch):
+    rows = _outcomes(monkeypatch)
+    _learning(monkeypatch, interaction_id="iid-garbage")
+    _capture(monkeypatch, "Sure! Here is the object you asked for.")
+    server.offload(
+        "describe ada", tier="code", learn=True, schema=json.dumps(SCHEMA),
+    )
+    assert rows == [("iid-garbage", "rejected")]
+
+
+def test_a_conforming_response_files_nothing(monkeypatch):
+    # Matching the requested shape is not the same as being a good answer, and
+    # the caller has not judged it yet. Filing `accepted` here would inflate the
+    # reviewed rate on evidence that never measured quality.
+    rows = _outcomes(monkeypatch)
+    _learning(monkeypatch, interaction_id="iid-good")
+    _capture(monkeypatch, json.dumps(GOOD))
+    server.offload(
+        "describe ada", tier="code", learn=True, schema=json.dumps(SCHEMA),
+    )
+    assert rows == []
+
+
+def test_an_unschemaed_call_files_nothing(monkeypatch):
+    rows = _outcomes(monkeypatch)
+    _learning(monkeypatch, interaction_id="iid-plain")
+    _capture(monkeypatch, "not json at all")
+    server.offload("describe ada", tier="code", learn=True)
+    assert rows == []
+
+
+def test_the_non_learning_path_has_no_interaction_to_judge(monkeypatch):
+    # learn=False captures no interaction, so there is no row to attach an
+    # outcome to; inventing one would be a fabricated judgement.
+    rows = _outcomes(monkeypatch)
+    _capture(monkeypatch, json.dumps({"name": "ada"}))
+    out = server.offload(
+        "describe ada", tier="fast", learn=False, schema=json.dumps(SCHEMA),
+    )
+    assert out.startswith("ERROR:")
+    assert rows == []
+
+
+def test_a_failed_outcome_write_never_masks_the_schema_failure(monkeypatch):
+    def boom(interaction_id, signal):
+        raise RuntimeError("outcome store unavailable")
+
+    monkeypatch.setattr(server, "_record_outcome_signal", boom)
+    _learning(monkeypatch)
+    _capture(monkeypatch, json.dumps({"name": "ada"}))
+    out = server.offload(
+        "describe ada", tier="code", learn=True, schema=json.dumps(SCHEMA),
+    )
+    assert "missing required key 'age'" in out
 
 
 @pytest.mark.parametrize("empty", ["", "   "])
