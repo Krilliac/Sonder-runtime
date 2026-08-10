@@ -66,18 +66,18 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     assert "runtime_policy.py" in entries
     assert "learning_health.py" in entries
     assert "sonder_health.py" in entries
-    assert "sonder_runtime/adapters/legacy/inspections.py" in entries
+    assert "sonder_runtime/adapters/inspection_executor.py" in entries
     assert {
         "sonder_backup.py",
         "sonder_runtime/adapters/backup.py",
-        "sonder_runtime/adapters/legacy/backup.py",
+        "sonder_runtime/adapters/backup_gateway.py",
         "sonder_runtime/application/backup/__init__.py",
         "sonder_runtime/application/backup/use_cases.py",
         "sonder_runtime/application/ports/backup.py",
     } <= set(entries)
     assert "recall.py" in entries
     assert {
-        "sonder_runtime/adapters/legacy/recall.py",
+        "sonder_runtime/adapters/recall_gateway.py",
         "sonder_runtime/adapters/recall.py",
         "sonder_runtime/application/ports/recall.py",
         "sonder_runtime/application/recall/__init__.py",
@@ -86,7 +86,7 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     assert "sonder_runtime/adapters/git_discovery.py" in entries
     assert {
         "sonder_preflight.py",
-        "sonder_runtime/adapters/legacy/preflight.py",
+        "sonder_runtime/adapters/preflight_executor.py",
         "sonder_runtime/adapters/preflight.py",
         "sonder_runtime/application/ports/preflight.py",
         "sonder_runtime/application/preflight/__init__.py",
@@ -94,7 +94,7 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     } <= set(entries)
     assert "sonder_runtime/application/inspection/use_cases.py" in entries
     assert {
-        "sonder_runtime/adapters/legacy/preferences.py",
+        "sonder_runtime/adapters/preference_adapters.py",
         "sonder_runtime/application/ports/preferences.py",
         "sonder_runtime/application/preferences/__init__.py",
         "sonder_runtime/application/preferences/use_cases.py",
@@ -116,7 +116,7 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     assert {
         "workflow_store.py",
         "sonder_runtime/adapters/filesystem/workflow_store.py",
-        "sonder_runtime/adapters/legacy/workflows.py",
+        "sonder_runtime/adapters/workflow_adapters.py",
         "sonder_runtime/application/ports/workflows.py",
         "sonder_runtime/application/workflows/__init__.py",
         "sonder_runtime/application/workflows/loop.py",
