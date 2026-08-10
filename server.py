@@ -18,6 +18,7 @@ Tiers (escalation ladder, cheapest first):
     cloud-code/cloud-general -> configured hosted defaults (no local memory cost)
 """
 
+import collections
 import contextlib
 import hmac
 import importlib
@@ -99,7 +100,10 @@ import intents
 import runtime_policy
 import npu_contract
 import npu_service
+import calibration
 import command_catalog
+import grounded_outcomes
+import permission_modes
 import reloadable_mcp
 import autopilot_store
 import autopilot_controller
@@ -118,6 +122,7 @@ import tool_capabilities
 import git_tools
 import sonder_runtime.adapters.evaluation_history_store as eval_history
 import artifact_risk as artifact_risk_module
+import artifact_fetch as artifact_fetch_module
 import process_risk as process_risk_module
 import unsafe_lab
 
@@ -799,6 +804,79 @@ TRACE_SYSTEM = (
     "edge cases, and explain your approach and any tradeoffs. Then output a section "
     "titled '## Answer' with the final solution."
 )
+
+
+def _deployment_authenticates_callers() -> bool:
+    """True when this runtime can serve more than one identity.
+
+    Mirrors sonder_serve's auth-mode resolution without importing it (that
+    would be circular). Any of these means callers are distinguishable, so a
+    tool returning one caller's data to another is a real disclosure:
+    SONDER_AUTH_MODE set at all, an API key configured, or accounts required.
+    Absent all three the deployment is `local-open` -- a single operator on
+    loopback, where there is no second party to protect.
+    """
+    if os.environ.get("SONDER_AUTH_MODE", "").strip():
+        return True
+    if os.environ.get("SONDER_API_KEY", "").strip():
+        return True
+    return str(os.environ.get("SONDER_REQUIRE_ACCOUNT", "")).strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _developer_gate(tool_name: str, token: str, started):
+    """Refusal text when the caller may not read another caller's data, else None.
+
+    Deliberately NOT `if token:` -- that shape checks the token only when one
+    happens to be supplied, so omitting it skips the check entirely. It reads
+    like a gate and fails open. On any deployment that authenticates callers a
+    developer token is required; unauthenticated ones are refused rather than
+    waved through.
+    """
+    if not _deployment_authenticates_callers():
+        return None
+    account = _admin_account_from_token(token) if token else None
+    ok, msg = admin_auth.require(account, "developer")
+    if ok:
+        return None
+    _record_direct_tool(tool_name, {}, ok=False, started=started)
+    return "refused: %s." % msg
+
+
+_TURN_TRACES = collections.deque(maxlen=8)
+
+
+def _capture_turn(model, tier, trace_ctx, prompt, response, iid=None):
+    """Keep the last few turns' pipeline state so a turn can be debugged after it.
+
+    ``/trace on`` already prints all of this -- the assembled prompt, the
+    lessons retrieved, the tier -- but only for turns run *after* you thought
+    to enable it. That is the wrong way round for debugging: you want the
+    trace for the turn that already surprised you, and reproducing it is
+    exactly what is hard when the behaviour is intermittent.
+
+    ``_answer`` returns ``trace_ctx`` on every turn regardless of the flag, so
+    this state is built and then thrown away. Keeping a bounded ring of it in
+    memory costs nothing and makes ``turn_inspect`` retrospective. Nothing is
+    written to disk; the buffer dies with the process.
+    """
+    if not isinstance(trace_ctx, dict):
+        return
+    try:
+        _TURN_TRACES.append({
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "model": str(model or ""),
+            "tier": str(tier or ""),
+            "interaction_id": str(iid or ""),
+            "prompt": str(prompt or "")[:4000],
+            "augmented_prompt": str(trace_ctx.get("augmented_prompt") or "")[:16000],
+            "lessons": [str(x)[:400] for x in (trace_ctx.get("lessons") or [])][:20],
+            "response_head": str(response or "")[:2000],
+        })
+    except Exception:
+        # Debug bookkeeping must never break the answer path it observes.
+        pass
 
 
 def _format_trace(model, tier, params, trace):
@@ -4017,6 +4095,7 @@ def _sonder_impl_serialized(
             num_ctx_eff, session_id, project_id, history, trace=trace,
             tier=tier_label, cloud=cloud, augment=augment,
         )
+        _capture_turn(tgt_model, tier_label, trace_ctx, prompt, response, iid)
         if iid is not None:
             interaction_snapshot = memory_store.get_interaction(conn, iid)
         if session_id and is_first:
@@ -4246,6 +4325,7 @@ def _answer_with_history_impl(
                 session_id, capture_project, history or None, trace=trace,
                 tier=tier_label, cloud=cloud, augment=augment,
             )
+            _capture_turn(model, tier_label, trace_ctx, prompt, response, iid)
             if iid is not None:
                 interaction_snapshot = memory_store.get_interaction(conn, iid)
         else:
@@ -7384,11 +7464,12 @@ def admin_status(token: str = "") -> str:
 def debug_inspect(token: str = "", include_status: bool = True) -> str:
     """Developer/admin inspection bundle without hidden chain-of-thought."""
     _maybe_live_reload()
-    account = _admin_account_from_token(token)
-    if token:
-        ok, msg = admin_auth.require(account, "developer")
-        if not ok:
-            return "ERROR: %s." % msg
+    # Was `if token:` -- which only checked a token that was volunteered, so
+    # omitting it skipped the gate entirely. Same fail-open shape as the one
+    # flagged in turn_inspect; this is where that pattern was copied from.
+    refusal = _developer_gate("debug_inspect", token, None)
+    if refusal:
+        return refusal
     sections = [
         "sonder debug inspect",
         "  note: private hidden chain-of-thought is not exposed; use trace/tool/activity logs instead.",
@@ -7620,6 +7701,45 @@ def _record_file_activity(
     )
 
 
+_INTERACTION_ID_RE = re.compile(r"\[interaction_id:\s*([0-9A-Za-z_-]+)\]")
+
+
+def _record_outcome_signal(interaction_id: str, signal: str) -> None:
+    """Write one grounded outcome row, bypassing the model-facing wrapper."""
+    conn = _open_db()
+    try:
+        memory_store.record_outcome_row(
+            conn, interaction_id, signal, reward.score(signal),
+        )
+    finally:
+        conn.close()
+
+
+def _feed_grounded_outcome(name, ok, output, args=None) -> None:
+    """Attribute execution evidence to the work it judges.
+
+    The outcome store holds ~9,000 rows and only ~190 of them measure delegated
+    work, because filing an outcome is a manual step and people file successes
+    far more readily than failures. The verification tools already know the
+    truth, so take it from them instead of asking anyone to remember.
+    """
+    project = ""
+    if isinstance(args, dict):
+        project = str(args.get("project") or args.get("root") or "")
+    try:
+        if name in grounded_outcomes.GENERATORS:
+            match = _INTERACTION_ID_RE.search(str(output or ""))
+            if match:
+                grounded_outcomes.note_generation(match.group(1), name, project)
+        elif name in grounded_outcomes.VERIFIERS:
+            grounded_outcomes.attribute(
+                name, bool(ok), project, record_fn=_record_outcome_signal,
+            )
+    except Exception:
+        # Bookkeeping must never break the run it is observing.
+        pass
+
+
 def _record_direct_tool(
     name: str, args=None, ok=True, started=None, summary="", command="", output="",
 ) -> None:
@@ -7635,6 +7755,198 @@ def _record_direct_tool(
         command=command,
         output=output,
     )
+    _feed_grounded_outcome(name, ok, output, args)
+
+
+@mcp.tool()
+def turn_inspect(index: int = 0, full_prompt: bool = False, token: str = "") -> str:
+    """Show what actually went into a recent turn: prompt, lessons, tier, model.
+
+    index 0 is the most recent turn, 1 the one before it, and so on. This is
+    the retrospective half of /trace: the same pipeline state, for turns that
+    already ran, so an intermittent result can be debugged without first
+    reproducing it with tracing switched on.
+
+    Developer-gated like debug_inspect, because the captured prompts are the
+    caller's own text.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    refusal = _developer_gate("turn_inspect", token, started)
+    if refusal:
+        return refusal
+    turns = list(_TURN_TRACES)
+    if not turns:
+        _record_direct_tool("turn_inspect", {}, ok=True, started=started)
+        return (
+            "no turns captured yet.\n"
+            "  The buffer fills as answers are generated and holds the last %d.\n"
+            "  It lives in memory only and is empty after a restart."
+            % _TURN_TRACES.maxlen
+        )
+    try:
+        position = int(index)
+    except (TypeError, ValueError):
+        position = 0
+    if position < 0 or position >= len(turns):
+        _record_direct_tool("turn_inspect", {}, ok=False, started=started)
+        return "no turn at index %s; %d captured (0 is most recent)." % (
+            index, len(turns),
+        )
+    turn = turns[-1 - position]
+    prompt_text = turn["augmented_prompt"]
+    if not full_prompt and len(prompt_text) > 2000:
+        prompt_text = prompt_text[:2000] + (
+            "\n... (%d more chars; pass full_prompt=True)" % (
+                len(turn["augmented_prompt"]) - 2000)
+        )
+    lines = [
+        "turn -%d of %d captured   %s" % (position, len(turns), turn["ts"]),
+        "  model: %s   tier: %s%s" % (
+            turn["model"], turn["tier"],
+            "   interaction: %s" % turn["interaction_id"]
+            if turn["interaction_id"] else "",
+        ),
+        "",
+        "  asked:",
+    ]
+    lines += ["    " + line for line in (turn["prompt"] or "(none)").splitlines()[:20]]
+    lines += ["", "  lessons retrieved: %d" % len(turn["lessons"])]
+    lines += ["    - " + text for text in turn["lessons"]]
+    lines += ["", "  exact prompt sent to the model:"]
+    lines += ["    " + line for line in (prompt_text or "(none)").splitlines()]
+    lines += ["", "  response began:"]
+    lines += ["    " + line for line in
+              (turn["response_head"] or "(none)").splitlines()[:12]]
+    output = "\n".join(lines)
+    _record_direct_tool(
+        "turn_inspect", {"index": position}, ok=True, started=started,
+    )
+    return output
+
+
+@mcp.tool()
+def reasoning_show(token: str = "") -> str:
+    """Show the reasoning the model emitted for the current/last turn, if enabled.
+
+    Two gates, both of which must pass. The operator gate
+    (SONDER_EXPOSE_REASONING) decides whether reasoning is captured at all --
+    with it off Sonder never asks the model for its thinking. The caller gate
+    decides who may read it: on a deployment that authenticates callers this
+    needs a developer token, because the reasoning belongs to whoever's turn
+    produced it. The HTTP path gates the same way via SONDER_REASONING_AUDIENCE.
+
+    This is NOT admin_private_chain_of_thought. That refuses arbitrary
+    inspection of hidden reasoning and still does. This shows only what a
+    reasoning model deliberately emitted, for the turn you just ran, on the
+    channel it emits separately from its answer.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    refusal = _developer_gate("reasoning_show", token, started)
+    if refusal:
+        return refusal
+    if not reasoning_exposure_enabled():
+        _record_direct_tool("reasoning_show", {}, ok=True, started=started)
+        return (
+            "reasoning is not exposed.\n"
+            "  SONDER_EXPOSE_REASONING is off, so Sonder does not request the\n"
+            "  model's thinking at all -- there is nothing withheld, there is\n"
+            "  nothing captured.\n\n"
+            "  enable:   set SONDER_EXPOSE_REASONING=1  (then restart the runtime)\n"
+            "  audience: SONDER_REASONING_AUDIENCE=developer (default) | all\n\n"
+            "  Unrelated to /cot, which refuses arbitrary hidden-state\n"
+            "  inspection and stays refused either way."
+        )
+    record = activity_tracker.current_reasoning() or activity_tracker.latest_reasoning()
+    if not record:
+        _record_direct_tool("reasoning_show", {}, ok=True, started=started)
+        return (
+            "reasoning is enabled, but nothing is recorded for this turn.\n"
+            "  Either the last answer came from a model that emits no separate\n"
+            "  thinking channel, or no turn has run since the runtime started."
+        )
+    text = str(record.get("text") or "").strip()
+    model = str(record.get("model") or "")
+    lines = ["model reasoning%s" % (" (%s)" % model if model else ""), ""]
+    lines += ["  " + line for line in (text or "(empty)").splitlines()]
+    output = "\n".join(lines)
+    _record_direct_tool("reasoning_show", {}, ok=True, started=started)
+    return output
+
+
+@mcp.tool()
+def calibration_status() -> str:
+    """Measured reliability, split by population and never averaged.
+
+    Reports how often delegated work was judged good by a caller, separately
+    from how often generated code built or passed tests. A single figure over
+    both reads like accuracy and is not one: the self-graded population is
+    ~50x larger and ~45 points higher, so combining them hides exactly the
+    number worth knowing.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    conn = _open_db()
+    try:
+        output = calibration.report(conn)
+    finally:
+        conn.close()
+    _record_direct_tool("calibration_status", {}, ok=True, started=started)
+    return output
+
+
+@mcp.tool()
+def permission_mode(mode: str = "", explain: bool = False) -> str:
+    """Show or set how much Sonder does without asking.
+
+    Modes, least to most autonomous: plan (reads only), manual (ask before
+    anything that is not a read), acceptEdits (file changes proceed, running
+    programs still asks), auto (programs proceed too). Destructive tools ask in
+    every mode, including auto.
+
+    Elevation is a separate axis no mode grants; see permission_policy.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    wanted = str(mode or "").strip()
+    try:
+        if not wanted:
+            output = permission_modes.overview()
+        elif explain:
+            output = permission_modes.describe(wanted)
+        else:
+            permission_modes.set_mode(wanted)
+            output = permission_modes.describe()
+    except ValueError as exc:
+        _record_direct_tool(
+            "permission_mode", {"mode": wanted}, ok=False, started=started,
+            summary=str(exc),
+        )
+        return str(exc)
+    _record_direct_tool("permission_mode", {"mode": wanted}, ok=True, started=started)
+    return output
+
+
+def permission_mode_data() -> dict:
+    """Mode state as structured data, for the HTTP API and the app."""
+    active = permission_modes.current_mode()
+    return {
+        "mode": active,
+        "label": permission_modes.MODE_LABELS.get(active, active),
+        "blurb": permission_modes.MODE_BLURBS.get(active, ""),
+        "elevated": permission_modes.elevated(),
+        "elevationReason": permission_modes.elevation_reason(),
+        "modes": [
+            {
+                "name": name,
+                "label": permission_modes.MODE_LABELS.get(name, name),
+                "blurb": permission_modes.MODE_BLURBS.get(name, ""),
+            }
+            for name in permission_modes.MODES
+        ],
+        "matrix": dict(permission_modes._MATRIX[active]),
+    }
 
 
 @mcp.tool()
@@ -9946,6 +10258,131 @@ def artifact_risk_inspect(
 
 
 @mcp.tool()
+def fetch_artifact(
+    url: str,
+    dest: str,
+    expect_type: str = "",
+    expect_publisher: str = "",
+    sha256: str = "",
+    max_mb: float = artifact_fetch_module.DEFAULT_MAX_MB,
+    timeout: float = artifact_fetch_module.DEFAULT_TIMEOUT,
+    resume: bool = True,
+    overwrite: bool = False,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Download a binary artifact to a guarded path and verify it atomically.
+
+    Unlike web_fetch this writes bytes, not text, so it is the only supported
+    way to acquire an installer, driver, ISO, or archive. Nothing lands at
+    *dest* unless the payload passes every check: HTTP status, block/denial
+    page detection, magic bytes against expect_type or the extension, a size
+    floor, an optional sha256, and -- on Windows for PE payloads -- the
+    Authenticode signer subject against expect_publisher. Success also writes
+    <dest>.provenance.json recording the URL, redirect chain, digest,
+    signature, and every verdict.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "url": url, "dest": dest, "expect_type": expect_type,
+        "expect_publisher": expect_publisher, "sha256": sha256,
+        "max_mb": max_mb, "timeout": timeout,
+    }
+    try:
+        data = artifact_fetch_module.fetch_artifact(
+            url,
+            dest,
+            expect_type=expect_type,
+            expect_publisher=expect_publisher,
+            sha256=sha256,
+            max_mb=max_mb,
+            timeout=timeout,
+            resume=resume,
+            overwrite=overwrite,
+            extra_roots=extra_roots if _file_bypass_allowed(token, approval) else "",
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "fetch_artifact", args, ok=False, started=started, summary=str(exc),
+        )
+        return "artifact fetch REFUSED: %s" % exc
+    output = artifact_fetch_module.format_fetch_result(data)
+    summary = "%s; %d bytes; %s" % (
+        data.get("verdict", "rejected"), data.get("bytes", 0),
+        data.get("detected_type", "") or "unknown",
+    )
+    _record_direct_tool(
+        "fetch_artifact", args, ok=bool(data.get("ok")), started=started,
+        summary=summary, output=output,
+    )
+    if data.get("ok"):
+        _record_file_activity("write", {
+            "action": "fetch_artifact",
+            "path": data.get("path", ""),
+            "bytes": data.get("bytes", 0),
+        })
+    activity_tracker.record_event(
+        "fetch_artifact", summary=summary, path=data.get("path", ""),
+    )
+    return output
+
+
+@mcp.tool()
+def verify_artifact(
+    path: str,
+    expect_type: str = "",
+    expect_publisher: str = "",
+    sha256: str = "",
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Run fetch_artifact's verification battery against a file already on disk.
+
+    Same code path as a fresh download: magic bytes vs expect_type or the
+    extension, block/denial-page markers, a per-type size floor, an optional
+    sha256, and the Authenticode signer subject against expect_publisher. Use
+    it on anything staged earlier or acquired outside Sonder.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "path": path, "expect_type": expect_type,
+        "expect_publisher": expect_publisher, "sha256": sha256,
+    }
+    try:
+        data = artifact_fetch_module.verify_artifact(
+            path,
+            expect_type=expect_type,
+            expect_publisher=expect_publisher,
+            sha256=sha256,
+            extra_roots=extra_roots if _file_bypass_allowed(token, approval) else "",
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "verify_artifact", args, ok=False, started=started, summary=str(exc),
+        )
+        return "artifact verify REFUSED: %s" % exc
+    output = artifact_fetch_module.format_verify_result(data)
+    summary = "%s; %d bytes; %s" % (
+        data.get("verdict", "rejected"), data.get("bytes", 0),
+        data.get("detected_type", "") or "unknown",
+    )
+    _record_direct_tool(
+        "verify_artifact", args, ok=bool(data.get("ok")), started=started,
+        summary=summary, output=output,
+    )
+    activity_tracker.record_event(
+        "verify_artifact", summary=summary, path=data.get("path", ""),
+    )
+    return output
+
+
+@mcp.tool()
 def script_run(
     path: str,
     args_json: str = "[]",
@@ -11458,6 +11895,23 @@ def web_fetch(url: str, max_chars: int = 8000) -> str:
             summary=str(e),
         )
         return "ERROR: %s" % e
+    # A bot-block, captcha interstitial, or Access Denied page arrives with a
+    # 200 and reads like a document, so without this the caller consumes a
+    # refusal as if it were the requested content -- worse than a 404 because
+    # it looks like success. Name the denial instead of relaying it.
+    blocked = artifact_fetch_module.detect_block_page(
+        out, content_type="text/html", url=url,
+    )
+    if blocked is not None:
+        notice = artifact_fetch_module.format_block_notice(url, blocked)
+        _record_direct_tool(
+            "web_fetch",
+            {"url": url, "max_chars": max_chars},
+            ok=False, started=started,
+            summary="blocked: %s" % blocked.get("reason", "denial page"),
+            output=notice,
+        )
+        return notice
     _record_direct_tool(
         "web_fetch",
         {"url": url, "max_chars": max_chars},
@@ -12739,6 +13193,7 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "repo_status", "repo_diff",
     "repo_log", "repo_show", "repo_blame",
     "project_detect", "data_inspect", "data_query", "archive_list", "artifact_risk_inspect",
+    "verify_artifact",
     "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
     "diagnostics", "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
@@ -12777,6 +13232,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - repo_blame: {"path": ".", "file_path": "<required contained relative file>", "revision": "HEAD", "start_line": 1, "end_line": 100, "timeout": 5, "max_bytes": 256000}
 - archive_list: {"path": "<task-relevant ZIP or TAR>", "max_entries": 2000, "max_total_bytes": 256000000, "max_ratio": 100, "max_results": 2500}
 - artifact_risk_inspect: {"path": "<task-relevant document, executable, script, or binary>", "max_scan_bytes": 16777216, "max_seconds": 5}
+- verify_artifact: {"path": "<task-relevant downloaded installer, archive, or image>", "expect_type": "pe|msi|zip|iso|elf", "expect_publisher": "<required signer substring>", "sha256": "<64-hex digest>"}
 - log_inspect: {"path": "<task-relevant log file>", "tail_lines": 0, "context_lines": 2, "max_file_bytes": 64000000, "max_scan_bytes": 4000000, "max_lines": 10000, "max_line_bytes": 4096, "max_results": 100, "max_output_bytes": 256000, "timeout": 5}
 - text_search: {"query": "<exact task symbol or anchor>", "root": ".", "glob": "<task-relevant glob>", "max_results": 100}
 - script_search: {"query": "<task-relevant script name>", "root": ".", "max_results": 100}
@@ -14257,6 +14713,16 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "verify_artifact":
+        return verify_artifact(
+            path=args.get("path", ""),
+            expect_type=args.get("expect_type", ""),
+            expect_publisher=args.get("expect_publisher", ""),
+            sha256=args.get("sha256", ""),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "process_list":
         return process_list(
             max_processes=args.get("max_processes", 128),
@@ -14545,6 +15011,7 @@ _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "archive_list", "archive_extract",
     "file_delete", "directory_create", "workspace_inventory", "dependency_inventory", "directory_tree",
     "file_find", "repository_symbol_index", "text_search", "script_search", "artifact_verify",
+    "fetch_artifact", "verify_artifact",
     "artifact_ground", "artifact_risk_inspect", "scaffold_project", "archive_create", "repo_status", "repo_diff", "project_detect", "file_copy", "file_move",
     "test_discover", "test_run", "lint_run", "format_code", "typecheck_run",
     "dependency_add", "dependency_remove", "dependency_update", "dependency_audit",
@@ -14821,6 +15288,7 @@ def _agent_dispatch_observed(
 _WORK_MUTATION_TOOLS = frozenset({
     "directory_create", "file_write", "file_batch_write", "json_patch", "file_edit", "file_copy", "file_move", "file_delete", "text_patch", "data_convert",
     "sqlite_mutate", "scaffold_project", "archive_extract", "archive_create",
+    "fetch_artifact",
     "artifact_generate", "game_generate_and_test", "game_generation_campaign",
     "memory_quality_repair", "memory_privacy_repair", "memory_embedding_backfill",
     "memory_interaction_embedding_backfill",
@@ -15326,6 +15794,7 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "text_search", "script_search", "program_search", "image_inspect", "repo_status", "repo_diff",
     "repo_log", "repo_show", "repo_blame",
     "data_inspect", "data_query", "project_detect", "archive_list", "artifact_risk_inspect",
+    "verify_artifact",
     "memory_search", "learning_health_status", "evaluation_history_status",
     "memory_quality_report", "memory_privacy_review", "artifact_ground",
     "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",

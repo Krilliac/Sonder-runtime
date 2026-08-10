@@ -202,6 +202,10 @@ _DANGEROUS = frozenset({
     "file_delete", "unload", "sqlite_mutate", "memory_privacy_repair",
     "memory_quality_repair", "admin_set_account", "admin_register",
     "git_merge", "git_cherry_pick", "task_delete", "self_heal_repair",
+    # Changing routing or the permission policy itself is not an ordinary
+    # workspace edit: it alters what every later call is allowed to do, so it
+    # must not flow unprompted in acceptEdits/auto.
+    "runtime_policy_update", "permission_rule_set",
 })
 
 

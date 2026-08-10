@@ -26,6 +26,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import permission_modes
 import server
 import command_catalog
 import admin_auth
@@ -1814,6 +1815,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._handle_commands_get():
             return
+        if self._handle_permission_mode_get():
+            return
         self._send_not_found()
 
     def _handle_commands_get(self):
@@ -1846,6 +1849,41 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json_payload(payload)
         return True
 
+    def _handle_permission_mode_get(self):
+        """Current autonomy mode, so a client can show it before you send.
+
+        Read-only. Setting the mode is a POST; a GET must never change it.
+        """
+        route = urllib.parse.urlsplit(self.path).path.rstrip("/") or "/"
+        if route != "/v1/permission-mode":
+            return False
+        if not self._request_auth_context()["authorized"]:
+            self._send_auth_error()
+            return True
+        self._send_json_payload(server.permission_mode_data())
+        return True
+
+    def _handle_permission_mode_post(self, req):
+        """Switch the autonomy mode. Deliberately cannot grant elevation."""
+        wanted = ""
+        if isinstance(req, dict):
+            wanted = str(req.get("mode") or "").strip()
+        if not wanted:
+            self._send_json_payload(
+                {"error": "mode is required", "modes": list(permission_modes.MODES)},
+                status=400,
+            )
+            return
+        try:
+            permission_modes.set_mode(wanted)
+        except ValueError as exc:
+            self._send_json_payload(
+                {"error": str(exc), "modes": list(permission_modes.MODES)},
+                status=400,
+            )
+            return
+        self._send_json_payload(server.permission_mode_data())
+
     def do_POST(self):
         if self._reject_disallowed_origin():
             return
@@ -1866,6 +1904,12 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         context = self._request_auth_context()
+        if path == "/v1/permission-mode":
+            if not context["authorized"]:
+                self._send_auth_error()
+                return
+            self._handle_permission_mode_post(req)
+            return
         if path == "/v1/sonder/register":
             conn = server._open_db()
             try:
