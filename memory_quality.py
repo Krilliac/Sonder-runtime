@@ -71,21 +71,30 @@ def choose_exact_duplicate_keeper(group, stats=None):
     text, then the oldest row. Exact duplicates have the same text, but this
     keeps the rule robust if whitespace/case differ.
 
-    ``avg_reward`` is read through an explicit ``None`` check. Reading it as
-    ``avg_reward or _NO_EVIDENCE_RANK`` collapsed a measured average of exactly
+    Evidence is read as TWO ranks, never one average. ``avg_reward`` is a mean
+    over both outcome populations, so ranking on it kept the lesson the runtime
+    graded 1.0 by running its own tests over one a caller reviewed and accepted
+    at 0.8 -- and the reviewed copy was the row deleted. That is the same
+    inversion the fine-tuning export carried, and it is a real ordering rather
+    than an eligibility filter, so the same rule applies: caller-judged
+    evidence decides first, the self-graded mean only breaks ties inside it.
+
+    Each rank is read through an explicit ``None`` check. Reading one as
+    ``average or _NO_EVIDENCE_RANK`` collapsed a measured average of exactly
     0.0 onto the never-evaluated rank, so a lesson the store had graded neutral
     sorted below one it had graded -1.0.
     """
     stats = stats or {}
 
-    def evidence_rank(row):
-        average = stats.get(row["id"], {}).get("avg_reward")
+    def evidence_rank(row, key):
+        average = stats.get(row["id"], {}).get(key)
         return _NO_EVIDENCE_RANK if average is None else float(average)
 
     return sorted(
         group,
         key=lambda row: (
-            -evidence_rank(row),
+            -evidence_rank(row, "avg_reward_caller"),
+            -evidence_rank(row, "avg_reward_execution"),
             -int(stats.get(row["id"], {}).get("wins") or 0),
             -int(stats.get(row["id"], {}).get("uses") or 0),
             -len(row.get("text") or ""),

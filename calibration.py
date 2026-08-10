@@ -31,17 +31,18 @@ from dataclasses import dataclass
 
 from sonder_runtime.domain.memory import rules as _rules
 
+# The split itself lives in the domain rules, next to the pricing table it has
+# to correct: two copies of it would drift, and the corpus ranking in
+# export_training_data needs the same boundary this module reports on.
+#
 # Judged by a caller who reviewed the work. The population that answers "was
 # the delegated work any good".
-CALLER_JUDGED = frozenset({"used", "copied", "edited", "accepted", "rejected"})
+CALLER_JUDGED = _rules.CALLER_JUDGED
 
 # Produced by running something. Answers "did it build / did tests pass".
-EXECUTION_GROUNDED = frozenset({"tests_passed", "compiled", "failed"})
+EXECUTION_GROUNDED = _rules.EXECUTION_GROUNDED
 
-POPULATIONS = {
-    "caller": CALLER_JUDGED,
-    "execution": EXECUTION_GROUNDED,
-}
+POPULATIONS = dict(_rules.POPULATIONS)
 
 # Below this many observations, reliability is unknown, not good.
 MIN_SAMPLE = 20
