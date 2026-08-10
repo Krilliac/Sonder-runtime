@@ -545,12 +545,16 @@ def _distillation_reason_lines(report: dict) -> list[str]:
 
 
 # Below this many caller-judged outcomes the reviewed rate is too noisy to gate
-# on, and the blended rate is the only thing left to look at.
+# on, and there is nothing honest to gate on in its place. Deliberately the same
+# value as ``calibration.MIN_SAMPLE``, which fails closed at the same point.
 _MIN_REVIEWED_SAMPLE = 20
 
+# The gate has no rate it is entitled to believe.
+_UNMEASURED_BASIS = "unmeasured"
 
-def _gating_positive_percent(report: dict) -> tuple[float, str]:
-    """The positive rate the status gate is allowed to believe.
+
+def _gating_positive_percent(report: dict) -> tuple[float | None, str]:
+    """The positive rate the status gate is allowed to believe, if any.
 
     ``positive_percent`` blends caller-judged outcomes with the runtime marking
     its own curriculum, and the curriculum outnumbers review by more than an
@@ -558,11 +562,23 @@ def _gating_positive_percent(report: dict) -> tuple[float, str]:
     reporting 96.1% positive and 52.7% on the 186 outcomes a caller actually
     judged -- a rate that should have read "attention". Once there is a usable
     reviewed sample, that is the number the thresholds apply to.
+
+    Below that sample this used to fall back to the blend, which is worse than
+    it sounds: the blend is not a noisier estimate of the reviewed rate, it is a
+    different population answering a different question, and it is the *more
+    flattering* one. A store with 500 autograded rows and no caller judgements
+    read ~100% positive, cleared both thresholds and reported "healthy" -- a
+    green check earned entirely by the runtime grading itself.
+
+    So there is no fallback. Returning ``None`` says the honest thing: nobody
+    knows. ``_status`` spends that ignorance the way ``calibration`` does at the
+    identical threshold -- it costs the store "healthy" without being read as
+    measured failure, because unmeasured is neither good nor bad.
     """
     reviewed = int(report.get("reviewed_outcomes") or 0)
     if reviewed >= _MIN_REVIEWED_SAMPLE:
         return float(report.get("reviewed_positive_percent") or 0.0), "reviewed"
-    return float(report.get("positive_percent") or 0.0), "blended"
+    return None, _UNMEASURED_BASIS
 
 
 def _status(report: dict) -> str:
@@ -585,8 +601,9 @@ def _status(report: dict) -> str:
         + int(task_embeddings.get("vector_invalid", 0))
         + int(len(task_embeddings.get("dimensions") or {}) > 1)
     )
-    positive_percent, _basis = _gating_positive_percent(report)
-    if severe or (report["outcomes"] and positive_percent < 60.0):
+    positive_percent, basis = _gating_positive_percent(report)
+    measured = positive_percent is not None
+    if severe or (report["outcomes"] and measured and positive_percent < 60.0):
         return "attention"
     hygiene = (
         quality["exact_duplicate_prunable"]
@@ -603,8 +620,14 @@ def _status(report: dict) -> str:
     if hygiene or (
         report["interactions"] >= 20
         and report["outcome_coverage_percent"] < 35.0
-    ) or (report["outcomes"] and positive_percent < 80.0) or (
+    ) or (report["outcomes"] and measured and positive_percent < 80.0) or (
         report.get("quarantined_lessons", 0)
+    ) or (
+        # Fail closed on ignorance. There are outcomes but too few judged ones
+        # to say anything about them, so "healthy" is a claim the store has not
+        # earned. "watch", not "attention": nothing is measurably wrong, the
+        # measurement is missing -- which is the thing to go and look at.
+        report["outcomes"] and basis == _UNMEASURED_BASIS
     ):
         return "watch"
     if not report["interactions"] or not report["outcomes"] or not report["lessons"]:
@@ -736,10 +759,15 @@ def format_report(report: dict) -> str:
             report.get("positive_percent", 0),
             report.get("bad_outcomes", 0),
         ),
-        "    reviewed (judged by a caller): %s | positive: %s%%"
+        "    reviewed (judged by a caller): %s | positive: %s%%%s"
         % (
             report.get("reviewed_outcomes", 0),
             report.get("reviewed_positive_percent", 0),
+            # Say it on the line carrying the number, not in a footnote. The
+            # status gate believes nothing here, so neither should a reader.
+            "   <- reviewed sample too small to gate on (need %d): the status "
+            "cannot read healthy on an unjudged store" % _MIN_REVIEWED_SAMPLE
+            if _gating_positive_percent(report)[1] == _UNMEASURED_BASIS else "",
         ),
         "    autograded (runtime marking its own curriculum): %s | positive: %s%%"
         % (
