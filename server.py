@@ -18880,7 +18880,7 @@ def _codegen_build(program, args_json, cwd, timeout, token, approval, extra_root
     if data.get("stdout_truncated") or data.get("stderr_truncated"):
         # The captured window keeps the head, and MSBuild prints its error
         # summary at the tail, so the errors are exactly what gets dropped.
-        parts.append("error: build output was truncated; the error summary may be missing")
+        parts.append(codegen_loop.TRUNCATED_MEASUREMENT_NOTICE)
     parts.append(stdout)
     parts.append(stderr)
     return "\n".join(p for p in parts if p), bool(data.get("ok"))
@@ -18970,6 +18970,19 @@ def codegen_build_loop(
                 "error: the build exited with a failure status but no output "
                 "line matched error_regex"
             ]
+        if (
+            codegen_loop.output_truncated(out)
+            and not codegen_loop.partial_output_blocked(errors)
+        ):
+            # Same failure one step further out: error_regex is a documented
+            # parameter, and a stricter one (CS\d{4}) does not match the
+            # truncation notice, so the parsed list loses the only trace that
+            # this build was never fully read. count_unreliable then returns 0
+            # and score() hands a truncated build a trustworthy (0, 0, 0),
+            # which beats an honest (0, 0, 30) -- the original defect, through
+            # a knob the docstring advertises. build_ran() consults the RAW
+            # output for exactly this reason; so does this.
+            errors = [codegen_loop.TRUNCATED_MEASUREMENT_NOTICE] + errors
         return errors
 
     def read(name):
