@@ -262,7 +262,7 @@ def test_agent_dispatch_can_learn_preference(monkeypatch, tmp_path):
     assert "User prefers direct answers." in server.preferences_status()
 
 
-def test_agent_runs_tool_then_final(monkeypatch):
+def test_agent_runs_tool_then_final(monkeypatch, without_standing):
     responses = [
         '{"tool": "memory_search", "args": {"query": "deque"}, "reason": "check memory"}',
         '{"final": "done after observation"}',
@@ -282,7 +282,7 @@ def test_agent_runs_tool_then_final(monkeypatch):
         lambda tool, args, allow_web=True, read_only=False, project="", allow_location=False: "OBSERVATION",
     )
     out = server.agent("answer with tools", tier="code", max_steps=2, checklist=False)
-    assert out.startswith("done after observation")
+    assert without_standing(out).startswith("done after observation")
     assert "=== ACTIVITY (observable work) ===" in out
     assert "tool calls:" in out
     assert "OBSERVATION" in prompts[1]
@@ -294,7 +294,7 @@ def test_agent_reports_parse_error(monkeypatch):
     assert out.startswith("ERROR: could not parse agent decision")
 
 
-def test_agent_repairs_invalid_json_decision_then_continues(monkeypatch):
+def test_agent_repairs_invalid_json_decision_then_continues(monkeypatch, without_standing):
     responses = [
         "I should inspect memory first.",
         '{"tool": "memory_search", "args": {"query": "adaptive"}}',
@@ -313,7 +313,7 @@ def test_agent_repairs_invalid_json_decision_then_continues(monkeypatch):
 
     output = server._agent_impl("inspect adaptive behavior", max_steps=2)
 
-    assert output == "done after repaired decision"
+    assert without_standing(output) == "done after repaired decision"
     assert "HOST FORMAT REPAIR 1/2" in prompts[1]
     assert "exactly one JSON object" in prompts[1]
     assert "grounded observation" in prompts[2]
@@ -558,7 +558,7 @@ def test_agent_stops_repeating_identical_failed_tool_call(monkeypatch):
     assert "HOST NO-PROGRESS" in prompts[3]
 
 
-def test_agent_gets_final_only_pass_after_tool_step_budget(monkeypatch):
+def test_agent_gets_final_only_pass_after_tool_step_budget(monkeypatch, without_standing):
     responses = [
         '{"tool": "memory_search", "args": {"query": "one"}}',
         '{"tool": "memory_search", "args": {"query": "two"}}',
@@ -579,7 +579,7 @@ def test_agent_gets_final_only_pass_after_tool_step_budget(monkeypatch):
         "inspect twice", max_steps=2, include_evidence=True,
     )
 
-    assert output.startswith("synthesized after tool budget")
+    assert without_standing(output).startswith("synthesized after tool budget")
     assert "=== TOOL EVIDENCE ===" in output
     assert "HOST FINALIZATION ONLY" in prompts[2]
 
@@ -688,7 +688,7 @@ def test_negative_claim_review_requires_exact_named_heading(monkeypatch):
     }
 
 
-def test_agent_collects_more_evidence_after_negative_claim_review(monkeypatch):
+def test_agent_collects_more_evidence_after_negative_claim_review(monkeypatch, without_standing):
     responses = [
         '{"tool":"file_read","args":{"path":"README.md"}}',
         '{"final":"The Persistent autopilot heading was not found."}',
@@ -723,7 +723,7 @@ def test_agent_collects_more_evidence_after_negative_claim_review(monkeypatch):
 
     output = server._agent_impl("Find the Persistent autopilot heading", max_steps=4)
 
-    assert output == "The Persistent autopilot heading is present."
+    assert without_standing(output) == "The Persistent autopilot heading is present."
     assert len(reviews) == 1
     assert "HOST CLAIM REVIEW" in prompts[2]
     assert "### Persistent autopilot" in prompts[2]
@@ -761,7 +761,7 @@ def test_agent_bounds_repeated_negative_claim_recovery(monkeypatch):
     assert "exact anchor was never searched" in output
 
 
-def test_agent_host_requires_successful_web_tool_before_final(monkeypatch):
+def test_agent_host_requires_successful_web_tool_before_final(monkeypatch, without_standing):
     responses = [
         '{"final": "I cannot access the web."}',
         '{"tool": "web_search", "args": {"query": "current news"}}',
@@ -786,7 +786,7 @@ def test_agent_host_requires_successful_web_tool_before_final(monkeypatch):
         required_tool_names=("web_search", "web_fetch"),
     )
 
-    assert output == "Here are the current results."
+    assert without_standing(output) == "Here are the current results."
     assert "HOST REQUIREMENT" in prompts[1]
 
 
@@ -806,7 +806,7 @@ def test_agent_rejects_final_when_required_web_tool_never_runs(monkeypatch):
     assert "required web tool" in output
 
 
-def test_agent_does_not_repeat_identical_successful_web_call(monkeypatch):
+def test_agent_does_not_repeat_identical_successful_web_call(monkeypatch, without_standing):
     responses = [
         '{"tool": "web_fetch", "args": {"url": "https://example.com"}}',
         '{"tool": "web_fetch", "args": {"url": "https://example.com"}}',
@@ -829,11 +829,11 @@ def test_agent_does_not_repeat_identical_successful_web_call(monkeypatch):
         "Fetch the page", max_steps=3, required_tool_names=("web_fetch",),
     )
 
-    assert output == "Used the fetched page."
+    assert without_standing(output) == "Used the fetched page."
     assert len(dispatches) == 1
 
 
-def test_agent_generate_enables_agent_transport_mode(monkeypatch):
+def test_agent_generate_enables_agent_transport_mode(monkeypatch, without_standing):
     seen = {}
 
     def fake_make_generate(*args, **kwargs):
@@ -843,13 +843,13 @@ def test_agent_generate_enables_agent_transport_mode(monkeypatch):
 
     monkeypatch.setattr(server, "_make_generate", fake_make_generate)
 
-    assert server._agent_impl("finish", max_steps=1) == "done"
+    assert without_standing(server._agent_impl("finish", max_steps=1)) == "done"
     assert seen["args"][3] == server._LOCAL_AGENT_NUM_PREDICT
     assert seen["accept_native_tool_calls"] is True
     assert seen["compact_cloud_reasoning"] is True
 
 
-def test_cloud_agent_budget_can_carry_bounded_file_write(monkeypatch):
+def test_cloud_agent_budget_can_carry_bounded_file_write(monkeypatch, without_standing):
     seen = {}
 
     monkeypatch.setattr(
@@ -866,12 +866,12 @@ def test_cloud_agent_budget_can_carry_bounded_file_write(monkeypatch):
 
     monkeypatch.setattr(server, "_make_generate", fake_make_generate)
 
-    assert server._agent_impl("write a complete file", max_steps=1) == "done"
+    assert without_standing(server._agent_impl("write a complete file", max_steps=1)) == "done"
     assert seen["args"][3] == server._CLOUD_AGENT_NUM_PREDICT
     assert server._CLOUD_AGENT_NUM_PREDICT == 16384
 
 
-def test_agent_does_not_repeat_identical_successful_inspection(monkeypatch):
+def test_agent_does_not_repeat_identical_successful_inspection(monkeypatch, without_standing):
     responses = [
         '{"tool":"file_read","args":{"path":"README.md"}}',
         '{"tool":"file_read","args":{"path":"README.md"}}',
@@ -893,13 +893,13 @@ def test_agent_does_not_repeat_identical_successful_inspection(monkeypatch):
 
     output = server._agent_impl("read the README", max_steps=3)
 
-    assert output == "used the first read"
+    assert without_standing(output) == "used the first read"
     assert len(dispatches) == 1
     assert "HOST CACHED INSPECTION" in prompts[2]
     assert "README evidence" in prompts[2]
 
 
-def test_agent_canonicalizes_equivalent_inspection_paths(monkeypatch, tmp_path):
+def test_agent_canonicalizes_equivalent_inspection_paths(monkeypatch, tmp_path, without_standing):
     responses = [
         '{"tool":"file_read","args":{"path":"README.md"}}',
         '{"tool":"file_read","args":{"path":"./README.md"}}',
@@ -923,12 +923,12 @@ def test_agent_canonicalizes_equivalent_inspection_paths(monkeypatch, tmp_path):
         "read the README", max_steps=3, project=str(tmp_path),
     )
 
-    assert output == "used canonical cached evidence"
+    assert without_standing(output) == "used canonical cached evidence"
     assert len(dispatches) == 1
     assert "HOST CACHED INSPECTION" in prompts[2]
 
 
-def test_agent_allows_identical_inspection_after_mutation(monkeypatch):
+def test_agent_allows_identical_inspection_after_mutation(monkeypatch, without_standing):
     responses = [
         '{"tool":"file_read","args":{"path":"README.md"}}',
         '{"tool":"file_write","args":{"path":"README.md","content":"updated"}}',
@@ -951,7 +951,7 @@ def test_agent_allows_identical_inspection_after_mutation(monkeypatch):
 
     output = server._agent_impl("update and reread", max_steps=4)
 
-    assert output == "verified the update"
+    assert without_standing(output) == "verified the update"
     assert [tool for tool, _ in dispatches] == [
         "file_read", "file_write", "file_read",
     ]
@@ -985,7 +985,7 @@ def test_agent_stops_repeating_identical_successful_inspection(monkeypatch):
     assert len(dispatches) == 1
 
 
-def test_agent_dry_run_does_not_invalidate_cached_inspection(monkeypatch):
+def test_agent_dry_run_does_not_invalidate_cached_inspection(monkeypatch, without_standing):
     responses = [
         '{"tool":"file_read","args":{"path":"README.md"}}',
         '{"tool":"file_read","args":{"path":"README.md"}}',
@@ -1009,11 +1009,11 @@ def test_agent_dry_run_does_not_invalidate_cached_inspection(monkeypatch):
 
     output = server._agent_impl("inspect and dry-run delete", max_steps=5)
 
-    assert output == "used cached evidence"
+    assert without_standing(output) == "used cached evidence"
     assert [tool for tool, _ in dispatches] == ["file_read", "file_delete"]
 
 
-def test_agent_execution_tool_invalidates_cached_inspection(monkeypatch):
+def test_agent_execution_tool_invalidates_cached_inspection(monkeypatch, without_standing):
     responses = [
         '{"tool":"file_read","args":{"path":"README.md"}}',
         '{"tool":"workspace_run","args":{"program":"generator","args":[]}}',
@@ -1036,7 +1036,7 @@ def test_agent_execution_tool_invalidates_cached_inspection(monkeypatch):
 
     output = server._agent_impl("generate and reread", max_steps=4)
 
-    assert output == "read generated state"
+    assert without_standing(output) == "read generated state"
     assert [tool for tool, _ in dispatches] == [
         "file_read", "workspace_run", "file_read",
     ]
@@ -1054,6 +1054,7 @@ def test_agent_execution_tool_invalidates_cached_inspection(monkeypatch):
 )
 def test_agent_failed_execution_invalidates_cached_inspection(
     monkeypatch, execution_decision, execution_tool,
+    without_standing,
 ):
     responses = [
         '{"tool":"file_read","args":{"path":"README.md"}}',
@@ -1079,7 +1080,7 @@ def test_agent_failed_execution_invalidates_cached_inspection(
 
     output = server._agent_impl("run and reread", max_steps=4)
 
-    assert output == "read post-execution state"
+    assert without_standing(output) == "read post-execution state"
     assert [tool for tool, _ in dispatches] == [
         "file_read", execution_tool, "file_read",
     ]
@@ -1142,7 +1143,7 @@ def test_agent_requires_successful_file_evidence(monkeypatch):
     assert "I inspected it" not in out
 
 
-def test_agent_attaches_successful_file_evidence(monkeypatch):
+def test_agent_attaches_successful_file_evidence(monkeypatch, without_standing):
     responses = [
         '{"tool": "file_read", "args": {"path": "README.md"}, "reason": "inspect source"}',
         '{"final": "README says hello."}',
@@ -1167,12 +1168,12 @@ def test_agent_attaches_successful_file_evidence(monkeypatch):
         include_evidence=True,
     )
 
-    assert out.startswith("README says hello.")
+    assert without_standing(out).startswith("README says hello.")
     assert "=== TOOL EVIDENCE ===" in out
     assert "tool=file_read" in out
 
 
-def test_agent_counts_project_detection_as_file_evidence(monkeypatch):
+def test_agent_counts_project_detection_as_file_evidence(monkeypatch, without_standing):
     responses = [
         '{"tool":"project_detect","args":{"path":"."},"reason":"inspect manifests"}',
         '{"final":"Detected the project from its manifests."}',
@@ -1199,12 +1200,13 @@ def test_agent_counts_project_detection_as_file_evidence(monkeypatch):
         include_evidence=True,
     )
 
-    assert out.startswith("Detected the project")
+    assert without_standing(out).startswith("Detected the project")
     assert "tool=project_detect" in out
 
 
 def test_project_scoped_agent_accepts_absolute_path_inside_host_root(
     monkeypatch, tmp_path,
+    without_standing,
 ):
     """The model may echo PROJECT ROOT as an absolute read path.
 
@@ -1242,7 +1244,7 @@ def test_project_scoped_agent_accepts_absolute_path_inside_host_root(
         project=str(tmp_path),
     )
 
-    assert out.startswith("The project evidence was inspected.")
+    assert without_standing(out).startswith("The project evidence was inspected.")
     assert observed and observed[0][0] == "file_read"
     assert observed[0][2]["project"] == str(tmp_path.resolve())
     assert "=== TOOL EVIDENCE ===" in out
@@ -1483,7 +1485,7 @@ def test_validation_rejects_inline_keyword_and_partial_file_checks(tmp_path):
     )
 
 
-def test_failed_mutator_invalidates_successful_inspection_cache(monkeypatch):
+def test_failed_mutator_invalidates_successful_inspection_cache(monkeypatch, without_standing):
     responses = [
         '{"tool":"file_read","args":{"path":"README.md"}}',
         '{"tool":"game_generate_and_test","args":{"name":"partial"}}',
@@ -1507,7 +1509,7 @@ def test_failed_mutator_invalidates_successful_inspection_cache(monkeypatch):
 
     output = server._agent_impl("inspect, generate, inspect", max_steps=4)
 
-    assert output == "reported the failed generation"
+    assert without_standing(output) == "reported the failed generation"
     assert dispatches == [
         "file_read", "game_generate_and_test", "file_read",
     ]
