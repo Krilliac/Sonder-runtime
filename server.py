@@ -72,6 +72,7 @@ import codegen_loop
 import file_ops
 import data_query as data_query_module
 import json_patch_tool
+import json_schema_verifier
 import text_patch as text_patch_ops
 import workspace_compare as workspace_compare_module
 import log_inspect as log_inspect_module
@@ -922,7 +923,7 @@ def resolve_sonder_model(strict=False):
 def _make_generate(
     model, system, temperature, num_predict, num_ctx, cloud=False, timeout=None,
     cancel_check=None, accept_native_tool_calls=False,
-    compact_cloud_reasoning=False,
+    compact_cloud_reasoning=False, schema=None,
 ):
     """Build a generate(prompt, history) closure for `model`.
 
@@ -930,6 +931,12 @@ def _make_generate(
     (they're VRAM/local-context knobs the remote tier doesn't take), matching how the
     non-learning cloud path posts.  The opt-in agent flags accept one canonical
     native tool call and keep hosted reasoning compact for a small JSON contract.
+
+    `schema` is a JSON Schema object handed to Ollama as the decoder-side
+    ``format`` constraint. It is omitted from the payload entirely when None, so
+    an unconstrained call posts exactly the bytes it always did. Constraining
+    the decoder is not the same as verifying the result -- see
+    `_require_schema_match`, which callers apply to the returned text.
     """
     cloud = bool(cloud or _is_cloud_model_name(model))
 
@@ -954,6 +961,8 @@ def _make_generate(
             options = _local_model_options(temperature, prediction_limit, num_ctx)
         payload = {"model": model, "messages": messages, "stream": False,
                    "options": options}
+        if schema is not None:
+            payload["format"] = schema
         if cloud:
             _apply_cloud_thinking_policy(
                 payload, model, compact=compact_cloud_reasoning,
@@ -3705,6 +3714,74 @@ def _get(path: str) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _parse_schema_arg(schema):
+    """Normalize an offload `schema` argument to a schema object, or None.
+
+    Accepts an already-parsed object (internal callers) or the JSON text the
+    tool surface passes (matching how every other structured argument crosses
+    that boundary). A blank string means "no schema", so the unconstrained path
+    stays the default. Anything else that is not a JSON object is a caller
+    error and is raised as a typed configuration failure -- never quietly
+    dropped, because dropping it would run the call unconstrained while the
+    caller believed it was constrained.
+    """
+    if schema is None:
+        return None
+    if isinstance(schema, dict):
+        return schema
+    if isinstance(schema, str):
+        text = schema.strip()
+        if not text:
+            return None
+        try:
+            parsed = json.loads(text)
+        except ValueError as exc:
+            raise ModelCallError(
+                "configuration",
+                "schema is not valid JSON: %s" % exc,
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise ModelCallError(
+                "configuration",
+                "schema must be a JSON object, got %s" % type(parsed).__name__,
+            )
+        return parsed
+    raise ModelCallError(
+        "configuration",
+        "schema must be a JSON object or JSON text, got %s" % type(schema).__name__,
+    )
+
+
+def _require_schema_match(text, schema):
+    """Check a schema-constrained generation actually matches its schema.
+
+    Ollama's ``format`` is applied by the backend we asked, which makes it a
+    claim rather than evidence: a stale server, a model that ignores the
+    grammar, or a truncated decode all produce text that never went through the
+    constraint we think we imposed. Re-checking it here is cheap and makes the
+    guarantee ours.
+
+    A violation raises. It is deliberately not repaired, coerced, defaulted or
+    silently re-asked -- rejecting non-conforming output is the entire point of
+    requesting a schema, and a path that quietly fixes it up would return
+    something that looks validated and is not. The failure names every path
+    that did not validate so the caller can see what was wrong.
+    """
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError) as exc:
+        raise ModelCallError(
+            "protocol",
+            "response is not valid JSON despite a schema constraint: %s" % exc,
+        ) from exc
+    errors = json_schema_verifier.validate(data, schema)
+    if errors:
+        raise ModelCallError(
+            "protocol", "schema violation: %s" % "; ".join(errors),
+        )
+    return data
+
+
 def _offload_impl(
     prompt: str,
     tier: str = "fast",
@@ -3715,8 +3792,10 @@ def _offload_impl(
     learn: bool = True,
     timeout: int = TIMEOUT,
     cancel_check=None,
+    schema=None,
 ) -> str:
     """Internal offload path; model failures stay typed for orchestrators."""
+    schema = _parse_schema_arg(schema)
     # 0 means "ask the context policy", which the session path already does.
     # This path hardcoded 4096 and so ignored the policy and its env knobs,
     # which cost real capability: an autopilot run inspecting a 524 KB source
@@ -3755,6 +3834,8 @@ def _offload_impl(
             "stream": False,
             "options": options,
         }
+        if schema is not None:
+            payload["format"] = schema
         if cloud:
             _apply_cloud_thinking_policy(payload, model)
         else:
@@ -3800,6 +3881,11 @@ def _offload_impl(
                 "tokens_out": int(tokens_out or 0),
                 "token_source": source,
             }
+            if schema is not None:
+                # A response that did not honour the schema is a failed call,
+                # not a successful one with bad content -- so this runs before
+                # `ok`, and the tracker records the attempt as a failure.
+                _require_schema_match(msg, schema)
             ok = True
             return msg
         finally:
@@ -3827,6 +3913,7 @@ def _offload_impl(
             cloud=True,
             timeout=request_timeout,
             cancel_check=cancel_check,
+            schema=schema,
         )
         retrieve_kwargs["retrieve_fn"] = _no_retrieve
     else:
@@ -3845,6 +3932,7 @@ def _offload_impl(
             num_ctx,
             timeout=request_timeout,
             cancel_check=cancel_check,
+            schema=schema,
         )
     conn = _open_db()
     try:
@@ -3853,6 +3941,8 @@ def _offload_impl(
         )
     finally:
         conn.close()
+    if schema is not None:
+        _require_schema_match(response, schema)
     return with_footer(response, iid)
 
 
@@ -3866,6 +3956,7 @@ def offload(
     num_ctx: int = 0,
     learn: bool = True,
     timeout: int = TIMEOUT,
+    schema: str = "",
 ) -> str:
     """Offload a self-contained subtask to a local or Ollama-cloud model.
 
@@ -3885,6 +3976,15 @@ def offload(
     Tiers: fast=3B (default), code=7B coder, general=7B instruct,
     cloud-code / cloud-general (METERED, prompt leaves this machine).
     Give a FULLY self-contained prompt (the model can't see this chat or your files).
+
+    schema: optional JSON Schema *as JSON text*, e.g.
+    '{"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}}'.
+    Supplying it constrains the model's decoder to that shape AND re-checks the
+    returned text against it here. A response that does not match is REJECTED
+    with the failing path named -- it is never repaired into a passing one, and
+    there is no silent retry. Omit it (the default) and this call behaves
+    exactly as it always has: no format constraint, no validation, raw text back.
+    Small object shapes work far better than deep ones on a 3B/7B local tier.
     """
     _maybe_live_reload()
     try:
@@ -3897,6 +3997,7 @@ def offload(
             num_ctx=num_ctx,
             learn=learn,
             timeout=timeout,
+            schema=schema,
         )
     except ModelCallError as error:
         return _format_model_call_error(error)
