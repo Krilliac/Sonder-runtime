@@ -198,6 +198,25 @@ class _FakeExecutor:
         return self._result
 
 
+def _wait_past(deadline_monotonic, limit_seconds=2.0):
+    """Block until ``time.monotonic()`` is genuinely past ``deadline``.
+
+    Sleeping a fixed amount does not work here. ``time.monotonic()`` has a
+    15.625 ms resolution on Windows, so a ``sleep(0.01)`` used to verify a
+    1 ms deadline advanced the clock by exactly zero in 14 of 40 measured
+    runs -- both reads landed inside one tick -- and the test failed roughly
+    one run in eight. Waiting on the clock the service actually reads makes
+    it deterministic on any resolution.
+    """
+    if deadline_monotonic is None:
+        raise AssertionError("context carries no deadline to wait past")
+    give_up = time.monotonic() + limit_seconds
+    while time.monotonic() <= deadline_monotonic:
+        if time.monotonic() > give_up:
+            raise AssertionError("clock never advanced past the deadline")
+        time.sleep(0.005)
+
+
 def _context(deadline=None, **overrides):
     kwargs = dict(
         correlation_id="test",
@@ -248,7 +267,7 @@ class TestToolService:
             _FakeExecutor(),
         )
         ctx = _context(deadline=0.001)
-        time.sleep(0.01)
+        _wait_past(ctx.deadline_monotonic)
         with pytest.raises(DeadlineExceeded):
             svc.execute(ToolCall(tool_name="test"), ctx)
 

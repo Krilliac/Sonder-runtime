@@ -173,6 +173,12 @@ CREATE TABLE IF NOT EXISTS task_events (
     note TEXT,
     ts TEXT DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS task_deps (
+    task_id TEXT NOT NULL,
+    depends_on TEXT NOT NULL,
+    created_ts TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (task_id, depends_on)
+);
 CREATE TABLE IF NOT EXISTS preferences (
     id TEXT PRIMARY KEY,
     scope TEXT DEFAULT 'global',
@@ -3014,6 +3020,105 @@ def task_children(conn, task_id):
         (resolved,),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def delete_task(conn, task_id):
+    resolved = resolve_task_id(conn, task_id)
+    if not resolved:
+        raise ValueError("no unique task '%s'" % task_id)
+    children = conn.execute(
+        "SELECT id FROM tasks WHERE parent_id=?", (resolved,)
+    ).fetchall()
+    child_ids = [r["id"] for r in children]
+    all_ids = [resolved] + child_ids
+    placeholders = ",".join("?" * len(all_ids))
+    conn.execute("DELETE FROM task_events WHERE task_id IN (%s)" % placeholders, all_ids)
+    conn.execute("DELETE FROM task_deps WHERE task_id IN (%s) OR depends_on IN (%s)"
+                 % (placeholders, placeholders), all_ids + all_ids)
+    conn.execute("DELETE FROM tasks WHERE id IN (%s)" % placeholders, all_ids)
+    conn.commit()
+    log_task_event(conn, resolved, "deleted", "task and %d children removed" % len(child_ids))
+    return {"deleted": resolved, "children_removed": len(child_ids)}
+
+
+def add_task_dep(conn, task_id, depends_on):
+    resolved = resolve_task_id(conn, task_id)
+    dep_resolved = resolve_task_id(conn, depends_on)
+    if not resolved:
+        raise ValueError("no unique task '%s'" % task_id)
+    if not dep_resolved:
+        raise ValueError("no unique task '%s'" % depends_on)
+    if resolved == dep_resolved:
+        raise ValueError("a task cannot depend on itself")
+    conn.execute(
+        "INSERT OR IGNORE INTO task_deps(task_id, depends_on) VALUES(?, ?)",
+        (resolved, dep_resolved),
+    )
+    conn.commit()
+    log_task_event(conn, resolved, "dep_added", "depends on %s" % dep_resolved[:8])
+    return {"task_id": resolved, "depends_on": dep_resolved}
+
+
+def remove_task_dep(conn, task_id, depends_on):
+    resolved = resolve_task_id(conn, task_id)
+    dep_resolved = resolve_task_id(conn, depends_on)
+    if not resolved or not dep_resolved:
+        return {"removed": False}
+    conn.execute(
+        "DELETE FROM task_deps WHERE task_id=? AND depends_on=?",
+        (resolved, dep_resolved),
+    )
+    conn.commit()
+    return {"removed": True, "task_id": resolved, "depends_on": dep_resolved}
+
+
+def task_dependencies(conn, task_id):
+    resolved = resolve_task_id(conn, task_id)
+    if not resolved:
+        return []
+    rows = conn.execute(
+        "SELECT t.* FROM tasks t JOIN task_deps d ON t.id=d.depends_on "
+        "WHERE d.task_id=? ORDER BY t.priority ASC, t.rowid ASC",
+        (resolved,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def task_dependents(conn, task_id):
+    resolved = resolve_task_id(conn, task_id)
+    if not resolved:
+        return []
+    rows = conn.execute(
+        "SELECT t.* FROM tasks t JOIN task_deps d ON t.id=d.task_id "
+        "WHERE d.depends_on=? ORDER BY t.priority ASC, t.rowid ASC",
+        (resolved,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def task_progress(conn, project=""):
+    clauses = []
+    values = []
+    if project:
+        clauses.append("project=?")
+        values.append(project)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = conn.execute(
+        "SELECT status, COUNT(*) as cnt FROM tasks%s GROUP BY status" % where,
+        tuple(values),
+    ).fetchall()
+    counts = {r["status"]: r["cnt"] for r in rows}
+    total = sum(counts.values())
+    done = counts.get("done", 0) + counts.get("canceled", 0)
+    return {
+        "total": total,
+        "pending": counts.get("pending", 0),
+        "in_progress": counts.get("in_progress", 0),
+        "blocked": counts.get("blocked", 0),
+        "done": counts.get("done", 0),
+        "canceled": counts.get("canceled", 0),
+        "progress_pct": round(100 * done / total, 1) if total else 0.0,
+    }
 
 
 def all_preferences(conn, limit=50, include_disabled=False):

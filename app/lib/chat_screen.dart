@@ -34,8 +34,19 @@ class _ChatScreenState extends State<ChatScreen> {
   // Slash-command palette. Non-empty only while the composer holds a single
   // "/word" token with no space yet, so typing a normal message that merely
   // contains a slash never opens it.
-  List<MapEntry<String, String>> _paletteMatches = const [];
+  List<SonderCommand> _paletteMatches = const [];
   int _paletteSelected = 0;
+
+  /// True while the palette is showing the server's "popular" shortlist (the
+  /// user has typed a bare "/"), which is the only case that gets category
+  /// headers — once a query narrows the list, headers are just noise.
+  bool _paletteGrouped = false;
+
+  /// The server's command catalog, fetched once on init and then filtered
+  /// entirely in memory. Starts as the hardcoded fallback so the palette works
+  /// before the fetch lands, and stays that way if the fetch fails.
+  CommandCatalog _catalog = _fallbackCatalog;
+  bool _catalogFromServer = false;
 
   /// Append the original exception to error bubbles. Off by default: the
   /// friendly message is what a person needs, the raw one is what a
@@ -57,7 +68,12 @@ class _ChatScreenState extends State<ChatScreen> {
   late String _model;
   List<String> _models = const ['sonder'];
 
-  // Quick-access slash commands the serve layer understands.
+  /// Offline fallback for the command palette.
+  ///
+  /// The real surface lives in the server's `command_catalog.py` and arrives
+  /// over GET /v1/commands; this short list is what the palette falls back to
+  /// when that fetch fails, so typing "/" offline still offers something
+  /// rather than an empty panel.
   static const _quickCommands = <String, String>{
     '/stats': 'Show learning stats',
     '/context': 'Show context health',
@@ -102,6 +118,39 @@ class _ChatScreenState extends State<ChatScreen> {
     '/fail': 'Mark last answer bad',
   };
 
+  /// Names promoted to the top of the offline palette, mirroring the shape of
+  /// the server's own `popular` list.
+  static const _fallbackPopular = <String>[
+    '/help',
+    '/commands',
+    '/stats',
+    '/context',
+    '/todo',
+    '/activity',
+    '/report',
+    '/dump',
+  ];
+
+  /// [_quickCommands] rendered as a catalog so the palette has exactly one
+  /// code path whether or not the server answered.
+  ///
+  /// Risk is left blank rather than guessed: an unlabelled row is honest,
+  /// a wrongly-green one is not. The `/asset …` entries keep their example
+  /// payload in the name, which is what gets inserted into the composer.
+  static final CommandCatalog _fallbackCatalog = CommandCatalog(
+    commands: _quickCommands.entries
+        .map((e) => SonderCommand(
+              name: e.key,
+              category: 'quick',
+              summary: e.value,
+              native: true,
+              usage: e.key,
+            ))
+        .toList(growable: false),
+    categories: const {'quick': 'Built-in quick commands (offline fallback)'},
+    popular: _fallbackPopular,
+  );
+
   SonderApi get _api => SonderApi(
         baseUrl: widget.settings.serverUrl,
         apiKey: widget.settings.apiKey,
@@ -113,6 +162,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _model = widget.settings.model;
     _loadThreads();
     _refreshModels();
+    _refreshCommands();
     _refreshStatus();
     _statusTimer = Timer.periodic(
       const Duration(seconds: 1),
@@ -121,37 +171,74 @@ class _ChatScreenState extends State<ChatScreen> {
     _input.addListener(_updatePalette);
   }
 
+  /// Pull the server's command catalog once, and keep the hardcoded fallback
+  /// if it cannot be reached.
+  ///
+  /// Deliberately silent on failure: the palette degrading from ~265 commands
+  /// to ~35 is not worth an error bubble mid-conversation, and every command
+  /// still works when typed regardless of what the palette knows about.
+  Future<void> _refreshCommands() async {
+    try {
+      final catalog = await _api.fetchCommands();
+      if (!mounted || catalog.isEmpty) return;
+      setState(() {
+        _catalog = catalog;
+        _catalogFromServer = true;
+        // Cleared so the recompute below always applies: its "nothing visible
+        // changed" shortcut compares length and first name, which a fallback
+        // and a server list can coincidentally share.
+        _paletteMatches = const [];
+        _paletteGrouped = false;
+      });
+      // A catalog that landed while the palette was open would otherwise show
+      // stale fallback rows until the next keystroke.
+      _updatePalette();
+    } catch (_) {
+      // Offline / no auth / older server without /v1/commands — keep the
+      // static fallback list.
+    }
+  }
+
   /// Recompute the slash-command matches for whatever is in the composer.
   ///
   /// Opens only for a lone leading "/token": once a space is typed the user
   /// is writing arguments (or prose that happens to contain a slash), so the
   /// palette gets out of the way rather than hovering over the conversation.
+  ///
+  /// Filtering runs against the in-memory catalog rather than
+  /// GET /v1/commands/complete, so narrowing costs no round trip per keypress.
   void _updatePalette() {
     final text = _input.text;
-    List<MapEntry<String, String>> matches = const [];
+    List<SonderCommand> matches = const [];
+    var grouped = false;
     if (text.startsWith('/') && !text.contains(RegExp(r'[\s\n]'))) {
       final query = text.toLowerCase();
-      matches = _quickCommands.entries
-          .where((e) => e.key.toLowerCase().startsWith(query))
-          .toList();
-      // Nothing starts with it -- fall back to matching the description too,
-      // so "/memory" still finds the quality and privacy audits.
-      if (matches.isEmpty && query.length > 1) {
-        final needle = query.substring(1);
-        matches = _quickCommands.entries
-            .where((e) =>
-                e.key.toLowerCase().contains(needle) ||
-                e.value.toLowerCase().contains(needle))
-            .toList();
+      if (query == '/') {
+        // A bare slash is a browse, not a search: show the shortlist the
+        // server marks as popular, labelled by category.
+        matches = _catalog.popularCommands;
+        grouped = true;
+      } else {
+        matches =
+            _catalog.commands.where((c) => c.matchesPrefix(query)).toList();
+        // Nothing starts with it -- fall back to matching the summary and
+        // category too, so "/memory" still finds the quality and privacy
+        // audits.
+        if (matches.isEmpty) {
+          final needle = query.substring(1);
+          matches =
+              _catalog.commands.where((c) => c.matchesLoose(needle)).toList();
+        }
       }
     }
-    if (matches.length == _paletteMatches.length &&
-        (matches.isEmpty ||
-            matches.first.key == _paletteMatches.first.key)) {
+    if (grouped == _paletteGrouped &&
+        matches.length == _paletteMatches.length &&
+        (matches.isEmpty || matches.first.name == _paletteMatches.first.name)) {
       return; // nothing visible changed; skip the rebuild
     }
     setState(() {
       _paletteMatches = matches;
+      _paletteGrouped = grouped;
       _paletteSelected = 0;
     });
   }
@@ -167,6 +254,7 @@ class _ChatScreenState extends State<ChatScreen> {
     );
     setState(() {
       _paletteMatches = const [];
+      _paletteGrouped = false;
       _paletteSelected = 0;
     });
     _inputFocus.requestFocus();
@@ -192,11 +280,14 @@ class _ChatScreenState extends State<ChatScreen> {
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.tab) {
-      _pickCommand(_paletteMatches[_paletteSelected].key);
+      _pickCommand(_paletteMatches[_paletteSelected].name);
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.escape) {
-      setState(() => _paletteMatches = const []);
+      setState(() {
+        _paletteMatches = const [];
+        _paletteGrouped = false;
+      });
       return KeyEventResult.handled;
     }
     return KeyEventResult.ignored;
@@ -274,6 +365,25 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (_) {
       // Offline / no auth — keep the static fallback list.
     }
+  }
+
+  /// Browse the command surface by category.
+  ///
+  /// A flat menu worked at ~35 commands and does not at ~265, so the toolbar
+  /// opens a two-level browser (categories, then the commands inside one)
+  /// with a search box across the whole catalog. Picking a command loads it
+  /// into the composer rather than sending it, because most commands take
+  /// arguments the user still has to fill in.
+  Future<void> _openCommandBrowser() async {
+    final picked = await showDialog<String>(
+      context: context,
+      builder: (_) => _CommandBrowser(
+        catalog: _catalog,
+        fromServer: _catalogFromServer,
+      ),
+    );
+    if (picked == null || !mounted) return;
+    _pickCommand(picked);
   }
 
   void _selectModel(String m) {
@@ -597,21 +707,10 @@ class _ChatScreenState extends State<ChatScreen> {
           ],
         ),
         actions: [
-          PopupMenuButton<String>(
+          IconButton(
             tooltip: 'Commands',
             icon: const Icon(Icons.bolt_outlined),
-            onSelected: (c) => _send(c),
-            itemBuilder: (_) => _quickCommands.entries
-                .map((e) => PopupMenuItem<String>(
-                      value: e.key,
-                      child: ListTile(
-                        dense: true,
-                        contentPadding: EdgeInsets.zero,
-                        title: Text(e.key),
-                        subtitle: Text(e.value),
-                      ),
-                    ))
-                .toList(),
+            onPressed: _openCommandBrowser,
           ),
           IconButton(
             tooltip: 'New chat',
@@ -666,6 +765,8 @@ class _ChatScreenState extends State<ChatScreen> {
             onSend: () => _send(),
             paletteMatches: _paletteMatches,
             paletteSelected: _paletteSelected,
+            paletteGrouped: _paletteGrouped,
+            paletteCategories: _catalog.categories,
             onPalettePick: _pickCommand,
             onKey: _onComposerKey,
           ),
@@ -1385,78 +1486,435 @@ class _TypingDotsState extends State<_TypingDots>
   }
 }
 
-/// Command palette that opens when the composer starts with "/".
+/// Colour for a command's risk band.
 ///
-/// The commands were already listed in `_quickCommands`, but only reachable
-/// by typing one exactly from memory or finding it on the System page. This
-/// surfaces them where they are used, filtered as you type, the same way the
-/// slash menu works in the terminal REPL.
-class _CommandPalette extends StatelessWidget {
-  final List<MapEntry<String, String>> matches;
-  final int selected;
-  final ValueChanged<String> onPick;
+/// An unrecognised or missing band deliberately gets the neutral outline
+/// colour: an unlabelled row is honest, a wrongly-green one is not.
+Color _riskColor(ColorScheme cs, String risk) {
+  switch (risk) {
+    case 'safe':
+      return const Color(0xFF4CAF50);
+    case 'ask':
+      return const Color(0xFFFFC107);
+    case 'mutation':
+      return const Color(0xFFFF7043);
+    case 'dangerous':
+      return const Color(0xFFE53935);
+    default:
+      return cs.outline;
+  }
+}
 
-  const _CommandPalette({
-    required this.matches,
-    required this.selected,
-    required this.onPick,
-  });
+/// Human wording for a risk band, used as the dot's tooltip.
+String _riskLabel(String risk) {
+  switch (risk) {
+    case 'safe':
+      return 'Safe — read only';
+    case 'ask':
+      return 'Asks before acting';
+    case 'mutation':
+      return 'Changes files or state';
+    case 'dangerous':
+      return 'Dangerous — destructive';
+    default:
+      return 'Risk not published';
+  }
+}
+
+/// Small coloured dot that carries a command's risk band.
+class _RiskDot extends StatelessWidget {
+  final String risk;
+  const _RiskDot({required this.risk});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Tooltip(
+      message: _riskLabel(risk),
+      child: Container(
+        width: 9,
+        height: 9,
+        decoration: BoxDecoration(
+          color: _riskColor(cs, risk),
+          shape: BoxShape.circle,
+        ),
+      ),
+    );
+  }
+}
+
+/// Compact category tag shown beside a command name.
+class _CategoryTag extends StatelessWidget {
+  final String category;
+  const _CategoryTag({required this.category});
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: cs.outlineVariant),
+      ),
+      child: Text(
+        category,
+        style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+      ),
+    );
+  }
+}
+
+/// One command as it appears in the palette and in the browser: risk dot,
+/// name, category tag, summary, and the usage line that says what arguments
+/// it takes.
+class _CommandRow extends StatelessWidget {
+  final SonderCommand command;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _CommandRow({
+    required this.command,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final usage = command.usageLine;
+    return InkWell(
+      onTap: onTap,
+      child: Container(
+        color: selected ? cs.primary.withValues(alpha: 0.16) : null,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                _RiskDot(risk: command.risk),
+                const SizedBox(width: 8),
+                SizedBox(
+                  width: 150,
+                  child: Text(
+                    // The asset commands carry a whole example payload as
+                    // their name; showing the first token keeps rows readable.
+                    command.displayName,
+                    style: TextStyle(
+                      fontFamily: 'monospace',
+                      fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                      color: cs.primary,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                if (command.category.isNotEmpty) ...[
+                  const SizedBox(width: 8),
+                  _CategoryTag(category: command.category),
+                ],
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    command.summary,
+                    style: TextStyle(color: cs.onSurfaceVariant),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            if (usage != command.displayName)
+              Padding(
+                padding: const EdgeInsets.only(left: 17, top: 2),
+                child: Text(
+                  usage,
+                  style: TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 11,
+                    color: cs.onSurfaceVariant.withValues(alpha: 0.75),
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A palette line: either a category heading or a selectable command.
+class _PaletteRow {
+  final String? heading;
+  final SonderCommand? command;
+
+  /// Index into the flat match list, so keyboard selection stays independent
+  /// of however many headings were interleaved.
+  final int matchIndex;
+
+  const _PaletteRow.heading(this.heading)
+      : command = null,
+        matchIndex = -1;
+  const _PaletteRow.command(this.command, this.matchIndex) : heading = null;
+}
+
+/// Command palette that opens when the composer starts with "/".
+///
+/// Rows come from the server's command catalog (GET /v1/commands), cached in
+/// the chat screen and filtered in memory as you type — the same way the
+/// slash menu works in the terminal REPL. A bare "/" browses the popular
+/// shortlist grouped under category headings; any further character narrows
+/// to a flat ranked list where headings would only be noise.
+class _CommandPalette extends StatelessWidget {
+  final List<SonderCommand> matches;
+  final int selected;
+
+  /// Insert category headings (true only for the bare-"/" browse).
+  final bool grouped;
+
+  /// Category key -> blurb, used to caption the headings.
+  final Map<String, String> categories;
+  final ValueChanged<String> onPick;
+
+  const _CommandPalette({
+    required this.matches,
+    required this.selected,
+    required this.grouped,
+    required this.categories,
+    required this.onPick,
+  });
+
+  List<_PaletteRow> get _rows {
+    final rows = <_PaletteRow>[];
+    String? lastCategory;
+    for (var i = 0; i < matches.length; i++) {
+      final command = matches[i];
+      if (grouped && command.category != lastCategory) {
+        lastCategory = command.category;
+        rows.add(_PaletteRow.heading(command.category));
+      }
+      rows.add(_PaletteRow.command(command, i));
+    }
+    return rows;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final rows = _rows;
+    return Container(
       margin: const EdgeInsets.only(bottom: 8),
-      constraints: const BoxConstraints(maxHeight: 280),
+      constraints: const BoxConstraints(maxHeight: 320),
       decoration: BoxDecoration(
         color: cs.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: cs.outlineVariant),
       ),
       child: ListView.builder(
+        key: const Key('command-palette'),
         shrinkWrap: true,
         padding: const EdgeInsets.symmetric(vertical: 4),
-        itemCount: matches.length,
+        itemCount: rows.length,
         itemBuilder: (context, i) {
-          final entry = matches[i];
-          final isSelected = i == selected;
-          // The asset commands carry a whole example payload as their key;
-          // showing the first token keeps every row readable.
-          final name = entry.key.split(' ').first;
-          return InkWell(
-            onTap: () => onPick(entry.key),
-            child: Container(
-              color: isSelected ? cs.primary.withValues(alpha: 0.16) : null,
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              child: Row(
+          final row = rows[i];
+          final command = row.command;
+          if (command == null) {
+            final key = row.heading ?? '';
+            final blurb = categories[key] ?? '';
+            return Padding(
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 2),
+              child: Text(
+                blurb.isEmpty ? key.toUpperCase() : '${key.toUpperCase()} — $blurb',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.6,
+                  color: cs.onSurfaceVariant,
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            );
+          }
+          return _CommandRow(
+            command: command,
+            selected: row.matchIndex == selected,
+            onTap: () => onPick(command.name),
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// Two-level browser for the whole command surface, opened from the toolbar.
+///
+/// The old toolbar menu listed every command flat, which stops working once
+/// the catalog is a few hundred entries: this opens on the category list,
+/// drills into one category, and offers a search box that cuts across all of
+/// them. Returns the picked command's name via [Navigator.pop] so the caller
+/// can load it into the composer.
+class _CommandBrowser extends StatefulWidget {
+  final CommandCatalog catalog;
+
+  /// False when the catalog fetch failed and these are the built-in fallback
+  /// commands — surfaced in the footer so a short list is never mistaken for
+  /// the real surface.
+  final bool fromServer;
+
+  const _CommandBrowser({required this.catalog, required this.fromServer});
+
+  @override
+  State<_CommandBrowser> createState() => _CommandBrowserState();
+}
+
+class _CommandBrowserState extends State<_CommandBrowser> {
+  final _search = TextEditingController();
+
+  /// Null while showing the category list; otherwise the category being
+  /// drilled into.
+  String? _category;
+  String _query = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _search.addListener(() {
+      final next = _search.text.trim().toLowerCase();
+      if (next == _query) return;
+      setState(() => _query = next);
+    });
+  }
+
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
+  }
+
+  /// Search wins over the category drill-down: a query always searches the
+  /// whole catalog, so a user never gets an empty result that is really just
+  /// "not in this category".
+  List<SonderCommand> get _results {
+    if (_query.isNotEmpty) {
+      final needle = _query.startsWith('/') ? _query.substring(1) : _query;
+      return widget.catalog.commands
+          .where((c) => c.matchesLoose(needle))
+          .toList(growable: false);
+    }
+    final category = _category;
+    if (category == null) return const [];
+    return widget.catalog.byCategory[category] ?? const [];
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final grouped = widget.catalog.byCategory;
+    final showingCategories = _query.isEmpty && _category == null;
+    final results = _results;
+    final total = widget.catalog.commands.length;
+
+    return Dialog(
+      key: const Key('command-browser'),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 760, maxHeight: 620),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
                 children: [
-                  SizedBox(
-                    width: 150,
+                  if (!showingCategories)
+                    IconButton(
+                      tooltip: 'All categories',
+                      icon: const Icon(Icons.arrow_back),
+                      onPressed: () {
+                        _search.clear();
+                        setState(() {
+                          _category = null;
+                          _query = '';
+                        });
+                      },
+                    ),
+                  Expanded(
                     child: Text(
-                      name,
-                      style: TextStyle(
-                        fontFamily: 'monospace',
-                        fontWeight:
-                            isSelected ? FontWeight.w700 : FontWeight.w500,
-                        color: cs.primary,
+                      showingCategories
+                          ? 'Commands'
+                          : (_query.isNotEmpty
+                              ? 'Search results'
+                              : _category ?? 'Commands'),
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
                       ),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      entry.value,
-                      style: TextStyle(color: cs.onSurfaceVariant),
-                      overflow: TextOverflow.ellipsis,
-                    ),
+                  IconButton(
+                    tooltip: 'Close',
+                    icon: const Icon(Icons.close),
+                    onPressed: () => Navigator.of(context).pop(),
                   ),
                 ],
               ),
-            ),
-          );
-        },
+              TextField(
+                key: const Key('command-browser-search'),
+                controller: _search,
+                decoration: const InputDecoration(
+                  prefixIcon: Icon(Icons.search),
+                  hintText: 'Search all commands…',
+                  isDense: true,
+                ),
+              ),
+              const SizedBox(height: 10),
+              Flexible(
+                child: showingCategories
+                    ? ListView(
+                        key: const Key('command-browser-categories'),
+                        shrinkWrap: true,
+                        children: [
+                          for (final entry in grouped.entries)
+                            ListTile(
+                              key: Key('command-category-${entry.key}'),
+                              dense: true,
+                              leading: const Icon(Icons.folder_outlined),
+                              title: Text(entry.key),
+                              subtitle: Text(
+                                widget.catalog.categories[entry.key] ?? '',
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              trailing: Text('${entry.value.length}'),
+                              onTap: () =>
+                                  setState(() => _category = entry.key),
+                            ),
+                        ],
+                      )
+                    : ListView.builder(
+                        key: const Key('command-browser-commands'),
+                        shrinkWrap: true,
+                        itemCount: results.length,
+                        itemBuilder: (context, i) => _CommandRow(
+                          command: results[i],
+                          selected: false,
+                          onTap: () =>
+                              Navigator.of(context).pop(results[i].name),
+                        ),
+                      ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                widget.fromServer
+                    ? '$total commands published by this server.'
+                    : 'Server catalog unavailable — showing $total built-in '
+                        'commands.',
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -1467,8 +1925,10 @@ class _InputBar extends StatelessWidget {
   final FocusNode focusNode;
   final bool sending;
   final VoidCallback onSend;
-  final List<MapEntry<String, String>> paletteMatches;
+  final List<SonderCommand> paletteMatches;
   final int paletteSelected;
+  final bool paletteGrouped;
+  final Map<String, String> paletteCategories;
   final ValueChanged<String> onPalettePick;
   final KeyEventResult Function(KeyEvent) onKey;
 
@@ -1479,6 +1939,8 @@ class _InputBar extends StatelessWidget {
     required this.onSend,
     required this.paletteMatches,
     required this.paletteSelected,
+    required this.paletteGrouped,
+    required this.paletteCategories,
     required this.onPalettePick,
     required this.onKey,
   });
@@ -1504,6 +1966,8 @@ class _InputBar extends StatelessWidget {
                   _CommandPalette(
                     matches: paletteMatches,
                     selected: paletteSelected,
+                    grouped: paletteGrouped,
+                    categories: paletteCategories,
                     onPick: onPalettePick,
                   ),
                 Row(

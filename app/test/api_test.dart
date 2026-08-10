@@ -1055,4 +1055,215 @@ void main() {
 
     expect(output, 'the answer');
   });
+
+  test('command catalog parses commands, categories and popular', () async {
+    late http.Request seen;
+    final client = MockClient((request) async {
+      seen = request;
+      return http.Response(
+        jsonEncode({
+          'commands': [
+            {
+              'name': '/task_plan',
+              'aliases': ['/plan'],
+              'tool': 'task_plan',
+              'category': 'planning',
+              'risk': 'safe',
+              'summary': 'Plan a task',
+              'native': false,
+              'usage': '/task_plan <title> <steps> [project]',
+              'params': [
+                {
+                  'name': 'title',
+                  'type': 'str',
+                  'required': true,
+                  'default': null
+                },
+                {
+                  'name': 'project',
+                  'type': 'str',
+                  'required': false,
+                  'default': 'default'
+                },
+              ],
+            },
+            {
+              'name': '/file_write',
+              'aliases': [],
+              'tool': 'file_write',
+              'category': 'files',
+              'risk': 'mutation',
+              'summary': 'Write a file',
+              'native': false,
+              'params': [
+                {
+                  'name': 'path',
+                  'type': 'str',
+                  'required': true,
+                  'default': null
+                },
+              ],
+            },
+            {
+              'name': '/help',
+              'category': 'meta',
+              'risk': 'safe',
+              'summary': 'List commands',
+              'native': true,
+              'usage': '/help',
+            },
+          ],
+          'categories': {
+            'meta': 'Help and discovery',
+            'planning': 'Plans and tasks',
+            'files': 'Workspace files',
+          },
+          // "/nope" is not in the catalog: a popular entry the server no
+          // longer publishes must be skipped, not rendered as a dead row.
+          'popular': ['/help', '/nope', '/task_plan'],
+        }),
+        200,
+      );
+    });
+
+    final catalog = await http.runWithClient(
+      () => const SonderApi(baseUrl: 'http://sonder.test/').fetchCommands(),
+      () => client,
+    );
+
+    expect(seen.url.toString(), 'http://sonder.test/v1/commands');
+    expect(catalog.commands.length, 3);
+    expect(catalog.isEmpty, isFalse);
+
+    final plan = catalog.commands.first;
+    expect(plan.name, '/task_plan');
+    expect(plan.aliases, ['/plan']);
+    expect(plan.tool, 'task_plan');
+    expect(plan.category, 'planning');
+    expect(plan.risk, 'safe');
+    expect(plan.native, isFalse);
+    expect(plan.params.length, 2);
+    expect(plan.params.first.label, 'title: str');
+    expect(plan.params.last.label, '[project: str = default]');
+    expect(plan.usageLine, '/task_plan <title> <steps> [project]');
+    expect(plan.matchesPrefix('/pl'), isTrue, reason: 'aliases match');
+    expect(plan.matchesLoose('plan a task'), isTrue);
+
+    // No usage on the wire: synthesise one from the declared params so a
+    // palette row still says what arguments the command takes.
+    final write = catalog.commands[1];
+    expect(write.usage, '');
+    expect(write.usageLine, '/file_write path: str');
+    expect(write.risk, 'mutation');
+
+    expect(catalog.categories['meta'], 'Help and discovery');
+    expect(
+      catalog.popularCommands.map((c) => c.name).toList(),
+      ['/help', '/task_plan'],
+    );
+    // Grouping follows the server's own category ordering, not insertion
+    // order of the commands.
+    expect(catalog.byCategory.keys.toList(), ['meta', 'planning', 'files']);
+    expect(catalog.byCategory['files']!.single.name, '/file_write');
+  });
+
+  test('command catalog tolerates a partial server record', () async {
+    final client = MockClient((request) async {
+      return http.Response(
+        jsonEncode({
+          'commands': [
+            {'name': '/bare'},
+            {'summary': 'nameless entries are dropped'},
+          ],
+        }),
+        200,
+      );
+    });
+
+    final catalog = await http.runWithClient(
+      () => const SonderApi(baseUrl: 'http://sonder.test').fetchCommands(),
+      () => client,
+    );
+
+    expect(catalog.commands.length, 1);
+    final bare = catalog.commands.single;
+    expect(bare.aliases, isEmpty);
+    expect(bare.params, isEmpty);
+    expect(bare.risk, '');
+    expect(bare.usageLine, '/bare');
+    expect(catalog.categories, isEmpty);
+    // No popular list published: fall back to the head of the catalog so a
+    // bare "/" is never answered with a blank panel.
+    expect(catalog.popularCommands.single.name, '/bare');
+    expect(catalog.byCategory.keys.single, 'other');
+  });
+
+  test('command catalog surfaces server failures', () async {
+    final failing = MockClient((request) async => http.Response('nope', 503));
+    await expectLater(
+      http.runWithClient(
+        () => const SonderApi(baseUrl: 'http://sonder.test').fetchCommands(),
+        () => failing,
+      ),
+      throwsA(isA<SonderException>()),
+    );
+
+    final unauthorized = MockClient((request) async => http.Response('', 401));
+    await expectLater(
+      http.runWithClient(
+        () => const SonderApi(baseUrl: 'http://sonder.test').fetchCommands(),
+        () => unauthorized,
+      ),
+      throwsA(isA<SonderException>()),
+    );
+  });
+
+  test('command completion sends the query and limit', () async {
+    late http.Request seen;
+    final client = MockClient((request) async {
+      seen = request;
+      return http.Response(
+        jsonEncode({
+          'matches': [
+            {
+              'name': '/task_plan',
+              'category': 'planning',
+              'risk': 'safe',
+              'summary': 'Plan a task',
+            },
+          ],
+        }),
+        200,
+      );
+    });
+
+    final matches = await http.runWithClient(
+      () => const SonderApi(baseUrl: 'http://sonder.test')
+          .completeCommands('/ta', limit: 5),
+      () => client,
+    );
+
+    expect(seen.url.path, '/v1/commands/complete');
+    expect(seen.url.queryParameters, {'q': '/ta', 'limit': '5'});
+    expect(matches.single.name, '/task_plan');
+    expect(matches.single.summary, 'Plan a task');
+  });
+
+  test('command help returns the rendered topic text', () async {
+    late http.Request seen;
+    final client = MockClient((request) async {
+      seen = request;
+      return http.Response(jsonEncode({'text': 'usage: /task_plan <title> <steps>'}), 200);
+    });
+
+    final text = await http.runWithClient(
+      () => const SonderApi(baseUrl: 'http://sonder.test')
+          .commandHelp('/task_plan'),
+      () => client,
+    );
+
+    expect(seen.url.path, '/v1/commands/help');
+    expect(seen.url.queryParameters, {'topic': '/task_plan'});
+    expect(text, 'usage: /task_plan <title> <steps>');
+  });
 }

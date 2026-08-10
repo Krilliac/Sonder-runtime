@@ -20,12 +20,14 @@ import sqlite3
 import sys
 import threading
 import time
+import urllib.parse
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import server
+import command_catalog
 import admin_auth
 import sonder_config
 import grounding
@@ -321,89 +323,6 @@ LIVE_RELOAD_MODULES = [
     "permission_rules",
     "debug_dump",
 ]
-
-HELP_TEXT = """commands:
-  /help              show this help
-  /trace [on|off]    toggle trace mode (bare = on); shows retrieval + prompt
-  /strict [on|off]   toggle strict mode (bare = on); pins to the sonder alias
-  /stats             show sonder's learning stats
-  /context           show context, session, and memory health meters
-  /contextsize [N]   show/set requested context (8k..1m; native num_ctx is clamped)
-  /compact           preview context compaction/rollover recommendations
-  /commands [filter] list available commands by category, name, or risk
-  /activity          show active/latest tool calls and file changes
-  /work <task>       execute a guarded workflow with checklist and end report
-  /autopilot ...     persistent plan/run/status/resume/pause/cancel autonomy
-  /runtime ...       shared local model mappings and execution-lane tiers
-  /hardware          inspect live RAM/GPU/VRAM capacity
-  /training ...      plan/start/status/deploy/rollback attended weight training
-  /selfmod ...       isolated inspect/plan/test/approve/deploy/rollback lifecycle
-  /mcp ...           audit/refresh atomic MCP source and tool convergence
-  /learning          show grounded outcomes, lesson sources, and memory hygiene
-  natural work       auto-select foreground, Autopilot, or explicit fleet mode
-  /report            show the latest grounded report and action transcript
-  /checklist [id]    show the current or selected persistent checklist
-  /inventory [path]  summarize a guarded workspace with explicit scan budgets
-  /tree [path]       list a guarded folder tree
-  /search q|root|g   search text under a guarded root (optional glob)
-  /programs [query]  find installed programs
-  /scripts q|root    find runnable scripts under a guarded root
-  /image <path>      inspect image metadata and dimensions
-  /mkdir <path>      create a guarded directory
-  /runprogram p|a|c  run a program with JSON args and optional cwd
-  /runscript p|a|c   run a known script type with JSON args and optional cwd
-  /dump [label]      dump chat log and debug info to a text file
-  /todo ...          list/add/update visible task state
-  /quality           audit lesson quality and duplicate rows
-  /qualityfix [apply] dry-run or apply exact duplicate lesson cleanup
-  /privacy [N]       review redacted path/credential-like lesson findings
-  /privacyfix ...    dry-run or delete explicit flagged lesson IDs
-  /embeddings ...    dry-run or refresh stale/missing local lesson vectors
-  /emotion [cmd]     show/tune live tone vectors; try: /emotion tune warmer shorter
-  /prefer [text]     show/teach preferences; /prefer forget <id-or-key>
-  /improve           show the next system improvement checklist
-  /master [mode] ... run orchestration: ask, inline, delegate, or fleet
-  /agents            show live master/subagent activity
-  /capacity [N]      show queued-agent ceiling and safe concurrent worker slots
-  /agentcancel <id>  cooperatively cancel an agent/master prefix or all
-  /agentretry <id>   explicitly retry persisted interrupted/failed master work
-  /weather <place>   get sourced live conditions and a short forecast
-  /asset <n> <brief> generate icons/media/morphing multi-clip models
-  /artifactcheck ... ground a file/pack: /artifactcheck <path> [| recipe]
-  /forge [name]      build and run the dependency-free reference game suite
-  /game ...          generate/test: /game cpp 3d name | concept
-  /gamefleet ...     run a parallel multi-language game campaign
-  /register u p      create account (first account becomes admin)
-  /login u p         login for admin/debug commands
-  /whoami            show current account
-  /admin             show admin status
-  /accounts          list accounts (admin)
-  /setaccount ...    admin account edits: user role= tier= dev_flags= banned=
-  /debug             inspect safe debug state
-  /cot               denied: hidden private chain-of-thought is not exposed
-  /ensemble [tiers=a,b] <q>  ask several local models the same question, then
-                     compound one answer (sequential; one model fits at a time)
-  /permissions [tool] show local permission rules, or one matched rule, plus
-                     the auth mode and command gating this deployment enforces
-  /filepolicy        show file access roots and bypass controls
-  /files [query]     find files under guarded roots
-  /read <path>       read a guarded file
-  /write <p> <text>  create a guarded file
-  /append <p> <text> append to a guarded file
-  /edit <p>|<old>|<new> replace text in a guarded file
-  /delete <path>     dry-run delete; output shows required confirm string
-  /pass, /good       record the last answer as tests_passed
-  /accept,/used      record the last answer as accepted/used
-  /copied,/edited    record copy/edit passive learning signals
-  /fail, /bad        record the last answer as failed
-  /run [seconds]     execute the code block from the last response (default 8s)
-  /runwindow [sec]   launch the last code block in a separate Windows console
-  /runproject [sec]  execute file/path fenced blocks as a temp project
-  /train, /learn [N] grounded practice: check N tasks and record lessons (default 3, max 500)
-
-Plain English also works for the toggles/actions above, e.g. "strict on,
-show your reasoning", "run it", "practice tasks".
-"""
 
 
 def check_auth(auth_header, api_key):
@@ -1000,7 +919,10 @@ def _handle_slash(content, messages=None, state=None, project=""):
     arg = parts[1] if len(parts) > 1 else ""
 
     if cmd == "/help":
-        return HELP_TEXT
+        # The catalog derives every command from the dispatch chains and the
+        # live tool registry, so /help cannot drift behind them the way the
+        # hand-written text it replaced did.
+        return command_catalog.help_text(arg.strip())
     if cmd == "/dump":
         return _dump_chat(
             messages=messages, label=arg.strip() or "chat", state=state
@@ -1286,7 +1208,50 @@ def _handle_slash(content, messages=None, state=None, project=""):
             return err
         return _do_train(n)
 
+    dispatched = _dispatch_catalogued_tool(stripped, state)
+    if dispatched is not None:
+        return dispatched
+
     return None  # not a recognized slash command — fall through to the model
+
+
+def _dispatch_catalogued_tool(line, state):
+    """Run ``/<tool> ...`` for any registered tool without a branch of its own.
+
+    The explicit branches above cover the curated console commands; everything
+    else the server registers -- all 178 tools -- is reachable here by its own
+    name, which is the only way the app can offer the whole surface without a
+    branch per tool. Returns None when the line names nothing catalogued, so
+    an ordinary sentence beginning with "/" still falls through to the model.
+    """
+    try:
+        invocation = command_catalog.parse_invocation(line)
+    except ValueError as error:
+        # A mistyped key must not run the tool with that argument silently
+        # dropped; say so instead of 500ing or half-executing.
+        return str(error)
+    if not invocation:
+        return None
+    tool_name, kwargs = invocation
+    handler = getattr(server, tool_name, None)
+    if not callable(handler):
+        return "%s is catalogued but not callable here." % tool_name
+    # Guarded tools take the caller's own token exactly as the explicit
+    # branches pass it (/read, /files, /delete); the tool still enforces its
+    # own permission rules with it.
+    if "token" not in kwargs and getattr(state, "token", ""):
+        # Look the command up by the name that was typed: a native alias
+        # ("/read") carries the tool ("file_read") but is not catalogued under
+        # the tool's own name, so by_name(tool_name) would miss its schema.
+        command = command_catalog.by_name(line.split(None, 1)[0])
+        if command and any(p.name == "token" for p in command.params):
+            kwargs["token"] = state.token
+    try:
+        return str(handler(**kwargs))
+    except TypeError as error:
+        return "%s: %s" % (tool_name, error)
+    except Exception as error:  # a tool fault is a chat answer, not a 500
+        return "%s failed: %s: %s" % (tool_name, type(error).__name__, error)
 
 
 def _handle_feedback(content, state=None):
@@ -1450,6 +1415,49 @@ def _chunk(iid, model, delta, finish_reason=None):
         "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
     }
     return "data: %s\n\n" % json.dumps(obj)
+
+
+COMPLETE_DEFAULT_LIMIT = 12
+COMPLETE_MAX_LIMIT = 50
+
+
+def _completion_limit(raw):
+    """Clamp ``?limit=`` into 1..50; anything unreadable takes the default.
+
+    A junk limit is a typo in a URL someone is hand-editing, not an attack.
+    Failing the request would blank the completion menu mid-keystroke, so the
+    parameter is ignored instead.
+    """
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return COMPLETE_DEFAULT_LIMIT
+    return max(1, min(COMPLETE_MAX_LIMIT, value))
+
+
+def _commands_index_payload():
+    return {
+        "commands": [command.to_dict() for command in command_catalog.catalog()],
+        # The blurb per category, not the commands in it: the client renders
+        # these as section headings beside the counts it derives itself.
+        "categories": dict(command_catalog.CATEGORIES),
+        "popular": list(command_catalog.POPULAR),
+    }
+
+
+def _commands_complete_payload(query, limit=""):
+    return {
+        "matches": [
+            command.to_dict()
+            for command in command_catalog.complete(
+                query, limit=_completion_limit(limit),
+            )
+        ],
+    }
+
+
+def _commands_help_payload(topic=""):
+    return {"text": command_catalog.help_text(topic)}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1804,7 +1812,39 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self._handle_commands_get():
+            return
         self._send_not_found()
+
+    def _handle_commands_get(self):
+        """Command catalog, completion, and help for the app's command bar.
+
+        Read-only over the same gate the neighbouring GET routes use: the
+        catalog names every tool but runs none of them.
+        """
+        split = urllib.parse.urlsplit(self.path)
+        route = split.path.rstrip("/") or "/"
+        if route not in (
+            "/v1/commands", "/v1/commands/complete", "/v1/commands/help",
+        ):
+            return False
+        if not self._request_auth_context()["authorized"]:
+            self._send_auth_error()
+            return True
+        query = urllib.parse.parse_qs(split.query, keep_blank_values=True)
+
+        def first(name):
+            values = query.get(name) or [""]
+            return values[0]
+
+        if route == "/v1/commands/complete":
+            payload = _commands_complete_payload(first("q"), first("limit"))
+        elif route == "/v1/commands/help":
+            payload = _commands_help_payload(first("topic"))
+        else:
+            payload = _commands_index_payload()
+        self._send_json_payload(payload)
+        return True
 
     def do_POST(self):
         if self._reject_disallowed_origin():

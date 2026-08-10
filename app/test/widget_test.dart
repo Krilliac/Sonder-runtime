@@ -3,9 +3,12 @@ import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sonder_runtime/main.dart';
 import 'package:sonder_runtime/models.dart';
@@ -30,13 +33,27 @@ void main() {
   });
 
   testWidgets(
-      'Commands expose grounded Office, media, and model artifact suites',
+      'Commands browser opens on categories and searches the whole catalog',
       (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
     SharedPreferences.setMockInitialValues(<String, Object>{});
 
     await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Commands'));
+    await tester.pumpAndSettle();
+
+    // No server in a widget test, so this is the offline fallback catalog --
+    // and it says so rather than passing a short list off as the real surface.
+    expect(find.byKey(const Key('command-browser')), findsOneWidget);
+    expect(find.byKey(const Key('command-browser-categories')), findsOneWidget);
+    expect(find.byKey(const Key('command-category-quick')), findsOneWidget);
+    expect(find.textContaining('Server catalog unavailable'), findsOneWidget);
+
+    // Search cuts across every category, not just the open one.
+    await tester.enterText(
+        find.byKey(const Key('command-browser-search')), 'asset');
     await tester.pumpAndSettle();
 
     expect(find.textContaining('/asset office-suite'), findsOneWidget);
@@ -45,6 +62,161 @@ void main() {
     expect(find.text('Generate a grounded editable media kit'), findsOneWidget);
     expect(find.text('Generate a grounded animated humanoid character'),
         findsOneWidget);
+  });
+
+  testWidgets('Commands browser drills into a category and fills the composer',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+
+    await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Commands'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('command-category-quick')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('command-browser-commands')), findsOneWidget);
+    expect(find.byKey(const Key('command-browser-categories')), findsNothing);
+
+    // Scoped to the dialog: the empty state behind it also offers "/stats".
+    await tester.tap(find.descendant(
+      of: find.byKey(const Key('command-browser')),
+      matching: find.text('/stats'),
+    ));
+    await tester.pumpAndSettle();
+
+    // Picking loads the command into the composer rather than sending it,
+    // because most commands still need arguments typed.
+    expect(find.byKey(const Key('command-browser')), findsNothing);
+    final field = tester.widget<TextField>(find.byType(TextField));
+    expect(field.controller!.text, '/stats ');
+  });
+
+  testWidgets('Typing "/" browses popular commands, more characters narrow',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+
+    await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
+    await tester.pumpAndSettle();
+
+    // The empty state also offers a "/stats" chip, so every palette
+    // assertion is scoped to the palette itself.
+    Finder inPalette(Finder matching) => find.descendant(
+          of: find.byKey(const Key('command-palette')),
+          matching: matching,
+        );
+
+    await tester.enterText(find.byType(TextField), '/');
+    await tester.pumpAndSettle();
+
+    // A bare slash is a browse: the popular shortlist, labelled by category.
+    expect(find.byKey(const Key('command-palette')), findsOneWidget);
+    expect(inPalette(find.textContaining('QUICK')), findsOneWidget);
+    expect(inPalette(find.text('/help')), findsOneWidget);
+    expect(inPalette(find.text('List commands')), findsOneWidget);
+    // Popular is a shortlist, not the whole catalog.
+    expect(inPalette(find.text('/emotion')), findsNothing);
+
+    // Every further character narrows, and the category heading drops away
+    // once the list is a ranked search rather than a browse.
+    await tester.enterText(find.byType(TextField), '/stat');
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('command-palette')), findsOneWidget);
+    expect(inPalette(find.text('/stats')), findsOneWidget);
+    expect(inPalette(find.text('/help')), findsNothing);
+    expect(inPalette(find.textContaining('QUICK')), findsNothing);
+
+    // Nothing starts with "/memory", so the looser pass matches summaries.
+    await tester.enterText(find.byType(TextField), '/memory');
+    await tester.pumpAndSettle();
+
+    expect(inPalette(find.text('/quality')), findsOneWidget);
+    expect(inPalette(find.text('/privacy')), findsOneWidget);
+  });
+
+  testWidgets('Palette keeps arrow/Enter selection and shows usage lines',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+
+    await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), '/c');
+    await tester.pumpAndSettle();
+
+    // /context, /compact, /commands, /checklist, /capacity — in catalog order.
+    expect(find.text('/context'), findsOneWidget);
+    expect(find.text('/compact'), findsOneWidget);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pumpAndSettle();
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+
+    final field = tester.widget<TextField>(find.byType(TextField));
+    expect(field.controller!.text, '/compact ');
+    expect(find.byKey(const Key('command-palette')), findsNothing);
+
+    // Commands whose name carries an example payload keep it on the usage
+    // line, so a user can see the arguments before picking.
+    await tester.enterText(find.byType(TextField), '/asset');
+    await tester.pumpAndSettle();
+    expect(find.textContaining('/asset office-suite DOCX'), findsOneWidget);
+  });
+
+  testWidgets('Palette prefers the server catalog when one is reachable',
+      (tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    final client = MockClient((request) async {
+      if (request.url.path == '/v1/commands') {
+        return http.Response(
+          jsonEncode({
+            'commands': [
+              {
+                'name': '/task_plan',
+                'aliases': ['/plan'],
+                'tool': 'task_plan',
+                'category': 'planning',
+                'risk': 'safe',
+                'summary': 'Plan a task',
+                'usage': '/task_plan <title> <steps>',
+              },
+            ],
+            'categories': {'planning': 'Plans and tasks'},
+            'popular': ['/task_plan'],
+          }),
+          200,
+        );
+      }
+      return http.Response('{}', 503);
+    });
+
+    await http.runWithClient(() async {
+      await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.byType(TextField), '/');
+      await tester.pumpAndSettle();
+
+      // Server rows, not the built-in fallback ones.
+      expect(find.text('/task_plan'), findsOneWidget);
+      expect(find.text('Plan a task'), findsOneWidget);
+      expect(find.textContaining('/task_plan <title> <steps>'), findsOneWidget);
+      expect(find.text('/help'), findsNothing);
+
+      // The alias resolves through the cached catalog, client-side.
+      await tester.enterText(find.byType(TextField), '/plan');
+      await tester.pumpAndSettle();
+      expect(find.text('/task_plan'), findsOneWidget);
+    }, () => client);
   });
 
   testWidgets('System always has an explicit return to main chat',

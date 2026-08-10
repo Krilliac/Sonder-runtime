@@ -358,10 +358,41 @@ COMMANDS = [
 ]
 
 
+def _catalog_rows():
+    """Every command the runtime actually answers, via command_catalog.
+
+    Imported lazily: command_catalog reads COMMANDS above for its curated
+    summaries, so a module-level import here would be circular.
+    """
+    import command_catalog
+
+    return [
+        {
+            "name": command.name,
+            "category": command.category,
+            "risk": command.risk,
+            "summary": command.summary,
+            "aliases": list(command.aliases),
+            "usage": command.usage(),
+        }
+        for command in command_catalog.catalog()
+    ]
+
+
 def list_commands(filter_text=""):
+    """Filter the live command surface, falling back to the curated seed.
+
+    COMMANDS below is a hand-written list that drifted badly -- it described 59
+    commands while the runtime answered 265 -- so it is now only the seed for
+    curated summaries and the offline fallback, never the answer.
+    """
+    try:
+        source = _catalog_rows()
+    except Exception:
+        source = [dict(command) for command in COMMANDS]
     f = (filter_text or "").strip().lower()
     rows = []
-    for command in COMMANDS:
+    for command in source:
         haystack = " ".join(
             str(command.get(k, "")) for k in ("name", "category", "risk", "summary")
         ).lower()

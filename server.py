@@ -99,6 +99,7 @@ import intents
 import runtime_policy
 import npu_contract
 import npu_service
+import command_catalog
 import reloadable_mcp
 import autopilot_store
 import autopilot_controller
@@ -2009,6 +2010,11 @@ def control_command(prompt: str, history=None, session="", project=""):
     parts = text.split(None, 1)
     cmd = parts[0].lower()
     arg = parts[1] if len(parts) > 1 else ""
+    if cmd == "/":
+        # A bare slash is the "what can I type" gesture.
+        return command_catalog.format_matches("")
+    if cmd == "/help":
+        return command_catalog.help_text(arg.strip())
     if cmd == "/stats":
         return sonder_stats()
     if cmd == "/context":
@@ -2197,6 +2203,25 @@ def control_command(prompt: str, history=None, session="", project=""):
         return _control_runproject(arg, history=history)
     if cmd == "/dump":
         return _control_dump(arg, text, history=history, session=session, project=project)
+    # Every registered tool is catalogued, so /<tool_name> works here as well
+    # as in the branches above -- that is what puts the whole surface, not
+    # just the hand-written slice, in reach of the console, app, and API. A
+    # slash line that names no known tool still returns None and reaches the
+    # model unchanged, so ordinary prose beginning with "/" is unaffected.
+    try:
+        parsed = command_catalog.parse_invocation(text)
+    except ValueError as exc:
+        return str(exc)
+    if parsed:
+        tool, kwargs = parsed
+        handler = globals().get(tool)
+        if callable(handler):
+            try:
+                return str(handler(**kwargs))
+            except TypeError as exc:
+                return "%s: %s\n\n%s" % (
+                    cmd, exc, command_catalog.help_command(cmd),
+                )
     return None
 
 
@@ -5766,6 +5791,114 @@ def task_show(task_id: str, events: bool = True) -> str:
         for event in detail.events:
             lines.append("  %(ts)s  %(event)s  %(note)s" % event)
     return "\n".join(lines)
+
+
+@mcp.tool()
+def task_delete(task_id: str) -> str:
+    """Delete a task and all its children, events, and dependencies."""
+    _maybe_live_reload()
+    conn = _open_db()
+    try:
+        result = _task_service(conn).delete_task(task_id)
+    except Exception as e:
+        return "ERROR: %s" % e
+    finally:
+        conn.close()
+    return "deleted task %s (removed %d children)" % (
+        result["deleted"][:8], result["children_removed"]
+    )
+
+
+@mcp.tool()
+def task_plan(
+    title: str,
+    steps: str,
+    project: str = "",
+    owner: str = "agent",
+    priority: int = 2,
+    sequential: bool = True,
+) -> str:
+    """Batch-create a work plan: a parent task with ordered steps.
+
+    steps is a JSON array of strings or {title, detail} objects.
+    When sequential=True (default), each step depends on the previous one.
+    """
+    _maybe_live_reload()
+    import json as _json
+    try:
+        parsed = _json.loads(steps) if isinstance(steps, str) else steps
+    except (ValueError, TypeError) as e:
+        return "ERROR: steps must be valid JSON array: %s" % e
+    conn = _open_db()
+    try:
+        service = _task_service(conn)
+        checklist = service.plan_tasks(
+            title=title, steps=parsed,
+            project=project, owner=owner, priority=priority,
+            sequential=bool(sequential),
+        )
+        data = checklist.to_dict()
+    except Exception as e:
+        return "ERROR: %s" % e
+    finally:
+        conn.close()
+    # Publish so a bare /checklist and the app's activity pane resolve to the
+    # plan that was just created, the same way checklist_create does.
+    service.publish_checklist(checklist)
+    return _format_checklist(data)
+
+
+@mcp.tool()
+def task_progress(project: str = "") -> str:
+    """Show a compact progress summary of all tasks (or filtered by project)."""
+    _maybe_live_reload()
+    conn = _open_db()
+    try:
+        stats = _task_service(conn).task_progress(project=project)
+    except Exception as e:
+        return "ERROR: %s" % e
+    finally:
+        conn.close()
+    bar_len = 20
+    filled = round(bar_len * stats["progress_pct"] / 100)
+    bar = "#" * filled + "-" * (bar_len - filled)
+    lines = [
+        "sonder task progress%s" % (" [%s]" % project if project else ""),
+        "  [%s] %.1f%%" % (bar, stats["progress_pct"]),
+        "  total: %d | pending: %d | in_progress: %d | blocked: %d | done: %d | canceled: %d"
+        % (stats["total"], stats["pending"], stats["in_progress"],
+           stats["blocked"], stats["done"], stats["canceled"]),
+    ]
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def task_depend(
+    task_id: str,
+    depends_on: str,
+    remove: bool = False,
+) -> str:
+    """Add or remove a dependency between tasks. task_id depends on depends_on."""
+    _maybe_live_reload()
+    conn = _open_db()
+    try:
+        service = _task_service(conn)
+        if remove:
+            result = service.remove_dependency(task_id, depends_on)
+            if not result.get("removed"):
+                return "no dependency found"
+            return "removed dependency: %s no longer depends on %s" % (
+                result["task_id"][:8], result["depends_on"][:8]
+            )
+        else:
+            result = service.add_dependency(task_id, depends_on)
+            return "dependency added: %s depends on %s" % (
+                result["task_id"][:8], result["depends_on"][:8]
+            )
+    except Exception as e:
+        return "ERROR: %s" % e
+    finally:
+        conn.close()
 
 
 def context_compaction_plan_data(session: str = "", project: str = "") -> dict:
@@ -12423,7 +12556,7 @@ def tool_manifest() -> str:
         "data_inspect/data_query/sqlite_mutate": "Preview structured data, run bounded read-only queries, or explicitly preview/apply one guarded parameterized SQLite DML statement.",
         "data_convert": "Preview or atomically create a non-overwriting JSON/JSONL/CSV/TSV conversion with explicit ordered fields.",
         "program_search/script_search/workspace_run/script_run/image_inspect": "Discover installed programs and workspace scripts, run bounded argv-only processes, and inspect image metadata; script_run applies the operator execution-risk policy before launch.",
-        "task_create/task_list/task_update/task_show/checklist_create/checklist_update/checklist_show": "Visible todo and ordered checklist state shared by console, app, agents, and MCP.",
+        "task_create/task_list/task_update/task_show/task_delete/task_plan/task_progress/task_depend/checklist_create/checklist_update/checklist_show": "Visible todo and ordered checklist state shared by console, app, agents, and MCP. task_plan batch-creates a work plan with ordered steps and auto-dependencies. task_progress shows a compact summary. task_depend manages blocking relationships.",
         "workbench_agent": "Run an autonomous local tool loop with a guaranteed checklist, exact action transcript, validation gate, and end report.",
         "command_registry_list": "Inspect available slash commands by category, name, or risk.",
         "activity_status": "Inspect active/latest response activity, tool calls, and file changes.",
@@ -12546,6 +12679,10 @@ AGENT_TOOL_HELP = """Available tools:
 - task_list: {"status": "pending|in_progress|blocked|done|canceled", "project": "", "include_done": false, "limit": 50}
 - task_update: {"task_id": "...", "status": "in_progress|blocked|done", "note": "..."}
 - task_show: {"task_id": "..."}
+- task_delete: {"task_id": "..."}
+- task_plan: {"title": "...", "steps": ["Step 1", "Step 2", {"title": "Step 3", "detail": "..."}], "project": "...", "sequential": true}
+- task_progress: {"project": ""}
+- task_depend: {"task_id": "...", "depends_on": "...", "remove": false}
 - checklist_create: {"title": "...", "items_json": ["Inspect", "Implement", "Validate", "Report"], "project": "..."}
 - checklist_update: {"checklist_id": "...", "item": "1|id-prefix", "status": "in_progress|done|blocked", "note": "..."}
 - checklist_show: {"checklist_id": "..."}
@@ -14174,6 +14311,26 @@ def _agent_dispatch(
         )
     if tool_name == "task_show":
         return task_show(args.get("task_id", args.get("id", "")))
+    if tool_name == "task_delete":
+        return task_delete(args.get("task_id", args.get("id", "")))
+    if tool_name == "task_plan":
+        steps = args.get("steps", args.get("items", []))
+        return task_plan(
+            title=args.get("title", "Work plan"),
+            steps=json.dumps(steps) if not isinstance(steps, str) else steps,
+            project=args.get("project", ""),
+            owner=args.get("owner", "agent"),
+            priority=args.get("priority", 2),
+            sequential=args.get("sequential", True),
+        )
+    if tool_name == "task_progress":
+        return task_progress(project=args.get("project", ""))
+    if tool_name == "task_depend":
+        return task_depend(
+            task_id=args.get("task_id", args.get("id", "")),
+            depends_on=args.get("depends_on", ""),
+            remove=args.get("remove", False),
+        )
     if tool_name == "checklist_create":
         items = args.get("items_json", args.get("items", []))
         return checklist_create(
@@ -14415,6 +14572,7 @@ _PROJECT_BOUND_AGENT_TOOLS = (
         "web_search", "web_fetch",
         "weather_lookup", "approximate_location_lookup", "memory_search",
         "file_policy", "task_create", "task_list", "task_update", "task_show",
+        "task_delete", "task_plan", "task_progress", "task_depend",
         "checklist_create", "checklist_update", "checklist_show",
         "command_registry_list", "tool_manifest", "activity_status",
         "permission_policy", "context_compaction_plan", "diagnostics",
@@ -14670,6 +14828,7 @@ _WORK_MUTATION_TOOLS = frozenset({
     "git_merge", "git_cherry_pick",
     "dependency_add", "dependency_remove", "dependency_update",
     "build_clean", "rename_symbol", "apply_patch",
+    "task_delete",
 })
 
 
@@ -15174,6 +15333,7 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "test_discover", "test_run", "lint_run", "format_code", "typecheck_run",
     "dependency_audit", "find_references", "diff_files", "secret_scan",
     "build_run",
+    "task_progress",
 })
 _AGENT_FILE_EVIDENCE_TOOLS = frozenset({
     "workspace_inventory", "workspace_compare", "directory_tree", "file_read", "file_read_range",
@@ -16375,6 +16535,7 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
     "test_discover", "find_references", "diff_files", "secret_scan",
     "dependency_audit",
+    "task_progress",
 })
 _AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
     "directory_create", "file_write", "file_batch_write", "json_patch", "file_edit", "file_copy", "file_move", "archive_extract", "archive_create", "text_patch", "data_convert", "workspace_run",
@@ -16385,6 +16546,7 @@ _AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
     "dependency_add", "dependency_remove", "dependency_update",
     "git_commit", "git_branch", "git_checkout", "git_stash", "git_tag", "git_merge", "git_cherry_pick",
     "build_run", "build_clean", "rename_symbol", "apply_patch",
+    "task_delete", "task_plan", "task_depend",
 })
 _AUTOPILOT_RUNNERS = frozenset({
     "python", "python.exe", "py", "py.exe", "pytest", "pytest.exe",

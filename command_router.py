@@ -20,10 +20,18 @@ Design rules that keep this from hijacking real work:
 * The tier-aware trio (consult / route / refactor) is delegated to
   ``intents.classify_command`` so their argument extraction lives in one place.
 
+After every hand-written rule misses, a generic ``command_catalog`` match runs
+so the other ~225 commands are reachable in plain language too ("scan for
+secrets" -> ``/secret_scan``). The hand-written rules keep first refusal
+because they extract arguments the generic path cannot. The generic path is
+deliberately narrow -- see ``_catalog_match`` -- because its failure mode is
+hijacking a real coding question.
+
 Stdlib only.
 """
 import re
 
+import command_catalog
 import intents
 import project_scaffold
 
@@ -188,6 +196,319 @@ _RULES = [
 ]
 
 
+# --- generic catalog fallback ---------------------------------------------
+#
+# The hand-written rules above cover ~40 commands; the catalog exposes 265.
+# Rather than hand-write 225 more patterns (which would rot the moment a tool
+# is added), the rest are matched generically against their own names, aliases
+# and summaries. Everything below exists to keep that from firing on prose.
+#
+# A turn has to clear four independent gates to resolve generically:
+#
+# 1. OPENING. It must start with an imperative/request verb ("scan for
+#    secrets") or name a multi-word command outright ("what's my task
+#    progress" contains "task progress"). A question or a statement that does
+#    neither is left alone, which is what keeps "how do I cache a parse
+#    result" and "the build is broken, any idea why" out.
+# 2. NAME. Every token of the command's name (or of one alias) must be
+#    present, so a single word shared with a summary can never elect a
+#    command. Summary words only break ties and, in the narrow second stage,
+#    stand in for a partly-named command ("scan for leaked api keys").
+# 3. COVERAGE. Every remaining content word in the turn must be accounted for
+#    by that command's name or summary. This is what distinguishes "read the
+#    file notes.txt" (a command) from "read the file notes.txt and summarize
+#    it" (work): the leftover words prove the turn is asking for more than the
+#    command does. One trailing leftover is allowed as an argument, and only
+#    for a multi-word name that was matched in full.
+# 4. UNIQUENESS. If two commands score identically the turn is ambiguous and
+#    resolves to nothing, rather than to whichever happened to sort first.
+#
+# Mutation and dangerous commands additionally have to be named -- their name
+# tokens must appear adjacent in the turn -- and can never be reached from the
+# summary-only stage. "delete task abc" names /task_delete; "clean up" names
+# nothing.
+
+_WORD = re.compile(r"[a-z0-9]+")
+
+# The three vocabularies are written as plain prose here and normalized into
+# _STOPWORDS / _OPENERS / _POLITE below, once _norm_token exists: they have to
+# live in the same token space as the turn or "status" never finds itself.
+
+_RAW_STOPWORDS = """
+a an the this that these those my your our their his her
+is are was were be been being am do does did done doing has have had
+to for of in on at by with from about into onto over under out up off
+and or but not no nor so then than if when while as at
+please just let lets us me i you we they it he she
+all any some every each other another there here now again really very
+what whats which who whom whose how why where whether
+s t m d re ve ll
+"""
+
+# An explicit imperative/request opening. Deliberately excludes the verbs that
+# introduce work rather than a command -- fix, write, implement, refactor,
+# explain, reset -- because those open real requests ("fix the failing API
+# tests", "reset the session token when it expires") far more often than they
+# open a command.
+_RAW_OPENERS = """
+run rerun execute launch start stop restart pause resume retry cancel kill
+show display print tell list ls dump export
+check inspect audit review verify validate diagnose
+scan search find locate grep look
+get fetch pull read open view load
+create make generate build compile scaffold add
+delete remove drop clear
+format lint typecheck test benchmark profile
+commit diff compare status count measure
+update set switch enable disable
+"""
+
+# Dropped from the front before looking for an opener, so "can you list the
+# workflows" is still an imperative opening.
+_RAW_POLITE = """
+please can could would will you i we want need to like d lets let us
+hey ok okay kindly pls go ahead and now just
+"""
+
+_MAX_POLITE_PREFIX = 4
+
+# A summary word is "distinctive" only if few other commands use it, which is
+# what stops "file", "run" or "code" from electing a command on their own.
+_MAX_DISTINCTIVE_DF = 3
+
+_RISKY = frozenset({"mutation", "dangerous"})
+
+# Verbs that ask to be shown something. Naming a command is normally enough to
+# reach it even when it mutates, but a read verb contradicts that: "list the
+# git branches" names /git_branch, which CREATES one. When the opening verb
+# asks to look and the command would change something, the turn is asking for
+# a different thing than it named, so route nothing.
+_READ_VERBS = frozenset("""
+show display print tell list ls view read open
+inspect review audit check count measure status
+compare diff describe
+""".split())
+
+_INDEX_CACHE = {"key": None, "entries": ()}
+
+
+_ES_STEMS = ("s", "x", "z", "ch", "sh")
+
+
+def _norm_token(token):
+    """Fold a trivial plural so "secrets" matches ``secret_scan``.
+
+    The ``-es`` case matters more than it looks: without it "list processes"
+    never reaches ``/process_list``.
+    """
+    if len(token) > 4 and token.endswith("es"):
+        stem = token[:-2]
+        if stem.endswith(_ES_STEMS):
+            return stem
+    if len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+        return token[:-1]
+    return token
+
+
+def _tokenize(text):
+    return [_norm_token(t) for t in _WORD.findall(str(text or "").lower())]
+
+
+def _word_set(raw):
+    """The vocabularies live in the same normalized space as the turn.
+
+    Without this a bare "status" tokenizes to "statu" and then fails to find
+    itself in the opener list.
+    """
+    return frozenset(_norm_token(word) for word in raw.split())
+
+
+_STOPWORDS = _word_set(_RAW_STOPWORDS)
+_OPENERS = _word_set(_RAW_OPENERS)
+_POLITE = _word_set(_RAW_POLITE)
+
+
+def _index():
+    """Per-command token sets, rebuilt when the catalog itself changes.
+
+    ``command_catalog.catalog()`` is memoised and returns a new tuple after a
+    live reload adds tools, so identity on that tuple is the cache key.
+    """
+    try:
+        commands = command_catalog.catalog()
+    except Exception:  # a half-initialised server must not break plain chat
+        return ()
+    if _INDEX_CACHE["key"] is commands:
+        return _INDEX_CACHE["entries"]
+
+    rows = []
+    frequency = {}
+    for command in commands:
+        variants = []
+        for name in command.all_names:
+            tokens = tuple(_tokenize(name))
+            if tokens and tokens not in variants:
+                variants.append(tokens)
+        summary = frozenset(
+            t for t in _tokenize(command.summary) if t not in _STOPWORDS
+        )
+        for token in summary:
+            frequency[token] = frequency.get(token, 0) + 1
+        rows.append({"command": command, "variants": tuple(variants),
+                     "summary": summary})
+    for row in rows:
+        row["distinctive"] = frozenset(
+            t for t in row["summary"]
+            if len(t) >= 3 and frequency.get(t, 0) <= _MAX_DISTINCTIVE_DF
+        )
+    entries = tuple(rows)
+    _INDEX_CACHE["key"] = commands
+    _INDEX_CACHE["entries"] = entries
+    return entries
+
+
+def _opening(tokens):
+    """(imperative the turn opens with, tokens from that verb on).
+
+    The politeness a request is wrapped in is dropped rather than ignored:
+    "can you list the workflows" has to reduce to "list the workflows" or the
+    coverage check counts "can" as an unexplained word and refuses the turn.
+    """
+    for index, token in enumerate(tokens[:_MAX_POLITE_PREFIX + 1]):
+        if token in _OPENERS:
+            return token, tokens[index:]
+        if token not in _POLITE:
+            return None, tokens
+    return None, tokens
+
+
+def _names_a_command(tokens, entries):
+    """True when a multi-word command name appears verbatim in the turn.
+
+    Only multi-word names count. A one-word name ("/build", "/status",
+    "/loop") is an ordinary English word, and letting one open the gate would
+    hand every sentence mentioning a build to the router.
+    """
+    for entry in entries:
+        for variant in entry["variants"]:
+            width = len(variant)
+            if width < 2:
+                continue
+            for start in range(len(tokens) - width + 1):
+                if tuple(tokens[start:start + width]) == variant:
+                    return True
+    return False
+
+
+def _adjacent(tokens, variant):
+    """The name's tokens sit together, allowing one filler word inside."""
+    wanted = set(variant)
+    for width in (len(variant), len(variant) + 1):
+        for start in range(max(0, len(tokens) - width + 1)):
+            if wanted <= set(tokens[start:start + width]):
+                return True
+    return False
+
+
+def _score(entry, present, content_set):
+    """(stage, strength) for one command, or None when it is not a candidate.
+
+    Stage 2 is a full name match -- every word of the command's name (or an
+    alias) is in the turn. Stage 1 is the narrow summary fallback: part of the
+    name plus two or more distinctive summary words, which is what lets "scan
+    for leaked api keys" find ``/secret_scan``.
+    """
+    full = 0
+    partial = 0
+    matched = ()
+    for variant in entry["variants"]:
+        hits = sum(1 for token in variant if token in present)
+        partial = max(partial, hits)
+        if hits == len(variant) and len(variant) > full:
+            full, matched = len(variant), variant
+    summary_hits = len(content_set & entry["summary"])
+    if full:
+        return 2, (full, summary_hits), matched
+    if partial and entry["command"].risk not in _RISKY:
+        distinctive = len(content_set & entry["distinctive"])
+        if distinctive >= 2:
+            return 1, (distinctive, summary_hits), ()
+    return None
+
+
+def _catalog_match(value):
+    """Resolve `value` against the whole command catalog, or return None.
+
+    Conservative by construction: see the gate list at the top of this
+    section. Returning None is always the safe answer -- the caller falls
+    through to normal chat, which can still run the command itself.
+    """
+    entries = _index()
+    if not entries:
+        return None
+    tokens = _tokenize(value)
+    if not tokens:
+        return None
+    lead, body = _opening(tokens)
+    if lead is None and not _names_a_command(tokens, entries):
+        return None
+
+    content = [t for t in body if t not in _STOPWORDS]
+    if not content:
+        return None
+    present = set(body)
+    content_set = set(content)
+
+    ranked = []
+    for entry in entries:
+        scored = _score(entry, present, content_set)
+        if scored:
+            ranked.append((scored[0], scored[1], entry, scored[2]))
+    if not ranked:
+        return None
+
+    top = max(rank[:2] for rank in ranked)
+    finalists = [rank for rank in ranked if rank[:2] == top]
+    if len(finalists) != 1:
+        # A tie means the turn does not pick a command out; guessing here is
+        # exactly the failure this fallback must not have.
+        return None
+    stage, _strength, entry, matched = finalists[0]
+    command = entry["command"]
+
+    if command.risk in _RISKY and (stage != 2 or not _adjacent(tokens, matched)):
+        # Destructive and file-changing commands are never inferred from a
+        # loose match; the turn has to name them.
+        return None
+    if command.risk in _RISKY and lead in _READ_VERBS:
+        # Asked to be shown something, but the named command would change it.
+        return None
+
+    explained = set(entry["summary"])
+    for variant in entry["variants"]:
+        explained.update(variant)
+    if lead and len(matched) >= 2:
+        # The request verb frames the ask rather than adding content -- but
+        # only once the turn has named a multi-word command. A one-word name
+        # is weak evidence and has to account for the whole turn, verb
+        # included, or "create a file" would resolve to /files.
+        explained.add(lead)
+    leftover = [t for t in content if t not in explained]
+    if not leftover:
+        return command.name
+    required = any(p.required for p in command.params)
+    if (len(leftover) == 1 and len(matched) >= 2 and required
+            and leftover[0] == content[-1]):
+        # One trailing word after a fully named multi-word command that wants
+        # an argument is that argument ("delete task abc"). Anything more, a
+        # bare one-word name, or a command that takes nothing, means the turn
+        # is asking for more than the command does.
+        words = re.findall(r"[A-Za-z0-9][A-Za-z0-9_.\-]*", str(value))
+        if words and _norm_token(words[-1].lower()) == leftover[0]:
+            return "%s %s" % (command.name, words[-1])
+    return None
+
+
 def resolve(text):
     """Return a synthesized slash-command line for `text`, or None.
 
@@ -216,4 +537,10 @@ def resolve(text):
             result = action(match)
             if result:
                 return result.strip()
-    return None
+
+    # Nothing hand-written claimed the turn: fall back to the catalog so the
+    # commands nobody wrote a pattern for are still reachable in plain
+    # language. This runs last so the rules above keep their argument
+    # extraction and their precedence.
+    generic = _catalog_match(value)
+    return generic.strip() if generic else None

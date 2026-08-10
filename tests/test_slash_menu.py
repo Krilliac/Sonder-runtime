@@ -1,0 +1,427 @@
+"""slash_menu must be testable, and safe, without a terminal.
+
+Every test here runs headless: the key handling lives in a pure state machine
+so the menu's behaviour can be driven with plain strings, and the terminal
+paths are only checked for the one property that matters in CI -- that they
+refuse to engage and fall through to builtin input().
+"""
+from __future__ import annotations
+
+import builtins
+
+import pytest
+
+import slash_menu
+
+
+class _Entry:
+    """Stand-in for command_catalog.Command (only .name/.summary are read)."""
+
+    def __init__(self, name, summary=""):
+        self.name = name
+        self.summary = summary
+
+
+_COMMANDS = [
+    _Entry("/help", "show help"),
+    _Entry("/read", "read a file"),
+    _Entry("/run", "run a command"),
+    _Entry("/report", "write a report"),
+    _Entry("/stats", "show statistics"),
+]
+
+
+def _completer(prefix, limit=8):
+    """Name-prefix filter standing in for command_catalog.complete."""
+    text = str(prefix or "").lstrip("/").lower()
+    if not text:
+        return _COMMANDS[:limit]
+    return [c for c in _COMMANDS if c.name.lstrip("/").startswith(text)][:limit]
+
+
+def _state(buffer=""):
+    state = slash_menu.MenuState(completer=_completer, limit=8)
+    state.feed(buffer)
+    return state
+
+
+# --- degradation ----------------------------------------------------------
+
+
+def test_available_is_false_without_a_tty():
+    # pytest replaces stdin with a non-tty capture object, which is exactly
+    # the situation sonder_client and the suite put the REPL in.
+    assert slash_menu.available() is False
+
+
+def test_available_is_false_when_no_color_is_set(monkeypatch):
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert slash_menu.available() is False
+
+
+def test_available_is_false_on_a_dumb_terminal(monkeypatch):
+    monkeypatch.setenv("TERM", "dumb")
+    assert slash_menu.available() is False
+
+
+def test_available_survives_a_broken_stdin(monkeypatch):
+    class _Exploding:
+        def isatty(self):
+            raise RuntimeError("no console")
+
+    monkeypatch.setattr(slash_menu.sys, "stdin", _Exploding())
+    assert slash_menu.available() is False
+
+
+def test_read_line_falls_back_to_input_without_a_tty(monkeypatch):
+    seen = []
+
+    def _fake_input(prompt=""):
+        seen.append(prompt)
+        return "/help me"
+
+    monkeypatch.setattr(builtins, "input", _fake_input)
+    assert slash_menu.read_line("sonder> ") == "/help me"
+    assert seen == ["sonder> "]
+
+
+def test_read_line_falls_back_when_disabled(monkeypatch):
+    monkeypatch.setattr(slash_menu, "available", lambda: True)
+    monkeypatch.setattr(builtins, "input", lambda prompt="": "plain")
+    called = []
+    monkeypatch.setattr(
+        slash_menu, "_read_line_raw",
+        lambda *a, **k: called.append(1) or "raw",
+    )
+    assert slash_menu.read_line("> ", enabled=False) == "plain"
+    assert called == []
+
+
+def test_raw_read_failure_falls_back_to_input(monkeypatch):
+    """The whole point: a broken menu must not break the REPL."""
+    monkeypatch.setattr(slash_menu, "available", lambda: True)
+
+    def _explode(*args, **kwargs):
+        raise RuntimeError("terminal went away")
+
+    monkeypatch.setattr(slash_menu, "_read_line_raw", _explode)
+    monkeypatch.setattr(builtins, "input", lambda prompt="": "typed anyway")
+    assert slash_menu.read_line("> ") == "typed anyway"
+
+
+def test_keyboard_interrupt_from_raw_read_is_not_swallowed(monkeypatch):
+    monkeypatch.setattr(slash_menu, "available", lambda: True)
+
+    def _interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(slash_menu, "_read_line_raw", _interrupt)
+    monkeypatch.setattr(builtins, "input", lambda prompt="": "should not run")
+    with pytest.raises(KeyboardInterrupt):
+        slash_menu.read_line("> ")
+
+
+def test_default_completer_returns_a_list_when_the_catalog_is_unavailable(
+    monkeypatch,
+):
+    """The catalog imports server; if that fails the menu is empty, not fatal."""
+    import builtins as _builtins
+
+    real_import = _builtins.__import__
+
+    def _no_catalog(name, *args, **kwargs):
+        if name == "command_catalog":
+            raise ImportError("no catalog here")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(_builtins, "__import__", _no_catalog)
+    assert slash_menu._default_completer("/re") == []
+
+
+# --- the menu only engages for slash lines --------------------------------
+
+
+def test_plain_prose_never_opens_the_menu():
+    state = _state("hello world")
+    assert state.menu_active is False
+    assert state.render_rows() == []
+    assert state.matches() == []
+
+
+def test_backspace_on_prose_behaves_like_normal_input():
+    state = _state("hey")
+    state.handle_key("\x08")
+    assert state.buffer == "he"
+    assert state.render_rows() == []
+
+
+def test_slash_opens_the_menu_on_the_popular_set():
+    state = _state("/")
+    assert state.menu_active is True
+    rows = state.render_rows()
+    assert len(rows) == len(_COMMANDS)
+    assert rows[0].startswith(">")
+
+
+# --- typing narrows -------------------------------------------------------
+
+
+def test_typing_narrows_the_rows_in_place():
+    state = _state("/")
+    wide = state.render_rows()
+    state.feed("re")
+    narrow = state.render_rows()
+    assert len(narrow) < len(wide)
+    assert [c.name for c in state.matches()] == ["/read", "/report"]
+    state.feed("a")
+    assert [c.name for c in state.matches()] == ["/read"]
+
+
+def test_backspace_widens_the_rows_again():
+    state = _state("/read")
+    assert len(state.matches()) == 1
+    state.handle_key("\x08")
+    assert state.buffer == "/rea"
+    assert len(state.matches()) == 1
+    state.handle_key("\x08")
+    assert [c.name for c in state.matches()] == ["/read", "/report"]
+
+
+def test_no_match_leaves_an_empty_menu_not_a_crash():
+    state = _state("/zzzz")
+    assert state.matches() == []
+    assert state.render_rows() == []
+
+
+# --- selection ------------------------------------------------------------
+
+
+def test_down_moves_the_highlight():
+    state = _state("/")
+    state.handle_key(slash_menu.KEY_DOWN)
+    assert state.selected == 1
+    assert state.selection().name == "/read"
+    assert state.render_rows()[1].startswith(">")
+
+
+def test_up_and_down_clamp_at_the_ends():
+    state = _state("/")
+    state.handle_key(slash_menu.KEY_UP)
+    assert state.selected == 0  # already at the top
+    for _ in range(len(_COMMANDS) + 5):
+        state.handle_key(slash_menu.KEY_DOWN)
+    assert state.selected == len(_COMMANDS) - 1
+    state.handle_key(slash_menu.KEY_UP)
+    assert state.selected == len(_COMMANDS) - 2
+
+
+def test_typing_resets_the_highlight_to_the_best_match():
+    state = _state("/")
+    state.handle_key(slash_menu.KEY_DOWN)
+    state.handle_key(slash_menu.KEY_DOWN)
+    assert state.selected == 2
+    state.feed("r")
+    assert state.selected == 0
+    assert state.selection().name == "/read"
+
+
+def test_arrows_are_inert_without_a_menu():
+    state = _state("plain text")
+    state.handle_key(slash_menu.KEY_DOWN)
+    assert state.selected == 0
+    assert state.buffer == "plain text"
+
+
+# --- accepting ------------------------------------------------------------
+
+
+def test_tab_replaces_the_buffer_with_the_selection():
+    state = _state("/re")
+    state.handle_key(slash_menu.KEY_DOWN)
+    assert state.selection().name == "/report"
+    assert state.handle_key("\t") == slash_menu.CONTINUE
+    assert state.buffer == "/report"
+    assert state.selected == 0
+
+
+def test_tab_with_no_match_leaves_the_buffer_alone():
+    state = _state("/zzz")
+    state.handle_key("\t")
+    assert state.buffer == "/zzz"
+
+
+def test_enter_accepts_the_line_as_typed():
+    state = _state("/read notes.txt")
+    assert state.handle_key("\r") == slash_menu.ACCEPT
+    assert state.buffer == "/read notes.txt"
+
+
+def test_ctrl_c_reports_interrupt():
+    state = _state("/re")
+    assert state.handle_key("\x03") == slash_menu.INTERRUPT
+
+
+def test_ctrl_u_clears_the_line():
+    state = _state("/read something")
+    assert state.handle_key("\x15") == slash_menu.CONTINUE
+    assert state.buffer == ""
+    assert state.menu_active is False
+
+
+# --- escape ---------------------------------------------------------------
+
+
+def test_esc_dismisses_the_menu_but_keeps_the_line():
+    state = _state("/re")
+    state.handle_key("\x1b")
+    assert state.buffer == "/re"
+    assert state.menu_active is False
+    assert state.render_rows() == []
+    state.feed("ad")
+    assert state.buffer == "/read"
+    assert state.render_rows() == []  # stays dismissed while typing
+
+
+def test_clearing_the_line_re_arms_the_menu():
+    state = _state("/re")
+    state.handle_key("\x1b")
+    for _ in range(3):
+        state.handle_key("\x08")
+    assert state.buffer == ""
+    state.feed("/r")
+    assert state.menu_active is True
+    assert state.render_rows()
+
+
+# --- rendering ------------------------------------------------------------
+
+
+def test_rows_are_truncated_to_the_terminal_width():
+    state = _state("/")
+    rows = state.render_rows(width=20)
+    assert rows, "expected a menu"
+    assert all(len(row) <= 19 for row in rows), rows
+    assert any(row.endswith("…") for row in rows)
+
+
+def test_rows_never_exceed_the_terminal_height():
+    entries = [_Entry("/c%d" % i, "summary %d" % i) for i in range(40)]
+    state = slash_menu.MenuState(completer=lambda p, limit=8: entries[:limit])
+    state.feed("/c")
+    assert len(state.render_rows(height=100)) <= slash_menu.MAX_ROWS
+    assert len(state.render_rows(height=5)) == 3   # height - 2
+    assert state.render_rows(height=2) == []
+
+
+def test_render_rows_accepts_an_explicit_prefix():
+    state = _state("")
+    rows = state.render_rows("/rea", width=200)
+    assert len(rows) == 1
+    assert "/read" in rows[0]
+    assert state.buffer == "", "render_rows must not mutate the state"
+
+
+def test_render_rows_marks_exactly_one_selection():
+    state = _state("/")
+    state.handle_key(slash_menu.KEY_DOWN)
+    rows = state.render_rows(width=200)
+    assert sum(1 for row in rows if row.startswith(">")) == 1
+
+
+def test_a_broken_completer_yields_an_empty_menu():
+    def _broken(prefix, limit=8):
+        raise RuntimeError("catalog exploded")
+
+    state = slash_menu.MenuState(completer=_broken)
+    state.feed("/re")
+    assert state.matches() == []
+    assert state.render_rows() == []
+    assert state.buffer == "/re"
+
+
+def test_unknown_control_keys_are_ignored():
+    state = _state("/re")
+    state.handle_key("\x0c")  # Ctrl+L
+    assert state.buffer == "/re"
+
+
+# --- the raw reader, driven through a fake console ------------------------
+
+
+class _FakeConsole:
+    """Stands in for msvcrt: getwch() replays a scripted key sequence."""
+
+    def __init__(self, keys):
+        self._keys = list(keys)
+
+    def getwch(self):
+        if not self._keys:
+            raise AssertionError("reader asked for more keys than were scripted")
+        return self._keys.pop(0)
+
+
+class _FakeStdout:
+    def __init__(self):
+        self.chunks = []
+
+    def write(self, text):
+        self.chunks.append(text)
+
+    def flush(self):
+        pass
+
+    @property
+    def text(self):
+        return "".join(self.chunks)
+
+
+def _drive(monkeypatch, keys, prompt="> "):
+    console = _FakeConsole(keys)
+    out = _FakeStdout()
+    monkeypatch.setattr(slash_menu, "_msvcrt", lambda: console)
+    monkeypatch.setattr(slash_menu.sys, "stdout", out)
+    return slash_menu._read_line_raw(prompt, completer=_completer), out
+
+
+def test_raw_reader_accepts_a_typed_line(monkeypatch):
+    line, out = _drive(monkeypatch, list("/read x") + ["\r"])
+    assert line == "/read x"
+    assert out.text.endswith("> /read x\n")
+
+
+def test_raw_reader_decodes_the_arrow_prefix_and_completes_with_tab(monkeypatch):
+    # \xe0 + 'P' is Down on Windows; Tab then takes the second match.
+    keys = list("/re") + ["\xe0", "P", "\t", "\r"]
+    line, _ = _drive(monkeypatch, keys)
+    assert line == "/report"
+
+
+def test_raw_reader_ignores_an_unmapped_extended_key(monkeypatch):
+    # \x00 + 'R' is Insert: it must be consumed whole, not leak an 'R'.
+    keys = ["/", "\x00", "R", "h", "\r"]
+    line, _ = _drive(monkeypatch, keys)
+    assert line == "/h"
+
+
+def test_raw_reader_raises_keyboard_interrupt_on_ctrl_c(monkeypatch):
+    with pytest.raises(KeyboardInterrupt):
+        _drive(monkeypatch, list("/re") + ["\x03"])
+
+
+def test_raw_reader_clears_the_menu_before_returning(monkeypatch):
+    _, out = _drive(monkeypatch, list("/re") + ["\r"])
+    tail = out.text.split("\r")[-1]
+    # The final write is an erase-to-end-of-display plus the accepted line, so
+    # nothing of the menu survives underneath it.
+    assert tail.startswith(slash_menu.CSI + "0J")
+    assert "/read" not in tail  # the menu rows are gone
+    assert tail.endswith("> /re\n")
+
+
+def test_raw_reader_moves_the_cursor_back_onto_the_input_line(monkeypatch):
+    _, out = _drive(monkeypatch, list("/re") + ["\r"])
+    text = out.text
+    rows = _state("/re").render_rows()
+    assert rows, "expected the fixture to produce a menu"
+    assert slash_menu.CSI + "%dA" % len(rows) in text
+    assert slash_menu.CSI + "%dC" % len("> /re") in text

@@ -77,6 +77,8 @@ REQUIRED_FILES = {
     "context_overflow.py",
     "creative_router.py",
     "command_recovery.py",
+    "command_catalog.py",
+    "slash_menu.py",
     "engine_bundle.py",
     "endless-train.sh",
     "game_forge.py",
