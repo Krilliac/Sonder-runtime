@@ -7949,6 +7949,92 @@ def permission_mode_data() -> dict:
     }
 
 
+_ELEVATE_ON_WORDS = frozenset({"on", "true", "yes", "1"})
+_ELEVATE_OFF_WORDS = frozenset({"off", "false", "no", "0"})
+
+
+def _elevation_status_text() -> str:
+    if permission_modes.elevated():
+        reason = permission_modes.elevation_reason()
+        lines = ["elevation: on%s" % (" -- %s" % reason if reason else "")]
+    else:
+        lines = ["elevation: off"]
+    lines.append(
+        "  host process: %s administrator rights"
+        % ("holds" if permission_modes.host_is_elevated() else "does not hold")
+    )
+    lines.append(
+        "  no /mode ever grants or revokes this; it is session-only and is "
+        "dropped, never restored, at the start of the next session."
+    )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def elevate(on: str = "", reason: str = "", token: str = "") -> str:
+    """Turn Sonder's privilege axis on or off for this session, or show it.
+
+    Elevation is a separate axis from the autonomy mode set by /mode: no mode
+    grants it, switching modes never touches it, and -- unlike mode -- it is
+    never restored from a previous session, so a fresh session always starts
+    unelevated. This is the only way to change it.
+
+    Sonder's own tool catalog does not currently mark anything as
+    unconditionally requiring administrator rights (see PRIVILEGED_TOOLS in
+    permission_modes.py for the reasoning); this flag is the session-scoped
+    switch for the day something does, and for decide()'s per-call
+    requires_elevation path in the meantime.
+
+    on: "on"/"true"/"yes"/"1" to elevate (a reason is required), "off"/
+        "false"/"no"/"0" to de-elevate. Omitted, or "status", just reports
+        the current state; neither requires a reason or a token.
+    reason: why elevation is being turned on. Shown by /mode --explain and
+        /permissions for as long as elevation stays on; dropped the moment
+        it is turned off.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    wanted = str(on or "").strip().lower()
+    if wanted in ("", "status", "show"):
+        output = _elevation_status_text()
+        _record_direct_tool("elevate", {"on": wanted}, ok=True, started=started)
+        return output
+    if wanted in _ELEVATE_ON_WORDS:
+        refusal = _developer_gate("elevate", token, started)
+        if refusal:
+            return refusal
+        reason_text = str(reason or "").strip()
+        if not reason_text:
+            _record_direct_tool(
+                "elevate", {"on": wanted}, ok=False, started=started,
+                summary="reason required",
+            )
+            return (
+                'elevate on requires a reason, e.g. '
+                '/elevate on "installing a signed driver".'
+            )
+        permission_modes.set_elevated(True, reason_text)
+        output = _elevation_status_text()
+        if not permission_modes.host_is_elevated():
+            output += (
+                "\n  note: this process does not actually hold administrator "
+                "rights, so anything genuinely needing them (e.g. dism) will "
+                "still fail at the OS -- this only lifted Sonder's own "
+                "privilege gate, not Windows'."
+            )
+    elif wanted in _ELEVATE_OFF_WORDS:
+        permission_modes.set_elevated(False)
+        output = _elevation_status_text()
+    else:
+        _record_direct_tool(
+            "elevate", {"on": wanted}, ok=False, started=started,
+            summary="unrecognised argument",
+        )
+        return "unrecognised /elevate argument %r. use on, off, or status." % on
+    _record_direct_tool("elevate", {"on": wanted}, ok=True, started=started)
+    return output
+
+
 @mcp.tool()
 def file_policy(token: str = "", approval: str = "", extra_roots: str = "") -> str:
     """Show guarded filesystem roots and bypass state."""

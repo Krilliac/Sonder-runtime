@@ -249,6 +249,60 @@ def test_privileged_tools_are_denied_without_elevation(monkeypatch):
     assert pm.decide("file_read").action == pm.ALLOW
 
 
+def test_privileged_tools_is_empty_by_default():
+    """Locks the decision made in the module docstring's rationale section.
+
+    Not a drift guard -- a deliberate choice. If this ever fails because
+    someone added a tool, that addition needs the same evidence-backed
+    justification the docstring asks for, not a quiet edit to this test.
+    """
+    assert pm.PRIVILEGED_TOOLS == frozenset()
+
+
+def test_requires_elevation_denies_without_elevation_and_allows_with_it():
+    """The capability-gate path: privilege on ONE call, not a tool-wide list.
+
+    file_read is not in PRIVILEGED_TOOLS and never will be for this test --
+    the caller flags this specific invocation instead.
+    """
+    pm.set_mode(pm.AUTO)
+    pm.set_elevated(False)
+    denied = pm.decide("file_read", requires_elevation=True)
+    assert denied.action == pm.DENY
+    assert "elevation" in denied.reason
+    pm.set_elevated(True, "test")
+    assert pm.decide("file_read", requires_elevation=True).action == pm.ALLOW
+
+
+def test_requires_elevation_defaults_to_false_and_changes_nothing():
+    """Passing no requires_elevation must be byte-for-byte the old behaviour."""
+    pm.set_elevated(False)
+    for mode in pm.MODES:
+        for tool in ("file_read", "file_write", "workspace_run", "file_delete"):
+            with_default = pm.decide(tool, mode=mode)
+            explicit_false = pm.decide(tool, mode=mode, requires_elevation=False)
+            assert with_default == explicit_false
+
+
+def test_requires_elevation_does_not_leak_onto_other_tools_or_calls():
+    """One call's requires_elevation must not become a standing restriction."""
+    pm.set_elevated(False)
+    pm.decide("file_read", requires_elevation=True)  # denied, discarded
+    assert pm.decide("file_read").action == pm.ALLOW, (
+        "requires_elevation from a prior call leaked into a later one"
+    )
+    assert pm.decide("file_write", mode=pm.AUTO, requires_elevation=False).action == pm.ALLOW
+
+
+def test_rule_deny_still_outranks_requires_elevation(monkeypatch):
+    """Precedence order 1 (rule deny) is checked before 2 (privilege)."""
+    monkeypatch.setattr(pm, "_rule_lookup", _rule(pm.DENY, pattern="file_read"))
+    pm.set_elevated(True, "test")
+    decision = pm.decide("file_read", requires_elevation=True)
+    assert decision.action == pm.DENY
+    assert "rule" in decision.reason.lower()
+
+
 # --- invariant 3: plan holds still ----------------------------------------
 
 
@@ -893,3 +947,142 @@ def test_concurrent_decide_never_returns_an_unknown_action():
 
     assert set(actions) <= {pm.ALLOW, pm.ASK, pm.DENY}
     assert pm.ALLOW not in actions, "file_delete was allowed outright in some mode"
+
+
+# --- /elevate: the console command that actually turns the axis -----------
+#
+# set_elevated()/elevated()/elevation_reason() existed before this task but
+# nothing reachable from the console called them. server.elevate() is that
+# surface; command_catalog exposes it as "/elevate" automatically because it
+# is a plain @mcp.tool() with no hand-written dispatch branch (see
+# command_catalog's module docstring). These tests exercise the tool
+# directly through `server`, on the same isolated state_file fixture the rest
+# of this module uses, so they never touch a real permission_mode.json.
+
+
+def test_elevate_with_no_argument_reports_current_state():
+    import server
+
+    assert pm.elevated() is False
+    output = server.elevate()
+    assert "elevation: off" in output
+    assert "no /mode ever grants or revokes this" in output
+
+
+def test_elevate_on_requires_a_reason():
+    import server
+
+    output = server.elevate(on="on")
+    assert "reason" in output.lower()
+    assert pm.elevated() is False, "a reason-less request must not elevate"
+
+
+def test_elevate_on_with_a_reason_elevates_and_records_it():
+    import server
+
+    output = server.elevate(on="on", reason="installing a signed driver")
+    assert pm.elevated() is True
+    assert pm.elevation_reason() == "installing a signed driver"
+    assert "elevation: on" in output
+    assert "installing a signed driver" in output
+
+
+def test_elevate_off_de_elevates_and_drops_the_reason():
+    import server
+
+    pm.set_elevated(True, "prior reason")
+    output = server.elevate(on="off")
+    assert pm.elevated() is False
+    assert pm.elevation_reason() == ""
+    assert "elevation: off" in output
+
+
+@pytest.mark.parametrize("word", ["on", "true", "yes", "1", "ON", " On "])
+def test_elevate_accepts_several_spellings_of_on(word):
+    import server
+
+    server.elevate(on=word, reason="test")
+    assert pm.elevated() is True
+
+
+@pytest.mark.parametrize("word", ["off", "false", "no", "0", "OFF"])
+def test_elevate_accepts_several_spellings_of_off(word):
+    import server
+
+    pm.set_elevated(True, "prior")
+    server.elevate(on=word)
+    assert pm.elevated() is False
+
+
+def test_elevate_rejects_an_unrecognised_argument():
+    import server
+
+    output = server.elevate(on="sudo")
+    assert "unrecognised" in output.lower()
+    assert pm.elevated() is False
+
+
+def test_elevate_warns_when_the_host_process_is_not_actually_elevated(monkeypatch):
+    import server
+
+    monkeypatch.setattr(pm, "host_is_elevated", lambda: False)
+    output = server.elevate(on="on", reason="test")
+    assert "does not actually hold administrator" in output
+
+
+def test_elevate_does_not_warn_when_the_host_process_is_actually_elevated(monkeypatch):
+    import server
+
+    monkeypatch.setattr(pm, "host_is_elevated", lambda: True)
+    output = server.elevate(on="on", reason="test")
+    assert "does not actually hold administrator" not in output
+
+
+def test_elevate_on_is_refused_by_the_developer_gate_when_deployment_authenticates(monkeypatch):
+    import server
+
+    monkeypatch.setattr(
+        server, "_developer_gate",
+        lambda *_a, **_k: "refused: developer authority required.",
+    )
+    output = server.elevate(on="on", reason="test")
+    assert output.startswith("refused:")
+    assert pm.elevated() is False
+
+
+def test_elevate_off_and_status_never_consult_the_developer_gate(monkeypatch):
+    import server
+
+    def boom(*_a, **_k):
+        raise AssertionError("off/status must not require developer authority")
+
+    monkeypatch.setattr(server, "_developer_gate", boom)
+    pm.set_elevated(True, "prior")
+    assert "elevation: on" in server.elevate()
+    assert "elevation: off" in server.elevate(on="off")
+
+
+def test_elevate_is_reachable_as_a_slash_command_and_classed_dangerous():
+    import command_catalog
+
+    command_catalog.reset_cache()
+    command = command_catalog.by_name("/elevate")
+    assert command is not None
+    assert command.tool == "elevate"
+    assert command.risk == "dangerous"
+
+
+def test_elevate_never_allows_outright_in_any_mode():
+    """Matches the module's own headline promise for the ``dangerous`` class."""
+    for mode in pm.MODES:
+        assert pm.decide("elevate", mode=mode).action != pm.ALLOW
+
+
+def test_elevate_parses_a_natural_console_line():
+    import command_catalog
+
+    command_catalog.reset_cache()
+    parsed = command_catalog.parse_invocation(
+        '/elevate on "installing a driver"'
+    )
+    assert parsed == ("elevate", {"on": "on", "reason": "installing a driver"})

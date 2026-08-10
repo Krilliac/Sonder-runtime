@@ -113,6 +113,7 @@ _CATEGORY_BY_TOOL = {
     "update_system_profile": "persona",
     "system_improvement_report": "system",
     "data_convert": "data",
+    "elevate": "security",
 }
 
 # Ordered longest-first at use time; first hit wins.
@@ -204,8 +205,10 @@ _DANGEROUS = frozenset({
     "git_merge", "git_cherry_pick", "task_delete", "self_heal_repair",
     # Changing routing or the permission policy itself is not an ordinary
     # workspace edit: it alters what every later call is allowed to do, so it
-    # must not flow unprompted in acceptEdits/auto.
-    "runtime_policy_update", "permission_rule_set",
+    # must not flow unprompted in acceptEdits/auto. Elevation is the same
+    # shape of decision -- it widens what every later privileged call is
+    # allowed to do -- so it gets the same treatment.
+    "runtime_policy_update", "permission_rule_set", "elevate",
 })
 
 
