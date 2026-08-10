@@ -1,3 +1,4 @@
+import dataclasses
 from dataclasses import replace
 import inspect
 
@@ -267,9 +268,131 @@ def test_descriptor_policy_invariants_are_checked():
 
 def test_diagnostics_exposes_shadow_result_without_startup_enforcement():
     report = server.tool_capability_shadow_report()
-    assert report == "ok (15 descriptors; shadow-only)"
+    # "ok" is exactly what this validator must never be able to say while it
+    # inspects 15 of ~184 advertised tools.  The verdict names the coverage.
+    assert report.startswith("partial: ")
+    assert "15 of " in report
+    assert "unvalidated" in report
     # Prove diagnostics consumes the shadow report without running its unrelated
     # model, database, NPU, and filesystem checks in this focused unit test.
     source = inspect.getsource(server.diagnostics)
     assert "tool_capability_shadow_report()" in source
     assert "tool capability shadow" in source
+
+
+# --- the validator must state how much of the surface it validated ----------
+
+
+def test_shadow_report_can_never_say_ok_while_the_surface_is_undescribed():
+    """A validator that cannot say what fraction it validated is not a validator.
+
+    Absence from _DESCRIPTORS silently exempts a tool from every drift check,
+    so "no drift found" over 15 of ~184 advertised tools is a coverage
+    statement wearing a verdict's clothes.  The verdict must carry the number.
+    """
+    surfaces = server._tool_capability_shadow_surfaces()
+    report = capabilities.format_shadow_report(surfaces)
+
+    assert not report.startswith("ok")
+    described = len(capabilities.CAPABILITIES)
+    advertised = len(
+        set().union(*(names for _label, names in capabilities.advertised_surfaces(surfaces)))
+    )
+    assert advertised > described * 5, "the point of the number is that it is small"
+    assert "%d of %d" % (described, advertised) in report
+    assert "%d unvalidated" % (advertised - described) in report
+
+
+def test_coverage_is_measured_for_every_field_of_the_snapshot():
+    """Hand-listing the surfaces reproduces the defect one level up.
+
+    A hardcoded list covers today's fields; a fifteenth would be silently
+    unmeasured, exactly as a tool without a descriptor is silently unchecked.
+    The list is therefore DERIVED from ShadowSurfaces, and this pins that --
+    checking a handful of labels by name would not.
+    """
+    surfaces = server._tool_capability_shadow_surfaces()
+    coverage = capabilities.shadow_coverage(surfaces)
+
+    expected = [
+        capabilities.surface_label(field.name)
+        for field in dataclasses.fields(capabilities.ShadowSurfaces)
+    ]
+    assert [row.surface for row in coverage] == expected
+    assert len(coverage) == len(dataclasses.fields(capabilities.ShadowSurfaces))
+
+    by_surface = {row.surface: row for row in coverage}
+    for row in coverage:
+        assert row.described <= row.advertised
+        assert row.unvalidated == row.advertised - row.described
+    # Every surface is measured against the same 15 descriptors, so each is
+    # mostly unvalidated -- and the report says so per surface.
+    assert by_surface["direct-mcp"].unvalidated > 100
+    assert by_surface["autopilot-workspace"].unvalidated > 50
+
+    line = capabilities.format_coverage_report(surfaces)
+    for row in coverage:
+        assert "%s %d/%d" % (row.surface, row.described, row.advertised) in line
+
+
+def test_a_text_surface_with_no_name_parser_fails_instead_of_being_skipped():
+    """The one hand-maintained part must be loud when it goes stale."""
+    surfaces = server._tool_capability_shadow_surfaces()
+    parsers = dict(capabilities._TEXT_SURFACE_PARSERS)
+    parsers.pop("tool_manifest")
+
+    with pytest.raises(ValueError) as excinfo:
+        capabilities.advertised_surfaces(surfaces, text_parsers=parsers)
+
+    assert "tool_manifest" in str(excinfo.value)
+
+
+def test_autopilot_transcript_sets_are_snapshotted_as_advertised_surfaces():
+    """_AUTOPILOT_*_TOOLS are injected verbatim into the model transcript."""
+    surfaces = server._tool_capability_shadow_surfaces()
+
+    assert surfaces.autopilot_observe_tools == server._AUTOPILOT_OBSERVE_TOOLS
+    assert surfaces.autopilot_workspace_tools == server._AUTOPILOT_WORKSPACE_TOOLS
+
+
+def test_no_surface_can_be_omitted_from_a_snapshot():
+    """A defaulted field is an unmeasured surface that reads as an empty one."""
+    for field in dataclasses.fields(capabilities.ShadowSurfaces):
+        assert field.default is dataclasses.MISSING, field.name
+        assert field.default_factory is dataclasses.MISSING, field.name
+
+
+def _empty_surfaces():
+    return capabilities.ShadowSurfaces(**{
+        field.name: ("" if field.type is str or "help" in field.name
+                     or field.name == "tool_manifest" else frozenset())
+        for field in dataclasses.fields(capabilities.ShadowSurfaces)
+    })
+
+
+def test_measuring_nothing_is_unmeasured_not_a_clean_hundred_percent():
+    """The A1 defect, one level up: 0 of 0 is not full coverage.
+
+    A snapshot taken before registration advertises nothing, and a coverage
+    report that answers "complete, 100.0%" to that has done precisely what
+    "ok (15 descriptors)" did -- reported the absence of evidence as evidence
+    of absence.
+    """
+    report = capabilities.format_shadow_report(_empty_surfaces())
+
+    assert report.startswith("unmeasured")
+    assert "complete" not in report
+    assert "100.0%" not in report
+
+
+def test_a_surface_that_advertises_nothing_has_no_coverage_fraction():
+    assert capabilities.SurfaceCoverage("x", 0, 0).described_fraction is None
+    assert capabilities.SurfaceCoverage("x", 4, 1).described_fraction == 0.25
+
+
+def test_diagnostics_reports_shadow_coverage_per_surface():
+    source = inspect.getsource(server.diagnostics)
+    assert "tool_capability_coverage_report()" in source
+    assert "tool capability coverage" in source
+    line = server.tool_capability_coverage_report()
+    assert "direct-mcp 15/" in line
