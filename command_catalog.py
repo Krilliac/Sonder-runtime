@@ -1,0 +1,813 @@
+"""command_catalog -- one source of truth for every Sonder command.
+
+Three surfaces used to drift apart: the REPL's ``elif cmd in (...)`` chain, the
+``control_command`` chain the app and HTTP API call, and ``command_registry``'s
+hand-written list.  The registry had 59 entries while the REPL answered 151
+names and the MCP server registered 178 tools, so ``/commands`` confidently
+under-reported the surface by more than half.
+
+Nothing here is hand-maintained per command:
+
+* Slash names and their alias groups are read out of the dispatch chains
+  themselves (``ast`` over the ``cmd == "/x"`` / ``cmd in ("/x", "/y")``
+  comparisons), so a new branch is catalogued the moment it is written.
+* Every registered MCP tool is exposed as ``/<tool_name>`` with its real
+  parameter schema, so all 178 are reachable without 178 new branches.
+* Risk is read from the server's own policy sets rather than restated.
+
+Only the category taxonomy and the "most used" ordering are curated, and the
+category map falls back to prefix rules so a brand-new tool still lands
+somewhere sensible instead of vanishing.
+
+Stdlib only.  ``server`` is imported lazily inside functions: server imports
+this module for /help, so a module-level import would be circular.
+"""
+from __future__ import annotations
+
+import ast
+import functools
+import os
+import re
+import shlex
+from dataclasses import dataclass
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+# --- taxonomy -------------------------------------------------------------
+
+CATEGORIES = {
+    "basic": "Session, help, and getting around",
+    "chat": "Ask the model, offload, consult, and route",
+    "planning": "Tasks, plans, and checklists",
+    "filesystem": "Find, read, write, and move guarded files",
+    "repo": "Git history, status, diffs, and branches",
+    "dev": "Test, lint, format, typecheck, build, and refactor",
+    "execution": "Run code, scripts, programs, and projects",
+    "agents": "Autonomous agents, fleets, autopilot, and workflows",
+    "memory": "Lessons, facts, recall, and learning health",
+    "context": "Context health, compaction, and sessions",
+    "data": "Inspect, query, and convert structured data",
+    "creative": "Artifacts, assets, images, and games",
+    "web": "Search, fetch, weather, and location",
+    "system": "Host, hardware, runtime policy, and diagnostics",
+    "persona": "Tone, emotion vectors, and preferences",
+    "security": "Permissions, risk inspection, and accounts",
+    "training": "Curriculum, evaluation, and weight training",
+}
+
+# Explicit placements that the prefix rules would get wrong.
+_CATEGORY_BY_TOOL = {
+    "sonder": "chat",
+    "offload": "chat",
+    "consult": "chat",
+    "ensemble_answer": "chat",
+    "route_request": "chat",
+    "agent": "agents",
+    "workbench_agent": "agents",
+    "loop": "agents",
+    "improve_function": "dev",
+    "codegen_build_loop": "dev",
+    "scaffold_project": "dev",
+    "project_detect": "dev",
+    "repository_symbol_index": "dev",
+    "dependency_inventory": "dev",
+    "import_autofix": "dev",
+    "json_patch": "filesystem",
+    "text_patch": "filesystem",
+    "text_search": "filesystem",
+    "script_search": "filesystem",
+    "program_search": "execution",
+    "isolated_run": "execution",
+    "sqlite_mutate": "data",
+    "image_inspect": "creative",
+    "ground_artifact": "creative",
+    "weather_lookup": "web",
+    "approximate_location_lookup": "web",
+    "local_service_probe": "system",
+    "diagnostics": "system",
+    "status": "system",
+    "unload": "system",
+    "command_registry_list": "basic",
+    "tool_manifest": "basic",
+    "activity_status": "system",
+    "debug_inspect": "system",
+    "record_outcome": "memory",
+    "apply_learned": "memory",
+    "recall": "memory",
+    "learning_health_status": "memory",
+    "evaluation_history_status": "training",
+    "promotion_eval": "training",
+    "secret_scan": "security",
+    "artifact_risk_inspect": "security",
+    "process_memory_risk_inspect": "security",
+    "process_list": "system",
+    "set_context_size": "context",
+    "session_export": "context",
+    "sonder_sessions": "context",
+    "sonder_stats": "memory",
+    "sonder_remember_fact": "memory",
+    "hardware_profile": "system",
+    "environment_status": "system",
+    "npu_status": "system",
+    "system_profile_text": "persona",
+    "update_system_profile": "persona",
+    "system_improvement_report": "system",
+    "data_convert": "data",
+}
+
+# Ordered longest-first at use time; first hit wins.
+_CATEGORY_BY_PREFIX = {
+    "task_": "planning",
+    "checklist_": "planning",
+    "file_": "filesystem",
+    "directory_": "filesystem",
+    "archive_": "filesystem",
+    "workspace_": "filesystem",
+    "repo_": "repo",
+    "git_": "repo",
+    "test_": "dev",
+    "lint_": "dev",
+    "format_": "dev",
+    "typecheck_": "dev",
+    "build_": "dev",
+    "dependency_": "dev",
+    "rename_": "dev",
+    "find_": "dev",
+    "diff_": "dev",
+    "apply_": "dev",
+    "run_": "execution",
+    "script_": "execution",
+    "parallel_": "execution",
+    "campaign_": "agents",
+    "master_": "agents",
+    "autopilot_": "agents",
+    "workflow_": "agents",
+    "memory_": "memory",
+    "learn_": "memory",
+    "learning_": "memory",
+    "context_": "context",
+    "data_": "data",
+    "artifact_": "creative",
+    "asset": "creative",
+    "game_": "creative",
+    "web_": "web",
+    "admin_": "security",
+    "permission_": "security",
+    "runtime_": "system",
+    "mcp_": "system",
+    "live_": "system",
+    "self_heal": "system",
+    "system_": "system",
+    "update_": "persona",
+    "emotion_": "persona",
+    "tune_emotion": "persona",
+    "preferences_": "persona",
+    "curriculum": "training",
+    "eval": "training",
+}
+
+# The bare "/" menu. Ordered by how often they are actually reached for.
+POPULAR = (
+    "/help", "/todo", "/context", "/stats", "/work", "/read", "/search",
+    "/files", "/run", "/agents", "/commands", "/activity",
+)
+
+# command_registry predates this taxonomy and uses two names it does not share.
+_LEGACY_CATEGORY = {"inspect": "system", "learning": "memory"}
+
+# Native console commands that front no MCP tool, so no schema names them.
+_CATEGORY_BY_SLASH = {
+    "/help": "basic", "/exit": "basic", "/new": "basic", "/project": "basic",
+    "/sessions": "basic", "/resume": "basic", "/version": "basic",
+    "/model": "chat", "/persona": "persona", "/consult": "chat",
+    "/route": "chat", "/refactor": "dev", "/scaffold": "dev",
+    "/fact": "memory", "/facts": "memory", "/lessons": "memory",
+    "/learn": "memory", "/good": "memory", "/bad": "memory",
+    "/accept": "memory", "/pass": "memory", "/fail": "memory",
+    "/todo": "planning", "/plan": "planning",
+    "/cot": "system", "/debug": "system", "/env": "system",
+    "/trace": "system", "/strict": "system", "/dump": "system",
+    "/whoami": "security", "/admin": "security", "/accounts": "security",
+    "/login": "security", "/register": "security", "/setaccount": "security",
+    "/goal": "system", "/improve": "system", "/append": "filesystem",
+    "/write": "filesystem", "/edit": "filesystem", "/delete": "filesystem",
+    "/read": "filesystem", "/files": "filesystem", "/filepolicy": "filesystem",
+    "/run": "execution", "/runwindow": "execution",
+}
+
+_RISK_ORDER = ("safe", "ask", "mutation", "dangerous")
+
+# Names whose blast radius the policy sets alone understate.
+_DANGEROUS = frozenset({
+    "file_delete", "unload", "sqlite_mutate", "memory_privacy_repair",
+    "memory_quality_repair", "admin_set_account", "admin_register",
+    "git_merge", "git_cherry_pick", "task_delete", "self_heal_repair",
+})
+
+
+@dataclass(frozen=True)
+class Param:
+    name: str
+    type: str
+    required: bool
+    default: object = None
+
+    def render(self) -> str:
+        if self.required:
+            return "<%s>" % self.name
+        # Compare against None/"" explicitly. `0 in (None, "", False)` is True
+        # because 0 == False, so a membership test silently hid every int
+        # default of 0 from the usage line while help_command's table still
+        # printed it -- the two disagreed on 62 parameters.
+        if self.default is None or self.default == "":
+            return "[%s]" % self.name
+        return "[%s=%s]" % (self.name, self.default)
+
+
+@dataclass(frozen=True)
+class Command:
+    name: str
+    aliases: tuple
+    tool: str
+    category: str
+    risk: str
+    summary: str
+    params: tuple
+    native: bool
+
+    @property
+    def all_names(self) -> tuple:
+        return (self.name,) + tuple(self.aliases)
+
+    def usage(self) -> str:
+        if not self.params:
+            return self.name
+        return "%s %s" % (self.name, " ".join(p.render() for p in self.params))
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name, "aliases": list(self.aliases), "tool": self.tool,
+            "category": self.category, "risk": self.risk,
+            "summary": self.summary, "native": self.native,
+            "usage": self.usage(),
+            "params": [
+                {"name": p.name, "type": p.type, "required": p.required,
+                 "default": p.default}
+                for p in self.params
+            ],
+        }
+
+
+# --- derivation -----------------------------------------------------------
+
+
+def _slash_groups(path: str) -> list[tuple[str, ...]]:
+    """Alias groups read out of a dispatch chain's ``cmd`` comparisons.
+
+    ``elif cmd in ("/cot", "/thoughts")`` yields ``("/cot", "/thoughts")`` so
+    the catalog can show one command with two spellings rather than two
+    commands that happen to do the same thing.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read())
+    except (OSError, SyntaxError):
+        return []
+    groups: list[tuple[str, ...]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Compare) or len(node.ops) != 1:
+            continue
+        if not isinstance(node.left, ast.Name) or node.left.id != "cmd":
+            continue
+        comparator = node.comparators[0]
+        names: list[str] = []
+        if isinstance(node.ops[0], ast.Eq) and isinstance(comparator, ast.Constant):
+            if isinstance(comparator.value, str):
+                names = [comparator.value]
+        elif isinstance(node.ops[0], ast.In) and isinstance(
+            comparator, (ast.Set, ast.Tuple, ast.List)
+        ):
+            names = [
+                item.value for item in comparator.elts
+                if isinstance(item, ast.Constant) and isinstance(item.value, str)
+            ]
+        # len > 1 drops the bare "/" branch: that is the "show me what I can
+        # type" gesture, not a command, and cataloguing it puts an entry named
+        # "/" in every help listing.
+        names = [n for n in names if n.startswith("/") and len(n) > 1]
+        if names:
+            groups.append(tuple(dict.fromkeys(names)))
+    return groups
+
+
+def _native_groups() -> list[tuple[str, ...]]:
+    """Alias groups, taking ``control_command`` as authoritative.
+
+    The two chains do not mean the same thing by ``cmd in (...)``.  In
+    ``server.control_command`` each branch is one command and the tuple is its
+    real alias list.  In the REPL several branches are *delegation* lists --
+    ``elif cmd in ("/report", "/endreport", "/checklist", "/plan", ...)``
+    simply forwards all of them to ``control_command`` -- so reading those as
+    aliases collapsed 22 unrelated commands into one entry and gave ``/grep``
+    the summary belonging to ``/report``.
+
+    So: take server.py's grouping first, then let the REPL contribute only the
+    names server.py never defines (``/todo``, ``/exit``, ``/model``, ...).
+    """
+    groups: list[tuple[str, ...]] = []
+    claimed: set[str] = set()
+    for path in ("server.py", "sonder_repl.py"):
+        for group in _slash_groups(os.path.join(_HERE, path)):
+            fresh = tuple(n for n in group if n not in claimed)
+            if fresh:
+                groups.append(fresh)
+                claimed.update(fresh)
+    return groups
+
+
+@functools.lru_cache(maxsize=1)
+def _help_summaries() -> dict:
+    """One-liners harvested from the REPL's hand-written ``HELP`` block.
+
+    Native console commands (``/trace``, ``/model``, ``/persona``) front no MCP
+    tool, so no schema describes them, and most predate ``command_registry``.
+    Their descriptions already exist in that block -- read them rather than
+    restate them.  Parsed from source, not imported: ``sonder_repl`` imports
+    ``server``, which imports this module.
+    """
+    try:
+        with open(os.path.join(_HERE, "sonder_repl.py"), encoding="utf-8") as handle:
+            tree = ast.parse(handle.read())
+    except (OSError, SyntaxError):
+        return {}
+    block = ""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if "HELP" in targets and isinstance(node.value, ast.Constant):
+            if isinstance(node.value.value, str):
+                block = node.value.value
+                break
+    out: dict[str, str] = {}
+    for line in block.splitlines():
+        match = re.match(r"^\s+(/[a-z]\w*)", line)
+        if not match:
+            continue
+        # The block is column-aligned, but a long argument list can eat the
+        # gutter ("/model [name|tier] list installed..."), so fall back to the
+        # description column when the two-space split finds only one chunk.
+        chunks = [c for c in re.split(r"\s{2,}", line.strip()) if c]
+        description = chunks[-1] if len(chunks) > 1 else line[21:].strip()
+        if description and not description.startswith("/"):
+            out.setdefault(match.group(1), description)
+    return out
+
+
+def _category_for(name: str) -> str:
+    if name in _CATEGORY_BY_TOOL:
+        return _CATEGORY_BY_TOOL[name]
+    for prefix in sorted(_CATEGORY_BY_PREFIX, key=len, reverse=True):
+        if name.startswith(prefix):
+            return _CATEGORY_BY_PREFIX[prefix]
+    return "system"
+
+
+def _risk_for(name: str, server) -> str:
+    if name in _DANGEROUS:
+        return "dangerous"
+    if name in getattr(server, "_WORK_MUTATION_TOOLS", frozenset()):
+        return "mutation"
+    read_only = getattr(server, "REPOSITORY_READ_ONLY_TOOLS", frozenset())
+    inspection = getattr(server, "_WORK_INSPECTION_TOOLS", frozenset())
+    if name in read_only or name in inspection:
+        return "safe"
+    return "ask"
+
+
+_SCHEMA_TYPES = {
+    "string": "str", "integer": "int", "number": "num",
+    "boolean": "bool", "array": "list", "object": "obj",
+}
+
+
+def _params_from_schema(schema: dict) -> tuple:
+    properties = (schema or {}).get("properties") or {}
+    required = set((schema or {}).get("required") or [])
+    out = []
+    for pname, spec in properties.items():
+        raw = spec.get("type")
+        if isinstance(raw, list):  # {"type": ["string", "null"]}
+            raw = next((t for t in raw if t != "null"), "string")
+        out.append(Param(
+            name=pname,
+            type=_SCHEMA_TYPES.get(raw, "str"),
+            required=pname in required,
+            default=spec.get("default"),
+        ))
+    # Declaration order, deliberately not sorted required-first: positional
+    # binding uses this order, and reordering made "/git_branch feature-x"
+    # bind the branch name to the tool's second parameter.
+    return tuple(out)
+
+
+def _summarize(text: str) -> str:
+    """First sentence of a docstring, collapsed to one line."""
+    body = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not body:
+        return ""
+    match = re.match(r"^(.+?[.!?])(?:\s|$)", body)
+    return (match.group(1) if match else body).strip()
+
+
+@functools.lru_cache(maxsize=1)
+def catalog() -> tuple:
+    """Every reachable command: native slash commands plus every MCP tool."""
+    import server  # lazy: server imports this module for /help
+
+    commands: list[Command] = []
+    claimed: set[str] = set()
+
+    try:
+        tools = list(server.mcp._tool_manager.list_tools())
+    except Exception:  # a partially initialised server must not break /help
+        tools = []
+    tools_by_name = {t.name: t for t in tools}
+
+    import command_registry
+    legacy = {c["name"]: c for c in command_registry.COMMANDS}
+
+    # 1. Native slash commands, with the tool they front when the names line up.
+    for group in _native_groups():
+        # The curated name wins; otherwise the one the author wrote first,
+        # which is the canonical spelling in every branch in both chains
+        # ("/todo", "/task", "/tasks" -- not the shortest, "/task").
+        canonical = next((n for n in group if n in legacy), group[0])
+        aliases = tuple(n for n in group if n != canonical)
+        stem = canonical.lstrip("/")
+        tool = next(
+            (n.lstrip("/") for n in group if n.lstrip("/") in tools_by_name), "",
+        )
+        row = tools_by_name.get(tool)
+        hit = next((legacy[n] for n in group if n in legacy), None)
+        category = _CATEGORY_BY_SLASH.get(canonical)
+        if not category and hit:
+            raw = hit.get("category", "")
+            category = _LEGACY_CATEGORY.get(raw, raw)
+        if category not in CATEGORIES:
+            category = _category_for(tool or stem)
+        commands.append(Command(
+            name=canonical,
+            aliases=aliases,
+            tool=tool,
+            category=category,
+            # A console command that drives no tool cannot mutate on its own.
+            risk=_risk_for(tool, server) if tool else (
+                hit.get("risk", "safe") if hit else "safe"
+            ),
+            summary=_summarize(getattr(row, "description", "")) if row else "",
+            params=_params_from_schema(getattr(row, "parameters", {})) if row else (),
+            native=True,
+        ))
+        claimed.update(group)
+        if tool:
+            claimed.add("/" + tool)
+
+    # 2. Every remaining MCP tool, reachable as /<tool_name>.
+    for row in tools:
+        slash = "/" + row.name
+        if slash in claimed:
+            continue
+        commands.append(Command(
+            name=slash,
+            aliases=(),
+            tool=row.name,
+            category=_category_for(row.name),
+            risk=_risk_for(row.name, server),
+            summary=_summarize(row.description),
+            params=_params_from_schema(row.parameters),
+            native=False,
+        ))
+
+    # 3. Curated summaries for native commands the tool registry cannot
+    #    describe: the registry first, then the REPL's own help block.
+    from_help = _help_summaries()
+    filled = []
+    for command in commands:
+        if command.summary:
+            filled.append(command)
+            continue
+        hit = next((legacy[n] for n in command.all_names if n in legacy), None)
+        summary = hit.get("summary", "") if hit else ""
+        if not summary:
+            summary = next(
+                (from_help[n] for n in command.all_names if n in from_help), "",
+            )
+        filled.append(command if not summary else Command(
+            name=command.name, aliases=command.aliases, tool=command.tool,
+            category=command.category, risk=command.risk, summary=summary,
+            params=command.params, native=command.native,
+        ))
+    filled.sort(key=lambda c: (c.category, c.name))
+    return tuple(filled)
+
+
+def reset_cache() -> None:
+    """Drop the memoised catalog (used after a live reload adds tools)."""
+    catalog.cache_clear()
+
+
+# --- lookup / search ------------------------------------------------------
+
+
+def by_name(name: str):
+    wanted = str(name or "").strip()
+    if not wanted:
+        return None
+    if not wanted.startswith("/"):
+        wanted = "/" + wanted
+    wanted = wanted.lower()
+    for command in catalog():
+        if wanted in (n.lower() for n in command.all_names):
+            return command
+    return None
+
+
+def categories() -> dict:
+    grouped: dict[str, list] = {key: [] for key in CATEGORIES}
+    for command in catalog():
+        grouped.setdefault(command.category, []).append(command)
+    return {k: v for k, v in grouped.items() if v}
+
+
+def complete(prefix: str = "", limit: int = 12) -> list:
+    """Commands to offer for a partially typed slash line.
+
+    A bare "/" offers the curated popular set; every extra character narrows
+    by name first, then aliases, then summary text, so the list converges on
+    what was actually typed instead of reordering under the cursor.
+    """
+    text = str(prefix or "").strip().lower()
+    if text.startswith("/"):
+        text = text[1:]
+    everything = catalog()
+    if not text:
+        popular = [by_name(n) for n in POPULAR]
+        return [c for c in popular if c][:limit]
+
+    exact, prefixed, aliased, contained, described = [], [], [], [], []
+    for command in everything:
+        stem = command.name.lstrip("/").lower()
+        alias_stems = [a.lstrip("/").lower() for a in command.aliases]
+        if stem == text:
+            exact.append(command)
+        elif stem.startswith(text):
+            prefixed.append(command)
+        elif any(a.startswith(text) for a in alias_stems):
+            aliased.append(command)
+        elif text in stem:
+            contained.append(command)
+        elif text in (command.summary or "").lower():
+            described.append(command)
+
+    # Within a tier, float the curated console commands above raw tool names.
+    # Ordering tiers by catalog order alone buried "/files" under every
+    # file_* tool for the query "/fil" -- the popular short command is the
+    # one the typist almost certainly meant.
+    popular_rank = {name: index for index, name in enumerate(POPULAR)}
+
+    def _rank(command):
+        return (
+            popular_rank.get(command.name, len(POPULAR)),
+            0 if command.native else 1,
+            len(command.name),
+            command.name,
+        )
+
+    ranked = []
+    for tier in (exact, prefixed, aliased, contained, described):
+        ranked.extend(sorted(tier, key=_rank))
+    return ranked[:limit]
+
+
+# --- rendering ------------------------------------------------------------
+
+_RISK_MARK = {"safe": " ", "ask": "?", "mutation": "*", "dangerous": "!"}
+
+
+def _line(command: Command, width: int) -> str:
+    return "  %s %-*s  %s" % (
+        _RISK_MARK.get(command.risk, " "), width, command.name,
+        command.summary or "(no description)",
+    )
+
+
+def help_overview() -> str:
+    grouped = categories()
+    total = sum(len(v) for v in grouped.values())
+    lines = [
+        "sonder commands  (%d across %d categories)" % (total, len(grouped)),
+        "",
+        "  /help <category>   list that category      /help <command>  full usage",
+        "  /<text>            match commands as you type",
+        "",
+    ]
+    width = max((len(k) for k in grouped), default=8)
+    for key in sorted(grouped):
+        lines.append("  %-*s  %2d  %s" % (
+            width, key, len(grouped[key]), CATEGORIES.get(key, ""),
+        ))
+    popular = [c for c in (by_name(n) for n in POPULAR) if c]
+    if popular:
+        lines += ["", "most used"]
+        pwidth = max(len(c.name) for c in popular)
+        lines += [_line(c, pwidth) for c in popular]
+    lines += ["", "  legend: ? asks first   * changes files   ! destructive"]
+    return "\n".join(lines)
+
+
+def help_category(name: str) -> str:
+    key = str(name or "").strip().lower().lstrip("/")
+    grouped = categories()
+    if key not in grouped:
+        close = [k for k in grouped if k.startswith(key) or key in k]
+        if len(close) == 1:
+            key = close[0]
+        else:
+            known = ", ".join(sorted(grouped))
+            return "no command category '%s'.\ncategories: %s" % (name, known)
+    rows = sorted(grouped[key], key=lambda c: c.name)
+    width = max(len(c.name) for c in rows)
+    lines = ["%s -- %s  (%d)" % (key, CATEGORIES.get(key, ""), len(rows)), ""]
+    for command in rows:
+        lines.append(_line(command, width))
+        if command.aliases:
+            lines.append("    %s  aliases: %s" % (
+                " " * width, " ".join(sorted(command.aliases)),
+            ))
+    return "\n".join(lines)
+
+
+def help_command(name: str) -> str:
+    command = by_name(name)
+    if not command:
+        matches = complete(name, limit=8)
+        if not matches:
+            return "no command '%s'. try /help for categories." % name
+        lines = ["no exact command '%s'. did you mean:" % name, ""]
+        width = max(len(c.name) for c in matches)
+        return "\n".join(lines + [_line(c, width) for c in matches])
+    lines = [
+        command.usage(),
+        "",
+        "  %s" % (command.summary or "(no description)"),
+        "",
+        "  category: %s    risk: %s" % (command.category, command.risk),
+    ]
+    if command.aliases:
+        lines.append("  aliases:  %s" % " ".join(sorted(command.aliases)))
+    if command.tool:
+        lines.append("  tool:     %s" % command.tool)
+    if command.params:
+        lines += ["", "  parameters"]
+        width = max(len(p.name) for p in command.params)
+        for param in command.params:
+            flag = "required" if param.required else "optional"
+            default = "" if param.default in (None, "") else "  (default %s)" % param.default
+            lines.append("    %-*s  %-5s %s%s" % (
+                width, param.name, param.type, flag, default,
+            ))
+        lines += [
+            "",
+            "  call it as:  %s %s" % (
+                command.name,
+                " ".join("%s=<%s>" % (p.name, p.type) for p in command.params[:3]),
+            ),
+        ]
+    return "\n".join(lines)
+
+
+def help_text(topic: str = "") -> str:
+    """Dispatcher behind /help: no topic -> categories, else category or command."""
+    key = str(topic or "").strip()
+    if not key:
+        return help_overview()
+    if key.lstrip("/").lower() in categories():
+        return help_category(key)
+    return help_command(key)
+
+
+def format_matches(prefix: str, limit: int = 12) -> str:
+    matches = complete(prefix, limit=limit)
+    if not matches:
+        return "no command matches '%s'. /help lists every category." % prefix
+    header = "most used" if not str(prefix or "").strip("/ ") else (
+        "commands matching '%s'" % prefix
+    )
+    width = max(len(c.name) for c in matches)
+    return "\n".join([header] + [_line(c, width) for c in matches])
+
+
+# --- invocation -----------------------------------------------------------
+
+_TRUE = {"1", "true", "yes", "on"}
+_FALSE = {"0", "false", "no", "off"}
+
+# A quoted value keeps its spaces; an unquoted one runs to whitespace, which
+# leaves JSON payloads such as steps=["a","b"] intact.
+_KV_TOKEN = re.compile(
+    r"""\b([A-Za-z_]\w*)=("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)"""
+)
+
+# Scope and plumbing parameters. Many tools declare these first, so a bare
+# "/git_branch feature-x" would otherwise bind the branch name to `root`.
+_CONTEXT_PARAMS = frozenset({
+    "root", "cwd", "project", "token", "approval", "extra_roots", "timeout",
+    "max_bytes", "limit", "owner", "priority", "session",
+})
+
+
+def _coerce(value: str, kind: str):
+    if kind == "int":
+        try:
+            return int(value)
+        except ValueError:
+            return value
+    if kind == "num":
+        try:
+            return float(value)
+        except ValueError:
+            return value
+    if kind == "bool":
+        low = value.strip().lower()
+        if low in _TRUE:
+            return True
+        if low in _FALSE:
+            return False
+        return value
+    return value
+
+
+def parse_invocation(line: str):
+    """Turn ``/tool a=1 rest of text`` into ``(tool_name, kwargs)``.
+
+    ``key=value`` tokens bind by name; anything left over fills the parameters
+    in declaration order, so both ``/file_read path=x`` and ``/file_read x``
+    work. Returns None when the line is not a catalogued tool command.
+
+    Raises ValueError for a ``key=value`` whose key the tool does not accept.
+    Dropping it silently is worse than failing: ``/file_read path=x limit=5``
+    would run against the whole file while looking like it had been bounded.
+    """
+    text = str(line or "").strip()
+    if not text.startswith("/"):
+        return None
+    head, _, rest = text.partition(" ")
+    command = by_name(head)
+    if not command or not command.tool:
+        return None
+    by_param = {p.name: p for p in command.params}
+    kwargs: dict = {}
+    unknown: list[str] = []
+
+    def _take(match):
+        key, value = match.group(1), match.group(2)
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key in by_param:
+            kwargs[key] = _coerce(value, by_param[key].type)
+        else:
+            unknown.append(key)
+        return " "
+
+    # Lift key=value off the raw remainder before any shlex pass: shlex strips
+    # the quotes that JSON-valued parameters (steps, items_json) depend on.
+    leftover = _KV_TOKEN.sub(_take, rest).strip()
+    if unknown:
+        raise ValueError(
+            "%s does not take %s. parameters: %s" % (
+                command.name,
+                ", ".join(sorted(set(unknown))),
+                ", ".join(p.name for p in command.params) or "(none)",
+            )
+        )
+
+    if leftover:
+        candidates = [p for p in command.params if p.name not in kwargs]
+        required = [p for p in candidates if p.required]
+        open_params = required or (
+            [p for p in candidates if p.name not in _CONTEXT_PARAMS] or candidates
+        )
+        if open_params:
+            try:
+                words = shlex.split(leftover)
+            except ValueError:
+                words = leftover.split()
+            # One free-text parameter takes the whole remainder rather than
+            # only its first whitespace-delimited word.
+            if len(open_params) == 1 and open_params[0].type == "str":
+                kwargs[open_params[0].name] = leftover
+            else:
+                for param, value in zip(open_params, words):
+                    kwargs[param.name] = _coerce(value, param.type)
+    return command.tool, kwargs

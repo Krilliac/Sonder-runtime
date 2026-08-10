@@ -51,6 +51,30 @@ class LegacyTaskRepository:
         import sonder_runtime.adapters.memory_store as memory_store
         return _store_call(memory_store.task_children, self._connection, task_id)
 
+    def delete(self, task_id: str) -> dict:
+        import sonder_runtime.adapters.memory_store as memory_store
+        return _store_call(memory_store.delete_task, self._connection, task_id)
+
+    def add_dependency(self, task_id: str, depends_on: str) -> dict:
+        import sonder_runtime.adapters.memory_store as memory_store
+        return _store_call(memory_store.add_task_dep, self._connection, task_id, depends_on)
+
+    def remove_dependency(self, task_id: str, depends_on: str) -> dict:
+        import sonder_runtime.adapters.memory_store as memory_store
+        return _store_call(memory_store.remove_task_dep, self._connection, task_id, depends_on)
+
+    def dependencies(self, task_id: str) -> list[dict]:
+        import sonder_runtime.adapters.memory_store as memory_store
+        return _store_call(memory_store.task_dependencies, self._connection, task_id)
+
+    def dependents(self, task_id: str) -> list[dict]:
+        import sonder_runtime.adapters.memory_store as memory_store
+        return _store_call(memory_store.task_dependents, self._connection, task_id)
+
+    def progress(self, project: str = "") -> dict:
+        import sonder_runtime.adapters.memory_store as memory_store
+        return _store_call(memory_store.task_progress, self._connection, project=project)
+
 
 class LegacyChecklistEventSink:
     def __init__(self, publish_fn: Callable[[dict], None]) -> None:
