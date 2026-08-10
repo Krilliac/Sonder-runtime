@@ -59,9 +59,17 @@ VERIFIERS = {
     "run_project": ("compiled", "failed"),
     "isolated_run": ("compiled", "failed"),
     "codegen_build_loop": ("compiled", "failed"),
-    "artifact_verify": ("accepted", "rejected"),
-    "ground_artifact": ("accepted", "rejected"),
-    "artifact_ground": ("accepted", "rejected"),
+    # File-format validators. Their verdict is a program's, so it belongs in the
+    # execution-grounded vocabulary like every other entry here. It was
+    # ("accepted", "rejected") -- signals `calibration.CALLER_JUDGED` counts --
+    # which quietly filed a machine's opinion of a .docx into the population
+    # that answers "did a caller accept the delegated work", moving the
+    # `should_verify` and `_status` gates with no human having judged anything.
+    # `compiled` is the honest fit: well-formed is not the same as right, which
+    # is why that signal sits below the good threshold.
+    "artifact_verify": ("compiled", "failed"),
+    "ground_artifact": ("compiled", "failed"),
+    "artifact_ground": ("compiled", "failed"),
 }
 
 # Tools that produce work worth judging later.

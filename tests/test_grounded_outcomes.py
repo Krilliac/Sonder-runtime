@@ -80,6 +80,45 @@ def test_building_is_not_passing():
     assert go.VERIFIERS["test_run"][0] == "tests_passed"
 
 
+def test_no_verifier_may_write_into_the_caller_judged_population():
+    """A machine verdict is not a caller's judgement.
+
+    Everything in VERIFIERS is a program deciding whether something ran or
+    validated. `calibration.CALLER_JUDGED` answers a different question -- did a
+    human accept the delegated work -- and it is the population `should_verify`
+    and the `_status` thresholds gate on. One machine signal leaking into it
+    moves that gate, optimistically, with no human having judged anything.
+    """
+    import calibration
+
+    for tool, (good, bad) in go.VERIFIERS.items():
+        assert good not in calibration.CALLER_JUDGED, tool
+        assert bad not in calibration.CALLER_JUDGED, tool
+        assert good in calibration.EXECUTION_GROUNDED, tool
+        assert bad in calibration.EXECUTION_GROUNDED, tool
+
+
+def test_an_artifact_validator_files_its_verdict_as_execution_evidence():
+    """`artifact_verify` runs a file-format checker: it proves the artifact is
+    well formed, which is exactly what `compiled` means and is not what
+    `accepted` means."""
+    written, record = _sink()
+    go.note_generation("i1", "artifact_generate")
+
+    go.attribute("artifact_verify", ok=True, record_fn=record)
+
+    assert written == [("i1", "compiled")]
+
+
+def test_a_failing_artifact_validator_is_execution_evidence_too():
+    written, record = _sink()
+    go.note_generation("i1", "artifact_generate")
+
+    go.attribute("artifact_ground", ok=False, record_fn=record)
+
+    assert written == [("i1", "failed")]
+
+
 def test_a_tool_that_is_not_evidence_never_attributes():
     written, record = _sink()
     go.note_generation("i1", "sonder")
