@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import server
-from sonder_runtime.adapters.legacy.preferences import (
+from sonder_runtime.adapters.preference_adapters import (
     LegacyPreferenceCodec,
     LegacyPreferenceRepository,
     NullPreferenceEventSink,
@@ -312,7 +312,7 @@ def test_live_reload_keeps_tool_identity_and_updates_service_codec(monkeypatch):
 
 
 def test_legacy_adapter_has_no_server_dependency_or_raw_activity_payload():
-    from sonder_runtime.adapters.legacy import preferences
+    from sonder_runtime.adapters import preference_adapters as preferences
 
     source = Path(preferences.__file__).read_text(encoding="utf-8")
     assert "import server" not in source

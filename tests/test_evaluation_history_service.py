@@ -6,7 +6,7 @@ import importlib
 import pytest
 
 from sonder_runtime.adapters import evaluation_history_store
-from sonder_runtime.adapters.legacy.evaluation_history import (
+from sonder_runtime.adapters.eval_history_reader import (
     LegacyEvaluationHistoryReader,
 )
 from sonder_runtime.application.evaluation_history import EvaluationHistoryService

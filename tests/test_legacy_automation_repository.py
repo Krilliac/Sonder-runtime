@@ -11,7 +11,7 @@ import os
 import pytest
 
 import autopilot_store
-from sonder_runtime.adapters.legacy.services import LegacyAutomationRepository
+from sonder_runtime.adapters.strangler_services import LegacyAutomationRepository
 from sonder_runtime.bootstrap import app as bootstrap_app
 
 

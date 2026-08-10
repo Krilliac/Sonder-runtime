@@ -2,7 +2,7 @@
 import pytest
 
 from sonder_runtime.adapters import memory_store
-from sonder_runtime.adapters.legacy.task_state import LegacyTaskRepository
+from sonder_runtime.adapters.task_store import LegacyTaskRepository
 from sonder_runtime.application.tasks.use_cases import TaskService
 from sonder_runtime.domain.common.errors import (
     DependencyUnavailable,

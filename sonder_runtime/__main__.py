@@ -69,10 +69,10 @@ def _emit(payload: dict, *, as_json: bool) -> None:
 
 def _run_preflight(config, *, check_ollama=True, ollama_timeout=5.0):
     """Resolve the host adapter only when an entry-point command needs it."""
-    from .adapters.legacy.preflight import LegacyPreflightExecutor
+    from .adapters.preflight_executor import PreflightExecutor
     from .application.preflight import PreflightService
 
-    return PreflightService(LegacyPreflightExecutor()).run(
+    return PreflightService(PreflightExecutor()).run(
         config,
         check_ollama=check_ollama,
         ollama_timeout=ollama_timeout,

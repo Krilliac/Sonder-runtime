@@ -12,7 +12,7 @@ import pytest
 import recall
 import server
 from sonder_runtime.adapters import recall as recall_adapter
-from sonder_runtime.adapters.legacy.recall import LegacyRecallGateway
+from sonder_runtime.adapters.recall_gateway import LegacyRecallGateway
 from sonder_runtime.application.recall import RecallService
 from sonder_runtime.domain.common.errors import DependencyUnavailable, InvalidInput
 

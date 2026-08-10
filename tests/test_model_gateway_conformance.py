@@ -14,7 +14,7 @@ import pytest
 
 import embeddings
 import server
-from sonder_runtime.adapters.legacy.services import LegacyModelGateway
+from sonder_runtime.adapters.strangler_services import LegacyModelGateway
 from sonder_runtime.adapters.ollama.gateway import OllamaGateway
 from sonder_runtime.adapters.openai_compat.gateway import (
     OpenAICompatibleConfig,

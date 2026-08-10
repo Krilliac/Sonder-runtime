@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import threading
 
-from ..adapters.legacy.services import (
+from ..adapters.strangler_services import (
     LegacyAutomationRepository,
     LegacyPolicyRepository,
     LegacyProcessProbe,
@@ -21,16 +21,16 @@ from ..adapters.legacy.services import (
     OperationsEventSink,
     SystemClock,
 )
-from ..adapters.legacy.evaluation_history import LegacyEvaluationHistoryReader
-from ..adapters.legacy.inspections import LegacyInspectionExecutor
-from ..adapters.legacy.backup import LegacyBackupGateway
-from ..adapters.legacy.recall import LegacyRecallGateway
-from ..adapters.legacy.preferences import (
+from ..adapters.eval_history_reader import LegacyEvaluationHistoryReader
+from ..adapters.inspection_executor import LegacyInspectionExecutor
+from ..adapters.backup_gateway import LegacyBackupGateway
+from ..adapters.recall_gateway import LegacyRecallGateway
+from ..adapters.preference_adapters import (
     LegacyPreferenceCodec,
     LegacyPreferenceRepository,
     NullPreferenceEventSink,
 )
-from ..adapters.legacy.workflows import LegacyLoopRunner, LegacyWorkflowRepository
+from ..adapters.workflow_adapters import LegacyLoopRunner, LegacyWorkflowRepository
 from ..adapters.local_observability import LocalObservabilitySink
 from ..adapters.ollama.gateway import OllamaGateway
 from ..application.chat.handle_chat import ChatService
