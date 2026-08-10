@@ -401,7 +401,7 @@ def test_a_reviewed_sample_too_small_to_gate_on_is_unmeasured_not_blended():
     assert report["reviewed_outcomes"] == 4
     assert report["reviewed_positive_percent"] == 25.0
     assert report["status"] != "attention"
-    assert learning_health._gating_positive_percent(report) == (None, "unmeasured")
+    assert learning_health.gating_positive_percent(report) == (None, "unmeasured")
 
 
 def test_an_unmeasured_reviewed_sample_cannot_read_healthy(monkeypatch):
@@ -448,7 +448,7 @@ def test_a_measurable_reviewed_sample_can_still_read_healthy(monkeypatch):
         conn.close()
 
     assert report["reviewed_outcomes"] == learning_health._MIN_REVIEWED_SAMPLE
-    assert learning_health._gating_positive_percent(report) == (100.0, "reviewed")
+    assert learning_health.gating_positive_percent(report) == (100.0, "reviewed")
     assert report["status"] == "healthy"
 
 

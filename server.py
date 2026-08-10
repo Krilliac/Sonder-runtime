@@ -6527,7 +6527,15 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
     outcomes = learning_state["outcomes"]
     lesson_count = learning_state["lessons"]
     fact_count = learning_state["facts"]
-    acceptance = learning_state["positive_percent"] / 100.0
+    # "Acceptance" is caller-judgement language, so it may only ever carry the
+    # caller-judged rate. It used to be the blend: 398 rows of the runtime
+    # grading its own curriculum plus 2 real judgements published as
+    # "acceptance: 99.0%". Below the reviewed sample there is no acceptance rate
+    # to publish and the blend is not a stand-in for one -- and the rule stays
+    # learning_health's, not a second copy of the threshold here.
+    acceptance_percent, acceptance_basis = learning_health.gating_positive_percent(
+        learning_state,
+    )
     issues = []
     try:
         autopilot = _application().automation.snapshot(include_finished=False, limit=100)
@@ -6732,7 +6740,10 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
         )))),
         "interactions": interactions,
         "outcomes": outcomes,
-        "acceptance_percent": round(acceptance * 100.0, 1),
+        "acceptance_percent": (
+            None if acceptance_percent is None else round(acceptance_percent, 1)
+        ),
+        "acceptance_basis": acceptance_basis,
         "reviewed_outcomes": learning_state.get("reviewed_outcomes", 0),
         "reviewed_positive_percent": learning_state.get("reviewed_positive_percent", 0.0),
         "autograded_outcomes": learning_state.get("autograded_outcomes", 0),
@@ -6769,13 +6780,24 @@ def format_improvement_report(report: dict) -> str:
         ),
         # Never show the blended rate alone: it is dominated by the runtime
         # marking its own curriculum, and reads as a quality score when it
-        # is not one.
-        "    caller-judged: %s%% of %s reviewed | autograded: %s%% of %s | blended: %s%%" % (
-            report.get("reviewed_positive_percent", 0),
-            report.get("reviewed_outcomes", 0),
+        # is not one. The blend comes straight from learning_health -- the
+        # `acceptance_percent` slot now carries the caller-judged rate, so
+        # reusing it here would print that number twice under two names.
+        "    caller-judged: %s | autograded: %s%% of %s | blended: %s%%" % (
+            # "0.0% of 0 reviewed" reads as total failure when what it means is
+            # that nobody has looked. Unmeasured says so in words.
+            "unmeasured (%s of %s judged)" % (
+                report.get("reviewed_outcomes", 0),
+                learning_health._MIN_REVIEWED_SAMPLE,
+            )
+            if report.get("acceptance_basis") == "unmeasured"
+            else "%s%% of %s reviewed" % (
+                report.get("reviewed_positive_percent", 0),
+                report.get("reviewed_outcomes", 0),
+            ),
             report.get("learning_health", {}).get("autograded_positive_percent", 0),
             report.get("autograded_outcomes", 0),
-            report.get("acceptance_percent", 0),
+            report.get("learning_health", {}).get("positive_percent", 0),
         ),
         "  memory: %s lessons, %s facts, duplicate rows=%s, vague=%s, missing embeddings=%s" % (
             report.get("lessons", 0),

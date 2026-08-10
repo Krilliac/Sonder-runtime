@@ -553,8 +553,14 @@ _MIN_REVIEWED_SAMPLE = 20
 _UNMEASURED_BASIS = "unmeasured"
 
 
-def _gating_positive_percent(report: dict) -> tuple[float | None, str]:
-    """The positive rate the status gate is allowed to believe, if any.
+def gating_positive_percent(report: dict) -> tuple[float | None, str]:
+    """The positive rate a gate is allowed to believe, if any.
+
+    Public because ``_status`` is not the only decision hanging off this rule:
+    ``server.improvement_report_data`` publishes an acceptance rate from the
+    same report and must answer the same way. A second copy of the threshold in
+    another module is how the original defect happened -- there is one rule,
+    and this is it.
 
     ``positive_percent`` blends caller-judged outcomes with the runtime marking
     its own curriculum, and the curriculum outnumbers review by more than an
@@ -601,7 +607,7 @@ def _status(report: dict) -> str:
         + int(task_embeddings.get("vector_invalid", 0))
         + int(len(task_embeddings.get("dimensions") or {}) > 1)
     )
-    positive_percent, basis = _gating_positive_percent(report)
+    positive_percent, basis = gating_positive_percent(report)
     measured = positive_percent is not None
     if severe or (report["outcomes"] and measured and positive_percent < 60.0):
         return "attention"
@@ -767,7 +773,7 @@ def format_report(report: dict) -> str:
             # status gate believes nothing here, so neither should a reader.
             "   <- reviewed sample too small to gate on (need %d): the status "
             "cannot read healthy on an unjudged store" % _MIN_REVIEWED_SAMPLE
-            if _gating_positive_percent(report)[1] == _UNMEASURED_BASIS else "",
+            if gating_positive_percent(report)[1] == _UNMEASURED_BASIS else "",
         ),
         "    autograded (runtime marking its own curriculum): %s | positive: %s%%"
         % (
