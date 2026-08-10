@@ -50,6 +50,12 @@ DEV_WORKFLOW_READ_ONLY_TOOLS = frozenset({
     "test_discover", "find_references", "diff_files", "secret_scan",
 })
 
+# The four tools that take BOTH `root` and a `path` that harness_tools appends
+# straight to the child argv (harness_tools.py:233, 353, 366, 394).
+DEV_WORKFLOW_PATH_ARG_TOOLS = frozenset({
+    "test_run", "lint_run", "format_code", "typecheck_run",
+})
+
 
 def _help_advertised_names(help_text):
     names = set()
@@ -66,11 +72,32 @@ def test_every_advertised_agent_tool_is_dispatchable():
     """The regression test. Must fail on the unfixed dispatcher (see module
     docstring for the exact before-numbers this was run against)."""
     advertised = _help_advertised_names(server.AGENT_TOOL_HELP)
+    # Sentinel: _help_advertised_names returns set() for any help text whose
+    # lines stop starting with "- ", and an empty `advertised` makes the
+    # difference below empty too -- the invariant would pass while measuring
+    # nothing, which is exactly what an infrastructure failure looks like in
+    # the one test whose whole job is to notice. 130 are advertised today.
+    assert len(advertised) >= 120, (
+        "AGENT_TOOL_HELP parsed as only %d advertised tools -- the help format "
+        "changed and this drift test is no longer measuring anything"
+        % len(advertised)
+    )
     dispatchable = capabilities.dispatch_names(server._agent_dispatch)
     missing = advertised - dispatchable
     assert missing == set(), (
         "advertised in AGENT_TOOL_HELP but not dispatchable: %s" % sorted(missing)
     )
+
+
+def test_drift_invariant_fails_loudly_when_the_help_format_changes(monkeypatch):
+    # Proves the sentinel above is load-bearing rather than decorative: feed
+    # the drift test a help text its parser cannot read and it must fail, not
+    # pass with an empty set on both sides.
+    monkeypatch.setattr(
+        server, "AGENT_TOOL_HELP", "Available tools:\n* file_read: {}\n",
+    )
+    with pytest.raises(AssertionError, match="AGENT_TOOL_HELP parsed"):
+        test_every_advertised_agent_tool_is_dispatchable()
 
 
 def test_dev_workflow_tools_are_exactly_what_was_missing():
@@ -146,6 +173,36 @@ def test_apply_patch_mutation_gate_keys_on_check_only():
     assert server._agent_tool_mutates("apply_patch", {"check_only": True}) is False
 
 
+@pytest.mark.parametrize("tool_name", sorted(DEV_WORKFLOW_MUTATING_TOOLS))
+def test_mutating_dev_workflow_tools_are_refused_by_read_only_dispatch(
+    monkeypatch, tool_name,
+):
+    """Assert the gate at the enforcement layer, not the classification layer.
+
+    All 23 branches were appended at the *end* of ``_agent_dispatch`` and are
+    gated purely by sitting below the ``read_only`` policy block. Membership in
+    ``_WORK_MUTATION_TOOLS`` cannot see that: a refactor that hoisted or
+    reordered the branches would bypass the gate with every membership test
+    still green. So assert both halves of the differential -- the same call is
+    refused *and never reaches the tool* under ``read_only=True``, and does
+    reach it when the gate is off. The second half is what stops this test
+    passing vacuously (e.g. on a misspelled tool name, where "ERROR:" would be
+    returned for the wrong reason).
+    """
+    calls = []
+    monkeypatch.setattr(
+        server, tool_name, lambda *a, **k: calls.append((a, k)) or "ran",
+    )
+
+    refused = server._agent_dispatch(tool_name, {"root": "."}, read_only=True)
+
+    assert refused.startswith("ERROR:")
+    assert calls == [], "%s executed despite read_only=True" % tool_name
+
+    assert server._agent_dispatch(tool_name, {"root": "."}) == "ran"
+    assert len(calls) == 1
+
+
 def test_git_and_dependency_and_build_clean_always_mutate():
     for tool_name in (
         "git_commit", "git_branch", "git_checkout", "git_stash", "git_tag",
@@ -181,6 +238,118 @@ def test_diff_files_project_scope_rejects_escaping_right_path(tmp_path):
 
     assert error.startswith("ERROR:")
     assert "outside the host-selected project root" in error
+
+
+@pytest.mark.parametrize("tool_name", sorted(DEV_WORKFLOW_PATH_ARG_TOOLS))
+def test_root_and_path_tools_reject_an_escaping_relative_path(tmp_path, tool_name):
+    # `root` alone being contained is not enough: harness_tools appends `path`
+    # to the child argv, so lint_run(path="../outside", fix=True) and
+    # format_code(path="../outside") WRITE outside the host-selected project.
+    project = tmp_path / "project"
+    project.mkdir()
+    args = {"root": ".", "path": "../outside", "fix": True}
+
+    error = server._repository_scope_path_error(tool_name, args, str(project))
+
+    assert error.startswith("ERROR:")
+    assert "outside the host-selected project root" in error
+
+
+@pytest.mark.parametrize("tool_name", sorted(DEV_WORKFLOW_PATH_ARG_TOOLS))
+def test_root_and_path_tools_reject_an_escaping_absolute_path(tmp_path, tool_name):
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    error = server._repository_scope_path_error(
+        tool_name, {"root": ".", "path": str(outside)}, str(project),
+    )
+
+    assert error.startswith("ERROR:")
+    assert "outside the host-selected project root" in error
+
+
+@pytest.mark.parametrize("tool_name", sorted(DEV_WORKFLOW_PATH_ARG_TOOLS))
+def test_root_and_path_tools_allow_omitted_and_contained_paths(tmp_path, tool_name):
+    # The containment check must not over-block: `path` is optional, and it is
+    # resolved against the tool's OWN root (which is what the child process
+    # does), not against the project root.
+    project = tmp_path / "project"
+    project.mkdir()
+
+    assert server._repository_scope_path_error(
+        tool_name, {"root": "."}, str(project),
+    ) == ""
+    assert server._repository_scope_path_error(
+        tool_name, {"root": ".", "path": "src/pkg"}, str(project),
+    ) == ""
+    assert server._repository_scope_path_error(
+        tool_name, {"root": "sub", "path": "../other"}, str(project),
+    ) == ""
+
+
+# --- build_run forwards argv, so it needs the argv guard -------------------
+
+
+@pytest.mark.parametrize("command", [
+    "powershell -Command Remove-Item x",
+    "python -c import os",
+    "uv run python -c print(1)",
+    "bash -c make",
+    "node -e process.exit()",
+    "cmd /c del x",
+])
+def test_build_run_command_rejects_inline_interpreters(tmp_path, command):
+    # build_run forwards a caller-supplied `command` straight to a child
+    # process (harness_tools.py:657-663). Making it dispatchable therefore
+    # opened an execution route around the inline-interpreter guard that was
+    # written for exactly this risk on workspace_run/script_run.
+    project = tmp_path / "project"
+    project.mkdir()
+
+    error = server._agent_project_execution_argument_error(
+        "build_run", {"root": str(project), "command": command}, str(project),
+    )
+
+    assert error.startswith("ERROR:")
+    assert "inline interpreter" in error
+
+
+def test_build_run_command_rejects_an_argv_path_outside_the_project(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+
+    error = server._agent_project_execution_argument_error(
+        "build_run", {"root": str(project), "command": "make -C ../outside"},
+        str(project),
+    )
+
+    assert error.startswith("ERROR:")
+    assert "outside the host-selected project root" in error
+
+
+@pytest.mark.parametrize("command", [
+    "", "make", "cmake --build build", "npm run build", "cargo build --release",
+    "go build ./...",
+])
+def test_build_run_allows_ordinary_build_commands(tmp_path, command):
+    project = tmp_path / "project"
+    project.mkdir()
+
+    assert server._agent_project_execution_argument_error(
+        "build_run", {"root": str(project), "command": command}, str(project),
+    ) == ""
+
+
+def test_build_run_command_guard_is_project_bound_only():
+    # Documented residual: like workspace_run, this guard only engages when the
+    # host has bound the agent to a project. An unbound agent's build_run is
+    # governed by permission_modes.risk_of("build_run") == "execution", not by
+    # this argument guard.
+    assert server._agent_project_execution_argument_error(
+        "build_run", {"command": "powershell -Command x"}, "",
+    ) == ""
 
 
 def test_project_scoped_test_discover_rebases_and_dispatches_read_only(tmp_path):

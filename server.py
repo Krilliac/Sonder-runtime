@@ -13375,6 +13375,27 @@ def _repository_scope_path_error(tool_name, args, project_root):
                 ("left path", args.get("left") or ""),
                 ("right path", args.get("right") or ""),
             ]
+        elif tool_name in _PROJECT_SCOPED_ROOT_AND_PATH_TOOLS:
+            # `path` is optional here, but when present harness_tools appends
+            # it to the child argv, so an unchecked value is a read or write
+            # outside the project even when `root` is contained.  Resolve it
+            # against the tool's OWN root -- that is what the child process
+            # does (cwd=root), and resolving against the project root instead
+            # would falsely reject a legitimate sibling reference from a
+            # subdirectory root.  It is checked, not rebased: for the cargo
+            # and go frameworks `path` names a test target or package pattern
+            # rather than a filesystem path, and rebasing would corrupt it.
+            tool_root = Path(str(args.get("root") or ".")).expanduser()
+            if not tool_root.is_absolute():
+                tool_root = root / tool_root
+            targets = [("repository root", tool_root)]
+            raw_path = str(args.get("path") or "").strip()
+            if raw_path:
+                candidate = Path(raw_path).expanduser()
+                targets.append((
+                    "path",
+                    candidate if candidate.is_absolute() else tool_root / candidate,
+                ))
         elif tool_name == "file_batch_write":
             operations = _batch_agent_operations(args)
             if operations is None or not operations:
@@ -13477,17 +13498,31 @@ def _agent_project_execution_argument_error(tool_name, args, project_root):
     program can still access resources available to the user account.  Keep
     that limitation explicit while blocking the direct escape forms a model
     can otherwise express in workspace/script argv.
+
+    build_run is covered too.  It forwards a caller-supplied `command` verbatim
+    to a child process (harness_tools.py:657-663), so leaving it outside this
+    guard would make it the one reachable execution route that accepts exactly
+    the inline-interpreter forms workspace_run refuses.
     """
     if (
         not project_root
-        or tool_name not in _PROJECT_SCOPED_EXECUTION_TOOLS
+        or tool_name not in (
+            _PROJECT_SCOPED_EXECUTION_TOOLS | _PROJECT_SCOPED_COMMAND_TOOLS
+        )
         or not isinstance(args, dict)
     ):
         return ""
     root = Path(str(project_root)).expanduser().resolve(strict=True)
-    argv = _agent_argv(args)
+    if tool_name in _PROJECT_SCOPED_COMMAND_TOOLS:
+        # harness_tools splits the command on whitespace and execs the result,
+        # so read the program and its argv exactly the way the child will.
+        command_argv = str(args.get("command") or "").split()
+        program = Path(command_argv[0]).name.casefold() if command_argv else ""
+        argv = command_argv[1:]
+    else:
+        argv = _agent_argv(args)
+        program = Path(str(args.get("program") or "")).name.casefold()
     lowered = [item.casefold() for item in argv]
-    program = Path(str(args.get("program") or "")).name.casefold()
     inline_flags = {
         "python": {"-c"}, "python.exe": {"-c"},
         "py": {"-c"}, "py.exe": {"-c"},
@@ -13550,9 +13585,14 @@ def _agent_project_execution_argument_error(tool_name, args, project_root):
                 "stdin is outside the project path guard"
             )
 
-    base_value = args.get("cwd") or (
-        os.path.dirname(str(args.get("path") or "")) if tool_name == "script_run" else "."
-    )
+    if tool_name in _PROJECT_SCOPED_COMMAND_TOOLS:
+        # build_run runs the child with cwd=root, so relative argv entries
+        # resolve against root -- not against Sonder's own working directory.
+        base_value = args.get("root") or "."
+    else:
+        base_value = args.get("cwd") or (
+            os.path.dirname(str(args.get("path") or "")) if tool_name == "script_run" else "."
+        )
     base = Path(str(base_value)).expanduser().resolve(strict=False)
     for raw_item in argv:
         raw = str(raw_item or "").strip().strip('"\'')
@@ -15201,6 +15241,18 @@ _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "rename_symbol", "find_references", "diff_files", "apply_patch", "secret_scan",
 })
 _PROJECT_SCOPED_EXECUTION_TOOLS = frozenset({"workspace_run", "script_run"})
+# Developer-workflow tools that take BOTH `root` and a second `path` argument
+# which harness_tools appends straight to the child argv (harness_tools.py:233,
+# 353, 366, 394).  Containing `root` alone leaves `path` checked by nothing, so
+# lint_run(path="../../x", fix=True) would write outside the project.
+_PROJECT_SCOPED_ROOT_AND_PATH_TOOLS = frozenset({
+    "test_run", "lint_run", "format_code", "typecheck_run",
+})
+# Tools that forward a caller-supplied command string to a child process.  They
+# need the same inline-interpreter argv guard as the execution tools, but they
+# are not execution tools for scoping purposes -- their working directory is
+# `root`, not `cwd`.
+_PROJECT_SCOPED_COMMAND_TOOLS = frozenset({"build_run"})
 _AGENT_TOOL_ALIASES = {
     "assetgen": "artifact_generate",
     "game_generate": "game_generate_and_test",
