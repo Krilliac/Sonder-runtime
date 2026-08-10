@@ -549,6 +549,103 @@ class CommandCatalog {
   }
 }
 
+/// One selectable autonomy mode, as published by the server's mode table
+/// (`permission_modes.py`: MODES / MODE_LABELS / MODE_BLURBS).
+class PermissionModeOption {
+  final String name;
+  final String label;
+  final String blurb;
+
+  const PermissionModeOption({
+    required this.name,
+    this.label = '',
+    this.blurb = '',
+  });
+
+  factory PermissionModeOption.fromJson(Map<String, dynamic> json) =>
+      PermissionModeOption(
+        name: json['name']?.toString().trim() ?? '',
+        label: json['label']?.toString() ?? '',
+        blurb: json['blurb']?.toString() ?? '',
+      );
+
+  /// What a row actually renders. Falls back to the wire name so a record that
+  /// omitted the label still names its mode instead of showing a blank row.
+  String get displayLabel => label.trim().isEmpty ? name : label.trim();
+}
+
+/// The agent's autonomy mode, plus the privilege axis that is deliberately
+/// *not* one of the modes.
+///
+/// `permission_modes.py` keeps the two apart on purpose: the mode says how
+/// often Sonder stops to ask, [elevated] says what it may touch at all, and no
+/// mode grants elevation. The UI mirrors that split — [elevated] is rendered
+/// as its own badge and never folded into [displayLabel], because a merged
+/// "auto +admin" label reads as a fifth mode.
+///
+/// Every field degrades to a default rather than throwing, so a partial record
+/// from an older server still parses. [isUsable] is the one thing callers must
+/// check: a record with no mode name is not a mode, and a blank or guessed
+/// chip is worse than no chip at all.
+class PermissionMode {
+  final String mode;
+  final String label;
+  final String blurb;
+  final bool elevated;
+  final String elevationReason;
+  final List<PermissionModeOption> modes;
+
+  /// risk class -> allow | ask | deny, as the server resolved it for [mode].
+  final Map<String, String> matrix;
+
+  const PermissionMode({
+    required this.mode,
+    this.label = '',
+    this.blurb = '',
+    this.elevated = false,
+    this.elevationReason = '',
+    this.modes = const [],
+    this.matrix = const {},
+  });
+
+  factory PermissionMode.fromJson(Map<String, dynamic> json) {
+    final rawModes = json['modes'];
+    return PermissionMode(
+      mode: json['mode']?.toString().trim() ?? '',
+      label: json['label']?.toString() ?? '',
+      blurb: json['blurb']?.toString() ?? '',
+      // Only an explicit true elevates. Anything else — absent, null, a string
+      // — is read as "not elevated", because guessing this axis upward is the
+      // one mistake with real consequences.
+      elevated: json['elevated'] == true,
+      elevationReason: json['elevationReason']?.toString() ??
+          json['elevation_reason']?.toString() ??
+          '',
+      modes: rawModes is List
+          ? rawModes
+              .whereType<Map>()
+              .map((m) =>
+                  PermissionModeOption.fromJson(Map<String, dynamic>.from(m)))
+              .where((m) => m.name.isNotEmpty)
+              .toList(growable: false)
+          : const [],
+      matrix: _stringMap(json['matrix']),
+    );
+  }
+
+  /// False when the server did not actually name a mode. Callers hide the
+  /// indicator instead of rendering an empty one.
+  bool get isUsable => mode.isNotEmpty;
+
+  String get displayLabel => label.trim().isEmpty ? mode : label.trim();
+
+  /// The modes a picker should offer. A record that shipped no list still
+  /// offers the active mode, so the picker is never an empty sheet.
+  List<PermissionModeOption> get options => modes.isNotEmpty
+      ? modes
+      : [PermissionModeOption(name: mode, label: label, blurb: blurb)];
+}
+
 /// Thin client for a hosted Sonder Runtime instance (sonder_serve.py).
 ///
 /// The server speaks the OpenAI chat-completions dialect:
@@ -891,6 +988,89 @@ class SonderApi {
       return obj['text']?.toString() ?? '';
     } catch (_) {
       throw SonderException('Could not parse command help.');
+    }
+  }
+
+  /// The agent's current autonomy mode (GET /v1/permission-mode).
+  ///
+  /// Returns null when this server does not publish the route, so an older
+  /// build simply has no mode indicator. Every other failure throws: a mode
+  /// rendered after a failed read would be a guess, and a wrong mode is worse
+  /// than none — the whole point of showing it is knowing what the agent will
+  /// do before you send.
+  Future<PermissionMode?> fetchPermissionMode() async {
+    late http.Response resp;
+    try {
+      resp = await http
+          .get(_uri('/v1/permission-mode'), headers: _headers())
+          .timeout(const Duration(seconds: 10));
+    } catch (e) {
+      throw SonderException('Cannot reach server: $e');
+    }
+    if (resp.statusCode == 404) return null;
+    if (resp.statusCode == 401) {
+      throw SonderException('Unauthorized - check the API key.');
+    }
+    if (resp.statusCode != 200) {
+      throw SonderException('Server returned HTTP ${resp.statusCode}.');
+    }
+    try {
+      final obj =
+          jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+      return PermissionMode.fromJson(obj);
+    } catch (_) {
+      throw SonderException('Could not parse the permission mode.');
+    }
+  }
+
+  /// Switch the autonomy mode (POST /v1/permission-mode) and return the state
+  /// the server reports afterwards, so the UI shows what actually took effect
+  /// rather than what was requested.
+  Future<PermissionMode> setPermissionMode(String mode) async {
+    final wanted = mode.trim();
+    if (wanted.isEmpty) {
+      throw SonderException('A permission mode name is required.');
+    }
+    late http.Response resp;
+    try {
+      resp = await http
+          .post(
+            _uri('/v1/permission-mode'),
+            headers: _headers(),
+            body: jsonEncode({'mode': wanted}),
+          )
+          .timeout(const Duration(seconds: 10));
+    } catch (e) {
+      throw SonderException('Cannot reach server: $e');
+    }
+    if (resp.statusCode == 401) {
+      throw SonderException('Unauthorized - check the API key.');
+    }
+    if (resp.statusCode == 404) {
+      throw SonderException('This server does not support permission modes.');
+    }
+    if (resp.statusCode != 200) {
+      // A rejected mode name is the common case here, and the server's own
+      // wording ("unknown mode 'x'. modes: ...") is more useful than ours.
+      var detail = '';
+      try {
+        final body = jsonDecode(utf8.decode(resp.bodyBytes));
+        if (body is Map) {
+          detail = body['error']?.toString() ?? body['message']?.toString() ?? '';
+        }
+      } catch (_) {
+        // Non-JSON error body; fall through to the status code.
+      }
+      throw SonderException(detail.isNotEmpty
+          ? detail
+          : 'Server returned HTTP ${resp.statusCode}.');
+    }
+    try {
+      final obj =
+          jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+      return PermissionMode.fromJson(obj);
+    } catch (_) {
+      throw SonderException('Could not parse the permission mode.');
     }
   }
 

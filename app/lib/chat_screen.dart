@@ -25,7 +25,7 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen> {
+class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final _messages = <ChatMessage>[];
   final _input = TextEditingController();
   final _scroll = ScrollController();
@@ -61,6 +61,18 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _loadingThreads = true;
   Timer? _statusTimer;
   SystemInfo? _systemInfo;
+
+  /// What the agent is allowed to do without asking, as the server reports it.
+  ///
+  /// Null means "we do not currently know" — an older server without the
+  /// route, an unreachable one, or a read that failed — and the indicator is
+  /// hidden in that case. It is never left holding the last known value: a
+  /// stale mode shown as if it were current is worse than showing nothing,
+  /// because the whole point of the chip is knowing what will happen before
+  /// you press send.
+  PermissionMode? _permissionMode;
+  Timer? _permissionModeTimer;
+  bool _switchingMode = false;
 
   // The inference route/model to answer with. "sonder" is the local route;
   // other entries route to a model on the server.
@@ -168,7 +180,77 @@ class _ChatScreenState extends State<ChatScreen> {
       const Duration(seconds: 1),
       (_) => _refreshStatus(),
     );
+    _refreshPermissionMode();
+    // Slower than the status poll on purpose. The mode only changes when
+    // somebody changes it — from here, or from a terminal session cycling it
+    // with Shift+Tab — so this is a drift check, not a live feed. The paths
+    // that matter (app resumed, message sent) refresh it directly.
+    _permissionModeTimer = Timer.periodic(
+      const Duration(seconds: 15),
+      (_) => _refreshPermissionMode(),
+    );
+    WidgetsBinding.instance.addObserver(this);
     _input.addListener(_updatePalette);
+  }
+
+  /// A terminal session can cycle the mode while the app is in the background,
+  /// so re-read it the moment the app is in front of the user again.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state == AppLifecycleState.resumed) _refreshPermissionMode();
+  }
+
+  /// Read the current autonomy mode, or clear it if it cannot be read.
+  ///
+  /// Any failure — no route on an older server, no server at all, an
+  /// unparseable body — clears the chip rather than leaving the previous
+  /// value on screen.
+  Future<void> _refreshPermissionMode() async {
+    PermissionMode? mode;
+    try {
+      mode = await _api.fetchPermissionMode();
+    } catch (_) {
+      mode = null;
+    }
+    if (!mounted) return;
+    final next = (mode != null && mode.isUsable) ? mode : null;
+    if (next?.mode == _permissionMode?.mode &&
+        next?.elevated == _permissionMode?.elevated &&
+        next?.elevationReason == _permissionMode?.elevationReason) {
+      return; // nothing visible changed; skip the rebuild
+    }
+    setState(() => _permissionMode = next);
+  }
+
+  /// Pick a mode from the four the server publishes, with their blurbs.
+  Future<void> _openPermissionModePicker() async {
+    final current = _permissionMode;
+    if (current == null || _switchingMode) return;
+    final picked = await showDialog<String>(
+      context: context,
+      builder: (_) => _PermissionModeDialog(state: current),
+    );
+    if (picked == null || !mounted || picked == current.mode) return;
+
+    setState(() => _switchingMode = true);
+    try {
+      final next = await _api.setPermissionMode(picked);
+      if (!mounted) return;
+      setState(() => _permissionMode = next.isUsable ? next : null);
+    } on SonderException catch (e) {
+      if (!mounted) return;
+      // The switch failed, so what the server holds is now unknown — drop the
+      // chip instead of leaving the old label sitting there looking current,
+      // and re-read in the background.
+      setState(() => _permissionMode = null);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not change mode: ${e.message}')),
+      );
+      unawaited(_refreshPermissionMode());
+    } finally {
+      if (mounted) setState(() => _switchingMode = false);
+    }
   }
 
   /// Pull the server's command catalog once, and keep the hardcoded fallback
@@ -421,6 +503,8 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void dispose() {
     _statusTimer?.cancel();
+    _permissionModeTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     _input.removeListener(_updatePalette);
     _input.dispose();
     _scroll.dispose();
@@ -542,6 +626,10 @@ class _ChatScreenState extends State<ChatScreen> {
         await _saveCurrentThread();
         setState(() => _sending = false);
         _refreshStatus();
+        // A turn can be the thing that changes the mode (or a terminal session
+        // may have changed it mid-turn), so re-read rather than wait out the
+        // poll interval.
+        _refreshPermissionMode();
         _scrollToEnd();
         _inputFocus.requestFocus();
       }
@@ -631,6 +719,8 @@ class _ChatScreenState extends State<ChatScreen> {
       _model = widget.settings.model;
     });
     _refreshModels();
+    // A different server URL or key means a different mode entirely.
+    _refreshPermissionMode();
   }
 
   Future<void> _openSystem() async {
@@ -769,6 +859,9 @@ class _ChatScreenState extends State<ChatScreen> {
             paletteCategories: _catalog.categories,
             onPalettePick: _pickCommand,
             onKey: _onComposerKey,
+            permissionMode: _permissionMode,
+            permissionModeBusy: _switchingMode,
+            onTapPermissionMode: _openPermissionModePicker,
           ),
           _LiveStatusBar(info: _systemInfo, model: _model, project: _project),
         ],
@@ -1932,6 +2025,11 @@ class _InputBar extends StatelessWidget {
   final ValueChanged<String> onPalettePick;
   final KeyEventResult Function(KeyEvent) onKey;
 
+  /// Null when the mode is unknown, in which case nothing is shown.
+  final PermissionMode? permissionMode;
+  final bool permissionModeBusy;
+  final VoidCallback onTapPermissionMode;
+
   const _InputBar({
     required this.controller,
     required this.focusNode,
@@ -1943,6 +2041,9 @@ class _InputBar extends StatelessWidget {
     required this.paletteCategories,
     required this.onPalettePick,
     required this.onKey,
+    required this.permissionMode,
+    required this.permissionModeBusy,
+    required this.onTapPermissionMode,
   });
 
   @override
@@ -1969,6 +2070,20 @@ class _InputBar extends StatelessWidget {
                     grouped: paletteGrouped,
                     categories: paletteCategories,
                     onPick: onPalettePick,
+                  ),
+                // Sits directly above the composer so it is read on the way to
+                // the send button, rather than hidden behind a menu.
+                if (permissionMode != null)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: _PermissionModeChip(
+                        state: permissionMode!,
+                        busy: permissionModeBusy,
+                        onTap: onTapPermissionMode,
+                      ),
+                    ),
                   ),
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.end,
@@ -2017,6 +2132,278 @@ class _InputBar extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Fill colour for an autonomy mode.
+///
+/// Green is reserved for `plan` — the only mode that genuinely cannot change
+/// anything — and deliberately withheld from `auto`. Green reads as "safe",
+/// and `auto` is the least cautious setting on offer; colouring it green would
+/// say the opposite of what it means. An unrecognised name gets the neutral
+/// outline colour rather than borrowing another mode's meaning.
+///
+/// All four are dark enough for white text (>= 4.5:1) and are used as-is in
+/// both themes so the same mode is the same colour wherever it appears.
+Color _permissionModeColor(ColorScheme cs, String mode) {
+  switch (mode) {
+    case 'plan':
+      return const Color(0xFF1B5E20); // green
+    case 'manual':
+      return const Color(0xFF0D47A1); // blue
+    case 'acceptEdits':
+      return const Color(0xFFBF360C); // deep orange
+    case 'auto':
+      return const Color(0xFF6A1B9A); // purple
+    default:
+      return cs.outline;
+  }
+}
+
+/// A glyph per mode, so the chip does not carry its meaning in colour alone.
+IconData _permissionModeIcon(String mode) {
+  switch (mode) {
+    case 'plan':
+      return Icons.visibility_outlined;
+    case 'manual':
+      return Icons.pan_tool_outlined;
+    case 'acceptEdits':
+      return Icons.edit_outlined;
+    case 'auto':
+      return Icons.fast_forward_outlined;
+    default:
+      return Icons.help_outline;
+  }
+}
+
+/// The always-visible autonomy indicator above the composer: what the agent
+/// will do without asking, and — separately — whether it is elevated.
+class _PermissionModeChip extends StatelessWidget {
+  final PermissionMode state;
+  final bool busy;
+  final VoidCallback onTap;
+
+  const _PermissionModeChip({
+    required this.state,
+    required this.busy,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final fill = _permissionModeColor(cs, state.mode);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Tooltip(
+          message: state.blurb.trim().isEmpty
+              ? 'Autonomy mode — tap to change'
+              : '${state.displayLabel} — ${state.blurb}',
+          child: InkWell(
+            key: const Key('permission-mode-chip'),
+            onTap: busy ? null : onTap,
+            borderRadius: BorderRadius.circular(20),
+            child: Container(
+              padding: const EdgeInsets.fromLTRB(10, 4, 6, 4),
+              decoration: BoxDecoration(
+                color: fill,
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    _permissionModeIcon(state.mode),
+                    size: 14,
+                    color: Colors.white,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    state.displayLabel,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  if (busy)
+                    const Padding(
+                      padding: EdgeInsets.only(left: 6, right: 2),
+                      child: SizedBox(
+                        width: 11,
+                        height: 11,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      ),
+                    )
+                  else
+                    const Icon(
+                      Icons.arrow_drop_down,
+                      size: 18,
+                      color: Colors.white,
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        if (state.elevated) ...[
+          const SizedBox(width: 8),
+          _ElevatedBadge(reason: state.elevationReason),
+        ],
+      ],
+    );
+  }
+}
+
+/// The privilege axis, as its own badge outside the mode chip.
+///
+/// Elevation is a different question from autonomy — `permission_modes.py`
+/// grants it from no mode at all — so it is kept distinct on every channel
+/// available: it sits outside the chip, is outlined rather than filled, uses
+/// the theme's error colour rather than a mode colour, carries a shield, and
+/// is set in spaced capitals. Folding it into the label as "auto +admin"
+/// would read as a fifth mode, which is exactly the confusion to avoid.
+class _ElevatedBadge extends StatelessWidget {
+  final String reason;
+  const _ElevatedBadge({required this.reason});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Tooltip(
+      message: reason.trim().isEmpty
+          ? 'Elevated privileges are on. This is separate from the mode — no '
+              'mode turns it on.'
+          : 'Elevated privileges are on: ${reason.trim()}',
+      child: Container(
+        key: const Key('permission-elevated-badge'),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: cs.errorContainer,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: cs.error, width: 1.5),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.shield_outlined, size: 13, color: cs.onErrorContainer),
+            const SizedBox(width: 4),
+            Text(
+              'ADMIN',
+              style: TextStyle(
+                color: cs.onErrorContainer,
+                fontSize: 11,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 1.0,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The mode picker: every mode the server publishes, with the blurb that says
+/// where its boundary is, and the privilege axis called out as separate.
+class _PermissionModeDialog extends StatelessWidget {
+  final PermissionMode state;
+  const _PermissionModeDialog({required this.state});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return AlertDialog(
+      key: const Key('permission-mode-picker'),
+      title: const Text('Autonomy mode'),
+      contentPadding: const EdgeInsets.fromLTRB(0, 12, 0, 0),
+      content: SizedBox(
+        width: 420,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              for (final option in state.options)
+                InkWell(
+                  key: Key('permission-mode-option-${option.name}'),
+                  onTap: () => Navigator.of(context).pop(option.name),
+                  child: Container(
+                    width: double.infinity,
+                    color: option.name == state.mode
+                        ? cs.primary.withValues(alpha: 0.10)
+                        : null,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 20, vertical: 10),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.only(top: 2),
+                          child: Icon(
+                            _permissionModeIcon(option.name),
+                            size: 16,
+                            color: _permissionModeColor(cs, option.name),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                option.displayLabel,
+                                style: TextStyle(
+                                  fontWeight: option.name == state.mode
+                                      ? FontWeight.w700
+                                      : FontWeight.w500,
+                                  color: _permissionModeColor(cs, option.name),
+                                ),
+                              ),
+                              if (option.blurb.trim().isNotEmpty)
+                                Text(
+                                  option.blurb,
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: cs.onSurfaceVariant,
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                        if (option.name == state.mode)
+                          Icon(Icons.check, size: 18, color: cs.primary),
+                      ],
+                    ),
+                  ),
+                ),
+              const Divider(height: 20),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                child: Text(
+                  state.elevated
+                      ? 'Privilege: elevated — a separate switch. No mode '
+                          'grants it, and changing mode does not turn it off.'
+                      : 'Privilege: normal. Elevation is a separate switch — '
+                          'no mode grants it.',
+                  style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Close'),
+        ),
+      ],
     );
   }
 }

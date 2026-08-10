@@ -1266,4 +1266,171 @@ void main() {
     expect(seen.url.queryParameters, {'topic': '/task_plan'});
     expect(text, 'usage: /task_plan <title> <steps>');
   });
+
+  test('permission mode parses the published record', () async {
+    late http.Request seen;
+    final client = MockClient((request) async {
+      seen = request;
+      return http.Response(
+        jsonEncode({
+          'mode': 'acceptEdits',
+          'label': 'accept edits',
+          'blurb': 'file changes proceed; running programs still asks',
+          'elevated': true,
+          'elevationReason': 'installing a driver',
+          'modes': [
+            {
+              'name': 'plan',
+              'label': 'plan',
+              'blurb': 'reads only - no writes, no commands',
+            },
+            {'name': 'manual', 'label': 'manual', 'blurb': 'ask first'},
+            {'name': 'acceptEdits', 'label': 'accept edits', 'blurb': 'edits'},
+            {'name': 'auto', 'label': 'auto', 'blurb': 'programs too'},
+          ],
+          'matrix': {
+            'safe': 'allow',
+            'ask': 'allow',
+            'mutation': 'allow',
+            'execution': 'ask',
+            'dangerous': 'ask',
+          },
+        }),
+        200,
+      );
+    });
+
+    final mode = await http.runWithClient(
+      () => const SonderApi(baseUrl: 'http://sonder.test').fetchPermissionMode(),
+      () => client,
+    );
+
+    expect(seen.url.path, '/v1/permission-mode');
+    expect(mode, isNotNull);
+    expect(mode!.isUsable, isTrue);
+    expect(mode.mode, 'acceptEdits');
+    // The privilege axis stays out of the label: it is a different question,
+    // and a merged "accept edits +admin" would read as another mode.
+    expect(mode.displayLabel, 'accept edits');
+    expect(mode.elevated, isTrue);
+    expect(mode.elevationReason, 'installing a driver');
+    expect(mode.options.map((m) => m.name).toList(),
+        ['plan', 'manual', 'acceptEdits', 'auto']);
+    expect(mode.matrix['execution'], 'ask');
+    // Destructive tools ask in every mode, including auto.
+    expect(mode.matrix['dangerous'], 'ask');
+  });
+
+  test('permission mode degrades a partial record instead of throwing',
+      () async {
+    final client = MockClient(
+      (request) async => http.Response(jsonEncode({'mode': 'plan'}), 200),
+    );
+
+    final mode = await http.runWithClient(
+      () => const SonderApi(baseUrl: 'http://sonder.test').fetchPermissionMode(),
+      () => client,
+    );
+
+    expect(mode, isNotNull);
+    expect(mode!.isUsable, isTrue);
+    // No label published: show the wire name rather than an empty chip.
+    expect(mode.displayLabel, 'plan');
+    expect(mode.blurb, '');
+    expect(mode.matrix, isEmpty);
+    // Nothing absent is read as elevated, and an empty mode list still offers
+    // the active mode so the picker is never blank.
+    expect(mode.elevated, isFalse);
+    expect(mode.elevationReason, '');
+    expect(mode.options.single.name, 'plan');
+
+    // A record that names no mode at all is not a mode: usable is false, so
+    // the caller hides the indicator rather than rendering a blank one.
+    final empty = await http.runWithClient(
+      () => const SonderApi(baseUrl: 'http://sonder.test').fetchPermissionMode(),
+      () => MockClient((request) async => http.Response('{}', 200)),
+    );
+    expect(empty!.isUsable, isFalse);
+    expect(empty.elevated, isFalse);
+  });
+
+  test('permission mode reports an absent route as unsupported, not as a mode',
+      () async {
+    final missing = await http.runWithClient(
+      () => const SonderApi(baseUrl: 'http://sonder.test').fetchPermissionMode(),
+      () => MockClient((request) async => http.Response('', 404)),
+    );
+    expect(missing, isNull);
+
+    // Anything else is a failure, never a silently-invented mode.
+    await expectLater(
+      http.runWithClient(
+        () =>
+            const SonderApi(baseUrl: 'http://sonder.test').fetchPermissionMode(),
+        () => MockClient((request) async => http.Response('nope', 503)),
+      ),
+      throwsA(isA<SonderException>()),
+    );
+    await expectLater(
+      http.runWithClient(
+        () =>
+            const SonderApi(baseUrl: 'http://sonder.test').fetchPermissionMode(),
+        () => MockClient((request) async => http.Response('', 401)),
+      ),
+      throwsA(isA<SonderException>()),
+    );
+  });
+
+  test('setting the permission mode posts it and returns the server state',
+      () async {
+    late http.Request seen;
+    final client = MockClient((request) async {
+      seen = request;
+      return http.Response(
+        jsonEncode({
+          'mode': 'plan',
+          'label': 'plan',
+          'blurb': 'reads only - no writes, no commands',
+          'elevated': false,
+          'elevationReason': '',
+          'modes': [
+            {'name': 'plan', 'label': 'plan', 'blurb': 'reads only'},
+          ],
+          'matrix': {'safe': 'allow', 'mutation': 'deny'},
+        }),
+        200,
+      );
+    });
+
+    final mode = await http.runWithClient(
+      () => const SonderApi(baseUrl: 'http://sonder.test')
+          .setPermissionMode('plan'),
+      () => client,
+    );
+
+    expect(seen.method, 'POST');
+    expect(seen.url.path, '/v1/permission-mode');
+    expect(jsonDecode(seen.body), {'mode': 'plan'});
+    expect(mode.mode, 'plan');
+    expect(mode.matrix['mutation'], 'deny');
+
+    // A rejected name surfaces the server's own wording.
+    await expectLater(
+      http.runWithClient(
+        () => const SonderApi(baseUrl: 'http://sonder.test')
+            .setPermissionMode('nope'),
+        () => MockClient((request) async => http.Response(
+              jsonEncode({'error': "unknown mode 'nope'"}),
+              400,
+            )),
+      ),
+      throwsA(
+        isA<SonderException>().having(
+          (e) => e.message,
+          'message',
+          contains("unknown mode 'nope'"),
+        ),
+      ),
+    );
+  });
 }
