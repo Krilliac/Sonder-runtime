@@ -33,6 +33,7 @@ import pytest
 import permission_modes as pm
 import permission_rules
 import server
+import sonder_repl
 from sonder_runtime.domain.execution import policy as execution_policy
 
 pytestmark = pytest.mark.unit
@@ -248,22 +249,51 @@ def test_rendering_the_listing_reads_the_policy_file_exactly_once(tmp_path, monk
     assert reads == [str(policy)]
 
 
-def test_rendering_never_prompts_and_never_touches_elevation(tmp_path, monkeypatch):
-    """Display must not consume the operator's next keystroke, or the axis.
+def test_rendering_performs_nothing_it_only_reports(tmp_path, monkeypatch):
+    """Display must not prompt, must not persist, must not spend the axis.
 
-    ``decide()`` takes ``requires_elevation`` per call and never spends
-    anything, but that is a property worth pinning rather than assuming: a
-    render that silently flipped the privilege axis off would look identical.
+    An earlier version of this test patched ``builtins.input`` and compared
+    ``permission_modes._STATE`` before and after. It could not fail. Two
+    mutations of ``server._permission_policy_text`` were run against it and it
+    reported both as passes:
+
+    * calling ``sonder_repl._confirm(...)``, which never reaches ``input()`` at
+      all -- that helper short-circuits when stdin is not a tty, and pytest's
+      never is. Nothing in ``server``, ``permission_rules`` or
+      ``permission_modes`` imports ``sonder_repl`` either, so the tree's only
+      ``input()`` was unreachable from the patch to begin with;
+    * calling ``set_mode(current_mode())``, a same-value write-back that
+      persists the mode file to disk and leaves ``_STATE`` byte-identical.
+
+    A test that reads as protection and provides none is the exact defect this
+    branch exists to remove, so this one patches the *acts* rather than their
+    traces: every seam a performing render could reach for raises. The
+    ``_STATE`` comparison is kept only as a backstop against a direct write to
+    the dict, and is not what makes this a guard.
     """
     _write_policy(tmp_path, [dict(rule) for rule in execution_policy.DEFAULT_RULES])
     pm.set_mode(pm.MANUAL)
     pm.set_elevated(True, "installing a signed driver")
     before = dict(pm._STATE)
 
-    def _never(*_args, **_kwargs):
-        raise AssertionError("rendering the policy prompted the operator")
+    def _performing(name):
+        def _raise(*_args, **_kwargs):
+            raise AssertionError("rendering the policy called %s" % name)
+        return _raise
 
-    monkeypatch.setattr(builtins, "input", _never)
+    # Prompting.
+    monkeypatch.setattr(builtins, "input", _performing("input()"))
+    monkeypatch.setattr(sonder_repl, "_confirm", _performing("sonder_repl._confirm()"))
+    # Changing, or persisting, either axis.
+    monkeypatch.setattr(pm, "set_mode", _performing("permission_modes.set_mode()"))
+    monkeypatch.setattr(pm, "cycle_mode", _performing("permission_modes.cycle_mode()"))
+    monkeypatch.setattr(
+        pm, "set_elevated", _performing("permission_modes.set_elevated()"))
+    monkeypatch.setattr(pm, "_save", _performing("permission_modes._save()"))
+    # Writing back the policy it was asked to display.
+    monkeypatch.setattr(permission_rules, "save", _performing("permission_rules.save()"))
+    monkeypatch.setattr(
+        permission_rules, "add_rule", _performing("permission_rules.add_rule()"))
 
     server.permission_policy()
     server.permission_policy("file_delete")
