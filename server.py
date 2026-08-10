@@ -7715,7 +7715,7 @@ def _record_outcome_signal(interaction_id: str, signal: str) -> None:
         conn.close()
 
 
-def _feed_grounded_outcome(name, ok, output, args=None, project=None) -> None:
+def _feed_grounded_outcome(name, ok, output, args=None, project=None, run_id="") -> None:
     """Attribute execution evidence to the work it judges.
 
     The outcome store holds ~9,000 rows and only ~190 of them measure delegated
@@ -7727,6 +7727,14 @@ def _feed_grounded_outcome(name, ok, output, args=None, project=None) -> None:
     loop, which scopes every dispatched call to one explicit project root)
     pass it straight through. Direct MCP calls have no such value, so they
     leave it unset and it falls back to sniffing the tool's own arguments.
+
+    `run_id` is the caller's activity_tracker response id, when the caller is
+    running inside one (the agent loop always is). It is a stronger link than
+    project + time window: autopilot runs one thread per run, so two
+    concurrent runs -- especially two both scoped to the same project, or
+    both unscoped -- can otherwise have a verification from one run match the
+    newest pending generation from the OTHER run. Direct MCP calls pass
+    nothing here, which is unchanged from before this parameter existed.
     """
     if project is None:
         project = ""
@@ -7738,10 +7746,10 @@ def _feed_grounded_outcome(name, ok, output, args=None, project=None) -> None:
         if name in grounded_outcomes.GENERATORS:
             match = _INTERACTION_ID_RE.search(str(output or ""))
             if match:
-                grounded_outcomes.note_generation(match.group(1), name, project)
+                grounded_outcomes.note_generation(match.group(1), name, project, run_id)
         elif name in grounded_outcomes.VERIFIERS:
             grounded_outcomes.attribute(
-                name, bool(ok), project, record_fn=_record_outcome_signal,
+                name, bool(ok), project, record_fn=_record_outcome_signal, run_id=run_id,
             )
     except Exception:
         # Bookkeeping must never break the run it is observing.
@@ -15259,6 +15267,14 @@ def _agent_dispatch_observed(
     started = time.time()
     ok = False
     observation = ""
+    # True only once _agent_dispatch has actually returned a verdict. A
+    # dispatcher crash (bad arg handling, an internal KeyError, an IO fault
+    # before the tool's own try/except engages) is evidence the plumbing
+    # broke, not that the generated work failed -- grounded_outcomes must not
+    # see it, or a plumbing bug poisons the very population it exists to
+    # clean up. record_tool_result still logs it below either way; only the
+    # outcome feed is gated on this.
+    dispatched = False
     args = _project_scope_args(tool_name, args, project)
     dispatch_args = args
     if project and tool_name in {"archive_create", "sqlite_mutate"}:
@@ -15279,6 +15295,7 @@ def _agent_dispatch_observed(
                 )
             else:
                 observation = _agent_dispatch(tool_name, dispatch_args, **dispatch_options)
+        dispatched = True
         ok = not str(observation).startswith("ERROR:")
         return observation
     finally:
@@ -15297,13 +15314,27 @@ def _agent_dispatch_observed(
         # file_write, file_edit, text_patch, which are both GENERATORS and
         # direct MCP tools) sees inside_tool_call() = True and skips its feed
         # -- this call is the only one that fires for it. That guard is why
-        # this call is unconditional rather than itself checking
-        # inside_tool_call(): a nested dispatch (a sub-agent tool call
-        # running its own tool loop) still has its own genuinely distinct
-        # tool calls to feed, one call site per tool_name/ok/observation, and
-        # grounded_outcomes.attribute() additionally refuses to judge the same
-        # pending generation twice with the same verification kind.
-        _feed_grounded_outcome(tool_name, ok, observation, args, project=project)
+        # this call is unconditional (on dispatched) rather than itself
+        # checking inside_tool_call(): a nested dispatch (a sub-agent tool
+        # call running its own tool loop) still has its own genuinely
+        # distinct tool calls to feed, one call site per
+        # tool_name/ok/observation, and grounded_outcomes.attribute()
+        # additionally refuses to judge the same pending generation twice
+        # with the same verification kind.
+        if dispatched:
+            # activity_tracker.current_response_id() is this thread's active
+            # response span -- agent(), workbench_agent() and each autopilot
+            # run (one threading.Thread per run, each wrapped in its own
+            # response_span) all set one for the life of the run, so every
+            # call this function makes on that thread shares it. Passing it
+            # through lets grounded_outcomes refuse to let one run's
+            # verification claim another concurrent run's generation, which
+            # project + time window alone cannot distinguish when both runs
+            # share a project (or both leave it blank).
+            _feed_grounded_outcome(
+                tool_name, ok, observation, args, project=project,
+                run_id=activity_tracker.current_response_id() or "",
+            )
 
 
 _WORK_MUTATION_TOOLS = frozenset({
