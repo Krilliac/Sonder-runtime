@@ -8,7 +8,6 @@ from sonder_runtime.application.ports.preflight import (
 
 
 class PreflightExecutor:
-    """Lazy preflight executor that delegates to the real implementation."""
     def run(
         self,
         config: PreflightConfig,

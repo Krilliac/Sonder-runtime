@@ -9,7 +9,7 @@ from pathlib import Path
 
 import sonder_preflight
 from sonder_runtime.adapters import preflight as preflight_adapter
-from sonder_runtime.adapters.preflight_executor import LegacyPreflightExecutor
+from sonder_runtime.adapters.preflight_executor import PreflightExecutor
 from sonder_runtime.application.ports.preflight import CheckResult, PreflightReport
 from sonder_runtime.application.preflight import PreflightService
 
@@ -77,8 +77,8 @@ def test_legacy_executor_import_is_lazy_in_fresh_process():
     code = "\n".join((
         "import sys",
         "import sonder_runtime.__main__",
-        "from sonder_runtime.adapters.preflight_executor import LegacyPreflightExecutor",
-        "assert LegacyPreflightExecutor is not None",
+        "from sonder_runtime.adapters.preflight_executor import PreflightExecutor",
+        "assert PreflightExecutor is not None",
         "assert 'sonder_runtime.adapters.preflight' not in sys.modules",
         "assert 'sonder_migrations' not in sys.modules",
     ))
@@ -101,7 +101,7 @@ def test_legacy_executor_delegates_to_live_adapter_monkeypatch(monkeypatch):
         lambda config, **options: seen.append((config, options)) or expected,
     )
     config = object()
-    result = LegacyPreflightExecutor().run(
+    result = PreflightExecutor().run(
         config, check_ollama=False, ollama_timeout=0.75
     )
     assert result is expected
