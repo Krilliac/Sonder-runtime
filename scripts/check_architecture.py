@@ -50,19 +50,21 @@ ROOT_LEGACY_MODULES = set(BASELINE_ROOT_LEGACY_MODULES)
 # and must never happen as an accidental convenience import.
 ROOT_LEGACY_MODULE_LIMIT = 16
 
-LAYERS = ("domain", "application", "adapters", "platform", "bootstrap")
+LAYERS = ("domain", "application", "adapters", "interfaces", "platform", "bootstrap")
 
 ALLOWED_PACKAGE_EDGES = {
     "domain": {"domain"},
     "application": {"domain", "application"},
+    "interfaces": {"application", "interfaces"},
     "adapters": {"domain", "application", "adapters", "platform"},
     "platform": {"platform"},
-    "bootstrap": {"domain", "application", "adapters", "platform", "bootstrap"},
-    "entry": {"domain", "application", "adapters", "platform", "bootstrap"},
+    "bootstrap": {"domain", "application", "adapters", "interfaces", "platform", "bootstrap"},
+    "entry": {"domain", "application", "adapters", "interfaces", "platform", "bootstrap"},
 }
 ALLOWED_ROOT_IMPORTS = {
     "domain": set(),
     "application": set(),
+    "interfaces": set(),
     "adapters": ROOT_LEGACY_MODULES | ROOT_PLATFORM_MODULES,
     "platform": ROOT_PLATFORM_MODULES,
     "bootstrap": ROOT_LEGACY_MODULES | ROOT_PLATFORM_MODULES,
@@ -305,8 +307,8 @@ def find_cycles(imports: dict[str, set[str]]) -> list[str]:
         visiting.add(node)
         for dep in sorted(imports[node]):
             # Normalize package imports to their module entries.
-            candidates = [d for d in imports if d == dep or d.startswith(dep + ".")]
-            for candidate in candidates or ([dep] if dep in imports else []):
+            candidates = [d for d in imports if (d == dep or d.startswith(dep + ".")) and d != node]
+            for candidate in candidates or ([dep] if dep in imports and dep != node else []):
                 visit(candidate, path + [node])
         visiting.discard(node)
         done.add(node)
