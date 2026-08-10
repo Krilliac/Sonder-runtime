@@ -323,6 +323,126 @@ def test_the_verifiers_are_not_added_to_the_file_validation_set():
     )
 
 
+# --- a run that changed nothing still has to be covered ------------------
+#
+# `all([])` is True, so with no mutation records the coverage check reported
+# "covered" for a verifier rooted anywhere -- a check answering yes because it
+# had nothing to check. That matters now that a passing verifier also sets
+# `validation_attempted`/`validation_passed`: `_task_passed` and
+# `_completion_gate` accept that receipt for a whole `validate` task.
+#
+# The sibling `_agent_validation_covers` already decides its no-records case
+# explicitly rather than falling through an empty `all()`; this follows that
+# shape. With nothing changed on disk, the work the run was confined to *is*
+# the project scope, so the verifier has to cover that.
+
+
+@pytest.mark.parametrize(
+    "root_of, expected",
+    [
+        ("project", True),     # rooted exactly at the declared scope
+        ("subdir", False),     # a slice of the project is not the project
+        ("elsewhere", False),  # outside it entirely
+    ],
+)
+def test_a_non_mutating_verifier_must_cover_the_declared_scope(
+    tmp_path, root_of, expected,
+):
+    """Unit-level, because the loop cannot reach every case.
+
+    A project-bound run has the host reject an out-of-scope ``root`` before
+    dispatch, so an end-to-end test of the "elsewhere" case would pass because
+    the call was *blocked*, not because coverage said no -- vacuously green,
+    proving nothing about this function. The subdirectory case below is the one
+    that is genuinely reachable through the loop, and is tested there too.
+
+    Every one of these returned True before the fix, via ``all([])``.
+    """
+    project = tmp_path / "project"
+    subdir = project / "pkg"
+    elsewhere = tmp_path / "elsewhere"
+    for directory in (project, subdir, elsewhere):
+        directory.mkdir(parents=True, exist_ok=True)
+    roots = {"project": project, "subdir": subdir, "elsewhere": elsewhere}
+
+    covered = server._agent_verification_covers(
+        "test_run", {"root": str(roots[root_of])}, [],
+        project_scope=str(project),
+    )
+
+    assert covered is expected
+
+
+def test_an_unscoped_non_mutating_run_is_decided_not_skipped(tmp_path):
+    """The one case that stays True, stated as a decision rather than a default.
+
+    With no declared project there is no boundary to violate: ``root`` defaults
+    to the server CWD, which is the run's implicit scope. That default is the
+    separately-tracked fail-closed item, not something this check invents.
+    """
+    covered = server._agent_verification_covers(
+        "test_run", {"root": str(tmp_path)}, [], project_scope="",
+    )
+
+    assert covered is True
+
+
+def test_a_verifier_on_one_subdirectory_does_not_validate_the_project(
+    monkeypatch, tmp_path,
+):
+    """The reachable end-to-end case, and the one `_completion_gate` accepts."""
+    project = tmp_path / "project"
+    (project / "pkg").mkdir(parents=True)
+    _record(monkeypatch, POOR_RECORD)
+
+    receipt = _run(
+        monkeypatch,
+        [
+            '{"tool":"test_run","args":{"root":"%s"}}'
+            % (project / "pkg").as_posix(),
+            FINAL,
+        ],
+        [PASSING_RUN],
+        project=str(project),
+        return_host_receipt=True,
+    )
+
+    # Guards against a vacuous pass: the verifier really ran and really
+    # changed nothing, so the no-mutation branch is the one under test.
+    assert "test_run" in receipt.tools
+    assert receipt.mutation_observed is False
+
+    assert receipt.output.startswith(server._AGENT_UNVERIFIED_PREFIX)
+    assert receipt.validation_passed is False
+    ok, why = autopilot_controller._task_passed(receipt, {"kind": "validate"})
+    assert ok is False
+    assert "coverage" in why
+
+
+def test_a_verifier_rooted_at_the_project_does_validate_it(
+    monkeypatch, tmp_path,
+):
+    """The fix must not simply refuse everything that changed nothing."""
+    project = tmp_path / "project"
+    project.mkdir()
+    _record(monkeypatch, POOR_RECORD)
+
+    receipt = _run(
+        monkeypatch,
+        ['{"tool":"test_run","args":{"root":"."}}', FINAL],
+        [PASSING_RUN],
+        project=str(project),
+        return_host_receipt=True,
+    )
+
+    assert "test_run" in receipt.tools
+    assert receipt.mutation_observed is False
+    assert receipt.output == "the work is complete"
+    assert receipt.validation_passed is True
+    ok, why = autopilot_controller._task_passed(receipt, {"kind": "validate"})
+    assert ok, why
+
+
 # --- the standing must never displace an existing failure marker ---------
 #
 # `autopilot_controller._task_passed` matches `text.startswith(FAILURE_PREFIXES)`

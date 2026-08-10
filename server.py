@@ -15680,8 +15680,15 @@ _AGENT_VERIFIERS_PHRASE = (
 )
 
 
-def _agent_verification_covers(tool_name, args, mutations):
-    """Whether this verifier ran over the tree the run actually changed.
+def _agent_path_within(path, root):
+    """True when an already-normalized path is at or under an equally normalized root."""
+    if not path or not root:
+        return False
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def _agent_verification_covers(tool_name, args, mutations, project_scope=""):
+    """Whether this verifier ran over the work this run is answerable for.
 
     Keyed on ``root``. These four tools scope their run with ``root``; their
     ``path`` argument narrows *which* checks run inside it, not what those
@@ -15689,6 +15696,19 @@ def _agent_verification_covers(tool_name, args, mutations):
     here -- the argument the file-oriented _agent_validation_covers reads --
     would answer "" for nearly every real call and quietly refuse to count a
     verification that genuinely covered the change.
+
+    The no-mutation case is decided explicitly, never left to fall through an
+    empty ``all()``: ``all([])`` is True, so a run that changed nothing
+    previously reported *any* root as covering -- a check answering yes because
+    it had nothing to check. That is load-bearing now that a passing verifier
+    also sets validation_attempted/validation_passed, which is what
+    _task_passed and _completion_gate accept for a whole ``validate`` task.
+    With nothing changed on disk, the work the run is answerable for is the
+    scope it was confined to, so the verifier has to cover that scope.
+
+    An unscoped run has no declared boundary to violate -- ``root`` defaults to
+    the server CWD, which is that run's implicit scope -- so it is covered.
+    That default is a separately-tracked item, not something decided here.
     """
     args = args if isinstance(args, dict) else {}
     scope = _agent_normalized_path(str(args.get("root") or "."))
@@ -15698,10 +15718,10 @@ def _agent_verification_covers(tool_name, args, mutations):
         str(record.get("path") or "") for record in mutations
         if record.get("path")
     ]
-    return all(
-        path == scope or path.startswith(scope.rstrip(os.sep) + os.sep)
-        for path in changed
-    )
+    if not changed:
+        declared = _agent_normalized_path(project_scope)
+        return _agent_path_within(declared, scope) if declared else True
+    return all(_agent_path_within(path, scope) for path in changed)
 
 
 def _agent_verification_standing():
@@ -17251,6 +17271,7 @@ def _agent_impl(
             # pass, exactly as it does for validation_ok below.
             verification_ok = tool_ok and _agent_verification_covers(
                 tool_name, policy_tool_args, mutations,
+                project_scope=project_scope,
             )
         if tool_name in _WORK_VALIDATION_TOOLS:
             validation_attempted = True
