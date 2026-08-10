@@ -15656,10 +15656,28 @@ _AGENT_VERIFICATION_TOOLS = frozenset({
     "test_run", "build_run", "lint_run", "typecheck_run",
 })
 
-# Prefixed onto an end report that claims completion the record says must be
-# earned. A statement of standing, not a failure: deliberately absent from
+# Leads an end report that claims completion the record says must be earned.
+# A statement of standing, not a failure: deliberately absent from
 # autopilot_controller.FAILURE_PREFIXES.
+#
+# It leads only when nothing stronger already does. A prefix is a position, not
+# a decoration: _task_passed matches FAILURE_PREFIXES at position 0 and
+# _agent_observation_ok reads line one, so stacking this in front of
+# VALIDATION_FAILED would displace that marker and make both consumers blind to
+# a failed validation. When both apply the two are composed into one block led
+# by the failure marker -- see finish_final.
 _AGENT_UNVERIFIED_PREFIX = "UNVERIFIED:"
+
+_AGENT_VALIDATION_FAILED_LINE = (
+    "VALIDATION_FAILED: workspace changes were not successfully validated."
+)
+
+# One noun phrase, shared by the standalone standing and the composed clause,
+# so the two can never drift into describing different things.
+_AGENT_VERIFIERS_PHRASE = (
+    "a passing verification (test_run, build_run, lint_run or typecheck_run) "
+    "covering the work"
+)
 
 
 def _agent_verification_covers(tool_name, args, mutations):
@@ -16579,9 +16597,28 @@ def _agent_impl(
             text += "\n\n%s\n%s" % (marker, "\n\n".join(observations))
         return text
 
+    def _work_validated():
+        """Was the change actually checked, by either grounded route?
+
+        ``validation_ok`` and ``verification_ok`` answer the same question over
+        disjoint tool sets. Until the developer-workflow tools became
+        dispatchable, the only way to validate a mutation was to shell out
+        through ``workspace_run``; counting a passing, root-covering
+        test_run/build_run/lint_run/typecheck_run as anything less than a
+        validation would fail a run precisely *for reaching for the
+        purpose-built tool*, while the same run's end report called the
+        verification satisfied. This is the one place that contradiction is
+        resolved, so the report, the checklist and the receipt cannot disagree.
+
+        Not a relaxation: the added satisfying condition is a host-observed
+        passing verifier whose root covers every mutated path.
+        """
+        return validation_ok or verification_ok
+
     def finish_final(final):
         _teardown_speculation()
         final = str(final or "")
+        validated = _work_validated()
         if auto_checklist:
             _agent_checklist_mark(
                 checklist_id, checklist_states, 1, "done", "workspace evidence inspected",
@@ -16590,45 +16627,57 @@ def _agent_impl(
                 checklist_id, checklist_states, 2, "done",
                 "requested work completed" if mutated else "analysis completed without file mutation",
             )
-            validation_status = "done" if (validation_ok or not mutated) else "blocked"
+            validation_status = "done" if (validated or not mutated) else "blocked"
             _agent_checklist_mark(
                 checklist_id, checklist_states, 3, validation_status,
-                "grounded validation passed" if validation_ok else (
+                "grounded validation passed" if validated else (
                     "no mutation required" if not mutated else "validation did not pass"
                 ),
             )
             _agent_checklist_mark(
                 checklist_id, checklist_states, 4, "done", "end report prepared",
             )
-        if auto_checklist and mutated and not validation_ok:
-            final = (
-                "VALIDATION_FAILED: workspace changes were not successfully validated.\n\n"
-                + final
-            )
         final = _attach_tool_evidence(final)
-        # Capture the summary before any standing is prefixed, so the activity
-        # feed keeps naming the work rather than the standing on it.
-        result_summary = final.splitlines()[0] if final else "agent completed"
+        # The model's own first line, captured before anything leads the report,
+        # so the activity feed keeps naming the work rather than the standing.
+        model_summary = final.splitlines()[0] if final else "agent completed"
+
+        validation_failed = bool(auto_checklist and mutated and not validated)
+        standing = ""
         if not verification_ok:
             demanded, reason = _agent_verification_standing()
             if demanded:
-                # Every word after the colon is either a fixed host sentence or
-                # should_verify's own projection of the counts. Nothing here is
+                # Every word here is either a fixed host sentence or
+                # should_verify's own projection of the counts. Nothing is
                 # generated by the model or about how it feels.
-                final = (
-                    "%s this run claimed completion without a passing "
-                    "verification (test_run, build_run, lint_run or "
-                    "typecheck_run) covering the work - %s\n\n"
-                    % (_AGENT_UNVERIFIED_PREFIX, reason)
-                ) + final
-        activity_tracker.set_result_summary(result_summary)
+                standing = reason
+        if validation_failed:
+            # Compose, never stack. Prefixing the standing in front of
+            # VALIDATION_FAILED would push that marker off position 0, and
+            # _task_passed / _agent_observation_ok would stop seeing a failed
+            # validation -- a mechanism for honesty blinding a failure gate.
+            # The failure keeps line one, byte for byte; the standing becomes
+            # the second line of the same block.
+            block = _AGENT_VALIDATION_FAILED_LINE
+            if standing:
+                block += "\nThis run also claimed completion without %s - %s" % (
+                    _AGENT_VERIFIERS_PHRASE, standing,
+                )
+            final = block + "\n\n" + final
+        elif standing:
+            final = "%s this run claimed completion without %s - %s\n\n%s" % (
+                _AGENT_UNVERIFIED_PREFIX, _AGENT_VERIFIERS_PHRASE, standing, final,
+            )
+        activity_tracker.set_result_summary(
+            _AGENT_VALIDATION_FAILED_LINE if validation_failed else model_summary
+        )
         if return_host_receipt:
             return autopilot_controller.HostTaskResult(
                 output=final,
                 tools=tuple(sorted(used_tool_names)),
                 mutation_observed=mutated,
                 validation_attempted=validation_attempted,
-                validation_passed=validation_ok,
+                validation_passed=validated,
                 project_scope=project_scope,
             )
         return final
@@ -16657,7 +16706,7 @@ def _agent_impl(
                 tools=tuple(sorted(used_tool_names)),
                 mutation_observed=mutated,
                 validation_attempted=validation_attempted,
-                validation_passed=validation_ok,
+                validation_passed=_work_validated(),
                 project_scope=project_scope,
             )
         return text
@@ -17192,6 +17241,11 @@ def _agent_impl(
                     checklist_id, checklist_states, 2, "in_progress", "%s changed workspace state" % tool_name,
                 )
         if tool_name in _AGENT_VERIFICATION_TOOLS:
+            # A verifier is a validator by another route (see _work_validated),
+            # so a run that reached for one has attempted validation -- without
+            # this a "validate" task satisfied by test_run is rejected with
+            # "ran no host-observed validator", which would be false.
+            validation_attempted = True
             # The latest host-observed verifier decides current standing: a
             # later failing or out-of-scope check must invalidate an earlier
             # pass, exactly as it does for validation_ok below.
