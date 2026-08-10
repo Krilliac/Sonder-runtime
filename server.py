@@ -15325,6 +15325,14 @@ def _canonical_agent_tool_name(tool_name):
 def _project_scoped_path_key(tool_name):
     if tool_name == "archive_extract":
         return "destination"
+    if tool_name == "fetch_artifact":
+        # Its download target is `dest`; there is no `path` parameter, so the
+        # generic branch was reading a missing key, falling back to ".", and
+        # passing unconditionally. Latent rather than live today (this tool is
+        # neither advertised nor dispatchable), but it arms the moment anyone
+        # gives it a dispatch branch -- which is exactly what this task just
+        # did for twenty-three of its neighbours.
+        return "dest"
     if tool_name in {
         "file_find", "text_search", "script_search", "scaffold_project",
         "repo_status", "repo_diff", "text_patch", "archive_create",
@@ -15575,6 +15583,10 @@ _WORK_MUTATION_TOOLS = frozenset({
     "git_merge", "git_cherry_pick",
     "dependency_add", "dependency_remove", "dependency_update",
     "build_clean", "rename_symbol", "apply_patch",
+    # lint_run(fix=True) runs the linter's fix command and format_code writes
+    # in place unless check_only -- both rewrite source files, so both must be
+    # able to count as mutations. _agent_tool_mutates decides per invocation.
+    "lint_run", "format_code",
     "task_delete",
 })
 
@@ -15596,6 +15608,17 @@ def _agent_tool_mutates(tool_name, args):
         # Unlike rename_symbol's dry_run (default True, opt-in to mutate),
         # apply_patch's check_only defaults False -- it applies by default,
         # so only an explicit check_only=True is a non-mutating dry run.
+        return args.get("check_only") is not True
+    if tool_name == "lint_run":
+        # `ruff check --fix`, `npx eslint --fix` and `cargo clippy --fix`
+        # rewrite source files. Linters with no fix command (flake8, pylint)
+        # fall back to checking, but which linter runs is auto-detected inside
+        # the tool -- long after this gate has to answer -- so fix=True is
+        # treated as a mutation rather than guessing that it is harmless.
+        return args.get("fix") is True
+    if tool_name == "format_code":
+        # Every formatter in the table writes in place by default, so like
+        # apply_patch this applies unless explicitly told only to check.
         return args.get("check_only") is not True
     if tool_name == "data_convert":
         return args.get("apply") is True

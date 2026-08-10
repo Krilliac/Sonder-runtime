@@ -24,6 +24,8 @@ below uses it instead of hand-maintaining a duplicate tool list.
 """
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 import server
@@ -39,11 +41,26 @@ DEV_WORKFLOW_TOOLS = frozenset({
     "rename_symbol", "find_references", "diff_files", "apply_patch", "secret_scan",
 })
 
+# Every member of this batch that can change persistent workspace state on
+# some invocation -- unconditionally (git_*, dependency_*, build_clean) or
+# under an argument (rename_symbol dry_run, apply_patch check_only, lint_run
+# fix, format_code check_only).
 DEV_WORKFLOW_MUTATING_TOOLS = frozenset({
     "git_commit", "git_branch", "git_checkout", "git_stash", "git_tag",
     "git_merge", "git_cherry_pick",
     "dependency_add", "dependency_remove", "dependency_update",
     "build_clean", "rename_symbol", "apply_patch",
+    "lint_run", "format_code",
+})
+
+# Tools whose project scoping is handled by a dedicated branch in BOTH
+# _repository_scope_path_error and _project_scope_args, so the generic
+# single-key path below is never consulted for them.
+DEDICATED_SCOPE_BRANCH_TOOLS = frozenset({
+    "archive_create", "archive_extract", "context_pack", "data_convert",
+    "diff_files", "file_batch_write", "file_copy", "file_move", "repo_diff",
+    "text_patch", "workspace_compare",
+    "test_run", "lint_run", "format_code", "typecheck_run",
 })
 
 DEV_WORKFLOW_READ_ONLY_TOOLS = frozenset({
@@ -203,6 +220,28 @@ def test_mutating_dev_workflow_tools_are_refused_by_read_only_dispatch(
     assert len(calls) == 1
 
 
+def test_lint_run_mutation_gate_keys_on_fix():
+    # lint_run(fix=True) runs the linter's *fix* command -- `ruff check
+    # --fix`, `npx eslint --fix`, `cargo clippy --fix` -- all of which rewrite
+    # source files. fix=True counts as a mutation even for linters that have
+    # no fix command (flake8, pylint): the linter is auto-detected inside the
+    # tool, long after this gate has had to decide, so the gate must be honest
+    # about not knowing which one will run.
+    assert server._agent_tool_mutates("lint_run", {}) is False
+    assert server._agent_tool_mutates("lint_run", {"fix": False}) is False
+    assert server._agent_tool_mutates("lint_run", {"fix": True}) is True
+
+
+def test_format_code_mutation_gate_keys_on_check_only():
+    # Every formatter in the table writes in place by default (`ruff format`,
+    # `black`, `prettier --write`, `cargo fmt`, `gofmt -w`, `clang-format
+    # -i`), so like apply_patch this one applies unless explicitly told only
+    # to check.
+    assert server._agent_tool_mutates("format_code", {}) is True
+    assert server._agent_tool_mutates("format_code", {"check_only": False}) is True
+    assert server._agent_tool_mutates("format_code", {"check_only": True}) is False
+
+
 def test_git_and_dependency_and_build_clean_always_mutate():
     for tool_name in (
         "git_commit", "git_branch", "git_checkout", "git_stash", "git_tag",
@@ -238,6 +277,49 @@ def test_diff_files_project_scope_rejects_escaping_right_path(tmp_path):
 
     assert error.startswith("ERROR:")
     assert "outside the host-selected project root" in error
+
+
+def test_generic_scoped_path_key_names_a_real_parameter_of_every_tool():
+    """The generic containment branch checks exactly one argument key.
+
+    If that key is not a parameter the tool actually accepts, the branch reads
+    a missing key, falls back to ``"."``, and ``"."`` always resolves inside
+    the project root -- so the check passes unconditionally on every input.
+    That is a guard that silently no-ops, which is the defect class this task
+    exists to close, so enumerate it from the real signatures rather than
+    trusting any hand-maintained list (this one included).
+    """
+    offenders = []
+    for name in sorted(server._PROJECT_SCOPED_PATH_TOOLS):
+        if name in DEDICATED_SCOPE_BRANCH_TOOLS:
+            continue
+        tool = getattr(server, name, None)
+        assert tool is not None, "%s is project-scoped but not defined" % name
+        parameters = sorted(inspect.signature(tool).parameters)
+        key = server._project_scoped_path_key(name)
+        if key not in parameters:
+            offenders.append(
+                "%s: scoped key %r is not one of its parameters %s"
+                % (name, key, parameters)
+            )
+    assert offenders == [], "\n".join(offenders)
+
+
+@pytest.mark.parametrize("tool_name", sorted(DEV_WORKFLOW_PATH_ARG_TOOLS))
+def test_both_arg_tools_rebase_root_and_leave_path_alone(tmp_path, tool_name):
+    # These four accept `path` AND `root`. A scoping rule that rebased the
+    # first path-shaped argument it found would pick `path` and leave
+    # root="." -- so the tool would run in Sonder's own working directory
+    # while reporting the project's name, succeeding silently against the
+    # wrong tree. `root` is the argument that must move. `path` must not: the
+    # child interprets it relative to `root` (cwd=root), and for the cargo and
+    # go frameworks it is a target/package selector, not a path at all.
+    project = str(tmp_path)
+
+    scoped = server._project_scope_args(tool_name, {"path": "tests/unit"}, project)
+
+    assert scoped["root"] == project
+    assert scoped["path"] == "tests/unit"
 
 
 @pytest.mark.parametrize("tool_name", sorted(DEV_WORKFLOW_PATH_ARG_TOOLS))
