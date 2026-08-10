@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from sonder_runtime.adapters.legacy.services import LegacyProcessProbe
+from sonder_runtime.adapters.strangler_services import LegacyProcessProbe
 from sonder_runtime.application.ports.process_probe import (
     ProbeResult,
     ProcessIdentity,

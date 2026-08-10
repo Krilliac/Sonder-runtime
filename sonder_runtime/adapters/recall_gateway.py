@@ -1,10 +1,10 @@
-"""Legacy adapter binding semantic recall to its migrated implementation."""
+"""Semantic recall gateway adapter."""
 from __future__ import annotations
 
 import importlib
 import sqlite3
 
-from ...domain.common.errors import DependencyUnavailable
+from ..domain.common.errors import DependencyUnavailable
 
 
 class LegacyRecallGateway:

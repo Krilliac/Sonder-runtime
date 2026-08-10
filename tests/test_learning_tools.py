@@ -544,7 +544,7 @@ def test_pitfall_crash_is_reported_not_swallowed(monkeypatch, tmp_path):
 def test_record_outcome_routes_through_unit_of_work(monkeypatch, tmp_path):
     """SPEC-3: the outcome write + distillation claim go through the
     UnitOfWork port, bound to the server's database path."""
-    from sonder_runtime.adapters.legacy.services import LegacyUnitOfWork
+    from sonder_runtime.adapters.strangler_services import LegacyUnitOfWork
 
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
     conn = server._open_db()
@@ -576,7 +576,7 @@ def test_record_outcome_routes_through_unit_of_work(monkeypatch, tmp_path):
 def test_learn_from_example_routes_through_unit_of_work(monkeypatch, tmp_path):
     """SPEC-3: the example interaction write goes through the UnitOfWork
     port, bound to the server's database path."""
-    from sonder_runtime.adapters.legacy.services import LegacyUnitOfWork
+    from sonder_runtime.adapters.strangler_services import LegacyUnitOfWork
 
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
     monkeypatch.setattr(server.embeddings, "embed", lambda *a, **k: None)

@@ -6,7 +6,7 @@ import shutil
 import file_ops
 import pytest
 
-from sonder_runtime.adapters.legacy.services import LegacyToolExecutor
+from sonder_runtime.adapters.strangler_services import LegacyToolExecutor
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.tool_executor import ToolCall
 from sonder_runtime.bootstrap import app as bootstrap_app

@@ -18,8 +18,6 @@ class LegacyEvaluationHistoryReader:
         tolerance: float = 0.0,
         max_records: int = 10_000,
     ) -> Mapping[str, object]:
-        # Resolve lazily so live reload and compatibility-module monkeypatches
-        # continue to affect an already-composed application graph.
         import sonder_runtime.adapters.evaluation_history_store as evaluation_history_store
 
         return evaluation_history_store.history_status(

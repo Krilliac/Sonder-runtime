@@ -1,12 +1,12 @@
-"""Legacy implementations behind the typed read-only inspection facade."""
+"""Typed read-only inspection executor adapter."""
 from __future__ import annotations
 
 import json
 import importlib
 import os
 
-from ...application.context import OperationContext
-from ...application.ports.tool_executor import ToolCall, ToolResult
+from ..application.context import OperationContext
+from ..application.ports.tool_executor import ToolCall, ToolResult
 
 
 def _legacy_module(name: str):
@@ -95,8 +95,6 @@ class LegacyInspectionExecutor:
         try:
             return handler(args, context)
         except Exception as exc:
-            # Malformed internal calls and lazy import failures remain typed at
-            # the same adapter boundary as guarded legacy-module failures.
             return _failure(exc, args)
 
     def _log_inspect(self, args: dict, context: OperationContext) -> ToolResult:

@@ -188,8 +188,8 @@ def test_checker_detects_a_violation(tmp_path):
 
 def test_inspection_adapter_has_an_exact_read_only_legacy_dependency_set():
     path = (
-        _REPO_ROOT / "sonder_runtime" / "adapters" / "legacy"
-        / "inspections.py"
+        _REPO_ROOT / "sonder_runtime" / "adapters"
+        / "inspection_executor.py"
     )
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     resolved = {
@@ -229,8 +229,8 @@ def test_preference_use_case_depends_only_on_narrow_application_ports():
     assert imports == {"ports.preferences", "ports.tool_executor", "__future__"}
 
     adapter = (
-        _REPO_ROOT / "sonder_runtime" / "adapters" / "legacy"
-        / "preferences.py"
+        _REPO_ROOT / "sonder_runtime" / "adapters"
+        / "preference_adapters.py"
     ).read_text(encoding="utf-8")
     assert "import server" not in adapter
     assert "activity_tracker" not in adapter

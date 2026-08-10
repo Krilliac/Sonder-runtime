@@ -1,15 +1,14 @@
-"""Legacy SQLite and activity adapters for task/checklist use cases."""
+"""Task/checklist adapters (SPEC-5 WP11, relocated from legacy)."""
 from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable
 from typing import Mapping
 
-from ...domain.common.errors import DependencyUnavailable, InvalidInput, NotFound
+from ..domain.common.errors import DependencyUnavailable, InvalidInput, NotFound
 
 
 def _store_call(operation, *args, **kwargs):
-    """Translate legacy storage failures into the public port taxonomy."""
     try:
         return operation(*args, **kwargs)
     except ValueError as exc:

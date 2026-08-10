@@ -1,4 +1,4 @@
-"""Legacy binding for the migrated backup implementation."""
+"""Backup gateway adapter."""
 from __future__ import annotations
 
 import importlib
