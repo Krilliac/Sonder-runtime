@@ -13369,6 +13369,12 @@ def _repository_scope_path_error(tool_name, args, project_root):
             targets = [("repository root", args.get("root") or ".")]
             if str(args.get("path") or "").strip():
                 targets.append(("diff path", args.get("path")))
+        elif tool_name == "diff_files":
+            targets = [
+                ("repository root", args.get("root") or "."),
+                ("left path", args.get("left") or ""),
+                ("right path", args.get("right") or ""),
+            ]
         elif tool_name == "file_batch_write":
             operations = _batch_agent_operations(args)
             if operations is None or not operations:
@@ -14973,6 +14979,165 @@ def _agent_dispatch(
             num_ctx=args.get("num_ctx", 4096),
             learn=args.get("learn", False),
         )
+    # ── Developer-workflow tools (harness_tools.py) ──────────────────────
+    if tool_name == "test_discover":
+        return test_discover(
+            root=args.get("root", "."),
+            framework=args.get("framework", "auto"),
+        )
+    if tool_name == "test_run":
+        return test_run(
+            root=args.get("root", "."),
+            framework=args.get("framework", "auto"),
+            path=args.get("path", ""),
+            pattern=args.get("pattern", ""),
+            verbose=args.get("verbose", False),
+            coverage=args.get("coverage", False),
+            timeout=args.get("timeout", 120),
+            extra_args_json=args.get("extra_args_json", "[]"),
+        )
+    if tool_name == "lint_run":
+        return lint_run(
+            root=args.get("root", "."),
+            tool=args.get("tool", "auto"),
+            path=args.get("path", ""),
+            fix=args.get("fix", False),
+            timeout=args.get("timeout", 60),
+        )
+    if tool_name == "format_code":
+        return format_code(
+            root=args.get("root", "."),
+            tool=args.get("tool", "auto"),
+            path=args.get("path", ""),
+            check_only=args.get("check_only", False),
+            timeout=args.get("timeout", 60),
+        )
+    if tool_name == "typecheck_run":
+        return typecheck_run(
+            root=args.get("root", "."),
+            tool=args.get("tool", "auto"),
+            path=args.get("path", ""),
+            timeout=args.get("timeout", 120),
+        )
+    if tool_name == "dependency_add":
+        return dependency_add(
+            root=args.get("root", "."),
+            packages_json=args.get("packages_json", "[]"),
+            dev=args.get("dev", False),
+            timeout=args.get("timeout", 60),
+        )
+    if tool_name == "dependency_remove":
+        return dependency_remove(
+            root=args.get("root", "."),
+            packages_json=args.get("packages_json", "[]"),
+            timeout=args.get("timeout", 60),
+        )
+    if tool_name == "dependency_update":
+        return dependency_update(
+            root=args.get("root", "."),
+            packages_json=args.get("packages_json", "[]"),
+            timeout=args.get("timeout", 120),
+        )
+    if tool_name == "dependency_audit":
+        return dependency_audit(
+            root=args.get("root", "."),
+            timeout=args.get("timeout", 60),
+        )
+    if tool_name == "git_commit":
+        return git_commit(
+            root=args.get("root", "."),
+            message=args.get("message", ""),
+            paths_json=args.get("paths_json", "[]"),
+            all_tracked=args.get("all_tracked", False),
+            timeout=args.get("timeout", 30),
+        )
+    if tool_name == "git_branch":
+        return git_branch(
+            root=args.get("root", "."),
+            name=args.get("name", ""),
+            checkout=args.get("checkout", True),
+            base=args.get("base", ""),
+            timeout=args.get("timeout", 10),
+        )
+    if tool_name == "git_checkout":
+        return git_checkout(
+            root=args.get("root", "."),
+            ref=args.get("ref", ""),
+            timeout=args.get("timeout", 10),
+        )
+    if tool_name == "git_stash":
+        return git_stash(
+            root=args.get("root", "."),
+            action=args.get("action", "push"),
+            message=args.get("message", ""),
+            include_untracked=args.get("include_untracked", True),
+            timeout=args.get("timeout", 10),
+        )
+    if tool_name == "git_tag":
+        return git_tag(
+            root=args.get("root", "."),
+            name=args.get("name", ""),
+            message=args.get("message", ""),
+            delete=args.get("delete", False),
+            timeout=args.get("timeout", 10),
+        )
+    if tool_name == "git_merge":
+        return git_merge(
+            root=args.get("root", "."),
+            branch=args.get("branch", ""),
+            no_ff=args.get("no_ff", True),
+            message=args.get("message", ""),
+            timeout=args.get("timeout", 30),
+        )
+    if tool_name == "git_cherry_pick":
+        return git_cherry_pick(
+            root=args.get("root", "."),
+            commits_json=args.get("commits_json", "[]"),
+            timeout=args.get("timeout", 30),
+        )
+    if tool_name == "build_run":
+        return build_run(
+            root=args.get("root", "."),
+            command=args.get("command", ""),
+            timeout=args.get("timeout", 120),
+        )
+    if tool_name == "build_clean":
+        return build_clean(
+            root=args.get("root", "."),
+            timeout=args.get("timeout", 30),
+        )
+    if tool_name == "rename_symbol":
+        return rename_symbol(
+            root=args.get("root", "."),
+            old_name=args.get("old_name", ""),
+            new_name=args.get("new_name", ""),
+            glob=args.get("glob", "**/*.py"),
+            dry_run=args.get("dry_run", True),
+        )
+    if tool_name == "find_references":
+        return find_references(
+            root=args.get("root", "."),
+            symbol=args.get("symbol", ""),
+            glob=args.get("glob", "**/*.py"),
+        )
+    if tool_name == "diff_files":
+        return diff_files(
+            root=args.get("root", "."),
+            left=args.get("left", ""),
+            right=args.get("right", ""),
+            context=args.get("context", 3),
+        )
+    if tool_name == "apply_patch":
+        return apply_patch(
+            root=args.get("root", "."),
+            patch_text=args.get("patch_text", ""),
+            check_only=args.get("check_only", False),
+        )
+    if tool_name == "secret_scan":
+        return secret_scan(
+            root=args.get("root", "."),
+            timeout=args.get("timeout", 30),
+        )
     return "ERROR: unknown tool '%s'." % tool_name
 
 
@@ -15111,6 +15276,16 @@ def _project_scoped_path_key(tool_name):
     if tool_name in {
         "file_find", "text_search", "script_search", "scaffold_project",
         "repo_status", "repo_diff", "text_patch", "archive_create",
+        # Developer-workflow tools (harness_tools.py) all take "root", not
+        # "path" -- without this, a project-bound run would silently
+        # rebase a nonexistent "path" key while the real "root" argument
+        # (and its escape-check) went untouched.
+        "test_discover", "test_run", "lint_run", "format_code", "typecheck_run",
+        "dependency_add", "dependency_remove", "dependency_update", "dependency_audit",
+        "git_commit", "git_branch", "git_checkout", "git_stash", "git_tag",
+        "git_merge", "git_cherry_pick",
+        "build_run", "build_clean",
+        "rename_symbol", "find_references", "diff_files", "apply_patch", "secret_scan",
     }:
         return "root"
     return "path"
@@ -15365,6 +15540,11 @@ def _agent_tool_mutates(tool_name, args):
         return args.get("apply") is True
     if tool_name == "rename_symbol":
         return args.get("dry_run") is False
+    if tool_name == "apply_patch":
+        # Unlike rename_symbol's dry_run (default True, opt-in to mutate),
+        # apply_patch's check_only defaults False -- it applies by default,
+        # so only an explicit check_only=True is a non-mutating dry run.
+        return args.get("check_only") is not True
     if tool_name == "data_convert":
         return args.get("apply") is True
     if tool_name == "sqlite_mutate":
