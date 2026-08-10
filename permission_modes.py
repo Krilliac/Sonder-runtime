@@ -57,7 +57,50 @@ everywhere. Preserving existing behaviour by default matters here: these rules
 have been dormant since they were written, and switching them on globally in
 one step would break flows that have always worked.
 
-Stdlib only. ``command_catalog`` is imported lazily (it imports ``server``).
+Rules and modes compose; they do not race
+-------------------------------------------
+``permission_rules`` shipped its own per-tool ``allow``/``ask``/``deny`` rules
+long before this module existed, but nothing ever called ``check()`` -- the
+policy was displayed by ``/permissions`` and enforced nowhere. ``decide()``
+now looks one up on every call, through a small swappable hook
+(``_rule_lookup``, module-level, defaulting to ``_default_rule_lookup``, which
+reads the real on-disk policy via ``permission_rules`` +
+``sonder_paths.default_home()``). A caller may also pass ``rule_lookup=``
+directly, which takes precedence over the module hook for that call; this is
+what lets ``decide()`` stay testable without ever touching a real, machine-
+specific ``permissions.json``.
+
+The combination follows one explicit precedence, in this order:
+
+    1. an explicit rule DENY   always wins -- over every mode, including auto.
+    2. privilege                (``PRIVILEGED_TOOLS`` + ``elevated()``) is
+                                 checked next; a rule cannot grant elevation,
+                                 the same way no mode can.
+    3. an explicit rule ALLOW  satisfies the mode's ASK -- it loosens an ask
+                                 into an allow, but never touches a mode that
+                                 already allows or (under ``plan``) denies.
+    4. plan's denials          are never overridden by a rule -- holding still
+                                 is that mode's entire purpose, so an allow
+                                 rule is inert there.
+    5. anything else           (no rule matched, or a matched rule says
+                                 ``ask``, or is otherwise unrecognised) is
+                                 inert: the mode alone decides, byte-for-byte
+                                 what it decided before rules were wired in.
+
+Why deny outranks every mode, including auto: a rule is a narrower, written
+decision about ONE tool (``permission_rule_set file_delete deny``); a mode is
+a broad dial covering five risk classes at once for everything Sonder can do.
+The narrower, audited, on-the-record decision should outrank the broad one --
+which is also why an allow rule only ever *loosens* an ask and never a deny:
+letting it loosen a deny would mean a five-risk-class dial (or ``plan``'s
+"hold still") could be defeated by a rule that was written down for some
+unrelated tool's convenience. ``Decision.reason`` always says which of these
+layers actually decided, so an operator can tell a mode refusal from a rule
+refusal from an elevation refusal.
+
+Stdlib only. ``command_catalog`` is imported lazily (it imports ``server``);
+``permission_rules`` and ``sonder_paths`` are imported lazily for the same
+reason -- so this module keeps importing on its own with no cycle.
 """
 from __future__ import annotations
 
@@ -303,14 +346,79 @@ def risk_of(tool_name: str) -> str:
     return catalogued or "ask"
 
 
+def _default_rule_lookup(tool_name: str) -> dict | None:
+    """The production rule source: the real on-disk ``permission_rules`` policy.
+
+    This is the module-level hook ``decide()`` falls back on when no
+    ``rule_lookup=`` is passed explicitly. It is deliberately a swappable
+    attribute rather than code inlined into ``decide()``: it is the one part
+    of the decision that touches the filesystem, and tests monkeypatch
+    ``permission_modes._rule_lookup`` so ``decide()`` never has to read a
+    real, machine-specific ``permissions.json`` to be exercised.
+
+    Returns ``None`` when nothing genuinely matched. ``permission_rules.check``
+    always returns *some* rule dict -- it falls back to a permissive wildcard
+    "no matching rule" entry -- and that fallback must read as "no rule" here,
+    not as an explicit ask that could be confused for one.
+    """
+    try:
+        import sonder_paths
+        import permission_rules
+        from sonder_runtime.domain.execution import policy as _policy
+
+        home = sonder_paths.default_home()
+        rule = permission_rules.check(home, tool_name)
+    except Exception:
+        return None
+    if not isinstance(rule, dict):
+        return None
+    if rule == dict(_policy.NO_MATCH_RULE):
+        return None
+    return rule
+
+
+# Swappable so tests never have to touch a real, machine-specific
+# permissions.json to exercise decide()'s rule-combination logic. Production
+# code (and any test that wants the real thing) can restore this to
+# ``_default_rule_lookup``, or pass ``rule_lookup=`` to a single ``decide()``
+# call instead.
+_rule_lookup = _default_rule_lookup
+
+
+def _rule_action_for(tool_name: str, rule_lookup) -> tuple[str | None, str]:
+    """Resolve ``(action, pattern)`` for a tool via a rule lookup, or (None, "").
+
+    Only ``allow``/``deny`` are meaningful here -- see the module docstring.
+    A missing/failing/malformed lookup, or a rule that says ``ask`` (or
+    anything not recognised), is treated as "no rule": the mode alone decides.
+    """
+    lookup = rule_lookup if rule_lookup is not None else _rule_lookup
+    if lookup is None:
+        return None, ""
+    try:
+        rule = lookup(tool_name)
+    except Exception:
+        return None, ""
+    if not isinstance(rule, dict):
+        return None, ""
+    action = str(rule.get("action", "")).strip().lower()
+    if action not in (ALLOW, DENY):
+        return None, ""
+    return action, str(rule.get("pattern", "")).strip()
+
+
 def decide(tool_name: str, *, interactive: bool = True,
-           mode: str | None = None) -> Decision:
+           mode: str | None = None, rule_lookup=None) -> Decision:
     """Whether ``tool_name`` may run right now.
 
     ``interactive=False`` means nobody is present to answer a prompt (a direct
     MCP call). ``ask`` then degrades to ``allow`` -- preserving how Sonder has
     always behaved -- except under ``plan``, which denies regardless because
     holding still is the entire point of that mode.
+
+    ``rule_lookup``, if given, overrides the module-level ``_rule_lookup``
+    hook for this call only. See the module docstring for the precedence
+    rules that combine a per-tool rule with the active mode.
     """
     active = mode or current_mode()
     if active not in _MATRIX:
@@ -318,12 +426,43 @@ def decide(tool_name: str, *, interactive: bool = True,
         # Decision put a mode that was never in effect into the audit trail.
         active = DEFAULT_MODE
     risk = risk_of(tool_name)
-    action = _MATRIX[active].get(risk, ASK)
     name = str(tool_name or "").lstrip("/")
 
+    rule_action, rule_pattern = _rule_action_for(name, rule_lookup)
+
+    # 1. An explicit deny is a narrower, written-down decision than any mode
+    #    dial, so it wins outright -- including over auto, and immune to the
+    #    non-interactive degrade below (a real deny is never softened).
+    if rule_action == DENY:
+        return Decision(
+            DENY, active, risk,
+            "rule denies this tool (pattern %r); an explicit deny outranks "
+            "every mode, including auto" % (rule_pattern or name),
+            name,
+        )
+
+    # 2. Privilege is a separate axis from both modes and rules; neither can
+    #    grant it.
     if name in PRIVILEGED_TOOLS and not elevated():
         return Decision(DENY, active, risk, "needs elevation, which is off", name)
 
+    mode_action = _MATRIX[active].get(risk, ASK)
+
+    # 3. An explicit allow loosens an ask into an allow -- but only an ask:
+    #    it must not appear to have decided anything when the mode already
+    #    allowed the tool, and (4) plan's denials are never a mode's "ask" in
+    #    the first place, so this branch naturally never fires under plan.
+    if rule_action == ALLOW and mode_action == ASK:
+        return Decision(
+            ALLOW, active, risk,
+            "rule allows this tool (pattern %r), satisfying %s's ask"
+            % (rule_pattern or name, MODE_LABELS.get(active, active)),
+            name,
+        )
+
+    # 5. No rule applied (or it was inert): the mode alone decides, exactly as
+    #    it did before rules were wired in.
+    action = mode_action
     if action == ASK and not interactive:
         return Decision(
             ALLOW, active, risk,
