@@ -336,6 +336,219 @@ class SonderLauncherApi {
   }
 }
 
+/// One declared argument of a slash command, as published by the server's
+/// unified command catalog (`command_catalog.py`).
+class CommandParam {
+  final String name;
+  final String type;
+  final bool required;
+
+  /// Server-supplied default. Left as a raw JSON value because a default can
+  /// legitimately be a string, number, bool or null, and rendering it is the
+  /// only thing the app does with it.
+  final Object? defaultValue;
+
+  const CommandParam({
+    required this.name,
+    this.type = '',
+    this.required = false,
+    this.defaultValue,
+  });
+
+  factory CommandParam.fromJson(Map<String, dynamic> json) => CommandParam(
+        name: json['name']?.toString() ?? '',
+        type: json['type']?.toString() ?? '',
+        required: json['required'] == true,
+        defaultValue: json['default'],
+      );
+
+  /// `title: str` / `[project: str = default]` — compact enough for a palette
+  /// row while still saying whether the caller has to supply it.
+  String get label {
+    final typed = type.isEmpty ? name : '$name: $type';
+    if (required) return typed;
+    final shown = defaultValue == null ? typed : '$typed = $defaultValue';
+    return '[$shown]';
+  }
+}
+
+/// A single slash command in the server's command catalog.
+///
+/// The Python side (`command_catalog.py`) is the one source of truth for the
+/// ~265 commands; this is its wire shape. Anything the server omits degrades
+/// to an empty string rather than throwing, so an older server that publishes
+/// a partial record still yields a usable palette row.
+class SonderCommand {
+  final String name;
+  final List<String> aliases;
+  final String tool;
+  final String category;
+
+  /// safe | ask | mutation | dangerous. Free-form on the wire; the UI treats
+  /// anything it does not recognise as unlabelled rather than guessing.
+  final String risk;
+  final String summary;
+
+  /// True when the command is handled by the serve layer itself rather than
+  /// by dispatching to a registered tool.
+  final bool native;
+  final String usage;
+  final List<CommandParam> params;
+
+  const SonderCommand({
+    required this.name,
+    this.aliases = const [],
+    this.tool = '',
+    this.category = '',
+    this.risk = '',
+    this.summary = '',
+    this.native = false,
+    this.usage = '',
+    this.params = const [],
+  });
+
+  factory SonderCommand.fromJson(Map<String, dynamic> json) {
+    final rawAliases = json['aliases'];
+    final rawParams = json['params'];
+    return SonderCommand(
+      name: json['name']?.toString() ?? '',
+      aliases: rawAliases is List
+          ? rawAliases
+              .map((a) => a?.toString() ?? '')
+              .where((a) => a.isNotEmpty)
+              .toList(growable: false)
+          : const [],
+      tool: json['tool']?.toString() ?? '',
+      category: json['category']?.toString() ?? '',
+      risk: json['risk']?.toString().trim().toLowerCase() ?? '',
+      summary: json['summary']?.toString() ?? '',
+      native: json['native'] == true,
+      usage: json['usage']?.toString() ?? '',
+      params: rawParams is List
+          ? rawParams
+              .whereType<Map>()
+              .map((p) => CommandParam.fromJson(Map<String, dynamic>.from(p)))
+              .toList(growable: false)
+          : const [],
+    );
+  }
+
+  /// The token a user actually types. Fallback entries embed an example
+  /// payload in the name (`/asset office-suite DOCX report, …`), so rows show
+  /// the leading token and insertion keeps the whole string.
+  String get displayName => name.split(' ').first;
+
+  /// The usage line, synthesised from [params] when the server did not send
+  /// one, so a row always tells the user what arguments it takes.
+  String get usageLine {
+    if (usage.trim().isNotEmpty) return usage.trim();
+    if (params.isEmpty) return displayName;
+    return '$displayName ${params.map((p) => p.label).join(' ')}';
+  }
+
+  /// Does this command answer to [query] (a lowercased "/foo" prefix)?
+  /// Aliases count, so `/plan` still finds `/task_plan`.
+  bool matchesPrefix(String query) {
+    if (name.toLowerCase().startsWith(query)) return true;
+    for (final alias in aliases) {
+      if (alias.toLowerCase().startsWith(query)) return true;
+    }
+    return false;
+  }
+
+  /// Looser second pass: substring anywhere in the name, an alias, the
+  /// summary or the category. [needle] is lowercased and has no leading slash.
+  bool matchesLoose(String needle) {
+    if (needle.isEmpty) return true;
+    if (name.toLowerCase().contains(needle)) return true;
+    if (summary.toLowerCase().contains(needle)) return true;
+    if (category.toLowerCase().contains(needle)) return true;
+    for (final alias in aliases) {
+      if (alias.toLowerCase().contains(needle)) return true;
+    }
+    return false;
+  }
+}
+
+/// The whole published command surface: every command, the category blurbs,
+/// and the short "popular" list shown the moment a user types "/".
+class CommandCatalog {
+  final List<SonderCommand> commands;
+  final Map<String, String> categories;
+  final List<String> popular;
+
+  const CommandCatalog({
+    this.commands = const [],
+    this.categories = const {},
+    this.popular = const [],
+  });
+
+  static const empty = CommandCatalog();
+
+  factory CommandCatalog.fromJson(Map<String, dynamic> json) {
+    final rawCommands = json['commands'];
+    final rawCategories = json['categories'];
+    final rawPopular = json['popular'];
+    return CommandCatalog(
+      commands: rawCommands is List
+          ? rawCommands
+              .whereType<Map>()
+              .map((c) => SonderCommand.fromJson(Map<String, dynamic>.from(c)))
+              .where((c) => c.name.isNotEmpty)
+              .toList(growable: false)
+          : const [],
+      categories: rawCategories is Map
+          ? <String, String>{
+              for (final entry in rawCategories.entries)
+                entry.key.toString(): entry.value?.toString() ?? '',
+            }
+          : const {},
+      popular: rawPopular is List
+          ? rawPopular
+              .map((p) => p?.toString() ?? '')
+              .where((p) => p.isNotEmpty)
+              .toList(growable: false)
+          : const [],
+    );
+  }
+
+  bool get isEmpty => commands.isEmpty;
+
+  /// Commands named by [popular], in the server's order, skipping any name the
+  /// catalog does not actually define. Falls back to the head of the full list
+  /// so typing "/" is never answered with a blank panel.
+  List<SonderCommand> get popularCommands {
+    final index = <String, SonderCommand>{
+      for (final c in commands) c.name.toLowerCase(): c,
+    };
+    final picked = <SonderCommand>[];
+    for (final name in popular) {
+      final hit = index[name.toLowerCase()];
+      if (hit != null) picked.add(hit);
+    }
+    if (picked.isNotEmpty) return picked;
+    return commands.take(12).toList(growable: false);
+  }
+
+  /// Category key -> its commands, ordered by the category blurb map when the
+  /// server supplied one so the browser matches the server's own grouping.
+  Map<String, List<SonderCommand>> get byCategory {
+    final grouped = <String, List<SonderCommand>>{};
+    for (final command in commands) {
+      final key = command.category.isEmpty ? 'other' : command.category;
+      grouped.putIfAbsent(key, () => <SonderCommand>[]).add(command);
+    }
+    if (categories.isEmpty) return grouped;
+    final ordered = <String, List<SonderCommand>>{};
+    for (final key in categories.keys) {
+      final hit = grouped.remove(key);
+      if (hit != null) ordered[key] = hit;
+    }
+    ordered.addAll(grouped);
+    return ordered;
+  }
+}
+
 /// Thin client for a hosted Sonder Runtime instance (sonder_serve.py).
 ///
 /// The server speaks the OpenAI chat-completions dialect:
@@ -578,6 +791,106 @@ class SonderApi {
       return UpdateStatus.fromJson(obj);
     } catch (_) {
       throw SonderException('Could not parse update status.');
+    }
+  }
+
+  /// The server's whole published command surface (GET /v1/commands).
+  ///
+  /// Fetched once and cached by the caller: the catalog is a few hundred
+  /// entries, so filtering it client-side per keystroke costs nothing and a
+  /// request per keystroke would cost a round trip.
+  Future<CommandCatalog> fetchCommands() async {
+    late http.Response resp;
+    try {
+      resp = await http
+          .get(_uri('/v1/commands'), headers: _headers())
+          .timeout(const Duration(seconds: 15));
+    } catch (e) {
+      throw SonderException('Cannot reach server: $e');
+    }
+    if (resp.statusCode == 401) {
+      throw SonderException('Unauthorized - check the API key.');
+    }
+    if (resp.statusCode != 200) {
+      throw SonderException('Server returned HTTP ${resp.statusCode}.');
+    }
+    try {
+      final obj =
+          jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+      return CommandCatalog.fromJson(obj);
+    } catch (_) {
+      throw SonderException('Could not parse the command catalog.');
+    }
+  }
+
+  /// Server-side completion for [q] (GET /v1/commands/complete).
+  ///
+  /// The palette filters the cached catalog instead of calling this on every
+  /// keypress; this exists as the parity/fallback path — it is what to use
+  /// when the catalog could not be cached, or to check the client filter
+  /// against the server's own ranking.
+  Future<List<SonderCommand>> completeCommands(
+    String q, {
+    int limit = 20,
+  }) async {
+    final uri = _uri('/v1/commands/complete').replace(queryParameters: {
+      'q': q,
+      'limit': '$limit',
+    });
+    late http.Response resp;
+    try {
+      resp = await http
+          .get(uri, headers: _headers())
+          .timeout(const Duration(seconds: 10));
+    } catch (e) {
+      throw SonderException('Cannot reach server: $e');
+    }
+    if (resp.statusCode == 401) {
+      throw SonderException('Unauthorized - check the API key.');
+    }
+    if (resp.statusCode != 200) {
+      throw SonderException('Server returned HTTP ${resp.statusCode}.');
+    }
+    try {
+      final obj =
+          jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+      final matches = obj['matches'];
+      if (matches is! List) return const [];
+      return matches
+          .whereType<Map>()
+          .map((c) => SonderCommand.fromJson(Map<String, dynamic>.from(c)))
+          .where((c) => c.name.isNotEmpty)
+          .toList(growable: false);
+    } catch (_) {
+      throw SonderException('Could not parse command completions.');
+    }
+  }
+
+  /// Rendered help for one command or topic (GET /v1/commands/help).
+  Future<String> commandHelp(String topic) async {
+    final uri = _uri('/v1/commands/help').replace(queryParameters: {
+      'topic': topic,
+    });
+    late http.Response resp;
+    try {
+      resp = await http
+          .get(uri, headers: _headers())
+          .timeout(const Duration(seconds: 15));
+    } catch (e) {
+      throw SonderException('Cannot reach server: $e');
+    }
+    if (resp.statusCode == 401) {
+      throw SonderException('Unauthorized - check the API key.');
+    }
+    if (resp.statusCode != 200) {
+      throw SonderException('Server returned HTTP ${resp.statusCode}.');
+    }
+    try {
+      final obj =
+          jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+      return obj['text']?.toString() ?? '';
+    } catch (_) {
+      throw SonderException('Could not parse command help.');
     }
   }
 

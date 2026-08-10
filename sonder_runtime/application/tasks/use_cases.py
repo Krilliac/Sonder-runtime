@@ -177,5 +177,62 @@ class TaskService:
         )
         return self.checklist(checklist_id)
 
+    def delete_task(self, task_id: str) -> dict:
+        return self._repository.delete(task_id)
+
+    def add_dependency(self, task_id: str, depends_on: str) -> dict:
+        return self._repository.add_dependency(task_id, depends_on)
+
+    def remove_dependency(self, task_id: str, depends_on: str) -> dict:
+        return self._repository.remove_dependency(task_id, depends_on)
+
+    def task_dependencies(self, task_id: str) -> list[TaskView]:
+        return [TaskView.from_raw(r) for r in self._repository.dependencies(task_id)]
+
+    def task_dependents(self, task_id: str) -> list[TaskView]:
+        return [TaskView.from_raw(r) for r in self._repository.dependents(task_id)]
+
+    def task_progress(self, project: str = "") -> dict:
+        return self._repository.progress(project=project)
+
+    def plan_tasks(
+        self,
+        title: str,
+        steps: list[str | dict],
+        *,
+        project: str = "",
+        owner: str = "agent",
+        priority: int = 2,
+        sequential: bool = True,
+    ) -> ChecklistView:
+        if not steps:
+            raise InvalidInput("at least one step is required")
+        if len(steps) > 30:
+            raise InvalidInput("a plan supports at most 30 steps")
+        parent = self._repository.create(
+            title=title, detail="work plan", status="in_progress",
+            priority=priority, project=project, owner=owner,
+        )
+        child_ids = []
+        for step in steps:
+            if isinstance(step, dict):
+                step_title = str(step.get("title", "")).strip()
+                detail = str(step.get("detail", ""))
+            else:
+                step_title = str(step).strip()
+                detail = ""
+            if not step_title:
+                raise InvalidInput("plan step titles cannot be empty")
+            child = self._repository.create(
+                title=step_title, detail=detail, status="pending",
+                priority=priority, project=project, owner=owner,
+                parent_id=parent["id"],
+            )
+            child_ids.append(child["id"])
+        if sequential and len(child_ids) > 1:
+            for i in range(1, len(child_ids)):
+                self._repository.add_dependency(child_ids[i], child_ids[i - 1])
+        return self.checklist(parent["id"])
+
     def publish_checklist(self, checklist: ChecklistView) -> None:
         self._checklist_events.publish(checklist.to_dict())

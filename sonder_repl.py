@@ -4,6 +4,7 @@ Boots straight into the real learning loop (server.sonder), the way `claude`
 drops you into an interactive session. Slash-commands control trace/strict mode,
 teach outcomes back, and surface stats/lessons. Stdlib only + server/memory_store.
 """
+import json
 import os
 import re
 import sys
@@ -23,7 +24,15 @@ import consult as consult_flow
 import tier_router
 import code_improve
 import command_router
+import command_catalog
 import project_scaffold
+
+try:
+    # Optional: the live filtering "/" menu. Absent or unusable (piped stdin,
+    # non-Windows, dumb terminal) the REPL falls back to plain input().
+    import slash_menu
+except ImportError:  # pragma: no cover - the REPL must never hard-depend on it
+    slash_menu = None
 
 CURRENT_TOKEN = ""
 
@@ -46,6 +55,46 @@ def _paint(text, *styles):
     if not _Ansi.enabled:
         return str(text)
     return "".join(styles) + str(text) + _Ansi.reset
+
+
+def _read_input(prompt):
+    """Prompt for a line, with the live "/" menu when the terminal allows it."""
+    if slash_menu is not None:
+        try:
+            if slash_menu.available():
+                return slash_menu.read_line(prompt)
+        except (EOFError, KeyboardInterrupt):
+            raise
+        except Exception:
+            pass  # a menu problem must never cost the user their prompt
+    return input(prompt)
+
+
+def _run_catalogued(line, cmd):
+    """Run any registered MCP tool typed as /<tool_name>, or explain the miss.
+
+    Every tool is catalogued, so this is what makes the whole surface -- not
+    just the branches written out above -- reachable from the console.
+    """
+    try:
+        parsed = command_catalog.parse_invocation(line)
+    except ValueError as exc:
+        return str(exc)
+    if parsed:
+        tool, kwargs = parsed
+        handler = getattr(server, tool, None)
+        if callable(handler):
+            try:
+                return str(handler(**kwargs))
+            except TypeError as exc:
+                return "%s: %s\n%s" % (
+                    cmd, exc, command_catalog.help_command(cmd),
+                )
+            except Exception as exc:
+                return "%s failed: %s" % (cmd, exc)
+    return "unknown command %s\n\n%s" % (
+        cmd, command_catalog.format_matches(cmd),
+    )
 
 
 def _normalize_input_line(line):
@@ -296,6 +345,8 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /runscript p|a|c   run a known script type with JSON args and optional cwd
   /dump [label]      dump this chat and debug info to a text file
   /todo ...          list/add/update visible task state
+  /todo plan t|s|s   plan a titled set of ordered, auto-sequenced steps
+  /todo progress     show a progress bar and per-status task counts
   /quality           audit lesson quality and duplicate rows
   /qualityfix [apply] dry-run or apply exact duplicate lesson cleanup
   /privacy [N]       review redacted path/credential-like lesson findings
@@ -751,8 +802,8 @@ def main():
 
     while True:
         try:
-            line = input(_paint("sonder", _Ansi.teal, _Ansi.bold) + " " +
-                         _execution_prompt() + _paint(" > ", _Ansi.muted))
+            line = _read_input(_paint("sonder", _Ansi.teal, _Ansi.bold) + " " +
+                               _execution_prompt() + _paint(" > ", _Ansi.muted))
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -781,8 +832,11 @@ def main():
             cmd = parts[0].lower()
             arg = parts[1] if len(parts) > 1 else ""
 
-            if cmd == "/help":
-                print(HELP)
+            if cmd == "/":
+                # A bare slash is the "what can I type" gesture.
+                print(command_catalog.format_matches(""))
+            elif cmd == "/help":
+                print(command_catalog.help_text(arg.strip()))
             elif cmd == "/trace":
                 apply_trace(_on_off(arg, trace))
             elif cmd == "/strict":
@@ -871,10 +925,42 @@ def main():
                             print(server.task_show(rest.strip()))
                         else:
                             print("usage: /todo show <task-id>")
+                    elif action == "plan":
+                        # "/todo plan Build auth | design schema | add API"
+                        parts = [p.strip() for p in rest.split("|")]
+                        parts = [p for p in parts if p]
+                        if len(parts) < 2:
+                            print("usage: /todo plan <title> | <step> | <step> ...")
+                        else:
+                            print(server.task_plan(
+                                title=parts[0],
+                                steps=json.dumps(parts[1:]),
+                                project=project,
+                                owner="sonder",
+                            ))
+                    elif action in ("progress", "status"):
+                        print(server.task_progress(project=project))
+                    elif action in ("delete", "rm", "remove"):
+                        if rest.strip():
+                            print(server.task_delete(task_id=rest.strip()))
+                        else:
+                            print("usage: /todo delete <task-id>")
+                    elif action in ("depend", "dep", "blockedby"):
+                        # "/todo depend <task-id> <depends-on-id>"
+                        dep_parts = rest.split()
+                        if len(dep_parts) == 2:
+                            print(server.task_depend(
+                                task_id=dep_parts[0], depends_on=dep_parts[1],
+                            ))
+                        else:
+                            print("usage: /todo depend <task-id> <depends-on-id>")
                     else:
                         print(
                             "usage: /todo [list] | /todo add <title> | /todo start <id> | "
-                            "/todo done <id> | /todo block <id> | /todo show <id>"
+                            "/todo done <id> | /todo block <id> | /todo show <id>\n"
+                            "       /todo plan <title> | <step> | <step> ...\n"
+                            "       /todo progress | /todo delete <id> | "
+                            "/todo depend <id> <depends-on-id>"
                         )
             elif cmd == "/quality":
                 print(server.memory_quality_report())
@@ -1148,7 +1234,7 @@ def main():
             elif cmd in ("/exit", "/quit", "/q"):
                 break
             else:
-                print("unknown command %s — try /help" % cmd)
+                print(_run_catalogued(line, cmd))
             continue
 
         # Passive learning: if the previous turn is still pending an outcome,
