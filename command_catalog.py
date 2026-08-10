@@ -211,6 +211,24 @@ _DANGEROUS = frozenset({
     "runtime_policy_update", "permission_rule_set", "elevate",
 })
 
+# Reads the server's own policy sets do not cover. Those two sets answer
+# narrower questions -- what a *repository-scoped* agent may call
+# (``REPOSITORY_READ_ONLY_TOOLS``) and what counts as having inspected the
+# workspace before acting (``_WORK_INSPECTION_TOOLS``) -- so a tool can be
+# plainly read-only and still belong in neither. ``task_list`` was exactly
+# that: one ``SELECT`` and no writer anywhere beneath it, yet it landed in
+# ``_risk_for``'s deliberately fail-closed ``ask`` default, which ``plan``
+# denies. Plan exists to stop Sonder *changing* things, not to stop it
+# answering a question, so a verified read is named here rather than pushed
+# into a server set whose other meanings it does not carry -- adding
+# ``task_list`` to ``_WORK_INSPECTION_TOOLS`` would have made listing todos
+# count as having inspected the workspace.
+#
+# Membership is a claim that the tool has no write path, checked by reading
+# it. It is not a place to park a tool that merely looks harmless: the
+# ``ask`` default above is the right answer for anything unverified.
+_READ_ONLY = frozenset({"task_list", "task_show"})
+
 
 @dataclass(frozen=True)
 class Param:
@@ -332,6 +350,130 @@ def _native_groups() -> list[tuple[str, ...]]:
     return groups
 
 
+def _branch_tool_calls(path: str, function: str, tool_names: frozenset) -> dict:
+    """``{"/write": ("file_write",)}`` for one hand-written dispatch chain.
+
+    Read out of the source rather than hand-listed, for the same reason the
+    alias groups above are: a console branch that calls a real tool has to be
+    covered by the permission gate the moment it is written, not the next time
+    someone remembers to update a table. Hand-maintained security tables go
+    stale silently, and a permission gate that silently stops covering a
+    command is worse than none, because the mode indicator keeps claiming it.
+
+    ``/write`` runs ``file_write`` but is not *named* ``file_write``, so the
+    catalog's own name-matching (``Command.tool``) cannot see it: that only
+    fronts a tool when a slash name and a tool name coincide. This walks the
+    branch body instead, following module-level helpers one level deep
+    (``do_refactor`` -> ``ensemble_answer``) and keeping only names that are
+    actually registered MCP tools, so ``_open_db`` and friends drop out.
+    """
+    try:
+        with open(os.path.join(_HERE, path), encoding="utf-8") as handle:
+            tree = ast.parse(handle.read())
+    except (OSError, SyntaxError):
+        return {}
+    functions = {
+        node.name: node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    scope = functions.get(function)
+    if scope is None:
+        return {}
+
+    def _called_tools(node, depth: int, seen: set) -> set:
+        found: set = set()
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Call):
+                continue
+            target = child.func
+            if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
+                # Any ``<module>.<tool_name>``, not just ``server.<tool_name>``.
+                # ``/run`` executes host code through ``code_runner.run_code``
+                # and never touches the ``run_code`` tool, so a receiver check
+                # would have left the console's most obviously "runs a program"
+                # command outside a gate whose whole job is running programs.
+                # The name is filtered against the real registry below.
+                found.add(target.attr)
+            elif isinstance(target, ast.Name):
+                if target.id in tool_names:
+                    found.add(target.id)
+                elif (
+                    target.id in functions
+                    and target.id not in seen
+                    and depth < 2
+                ):
+                    seen.add(target.id)
+                    found |= _called_tools(functions[target.id], depth + 1, seen)
+        return found
+
+    found: dict = {}
+    for node in ast.walk(scope):
+        if not isinstance(node, ast.If):
+            continue
+        names = _branch_names(node.test)
+        if not names:
+            continue
+        body = ast.Module(body=node.body, type_ignores=[])
+        tools = sorted(_called_tools(body, 0, set()) & tool_names)
+        if not tools:
+            continue
+        for name in names:
+            found[name] = tuple(sorted(set(found.get(name, ())) | set(tools)))
+    return found
+
+
+def _branch_names(test) -> list[str]:
+    """Slash names compared in one ``cmd == "/x"`` / ``cmd in ("/x", "/y")`` test."""
+    if not isinstance(test, ast.Compare) or len(test.ops) != 1:
+        return []
+    if not isinstance(test.left, ast.Name) or test.left.id != "cmd":
+        return []
+    comparator = test.comparators[0]
+    values: list = []
+    if isinstance(comparator, ast.Constant):
+        values = [comparator.value]
+    elif isinstance(comparator, (ast.Tuple, ast.List, ast.Set)):
+        values = [
+            item.value for item in comparator.elts
+            if isinstance(item, ast.Constant)
+        ]
+    return [
+        value.lower() for value in values
+        if isinstance(value, str) and value.startswith("/") and len(value) > 1
+    ]
+
+
+@functools.lru_cache(maxsize=1)
+def console_tools() -> dict:
+    """Every named console command mapped to the MCP tools it can invoke.
+
+    Covers both hand-written chains a typed slash command can reach: the
+    REPL's own ``main`` and ``server.control_command``, which the REPL
+    delegates ~25 names to. ``/mkdir`` therefore resolves to
+    ``directory_create`` even though only ``control_command`` names it.
+
+    This is what lets the console permission gate sit at ONE choke point --
+    the top of the REPL's slash chain -- instead of at each of the ~50
+    branches. Commands that front no tool (``/help``, ``/trace``, ``/exit``)
+    are simply absent, and are not gated.
+    """
+    import server  # lazy: server imports this module for /help
+
+    try:
+        names = frozenset(
+            tool.name for tool in server.mcp._tool_manager.list_tools()
+        )
+    except Exception:  # a partially initialised server must not break the gate
+        names = frozenset()
+    merged: dict = {}
+    for path, function in (
+        ("server.py", "control_command"), ("sonder_repl.py", "main"),
+    ):
+        for slash, tools in _branch_tool_calls(path, function, names).items():
+            merged[slash] = tuple(sorted(set(merged.get(slash, ())) | set(tools)))
+    return merged
+
+
 @functools.lru_cache(maxsize=1)
 def _help_summaries() -> dict:
     """One-liners harvested from the REPL's hand-written ``HELP`` block.
@@ -387,7 +529,7 @@ def _risk_for(name: str, server) -> str:
         return "mutation"
     read_only = getattr(server, "REPOSITORY_READ_ONLY_TOOLS", frozenset())
     inspection = getattr(server, "_WORK_INSPECTION_TOOLS", frozenset())
-    if name in read_only or name in inspection:
+    if name in _READ_ONLY or name in read_only or name in inspection:
         return "safe"
     return "ask"
 
@@ -522,6 +664,7 @@ def catalog() -> tuple:
 def reset_cache() -> None:
     """Drop the memoised catalog (used after a live reload adds tools)."""
     catalog.cache_clear()
+    console_tools.cache_clear()
 
 
 # --- lookup / search ------------------------------------------------------

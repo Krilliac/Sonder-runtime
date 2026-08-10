@@ -49,14 +49,32 @@ decision because it is narrow and it is written down.
 
 Enforcement scope
 -----------------
-``decide()`` is a pure function; call sites opt in. Two do:
+``decide()`` is a pure function; call sites opt in. Every place a tool is
+chosen -- by a model, by a person, or by a protocol client -- does:
 
     server._agent_dispatch          the agent/workbench/autopilot tool path,
                                     via ``_agent_permission_gate_error``.
                                     ``interactive=False``.
-    sonder_repl._run_catalogued     ``/<tool_name>`` typed at the console,
-                                    via ``_permission_gate``.
+    server._loop_dispatch           the ``loop``/``workflow_run`` actions a
+                                    model authors, via
+                                    ``_loop_permission_refusal``.
+                                    ``interactive=False``.
+    reloadable_mcp.call_tool        the protocol entry point an MCP client
+                                    arrives at, via ``_refuse_if_gated``.
+                                    ``interactive=False``.
+    sonder_repl.main                the ~50 hand-written ``/write``-style
+                                    branches and the ~25 forwarded to
+                                    ``server.control_command``, at one choke
+                                    point via ``_named_command_gate``.
                                     ``interactive=True``.
+    sonder_repl._run_catalogued     ``/<tool_name>`` typed at the console --
+                                    the fallback for everything without a
+                                    hand-written branch, via
+                                    ``_permission_gate``. ``interactive=True``.
+
+The console's two entries are disjoint by construction: a typed command is
+served by a named branch or by the catalogued fallback, never both, so nothing
+is prompted for twice.
 
 Interactive surfaces honour ``ask`` by actually asking (the console prompts
 ``y/N``, defaulting to no). A direct MCP tool call has no one to ask, so
@@ -64,14 +82,17 @@ Interactive surfaces honour ``ask`` by actually asking (the console prompts
 purpose is to hold still, and which therefore denies everywhere. Preserving
 existing behaviour by default matters here: these rules have been dormant since
 they were written, and switching them on globally in one step would break flows
-that have always worked. That is why the agent path passes
-``interactive=False``: under the default ``manual`` mode it therefore refuses
+that have always worked. That is why every non-console site passes
+``interactive=False``: under the default ``manual`` mode they therefore refuse
 nothing the mode itself refused before, and only ``plan`` or an explicit
-per-tool ``deny`` rule can stop a dispatch.
+per-tool ``deny`` rule can stop a call.
 
-Direct MCP tool functions are *not* individually gated -- a client calling
-``file_write`` gets exactly the behaviour it always got. The gate lives at the
-two places that dispatch a tool chosen by a model or typed by a person.
+The gate sits at those entry points and *not* inside the tool functions
+themselves. An internal Python call to ``server.file_write`` is therefore
+ungated -- deliberately, because the surfaces above each call the function
+directly with their own ``interactive`` value, and gating the bodies as well
+would prompt twice for one console command and attribute the agent path's
+refusal to the wrong layer.
 
 One deliberate console-only exemption: ``permission_mode`` itself is never
 gated there. It is risk ``ask``, which ``plan`` denies, so gating it would
@@ -217,6 +238,21 @@ EXECUTION_TOOLS = frozenset({
 # adding to this. A per-call need for elevation belongs in
 # ``requires_elevation=True`` at the ``decide()`` call site instead.
 PRIVILEGED_TOOLS = frozenset()
+
+# The gate's own control, exempt at every surface a *person* reaches the gate
+# through: the console and the MCP protocol entry point. ``permission_mode`` is
+# risk ``ask``, which ``plan`` denies, and the chosen mode persists to disk --
+# so gating it would leave whoever selected ``plan`` unable to select anything
+# else, across restarts, with no remedy but hand-editing
+# ``permission_mode.json``. A refusal nobody can act on is the failure this
+# module's ``dangerous``-always-asks note already argues against, and it is
+# worse here because the refusal message names the very tool it is refusing.
+#
+# ``server._agent_dispatch`` and ``server._loop_dispatch`` deliberately do NOT
+# consult this: a model must not be able to lift its own restraint. The
+# distinction is who is choosing -- a person driving Sonder, or Sonder driving
+# itself -- not how hard the tool is to reach.
+GATE_CONTROL_TOOLS = frozenset({"permission_mode"})
 
 _LOCK = threading.RLock()
 _STATE = {"mode": DEFAULT_MODE, "elevated": False, "elevation_reason": ""}

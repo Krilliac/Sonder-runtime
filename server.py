@@ -11288,6 +11288,61 @@ def _loop_verdict_result(action_type, text, success_prefix):
     return result
 
 
+# `_loop_dispatch` action types are mostly tool names already; these are the
+# ones that are not, so the gate below decides on the tool that actually runs
+# rather than on a name `risk_of` has never heard of.
+_LOOP_ACTION_TOOLS = {
+    "code": "run_code",
+    "project": "run_project",
+    "artifact": "artifact_generate",
+    "artifact_check": "artifact_ground",
+    "game_reference": "game_reference_suite",
+    "game": "game_generate_and_test",
+    "work": "workbench_agent",
+    "agent": "workbench_agent",
+    "improvement_report": "system_improvement_report",
+    "profile_status": "system_profile_text",
+    "emotion_status": "emotion_vector_status",
+    "emotion_update": "update_emotion_vectors",
+    "emotion_tune": "tune_emotion_vectors",
+    "learning_health": "learning_health_status",
+}
+
+
+def _loop_action_tool(action_type):
+    """The tool a loop action really runs, for the permission gate."""
+    name = str(action_type or "").strip().lower()
+    return _canonical_agent_tool_name(_LOOP_ACTION_TOOLS.get(name, name))
+
+
+def _loop_permission_refusal(action_type):
+    """Gate a model-authored `loop`/`workflow_run` action, or None to proceed.
+
+    `_loop_dispatch` is the third place a *model* chooses what runs -- the
+    `loop` and `workflow_run` tools execute actions the model authored,
+    including `file_delete`, `workspace_run` and `self_heal_repair`. That is
+    the same threat model as `_agent_dispatch`, not "a client calling a tool
+    directly", so it takes the same `interactive=False` gate: `manual` refuses
+    nothing it refused yesterday, while `plan` and an explicit per-tool `deny`
+    rule stop the action before it runs.
+    """
+    tool = _loop_action_tool(action_type)
+    decision = permission_modes.decide(tool, interactive=False)
+    if decision.allowed:
+        return None
+    return {
+        "ok": False,
+        "type": str(action_type or ""),
+        "summary": "refused by the permission gate (mode=%s)" % decision.mode,
+        "output": (
+            "HOST POLICY: '%s' is refused by the active permission gate: %s "
+            "(tool=%s, mode=%s, risk=%s). This is standing policy, not a "
+            "transient failure -- choose a different action."
+            % (action_type, decision.reason, tool, decision.mode, decision.risk)
+        ),
+    }
+
+
 def _loop_dispatch(action):
     action_type = (action.get("type") or action.get("action") or "code").strip().lower()
     activity_tracker.record_tool_call(
@@ -11295,6 +11350,9 @@ def _loop_dispatch(action):
         {k: v for k, v in (action or {}).items() if k not in {"code", "content", "files"}},
         summary="loop action queued",
     )
+    refusal = _loop_permission_refusal(action_type)
+    if refusal is not None:
+        return refusal
     if action_type in ("code", "run_code"):
         result = code_runner.run_code(
             code=action.get("code", ""),

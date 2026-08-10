@@ -77,7 +77,11 @@ def _read_input(prompt):
 # is the authority the gate exists to serve; the agent path deliberately gets
 # no such exemption (a model must not be able to lift its own restraint, and
 # `_agent_dispatch` cannot reach this tool at all).
-GATE_EXEMPT_TOOLS = frozenset({"permission_mode"})
+#
+# Aliased, not restated: the MCP protocol entry point exempts the same names
+# for the same reason, and two hand-kept copies of a security-relevant set is
+# how one of them silently stops matching the other.
+GATE_EXEMPT_TOOLS = permission_modes.GATE_CONTROL_TOOLS
 
 
 def _confirm(question):
@@ -94,26 +98,86 @@ def _confirm(question):
     return str(answer or "").strip().lower() in ("y", "yes")
 
 
-def _permission_gate(tool):
-    """(may_run, refusal_text) for running ``tool`` from the console.
+# Most-to-least severe, so a command that fronts several tools is described by
+# the worst thing it can do rather than by whichever branch ast.walk saw first.
+_RISK_ORDER = ("dangerous", "execution", "mutation", "ask", "safe")
+_RISK_RANK = {risk: index for index, risk in enumerate(_RISK_ORDER)}
+
+
+def _severity(risk):
+    """Rank a risk class, treating an unrecognised one as the most severe.
+
+    A class this list has not heard of is by definition unclassified, and the
+    rest of the gate fails closed on ignorance rather than open. Ranking it
+    with a plain ``_RISK_ORDER.index`` instead would raise ``ValueError``
+    inside the gate -- turning "a new risk class was added" into a crashed
+    REPL loop, which is a worse answer than either allowing or refusing.
+    """
+    return _RISK_RANK.get(risk, -1)
+
+
+def _gate_tools(tools, label):
+    """Strictest decision across ``tools``; returns ``(may_run, refusal_text)``.
 
     The console is the one surface with a human attached, so ``ask`` means
     actually asking rather than degrading to allow the way a direct MCP call
     does. ``deny`` prints why and runs nothing.
+
+    A named command can front several tools (``/todo`` reaches everything from
+    ``task_list`` to ``task_delete``), and which one runs depends on an
+    argument this gate has not parsed. It therefore decides on the *strictest*
+    member: a deny anywhere refuses, otherwise the highest-risk ``ask`` is the
+    one the operator is asked about, once. Rounding the other way -- gating a
+    command that can delete at the risk of its most harmless sibling -- would
+    be under-enforcement, which is the failure this whole change exists to fix.
     """
-    if tool in GATE_EXEMPT_TOOLS:
+    worst = None
+    for tool in tools:
+        if tool in GATE_EXEMPT_TOOLS:
+            continue
+        decision = permission_modes.decide(tool, interactive=True)
+        if decision.action == permission_modes.DENY:
+            return False, "refused %s: %s (mode: %s)" % (
+                label, decision.reason, permission_modes.MODE_LABELS.get(
+                    decision.mode, decision.mode),
+            )
+        if decision.action != permission_modes.ASK:
+            continue
+        if worst is None or _severity(decision.risk) < _severity(worst.risk):
+            worst = decision
+    if worst is None:
         return True, ""
-    decision = permission_modes.decide(tool, interactive=True)
-    if decision.action == permission_modes.ALLOW:
+    if _confirm("run %s? %s." % (label, worst.reason)):
         return True, ""
-    if decision.action == permission_modes.DENY:
-        return False, "refused /%s: %s (mode: %s)" % (
-            tool, decision.reason, permission_modes.MODE_LABELS.get(
-                decision.mode, decision.mode),
-        )
-    if _confirm("run /%s? %s." % (tool, decision.reason)):
-        return True, ""
-    return False, "skipped /%s" % tool
+    return False, "skipped %s" % label
+
+
+def _permission_gate(tool):
+    """Gate one tool dispatched as ``/<tool_name>`` through _run_catalogued."""
+    return _gate_tools((tool,), "/" + tool)
+
+
+def _named_command_gate(cmd):
+    """Gate a hand-written console branch (``/write``, ``/delete``, ``/mkdir``).
+
+    ``_run_catalogued`` is only the *fallback* path: roughly fifty named
+    branches in ``main`` -- and another twenty-five that ``main`` forwards to
+    ``server.control_command`` -- call their tool directly and never reach it.
+    Left ungated, ``/write x hi`` wrote a file in ``plan`` mode while
+    ``/file_write`` was refused, which is the same "policy that reports one
+    thing and enforces another" this change exists to remove, reintroduced at
+    a new site.
+
+    So the gate sits at ONE choke point, the top of the slash chain, and reads
+    which tools a branch can invoke out of the source
+    (``command_catalog.console_tools``) rather than out of a hand-kept table
+    that would go stale the first time someone adds a branch. Commands that
+    front no tool (``/help``, ``/exit``, ``/trace``) are absent from that map
+    and are not gated. Named branches and ``_run_catalogued`` are disjoint by
+    construction -- a command is handled by a branch or by the fallback, never
+    both -- so nothing is prompted for twice.
+    """
+    return _gate_tools(command_catalog.console_tools().get(cmd, ()), cmd)
 
 
 def _mode_command(argument):
@@ -905,6 +969,14 @@ def main():
             parts = line.split(None, 1)
             cmd = parts[0].lower()
             arg = parts[1] if len(parts) > 1 else ""
+
+            # One choke point for every hand-written branch below, including
+            # the ones forwarded to server.control_command. Commands handled by
+            # _run_catalogued (the `else`) are gated there instead.
+            may_run, refusal = _named_command_gate(cmd)
+            if not may_run:
+                print(refusal)
+                continue
 
             if cmd == "/":
                 # A bare slash is the "what can I type" gesture.
