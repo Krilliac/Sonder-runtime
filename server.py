@@ -1342,6 +1342,64 @@ def _runtime_identity_block() -> str:
     )
 
 
+# The mutable, disk-backed parts of the system prompt, pinned for one turn.
+#
+# One turn can build the system prompt more than once, and each build re-read
+# system_profile.md, the emotion vectors and the goal store from disk.
+# Measured: a workbench-agent turn builds it twice (the agent loop, then the
+# negative-claim reviewer at finalization) and a routed work request builds it
+# three times (execution-mode router, then the agent, then that reviewer).
+# Every one of those prompts is sent to a model -- none is discarded -- so this
+# cannot be fixed by dropping a build. With an edit landing between two reads,
+# one turn told the router "never use the network" and, in the same turn, told
+# the agent "always use the network".
+#
+# Per-REQUEST freshness is deliberate: system_profile.py exists so an operator
+# can edit standing instructions while the server runs. Per-TURN consistency is
+# what was missing, so the parts are read once per turn and reused, not cached
+# for the life of the process.
+#
+# _runtime_identity_block() is deliberately NOT pinned. It names the model
+# answering THIS call, and the two consumers in a routed turn can run on
+# different tiers; pinning it would make the second prompt state the first
+# one's model, which is the exact failure that block exists to prevent.
+_SYSTEM_CONTEXT = threading.local()
+
+
+def _read_system_context():
+    """Read the disk-backed system-prompt parts: (profile, emotions, goal)."""
+    profile = system_profile.system_prompt()
+    emotions = emotion_vectors.system_prompt()
+    # An active goal is re-stated every turn so a long objective cannot erode
+    # into whatever fits the current turn. Fail-soft: goal bookkeeping must
+    # never be able to break a conversation.
+    try:
+        import goal_store
+        goal_block = goal_store.context_block()
+    except Exception:
+        goal_block = ""
+    return profile, emotions, goal_block
+
+
+@contextlib.contextmanager
+def _stable_system_context():
+    """Pin the disk-backed system-prompt parts for the duration of one turn.
+
+    Thread-local, so concurrent turns never share a pin, and re-entrant: a lane
+    nested inside an already-pinned turn (the workbench agent under the
+    execution router) keeps the outer turn's reading instead of taking a fresh
+    one. Always released, so the next turn reads from disk again.
+    """
+    if getattr(_SYSTEM_CONTEXT, "parts", None) is not None:
+        yield
+        return
+    _SYSTEM_CONTEXT.parts = _read_system_context()
+    try:
+        yield
+    finally:
+        _SYSTEM_CONTEXT.parts = None
+
+
 def _build_system(system, trace, persona):
     """Compose the effective system prompt from a base `system`, optional trace
     instruction, optional persona, editable profile, and emotion vectors."""
@@ -1353,16 +1411,10 @@ def _build_system(system, trace, persona):
         effective_system = (
             "%s\n\n%s" % (persona_prompt, effective_system) if effective_system else persona_prompt
         )
-    profile = system_profile.system_prompt()
-    emotions = emotion_vectors.system_prompt()
-    # An active goal is re-stated every turn so a long objective cannot erode
-    # into whatever fits the current turn. Fail-soft: goal bookkeeping must
-    # never be able to break a conversation.
-    try:
-        import goal_store
-        goal_block = goal_store.context_block()
-    except Exception:
-        goal_block = ""
+    # Outside a pinned turn this is an ordinary fresh read, so a single-build
+    # caller behaves exactly as before.
+    parts = getattr(_SYSTEM_CONTEXT, "parts", None)
+    profile, emotions, goal_block = parts or _read_system_context()
     return _join_system_parts(
         _runtime_identity_block(), profile, emotions, goal_block, effective_system
     )
@@ -16005,7 +16057,21 @@ def _agent_checklist_fail(checklist_id, states, reason, item=1):
     _agent_checklist_mark(checklist_id, states, 4, "done", "failure included in end report")
 
 
-def _agent_impl(
+def _agent_impl(*args, **kwargs) -> str:
+    """One agent turn, with the disk-backed system-prompt parts pinned.
+
+    The agent builds its system prompt at the top of the turn and the
+    negative-claim reviewer builds another at finalization (measured: two
+    builds, two reads of system_profile.md, in one turn). Both are sent to a
+    model, so they must not disagree about the operator's standing
+    instructions. See _stable_system_context; a nested call under an already
+    pinned turn reuses the outer reading.
+    """
+    with _stable_system_context():
+        return _agent_turn(*args, **kwargs)
+
+
+def _agent_turn(
     prompt: str,
     tier: str = "code",
     max_steps: int = 6,
@@ -17757,7 +17823,17 @@ def _capability_refined_tier(
 
 
 def route_work_request(prompt: str, project: str = "") -> str | None:
-    """Transparently route eligible natural work to a bounded execution lane."""
+    """Transparently route eligible natural work to a bounded execution lane.
+
+    The disk-backed system-prompt parts are pinned across the whole routed
+    turn: the execution-mode router and the lane it chooses each build their
+    own system prompt, and both go to a model. See _stable_system_context.
+    """
+    with _stable_system_context():
+        return _route_work_request(prompt, project=project)
+
+
+def _route_work_request(prompt: str, project: str = "") -> str | None:
     _maybe_live_reload()
     explicit_worker_cap = master_orchestrator.requested_worker_cap(prompt)
     decision = (
