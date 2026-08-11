@@ -55,9 +55,9 @@ def test_outcome_signal_distribution_counts_and_rewards():
     ms.log_interaction(c, "i1", "t1", "ctx", "resp", "code")
     ms.log_interaction(c, "i2", "t2", "ctx", "resp", "code")
     ms.log_interaction(c, "i3", "t3", "ctx", "resp", "code")
-    ms.record_outcome_row(c, "i1", "tests_passed", 1.0)
-    ms.record_outcome_row(c, "i2", "tests_passed", 1.0)
-    ms.record_outcome_row(c, "i3", "failed", -1.0)
+    ms.record_outcome_row(c, "i1", "tests_passed", 1.0, source="caller")
+    ms.record_outcome_row(c, "i2", "tests_passed", 1.0, source="caller")
+    ms.record_outcome_row(c, "i3", "failed", -1.0, source="caller")
     dist = mr.outcome_signal_distribution(c)
     assert dist["by_signal"]["tests_passed"]["count"] == 2
     assert dist["by_signal"]["tests_passed"]["avg_reward"] == 1.0
@@ -90,8 +90,8 @@ def test_the_distribution_splits_the_populations_it_blends():
     """
     c = _conn()
     for n in range(3):
-        ms.record_outcome_row(c, "auto%d" % n, "tests_passed", 1.0)
-    ms.record_outcome_row(c, "judged", "rejected", -0.5)
+        ms.record_outcome_row(c, "auto%d" % n, "tests_passed", 1.0, source="caller")
+    ms.record_outcome_row(c, "judged", "rejected", -0.5, source="caller")
 
     dist = mr.outcome_signal_distribution(c)
 
@@ -106,8 +106,8 @@ def test_the_distribution_splits_the_populations_it_blends():
 def test_format_report_never_prints_the_blend_unlabelled():
     c = _conn()
     for n in range(3):
-        ms.record_outcome_row(c, "auto%d" % n, "tests_passed", 1.0)
-    ms.record_outcome_row(c, "judged", "rejected", -0.5)
+        ms.record_outcome_row(c, "auto%d" % n, "tests_passed", 1.0, source="caller")
+    ms.record_outcome_row(c, "judged", "rejected", -0.5, source="caller")
 
     text = mr.format_report(mr.build_report(c))
 
@@ -145,8 +145,8 @@ def test_distillation_yield_uses_good_outcome_interactions_only():
     ms.log_interaction(c, "i1", "t1", "ctx", "resp", "code")
     ms.log_interaction(c, "i2", "t2", "ctx", "resp", "code")
     # i1 has a good outcome and got a lesson distilled; i2 failed and got none.
-    ms.record_outcome_row(c, "i1", "tests_passed", 1.0)
-    ms.record_outcome_row(c, "i2", "failed", -1.0)
+    ms.record_outcome_row(c, "i1", "tests_passed", 1.0, source="caller")
+    ms.record_outcome_row(c, "i2", "failed", -1.0, source="caller")
     ms.add_lesson(c, ms.new_id(), "Use heapq.nsmallest instead of sort()[:n].", None, "i1")
     stats = mr.lessons_per_interaction(c)
     assert stats["n_good_outcome_interactions"] == 1
@@ -157,8 +157,8 @@ def test_distillation_yield_below_one_when_some_good_outcomes_yield_nothing():
     c = _conn()
     ms.log_interaction(c, "i1", "t1", "ctx", "resp", "code")
     ms.log_interaction(c, "i2", "t2", "ctx", "resp", "code")
-    ms.record_outcome_row(c, "i1", "tests_passed", 1.0)
-    ms.record_outcome_row(c, "i2", "accepted", 0.8)  # also "good" but no lesson stored (e.g. vague)
+    ms.record_outcome_row(c, "i1", "tests_passed", 1.0, source="caller")
+    ms.record_outcome_row(c, "i2", "accepted", 0.8, source="caller")  # also "good" but no lesson stored (e.g. vague)
     ms.add_lesson(c, ms.new_id(), "Use itertools.groupby after sorting the key.", None, "i1")
     stats = mr.lessons_per_interaction(c)
     assert stats["n_good_outcome_interactions"] == 2
@@ -170,7 +170,7 @@ def test_distillation_yield_below_one_when_some_good_outcomes_yield_nothing():
 def test_build_report_assembles_all_sections():
     c = _conn()
     ms.log_interaction(c, "i1", "t1", "ctx", "resp", "code")
-    ms.record_outcome_row(c, "i1", "tests_passed", 1.0)
+    ms.record_outcome_row(c, "i1", "tests_passed", 1.0, source="caller")
     ms.add_lesson(c, ms.new_id(), "Use contextlib.suppress to swallow a known exception.",
                   None, "i1")
     report = mr.build_report(c)
@@ -192,7 +192,7 @@ def test_build_report_on_empty_store_has_no_errors():
 def test_format_report_is_readable_text_with_key_sections():
     c = _conn()
     ms.log_interaction(c, "i1", "t1", "ctx", "resp", "code")
-    ms.record_outcome_row(c, "i1", "tests_passed", 1.0)
+    ms.record_outcome_row(c, "i1", "tests_passed", 1.0, source="caller")
     ms.add_lesson(c, ms.new_id(), "Use array.array for a compact numeric buffer.", None, "i1")
     text = mr.format_report(mr.build_report(c))
     assert "sonder metrics report" in text

@@ -9,7 +9,10 @@ import calibration
 
 
 def _with_counts(monkeypatch, counts):
-    monkeypatch.setattr(calibration, "_counts", lambda _conn: dict(counts))
+    # Signature-agnostic: `_counts` gained a provenance filter with #62 and
+    # no assertion here concerns its parameters. A double that pins an
+    # argument list it never checks fails on changes it does not test.
+    monkeypatch.setattr(calibration, "_counts", lambda *a, **k: dict(counts))
     return object()   # a stand-in connection; _counts is what reads it
 
 

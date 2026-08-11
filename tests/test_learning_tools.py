@@ -49,7 +49,7 @@ def test_apply_learned_returns_usage_stats(monkeypatch, tmp_path):
     try:
         memory_store.add_lesson(conn, "L1", "use deque for queue operations", None, "seed")
         memory_store.log_lesson_usage(conn, ["L1"], "I1", "queue task")
-        memory_store.record_lesson_usage_outcome(conn, "I1", "tests_passed", 1.0)
+        memory_store.record_lesson_usage_outcome(conn, "I1", "tests_passed", 1.0, source="caller")
     finally:
         conn.close()
     monkeypatch.setattr(
@@ -631,7 +631,9 @@ def test_record_outcome_persists_the_refusal_reason_reflection_computed(
         lambda *args, **kwargs: {"status": "no_lesson", "reason": "not_concrete"},
     )
 
-    result = server._record_outcome_and_maybe_distill("I1", "tests_passed")
+    result = server._record_outcome_and_maybe_distill(
+        "I1", "tests_passed", source="caller",
+    )
 
     assert result["distillation_state"] == memory_store.DISTILLATION_NO_LESSON
     assert result["distillation_reason"] == "not_concrete"
@@ -669,7 +671,9 @@ def test_record_outcome_persists_a_real_dedupe_refusal_reason(monkeypatch, tmp_p
         lambda *args, **kwargs: _prepared_candidate(text=text),
     )
 
-    result = server._record_outcome_and_maybe_distill("I1", "tests_passed")
+    result = server._record_outcome_and_maybe_distill(
+        "I1", "tests_passed", source="caller",
+    )
 
     assert result["distillation_state"] == memory_store.DISTILLATION_NO_LESSON
     assert result["distillation_reason"] == "exact_duplicate"

@@ -188,8 +188,13 @@ class _FakeOutcomeStore:
     def get_interaction(self, iid):
         return self._interaction
 
-    def record_outcome(self, iid, signal, reward):
-        self.outcomes.append({"id": iid, "signal": signal, "reward": reward})
+    def record_outcome(self, iid, signal, reward, *, source):
+        # Mirrors the OutcomeStore port exactly, including #62's required
+        # provenance. A double that accepts less than the port does is a double
+        # that has stopped proving the port is honoured.
+        self.outcomes.append(
+            {"id": iid, "signal": signal, "reward": reward, "source": source}
+        )
 
     def append_outbox_event(self, event):
         self.events.append(event)
@@ -203,6 +208,9 @@ class TestOutcomeService:
         assert reward == 1.0
         assert len(store.outcomes) == 1
         assert store.outcomes[0]["signal"] == "tests_passed"
+        # This service sits behind the caller-facing tool, so an unstated
+        # provenance is `caller` -- and it must reach the store, not stop here.
+        assert store.outcomes[0]["source"] == "caller"
 
     def test_outcome_emits_event(self):
         store = _FakeOutcomeStore(interaction={"id": "i1", "task": "test"})

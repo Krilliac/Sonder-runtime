@@ -45,7 +45,12 @@ class _FakeConn:
 
 def _record(monkeypatch, counts):
     monkeypatch.setattr(server, "_open_db_readonly", lambda: _FakeConn())
-    monkeypatch.setattr(calibration, "_counts", lambda _conn: dict(counts))
+    # Signature-agnostic on purpose. `_counts` gained a provenance filter with
+    # #62, and a double pinning an argument list that no assertion here
+    # concerns is the trap this repo has been bitten by before: it breaks on a
+    # parameter these tests do not care about. They supply the counts and
+    # assert on the rendered standing, nothing more.
+    monkeypatch.setattr(calibration, "_counts", lambda *a, **k: dict(counts))
 
 
 def _standing_line(text):
@@ -230,7 +235,7 @@ def test_the_standing_open_is_read_only_and_waits_seconds_not_half_a_minute(
 
     path = tmp_path / "memory.db"
     writer = memory_store.connect(str(path))
-    memory_store.record_outcome_row(writer, "i1", "accepted", 0.8)
+    memory_store.record_outcome_row(writer, "i1", "accepted", 0.8, source="caller")
     writer.close()
     monkeypatch.setattr(server, "_DB_PATH", str(path))
 
@@ -288,9 +293,9 @@ def test_both_standings_read_the_same_store_under_a_relative_db_path(
     monkeypatch.chdir(tmp_path)
     writer = memory_store.connect("memory.db")
     for n in range(40):
-        memory_store.record_outcome_row(writer, "ok%d" % n, "accepted", 0.8)
+        memory_store.record_outcome_row(writer, "ok%d" % n, "accepted", 0.8, source="caller")
     for n in range(60):
-        memory_store.record_outcome_row(writer, "no%d" % n, "rejected", -0.5)
+        memory_store.record_outcome_row(writer, "no%d" % n, "rejected", -0.5, source="caller")
     writer.close()
     # Relative, exactly as SONDER_DB=memory.db would leave it.
     monkeypatch.setattr(server, "_DB_PATH", "memory.db")
