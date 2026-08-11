@@ -72,15 +72,15 @@ It was not *live* in production, for two reasons, and both are accidents:
    happens to be is_good-gated, which is an unwritten contract the next caller cannot
    see."* The guard was in a different file from the decision.
 2. `codegen_build_loop` never calls `_record_direct_tool` at all, so **neither** role
-   fires for it today. Measured across every name in both tables — it is the only entry
-   in either table that reaches the recorder from nowhere:
+   fires for it today. It is nowhere near alone in that — see §7, **corrected**:
+   `10 of 19 GENERATORS` and `3 of 11 VERIFIERS` never reach the recorder under their
+   own name.
 
    ```
-   codegen_build_loop  [G+V] def 18898  _record_direct_tool@ []
-   build_run           [V  ] def  9986  _record_direct_tool@ [9998, 10001]
-   test_run            [V  ] def  9623  _record_direct_tool@ [9644, 9647]
-   file_write          [G  ] def  8731  _record_direct_tool@ [8752, 8754]
-   ...
+   codegen_build_loop  [G+V] def 18898  INERT
+   build_run           [V  ] def  9994  live
+   test_run            [V  ] def  9631  live
+   file_write          [G  ] def  8739  live
    ```
 
 Stated plainly: **the runtime is not currently marking its own homework here — but the
@@ -182,6 +182,11 @@ Baseline at the parent, same three files, before any test was added:
 79 passed in 17.70s
 ```
 
+(The re-review reproduced this baseline at `79 passed in 1.88s`, and `2.31s` on a
+deliberately cold cache. The 17.70s was cold worktree file cache on `D:` plus sibling
+agents on a 16 GB box, not work skipped in the faster runs — item counts, not the clock,
+are what prove both runs reached the same stage, and 79/87 reconcile exactly.)
+
 **RED** — new tests against the parent's `grounded_outcomes.py` and `server.py`
 (restored with `git checkout HEAD -- <paths>`; **no `git stash` was used at any point**):
 
@@ -216,6 +221,43 @@ labelled as such: `test_the_two_role_sets_overlap_on_exactly_one_tool`,
 `test_another_verifier_may_still_judge_a_codegen_generation`, and
 `test_a_shrinking_regeneration_never_replaces_the_file_on_disk`.
 
+### 5b. Round two — closing the re-review's condition
+
+The re-review found `test_a_dual_role_tool_is_routed_by_role_not_by_branch_order`
+**narrower than its name**: its fixture output carried no `[interaction_id: ...]`, so the
+GENERATORS branch was a silent no-op and the test proved only that the verifier branch
+runs — never that it runs *safely* alongside the generator branch it now shares a call
+with. Confirmed: the old version **survived M1 unchanged**. That is the same error as the
+first shrink-floor draft — exercising a neighbouring, safer path than the one the change
+made reachable.
+
+Widened: the output now carries `[interaction_id: gen-self]`, and the test asserts
+`go.pending_count() == 2` before the verdict, so it fails loudly if the tag ever stops
+matching `_INTERACTION_ID_RE` rather than quietly reverting to testing half the call
+site. RED under mutation, verbatim:
+
+| mutation | result | the widened test's message |
+|---|---|---|
+| M1 self-guard removed | `3 failed, 84 passed in 1.46s` (was 2 failed) | `AssertionError: assert [('gen-self', 'compiled')] == [('gen-1', 'compiled')]` |
+| M3 `elif` restored | `1 failed, 86 passed in 1.59s` | `AssertionError: assert [] == [('gen-1', 'compiled')]` |
+
+Under M1 the tool writes `compiled` (+0.70) **against its own interaction id** — the
+exact call-site self-grade the re-review proved reachable and that nothing in the suite
+caught. It now fails under both mutations: M1 shows the guard is load-bearing, M3 shows
+the routing fix is.
+
+The two Minors, both taken:
+
+* **`unlinked` blended self-blocks with "nothing was waiting".** Fixed
+  (`grounded_outcomes.py:186`): the two are counted apart rather than summed and split
+  later. RED verbatim before the fix — `1 failed, 86 passed in 1.51s`,
+  `assert 1 == 0` at `tests/test_grounded_outcomes.py:245`. New mutation **M6**
+  (re-blend them) → `1 failed, 86 passed`, so the split binds.
+* **`test_stats_count_rows_written_apart_from_attribution_decisions` never asserted
+  `attributed == 2`,** the very split it is named for. Assertion added. It was *already
+  true*, so this is coverage rather than a fix, and it is reported as such — the
+  under-assertion was the defect, not the counter.
+
 ## 6. Do the guards bind? Mutation results
 
 Each fix reverted individually, in place, with the scoped suite re-run and the file
@@ -223,28 +265,66 @@ restored afterwards:
 
 | Mutation | Result |
 |---|---|
-| M1 remove the self-grading guard | `2 failed, 85 passed` — `test_a_tool_never_grades_the_work_it_generated_itself`, `test_a_self_generated_row_does_not_hide_an_eligible_older_one` |
+| M1 remove the self-grading guard | **`3 failed, 84 passed`** (2 before the test was widened) — `test_a_tool_never_grades_the_work_it_generated_itself`, `test_a_self_generated_row_does_not_hide_an_eligible_older_one`, `test_a_dual_role_tool_is_routed_by_role_not_by_branch_order` |
 | M2 remove `pending.judged.discard(name)` on a failed write | `2 failed, 85 passed` — `test_a_failed_write_leaves_the_generation_still_judgeable`, `test_stats_count_rows_written_apart_from_attribution_decisions` |
 | M3 restore `elif` at the call site | `1 failed, 86 passed` — `test_a_dual_role_tool_is_routed_by_role_not_by_branch_order` |
 | M4 `SHRINK_FLOOR = 0.75` → `0.0` | `2 failed, 85 passed` — `test_a_shrinking_regeneration_never_replaces_the_file_on_disk` (new, end-to-end), `test_shrink_rejects_an_amputation` (existing unit) |
+| M5 (added by the re-review) `continue` → `break` in the guard | `1 failed, 86 passed` — `test_a_self_generated_row_does_not_hide_an_eligible_older_one` |
+| M6 re-blend `unlinked` and `self_blocked` | `1 failed, 86 passed` — `test_a_tool_never_grades_the_work_it_generated_itself` |
 
-All four bind. M4 is the interesting one: it is the mutation that caught my own
-non-binding first draft of the guard, before this table was written.
+All six bind. M4 caught my own non-binding first draft of the shrink guard before this
+table was written; **M1 caught the second instance of the same error** — the call-site
+test passed under it until the re-review flagged it and it was widened. Twice in one
+lane, the same failure mode: a test that exercises the neighbouring safe path instead of
+the newly reachable dangerous one. Mutation is what found it both times; reading the test
+did not.
 
 ## 7. New findings (not fixed here)
 
-* **Important — `codegen_build_loop` is declared in both role tables and wired to
-  neither.** It never calls `_record_direct_tool`, so its compiler verdict — the most
-  execution-grounded evidence the runtime produces, and the exact commodity
-  `grounded_outcomes` exists to harvest — is never attributed to anything, and the code
-  it writes is never noted as judgeable work either. Every other name in both tables
-  either reaches the recorder or is a verifier that does. Now that self-grading is
-  blocked at the decision site, wiring it is safe; it is a deliberate scope call, not an
-  oversight.
-* **Important — `artifact_verify` (`server.py:10806`) and `ground_artifact`
-  (`server.py:4480`) are in `VERIFIERS` but also never call `_record_direct_tool`**, so
-  three of the eleven verifier entries are inert. Any report of grounded-outcome
-  coverage built from the table rather than from the wiring will overstate it.
+* **CRITICAL — the attribution machinery is very close to entirely dead in production.**
+  This entry replaces a claim in the first version of this report that was **measurably
+  false**: *"Every other name in both tables either reaches the recorder or is a verifier
+  that does."* Re-measured from the AST, on the criterion that actually governs — is
+  `_record_direct_tool` ever called with **this tool's own name** as its first argument
+  (a transitive call through a differently-named tool records under *that* name, and
+  `_record_direct_tool` early-returns on `activity_tracker.inside_tool_call()` anyway,
+  `activity_tracker.py:648`):
+
+  | table | live | inert |
+  |---|---|---|
+  | `GENERATORS` (19) | 9 | **10** — `agent`, `apply_learned`, `codegen_build_loop`, `consult`, `ensemble_answer`, `improve_function`, `offload`, `scaffold_project`, `sonder`, `workbench_agent` |
+  | `VERIFIERS` (11) | 8 | **3** — `artifact_verify`, `codegen_build_loop`, `ground_artifact` |
+
+  My first pass reported 7/19 because it followed transitive call paths
+  (`sonder → control_command → directory_tree → _record_direct_tool`). Those paths are
+  real but irrelevant: they record under `directory_tree`, which is in neither table.
+  Corrected number is **10/19**, matching the re-review.
+
+  **The production consequence, stated plainly.** `note_generation` fires only when a
+  tool clears *two* gates: it reaches the recorder under its own name, **and** its output
+  matches `_INTERACTION_ID_RE` (`server.py:7704`). Measured, the only producers of that
+  footer are `with_footer` (`server.py:558`), `_sonder_impl_serialized`, `_offload_impl`
+  and `_answer_with_history_impl` — i.e. the learning-tier tools. **Every single one of
+  them is in the inert column.** The 9 live generators are the file/patch/artifact tools,
+  whose output is a diff or a byte count and carries no footer at all. The two sets do
+  not intersect: transitive search finds exactly one live generator that can even
+  *embed* a footer, `game_generate_and_test`, and only via an internal `sonder` call
+  (`game_generate_and_test → _game_generate_result → sonder → _sonder_impl →
+  _sonder_impl_serialized`).
+
+  So: **`note_generation` essentially never fires, therefore `attribute` essentially
+  never has anything to judge, therefore the eight live verifiers are writing grounded
+  outcome rows at close to a rate of zero.** The module was built to fix a 8,883-vs-192
+  reporting bias and is not currently moving that ratio. Do not read a coverage figure
+  off these tables — the tables describe intent, not wiring.
+
+  This is pre-existing and is not introduced by this change. Two honest consequences,
+  in both directions: it **lowers the live severity of defect #35** (the self-grade could
+  not fire because nothing fires), and it **raises the value of the wiring work this
+  report deferred** far above the value of the guard itself. The guard is what makes that
+  wiring safe to do; it is not, on its own, worth much until the wiring lands.
+  I have not fixed the wiring here — it would start real writes to the operator's outcome
+  store from ten tools at once, which is out of scope for this session by instruction.
 * **Minor — a per-file repair whose cause is in another file is silent.** The loop
   correctly declines to keep a worse file (`note: unchanged`) but never says "no attempt
   on this file moved the project total; the cause is elsewhere". A caller reading
@@ -257,7 +337,10 @@ non-binding first draft of the guard, before this table was written.
 
 ## Provenance
 
-Investigated and fixed 2026-08-10/11 on `work/15-codegen-loop` @ parent `4e2a315`.
+Investigated and fixed 2026-08-10/11 on `work/15-codegen-loop` @ parent `4e2a315`;
+revised 2026-08-11 to close the re-review's condition (`rereview-codegen.md`, verdict
+MERGE) -- the widened call-site test, both Minors, and the corrected inertness
+measurement in Sec. 7.
 Every number in this report was measured by running the code, not derived. No `git
 stash`, no `git add -A`, no live benchmark or codegen campaign, no writes to the
 operator's store; vendored `app/build/**/local-system/*.py` untouched.
