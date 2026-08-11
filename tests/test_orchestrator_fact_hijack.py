@@ -269,6 +269,72 @@ def test_one_oversized_entry_does_not_starve_everything_behind_it():
     assert all(len(text) <= o.MAX_FACTS_CHARS for text in kept)
 
 
+def test_the_first_drawn_entry_being_oversized_does_not_starve_everything_behind_it():
+    """R-1 (residual filed in round-2 review): the char-budget skip added for
+    `test_one_oversized_entry_does_not_starve_everything_behind_it` only
+    protects entries drawn AFTER the first one -- `if kept and used + ...`
+    short-circuits to False while `kept` is still empty, so the very first
+    entry is kept unconditionally no matter its size. Project facts are drawn
+    before preferences (`queues[0]`), so an oversized entry sitting first in
+    `project_facts` used to poison `used` before anything else got a turn.
+    """
+    oversized = "z" * (o.MAX_FACTS_CHARS + 200)
+    projects = [oversized] + ["project fact %d." % n for n in range(11)]
+    prefs = ["pref %d" % n for n in range(12)]
+    kept, omitted = o.select_facts(facts=prefs, project_facts=projects)
+
+    assert omitted > 0, "the bound must still be biting here or this proves nothing"
+    assert oversized not in kept, "oversized entry must be skipped, not truncated"
+    assert [t for t in kept if t in projects[1:]], "project facts starved by the oversized first draw"
+    assert [t for t in kept if t in prefs], "preferences starved by the oversized first draw"
+    assert len(kept) >= o.MAX_INJECTED_FACTS - 1, len(kept)
+
+
+def test_live_composition_survives_an_oversized_newest_project_fact(monkeypatch):
+    """R-1 on the real path. Round 2 made project facts newest-first (correct:
+    a fact someone just stored must not be the first one evicted) -- but that
+    also puts the newest fact into the one slot the char-budget skip did not
+    cover. Measured before this fix: a project of 8 old facts + 1 canary + 1
+    oversized fact stored last (the newest row) collapsed the block to
+    kept=1, dropping the canary entirely, via the real server._answer path.
+    """
+    conn = _seeded_conn()
+    for index in range(8):
+        ms.add_fact(conn, "old-%d" % index, "sonder", "Older project fact %d." % index)
+    ms.add_fact(conn, "canary-0", "sonder", CANARIES[0])
+    oversized = "AUDIT3 PROBE oversized newest fact: " + "z" * o.MAX_FACTS_CHARS
+    ms.add_fact(conn, "big-0", "sonder", oversized)
+
+    stored = ms.facts_for_project(conn, "sonder")
+    assert len(stored) > 6, "must exceed the round-robin floor or this proves nothing"
+    assert stored[-1]["text"] == oversized, "the oversized fact must be the newest row"
+    assert len(server._preference_facts(conn, SHORT_QUESTION)) == 12
+
+    _stub_model(monkeypatch)
+    _resp, _iid, trace = server._answer(
+        conn, SHORT_QUESTION, "model", "system", 0.2, 128, 2048,
+        "session", "sonder", None, trace=True,
+    )
+
+    prompt = trace["augmented_prompt"]
+    assert CANARIES[0] in prompt, "canary evicted by the oversized newest fact"
+    assert oversized not in prompt, "oversized fact must be skipped, not truncated into the block"
+    assert trace["facts_omitted"] > 0, "the bound must actually be biting here"
+
+
+def test_when_every_candidate_is_oversized_the_block_still_shows_one_fact():
+    # The R-1 fix must not turn "skip an oversized first entry" into "the
+    # block can end up completely empty": an empty block is worse than one
+    # oversized fact, matching the existing invariant in
+    # test_a_single_oversized_fact_is_never_cut_in_half but exercised here
+    # with more than one candidate, all of them oversized.
+    a = "a" * (o.MAX_FACTS_CHARS + 10)
+    b = "b" * (o.MAX_FACTS_CHARS + 20)
+    kept, omitted = o.select_facts(project_facts=[a, b])
+    assert kept == [a], "must fall back to the first entry drawn, whole, not truncated"
+    assert omitted == 1
+
+
 def test_turn_capture_and_trace_render_report_dropped_facts():
     # facts_omitted must have a consumer, or "reported" is a claim with no
     # surface behind it.
