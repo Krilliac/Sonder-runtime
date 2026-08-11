@@ -18066,6 +18066,50 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "build_run",
     "task_progress",
 })
+
+# Tools that only observe the running runtime: no filesystem root, no host
+# process, no outbound socket, no row written. They are in neither
+# REPOSITORY_READ_ONLY_TOOLS nor _WORK_INSPECTION_TOOLS, because both of those
+# sets are about *repository* work -- so command_catalog._risk_for fell through
+# to "ask" for all sixteen, and `plan`, a mode whose entire promise is reads,
+# refused every one of them.
+#
+# Membership was established by running each tool in a cold interpreter against
+# traps on file writes, process spawns, outbound sockets and non-DDL SQL, on its
+# SUCCESS path. Candidates that look read-only and failed that check are
+# deliberately absent: debug_inspect and npu_status spawn PowerShell,
+# apply_learned writes the embedding cache and calls the model endpoint, and
+# runtime_policy_status calls the model endpoint. admin_accounts is absent
+# because it answers "login required" and its success path could not be
+# exercised -- unverified is not the same as verified-safe. permission_mode is
+# absent because with a mode argument it rewrites the saved mode, which would
+# let a plan-mode run leave plan mode.
+#
+# Do not add a name here from its docstring. Run it.
+_RUNTIME_OBSERVATION_TOOLS = frozenset({
+    "task_list", "task_show", "checklist_show",
+    "admin_status", "admin_whoami",
+    "autopilot_status", "calibration_status",
+    "learn_tiers", "live_reload_status", "mcp_runtime_status",
+    "reasoning_show", "sonder_sessions", "sonder_stats",
+    "turn_inspect", "workflow_list", "memory_export",
+})
+
+# Tools that resolve a caller-supplied root through harness_tools._resolve_root,
+# which does `Path(root).resolve()` and no allowed-roots check at all.
+#
+# All four are in _WORK_INSPECTION_TOOLS, so _risk_for called them "safe" and
+# `plan` allowed them. Verified by execution: under that classification
+# `secret_scan(root=...)` reads a directory on another drive entirely and prints
+# the credential material it finds there. `b8a15ef` removed exactly these four
+# from REPOSITORY_READ_ONLY_TOOLS for this reason; the removal never reached the
+# risk classification, so the hole stayed open on the one mode that promises
+# reads only. They stay refused until _resolve_root confines -- adding that
+# confinement is what lets them back, not deleting this set.
+_UNCONFINED_ROOT_TOOLS = frozenset({
+    "diff_files", "find_references", "secret_scan", "test_discover",
+})
+
 _AGENT_FILE_EVIDENCE_TOOLS = frozenset({
     "workspace_inventory", "workspace_compare", "directory_tree", "file_read", "file_read_range",
     "file_digest", "directory_digest", "file_find", "text_search",
@@ -18467,6 +18511,9 @@ def _agent_turn(
             "\n\nHOST TOOL ALLOWLIST (cannot be expanded by the model):\n- %s"
             % "\n- ".join(sorted(allowed_tools))
         )
+    standing_notice = _agent_verification_standing()
+    if standing_notice:
+        transcript += "\n\n" + standing_notice
 
     def ensure_not_cancelled():
         if cancel_check is not None and _cancel_requested(cancel_check):

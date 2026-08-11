@@ -66,6 +66,25 @@ GOOD_AT_OR_ABOVE = 0.85
 
 UNMEASURED, POOR, MIXED, GOOD = "unmeasured", "poor", "mixed", "good"
 
+# The standing as an agent must be able to read it. Three states, never two.
+#
+# ``should_verify`` returns ``(True, reason)`` for a measured-poor record *and*
+# for a record too thin to measure. The boolean is identical; the facts are not.
+# "We measured you 218 times and you were right 56% of the time" and "we have
+# never measured you" call for the same caution and for completely different
+# reporting, and an agent handed only the boolean cannot say which one it is
+# working under. That collapse is the same defect the claim reviewer had, where
+# "the tool ran and found nothing" and "the tool was never permitted to run"
+# arrived as one indistinguishable silence.
+#
+# So the state is what crosses the boundary. The reason string still carries the
+# numbers; the state carries the epistemic difference.
+VERIFIED_GOOD = "verified-good"     # measured, and at or above the bar
+UNVERIFIED = "unverified"           # measured, and below the bar
+UNVERIFIABLE = "unverifiable"       # too few observations to measure at all
+
+STATES = (VERIFIED_GOOD, UNVERIFIED, UNVERIFIABLE)
+
 
 @dataclass(frozen=True)
 class Measurement:
@@ -166,6 +185,65 @@ def caution(conn, population: str = "caller") -> str:
     """
     verify, reason = should_verify(conn, population)
     return reason if verify else ""
+
+
+def standing(conn, population: str = "caller") -> tuple:
+    """``(state, Measurement)`` for one population. Never collapses the states.
+
+    The verdict already distinguishes ``unmeasured`` from ``poor``; this maps
+    the four verdicts onto the three states a consumer has to act on, so that
+    "could not be verified" cannot arrive looking like "was not verified".
+    """
+    m = measure(conn, population)
+    if m.verdict == UNMEASURED:
+        return UNVERIFIABLE, m
+    if m.verdict == GOOD:
+        return VERIFIED_GOOD, m
+    return UNVERIFIED, m
+
+
+def agent_notice(conn, population: str = "caller") -> str:
+    """The standing, rendered for the agent that is about to make the claims.
+
+    Every figure is a projection of counts. There is deliberately no rate in the
+    ``unverifiable`` branch: below ``MIN_SAMPLE`` there is no rate, and printing
+    one anyway is how a thin sample becomes a reassuring percentage.
+
+    Only the named population is rendered. The self-graded execution population
+    is roughly fifty times larger and forty points higher; showing both here, or
+    either one unlabelled, would read as accuracy and is not one.
+    """
+    state, m = standing(conn, population)
+    head = "VERIFICATION STANDING: %s" % state
+    if state == UNVERIFIABLE:
+        return "\n".join([
+            head,
+            "  population '%s': %d judged outcomes on record, below the %d needed"
+            % (m.population, m.total, MIN_SAMPLE),
+            "  to measure anything. There is no reliability figure to quote here.",
+            "  This is 'could not be verified', which is NOT 'verified and fine'.",
+            "  Cite a check you actually ran, or report the work as unverified.",
+        ])
+    rate = "%.1f%%" % (m.rate * 100)
+    if state == VERIFIED_GOOD:
+        tail = [
+            "  Measured good, so this is 'verified and good' for past work only.",
+            "  It is not evidence about this run. Say what you checked.",
+        ]
+    else:
+        tail = [
+            "  Measured below the %.0f%% bar, so treat your own output as"
+            % (GOOD_AT_OR_ABOVE * 100),
+            "  unverified until a check confirms it. Do not report success on",
+            "  your own say-so; cite a check, or report the work as unverified.",
+        ]
+    return "\n".join([
+        head,
+        "  population '%s': %d good / %d bad (%s over n=%d) - %s"
+        % (m.population, m.good, m.bad, rate, m.total, m.verdict),
+        "  Self-graded execution outcomes are counted separately and are not",
+        "  included in this figure.",
+    ] + tail)
 
 
 def report(conn) -> str:
