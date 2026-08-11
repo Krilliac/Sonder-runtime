@@ -264,3 +264,42 @@ def test_the_report_command_shows_the_standing(monkeypatch):
         "standing: verify before claiming done: yes"
     )
     assert "40 good / 60 bad" in out
+
+
+# --- both standings must read the SAME store ------------------------------
+#
+# ``_agent_verification_standing`` (via ``_open_db``) and this line (via
+# ``_open_db_readonly``) render on the same page. sqlite3 resolves a relative
+# path against the process cwd, but ``Path(p).as_uri()`` REFUSES a relative
+# path outright -- so a relative ``SONDER_DB`` made one of them read 192 judged
+# outcomes while the other said the record could not be read.
+#
+# Failing closed is a property of the verdict, not of the report. Two verdicts
+# on one page that contradict each other is worse than an admission of
+# ignorance, because a reader has to guess which half to believe.
+
+
+def test_both_standings_read_the_same_store_under_a_relative_db_path(
+    monkeypatch, tmp_path
+):
+    """One page, one answer -- whatever SONDER_DB happens to look like."""
+    import sonder_runtime.adapters.memory_store as memory_store
+
+    monkeypatch.chdir(tmp_path)
+    writer = memory_store.connect("memory.db")
+    for n in range(40):
+        memory_store.record_outcome_row(writer, "ok%d" % n, "accepted", 0.8)
+    for n in range(60):
+        memory_store.record_outcome_row(writer, "no%d" % n, "rejected", -0.5)
+    writer.close()
+    # Relative, exactly as SONDER_DB=memory.db would leave it.
+    monkeypatch.setattr(server, "_DB_PATH", "memory.db")
+
+    line = _standing_line(server._agent_end_report_standing_line())
+    demanded, reason = server._agent_verification_standing()
+
+    assert "40 good / 60 bad" in line and "n=100" in line
+    assert "could not be read" not in line
+    # The other half of the page, from the other opener, on the same store.
+    assert demanded is True
+    assert "100 judged outcomes" in reason

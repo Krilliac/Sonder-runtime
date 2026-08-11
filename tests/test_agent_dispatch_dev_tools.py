@@ -56,11 +56,22 @@ DEV_WORKFLOW_MUTATING_TOOLS = frozenset({
 # Tools whose project scoping is handled by a dedicated branch in BOTH
 # _repository_scope_path_error and _project_scope_args, so the generic
 # single-key path below is never consulted for them.
+#
+# Every name here is a HOLE in the generic-key invariant, so each one has to be
+# earned. This list previously carried seven more -- archive_create,
+# diff_files, repo_diff, and all four of
+# test_run/lint_run/format_code/typecheck_run -- on a premise that was false
+# for them: they have a dedicated branch in _repository_scope_path_error only
+# and fall through to the generic key in _project_scope_args. Excluding the
+# four verifiers meant the invariant skipped precisely the tools whose
+# scoped-key bug 84f8bd1 existed to fix -- a test excluding what it was written
+# for. test_every_dedicated_branch_exclusion_is_a_real_dedicated_branch now
+# reads both scopers from source and fails if this list claims a hole it has
+# not earned.
 DEDICATED_SCOPE_BRANCH_TOOLS = frozenset({
-    "archive_create", "archive_extract", "context_pack", "data_convert",
-    "diff_files", "file_batch_write", "file_copy", "file_move", "repo_diff",
+    "archive_extract", "context_pack", "data_convert",
+    "file_batch_write", "file_copy", "file_move",
     "text_patch", "workspace_compare",
-    "test_run", "lint_run", "format_code", "typecheck_run",
 })
 
 DEV_WORKFLOW_READ_ONLY_TOOLS = frozenset({
@@ -443,3 +454,62 @@ def test_project_scoped_test_discover_rebases_and_dispatches_read_only(tmp_path)
     )
 
     assert not out.startswith("ERROR:")
+
+
+def _tool_name_branches(function_name):
+    """Tool names that ``function_name`` compares ``tool_name`` against.
+
+    Read from the source rather than from a list someone maintains, because a
+    hand-kept exclusion list is exactly the thing that drifted.
+    """
+    import ast
+    import pathlib
+
+    tree = ast.parse(pathlib.Path(server.__file__).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or node.name != function_name:
+            continue
+        names = set()
+        for inner in ast.walk(node):
+            if not isinstance(inner, ast.Compare):
+                continue
+            if not (isinstance(inner.left, ast.Name) and inner.left.id == "tool_name"):
+                continue
+            for comparator in inner.comparators:
+                if isinstance(comparator, ast.Constant) and isinstance(
+                    comparator.value, str
+                ):
+                    names.add(comparator.value)
+                elif isinstance(comparator, (ast.Set, ast.Tuple, ast.List)):
+                    for element in comparator.elts:
+                        if isinstance(element, ast.Constant) and isinstance(
+                            element.value, str
+                        ):
+                            names.add(element.value)
+        return names
+    raise AssertionError("no function named %r in server.py" % function_name)
+
+
+def test_every_dedicated_branch_exclusion_is_a_real_dedicated_branch():
+    """An exclusion list is a hole in a test; each hole must be earned.
+
+    ``DEDICATED_SCOPE_BRANCH_TOOLS`` skips names in the generic-key invariant
+    on the stated premise that each has a dedicated branch in BOTH
+    ``_repository_scope_path_error`` and ``_project_scope_args``. Where that
+    premise is false the tool is simply unchecked -- and the names it was false
+    for were ``test_run``/``lint_run``/``format_code``/``typecheck_run``, the
+    exact tools whose scoped-key bug ``84f8bd1`` existed to fix. A test that
+    excludes what it was written for.
+    """
+    repository = _tool_name_branches("_repository_scope_path_error")
+    project = _tool_name_branches("_project_scope_args")
+    # Sentinels: an ast walk that silently stopped matching would otherwise
+    # make every exclusion look unjustified, or justify all of them.
+    assert len(repository) >= 10 and len(project) >= 8
+
+    unearned = sorted(DEDICATED_SCOPE_BRANCH_TOOLS - (repository & project))
+
+    assert unearned == [], (
+        "these are excluded from the generic-key invariant but have no "
+        "dedicated branch in both scopers, so nothing checks them: %s" % unearned
+    )

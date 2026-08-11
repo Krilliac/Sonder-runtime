@@ -782,7 +782,15 @@ def _open_db_readonly():
     import sqlite3
 
     conn = sqlite3.connect(
-        "%s?mode=ro" % Path(_DB_PATH).as_uri(), uri=True, check_same_thread=True,
+        # .resolve() before .as_uri(): sqlite3 resolves a relative path against
+        # the process cwd, but as_uri() refuses one outright. Without this a
+        # relative SONDER_DB made this opener report "could not be read" while
+        # _open_db on the same page read the store fine -- one page, two
+        # contradicting verdicts. Failing closed is a property of the verdict,
+        # not of a report that argues with itself.
+        "%s?mode=ro" % Path(_DB_PATH).resolve().as_uri(),
+        uri=True,
+        check_same_thread=True,
     )
     try:
         conn.row_factory = sqlite3.Row
@@ -15723,11 +15731,35 @@ _AGENT_VERIFIERS_PHRASE = (
 )
 
 
-def _agent_path_within(path, root):
-    """True when an already-normalized path is at or under an equally normalized root."""
-    if not path or not root:
-        return False
-    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+def _agent_verifier_reachable(read_only, allowed_tools):
+    """Whether any verifier could have been called in this lane at all.
+
+    Read from the two gates the dispatcher actually enforces -- the read-only
+    policy, which admits only ``REPOSITORY_READ_ONLY_TOOLS``, and the lane's
+    own ``tool_allowlist`` -- rather than from a list of lane names, so a lane
+    added later is classified by what it can do instead of by whether someone
+    remembered to add it here.
+
+    This exists because a demand nothing in the lane can satisfy is not a gate.
+    Four allowlists in this file admit no member of
+    ``_AGENT_VERIFICATION_TOOLS``: ``REPOSITORY_READ_ONLY_TOOLS`` (repository
+    workers), ``_AUTOPILOT_OBSERVE_TOOLS``, the chat/web research allowlist,
+    and the selfmod editor's. Leading their answers -- every weather question
+    among them -- with "claimed completion without a passing verification
+    (test_run, build_run, lint_run or typecheck_run)" names tools the lane is
+    forbidden from calling, and no run in it could ever clear the line. A
+    standing with no OFF state is a banner, and a banner teaches a reader to
+    skip exactly where a real warning would appear.
+
+    The measurement is unchanged either way, and still reaches the caller
+    through the end-report standing line, which ships on every run.
+    """
+    reachable = set(_AGENT_VERIFICATION_TOOLS)
+    if read_only:
+        reachable &= REPOSITORY_READ_ONLY_TOOLS
+    if allowed_tools is not None:
+        reachable &= set(allowed_tools)
+    return bool(reachable)
 
 
 def _agent_verification_covers(tool_name, args, mutations, project_scope=""):
@@ -15780,7 +15812,12 @@ def _agent_verification_standing():
         "so verify rather than assume"
     )
     try:
-        conn = _open_db()
+        # Read-only, like the end-report standing: this is the last completion
+        # path that could take the write path's thirty-second busy_timeout and
+        # a BEGIN IMMEDIATE just to count rows. Reading a count is not a reason
+        # to queue behind another process's write lock, and using the same
+        # opener as the other standing keeps the two from disagreeing.
+        conn = _open_db_readonly()
     except Exception:
         return True, unreadable
     try:
@@ -16765,7 +16802,12 @@ def _agent_impl(
 
         validation_failed = bool(auto_checklist and mutated and not validated)
         standing = ""
-        if not verification_ok:
+        # Only where a verifier was actually callable. Elsewhere the sentence
+        # names tools the lane is forbidden from using and has no OFF state --
+        # see _agent_verifier_reachable.
+        if not verification_ok and _agent_verifier_reachable(
+            read_only, allowed_tools,
+        ):
             demanded, reason = _agent_verification_standing()
             if demanded:
                 # Every word here is either a fixed host sentence or
