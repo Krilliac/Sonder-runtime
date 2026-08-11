@@ -1162,20 +1162,33 @@ def test_a_dangerous_tool_does_not_downgrade_when_the_catalog_is_blind(broken_re
     nothing, with an operator sitting right there. Only `file_delete` and
     `admin_private_chain_of_thought` were saved, by shipped deny rules.
 
-    Note what this does *not* claim: a caller with nobody to ask still gets
-    `allow` here, because `ask` degrades for such callers in every mode but
-    `plan`. That degrade is the "preserve current behaviour" contract and is
-    unchanged; see `ASK_CAVEAT`.
+    This used to end by disclaiming the half that mattered: "a caller with
+    nobody to ask still gets `allow` here ... that degrade is the 'preserve
+    current behaviour' contract and is unchanged". Every production gate is
+    such a caller, so the disclaimer covered the whole enforced surface -- the
+    test proved the downgrade was fixed for the one caller never at risk, and
+    recorded it as still broken for all the ones that were.
+
+    Returning `dangerous` could not have fixed it either: `dangerous` is `ask`
+    in manual, acceptEdits and auto, and the degrade allows it. A blind
+    catalog now grades `unclassified`, which is not degraded, so the last
+    three lines below are the property this test's title always claimed.
     """
     lookup = lambda _tool: None
     for tool in ("git_merge", "sqlite_mutate", "task_delete", "permission_rule_set"):
-        assert pm.risk_of(tool) == "dangerous", tool
+        assert pm.risk_of(tool) == pm.UNCLASSIFIED, tool
         assert pm.decide(
             tool, interactive=True, mode=pm.AUTO, rule_lookup=lookup,
         ).action == pm.ASK, tool
         assert pm.decide(
             tool, interactive=False, mode=pm.PLAN, rule_lookup=lookup,
         ).action == pm.DENY, tool
+        # The half the old docstring waived. These are the modes an operator
+        # actually runs in, reached by the callers that actually enforce.
+        for mode in (pm.MANUAL, pm.ACCEPT_EDITS, pm.AUTO):
+            assert pm.decide(
+                tool, interactive=False, mode=mode, rule_lookup=lookup,
+            ).action == pm.DENY, (tool, mode)
 
 
 def test_a_transient_catalog_failure_does_not_latch(monkeypatch):

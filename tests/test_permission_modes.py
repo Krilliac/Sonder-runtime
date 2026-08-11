@@ -34,7 +34,12 @@ pytestmark = pytest.mark.unit
 # Rank for monotonicity: more permissive == higher.
 _RANK = {pm.DENY: 0, pm.ASK: 1, pm.ALLOW: 2}
 
-_RISK_CLASSES = ("safe", "ask", "mutation", "execution", "dangerous")
+# ``unclassified`` is not a severity -- it is the classifier reporting that it
+# could not grade the name at all. It carries a matrix row like the rest so
+# ``_MATRIX.get`` can never silently fall back for it, and so ``plan`` denies
+# it explicitly rather than by accident.
+_RISK_CLASSES = ("safe", "ask", "mutation", "execution", "dangerous",
+                 pm.UNCLASSIFIED)
 
 # No exemptions. There was one here for ``self_heal_repair`` while
 # ``risk_of`` consulted ``EXECUTION_TOOLS`` ahead of the catalog; the
@@ -441,12 +446,24 @@ def test_deny_is_never_softened_by_non_interactivity():
 
 
 def test_unknown_tool_is_never_treated_as_safe():
-    """Fail closed: an unregistered name must not sail through as a read."""
+    """Fail closed: an unregistered name must not sail through as a read.
+
+    This test asserted ``risk_of(name) == "ask"`` and then checked only the
+    *interactive* decision -- so it carried the words "fail closed" while
+    proving nothing of the sort. ``ask`` is exactly what a catalogued,
+    deliberately-permissive tool grades, and every production gate calls
+    ``decide(interactive=False)``, where ``ask`` degrades to ``allow``. The
+    assertion below it was true and the property above it was false.
+
+    See ``tests/test_risk_of_fail_closed.py`` for the full treatment; the
+    non-interactive line here is what this test was always claiming to check.
+    """
     for name in ("not_a_real_tool", "rm_rf_slash", "file_read_but_not_really"):
         assert pm.risk_of(name) != "safe", "%s classified as safe" % name
-        assert pm.risk_of(name) == "ask"
+        assert pm.risk_of(name) == pm.UNCLASSIFIED
         assert pm.decide(name, mode=pm.MANUAL).action == pm.ASK
         assert pm.decide(name, mode=pm.PLAN).action == pm.DENY
+        assert pm.decide(name, mode=pm.AUTO, interactive=False).action == pm.DENY
 
 
 def test_decide_uses_the_current_mode_when_none_is_given():
@@ -605,7 +622,9 @@ def test_a_broken_rule_lookup_fails_closed_not_open(monkeypatch):
     monkeypatch.setattr(pm, "_rule_lookup", boom)
     decision = pm.decide("not_a_real_tool", mode=pm.MANUAL)
     assert decision.action == pm.ASK
-    assert decision.risk == "ask"
+    # The subject here is the broken *rule lookup*, not the grade; the name is
+    # incidental and an unregistered one now grades ``unclassified``.
+    assert decision.risk == pm.UNCLASSIFIED
     decision_plan = pm.decide("not_a_real_tool", mode=pm.PLAN)
     assert decision_plan.action == pm.DENY
 
