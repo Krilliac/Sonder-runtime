@@ -44,7 +44,7 @@ class _FakeConn:
 
 
 def _record(monkeypatch, counts):
-    monkeypatch.setattr(server, "_open_db", lambda: _FakeConn())
+    monkeypatch.setattr(server, "_open_db_readonly", lambda: _FakeConn())
     monkeypatch.setattr(calibration, "_counts", lambda _conn: dict(counts))
 
 
@@ -130,7 +130,7 @@ def test_an_unreadable_record_demands_verification_rather_than_passing(monkeypat
     def boom():
         raise RuntimeError("database is locked")
 
-    monkeypatch.setattr(server, "_open_db", boom)
+    monkeypatch.setattr(server, "_open_db_readonly", boom)
 
     line = _standing_line(server._agent_end_report_standing_line())
 
@@ -187,3 +187,80 @@ def test_the_agent_end_report_shows_the_standing(monkeypatch):
 
     assert "=== END REPORT ===" in out
     assert _standing_line(out).startswith("standing: verify before claiming done: yes")
+
+
+# --- reading a standing must not write to the store -----------------------
+#
+# ``_open_db`` is the WRITE path. ``memory_store.connect`` runs
+# ``PRAGMA journal_mode=WAL`` (a brief exclusive lock) and then ``init_db``
+# under ``BEGIN IMMEDIATE``, with ``busy_timeout=30000`` set first. For a
+# caller about to write that is exactly right. For one that wants a count it
+# is not: it can create a ~200KB database from nothing, run schema migration,
+# and wait up to thirty seconds behind another Sonder process's write lock --
+# and a *wait* is not an exception, so no ``try`` around it can shorten it.
+#
+# ``/report`` is the surface where this bites. It did no I/O at all before the
+# standing line was added, so the standing must reach it through a genuinely
+# read-only open or it has made a status command capable of stalling.
+
+
+def test_reading_a_standing_never_creates_the_store(monkeypatch, tmp_path):
+    """A question about the record must not bring the record into existence."""
+    missing = tmp_path / "memory.db"
+    monkeypatch.setattr(server, "_DB_PATH", str(missing))
+
+    line = _standing_line(server._agent_end_report_standing_line())
+
+    assert not missing.exists(), "reading a standing must not create a store"
+    assert not list(tmp_path.iterdir()), "nor any sidecar: %r" % (
+        [p.name for p in tmp_path.iterdir()],
+    )
+    # And it still fails closed: an absent record is not a passing record.
+    assert "verify before claiming done: yes" in line
+    assert "could not be read" in line
+
+
+def test_the_standing_open_is_read_only_and_waits_seconds_not_half_a_minute(
+    monkeypatch, tmp_path
+):
+    """Bounded, and unable to write even if something later tries."""
+    import sqlite3
+
+    import sonder_runtime.adapters.memory_store as memory_store
+
+    path = tmp_path / "memory.db"
+    writer = memory_store.connect(str(path))
+    memory_store.record_outcome_row(writer, "i1", "accepted", 0.8)
+    writer.close()
+    monkeypatch.setattr(server, "_DB_PATH", str(path))
+
+    conn = server._open_db_readonly()
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM outcomes").fetchone()[0] == 1
+        # A stall is not an exception. Thirty seconds is the write path's
+        # budget; a status command does not get to borrow it.
+        timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        assert timeout == server._READ_ONLY_BUSY_TIMEOUT_MS
+        assert 0 < timeout <= 5000
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute("CREATE TABLE scribble (x)")
+    finally:
+        conn.close()
+
+
+# --- /report is a wired site, so it is a tested site ----------------------
+
+
+def test_the_report_command_shows_the_standing(monkeypatch):
+    """The other end-report surface. Untested is how a wired site regresses."""
+    _record(monkeypatch, POOR_RECORD)
+    with activity_tracker.response_span("test", "prompt", surface="agent"):
+        activity_tracker.set_result_summary("did the thing")
+
+    out = server.control_command("/report")
+
+    assert "=== END REPORT ===" in out
+    assert _standing_line(out).startswith(
+        "standing: verify before claiming done: yes"
+    )
+    assert "40 good / 60 bad" in out

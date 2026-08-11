@@ -752,6 +752,47 @@ def _open_db():
     return memory_store.connect(_DB_PATH, check_same_thread=True)
 
 
+# A status surface may wait a moment for a busy store; it may not wait the
+# write path's thirty seconds. WAL readers do not queue behind a writer at all,
+# so this is a backstop rather than an expected cost -- but SQLite's default of
+# zero fails instantly on the one case where a short wait would have succeeded.
+_READ_ONLY_BUSY_TIMEOUT_MS = 2000
+
+
+def _open_db_readonly():
+    """Open the store read-only: no creation, no migration, no long wait.
+
+    ``_open_db`` is the *write* path. ``memory_store.connect`` sets
+    ``busy_timeout=30000``, runs ``PRAGMA journal_mode=WAL`` (which takes a
+    brief exclusive lock) and then ``init_db`` under ``BEGIN IMMEDIATE``. For a
+    caller that is about to write, all three are correct. For one that only
+    wants a count they are not: on a machine with no store yet it CREATES a
+    ~200KB database and migrates the schema, and with a second Sonder process
+    live it can block for up to thirty seconds on that process's write lock.
+
+    A block is not an exception. No ``try`` around the call can shorten it, so
+    a read-only caller cannot make the write path safe by catching things --
+    it has to not take the write path. Hence this one: ``mode=ro`` raises on a
+    missing database instead of conjuring one, runs no migration, and cannot
+    write even if a later edit asks it to.
+
+    Raises on a missing or unreadable store, which callers must treat as
+    ignorance rather than as a pass.
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(
+        "%s?mode=ro" % Path(_DB_PATH).as_uri(), uri=True, check_same_thread=True,
+    )
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=%d" % _READ_ONLY_BUSY_TIMEOUT_MS)
+    except Exception:
+        conn.close()
+        raise
+    return conn
+
+
 def with_footer(text, interaction_id):
     current = activity_tracker.current()
     activity = activity_tracker.format_response(current) if current else ""
@@ -15770,13 +15811,21 @@ def _agent_end_report_standing_line():
     Ignorance fails closed in both directions: too thin a sample and a record
     that cannot be read both demand verification, and a sample too thin to
     measure is reported as exactly that rather than as ``0.0%``.
+
+    Read through ``_open_db_readonly`` on purpose. ``/report`` is one of the
+    two surfaces this composes for, and it did no I/O whatsoever before this
+    line existed; putting the write path behind a status command would let it
+    create a database, migrate a schema, and stall for thirty seconds on
+    another process's lock. A store that does not exist yet raises here and
+    lands on ``unreadable`` below -- which demands verification, the same
+    answer an empty store gets.
     """
     unreadable = (
         "standing: verify before claiming done: yes | caller-judged: the "
         "measured record could not be read"
     )
     try:
-        conn = _open_db()
+        conn = _open_db_readonly()
     except Exception:
         return unreadable
     try:
