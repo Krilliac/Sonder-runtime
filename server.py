@@ -2286,14 +2286,41 @@ def control_command(prompt: str, history=None, session="", project=""):
     # just the hand-written slice, in reach of the console, app, and API. A
     # slash line that names no known tool still returns None and reaches the
     # model unchanged, so ordinary prose beginning with "/" is unaffected.
+    #
+    # Gated, like the console's fall-through and the app's, and for the same
+    # reason all three need their own: the branch chain above is covered by
+    # the console map, keyed on the *named command*, while this path is
+    # reached by the *tool's own name*, which no named command covers. This
+    # copy is reached from ``answer_with_history`` with the user's raw prompt,
+    # so a chat line reading ``/file_delete path=x dry_run=false`` ran the
+    # tool with nothing in front of it -- under ``plan``, and through a
+    # ``deny`` rule.
+    #
+    # ``interactive=False``: nothing here has a console attached. The
+    # console's own prompt already happened at
+    # ``sonder_repl._named_command_gate`` before it forwarded, and the chat
+    # path has nobody to ask -- so ``ask`` degrades to allow and only a
+    # ``deny`` rule and ``plan`` refuse, which is what "preserve current
+    # behaviour" requires of a path this widely reached.
     try:
         parsed = command_catalog.parse_invocation(text)
     except ValueError as exc:
         return str(exc)
+    except command_catalog.CatalogUnavailable as exc:
+        # This is a RuntimeError, so the ``except ValueError`` above let it
+        # out -- onto the ordinary chat path, which reaches this function
+        # unguarded and has no handler for it. Refuse in-band instead.
+        return "refused %s: %s" % (cmd, exc)
     if parsed:
         tool, kwargs = parsed
         handler = globals().get(tool)
         if callable(handler):
+            decision = permission_modes.decide(tool, interactive=False)
+            if decision.action == permission_modes.DENY:
+                return "refused /%s: %s (mode: %s)" % (
+                    tool, decision.reason,
+                    permission_modes.MODE_LABELS.get(decision.mode, decision.mode),
+                )
             try:
                 return str(handler(**kwargs))
             except TypeError as exc:

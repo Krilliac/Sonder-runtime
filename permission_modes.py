@@ -715,8 +715,11 @@ def overview() -> str:
     lines += [
         "",
         "  shift+tab cycles   /mode <name> sets   /mode <name> --explain details",
-        "  destructive tools ask in every mode, including auto.",
-        "  %s" % ASK_CAVEAT,
+        # One sentence, not a flat claim with a caveat filed underneath it: a
+        # reader who stopped at the full stop after "auto." had read something
+        # false, and nothing on that line invited them to read on.
+        "  destructive tools ask in every mode, including auto, of a caller",
+        "  who can be asked. %s" % ASK_CAVEAT,
     ]
     if elevated():
         lines.append("  PRIVILEGE: elevated%s" % (

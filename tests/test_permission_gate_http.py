@@ -323,3 +323,112 @@ def test_the_gate_sits_in_front_of_every_branch_in_the_chain():
     assert min(gate_calls) < min(branch_tests), (
         "the gate runs after a dispatch branch, so that branch is ungated"
     )
+
+
+# --- the catalogued fall-through: same surface, other spelling -------------
+#
+# The branch chain above is only the curated slice. `_dispatch_catalogued_tool`
+# runs ANY registered tool by its own name, which is how the app reaches the
+# whole surface without a branch per tool -- and it sits after the chain, so a
+# gate at the top of the chain does not cover it. Every test above enters
+# through a `cmd ==` branch, which is exactly why none of them could see this.
+
+
+def test_the_catalogued_fall_through_is_gated_by_tool_name(monkeypatch):
+    """`/delete` was refused under `plan` while `/file_delete` ran.
+
+    And it ran with the argument the caller chose: `dry_run=false` turns the
+    tool's own last-resort default off, so the plan's motivating sentence --
+    "the only thing actually stopping a delete is that tool's own `dry_run`
+    default" -- was not merely still true here, it was defeated outright.
+    """
+    monkeypatch.setattr(server, "file_delete", _never_runs)
+    pm.set_mode(pm.PLAN)
+
+    reply = ts._handle_slash("/file_delete path=notes.txt dry_run=false")
+
+    assert reply is not None
+    assert reply.startswith("refused /file_delete:")
+
+
+def test_a_deny_rule_binds_on_the_fall_through_too(monkeypatch):
+    """`manual` + a `file_delete: deny` rule: the console refused, the app ran it."""
+    monkeypatch.setattr(server, "file_delete", _never_runs)
+    monkeypatch.setattr(pm, "_rule_lookup", _rules("deny"))
+    pm.set_mode(pm.MANUAL)
+
+    reply = ts._handle_slash("/file_delete path=notes.txt")
+
+    assert reply.startswith("refused /file_delete:")
+    assert "rule denies this tool" in reply
+
+
+def test_both_spellings_of_one_tool_get_the_same_answer(monkeypatch):
+    """The test that would have caught it, stated as the property it is.
+
+    A surface where `/delete` and `/file_delete` disagree is not a gate, it is
+    a spelling test. Asserting the *agreement* -- in both directions, mode by
+    mode -- rather than either half is what survives someone adding a third
+    way to reach the same tool.
+
+    Note that agreement is not the same as refusal: with no rule in play,
+    `acceptEdits` and `auto` let a `dangerous` tool through for a caller with
+    nobody to ask, and both spellings must agree about *that* too. A version
+    of this test that asserted "both refuse" would have been asserting the
+    over-correction instead of the property.
+    """
+    ran = []
+    monkeypatch.setattr(
+        server, "file_delete", lambda **kwargs: ran.append(kwargs) or "deleted",
+    )
+
+    for mode in pm.MODES:
+        pm.set_mode(mode)
+        before = len(ran)
+        named = ts._handle_slash("/delete notes.txt")
+        middle = len(ran)
+        by_tool = ts._handle_slash("/file_delete path=notes.txt")
+        after = len(ran)
+
+        assert named.startswith("refused") == by_tool.startswith("refused"), (
+            "%s: /delete says %r and /file_delete says %r" % (mode, named, by_tool)
+        )
+        assert (middle - before) == (after - middle), (
+            "%s: one spelling reached the tool and the other did not" % mode
+        )
+
+    # ...and the guard against both halves being vacuously permissive: at
+    # least one mode must actually have refused, and one must have run it.
+    assert ran, "no mode ran the tool -- the agreement is vacuous"
+
+
+def test_the_fall_through_still_runs_a_read_in_every_mode(monkeypatch):
+    """The over-correction guard: gating it must not close the whole surface."""
+    monkeypatch.setattr(server, "context_health", lambda **_k: "CONTEXT OK")
+
+    for mode in pm.MODES:
+        pm.set_mode(mode)
+        assert ts._handle_slash("/context_health") == "CONTEXT OK", mode
+
+
+def test_the_fall_through_refuses_when_the_catalog_is_blind(monkeypatch):
+    """Resolving the tool is itself a catalog read; a blind catalog must refuse.
+
+    `parse_invocation` raised `CatalogUnavailable` straight through the
+    `except ValueError` here, so a blind registry turned a slash line into an
+    unhandled `RuntimeError` on this path instead of a refusal.
+    """
+    class _Broken:
+        def list_tools(self):
+            raise RuntimeError("registry not initialised")
+
+    command_catalog.reset_cache()
+    monkeypatch.setattr(server.mcp, "_tool_manager", _Broken())
+    try:
+        reply = ts._handle_slash("/file_delete path=notes.txt")
+        assert reply is not None
+        assert reply.startswith("refused")
+        assert "registry could not be read" in reply
+    finally:
+        monkeypatch.undo()
+        command_catalog.reset_cache()

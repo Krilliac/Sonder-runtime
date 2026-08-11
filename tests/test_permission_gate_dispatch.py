@@ -1205,3 +1205,175 @@ def test_a_transient_catalog_failure_does_not_latch(monkeypatch):
     finally:
         monkeypatch.undo()
         command_catalog.reset_cache()
+
+
+# --- control_command has the same fall-through, on the chat path ----------
+
+
+def test_the_control_command_fall_through_is_gated_by_tool_name(monkeypatch):
+    """`server.control_command` ends in the same catalogued dispatch.
+
+    It is reached from `answer_with_history` (`server.py:4055, :4237, :4292`)
+    with the user's raw prompt, so a chat line reading `/file_delete path=x`
+    ran the tool with no gate in front of it. Its branch chain is covered by
+    the console map, but the fall-through *after* the chain is not -- the same
+    shape as the app surface's, one file over.
+
+    `interactive=False`: nothing here has a console attached. The console's own
+    prompt already happened at `_named_command_gate` before it forwarded, and
+    the chat path has nobody to ask -- so `ask` degrades to allow and only a
+    `deny` rule and `plan` refuse.
+    """
+    monkeypatch.setattr(server, "file_delete", _never_runs)
+    pm.set_mode(pm.PLAN)
+
+    out = server.control_command("/file_delete path=notes.txt dry_run=false")
+
+    assert out is not None
+    assert out.startswith("refused /file_delete:")
+
+
+def test_a_deny_rule_binds_on_the_control_command_fall_through(monkeypatch):
+    monkeypatch.setattr(server, "file_delete", _never_runs)
+    monkeypatch.setattr(pm, "_rule_lookup", _rules("deny"))
+    pm.set_mode(pm.AUTO)
+
+    out = server.control_command("/file_delete path=notes.txt")
+
+    assert out.startswith("refused /file_delete:")
+    assert "rule denies this tool" in out
+
+
+def test_the_control_command_fall_through_still_runs_a_read(monkeypatch):
+    """The over-correction guard: `/context_health` must answer in every mode."""
+    monkeypatch.setattr(server, "context_health", lambda **_k: "CONTEXT OK")
+
+    for mode in pm.MODES:
+        pm.set_mode(mode)
+        assert server.control_command("/context_health") == "CONTEXT OK", mode
+
+
+def test_ordinary_prose_beginning_with_a_slash_still_reaches_the_model():
+    """`control_command` returns None for a line that names nothing.
+
+    Returning a refusal there would swallow the turn instead of answering it.
+    """
+    assert server.control_command("/not-a-tool-at-all what do you think") is None
+    assert server.control_command("just a sentence") is None
+
+
+# --- a blind catalog must not raise into the ordinary chat path -----------
+
+
+def test_a_blind_catalog_does_not_raise_out_of_control_command(broken_registry):
+    """`control_command` caught only `ValueError`, and `CatalogUnavailable` is
+    a `RuntimeError`.
+
+    It is reached unguarded from `answer_with_history`, so raising here turned
+    a broken registry into an exception on the ordinary chat path, where it
+    previously degraded. Fail closed *and* stay in-band: refuse, in a string.
+    """
+    out = server.control_command("/file_delete path=notes.txt")
+
+    assert isinstance(out, str)
+    assert out.startswith("refused")
+    assert "registry could not be read" in out
+
+
+def test_the_help_fallback_cannot_mask_a_type_error(broken_registry):
+    """`help_command` inside `except TypeError` is a second unrouted read.
+
+    Both `server.control_command` and `sonder_repl._run_catalogued` build
+    their "you called it wrong" message by asking the catalog for usage. With
+    a blind catalog that read raises, replacing the caller's real mistake with
+    an unrelated `RuntimeError`.
+    """
+    assert command_catalog.help_command("/file_read").startswith(
+        "the command catalog is unavailable"
+    )
+
+
+# --- the C2 floor must not depend on the incidental call that hid it ------
+
+
+def test_the_selfmod_floor_survives_the_branch_losing_its_registered_call(monkeypatch):
+    """`/selfmod`'s stand-in must not be conditional on the thing it fixes.
+
+    The map only listed `/selfmod` at all because the branch happens to call
+    `system_improvement_report`. If that incidental call ever goes away, the
+    derivation produces no key -- and a floor that only augments existing keys
+    would vanish with it, silently restoring the exact defect it was added
+    for.
+    """
+    monkeypatch.setattr(
+        command_catalog, "_branch_tool_calls", lambda *_a, **_k: {},
+    )
+    command_catalog.reset_cache()
+    try:
+        mapped = command_catalog.console_tools()
+        assert mapped.get("/selfmod") == ("selfmod",)
+        assert pm.risk_of("selfmod") == "dangerous"
+    finally:
+        monkeypatch.undo()
+        command_catalog.reset_cache()
+
+
+# --- the other two branches whose work no registered tool fronts ----------
+
+
+def test_the_registry_refreshing_and_goal_writing_branches_are_graded():
+    """Two more instances of C2's shape, found by the same reading.
+
+    `/mcp refresh` republishes the live tool registry -- it changes what every
+    later call is allowed to do, which is the reasoning `_DANGEROUS` already
+    applies to `runtime_policy_update` and `permission_rule_set`. `/goal`
+    writes to `goal_store` (adopt, complete, abandon, note). Neither branch
+    calls a registered tool, so both mapped to nothing and were ungated.
+
+    `/report` was read the same way and deliberately left alone: it only
+    formats `activity_tracker.latest()`, so there is nothing to gate.
+    """
+    mapped = command_catalog.console_tools()
+    assert mapped.get("/mcp") == ("mcp",)
+    assert mapped.get("/convergence") == ("mcp",)
+    assert mapped.get("/goal") == ("goal",)
+    assert mapped.get("/goals") == ("goal",)
+    assert "/report" not in mapped
+
+    assert pm.risk_of("mcp") == "dangerous"
+    assert pm.risk_of("goal") == "mutation"
+
+
+def test_plan_refuses_a_registry_refresh_and_a_goal_write(monkeypatch):
+    monkeypatch.setattr(
+        sonder_repl, "_confirm",
+        lambda _question: pytest.fail("a plan-mode denial must not prompt"),
+    )
+    pm.set_mode(pm.PLAN)
+
+    for name in ("/mcp", "/convergence", "/goal", "/goals"):
+        may_run, refusal = sonder_repl._named_command_gate(name)
+        assert not may_run, name
+        assert refusal.startswith("refused %s:" % name), name
+
+
+def test_acceptedits_lets_a_goal_write_through_but_still_stops_a_registry_refresh(
+    monkeypatch,
+):
+    """The two are graded differently, and the difference is the point.
+
+    A goal note is an ordinary write, which `acceptEdits` exists to let flow.
+    Republishing the tool registry is not, and no mode lets it pass unasked.
+    """
+    asked = []
+    monkeypatch.setattr(
+        sonder_repl, "_confirm", lambda question: asked.append(question) or False,
+    )
+    pm.set_mode(pm.ACCEPT_EDITS)
+
+    assert sonder_repl._named_command_gate("/goal") == (True, "")
+    assert not asked
+
+    may_run, _refusal = sonder_repl._named_command_gate("/mcp")
+    assert not may_run
+    assert len(asked) == 1
