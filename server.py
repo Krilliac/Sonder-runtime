@@ -14504,19 +14504,41 @@ def _agent_help_advertised_tools(help_text):
     return tuple(names)
 
 
-def _agent_tool_help(read_only=False, cloud=False, unsafe=False):
+def _agent_tool_help(
+    read_only=False,
+    cloud=False,
+    unsafe=False,
+    project_bound=False,
+    allow_web=True,
+    allow_location=False,
+):
+    """Advertise exactly what THIS run's gates will admit.
+
+    Deriving the filter from ``_agent_run_tool_refusal`` instead of
+    restating one of its tool sets is what stops the two from drifting: the
+    local-only set was stripped here while the nested-model set never was, so a
+    hosted agent read in its own tool help that it could nest a model call that
+    dispatch hard-denies.  The same failure was live on three more gates --
+    ``project_bound`` left 21 names dead in ``AGENT_TOOL_HELP`` for every
+    project-bound run, and ``allow_web`` left the three web tools dead on every
+    ``master_orchestrate`` worker -- because those gates were never modelled
+    here at all.
+    """
     help_text = REPOSITORY_AGENT_TOOL_HELP if read_only else AGENT_TOOL_HELP
-    if not cloud:
-        return help_text
-    # Advertise exactly what hosted policy will admit.  Deriving the filter
-    # from _cloud_agent_tool_policy_error instead of restating one of its tool
-    # sets is what stops the two from drifting: the local-only set was stripped
-    # here while the nested-model set never was, so a hosted agent read in its
-    # own tool help that it could nest a model call that dispatch hard-denies.
     denied = frozenset(
         name for name in _agent_help_advertised_tools(help_text)
-        if _cloud_agent_tool_policy_error(name, unsafe=unsafe)
+        if _agent_run_tool_refusal(
+            name,
+            read_only=read_only,
+            cloud=cloud,
+            unsafe=unsafe,
+            project_bound=project_bound,
+            allow_web=allow_web,
+            allow_location=allow_location,
+        )
     )
+    if not denied:
+        return help_text
     return "\n".join(
         line for line in help_text.splitlines()
         if not any(
@@ -15228,8 +15250,44 @@ def _agent_task_exact_anchors(task: str) -> list[str]:
     return deduped[:6]
 
 
-def _agent_exact_negative_action(task: str, observations) -> dict | None:
+def _agent_claim_review_tools(cloud: bool = False) -> frozenset:
+    """Claim-review tools this run can actually reach, derived from the gate.
+
+    ``_AGENT_CLAIM_REVIEW_TOOLS`` is only the first of two gates a claim-review
+    action passes.  On a hosted run ``_cloud_agent_tool_policy_error`` refuses
+    every local-only tool one step later, and three of the five claim-review
+    tools are local-only -- so a reviewer told to use ``text_search`` /
+    ``file_read_range`` / ``file_find`` has, hosted, no working vocabulary at
+    all, while ``repository_symbol_index`` and ``project_detect`` sit unnamed.
+
+    Deriving the advertised vocabulary from the denial function rather than
+    restating one of its tool sets is what stops the two from drifting again;
+    this mirrors ``_agent_tool_help``, which was fixed the same way.
+    """
+    if not cloud:
+        return frozenset(_AGENT_CLAIM_REVIEW_TOOLS)
+    return frozenset(
+        name for name in _AGENT_CLAIM_REVIEW_TOOLS
+        if not _cloud_agent_tool_policy_error(name)
+    )
+
+
+def _agent_claim_review_vocabulary(cloud: bool = False) -> tuple:
+    """Deterministic ordering for the tool names shown to the reviewer."""
+    return tuple(sorted(_agent_claim_review_tools(cloud)))
+
+
+def _agent_exact_negative_action(
+    task: str, observations, cloud: bool = False,
+) -> dict | None:
     """Require exact anchor queries before accepting a negative existence claim."""
+    # This deterministic action runs before the reviewer model is consulted, so
+    # a hardcoded tool name here makes the *host itself* propose a tool the
+    # host will then refuse.  ``text_search`` is local-only, so it is dead on
+    # every hosted run; fall through to the model reviewer instead of emitting
+    # an action that can only produce a policy refusal.
+    if "text_search" not in _agent_claim_review_tools(cloud):
+        return None
     anchors = _agent_task_exact_anchors(task)
     if not anchors:
         return None
@@ -15278,9 +15336,12 @@ def _agent_negative_claim_review(
     """Audit negative existence claims without letting the reviewer invent facts."""
     if not _AGENT_NEGATIVE_CLAIM_RE.search(str(final or "")):
         return {"decision": "accept", "reason": "no negative existence claim"}
-    exact_action = _agent_exact_negative_action(task, observations)
+    exact_action = _agent_exact_negative_action(task, observations, cloud=cloud)
     if exact_action:
         return exact_action
+    # Name only what this run's policy will actually admit.  Restating a fixed
+    # trio here is what made 100% of the hosted reviewer's vocabulary dead.
+    vocabulary = _agent_claim_review_vocabulary(cloud)
     system = _build_system(
         "You are a local evidence reviewer. Return exactly one JSON object and no "
         "prose or chain-of-thought. Decide only accept or continue. Accept a negative "
@@ -15288,20 +15349,24 @@ def _agent_negative_claim_review(
         "anchor across the relevant scope. Reject a paraphrased/descriptive search "
         "query, a clipped read that did not reach the target, or a scope mismatch. "
         "Never rewrite the answer or invent evidence; continue must return exactly "
-        "one structured read-only evidence action using text_search, file_read_range, "
-        "or file_find.",
+        "one structured read-only evidence action using %s. No other tool is "
+        "available on this run: if none of them can settle the claim, return "
+        "continue with an empty tool and say so in the reason -- never accept a "
+        "claim you could not check."
+        % ", ".join(vocabulary),
         False,
         "",
     )
     review_prompt = (
         "Task:\n%s\n\nProposed final:\n%s\n\n%s\n\n"
         "JSON schema: {\"decision\":\"accept|continue\",\"reason\":\"brief\","
-        "\"tool\":\"text_search|file_read_range|file_find or empty\","
+        "\"tool\":\"%s or empty\","
         "\"args\":{}}"
         % (
             str(task or "")[:8000],
             str(final or "")[:4000],
             _agent_observation_prompt(observations, max_chars=7000),
+            "|".join(vocabulary),
         )
     )
     if cloud and cloud_budget_state is None:
@@ -15350,9 +15415,21 @@ def _agent_negative_claim_review(
                 raise ValueError("claim review needs a reason")
             if not isinstance(args, dict):
                 raise ValueError("claim review args must be a JSON object")
-            if decision == "continue" and tool not in _AGENT_CLAIM_REVIEW_TOOLS:
+            # Validate against what this run admits, not the superset.  A
+            # hosted reviewer naming ``text_search`` used to pass here and be
+            # refused a step later, spending the whole claim-review budget on
+            # a tool that could never run.
+            #
+            # An empty tool on ``continue`` is accepted: it is the reviewer
+            # saying "I cannot settle this with the tools I have", which the
+            # caller already handles by withholding evidence and ultimately
+            # returning EVIDENCE_REQUIRED.  That is strictly safer than an
+            # ``accept`` it cannot support, and it is the same shape this
+            # function's own parse-failure fallback returns.
+            if decision == "continue" and tool and tool not in vocabulary:
                 raise ValueError(
-                    "continued claim review needs an approved read-only tool"
+                    "continued claim review needs one of these approved "
+                    "read-only tools: %s" % ", ".join(vocabulary)
                 )
             if decision == "accept":
                 tool, args = "", {}
@@ -15506,7 +15583,12 @@ def _agent_dispatch(
         if policy_error:
             return policy_error
         if tool_name in {"command_registry_list", "tool_manifest"}:
-            return _agent_tool_help(read_only=True)
+            return _agent_tool_help(
+                read_only=True,
+                project_bound=bool(repository_extra_roots),
+                allow_web=allow_web,
+                allow_location=allow_location,
+            )
         if repository_extra_roots:
             # The model cannot grant itself filesystem authority.  Replace any
             # scoped value with the exact host-selected project root, then use
@@ -16641,6 +16723,64 @@ _CLOUD_AGENT_LOCAL_ONLY_TOOLS = frozenset({
     "repo_diff", "artifact_risk_inspect", "process_list",
     "process_memory_risk_inspect",
 })
+# ``_agent_dispatch`` checks these two flags *inside* the matched tool branch,
+# so every name here is dispatchable and a dispatch-only drift check reports it
+# as fine.  The refusal is name-unconditional all the same: on a run with the
+# flag off the tool can never do anything.  Kept as declared sets so the help
+# filter is cheap; tests/test_advertised_surface_drift.py AST-extracts the real
+# branch guards and asserts these two constants match them exactly.
+_AGENT_WEB_GATED_TOOLS = frozenset({
+    "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",
+})
+_AGENT_LOCATION_GATED_TOOLS = frozenset({"approximate_location_lookup"})
+
+
+def _agent_run_tool_refusal(
+    tool_name,
+    *,
+    read_only=False,
+    cloud=False,
+    unsafe=False,
+    project_bound=False,
+    allow_web=True,
+    allow_location=False,
+):
+    """Name the gate that will refuse this tool on this run, or ``""``.
+
+    Advertising a tool a later gate always refuses is the "admit-then-deny"
+    defect: the model is told it may call the tool, spends a step calling it,
+    and is refused.  ``_agent_tool_help`` used to model only ``read_only`` /
+    ``cloud`` / ``unsafe``, while ``_agent_impl`` gates three more times --
+    ``project_scope`` against ``_PROJECT_BOUND_AGENT_TOOLS``, and ``allow_web``
+    / ``allow_location`` inside the dispatcher.  Both the help filter and the
+    drift guard read this one predicate, so neither can drift from the other.
+
+    This deliberately returns a short GATE NAME, never a user-facing
+    ``ERROR:`` message.  The refusal messages themselves belong to the gates
+    that actually enforce them (``_repository_read_only_error``, the
+    project-bound branch of ``_agent_impl``, and ``_agent_dispatch``'s own
+    web/location guards); restating them here would put a fifth copy of each
+    string one edit away from drifting out of sync with the real one -- the
+    exact defect shape this function exists to prevent.  No caller reads the
+    text: both use it as a predicate.
+    """
+    if unsafe:
+        # unsafe_lab resets read_only/allow_web/allow_location/project in
+        # _agent_impl, so only hosted policy still applies.
+        return "hosted agent policy" if _cloud_agent_tool_policy_error(
+            tool_name, unsafe=True,
+        ) else ""
+    if cloud and _cloud_agent_tool_policy_error(tool_name, unsafe=unsafe):
+        return "hosted agent policy"
+    if read_only and tool_name not in REPOSITORY_READ_ONLY_TOOLS:
+        return "repository read-only policy"
+    if project_bound and tool_name not in _PROJECT_BOUND_AGENT_TOOLS:
+        return "project-bound execution contract"
+    if not allow_web and tool_name in _AGENT_WEB_GATED_TOOLS:
+        return "allow_web=False"
+    if not allow_location and tool_name in _AGENT_LOCATION_GATED_TOOLS:
+        return "allow_location=False"
+    return ""
 
 
 def _cloud_agent_tool_policy_error(tool_name, *, unsafe=False):
@@ -18173,6 +18313,13 @@ def _agent_impl(
     # lost to that loop). Pre-existing files are never auto-overwritten.
     run_created_paths = set()
     claim_review_requests = 0
+    # A claim-review action that host policy refused proves nothing.  Track it
+    # separately from a tool that simply found no match, so an ``accept`` that
+    # follows only refusals cannot pass an unchecked negative claim off as
+    # verified.  ``claim_review_verified`` is the release valve: once any
+    # claim-review tool has actually produced evidence, a later accept is real.
+    claim_review_policy_refused = False
+    claim_review_verified = False
     # Branch prediction + speculative execution (advisory; a mispredict costs
     # at most one wasted read-only call and never touches durable state).
     _predictor = sonder_speculation.default_predictor()
@@ -18205,7 +18352,18 @@ def _agent_impl(
     # own workspace.
     transcript = "Task:\n%s\n\n%s" % (
         prompt,
-        _agent_tool_help(read_only=read_only, cloud=cloud, unsafe=unsafe),
+        # Every gate this run will actually apply, not just the three that
+        # used to be modelled here.  project_scope/allow_web/allow_location
+        # refuse name-unconditionally further down; advertising through them
+        # spent steps on calls that could never run.
+        _agent_tool_help(
+            read_only=read_only,
+            cloud=cloud,
+            unsafe=unsafe,
+            project_bound=bool(project_scope),
+            allow_web=allow_web,
+            allow_location=allow_location,
+        ),
     )
     if unsafe:
         transcript = "%s\n\n%s" % (unsafe_lab.WARNING, transcript)
@@ -18375,6 +18533,7 @@ def _agent_impl(
 
     def run_claim_review_action(review, review_number):
         nonlocal file_evidence, inspected, used_tool
+        nonlocal claim_review_policy_refused, claim_review_verified
         tool_name = str(review.get("tool") or "")
         tool_args = review.get("args") or {}
         # Validate the same host-scoped arguments that dispatch will use.  A
@@ -18404,6 +18563,9 @@ def _agent_impl(
                 trusted_extra_roots=project_scope,
             )
         if policy_error:
+            # The verification mechanism was refused, not answered.  Record it
+            # so no later ``accept`` can be mistaken for a checked claim.
+            claim_review_policy_refused = True
             observation_text = policy_error
         else:
             ensure_not_cancelled()
@@ -18416,6 +18578,7 @@ def _agent_impl(
             ))
         tool_ok = _agent_tool_observation_ok(tool_name, observation_text)
         if tool_ok:
+            claim_review_verified = True
             used_tool = True
             used_tool_names.add(tool_name)
             file_evidence = True
@@ -18437,6 +18600,33 @@ def _agent_impl(
                 observation_text[:6000],
             )
         )
+
+    def unverifiable_claim_review_exit():
+        """Refuse a confident verdict the claim reviewer could not support.
+
+        If every claim-review action this run attempted was refused by host
+        policy and none ever returned evidence, the negative existence claim
+        was never checked.  Accepting it here would let the mechanism whose
+        job is catching silent failures fail silently itself, which is exactly
+        what a hosted run did while its entire named vocabulary was denied.
+        """
+        if not claim_review_policy_refused or claim_review_verified:
+            return None
+        if auto_checklist:
+            _agent_checklist_fail(
+                checklist_id,
+                checklist_states,
+                "negative-claim review could not run: host policy refused "
+                "every evidence tool it was given",
+                1,
+            )
+        return _early_exit("%s: %s\n\n%s" % (
+            master_orchestrator.EVIDENCE_REQUIRED,
+            "the negative existence claim was never verified -- host policy "
+            "refused every claim-review evidence tool this run offered, so "
+            "the reviewer's acceptance carries no evidence",
+            "\n\n".join(observations),
+        ))
 
     for step in range(1, max_steps + 1):
         # Squash any speculation left unretired by the previous step (the
@@ -18578,6 +18768,9 @@ def _agent_impl(
                         claim_review["reason"],
                         "\n\n".join(observations),
                     ))
+                unverifiable = unverifiable_claim_review_exit()
+                if unverifiable is not None:
+                    return unverifiable
             if require_file_evidence and not file_evidence:
                 if auto_checklist:
                     _agent_checklist_fail(
@@ -18748,9 +18941,15 @@ def _agent_impl(
             # while a hosted model sees only the capabilities it may request.
             observation = _agent_tool_help(
                 read_only=read_only, cloud=True, unsafe=unsafe,
+                project_bound=bool(project_scope),
+                allow_web=allow_web, allow_location=allow_location,
             )
         elif read_only and tool_name in {"command_registry_list", "tool_manifest"}:
-            observation = _agent_tool_help(read_only=True)
+            observation = _agent_tool_help(
+                read_only=True, cloud=cloud, unsafe=unsafe,
+                project_bound=bool(project_scope),
+                allow_web=allow_web, allow_location=allow_location,
+            )
         else:
             ensure_not_cancelled()
             # Retire a matching speculation: if the model committed to the
@@ -19004,6 +19203,9 @@ def _agent_impl(
                 )
             return _early_exit(claim_review["reason"])
         if claim_review["decision"] == "accept":
+            unverifiable = unverifiable_claim_review_exit()
+            if unverifiable is not None:
+                return unverifiable
             break
         claim_review_requests += 1
         if claim_review_requests <= 2:
@@ -19124,6 +19326,15 @@ def workbench_agent(
 # on a call that cannot run.  Keep both sets a subset of _agent_dispatch's
 # branches and the observe set a subset of REPOSITORY_READ_ONLY_TOOLS;
 # tests/test_advertised_surface_drift.py asserts both.
+#
+# There is a THIRD gate these sets must clear, and it was missing from this
+# comment when the first two were added: a project-bound run refuses every
+# tool outside _PROJECT_BOUND_AGENT_TOOLS, which left 5 workspace names dead
+# in the rendered allowlist.  _autopilot_allowed_tools now intersects with it
+# rather than requiring these literals to be maintained against it, because
+# these sets are also used for unbound runs where all 5 are legitimate.  Do
+# not "fix" a future gap by editing the literals -- narrow at the point of use,
+# where the run's flags are known.
 _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "directory_digest", "file_find",
     "dependency_inventory",
@@ -19178,11 +19389,20 @@ _AUTOPILOT_MUTATION_EVIDENCE = frozenset({
 def _autopilot_allowed_tools(run: dict) -> frozenset | None:
     if unsafe_lab.active():
         return None
-    return (
+    allowed = (
         _AUTOPILOT_OBSERVE_TOOLS
         if run.get("policy") == "observe"
         else _AUTOPILOT_WORKSPACE_TOOLS
     )
+    # A project-bound run renders this set into the transcript as "HOST TOOL
+    # ALLOWLIST (cannot be expanded by the model)" and then refuses every name
+    # outside _PROJECT_BOUND_AGENT_TOOLS at the project-bound gate.  Narrowing
+    # here keeps the promise and the gate identical: the literal sibling of the
+    # advertise-vs-dispatch bug 277fd27 fixed, one gate further down.
+    project_scope, _project_error = _agent_project_scope(run.get("project", ""))
+    if project_scope:
+        allowed = allowed & _PROJECT_BOUND_AGENT_TOOLS
+    return allowed
 
 
 def _autopilot_command_programs(value) -> list[str]:
