@@ -195,6 +195,69 @@ def test_a_host_selected_project_root_still_reaches_the_tool(tmp_path):
     assert "test discovery" in observation
 
 
+@pytest.mark.parametrize("tool_name,extra", [
+    ("test_discover", {}),
+    ("lint_run", {}),
+    ("git_branch", {}),
+    ("build_run", {"command": "git --version"}),
+])
+def test_a_write_enabled_run_reaches_the_tool_on_its_bound_project(
+    tmp_path, tool_name, extra,
+):
+    """The control above, on the arm that MUTATES -- which had none at all.
+
+    ``_agent_dispatch_observed`` passed ``repository_extra_roots=project`` on
+    the ``read_only`` arm only. The write-enabled arm dispatched with no roots,
+    so ``authorized_root_scope("")`` opened empty and every one of the 23
+    developer-workflow tools raised ``PermissionError`` on the very project the
+    host bound -- the commit that wired these tools in broke them for the exact
+    run type that changes anything.
+
+    It shipped green because no test could see it: every write-path test in
+    ``test_agent_dispatch_dev_tools.py`` does
+    ``monkeypatch.setattr(server, tool_name, ...)``, so ``_resolve_root`` is
+    never reached, and the only end-to-end control
+    (``test_a_host_selected_project_root_still_reaches_the_tool``) uses
+    ``read_only=True``. **Nothing here monkeypatches the tool** -- that is the
+    entire point; the real ``_resolve_root`` has to run for this to bind.
+
+    ``tmp_path`` is deliberately outside every configured root, so reaching the
+    tool at all is proof the host-selected root was granted. The tools may
+    still fail for their own reasons (no git repo, no linter) -- what must not
+    appear is the confinement refusal.
+    """
+    (tmp_path / "t.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    observation = str(server._agent_dispatch_observed(
+        tool_name, dict({"root": str(tmp_path)}, **extra),
+        read_only=False, project=str(tmp_path),
+    ))
+    assert "outside every authorized root" not in observation, (
+        "%s: a write-enabled run was refused on the project the host bound it "
+        "to -- %s" % (tool_name, observation.splitlines()[0])
+    )
+    assert "PermissionError" not in observation, observation.splitlines()[0]
+
+
+def test_a_write_enabled_run_is_still_confined_off_its_bound_project(tmp_path):
+    """The other half: granting the write arm a root must not grant everything.
+
+    Without this, "fix the write arm" could be satisfied by passing the scope
+    unconditionally or by widening ``allowed_roots``. The bound project is
+    reachable; a sibling directory outside it is not.
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "t.py").write_text("", encoding="utf-8")
+    observation = str(server._agent_dispatch_observed(
+        "test_discover", {"root": str(outside)},
+        read_only=False, project=str(project),
+    ))
+    assert observation.startswith("ERROR:"), observation
+    assert "outside every authorized root" in observation, observation
+
+
 def test_diff_files_does_not_leak_the_absolute_host_path(tmp_path, monkeypatch):
     """``git diff --no-index`` echoes its arguments into the ``diff --git`` header.
 

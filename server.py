@@ -15934,13 +15934,24 @@ def _agent_dispatch_observed(
             dispatch_options = {"allow_web": allow_web}
             if allow_location:
                 dispatch_options["allow_location"] = True
-            if read_only:
-                observation = _agent_dispatch(
-                    tool_name, dispatch_args, read_only=True,
-                    repository_extra_roots=project, **dispatch_options,
-                )
-            else:
-                observation = _agent_dispatch(tool_name, dispatch_args, **dispatch_options)
+            # `repository_extra_roots` is the ONLY channel that adds the
+            # host-selected project root to the authorized set -- it opens
+            # `harness_tools.authorized_root_scope` inside `_agent_dispatch` --
+            # and it belongs on BOTH arms. It used to be passed on the
+            # `read_only` arm alone, so a write-enabled project-bound run
+            # dispatched under `authorized_root_scope("")` and all 23
+            # developer-workflow tools raised `PermissionError: root is outside
+            # every authorized root` on the very project the host bound. The
+            # commit that made these tools dispatchable broke them for exactly
+            # the run type that changes anything.
+            #
+            # This grants no authority the read-only arm did not already have:
+            # the value is the host-selected `project`, never a model-supplied
+            # argument, and `_resolve_root` still refuses everything outside it.
+            observation = _agent_dispatch(
+                tool_name, dispatch_args, read_only=read_only,
+                repository_extra_roots=project, **dispatch_options,
+            )
         dispatched = True
         ok = not str(observation).startswith("ERROR:")
         return observation
