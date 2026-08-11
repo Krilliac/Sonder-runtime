@@ -175,14 +175,27 @@ def retention_rank(caller_mean, execution_mean) -> tuple[float, float]:
     Two keys, never one number, and the caller key decides first
     UNCONDITIONALLY -- the deliberate difference from ``evidence_rank``, which
     conditions population on eligibility because it is attributing credit.
-    Here a caller's ``rejected`` is not weak evidence, it is the strongest
-    reason to keep the row: it is a measured harm, the self-graded copy cannot
-    stand in for it, and deleting it launders the lesson. A blended mean is
-    what made a row a caller rejected at -0.5 and the runtime then passed eight
-    times read as +0.83 and win.
+    ACROSS populations a caller's ``rejected`` is not weak evidence, it is the
+    strongest reason to keep the row: it is a measured harm, the self-graded
+    copy cannot stand in for it, and deleting it launders the lesson. A blended
+    mean is what made a row a caller rejected at -0.5 and the runtime then
+    passed eight times read as +0.83 and win.
 
-    Within a population the ordering is the mean itself, so a measured neutral
-    0.0 stays above a measured -1.0 -- neutral evidence is not absent evidence.
+    ACROSS populations is the whole extent of that claim, and the next
+    paragraph is where it stops -- read both before quoting either.
+
+    WITHIN a population the ordering is the mean itself. That keeps a measured
+    neutral 0.0 above a measured -1.0 -- neutral evidence is not absent
+    evidence -- but it is one key, not two, so the same comparison also means a
+    caller-judged +0.8 DOES delete a caller-judged -1.0. That is a laundering
+    this rule does not prevent, and the sentence above must not be read as
+    saying it does. Both halves are pinned by one test,
+    ``test_measured_zero_reward_outranks_a_measured_negative_reward``, so the
+    behaviour cannot be changed here without answering for the neutral case
+    too. Whether duplicate cleanup should ever delete a measured harm is a
+    different question from which population decides; this function answers
+    only the second.
+
     ``None`` maps to ``NO_MEASUREMENT_RANK``, below every real reward, so an
     unevaluated duplicate can never displace a measured one.
 
