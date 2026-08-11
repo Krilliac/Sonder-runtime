@@ -1873,12 +1873,42 @@ def _training_command(arg: str) -> str:
 def _selfmod_test_commands(run, explicit_tests):
     import shlex
     workspace = Path(run["workspace_path"])
-    python_files = [path for path in run["files"] if path.endswith(".py") and (workspace / path).is_file()]
-    syntax = [sys.executable, "-m", "py_compile", *python_files] if python_files else [sys.executable, "-c", "print('no Python syntax targets')"]
+    declared_python = sorted(path for path in run["files"] if path.lower().endswith(".py"))
+    present_python = [path for path in declared_python if (workspace / path).is_file()]
+    absent_python = [path for path in declared_python if not (workspace / path).is_file()]
+    if present_python:
+        syntax = [sys.executable, "-m", "py_compile", *present_python]
+    elif declared_python:
+        # `.is_file()` used to empty this list silently and the required syntax
+        # check degraded to `print('no Python syntax targets')` -- exit 0,
+        # recorded as passing. The list empties exactly when the candidate
+        # DELETED its declared modules, and deletion is the shape an automated
+        # repair loop is most likely to produce, so the one change that most
+        # needed a syntax gate was the one that skipped it.
+        syntax = [sys.executable, "-c", "raise SystemExit(%r)" % (
+            "selfmod syntax gate: every declared Python target is absent from the "
+            "candidate workspace (%s). A deletion-only change has nothing to compile "
+            "in place, and an empty target set is a refusal, not a pass. Re-scope the "
+            "run so a surviving module carries the change, or take the deletion "
+            "through an explicit maintenance review."
+            % ", ".join(absent_python)
+        )]
+    else:
+        syntax = [sys.executable, "-c", "raise SystemExit(%r)" % (
+            "selfmod syntax gate: this run declares no Python file (%s), so the "
+            "required syntax check has nothing to compile. An empty target set is a "
+            "refusal, not a pass." % (", ".join(run["files"]) or "no files")
+        )]
     targeted = shlex.split(explicit_tests[0], posix=os.name != "nt") if explicit_tests else [sys.executable, "-c", "raise SystemExit('explicit reproducing/targeted test required')"]
     regression = [sys.executable, "-m", "pytest", "-q"]
-    smoke = [sys.executable, "-c", "import pathlib; assert pathlib.Path('.').is_dir(); print('selfmod smoke ok')"]
-    commands = [("syntax", syntax), ("targeted", targeted), ("regression", regression), ("smoke", smoke)]
+    # `smoke` is deliberately NOT built here. It used to be
+    #     python -c "import pathlib; assert pathlib.Path('.').is_dir(); ..."
+    # run with the candidate workspace as cwd -- a required gate that could not
+    # fail. It is now selfmod.record_smoke(), which imports the candidate in a
+    # child process and must return a SHA-256 receipt over the bytes it loaded.
+    # It lives in selfmod.py because the receipt has to be computed by the
+    # recording process from the workspace, and never handed to the probe.
+    commands = [("syntax", syntax), ("targeted", targeted), ("regression", regression)]
     if run["maintenance_authorized"]:
         security = shlex.split(explicit_tests[1], posix=os.name != "nt") if len(explicit_tests) > 1 else [sys.executable, "-c", "raise SystemExit('explicit protected security test required')"]
         commands.append(("security", security))
@@ -1993,6 +2023,10 @@ def _execute_selfmod_run(run_id, explicit_tests=None):
         selfmod.begin_testing(run_id)
         for kind, command in test_commands:
             selfmod.record_test(run_id, kind, command)
+        # review() requires a passing `smoke`; this is what supplies it. It runs
+        # the candidate rather than describing it, so it is recorded here rather
+        # than being one more argv in the list above.
+        selfmod.record_smoke(run_id)
         selfmod.review(run_id)
         return selfmod.format_run(run_id) + "\n\nAgent evidence:\n" + output
     except Exception as exc:
@@ -2139,12 +2173,41 @@ def _goal_command(arg: str) -> str:
         return "ERROR: %s" % exc
 
 
-def _selfmod_command(arg: str, *, repository_root="") -> str:
+# The ``/selfmod`` actions that write the *live* source tree, as opposed to the
+# isolated candidate workspace. ``plan``/``run``/``approve`` stay out: they edit
+# and grade a copy, and nothing they do survives without a ``deploy``.
+#
+# The chain gate above already grades ``/selfmod`` ``dangerous``, which is what
+# makes ``plan`` refuse it at every surface. This second gate adds the one thing
+# that grade alone could not say: that for *these two* actions, "nobody was
+# available to ask" must resolve to no. Keyed on the action rather than the
+# command because ``/selfmod status`` arrives at the same entry point, and
+# refusing a status read unattended would be the over-refusal this gate exists
+# to avoid.
+_SELFMOD_SOURCE_WRITING_ACTIONS = frozenset({"deploy", "rollback"})
+
+
+def _selfmod_command(arg: str, *, repository_root="", operator_approved=False) -> str:
     text = str(arg or "status").strip() or "status"
     action, _, rest = text.partition(" ")
     action = action.lower()
     rest = rest.strip()
     root = Path(repository_root or Path(__file__).resolve().parent).resolve()
+    if action in _SELFMOD_SOURCE_WRITING_ACTIONS and not operator_approved:
+        # ``interactive=False`` is the honest value at every caller that gets
+        # here without ``operator_approved``: the app's HTTP chain and
+        # ``answer_with_history`` (ordinary chat, and the MCP ``sonder`` tool)
+        # have nobody to prompt. ``non_degrading`` is what stops that from
+        # meaning yes. The console sets ``operator_approved`` only after a
+        # person has actually answered ``_named_command_gate``'s prompt.
+        decision = permission_modes.decide(
+            "selfmod", interactive=False, non_degrading=True,
+        )
+        if decision.action == permission_modes.DENY:
+            return "refused /selfmod %s: %s (mode: %s)" % (
+                action, decision.reason,
+                permission_modes.MODE_LABELS.get(decision.mode, decision.mode),
+            )
     try:
         if action in {"status", "show", "list"}:
             return selfmod.format_status()
@@ -2207,6 +2270,18 @@ def _selfmod_command(arg: str, *, repository_root="") -> str:
             run_id, _, reason = rest.partition(" ")
             return selfmod.format_run(selfmod.reject(run_id, reason or "explicit user rejection")["id"])
         if action == "deploy":
+            # This command proves the new bytes import and that `status()` does
+            # not raise. It does NOT prove the server answers: `status()` catches
+            # `ModelCallError`/`URLError` and *returns* the error as a string, so
+            # this exits 0 with "ERROR contacting Ollama..." in its output, which
+            # nothing reads. Do not grow claims for it.
+            #
+            # It is also deliberately NOT the check that the deployment can be
+            # undone: a `--maintenance` run can rewrite `selfmod.py` and
+            # `selfmod_recover.py` in one deploy, and this command passed on a
+            # tree whose rollback was broken. `selfmod.deploy` now dry-runs both
+            # rollback routes itself, unconditionally, so that property cannot be
+            # lost by editing the argv here or by a caller that passes none.
             run = selfmod.deploy(rest, health_command=[sys.executable, "-c", "import server; print(server.status())"])
             module_names = {
                 Path(path).stem for path in run["files"]
@@ -2264,7 +2339,8 @@ def _control_tool_refusal(tools, label):
     return ""
 
 
-def control_command(prompt: str, history=None, session="", project=""):
+def control_command(prompt: str, history=None, session="", project="",
+                    operator_approved=False):
     """Handle safe slash commands before a prompt reaches the model.
 
     Client layers have richer commands like /run that depend on their local last
@@ -2280,6 +2356,16 @@ def control_command(prompt: str, history=None, session="", project=""):
     it. Re-deciding on the two paths that already gated is free and cannot
     double-prompt: nothing here prompts, and a caller with nobody to ask gets
     ``allow`` for anything the mode merely asks about.
+
+    ``operator_approved`` is the one place that last sentence stops being
+    harmless. ``/selfmod deploy`` refuses to take "nobody to ask" for yes (see
+    ``_SELFMOD_SOURCE_WRITING_ACTIONS``), so the console -- which really did ask,
+    at ``sonder_repl._named_command_gate``, and got an answer -- has to be able
+    to say so, or re-deciding here would silently overrule the person who
+    approved. It defaults to False and is passed only by ``sonder_repl``, and
+    only when a real operator is attached; ``control_command`` is not a
+    registered tool and is not in the catalog, so no model can reach this
+    argument and grant itself the approval.
     """
     text = (prompt or "").strip()
     if not text.startswith("/"):
@@ -2321,7 +2407,7 @@ def control_command(prompt: str, history=None, session="", project=""):
     if cmd in ("/training", "/weighttraining"):
         return _training_command(arg)
     if cmd in ("/selfmod", "/selfmodify"):
-        return _selfmod_command(arg)
+        return _selfmod_command(arg, operator_approved=operator_approved)
     if cmd in ("/goal", "/goals"):
         return _goal_command(arg)
     if cmd in ("/ensemble",):

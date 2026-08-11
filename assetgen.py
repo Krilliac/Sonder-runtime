@@ -50,6 +50,46 @@ OWNED_FILENAMES = {
     "rigged.glb", "scene.json", "score.mid", "sprites.png", "texture.png", "theme.wav",
     "tiles.png", "timeline.edl", "vector.svg", "workbook.xlsx",
 }
+# What each requested kind must actually have put on disk.
+#
+# `verify_pack` used to ask artifact_grounding to enforce
+# `required_kinds = manifest["kinds"]`, and artifact_grounding answered it by
+# testing membership in `manifest["kinds"]` -- the same list. The check
+# compared a value with itself and could not fail. `manifest["kinds"]` is the
+# REQUESTED kinds, copied from the parsed request, so a kind whose writer
+# silently produced nothing still passed: hashes covered the files that were
+# there and nothing covered the ones that were not.
+#
+# This map is the independent evidence the check was missing. It must stay in
+# step with the writers in `generate_artifacts`; the paired test asserts it
+# covers every kind in ARTIFACT_KINDS and names only OWNED_FILENAMES.
+KIND_ARTIFACTS = {
+    "icon": ("icon.png",),
+    "background": ("background.png",),
+    "tileset": ("tiles.png",),
+    "sprite_sheet": ("sprites.png",),
+    "texture": ("texture.png",),
+    "preview": ("preview.ppm",),
+    "vector": ("vector.svg",),
+    "diagram": ("diagram.svg",),
+    "palette": ("palette.json",),
+    "document": ("brief.md",),
+    "data": ("data.csv", "data.json"),
+    "web": ("preview.html",),
+    "docx": ("document.docx",),
+    "spreadsheet": ("workbook.xlsx",),
+    "presentation": ("presentation.pptx",),
+    "animation": ("animation.gif",),
+    "video": ("preview.avi",),
+    "sound": ("hit.wav", "pickup.wav"),
+    "music": ("score.mid", "theme.wav"),
+    "midi": ("score.mid",),
+    "captions": ("captions.srt", "captions.vtt"),
+    "timeline": ("animation.gif", "preview.avi", "timeline.edl"),
+    "model": ("materials.mtl", "models.obj", "rigged.glb", "texture.png"),
+    "rigged_model": ("rigged.glb", "texture.png"),
+    "scene": ("scene.json",),
+}
 MAX_NAME = 48
 MAX_IMAGE_SIDE = 512
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
@@ -850,6 +890,10 @@ def verify_pack(path: str) -> dict:
         {
             "require_manifest": True,
             "required_kinds": manifest.get("kinds", []),
+            # Without this the check reads `required_kinds` back out of the
+            # same manifest and compares the list with itself. `kind_files` is
+            # the independent side: what each kind had to leave on disk.
+            "kind_files": {kind: list(names) for kind, names in KIND_ARTIFACTS.items()},
             "no_external_dependencies": True,
             "recipes": {
                 "avi": {"min_frames": 2, "min_duration_ms": 1, "require_audio": True},
