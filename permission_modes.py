@@ -530,27 +530,45 @@ def risk_of(tool_name: str) -> str:
     try:
         import command_catalog
     except Exception:
-        command_catalog = None
-    if command_catalog is not None:
-        try:
-            command = command_catalog.by_name("/" + name)
-        except command_catalog.CatalogUnavailable:
-            # The classifier itself is blind. Continuing would report every
-            # ``dangerous`` tool as ``ask``, which a caller with nobody to ask
-            # resolves to ``allow`` -- a gate that cannot see refusing nothing.
-            #
-            # This used to return "dangerous", on the stated grounds that it
-            # "is the one class that stops in every mode". Measured, that is
-            # false on the only path this matters: ``dangerous`` is ASK in
-            # manual, acceptEdits and auto, and ``interactive=False`` degrades
-            # ASK to ALLOW. The blind-catalog branch therefore allowed
-            # git_merge in three of four modes. UNCLASSIFIED is not degraded,
-            # so the branch now does what it always said it did.
-            return UNCLASSIFIED
-        except Exception:
-            command = None
-        if command is not None:
-            catalogued = command.risk
+        # The classifier is blind -- see the blind-catalog note below. This
+        # used to set ``command_catalog = None`` and skip the lookup block,
+        # which left ``catalogued`` empty and fell through to the static
+        # tables at the bottom, so a partially-initialised server (the case
+        # where an import fails) got a confident grade from a table instead
+        # of the refusal the branch below returns for the same condition.
+        return UNCLASSIFIED
+    try:
+        command = command_catalog.by_name("/" + name)
+    except Exception:
+        # The classifier itself is blind. Continuing would report every
+        # ``dangerous`` tool as ``ask``, which a caller with nobody to ask
+        # resolves to ``allow`` -- a gate that cannot see refusing nothing.
+        #
+        # This used to return "dangerous", on the stated grounds that it
+        # "is the one class that stops in every mode". Measured, that is
+        # false on the only path this matters: ``dangerous`` is ASK in
+        # manual, acceptEdits and auto, and ``interactive=False`` degrades
+        # ASK to ALLOW. The blind-catalog branch therefore allowed
+        # git_merge in three of four modes. UNCLASSIFIED is not degraded,
+        # so the branch now does what it always said it did.
+        #
+        # This catches ``Exception``, not just ``CatalogUnavailable``, and the
+        # width is the point. ``catalog()`` converts only the registry read
+        # into ``CatalogUnavailable``; ``import command_registry``,
+        # ``_native_groups()``, ``Command`` construction and ``_category_for``
+        # are unwrapped, so the partially-initialised server that
+        # ``CatalogUnavailable``'s docstring cites usually arrives as an
+        # ``ImportError``/``AttributeError`` instead. A narrower
+        # ``except CatalogUnavailable`` beside a broad ``except Exception:
+        # command = None`` meant those fell through to the static tables
+        # below -- and those tables can answer SOFTER than the catalog:
+        # ``self_heal_repair`` is catalog-``dangerous`` and in
+        # ``EXECUTION_TOOLS``, so blind it graded ``execution``, which ``auto``
+        # ALLOWS outright. The gate cannot know WHY it went blind, only that
+        # it did, so every way of going blind must grade the same.
+        return UNCLASSIFIED
+    if command is not None:
+        catalogued = command.risk
     if catalogued == "dangerous":
         return "dangerous"
     if name in EXECUTION_TOOLS or name in EXECUTION_COMMANDS:
