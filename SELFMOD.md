@@ -78,6 +78,14 @@ Acceptance also rejects:
 - any candidate file outside the pre-backed-up scope;
 - removed/renamed tests from the pre-change inventory;
 - missing or failed syntax, targeted, regression, or smoke checks;
+  - `syntax` compiles the declared Python modules that survive in the candidate.
+    If every declared module was deleted, or the run declares no Python at all,
+    that is a refusal: an empty target set is not a pass.
+  - `smoke` imports the candidate's own modules in a child process rooted at the
+    workspace, confirms any declared deletion is genuinely unreachable, and must
+    return a SHA-256 receipt over the bytes it loaded. The receipt is computed by
+    the recording process and never handed to the probe, so exit 0 on its own
+    cannot satisfy the gate.
 - oversized diffs or file counts;
 - source conflicts after planning;
 - corrupted backups or failed rollback rehearsal.
@@ -120,8 +128,26 @@ Before deployment, the host re-verifies backups, the complete candidate diff,
 the starting commit, dirty-tree fingerprint, scope, inventory, and approval.
 Files are replaced with same-directory temporary files plus `fsync` and
 `os.replace`. Deletions happen only for declared files whose candidate version
-was removed. A separate Python health subprocess imports Sonder Runtime and
-requests status. Failure automatically restores exact backup hashes. Already-loaded
+was removed.
+
+Deployment then verifies, first and unconditionally, that the code just written
+can still undo itself. A child process running the *deployed* bytes dry-runs
+both rollback routes against temporary directories: the in-tree manifest
+restore that `/selfmod rollback` funnels through, and the out-of-tree
+`selfmod_recover` entry point driven through its own manifest bundle, so its
+checksum gate and path confinement execute too. Both must return the exact
+pre-deploy bytes and agree on a content receipt whose expected value is
+computed by the deploying process and deliberately never given to the child.
+This runs whether or not a caller supplies a health command, because the
+unattended nightly lane supplies none, and because a `--maintenance` run is
+allowed to rewrite the recovery path itself. It writes only inside its
+temporary directories, so it can fail without changing anything.
+
+A separate Python health subprocess then imports Sonder Runtime and requests
+status. That subprocess proves the new bytes import; it is not, and never was,
+evidence that rollback still works.
+
+Failure of either automatically restores exact backup hashes. Already-loaded
 helper modules on Sonder Runtime's conservative live-reload allowlist are then
 reloaded; a reload error also triggers rollback. Restart-critical supervisor,
 server, ledger, and recovery modules are protected maintenance targets, so the

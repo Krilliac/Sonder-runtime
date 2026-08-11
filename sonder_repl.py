@@ -1213,8 +1213,17 @@ def main():
                 "/learning", "/learnhealth", "/metrics",
                 "/goal", "/goals", "/ensemble",
             ):
+                # ``/selfmod deploy`` will not accept "nobody to ask" as a yes,
+                # so this branch reports whether anybody was in fact asked.
+                # Reaching here means ``_named_command_gate`` passed; combined
+                # with an operator actually being attached, that is a person
+                # having answered its prompt, because ``/selfmod`` is graded
+                # ``dangerous`` and so always prompts outside ``plan``. With a
+                # piped stdin the gate degraded rather than asked, nobody said
+                # yes, and this is False -- which is the whole point.
                 print(server.control_command(
                     line, session=session_id, project=project,
+                    operator_approved=_console_has_operator(),
                 ))
             elif cmd in ("/weather", "/forecast"):
                 print(server.control_command(
