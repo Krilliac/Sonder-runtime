@@ -20,10 +20,13 @@ This module pins the decision that now hangs off the measurement:
   there. That is "default to verified when detection fails", and it would fire
   on the majority of real runs. The gate therefore reuses the ``validation_ok``
   discipline: latest-wins, cleared by any mutation or execution.
-* Coverage is keyed on ``root``. The four verifiers scope their run with
-  ``root``; ``path`` merely narrows *which* checks run and is empty on a
-  default invocation. Reading ``path`` here would answer the wrong question
-  and answer it "" on nearly every real call.
+* Coverage is keyed on ``root`` NARROWED BY ``path``. This file used to say
+  ``path`` "merely narrows *which* checks run" and that reading it "would
+  answer the wrong question". The first half was refuted by ``harness_tools``,
+  which appends ``path`` straight to the child argv -- so ``path`` is what the
+  check exercises. The second half was right, and is why the narrowing is
+  conditional on ``path`` being non-empty. A verifier narrowed to ``tests/``
+  no longer counts as covering a change to ``payments.py``.
 """
 from __future__ import annotations
 
@@ -820,3 +823,86 @@ def test_the_connection_is_closed_even_though_the_loop_continues(monkeypatch):
     _run(monkeypatch, [FINAL])
 
     assert conns and all(conn.closed for conn in conns)
+
+
+# --- the `path` axis: the one this file never varied ------------------------
+
+
+def test_a_narrowing_path_that_misses_the_change_does_not_cover_it(tmp_path):
+    """The axis this file claimed to enforce and never exercised.
+
+    Every coverage test above varies only ``root``. ``_agent_verification_covers``
+    keyed on ``root`` alone and justified it in-comment: *"their `path` argument
+    narrows which checks run inside it, not what those checks exercise."*
+
+    That justification is refuted by code written in the same lane.
+    ``harness_tools`` appends ``path`` straight to the child argv, so ``path``
+    decides what the child actually looks at -- measured, it could even point
+    outside the root entirely until the confinement added alongside this fix
+    (see ``test_harness_root_confinement``). ``path`` is what those checks
+    exercise.
+
+    Concretely: the model changes ``payments.py`` at the top of the project,
+    then runs the verifier narrowed to ``tests/`` -- a real, passing, in-scope
+    verification that examined a different part of the tree. Keyed on ``root``
+    that counted as covering the change.
+    """
+    project = tmp_path / "proj"
+    (project / "tests").mkdir(parents=True)
+    changed = project / "payments.py"
+    changed.write_text("x = 1\n", encoding="utf-8")
+    mutations = [{"path": str(changed)}]
+
+    assert server._agent_verification_covers(
+        "test_run", {"root": str(project), "path": "tests"}, mutations,
+    ) is False, (
+        "a verifier narrowed to tests/ was counted as covering a change to "
+        "payments.py, which it never looked at"
+    )
+
+
+def test_a_narrowing_path_that_contains_the_change_still_covers_it(tmp_path):
+    """The control. Reading ``path`` must not refuse every real narrowed run.
+
+    This is the half the original comment was right about: ``path`` is empty on
+    a default invocation, and a narrowed run that *does* contain the change is
+    a genuine verification. Without this test, "return False whenever path is
+    set" would satisfy the test above.
+    """
+    project = tmp_path / "proj"
+    (project / "src").mkdir(parents=True)
+    changed = project / "src" / "payments.py"
+    changed.write_text("x = 1\n", encoding="utf-8")
+    mutations = [{"path": str(changed)}]
+
+    assert server._agent_verification_covers(
+        "test_run", {"root": str(project), "path": "src"}, mutations,
+    ) is True
+    # And the default invocation -- path empty -- is unchanged.
+    assert server._agent_verification_covers(
+        "test_run", {"root": str(project), "path": ""}, mutations,
+    ) is True
+    assert server._agent_verification_covers(
+        "test_run", {"root": str(project)}, mutations,
+    ) is True
+
+
+def test_a_narrowing_path_is_read_for_the_no_mutation_case_too(tmp_path):
+    """The declared-scope branch must narrow the same way.
+
+    With nothing changed on disk the function compares the run's declared
+    project scope against the verifier's scope. If ``path`` narrows that scope
+    away from the declared project, the verifier no longer covers the scope the
+    run is answerable for.
+    """
+    project = tmp_path / "proj"
+    (project / "sub").mkdir(parents=True)
+
+    assert server._agent_verification_covers(
+        "test_run", {"root": str(project), "path": "sub"}, [],
+        project_scope=str(project),
+    ) is False
+    assert server._agent_verification_covers(
+        "test_run", {"root": str(project)}, [],
+        project_scope=str(project),
+    ) is True

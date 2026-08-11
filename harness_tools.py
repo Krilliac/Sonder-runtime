@@ -72,6 +72,51 @@ def _resolve_root(root, extra_roots=""):
     return p
 
 
+def _resolve_target_path(root, path):
+    """Confine the SECOND argument -- the one appended to the child's argv.
+
+    ``_resolve_root`` confines the working directory. It was the only control,
+    and four tools take a second argument that is not a working directory:
+    ``test_run``, ``lint_run``, ``format_code`` and ``typecheck_run`` do
+    ``cmd.append(path)`` and the child resolves it against ``cwd=root``. So
+    ``path`` was checked by nothing.
+
+    ``server.py`` already wrote this fact down at its own layer --
+    *"Containing `root` alone leaves `path` checked by nothing, so
+    lint_run(path='../../x', fix=True) would write outside the project"* -- and
+    closed it only on the project-bound agent path, leaving the direct
+    ``@mcp.tool()`` callers and every unbound run open. Measured, the exposure
+    is not limited to writes: with pytest as the framework,
+    ``test_run(root=<authorized>, path="../OUTSIDE/test_evil.py")`` returned
+    ``ok=True, "1 passed"`` having **executed** a file outside the authorized
+    root, which wrote a marker there.
+
+    Confinement therefore belongs here, one layer below all four entry points,
+    for the same reason ``_resolve_root``'s docstring gives: reachability is
+    not a control.
+
+    Returns the path to hand the child -- relative to ``root`` so the argv keeps
+    the same shape (and does not leak the absolute host path, as
+    ``diff_files`` was fixed not to). An empty ``path`` stays empty; callers
+    already branch on that.
+    """
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    root = Path(root)
+    candidate = Path(text)
+    resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
+    if resolved != root and not file_ops._is_inside(resolved, root):
+        raise ValueError(
+            "path is outside the root it was given: %s is not inside %s"
+            % (text, root)
+        )
+    try:
+        return str(resolved.relative_to(root)) or "."
+    except ValueError:
+        return str(resolved)
+
+
 _AUTHORIZED_ROOT = contextvars.ContextVar("harness_authorized_root", default="")
 
 
@@ -283,6 +328,8 @@ def test_run(
     extra_roots="",
 ):
     root = _resolve_root(root, extra_roots)
+    # Confine the argv-appended path too; see _resolve_target_path.
+    path = _resolve_target_path(root, path)
     timeout = _bounded_int(timeout, 120, 5, MAX_TIMEOUT)
     if framework == "auto":
         framework = _detect_test_framework(root)
@@ -410,6 +457,8 @@ def _detect_typechecker(root):
 
 def lint_run(root=".", tool="auto", path="", fix=False, timeout=60, extra_roots=""):
     root = _resolve_root(root, extra_roots)
+    # Confine the argv-appended path too; see _resolve_target_path.
+    path = _resolve_target_path(root, path)
     timeout = _bounded_int(timeout, 60, 5, MAX_TIMEOUT)
     if tool == "auto":
         tool = _detect_linter(root)
@@ -432,6 +481,8 @@ def lint_run(root=".", tool="auto", path="", fix=False, timeout=60, extra_roots=
 
 def format_code(root=".", tool="auto", path="", check_only=False, timeout=60, extra_roots=""):
     root = _resolve_root(root, extra_roots)
+    # Confine the argv-appended path too; see _resolve_target_path.
+    path = _resolve_target_path(root, path)
     timeout = _bounded_int(timeout, 60, 5, MAX_TIMEOUT)
     if tool == "auto":
         tool = _detect_formatter(root)
@@ -458,6 +509,8 @@ def format_code(root=".", tool="auto", path="", check_only=False, timeout=60, ex
 
 def typecheck_run(root=".", tool="auto", path="", timeout=120, extra_roots=""):
     root = _resolve_root(root, extra_roots)
+    # Confine the argv-appended path too; see _resolve_target_path.
+    path = _resolve_target_path(root, path)
     timeout = _bounded_int(timeout, 120, 5, MAX_TIMEOUT)
     if tool == "auto":
         tool = _detect_typechecker(root)

@@ -258,6 +258,75 @@ def test_a_write_enabled_run_is_still_confined_off_its_bound_project(tmp_path):
     assert "outside every authorized root" in observation, observation
 
 
+# The four tools that take BOTH `root` and a second `path` that harness_tools
+# appends straight to the child argv. server._PROJECT_SCOPED_ROOT_AND_PATH_TOOLS
+# names the same four and says why.
+ROOT_AND_PATH_TOOLS = ("test_run", "lint_run", "format_code", "typecheck_run")
+
+
+@pytest.mark.parametrize("tool_name", ROOT_AND_PATH_TOOLS)
+def test_the_second_path_argument_cannot_escape_the_root(
+    tmp_path, monkeypatch, tool_name,
+):
+    """``_resolve_root`` confines ``root``. Nothing confined ``path``.
+
+    ``lint_run`` (411), ``format_code``, ``test_run`` and ``typecheck_run`` do
+    ``cmd.append(path)`` with no check, so the caller-supplied ``path`` reached
+    the child argv verbatim and the child ran it relative to ``cwd=root``.
+    ``server.py:15659`` -- in the same lane -- already says exactly this:
+    *"Containing `root` alone leaves `path` checked by nothing, so
+    lint_run(path='../../x', fix=True) would write outside the project."*
+
+    Measured, it is worse than a write. With pytest as the framework this is
+    arbitrary **code execution** outside the authorized root::
+
+        test_run(root=<authorized>, path="../OUTSIDE/test_evil.py")
+        -> ok=True, "1 passed"
+        -> the collected file's module-level/test body ran and wrote a marker
+           outside the authorized root
+
+    So ``path`` is load-bearing, not decorative -- which is the fact
+    ``_agent_verification_covers`` denies when it justifies reading only
+    ``root``. Both halves of that contradiction are fixed together.
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    outside = tmp_path / "OUTSIDE"
+    outside.mkdir()
+    (outside / "test_evil.py").write_text("def test_x():\n    assert True\n", encoding="utf-8")
+    # Authorize ONLY the project, exactly as a host-selected project scope does.
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(project))
+
+    fn = getattr(harness_tools, tool_name)
+    try:
+        result = fn(root=str(project), path="../OUTSIDE/test_evil.py")
+    except (ValueError, PermissionError) as exc:
+        assert "OUTSIDE" in str(exc) or "outside" in str(exc).lower(), exc
+        return
+    assert result.get("ok") is False, (
+        "%s accepted a path escaping its root: %s" % (tool_name, result)
+    )
+    assert "outside" in str(result.get("error", "")).lower(), result
+
+
+@pytest.mark.parametrize("tool_name", ROOT_AND_PATH_TOOLS)
+def test_a_path_inside_the_root_still_works(tmp_path, monkeypatch, tool_name):
+    """The control, so the refusal above is confinement and not a blanket ban.
+
+    Without this, "reject every path" would pass the test above and silently
+    remove the narrowing argument these four tools exist to offer.
+    """
+    project = tmp_path / "proj"
+    (project / "sub").mkdir(parents=True)
+    (project / "sub" / "test_ok.py").write_text(
+        "def test_x():\n    assert True\n", encoding="utf-8")
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(project))
+
+    fn = getattr(harness_tools, tool_name)
+    result = fn(root=str(project), path="sub/test_ok.py")
+    assert "outside" not in str(result.get("error", "")).lower(), result
+
+
 def test_diff_files_does_not_leak_the_absolute_host_path(tmp_path, monkeypatch):
     """``git diff --no-index`` echoes its arguments into the ``diff --git`` header.
 

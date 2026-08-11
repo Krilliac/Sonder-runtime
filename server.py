@@ -16136,12 +16136,28 @@ def _agent_verifier_reachable(read_only, allowed_tools):
 def _agent_verification_covers(tool_name, args, mutations, project_scope=""):
     """Whether this verifier ran over the work this run is answerable for.
 
-    Keyed on ``root``. These four tools scope their run with ``root``; their
-    ``path`` argument narrows *which* checks run inside it, not what those
-    checks exercise, and it is empty on a default invocation. Reading ``path``
-    here -- the argument the file-oriented _agent_validation_covers reads --
-    would answer "" for nearly every real call and quietly refuse to count a
-    verification that genuinely covered the change.
+    Keyed on ``root`` NARROWED BY ``path``. This used to key on ``root`` alone,
+    justified here as: *"their `path` argument narrows which checks run inside
+    it, not what those checks exercise."* That was refuted by code in the same
+    lane. ``harness_tools`` appends ``path`` straight to the child argv
+    (``cmd.append(path)`` in test_run/lint_run/format_code/typecheck_run), so
+    ``path`` decides what the child actually looks at -- it *is* what those
+    checks exercise. ``server.py:15659`` says so in the other direction, and
+    until the confinement added beside this fix, ``path`` could even point
+    outside ``root`` altogether (measured: ``test_run`` executed a file outside
+    the authorized root through it).
+
+    The half the old comment had right is kept, and is why the narrowing is
+    conditional: ``path`` is empty on a default invocation, and reading it
+    unconditionally -- as the file-oriented ``_agent_validation_covers`` does --
+    would answer "" for nearly every real call and refuse verifications that
+    genuinely covered the change. So an empty ``path`` means "the whole root",
+    exactly as before; a non-empty one means the verifier looked at that
+    subtree and must be judged on it.
+
+    Without this, the model changes ``payments.py`` and runs the verifier
+    narrowed to ``tests/`` -- a real, passing, in-scope check of a different
+    part of the tree -- and it counted as covering the change.
 
     The no-mutation case is decided explicitly, never left to fall through an
     empty ``all()``: ``all([])`` is True, so a run that changed nothing
@@ -16157,9 +16173,25 @@ def _agent_verification_covers(tool_name, args, mutations, project_scope=""):
     That default is a separately-tracked item, not something decided here.
     """
     args = args if isinstance(args, dict) else {}
-    scope = _agent_normalized_path(str(args.get("root") or "."))
+    root = str(args.get("root") or ".")
+    scope = _agent_normalized_path(root)
     if not scope:
         return False
+    # A non-empty `path` narrows the scope to what the child was actually
+    # pointed at. Resolved against `root`, matching how the child resolves it
+    # (harness_tools runs it with cwd=root).
+    narrowing = str(args.get("path") or "").strip()
+    if narrowing:
+        narrowed = _agent_normalized_path(
+            narrowing if os.path.isabs(narrowing)
+            else os.path.join(root, narrowing)
+        )
+        # Only ever narrows. A `path` that resolves outside `root` is refused
+        # by harness_tools now; if one still arrives, the scope it covers is
+        # not the root it claimed, so fall closed rather than widen.
+        if not narrowed or not _agent_path_within(narrowed, scope):
+            return False
+        scope = narrowed
     changed = [
         str(record.get("path") or "") for record in mutations
         if record.get("path")
