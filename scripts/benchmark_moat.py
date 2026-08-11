@@ -166,6 +166,13 @@ def grade_parses_int(expected: int) -> Callable[[str], float]:
 # Prompt augmentation. Deliberately small and self-contained (a slimmed echo of
 # retriever.build_prompt) so the harness has no import-time dependency on the
 # live retrieval stack — the real lift comes from the same *shape* of context.
+#
+# Known divergence (2026-08-10): this still renders the older facts shape. The
+# runtime (orchestrator.build_prompt) now fences each fact, labels the block as
+# non-instruction reference material, bounds it with disclosure, and appends
+# orchestrator.TASK_DIRECTIVE. Adopting that here would move the measured moat
+# numbers for a reason unrelated to retrieval quality, so the divergence is
+# recorded rather than silently inherited; sync it only with a re-baselined run.
 # ---------------------------------------------------------------------------
 FACTS_HEADER = "# Project facts (always true here):"
 LESSONS_HEADER = "# Relevant lessons from past work (may help):"
