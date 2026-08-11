@@ -2269,9 +2269,13 @@ def test_admin_register_login_and_cot_denial(monkeypatch, tmp_path):
     assert "token:" in login
     token = login.split("token: ", 1)[1].strip()
     assert "owner role=admin" in server.admin_whoami(token)
-    assert "hidden private chain-of-thought cannot be exposed" in (
-        server.admin_private_chain_of_thought(token)
-    )
+    # An admin token is not an opt-in. Exposure needs SONDER_ALLOW_PRIVATE_COT
+    # plus an explicit allow rule; with neither set this refuses regardless of
+    # who is asking. See tests/test_private_cot_opt_in.py for the opted-in side.
+    monkeypatch.delenv("SONDER_ALLOW_PRIVATE_COT", raising=False)
+    denial = server.admin_private_chain_of_thought(token)
+    assert "hidden private chain-of-thought cannot be exposed" in denial
+    assert "SONDER_ALLOW_PRIVATE_COT" in denial
 
 
 def test_admin_accounts_requires_admin_token(monkeypatch, tmp_path):
