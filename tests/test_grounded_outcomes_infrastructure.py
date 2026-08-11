@@ -197,6 +197,42 @@ def test_a_tool_that_raised_reads_as_infrastructure():
     )
 
 
+@pytest.mark.parametrize("refusal", [
+    "ERROR: root is outside every authorized root: C:\\x",
+    "ERROR: tool args must be a JSON object",
+    "ERROR: read-only agent run has no host-selected project root, so "
+    "developer-workflow tool 'secret_scan' has no project to work on. "
+    "Pass project=<directory>.",
+    "ERROR: HOST POLICY: tool 'x' is refused by the active permission gate.",
+    "  ERROR: an indented refusal",
+    "ERROR: first line\nstdout: whatever the tool printed",
+])
+def test_every_dispatcher_refusal_shape_reads_as_infrastructure(refusal):
+    """The reader stopped naming the ``ERROR:`` wire marker and reads the
+    leading ``error:`` header instead, so pin it against the real refusal
+    shapes ``_agent_dispatch`` emits rather than one sample."""
+    assert go.rendered_infrastructure_error(refusal) == refusal.strip().splitlines()[0]
+
+
+@pytest.mark.parametrize("empty_detail", ["ERROR:", "ERROR: ", "  ERROR:  "])
+def test_a_refusal_with_no_detail_is_still_infrastructure(empty_detail):
+    """``server.isolated_run`` renders ``"ERROR: %s" % exc``, so an exception
+    whose ``str()`` is empty produces a refusal with a blank detail. The header
+    loop reads the *value* and cannot see it, so deleting the leading read
+    rather than replacing it would attribute a verdict the tool never
+    produced -- the exact harm this predicate exists to prevent."""
+    assert go.rendered_infrastructure_error(empty_detail)
+
+
+def test_a_verdict_line_is_not_mistaken_for_a_refusal():
+    """Only the *leading* line is read as a refusal header. A verifier that
+    rendered a real verdict and then mentioned an error must keep its verdict:
+    a lost negative is the worse mistake here."""
+    assert go.rendered_infrastructure_error(
+        "test run (pytest)\n  ok: False\n  returncode: 1"
+    ) == ""
+
+
 def test_unrelated_text_is_not_read_as_infrastructure():
     assert go.rendered_infrastructure_error("") == ""
     assert go.rendered_infrastructure_error("some other tool's output") == ""

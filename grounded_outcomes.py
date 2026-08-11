@@ -188,14 +188,35 @@ def rendered_infrastructure_error(observation) -> str:
     ``test_the_two_predicates_agree`` pins this against
     ``evaluation_infrastructure_error`` over the same measured result dicts, so
     the two cannot drift.
+
+    One grammar, not two. A tool that raised never produced a verdict about
+    anything, and ``server._agent_dispatch`` renders that as a first line whose
+    header key is ``error``. This function used to test that line against the
+    literal ``ERROR:`` wire marker, which put knowledge of the server's error
+    protocol inside a module whose whole design is to have no dependency on the
+    server (``record_fn`` is injected for exactly that reason, and this module
+    is stdlib-only). It is also a second protocol bolted beside the header
+    grammar the rest of this function already reads. So the leading line is now
+    read as what it is -- an ``error:`` header -- which matches every refusal
+    the dispatcher emits *and* ``_format_run_result``'s own ``error:`` line,
+    without naming the marker. Measured over the dispatcher's real refusal
+    shapes, the verdicts are identical to the literal test, including a refusal
+    whose detail is empty (``"ERROR:"``), which the header loop below cannot
+    see because it reads the value and that value is blank. That case is the
+    reason this is a distinct read rather than a deletion:
+    ``server.isolated_run`` renders ``"ERROR: %s" % exc``, and an exception
+    whose ``str()`` is empty would otherwise be attributed a verdict it never
+    produced.
     """
     text = str(observation or "")
     if not text.strip():
         return ""
-    # A tool that raised never produced a verdict about anything. This is how
-    # `_agent_dispatch` renders one, and how `ok` becomes False for it.
-    if text.lstrip().startswith("ERROR:"):
-        return text.strip().splitlines()[0]
+    leading = next(
+        (line.strip() for line in text.splitlines() if line.strip()), "",
+    )
+    leading_key, leading_sep, _ = leading.partition(":")
+    if leading_sep and leading_key.strip().casefold() == "error":
+        return leading
     fields = {}
     for line in text.splitlines():
         stripped = line.strip()
