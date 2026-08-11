@@ -14605,7 +14605,6 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "self_heal_check", "status", "system_profile_text", "environment_status", "hardware_profile",
     "emotion_vector_status", "preferences_status", "tool_manifest",
     "memory_search", "web_search", "web_fetch", "weather_lookup",
-    "test_discover",
     # test_discover / find_references / diff_files / secret_scan are
     # deliberately absent.  They are read-only, but they are direct-MCP tools
     # only: harness_tools._resolve_root resolves any absolute path with no

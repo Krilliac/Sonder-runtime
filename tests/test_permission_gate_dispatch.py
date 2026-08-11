@@ -967,8 +967,8 @@ def test_confirm_never_reads_a_line_nobody_typed(monkeypatch):
     assert piped.readline() == "y\n", "the prompt consumed a line anyway"
 
 
-def test_a_real_terminal_still_prompts(monkeypatch):
-    """The degrade must be conditional -- a tty keeps its y/N question."""
+def test_a_real_terminal_does_not_prompt_for_a_safe_observation(monkeypatch):
+    """A verified safe observation bypasses the prompt even on a tty."""
     asked = []
     monkeypatch.setattr(
         sonder_repl, "_confirm", lambda question: asked.append(question) or False,
@@ -977,8 +977,8 @@ def test_a_real_terminal_still_prompts(monkeypatch):
 
     may_run, refusal = sonder_repl._named_command_gate("/stats")
 
-    assert (may_run, refusal) == (False, "skipped /stats")
-    assert len(asked) == 1
+    assert (may_run, refusal) == (True, "")
+    assert not asked
 
 
 def test_an_unrecognised_risk_class_does_not_crash_the_console_gate(monkeypatch):
