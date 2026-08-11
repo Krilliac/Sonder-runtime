@@ -2499,8 +2499,14 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
         # the recall canaries -- because _preference_facts' cap is exactly the
         # block's cap. orchestrator.select_facts draws the two round-robin so
         # neither source can starve the other by call order.
+        # Newest first. facts_for_project is ORDER BY ts ASC (and other callers
+        # want that chronological order, so it stays as it is), but the block
+        # is bounded: fed oldest-first, a project holding more facts than the
+        # round-robin floor fills the block with its oldest rows and drops the
+        # newest. A fact someone just stored is the newest row in the project
+        # by definition, so oldest-first makes recency the thing that loses.
         project_facts = (
-            [f["text"] for f in memory_store.facts_for_project(conn, project)]
+            [f["text"] for f in reversed(memory_store.facts_for_project(conn, project))]
             if project else []
         )
         retrieve_fn = retriever.retrieve
