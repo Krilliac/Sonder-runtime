@@ -205,11 +205,30 @@ drift as files change. Anchor on the named function, not just the integer.
   `allow_web` **and** `allow_location` **and** `consent`; remote-Ollama —
   `sonder_config.py:418-422` rejects a non-loopback `ollama.url` unless
   `allow_remote` is set; cloud — `sonder_config.py:331` `SONDER_ALLOW_CLOUD`
-  feature flag, enforced at the operation-context gate (`server.py:743`).
+  feature flag, enforced at the operation-context gate (`server.py:743`);
+  private chain-of-thought — `server.py:309` `private_cot_opt_in_enabled`
+  (`SONDER_ALLOW_PRIVATE_COT`, off by default) **and** `server.py:326`
+  `_private_cot_rule_allows`, both required by the single conjunction at
+  `server.py:7593`, with the denying rule in
+  `sonder_runtime/domain/execution/policy.py` `DEFAULT_RULES` left in place.
 - **Why it holds:** each capability is default-denied and re-checked at the tool
   boundary, not only at config load; the location gate in particular is checked
   at three independent layers, and the raw IP is explicitly not retained
   (`web_tools.py:1049` `normalize_location_hint`, `web_tools.py:1102`).
+- **`SONDER_ALLOW_PRIVATE_COT` is the strictest of these**, and the only one an
+  environment variable cannot open alone. The second act must be written to
+  `permissions.json` through the developer-gated `permission_rule_set`, and
+  `_private_cot_rule_allows` demands `action == "allow"` exactly — `ask` does
+  not open it. It fails closed twice over: `permission_rules.load` degrades to
+  the denying `DEFAULT_RULES` on an unreadable or malformed policy file, and the
+  helper returns False on any exception. The gate is evaluated *before* the
+  caller's token is examined, so a deployment that has not opted in returns one
+  refusal to everybody and cannot be used to probe who holds a developer token;
+  that refusal is recorded (`ok=False`) so probing is visible.
+- **Residual, by design:** opted in, this serves the model's own thinking
+  channel, which can contain reasoning the final answer deliberately omitted.
+  On a `local-open` deployment the developer-token gate is inert by definition,
+  so the two operator acts are the only effective gates there.
 
 ### D3 — Secret rotation and redaction
 
