@@ -6055,8 +6055,12 @@ def _permission_mode_context(mode: str) -> str:
             permission_modes.MODE_LABELS.get(mode, mode),
             permission_modes.MODE_BLURBS.get(mode, ""),
         ),
-        "  'ask' means a prompt at the console; a caller with nobody to ask "
-        "proceeds instead, except under plan.",
+        # Load-bearing, and printed unconditionally on every render: it is
+        # what makes an `ask` row incomplete rather than false for a caller
+        # this surface does not speak for. Defined in permission_modes so the
+        # same sentence reaches /mode and /help too, rather than being a
+        # second copy free to drift.
+        "  %s" % permission_modes.ASK_CAVEAT,
         _elevation_status_text(),
     ])
 

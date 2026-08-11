@@ -33,6 +33,41 @@ from dataclasses import dataclass
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
+
+class CatalogUnavailable(RuntimeError):
+    """The tool registry could not be read, so nothing here can be trusted.
+
+    This used to be swallowed. Both ``console_tools()`` and ``catalog()``
+    wrapped the registry read in ``except Exception:`` and carried on with an
+    empty set, with a comment explaining that a partially initialised server
+    must not break the gate -- but the code kept the gate from breaking by
+    turning it off. Two things happened at once, and the quieter one was
+    worse: every catalog-``dangerous`` tool downgraded to ``ask``, and
+    ``console_tools()`` returned ``{}``, so the console's named-branch gate
+    answered "allowed" for every command it maps.
+
+    Both results are ``lru_cache(maxsize=1)``, so a *transient* failure --
+    exactly the partially-initialised case the comments cited -- latched for
+    the life of the process. Raising fixes that for free: an exception is not
+    memoised, so the next call re-reads.
+
+    Callers that enforce (``permission_modes.risk_of``, the console gate, the
+    HTTP gate) treat this as "fail closed on ignorance" and refuse. Callers
+    that merely display (``help_text``, ``format_matches``) say so in place of
+    the listing rather than raising into a REPL loop.
+    """
+
+
+def _registered_tool_names(server) -> frozenset:
+    """Every registered MCP tool name, or ``CatalogUnavailable``."""
+    try:
+        return frozenset(tool.name for tool in server.mcp._tool_manager.list_tools())
+    except Exception as exc:
+        raise CatalogUnavailable(
+            "the MCP tool registry could not be read: %s" % exc
+        ) from exc
+
+
 # --- taxonomy -------------------------------------------------------------
 
 CATEGORIES = {
@@ -228,6 +263,46 @@ _DANGEROUS = frozenset({
 # it. It is not a place to park a tool that merely looks harmless: the
 # ``ask`` default above is the right answer for anything unverified.
 _READ_ONLY = frozenset({"task_list", "task_show"})
+
+# Branches whose real work is done by module-level functions that front no
+# registered MCP tool, mapped to the name the gate should grade them by.
+#
+# ``_branch_tool_calls`` keeps only names the registry knows, so ``_open_db``
+# and friends drop out. That filter is fail-OPEN at the *command* level: a
+# branch whose writer is a plain module function is classified by whatever
+# registered tool it incidentally also calls. ``/selfmod`` was the live case
+# -- ``selfmod.deploy`` ``os.replace``s Sonder's own source tree
+# (``selfmod.py``), and the only registered tool in that branch is
+# ``system_improvement_report``, a ``safe`` read it quotes as evidence. So the
+# gate was consulted, took the strictest member of a one-element ``safe`` set,
+# and answered "allowed" under ``plan``. A confident wrong answer, not a gap.
+#
+# The remedy is to make the command stand for its own work: the name here is
+# added to the branch's tool list, and ``permission_modes.risk_of`` resolves it
+# through this catalog's entry for ``/selfmod``, whose curated risk
+# (``command_registry``) now says what the command actually does. It is a
+# floor, not a replacement -- the strictest of it and every tool the branch
+# calls still decides.
+#
+# Deliberately a short, written-down list rather than a general rule, and that
+# is a measurement rather than a preference. Two general rules were tried over
+# both console chains against the 185 registered tools:
+#
+#   "any call this walk could not resolve fails closed" flags 94 of the 124
+#   mapped commands -- ``json.dumps``, ``arg.strip()`` and every
+#   ``server.control_command`` delegation among them;
+#
+#   "grade a command by its own catalogued risk" flags 19, of which 18 are
+#   verified reads (``/read``, ``/search``, ``/tree``, ``/files``).
+#
+# Both would put ordinary reads behind a prompt and deny them under ``plan``,
+# which is the over-refusal this gate is explicitly built to avoid -- a
+# refusal nobody can act on trains operators to route around the gate. A rule
+# that fires on 94 of 124 commands is not a gate; it is noise with a verdict.
+_UNREGISTERED_BRANCH_WORK = {
+    "/selfmod": "selfmod",
+    "/selfmodify": "selfmod",
+}
 
 
 @dataclass(frozen=True)
@@ -459,19 +534,76 @@ def console_tools() -> dict:
     """
     import server  # lazy: server imports this module for /help
 
-    try:
-        names = frozenset(
-            tool.name for tool in server.mcp._tool_manager.list_tools()
-        )
-    except Exception:  # a partially initialised server must not break the gate
-        names = frozenset()
+    names = _registered_tool_names(server)
     merged: dict = {}
     for path, function in (
         ("server.py", "control_command"), ("sonder_repl.py", "main"),
     ):
         for slash, tools in _branch_tool_calls(path, function, names).items():
             merged[slash] = tuple(sorted(set(merged.get(slash, ())) | set(tools)))
-    return merged
+    return _with_unregistered_work(merged)
+
+
+def _with_unregistered_work(mapped: dict) -> dict:
+    """Add the stand-in name for branches whose real work fronts no tool.
+
+    Only for names the chain actually dispatches -- a map for a chain that
+    never mentions ``/selfmod`` does not gain it.
+    """
+    out = dict(mapped)
+    for slash, stand_in in _UNREGISTERED_BRANCH_WORK.items():
+        if slash in out:
+            out[slash] = tuple(sorted(set(out[slash]) | {stand_in}))
+    return out
+
+
+# Marker for a branch that is a one-line forward to ``server.control_command``.
+# It is not a tool; it is resolved away below into whatever that chain's own
+# branch of the same name reaches.
+_DELEGATION = "control_command"
+
+
+@functools.lru_cache(maxsize=1)
+def http_slash_tools() -> dict:
+    """Every app/HTTP slash command mapped to the MCP tools it can invoke.
+
+    ``sonder_serve._handle_slash`` is a sixth hand-written dispatch chain and
+    the one the Flutter app talks to. It is derived here for exactly the reason
+    the console's map is: it calls ``server.file_write``/``file_edit``/
+    ``file_delete`` directly and forwards ten more names to
+    ``server.control_command``, so a hand-kept table would go stale the first
+    time a branch was added, and a permission gate that silently stops covering
+    a command is worse than none.
+
+    Kept separate from ``console_tools()`` rather than merged into it: the two
+    chains answer the same slash names with *different* bodies. Measured over
+    the 110 names both chains define, three differ -- ``/todo`` and its aliases
+    reach ``task_delete``/``task_plan``/``task_depend``/``task_progress`` at
+    the console and only ``task_create``/``list``/``show``/``update`` here --
+    so unioning them would gate each surface at the other's blast radius, and
+    an operator refused a delete here could not tell why.
+
+    The forwards are resolved rather than dropped. A branch whose whole body is
+    ``return server.control_command(...)`` names no tool of its own, so
+    attributing it nothing would have left those ten as ungated as the chain
+    was -- they inherit ``control_command``'s own branch of the same name.
+    """
+    import server  # lazy: server imports this module for /help
+
+    names = _registered_tool_names(server)
+    delegated = _branch_tool_calls("server.py", "control_command", names)
+    own = _branch_tool_calls(
+        "sonder_serve.py", "_handle_slash", names | {_DELEGATION},
+    )
+    merged: dict = {}
+    for slash, tools in own.items():
+        resolved = set(tools)
+        if _DELEGATION in resolved:
+            resolved.discard(_DELEGATION)
+            resolved |= set(delegated.get(slash, ()))
+        if resolved:
+            merged[slash] = tuple(sorted(resolved))
+    return _with_unregistered_work(merged)
 
 
 @functools.lru_cache(maxsize=1)
@@ -579,8 +711,14 @@ def catalog() -> tuple:
 
     try:
         tools = list(server.mcp._tool_manager.list_tools())
-    except Exception:  # a partially initialised server must not break /help
-        tools = []
+    except Exception as exc:
+        # Not swallowed. `risk_of` reads `dangerous` out of this catalog, so
+        # continuing with an empty list silently reclassified every dangerous
+        # tool as `ask` -- and memoised the answer. Raising leaves nothing
+        # cached, and the display callers below turn it into a message.
+        raise CatalogUnavailable(
+            "the MCP tool registry could not be read: %s" % exc
+        ) from exc
     tools_by_name = {t.name: t for t in tools}
 
     import command_registry
@@ -665,6 +803,7 @@ def reset_cache() -> None:
     """Drop the memoised catalog (used after a live reload adds tools)."""
     catalog.cache_clear()
     console_tools.cache_clear()
+    http_slash_tools.cache_clear()
 
 
 # --- lookup / search ------------------------------------------------------
@@ -837,18 +976,37 @@ def help_command(name: str) -> str:
     return "\n".join(lines)
 
 
+_UNAVAILABLE_TEXT = (
+    "the command catalog is unavailable: %s\n"
+    "  nothing can be listed, and the permission gate is refusing commands "
+    "until the tool registry answers again."
+)
+
+
 def help_text(topic: str = "") -> str:
-    """Dispatcher behind /help: no topic -> categories, else category or command."""
+    """Dispatcher behind /help: no topic -> categories, else category or command.
+
+    A registry that cannot be read is reported rather than raised: this is the
+    display path, and a traceback out of ``/help`` would take the REPL loop
+    with it. The enforcing paths fail closed instead -- see
+    ``CatalogUnavailable``.
+    """
     key = str(topic or "").strip()
-    if not key:
-        return help_overview()
-    if key.lstrip("/").lower() in categories():
-        return help_category(key)
-    return help_command(key)
+    try:
+        if not key:
+            return help_overview()
+        if key.lstrip("/").lower() in categories():
+            return help_category(key)
+        return help_command(key)
+    except CatalogUnavailable as exc:
+        return _UNAVAILABLE_TEXT % exc
 
 
 def format_matches(prefix: str, limit: int = 12) -> str:
-    matches = complete(prefix, limit=limit)
+    try:
+        matches = complete(prefix, limit=limit)
+    except CatalogUnavailable as exc:
+        return _UNAVAILABLE_TEXT % exc
     if not matches:
         return "no command matches '%s'. /help lists every category." % prefix
     header = "most used" if not str(prefix or "").strip("/ ") else (

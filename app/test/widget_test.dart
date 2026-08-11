@@ -1189,7 +1189,8 @@ Map<String, dynamic> _permissionModeBody(
     'plan': 'reads only - no writes, no commands',
     'manual': 'ask before anything that is not a read',
     'acceptEdits': 'file changes proceed; running programs still asks',
-    'auto': 'file changes and programs proceed; destructive still asks',
+    'auto':
+        'file changes and programs proceed; destructive still asks at the console',
   };
   const labels = <String, String>{
     'plan': 'plan',

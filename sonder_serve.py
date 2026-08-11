@@ -908,6 +908,51 @@ def _dump_chat(messages=None, label="chat", state=None):
     return "dumped chat/debug log to %s" % path
 
 
+def _http_slash_refusal(cmd):
+    """The permission gate for this chain: "" to proceed, else the refusal text.
+
+    This chain calls `server.file_write` / `file_edit` / `file_delete`
+    directly and forwards ten more names to `server.control_command`, and
+    until now nothing in front of it consulted `permission_modes` --
+    `permission_modes` was imported here only to *set* the mode at
+    `/v1/permission-mode`. So a shipped `file_delete: deny` rule bound at four
+    surfaces and not at this one, and `plan`, which this same surface both
+    selects and displays on its mode chip, did not hold still here.
+
+    `_dangerous_http_slash` + `_developer_authorized` is not this check. That
+    pair is an authentication tier -- it asks *who* is calling, and in the
+    default `local-open` deployment the answer is "anyone who can reach this
+    port" (see `_deployment_gating_summary`). It has nothing to say about
+    which mode is in force or which rules an operator wrote.
+
+    `interactive=False`, like every other caller with nobody to prompt: `ask`
+    degrades to `allow`, so this surface refuses nothing today that it did not
+    refuse before, while a `deny` rule and `plan` refuse. Only a `deny` can
+    come back from `decide()` here, which is why this is a flat loop rather
+    than a copy of the console's ask-and-rank gate.
+
+    The gate's own control is exempt for the reason it is everywhere else --
+    though the app's real way back out of `plan` is the `/v1/permission-mode`
+    endpoint, which is not a slash command and is not gated.
+    """
+    try:
+        tools = command_catalog.http_slash_tools().get(cmd, ())
+    except command_catalog.CatalogUnavailable as exc:
+        # Fail closed on ignorance: an empty map would answer "allowed" for
+        # every command in this chain.
+        return "refused %s: %s" % (cmd, exc)
+    for tool in tools:
+        if tool in permission_modes.GATE_CONTROL_TOOLS:
+            continue
+        decision = permission_modes.decide(tool, interactive=False)
+        if decision.action == permission_modes.DENY:
+            return "refused %s: %s (mode: %s)" % (
+                cmd, decision.reason,
+                permission_modes.MODE_LABELS.get(decision.mode, decision.mode),
+            )
+    return ""
+
+
 def _handle_slash(content, messages=None, state=None, project=""):
     """Return response text if `content` is a recognized slash command, else None."""
     state = _state_or_legacy(state)
@@ -919,6 +964,13 @@ def _handle_slash(content, messages=None, state=None, project=""):
     parts = stripped.split(None, 1)
     cmd = parts[0].lower()
     arg = parts[1] if len(parts) > 1 else ""
+
+    # One choke point in front of every branch below, for the same reason the
+    # REPL has one: this is a flat chain of ~130 `if cmd == ...` returns, and a
+    # check placed after even one of them leaves that one ungated.
+    refusal = _http_slash_refusal(cmd)
+    if refusal:
+        return refusal
 
     if cmd == "/help":
         # The catalog derives every command from the dispatch chains and the
@@ -1438,24 +1490,39 @@ def _completion_limit(raw):
 
 
 def _commands_index_payload():
-    return {
-        "commands": [command.to_dict() for command in command_catalog.catalog()],
+    # A catalog that cannot read the tool registry now raises rather than
+    # quietly returning nothing (command_catalog.CatalogUnavailable). This is
+    # a listing endpoint, not an enforcing one, so it degrades -- but it says
+    # so in the payload instead of shipping an empty list the client would
+    # render as "this build has no commands".
+    try:
+        commands = [command.to_dict() for command in command_catalog.catalog()]
+        error = ""
+    except command_catalog.CatalogUnavailable as exc:
+        commands, error = [], str(exc)
+    payload = {
+        "commands": commands,
         # The blurb per category, not the commands in it: the client renders
         # these as section headings beside the counts it derives itself.
         "categories": dict(command_catalog.CATEGORIES),
         "popular": list(command_catalog.POPULAR),
     }
+    if error:
+        payload["error"] = error
+    return payload
 
 
 def _commands_complete_payload(query, limit=""):
-    return {
-        "matches": [
+    try:
+        matches = [
             command.to_dict()
             for command in command_catalog.complete(
                 query, limit=_completion_limit(limit),
             )
-        ],
-    }
+        ]
+    except command_catalog.CatalogUnavailable as exc:
+        return {"matches": [], "error": str(exc)}
+    return {"matches": matches}
 
 
 def _commands_help_payload(topic=""):

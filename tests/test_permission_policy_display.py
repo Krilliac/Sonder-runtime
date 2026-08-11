@@ -393,3 +393,82 @@ def test_every_decide_return_site_names_its_source():
 def test_decision_source_is_carried_into_the_dict_form():
     decision = pm.decide("status", mode=pm.AUTO, rule_lookup=lambda n: None)
     assert decision.to_dict()["source"] == "mode"
+
+
+# --- the caveat that makes an incomplete row recoverable -------------------
+#
+# `/permissions` renders with `interactive=True`, so `effective: ask` is the
+# operator's answer and not an MCP caller's. That output ships because it is
+# incomplete rather than false: one line, printed unconditionally on every
+# render, states the exact rule a reader needs to get from the row to their
+# own answer. That line is therefore load-bearing, and was untested -- make it
+# conditional or move it and the gap becomes a plain falsehood.
+
+
+def test_the_ask_caveat_is_printed_on_every_render(tmp_path):
+    _write_policy(tmp_path, [{"pattern": "status", "action": "allow"}])
+
+    for mode in (pm.PLAN, pm.MANUAL, pm.ACCEPT_EDITS, pm.AUTO):
+        pm.set_mode(mode)
+        assert pm.ASK_CAVEAT in server.permission_policy(), mode
+        assert pm.ASK_CAVEAT in server.permission_policy("file_write"), mode
+
+
+def test_the_caveat_states_the_rule_it_has_to_state(tmp_path):
+    """Not just "a line is present" -- the two facts a reader needs.
+
+    A caller with nobody to ask proceeds instead of being asked, and `plan` is
+    the exception. Both are behaviour, so both are measured here rather than
+    read off the sentence.
+    """
+    _write_policy(tmp_path, [{"pattern": "status", "action": "allow"}])
+    pm.set_mode(pm.MANUAL)
+    lookup = lambda _tool: None
+
+    assert pm.decide(
+        "file_write", interactive=True, mode=pm.MANUAL, rule_lookup=lookup,
+    ).action == pm.ASK
+    assert pm.decide(
+        "file_write", interactive=False, mode=pm.MANUAL, rule_lookup=lookup,
+    ).action == pm.ALLOW
+    assert pm.decide(
+        "file_write", interactive=False, mode=pm.PLAN, rule_lookup=lookup,
+    ).action == pm.DENY
+
+    out = server.permission_policy()
+    assert "nobody to ask" in out
+    assert "except under plan" in out
+
+
+# --- an `ask` row says whose answer it is ---------------------------------
+
+
+def test_an_ask_row_shows_both_callers_answers(tmp_path):
+    """`ask` is the only verdict that differs between the two callers.
+
+    Every other row is the same for an operator and for an MCP client -- a
+    `deny` is a deny, an `allow` is an allow -- so naming both answers on the
+    rows where they differ upgrades this output from disclosure to truth,
+    without plumbing a caller flag through the renderer.
+    """
+    _write_policy(tmp_path, [{"pattern": "file_write", "action": "ask",
+                              "note": "workspace writes"}])
+    pm.set_mode(pm.MANUAL)
+
+    single = server.permission_policy("file_write")
+    assert "  effective: ask (console) / allow (non-interactive)" in single
+
+    listing = server.permission_policy()
+    assert "-> ask (mode) / allow (non-interactive)" in listing
+
+
+def test_only_ask_rows_are_qualified(tmp_path):
+    """A deny or an allow means the same thing to both callers; say it plainly."""
+    _write_policy(tmp_path, [{"pattern": "file_delete", "action": "deny",
+                              "note": "destructive by default"}])
+    pm.set_mode(pm.MANUAL)
+
+    out = server.permission_policy("file_delete")
+
+    assert "  effective: deny" in out
+    assert "non-interactive" not in out.split("permission mode:")[0]

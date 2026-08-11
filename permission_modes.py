@@ -37,7 +37,18 @@ including ``auto``, the tools the catalog classes ``dangerous`` (``file_delete``
 ``admin_register``/``admin_set_account``, and the policy-changing
 ``runtime_policy_update``/``permission_rule_set``) still stop and ask.
 
-Note the qualifier: *what the catalog classes dangerous*, which is not every
+Read that as the promise it is, which is narrower than "cannot happen":
+``ask`` is a promise about a *prompt*, and a prompt needs somebody to answer
+it. Three of the five call sites below pass ``interactive=False`` -- the agent
+path, the loop path and the MCP entry point -- and there ``ask`` degrades to
+``allow`` (see "Enforcement scope"), so ``auto`` plus no operator runs a
+``dangerous`` tool without stopping. ``plan`` is the exception that holds
+everywhere. That degrade is deliberate and is what "preserve current
+behaviour" requires; what is not acceptable is stating the guarantee without
+it, so ``ASK_CAVEAT`` carries the condition onto every surface that repeats
+the claim.
+
+Note the other qualifier: *what the catalog classes dangerous*, which is not every
 ``admin_*`` tool. Read-only ones such as ``admin_whoami`` are ordinary ``ask``
 tools and do flow in ``acceptEdits``/``auto``. Sonder's agent
 loop can be driven by a 7B local model whose measured caller-judged accuracy is
@@ -100,10 +111,22 @@ directly with their own ``interactive`` value, and gating the bodies as well
 would prompt twice for one console command and attribute the agent path's
 refusal to the wrong layer.
 
-One deliberate console-only exemption: ``permission_mode`` itself is never
-gated there. It is risk ``ask``, which ``plan`` denies, so gating it would
-leave the operator in ``plan`` with no console way back out. The agent path
-gets no such exemption -- a model must not be able to lift its own restraint.
+One deliberate exemption, at the two surfaces a *person* drives Sonder
+through: ``permission_mode`` itself is never gated at the console
+(``sonder_repl.GATE_EXEMPT_TOOLS``) or at the MCP protocol entry point
+(``reloadable_mcp._refuse_if_gated``, which consults the same
+``GATE_CONTROL_TOOLS``). It is risk ``ask``, which ``plan`` denies, and the
+chosen mode persists to disk -- so gating it would leave whoever selected
+``plan`` unable to select anything else, across restarts, with no remedy but
+hand-editing ``permission_mode.json``.
+
+Be exact about what that costs, because the exemption is about who can defeat
+the gate. Sonder's *own* agent and loop paths get no exemption -- a model
+Sonder is running must not be able to lift its own restraint, and
+``_agent_dispatch`` cannot reach the tool at all. But an external model
+driving Sonder over MCP reaches ``reloadable_mcp`` and therefore *can* lift
+``plan``. That is the accepted price of not trapping an operator whose only
+client is an MCP one; it is not an accident, and it is not "console-only".
 
 Rules and modes compose; they do not race
 -------------------------------------------
@@ -206,11 +229,27 @@ MODE_LABELS = {
     AUTO: "auto",
 }
 
+# The one sentence that keeps every "ask" claim on this module's surfaces
+# honest, defined once so the copies cannot drift. `ask` is a promise about a
+# prompt; a caller with nobody to prompt gets `allow` instead, except under
+# `plan`. `server._permission_mode_context` prints this on every
+# `/permissions` render and the presentation functions below repeat it, so a
+# reader of any of them can get from a row to their own answer.
+ASK_CAVEAT = (
+    "'ask' means a prompt at the console; a caller with nobody to ask "
+    "proceeds instead, except under plan."
+)
+
 MODE_BLURBS = {
     PLAN: "reads only - no writes, no commands",
     MANUAL: "ask before anything that is not a read",
     ACCEPT_EDITS: "file changes proceed; running programs still asks",
-    AUTO: "file changes and programs proceed; destructive still asks",
+    # "destructive still asks" full stop was false for the three
+    # `interactive=False` call sites, and this string has the widest reach of
+    # any of them: `server.permission_mode_data()` ships it to the Flutter
+    # client, which renders it on the mode chip and in the mode picker. Name
+    # where the prompt happens, because it does not happen anywhere else.
+    AUTO: "file changes and programs proceed; destructive still asks at the console",
 }
 
 # Colour hints for whatever renders the indicator (ANSI 256 palette).
@@ -443,11 +482,22 @@ def risk_of(tool_name: str) -> str:
     catalogued = ""
     try:
         import command_catalog
-        command = command_catalog.by_name("/" + name)
+    except Exception:
+        command_catalog = None
+    if command_catalog is not None:
+        try:
+            command = command_catalog.by_name("/" + name)
+        except command_catalog.CatalogUnavailable:
+            # The classifier itself is blind. Continuing would report every
+            # ``dangerous`` tool as ``ask``, which a caller with nobody to ask
+            # resolves to ``allow`` -- a gate that cannot see refusing nothing.
+            # Fail closed on ignorance instead; ``dangerous`` is the one class
+            # that stops in every mode.
+            return "dangerous"
+        except Exception:
+            command = None
         if command is not None:
             catalogued = command.risk
-    except Exception:
-        pass
     if catalogued == "dangerous":
         return "dangerous"
     if name in EXECUTION_TOOLS:
@@ -638,6 +688,10 @@ def describe(mode: str | None = None) -> str:
     width = max(len(labels[k]) for k in order)
     for key in order:
         lines.append("  %-*s  %s" % (width, labels[key], _MATRIX[active][key]))
+    if ASK in _MATRIX[active].values():
+        # The rows above are the raw matrix, and an `ask` row read alone is a
+        # promise this mode only keeps for a caller somebody can answer for.
+        lines += ["", "  %s" % ASK_CAVEAT]
     lines += [
         "",
         "  privilege: %s" % (
@@ -662,6 +716,7 @@ def overview() -> str:
         "",
         "  shift+tab cycles   /mode <name> sets   /mode <name> --explain details",
         "  destructive tools ask in every mode, including auto.",
+        "  %s" % ASK_CAVEAT,
     ]
     if elevated():
         lines.append("  PRIVILEGE: elevated%s" % (

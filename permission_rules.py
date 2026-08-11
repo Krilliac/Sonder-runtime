@@ -295,6 +295,25 @@ def rule_lookup(rules):
     return lookup
 
 
+def _both_callers(action):
+    """An action, naming both callers' answers on the one row where they differ.
+
+    ``/permissions`` is rendered with ``interactive=True`` -- the operator's
+    view -- because that is the surface it is principally typed at. For a
+    caller with nobody to ask (an MCP client, the app, a piped console) the
+    same inputs give a different answer, and ``ask`` is the *only* verdict
+    where that is true: a ``deny`` is a deny for both, an ``allow`` is an
+    allow for both, and ``plan`` -- the one mode where a non-interactive
+    caller is still refused -- never produces ``ask`` at all (its matrix row
+    has no ASK entry). So naming both answers here, on ask rows only, turns
+    this output from disclosure into truth without plumbing a caller flag
+    through the renderer.
+    """
+    if action != "ask":
+        return action
+    return "ask (console) / allow (non-interactive)"
+
+
 def _effective_lines(decide, tool_name):
     """The mode/risk/effective/governed-by block for one named tool."""
     if decide is None:
@@ -304,7 +323,7 @@ def _effective_lines(decide, tool_name):
         return [
             "  mode: %s" % decision.mode,
             "  risk: %s" % decision.risk,
-            "  effective: %s" % decision.action,
+            "  effective: %s" % _both_callers(decision.action),
             "  governed by: %s -- %s" % (decision.source, decision.reason),
         ]
     except Exception as exc:
@@ -328,6 +347,8 @@ def _effective_suffix(decide, rule):
         decision = decide(rule["pattern"])
     except Exception as exc:
         return "  -> UNAVAILABLE (%s)" % _describe_exc(exc)
+    if decision.action == "ask":
+        return "  -> ask (%s) / allow (non-interactive)" % decision.source
     return "  -> %s (%s)" % (decision.action, decision.source)
 
 
@@ -370,7 +391,8 @@ def format_policy(home, tool_name="", *, decide=None, snapshot=None):
             lines.append(
                 "  -> is the effective decision for that tool name, rule and "
                 "mode combined; wildcard rows cover tools of differing risk, "
-                "so they get none."
+                "so they get none. An 'ask' row names both callers' answers, "
+                "because it is the only verdict where they differ."
             )
         for rule in rules:
             lines.append(
