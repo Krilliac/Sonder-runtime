@@ -114,6 +114,24 @@ def grounded_schema(schema):
     required = schema.get("required")
     if not isinstance(required, list):
         required = list(properties)
+    unknown = [name for name in required if name not in properties]
+    if unknown:
+        # Filtering these out turned a caller's typo into a clean success: a
+        # `required` naming only fields that do not exist produced a schema with
+        # nothing in it, and the tool answered `{"fields": {}}` as though the
+        # document had been read and none of the facts were in it. A caller
+        # cannot tell that apart from an honest empty result, which makes it the
+        # same shape as a guard that silently no-ops. `_parse_schema_arg` already
+        # refuses a malformed schema outright rather than running the call
+        # unconstrained while the caller believes it was constrained; this is
+        # that rule applied one layer up.
+        raise GroundingError(
+            "extraction schema lists %s in \"required\" but does not define %s in "
+            "\"properties\"; a field that is required and undefined can be "
+            "neither extracted nor grounded"
+            % (", ".join(repr(name) for name in unknown),
+               "them" if len(unknown) > 1 else "it")
+        )
     return {
         "type": "object",
         "required": [name for name in required if name in properties],

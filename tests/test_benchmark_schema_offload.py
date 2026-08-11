@@ -216,6 +216,29 @@ def test_the_report_names_the_caller_judged_population_and_keeps_curriculum_apar
     assert "curriculum" in text.lower()
 
 
+def test_the_report_surfaces_keys_the_harness_ignored_that_production_rejects():
+    # The harness drops a key outside the schema so the unconstrained arm is not
+    # penalised for chattiness. The shipped tool does the opposite --
+    # extract_grounded REJECTS that reply. Left unsaid, the scorecard's absolute
+    # rates read as the product's rates and quietly overstate it. The delta is
+    # unaffected either way; the absolute numbers are not.
+    rows = _rows(bench.VALID, bench.VALID)
+    rows[0]["ignored_keys"] = ["explanation"]
+    baseline = bench.aggregate(bench.ARM_NO_SCHEMA, rows)
+    assert baseline["ignored_keys"] == {"explanation": 1}
+    text = bench.render_report(
+        bench.compare_arms(baseline, _arm(bench.ARM_SCHEMA, bench.VALID, bench.VALID)),
+    )
+    assert "explanation" in text
+    assert "extract_grounded" in text
+    # The caveat is stated even when nothing was ignored, so a clean run cannot
+    # read as "this harness and the product agree".
+    clean = bench.render_report(bench.compare_arms(
+        _arm(bench.ARM_NO_SCHEMA, bench.VALID), _arm(bench.ARM_SCHEMA, bench.VALID),
+    ))
+    assert "extract_grounded" in clean
+
+
 def test_the_module_has_no_combined_figure_over_both_populations():
     assert not hasattr(bench, "overall")
     source = MODULE_PATH.read_text(encoding="utf-8")
@@ -225,7 +248,34 @@ def test_the_module_has_no_combined_figure_over_both_populations():
 # --------------------------------------------------------------------------
 # What reaches the outcome store
 # --------------------------------------------------------------------------
-def test_a_never_ran_case_records_nothing_in_the_store():
+@pytest.fixture
+def provenance(monkeypatch):
+    """Opt in to recording, which ships refused.
+
+    The accounting inside record_outcomes is worth pinning on its own, so these
+    tests flip the module flag rather than being handed an escape-hatch
+    argument. An escape hatch would be exactly the ungated importable writer the
+    refusal exists to remove.
+    """
+    monkeypatch.setattr(bench, "PROVENANCE_AVAILABLE", True)
+
+
+def test_recording_refuses_while_a_row_cannot_carry_its_provenance():
+    # The refusal has to live on the writers themselves, not only on the CLI
+    # path. "The gate is on the path a stranger would take" is the argument this
+    # branch already rejected one level up: record_outcomes and _live_recorder
+    # are both importable, and _live_recorder writes into the very population
+    # calibration.should_verify gates runtime behaviour on.
+    assert bench.PROVENANCE_AVAILABLE is False
+    with pytest.raises(bench.SchemaBenchmarkError) as recording:
+        bench.record_outcomes(_arm("schema", bench.VALID), lambda iid, signal: None)
+    assert "provenance" in str(recording.value).lower()
+    with pytest.raises(bench.SchemaBenchmarkError) as writer:
+        bench._live_recorder()
+    assert "provenance" in str(writer.value).lower()
+
+
+def test_a_never_ran_case_records_nothing_in_the_store(provenance):
     written = []
     summary = bench.record_outcomes(
         _arm("schema", bench.NOT_RUN), lambda iid, signal: written.append((iid, signal)),
@@ -234,7 +284,7 @@ def test_a_never_ran_case_records_nothing_in_the_store():
     assert summary["skipped_not_run"] == 1
 
 
-def test_a_valid_case_records_accepted_and_a_wrong_one_records_rejected():
+def test_a_valid_case_records_accepted_and_a_wrong_one_records_rejected(provenance):
     written = []
     bench.record_outcomes(
         _arm("schema", bench.VALID, bench.WRONG, bench.UNUSABLE),
@@ -243,7 +293,7 @@ def test_a_valid_case_records_accepted_and_a_wrong_one_records_rejected():
     assert [signal for _iid, signal in written] == ["accepted", "rejected", "rejected"]
 
 
-def test_a_rejection_the_runtime_already_filed_is_not_filed_twice():
+def test_a_rejection_the_runtime_already_filed_is_not_filed_twice(provenance):
     rows = _rows(bench.REJECTED, bench.REJECTED)
     rows[0]["already_filed"] = True
     written = []
@@ -254,7 +304,7 @@ def test_a_rejection_the_runtime_already_filed_is_not_filed_twice():
     assert summary["skipped_already_filed"] == 1
 
 
-def test_a_case_with_no_interaction_id_is_counted_rather_than_dropped():
+def test_a_case_with_no_interaction_id_is_counted_rather_than_dropped(provenance):
     rows = _rows(bench.VALID)
     rows[0]["interaction_id"] = None
     written = []

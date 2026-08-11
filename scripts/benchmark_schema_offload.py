@@ -581,6 +581,10 @@ def aggregate(arm, rows):
         row.get("not_run_kind") or "unknown"
         for row in rows if row.get("outcome") == NOT_RUN
     )
+    ignored = Counter()
+    for row in rows:
+        for name in (row.get("ignored_keys") or ()):
+            ignored[name] += 1
     return {
         "arm": arm,
         "rows": rows,
@@ -591,6 +595,7 @@ def aggregate(arm, rows):
         "success_rate": (counts[VALID] / completed) if completed else None,
         "rejection_mix": dict(mix),
         "not_run_kinds": dict(kinds),
+        "ignored_keys": dict(ignored),
     }
 
 
@@ -694,7 +699,15 @@ def record_outcomes(arm_result, record_fn):
     Conformance alone is never filed as ``accepted``; only agreement with the
     fixture is. Filing ``accepted`` for a reply that merely matched a shape is
     precisely how a pass rate rises without the work getting better.
+
+    Refuses outright while ``PROVENANCE_AVAILABLE`` is False. The gate belongs
+    here and on :func:`_live_recorder`, not only on the CLI: both are
+    importable, and "the gate is on the path a stranger would take" is exactly
+    the argument this module already rejected one level up, about a disclosure
+    only the writer could ever read.
     """
+    if not PROVENANCE_AVAILABLE:
+        raise SchemaBenchmarkError(_PROVENANCE_REFUSAL)
     written = []
     summary = {
         "written": written, "skipped_not_run": 0,
@@ -734,6 +747,17 @@ def _mix_line(arm):
     return "%s: %s." % (
         arm["arm"],
         ", ".join("%s %d" % (name, mix[name]) for name in sorted(mix)),
+    )
+
+
+def _ignored_line(arm):
+    ignored = arm.get("ignored_keys") or {}
+    if not ignored:
+        return ("%s: no reply carried a key outside the schema, so on this run "
+                "the leniency changed nothing." % arm["arm"])
+    return "%s: dropped %s -- each would have been rejected by extract_grounded." % (
+        arm["arm"],
+        ", ".join("%s (x%d)" % (name, ignored[name]) for name in sorted(ignored)),
     )
 
 
@@ -795,6 +819,19 @@ def render_report(comparison, *, caller_before=None, caller_after=None):
         _mix_line(baseline),
         "",
         _mix_line(treatment),
+        "",
+        "## Where this harness is more forgiving than the shipped tool",
+        "",
+        "To keep the unconstrained arm from being penalised for chattiness, a "
+        "top-level key outside the schema is dropped here before anything "
+        "judges it. **`extract_grounded` does the opposite and rejects that "
+        "reply outright.** So these absolute rates are the rates of a lenient "
+        "reader, not of the product; the delta between the arms is unaffected, "
+        "because the leniency can only ever help the arm without the schema.",
+        "",
+        _ignored_line(baseline),
+        "",
+        _ignored_line(treatment),
         "",
         "## Caller-judged outcomes",
         "",
@@ -884,6 +921,14 @@ def _caller_line():
 
 
 def _live_recorder():
+    """The one function here that actually writes to the store.
+
+    Gated at construction rather than at call: this is the writer whose rows
+    ``calibration.should_verify`` gates runtime behaviour on, so it must not be
+    possible to obtain one while a row cannot say where it came from.
+    """
+    if not PROVENANCE_AVAILABLE:
+        raise SchemaBenchmarkError(_PROVENANCE_REFUSAL)
     import server
 
     def record_fn(identifier, signal):

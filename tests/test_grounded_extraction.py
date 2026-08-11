@@ -109,6 +109,25 @@ def test_each_field_is_wrapped_into_a_value_and_a_quote():
     }
 
 
+def test_a_required_field_absent_from_properties_is_refused_not_filtered():
+    # Silently dropping the name turned a caller's typo into a clean success:
+    # {"required": ["ghost"]} with no matching property produced a schema with
+    # no fields at all, and the tool answered {"fields": {}} as though the
+    # document had been read and nothing found. The caller believes a question
+    # was asked that never was. It also contradicts _parse_schema_arg five
+    # hundred lines away, which refuses a malformed schema outright rather than
+    # running the call unconstrained while the caller believes otherwise.
+    with pytest.raises(grounded_extraction.GroundingError) as excinfo:
+        grounded_extraction.grounded_schema(
+            {
+                "type": "object",
+                "required": ["ghost"],
+                "properties": {"name": {"type": "string"}},
+            }
+        )
+    assert "ghost" in str(excinfo.value)
+
+
 def test_the_callers_required_list_is_honoured_so_an_absent_fact_can_be_omitted():
     # A field the source never states cannot be grounded, so forcing the model
     # to return one would force it to invent. Optional stays optional.
