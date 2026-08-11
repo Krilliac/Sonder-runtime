@@ -2122,9 +2122,14 @@ def _selfmod_command(arg: str, *, repository_root="", operator_approved=False) -
             run_id, _, reason = rest.partition(" ")
             return selfmod.format_run(selfmod.reject(run_id, reason or "explicit user rejection")["id"])
         if action == "deploy":
-            # This command proves the new bytes import and that the server still
-            # answers. It is deliberately NOT the check that the deployment can
-            # be undone: a `--maintenance` run can rewrite `selfmod.py` and
+            # This command proves the new bytes import and that `status()` does
+            # not raise. It does NOT prove the server answers: `status()` catches
+            # `ModelCallError`/`URLError` and *returns* the error as a string, so
+            # this exits 0 with "ERROR contacting Ollama..." in its output, which
+            # nothing reads. Do not grow claims for it.
+            #
+            # It is also deliberately NOT the check that the deployment can be
+            # undone: a `--maintenance` run can rewrite `selfmod.py` and
             # `selfmod_recover.py` in one deploy, and this command passed on a
             # tree whose rollback was broken. `selfmod.deploy` now dry-runs both
             # rollback routes itself, unconditionally, so that property cannot be
