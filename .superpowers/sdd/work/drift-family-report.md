@@ -361,7 +361,7 @@ the surface the alias-laundering route below reached.
   (autopilot allowlists, `tool_manifest` key, `_LOOP_ACTION_TYPES`, new guard file,
   two updated existing tests)
 - `dad98ac` — this report
-- `<follow-up>` — close the alias-key laundering route in the guard, plus the three
+- `278839e` — close the alias-key laundering route in the guard, plus the three
   report corrections above (2026-08-11, after re-review `MERGE` on `277fd27`)
 
 Out of scope by instruction and untouched here: findings F1, F2, F4 and the test-selection
