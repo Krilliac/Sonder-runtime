@@ -65,7 +65,15 @@ CREATE TABLE IF NOT EXISTS outcomes (
     interaction_id TEXT,
     signal TEXT,
     reward REAL,
-    ts TEXT DEFAULT CURRENT_TIMESTAMP
+    ts TEXT DEFAULT CURRENT_TIMESTAMP,
+    -- WHO judged (#62). NOT NULL with deliberately NO DEFAULT: a default is
+    -- how the original defect would come back, because a writer that forgot
+    -- would keep filing rows under a meaning it never chose. Omitting the
+    -- column is a constraint failure, not a silent relabelling. The CHECK
+    -- keeps the vocabulary closed so nobody invents 'human'.
+    source TEXT NOT NULL CHECK(source IN (
+        'caller', 'machine', 'attributed', 'self_curriculum', 'unknown'
+    ))
 );
 CREATE TABLE IF NOT EXISTS memory_migrations (
     name TEXT PRIMARY KEY,
@@ -121,6 +129,11 @@ CREATE TABLE IF NOT EXISTS lesson_usage (
     reward REAL,
     ts TEXT DEFAULT CURRENT_TIMESTAMP,
     outcome_ts TEXT,
+    -- Provenance of the credited outcome (#62). Nullable, unlike outcomes.source:
+    -- a usage row exists before any outcome lands on it, so NULL means "not yet
+    -- credited" as well as "credited before this column existed". Both read as
+    -- unknown provenance, which is what the eviction filter treats them as.
+    outcome_source TEXT,
     PRIMARY KEY(lesson_id, interaction_id)
 );
 CREATE TABLE IF NOT EXISTS lesson_distillations (
@@ -252,6 +265,44 @@ def _good_outcome_signals():
     ))
 
 
+def _migrate_outcomes_source(conn):
+    """Give `outcomes` a NOT NULL provenance column, backfilled `unknown`.
+
+    A plain ``ALTER TABLE ... ADD COLUMN`` cannot express this: SQLite demands
+    a non-null DEFAULT for a NOT NULL column, and a default is precisely what
+    must not exist here -- it would let a future writer keep omitting the value
+    and have the store quietly decide what it meant. So the table is rebuilt.
+
+    The backfill is `unknown` for EVERY existing row, and that is a finding,
+    not a shortcut. Measured on the live store: 9,450 rows across seven
+    signals, and no column, join, or id shape separates a caller judgement from
+    a machine verdict or a self-curriculum result -- ``curriculum_run`` and
+    ``game_ladder`` call the very same caller-facing ``record_outcome`` tool a
+    human does. Labelling them anything else would be inventing the evidence
+    the column exists to stop inventing.
+
+    Indexes are intentionally not recreated here: ``init_db`` recreates all of
+    them immediately after ``_migrate`` returns, in the same transaction.
+    """
+    if "source" in _column_names(conn, "outcomes"):
+        return
+    conn.execute(
+        "CREATE TABLE outcomes_with_source ("
+        "interaction_id TEXT, signal TEXT, reward REAL, "
+        "ts TEXT DEFAULT CURRENT_TIMESTAMP, "
+        "source TEXT NOT NULL CHECK(source IN ("
+        "'caller', 'machine', 'attributed', 'self_curriculum', 'unknown')))"
+    )
+    conn.execute(
+        "INSERT INTO outcomes_with_source"
+        "(rowid, interaction_id, signal, reward, ts, source) "
+        "SELECT rowid, interaction_id, signal, reward, ts, ? FROM outcomes",
+        (memory_rules.OUTCOME_SOURCE_UNKNOWN,),
+    )
+    conn.execute("DROP TABLE outcomes")
+    conn.execute("ALTER TABLE outcomes_with_source RENAME TO outcomes")
+
+
 def _dedupe_outcomes_for_unique_index(conn):
     """Keep the earliest append for each non-null interaction/signal pair."""
     index_exists = conn.execute(
@@ -370,6 +421,13 @@ def _migrate(conn):
     usage_cols = _column_names(conn, "lesson_usage")
     if "outcome_ts" not in usage_cols:
         conn.execute("ALTER TABLE lesson_usage ADD COLUMN outcome_ts TEXT")
+    if "outcome_source" not in usage_cols:
+        # Nullable and unbackfilled, for the same reason as outcomes.source:
+        # the provenance of a credit written before this column is not
+        # recoverable. NULL reads as unknown, and unknown keeps driving the
+        # eviction gate exactly as it does today -- see
+        # memory_rules.EVICTION_INELIGIBLE_OUTCOME_SOURCES.
+        conn.execute("ALTER TABLE lesson_usage ADD COLUMN outcome_source TEXT")
     distillation_cols = _column_names(conn, "lesson_distillations")
     if "result_reason" not in distillation_cols:
         # Nullable and unbackfilled on purpose: the reason for a historical
@@ -378,6 +436,10 @@ def _migrate(conn):
         conn.execute(
             "ALTER TABLE lesson_distillations ADD COLUMN result_reason TEXT"
         )
+    # Before the dedupe: the rebuild drops the table and with it the unique
+    # index the dedupe uses as its "already done" marker, so running it the
+    # other way round would leave the dedupe re-scanning on every open.
+    _migrate_outcomes_source(conn)
     _dedupe_outcomes_for_unique_index(conn)
     _backfill_lesson_distillations_once(conn)
     claim_cols = _column_names(conn, "session_turn_claims")
@@ -777,8 +839,31 @@ def replace_interaction_response_cas(
     return cur.rowcount == 1
 
 
-def record_outcome_row(conn, interaction_id, signal, reward_value):
-    """Record one signal once; return whether this call inserted the evidence."""
+def _checked_outcome_source(source):
+    """Validate provenance at the storage boundary, never infer it.
+
+    Keyword-only and required at every call site above this, so a writer that
+    omits it fails at the call rather than being assigned a meaning. The
+    database refuses the row as well (NOT NULL, closed CHECK); this raises the
+    error that names the problem instead of a bare IntegrityError.
+    """
+    if not memory_rules.outcome_source_is_valid(source):
+        raise ValueError(
+            "outcome source must be one of %s (got %r); it records WHICH "
+            "writer produced the verdict and is never inferred"
+            % (", ".join(sorted(memory_rules.OUTCOME_SOURCES)), source)
+        )
+    return source
+
+
+def record_outcome_row(conn, interaction_id, signal, reward_value, *, source):
+    """Record one signal once; return whether this call inserted the evidence.
+
+    ``source`` is required and keyword-only: it is a fact about the writing
+    path, so no caller may leave it to be guessed later. See
+    ``memory_rules.OUTCOME_SOURCES``.
+    """
+    _checked_outcome_source(source)
     signal = str(signal or "").strip()
     if signal not in memory_rules.VALID_SIGNALS:
         raise ValueError("signal is not a supported grounded outcome")
@@ -793,15 +878,30 @@ def record_outcome_row(conn, interaction_id, signal, reward_value):
         raise ValueError("reward must match the canonical signal reward")
     try:
         cur = conn.execute(
-            "INSERT OR IGNORE INTO outcomes(interaction_id, signal, reward) "
-            "VALUES(?, ?, ?)",
-            (interaction_id, signal, canonical),
+            "INSERT OR IGNORE INTO outcomes"
+            "(interaction_id, signal, reward, source) VALUES(?, ?, ?, ?)",
+            (interaction_id, signal, canonical, source),
         )
         conn.commit()
     except Exception:
         conn.rollback()
         raise
     return cur.rowcount == 1
+
+
+def outcome_row_source(conn, interaction_id, signal):
+    """Provenance of a stored outcome, or None when no such row exists.
+
+    Exists so a retry path can re-assert an existing row without inventing a
+    provenance for it: ``uq_outcomes_interaction_signal_nonnull`` plus
+    ``INSERT OR IGNORE`` means the first writer's source is the permanent one.
+    """
+    row = conn.execute(
+        "SELECT source FROM outcomes WHERE interaction_id=? AND signal=? "
+        "ORDER BY rowid ASC LIMIT 1",
+        (interaction_id, signal),
+    ).fetchone()
+    return None if row is None else row[0]
 
 
 def _distillation_owner(owner_pid, owner_identity, owner_probe):
@@ -895,17 +995,35 @@ def _distillation_evidence(conn, interaction_id):
     # "compiled" (0.70) once GOOD_THRESHOLD rose to 0.71, is neither good
     # enough to ground a lesson nor evidence against one, so it never cancels
     # an otherwise-clean distillation.
+    # The provenance filter here is ASYMMETRIC, and that is the point (#62).
+    #
+    # `has_good` excludes heuristically-`attributed` rows: a lesson is durable
+    # material the retriever will serve for months, so the evidence grounding
+    # it must be about the work it claims to be about, and that path matches a
+    # verification to a generation by project + time window. Without this, a
+    # caller recording a merely weak-positive signal (`compiled`, 0.70 -- not
+    # good, not a contradiction) could claim a distillation whose ONLY good
+    # evidence is a row nobody reviewed and nothing firmly linked.
+    #
+    # `has_contradiction` deliberately does NOT exclude them. Dropping evidence
+    # that the work was bad would lose a real negative to protect a lesson,
+    # which is the worse mistake in both directions this module already
+    # reasons about: `attributed` may block a lesson, never ground one.
+    ineligible = sorted(memory_rules.EVICTION_INELIGIBLE_OUTCOME_SOURCES)
+    source_filter = " AND good.source NOT IN (%s)" % ",".join(
+        "?" for _ in ineligible
+    )
     row = conn.execute(
         "SELECT EXISTS(SELECT 1 FROM outcomes good "
         "WHERE good.interaction_id=? AND good.signal IN (%s) "
-        "AND good.reward >= ?) AS has_good, "
+        "AND good.reward >= ?%s) AS has_good, "
         "EXISTS(SELECT 1 FROM outcomes bad "
         "WHERE bad.interaction_id=? AND (bad.signal IS NULL "
         "OR bad.reward IS NULL OR bad.reward < 0)) AS has_contradiction"
-        % placeholders,
+        % (placeholders, source_filter),
         (
             interaction_id, *good_signals, memory_rules.GOOD_THRESHOLD,
-            interaction_id,
+            *ineligible, interaction_id,
         ),
     ).fetchone()
     return bool(row["has_good"]), bool(row["has_contradiction"])
@@ -1091,8 +1209,9 @@ def _outcome_distillation_result(
 
 
 def record_outcome_and_claim_lesson_distillation(
-    conn, interaction_id, signal, reward_value, *, claim_token=None,
+    conn, interaction_id, signal, reward_value, *, source, claim_token=None,
     owner_pid=None, owner_identity=None, owner_probe=None, now=None,
+    claim_distillation=True,
 ):
     """Atomically record evidence, credit usage, and claim eligible distillation.
 
@@ -1100,7 +1219,19 @@ def record_outcome_and_claim_lesson_distillation(
     ``lesson_usage.outcome_ts``. It can still reacquire a retryable job or recover
     one whose exact PID/process-start owner is confirmed dead. UNKNOWN liveness
     never steals a claim. Contradictory evidence cancels only live jobs.
+
+    ``source`` is required (#62) and is stamped on both the outcome row and the
+    ``lesson_usage`` credit, so the eviction gate can tell the populations apart
+    instead of averaging them.
+
+    ``claim_distillation=False`` records the evidence and credits usage but
+    neither claims nor cancels a distillation job. It exists for the machine
+    attribution path, which has no way to *finish* a claim: claiming there would
+    park the interaction's single distillation slot on a worker that never
+    returns, and cancelling there would let an unreviewed verdict destroy a
+    caller's live job. Recording evidence is safe; deciding a job's fate is not.
     """
+    _checked_outcome_source(source)
     interaction_id = str(interaction_id or "").strip()
     signal = str(signal or "").strip()
     if not interaction_id or not signal:
@@ -1137,33 +1268,36 @@ def record_outcome_and_claim_lesson_distillation(
             )
 
         outcome_cur = conn.execute(
-            "INSERT OR IGNORE INTO outcomes(interaction_id, signal, reward) "
-            "VALUES(?, ?, ?)",
-            (interaction_id, signal, reward_value),
+            "INSERT OR IGNORE INTO outcomes"
+            "(interaction_id, signal, reward, source) VALUES(?, ?, ?, ?)",
+            (interaction_id, signal, reward_value, source),
         )
         outcome_inserted = outcome_cur.rowcount == 1
         usage_rows_updated = 0
         if outcome_inserted:
             usage_cur = conn.execute(
                 "UPDATE lesson_usage SET outcome_signal=?, reward=?, "
-                "outcome_ts=CURRENT_TIMESTAMP WHERE interaction_id=?",
-                (signal, reward_value, interaction_id),
+                "outcome_ts=CURRENT_TIMESTAMP, outcome_source=? "
+                "WHERE interaction_id=?",
+                (signal, reward_value, source, interaction_id),
             )
             usage_rows_updated = usage_cur.rowcount
 
-        has_good, has_contradiction = _distillation_evidence(
-            conn, interaction_id,
-        )
         claimed = False
-        if not has_good or has_contradiction:
-            _cancel_live_distillation(
-                conn, interaction_id, signal, "contradictory outcome evidence",
+        if claim_distillation:
+            has_good, has_contradiction = _distillation_evidence(
+                conn, interaction_id,
             )
-        else:
-            claimed = _claim_distillation(
-                conn, interaction_id, signal, claim_token, owner, owner_probe,
-                claimed_at,
-            )
+            if not has_good or has_contradiction:
+                _cancel_live_distillation(
+                    conn, interaction_id, signal,
+                    "contradictory outcome evidence",
+                )
+            else:
+                claimed = _claim_distillation(
+                    conn, interaction_id, signal, claim_token, owner,
+                    owner_probe, claimed_at,
+                )
         row = _distillation_row(conn, interaction_id)
         conn.commit()
     except Exception:
@@ -2023,11 +2157,19 @@ def log_lesson_usage(conn, lesson_ids, interaction_id, task):
     conn.commit()
 
 
-def record_lesson_usage_outcome(conn, interaction_id, signal, reward):
+def record_lesson_usage_outcome(conn, interaction_id, signal, reward, *, source):
+    """Credit a retrieval with the outcome it earned, stamped with provenance.
+
+    ``source`` is required for the same reason it is on ``record_outcome_row``:
+    this row feeds ``lesson_usage_stats`` -> ``retriever.lesson_quarantine``,
+    which removes lessons from retrieval. Evidence with no provenance cannot be
+    excluded from that gate later.
+    """
+    _checked_outcome_source(source)
     conn.execute(
         "UPDATE lesson_usage SET outcome_signal=?, reward=?, "
-        "outcome_ts=CURRENT_TIMESTAMP WHERE interaction_id=?",
-        (signal, reward, interaction_id),
+        "outcome_ts=CURRENT_TIMESTAMP, outcome_source=? WHERE interaction_id=?",
+        (signal, reward, source, interaction_id),
     )
     conn.commit()
 
@@ -2043,11 +2185,20 @@ def lesson_usage_history(conn):
     lets a caller that needs both pay for the scan once, and keeps the two
     epoch definitions from drifting apart.
     """
+    excluded = sorted(memory_rules.EVICTION_INELIGIBLE_OUTCOME_SOURCES)
+    placeholders = ",".join("?" for _ in excluded)
+    # `outcome_source IS NULL` is kept deliberately. Those are the rows written
+    # before the column existed, and dropping them would shrink the gate's
+    # evidence to nothing on every existing store -- a gate that stops firing
+    # because its input vanished, reported as an improvement. Only the one
+    # named ineligible source is removed.
     return conn.execute(
         "SELECT lesson_id, interaction_id, task, reward, "
         "COALESCE(outcome_ts, ts) AS evidence_ts "
         "FROM lesson_usage WHERE reward IS NOT NULL "
-        "ORDER BY lesson_id, datetime(evidence_ts), rowid"
+        "AND (outcome_source IS NULL OR outcome_source NOT IN (%s)) "
+        "ORDER BY lesson_id, datetime(evidence_ts), rowid" % placeholders,
+        tuple(excluded),
     ).fetchall()
 
 
@@ -2058,12 +2209,22 @@ def lesson_usage_stats(conn, history=None):
     that also needs the raw evidence (retriever.usage_stats_with_attribution)
     scans lesson_usage once rather than once per consumer.
     """
+    excluded = sorted(memory_rules.EVICTION_INELIGIBLE_OUTCOME_SOURCES)
+    placeholders = ",".join("?" for _ in excluded)
+    # `uses` still counts every retrieval, credited or not -- that is what the
+    # word means and learning_health already documents it. Only the reward
+    # aggregates are restricted, because those are what quarantines a lesson.
     rows = conn.execute(
         "SELECT lesson_id, COUNT(*) AS uses, "
-        "SUM(CASE WHEN reward > 0 THEN 1 ELSE 0 END) AS wins, "
-        "SUM(CASE WHEN reward < 0 THEN 1 ELSE 0 END) AS losses, "
-        "AVG(CASE WHEN reward IS NOT NULL THEN reward END) AS avg_reward "
-        "FROM lesson_usage GROUP BY lesson_id"
+        "SUM(CASE WHEN %(elig)s AND reward > 0 THEN 1 ELSE 0 END) AS wins, "
+        "SUM(CASE WHEN %(elig)s AND reward < 0 THEN 1 ELSE 0 END) AS losses, "
+        "AVG(CASE WHEN %(elig)s AND reward IS NOT NULL THEN reward END) "
+        "AS avg_reward "
+        "FROM lesson_usage GROUP BY lesson_id" % {
+            "elig": "(outcome_source IS NULL OR outcome_source NOT IN (%s))"
+                    % placeholders,
+        },
+        tuple(excluded) * 3,
     ).fetchall()
     stats = {r["lesson_id"]: dict(r) for r in rows}
 
@@ -2216,8 +2377,35 @@ def interaction_token_totals_by_tier(conn):
     return out
 
 
-def outcome_signal_counts(conn):
-    rows = conn.execute("SELECT signal, COUNT(*) FROM outcomes GROUP BY signal").fetchall()
+def outcome_signal_counts(conn, sources=None):
+    """Rows per signal; ``sources`` restricts to named provenances (#62).
+
+    ``sources=None`` is every row, which is what a raw inventory wants. A
+    caller computing a RATE must name its population -- a machine `accepted`
+    and a caller `accepted` are the same signal and answer different questions.
+    """
+    if sources is None:
+        rows = conn.execute(
+            "SELECT signal, COUNT(*) FROM outcomes GROUP BY signal"
+        ).fetchall()
+        return {r[0]: r[1] for r in rows}
+    wanted = sorted(str(s) for s in sources)
+    if not wanted:
+        return {}
+    placeholders = ",".join("?" for _ in wanted)
+    rows = conn.execute(
+        "SELECT signal, COUNT(*) FROM outcomes WHERE source IN (%s) "
+        "GROUP BY signal" % placeholders,
+        tuple(wanted),
+    ).fetchall()
+    return {r[0]: r[1] for r in rows}
+
+
+def outcome_source_counts(conn):
+    """Rows per provenance. The inventory that says how much is still unknown."""
+    rows = conn.execute(
+        "SELECT source, COUNT(*) FROM outcomes GROUP BY source"
+    ).fetchall()
     return {r[0]: r[1] for r in rows}
 
 
@@ -2249,7 +2437,14 @@ _INTERACTION_OUTCOME_EVIDENCE_SQL = (
     "substr(COALESCE(i.response,''),1,?) AS response, "
     "length(COALESCE(i.response,'')) AS response_length, "
     "i.ts AS interaction_ts, i.rowid AS interaction_rowid, "
-    "o.signal, o.reward, o.ts AS outcome_ts, o.rowid AS outcome_rowid "
+    # `source` is carried but NOT filtered on, deliberately (#62). Export
+    # policy belongs to the caller, and this query's whole point is that it
+    # must not pre-select: dropping rows by provenance would drop contradictory
+    # evidence, which is the failure the docstring below already guards against.
+    # Surfacing it lets a policy decide with the fact in hand rather than have
+    # this layer decide silently on its behalf.
+    "o.signal, o.reward, o.source AS outcome_source, "
+    "o.ts AS outcome_ts, o.rowid AS outcome_rowid "
     "FROM interactions AS i NOT INDEXED "
     "JOIN outcomes AS o INDEXED BY idx_outcomes_interaction "
     "ON o.interaction_id=i.id "
