@@ -249,6 +249,16 @@ _DANGEROUS = frozenset({
     # shape of decision -- it widens what every later privileged call is
     # allowed to do -- so it gets the same treatment.
     "runtime_policy_update", "permission_rule_set", "elevate",
+    # `admin_login` is the console's elevation primitive by that same
+    # definition, and was missing from this set because it looks like a read:
+    # the login call mutates nothing itself. What it *returns* does. It is the
+    # only way `sonder_repl.CURRENT_TOKEN` becomes non-empty, and that token is
+    # threaded as `token=` into every guarded file op, where
+    # `server._file_developer_allowed` turns it into `developer_authorized=` at
+    # thirteen call sites. Measured: the identical `file_write` to a protected
+    # control-plane path is refused before `/login` and succeeds after it, with
+    # nothing else changed. That is `elevate` wearing a different name.
+    "admin_login",
 })
 
 # Reads the server's own policy sets do not cover. Those two sets answer
@@ -648,6 +658,112 @@ def _branch_names(test) -> list[str]:
     ]
 
 
+# Keyword arguments that remove the capability a tool is graded for, when the
+# CALL SITE pins them to a literal the caller cannot influence.
+#
+# This exists for the inverse of the tool-less default, and it is deliberately
+# tiny. `/delete` is graded `dangerous` -- correctly, for the tool -- but the
+# console branch is `server.file_delete(path=..., dry_run=True, token=...)`
+# with the literal written in. There is no console spelling that reaches a real
+# delete, so the operator is warned about a deletion that cannot happen. That
+# is the same class of wrong answer as grading `/setaccount` safe, and it is
+# why "grade tool-less commands stricter" is not the fix for #47: it would make
+# this error worse rather than better.
+#
+# Two properties keep this from becoming a bypass:
+#   * It is evidence-based. The literal must be visible in the AST at the call
+#     site. A variable, an expression, or a caller-supplied value does not
+#     match, so nothing that could be `False` at runtime is ever de-escalated.
+#   * It attaches to a CALL SITE, never to a tool. `/file_delete` -- the direct
+#     MCP spelling, which takes `dry_run` from whoever calls it -- is untouched
+#     and stays `dangerous`.
+_DISARMING_ARGUMENTS = {
+    "file_delete": {"dry_run": True},
+}
+
+
+def _disarmed_branch_tools(path: str, function: str) -> dict:
+    """``{slash: frozenset(tools this branch can only call disarmed)}``.
+
+    A tool counts as disarmed for a branch only if the branch calls it at least
+    once and *every* call in that branch pins every disarming argument to the
+    required literal. One armed call anywhere in the branch re-arms it, so
+    adding a second `file_delete(...)` call without `dry_run=True` restores the
+    `dangerous` grade instead of inheriting the exemption.
+    """
+    try:
+        with open(os.path.join(_HERE, path), encoding="utf-8") as handle:
+            tree = ast.parse(handle.read())
+    except (OSError, SyntaxError):
+        return {}
+    functions = {
+        node.name: node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    scope = functions.get(function)
+    if scope is None:
+        return {}
+
+    def _classify(node) -> tuple:
+        """(tools called, tools called with every disarming literal pinned)."""
+        called: set = set()
+        disarmed: set = set()
+        armed: set = set()
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Call):
+                continue
+            target = child.func
+            if isinstance(target, ast.Attribute):
+                name = target.attr
+            elif isinstance(target, ast.Name):
+                name = target.id
+            else:
+                continue
+            required = _DISARMING_ARGUMENTS.get(name)
+            if required is None:
+                continue
+            called.add(name)
+            supplied = {
+                kw.arg: kw.value for kw in child.keywords
+                if kw.arg is not None
+            }
+            ok = True
+            for key, needed in required.items():
+                value = supplied.get(key)
+                if not isinstance(value, ast.Constant) or value.value is not needed:
+                    ok = False
+                    break
+            (disarmed if ok else armed).add(name)
+        return called, disarmed - armed
+
+    found: dict = {}
+    for node in ast.walk(scope):
+        if not isinstance(node, ast.If):
+            continue
+        names = _branch_names(node.test)
+        if not names:
+            continue
+        body = ast.Module(body=node.body, type_ignores=[])
+        _, disarmed = _classify(body)
+        if not disarmed:
+            continue
+        for name in names:
+            found[name] = frozenset(found.get(name, frozenset()) | disarmed)
+    return found
+
+
+@functools.lru_cache(maxsize=1)
+def console_disarmed_tools() -> dict:
+    """`_disarmed_branch_tools` across both console dispatch chains."""
+    merged: dict = {}
+    for path, function in (
+        ("server.py", "control_command"), ("sonder_repl.py", "main"),
+    ):
+        for slash, tools in _disarmed_branch_tools(path, function).items():
+            merged[slash] = frozenset(merged.get(slash, frozenset()) | tools)
+    return merged
+
+
 @functools.lru_cache(maxsize=1)
 def console_tools() -> dict:
     """Every named console command mapped to the MCP tools it can invoke.
@@ -857,6 +973,84 @@ def _risk_for(name: str, server) -> str:
     if name in _READ_ONLY or name in read_only or name in inspection:
         return "safe"
     return "ask"
+
+
+# Severity order for combining several tools into one command's grade. Only
+# used to pick a maximum -- the grade itself is always one of these strings.
+_RISK_SEVERITY = {"safe": 0, "ask": 1, "mutation": 2, "execution": 2,
+                  "dangerous": 3}
+
+
+def _native_risk(group, tool, hit, server, tools_by_name) -> str:
+    """Grade for one native slash command, from what its branch actually calls.
+
+    The rule this replaces graded a native command by *string identity*::
+
+        risk = _risk_for(tool, server) if tool else (declared or "safe")
+
+    where ``tool`` was only non-empty when a slash name and a tool name happened
+    to coincide. Every command whose branch calls its tool under a different
+    name -- the majority -- therefore fell into the "fronts no tool, so it
+    cannot mutate on its own, so it is safe" default. Measured across the real
+    catalog: 31 native commands graded below what their branch can reach,
+    including ``/setaccount`` and ``/register``, whose tools ``admin_set_account``
+    and ``admin_register`` are named in ``_DANGEROUS``. A name-matching
+    heuristic was silently overriding an explicit danger marking.
+
+    ``console_tools()`` already answers the real question -- it resolves each
+    branch to the tools it calls by walking the source -- and the console
+    permission gate has been reading it all along. The gate and the catalog
+    were simply answering from different sources, so the gate refused what the
+    help surface called safe. This makes the catalog read the same derivation.
+
+    Three inputs, and the grade is the strongest of them:
+
+    * the declared value (``command_registry``), so a human judgement about a
+      command that fronts no tool at all -- ``/mcp``, ``/selfmod`` -- still
+      stands;
+    * the name-matched tool, unchanged, for the commands where it does work;
+    * every tool the branch actually calls.
+
+    ...after which a call site that pins a disarming literal
+    (``_DISARMING_ARGUMENTS``) is subtracted, which is what stops ``/delete``
+    being graded ``dangerous`` for a delete it hard-codes as a dry run.
+
+    This is a derived property on purpose. Command 272 is graded by what its
+    branch does the moment it is written; nobody has to remember to add it to a
+    table, and a table nobody updates is exactly how ``/setaccount`` came to be
+    graded ``safe``.
+    """
+    declared = _risk_for(tool, server) if tool else (
+        hit.get("risk", "safe") if hit else "safe"
+    )
+
+    mapped = console_tools()
+    disarmed_map = console_disarmed_tools()
+    reached: set = set()
+    disarmed: set = set()
+    for name in group:
+        reached |= set(mapped.get(name, ()))
+        disarmed |= set(disarmed_map.get(name, ()))
+
+    # Registered tools only. Stand-in names from `_UNREGISTERED_BRANCH_WORK`
+    # ("mcp", "selfmod", "location") are not tools and have no `_risk_for`
+    # answer; they are graded by the declared value above. Grading them here
+    # via `permission_modes.risk_of` would also recurse straight back into this
+    # function, since that resolves a name through this catalog.
+    graded = [
+        _risk_for(name, server) for name in reached
+        if name in tools_by_name and name not in disarmed
+    ]
+
+    # A branch whose only tool calls are disarmed is graded as what it can
+    # actually do, not as what the tool could do if called differently. The
+    # declared value is deliberately NOT a floor here: for `/delete` the
+    # declaration is itself the inverse error being corrected.
+    if disarmed and not graded:
+        return "safe"
+
+    candidates = [declared] + graded
+    return max(candidates, key=lambda r: _RISK_SEVERITY.get(r, 3))
 
 
 _SCHEMA_TYPES = {
