@@ -1097,7 +1097,7 @@ def test_learning_health_is_structured_and_routed(monkeypatch, tmp_path):
             revision=server.embeddings.EMBED_REVISION,
             dimension=1,
         )
-        memory_store.record_outcome_row(conn, "i1", "tests_passed", 1.0, source="caller")
+        memory_store.record_outcome_row(conn, "i1", "tests_passed", 1.0, source="machine")
         memory_store.add_lesson(
             conn,
             "lesson-one",
