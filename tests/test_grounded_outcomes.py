@@ -307,6 +307,192 @@ def test_unmeasured_runs_are_counted_separately_from_failures():
     assert stats["unlinked"] == 0, "there was a generation; the verifier is what failed"
 
 
+# --- the code runners, whose `error` means two different things -----------
+
+# `code_runner` writes `error` for a runner that could not start AND for a
+# genuine compilation failure (`_run_rust` stamps "rust compilation failed"
+# onto a result whose process really did run -- code_runner.py:460). Reading
+# `error` first, which is right for `harness_tools`, would file that real
+# compile failure as unmeasured and throw away the negative signal this store
+# is measurably short of. The discriminator is `returncode`: every result
+# `code_runner` builds without a process carries None, every result built from
+# a process that exited carries an int.
+
+# The runner could not run -- returncode is None because nothing produced one.
+_NO_INTERPRETER = {
+    "ok": False, "returncode": None, "stdout": "", "stderr": "",
+    "language": "javascript", "cwd": "/w", "timeout": 10,
+    "error": "node executable not found on PATH",
+}
+_NO_CPP_COMPILER = {
+    "ok": False, "returncode": None, "stdout": "", "stderr": "",
+    "language": "cpp", "cwd": "/w", "timeout": 10,
+    "error": "C++ compiler not found (tried g++, clang++, cl, and Visual Studio vcvars64.bat)",
+}
+_RUN_TIMED_OUT = {
+    "ok": False, "returncode": None, "stdout": "partial", "stderr": "",
+    "language": "python", "cwd": "/w", "timeout": 10,
+    "error": "timed out after 10s",
+}
+
+# The code ran and the code is wrong -- a process exited and said so.
+_RUST_COMPILE_FAILURE = {
+    "ok": False, "returncode": 1, "stdout": "",
+    "stderr": "error[E0425]: cannot find value `x` in this scope",
+    "language": "rust", "cwd": "/w", "timeout": 10,
+    "error": "rust compilation failed",          # the overload, on a real verdict
+}
+_RUNTIME_FAILURE = {
+    "ok": False, "returncode": 1, "stdout": "",
+    "stderr": "Traceback (most recent call last):\nZeroDivisionError",
+    "language": "python", "cwd": "/w", "timeout": 10, "error": "",
+}
+
+
+@pytest.mark.parametrize("tool", ["run_code", "run_project"])
+@pytest.mark.parametrize("evidence", [
+    _NO_INTERPRETER, _NO_CPP_COMPILER, _RUN_TIMED_OUT,
+])
+def test_a_runner_that_could_not_run_records_nothing(tool, evidence):
+    """No node, no compiler, no time left: facts about this machine."""
+    written, record = _sink()
+    go.note_generation("i1", "sonder")
+
+    report = go.attribute(tool, ok=False, record_fn=record, evidence=evidence)
+
+    assert written == []
+    assert report["attributed"] is False
+    assert report["evaluation_infrastructure_error"]
+    assert go.pending_count() == 1, "still awaiting real evidence"
+
+
+@pytest.mark.parametrize("tool", ["run_code", "run_project"])
+@pytest.mark.parametrize("evidence", [_RUST_COMPILE_FAILURE, _RUNTIME_FAILURE])
+def test_code_that_ran_and_failed_is_still_recorded_as_failed(tool, evidence):
+    """The trap. `error` is set on the rust result too, but a process produced
+    that verdict -- discarding it would destroy the scarce negative signal."""
+    written, record = _sink()
+    go.note_generation("i1", "sonder")
+
+    go.attribute(tool, ok=False, record_fn=record, evidence=evidence)
+
+    assert written == [("i1", "failed")]
+
+
+def test_a_runner_that_could_not_run_is_not_recorded_as_success_either():
+    written, record = _sink()
+    go.note_generation("i1", "sonder")
+
+    report = go.attribute("run_code", ok=False, record_fn=record,
+                          evidence=_NO_INTERPRETER)
+
+    assert written == []
+    assert "signal" not in report
+
+
+def test_a_run_code_exception_leaves_the_generation_judgeable():
+    """`run_code` raises before spawning anything for an empty snippet, an
+    unsupported language, or a cwd outside the workspace."""
+    written, record = _sink()
+    go.note_generation("i1", "sonder")
+
+    go.attribute("run_code", ok=False, record_fn=record,
+                 evidence={"error": "unsupported language 'brainfuck'"})
+
+    assert written == []
+    assert go.pending_count() == 1
+
+
+# `run_project` returns a composite with no top-level `error` or `returncode`
+# at all; the evidence lives in the step that stopped the run, and it stops on
+# the first failure, so that is the last step.
+
+def _project(ok, *results):
+    return {
+        "ok": ok, "files": ["main.py"], "timeout": 60,
+        "steps": [
+            {"index": i, "cmd": ["x"], "cwd": "/w", "result": r}
+            for i, r in enumerate(results, start=1)
+        ],
+    }
+
+
+def test_a_project_stopped_by_a_missing_toolchain_records_nothing():
+    written, record = _sink()
+    go.note_generation("i1", "sonder")
+
+    report = go.attribute("run_project", ok=False, record_fn=record,
+                          evidence=_project(False, _NO_CPP_COMPILER))
+
+    assert written == []
+    assert "compiler not found" in report["evaluation_infrastructure_error"]
+
+
+def test_a_project_whose_step_rejected_the_code_records_the_failure():
+    """The step ran and exited nonzero. That is the evidence."""
+    written, record = _sink()
+    go.note_generation("i1", "sonder")
+
+    go.attribute("run_project", ok=False, record_fn=record,
+                 evidence=_project(False, _RUNTIME_FAILURE))
+
+    assert written == [("i1", "failed")]
+
+
+def test_a_project_that_ran_every_step_is_recorded_as_compiled():
+    written, record = _sink()
+    go.note_generation("i1", "sonder")
+
+    ran = dict(_RUNTIME_FAILURE, ok=True, returncode=0, stderr="")
+    go.attribute("run_project", ok=True, record_fn=record,
+                 evidence=_project(True, ran, ran))
+
+    assert written == [("i1", "compiled")]
+
+
+# `isolated_runner` does NOT overload `error`: `_run_bounded` puts the
+# container's own exit status in `returncode` and reserves `error` for the
+# reasons the runner itself stopped the run.
+
+_NO_CONTAINER_RUNTIME = {
+    "ok": False, "returncode": None, "stdout": "", "stderr": "",
+    "error": ("isolated execution unavailable: explicitly enable a ready local "
+              "Docker or Podman engine with SONDER_ISOLATED_RUNTIME"),
+    "runtime": "", "project": "", "writable_workspace": False,
+}
+_CONTAINER_KILLED = {
+    "ok": False, "returncode": -9, "stdout": "", "stderr": "",
+    "error": "timed out after 30s", "cleanup": "verified-absent",
+    "runtime": "docker",
+}
+_CONTAINER_EXITED_NONZERO = {
+    "ok": False, "returncode": 2, "stdout": "", "stderr": "assertion failed",
+    "error": "", "cleanup": "not-required", "runtime": "docker",
+}
+
+
+@pytest.mark.parametrize("evidence", [_NO_CONTAINER_RUNTIME, _CONTAINER_KILLED])
+def test_a_container_that_never_produced_a_verdict_records_nothing(evidence):
+    """No engine, or killed by the output/time cap: neither judges the code."""
+    written, record = _sink()
+    go.note_generation("i1", "sonder")
+
+    go.attribute("isolated_run", ok=False, record_fn=record, evidence=evidence)
+
+    assert written == []
+    assert go.pending_count() == 1
+
+
+def test_a_container_that_ran_and_exited_nonzero_is_recorded_as_failed():
+    written, record = _sink()
+    go.note_generation("i1", "sonder")
+
+    go.attribute("isolated_run", ok=False, record_fn=record,
+                 evidence=_CONTAINER_EXITED_NONZERO)
+
+    assert written == [("i1", "failed")]
+
+
 # --- robustness -----------------------------------------------------------
 
 
