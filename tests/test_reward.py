@@ -114,3 +114,68 @@ def test_calibration_and_the_rules_share_one_population_taxonomy():
 
     assert calibration.CALLER_JUDGED is rules.CALLER_JUDGED
     assert calibration.EXECUTION_GROUNDED is rules.EXECUTION_GROUNDED
+
+
+# --- two QUESTIONS, deliberately different rules -----------------------------
+#
+# `evidence_rank` and `retention_rank` disagree about the same pair of rows on
+# purpose. That disagreement is the thing under test: it was previously
+# implicit -- one rule lived in these rules and the other in a closure inside
+# memory_quality that happened to share the name `evidence_rank` -- which is
+# the shape of the B2 defect (two sites, one concept, opposite philosophies,
+# unstated).
+
+
+def test_the_two_questions_disagree_on_the_same_pair_on_purpose():
+    """Credit asks "whose judgement says this was GOOD"; retention asks "whose
+    judgement would be LOST if this row were deleted".
+
+    A caller's `rejected` carries no credit -- there is nothing good to
+    attribute -- so `tests_passed` outranks it for credit. It carries the MOST
+    retention value for exactly the same reason: it is a measured harm, and the
+    self-graded row cannot stand in for it. Deleting it would leave a
+    clean-looking duplicate behind and launder a lesson the store has already
+    measured as harmful.
+    """
+    caller_rejected = (-0.5, None)
+    execution_passed = (None, 1.0)
+
+    # Credit: the passing test is the better evidence of good work.
+    assert rules.evidence_rank("tests_passed") > rules.evidence_rank("rejected")
+
+    # Retention: the caller-judged row is the one to keep. These are ascending
+    # sort keys, so the SMALLER tuple is the keeper.
+    assert rules.retention_rank(*caller_rejected) < rules.retention_rank(*execution_passed)
+
+
+def test_the_two_questions_agree_wherever_credit_exists():
+    """The rules are not opposites -- they differ only below the eligibility
+    bar. Where there is credit to attribute, a caller who reviewed the work
+    outranks the runtime grading itself in both."""
+    assert rules.evidence_rank("accepted") > rules.evidence_rank("tests_passed")
+    assert rules.retention_rank(0.8, None) < rules.retention_rank(None, 1.0)
+
+
+def test_retention_never_averages_the_two_populations():
+    """Two keys, never one number. A row with a caller mean of -0.5 and eight
+    self-graded passes has a BLENDED mean of +0.83; retention must read the
+    caller key and ignore that entirely."""
+    laundered = rules.retention_rank(-0.5, 1.0)
+    reviewed = rules.retention_rank(0.8, None)
+
+    assert reviewed < laundered, "a blended mean must not decide retention"
+    assert len(laundered) == 2
+    assert not hasattr(rules, "overall")
+    assert not hasattr(rules, "combined")
+
+
+def test_a_measured_row_is_always_kept_over_an_unmeasured_one():
+    """"No measurement" sorts below every real reward, including the worst, so
+    an unevaluated duplicate can never displace a measured one. A measured
+    neutral 0.0 is NOT absent evidence and stays above a measured -1.0."""
+    assert rules.NO_MEASUREMENT_RANK < min(rules.SIGNAL_REWARDS.values())
+    assert rules.retention_rank(-1.0, None) < rules.retention_rank(None, None)
+    assert rules.retention_rank(0.0, None) < rules.retention_rank(-1.0, None)
+    # Execution evidence only breaks a tie in the caller key, never overrides it.
+    assert rules.retention_rank(0.0, None) < rules.retention_rank(-1.0, 1.0)
+    assert rules.retention_rank(None, 1.0) < rules.retention_rank(None, None)

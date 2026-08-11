@@ -1,5 +1,6 @@
 import memory_quality
 import memory_store
+from sonder_runtime.domain.memory import rules as memory_rules
 
 
 def test_exact_duplicate_plan_keeps_best_scored_lesson():
@@ -267,3 +268,46 @@ def test_retryable_backlog_is_zero_on_a_clean_store():
         assert ms.count_retryable_distillations(conn) == 0
     finally:
         conn.close()
+
+
+def test_the_keeper_rule_is_the_written_domain_rule_not_a_local_copy():
+    """#27: this module and ``rules.evidence_rank`` taught contradictory rules
+    for the same concept, under the same NAME.
+
+    ``choose_exact_duplicate_keeper`` held a closure literally called
+    ``evidence_rank`` that made the caller mean key 1 unconditionally, while
+    ``rules.evidence_rank`` deliberately conditions population on eligibility.
+    Both are right -- for DIFFERENT questions -- but nothing said so and
+    nothing tested it, which is the B2 shape. The keeper now reads the domain
+    rule for its question rather than keeping a second, silent copy.
+    """
+    stats = {
+        "rejected": {"avg_reward_caller": -0.5, "avg_reward_execution": None,
+                     "wins": 0, "uses": 1},
+        "self_graded": {"avg_reward_caller": None, "avg_reward_execution": 1.0,
+                        "wins": 1, "uses": 1},
+    }
+    group = [
+        {"id": "rejected", "text": "Retry on any exception.", "ts": "2026-01-01"},
+        {"id": "self_graded", "text": "Retry on any exception.", "ts": "2026-01-02"},
+    ]
+
+    keeper = memory_quality.choose_exact_duplicate_keeper(group, stats)
+
+    # The row a caller judged is the one whose history would be lost.
+    assert keeper["id"] == "rejected"
+    # ... and the ordering is the one written down in the rules, not a local
+    # restatement of it that can drift.
+    assert memory_rules.retention_rank(-0.5, None) < memory_rules.retention_rank(None, 1.0)
+    assert not hasattr(memory_quality, "_NO_EVIDENCE_RANK"), (
+        "the never-measured rank belongs to the rules, in one place"
+    )
+
+
+def test_the_keeper_rule_is_not_the_credit_rule():
+    """The same pair, ranked for credit, comes out the other way -- and must.
+    A `rejected` row is the WORST evidence of good work and the BEST reason to
+    keep a duplicate's history. Naming the two questions apart is the fix; a
+    single rule for both would be wrong at one site or the other."""
+    assert memory_rules.evidence_rank("tests_passed") > memory_rules.evidence_rank("rejected")
+    assert memory_rules.retention_rank(-0.5, None) < memory_rules.retention_rank(None, 1.0)
