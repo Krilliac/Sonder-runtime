@@ -872,6 +872,7 @@ def _capture_turn(model, tier, trace_ctx, prompt, response, iid=None):
             "prompt": str(prompt or "")[:4000],
             "augmented_prompt": str(trace_ctx.get("augmented_prompt") or "")[:16000],
             "lessons": [str(x)[:400] for x in (trace_ctx.get("lessons") or [])][:20],
+            "facts_omitted": int(trace_ctx.get("facts_omitted") or 0),
             "response_head": str(response or "")[:2000],
         })
     except Exception:
@@ -890,6 +891,11 @@ def _format_trace(model, tier, params, trace):
     ]
     for lesson_text in lessons:
         lines.append("   - %s" % lesson_text)
+    # A bounded facts block that drops entries must say so on the surface an
+    # operator actually reads, not only inside the prompt text.
+    facts_omitted = int(trace.get("facts_omitted") or 0)
+    if facts_omitted:
+        lines.append("stored facts omitted by the block bound: %d" % facts_omitted)
     lines.append("--- exact prompt sent to the model ---")
     lines.append(trace.get("augmented_prompt", ""))
     lines.append("=== END TRACE ===")
@@ -2487,17 +2493,27 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
             if project is not None else []
         )
         facts = _preference_facts(conn, prompt, project=project)
-        if project:
-            facts.extend(f["text"] for f in memory_store.facts_for_project(conn, project))
+        # Kept SEPARATE from the preferences rather than appended to them. The
+        # facts block is bounded, and a single list spent in order let twelve
+        # preferences evict every operator-authored project fact -- including
+        # the recall canaries -- because _preference_facts' cap is exactly the
+        # block's cap. orchestrator.select_facts draws the two round-robin so
+        # neither source can starve the other by call order.
+        project_facts = (
+            [f["text"] for f in memory_store.facts_for_project(conn, project)]
+            if project else []
+        )
         retrieve_fn = retriever.retrieve
     else:
         recalls = None
         facts = None
+        project_facts = None
         retrieve_fn = _no_retrieve
     if trace:
         resp, iid, tctx = orchestrator.run_with_learning_traced(
             conn, prompt, tier, gen, retrieve_fn=retrieve_fn, history=history,
-            recalls=recalls, facts=facts, session_id=session_id, task_embedding=blob,
+            recalls=recalls, facts=facts, project_facts=project_facts,
+            session_id=session_id, task_embedding=blob,
             project=project,
             project_explicit=True,
             task_embedding_model=embedding_provenance.get("model"),
@@ -2511,7 +2527,8 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
         return resp, iid, tctx
     resp, iid = orchestrator.run_with_learning(
         conn, prompt, tier, gen, retrieve_fn=retrieve_fn, history=history,
-        recalls=recalls, facts=facts, session_id=session_id, task_embedding=blob,
+        recalls=recalls, facts=facts, project_facts=project_facts,
+        session_id=session_id, task_embedding=blob,
         project=project,
         project_explicit=True,
         task_embedding_model=embedding_provenance.get("model"),

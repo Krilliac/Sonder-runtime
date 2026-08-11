@@ -164,7 +164,7 @@ def grade_parses_int(expected: int) -> Callable[[str], float]:
 
 # ---------------------------------------------------------------------------
 # Prompt augmentation. Deliberately small and self-contained (a slimmed echo of
-# retriever.build_prompt) so the harness has no import-time dependency on the
+# orchestrator.build_prompt) so the harness has no import-time dependency on the
 # live retrieval stack — the real lift comes from the same *shape* of context.
 #
 # Known divergence (2026-08-10): this still renders the older facts shape. The
@@ -179,7 +179,9 @@ LESSONS_HEADER = "# Relevant lessons from past work (may help):"
 
 
 def build_augmented_prompt(task_prompt: str, lessons=None, facts=None) -> str:
-    """Prepend facts/lessons blocks to a task prompt, mirroring the runtime.
+    """Prepend facts/lessons blocks to a task prompt, in the pre-2026-08-10
+    runtime shape (see the divergence note above — this no longer mirrors
+    orchestrator.build_prompt and is pinned deliberately).
 
     With no lessons and no facts this returns the task prompt unchanged — which
     is exactly why the cold arm (empty store) reduces to the bare prompt and the
