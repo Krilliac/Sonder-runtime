@@ -384,3 +384,33 @@ never run; `refs/stash` untouched.** No `git add -A`; staging was always by
 explicit path. No sibling worktree was modified, no vendored
 `app/build/**/local-system/*.py` was touched, no network call was made, and the
 operator's memory DB was not touched.
+
+---
+
+## 8. Follow-up: `check_error_signals.py` regression from `3e27ae6` (fixed in `dfad7ce`)
+
+A sibling lane bisected a red `scripts/check_error_signals.py` to `3e27ae6`.
+Reproduced verbatim at `746d18b`: four `return_literal_prefix` findings in
+`_agent_run_tool_policy_error`, exit 1.
+
+**Ruling: the checker was right; my change was wrong.** It is a shrink-only
+ratchet ("remove/migrate sites, do not add or swap them") and `3e27ae6` added
+four new stringly `ERROR:` return sites in a new scope. All four were verbatim
+copies of messages already owned by the gates that enforce them
+(`_repository_read_only_error`, `_agent_impl`'s project-bound branch,
+`_agent_dispatch`'s web/location guards) — so the commit that set out to stop a
+policy being restated beside its gate restated four of them into a fifth place.
+Neither caller ever read the text; both use the result as a predicate.
+
+Fixed at the source. `_agent_run_tool_policy_error` → `_agent_run_tool_refusal`,
+returning a short gate name or `""`. The baseline was **not** regenerated —
+that would have widened a shrink-only ratchet to hide the finding. The drift
+guard now reports *which* gate refuses each wrongly-advertised tool, so
+diagnostics improved rather than regressed.
+
+Checker still binds — three plants, each run then reverted, all caught at exit
+1 across both categories: the exact literal removed, a brand-new `ERROR:`
+message, and a `.startswith("ERROR:")` parser. Reverted state exits 0.
+
+Regression set for this change (`--since 746d18b`, 53 files):
+`1474 passed, 3 skipped, 1 warning in 65.08s`.
