@@ -132,29 +132,55 @@ def _run_compat_block(task):
     )
 
 
-def select_facts(facts):
+def select_facts(facts=None, project_facts=None):
     """Return (kept, omitted_count) for the facts block.
 
-    Keeps whole facts in order until the count or character bound is reached,
-    then stops. The first fact is always kept whole however large it is: a fact
-    cut in half is a fact that lies, and the recall canaries are single facts.
+    Two sources feed this block and they are not interchangeable. ``facts`` are
+    auto-extracted user preferences, already capped by the caller and cheaply
+    regenerated. ``project_facts`` are operator-authored durable statements --
+    the things someone deliberately wrote down about this project.
+
+    A single budget spent in list order lets one source starve the other by
+    call order alone: ``server._answer`` puts up to MAX_INJECTED_FACTS
+    preferences in front of the project facts, so twelve preferences evicted
+    EVERY project fact, including the operator's recall canaries. Swapping the
+    order would only move the starvation onto preferences, and raising the cap
+    moves it one entry later, so the draw is round-robin instead: each source
+    keeps its turn and neither can be squeezed out by how many the other
+    happens to hold. Project facts draw first, so an odd slot falls the
+    operator's way.
+
+    Whole facts only, never a shortened one, and the first fact drawn is kept
+    however large it is -- a fact cut in half is a fact that lies, and a recall
+    canary is a single fact.
     """
+    queues = [
+        [str(f) for f in project_facts or []],
+        [str(f) for f in facts or []],
+    ]
+    total = sum(len(queue) for queue in queues)
     kept = []
     used = 0
-    for fact in facts or []:
-        text = str(fact)
+    turn = 0
+    while any(queues):
+        # Skip an exhausted source rather than ending the draw: a source with
+        # nothing left must not cost the other its remaining turns.
+        while not queues[turn]:
+            turn = (turn + 1) % len(queues)
+        text = queues[turn].pop(0)
+        turn = (turn + 1) % len(queues)
         if kept and (
             len(kept) >= MAX_INJECTED_FACTS or used + len(text) > MAX_FACTS_CHARS
         ):
             break
         kept.append(text)
         used += len(text)
-    return kept, len(facts or []) - len(kept)
+    return kept, total - len(kept)
 
 
-def _facts_block(facts):
+def _facts_block(facts, project_facts=None):
     """Render the facts block. Returns (text, omitted_count)."""
-    kept, omitted = select_facts(facts)
+    kept, omitted = select_facts(facts, project_facts)
     items = "\n\n".join(
         "%s %d of %d\n%s" % (FACT_ITEM_HEADER, index, len(kept), text)
         for index, text in enumerate(kept, 1)
@@ -170,19 +196,21 @@ def _facts_block(facts):
     return block, omitted
 
 
-def build_prompt(task, lessons, recalls=None, facts=None):
-    return build_prompt_reporting_omissions(task, lessons, recalls, facts)[0]
+def build_prompt(task, lessons, recalls=None, facts=None, project_facts=None):
+    return build_prompt_reporting_omissions(
+        task, lessons, recalls, facts, project_facts)[0]
 
 
-def build_prompt_reporting_omissions(task, lessons, recalls=None, facts=None):
+def build_prompt_reporting_omissions(task, lessons, recalls=None, facts=None,
+                                     project_facts=None):
     """build_prompt, plus how many facts the bound left out (0 when none)."""
     blocks = []
     retrieved = False
     facts_omitted = 0
     if _needs_run_compatible_code(task):
         blocks.append(_run_compat_block(task))
-    if facts:
-        block, facts_omitted = _facts_block(facts)
+    if facts or project_facts:
+        block, facts_omitted = _facts_block(facts, project_facts)
         blocks.append(block)
         retrieved = True
     if lessons:
@@ -227,7 +255,7 @@ def build_prompt_reporting_omissions(task, lessons, recalls=None, facts=None):
 
 def _run(conn, task, tier, generate_fn, retrieve_fn=None,
          id_fn=memory_store.new_id, history=None, recalls=None, facts=None,
-         session_id=None, task_embedding=None, project=None,
+         project_facts=None, session_id=None, task_embedding=None, project=None,
          project_explicit=True,
          task_embedding_model=None, task_embedding_revision=None,
          task_embedding_dim=None):
@@ -238,7 +266,7 @@ def _run(conn, task, tier, generate_fn, retrieve_fn=None,
     else:
         lessons = retrieve_fn(conn, task)
     augmented, facts_omitted = build_prompt_reporting_omissions(
-        task, lessons, recalls, facts)
+        task, lessons, recalls, facts, project_facts)
     # Existing callers/tests pass a 1-arg gen; only pass history when present.
     response = generate_fn(augmented, history) if history else generate_fn(augmented)
     tokens_in, tokens_out, token_source = _token_usage(
@@ -263,13 +291,14 @@ def _run(conn, task, tier, generate_fn, retrieve_fn=None,
 def run_with_learning(conn, task, tier, generate_fn,
                       retrieve_fn=None, id_fn=memory_store.new_id,
                       history=None, recalls=None, facts=None,
-                      session_id=None, task_embedding=None, project=None,
+                      project_facts=None, session_id=None, task_embedding=None, project=None,
                       project_explicit=True,
                       task_embedding_model=None, task_embedding_revision=None,
                       task_embedding_dim=None):
     response, interaction_id, _lessons, _augmented, _omitted = _run(
         conn, task, tier, generate_fn, retrieve_fn, id_fn,
         history=history, recalls=recalls, facts=facts,
+        project_facts=project_facts,
         session_id=session_id, task_embedding=task_embedding,
         project=project,
         project_explicit=project_explicit,
@@ -283,7 +312,7 @@ def run_with_learning(conn, task, tier, generate_fn,
 def run_with_learning_traced(conn, task, tier, generate_fn,
                              retrieve_fn=None, id_fn=memory_store.new_id,
                              history=None, recalls=None, facts=None,
-                             session_id=None, task_embedding=None, project=None,
+                             project_facts=None, session_id=None, task_embedding=None, project=None,
                              project_explicit=True,
                              task_embedding_model=None,
                              task_embedding_revision=None,
@@ -291,6 +320,7 @@ def run_with_learning_traced(conn, task, tier, generate_fn,
     response, interaction_id, lessons, augmented, facts_omitted = _run(
         conn, task, tier, generate_fn, retrieve_fn, id_fn,
         history=history, recalls=recalls, facts=facts,
+        project_facts=project_facts,
         session_id=session_id, task_embedding=task_embedding,
         project=project,
         project_explicit=project_explicit,
