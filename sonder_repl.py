@@ -180,9 +180,15 @@ def _gate_tools(tools, label):
     interactive = _console_has_operator()
     worst = None
     for tool in tools:
-        if tool in GATE_EXEMPT_TOOLS:
+        # The exemption is not applied here any more: this asks for a decision
+        # *for a person at a console*, and `permission_modes` owns which
+        # exemptions that kind of caller carries. Four surfaces kept their own
+        # copy of the check and the fifth was written without it.
+        decision = permission_modes.decide_for_caller(
+            tool, interactive=interactive, gate_control_exempt=True,
+        )
+        if decision is None:
             continue
-        decision = permission_modes.decide(tool, interactive=interactive)
         if decision.action == permission_modes.DENY:
             return False, "refused %s: %s (mode: %s)" % (
                 label, decision.reason, permission_modes.MODE_LABELS.get(

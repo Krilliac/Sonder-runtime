@@ -283,6 +283,19 @@ EXECUTION_TOOLS = frozenset({
     "self_heal_repair", "scaffold_project",
 })
 
+# The same class, for work that no *registered tool* fronts. ``EXECUTION_TOOLS``
+# above is pinned by a drift test to names the MCP registry actually knows, and
+# that invariant is worth keeping -- but a console branch can start a host
+# process without going through a tool at all. ``/runwindow`` calls
+# ``code_runner.run_code_window`` directly, so it resolved to nothing, and a
+# gate handed an empty set allows: ``/run`` was refused under ``plan`` while
+# ``/runwindow`` launched the same code block in a detached console.
+#
+# Entries here are the stand-in names ``command_catalog._UNREGISTERED_BRANCH_WORK``
+# maps such branches to, and a drift test requires that correspondence in both
+# directions, so this cannot drift into a free-floating list of strings.
+EXECUTION_COMMANDS = frozenset({"runwindow"})
+
 # Tools that need OS administrator rights UNCONDITIONALLY -- just being
 # invoked, regardless of what they are asked to do. Refused unless elevation
 # is on. Deliberately empty; see "Why PRIVILEGED_TOOLS is empty" above before
@@ -500,7 +513,7 @@ def risk_of(tool_name: str) -> str:
             catalogued = command.risk
     if catalogued == "dangerous":
         return "dangerous"
-    if name in EXECUTION_TOOLS:
+    if name in EXECUTION_TOOLS or name in EXECUTION_COMMANDS:
         return "execution"
     # Unknown tool: treat as needing a prompt, never as safe.
     return catalogued or "ask"
@@ -565,6 +578,34 @@ def _rule_action_for(tool_name: str, rule_lookup) -> tuple[str | None, str]:
     if action not in (ALLOW, DENY):
         return None, ""
     return action, str(rule.get("pattern", "")).strip()
+
+
+def decide_for_caller(tool_name: str, *, interactive: bool,
+                      gate_control_exempt: bool):
+    """``decide()`` plus the one exemption, for callers that share both.
+
+    Returns ``None`` when the tool is exempt and there is therefore nothing to
+    decide; otherwise the ``Decision``.
+
+    The exemption existed as six identical lines at four call sites, and this
+    round it drifted at the fifth: the gate added to
+    ``server.control_command``'s catalogued fall-through consulted ``decide()``
+    without it, so ``permission_mode`` -- risk ``ask``, which ``plan`` denies
+    -- came back ``deny`` on that path. A set that must be consulted at every
+    person-facing surface, by hand, is a set that will be missed at the next
+    surface someone adds; so the surfaces now ask for a decision *for a kind of
+    caller* and this function owns which exemptions that kind carries.
+
+    ``gate_control_exempt`` is the caller kind, and it is the whole distinction
+    the module docstring draws: a person driving Sonder (console, MCP client,
+    app) must keep a way out of ``plan``; Sonder driving itself (the agent and
+    loop paths) must not be able to lift its own restraint. It is a required
+    keyword because there is no defensible default -- getting it wrong in
+    either direction is a security answer, not a convenience.
+    """
+    if gate_control_exempt and str(tool_name or "").strip().lstrip("/") in GATE_CONTROL_TOOLS:
+        return None
+    return decide(tool_name, interactive=interactive)
 
 
 def decide(tool_name: str, *, interactive: bool = True,

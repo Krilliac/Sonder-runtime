@@ -1189,10 +1189,19 @@ def test_the_console_only_exemption_note_names_the_mcp_surface_too():
     """
     import reloadable_mcp
 
-    with open(reloadable_mcp.__file__, encoding="utf-8") as handle:
-        source = handle.read()
-    assert "permission_modes.GATE_CONTROL_TOOLS" in source, (
-        "the MCP entry point no longer shares this set -- recheck the note"
+    # Behaviour, not spelling: the MCP entry point stopped naming the set
+    # directly when the exemption was hoisted into `decide_for_caller`, and a
+    # test that pinned the spelling would have read that as the exemption
+    # going away.
+    pm.set_mode(pm.PLAN)
+    assert reloadable_mcp._refuse_if_gated("permission_mode") is None, (
+        "the MCP entry point no longer exempts the gate control -- recheck "
+        "the note, which says it does"
+    )
+    assert pm.decide_for_caller(
+        "permission_mode", interactive=False, gate_control_exempt=False,
+    ).action == pm.DENY, (
+        "and it is a real exemption, not a tool plan happens to allow"
     )
     doc = pm.__doc__
     assert "reloadable_mcp" in doc, "the note must name the surface it forgot"

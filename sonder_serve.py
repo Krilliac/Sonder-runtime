@@ -955,9 +955,11 @@ def _http_tool_refusal(tools, label):
     loop rather than a copy of the console's ask-and-rank gate.
     """
     for tool in tools:
-        if tool in permission_modes.GATE_CONTROL_TOOLS:
+        decision = permission_modes.decide_for_caller(
+            tool, interactive=False, gate_control_exempt=True,
+        )
+        if decision is None:
             continue
-        decision = permission_modes.decide(tool, interactive=False)
         if decision.action == permission_modes.DENY:
             return "refused %s: %s (mode: %s)" % (
                 label, decision.reason,
