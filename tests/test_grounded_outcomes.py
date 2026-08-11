@@ -17,9 +17,20 @@ def _clean():
 
 
 def _sink():
-    """A record_fn that captures what it was asked to write."""
+    """A record_fn that captures what it was asked to write.
+
+    Signature-agnostic on purpose, and not merely as tidiness. Many of the
+    assertions in this file and in its dispatch sibling are *negative* --
+    ``assert written == []``, the guards that stop a verdict being invented --
+    while `attribute`'s production caller (`server._feed_grounded_outcome`)
+    wraps the whole call in `except Exception: pass`. A double that raised
+    would be swallowed and read as "nothing was written", so every negative
+    guard would pass while testing nothing. Measured with a stale
+    two-parameter double against a call site passing one extra keyword: 8
+    tests failed and 5 passed -- and the 5 that passed were the negative ones.
+    """
     written = []
-    return written, lambda ident, signal: written.append((ident, signal))
+    return written, lambda *a, **k: written.append(tuple(a[:2]))
 
 
 # --- noting work worth judging --------------------------------------------
