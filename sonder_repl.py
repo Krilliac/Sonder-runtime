@@ -25,6 +25,7 @@ import tier_router
 import code_improve
 import command_router
 import command_catalog
+import permission_modes
 import project_scaffold
 
 try:
@@ -70,20 +71,223 @@ def _read_input(prompt):
     return input(prompt)
 
 
+# The gate's own controls are never gated by it. `permission_mode` is risk
+# `ask`, which `plan` denies -- so gating it would trap whoever is at the
+# keyboard in `plan` with no console way back out. A human typing the command
+# is the authority the gate exists to serve; the agent path deliberately gets
+# no such exemption (a model must not be able to lift its own restraint, and
+# `_agent_dispatch` cannot reach this tool at all).
+#
+# Aliased, not restated: the MCP protocol entry point exempts the same names
+# for the same reason, and two hand-kept copies of a security-relevant set is
+# how one of them silently stops matching the other.
+GATE_EXEMPT_TOOLS = permission_modes.GATE_CONTROL_TOOLS
+
+
+def _console_has_operator():
+    """Whether a person is actually at the console to answer a prompt.
+
+    This is the value ``permission_modes.decide(interactive=...)`` is asking
+    for -- it means "is somebody present to answer", not "is this the console
+    module". Passing a hardcoded ``True`` from here was simply the wrong
+    argument for `sonder < script.txt` or `echo /stats | sonder`, where nobody
+    is present and ``input()`` does not ask anybody anything: it reads the
+    next line of the script.
+
+    Deliberately narrower than ``slash_menu.available()``, which also consults
+    ``NO_COLOR``, ``TERM=dumb`` and ``SONDER_NO_MENU``. Those decide whether a
+    fancy prompt can be *drawn*; none of them is evidence about whether a
+    person is there, and letting ``NO_COLOR=1`` quietly change what the
+    permission gate enforces would be its own defect.
+    """
+    stream = getattr(sys, "stdin", None)
+    if stream is None:
+        return False
+    try:
+        return bool(stream.isatty())
+    except Exception:
+        # A stream that cannot answer is not evidence of an operator.
+        return False
+
+
+def _confirm(question):
+    """Ask a y/N question, defaulting to no. Anything but an explicit yes is no.
+
+    Every non-answer -- EOF on piped stdin, a closed console, Ctrl-C -- is a
+    "no". A permission prompt that a missing terminal turns into a "yes" is
+    worse than no prompt, because it looks like it asked.
+
+    With no operator present it does not read *at all*. Treating EOF as "no"
+    only ever covered the last line of a piped script; every earlier line
+    returns a real string, so the read succeeded and silently ate the next
+    command. Callers must not reach here without an operator anyway -- see
+    ``_gate_tools`` -- so this is the safety net rather than the seam: a
+    function whose whole job is asking a person has no business reading a
+    line nobody typed.
+    """
+    if not _console_has_operator():
+        return False
+    try:
+        answer = input("%s [y/N] " % question)
+    except (EOFError, OSError, KeyboardInterrupt):
+        return False
+    return str(answer or "").strip().lower() in ("y", "yes")
+
+
+# Most-to-least severe, so a command that fronts several tools is described by
+# the worst thing it can do rather than by whichever branch ast.walk saw first.
+_RISK_ORDER = ("dangerous", "execution", "mutation", "ask", "safe")
+_RISK_RANK = {risk: index for index, risk in enumerate(_RISK_ORDER)}
+
+
+def _severity(risk):
+    """Rank a risk class, treating an unrecognised one as the most severe.
+
+    A class this list has not heard of is by definition unclassified, and the
+    rest of the gate fails closed on ignorance rather than open. Ranking it
+    with a plain ``_RISK_ORDER.index`` instead would raise ``ValueError``
+    inside the gate -- turning "a new risk class was added" into a crashed
+    REPL loop, which is a worse answer than either allowing or refusing.
+    """
+    return _RISK_RANK.get(risk, -1)
+
+
+def _gate_tools(tools, label):
+    """Strictest decision across ``tools``; returns ``(may_run, refusal_text)``.
+
+    The console is the one surface that *can* have a human attached, so ``ask``
+    means actually asking rather than degrading to allow the way a direct MCP
+    call does -- but only when one actually is. ``deny`` prints why and runs
+    nothing, whoever is or is not watching.
+
+    ``interactive`` is therefore ``_console_has_operator()`` and not a
+    hardcoded ``True``. A piped session (`sonder < script.txt`) has nobody to
+    ask, so it degrades to allow exactly like every other non-interactive
+    caller: `manual` refuses nothing there that it did not refuse before this
+    gate existed, while a ``deny`` rule and ``plan`` still refuse. Asking
+    anyway was worse than useless -- ``input()`` read the next line of the
+    script as the answer, so one unseen prompt both denied the command and
+    swallowed the one after it.
+
+    A named command can front several tools (``/todo`` reaches everything from
+    ``task_list`` to ``task_delete``), and which one runs depends on an
+    argument this gate has not parsed. It therefore decides on the *strictest*
+    member: a deny anywhere refuses, otherwise the highest-risk ``ask`` is the
+    one the operator is asked about, once. Rounding the other way -- gating a
+    command that can delete at the risk of its most harmless sibling -- would
+    be under-enforcement, which is the failure this whole change exists to fix.
+    """
+    interactive = _console_has_operator()
+    worst = None
+    for tool in tools:
+        # The exemption is not applied here any more: this asks for a decision
+        # *for a person at a console*, and `permission_modes` owns which
+        # exemptions that kind of caller carries. Four surfaces kept their own
+        # copy of the check and the fifth was written without it.
+        decision = permission_modes.decide_for_caller(
+            tool, interactive=interactive, gate_control_exempt=True,
+        )
+        if decision is None:
+            continue
+        if decision.action == permission_modes.DENY:
+            return False, "refused %s: %s (mode: %s)" % (
+                label, decision.reason, permission_modes.MODE_LABELS.get(
+                    decision.mode, decision.mode),
+            )
+        if decision.action != permission_modes.ASK:
+            continue
+        if worst is None or _severity(decision.risk) < _severity(worst.risk):
+            worst = decision
+    if worst is None:
+        return True, ""
+    if _confirm("run %s? %s." % (label, worst.reason)):
+        return True, ""
+    return False, "skipped %s" % label
+
+
+def _permission_gate(tool):
+    """Gate one tool dispatched as ``/<tool_name>`` through _run_catalogued."""
+    return _gate_tools((tool,), "/" + tool)
+
+
+def _named_command_gate(cmd):
+    """Gate a hand-written console branch (``/write``, ``/delete``, ``/mkdir``).
+
+    ``_run_catalogued`` is only the *fallback* path: roughly fifty named
+    branches in ``main`` -- and another twenty-five that ``main`` forwards to
+    ``server.control_command`` -- call their tool directly and never reach it.
+    Left ungated, ``/write x hi`` wrote a file in ``plan`` mode while
+    ``/file_write`` was refused, which is the same "policy that reports one
+    thing and enforces another" this change exists to remove, reintroduced at
+    a new site.
+
+    So the gate sits at ONE choke point, the top of the slash chain, and reads
+    which tools a branch can invoke out of the source
+    (``command_catalog.console_tools``) rather than out of a hand-kept table
+    that would go stale the first time someone adds a branch. Commands that
+    front no tool (``/help``, ``/exit``, ``/trace``) are absent from that map
+    and are not gated. Named branches and ``_run_catalogued`` are disjoint by
+    construction -- a command is handled by a branch or by the fallback, never
+    both -- so nothing is prompted for twice.
+
+    A catalog that cannot read the tool registry refuses here rather than
+    returning an empty map. An empty map made `_gate_tools(())` answer
+    "allowed" for every command it covers, so the gate did not break -- it
+    turned off, silently, for the life of the process. Fail closed on
+    ignorance: a gate that cannot tell what a command runs must not let it run.
+    """
+    try:
+        tools = command_catalog.console_tools().get(cmd, ())
+    except command_catalog.CatalogUnavailable as exc:
+        return False, "refused %s: %s" % (cmd, exc)
+    return _gate_tools(tools, cmd)
+
+
+def _mode_command(argument):
+    """`/mode` -- show every mode, switch to one, or explain one.
+
+    Delegates to the `permission_mode` tool rather than reimplementing it, so
+    the console and the MCP surface cannot drift apart and a mode change made
+    from here is still recorded like any other tool call. It stays a REPL
+    branch (not a catalogued dispatch) so it can never be refused by the gate
+    it controls -- see GATE_EXEMPT_TOOLS.
+    """
+    wanted = str(argument or "").strip()
+    explain = False
+    for flag in ("--explain", "explain"):
+        if wanted.endswith(flag):
+            wanted = wanted[: -len(flag)].strip()
+            explain = True
+            break
+    return server.permission_mode(mode=wanted, explain=explain)
+
+
 def _run_catalogued(line, cmd):
     """Run any registered MCP tool typed as /<tool_name>, or explain the miss.
 
     Every tool is catalogued, so this is what makes the whole surface -- not
     just the branches written out above -- reachable from the console.
+
+    This is also where the permission gate applies to the console: the tool is
+    resolved first (so an unknown command still gets its suggestions rather
+    than a confusing refusal), then `permission_modes.decide` runs before the
+    handler is ever called.
     """
     try:
         parsed = command_catalog.parse_invocation(line)
     except ValueError as exc:
         return str(exc)
+    except command_catalog.CatalogUnavailable as exc:
+        # Resolving the command is itself a catalog read. Refuse rather than
+        # dispatch something the gate could not have classified.
+        return "refused %s: %s" % (cmd, exc)
     if parsed:
         tool, kwargs = parsed
         handler = getattr(server, tool, None)
         if callable(handler):
+            may_run, refusal = _permission_gate(tool)
+            if not may_run:
+                return refusal
             try:
                 return str(handler(**kwargs))
             except TypeError as exc:
@@ -375,6 +579,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /debug             inspect safe debug state
   /cot               denied: hidden private chain-of-thought is not exposed
   /permissions [tool] show local permission rules or one matched rule
+  /mode [name]       show or set how much runs without asking (plan/manual/acceptEdits/auto)
   /filepolicy        show file access roots and bypass controls
   /files [query]     find files under guarded roots
   /read <path>       read a guarded file
@@ -832,6 +1037,14 @@ def main():
             cmd = parts[0].lower()
             arg = parts[1] if len(parts) > 1 else ""
 
+            # One choke point for every hand-written branch below, including
+            # the ones forwarded to server.control_command. Commands handled by
+            # _run_catalogued (the `else`) are gated there instead.
+            may_run, refusal = _named_command_gate(cmd)
+            if not may_run:
+                print(refusal)
+                continue
+
             if cmd == "/":
                 # A bare slash is the "what can I type" gesture.
                 print(command_catalog.format_matches(""))
@@ -896,6 +1109,8 @@ def main():
                 do_dump(arg.strip() or "repl")
             elif cmd in ("/permissions", "/perms"):
                 print(server.permission_policy(arg.strip()))
+            elif cmd == "/mode":
+                print(_mode_command(arg.strip()))
             elif cmd in ("/todo", "/task", "/tasks"):
                 text = arg.strip()
                 if not text or text.lower() in ("list", "ls"):

@@ -260,8 +260,118 @@ def check(home, tool_name):
     return _policy.evaluate(load(home), tool_name)
 
 
-def format_policy(home, tool_name=""):
-    rules, report = load_report(home)
+# fnmatch's metacharacters. A pattern carrying any of them can match more than
+# one tool name, which is why such a row never gets a single effective verdict.
+_GLOB_CHARS = ("*", "?", "[")
+
+
+def is_glob(pattern):
+    """Whether a rule pattern can match more than one tool name."""
+    return any(char in str(pattern) for char in _GLOB_CHARS)
+
+
+def rule_lookup(rules):
+    """A ``permission_modes.decide()`` rule lookup bound to a loaded snapshot.
+
+    ``decide()``'s own default lookup re-reads and re-parses ``permissions.json``
+    on every call and resolves its home itself. Both are wrong for rendering a
+    table: one read per row against a file that can change between rows, from a
+    home that is not the one being displayed. This binds one already-loaded
+    snapshot instead, so a whole render sees a single consistent policy.
+
+    Returns ``None`` when nothing genuinely matched, matching
+    ``_default_rule_lookup``: ``evaluate`` always returns *some* rule (it falls
+    back to the permissive ``NO_MATCH_RULE`` wildcard) and that fallback must
+    read as "no rule", not as an explicit ask.
+    """
+    snapshot = list(rules)
+
+    def lookup(tool_name):
+        rule = _policy.evaluate(snapshot, tool_name)
+        if rule == dict(_policy.NO_MATCH_RULE):
+            return None
+        return rule
+
+    return lookup
+
+
+def _both_callers(action):
+    """An action, naming both callers' answers on the one row where they differ.
+
+    ``/permissions`` is rendered with ``interactive=True`` -- the operator's
+    view -- because that is the surface it is principally typed at. For a
+    caller with nobody to ask (an MCP client, the app, a piped console) the
+    same inputs give a different answer, and ``ask`` is the *only* verdict
+    where that is true: a ``deny`` is a deny for both, an ``allow`` is an
+    allow for both, and ``plan`` -- the one mode where a non-interactive
+    caller is still refused -- never produces ``ask`` at all (its matrix row
+    has no ASK entry). So naming both answers here, on ask rows only, turns
+    this output from disclosure into truth without plumbing a caller flag
+    through the renderer.
+    """
+    if action != "ask":
+        return action
+    return "ask (console) / allow (non-interactive)"
+
+
+def _effective_lines(decide, tool_name):
+    """The mode/risk/effective/governed-by block for one named tool."""
+    if decide is None:
+        return []
+    try:
+        decision = decide(tool_name)
+        return [
+            "  mode: %s" % decision.mode,
+            "  risk: %s" % decision.risk,
+            "  effective: %s" % _both_callers(decision.action),
+            "  governed by: %s -- %s" % (decision.source, decision.reason),
+        ]
+    except Exception as exc:
+        # Say so rather than quietly falling back to the rule-only view: the
+        # whole point of these lines is that the rule alone can be misleading,
+        # so their silent absence would be the same lie in a new place.
+        return ["  effective: UNAVAILABLE (%s)" % _describe_exc(exc)]
+
+
+def _effective_suffix(decide, rule):
+    """``-> action (source)`` for a row, or "" when the row cannot have one.
+
+    A glob row deliberately gets nothing. ``web_*`` covers tools of differing
+    risk classes, so one verdict for the row would be a fresh untruth -- the
+    per-tool answer belongs to the single-tool form, which is asked about a
+    name rather than a pattern.
+    """
+    if decide is None or is_glob(rule["pattern"]):
+        return ""
+    try:
+        decision = decide(rule["pattern"])
+    except Exception as exc:
+        return "  -> UNAVAILABLE (%s)" % _describe_exc(exc)
+    if decision.action == "ask":
+        return "  -> ask (%s) / allow (non-interactive)" % decision.source
+    return "  -> %s (%s)" % (decision.action, decision.source)
+
+
+def format_policy(home, tool_name="", *, decide=None, snapshot=None):
+    """Render the policy; with ``decide``, render what will actually happen.
+
+    Rules alone stopped being the whole answer when they started being
+    enforced: they now compose with an autonomy mode, and the two can disagree
+    (a ``deny`` rule beats even ``auto``; ``plan`` denies through an ``allow``
+    rule). ``decide`` is a ``tool_name -> Decision`` callable -- inject
+    ``permission_modes.decide`` bound to one pinned mode and one rule snapshot
+    -- and the effective verdict plus the layer that produced it are shown
+    alongside the rule. Omitted, the output is byte-for-byte what it always
+    was, because every other caller has no mode to speak for.
+
+    ``snapshot`` is the ``(rules, report)`` a caller already loaded in order to
+    build ``decide``. Passing it keeps a whole render to a single read of
+    ``permissions.json``; omitted, the policy is loaded here as before.
+    """
+    if snapshot is None:
+        rules, report = load_report(home)
+    else:
+        rules, report = snapshot
     _warn_once(report)
     if tool_name:
         rule = _policy.evaluate(rules, tool_name)
@@ -271,10 +381,24 @@ def format_policy(home, tool_name=""):
             "  matched: %s" % rule["pattern"],
             "  note: %s" % rule["note"],
         ]
+        lines.extend(_effective_lines(decide, tool_name))
     else:
         lines = ["sonder permission rules", "  path: %s" % report.path]
+        if decide is not None:
+            # Without this, a row shadowed by an earlier rule for the same tool
+            # reads as though its own action were being contradicted, and the
+            # absence of a verdict on a wildcard row reads as an omission.
+            lines.append(
+                "  -> is the effective decision for that tool name, rule and "
+                "mode combined; wildcard rows cover tools of differing risk, "
+                "so they get none. An 'ask' row names both callers' answers, "
+                "because it is the only verdict where they differ."
+            )
         for rule in rules:
-            lines.append("  %(action)-5s %(pattern)-32s %(note)s" % rule)
+            lines.append(
+                "  %(action)-5s %(pattern)-32s %(note)s" % rule
+                + _effective_suffix(decide, rule)
+            )
     if report.degraded:
         lines.append("  WARNING: %s" % report.describe())
     return "\n".join(lines)

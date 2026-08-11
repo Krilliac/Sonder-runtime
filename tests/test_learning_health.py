@@ -1,3 +1,4 @@
+import calibration
 import learning_health
 import memory_store
 
@@ -54,9 +55,9 @@ def test_learning_report_tracks_grounding_signals_sources_and_hygiene():
     try:
         for interaction_id in ("i1", "i2", "i3"):
             _interaction(conn, interaction_id)
-        memory_store.record_outcome_row(conn, "i1", "tests_passed", 1.0)
-        memory_store.record_outcome_row(conn, "i2", "accepted", 0.8)
-        memory_store.record_outcome_row(conn, "i3", "failed", -1.0)
+        memory_store.record_outcome_row(conn, "i1", "tests_passed", 1.0, source="caller")
+        memory_store.record_outcome_row(conn, "i2", "accepted", 0.8, source="caller")
+        memory_store.record_outcome_row(conn, "i3", "failed", -1.0, source="caller")
         memory_store.add_lesson(
             conn,
             "lesson-grounded",
@@ -110,7 +111,7 @@ def test_clean_grounded_learning_store_is_healthy_and_formats(monkeypatch):
             revision=learning_health.embeddings.EMBED_REVISION,
             dimension=1,
         )
-        memory_store.record_outcome_row(conn, "i1", "accepted", 0.8)
+        memory_store.record_outcome_row(conn, "i1", "accepted", 0.8, source="caller")
         memory_store.add_lesson(
             conn,
             "lesson-one",
@@ -264,7 +265,7 @@ def test_learning_health_reports_quarantined_lessons_as_watch():
                 conn, ["harmful"], interaction_id, "parser task",
             )
             memory_store.record_lesson_usage_outcome(
-                conn, interaction_id, "failed", -1.0,
+                conn, interaction_id, "failed", -1.0, source="caller",
             )
         report = learning_health.build_report(conn)
     finally:
@@ -302,10 +303,15 @@ def test_autograded_curriculum_outcomes_do_not_mask_the_reviewed_hit_rate():
             _interaction(conn, interaction_id)
             ids.append(interaction_id)
         for interaction_id in ids[:9]:
-            memory_store.record_outcome_row(conn, interaction_id, "tests_passed", 1.0)
-        memory_store.record_outcome_row(conn, ids[9], "accepted", 0.8)
+            # The runtime marking its own curriculum -- the population the
+            # reviewed rate must not absorb.
+            memory_store.record_outcome_row(
+                conn, interaction_id, "tests_passed", 1.0,
+                source="self_curriculum",
+            )
+        memory_store.record_outcome_row(conn, ids[9], "accepted", 0.8, source="caller")
         for interaction_id in ids[10:]:
-            memory_store.record_outcome_row(conn, interaction_id, "rejected", -0.5)
+            memory_store.record_outcome_row(conn, interaction_id, "rejected", -0.5, source="caller")
         report = learning_health.build_report(conn)
     finally:
         conn.close()
@@ -328,7 +334,7 @@ def test_autograded_curriculum_outcomes_do_not_mask_the_reviewed_hit_rate():
 def _graded(conn, interaction_id, lesson_ids, task, reward):
     memory_store.log_lesson_usage(conn, lesson_ids, interaction_id, task)
     memory_store.record_lesson_usage_outcome(
-        conn, interaction_id, "tests_passed" if reward > 0 else "failed", reward,
+        conn, interaction_id, "tests_passed" if reward > 0 else "failed", reward, source="caller",
     )
 
 
@@ -341,11 +347,14 @@ def test_status_gates_on_the_caller_judged_rate_not_the_blend():
     conn = _conn()
     try:
         for n in range(500):
-            memory_store.record_outcome_row(conn, "auto%d" % n, "tests_passed", 1.0)
+            memory_store.record_outcome_row(
+                conn, "auto%d" % n, "tests_passed", 1.0,
+                source="self_curriculum",
+            )
         for n in range(30):
-            memory_store.record_outcome_row(conn, "ok%d" % n, "accepted", 0.8)
+            memory_store.record_outcome_row(conn, "ok%d" % n, "accepted", 0.8, source="caller")
         for n in range(30):
-            memory_store.record_outcome_row(conn, "no%d" % n, "rejected", -0.5)
+            memory_store.record_outcome_row(conn, "no%d" % n, "rejected", -0.5, source="caller")
         report = learning_health.build_report(conn)
     finally:
         conn.close()
@@ -366,10 +375,13 @@ def test_a_reviewed_sample_too_small_to_gate_on_falls_back_to_the_blend():
     conn = _conn()
     try:
         for n in range(9):
-            memory_store.record_outcome_row(conn, "auto%d" % n, "tests_passed", 1.0)
-        memory_store.record_outcome_row(conn, "ok", "accepted", 0.8)
+            memory_store.record_outcome_row(
+                conn, "auto%d" % n, "tests_passed", 1.0,
+                source="self_curriculum",
+            )
+        memory_store.record_outcome_row(conn, "ok", "accepted", 0.8, source="caller")
         for n in range(3):
-            memory_store.record_outcome_row(conn, "no%d" % n, "rejected", -0.5)
+            memory_store.record_outcome_row(conn, "no%d" % n, "rejected", -0.5, source="caller")
         report = learning_health.build_report(conn)
     finally:
         conn.close()
@@ -687,14 +699,19 @@ def test_caller_judged_outcomes_are_attributed_to_the_tier_that_produced_them():
             memory_store.log_interaction(
                 conn, interaction_id, "task", "", "answer", tier
             )
-        memory_store.record_outcome_row(conn, "c1", "accepted", 0.8)
-        memory_store.record_outcome_row(conn, "c2", "rejected", -0.5)
-        memory_store.record_outcome_row(conn, "c3", "rejected", -0.5)
-        memory_store.record_outcome_row(conn, "g1", "accepted", 0.8)
+        memory_store.record_outcome_row(conn, "c1", "accepted", 0.8, source="caller")
+        memory_store.record_outcome_row(conn, "c2", "rejected", -0.5, source="caller")
+        memory_store.record_outcome_row(conn, "c3", "rejected", -0.5, source="caller")
+        memory_store.record_outcome_row(conn, "g1", "accepted", 0.8, source="caller")
         # No interaction row was ever logged for this one.
-        memory_store.record_outcome_row(conn, "vanished", "accepted", 0.8)
+        memory_store.record_outcome_row(conn, "vanished", "accepted", 0.8, source="caller")
         # Autograded: must not appear in a caller-judged breakdown at all.
-        memory_store.record_outcome_row(conn, "c1", "tests_passed", 1.0)
+        # Excluded by recorded provenance now, not by its signal name -- a
+        # caller who ran the tests and honestly reported `tests_passed` used to
+        # be dropped from this table by the old proxy.
+        memory_store.record_outcome_row(
+            conn, "c1", "tests_passed", 1.0, source="self_curriculum",
+        )
 
         report = learning_health.build_report(conn)
         rendered = learning_health.format_report(report)
@@ -732,8 +749,8 @@ def test_failed_blame_attribution_is_reported_not_swallowed(monkeypatch):
     try:
         for interaction_id in ("i1", "i2"):
             _interaction(conn, interaction_id)
-        memory_store.record_outcome_row(conn, "i1", "accepted", 0.8)
-        memory_store.record_outcome_row(conn, "i2", "rejected", -0.5)
+        memory_store.record_outcome_row(conn, "i1", "accepted", 0.8, source="caller")
+        memory_store.record_outcome_row(conn, "i2", "rejected", -0.5, source="caller")
 
         clean = learning_health.build_report(conn)
         assert clean["lesson_attribution_error"] == ""
@@ -754,3 +771,103 @@ def test_failed_blame_attribution_is_reported_not_swallowed(monkeypatch):
     # The caveat rides on the line carrying the numbers it invalidates, not in
     # a footnote a reader quoting the quarantine count would skip.
     assert "UPPER BOUND" in feedback[0]
+
+
+# --- the measured caller-judged figure ------------------------------------
+#
+# ``learning_health`` already splits reviewed from autograded, but its
+# ``reviewed`` bucket is a *complement* set (everything that is not
+# tests_passed/failed/compiled) and it renders through ``_percent``, which
+# returns 0.0 on an empty denominator. So a store with three judgements shows a
+# reviewed percent that reads like a rate and is not one. ``calibration``
+# names the population explicitly and refuses to produce a rate below
+# ``MIN_SAMPLE``; carrying its measurement here is what makes the report say
+# "too few to measure" where it used to say a number.
+
+
+def _calibration_line(rendered):
+    lines = [ln for ln in rendered.splitlines() if "calibration" in ln]
+    assert lines, "the report should carry a calibration line"
+    assert len(lines) == 1, "one calibration line, not several: %r" % (lines,)
+    return lines[0]
+
+
+def test_the_measured_caller_judged_figure_is_reported_beside_the_curriculum():
+    """The named population, kept apart from the runtime's own exams."""
+    conn = _conn()
+    try:
+        for n in range(500):
+            memory_store.record_outcome_row(
+                conn, "auto%d" % n, "tests_passed", 1.0,
+                source="self_curriculum",
+            )
+        for n in range(30):
+            memory_store.record_outcome_row(conn, "ok%d" % n, "accepted", 0.8, source="caller")
+        for n in range(30):
+            memory_store.record_outcome_row(conn, "no%d" % n, "rejected", -0.5, source="caller")
+        report = learning_health.build_report(conn)
+    finally:
+        conn.close()
+
+    assert report["calibration"]["population"] == "caller"
+    assert report["calibration"]["total"] == 60
+    assert report["calibration"]["rate"] == 0.5
+    assert report["calibration"]["verdict"] == calibration.POOR
+
+    line = _calibration_line(learning_health.format_report(report))
+    assert "caller-judged" in line
+    assert "50.0%" in line and "n=60" in line
+    # It must not carry the curriculum population, in any form.
+    assert "500" not in line and "autograded" not in line
+
+
+def test_a_caller_judged_sample_too_small_to_measure_does_not_read_as_a_rate():
+    """"Too few to measure" is not "0% good", and is not "100% good" either."""
+    conn = _conn()
+    try:
+        for n in range(3):
+            memory_store.record_outcome_row(conn, "ok%d" % n, "accepted", 0.8, source="caller")
+        report = learning_health.build_report(conn)
+    finally:
+        conn.close()
+
+    assert report["calibration"]["rate"] is None
+    assert report["calibration"]["verdict"] == calibration.UNMEASURED
+
+    line = _calibration_line(learning_health.format_report(report))
+    assert "too few to measure" in line
+    assert str(calibration.MIN_SAMPLE) in line
+    assert "%" not in line, "a thin sample must not render as any percentage"
+
+
+def test_no_percentage_in_the_report_blends_the_populations_unlabelled():
+    """A combined figure may ship, but never without saying it is combined.
+
+    The blended ``positive_percent`` is allowed here -- it is labelled, and the
+    split rides directly under it. What is forbidden is an *unqualified* blend:
+    a line carrying the combined number with nothing on it to stop a reader
+    quoting it as an accuracy figure.
+    """
+    conn = _conn()
+    try:
+        for n in range(500):
+            memory_store.record_outcome_row(
+                conn, "auto%d" % n, "tests_passed", 1.0,
+                source="self_curriculum",
+            )
+        for n in range(30):
+            memory_store.record_outcome_row(conn, "ok%d" % n, "accepted", 0.8, source="caller")
+        for n in range(30):
+            memory_store.record_outcome_row(conn, "no%d" % n, "rejected", -0.5, source="caller")
+        report = learning_health.build_report(conn)
+    finally:
+        conn.close()
+
+    blended = "%s%%" % report["positive_percent"]
+    assert blended == "94.6%"                      # distinct from every split rate
+    rendered = learning_health.format_report(report)
+
+    carrying = [ln for ln in rendered.splitlines() if blended in ln]
+    assert carrying, "the blended figure should still be reported"
+    for line in carrying:
+        assert "blended" in line, "unlabelled blend: %r" % (line,)

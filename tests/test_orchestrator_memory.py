@@ -100,7 +100,7 @@ def test_prompt_and_trace_omit_quarantined_lesson(monkeypatch):
     for index in range(retriever.QUARANTINE_REPEAT_TASK_MIN_LOSSES):
         interaction_id = "bad-use-%s" % index
         ms.log_lesson_usage(conn, ["bad"], interaction_id, "threading lock")
-        ms.record_lesson_usage_outcome(conn, interaction_id, "failed", -1.0)
+        ms.record_lesson_usage_outcome(conn, interaction_id, "failed", -1.0, source="caller")
 
     real_retrieve = retriever.retrieve_with_ids
     monkeypatch.setattr(

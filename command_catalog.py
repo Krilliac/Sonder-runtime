@@ -33,6 +33,41 @@ from dataclasses import dataclass
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
+
+class CatalogUnavailable(RuntimeError):
+    """The tool registry could not be read, so nothing here can be trusted.
+
+    This used to be swallowed. Both ``console_tools()`` and ``catalog()``
+    wrapped the registry read in ``except Exception:`` and carried on with an
+    empty set, with a comment explaining that a partially initialised server
+    must not break the gate -- but the code kept the gate from breaking by
+    turning it off. Two things happened at once, and the quieter one was
+    worse: every catalog-``dangerous`` tool downgraded to ``ask``, and
+    ``console_tools()`` returned ``{}``, so the console's named-branch gate
+    answered "allowed" for every command it maps.
+
+    Both results are ``lru_cache(maxsize=1)``, so a *transient* failure --
+    exactly the partially-initialised case the comments cited -- latched for
+    the life of the process. Raising fixes that for free: an exception is not
+    memoised, so the next call re-reads.
+
+    Callers that enforce (``permission_modes.risk_of``, the console gate, the
+    HTTP gate) treat this as "fail closed on ignorance" and refuse. Callers
+    that merely display (``help_text``, ``format_matches``) say so in place of
+    the listing rather than raising into a REPL loop.
+    """
+
+
+def _registered_tool_names(server) -> frozenset:
+    """Every registered MCP tool name, or ``CatalogUnavailable``."""
+    try:
+        return frozenset(tool.name for tool in server.mcp._tool_manager.list_tools())
+    except Exception as exc:
+        raise CatalogUnavailable(
+            "the MCP tool registry could not be read: %s" % exc
+        ) from exc
+
+
 # --- taxonomy -------------------------------------------------------------
 
 CATEGORIES = {
@@ -113,6 +148,7 @@ _CATEGORY_BY_TOOL = {
     "update_system_profile": "persona",
     "system_improvement_report": "system",
     "data_convert": "data",
+    "elevate": "security",
 }
 
 # Ordered longest-first at use time; first hit wins.
@@ -202,7 +238,122 @@ _DANGEROUS = frozenset({
     "file_delete", "unload", "sqlite_mutate", "memory_privacy_repair",
     "memory_quality_repair", "admin_set_account", "admin_register",
     "git_merge", "git_cherry_pick", "task_delete", "self_heal_repair",
+    # Changing routing or the permission policy itself is not an ordinary
+    # workspace edit: it alters what every later call is allowed to do, so it
+    # must not flow unprompted in acceptEdits/auto. Elevation is the same
+    # shape of decision -- it widens what every later privileged call is
+    # allowed to do -- so it gets the same treatment.
+    "runtime_policy_update", "permission_rule_set", "elevate",
 })
+
+# Reads the server's own policy sets do not cover. Those two sets answer
+# narrower questions -- what a *repository-scoped* agent may call
+# (``REPOSITORY_READ_ONLY_TOOLS``) and what counts as having inspected the
+# workspace before acting (``_WORK_INSPECTION_TOOLS``) -- so a tool can be
+# plainly read-only and still belong in neither. ``task_list`` was exactly
+# that: one ``SELECT`` and no writer anywhere beneath it, yet it landed in
+# ``_risk_for``'s deliberately fail-closed ``ask`` default, which ``plan``
+# denies. Plan exists to stop Sonder *changing* things, not to stop it
+# answering a question, so a verified read is named here rather than pushed
+# into a server set whose other meanings it does not carry -- adding
+# ``task_list`` to ``_WORK_INSPECTION_TOOLS`` would have made listing todos
+# count as having inspected the workspace.
+#
+# Membership is a claim that the tool has no write path, checked by reading
+# it. It is not a place to park a tool that merely looks harmless: the
+# ``ask`` default above is the right answer for anything unverified.
+_READ_ONLY = frozenset({"task_list", "task_show"})
+
+# Branches whose real work is done by module-level functions that front no
+# registered MCP tool, mapped to the name the gate should grade them by.
+#
+# ``_branch_tool_calls`` keeps only names the registry knows, so ``_open_db``
+# and friends drop out. That filter is fail-OPEN at the *command* level: a
+# branch whose writer is a plain module function is classified by whatever
+# registered tool it incidentally also calls. ``/selfmod`` was the live case
+# -- ``selfmod.deploy`` ``os.replace``s Sonder's own source tree
+# (``selfmod.py``), and the only registered tool in that branch is
+# ``system_improvement_report``, a ``safe`` read it quotes as evidence. So the
+# gate was consulted, took the strictest member of a one-element ``safe`` set,
+# and answered "allowed" under ``plan``. A confident wrong answer, not a gap.
+#
+# The remedy is to make the command stand for its own work: the name here is
+# added to the branch's tool list, and ``permission_modes.risk_of`` resolves it
+# through this catalog's entry for ``/selfmod``, whose curated risk
+# (``command_registry``) now says what the command actually does. It is a
+# floor, not a replacement -- the strictest of it and every tool the branch
+# calls still decides.
+#
+# Deliberately a short, written-down list rather than a general rule, and that
+# is a measurement rather than a preference. Two general rules were tried over
+# both console chains against the 185 registered tools:
+#
+#   "any call this walk could not resolve fails closed" flags 94 of the 124
+#   mapped commands -- ``json.dumps``, ``arg.strip()`` and every
+#   ``server.control_command`` delegation among them;
+#
+#   "grade a command by its own catalogued risk" flags 19, of which 18 are
+#   verified reads (``/read``, ``/search``, ``/tree``, ``/files``).
+#
+# Both would put ordinary reads behind a prompt and deny them under ``plan``,
+# which is the over-refusal this gate is explicitly built to avoid -- a
+# refusal nobody can act on trains operators to route around the gate. A rule
+# that fires on 94 of 124 commands is not a gate; it is noise with a verdict.
+# ``/mcp refresh`` republishes the live MCP source and tool registry, which
+# changes what every later call is allowed to do -- the same reasoning
+# ``_DANGEROUS`` already applies to ``runtime_policy_update`` and
+# ``permission_rule_set``. ``/goal`` writes to ``goal_store`` (adopt, complete,
+# abandon, note), an ordinary write, so it is graded ``mutation`` and flows in
+# ``acceptEdits`` where the registry refresh still does not.
+#
+# ``/report`` was read the same way and deliberately left out: it only formats
+# ``activity_tracker.latest()``, so there is nothing there to gate and adding
+# it would be over-refusal dressed as caution.
+# ``/runwindow`` and its aliases launch a code block in a detached console via
+# ``code_runner.run_code_window``, which fronts no tool -- so ``/run`` was
+# refused under ``plan`` while ``/runwindow`` ran the same block. Graded
+# ``execution`` through ``permission_modes.EXECUTION_COMMANDS``.
+#
+# ``/training`` passes its argument to ``adaptive_training.command_text``,
+# which runs that CLI's own ``main()``: ``start``, ``deploy``, ``rollback``,
+# ``adopt-legacy``, ``release-alias``. Deploying an adapter changes which
+# weights every later call uses, so it is graded ``dangerous`` for the reason
+# ``runtime_policy_update`` is.
+#
+# ``/hardware`` reaches the same CLI but only ever with a *literal* argument,
+# so it cannot reach those subcommands. It is recorded here as the read it is
+# rather than put on the coverage floor's display-only allow-list: a recorded
+# ``safe`` verdict and an exemption behave identically today and differ
+# entirely tomorrow -- the verdict is visible to ``/permissions``, can be
+# overridden by a rule, and stays inside the map this repo now has a floor
+# for. The literal is asserted by a test, because it is the only thing that
+# makes ``safe`` true.
+_UNREGISTERED_BRANCH_WORK = {
+    "/selfmod": "selfmod",
+    "/selfmodify": "selfmod",
+    "/mcp": "mcp",
+    "/convergence": "mcp",
+    "/goal": "goal",
+    "/goals": "goal",
+    "/runwindow": "runwindow",
+    "/runnew": "runwindow",
+    "/runconsole": "runwindow",
+    "/training": "training",
+    "/weighttraining": "training",
+    "/hardware": "hardware",
+    # `/location on` grants session-wide approximate IP-geolocation consent by
+    # assigning the REPL's `location_consent`, which every later turn is then
+    # handed. No registered tool fronts that assignment -- `/location` never
+    # calls `approximate_location_lookup`, it authorizes it -- so without an
+    # entry here the console gate resolves the command to an empty tool set
+    # and allows it unconditionally. It sat on the coverage floor's
+    # display-only allow-list instead, under a reason ("reads the
+    # location-consent env flag") that described only the bare form. Recorded
+    # as the grant it is, for the reason `/hardware` is recorded as the read
+    # it is: a verdict is visible to `/permissions`, can be overridden by a
+    # rule, and stays inside the map the floor checks.
+    "/location": "location",
+}
 
 
 @dataclass(frozen=True)
@@ -325,6 +476,269 @@ def _native_groups() -> list[tuple[str, ...]]:
     return groups
 
 
+# ``control_command`` is a dispatch chain, not a worker. It is resolved by
+# name (see ``http_slash_tools``), and following it as a function would grade
+# every branch that forwards to it by everything the whole chain can do.
+_NEVER_FOLLOW = frozenset({"control_command"})
+
+
+@functools.lru_cache(maxsize=None)
+def _module_level_functions(module: str) -> dict:
+    """Top-level ``def``s of a sibling module in this repo, or ``{}``.
+
+    Module level only: a nested helper is not reachable as
+    ``<module>.<name>``, so admitting one would attribute a call that cannot
+    happen.
+    """
+    path = os.path.join(_HERE, module + ".py")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read())
+    except (OSError, SyntaxError):
+        return {}
+    return {
+        node.name: node for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
+def _wrapper_tools(module: str, name: str, tool_names: frozenset, seen: set) -> set:
+    """Registered tools called directly inside ``<module>.<name>``.
+
+    Deliberately shallow -- the tools that one function calls itself, and no
+    further. Depth is where this turns into over-attribution: two levels out
+    of a general-purpose helper starts crediting a branch with work it cannot
+    reach, and over-refusal trains operators to route around the gate.
+    """
+    key = "%s.%s" % (module, name)
+    if key in seen:
+        return set()
+    seen.add(key)
+    target = _module_level_functions(module).get(name)
+    if target is None:
+        return set()
+    found = set()
+    for child in ast.walk(target):
+        if not isinstance(child, ast.Call):
+            continue
+        inner = child.func
+        if isinstance(inner, ast.Attribute) and inner.attr in tool_names:
+            found.add(inner.attr)
+        elif isinstance(inner, ast.Name) and inner.id in tool_names:
+            found.add(inner.id)
+    return found
+
+
+def _branch_tool_calls(path: str, function: str, tool_names: frozenset) -> dict:
+    """``{"/write": ("file_write",)}`` for one hand-written dispatch chain.
+
+    Read out of the source rather than hand-listed, for the same reason the
+    alias groups above are: a console branch that calls a real tool has to be
+    covered by the permission gate the moment it is written, not the next time
+    someone remembers to update a table. Hand-maintained security tables go
+    stale silently, and a permission gate that silently stops covering a
+    command is worse than none, because the mode indicator keeps claiming it.
+
+    ``/write`` runs ``file_write`` but is not *named* ``file_write``, so the
+    catalog's own name-matching (``Command.tool``) cannot see it: that only
+    fronts a tool when a slash name and a tool name coincide. This walks the
+    branch body instead, following module-level helpers one level deep
+    (``do_refactor`` -> ``ensemble_answer``) and keeping only names that are
+    actually registered MCP tools, so ``_open_db`` and friends drop out.
+    """
+    try:
+        with open(os.path.join(_HERE, path), encoding="utf-8") as handle:
+            tree = ast.parse(handle.read())
+    except (OSError, SyntaxError):
+        return {}
+    functions = {
+        node.name: node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    scope = functions.get(function)
+    if scope is None:
+        return {}
+
+    def _called_tools(node, depth: int, seen: set) -> set:
+        found: set = set()
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Call):
+                continue
+            target = child.func
+            if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
+                # Any ``<module>.<tool_name>``, not just ``server.<tool_name>``.
+                # ``/run`` executes host code through ``code_runner.run_code``
+                # and never touches the ``run_code`` tool, so a receiver check
+                # would have left the console's most obviously "runs a program"
+                # command outside a gate whose whole job is running programs.
+                # The name is filtered against the real registry below.
+                found.add(target.attr)
+                # ...and when the name is NOT a tool, it may be a wrapper in
+                # another module of this repo that calls the tools for it.
+                # ``sonder_serve``'s ``/emotion`` branch calls
+                # ``server.emotion_command``, so it resolved to nothing while
+                # the console's own branch -- which calls the tools directly --
+                # resolved to three: the same command, the same write, refused
+                # for the operator and allowed for the app. One level only, and
+                # never into ``control_command``, which is a 97-branch dispatch
+                # chain: following that grades every delegating branch by the
+                # union of all of them (measured: 49 branches jump to
+                # ``dangerous``). It is resolved by name instead.
+                if (
+                    target.attr not in tool_names
+                    and target.attr not in _NEVER_FOLLOW
+                    and depth < 1
+                ):
+                    found |= _wrapper_tools(
+                        target.value.id, target.attr, tool_names, seen,
+                    )
+            elif isinstance(target, ast.Name):
+                if target.id in tool_names:
+                    found.add(target.id)
+                elif (
+                    target.id in functions
+                    and target.id not in seen
+                    and depth < 2
+                ):
+                    seen.add(target.id)
+                    found |= _called_tools(functions[target.id], depth + 1, seen)
+        return found
+
+    found: dict = {}
+    for node in ast.walk(scope):
+        if not isinstance(node, ast.If):
+            continue
+        names = _branch_names(node.test)
+        if not names:
+            continue
+        body = ast.Module(body=node.body, type_ignores=[])
+        tools = sorted(_called_tools(body, 0, set()) & tool_names)
+        if not tools:
+            continue
+        for name in names:
+            found[name] = tuple(sorted(set(found.get(name, ())) | set(tools)))
+    return found
+
+
+def _branch_names(test) -> list[str]:
+    """Slash names compared in one ``cmd == "/x"`` / ``cmd in ("/x", "/y")`` test."""
+    if not isinstance(test, ast.Compare) or len(test.ops) != 1:
+        return []
+    if not isinstance(test.left, ast.Name) or test.left.id != "cmd":
+        return []
+    comparator = test.comparators[0]
+    values: list = []
+    if isinstance(comparator, ast.Constant):
+        values = [comparator.value]
+    elif isinstance(comparator, (ast.Tuple, ast.List, ast.Set)):
+        values = [
+            item.value for item in comparator.elts
+            if isinstance(item, ast.Constant)
+        ]
+    return [
+        value.lower() for value in values
+        if isinstance(value, str) and value.startswith("/") and len(value) > 1
+    ]
+
+
+@functools.lru_cache(maxsize=1)
+def console_tools() -> dict:
+    """Every named console command mapped to the MCP tools it can invoke.
+
+    Covers both hand-written chains a typed slash command can reach: the
+    REPL's own ``main`` and ``server.control_command``, which the REPL
+    delegates ~25 names to. ``/mkdir`` therefore resolves to
+    ``directory_create`` even though only ``control_command`` names it.
+
+    This is what lets the console permission gate sit at ONE choke point --
+    the top of the REPL's slash chain -- instead of at each of the ~50
+    branches. Commands that front no tool (``/help``, ``/trace``, ``/exit``)
+    are simply absent, and are not gated.
+    """
+    import server  # lazy: server imports this module for /help
+
+    names = _registered_tool_names(server)
+    merged: dict = {}
+    for path, function in (
+        ("server.py", "control_command"), ("sonder_repl.py", "main"),
+    ):
+        for slash, tools in _branch_tool_calls(path, function, names).items():
+            merged[slash] = tuple(sorted(set(merged.get(slash, ())) | set(tools)))
+    return _with_unregistered_work(merged)
+
+
+def _with_unregistered_work(mapped: dict) -> dict:
+    """Add the stand-in name for branches whose real work fronts no tool.
+
+    Unconditional, and that is the point. An earlier version only augmented
+    keys the derivation had already produced -- which made ``/selfmod``'s
+    floor depend on the branch still calling ``system_improvement_report``,
+    the incidental ``safe`` sibling that caused the defect in the first place.
+    Drop that one call and the key disappears, taking the floor with it and
+    silently restoring the exact hole it was added to close. A floor
+    conditional on the thing it is protecting against is not a floor.
+
+    ``/mcp`` and ``/goal`` are here for the same reason and were never in the
+    derivation at all: neither branch calls a registered tool, so both mapped
+    to nothing and were ungated.
+    """
+    out = dict(mapped)
+    for slash, stand_in in _UNREGISTERED_BRANCH_WORK.items():
+        out[slash] = tuple(sorted(set(out.get(slash, ())) | {stand_in}))
+    return out
+
+
+# Marker for a branch that is a one-line forward to ``server.control_command``.
+# It is not a tool; it is resolved away below into whatever that chain's own
+# branch of the same name reaches.
+_DELEGATION = "control_command"
+
+
+@functools.lru_cache(maxsize=1)
+def http_slash_tools() -> dict:
+    """Every app/HTTP slash command mapped to the MCP tools it can invoke.
+
+    ``sonder_serve._handle_slash`` is a sixth hand-written dispatch chain and
+    the one the Flutter app talks to. It is derived here for exactly the reason
+    the console's map is: it calls ``server.file_write``/``file_edit``/
+    ``file_delete`` directly and forwards ten more names to
+    ``server.control_command``, so a hand-kept table would go stale the first
+    time a branch was added, and a permission gate that silently stops covering
+    a command is worse than none.
+
+    Kept separate from ``console_tools()`` rather than merged into it: the two
+    chains answer the same slash names with *different* bodies. Measured over
+    the 110 names both chains define, three differ -- ``/todo`` and its aliases
+    reach ``task_delete``/``task_plan``/``task_depend``/``task_progress`` at
+    the console and only ``task_create``/``list``/``show``/``update`` here --
+    so unioning them would gate each surface at the other's blast radius, and
+    an operator refused a delete here could not tell why.
+
+    The forwards are resolved rather than dropped. A branch whose whole body is
+    ``return server.control_command(...)`` names no tool of its own, so
+    attributing it nothing would have left those ten as ungated as the chain
+    was -- they inherit ``control_command``'s own branch of the same name.
+    """
+    import server  # lazy: server imports this module for /help
+
+    names = _registered_tool_names(server)
+    delegated = _branch_tool_calls("server.py", "control_command", names)
+    own = _branch_tool_calls(
+        "sonder_serve.py", "_handle_slash", names | {_DELEGATION},
+    )
+    merged: dict = {}
+    for slash, tools in own.items():
+        resolved = set(tools)
+        if _DELEGATION in resolved:
+            resolved.discard(_DELEGATION)
+            resolved |= set(delegated.get(slash, ()))
+        if resolved:
+            merged[slash] = tuple(sorted(resolved))
+    return _with_unregistered_work(merged)
+
+
 @functools.lru_cache(maxsize=1)
 def _help_summaries() -> dict:
     """One-liners harvested from the REPL's hand-written ``HELP`` block.
@@ -380,7 +794,7 @@ def _risk_for(name: str, server) -> str:
         return "mutation"
     read_only = getattr(server, "REPOSITORY_READ_ONLY_TOOLS", frozenset())
     inspection = getattr(server, "_WORK_INSPECTION_TOOLS", frozenset())
-    if name in read_only or name in inspection:
+    if name in _READ_ONLY or name in read_only or name in inspection:
         return "safe"
     return "ask"
 
@@ -430,8 +844,14 @@ def catalog() -> tuple:
 
     try:
         tools = list(server.mcp._tool_manager.list_tools())
-    except Exception:  # a partially initialised server must not break /help
-        tools = []
+    except Exception as exc:
+        # Not swallowed. `risk_of` reads `dangerous` out of this catalog, so
+        # continuing with an empty list silently reclassified every dangerous
+        # tool as `ask` -- and memoised the answer. Raising leaves nothing
+        # cached, and the display callers below turn it into a message.
+        raise CatalogUnavailable(
+            "the MCP tool registry could not be read: %s" % exc
+        ) from exc
     tools_by_name = {t.name: t for t in tools}
 
     import command_registry
@@ -515,6 +935,9 @@ def catalog() -> tuple:
 def reset_cache() -> None:
     """Drop the memoised catalog (used after a live reload adds tools)."""
     catalog.cache_clear()
+    console_tools.cache_clear()
+    http_slash_tools.cache_clear()
+    _module_level_functions.cache_clear()
 
 
 # --- lookup / search ------------------------------------------------------
@@ -649,6 +1072,22 @@ def help_category(name: str) -> str:
 
 
 def help_command(name: str) -> str:
+    """Full usage for one command, or the closest matches.
+
+    Guarded rather than left to raise: both ``server.control_command`` and
+    ``sonder_repl._run_catalogued`` call this from inside an
+    ``except TypeError`` to explain how a tool should have been invoked. A
+    blind registry raising here would replace the caller's real mistake with
+    an unrelated error about the catalog, on a path whose whole job is telling
+    the caller what they got wrong.
+    """
+    try:
+        return _help_command(name)
+    except CatalogUnavailable as exc:
+        return _UNAVAILABLE_TEXT % exc
+
+
+def _help_command(name: str) -> str:
     command = by_name(name)
     if not command:
         matches = complete(name, limit=8)
@@ -687,18 +1126,37 @@ def help_command(name: str) -> str:
     return "\n".join(lines)
 
 
+_UNAVAILABLE_TEXT = (
+    "the command catalog is unavailable: %s\n"
+    "  nothing can be listed, and the permission gate is refusing commands "
+    "until the tool registry answers again."
+)
+
+
 def help_text(topic: str = "") -> str:
-    """Dispatcher behind /help: no topic -> categories, else category or command."""
+    """Dispatcher behind /help: no topic -> categories, else category or command.
+
+    A registry that cannot be read is reported rather than raised: this is the
+    display path, and a traceback out of ``/help`` would take the REPL loop
+    with it. The enforcing paths fail closed instead -- see
+    ``CatalogUnavailable``.
+    """
     key = str(topic or "").strip()
-    if not key:
-        return help_overview()
-    if key.lstrip("/").lower() in categories():
-        return help_category(key)
-    return help_command(key)
+    try:
+        if not key:
+            return help_overview()
+        if key.lstrip("/").lower() in categories():
+            return help_category(key)
+        return help_command(key)
+    except CatalogUnavailable as exc:
+        return _UNAVAILABLE_TEXT % exc
 
 
 def format_matches(prefix: str, limit: int = 12) -> str:
-    matches = complete(prefix, limit=limit)
+    try:
+        matches = complete(prefix, limit=limit)
+    except CatalogUnavailable as exc:
+        return _UNAVAILABLE_TEXT % exc
     if not matches:
         return "no command matches '%s'. /help lists every category." % prefix
     header = "most used" if not str(prefix or "").strip("/ ") else (

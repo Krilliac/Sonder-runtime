@@ -6,6 +6,8 @@ scanning for Sonder's MCP tool surface.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import os
 import re
@@ -15,7 +17,9 @@ import sys
 import time
 from pathlib import Path
 
+import file_ops
 import sonder_paths
+import unsafe_lab
 
 MAX_OUTPUT = 256_000
 MAX_TIMEOUT = 120
@@ -38,11 +42,138 @@ def _trim(text, limit=MAX_OUTPUT):
     return text[:half] + "\n... [trimmed %d chars] ...\n" % (len(text) - limit) + text[-half:]
 
 
-def _resolve_root(root):
+def _resolve_root(root, extra_roots=""):
+    """Resolve a caller-supplied working root INSIDE an authorized root.
+
+    Every tool in this module hands ``root`` straight to a child process as its
+    working directory, and several of them report what they find there --
+    ``secret_scan`` prints the credentials it matches. Until now this function
+    resolved any absolute path and returned it, so the only thing standing
+    between a caller and an arbitrary directory was whether a caller could
+    reach these functions at all. ``fix/cloud-help-drift`` @ ``b8a15ef`` relied
+    on exactly that, removing the four read-only tools from the agent surface
+    on the stated grounds that "adding a dispatch branch would have handed a
+    read-only agent unconfined filesystem read"; a later lane added the dispatch
+    branches back, and the unreachability that was doing the work went away.
+
+    Reachability is not a control. Confinement is, so it lives here -- one layer
+    below every entry point, which also covers the direct MCP tools that were
+    never confined either. The authorized set is ``file_ops.allowed_roots()``:
+    Sonder's workspace, its home, ``SONDER_FILE_ROOTS`` and ``file_roots.local``
+    -- exactly what the guarded file tools already honor, so this grants nothing
+    the operator has not already granted them. ``extra_roots`` carries the
+    host-selected project root and reaches here only through a host-controlled
+    parameter, never from model-supplied arguments.
+
+    Authorization is checked BEFORE the directory stat, and the unauthorized
+    refusal names no path. The other order answered "does this exist?" before
+    "are you allowed to ask?", and the two refusals were distinguishable::
+
+        unauthorized MISSING  -> ValueError: not a directory: C:\\Users\\natew\\__definitely_not_here__
+        unauthorized EXISTING -> PermissionError: root is outside every authorized root: C:\\Windows\\System32\\drivers
+
+    Every server wrapper does ``return "ERROR: %s" % exc``, so a confined agent
+    could probe the existence of any path on the host and read the resolved
+    location back -- the same class of leak the ``diff_files`` absolute-path
+    fix closed in this module. An authorized root may still report "not a
+    directory" with its path: the caller is entitled to that one.
+    """
     p = Path(root or ".").resolve()
+    _require_authorized_root(p, extra_roots)
     if not p.is_dir():
         raise ValueError("not a directory: %s" % p)
     return p
+
+
+def _resolve_target_path(root, path):
+    """Confine the SECOND argument -- the one appended to the child's argv.
+
+    ``_resolve_root`` confines the working directory. It was the only control,
+    and four tools take a second argument that is not a working directory:
+    ``test_run``, ``lint_run``, ``format_code`` and ``typecheck_run`` do
+    ``cmd.append(path)`` and the child resolves it against ``cwd=root``. So
+    ``path`` was checked by nothing.
+
+    ``server.py`` already wrote this fact down at its own layer --
+    *"Containing `root` alone leaves `path` checked by nothing, so
+    lint_run(path='../../x', fix=True) would write outside the project"* -- and
+    closed it only on the project-bound agent path, leaving the direct
+    ``@mcp.tool()`` callers and every unbound run open. Measured, the exposure
+    is not limited to writes: with pytest as the framework,
+    ``test_run(root=<authorized>, path="../OUTSIDE/test_evil.py")`` returned
+    ``ok=True, "1 passed"`` having **executed** a file outside the authorized
+    root, which wrote a marker there.
+
+    Confinement therefore belongs here, one layer below all four entry points,
+    for the same reason ``_resolve_root``'s docstring gives: reachability is
+    not a control.
+
+    Returns the path to hand the child -- relative to ``root`` so the argv keeps
+    the same shape (and does not leak the absolute host path, as
+    ``diff_files`` was fixed not to). An empty ``path`` stays empty; callers
+    already branch on that.
+    """
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    root = Path(root)
+    candidate = Path(text)
+    resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
+    if resolved != root and not file_ops._is_inside(resolved, root):
+        raise ValueError(
+            "path is outside the root it was given: %s is not inside %s"
+            % (text, root)
+        )
+    try:
+        return str(resolved.relative_to(root)) or "."
+    except ValueError:
+        return str(resolved)
+
+
+_AUTHORIZED_ROOT = contextvars.ContextVar("harness_authorized_root", default="")
+
+
+@contextlib.contextmanager
+def authorized_root_scope(root):
+    """Authorize ONE host-selected root for the duration of a dispatch.
+
+    This is a scope rather than an argument on purpose. A model can put any
+    string in a tool's arguments, so an ``extra_roots`` argument on the agent
+    surface would be a root it grants itself -- the same forgery
+    ``_TRUSTED_REPOSITORY_APPROVAL`` exists to prevent for the guarded file
+    tools. Only ``server._agent_dispatch`` opens this scope, and only with the
+    root the host chose. Every other caller sees the default of "" and is
+    confined to the operator's configured roots.
+    """
+    token = _AUTHORIZED_ROOT.set(str(root or ""))
+    try:
+        yield
+    finally:
+        _AUTHORIZED_ROOT.reset(token)
+
+
+def _require_authorized_root(resolved, extra_roots=""):
+    if unsafe_lab.active() or file_ops.bypass_enabled():
+        # The deliberately unrestricted process, and the operator's explicit
+        # env bypass, already remove every other file-policy control.
+        return
+    extra_roots = extra_roots or _AUTHORIZED_ROOT.get()
+    for root in file_ops.allowed_roots(extra_roots):
+        try:
+            candidate = root.resolve()
+        except OSError:
+            candidate = root
+        if resolved == candidate or file_ops._is_inside(resolved, candidate):
+            return
+    # Deliberately names NO path. The resolved path is the host's real
+    # location -- account name included -- and every server wrapper returns
+    # `"ERROR: %s" % exc` straight to a confined agent, so echoing it here
+    # disclosed both that the path exists and where it actually lives.
+    # `_resolve_root` explains the ordering half of the same leak.
+    raise PermissionError(
+        "root is outside every authorized root. Add it to file_roots.local "
+        "or SONDER_FILE_ROOTS, or pass a project the host has selected."
+    )
 
 
 def _child_env():
@@ -159,8 +290,8 @@ def _detect_test_framework(root):
     return "pytest"
 
 
-def test_discover(root=".", framework="auto"):
-    root = _resolve_root(root)
+def test_discover(root=".", framework="auto", extra_roots=""):
+    root = _resolve_root(root, extra_roots)
     if framework == "auto":
         framework = _detect_test_framework(root)
 
@@ -211,8 +342,11 @@ def test_discover(root=".", framework="auto"):
 def test_run(
     root=".", framework="auto", path="", pattern="", verbose=False,
     coverage=False, timeout=120, extra_args_json="[]",
+    extra_roots="",
 ):
-    root = _resolve_root(root)
+    root = _resolve_root(root, extra_roots)
+    # Confine the argv-appended path too; see _resolve_target_path.
+    path = _resolve_target_path(root, path)
     timeout = _bounded_int(timeout, 120, 5, MAX_TIMEOUT)
     if framework == "auto":
         framework = _detect_test_framework(root)
@@ -338,8 +472,10 @@ def _detect_typechecker(root):
     return "mypy"
 
 
-def lint_run(root=".", tool="auto", path="", fix=False, timeout=60):
-    root = _resolve_root(root)
+def lint_run(root=".", tool="auto", path="", fix=False, timeout=60, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
+    # Confine the argv-appended path too; see _resolve_target_path.
+    path = _resolve_target_path(root, path)
     timeout = _bounded_int(timeout, 60, 5, MAX_TIMEOUT)
     if tool == "auto":
         tool = _detect_linter(root)
@@ -360,8 +496,10 @@ def lint_run(root=".", tool="auto", path="", fix=False, timeout=60):
     return result
 
 
-def format_code(root=".", tool="auto", path="", check_only=False, timeout=60):
-    root = _resolve_root(root)
+def format_code(root=".", tool="auto", path="", check_only=False, timeout=60, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
+    # Confine the argv-appended path too; see _resolve_target_path.
+    path = _resolve_target_path(root, path)
     timeout = _bounded_int(timeout, 60, 5, MAX_TIMEOUT)
     if tool == "auto":
         tool = _detect_formatter(root)
@@ -386,8 +524,10 @@ def format_code(root=".", tool="auto", path="", check_only=False, timeout=60):
     return result
 
 
-def typecheck_run(root=".", tool="auto", path="", timeout=120):
-    root = _resolve_root(root)
+def typecheck_run(root=".", tool="auto", path="", timeout=120, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
+    # Confine the argv-appended path too; see _resolve_target_path.
+    path = _resolve_target_path(root, path)
     timeout = _bounded_int(timeout, 120, 5, MAX_TIMEOUT)
     if tool == "auto":
         tool = _detect_typechecker(root)
@@ -427,8 +567,8 @@ def _detect_package_manager(root):
     return "pip"
 
 
-def dependency_add(root=".", packages_json="[]", dev=False, timeout=60):
-    root = _resolve_root(root)
+def dependency_add(root=".", packages_json="[]", dev=False, timeout=60, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
     timeout = _bounded_int(timeout, 60, 5, MAX_TIMEOUT)
     try:
         packages = json.loads(packages_json)
@@ -459,8 +599,8 @@ def dependency_add(root=".", packages_json="[]", dev=False, timeout=60):
     return result
 
 
-def dependency_remove(root=".", packages_json="[]", timeout=60):
-    root = _resolve_root(root)
+def dependency_remove(root=".", packages_json="[]", timeout=60, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
     timeout = _bounded_int(timeout, 60, 5, MAX_TIMEOUT)
     try:
         packages = json.loads(packages_json)
@@ -489,8 +629,8 @@ def dependency_remove(root=".", packages_json="[]", timeout=60):
     return result
 
 
-def dependency_update(root=".", packages_json="[]", timeout=120):
-    root = _resolve_root(root)
+def dependency_update(root=".", packages_json="[]", timeout=120, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
     timeout = _bounded_int(timeout, 120, 5, MAX_TIMEOUT)
     try:
         packages = json.loads(packages_json)
@@ -523,8 +663,8 @@ def dependency_update(root=".", packages_json="[]", timeout=120):
     return result
 
 
-def dependency_audit(root=".", timeout=60):
-    root = _resolve_root(root)
+def dependency_audit(root=".", timeout=60, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
     timeout = _bounded_int(timeout, 60, 5, MAX_TIMEOUT)
     mgr = _detect_package_manager(root)
     if mgr == "pip":
@@ -548,8 +688,8 @@ def dependency_audit(root=".", timeout=60):
 # Git mutations
 # ---------------------------------------------------------------------------
 
-def git_commit(root=".", message="", paths_json="[]", all_tracked=False, timeout=30):
-    root = _resolve_root(root)
+def git_commit(root=".", message="", paths_json="[]", all_tracked=False, timeout=30, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
     if not message:
         return {"ok": False, "error": "commit message is required"}
     try:
@@ -572,8 +712,8 @@ def git_commit(root=".", message="", paths_json="[]", all_tracked=False, timeout
     return result
 
 
-def git_branch(root=".", name="", checkout=True, base="", timeout=10):
-    root = _resolve_root(root)
+def git_branch(root=".", name="", checkout=True, base="", timeout=10, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
     if not name:
         return {"ok": False, "error": "branch name is required"}
     if checkout:
@@ -587,15 +727,15 @@ def git_branch(root=".", name="", checkout=True, base="", timeout=10):
     return _run_git(root, cmd, timeout=timeout)
 
 
-def git_checkout(root=".", ref="", timeout=10):
-    root = _resolve_root(root)
+def git_checkout(root=".", ref="", timeout=10, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
     if not ref:
         return {"ok": False, "error": "ref is required (branch name, tag, or commit)"}
     return _run_git(root, ["checkout", ref], timeout=timeout)
 
 
-def git_stash(root=".", action="push", message="", include_untracked=True, timeout=10):
-    root = _resolve_root(root)
+def git_stash(root=".", action="push", message="", include_untracked=True, timeout=10, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
     if action == "push":
         cmd = ["stash", "push"]
         if include_untracked:
@@ -613,8 +753,8 @@ def git_stash(root=".", action="push", message="", include_untracked=True, timeo
     return _run_git(root, cmd, timeout=timeout)
 
 
-def git_tag(root=".", name="", message="", delete=False, timeout=10):
-    root = _resolve_root(root)
+def git_tag(root=".", name="", message="", delete=False, timeout=10, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
     if not name:
         return {"ok": False, "error": "tag name is required"}
     if delete:
@@ -626,8 +766,8 @@ def git_tag(root=".", name="", message="", delete=False, timeout=10):
     return _run_git(root, cmd, timeout=timeout)
 
 
-def git_merge(root=".", branch="", no_ff=True, message="", timeout=30):
-    root = _resolve_root(root)
+def git_merge(root=".", branch="", no_ff=True, message="", timeout=30, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
     if not branch:
         return {"ok": False, "error": "branch name is required"}
     cmd = ["merge"]
@@ -639,8 +779,8 @@ def git_merge(root=".", branch="", no_ff=True, message="", timeout=30):
     return _run_git(root, cmd, timeout=timeout)
 
 
-def git_cherry_pick(root=".", commits_json="[]", timeout=30):
-    root = _resolve_root(root)
+def git_cherry_pick(root=".", commits_json="[]", timeout=30, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
     try:
         commits = json.loads(commits_json)
         if not isinstance(commits, list) or not commits:
@@ -654,8 +794,8 @@ def git_cherry_pick(root=".", commits_json="[]", timeout=30):
 # Build tools
 # ---------------------------------------------------------------------------
 
-def build_run(root=".", command="", timeout=120):
-    root = _resolve_root(root)
+def build_run(root=".", command="", timeout=120, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
     timeout = _bounded_int(timeout, 120, 5, MAX_TIMEOUT)
 
     if command:
@@ -680,8 +820,8 @@ def build_run(root=".", command="", timeout=120):
     return {"ok": False, "error": "no recognized build system found at %s" % root}
 
 
-def build_clean(root=".", timeout=30):
-    root = _resolve_root(root)
+def build_clean(root=".", timeout=30, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
     timeout = _bounded_int(timeout, 30, 5, MAX_TIMEOUT)
 
     if (root / "Makefile").exists():
@@ -697,8 +837,8 @@ def build_clean(root=".", timeout=30):
 # Refactoring helpers
 # ---------------------------------------------------------------------------
 
-def rename_symbol(root=".", old_name="", new_name="", glob="**/*.py", dry_run=True, timeout=30):
-    root = _resolve_root(root)
+def rename_symbol(root=".", old_name="", new_name="", glob="**/*.py", dry_run=True, timeout=30, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
     if not old_name or not new_name:
         return {"ok": False, "error": "both old_name and new_name are required"}
 
@@ -742,8 +882,8 @@ def rename_symbol(root=".", old_name="", new_name="", glob="**/*.py", dry_run=Tr
     }
 
 
-def extract_references(root=".", symbol="", glob="**/*.py", timeout=30):
-    root = _resolve_root(root)
+def extract_references(root=".", symbol="", glob="**/*.py", timeout=30, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
     if not symbol:
         return {"ok": False, "error": "symbol name is required"}
 
@@ -773,27 +913,43 @@ def extract_references(root=".", symbol="", glob="**/*.py", timeout=30):
 # Diff / patch helpers
 # ---------------------------------------------------------------------------
 
-def diff_files(root=".", left="", right="", context=3, timeout=10):
-    root = _resolve_root(root)
+def diff_files(root=".", left="", right="", context=3, timeout=10, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
     if not left or not right:
         return {"ok": False, "error": "both left and right paths are required"}
-    left_path = root / left
-    right_path = root / right
+    left_path = (root / left).resolve()
+    right_path = (root / right).resolve()
     if not left_path.is_file():
         return {"ok": False, "error": "left file not found: %s" % left}
     if not right_path.is_file():
         return {"ok": False, "error": "right file not found: %s" % right}
+    # Pass the paths RELATIVE to root. `git diff --no-index` echoes whatever it
+    # is given into the `diff --git a/... b/...` header, so absolute arguments
+    # printed the operator's full host path -- where the project lives on disk,
+    # and the account name in it -- into every diff a confined agent read back.
+    # Resolving relative to the root also closes the hole this exposed: `left`
+    # and `right` were joined to the root and never checked, so `../..` walked
+    # straight out of it on any caller that does not go through the agent
+    # surface's own scope check.
+    try:
+        left_rel = left_path.relative_to(root)
+        right_rel = right_path.relative_to(root)
+    except ValueError:
+        return {
+            "ok": False,
+            "error": "left and right must resolve inside the root directory",
+        }
 
     result = _run(
-        [_git(), "diff", "--no-index", "-U%d" % context, "--", str(left_path), str(right_path)],
+        [_git(), "diff", "--no-index", "-U%d" % context, "--", str(left_rel), str(right_rel)],
         cwd=root, timeout=timeout,
     )
     result["ok"] = True
     return result
 
 
-def apply_patch(root=".", patch_text="", check_only=False, timeout=10):
-    root = _resolve_root(root)
+def apply_patch(root=".", patch_text="", check_only=False, timeout=10, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
     if not patch_text:
         return {"ok": False, "error": "patch_text is required"}
     cmd = [_git(), "apply"]
@@ -807,8 +963,8 @@ def apply_patch(root=".", patch_text="", check_only=False, timeout=10):
 # Security scanning
 # ---------------------------------------------------------------------------
 
-def secret_scan(root=".", timeout=30):
-    root = _resolve_root(root)
+def secret_scan(root=".", timeout=30, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
     timeout = _bounded_int(timeout, 30, 5, MAX_TIMEOUT)
 
     secret_patterns = [

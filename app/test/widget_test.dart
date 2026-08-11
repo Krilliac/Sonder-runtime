@@ -1025,4 +1025,199 @@ void main() {
     expect(find.byKey(const Key('runtime-failure')), findsNothing);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('Permission mode chip is visible at the composer and switches',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+
+    var mode = 'manual';
+    final posted = <String>[];
+    final client = MockClient((request) async {
+      if (request.url.path != '/v1/permission-mode') {
+        return http.Response('{}', 503);
+      }
+      if (request.method == 'POST') {
+        mode = (jsonDecode(request.body) as Map)['mode'].toString();
+        posted.add(mode);
+      }
+      return http.Response(jsonEncode(_permissionModeBody(mode)), 200);
+    });
+
+    await http.runWithClient(() async {
+      await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
+      await tester.pumpAndSettle();
+
+      // Persistent, not buried in a menu: it is on screen next to the
+      // composer before anything is typed.
+      final chip = find.byKey(const Key('permission-mode-chip'));
+      expect(chip, findsOneWidget);
+      expect(find.descendant(of: chip, matching: find.text('manual')),
+          findsOneWidget);
+
+      await tester.tap(chip);
+      await tester.pumpAndSettle();
+
+      // The picker lists every mode the server published, with the blurb
+      // that says where each one's boundary is.
+      expect(find.byKey(const Key('permission-mode-picker')), findsOneWidget);
+      for (final name in ['plan', 'manual', 'acceptEdits', 'auto']) {
+        expect(find.byKey(Key('permission-mode-option-$name')), findsOneWidget);
+      }
+      expect(find.text('reads only - no writes, no commands'), findsOneWidget);
+      expect(
+        find.textContaining('Elevation is a separate switch'),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byKey(const Key('permission-mode-option-plan')));
+      await tester.pumpAndSettle();
+
+      // Selecting switches through the API and shows what the server
+      // reported back, not what was optimistically requested.
+      expect(posted, ['plan']);
+      expect(find.byKey(const Key('permission-mode-picker')), findsNothing);
+      expect(find.descendant(of: chip, matching: find.text('plan')),
+          findsOneWidget);
+      expect(tester.takeException(), isNull);
+    }, () => client);
+  });
+
+  testWidgets('Elevation renders as its own badge, never as the mode label',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+
+    final client = MockClient((request) async {
+      if (request.url.path != '/v1/permission-mode') {
+        return http.Response('{}', 503);
+      }
+      return http.Response(
+        jsonEncode(_permissionModeBody(
+          'auto',
+          elevated: true,
+          elevationReason: 'installing a driver',
+        )),
+        200,
+      );
+    });
+
+    await http.runWithClient(() async {
+      await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
+      await tester.pumpAndSettle();
+
+      final chip = find.byKey(const Key('permission-mode-chip'));
+      final badge = find.byKey(const Key('permission-elevated-badge'));
+      expect(chip, findsOneWidget);
+      expect(badge, findsOneWidget);
+
+      // Two axes, two widgets: the badge is outside the mode chip, and the
+      // chip's label is the mode alone -- no "auto +admin" hybrid.
+      expect(find.descendant(of: chip, matching: badge), findsNothing);
+      expect(find.descendant(of: badge, matching: find.text('ADMIN')),
+          findsOneWidget);
+      final labels = tester
+          .widgetList<Text>(find.descendant(of: chip, matching: find.byType(Text)))
+          .map((t) => t.data)
+          .toList();
+      expect(labels, ['auto']);
+      expect(tester.takeException(), isNull);
+    }, () => client);
+  });
+
+  testWidgets('Chip stays hidden on a server without the mode route',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+
+    // An older server has no such route at all: no indicator, not an error.
+    final missing = MockClient((request) async => http.Response('', 404));
+    await http.runWithClient(() async {
+      await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('permission-mode-chip')), findsNothing);
+      expect(find.byKey(const Key('permission-elevated-badge')), findsNothing);
+      // The composer still works; only the indicator is absent.
+      expect(find.byType(TextField), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    }, () => missing);
+  });
+
+  testWidgets('A mode that stops being readable disappears instead of going '
+      'stale', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+
+    var reachable = true;
+    final flaky = MockClient((request) async {
+      if (request.url.path != '/v1/permission-mode') {
+        return http.Response('{}', 503);
+      }
+      if (!reachable) return http.Response('nope', 503);
+      return http.Response(jsonEncode(_permissionModeBody('auto')), 200);
+    });
+
+    await http.runWithClient(() async {
+      await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('permission-mode-chip')), findsOneWidget);
+
+      // The next drift check fails. A stale mode shown as current is worse
+      // than showing nothing, so the chip goes rather than freezes.
+      reachable = false;
+      await tester.pump(const Duration(seconds: 16));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('permission-mode-chip')), findsNothing);
+      expect(find.text('auto'), findsNothing);
+      expect(tester.takeException(), isNull);
+    }, () => flaky);
+  });
+}
+
+/// The `/v1/permission-mode` record for [mode], shaped like the server's.
+Map<String, dynamic> _permissionModeBody(
+  String mode, {
+  bool elevated = false,
+  String elevationReason = '',
+}) {
+  const blurbs = <String, String>{
+    'plan': 'reads only - no writes, no commands',
+    'manual': 'ask before anything that is not a read',
+    'acceptEdits': 'file changes proceed; running programs still asks',
+    'auto':
+        'file changes and programs proceed; destructive still asks at the console',
+  };
+  const labels = <String, String>{
+    'plan': 'plan',
+    'manual': 'manual',
+    'acceptEdits': 'accept edits',
+    'auto': 'auto',
+  };
+  return {
+    'mode': mode,
+    'label': labels[mode] ?? mode,
+    'blurb': blurbs[mode] ?? '',
+    'elevated': elevated,
+    'elevationReason': elevationReason,
+    'modes': [
+      for (final entry in blurbs.entries)
+        {
+          'name': entry.key,
+          'label': labels[entry.key],
+          'blurb': entry.value,
+        },
+    ],
+    'matrix': const {
+      'safe': 'allow',
+      'ask': 'ask',
+      'mutation': 'ask',
+      'execution': 'ask',
+      'dangerous': 'ask',
+    },
+  };
 }
