@@ -14046,8 +14046,44 @@ def _agent_task_exact_anchors(task: str) -> list[str]:
     return deduped[:6]
 
 
-def _agent_exact_negative_action(task: str, observations) -> dict | None:
+def _agent_claim_review_tools(cloud: bool = False) -> frozenset:
+    """Claim-review tools this run can actually reach, derived from the gate.
+
+    ``_AGENT_CLAIM_REVIEW_TOOLS`` is only the first of two gates a claim-review
+    action passes.  On a hosted run ``_cloud_agent_tool_policy_error`` refuses
+    every local-only tool one step later, and three of the five claim-review
+    tools are local-only -- so a reviewer told to use ``text_search`` /
+    ``file_read_range`` / ``file_find`` has, hosted, no working vocabulary at
+    all, while ``repository_symbol_index`` and ``project_detect`` sit unnamed.
+
+    Deriving the advertised vocabulary from the denial function rather than
+    restating one of its tool sets is what stops the two from drifting again;
+    this mirrors ``_agent_tool_help``, which was fixed the same way.
+    """
+    if not cloud:
+        return frozenset(_AGENT_CLAIM_REVIEW_TOOLS)
+    return frozenset(
+        name for name in _AGENT_CLAIM_REVIEW_TOOLS
+        if not _cloud_agent_tool_policy_error(name)
+    )
+
+
+def _agent_claim_review_vocabulary(cloud: bool = False) -> tuple:
+    """Deterministic ordering for the tool names shown to the reviewer."""
+    return tuple(sorted(_agent_claim_review_tools(cloud)))
+
+
+def _agent_exact_negative_action(
+    task: str, observations, cloud: bool = False,
+) -> dict | None:
     """Require exact anchor queries before accepting a negative existence claim."""
+    # This deterministic action runs before the reviewer model is consulted, so
+    # a hardcoded tool name here makes the *host itself* propose a tool the
+    # host will then refuse.  ``text_search`` is local-only, so it is dead on
+    # every hosted run; fall through to the model reviewer instead of emitting
+    # an action that can only produce a policy refusal.
+    if "text_search" not in _agent_claim_review_tools(cloud):
+        return None
     anchors = _agent_task_exact_anchors(task)
     if not anchors:
         return None
@@ -14096,9 +14132,12 @@ def _agent_negative_claim_review(
     """Audit negative existence claims without letting the reviewer invent facts."""
     if not _AGENT_NEGATIVE_CLAIM_RE.search(str(final or "")):
         return {"decision": "accept", "reason": "no negative existence claim"}
-    exact_action = _agent_exact_negative_action(task, observations)
+    exact_action = _agent_exact_negative_action(task, observations, cloud=cloud)
     if exact_action:
         return exact_action
+    # Name only what this run's policy will actually admit.  Restating a fixed
+    # trio here is what made 100% of the hosted reviewer's vocabulary dead.
+    vocabulary = _agent_claim_review_vocabulary(cloud)
     system = _build_system(
         "You are a local evidence reviewer. Return exactly one JSON object and no "
         "prose or chain-of-thought. Decide only accept or continue. Accept a negative "
@@ -14106,20 +14145,24 @@ def _agent_negative_claim_review(
         "anchor across the relevant scope. Reject a paraphrased/descriptive search "
         "query, a clipped read that did not reach the target, or a scope mismatch. "
         "Never rewrite the answer or invent evidence; continue must return exactly "
-        "one structured read-only evidence action using text_search, file_read_range, "
-        "or file_find.",
+        "one structured read-only evidence action using %s. No other tool is "
+        "available on this run: if none of them can settle the claim, return "
+        "continue with an empty tool and say so in the reason -- never accept a "
+        "claim you could not check."
+        % ", ".join(vocabulary),
         False,
         "",
     )
     review_prompt = (
         "Task:\n%s\n\nProposed final:\n%s\n\n%s\n\n"
         "JSON schema: {\"decision\":\"accept|continue\",\"reason\":\"brief\","
-        "\"tool\":\"text_search|file_read_range|file_find or empty\","
+        "\"tool\":\"%s or empty\","
         "\"args\":{}}"
         % (
             str(task or "")[:8000],
             str(final or "")[:4000],
             _agent_observation_prompt(observations, max_chars=7000),
+            "|".join(vocabulary),
         )
     )
     if cloud and cloud_budget_state is None:
@@ -14168,9 +14211,21 @@ def _agent_negative_claim_review(
                 raise ValueError("claim review needs a reason")
             if not isinstance(args, dict):
                 raise ValueError("claim review args must be a JSON object")
-            if decision == "continue" and tool not in _AGENT_CLAIM_REVIEW_TOOLS:
+            # Validate against what this run admits, not the superset.  A
+            # hosted reviewer naming ``text_search`` used to pass here and be
+            # refused a step later, spending the whole claim-review budget on
+            # a tool that could never run.
+            #
+            # An empty tool on ``continue`` is accepted: it is the reviewer
+            # saying "I cannot settle this with the tools I have", which the
+            # caller already handles by withholding evidence and ultimately
+            # returning EVIDENCE_REQUIRED.  That is strictly safer than an
+            # ``accept`` it cannot support, and it is the same shape this
+            # function's own parse-failure fallback returns.
+            if decision == "continue" and tool and tool not in vocabulary:
                 raise ValueError(
-                    "continued claim review needs an approved read-only tool"
+                    "continued claim review needs one of these approved "
+                    "read-only tools: %s" % ", ".join(vocabulary)
                 )
             if decision == "accept":
                 tool, args = "", {}
@@ -16219,6 +16274,13 @@ def _agent_impl(
     # lost to that loop). Pre-existing files are never auto-overwritten.
     run_created_paths = set()
     claim_review_requests = 0
+    # A claim-review action that host policy refused proves nothing.  Track it
+    # separately from a tool that simply found no match, so an ``accept`` that
+    # follows only refusals cannot pass an unchecked negative claim off as
+    # verified.  ``claim_review_verified`` is the release valve: once any
+    # claim-review tool has actually produced evidence, a later accept is real.
+    claim_review_policy_refused = False
+    claim_review_verified = False
     # Branch prediction + speculative execution (advisory; a mispredict costs
     # at most one wasted read-only call and never touches durable state).
     _predictor = sonder_speculation.default_predictor()
@@ -16372,6 +16434,7 @@ def _agent_impl(
 
     def run_claim_review_action(review, review_number):
         nonlocal file_evidence, inspected, used_tool
+        nonlocal claim_review_policy_refused, claim_review_verified
         tool_name = str(review.get("tool") or "")
         tool_args = review.get("args") or {}
         # Validate the same host-scoped arguments that dispatch will use.  A
@@ -16401,6 +16464,9 @@ def _agent_impl(
                 trusted_extra_roots=project_scope,
             )
         if policy_error:
+            # The verification mechanism was refused, not answered.  Record it
+            # so no later ``accept`` can be mistaken for a checked claim.
+            claim_review_policy_refused = True
             observation_text = policy_error
         else:
             ensure_not_cancelled()
@@ -16413,6 +16479,7 @@ def _agent_impl(
             ))
         tool_ok = _agent_tool_observation_ok(tool_name, observation_text)
         if tool_ok:
+            claim_review_verified = True
             used_tool = True
             used_tool_names.add(tool_name)
             file_evidence = True
@@ -16434,6 +16501,33 @@ def _agent_impl(
                 observation_text[:6000],
             )
         )
+
+    def unverifiable_claim_review_exit():
+        """Refuse a confident verdict the claim reviewer could not support.
+
+        If every claim-review action this run attempted was refused by host
+        policy and none ever returned evidence, the negative existence claim
+        was never checked.  Accepting it here would let the mechanism whose
+        job is catching silent failures fail silently itself, which is exactly
+        what a hosted run did while its entire named vocabulary was denied.
+        """
+        if not claim_review_policy_refused or claim_review_verified:
+            return None
+        if auto_checklist:
+            _agent_checklist_fail(
+                checklist_id,
+                checklist_states,
+                "negative-claim review could not run: host policy refused "
+                "every evidence tool it was given",
+                1,
+            )
+        return _early_exit("%s: %s\n\n%s" % (
+            master_orchestrator.EVIDENCE_REQUIRED,
+            "the negative existence claim was never verified -- host policy "
+            "refused every claim-review evidence tool this run offered, so "
+            "the reviewer's acceptance carries no evidence",
+            "\n\n".join(observations),
+        ))
 
     for step in range(1, max_steps + 1):
         # Squash any speculation left unretired by the previous step (the
@@ -16575,6 +16669,9 @@ def _agent_impl(
                         claim_review["reason"],
                         "\n\n".join(observations),
                     ))
+                unverifiable = unverifiable_claim_review_exit()
+                if unverifiable is not None:
+                    return unverifiable
             if require_file_evidence and not file_evidence:
                 if auto_checklist:
                     _agent_checklist_fail(
@@ -16985,6 +17082,9 @@ def _agent_impl(
                 )
             return _early_exit(claim_review["reason"])
         if claim_review["decision"] == "accept":
+            unverifiable = unverifiable_claim_review_exit()
+            if unverifiable is not None:
+                return unverifiable
             break
         claim_review_requests += 1
         if claim_review_requests <= 2:
