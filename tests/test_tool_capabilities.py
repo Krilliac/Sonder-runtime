@@ -172,7 +172,7 @@ def test_hosted_tool_manifest_does_not_readvertise_local_only_tools(monkeypatch)
         assert "- %s:" % name not in prompts[1]
 
 
-def test_local_agent_keeps_host_brief_and_all_twelve_tools(monkeypatch):
+def test_local_agent_keeps_host_brief_and_all_twelve_tools(monkeypatch, without_standing):
     systems = []
 
     def generate(prompt, history=None):
@@ -191,7 +191,7 @@ def test_local_agent_keeps_host_brief_and_all_twelve_tools(monkeypatch):
         lambda model, system, *args, **kwargs: systems.append(system) or generate,
     )
 
-    assert server._agent_impl("summarize", max_steps=1) == "done"
+    assert without_standing(server._agent_impl("summarize", max_steps=1)) == "done"
     assert systems and "HOST-BRIEF" in systems[0]
     for name in capabilities.CAPABILITIES:
         assert "- %s:" % name in server._agent_tool_help()

@@ -1181,16 +1181,29 @@ def _bounded_action_count(value):
         return 30
 
 
-def format_end_report(response=None):
+def format_end_report(response=None, *, calibration_line=""):
+    """Render the end report, optionally under a caller-supplied standing line.
+
+    ``calibration_line`` is composed by the caller and passed in whole. This
+    module is deliberately dependency-free and holds no database connection,
+    so it cannot measure a standing itself and must not learn how: the tracker
+    records what happened; what the measured record says about a claim is
+    somebody else's fact. Defaulting to "" keeps the uncomposed report
+    byte-identical for every existing caller.
+    """
     response = response or _current() or latest()
     if not response:
         return "=== END REPORT ===\nresult: unavailable"
     checklist = response.get("checklist") or {}
     items = checklist.get("items") or []
     done = sum(1 for item in items if item.get("status") == "done")
+    standing = str(calibration_line or "").strip()
     lines = [
         "=== END REPORT ===",
         "result: %s" % response.get("status", "unknown"),
+        # Directly under the result it qualifies, not in a footer that a
+        # reader quoting "result: complete" would never reach.
+        *([standing] if standing else []),
         "elapsed: %sms | model calls: %s | tool calls: %s" % (
             response.get("elapsed_ms", 0), response.get("model_calls", 0),
             response.get("tool_calls", 0),

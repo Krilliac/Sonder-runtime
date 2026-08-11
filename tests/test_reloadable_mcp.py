@@ -1,5 +1,6 @@
 import asyncio
 import importlib
+import json
 import os
 import shutil
 import sys
@@ -7,10 +8,38 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from reloadable_mcp import ReloadableFastMCP, _recovery_action
+
+# The sample modules below register their own `alpha`/`beta` tools on a private
+# registry, so Sonder's command catalog -- which reads `server.mcp` -- has never
+# heard of them and `risk_of` grades them `unclassified`. `_refuse_if_gated`
+# then refuses them, correctly: these two tests drive `call_tool` through the
+# real permission gate, and an unclassifiable name is precisely what it exists
+# to stop. Before the fail-closed fix they passed because the unknown-tool
+# fallback graded `ask`, which a non-interactive caller was allowed.
+#
+# Granted here with an explicit `allow` rule rather than by disabling the gate:
+# that is the operator escape hatch `decide()` documents for exactly this
+# situation, so these tests go on exercising a live gate instead of proving
+# reload mechanics work with enforcement switched off.
+_SAMPLE_TOOLS = {"alpha", "beta"}
+
+
+@pytest.fixture
+def allow_sample_tools(monkeypatch):
+    import permission_modes
+
+    monkeypatch.setattr(
+        permission_modes,
+        "_rule_lookup",
+        lambda name: ({"action": permission_modes.ALLOW, "pattern": name}
+                      if str(name or "").lstrip("/") in _SAMPLE_TOOLS else None),
+    )
 
 
 def _module_source(version, *, include_beta=False):
@@ -548,7 +577,9 @@ def test_refresh_tracks_exact_executed_bytes_when_source_changes_during_exec(
         sys.modules.pop(module_name, None)
 
 
-def test_tool_call_refresh_sends_list_changed_notification(monkeypatch, tmp_path):
+def test_tool_call_refresh_sends_list_changed_notification(
+    monkeypatch, tmp_path, allow_sample_tools,
+):
     monkeypatch.setenv("SONDER_LIVE_RELOAD", "1")
     module_name = "reloadable_mcp_notification_sample"
     module_path = tmp_path / (module_name + ".py")
@@ -578,6 +609,87 @@ def test_tool_call_refresh_sends_list_changed_notification(monkeypatch, tmp_path
         sys.modules.pop(module_name, None)
 
 
+def test_a_registry_swap_drops_the_memoised_command_catalog(monkeypatch, tmp_path,
+                                                            allow_sample_tools):
+    """The catalog is an `lru_cache` over the registry this swap replaces.
+
+    `command_catalog.reset_cache()` existed, its docstring said "used after a
+    live reload adds tools", and it had **no callers anywhere** -- so the
+    catalog was memoised across every hot swap for the life of the process.
+    That is not only a staleness bug: the catalog is the permission gate's one
+    source of truth for a tool's risk class, so a reload that reclassified a
+    tool `safe` -> `dangerous` left the gate enforcing the old grade, and a
+    newly added tool was ungraded entirely.
+
+    Asserted by observing the invalidation rather than the cache's end state:
+    the permission gate runs immediately after the swap, on the same
+    `call_tool`, and re-warms the catalog before this test could look at it --
+    so `currsize == 0` afterwards is never true and would make this a test
+    that can only fail. `misses` is checked too, which is the evidence the
+    entry really was recomputed rather than served stale.
+    """
+    import command_catalog
+
+    monkeypatch.setenv("SONDER_LIVE_RELOAD", "1")
+    module_name = "reloadable_mcp_cachebust_sample"
+    module_path = tmp_path / (module_name + ".py")
+    module_path.write_text(_module_source("before"), encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    try:
+        module = importlib.import_module(module_name)
+        mcp = module.mcp
+        context = SimpleNamespace(
+            request_context=SimpleNamespace(
+                session=SimpleNamespace(
+                    send_tool_list_changed=_noop_async,
+                ),
+            ),
+        )
+        monkeypatch.setattr(mcp, "get_context", lambda: context)
+
+        # Warm the cache, and prove it is warm -- otherwise an invalidation
+        # would be indistinguishable from nothing ever having been cached.
+        command_catalog.catalog()
+        command_catalog.catalog()
+        assert command_catalog.catalog.cache_info().currsize == 1
+        assert command_catalog.catalog.cache_info().hits >= 1, (
+            "the second call should have been a cache hit; if it was not, "
+            "'the cache was cleared' below proves nothing"
+        )
+
+        real_reset = command_catalog.reset_cache
+        resets = []
+
+        def spy():
+            resets.append(1)
+            real_reset()
+
+        monkeypatch.setattr(command_catalog, "reset_cache", spy)
+
+        _write_new_source(module_path, _module_source("after", include_beta=True))
+        asyncio.run(mcp.call_tool("alpha", {}))
+
+        assert resets, (
+            "the registry was swapped and the memoised catalog was never "
+            "invalidated, so the permission gate keeps grading tools from the "
+            "pre-reload registry"
+        )
+        # `cache_clear()` zeroes the hit/miss counters as well as the entry, so
+        # the pre-swap hit recorded above must be gone. Anything still served
+        # from the old memoised entry would have carried it forward.
+        assert command_catalog.catalog.cache_info().hits == 0, (
+            "reset_cache ran but the catalog was still served from the "
+            "pre-reload memoised entry"
+        )
+    finally:
+        sys.modules.pop(module_name, None)
+        command_catalog.reset_cache()
+
+
+async def _noop_async():
+    return None
+
+
 def test_server_uses_reloadable_registry_and_reports_current_source(monkeypatch):
     monkeypatch.setenv("SONDER_LIVE_RELOAD", "1")
     import server
@@ -603,6 +715,20 @@ def test_real_stdio_session_hot_adds_updates_removes_and_fails_closed(
     server_path.write_text(_stdio_source("v1"), encoding="utf-8")
     repo_root = os.path.dirname(os.path.dirname(__file__))
     notifications = []
+
+    # This one really does spawn a child process, so the `allow_sample_tools`
+    # monkeypatch cannot reach it -- the grant has to be on disk where the
+    # child's own `_default_rule_lookup` will find it. A tmp SONDER_HOME also
+    # keeps the child off the operator's real home. See `_SAMPLE_TOOLS` above
+    # for why a grant is needed at all.
+    sonder_home = tmp_path / "sonder_home"
+    sonder_home.mkdir()
+    (sonder_home / "permissions.json").write_text(
+        json.dumps([{"pattern": name, "action": "allow"} for name in sorted(_SAMPLE_TOOLS)],
+                   indent=2) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SONDER_HOME", str(sonder_home))
 
     async def exercise():
         async def handle_message(message):

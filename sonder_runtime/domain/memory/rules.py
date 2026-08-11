@@ -40,6 +40,81 @@ def reward_is_good(signal: str) -> bool:
     return reward_score(signal) >= GOOD_THRESHOLD
 
 
+# --- outcome provenance -----------------------------------------------------
+
+# WHO produced a verdict, recorded by the writing path rather than asserted by
+# the caller. Without it a machine verdict is byte-identical to a human
+# judgement forever: three separate lanes could not quantify their own findings
+# because no query could separate the populations, and `accepted` is written
+# both by a caller reviewing delegated work and by artifact_verify.
+#
+# The value is a property of the WRITER, never a parameter a caller chooses.
+
+# Recorded through the caller-facing `record_outcome` tool: something with
+# judgement looked at the work and said so. NOT a promise that the something is
+# human -- see OUTCOME_SOURCE_SELF_CURRICULUM for the runtime's own drivers.
+OUTCOME_SOURCE_CALLER = "caller"
+# The runtime graded THIS interaction's own output by running it -- the code
+# gate executing the reply's code and finding it broken. Nobody judged, but the
+# link between the verdict and the work is direct and not in doubt.
+OUTCOME_SOURCE_MACHINE = "machine"
+# The runtime matched a LATER verification back to a pending generation, by
+# project + time window + run id (`grounded_outcomes.note_generation` ->
+# `attribute`). Execution-grounded like `machine`, but the link to the work is
+# a heuristic: two concurrent runs scoped to the same project can cross-match,
+# and the rendered-verdict reader this path depends on has already been found
+# inverted once, filing failing verifications as +1.0 passes. Separated from
+# `machine` for exactly that reason -- see
+# EVICTION_INELIGIBLE_OUTCOME_SOURCES.
+OUTCOME_SOURCE_ATTRIBUTED = "attributed"
+# The runtime set the task AND marked it (curriculum_run, game_ladder). It is
+# execution-grounded like `machine`, but it also chose the exam, so it answers
+# "how often does the runtime pass its own tests", not "is delegated work good".
+OUTCOME_SOURCE_SELF_CURRICULUM = "self_curriculum"
+# Written before this column existed. Not a default and not a guess: the
+# provenance of those rows is genuinely unrecoverable, and an honest `unknown`
+# is worth more than a plausible label that can never be audited again.
+OUTCOME_SOURCE_UNKNOWN = "unknown"
+
+OUTCOME_SOURCES = frozenset({
+    OUTCOME_SOURCE_CALLER,
+    OUTCOME_SOURCE_MACHINE,
+    OUTCOME_SOURCE_ATTRIBUTED,
+    OUTCOME_SOURCE_SELF_CURRICULUM,
+    OUTCOME_SOURCE_UNKNOWN,
+})
+
+# The population that answers "was the delegated work any good". Kept here
+# rather than in calibration.py because learning_health asks the same question
+# and the two disagreeing is how a blended number gets quoted as an accuracy.
+CALLER_JUDGED_OUTCOME_SOURCES = frozenset({OUTCOME_SOURCE_CALLER})
+
+# Sources whose verdicts may NOT drive live lesson eviction.
+#
+# `lesson_quarantine` removes a lesson from retrieval on accumulated negative
+# reward. The dividing line is NOT "machine versus human" -- the code gate
+# running a reply's own code and finding it broken is excellent evidence that
+# the lesson retrieved for that reply did not help, and it has driven the gate
+# for as long as it has existed. The line is whether the verdict is KNOWN to be
+# about the work the lesson informed.
+#
+# `attributed` is the one source where it is not: that path matches a later
+# verification back to a pending generation heuristically, so a mis-match evicts
+# a lesson on a failure that belongs to different work entirely. Excluding it is
+# the narrow change that makes routing `server._record_outcome_signal` through
+# the lesson-crediting wrapper safe -- refused before this column existed
+# because nothing could tell the populations apart afterwards.
+#
+# Everything else keeps driving the gate exactly as it does today, deliberately:
+# a filter that quietly emptied the gate's evidence would be a gate that stopped
+# firing, reported as an improvement.
+EVICTION_INELIGIBLE_OUTCOME_SOURCES = frozenset({OUTCOME_SOURCE_ATTRIBUTED})
+
+
+def outcome_source_is_valid(source) -> bool:
+    return source in OUTCOME_SOURCES
+
+
 # --- recall thresholding ----------------------------------------------------
 
 # Default cosine floor for recall: genuinely close matches only.

@@ -44,7 +44,8 @@ class MemoryRepository(Protocol):
     ) -> list: ...
 
     def record_outcome(
-        self, interaction_id: str, signal: str, reward_value: float, **options
+        self, interaction_id: str, signal: str, reward_value: float, *,
+        source: str, **options
     ): ...
 
 

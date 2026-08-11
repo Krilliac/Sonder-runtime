@@ -26,6 +26,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import permission_modes
 import server
 import command_catalog
 import admin_auth
@@ -489,6 +490,7 @@ DANGEROUS_HTTP_SLASH_COMMANDS = frozenset({
     "/agentretry", "/retryagent",
     "/runtime", "/models",
     "/selfmod", "/selfmodify",
+    "/elevate",
     # Spends several full model load+generate cycles per call.
     "/ensemble", "/council",
 })
@@ -906,6 +908,66 @@ def _dump_chat(messages=None, label="chat", state=None):
     return "dumped chat/debug log to %s" % path
 
 
+def _http_slash_refusal(cmd):
+    """The permission gate for this chain: "" to proceed, else the refusal text.
+
+    This chain calls `server.file_write` / `file_edit` / `file_delete`
+    directly and forwards ten more names to `server.control_command`, and
+    until now nothing in front of it consulted `permission_modes` --
+    `permission_modes` was imported here only to *set* the mode at
+    `/v1/permission-mode`. So a shipped `file_delete: deny` rule bound at four
+    surfaces and not at this one, and `plan`, which this same surface both
+    selects and displays on its mode chip, did not hold still here.
+
+    `_dangerous_http_slash` + `_developer_authorized` is not this check. That
+    pair is an authentication tier -- it asks *who* is calling, and in the
+    default `local-open` deployment the answer is "anyone who can reach this
+    port" (see `_deployment_gating_summary`). It has nothing to say about
+    which mode is in force or which rules an operator wrote.
+
+    `interactive=False`, like every other caller with nobody to prompt: `ask`
+    degrades to `allow`, so this surface refuses nothing today that it did not
+    refuse before, while a `deny` rule and `plan` refuse. Only a `deny` can
+    come back from `decide()` here, which is why this is a flat loop rather
+    than a copy of the console's ask-and-rank gate.
+
+    The gate's own control is exempt for the reason it is everywhere else --
+    though the app's real way back out of `plan` is the `/v1/permission-mode`
+    endpoint, which is not a slash command and is not gated.
+
+    This covers the `cmd ==` chain only. The chain is the curated slice; the
+    catalogued fall-through *after* it reaches any registered tool by its own
+    name and is gated separately -- see `_dispatch_catalogued_tool`.
+    """
+    try:
+        tools = command_catalog.http_slash_tools().get(cmd, ())
+    except command_catalog.CatalogUnavailable as exc:
+        # Fail closed on ignorance: an empty map would answer "allowed" for
+        # every command in this chain.
+        return "refused %s: %s" % (cmd, exc)
+    return _http_tool_refusal(tools, cmd)
+
+
+def _http_tool_refusal(tools, label):
+    """The decision itself, shared by this surface's two entry points.
+
+    Only a `deny` can come back under `interactive=False`, so this is a flat
+    loop rather than a copy of the console's ask-and-rank gate.
+    """
+    for tool in tools:
+        decision = permission_modes.decide_for_caller(
+            tool, interactive=False, gate_control_exempt=True,
+        )
+        if decision is None:
+            continue
+        if decision.action == permission_modes.DENY:
+            return "refused %s: %s (mode: %s)" % (
+                label, decision.reason,
+                permission_modes.MODE_LABELS.get(decision.mode, decision.mode),
+            )
+    return ""
+
+
 def _handle_slash(content, messages=None, state=None, project=""):
     """Return response text if `content` is a recognized slash command, else None."""
     state = _state_or_legacy(state)
@@ -917,6 +979,13 @@ def _handle_slash(content, messages=None, state=None, project=""):
     parts = stripped.split(None, 1)
     cmd = parts[0].lower()
     arg = parts[1] if len(parts) > 1 else ""
+
+    # One choke point in front of every branch below, for the same reason the
+    # REPL has one: this is a flat chain of ~130 `if cmd == ...` returns, and a
+    # check placed after even one of them leaves that one ungated.
+    refusal = _http_slash_refusal(cmd)
+    if refusal:
+        return refusal
 
     if cmd == "/help":
         # The catalog derives every command from the dispatch chains and the
@@ -1223,6 +1292,14 @@ def _dispatch_catalogued_tool(line, state):
     name, which is the only way the app can offer the whole surface without a
     branch per tool. Returns None when the line names nothing catalogued, so
     an ordinary sentence beginning with "/" still falls through to the model.
+
+    Gated here as well as at the top of the chain, and it has to be: the chain
+    gate keys on the *named command*, and this path is reached by the *tool's
+    own name*, which no named command covers. Left ungated, `/delete` was
+    refused under `plan` while `/file_delete path=x dry_run=false` ran -- the
+    same tool, the other spelling, with the tool's own last-resort default
+    turned off by the caller. `interactive=False` for the same reason as the
+    chain: an HTTP request has nobody to prompt.
     """
     try:
         invocation = command_catalog.parse_invocation(line)
@@ -1230,12 +1307,20 @@ def _dispatch_catalogued_tool(line, state):
         # A mistyped key must not run the tool with that argument silently
         # dropped; say so instead of 500ing or half-executing.
         return str(error)
+    except command_catalog.CatalogUnavailable as error:
+        # Resolving the tool is itself a catalog read. Refuse rather than
+        # raise into the request, and rather than dispatch something the gate
+        # could not have classified.
+        return "refused %s: %s" % (line.split(None, 1)[0], error)
     if not invocation:
         return None
     tool_name, kwargs = invocation
     handler = getattr(server, tool_name, None)
     if not callable(handler):
         return "%s is catalogued but not callable here." % tool_name
+    refusal = _http_tool_refusal((tool_name,), "/" + tool_name)
+    if refusal:
+        return refusal
     # Guarded tools take the caller's own token exactly as the explicit
     # branches pass it (/read, /files, /delete); the tool still enforces its
     # own permission rules with it.
@@ -1436,24 +1521,39 @@ def _completion_limit(raw):
 
 
 def _commands_index_payload():
-    return {
-        "commands": [command.to_dict() for command in command_catalog.catalog()],
+    # A catalog that cannot read the tool registry now raises rather than
+    # quietly returning nothing (command_catalog.CatalogUnavailable). This is
+    # a listing endpoint, not an enforcing one, so it degrades -- but it says
+    # so in the payload instead of shipping an empty list the client would
+    # render as "this build has no commands".
+    try:
+        commands = [command.to_dict() for command in command_catalog.catalog()]
+        error = ""
+    except command_catalog.CatalogUnavailable as exc:
+        commands, error = [], str(exc)
+    payload = {
+        "commands": commands,
         # The blurb per category, not the commands in it: the client renders
         # these as section headings beside the counts it derives itself.
         "categories": dict(command_catalog.CATEGORIES),
         "popular": list(command_catalog.POPULAR),
     }
+    if error:
+        payload["error"] = error
+    return payload
 
 
 def _commands_complete_payload(query, limit=""):
-    return {
-        "matches": [
+    try:
+        matches = [
             command.to_dict()
             for command in command_catalog.complete(
                 query, limit=_completion_limit(limit),
             )
-        ],
-    }
+        ]
+    except command_catalog.CatalogUnavailable as exc:
+        return {"matches": [], "error": str(exc)}
+    return {"matches": matches}
 
 
 def _commands_help_payload(topic=""):
@@ -1814,6 +1914,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._handle_commands_get():
             return
+        if self._handle_permission_mode_get():
+            return
         self._send_not_found()
 
     def _handle_commands_get(self):
@@ -1846,6 +1948,41 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json_payload(payload)
         return True
 
+    def _handle_permission_mode_get(self):
+        """Current autonomy mode, so a client can show it before you send.
+
+        Read-only. Setting the mode is a POST; a GET must never change it.
+        """
+        route = urllib.parse.urlsplit(self.path).path.rstrip("/") or "/"
+        if route != "/v1/permission-mode":
+            return False
+        if not self._request_auth_context()["authorized"]:
+            self._send_auth_error()
+            return True
+        self._send_json_payload(server.permission_mode_data())
+        return True
+
+    def _handle_permission_mode_post(self, req):
+        """Switch the autonomy mode. Deliberately cannot grant elevation."""
+        wanted = ""
+        if isinstance(req, dict):
+            wanted = str(req.get("mode") or "").strip()
+        if not wanted:
+            self._send_json_payload(
+                {"error": "mode is required", "modes": list(permission_modes.MODES)},
+                status=400,
+            )
+            return
+        try:
+            permission_modes.set_mode(wanted)
+        except ValueError as exc:
+            self._send_json_payload(
+                {"error": str(exc), "modes": list(permission_modes.MODES)},
+                status=400,
+            )
+            return
+        self._send_json_payload(server.permission_mode_data())
+
     def do_POST(self):
         if self._reject_disallowed_origin():
             return
@@ -1866,6 +2003,12 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         context = self._request_auth_context()
+        if path == "/v1/permission-mode":
+            if not context["authorized"]:
+                self._send_auth_error()
+                return
+            self._handle_permission_mode_post(req)
+            return
         if path == "/v1/sonder/register":
             conn = server._open_db()
             try:

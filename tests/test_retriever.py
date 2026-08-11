@@ -6,7 +6,7 @@ import retriever as r
 def _lesson_outcome(conn, lesson_id, index, signal, value, task="threading lock release"):
     interaction_id = "%s-use-%s" % (lesson_id, index)
     ms.log_lesson_usage(conn, [lesson_id], interaction_id, task)
-    ms.record_lesson_usage_outcome(conn, interaction_id, signal, value)
+    ms.record_lesson_usage_outcome(conn, interaction_id, signal, value, source="caller")
 
 
 def test_rrf_rewards_agreement():
@@ -399,7 +399,7 @@ def test_delayed_failures_start_cooldown_when_feedback_arrives():
     conn.commit()
 
     for interaction_id in interaction_ids:
-        ms.record_lesson_usage_outcome(conn, interaction_id, "failed", -1.0)
+        ms.record_lesson_usage_outcome(conn, interaction_id, "failed", -1.0, source="caller")
 
     decision = r.lesson_quarantine(ms.lesson_usage_stats(conn)["lesson"])
     assert decision["active"] is True
@@ -485,7 +485,7 @@ def test_retrieve_mmr_diversifies_near_duplicates(monkeypatch):
 def _graded(conn, interaction_id, lesson_ids, task, reward):
     ms.log_lesson_usage(conn, lesson_ids, interaction_id, task)
     ms.record_lesson_usage_outcome(
-        conn, interaction_id, "tests_passed" if reward > 0 else "failed", reward,
+        conn, interaction_id, "tests_passed" if reward > 0 else "failed", reward, source="caller",
     )
 
 

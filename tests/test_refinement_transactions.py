@@ -18,7 +18,8 @@ def _store():
         "INSERT INTO interactions(id, task, response) VALUES('i-1', 'task', 'done')"
     )
     conn.execute(
-        "INSERT INTO outcomes(interaction_id, signal, reward) VALUES('i-1', 'worked', 1.0)"
+        "INSERT INTO outcomes(interaction_id, signal, reward, source) "
+        "VALUES('i-1', 'worked', 1.0, 'caller')"
     )
     conn.commit()
     return conn

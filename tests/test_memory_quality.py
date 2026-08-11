@@ -8,7 +8,7 @@ def test_exact_duplicate_plan_keeps_best_scored_lesson():
     memory_store.add_lesson(conn, "winner", " use pathlib.path for joins. ", None, "a2")
     memory_store.add_lesson(conn, "other", "Use collections.Counter for counts.", None, "a3")
     memory_store.log_lesson_usage(conn, ["winner"], "i1", "task")
-    memory_store.record_lesson_usage_outcome(conn, "i1", "tests_passed", 1.0)
+    memory_store.record_lesson_usage_outcome(conn, "i1", "tests_passed", 1.0, source="caller")
 
     plan = memory_quality.exact_duplicate_plan(conn)
 
@@ -119,7 +119,7 @@ def test_audit_separates_ungrounded_and_never_validated_lessons():
     memory_store.add_lesson(conn, "earned", "Pin `cl.exe` before configuring.", None, "i1")
     memory_store.add_lesson(conn, "seeded", "Use `bisect` for sorted inserts.", None, "seed:algo")
     memory_store.log_lesson_usage(conn, ["earned"], "i2", "task")
-    memory_store.record_lesson_usage_outcome(conn, "i2", "tests_passed", 1.0)
+    memory_store.record_lesson_usage_outcome(conn, "i2", "tests_passed", 1.0, source="caller")
 
     report = memory_quality.audit(conn)
     text = memory_quality.format_audit(report)

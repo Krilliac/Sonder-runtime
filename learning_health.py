@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import calibration
 import embeddings
 import memory_quality
 import sonder_runtime.adapters.memory_store as memory_store
 import retriever
 import reward
+from sonder_runtime.domain.memory import rules
 
 
 def _percent(numerator: int | float, denominator: int | float) -> float:
@@ -63,40 +65,73 @@ def _lesson_sources(conn) -> tuple[dict[str, int], int, int]:
 # often the model is right on a caller's real task.
 _AUTOGRADED_SIGNALS = frozenset({"tests_passed", "failed", "compiled"})
 
+# `outcomes.source` (#62) replaced the signal-name proxy above for the reviewed
+# split. The proxy was the best reading available of an unrecorded fact, and it
+# was wrong in both directions: `accepted` is written by artifact_verify and
+# ground_artifact with nobody reviewing anything, and a caller who ran the tests
+# themselves and honestly reported `tests_passed` was filed as autograded.
+# Provenance is now recorded by the writer, so the split is read, not inferred.
+#
+# Rows written before the column carry `unknown` and are counted in NEITHER
+# population. They are reported as `unknown_source_outcomes` so a reviewed count
+# of 0 cannot read as "nobody ever judged anything" when the real statement is
+# "we cannot tell". A count that shrinks because its input became unclassifiable
+# is the floor-not-a-measurement trap this module already carries scars from.
+_REVIEWED_SOURCES = frozenset({rules.OUTCOME_SOURCE_CALLER})
+_AUTOGRADED_SOURCES = frozenset({
+    rules.OUTCOME_SOURCE_MACHINE, rules.OUTCOME_SOURCE_ATTRIBUTED,
+    rules.OUTCOME_SOURCE_SELF_CURRICULUM,
+})
+
 
 def _outcome_metrics(conn) -> dict:
     rows = conn.execute(
-        "SELECT signal, COUNT(*) AS count, AVG(reward) AS average_reward "
-        "FROM outcomes GROUP BY signal"
+        "SELECT signal, source, COUNT(*) AS count, SUM(reward) AS reward_total "
+        "FROM outcomes GROUP BY signal, source"
     ).fetchall()
-    signals = []
+    by_signal: dict[str, dict] = {}
+    by_source: dict[str, int] = {}
     outcomes = 0
     good_outcomes = 0
     autograded = 0
     autograded_good = 0
     reviewed = 0
     reviewed_good = 0
+    unknown_source = 0
     for row in rows:
         signal = str(row["signal"])
+        source = str(row["source"])
         count = int(row["count"] or 0)
         good = reward.is_good(signal)
-        if signal in _AUTOGRADED_SIGNALS:
+        if source in _REVIEWED_SOURCES:
+            reviewed += count
+            reviewed_good += count if good else 0
+        elif source in _AUTOGRADED_SOURCES:
             autograded += count
             autograded_good += count if good else 0
         else:
-            reviewed += count
-            reviewed_good += count if good else 0
-        signals.append(
-            {
-                "signal": signal,
-                "count": count,
-                "average_reward": round(float(row["average_reward"] or 0.0), 3),
-                "good": good,
-            }
+            unknown_source += count
+        by_source[source] = by_source.get(source, 0) + count
+        entry = by_signal.setdefault(
+            signal,
+            {"signal": signal, "count": 0, "reward_total": 0.0, "good": good},
         )
+        entry["count"] += count
+        entry["reward_total"] += float(row["reward_total"] or 0.0)
         outcomes += count
         if good:
             good_outcomes += count
+    signals = [
+        {
+            "signal": entry["signal"],
+            "count": entry["count"],
+            "average_reward": round(
+                entry["reward_total"] / entry["count"], 3
+            ) if entry["count"] else 0.0,
+            "good": entry["good"],
+        }
+        for entry in by_signal.values()
+    ]
     signals.sort(key=lambda item: (-item["count"], item["signal"]))
     outcome_interactions = int(
         conn.execute(
@@ -122,12 +157,18 @@ def _outcome_metrics(conn) -> dict:
         "good_outcome_interactions": good_interactions,
         "positive_percent": _percent(good_outcomes, outcomes),
         # Split so the blended number cannot hide the one that matters. See
-        # _AUTOGRADED_SIGNALS: reviewed_positive_percent is the model's hit rate
-        # on work a caller actually delegated and then judged.
+        # _REVIEWED_SOURCES: reviewed_positive_percent is the model's hit rate
+        # on work a caller actually delegated and then judged, now selected by
+        # recorded provenance rather than guessed from the signal name.
         "autograded_outcomes": autograded,
         "autograded_positive_percent": _percent(autograded_good, autograded),
         "reviewed_outcomes": reviewed,
         "reviewed_positive_percent": _percent(reviewed_good, reviewed),
+        # Neither reviewed nor autograded: written before provenance existed.
+        # Published so `reviewed_outcomes == 0` is readable as "unclassifiable"
+        # rather than "unjudged" -- the two demand different responses.
+        "unknown_source_outcomes": unknown_source,
+        "outcomes_by_source": dict(sorted(by_source.items())),
         "reviewed_by_tier": _reviewed_by_tier(conn),
         "signals": signals,
     }
@@ -152,14 +193,18 @@ def _reviewed_by_tier(conn) -> list[dict]:
     number it qualifies.
     """
     rows = conn.execute(
-        "SELECT i.tier AS tier, o.signal AS signal, COUNT(*) AS count "
+        "SELECT i.tier AS tier, o.signal AS signal, o.source AS source, "
+        "COUNT(*) AS count "
         "FROM outcomes o LEFT JOIN interactions i ON i.id = o.interaction_id "
-        "GROUP BY i.tier, o.signal"
+        "GROUP BY i.tier, o.signal, o.source"
     ).fetchall()
     totals: dict[str, list[int]] = {}
     for row in rows:
         signal = str(row["signal"])
-        if signal in _AUTOGRADED_SIGNALS:
+        # Selected by the same rule as reviewed_outcomes above, so this table
+        # still sums to it. Selecting on a different rule is exactly how a
+        # breakdown starts disagreeing with the number it breaks down.
+        if str(row["source"]) not in _REVIEWED_SOURCES:
             continue
         tier = str(row["tier"] or _UNATTRIBUTED_TIER)
         count = int(row["count"] or 0)
@@ -509,6 +554,50 @@ def _reviewed_by_tier_lines(report: dict) -> list[str]:
     return lines
 
 
+def _calibration_lines(report: dict) -> list[str]:
+    """The named caller-judged population, rendered without inventing a rate.
+
+    ``reviewed_positive_percent`` two lines up is a *complement* bucket
+    (everything that is not autograded) rendered through ``_percent``, which
+    answers ``0.0`` on an empty denominator. On a thin sample it therefore
+    prints something shaped like a rate: two acceptances and one rejection
+    read as ``66.7%``, and no judgements at all read as ``0.0%`` -- "nothing
+    delegated has ever been good", which is a different and false statement.
+
+    ``calibration`` names the population by signal instead of by exclusion and
+    returns no rate at all below ``MIN_SAMPLE``. This line is where the report
+    admits it does not know yet.
+
+    Returns ``[]`` for a report built before this key existed, so an older
+    snapshot renders as it always did rather than as a zero.
+    """
+    measurement = report.get("calibration")
+    if not measurement:
+        return []
+    label = (
+        "    calibration (caller-judged: the named population a completion "
+        "claim is gated on): "
+    )
+    if measurement.get("rate") is None:
+        return [
+            label
+            + "%s observation(s) - too few to measure (need %s), so the "
+            "reviewed rate above is not yet one"
+            % (measurement.get("total", 0), calibration.MIN_SAMPLE)
+        ]
+    return [
+        label
+        + "%s good / %s bad (%.1f%%, n=%s) - %s"
+        % (
+            measurement.get("good", 0),
+            measurement.get("bad", 0),
+            float(measurement["rate"]) * 100,
+            measurement.get("total", 0),
+            measurement.get("verdict", "unknown"),
+        )
+    ]
+
+
 def _distillation_reason_lines(report: dict) -> list[str]:
     """Render the breakdown with recorded and unrecorded rows kept apart.
 
@@ -711,6 +800,11 @@ def build_report(conn) -> dict:
         "interaction_task_embeddings": interaction_embedding_state,
         "ambiguous_legacy_project_turns": ambiguous_legacy_project_turns,
         "unscoped_session_turns": unscoped_session_turns,
+        # The same caller-judged population the agent loop gates completion
+        # claims on, measured by the module that owns that decision rather
+        # than re-derived here. Carrying it means the health report and the
+        # gate cannot drift into disagreeing about the same store.
+        "calibration": calibration.measure(conn, "caller").to_dict(),
     }
     report["status"] = _status(report)
     return report
@@ -757,6 +851,7 @@ def format_report(report: dict) -> str:
         "    (split inferred from signal name, not a recorded source: "
         "record_outcome callers who use tests_passed/failed/compiled land in "
         "the autograded bucket)",
+        *_calibration_lines(report),
         "  lessons: %s | interaction-grounded: %s | synthetic: %s | orphaned: %s"
         % (
             report.get("lessons", 0),
