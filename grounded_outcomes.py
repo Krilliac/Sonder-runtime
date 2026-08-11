@@ -69,6 +69,11 @@ VERIFIERS = {
     "artifact_ground": ("accepted", "rejected"),
 }
 
+# code_runner uses an ``error`` field both for infrastructure failures and for
+# a process that ran but rejected the generated program.  Its evidence must be
+# interpreted separately so an actual compiler failure is not discarded.
+CODE_RUNNER_VERIFIERS = frozenset({"run_code", "run_project"})
+
 # Tools that produce work worth judging later.
 GENERATORS = frozenset({
     "sonder", "offload", "agent", "workbench_agent", "improve_function",
@@ -166,6 +171,30 @@ def evaluation_infrastructure_error(evidence) -> str:
         stderr = str(evidence.get("stderr") or "").strip().splitlines()
         return stderr[0] if stderr else "the verifier could not be run"
     return ""
+
+
+def code_runner_infrastructure_error(evidence) -> str:
+    """Return an infrastructure reason for code_runner evidence, if any."""
+    if not isinstance(evidence, dict):
+        return ""
+    steps = evidence.get("steps")
+    if isinstance(steps, list):
+        if evidence.get("ok"):
+            return ""
+        for step in reversed(steps):
+            result = step.get("result") if isinstance(step, dict) else None
+            if isinstance(result, dict) and not result.get("ok"):
+                return code_runner_infrastructure_error(result)
+        return "the project run produced no step result to judge"
+    if evidence.get("timed_out"):
+        return "the run timed out before producing a verdict"
+    error = str(evidence.get("error") or "").strip()
+    if not error:
+        return ""
+    returncode = evidence.get("returncode")
+    if isinstance(returncode, int) and not isinstance(returncode, bool):
+        return ""
+    return error
 
 
 def rendered_infrastructure_error(observation) -> str:
@@ -362,11 +391,14 @@ def attribute(tool: str, ok: bool, project: str = "", record_fn=None,
     # generation once, so a run that measured nothing must not consume the one
     # chance that generation had to be judged for real -- measured, an
     # infrastructure blip permanently displaced the later genuine verdict.
-    infrastructure_error = (
-        evaluation_infrastructure_error(evidence)
-        if isinstance(evidence, dict)
-        else rendered_infrastructure_error(evidence)
-    )
+    if isinstance(evidence, dict):
+        infrastructure_error = (
+            code_runner_infrastructure_error(evidence)
+            if name in CODE_RUNNER_VERIFIERS
+            else evaluation_infrastructure_error(evidence)
+        )
+    else:
+        infrastructure_error = rendered_infrastructure_error(evidence)
     if infrastructure_error:
         with _LOCK:
             _STATS["unmeasured"] += 1

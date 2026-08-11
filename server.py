@@ -11066,11 +11066,14 @@ def run_code(
         )
         ok = bool(result.get("ok")) if isinstance(result, dict) else True
     except ValueError as e:
+        # Empty code, an unsupported language, a cwd outside the workspace: all
+        # raised before anything is spawned, so there is no verdict to file.
         _record_direct_tool(
             "run_code",
             {"language": language, "timeout": timeout},
             ok=False, started=started,
             summary=str(e),
+            evidence={"error": str(e)},
         )
         return "ERROR: %s" % e
     output = code_runner.format_result(result)
@@ -11080,6 +11083,9 @@ def run_code(
         ok=ok, started=started,
         summary=("ok" if ok else "failed"),
         output=output,
+        # `ok` cannot tell "the code is wrong" from "there is no interpreter on
+        # this machine"; the grounded-outcome ledger may only record the first.
+        evidence=result,
     )
     return output
 
@@ -11112,11 +11118,14 @@ def run_project(
         )
         ok = bool(result.get("ok")) if isinstance(result, dict) else True
     except ValueError as e:
+        # Malformed files_json, an unsafe path, or no detectable way to run the
+        # project: raised before any step is spawned, so nothing was measured.
         _record_direct_tool(
             "run_project",
             {"timeout": timeout},
             ok=False, started=started,
             summary=str(e),
+            evidence={"error": str(e)},
         )
         return "ERROR: %s" % e
     output = code_runner.format_project_result(result)
@@ -11126,6 +11135,9 @@ def run_project(
         ok=ok, started=started,
         summary=("ok" if ok else "failed"),
         output=output,
+        # The composite carries no top-level verdict at all; the step that
+        # stopped the run holds it, and the ledger reads it from there.
+        evidence=result,
     )
     return output
 
@@ -11171,6 +11183,8 @@ def isolated_run(
             "isolated_run",
             {"denial": code, "writable_workspace": writable_workspace is True},
             ok=False, started=started, summary=code, output=message,
+            # A denial spawns no container, so it judges nobody's code.
+            evidence={"error": code},
         )
         return message
 
@@ -11216,11 +11230,15 @@ def isolated_run(
         )
         ok = bool(result.get("ok"))
     except (OSError, ValueError) as exc:
+        # A rejected image, an unauthorized project root, a resource limit that
+        # would not validate: every one of these is raised before the container
+        # is launched, so nothing about the code was observed.
         _record_direct_tool(
             "isolated_run",
             {"failure": "policy-or-runtime-error",
              "writable_workspace": writable_workspace is True},
             ok=False, started=started, summary="isolated runner rejected request",
+            evidence={"error": str(exc)},
         )
         return "ERROR: %s" % exc
     output = isolated_runner.format_result(result)
@@ -11230,6 +11248,10 @@ def isolated_run(
          "writable_workspace": writable_workspace is True},
         ok=ok, started=started, summary=("ok" if ok else "failed"),
         output=output,
+        # No engine installed, or a run the caps killed, is not a verdict on
+        # the code; `isolated_runner` keeps that in `error` and the container's
+        # own exit status in `returncode`.
+        evidence=result,
     )
     return output
 
