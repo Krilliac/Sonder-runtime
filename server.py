@@ -15953,6 +15953,40 @@ def _project_scope_args(tool_name, args, project):
     return scoped
 
 
+# Dispatchable tools whose observation text THIS server rendered, in one of the
+# shapes `grounded_outcomes.rendered_verdict` reads. Membership is what makes it
+# safe to believe a verdict line: the text is ours, not the tool's subject.
+#
+# Scoped rather than applied to every observation, because measured, that
+# over-reaches -- `file_read` of a 23-byte YAML whose first line is `ok: false`
+# makes `rendered_verdict` return False, and filing a successful read as a
+# failure is the same defect pointing the other way, driven by file content the
+# caller supplies. `test_tool_content_cannot_flip_the_verdict` pins that case.
+#
+# Derived from the renderer call sites, intersected with
+# `tool_capabilities.dispatch_names(_agent_dispatch)`:
+#   _format_run_result                -> the 20 run-and-report tools below
+#   code_runner.format_result         -> run_code (script_run uses both)
+#   code_runner.format_project_result -> run_project
+#   artifact_grounding.format_result  -> ground_artifact, artifact_ground
+#   artifact_verify                   -> renders its verdict line inline
+# `archive_create`, `archive_extract` and `artifact_risk_inspect` also call a
+# `format_result`, but theirs is a `json.dumps`, whose `"ok": false` key keeps
+# its quotes and so is not a verdict line. They are deliberately absent.
+#
+# `test_every_format_run_result_tool_is_covered` re-derives the first group by
+# AST, so a new tool using the main renderer cannot quietly miss this.
+_RENDERED_VERDICT_TOOLS = frozenset({
+    "apply_patch", "build_clean", "build_run", "dependency_add",
+    "dependency_audit", "dependency_remove", "dependency_update", "format_code",
+    "git_branch", "git_checkout", "git_cherry_pick", "git_commit", "git_merge",
+    "git_stash", "git_tag", "lint_run", "script_run", "test_run",
+    "typecheck_run", "workspace_run",
+    "run_code", "run_project",
+    "ground_artifact", "artifact_ground", "artifact_verify",
+})
+
+
 def _agent_dispatch_observed(
     tool_name, args, allow_web=True, read_only=False, allow_location=False,
     project="",
@@ -16001,6 +16035,21 @@ def _agent_dispatch_observed(
             )
         dispatched = True
         ok = not str(observation).startswith("ERROR:")
+        if ok and tool_name in _RENDERED_VERDICT_TOOLS:
+            # `ok` above is a statement about the DISPATCHER, not the work:
+            # these tools emit `ERROR:` only when they never ran, so a genuinely
+            # failing run arrives here as True. Measured on a project holding
+            # one failing pytest -- harness ok=False, returncode=1, rendered
+            # "test run (pytest)\n  ok: False" -- the activity record said
+            # ok=True and the public snapshot said phase "completed".
+            #
+            # The outcome feed learned to read the verifier's own rendered
+            # verdict; this is the same read for the OTHER consumer of the same
+            # flag. It can only ever turn a claimed success into a failure --
+            # never the reverse -- so a dispatcher fault stays a failure.
+            rendered = grounded_outcomes.rendered_verdict(observation)
+            if rendered is not None:
+                ok = rendered
         return observation
     finally:
         activity_tracker.record_tool_result(
