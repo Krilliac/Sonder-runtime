@@ -87,8 +87,11 @@ COMMANDS = [
     },
     {
         "name": "/goal",
+        # adopt/complete/abandon/note write to goal_store; only the default
+        # "show" reads. Graded by the worst it can do, like every other
+        # command the gate reads a risk for.
         "category": "system",
-        "risk": "safe",
+        "risk": "mutation",
         "summary": "Set, inspect, note, or close the persistent goal; review and adopt self-proposed goals.",
     },
     {
@@ -105,8 +108,13 @@ COMMANDS = [
     },
     {
         "name": "/mcp",
+        # `refresh` republishes the live MCP source and tool registry, so it
+        # alters what every later call is allowed to do -- the reasoning
+        # command_catalog._DANGEROUS applies to runtime_policy_update and
+        # permission_rule_set. No registered tool fronts it, so this entry is
+        # what the permission gate grades the command by.
         "category": "system",
-        "risk": "safe",
+        "risk": "dangerous",
         "summary": "Audit or refresh the atomic live MCP source and tool registry.",
     },
     {

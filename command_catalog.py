@@ -299,9 +299,23 @@ _READ_ONLY = frozenset({"task_list", "task_show"})
 # which is the over-refusal this gate is explicitly built to avoid -- a
 # refusal nobody can act on trains operators to route around the gate. A rule
 # that fires on 94 of 124 commands is not a gate; it is noise with a verdict.
+# ``/mcp refresh`` republishes the live MCP source and tool registry, which
+# changes what every later call is allowed to do -- the same reasoning
+# ``_DANGEROUS`` already applies to ``runtime_policy_update`` and
+# ``permission_rule_set``. ``/goal`` writes to ``goal_store`` (adopt, complete,
+# abandon, note), an ordinary write, so it is graded ``mutation`` and flows in
+# ``acceptEdits`` where the registry refresh still does not.
+#
+# ``/report`` was read the same way and deliberately left out: it only formats
+# ``activity_tracker.latest()``, so there is nothing there to gate and adding
+# it would be over-refusal dressed as caution.
 _UNREGISTERED_BRANCH_WORK = {
     "/selfmod": "selfmod",
     "/selfmodify": "selfmod",
+    "/mcp": "mcp",
+    "/convergence": "mcp",
+    "/goal": "goal",
+    "/goals": "goal",
 }
 
 
@@ -547,13 +561,21 @@ def console_tools() -> dict:
 def _with_unregistered_work(mapped: dict) -> dict:
     """Add the stand-in name for branches whose real work fronts no tool.
 
-    Only for names the chain actually dispatches -- a map for a chain that
-    never mentions ``/selfmod`` does not gain it.
+    Unconditional, and that is the point. An earlier version only augmented
+    keys the derivation had already produced -- which made ``/selfmod``'s
+    floor depend on the branch still calling ``system_improvement_report``,
+    the incidental ``safe`` sibling that caused the defect in the first place.
+    Drop that one call and the key disappears, taking the floor with it and
+    silently restoring the exact hole it was added to close. A floor
+    conditional on the thing it is protecting against is not a floor.
+
+    ``/mcp`` and ``/goal`` are here for the same reason and were never in the
+    derivation at all: neither branch calls a registered tool, so both mapped
+    to nothing and were ungated.
     """
     out = dict(mapped)
     for slash, stand_in in _UNREGISTERED_BRANCH_WORK.items():
-        if slash in out:
-            out[slash] = tuple(sorted(set(out[slash]) | {stand_in}))
+        out[slash] = tuple(sorted(set(out.get(slash, ())) | {stand_in}))
     return out
 
 
@@ -938,6 +960,22 @@ def help_category(name: str) -> str:
 
 
 def help_command(name: str) -> str:
+    """Full usage for one command, or the closest matches.
+
+    Guarded rather than left to raise: both ``server.control_command`` and
+    ``sonder_repl._run_catalogued`` call this from inside an
+    ``except TypeError`` to explain how a tool should have been invoked. A
+    blind registry raising here would replace the caller's real mistake with
+    an unrelated error about the catalog, on a path whose whole job is telling
+    the caller what they got wrong.
+    """
+    try:
+        return _help_command(name)
+    except CatalogUnavailable as exc:
+        return _UNAVAILABLE_TEXT % exc
+
+
+def _help_command(name: str) -> str:
     command = by_name(name)
     if not command:
         matches = complete(name, limit=8)

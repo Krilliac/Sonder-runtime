@@ -934,6 +934,10 @@ def _http_slash_refusal(cmd):
     The gate's own control is exempt for the reason it is everywhere else --
     though the app's real way back out of `plan` is the `/v1/permission-mode`
     endpoint, which is not a slash command and is not gated.
+
+    This covers the `cmd ==` chain only. The chain is the curated slice; the
+    catalogued fall-through *after* it reaches any registered tool by its own
+    name and is gated separately -- see `_dispatch_catalogued_tool`.
     """
     try:
         tools = command_catalog.http_slash_tools().get(cmd, ())
@@ -941,13 +945,22 @@ def _http_slash_refusal(cmd):
         # Fail closed on ignorance: an empty map would answer "allowed" for
         # every command in this chain.
         return "refused %s: %s" % (cmd, exc)
+    return _http_tool_refusal(tools, cmd)
+
+
+def _http_tool_refusal(tools, label):
+    """The decision itself, shared by this surface's two entry points.
+
+    Only a `deny` can come back under `interactive=False`, so this is a flat
+    loop rather than a copy of the console's ask-and-rank gate.
+    """
     for tool in tools:
         if tool in permission_modes.GATE_CONTROL_TOOLS:
             continue
         decision = permission_modes.decide(tool, interactive=False)
         if decision.action == permission_modes.DENY:
             return "refused %s: %s (mode: %s)" % (
-                cmd, decision.reason,
+                label, decision.reason,
                 permission_modes.MODE_LABELS.get(decision.mode, decision.mode),
             )
     return ""
@@ -1277,6 +1290,14 @@ def _dispatch_catalogued_tool(line, state):
     name, which is the only way the app can offer the whole surface without a
     branch per tool. Returns None when the line names nothing catalogued, so
     an ordinary sentence beginning with "/" still falls through to the model.
+
+    Gated here as well as at the top of the chain, and it has to be: the chain
+    gate keys on the *named command*, and this path is reached by the *tool's
+    own name*, which no named command covers. Left ungated, `/delete` was
+    refused under `plan` while `/file_delete path=x dry_run=false` ran -- the
+    same tool, the other spelling, with the tool's own last-resort default
+    turned off by the caller. `interactive=False` for the same reason as the
+    chain: an HTTP request has nobody to prompt.
     """
     try:
         invocation = command_catalog.parse_invocation(line)
@@ -1284,12 +1305,20 @@ def _dispatch_catalogued_tool(line, state):
         # A mistyped key must not run the tool with that argument silently
         # dropped; say so instead of 500ing or half-executing.
         return str(error)
+    except command_catalog.CatalogUnavailable as error:
+        # Resolving the tool is itself a catalog read. Refuse rather than
+        # raise into the request, and rather than dispatch something the gate
+        # could not have classified.
+        return "refused %s: %s" % (line.split(None, 1)[0], error)
     if not invocation:
         return None
     tool_name, kwargs = invocation
     handler = getattr(server, tool_name, None)
     if not callable(handler):
         return "%s is catalogued but not callable here." % tool_name
+    refusal = _http_tool_refusal((tool_name,), "/" + tool_name)
+    if refusal:
+        return refusal
     # Guarded tools take the caller's own token exactly as the explicit
     # branches pass it (/read, /files, /delete); the tool still enforces its
     # own permission rules with it.

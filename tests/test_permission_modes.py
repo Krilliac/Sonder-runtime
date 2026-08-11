@@ -1142,9 +1142,24 @@ def test_describe_carries_the_caveat_wherever_it_prints_an_ask(mode):
 
 
 def test_overview_qualifies_the_claim_it_makes_about_every_mode():
+    """And the qualifier must not be a separate line under a flat assertion.
+
+    "destructive tools ask in every mode, including auto." read as a complete
+    sentence, with the caveat below it as a second, apparently unrelated fact.
+    A reader who stops at the full stop has read something false, so the
+    sentence itself has to carry the condition.
+    """
     text = pm.overview()
     assert "destructive tools ask in every mode" in text
     assert pm.ASK_CAVEAT in text
+
+    claim = next(
+        line for line in text.splitlines()
+        if "destructive tools ask in every mode" in line
+    )
+    assert not claim.rstrip().endswith("."), (
+        "the claim still stands as a complete sentence: %r" % claim
+    )
 
 
 def test_the_auto_blurb_does_not_promise_a_prompt_nobody_is_there_for():
