@@ -604,3 +604,80 @@ def test_a_plain_type_mismatch_is_a_violation_and_not_a_coverage_gap():
     # unchecked would drown the real gaps in noise.
     assert J.check(1, {"type": "string"}).errors
     assert J.check(1, {"type": "string"}).unchecked == []
+
+
+# --- a guard that no-ops is the bug this module exists to remove --------------
+
+@pytest.mark.parametrize("bad", [[], None, 0, "", False])
+@pytest.mark.parametrize("keyword", ["properties", "patternProperties"])
+def test_a_falsy_malformed_keyword_is_reported_like_any_other(keyword, bad):
+    # `schema.get(kw) or {}` swallowed the falsy values BEFORE the isinstance
+    # check, so {"properties": []} came back errors=[] unchecked=[] -- clean --
+    # while {"properties": ["a"]} was correctly reported, which is exactly why
+    # it read as working. That is the silent no-op this module exists to remove.
+    result = J.check({"a": 1}, {"type": "object", keyword: bad})
+    assert result.errors, "%s=%r passed silently" % (keyword, bad)
+    assert result.unchecked, "%s=%r claimed coverage it did not have" % (keyword, bad)
+
+
+@pytest.mark.parametrize("keyword", ["properties", "patternProperties"])
+def test_a_legitimately_empty_keyword_is_not_an_error(keyword):
+    # {} is legal, if pointless, and must not be swept up by the fix above.
+    assert J.check({"a": 1}, {"type": "object", keyword: {}}) == ([], [])
+
+
+# --- deep nesting: "Never raises" has to stay true ----------------------------
+
+def _nested(depth):
+    """A schema and a matching document, both nested `depth` levels deep."""
+    schema = {"type": "object"}
+    document = {}
+    schema_cursor, document_cursor = schema, document
+    for _ in range(depth):
+        schema_cursor["properties"] = {"c": {"type": "object"}}
+        schema_cursor = schema_cursor["properties"]["c"]
+        document_cursor["c"] = {}
+        document_cursor = document_cursor["c"]
+    return schema, document
+
+
+@pytest.mark.parametrize("depth", [400, 900, 2000])
+def test_deep_nesting_is_reported_unchecked_rather_than_raising(depth):
+    # `json_schema_verify` promises "Never raises", and RecursionError broke
+    # that at 500 levels -- while `json.loads` handles the same text fine, so
+    # this module was the limiter, not the input. Depth past what can be walked
+    # is ignorance, and ignorance is reported, never raised.
+    schema, document = _nested(depth)
+    text = json.dumps(document)
+    assert json.loads(text) is not None      # the input itself is fine
+
+    verdict = J.json_schema_verify(text, {"schema": schema})
+    assert verdict.passed is False
+    assert "deep" in verdict.detail
+    assert any("deep" in reason for _, reason in J.coverage_gaps(document, schema))
+    assert J.validate(document, schema) == []
+
+
+def test_a_deep_ref_chain_is_reported_rather_than_raising():
+    schema = {"$defs": {"n": {"type": "object",
+                              "properties": {"c": {"$ref": "#/$defs/n"}}}},
+              "$ref": "#/$defs/n"}
+    _, document = _nested(1000)
+    assert J.json_schema_verify(json.dumps(document), {"schema": schema}).passed is False
+    assert any("deep" in reason for _, reason in J.coverage_gaps(document, schema))
+
+
+def test_nesting_within_the_limit_is_still_fully_checked():
+    # The depth bound must not become a silent truncation of ordinary schemas:
+    # everything above it is checked exactly as before, violations included.
+    depth = J.MAX_DEPTH - 5
+    schema, document = _nested(depth)
+    assert J.check(document, schema) == ([], [])
+
+    schema_cursor, document_cursor = schema, document
+    for _ in range(depth):
+        schema_cursor = schema_cursor["properties"]["c"]
+        document_cursor = document_cursor["c"]
+    schema_cursor["properties"] = {"c": {"type": "object"}}
+    document_cursor["c"] = "not an object"
+    assert J.validate(document, schema), "a violation at the bottom must still be found"
