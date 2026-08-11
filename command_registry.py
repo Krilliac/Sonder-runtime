@@ -93,8 +93,14 @@ COMMANDS = [
     },
     {
         "name": "/selfmod",
+        # `deploy` and `rollback` os.replace() files in Sonder's own source
+        # tree, so this command's blast radius is the interpreter running it.
+        # It is also the risk the permission gate grades the command by
+        # (command_catalog._UNREGISTERED_BRANCH_WORK): the work is done by
+        # module functions that front no registered tool, so nothing else in
+        # the derivation can see it.
         "category": "system",
-        "risk": "ask",
+        "risk": "dangerous",
         "summary": "Inspect, isolate, test, approve, deploy, or roll back auditable self-improvements.",
     },
     {

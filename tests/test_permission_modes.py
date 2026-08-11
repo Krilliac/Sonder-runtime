@@ -1090,3 +1090,99 @@ def test_elevate_parses_a_natural_console_line():
         '/elevate on "installing a driver"'
     )
     assert parsed == ("elevate", {"on": "on", "reason": "installing a driver"})
+
+
+# --- the headline guarantee, stated where it is true and only there --------
+#
+# "in every mode, including auto, the tools the catalog classes dangerous
+# still stop and ask" was written while `decide()` had no production callers.
+# Wiring the gate in gave it three `interactive=False` callers, and `ask`
+# degrades to `allow` for a caller with nobody to ask -- so the sentence
+# became false at three of the five call sites this branch created, while
+# being restated with no caveat on four surfaces.
+
+
+def test_the_dangerous_guarantee_is_conditional_and_the_condition_is_measured():
+    """The fact the surfaces below have to state, pinned once, from behaviour."""
+    assert pm.risk_of("git_merge") == "dangerous"
+    assert pm._MATRIX[pm.AUTO]["dangerous"] == pm.ASK
+
+    with_operator = pm.decide(
+        "git_merge", interactive=True, mode=pm.AUTO, rule_lookup=lambda _t: None)
+    without = pm.decide(
+        "git_merge", interactive=False, mode=pm.AUTO, rule_lookup=lambda _t: None)
+
+    assert with_operator.action == pm.ASK
+    assert without.action == pm.ALLOW, (
+        "if this ever stops degrading, the caveat below can go -- but the "
+        "unqualified claim must not come back while it does"
+    )
+    # ...and `plan` is the exception the caveat names.
+    assert pm.decide(
+        "git_merge", interactive=False, mode=pm.PLAN, rule_lookup=lambda _t: None,
+    ).action == pm.DENY
+
+
+def test_the_ask_caveat_has_one_definition():
+    """One sentence, one home. Two copies is how one of them goes stale."""
+    assert "nobody to ask" in pm.ASK_CAVEAT
+    assert "except under plan" in pm.ASK_CAVEAT
+
+
+@pytest.mark.parametrize("mode", pm.MODES)
+def test_describe_carries_the_caveat_wherever_it_prints_an_ask(mode):
+    """`describe()` prints raw `_MATRIX` rows; an `ask` row is a promise."""
+    text = pm.describe(mode)
+    if pm.ASK in pm._MATRIX[mode].values():
+        assert pm.ASK_CAVEAT in text
+    else:
+        assert pm.ASK_CAVEAT not in text, (
+            "plan has no ask row, so the caveat would be noise there"
+        )
+
+
+def test_overview_qualifies_the_claim_it_makes_about_every_mode():
+    text = pm.overview()
+    assert "destructive tools ask in every mode" in text
+    assert pm.ASK_CAVEAT in text
+
+
+def test_the_auto_blurb_does_not_promise_a_prompt_nobody_is_there_for():
+    """The widest-reach copy: this string is the app's mode chip.
+
+    `server.permission_mode_data()` ships `MODE_BLURBS` to the Flutter client,
+    which renders it on the chip and in the mode picker. It is the one surface
+    that both selects the mode and displays what it means, so an unqualified
+    "destructive still asks" there is the claim at its least checkable.
+    """
+    blurb = pm.MODE_BLURBS[pm.AUTO]
+    assert "console" in blurb, (
+        "auto's blurb must say where the prompt happens, because it does not "
+        "happen for a caller with nobody to ask"
+    )
+
+
+def test_the_console_only_exemption_note_names_the_mcp_surface_too():
+    """The one docstring a reader uses to reason about defeating the gate.
+
+    It said the exemption was "console-only" and that "the agent path gets no
+    such exemption -- a model must not be able to lift its own restraint".
+    `reloadable_mcp` exempts the same set at the protocol entry point, so a
+    model driving Sonder over MCP *can* lift `plan` -- the precise thing the
+    next sentence forbids. Sonder's own agent loop cannot, so the design is
+    defensible; the description was not.
+    """
+    import reloadable_mcp
+
+    with open(reloadable_mcp.__file__, encoding="utf-8") as handle:
+        source = handle.read()
+    assert "permission_modes.GATE_CONTROL_TOOLS" in source, (
+        "the MCP entry point no longer shares this set -- recheck the note"
+    )
+    doc = pm.__doc__
+    assert "reloadable_mcp" in doc, "the note must name the surface it forgot"
+    assert "MCP protocol entry point" in doc
+    # The claim that was false: that only the console has the exemption, and
+    # that no model can therefore lift its own restraint through it.
+    assert "One deliberate console-only exemption" not in doc
+    assert "gets no such exemption" not in doc

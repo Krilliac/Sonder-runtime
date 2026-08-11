@@ -223,8 +223,18 @@ def _named_command_gate(cmd):
     and are not gated. Named branches and ``_run_catalogued`` are disjoint by
     construction -- a command is handled by a branch or by the fallback, never
     both -- so nothing is prompted for twice.
+
+    A catalog that cannot read the tool registry refuses here rather than
+    returning an empty map. An empty map made `_gate_tools(())` answer
+    "allowed" for every command it covers, so the gate did not break -- it
+    turned off, silently, for the life of the process. Fail closed on
+    ignorance: a gate that cannot tell what a command runs must not let it run.
     """
-    return _gate_tools(command_catalog.console_tools().get(cmd, ()), cmd)
+    try:
+        tools = command_catalog.console_tools().get(cmd, ())
+    except command_catalog.CatalogUnavailable as exc:
+        return False, "refused %s: %s" % (cmd, exc)
+    return _gate_tools(tools, cmd)
 
 
 def _mode_command(argument):
@@ -261,6 +271,10 @@ def _run_catalogued(line, cmd):
         parsed = command_catalog.parse_invocation(line)
     except ValueError as exc:
         return str(exc)
+    except command_catalog.CatalogUnavailable as exc:
+        # Resolving the command is itself a catalog read. Refuse rather than
+        # dispatch something the gate could not have classified.
+        return "refused %s: %s" % (cmd, exc)
     if parsed:
         tool, kwargs = parsed
         handler = getattr(server, tool, None)

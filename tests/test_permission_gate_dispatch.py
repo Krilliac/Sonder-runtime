@@ -998,6 +998,210 @@ def test_every_risky_console_tool_is_covered_by_the_derived_map():
     for path, function in (("server.py", "control_command"), ("sonder_repl.py", "main")):
         called |= _tools_called_anywhere_in(path, function)
 
-    risky = {tool for tool in called if pm.risk_of(tool) not in ("safe", "ask")}
+    # Everything that is not a verified read, `ask` included. `ask` is the
+    # fail-closed default every unclassified tool lands in, and the class
+    # `plan` denies -- so excluding it scoped this coverage test away from
+    # precisely the bucket a newly added, unclassified tool arrives in. It
+    # passes today with the exclusion removed: the `ask`-class tools reachable
+    # from the console chains are already covered, so closing the bucket costs
+    # nothing and turns a future silent gap into a failing test.
+    risky = {tool for tool in called if pm.risk_of(tool) != "safe"}
     assert risky, "the walk found no risky console tool at all -- it is broken"
     assert risky - covered == set()
+
+
+# --- the choke point's wiring, not just the function it calls -------------
+
+
+def test_the_console_gate_runs_before_the_first_hand_written_branch():
+    """The gate exists; this is the test that it is actually *called*.
+
+    Twelve tests above drive `_named_command_gate` directly. None drove
+    `main`, so deleting the one line that calls it left all of them green
+    while the console was ungated again. The wiring is the part that cannot be
+    checked by calling the gate yourself.
+
+    Read out of the source in `_branch_tool_calls`' own idiom rather than by
+    running the REPL loop: `main` is an unbounded read-eval loop around a
+    ~500-line branch chain, and what needs pinning here is an ordering, not a
+    behaviour.
+    """
+    with open(sonder_repl.__file__, encoding="utf-8") as handle:
+        tree = ast.parse(handle.read())
+    scope = next(
+        (node for node in ast.walk(tree)
+         if isinstance(node, ast.FunctionDef) and node.name == "main"),
+        None,
+    )
+    assert scope is not None, "sonder_repl.main no longer exists"
+
+    gate_calls = [
+        node.lineno for node in ast.walk(scope)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "_named_command_gate"
+    ]
+    branch_tests = [
+        node.lineno for node in ast.walk(scope)
+        if isinstance(node, ast.Compare) and isinstance(node.left, ast.Name)
+        and node.left.id == "cmd"
+    ]
+
+    assert gate_calls, "main no longer calls _named_command_gate at all"
+    assert branch_tests, "the walk found no dispatch branch -- it is broken"
+    assert min(gate_calls) < min(branch_tests), (
+        "the gate runs after a dispatch branch, so that branch is ungated"
+    )
+
+
+# --- a branch whose real work no registered tool fronts -------------------
+
+
+def test_selfmod_is_not_graded_by_its_most_harmless_sibling():
+    """`/selfmod deploy` os.replace()s Sonder's own source tree.
+
+    The only *registered tool* that branch calls is
+    `system_improvement_report`, a `safe` read it quotes as evidence; the
+    writer (`selfmod.deploy`) is a plain module function, so the
+    registered-tools filter drops it. `_gate_tools` then took the strictest
+    member of a set whose only member was `safe`, and the gate -- consulted --
+    answered "allowed" under `plan`.
+
+    That is worse than an uncovered path: a confident wrong answer from the
+    mechanism built to give the right one.
+    """
+    assert pm.risk_of("selfmod") == "dangerous"
+    for name in ("/selfmod", "/selfmodify"):
+        mapped = command_catalog.console_tools().get(name, ())
+        assert "selfmod" in mapped, name
+        worst = min(
+            (sonder_repl._severity(pm.risk_of(tool)) for tool in mapped),
+            default=None,
+        )
+        assert worst == sonder_repl._severity("dangerous"), name
+
+
+def test_plan_refuses_selfmod_at_the_console(monkeypatch):
+    """The named requirement: `plan` must refuse the command that rewrites Sonder."""
+    monkeypatch.setattr(
+        sonder_repl, "_confirm",
+        lambda _question: pytest.fail("a plan-mode denial must not prompt"),
+    )
+    pm.set_mode(pm.PLAN)
+
+    for name in ("/selfmod", "/selfmodify"):
+        may_run, refusal = sonder_repl._named_command_gate(name)
+        assert not may_run, name
+        assert refusal.startswith("refused %s:" % name), name
+
+
+def test_auto_still_asks_before_selfmod(monkeypatch):
+    """And it is `dangerous`, so even `auto` stops -- with an operator present."""
+    asked = []
+    monkeypatch.setattr(
+        sonder_repl, "_confirm", lambda question: asked.append(question) or False,
+    )
+    pm.set_mode(pm.AUTO)
+
+    may_run, refusal = sonder_repl._named_command_gate("/selfmod")
+
+    assert (may_run, refusal) == (False, "skipped /selfmod")
+    assert len(asked) == 1
+    assert "dangerous" in asked[0]
+
+
+# --- a catalog that cannot read the registry must refuse, not wave through --
+
+
+@pytest.fixture
+def broken_registry(monkeypatch):
+    """A tool registry that raises, with the memoised catalog dropped after."""
+    class _Broken:
+        def list_tools(self):
+            raise RuntimeError("registry not initialised")
+
+    command_catalog.reset_cache()
+    monkeypatch.setattr(server.mcp, "_tool_manager", _Broken())
+    try:
+        yield
+    finally:
+        monkeypatch.undo()
+        command_catalog.reset_cache()
+
+
+def test_a_catalog_that_cannot_read_the_registry_says_so(broken_registry):
+    """It swallowed the failure and continued with an empty set.
+
+    Two consequences, and the second is the worse one: every catalog-
+    `dangerous` tool downgraded to `ask`, and `console_tools()` returned `{}`,
+    which made `_gate_tools(())` answer `(True, "")` for every mapped console
+    command. The gate did not break -- it turned off.
+    """
+    with pytest.raises(command_catalog.CatalogUnavailable):
+        command_catalog.console_tools()
+
+
+def test_the_console_gate_refuses_when_it_cannot_see_the_catalog(broken_registry):
+    """Fail closed on ignorance: a gate that cannot tell must not allow."""
+    pm.set_mode(pm.MANUAL)
+
+    may_run, refusal = sonder_repl._named_command_gate("/delete")
+
+    assert not may_run
+    assert refusal.startswith("refused /delete:")
+    assert "registry could not be read" in refusal
+
+
+def test_a_dangerous_tool_does_not_downgrade_when_the_catalog_is_blind(broken_registry):
+    """`risk_of` reads `dangerous` out of the catalog.
+
+    A blind catalog silently reclassified `git_merge`, `sqlite_mutate`,
+    `task_delete` and the rest as `ask`, and `auto` allows `ask` outright --
+    so the mode that is supposed to stop for destructive tools stopped for
+    nothing, with an operator sitting right there. Only `file_delete` and
+    `admin_private_chain_of_thought` were saved, by shipped deny rules.
+
+    Note what this does *not* claim: a caller with nobody to ask still gets
+    `allow` here, because `ask` degrades for such callers in every mode but
+    `plan`. That degrade is the "preserve current behaviour" contract and is
+    unchanged; see `ASK_CAVEAT`.
+    """
+    lookup = lambda _tool: None
+    for tool in ("git_merge", "sqlite_mutate", "task_delete", "permission_rule_set"):
+        assert pm.risk_of(tool) == "dangerous", tool
+        assert pm.decide(
+            tool, interactive=True, mode=pm.AUTO, rule_lookup=lookup,
+        ).action == pm.ASK, tool
+        assert pm.decide(
+            tool, interactive=False, mode=pm.PLAN, rule_lookup=lookup,
+        ).action == pm.DENY, tool
+
+
+def test_a_transient_catalog_failure_does_not_latch(monkeypatch):
+    """Both catalog results are `lru_cache(maxsize=1)`.
+
+    A memoised degraded answer turns one transient failure -- a partially
+    initialised server, exactly the case the code cited -- into enforcement
+    that stays off for the life of the process, with nothing to notice it. An
+    exception is not memoised, which is what makes re-raising the fix.
+    """
+    real = server.mcp._tool_manager
+    calls = {"n": 0}
+
+    class _BrokenOnce:
+        def list_tools(self):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("registry not initialised")
+            return real.list_tools()
+
+    command_catalog.reset_cache()
+    monkeypatch.setattr(server.mcp, "_tool_manager", _BrokenOnce())
+    try:
+        with pytest.raises(command_catalog.CatalogUnavailable):
+            command_catalog.console_tools()
+
+        # Same process, nothing reset: the next read must see the registry.
+        assert "file_delete" in command_catalog.console_tools().get("/delete", ())
+    finally:
+        monkeypatch.undo()
+        command_catalog.reset_cache()
