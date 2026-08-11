@@ -38,9 +38,22 @@ CALLER_JUDGED = frozenset({"used", "copied", "edited", "accepted", "rejected"})
 # Produced by running something. Answers "did it build / did tests pass".
 EXECUTION_GROUNDED = frozenset({"tests_passed", "compiled", "failed"})
 
+# A population is a signal set AND a provenance set (#62). The signal name
+# alone was never enough: `accepted` is written by a caller reviewing delegated
+# work *and* by artifact_verify / ground_artifact reporting their own checks.
+# Before `outcomes.source` existed the two were indistinguishable, so the one
+# number claiming to measure delegated-work quality silently included machine
+# verdicts. `None` means "any provenance".
+#
+# Consequence, stated rather than hidden: on a store whose rows predate the
+# column every row is `unknown`, so the caller population measures 0 and the
+# verdict is `unmeasured`. That is not a regression, it is this module's own
+# rule -- ignorance fails closed -- finally applied to a question it could not
+# previously ask. 9,450 rows of unrecorded provenance are not 9,450 caller
+# judgements, and quoting them as one is the defect, not the measurement.
 POPULATIONS = {
-    "caller": CALLER_JUDGED,
-    "execution": EXECUTION_GROUNDED,
+    "caller": (CALLER_JUDGED, _rules.CALLER_JUDGED_OUTCOME_SOURCES),
+    "execution": (EXECUTION_GROUNDED, None),
 }
 
 # Below this many observations, reliability is unknown, not good.
@@ -79,24 +92,29 @@ class Measurement:
             self.total, self.verdict)
 
 
-def _counts(conn) -> dict:
+def _counts(conn, sources=None) -> dict:
     import sonder_runtime.adapters.memory_store as memory_store
     try:
-        return dict(memory_store.outcome_signal_counts(conn) or {})
+        return dict(memory_store.outcome_signal_counts(conn, sources) or {})
     except Exception:
         return {}
 
 
 def measure(conn, population: str = "caller") -> Measurement:
-    """Measured reliability for one named population of outcome signals."""
+    """Measured reliability for one named population of outcome signals.
+
+    The population fixes both the signals counted and the provenances they may
+    have come from; see POPULATIONS.
+    """
     key = str(population or "caller").strip().lower()
-    signals = POPULATIONS.get(key)
-    if signals is None:
+    entry = POPULATIONS.get(key)
+    if entry is None:
         raise ValueError(
             "unknown population '%s'. choose one of: %s"
             % (population, ", ".join(sorted(POPULATIONS)))
         )
-    counts = _counts(conn)
+    signals, sources = entry
+    counts = _counts(conn, sources)
     good = sum(n for s, n in counts.items()
                if s in signals and _rules.reward_is_good(s))
     bad = sum(n for s, n in counts.items()
@@ -121,8 +139,14 @@ def should_verify(conn, population: str = "caller") -> tuple:
     """
     m = measure(conn, population)
     if m.verdict == UNMEASURED:
-        return True, ("only %d judged outcomes on record (need %d) - reliability "
-                      "is unknown, so verify rather than assume" % (m.total, MIN_SAMPLE))
+        # "of recorded provenance" is load-bearing, not decoration: since #62
+        # this verdict has two causes -- too few judgements, or judgements
+        # whose provenance was never recorded and so cannot be counted as
+        # caller-judged. Both warrant verifying; conflating them in the prose
+        # would hide which one the operator can actually fix.
+        return True, ("only %d judged outcomes of recorded provenance (need "
+                      "%d) - reliability is unknown, so verify rather than "
+                      "assume" % (m.total, MIN_SAMPLE))
     if m.verdict == POOR:
         return True, ("measured %.0f%% good over %d judged outcomes - below the "
                       "%.0f%% bar, so verify before claiming done"
