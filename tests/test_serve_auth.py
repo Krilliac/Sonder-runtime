@@ -77,6 +77,24 @@ def test_execution_feed_detail_requires_flag_developer_and_non_local_open(
     assert ts._execution_feed_detail_allowed(developer) is False
 
 
+def test_system_operation_roles_separate_authentication_from_authority():
+    """An ordinary account never gains global-policy authority by prompting."""
+    ordinary = {"mode": "account", "authorized": True, "api_key": False,
+                "account": {"username": "ordinary", "role": "user"}}
+    developer = {"mode": "account", "authorized": True, "api_key": False,
+                 "account": {"username": "dev", "role": "developer"}}
+    admin = {"mode": "account", "authorized": True, "api_key": False,
+             "account": {"username": "admin", "role": "admin"}}
+    assert "administrator" in ts._system_operation_authority_error(
+        "permission_mode_change", ordinary,
+    )
+    assert "developer" in ts._system_operation_authority_error(
+        "workspace_execution", ordinary,
+    )
+    assert ts._system_operation_authority_error("workspace_execution", developer) == ""
+    assert ts._system_operation_authority_error("permission_mode_change", admin) == ""
+
+
 @contextmanager
 def _http_server(monkeypatch):
     monkeypatch.setattr(ts, "_maybe_live_reload", lambda: None)
