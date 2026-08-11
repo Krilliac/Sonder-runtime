@@ -969,6 +969,7 @@ def _capture_turn(model, tier, trace_ctx, prompt, response, iid=None):
             "prompt": str(prompt or "")[:4000],
             "augmented_prompt": str(trace_ctx.get("augmented_prompt") or "")[:16000],
             "lessons": [str(x)[:400] for x in (trace_ctx.get("lessons") or [])][:20],
+            "facts_omitted": int(trace_ctx.get("facts_omitted") or 0),
             "response_head": str(response or "")[:2000],
         })
     except Exception:
@@ -987,6 +988,11 @@ def _format_trace(model, tier, params, trace):
     ]
     for lesson_text in lessons:
         lines.append("   - %s" % lesson_text)
+    # A bounded facts block that drops entries must say so on the surface an
+    # operator actually reads, not only inside the prompt text.
+    facts_omitted = int(trace.get("facts_omitted") or 0)
+    if facts_omitted:
+        lines.append("stored facts omitted by the block bound: %d" % facts_omitted)
     lines.append("--- exact prompt sent to the model ---")
     lines.append(trace.get("augmented_prompt", ""))
     lines.append("=== END TRACE ===")
@@ -1441,6 +1447,64 @@ def _runtime_identity_block() -> str:
     )
 
 
+# The mutable, disk-backed parts of the system prompt, pinned for one turn.
+#
+# One turn can build the system prompt more than once, and each build re-read
+# system_profile.md, the emotion vectors and the goal store from disk.
+# Measured: a workbench-agent turn builds it twice (the agent loop, then the
+# negative-claim reviewer at finalization) and a routed work request builds it
+# three times (execution-mode router, then the agent, then that reviewer).
+# Every one of those prompts is sent to a model -- none is discarded -- so this
+# cannot be fixed by dropping a build. With an edit landing between two reads,
+# one turn told the router "never use the network" and, in the same turn, told
+# the agent "always use the network".
+#
+# Per-REQUEST freshness is deliberate: system_profile.py exists so an operator
+# can edit standing instructions while the server runs. Per-TURN consistency is
+# what was missing, so the parts are read once per turn and reused, not cached
+# for the life of the process.
+#
+# _runtime_identity_block() is deliberately NOT pinned. It names the model
+# answering THIS call, and the two consumers in a routed turn can run on
+# different tiers; pinning it would make the second prompt state the first
+# one's model, which is the exact failure that block exists to prevent.
+_SYSTEM_CONTEXT = threading.local()
+
+
+def _read_system_context():
+    """Read the disk-backed system-prompt parts: (profile, emotions, goal)."""
+    profile = system_profile.system_prompt()
+    emotions = emotion_vectors.system_prompt()
+    # An active goal is re-stated every turn so a long objective cannot erode
+    # into whatever fits the current turn. Fail-soft: goal bookkeeping must
+    # never be able to break a conversation.
+    try:
+        import goal_store
+        goal_block = goal_store.context_block()
+    except Exception:
+        goal_block = ""
+    return profile, emotions, goal_block
+
+
+@contextlib.contextmanager
+def _stable_system_context():
+    """Pin the disk-backed system-prompt parts for the duration of one turn.
+
+    Thread-local, so concurrent turns never share a pin, and re-entrant: a lane
+    nested inside an already-pinned turn (the workbench agent under the
+    execution router) keeps the outer turn's reading instead of taking a fresh
+    one. Always released, so the next turn reads from disk again.
+    """
+    if getattr(_SYSTEM_CONTEXT, "parts", None) is not None:
+        yield
+        return
+    _SYSTEM_CONTEXT.parts = _read_system_context()
+    try:
+        yield
+    finally:
+        _SYSTEM_CONTEXT.parts = None
+
+
 def _build_system(system, trace, persona):
     """Compose the effective system prompt from a base `system`, optional trace
     instruction, optional persona, editable profile, and emotion vectors."""
@@ -1452,16 +1516,10 @@ def _build_system(system, trace, persona):
         effective_system = (
             "%s\n\n%s" % (persona_prompt, effective_system) if effective_system else persona_prompt
         )
-    profile = system_profile.system_prompt()
-    emotions = emotion_vectors.system_prompt()
-    # An active goal is re-stated every turn so a long objective cannot erode
-    # into whatever fits the current turn. Fail-soft: goal bookkeeping must
-    # never be able to break a conversation.
-    try:
-        import goal_store
-        goal_block = goal_store.context_block()
-    except Exception:
-        goal_block = ""
+    # Outside a pinned turn this is an ordinary fresh read, so a single-build
+    # caller behaves exactly as before.
+    parts = getattr(_SYSTEM_CONTEXT, "parts", None)
+    profile, emotions, goal_block = parts or _read_system_context()
     return _join_system_parts(
         _runtime_identity_block(), profile, emotions, goal_block, effective_system
     )
@@ -2662,17 +2720,33 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
             if project is not None else []
         )
         facts = _preference_facts(conn, prompt, project=project)
-        if project:
-            facts.extend(f["text"] for f in memory_store.facts_for_project(conn, project))
+        # Kept SEPARATE from the preferences rather than appended to them. The
+        # facts block is bounded, and a single list spent in order let twelve
+        # preferences evict every operator-authored project fact -- including
+        # the recall canaries -- because _preference_facts' cap is exactly the
+        # block's cap. orchestrator.select_facts draws the two round-robin so
+        # neither source can starve the other by call order.
+        # Newest first. facts_for_project is ORDER BY ts ASC (and other callers
+        # want that chronological order, so it stays as it is), but the block
+        # is bounded: fed oldest-first, a project holding more facts than the
+        # round-robin floor fills the block with its oldest rows and drops the
+        # newest. A fact someone just stored is the newest row in the project
+        # by definition, so oldest-first makes recency the thing that loses.
+        project_facts = (
+            [f["text"] for f in reversed(memory_store.facts_for_project(conn, project))]
+            if project else []
+        )
         retrieve_fn = retriever.retrieve
     else:
         recalls = None
         facts = None
+        project_facts = None
         retrieve_fn = _no_retrieve
     if trace:
         resp, iid, tctx = orchestrator.run_with_learning_traced(
             conn, prompt, tier, gen, retrieve_fn=retrieve_fn, history=history,
-            recalls=recalls, facts=facts, session_id=session_id, task_embedding=blob,
+            recalls=recalls, facts=facts, project_facts=project_facts,
+            session_id=session_id, task_embedding=blob,
             project=project,
             project_explicit=True,
             task_embedding_model=embedding_provenance.get("model"),
@@ -2686,7 +2760,8 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
         return resp, iid, tctx
     resp, iid = orchestrator.run_with_learning(
         conn, prompt, tier, gen, retrieve_fn=retrieve_fn, history=history,
-        recalls=recalls, facts=facts, session_id=session_id, task_embedding=blob,
+        recalls=recalls, facts=facts, project_facts=project_facts,
+        session_id=session_id, task_embedding=blob,
         project=project,
         project_explicit=True,
         task_embedding_model=embedding_provenance.get("model"),
@@ -18169,7 +18244,21 @@ def _agent_checklist_fail(checklist_id, states, reason, item=1):
     _agent_checklist_mark(checklist_id, states, 4, "done", "failure included in end report")
 
 
-def _agent_impl(
+def _agent_impl(*args, **kwargs) -> str:
+    """One agent turn, with the disk-backed system-prompt parts pinned.
+
+    The agent builds its system prompt at the top of the turn and the
+    negative-claim reviewer builds another at finalization (measured: two
+    builds, two reads of system_profile.md, in one turn). Both are sent to a
+    model, so they must not disagree about the operator's standing
+    instructions. See _stable_system_context; a nested call under an already
+    pinned turn reuses the outer reading.
+    """
+    with _stable_system_context():
+        return _agent_turn(*args, **kwargs)
+
+
+def _agent_turn(
     prompt: str,
     tier: str = "code",
     max_steps: int = 6,
@@ -20098,7 +20187,17 @@ def _capability_refined_tier(
 
 
 def route_work_request(prompt: str, project: str = "") -> str | None:
-    """Transparently route eligible natural work to a bounded execution lane."""
+    """Transparently route eligible natural work to a bounded execution lane.
+
+    The disk-backed system-prompt parts are pinned across the whole routed
+    turn: the execution-mode router and the lane it chooses each build their
+    own system prompt, and both go to a model. See _stable_system_context.
+    """
+    with _stable_system_context():
+        return _route_work_request(prompt, project=project)
+
+
+def _route_work_request(prompt: str, project: str = "") -> str | None:
     _maybe_live_reload()
     explicit_worker_cap = master_orchestrator.requested_worker_cap(prompt)
     decision = (
