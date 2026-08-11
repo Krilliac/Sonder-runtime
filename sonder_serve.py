@@ -449,8 +449,10 @@ SYSTEM_OPERATION_ROLES = {
 SYSTEM_OPERATION_TOOLS = {
     "permission_mode": "permission_mode_change",
     "permission_rule_set": "permission_rule_change",
+    "elevate": "permission_mode_change",
     "runtime_policy_update": "runtime_policy_change",
     "update_system_profile": "selfmod_deploy",
+    "self_heal_repair": "selfmod_deploy",
     "admin_set_account": "account_management",
     "autopilot_start": "automation_lifecycle",
     "autopilot_resume": "automation_lifecycle",
@@ -460,6 +462,8 @@ SYSTEM_OPERATION_TOOLS = {
     "workflow_delete": "automation_lifecycle",
     "workflow_run": "automation_lifecycle",
     "memory_export": "workspace_execution",
+    "memory_privacy_repair": "workspace_execution",
+    "memory_quality_repair": "workspace_execution",
 }
 
 
