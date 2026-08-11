@@ -415,6 +415,44 @@ def test_chat_maps_typed_model_failures_to_http_errors(
     assert "choices" not in payload
 
 
+def test_chat_forwards_hosted_throttle_delay_and_explanation(monkeypatch):
+    error = ts.server.ModelCallError(
+        "http", "quota temporarily exhausted", status=429, cloud=True,
+        retry_after_seconds=17,
+    )
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+
+    class FakeConnection:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ts.server, "_open_db", lambda: FakeConnection())
+    monkeypatch.setattr(ts.admin_auth, "rate_limit", lambda conn, account: (True, ""))
+    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        ts.server, "answer_with_history",
+        lambda *args, **kwargs: (_ for _ in ()).throw(error),
+    )
+    request = json.dumps({
+        "model": "cloud-general",
+        "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, headers, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    payload = json.loads(body)
+    assert status == 429
+    assert headers["Retry-After"] == "17"
+    assert "not retried automatically" in payload["error"]["message"]
+    assert "after about 17s" in payload["error"]["message"]
+
+
 def test_api_key_mode_cannot_be_bypassed_by_account_token(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "k" * 32)
     monkeypatch.setattr(ts, "AUTH_MODE", "api-key")
