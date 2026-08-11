@@ -12881,7 +12881,7 @@ def _loop_dispatch(action):
         "ok": False,
         "type": action_type or "(unknown)",
         "summary": "unknown action type",
-        "output": "Valid action types: code, project, artifact_generate, artifact_ground, game_reference_suite, game_generate_and_test, game_generation_campaign, offload, sonder, master_orchestrate, master_status, master_capacity, master_cancel, master_retry, file_policy, workspace_inventory, directory_tree, text_search, script_search, program_search, workspace_run, script_run, image_inspect, file_find, file_read, file_write, file_edit, file_copy, file_move, file_delete, status, diagnostics, context_health, learning_health, memory_quality_report, memory_quality_repair, memory_privacy_review, memory_privacy_repair, memory_embedding_backfill, memory_interaction_embedding_backfill, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, weather_lookup, approximate_location_lookup, unload, sleep.",
+        "output": "Valid action types: %s." % ", ".join(_LOOP_ACTION_TYPES),
     }
 
 
@@ -12896,7 +12896,28 @@ def loop(
     """Run a bounded loop of code/model/system actions.
 
     `actions_json` is a JSON list of action objects, or {"actions": [...]}.
-    Supported action types:
+
+    All valid `type` values: code, project, artifact_generate, artifact_ground,
+    game_reference_suite, game_generate_and_test, game_generation_campaign,
+    offload, sonder, workbench_agent, master_orchestrate, master_status,
+    master_capacity, master_cancel, master_retry, file_policy,
+    workspace_inventory, directory_tree, directory_create, text_search,
+    script_search, program_search, workspace_run, script_run, image_inspect,
+    data_inspect, artifact_risk_inspect, process_list,
+    process_memory_risk_inspect, file_find, file_read, file_read_range,
+    file_write, file_edit, file_copy, file_move, file_delete,
+    checklist_create, checklist_update, checklist_show, status, diagnostics,
+    context_health, learning_health, memory_quality_report,
+    memory_quality_repair, memory_privacy_review, memory_privacy_repair,
+    memory_embedding_backfill, memory_interaction_embedding_backfill,
+    improvement_report, self_heal_check, self_heal_repair, profile_status,
+    emotion_status, emotion_update, emotion_tune, learn_preference,
+    preferences_status, memory_search, ground_artifact, apply_learned,
+    web_search, web_fetch, weather_lookup, approximate_location_lookup,
+    unload, sleep.
+
+    Argument shapes, by example (each action takes the same arguments as the
+    MCP tool of the same name):
       - {"type":"code","language":"python|js|powershell|cpp|csharp","code":"..."}
       - {"type":"project","files":[{"path":"src/main.cpp","content":"..."}],"commands":[{"cmd":["g++","src/main.cpp","-o","app"]}]}
       - {"type":"artifact_generate","name":"brand-kit","brief":"fiery logo, music, and 3D mascot","kinds":"auto"}
@@ -14196,7 +14217,11 @@ def tool_manifest() -> str:
         "artifact_generate/artifact_verify": "Create and verify stdlib-only images, animated GIF/AVI video, SVGs, Office files, MIDI/WAV audio, captions, EDL timelines, data, web mockups, OBJ and textured humanoid GLBs with full morph frames and clip sequences, scenes, and themed packs from a free-form brief.",
         "game_reference_suite/game_generate_and_test/game_generation_campaign": "Build, execute, repair, and ground persistent in-house 2D/2.5D/3D game projects and fleets.",
         "loop": "Repeat bounded code/model/system actions.",
-        "workflow_list/save/run/delete": "Manage reusable loop workflows.",
+        # Spell every tool out.  The old "workflow_list/save/run/delete"
+        # shorthand read as four tool names, three of which ("save", "run",
+        # "delete") are not registered tools at all -- the only names on any
+        # advertising surface that no @mcp.tool() backs.
+        "workflow_list/workflow_save/workflow_run/workflow_delete": "Manage reusable loop workflows.",
         "system_profile_text/update_system_profile": "Read or edit standing instructions.",
         "emotion_vector_status/update_emotion_vectors/tune_emotion_vectors": "Read, edit, or live-tune tone vectors.",
         "learn_preference/preferences_status": "Read or teach durable user behavior/workflow preferences.",
@@ -14374,7 +14399,17 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "self_heal_check", "status", "system_profile_text", "environment_status", "hardware_profile",
     "emotion_vector_status", "preferences_status", "tool_manifest",
     "memory_search", "web_search", "web_fetch", "weather_lookup",
-    "test_discover", "find_references", "diff_files", "secret_scan",
+    # test_discover / find_references / diff_files / secret_scan are
+    # deliberately absent.  They are read-only, but they are direct-MCP tools
+    # only: harness_tools._resolve_root resolves any absolute path with no
+    # allowed-roots check, and their signatures expose no token/approval/
+    # extra_roots, so they cannot take part in the guarded-read contract this
+    # allow-list grants.  _repository_read_only_error has no resolve branch for
+    # them and _project_scoped_path_key maps them to "path" while they actually
+    # take "root", so both the scope check and the project rebase would inspect
+    # a key they never use and pass while the real root went unchecked.
+    # Re-add them here, to REPOSITORY_AGENT_TOOL_HELP and to _agent_dispatch
+    # together, and only once they are root-confined.
 })
 REPOSITORY_READ_ONLY_FORBIDDEN_ARGS = frozenset({
     "token", "approval", "extra_roots",
@@ -14439,10 +14474,6 @@ an exact symbol named by the task; do not default to Python or server.py.
 - emotion_vector_status: {}
 - preferences_status: {"include_disabled": false, "limit": 20}
 - tool_manifest: {}
-- test_discover: {"root": ".", "framework": "auto"} -- discover tests; auto-detects pytest/jest/vitest/cargo/go/dotnet
-- find_references: {"root": ".", "symbol": "MyClass", "glob": "**/*.py"} -- find all occurrences of a symbol
-- diff_files: {"root": ".", "left": "a.py", "right": "b.py", "context": 3} -- unified diff between two files
-- secret_scan: {"root": ".", "timeout": 30} -- scan for leaked API keys, passwords, tokens, private keys
 
 Reply with exactly one JSON object and no markdown:
 {"tool": "tool_name", "args": {...}, "reason": "short reason"}
@@ -14451,15 +14482,38 @@ or
 """
 
 
-def _agent_tool_help(read_only=False, cloud=False):
+def _agent_help_advertised_tools(help_text):
+    """Tool names an agent help block advertises, one per '- name: {...}' line."""
+    names = []
+    for line in help_text.splitlines():
+        stripped = line.lstrip()
+        if not stripped.startswith("- "):
+            continue
+        name, separator, _ = stripped[2:].partition(":")
+        name = name.strip()
+        if separator and name.isidentifier():
+            names.append(name)
+    return tuple(names)
+
+
+def _agent_tool_help(read_only=False, cloud=False, unsafe=False):
     help_text = REPOSITORY_AGENT_TOOL_HELP if read_only else AGENT_TOOL_HELP
     if not cloud:
         return help_text
+    # Advertise exactly what hosted policy will admit.  Deriving the filter
+    # from _cloud_agent_tool_policy_error instead of restating one of its tool
+    # sets is what stops the two from drifting: the local-only set was stripped
+    # here while the nested-model set never was, so a hosted agent read in its
+    # own tool help that it could nest a model call that dispatch hard-denies.
+    denied = frozenset(
+        name for name in _agent_help_advertised_tools(help_text)
+        if _cloud_agent_tool_policy_error(name, unsafe=unsafe)
+    )
     return "\n".join(
         line for line in help_text.splitlines()
         if not any(
             line.lstrip().startswith("- %s:" % name)
-            for name in _CLOUD_AGENT_LOCAL_ONLY_TOOLS
+            for name in denied
         )
     )
 
@@ -18142,7 +18196,8 @@ def _agent_impl(
     # path-like typos were rejected above rather than failing open to Sonder's
     # own workspace.
     transcript = "Task:\n%s\n\n%s" % (
-        prompt, _agent_tool_help(read_only=read_only, cloud=cloud)
+        prompt,
+        _agent_tool_help(read_only=read_only, cloud=cloud, unsafe=unsafe),
     )
     if unsafe:
         transcript = "%s\n\n%s" % (unsafe_lab.WARNING, transcript)
@@ -18683,7 +18738,9 @@ def _agent_impl(
         elif cloud and tool_name == "tool_manifest":
             # The direct/local manifest remains authoritative and complete,
             # while a hosted model sees only the capabilities it may request.
-            observation = _agent_tool_help(read_only=read_only, cloud=True)
+            observation = _agent_tool_help(
+                read_only=read_only, cloud=True, unsafe=unsafe,
+            )
         elif read_only and tool_name in {"command_registry_list", "tool_manifest"}:
             observation = _agent_tool_help(read_only=True)
         else:
@@ -19050,29 +19107,51 @@ def workbench_agent(
     )
 
 
+# These two sets are not policy alone.  _agent_impl renders the selected one
+# into the model transcript verbatim under "HOST TOOL ALLOWLIST (cannot be
+# expanded by the model)", and _autopilot_plan_model renders it again as
+# "Allowed tools: ...", so every name here is a promise the model plans
+# against.  A name _agent_dispatch has no branch for -- or one the read-only
+# gate an observe run executes under would refuse -- spends autonomous steps
+# on a call that cannot run.  Keep both sets a subset of _agent_dispatch's
+# branches and the observe set a subset of REPOSITORY_READ_ONLY_TOOLS;
+# tests/test_advertised_surface_drift.py asserts both.
 _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "directory_digest", "file_find",
     "dependency_inventory",
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "data_inspect", "data_query", "text_search", "script_search",
     "project_detect",
     "repo_status", "repo_diff", "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
-    "program_search", "image_inspect", "memory_search", "process_list", "process_memory_risk_inspect", "web_search",
+    "program_search", "image_inspect", "memory_search", "web_search",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
-    "test_discover", "find_references", "diff_files", "secret_scan",
-    "dependency_audit",
-    "task_progress",
+    # test_discover / find_references / diff_files / secret_scan /
+    # dependency_audit are deliberately absent: _agent_dispatch has no branch
+    # for any of them, exactly as for REPOSITORY_READ_ONLY_TOOLS, so a run
+    # that believed this list burned steps on "ERROR: unknown tool".  Re-add
+    # them here only together with a root-confined dispatch branch.
+    # process_list / process_memory_risk_inspect / task_progress moved to the
+    # workspace-only block below: _autopilot_work_model runs observe tasks
+    # with read_only=True, and _repository_read_only_error refuses every tool
+    # outside REPOSITORY_READ_ONLY_TOOLS -- which those three are deliberately
+    # outside of.  Advertising them to an observe run promised a call the very
+    # next gate rejected.  They remain fully available to workspace runs.
 })
 _AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
     "directory_create", "file_write", "file_batch_write", "json_patch", "file_edit", "file_copy", "file_move", "archive_extract", "archive_create", "text_patch", "data_convert", "workspace_run",
     "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_generate", "artifact_verify", "game_reference_suite",
     "game_generate_and_test",
-    "test_run", "lint_run", "format_code", "typecheck_run",
-    "dependency_add", "dependency_remove", "dependency_update",
-    "git_commit", "git_branch", "git_checkout", "git_stash", "git_tag", "git_merge", "git_cherry_pick",
-    "build_run", "build_clean", "rename_symbol", "apply_patch",
+    "process_list", "process_memory_risk_inspect", "task_progress",
     "task_delete", "task_plan", "task_depend",
+    # test_run / lint_run / format_code / typecheck_run / dependency_add /
+    # dependency_remove / dependency_update / the seven git_* tools /
+    # build_run / build_clean / rename_symbol / apply_patch are deliberately
+    # absent for the same reason as the observe block: they are direct MCP
+    # tools with no _agent_dispatch branch, so advertising them to an
+    # autonomous run cost steps and bought no capability.  workspace_run and
+    # script_run stay, and reach the same build/test binaries through the
+    # argv-checked execution path.
 })
 _AUTOPILOT_RUNNERS = frozenset({
     "python", "python.exe", "py", "py.exe", "pytest", "pytest.exe",

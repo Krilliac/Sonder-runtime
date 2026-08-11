@@ -215,7 +215,13 @@ def test_local_read_only_project_dedup_and_autopilot_sets_are_unchanged():
     assert names <= server._AGENT_DEDUPLICATED_INSPECTION_TOOLS
     assert names - non_work <= server._WORK_INSPECTION_TOOLS
     assert non_work.isdisjoint(server._WORK_INSPECTION_TOOLS)
-    assert names - non_work <= server._AUTOPILOT_OBSERVE_TOOLS
+    # process_list / process_memory_risk_inspect are workspace-policy only:
+    # they sit outside REPOSITORY_READ_ONLY_TOOLS on purpose, and observe runs
+    # execute with read_only=True, so listing them in the observe allowlist
+    # advertised a call _repository_read_only_error always refused.
+    assert names - non_work - process_tools <= server._AUTOPILOT_OBSERVE_TOOLS
+    assert process_tools.isdisjoint(server._AUTOPILOT_OBSERVE_TOOLS)
+    assert names - non_work <= server._AUTOPILOT_WORKSPACE_TOOLS
     assert non_work.isdisjoint(server._AUTOPILOT_OBSERVE_TOOLS)
     assert names.isdisjoint(server._WORK_MUTATION_TOOLS)
 

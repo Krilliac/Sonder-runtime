@@ -56,9 +56,21 @@ def test_process_tool_registration_help_reload_and_autopilot():
         assert name in server.AGENT_TOOL_HELP
         assert name in server._WORK_INSPECTION_TOOLS
         assert name in server._AGENT_DEDUPLICATED_INSPECTION_TOOLS
-        assert name in server._AUTOPILOT_OBSERVE_TOOLS
         assert name not in server.REPOSITORY_READ_ONLY_TOOLS
-        assert server._autopilot_tool_policy({"policy": "observe"})(name, {"pid": 1234}) == ""
+        # Workspace-policy autopilot only.  These two are deliberately outside
+        # REPOSITORY_READ_ONLY_TOOLS, and _autopilot_work_model runs observe
+        # tasks with read_only=True, so _repository_read_only_error refuses
+        # them there.  Listing them in _AUTOPILOT_OBSERVE_TOOLS advertised a
+        # call to the model that the next gate always rejected.
+        assert name in server._AUTOPILOT_WORKSPACE_TOOLS
+        assert name not in server._AUTOPILOT_OBSERVE_TOOLS
+        assert server._autopilot_tool_policy({"policy": "workspace"})(name, {"pid": 1234}) == ""
+        assert server._autopilot_tool_policy({"policy": "observe"})(
+            name, {"pid": 1234},
+        ).startswith("ERROR: HOST POLICY:")
+        assert server._agent_dispatch(name, {"pid": 1234}, read_only=True).startswith(
+            "ERROR: tool '%s' is not allowed by the repository read-only policy." % name
+        )
     assert "process_risk" in server.LIVE_RELOAD_MODULES
     assert "process_list/process_memory_risk_inspect" in server.tool_manifest()
 
