@@ -94,6 +94,7 @@ CATEGORIES = {
 _CATEGORY_BY_TOOL = {
     "sonder": "chat",
     "offload": "chat",
+    "extract_grounded": "chat",
     "consult": "chat",
     "ensemble_answer": "chat",
     "route_request": "chat",

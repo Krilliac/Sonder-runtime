@@ -72,6 +72,7 @@ import codegen_loop
 import file_ops
 import data_query as data_query_module
 import json_patch_tool
+import json_schema_verifier
 import text_patch as text_patch_ops
 import workspace_compare as workspace_compare_module
 import log_inspect as log_inspect_module
@@ -102,6 +103,7 @@ import npu_contract
 import npu_service
 import calibration
 import command_catalog
+import grounded_extraction
 import grounded_outcomes
 import permission_modes
 import reloadable_mcp
@@ -1017,7 +1019,7 @@ def resolve_sonder_model(strict=False):
 def _make_generate(
     model, system, temperature, num_predict, num_ctx, cloud=False, timeout=None,
     cancel_check=None, accept_native_tool_calls=False,
-    compact_cloud_reasoning=False,
+    compact_cloud_reasoning=False, schema=None,
 ):
     """Build a generate(prompt, history) closure for `model`.
 
@@ -1025,6 +1027,12 @@ def _make_generate(
     (they're VRAM/local-context knobs the remote tier doesn't take), matching how the
     non-learning cloud path posts.  The opt-in agent flags accept one canonical
     native tool call and keep hosted reasoning compact for a small JSON contract.
+
+    `schema` is a JSON Schema object handed to Ollama as the decoder-side
+    ``format`` constraint. It is omitted from the payload entirely when None, so
+    an unconstrained call posts exactly the bytes it always did. Constraining
+    the decoder is not the same as verifying the result -- see
+    `_require_schema_match`, which callers apply to the returned text.
     """
     cloud = bool(cloud or _is_cloud_model_name(model))
 
@@ -1049,6 +1057,8 @@ def _make_generate(
             options = _local_model_options(temperature, prediction_limit, num_ctx)
         payload = {"model": model, "messages": messages, "stream": False,
                    "options": options}
+        if schema is not None:
+            payload["format"] = schema
         if cloud:
             _apply_cloud_thinking_policy(
                 payload, model, compact=compact_cloud_reasoning,
@@ -3960,6 +3970,221 @@ def _get(path: str) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _parse_schema_arg(schema):
+    """Normalize an offload `schema` argument to a schema object, or None.
+
+    Accepts an already-parsed object (internal callers) or the JSON text the
+    tool surface passes (matching how every other structured argument crosses
+    that boundary). A blank string means "no schema", so the unconstrained path
+    stays the default. Anything else that is not a JSON object is a caller
+    error and is raised as a typed configuration failure -- never quietly
+    dropped, because dropping it would run the call unconstrained while the
+    caller believed it was constrained.
+    """
+    if schema is None:
+        return None
+    if isinstance(schema, dict):
+        return schema
+    if isinstance(schema, str):
+        text = schema.strip()
+        if not text:
+            return None
+        try:
+            parsed = json.loads(text)
+        except ValueError as exc:
+            raise ModelCallError(
+                "configuration",
+                "schema is not valid JSON: %s" % exc,
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise ModelCallError(
+                "configuration",
+                "schema must be a JSON object, got %s" % type(parsed).__name__,
+            )
+        return parsed
+    raise ModelCallError(
+        "configuration",
+        "schema must be a JSON object or JSON text, got %s" % type(schema).__name__,
+    )
+
+
+# The complete set of keywords `json_schema_verifier` enforces. Coverage below
+# is the *complement* of this set rather than a list of unsupported keywords
+# somebody remembered to enumerate: a keyword nobody anticipated is reported as
+# unchecked by default instead of being assumed harmless. `tests/
+# test_offload_schema.py` pins both halves against the verifier's real
+# behaviour, so this cannot quietly drift out of step with it.
+_VERIFIED_SCHEMA_KEYWORDS = frozenset({"type", "required", "properties", "items"})
+
+# How many gaps a disclosure names before it summarizes the rest.
+_MAX_REPORTED_SCHEMA_GAPS = 8
+
+
+def _schema_coverage(value, schema, path, gaps):
+    """Mirror `json_schema_verifier._validate`'s descent, recording what it skips.
+
+    Deliberately walks the *data* as well as the schema, because the verifier's
+    descent is data-dependent: it only enters `properties[key]` when the key is
+    actually present and only applies `items` to elements that exist. A report
+    derived from the schema alone would claim coverage of branches nothing ever
+    walked.
+
+    The two cases that matter most are absences rather than keywords, and a
+    static list of unsupported keywords would score both as fully covered:
+
+    * a node with no ``type`` -- which includes every ``$ref`` node -- defaults
+      to ``"any"`` in the verifier, accepts literally any value, and never
+      applies its own ``required``/``properties`` either, so the whole subtree
+      goes unchecked;
+    * ``properties``/``required`` written without an explicit ``"type":
+      "object"`` are skipped for the same reason.
+    """
+    if not isinstance(schema, dict):
+        gaps.append((path, "schema node is not an object; nothing was checked"))
+        return gaps
+
+    declared = schema.get("type")
+    if declared is None:
+        reason = (
+            '"$ref" is not followed, so nothing at this node was checked'
+            if "$ref" in schema
+            else 'no "type", so any value is accepted and nothing was checked'
+        )
+        gaps.append((path, reason))
+        return gaps
+    if not isinstance(declared, str) or declared not in json_schema_verifier._TYPE_CHECKS:
+        # A type union -- legal JSON Schema, and honoured by Ollama's decoder --
+        # is not something this verifier can evaluate.
+        gaps.append((path, "type %r is not one this check understands" % (declared,)))
+        return gaps
+
+    unenforced = sorted(set(schema) - _VERIFIED_SCHEMA_KEYWORDS)
+    if unenforced:
+        gaps.append((path, "%s not checked" % ", ".join(unenforced)))
+
+    if declared == "object" and isinstance(value, dict):
+        for key, subschema in (schema.get("properties") or {}).items():
+            if key in value:
+                _schema_coverage(value[key], subschema, "%s.%s" % (path, key), gaps)
+    elif declared == "array" and isinstance(value, list):
+        items_schema = schema.get("items")
+        if items_schema is not None:
+            for index, item in enumerate(value):
+                _schema_coverage(item, items_schema, "%s[%d]" % (path, index), gaps)
+    return gaps
+
+
+def _schema_coverage_gaps(value, schema):
+    """Every part of `schema` the post-hoc check did not actually enforce.
+
+    Total by construction: a walker that raised would leave the caller with no
+    coverage information at all, which is the failure mode this exists to
+    prevent, so an unexpected error is itself reported as total non-coverage.
+    """
+    try:
+        return _schema_coverage(value, schema, "$", [])
+    except Exception as exc:
+        return [("$", "coverage could not be determined: %s" % exc)]
+
+
+def _format_schema_gaps(gaps):
+    shown = ["%s (%s)" % (path, reason) for path, reason in gaps[:_MAX_REPORTED_SCHEMA_GAPS]]
+    remaining = len(gaps) - len(shown)
+    if remaining > 0:
+        shown.append("and %d more" % remaining)
+    return "; ".join(shown)
+
+
+def _with_schema_coverage(text, gaps):
+    """Append what the check could not verify, or return `text` untouched.
+
+    A fully-checkable schema -- the common `type`/`required`/`properties`/
+    `items` case -- returns byte-for-byte clean JSON. Anything less carries the
+    shortfall with it, because a caller who cannot see that the check was
+    partial will read its silence as a pass.
+    """
+    if not gaps:
+        return text
+    return "%s\n[schema_unverified: %s]" % (text, _format_schema_gaps(gaps))
+
+
+def _require_schema_match(text, schema):
+    """Re-check a schema-constrained generation, and report what that covered.
+
+    Ollama's ``format`` is applied by the backend we asked, which makes it a
+    claim rather than evidence: a stale server, a model that ignores the
+    grammar, or a truncated decode all produce text that never went through the
+    constraint we think we imposed. Re-checking it here is cheap and catches
+    that.
+
+    It does **not** make the whole schema ours to guarantee.
+    ``json_schema_verifier`` implements a strict subset -- ``type``,
+    ``required``, ``properties``, ``items`` -- while Ollama's decoder honours
+    full JSON Schema. So `enum`, `minimum`, `additionalProperties`, `$ref` and
+    roughly twenty more are constrained during decoding and *not* re-checked
+    here. Returning silence for those would be the more dangerous failure: it
+    reads as a clean bill of health. This returns ``(data, gaps)`` and the
+    caller discloses the gaps.
+
+    A violation still raises, and is deliberately not repaired, coerced,
+    defaulted or silently re-asked -- rejecting non-conforming output is the
+    entire point of requesting a schema. The failure names every path that did
+    not validate, and the coverage shortfall alongside it, because "at least
+    this was wrong" is not the same claim as "this is all that was wrong".
+
+    Raises only ModelCallError. A schema this check cannot traverse at all is a
+    coverage gap, not a rejection: the decoder still applied it, so refusing the
+    response would remove capability the caller legitimately has.
+    """
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError) as exc:
+        raise ModelCallError(
+            "protocol",
+            "response is not valid JSON despite a schema constraint: %s" % exc,
+        ) from exc
+    gaps = _schema_coverage_gaps(data, schema)
+    try:
+        errors = json_schema_verifier.validate(data, schema)
+    except Exception as exc:
+        return data, gaps + [("$", "the check aborted on this schema: %s" % exc)]
+    if errors:
+        detail = "schema violation: %s" % "; ".join(errors)
+        if gaps:
+            detail += ". Unverified: %s" % _format_schema_gaps(gaps)
+        raise ModelCallError("protocol", detail)
+    return data, gaps
+
+
+def _file_schema_rejection(interaction_id):
+    """File a schema violation as a caller-judged `rejected` outcome.
+
+    A schema failure is the rare thing the outcome store is starved of: a
+    negative verdict on delegated work, produced without anyone having to
+    remember to file it. `grounded_outcomes` exists for exactly this -- taking
+    the verdict from the tool that knows the truth instead of asking a human --
+    and this writes through its own `record_fn` seam, `_record_outcome_signal`.
+    It does not go through `grounded_outcomes.attribute`, because that resolves
+    a *plausible* generation from a time-bounded ledger; here the failing
+    interaction id is known exactly, and guessing would be strictly worse.
+
+    `rejected` and not `failed`: `failed` is the machine-graded bucket that the
+    self-generated curriculum floods by more than an order of magnitude, where
+    a real caller-facing rejection is invisible to the only quality figure
+    worth trusting. A conforming response deliberately files nothing -- matching
+    a shape is not evidence that the answer was good, and recording `accepted`
+    for it would raise the reviewed rate on something that never measured
+    quality.
+    """
+    if not interaction_id:
+        return
+    try:
+        _record_outcome_signal(interaction_id, "rejected")
+    except Exception:
+        # Bookkeeping must never mask the schema failure it is describing.
+        pass
+
+
 def _offload_impl(
     prompt: str,
     tier: str = "fast",
@@ -3970,8 +4195,10 @@ def _offload_impl(
     learn: bool = True,
     timeout: int = TIMEOUT,
     cancel_check=None,
+    schema=None,
 ) -> str:
     """Internal offload path; model failures stay typed for orchestrators."""
+    schema = _parse_schema_arg(schema)
     # 0 means "ask the context policy", which the session path already does.
     # This path hardcoded 4096 and so ignored the policy and its env knobs,
     # which cost real capability: an autopilot run inspecting a 524 KB source
@@ -4010,6 +4237,8 @@ def _offload_impl(
             "stream": False,
             "options": options,
         }
+        if schema is not None:
+            payload["format"] = schema
         if cloud:
             _apply_cloud_thinking_policy(payload, model)
         else:
@@ -4055,7 +4284,20 @@ def _offload_impl(
                 "tokens_out": int(tokens_out or 0),
                 "token_source": source,
             }
+            # `ok` describes the model call, which succeeded: the request was
+            # answered and tokens came back. A schema violation is a verdict on
+            # the content, and it is carried by the `rejected` outcome rather
+            # than by recording the transport as failed. The learning path
+            # cannot report otherwise anyway -- `gen` has already recorded
+            # ok=True by the time the check runs -- and an activity feed that
+            # says a schema violation failed on one path and succeeded on the
+            # other measures nothing. Keeping ok=True here also preserves
+            # `response_preview`, which is the offending text a schema failure
+            # most needs.
             ok = True
+            if schema is not None:
+                _, gaps = _require_schema_match(msg, schema)
+                return _with_schema_coverage(msg, gaps)
             return msg
         finally:
             activity_tracker.record_model_call(
@@ -4082,6 +4324,7 @@ def _offload_impl(
             cloud=True,
             timeout=request_timeout,
             cancel_check=cancel_check,
+            schema=schema,
         )
         retrieve_kwargs["retrieve_fn"] = _no_retrieve
     else:
@@ -4100,6 +4343,7 @@ def _offload_impl(
             num_ctx,
             timeout=request_timeout,
             cancel_check=cancel_check,
+            schema=schema,
         )
     conn = _open_db()
     try:
@@ -4108,6 +4352,17 @@ def _offload_impl(
         )
     finally:
         conn.close()
+    if schema is not None:
+        try:
+            _, gaps = _require_schema_match(response, schema)
+        except Exception:
+            # Any failure here means the generation did not deliver what was
+            # asked for, so it must reach the outcome store. Catching only
+            # ModelCallError let anything unforeseen skip the `rejected` write
+            # and go invisible to the exact population this feature feeds.
+            _file_schema_rejection(iid)
+            raise
+        response = _with_schema_coverage(response, gaps)
     return with_footer(response, iid)
 
 
@@ -4121,6 +4376,7 @@ def offload(
     num_ctx: int = 0,
     learn: bool = True,
     timeout: int = TIMEOUT,
+    schema: str = "",
 ) -> str:
     """Offload a self-contained subtask to a local or Ollama-cloud model.
 
@@ -4140,6 +4396,32 @@ def offload(
     Tiers: fast=3B (default), code=7B coder, general=7B instruct,
     cloud-code / cloud-general (METERED, prompt leaves this machine).
     Give a FULLY self-contained prompt (the model can't see this chat or your files).
+
+    schema: optional JSON Schema *as JSON text*, e.g.
+    '{"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}}'.
+    Full JSON Schema is accepted and is applied in full by the model's decoder.
+
+    It is then re-checked here, but only PARTIALLY: the in-process check covers
+    "type", "required", "properties" and "items". Everything else -- "enum",
+    "minimum", "additionalProperties", "$ref", "oneOf", and so on -- is
+    constrained during decoding and NOT re-checked. So is any node without an
+    explicit "type" (every "$ref" node, and "properties" written without
+    "type": "object"), which the check accepts unconditionally.
+
+    What that means for you:
+      - A response failing the re-checked part is REJECTED, with the failing
+        path named. It is never repaired into a passing one and never silently
+        retried.
+      - A response that passes gets back exactly the JSON text, and nothing
+        else, ONLY when the whole schema was re-checkable. Otherwise a
+        '[schema_unverified: <path> (<what went unchecked>)]' line follows the
+        JSON, so partial verification is never handed to you as complete.
+      - Stick to type/required/properties/items if you want the strongest
+        guarantee and clean parseable output.
+
+    Omit schema (the default) and this call behaves exactly as it always has:
+    no format constraint, no checking, raw text back.
+    Small object shapes work far better than deep ones on a 3B/7B local tier.
     """
     _maybe_live_reload()
     try:
@@ -4147,6 +4429,189 @@ def offload(
             prompt=prompt,
             tier=tier,
             system=system,
+            temperature=temperature,
+            num_predict=num_predict,
+            num_ctx=num_ctx,
+            learn=learn,
+            timeout=timeout,
+            schema=schema,
+        )
+    except ModelCallError as error:
+        return _format_model_call_error(error)
+
+
+def _trailing_interaction_id(text):
+    """Read back the id `with_footer` appended, using the footer's own delimiters.
+
+    `parse_interaction_id` only matches the lowercase-hex ids the store happens
+    to mint today. Using it here would mean that the day an id gains a hyphen, a
+    rejection stops being filed -- silently, and in the direction that flatters
+    the numbers, since only negative outcomes are filed from this path.
+    """
+    body = (text or "").rstrip()
+    start = body.rfind(FOOTER_PREFIX)
+    if start < 0 or not body.endswith("]"):
+        return None
+    return body[start + len(FOOTER_PREFIX):-1].strip() or None
+
+
+def _leading_json_object(text):
+    """The JSON object a schema-constrained reply starts with.
+
+    A constrained response is JSON first and footers after -- the interaction-id
+    line, an activity block, a `[schema_unverified: ...]` disclosure. Decoding
+    the leading value instead of matching those trailers means this does not
+    have to know their formats, and cannot be broken by a new one.
+    """
+    body = (text or "").lstrip()
+    try:
+        data, _end = json.JSONDecoder().raw_decode(body)
+    except ValueError as exc:
+        raise ModelCallError(
+            "protocol",
+            "response did not begin with the JSON object the schema required: %s" % exc,
+        ) from exc
+    if not isinstance(data, dict):
+        raise ModelCallError(
+            "protocol",
+            "response was a JSON %s, not the object the schema required"
+            % type(data).__name__,
+        )
+    return data
+
+
+def _extract_grounded_impl(
+    source: str,
+    schema,
+    task: str = "",
+    tier: str = "fast",
+    temperature: float = 0.0,
+    num_predict: int = 1024,
+    num_ctx: int = 0,
+    learn: bool = True,
+    timeout: int = TIMEOUT,
+) -> str:
+    """Internal grounded-extraction path; model failures stay typed."""
+    if not isinstance(source, str) or not source.strip():
+        raise ModelCallError(
+            "configuration",
+            "source text is required: with nothing to ground against, every "
+            "field would be rejected and the call could only waste a generation.",
+        )
+    parsed = _parse_schema_arg(schema)
+    if parsed is None:
+        raise ModelCallError(
+            "configuration",
+            "a schema naming the fields to extract is required; without one there "
+            "is nothing to ground.",
+        )
+    if _is_cloud_tier(tier):
+        # This tool is handed whole source documents, so it stays on tiers that
+        # never leave the machine. `offload` still takes a cloud tier for work
+        # the caller has decided to send there -- nothing that would not already
+        # have gone to the cloud goes there because of this helper.
+        raise ModelCallError(
+            "configuration",
+            "extract_grounded runs on local tiers only (%s), because it sends the "
+            "whole source document to the model. Tier '%s' is a hosted tier."
+            % (", ".join(LOCAL_TIERS), tier),
+        )
+    try:
+        wrapped = grounded_extraction.grounded_schema(parsed)
+    except grounded_extraction.GroundingError as exc:
+        raise ModelCallError("configuration", str(exc)) from exc
+
+    text = _offload_impl(
+        prompt=grounded_extraction.extraction_prompt(source, task),
+        tier=tier,
+        system=grounded_extraction.EXTRACTION_SYSTEM,
+        temperature=temperature,
+        num_predict=num_predict,
+        num_ctx=num_ctx,
+        learn=learn,
+        timeout=timeout,
+        schema=wrapped,
+    )
+    interaction_id = _trailing_interaction_id(text)
+    try:
+        data = _leading_json_object(text)
+        fields = grounded_extraction.verify_grounding(data, source)
+    except grounded_extraction.GroundingError as exc:
+        _file_schema_rejection(interaction_id)
+        raise ModelCallError("protocol", str(exc)) from exc
+    except Exception:
+        _file_schema_rejection(interaction_id)
+        raise
+
+    result = {"fields": fields}
+    # The re-check that ran inside `_offload_impl` covers a subset of JSON
+    # Schema, and Task 1's rule is that a partial check never gets to look like
+    # a complete one. Recomputing the shortfall here -- with the same function
+    # the offload path uses -- keeps the disclosure inside the result object
+    # rather than trailing after it as prose.
+    gaps = _schema_coverage_gaps(data, wrapped)
+    if gaps:
+        result["schema_unverified"] = _format_schema_gaps(gaps)
+    body = json.dumps(result, indent=2, ensure_ascii=False)
+    return with_footer(body, interaction_id) if interaction_id else body
+
+
+@mcp.tool()
+def extract_grounded(
+    source: str,
+    schema: str,
+    task: str = "",
+    tier: str = "fast",
+    temperature: float = 0.0,
+    num_predict: int = 1024,
+    num_ctx: int = 0,
+    learn: bool = True,
+    timeout: int = TIMEOUT,
+) -> str:
+    """Extract fields from text you supply, with each one citing its source span.
+
+    Use this instead of `offload` whenever the answer is supposed to come out of
+    a document you already have. The local models are good at transforming facts
+    you give them and bad at supplying facts you did not: asked to recall, they
+    invent confidently and the output looks exactly like a correct one. A JSON
+    schema alone cannot see that -- an invented value is perfectly schema-valid.
+
+    So every field must come back with the span of `source` that states it, and
+    every span is checked here by literal substring against `source`. A field
+    citing text that is not in your document is REJECTED, by name. Nothing is
+    repaired, defaulted or silently re-asked.
+
+    source: the text to extract from, passed verbatim to a LOCAL tier only.
+      Hosted/cloud tiers are refused: this sends whole documents.
+    schema: JSON Schema text for the FIELDS you want, e.g.
+      '{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}'.
+      Only top-level "properties" are grounded, one citation per field. A field
+      you leave out of "required" may be omitted -- which is the right answer
+      when the source does not state it, and better than forcing an invention.
+
+    On success you get JSON: {"fields": {"<name>": {"value": ..., "quote": ...,
+    "quote_offset": N, "quote_occurrences": N}}}. The offset and the count are
+    computed here from your source, never taken from the model;
+    "quote_occurrences" above 1 means that span appears more than once and does
+    not pin down a single place.
+
+    WHAT THIS DOES NOT PROVE: that the quote supports the value. A model can cite
+    a genuine sentence and attach a wrong value to it, and that passes. This
+    guarantees the field points at text that really is in your source -- read the
+    quote before relying on the value. Comparison is exact, with no whitespace,
+    case or unicode folding, so an honest quote that was reflowed while copying
+    is also rejected; that error is the cheap direction.
+
+    A "schema_unverified" key appears when part of your schema was applied by the
+    decoder but not re-checked in process (see `offload` for which keywords).
+    """
+    _maybe_live_reload()
+    try:
+        return _extract_grounded_impl(
+            source=source,
+            schema=schema,
+            task=task,
+            tier=tier,
             temperature=temperature,
             num_predict=num_predict,
             num_ctx=num_ctx,
