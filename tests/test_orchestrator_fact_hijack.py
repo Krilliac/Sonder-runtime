@@ -335,6 +335,159 @@ def test_when_every_candidate_is_oversized_the_block_still_shows_one_fact():
     assert omitted == 1
 
 
+def _under_budget(prefix, size):
+    """A fact of exactly `size` chars, identifiable, and NOT over the bound."""
+    text = (prefix + "y" * size)[:size]
+    assert len(text) <= o.MAX_FACTS_CHARS, "the R-2 cases must use nothing oversized"
+    return text
+
+
+def test_the_char_bound_cannot_silently_reduce_a_source_to_zero():
+    """R-2: the per-source floor is enforced against the COUNT bound only.
+
+    The round-robin gives each source its turn, but both turns are spent from
+    one shared char budget in draw order. Project facts draw first, so one
+    ordinary long-but-legal project fact (3990 of a 4000-char budget -- nothing
+    oversized, no fallback involved) leaves under 10 chars behind it, and every
+    preference is skipped. The operator's entire preference set disappears from
+    the prompt with nothing in the block saying a source was cut at all.
+    """
+    projects = [_under_budget("project fact %d: " % n, o.MAX_FACTS_CHARS - 10)
+                for n in range(12)]
+    prefs = ["User prefers thing %d." % n for n in range(12)]
+    kept, omitted = o.select_facts(facts=prefs, project_facts=projects)
+
+    # guards: the setup must actually exercise the CHAR bound. Without the
+    # second one, shrinking these facts makes the block fill to the count cap
+    # and the test passes having exercised nothing about size at all.
+    assert omitted > 0, "the char bound must be biting here or this proves nothing"
+    assert len(kept) < o.MAX_INJECTED_FACTS, \
+        "the char bound must be the binding one here, not the count cap"
+    assert [t for t in kept if t in projects], "project facts starved"
+    assert [t for t in kept if t in prefs], "preference source starved to zero by the char bound"
+    # invariants this must not buy: nothing shortened, nothing invented
+    assert all(t in projects or t in prefs for t in kept)
+    assert omitted == (len(projects) + len(prefs)) - len(kept)
+
+
+def test_two_long_sources_do_not_collapse_the_block_to_a_single_fact():
+    """R-2 at its worst, and still with nothing over budget.
+
+    When BOTH sources hold facts over half the budget, the first entry drawn
+    consumes enough that no second entry from either queue fits -- so a block
+    with 24 candidates renders exactly one fact and the second source vanishes
+    entirely. Same shape as the R-1 collapse, reached without any oversized
+    entry, so the R-1 fix does not cover it.
+    """
+    size = (o.MAX_FACTS_CHARS // 2) + 100
+    projects = [_under_budget("project fact %d: " % n, size) for n in range(12)]
+    prefs = [_under_budget("User prefers thing %d: " % n, size) for n in range(12)]
+    kept, omitted = o.select_facts(facts=prefs, project_facts=projects)
+
+    # guard: same reason as above -- shrink these and the count cap becomes the
+    # binding bound, which is not the defect under test.
+    assert len(kept) < o.MAX_INJECTED_FACTS, \
+        "the char bound must be the binding one here, not the count cap"
+    assert len(kept) >= 2, "block collapsed to a single fact out of 24 candidates"
+    assert [t for t in kept if t in projects], "project facts starved"
+    assert [t for t in kept if t in prefs], "preference source starved to zero by the char bound"
+    assert all(t in projects or t in prefs for t in kept)
+    assert omitted == (len(projects) + len(prefs)) - len(kept)
+
+
+def test_the_omission_line_names_the_source_the_char_bound_cut():
+    """The floor cannot always be met -- so the shortfall must be LOUD.
+
+    12 project facts of 3000 chars cannot all fit a 4000-char budget no matter
+    how the draw is ordered: with zero preferences competing, the project
+    source still only reaches 1 kept. That part is arithmetic, not a bug. What
+    is a bug is reporting it as a flat "12 of 24 left out", which reads as an
+    even trim when one source actually lost 11 of 12 and the other lost 1 of
+    12. The operator cannot tell their project facts were the ones cut.
+    """
+    projects = [_under_budget("project fact %d: " % n, 3000) for n in range(12)]
+    prefs = ["User prefers thing %d." % n for n in range(12)]
+    kept, omitted = o.select_facts(facts=prefs, project_facts=projects)
+    kept_projects = len([t for t in kept if t in projects])
+    kept_prefs = len([t for t in kept if t in prefs])
+
+    # guards: this must be an UNEVEN cut of TWO live sources, or there is
+    # nothing for a per-source line to disclose
+    assert omitted > 0, "the bound must be biting or this proves nothing"
+    assert kept_projects < len(projects) // 2, "the project source must be the starved one"
+    assert kept_prefs > kept_projects, "the cut must be uneven or a split line adds nothing"
+
+    block, block_omitted = o._facts_block(prefs, projects)
+    disclosure = [ln for ln in block.splitlines()
+                  if ln.startswith(o.FACTS_OMITTED_PREFIX)]
+    assert len(disclosure) == 1
+    line = disclosure[0]
+    assert str(block_omitted) in line
+    assert "project facts %d of %d left out" % (
+        len(projects) - kept_projects, len(projects)) in line, line
+    assert "preferences %d of %d left out" % (
+        len(prefs) - kept_prefs, len(prefs)) in line, line
+
+
+def test_the_per_source_floor_never_readmits_an_oversized_entry():
+    """Lock-in, not a RED test: passes at the parent too.
+
+    The floor must not become a back door for the very entry R-1 taught the
+    draw to skip. A source whose only candidate is over budget stays absent --
+    an oversized fact is not a floor, and the block already has a separate,
+    narrower rule (kept empty => keep the first drawn) for the case where
+    nothing else is available at all.
+    """
+    oversized = "z" * (o.MAX_FACTS_CHARS + 200)
+    prefs = ["User prefers thing %d." % n for n in range(12)]
+    kept, omitted = o.select_facts(facts=prefs, project_facts=[oversized])
+
+    assert oversized not in kept, "the floor must not re-admit an oversized entry"
+    assert kept, "the block must not be empty"
+    assert all(len(t) <= o.MAX_FACTS_CHARS for t in kept)
+    assert omitted == (1 + len(prefs)) - len(kept)
+
+
+def test_live_composition_names_the_source_the_size_bound_cut(monkeypatch):
+    """R-2 on the real server._answer path, nothing over budget.
+
+    Measured before this fix: 12 project facts of 3000 chars each (all under
+    the 4000-char budget) put exactly ONE project fact in the prompt and evict
+    an operator recall canary, while the block reports a flat "12 of 24" that
+    names no source. Newest-first ordering (round 2) decides WHICH project
+    facts survive, so the ones dropped are the oldest -- long-standing operator
+    statements, the load-bearing ones.
+    """
+    conn = _seeded_conn()
+    for index in range(12):
+        ms.add_fact(conn, "long-%d" % index, "sonder",
+                    _under_budget("Long project fact %d: " % index, 3000))
+
+    stored = ms.facts_for_project(conn, "sonder")
+    assert len(stored) > 6, "must exceed the round-robin floor or this proves nothing"
+    assert all(len(f["text"]) <= o.MAX_FACTS_CHARS for f in stored), \
+        "no entry may be oversized or this is R-1, not R-2"
+    assert len(server._preference_facts(conn, SHORT_QUESTION)) == 12
+
+    _stub_model(monkeypatch)
+    _resp, _iid, trace = server._answer(
+        conn, SHORT_QUESTION, "model", "system", 0.2, 128, 2048,
+        "session", "sonder", None, trace=True,
+    )
+
+    prompt = trace["augmented_prompt"]
+    in_prompt = len([f for f in stored if f["text"] in prompt])
+    assert in_prompt < len(stored) // 2, \
+        "the project source must actually be starved here or this proves nothing"
+    assert trace["facts_omitted"] > 0, "the bound must be biting on the live path"
+
+    disclosure = [ln for ln in prompt.splitlines()
+                  if ln.startswith(o.FACTS_OMITTED_PREFIX)]
+    assert len(disclosure) == 1
+    assert "project facts %d of %d left out" % (
+        len(stored) - in_prompt, len(stored)) in disclosure[0], disclosure[0]
+
+
 def test_turn_capture_and_trace_render_report_dropped_facts():
     # facts_omitted must have a consumer, or "reported" is a claim with no
     # surface behind it.
