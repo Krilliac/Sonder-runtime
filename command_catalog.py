@@ -1142,7 +1142,7 @@ def catalog() -> tuple:
             # ``permission_modes.EXECUTION_COMMANDS`` classes it ``execution``
             # and ``plan`` denies it. The stem carries that, so grade by it
             # before falling back to the registry.
-            risk=_risk_for(tool, server) if tool else _native_risk(stem, hit),
+            risk=_native_risk(group, tool, hit, server, tools_by_name),
             summary=_summarize(getattr(row, "description", "")) if row else "",
             params=_params_from_schema(getattr(row, "parameters", {})) if row else (),
             native=True,

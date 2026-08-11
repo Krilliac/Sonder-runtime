@@ -34,7 +34,7 @@ def _db_path(conn) -> str:
 
 
 def apply(conn) -> None:
-    import memory_store
+    from sonder_runtime.adapters import memory_store
 
     path = _db_path(conn)
     legacy = memory_store.connect(path, check_same_thread=False)

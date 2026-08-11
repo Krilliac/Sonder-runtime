@@ -7495,7 +7495,12 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
     outcomes = learning_state["outcomes"]
     lesson_count = learning_state["lessons"]
     fact_count = learning_state["facts"]
-    acceptance = learning_state["positive_percent"] / 100.0
+    # The blended rate largely measures the runtime grading its own work.
+    # Publish an acceptance rate only when caller review is large enough to
+    # carry that claim, and keep the blended number explicitly labelled below.
+    reviewed = learning_state.get("reviewed_outcomes", 0)
+    reviewed_positive = learning_state.get("reviewed_positive_percent", 0.0)
+    acceptance = reviewed_positive / 100.0 if reviewed >= 30 else None
     issues = []
     try:
         autopilot = _application().automation.snapshot(include_finished=False, limit=100)
@@ -7657,8 +7662,6 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
     # good. learning_health_status separates these; this report used to blend
     # them, so it could show 96% positive and 100/100 readiness while
     # caller-judged work sat near 53% and the health view said "watch".
-    reviewed = learning_state.get("reviewed_outcomes", 0)
-    reviewed_positive = learning_state.get("reviewed_positive_percent", 0.0)
     if reviewed >= 30 and reviewed_positive < 60.0:
         add(
             "learning",
@@ -7714,7 +7717,8 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
         )))),
         "interactions": interactions,
         "outcomes": outcomes,
-        "acceptance_percent": round(acceptance * 100.0, 1),
+        "acceptance_percent": round(acceptance * 100.0, 1) if acceptance is not None else None,
+        "acceptance_basis": "reviewed" if acceptance is not None else "unmeasured",
         "reviewed_outcomes": learning_state.get("reviewed_outcomes", 0),
         "reviewed_positive_percent": learning_state.get("reviewed_positive_percent", 0.0),
         "autograded_outcomes": learning_state.get("autograded_outcomes", 0),
@@ -7748,6 +7752,12 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
 
 
 def format_improvement_report(report: dict) -> str:
+    acceptance = report.get("acceptance_percent")
+    caller_judged = (
+        "unmeasured" if acceptance is None else "%s%% of %s reviewed" % (
+            acceptance, report.get("reviewed_outcomes", 0),
+        )
+    )
     lines = [
         "sonder improvement report",
         "  readiness score: %s/100" % report.get("score", 0),
@@ -7759,12 +7769,11 @@ def format_improvement_report(report: dict) -> str:
         # Never show the blended rate alone: it is dominated by the runtime
         # marking its own curriculum, and reads as a quality score when it
         # is not one.
-        "    caller-judged: %s%% of %s reviewed | autograded: %s%% of %s | blended: %s%%" % (
-            report.get("reviewed_positive_percent", 0),
-            report.get("reviewed_outcomes", 0),
+        "    caller-judged: %s | autograded: %s%% of %s | blended: %s%%" % (
+            caller_judged,
             report.get("learning_health", {}).get("autograded_positive_percent", 0),
             report.get("autograded_outcomes", 0),
-            report.get("acceptance_percent", 0),
+            report.get("learning_health", {}).get("positive_percent", 0),
         ),
         "  memory: %s lessons, %s facts, duplicate rows=%s, vague=%s, missing embeddings=%s" % (
             report.get("lessons", 0),
@@ -18433,9 +18442,9 @@ def _agent_turn(
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()
     if tier_label is None:
-        return "ERROR: unknown tier '%s'. Valid: sonder, %s." % (tier, _valid_tier_names())
+        return "unknown tier '%s'. Valid: sonder, %s." % (tier, _valid_tier_names())
     if model is None:
-        return "ERROR: `sonder:latest` Ollama alias not found."
+        return "`sonder:latest` Ollama alias not found."
     project_scope, project_error = _agent_project_scope(project)
     if project_error:
         if return_host_receipt:
