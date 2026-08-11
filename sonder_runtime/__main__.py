@@ -215,11 +215,18 @@ def cmd_migrate(args) -> int:
     except sonder_migrations.MigrationError as exc:
         print(f"migration failed: {exc}", file=sys.stderr)
         return 1
+    # `applied`/`pending` alone cannot distinguish "there was nothing to do"
+    # from "this build has nothing to do it with". `discovered` and the two
+    # health tuples are what let a caller tell those apart; the update engine
+    # refuses an activation whose migrate step cannot show them.
     payload = {
         store: {
             "db_path": status.db_path,
             "applied": list(status.applied),
             "pending": list(status.pending),
+            "unknown": list(status.unknown),
+            "checksum_mismatches": list(status.checksum_mismatches),
+            "discovered": len(sonder_migrations.discover_migrations(store)),
         }
         for store, status in results.items()
     }

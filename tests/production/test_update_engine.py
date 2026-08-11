@@ -29,6 +29,16 @@ def env(tmp_path, monkeypatch):
     return tmp_path
 
 
+# The stub used to answer `migrate --json` with `{"ok": true}`, which sufficed
+# only because the engine discarded the payload. Now that the migrate step
+# reads what it already asks for, the stub speaks the real contract: a
+# per-store report showing migrations were discovered and none remain pending.
+_STUB_MIGRATE_REPORT = (
+    '{"operations": {"db_path": "stub", "applied": ["0001_baseline"],'
+    ' "pending": [], "unknown": [], "checksum_mismatches": [], "discovered": 1}}'
+)
+
+
 def _mini_source(tmp_path, name="source", *, migrate_rc=0, status_rc=0):
     source = tmp_path / name
     package = source / "sonder_runtime"
@@ -38,7 +48,10 @@ def _mini_source(tmp_path, name="source", *, migrate_rc=0, status_rc=0):
         "import sys\n"
         f"rc = {migrate_rc} if 'migrate' in sys.argv else "
         f"{status_rc} if 'status' in sys.argv else 0\n"
-        "print('{\"ok\": true}')\n"
+        "if 'migrate' in sys.argv:\n"
+        f"    print({_STUB_MIGRATE_REPORT!r})\n"
+        "else:\n"
+        "    print('{\"ok\": true}')\n"
         "sys.exit(rc)\n",
         encoding="utf-8",
     )
@@ -351,3 +364,104 @@ def test_update_events_are_audited(env):
     codes = {e.event_code for e in OperationsStore().recent_events(limit=50)}
     assert "UPDATE_AVAILABLE" in codes
     assert "UPDATE_COMMITTED" in codes
+
+
+# ---------------------------------------------------------------------------
+# The migrate step asked for --json, threw the payload away, and trusted the
+# exit code. Combined with `migrate_store`'s early return on an empty
+# discovery, a release shipped WITHOUT its `migrations/` directory journalled
+# "ok" and activated. These pin the step to the payload it already requests.
+# ---------------------------------------------------------------------------
+
+
+def _payload_source(tmp_path, name, payload_literal):
+    """A release whose `migrate --json` prints exactly *payload_literal*."""
+    source = tmp_path / name
+    package = source / "sonder_runtime"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "__main__.py").write_text(
+        "import sys\n"
+        "if 'migrate' in sys.argv:\n"
+        f"    print({payload_literal!r})\n"
+        "    sys.exit(0)\n"
+        "print('{\"ok\": true}')\n"
+        "sys.exit(0)\n",
+        encoding="utf-8",
+    )
+    (source / "app.py").write_text("print('app')\n", encoding="utf-8")
+    return source
+
+
+def _install_with_payload(manager, env, version, payload_literal):
+    source = _payload_source(env, f"payload-{version}", payload_literal)
+    bundle = env / f"payload-bundle-{version}"
+    build_bundle(source, bundle, version=version)
+    plan = manager.import_offline(bundle, allow_unverified=True)
+    return manager.install(
+        plan["update_id"], confirm=confirm_nonce_for(plan), allow_unverified=True
+    )
+
+
+HEALTHY_PAYLOAD = (
+    '{"operations": {"db_path": "x", "applied": ["0001_baseline"], "pending": [],'
+    ' "unknown": [], "checksum_mismatches": [], "discovered": 1}}'
+)
+
+
+def test_migrate_accepts_a_payload_that_shows_migrations_were_discovered(env):
+    manager = _manager(env)
+    done = _install_with_payload(manager, env, "4.0.0", HEALTHY_PAYLOAD)
+    assert done["status"] == "committed"
+    steps = {s["step_name"]: s["status"] for s in
+             manager.repository.steps(done["update_id"])}
+    assert steps["migrate"] == "ok"
+
+
+def test_migrate_refuses_a_release_that_shipped_no_migrations(env):
+    """Every store discovering zero migrations means `migrations/` is missing."""
+    manager = _manager(env)
+    payload = (
+        '{"operations": {"db_path": "x", "applied": [], "pending": [],'
+        ' "unknown": [], "checksum_mismatches": [], "discovered": 0}}'
+    )
+    result = _install_with_payload(manager, env, "4.1.0", payload)
+    assert result["status"] == "rolled_back"
+    assert result["error_code"] == "MIGRATION_FAILED"
+
+
+def test_migrate_refuses_when_migrations_remain_pending(env):
+    manager = _manager(env)
+    payload = (
+        '{"operations": {"db_path": "x", "applied": [], "pending": ["0002_next"],'
+        ' "unknown": [], "checksum_mismatches": [], "discovered": 2}}'
+    )
+    result = _install_with_payload(manager, env, "4.2.0", payload)
+    assert result["status"] == "rolled_back"
+    assert result["error_code"] == "MIGRATION_FAILED"
+
+
+def test_migrate_refuses_an_unreadable_payload(env):
+    """Exit 0 with output nothing can parse is not evidence of a migration."""
+    manager = _manager(env)
+    result = _install_with_payload(manager, env, "4.3.0", "migrations done!")
+    assert result["status"] == "rolled_back"
+    assert result["error_code"] == "MIGRATION_FAILED"
+
+
+def test_migrate_refuses_a_payload_reporting_an_unknown_ledger(env):
+    manager = _manager(env)
+    payload = (
+        '{"operations": {"db_path": "x", "applied": [], "pending": [],'
+        ' "unknown": ["9999_future"], "checksum_mismatches": [], "discovered": 1}}'
+    )
+    result = _install_with_payload(manager, env, "4.4.0", payload)
+    assert result["status"] == "rolled_back"
+    assert result["error_code"] == "MIGRATION_FAILED"
+
+
+def test_migrate_refuses_a_payload_with_no_stores_at_all(env):
+    manager = _manager(env)
+    result = _install_with_payload(manager, env, "4.5.0", "{}")
+    assert result["status"] == "rolled_back"
+    assert result["error_code"] == "MIGRATION_FAILED"
