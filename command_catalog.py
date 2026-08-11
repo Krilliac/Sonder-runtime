@@ -382,9 +382,19 @@ def _risk_for(name: str, server) -> str:
         return "dangerous"
     if name in getattr(server, "_WORK_MUTATION_TOOLS", frozenset()):
         return "mutation"
+    # A tool that resolves a caller-supplied root with no allowed-roots check is
+    # never "safe", however read-only its own body is: `plan` allows everything
+    # classed safe, and reading an arbitrary directory on the machine is not
+    # what "reads only - no writes, no commands" promises. Checked before the
+    # read-only sets because all four offenders are listed in one of them.
+    if name in getattr(server, "_UNCONFINED_ROOT_TOOLS", frozenset()):
+        return "ask"
     read_only = getattr(server, "REPOSITORY_READ_ONLY_TOOLS", frozenset())
     inspection = getattr(server, "_WORK_INSPECTION_TOOLS", frozenset())
-    if name in read_only or name in inspection:
+    # Tools that only observe the running runtime. Neither set above covers
+    # them, because both are about repository work.
+    observation = getattr(server, "_RUNTIME_OBSERVATION_TOOLS", frozenset())
+    if name in read_only or name in inspection or name in observation:
         return "safe"
     return "ask"
 
