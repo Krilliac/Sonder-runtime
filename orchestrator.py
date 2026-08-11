@@ -169,10 +169,15 @@ def select_facts(facts=None, project_facts=None):
             turn = (turn + 1) % len(queues)
         text = queues[turn].pop(0)
         turn = (turn + 1) % len(queues)
-        if kept and (
-            len(kept) >= MAX_INJECTED_FACTS or used + len(text) > MAX_FACTS_CHARS
-        ):
-            break
+        if kept and len(kept) >= MAX_INJECTED_FACTS:
+            break  # no slots left for anyone; drawing more cannot help
+        if kept and used + len(text) > MAX_FACTS_CHARS:
+            # Skip this one and keep drawing rather than ending the draw. One
+            # oversized entry used to cost BOTH queues every remaining slot
+            # (measured: kept=1 of 24 for a single 4200-char preference), so
+            # the round-robin floor held only while nothing was oversized.
+            # Skipping is still deterministic and still never shortens a fact.
+            continue
         kept.append(text)
         used += len(text)
     return kept, total - len(kept)

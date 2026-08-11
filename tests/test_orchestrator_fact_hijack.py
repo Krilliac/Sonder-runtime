@@ -157,17 +157,14 @@ def test_neither_fact_source_can_starve_the_other():
     assert omitted == 80 - len(kept)
 
 
-def test_live_composition_keeps_both_canaries_behind_a_full_preference_set(monkeypatch):
-    """The real server._answer composition, no model involved.
+def _seeded_conn():
+    """An in-memory DB whose preference cap is saturated for any question.
 
-    Which facts reach the prompt is deterministic, so this is provable without
-    a model: stub only the generator and the embedder, and let the real
-    _preference_facts, facts_for_project, orchestrator and build_prompt run.
+    Style preferences, because those are what `preference_applies` actually
+    admits for an arbitrary question -- topical ones are filtered out and would
+    make every test built on this vacuous.
     """
     conn = ms.connect(":memory:")
-    # Style preferences, because those are what `preference_applies` actually
-    # admits for an arbitrary question -- topical ones are filtered out and
-    # would make this test vacuous.
     index = 0
     for adjective in ("concise", "detailed", "short", "verbose", "formal",
                       "direct", "brief", "thorough", "plain", "structured"):
@@ -178,6 +175,25 @@ def test_live_composition_keeps_both_canaries_behind_a_full_preference_set(monke
                 preferences.preference_key(text), text, confidence=0.9,
             )
             index += 1
+    return conn
+
+
+def _stub_model(monkeypatch):
+    monkeypatch.setattr(server.embeddings, "embed", lambda _text: None)
+    monkeypatch.setattr(server.embeddings, "valid_vector", lambda _value: False)
+    monkeypatch.setattr(
+        server, "_make_generate", lambda *_a, **_k: (lambda _prompt: "unused"))
+    server.activity_tracker.reset_for_tests()
+
+
+def test_live_composition_keeps_both_canaries_behind_a_full_preference_set(monkeypatch):
+    """The real server._answer composition, no model involved.
+
+    Which facts reach the prompt is deterministic, so this is provable without
+    a model: stub only the generator and the embedder, and let the real
+    _preference_facts, facts_for_project, orchestrator and build_prompt run.
+    """
+    conn = _seeded_conn()
     for position, canary in enumerate(CANARIES):
         ms.add_fact(conn, "canary-%d" % position, "sonder", canary)
 
@@ -201,6 +217,56 @@ def test_live_composition_keeps_both_canaries_behind_a_full_preference_set(monke
     for canary in CANARIES:
         assert canary in prompt, "operator canary evicted on the live path"
     assert prompt.rstrip().endswith(SHORT_QUESTION)
+
+
+def test_live_composition_keeps_the_newest_facts_of_a_crowded_project(monkeypatch):
+    """A project holding MORE facts than the round-robin floor.
+
+    The previous live test seeded two project facts, so it only ever exercised
+    n <= floor and could not see within-source ordering. facts_for_project is
+    ORDER BY ts ASC, so the block filled with the OLDEST rows and dropped the
+    newest -- and a freshly stored fact (a canary is one) is the newest thing
+    in the project by definition.
+    """
+    conn = _seeded_conn()
+    for index in range(10):
+        ms.add_fact(conn, "old-%d" % index, "sonder", "Older project fact %d." % index)
+    for position, canary in enumerate(CANARIES):
+        ms.add_fact(conn, "canary-%d" % position, "sonder", canary)
+
+    stored = ms.facts_for_project(conn, "sonder")
+    assert len(stored) > 6, "must exceed the round-robin floor or this proves nothing"
+    assert stored[-1]["text"] == CANARIES[-1], "canaries must be the newest rows"
+    assert len(server._preference_facts(conn, SHORT_QUESTION)) == 12
+
+    _stub_model(monkeypatch)
+    _resp, _iid, trace = server._answer(
+        conn, SHORT_QUESTION, "model", "system", 0.2, 128, 2048,
+        "session", "sonder", None, trace=True,
+    )
+
+    prompt = trace["augmented_prompt"]
+    for canary in CANARIES:
+        assert canary in prompt, "newest project fact evicted by older ones"
+    assert trace["facts_omitted"] > 0, "the bound must actually be biting here"
+
+
+def test_one_oversized_entry_does_not_starve_everything_behind_it():
+    # The char bound used to END the draw on the first over-budget entry, so a
+    # single large preference cost BOTH queues every remaining slot: the
+    # ceil(n/2) floor held only while no entry was oversized.
+    oversized = "z" * (o.MAX_FACTS_CHARS + 200)
+    prefs = [oversized] + ["pref %d" % n for n in range(11)]
+    projects = ["project fact %d." % n for n in range(12)]
+    kept, omitted = o.select_facts(facts=prefs, project_facts=projects)
+
+    assert len(kept) >= o.MAX_INJECTED_FACTS - 1, len(kept)
+    assert [t for t in kept if t in prefs[1:]], "preferences starved by one big entry"
+    assert [t for t in kept if t in projects], "project facts starved by one big entry"
+    assert omitted == (len(prefs) + len(projects)) - len(kept)
+    # the oversized entry is SKIPPED, never shortened, and never half-included
+    assert oversized not in kept
+    assert all(len(text) <= o.MAX_FACTS_CHARS for text in kept)
 
 
 def test_turn_capture_and_trace_render_report_dropped_facts():
