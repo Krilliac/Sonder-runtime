@@ -71,6 +71,9 @@ blind spot here would remove capability the caller legitimately has:
   to but not JSON Schema's ECMA-262 dialect. A pattern `re` cannot compile is a
   gap, not a failed match.
 * `items` in the draft-07 per-position tuple form is not applied.
+* nesting past `MAX_DEPTH` levels is not descended into. The traversal costs
+  several Python frames per level, so an unbounded descent raised
+  RecursionError out of a function documented as never raising.
 
 `$ref` resolution is document-local, ignoring `$id` re-basing.
 """
@@ -133,19 +136,29 @@ _NUMBER_KEYWORDS = ("minimum", "maximum", "exclusiveMinimum",
 
 _MISSING = object()
 
+# How deep the traversal will descend before reporting the rest as unchecked.
+# This descent costs several Python frames per level, so without a bound a
+# deeply nested document raised RecursionError straight out of
+# `json_schema_verify` -- at 500 levels, while `json.loads` parsed the same text
+# happily, which made this module the limiter rather than the input. Depth we
+# cannot walk is ignorance like any other: reported, never raised, and never
+# mistaken for a pass. Real schemas nest in the tens; this is far above that.
+MAX_DEPTH = 100
+
 
 class _Ctx(object):
     """Carries the two output channels plus what `$ref` needs: the document
     root to resolve against, and the refs currently being expanded (so a cycle
     that consumes no data terminates instead of recursing forever)."""
 
-    __slots__ = ("errors", "unchecked", "root", "active_refs")
+    __slots__ = ("errors", "unchecked", "root", "active_refs", "depth")
 
-    def __init__(self, root, active_refs=None):
+    def __init__(self, root, active_refs=None, depth=0):
         self.errors = []
         self.unchecked = []
         self.root = root
         self.active_refs = set() if active_refs is None else set(active_refs)
+        self.depth = depth
 
 
 def _show(value):
@@ -291,7 +304,7 @@ def _validate_ref(value, ref, path, ctx):
 def _subcheck(value, subschema, path, ctx):
     """Validate against a subschema in isolation, so a combinator can inspect
     the outcome rather than leaking a branch's errors into the parent."""
-    sub = _Ctx(ctx.root, ctx.active_refs)
+    sub = _Ctx(ctx.root, ctx.active_refs, ctx.depth)
     _validate(value, subschema, path, sub)
     return sub
 
@@ -362,11 +375,16 @@ def _validate_object(value, schema, path, ctx):
         # Not a list: iterating it would silently check its characters.
         _malformed(ctx, path, "required", "must be an array, got %s" % _show(required))
 
-    properties = schema.get("properties") or {}
+    # `.get(key, default)`, never `.get(key) or default`: the `or` form swallows
+    # a falsy-but-malformed value ([], null, 0, "", false) before the isinstance
+    # check can report it, so {"properties": []} came back clean while
+    # {"properties": ["a"]} was caught. That is a guard that silently no-ops --
+    # the exact shape of bug this module was widened to remove.
+    properties = schema.get("properties", {})
     if not isinstance(properties, dict):
         _malformed(ctx, path, "properties", "must be an object, got %s" % _show(properties))
         properties = {}
-    pattern_properties = schema.get("patternProperties") or {}
+    pattern_properties = schema.get("patternProperties", {})
     compiled = []
     if isinstance(pattern_properties, dict):
         for raw, subschema in pattern_properties.items():
@@ -504,7 +522,23 @@ def _validate_number(value, schema, path, ctx):
 
 
 def _validate(value, schema, path, ctx):
-    """Recursively check value against schema, filling ctx's two channels."""
+    """Depth-bounded entry to `_validate_node`. Everything recurses through
+    here, so the bound cannot be bypassed by a new call site."""
+    if ctx.depth >= MAX_DEPTH:
+        ctx.unchecked.append(
+            (path, "nesting is more than %d levels deep here, which is deeper "
+                   "than this verifier walks, so nothing below was checked"
+                   % MAX_DEPTH))
+        return
+    ctx.depth += 1
+    try:
+        _validate_node(value, schema, path, ctx)
+    finally:
+        ctx.depth -= 1
+
+
+def _validate_node(value, schema, path, ctx):
+    """Check value against schema, filling ctx's two channels."""
     # A boolean schema is legal JSON Schema: true accepts everything, false
     # rejects everything.
     if schema is True:
@@ -598,7 +632,17 @@ def check(data, schema):
     [(path, reason), ...] naming everything this module could not evaluate.
     Pure function, no I/O."""
     ctx = _Ctx(schema)
-    _validate(data, schema, "$", ctx)
+    try:
+        _validate(data, schema, "$", ctx)
+    except RecursionError:
+        # `MAX_DEPTH` bounds the schema descent, but a pathological *value*
+        # (a deeply nested `enum` member reached by `_json_equal`) could still
+        # exhaust the stack. Whatever was found so far stands; the rest becomes
+        # a gap, so the promise that this module never raises is structural
+        # rather than a claim about every input.
+        ctx.unchecked.append(
+            ("$", "this data or schema nests too deeply for this verifier to "
+                  "walk, so it was not fully checked"))
     return CheckResult(ctx.errors, ctx.unchecked)
 
 
@@ -645,7 +689,10 @@ def json_schema_verify(artifact, spec=None):
     """Verifier-registry entrypoint: fn(artifact: str, spec: dict) -> Verdict.
     spec={"schema": {...}}. `artifact` is the raw JSON text to validate.
     Never raises -- invalid JSON or a missing schema is a failed Verdict, not
-    VerifierUnavailable (nothing external could be "unavailable" here).
+    VerifierUnavailable (nothing external could be "unavailable" here). Deep
+    nesting is part of that promise: the descent is bounded by `MAX_DEPTH` and
+    `check` absorbs a RecursionError, so a document `json.loads` can parse can
+    never come back out of here as an exception.
 
     Fails closed on ignorance: a Verdict has no third state, and passed=True is
     a claim that the data was checked, so a schema carrying anything this module
