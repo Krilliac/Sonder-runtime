@@ -11,6 +11,7 @@ import contextlib
 import difflib
 import hashlib
 import json
+import keyword
 import os
 import shutil
 import socket
@@ -21,7 +22,7 @@ import sys
 import tempfile
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import sonder_paths
 import sonder_logging
@@ -733,10 +734,22 @@ def begin_testing(run_id):
     return _phase(run_id, {"editing", "interrupted"}, "testing", "testing", "host-controlled validation started")
 
 
-def _record_command(run, kind, command, cwd_path, seconds, expect_failure=False):
+def _record_command(run, kind, command, cwd_path, seconds, expect_failure=False, receipt=None):
     run_id = run["id"]
     code, output, duration = _run(command, cwd_path, seconds)
     passed = code != 0 if expect_failure else code == 0
+    if receipt is not None and passed and receipt not in output:
+        # "It exited 0" is not "it did the thing". The receipt is computed by
+        # this process from the candidate on disk and is deliberately never
+        # handed to the child, so a probe that returns success without doing
+        # the work -- or that prints a fabricated line -- is refused here.
+        passed = False
+        output = (
+            "%s\nSELFMOD %s GATE REFUSED: the probe exited %s but did not report the "
+            "receipt it could only produce by examining the candidate.\n"
+            "  expected: %s"
+            % (output, str(kind).upper(), code, receipt)
+        )[:100_000]
     with _tx() as conn:
         conn.execute(
             "INSERT INTO selfmod_tests(run_id,kind,command_json,exit_code,duration_ms,output,passed,created_ts) VALUES(?,?,?,?,?,?,?,?)",
@@ -763,6 +776,174 @@ def record_test(run_id, kind, command, *, cwd=None, timeout=None):
     cwd_path = workspace if cwd is None else (workspace / _rel(workspace, cwd)).parent
     seconds = min(int(timeout or run["budgets"]["max_test_seconds"]), run["budgets"]["max_test_seconds"])
     return _record_command(run, kind, command, cwd_path, seconds)
+
+
+SMOKE_RECEIPT_PREFIX = "SELFMOD-SMOKE-RECEIPT"
+
+# Executed by a child process rooted at the candidate workspace, so the bytes
+# that answer are the candidate's own. It imports every declared module that
+# still exists, confirms every declared module that was deleted is genuinely
+# unreachable, and reports a SHA-256 over what it actually loaded.
+#
+# The expected digest is computed by the parent and is never passed in here.
+# That is deliberate: the check this replaced -- `assert Path('.').is_dir()` --
+# was a required gate that could not fail, and replacing it with anything whose
+# only evidence is an exit code would rebuild the same defect one layer up.
+_SMOKE_PROBE = r"""
+import hashlib
+import importlib
+import importlib.util
+import json
+import os
+import pathlib
+import sys
+
+sys.path.insert(0, os.getcwd())
+plan = json.loads(sys.argv[1])
+root = pathlib.Path(os.getcwd()).resolve()
+digest = hashlib.sha256()
+failures = []
+
+for index, rel in enumerate(plan["present"]):
+    name = plan["names"].get(rel)
+    try:
+        if name:
+            module = importlib.import_module(name)
+        else:
+            loader = importlib.util.spec_from_file_location(
+                "_selfmod_smoke_%d" % index, root / rel
+            )
+            module = importlib.util.module_from_spec(loader)
+            loader.loader.exec_module(module)
+    except BaseException as exc:
+        failures.append("%s: %s: %s" % (rel, type(exc).__name__, exc))
+        continue
+    source = getattr(module, "__file__", None)
+    if not source:
+        failures.append("%s: imported but reports no __file__" % rel)
+        continue
+    source = pathlib.Path(source).resolve()
+    if not source.is_relative_to(root):
+        failures.append(
+            "%s: import resolved outside the candidate workspace: %s" % (rel, source)
+        )
+        continue
+    digest.update(b"import\0" + rel.encode("utf-8") + b"\0")
+    digest.update(hashlib.sha256(source.read_bytes()).hexdigest().encode("ascii") + b"\n")
+
+for rel in plan["absent"]:
+    name = plan["names"].get(rel)
+    if (root / rel).exists():
+        failures.append("%s: declared deleted but still present" % rel)
+        continue
+    try:
+        resolved = importlib.util.find_spec(name) if name else None
+    except BaseException:
+        resolved = None
+    if resolved is not None:
+        failures.append("%s: deleted module still resolves as %r" % (rel, name))
+        continue
+    digest.update(b"gone\0" + rel.encode("utf-8") + b"\n")
+
+if failures:
+    sys.stdout.write("SELFMOD SMOKE FAILED -- the candidate does not run:\n")
+    for line in failures:
+        sys.stdout.write("  %s\n" % line)
+    raise SystemExit(1)
+
+sys.stdout.write(
+    "SELFMOD-SMOKE-RECEIPT %s modules=%d gone=%d\n"
+    % (digest.hexdigest(), len(plan["present"]), len(plan["absent"]))
+)
+"""
+
+
+def _module_name(rel: str):
+    """Dotted import name for a repo-relative .py path, or None if it has none."""
+    parts = tuple(PurePosixPath(rel).parts)
+    if not parts or not parts[-1].endswith(".py"):
+        return None
+    parts = parts[:-1] if parts[-1] == "__init__.py" else parts[:-1] + (parts[-1][:-3],)
+    if not parts:
+        return None
+    if not all(part.isidentifier() and not keyword.iskeyword(part) for part in parts):
+        return None
+    return ".".join(parts)
+
+
+def smoke_plan(run_id):
+    """Split the run's declared Python surface into must-import and must-be-gone."""
+    run = get_run(run_id)
+    workspace = candidate_path(run_id)
+    declared = sorted(path for path in run["files"] if path.lower().endswith(".py"))
+    present = [path for path in declared if (workspace / path).is_file()]
+    absent = [path for path in declared if not (workspace / path).is_file()]
+    names = {path: _module_name(path) for path in declared}
+    return {
+        "workspace": workspace,
+        "declared": declared,
+        "present": present,
+        "absent": absent,
+        "names": {key: value for key, value in names.items() if value},
+    }
+
+
+def _smoke_receipt(workspace: Path, present, absent) -> str:
+    digest = hashlib.sha256()
+    for rel in present:
+        digest.update(b"import\0" + rel.encode("utf-8") + b"\0")
+        digest.update(_sha(workspace / rel).encode("ascii") + b"\n")
+    for rel in absent:
+        digest.update(b"gone\0" + rel.encode("utf-8") + b"\n")
+    return "%s %s modules=%d gone=%d" % (
+        SMOKE_RECEIPT_PREFIX, digest.hexdigest(), len(present), len(absent),
+    )
+
+
+def record_smoke(run_id, *, timeout=None):
+    """Run the candidate, and require proof that it was the candidate that ran.
+
+    `review()` will not approve a self-modification without a passing check of
+    kind `smoke`. That check used to be
+
+        python -c "import pathlib; assert pathlib.Path('.').is_dir(); ..."
+
+    executed with the candidate workspace as its working directory -- so the
+    assertion was a constant and the required gate could not fail. It never
+    imported, ran or read one byte of what it was gating. A required gate that
+    cannot fail is worse than no gate: it manufactures the appearance of review.
+
+    What runs instead is bounded and offline -- a stdlib child process, no
+    network, no model, no operator -- and it writes nothing, so a failure cannot
+    leave state behind. It fails by naming the module and the exception.
+    """
+    run = get_run(run_id)
+    if run["phase"] != "testing":
+        raise RuntimeError("tests may run only in testing phase")
+    plan = smoke_plan(run_id)
+    seconds = min(int(timeout or run["budgets"]["max_test_seconds"]), run["budgets"]["max_test_seconds"])
+    workspace = plan["workspace"]
+
+    if not plan["declared"]:
+        # An empty target set is the same defect wearing a different hat: a
+        # check with nothing to examine that reports success anyway.
+        message = (
+            "selfmod smoke gate: this run declares no Python file (%s), so there is "
+            "nothing for a smoke check to execute. An empty target set is a refusal, "
+            "not a pass -- declare the module the change actually affects."
+            % (", ".join(run["files"]) or "no files")
+        )
+        return _record_command(
+            run, "smoke", [sys.executable, "-c", "raise SystemExit(%r)" % message],
+            workspace, seconds,
+        )
+
+    payload = _json({
+        "present": plan["present"], "absent": plan["absent"], "names": plan["names"],
+    })
+    command = [sys.executable, "-c", _SMOKE_PROBE, payload]
+    receipt = _smoke_receipt(workspace, plan["present"], plan["absent"])
+    return _record_command(run, "smoke", command, workspace, seconds, receipt=receipt)
 
 
 def test_results(run_id):
