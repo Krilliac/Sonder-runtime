@@ -428,6 +428,30 @@ def _admin_authorized(context):
     return bool(context.get("api_key"))
 
 
+# Operations that alter shared runtime authority or persist privileged state.
+# Keep this at the HTTP boundary: hiding a command in the app does not stop a
+# crafted request, and a prompt must never be the thing that confers a role.
+SYSTEM_OPERATION_ROLES = {
+    "permission_mode_change": "admin",
+    "runtime_policy_change": "admin",
+    "permission_rule_change": "admin",
+    "account_management": "admin",
+    "selfmod_deploy": "admin",
+    "automation_lifecycle": "developer",
+    "workspace_execution": "developer",
+}
+
+
+def _system_operation_authority_error(operation, context):
+    """Return a role-boundary refusal, or "" when this caller may proceed."""
+    required = SYSTEM_OPERATION_ROLES.get(str(operation or ""))
+    if required == "admin" and not _admin_authorized(context):
+        return "administrator authorization is required"
+    if required == "developer" and not _developer_authorized(context):
+        return "developer or administrator authorization is required"
+    return ""
+
+
 def _is_loopback_host(host):
     value = (host or "").strip().strip("[]").lower()
     if value == "localhost":
@@ -2011,6 +2035,23 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/v1/permission-mode":
             if not context["authorized"]:
                 self._send_auth_error()
+                return
+            # This changes process-global autonomy for every caller.  A valid
+            # ordinary account is authentication, not authority to alter a
+            # different user's execution policy.
+            authority_error = _system_operation_authority_error(
+                "permission_mode_change", context,
+            )
+            if authority_error:
+                self._send_json_payload(
+                    sonder_lifecycle.error_envelope(
+                        "FORBIDDEN",
+                        authority_error + " to change permission mode",
+                        self._correlation(),
+                        retryable=False,
+                    ),
+                    status=403,
+                )
                 return
             self._handle_permission_mode_post(req)
             return
