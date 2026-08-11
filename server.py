@@ -2935,7 +2935,7 @@ def _drain_deferred_distillations(limit=16):
     no-ops, so re-recording the original signal is safe.
     """
     if master_orchestrator.active_model_call_count():
-        return {"drained": 0, "stored": 0, "deferred": 0}
+        return _EMPTY_DRAIN.copy()
     try:
         conn = _open_db()
         try:
@@ -2943,10 +2943,11 @@ def _drain_deferred_distillations(limit=16):
         finally:
             conn.close()
     except Exception:
-        return {"drained": 0, "stored": 0, "deferred": 0}
-    stored = deferred = 0
+        return _EMPTY_DRAIN.copy()
+    stored = deferred = failed = skipped = 0
     for interaction_id, signal in pending:
         if signal not in reward.VALID_SIGNALS:
+            skipped += 1
             continue
         try:
             # Re-asserting an outcome that already exists. The stored row wins
@@ -2959,11 +2960,26 @@ def _drain_deferred_distillations(limit=16):
                 source=_stored_outcome_source(interaction_id, signal),
             )
         except Exception:
+            # Counted, never merely skipped. Swallowing this made `stored` a
+            # floor reported as a total: a batch whose every item raised
+            # returned `stored: 0, deferred: 0`, which is byte for byte what a
+            # batch that legitimately stored nothing looks like. Measured, that
+            # is exactly how an over-narrow test double hid its own TypeError
+            # as `stored == 0` -- inside the test written to catch the
+            # floor-as-total shape. The drain still must not break the run it
+            # is servicing, so the exception is still absorbed; what changes is
+            # that it can no longer be absorbed *silently*.
+            failed += 1
             continue
         if result.get("lesson_id"):
             stored += 1
         elif result.get("distillation_deferred"):
             deferred += 1
+        else:
+            # Returned, but claimed neither a lesson nor a deferral. Without
+            # this the buckets would not sum to the batch and the difference
+            # would be invisible again, one bucket further along.
+            skipped += 1
     # `deferred` counts only what stayed deferred inside this LIMIT-bounded
     # batch, which answers "how much of this batch failed" -- not "how big is
     # the backlog". Draining 16 of 500 successfully reported "still deferred 0"
@@ -2986,14 +3002,48 @@ def _drain_deferred_distillations(limit=16):
         "drained": len(pending),
         "stored": stored,
         "deferred": deferred,
+        "failed": failed,
+        "skipped": skipped,
         "backlog": backlog,
     }
+
+
+# Every bucket a drain can report, so an early return has the same shape as a
+# real one and a caller can never read a missing key as a zero.
+_EMPTY_DRAIN = {
+    "drained": 0, "stored": 0, "deferred": 0, "failed": 0, "skipped": 0,
+    "backlog": None,
+}
 
 
 def _drain_backlog_text(drain):
     """Render the drain's remaining backlog, or say it could not be read."""
     backlog = drain.get("backlog")
     return "unknown (count query failed)" if backlog is None else str(backlog)
+
+
+def _drain_summary_text(drain):
+    """The campaign's one line about the drain.
+
+    Rendered here rather than at the two call sites that used to format it
+    identically, so a bucket added to the drain cannot reach one report and
+    miss the other. The healthy line is byte-identical to what it has always
+    been; the failure clause is appended only when non-zero, because an
+    unattended nightly run keeps these lines and a drain whose items raised
+    must not read as a quiet success.
+    """
+    text = (
+        "deferred distillations drained: %d (lessons stored %d, still "
+        "deferred in batch %d, backlog remaining %s)"
+        % (
+            drain.get("drained", 0), drain.get("stored", 0),
+            drain.get("deferred", 0), _drain_backlog_text(drain),
+        )
+    )
+    if drain.get("failed"):
+        text += " -- failed %d (recorder raised; these are NOT deferred and " \
+                "will be retried)" % drain["failed"]
+    return text
 
 
 def _campaign_headline(
@@ -5253,14 +5303,7 @@ def campaign_generate_compile_execute_record(
         )
     drain = _drain_deferred_distillations(limit=max(16, len(results)))
     if drain["drained"]:
-        lines.append(
-            "deferred distillations drained: %d (lessons stored %d, "
-            "still deferred in batch %d, backlog remaining %s)"
-            % (
-                drain["drained"], drain["stored"], drain["deferred"],
-                _drain_backlog_text(drain),
-            ),
-        )
+        lines.append(_drain_summary_text(drain))
     for r in results:
         status = "PASS" if r["ok"] else "FAIL"
         lines.append("[%s] %s attempts=%d iid=%s" % (
@@ -5599,14 +5642,7 @@ def campaign_repo_repair(
         )
     drain = _drain_deferred_distillations(limit=max(16, len(results)))
     if drain["drained"]:
-        lines.append(
-            "deferred distillations drained: %d (lessons stored %d, "
-            "still deferred in batch %d, backlog remaining %s)"
-            % (
-                drain["drained"], drain["stored"], drain["deferred"],
-                _drain_backlog_text(drain),
-            ),
-        )
+        lines.append(_drain_summary_text(drain))
     for r in results:
         status = "PASS" if r["ok"] else "FAIL"
         lines.append("[%s] %s-%d attempts=%d iid=%s%s" % (
