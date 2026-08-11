@@ -103,6 +103,39 @@ def test_a_verification_that_really_failed_still_writes_the_failure(
     assert ledger == [("i1", "failed")]
 
 
+@pytest.mark.parametrize("tool,harness_name", VERIFIERS)
+@pytest.mark.parametrize("exc", [
+    ValueError(),          # str() -> ""
+    ValueError(""),        # str() -> ""
+    OSError(),             # str() -> ""
+], ids=["no-args", "empty-message", "bare-oserror"])
+def test_a_verifier_that_raised_without_a_message_writes_no_outcome(
+    monkeypatch, ledger, tool, harness_name, exc,
+):
+    """An exception carrying no message is still a run that never started.
+
+    Every wrapper forwards ``evidence={"error": str(exc)}``, and ``str()`` on
+    an exception raised with no argument is the empty string. The predicate
+    read the VALUE's truthiness rather than the key's presence, so
+    ``{"error": ""}`` was indistinguishable from "no error was reported" --
+    which closed the unmeasured state for every exception carrying a message
+    and left it open for exactly those that do not. A guard that only holds
+    for well-worded exceptions is not a guard.
+    """
+    def _raise(**_kwargs):
+        raise exc
+
+    monkeypatch.setattr(server.harness_tools, harness_name, _raise)
+
+    out = getattr(server, tool)()
+
+    assert out.startswith("ERROR"), "the caller is still told it went wrong"
+    assert ledger == [], (
+        "%s filed a verdict for a message-less exception" % tool
+    )
+    assert go.pending_count() == 1, "the generation is still awaiting real evidence"
+
+
 @pytest.mark.parametrize("tool,harness_name,signal", [
     ("test_run", "test_run", "tests_passed"),
     ("build_run", "build_run", "compiled"),
