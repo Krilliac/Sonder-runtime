@@ -210,3 +210,86 @@ def test_stats_count_what_happened():
     assert stats["noted"] == 1
     assert stats["attributed"] == 1
     assert stats["unlinked"] == 1
+
+
+# --- the runtime must not mark its own homework ----------------------------
+#
+# codegen_build_loop is the one tool listed in BOTH GENERATORS and VERIFIERS:
+# it writes the code and then runs the compiler over it. Nothing in this module
+# stopped it attributing its own `compiled` (+0.70) to its own generation --
+# the only thing that did was the `if/elif` ordering at the single call site in
+# server.py, which is a precondition in another file that attribute()'s callers
+# cannot see. 4e2a315 fixed exactly this shape in reward.py: an ordering that is
+# "harmless only while every call site happens to be gated".
+
+
+def test_the_two_role_sets_overlap_on_exactly_one_tool():
+    """Pinned so a second dual-role tool cannot be added unnoticed."""
+    assert sorted(set(go.GENERATORS) & set(go.VERIFIERS)) == ["codegen_build_loop"]
+
+
+def test_a_tool_never_grades_the_work_it_generated_itself():
+    written, record = _sink()
+    go.note_generation("i1", "codegen_build_loop", project="p")
+
+    report = go.attribute("codegen_build_loop", ok=True, project="p", record_fn=record)
+
+    assert report["attributed"] is False
+    assert written == [], "self-graded evidence is the population this module exists to dilute"
+
+
+def test_a_self_generated_row_does_not_hide_an_eligible_older_one():
+    """The guard must skip its own row and keep looking, not give up."""
+    written, record = _sink()
+    go.note_generation("older", "offload", project="p")
+    go.note_generation("newer", "codegen_build_loop", project="p")
+
+    report = go.attribute("codegen_build_loop", ok=True, project="p", record_fn=record)
+
+    assert report["attributed"] is True
+    assert written == [("older", "compiled")]
+
+
+def test_another_verifier_may_still_judge_a_codegen_generation():
+    """The guard is about self-grading, not about codegen work being unjudgeable."""
+    written, record = _sink()
+    go.note_generation("i1", "codegen_build_loop", project="p")
+
+    go.attribute("test_run", ok=True, project="p", record_fn=record)
+
+    assert written == [("i1", "tests_passed")]
+
+
+# --- a write that failed did not happen ------------------------------------
+
+
+def test_a_failed_write_leaves_the_generation_still_judgeable():
+    """attribute() consumed the pending before the write, so a locked database
+    lost the row permanently AND silently: the caller discards the report, and
+    the same verifier can never claim that generation again."""
+    def _explode(_ident, _signal):
+        raise RuntimeError("db locked")
+
+    written, record = _sink()
+    go.note_generation("i1", "sonder", project="p")
+
+    go.attribute("test_run", ok=True, project="p", record_fn=_explode)
+    retry = go.attribute("test_run", ok=True, project="p", record_fn=record)
+
+    assert retry["attributed"] is True
+    assert written == [("i1", "tests_passed")]
+
+
+def test_stats_count_rows_written_apart_from_attribution_decisions():
+    """`attributed` was incremented before the write, so it counted intent."""
+    def _explode(_ident, _signal):
+        raise RuntimeError("db locked")
+
+    _written, record = _sink()
+    go.note_generation("i1", "sonder", project="p")
+    go.attribute("test_run", ok=True, project="p", record_fn=_explode)
+    go.attribute("test_run", ok=True, project="p", record_fn=record)
+
+    stats = go.stats()
+    assert stats.get("write_failed") == 1
+    assert stats.get("recorded") == 1

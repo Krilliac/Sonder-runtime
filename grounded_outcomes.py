@@ -31,6 +31,15 @@ Deliberate limits
   recording nothing.
 * Only genuinely execution-grounded tools may attribute. A tool whose "success"
   means "it ran", not "the work was good", is not evidence.
+* A tool never judges its own output. ``codegen_build_loop`` writes code and
+  then runs the compiler over it, so it appears in both tables below -- and
+  self-graded rows are the exact population this module exists to dilute
+  (8,883 of ~9,200 rows). Nothing here used to stop it; the only thing that did
+  was the ``if``/``elif`` ordering at the single call site in server.py, which
+  is a precondition in another file that this module's callers cannot see.
+  4e2a315 fixed that same shape in the reward table: an ordering that is
+  "harmless only while every call site happens to be gated". The guard belongs
+  where the decision is made, so it is made here.
 
 Stdlib only.
 """
@@ -86,7 +95,13 @@ class _Pending:
 
 
 _PENDING: list[_Pending] = []
-_STATS = {"noted": 0, "attributed": 0, "expired": 0, "unlinked": 0}
+# `attributed` counts DECISIONS; `recorded` counts rows that actually landed.
+# They were one number, incremented before the write, so a locked database read
+# as a stored outcome.
+_STATS = {
+    "noted": 0, "attributed": 0, "expired": 0, "unlinked": 0,
+    "self_blocked": 0, "recorded": 0, "write_failed": 0,
+}
 
 
 def _now() -> float:
@@ -129,18 +144,30 @@ def note_generation(interaction_id: str, tool: str, project: str = "") -> bool:
 
 
 def _candidate(project: str, kind: str):
-    """Newest pending generation eligible for this verification, or None."""
+    """Newest eligible pending generation, and how many were self-produced.
+
+    Returns ``(pending_or_None, self_skipped)``. The count is what separates
+    "nothing was waiting" from "the only thing waiting was this tool's own
+    work", which are different facts about a run and used to look identical.
+    """
     wanted = str(project or "")
+    self_skipped = 0
     with _LOCK:
         for pending in reversed(_PENDING):
             if kind in pending.judged:
+                continue
+            # A tool may not judge what it generated itself. `continue` rather
+            # than bail out: its own row must not shadow an older one that a
+            # different generator produced and that this verifier CAN judge.
+            if pending.tool == kind:
+                self_skipped += 1
                 continue
             # An empty project on either side means "unscoped" and is allowed
             # to match; two *different* named projects never match.
             if wanted and pending.project and wanted != pending.project:
                 continue
-            return pending
-    return None
+            return pending, self_skipped
+    return None, self_skipped
 
 
 def attribute(tool: str, ok: bool, project: str = "", record_fn=None) -> dict:
@@ -154,10 +181,17 @@ def attribute(tool: str, ok: bool, project: str = "", record_fn=None) -> dict:
     if name not in VERIFIERS:
         return {"attributed": False, "reason": "%s is not execution-grounded evidence" % name}
     _prune()
-    pending = _candidate(project, name)
+    pending, self_skipped = _candidate(project, name)
     if pending is None:
         with _LOCK:
             _STATS["unlinked"] += 1
+            _STATS["self_blocked"] += self_skipped
+        if self_skipped:
+            return {
+                "attributed": False,
+                "self_blocked": self_skipped,
+                "reason": "%s may not grade the work it generated itself" % name,
+            }
         return {"attributed": False, "reason": "no recent generation to judge"}
 
     good_signal, bad_signal = VERIFIERS[name]
@@ -165,6 +199,7 @@ def attribute(tool: str, ok: bool, project: str = "", record_fn=None) -> dict:
     with _LOCK:
         pending.judged.add(name)
         _STATS["attributed"] += 1
+        _STATS["self_blocked"] += self_skipped
     report = {
         "attributed": True,
         "interaction_id": pending.interaction_id,
@@ -177,7 +212,16 @@ def attribute(tool: str, ok: bool, project: str = "", record_fn=None) -> dict:
         try:
             record_fn(pending.interaction_id, signal)
             report["recorded"] = True
+            with _LOCK:
+                _STATS["recorded"] += 1
         except Exception as exc:            # a failed write must not break the run
+            # The pending was consumed BEFORE the write, so a locked database
+            # burned the generation: this verifier could never claim it again,
+            # and every caller of this function discards the report that says
+            # so. A write that did not happen must not spend the evidence.
+            with _LOCK:
+                pending.judged.discard(name)
+                _STATS["write_failed"] += 1
             report["recorded"] = False
             report["error"] = str(exc)
     return report

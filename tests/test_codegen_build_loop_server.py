@@ -180,3 +180,73 @@ def test_an_unreadable_backlog_is_reported_as_unknown_not_as_the_batch(
     assert drain["deferred"] == 0
     assert drain["backlog"] is None
     assert "unknown" in server._drain_backlog_text(drain)
+
+
+# --- who judges the code this loop writes ----------------------------------
+
+
+def _grounded():
+    import grounded_outcomes
+    grounded_outcomes.reset()
+    return grounded_outcomes
+
+
+def test_a_dual_role_tool_is_routed_by_role_not_by_branch_order(monkeypatch):
+    """codegen_build_loop is in GENERATORS *and* VERIFIERS, and the call site
+    picked with `if/elif` -- so the generator branch won and the verifier
+    branch was unreachable. Whether a tool's compiler verdict counts as
+    evidence must not depend on which membership test happens to be written
+    first, and the loop's own build is the most execution-grounded evidence the
+    runtime produces."""
+    go = _grounded()
+    written = []
+    monkeypatch.setattr(
+        server, "_record_outcome_signal", lambda ident, signal: written.append((ident, signal)),
+    )
+    go.note_generation("gen-1", "offload", project="p")
+
+    server._feed_grounded_outcome(
+        "codegen_build_loop", True, "=== codegen build loop ===\nBUILD SUCCEEDED",
+        {"project": "p"},
+    )
+
+    assert written == [("gen-1", "compiled")]
+
+
+def test_a_shrinking_regeneration_never_replaces_the_file_on_disk(
+    monkeypatch, tmp_path,
+):
+    """The shrink floor, exercised through the whole tool rather than as a unit.
+
+    Measured (2026-08-06): a "repair" asked only to insert two '.' characters
+    came back at 44% of the original, and one asked to add a type name at 13%.
+    Both parse, so an unguarded loop reports a green build on a gutted file.
+    codegen_loop.shrink_rejected() is unit-tested; nothing pinned that
+    codegen_build_loop still consults it, and it silently no-opped once before
+    when `existing` was read from a key file_ops.read_file does not return.
+    """
+    original = "int main(void) {\n" + "    /* padding */\n" * 60 + "    return 0;\n}\n"
+    # Comfortably over shrink_rejected()'s 40-character near-empty rule, so this
+    # binds on SHRINK_FLOOR itself. The first draft used a 25-character reply,
+    # which was rejected as near-empty and still passed with the floor mutated
+    # to 0.0 -- a guard that cannot fail is not a guard.
+    amputated = "int main(void) {\n" + "    /* x */\n" * 20 + "    return 0;\n}\n"
+    assert len(amputated) > 40
+    assert 0.0 < len(amputated) / len(original) < 0.75
+    (tmp_path / "main.c").write_text(original, encoding="utf-8")
+    _prepare(
+        monkeypatch, tmp_path,
+        lambda *a, **k: _build(
+            ok=False, stdout="main.c(3): error C2065: undeclared identifier",
+        ),
+    )
+    monkeypatch.setattr(
+        server, "ensemble_answer", lambda prompt, **kw: amputated,
+    )
+
+    out = server.codegen_build_loop(
+        str(tmp_path), '{"main.c": "an entry point"}', "cl", attempts=2,
+    )
+
+    assert "rejected: shrank to" in out
+    assert (tmp_path / "main.c").read_text(encoding="utf-8") == original

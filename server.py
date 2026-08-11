@@ -7727,11 +7727,19 @@ def _feed_grounded_outcome(name, ok, output, args=None) -> None:
     if isinstance(args, dict):
         project = str(args.get("project") or args.get("root") or "")
     try:
+        # Both roles are consulted, not the first membership test that happens
+        # to match. codegen_build_loop is in BOTH tables -- it writes the code
+        # and then runs the compiler over it -- so `elif` silently made its
+        # verifier role unreachable and discarded the most execution-grounded
+        # verdict the runtime produces. Running both is safe only because
+        # grounded_outcomes now refuses to let a tool judge its own generation;
+        # before, this ordering was the ONLY thing preventing that, which is a
+        # precondition none of that module's other callers could see.
         if name in grounded_outcomes.GENERATORS:
             match = _INTERACTION_ID_RE.search(str(output or ""))
             if match:
                 grounded_outcomes.note_generation(match.group(1), name, project)
-        elif name in grounded_outcomes.VERIFIERS:
+        if name in grounded_outcomes.VERIFIERS:
             grounded_outcomes.attribute(
                 name, bool(ok), project, record_fn=_record_outcome_signal,
             )
