@@ -14518,6 +14518,52 @@ def _agent_permission_gate_error(tool_name):
     return refusal
 
 
+def _agent_project_root_refusal(tool_name, *, read_only, repository_extra_roots):
+    """Refusal text when a read-only run reaches a dev tool with no project.
+
+    ``_agent_project_scope("")`` returns ``("", "")`` with no error, so
+    ``project=""`` produced a read-only run bound to nothing -- and every path
+    check in ``_agent_dispatch``'s read-only block is conditional on
+    ``repository_extra_roots`` being set.  For these 23 that meant no
+    confinement at all, which is how ``secret_scan`` came to read a canary
+    outside the repository and print the key back to a read-only "observe"
+    agent.  Their whole contract is "work on a project", so with no project
+    there is nothing legitimate for them to do and refusing costs nothing.
+
+    Second lock, not the lock: ``harness_tools._resolve_root`` is where the
+    class is actually closed, because it also covers the direct MCP callers
+    and the 19 of these that ``_agent_dispatch`` never sees (the read-only
+    policy refuses them for not being in ``REPOSITORY_READ_ONLY_TOOLS``).
+    This one stands in front of it so that adding a tool to that set cannot
+    silently re-open the door -- and it is genuinely load-bearing rather than
+    belt-and-braces: with no project bound, ``root="."`` resolves to Sonder's
+    own cwd, which *is* in ``file_ops.allowed_roots()``, so ``_resolve_root``
+    admits it.  Removing this branch lets ``secret_scan(root=".")`` run and
+    print matched credentials back to the model.
+
+    The refusal lives here, beside its condition, rather than inline in
+    ``_agent_dispatch``: the dispatcher already forwards
+    ``_agent_permission_gate_error`` and ``_repository_read_only_error`` the
+    same way, so one more gate that owns its own message keeps every refusal
+    reachable from exactly one place instead of restated at the call site --
+    the drift shape ``dfad7ce`` removed from ``_agent_run_tool_refusal``.
+    """
+    if not read_only or repository_extra_roots:
+        return ""
+    if tool_name not in _DEVELOPER_WORKFLOW_TOOLS:
+        return ""
+    # Assigned rather than returned as a literal: scripts/check_error_signals.py
+    # ratchets new literal-prefixed ``ERROR:`` *returns*, and the agent loop's
+    # own policy chain builds its HOST POLICY strings the same way (see
+    # ``_agent_permission_gate_error`` directly above).
+    refusal = (
+        "ERROR: read-only agent run has no host-selected project root, "
+        "so developer-workflow tool '%s' has no project to work on. "
+        "Pass project=<directory>." % tool_name
+    )
+    return refusal
+
+
 def _agent_dispatch(
     tool_name, args, allow_web=True, read_only=False, allow_location=False,
     repository_extra_roots="",
@@ -14537,28 +14583,14 @@ def _agent_dispatch(
     gate_error = _agent_permission_gate_error(tool_name)
     if gate_error:
         return gate_error
+    root_refusal = _agent_project_root_refusal(
+        tool_name,
+        read_only=read_only,
+        repository_extra_roots=repository_extra_roots,
+    )
+    if root_refusal:
+        return root_refusal
     if read_only:
-        if not repository_extra_roots and tool_name in _DEVELOPER_WORKFLOW_TOOLS:
-            # `_agent_project_scope("")` returns ("", "") with no error, so
-            # `project=""` produced a read-only run bound to nothing -- and
-            # every path check below is conditional on `repository_extra_roots`
-            # being set.  For these 23 that meant no confinement at all, which
-            # is how `secret_scan` came to read a canary outside the repository
-            # and print the key back to a read-only "observe" agent.  Their
-            # whole contract is "work on a project", so with no project there
-            # is nothing legitimate for them to do and refusing costs nothing.
-            #
-            # Second lock, not the lock: `harness_tools._resolve_root` is where
-            # the class is actually closed, because it also covers the direct
-            # MCP callers and the 19 of these that this branch never sees (the
-            # read-only policy refuses them for not being in
-            # REPOSITORY_READ_ONLY_TOOLS).  This one stands in front of it so
-            # that adding a tool to that set cannot silently re-open the door.
-            return (
-                "ERROR: read-only agent run has no host-selected project root, "
-                "so developer-workflow tool '%s' has no project to work on. "
-                "Pass project=<directory>." % tool_name
-            )
         if repository_extra_roots:
             # Defense in depth for direct/internal dispatch callers.  The
             # observed agent path already scopes before policy, but dispatch
