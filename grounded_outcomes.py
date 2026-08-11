@@ -116,14 +116,23 @@ def evaluation_infrastructure_error(evidence) -> str:
 
     Silence when there is no evidence to read: a verifier that runs no process
     (an artifact validator, say) passes none, and must keep attributing.
+
+    The ``error`` key is read for PRESENCE, not for truthiness. Every wrapper
+    forwards ``evidence={"error": str(exc)}`` from its ``except`` branch, and
+    ``str()`` on an exception raised with no argument is "" -- so reading the
+    value's truthiness left the whole unmeasured state hinging on whether the
+    exception happened to carry a message, and a message-less one fell through
+    to ``failed`` (-1.0) against work nobody examined. An explicit ``None`` is
+    still the absence of an error; "" is an error that could not describe
+    itself.
     """
     if not isinstance(evidence, dict):
         return ""
     if evidence.get("timed_out"):
         return "the verification timed out before producing a verdict"
-    error = evidence.get("error")
-    if error:
-        return str(error)
+    if evidence.get("error") is not None:
+        detail = str(evidence["error"]).strip()
+        return detail or "the verifier raised an error carrying no message"
     if evidence.get("returncode") == -1:
         stderr = str(evidence.get("stderr") or "").strip().splitlines()
         detail = stderr[0] if stderr else "the verifier could not be run"

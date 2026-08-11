@@ -276,6 +276,41 @@ def test_an_unmeasured_verification_leaves_the_generation_judgeable():
     assert written == [("i1", "failed")]
 
 
+def test_an_error_with_no_message_is_still_an_error():
+    """``{"error": ""}`` is what a message-less exception forwards.
+
+    The wrappers pass ``evidence={"error": str(exc)}``, and ``str()`` on an
+    exception raised with no argument is "". Reading the VALUE's truthiness
+    made that indistinguishable from "no error was reported", so the whole
+    unmeasured state hinged on whether the exception happened to carry a
+    message. The KEY is the assertion; the message is only the detail.
+    """
+    written, record = _sink()
+    go.note_generation("i1", "sonder")
+
+    report = go.attribute("test_run", ok=False, record_fn=record,
+                          evidence={"ok": False, "error": ""})
+
+    assert written == []
+    assert report["attributed"] is False
+    assert report["evaluation_infrastructure_error"], (
+        "an unmeasured run must still say why it measured nothing"
+    )
+
+
+def test_an_absent_error_key_is_not_an_error():
+    """The counterpart: a verifier that ran and reported no error at all must
+    keep attributing. Only a PRESENT, non-None error key claims the run never
+    produced a verdict."""
+    written, record = _sink()
+    go.note_generation("i1", "sonder")
+
+    go.attribute("test_run", ok=False, record_fn=record,
+                 evidence={"ok": False, "returncode": 1, "error": None})
+
+    assert written == [("i1", "failed")]
+
+
 def test_a_genuine_failure_is_still_recorded():
     """Failing tests are the whole point of the module; only the runs that
     never produced a verdict are dropped."""
