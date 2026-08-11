@@ -99,6 +99,35 @@ _STATS = {"noted": 0, "attributed": 0, "expired": 0, "unlinked": 0, "unmeasured"
 # chose, so nothing after them may be read as a report about the verifier.
 _RENDERED_OUTPUT_HEADERS = ("stdout:", "stderr:")
 
+# Every verdict line this codebase actually emits, keyed by the field name and
+# mapping its two rendered values to a pass/fail. Derived by reading the
+# renderers, not recalled -- and the count is the point: ``rendered_verdict``
+# originally read the first two only, so the other four rendered a FAIL that
+# it answered ``None`` for, and the caller kept its inverted ``ok=True``.
+# Measured, one failing result per renderer::
+#
+#   server._format_run_result          "  ok: False"                    -> False
+#   code_runner.format_result          "status: failed"                 -> False
+#   code_runner.format_project_result  "project status: failed"         -> None
+#   artifact_grounding.format_result   "artifact grounding: FAIL"       -> None
+#   server.artifact_verify (inline)    "artifact verification: FAIL"    -> None
+#   isolated_runner.format_result      "isolated status: failed"        -> None
+#
+# The four unread shapes belong to VERIFIERS -- ``run_project``,
+# ``ground_artifact``/``artifact_ground``, ``artifact_verify`` and
+# ``isolated_run`` -- so a failing verification by any of them was still being
+# attributed as a success. ``test_every_renderer_shape_is_readable`` renders a
+# failing result through each renderer and asserts this reads it, so a sixth
+# renderer cannot be added without either being covered or failing that test.
+_RENDERED_VERDICT_FIELDS = {
+    "ok": {"true": True, "false": False},
+    "status": {"ok": True, "failed": False},
+    "project status": {"ok": True, "failed": False},
+    "isolated status": {"ok": True, "failed": False},
+    "artifact grounding": {"pass": True, "fail": False},
+    "artifact verification": {"pass": True, "fail": False},
+}
+
 
 def evaluation_infrastructure_error(evidence) -> str:
     """Why this verification measured nothing, or "" when it really ran.
@@ -197,11 +226,13 @@ def rendered_verdict(observation):
     is a number that can be trusted, and the caller-judged population sits near
     52%, so a manufactured success is indistinguishable from real progress.
 
-    The two renderers, both measured:
-      ``server._format_run_result``   -> ``  ok: True`` / ``  ok: False``
-      ``code_runner.format_result``   -> ``status: ok`` / ``status: failed``
+    The renderers and their verdict lines are enumerated in
+    ``_RENDERED_VERDICT_FIELDS``; all six are measured, and reading only the
+    first two of them is what let a failing ``run_project``,
+    ``ground_artifact`` or ``artifact_verify`` keep being attributed as a pass
+    after this function already existed.
 
-    Returns None when neither field is present, so a verifier rendered some
+    Returns None when no such field is present, so a verifier rendered some
     other way keeps whatever the caller decided and nothing changes for it.
     """
     text = str(observation or "")
@@ -214,12 +245,12 @@ def rendered_verdict(observation):
         key, sep, value = stripped.partition(":")
         if not sep:
             continue
-        key = key.strip().casefold()
-        value = value.strip().casefold()
-        if key == "ok" and value in ("true", "false"):
-            return value == "true"
-        if key == "status" and value in ("ok", "failed"):
-            return value == "ok"
+        values = _RENDERED_VERDICT_FIELDS.get(key.strip().casefold())
+        if values is None:
+            continue
+        verdict = values.get(value.strip().casefold())
+        if verdict is not None:
+            return verdict
     return None
 
 
