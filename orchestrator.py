@@ -150,9 +150,17 @@ def select_facts(facts=None, project_facts=None):
     happens to hold. Project facts draw first, so an odd slot falls the
     operator's way.
 
-    Whole facts only, never a shortened one, and the first fact drawn is kept
-    however large it is -- a fact cut in half is a fact that lies, and a recall
-    canary is a single fact.
+    Whole facts only, never a shortened one. An empty block is worse than one
+    oversized fact, so if every candidate is over budget the first one drawn
+    is kept anyway, however large -- a fact cut in half is a fact that lies,
+    and a recall canary is a single fact. That fallback is the exception, not
+    the rule: it used to be unconditional (the first entry drawn was ALWAYS
+    kept regardless of size), which meant an oversized first entry poisoned
+    ``used`` before anything behind it got a turn. Project facts are now fed
+    newest-first (see server._answer), so the entry most likely to land in
+    that slot is precisely a fact someone just stored -- the common case, not
+    an edge case. The char-budget check now applies to every entry, first
+    included; only the fallback below still special-cases position zero.
     """
     queues = [
         [str(f) for f in project_facts or []],
@@ -162,6 +170,7 @@ def select_facts(facts=None, project_facts=None):
     kept = []
     used = 0
     turn = 0
+    first_drawn = None
     while any(queues):
         # Skip an exhausted source rather than ending the draw: a source with
         # nothing left must not cost the other its remaining turns.
@@ -169,17 +178,31 @@ def select_facts(facts=None, project_facts=None):
             turn = (turn + 1) % len(queues)
         text = queues[turn].pop(0)
         turn = (turn + 1) % len(queues)
+        if first_drawn is None:
+            first_drawn = text
         if kept and len(kept) >= MAX_INJECTED_FACTS:
             break  # no slots left for anyone; drawing more cannot help
-        if kept and used + len(text) > MAX_FACTS_CHARS:
+        if used + len(text) > MAX_FACTS_CHARS:
             # Skip this one and keep drawing rather than ending the draw. One
             # oversized entry used to cost BOTH queues every remaining slot
             # (measured: kept=1 of 24 for a single 4200-char preference), so
             # the round-robin floor held only while nothing was oversized.
             # Skipping is still deterministic and still never shortens a fact.
+            # This check used to be gated on `kept` being non-empty, which
+            # exempted the first entry drawn from ever being skipped -- so an
+            # oversized first entry alone (project facts draw first, and are
+            # now newest-first) still collapsed the whole block to kept=1.
             continue
         kept.append(text)
         used += len(text)
+    if not kept and first_drawn is not None:
+        # Every candidate was over budget, so the loop above skipped all of
+        # them and left the block empty. An empty block is strictly worse
+        # than showing one oversized fact, so fall back to the first entry
+        # drawn -- the same choice the old unconditional-first-entry rule
+        # made, now reached only when nothing smaller was available to fill
+        # the slot instead.
+        kept = [first_drawn]
     return kept, total - len(kept)
 
 
