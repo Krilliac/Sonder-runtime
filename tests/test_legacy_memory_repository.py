@@ -71,10 +71,18 @@ def test_record_outcome_delegates_and_validates(db_path):
         # An unsupported signal must surface memory_store's ValueError — proof
         # the call reaches the real function rather than being swallowed.
         with pytest.raises(ValueError):
-            uow.memory.record_outcome("i1", "not-a-real-signal", 1.0)
+            uow.memory.record_outcome(
+                "i1", "not-a-real-signal", 1.0, source="caller",
+            )
+        # Provenance is required at this port (#62) and is never inferred, so
+        # omitting it is a signature error rather than a silently-defaulted row.
+        with pytest.raises(TypeError):
+            uow.memory.record_outcome("i1", "accepted", 0.8)
         # A valid good signal at its canonical reward is accepted.
         good = next(s for s in reward.VALID_SIGNALS if reward.is_good(s))
-        result = uow.memory.record_outcome("i1", good, reward.score(good))
+        result = uow.memory.record_outcome(
+            "i1", good, reward.score(good), source="caller",
+        )
         assert result is not None
 
 

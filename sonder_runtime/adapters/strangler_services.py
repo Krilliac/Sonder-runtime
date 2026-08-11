@@ -244,12 +244,20 @@ class LegacyMemoryRepository:
         return recall_module.recall(self._conn, task, k=k, project=project, **options)
 
     def record_outcome(
-        self, interaction_id: str, signal: str, reward_value: float, **options
+        self, interaction_id: str, signal: str, reward_value: float, *,
+        source: str, **options
     ):
+        """Record a verdict. ``source`` is required (#62) and never defaulted.
+
+        Naming it in the signature rather than letting it ride in ``**options``
+        means a caller that omits it fails at this port, with an error naming
+        the boundary, instead of at a SQLite NOT NULL several frames down.
+        """
         import sonder_runtime.adapters.memory_store as memory_store
 
         return memory_store.record_outcome_and_claim_lesson_distillation(
-            self._conn, interaction_id, signal, reward_value, **options
+            self._conn, interaction_id, signal, reward_value,
+            source=source, **options
         )
 
 

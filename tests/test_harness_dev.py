@@ -10,6 +10,24 @@ import pytest
 import harness_tools
 
 
+@pytest.fixture(autouse=True)
+def _authorize_pytest_tmp_roots(tmp_path_factory, monkeypatch):
+    """Authorize pytest's tmp tree for ``harness_tools._resolve_root``.
+
+    ``_resolve_root`` now confines every caller-supplied ``root`` to
+    ``file_ops.allowed_roots()`` -- see its docstring for why. These tests
+    legitimately do their work in ``tmp_path``, so they authorize exactly that
+    tree, the same way an operator authorizes a repository in
+    ``file_roots.local``.
+
+    This AUTHORIZES a root; it does not disable the check. A root outside the
+    tmp tree is still refused, which is what
+    ``tests/test_harness_root_confinement.py`` asserts -- without that file
+    this fixture would be indistinguishable from deleting the guard.
+    """
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path_factory.getbasetemp()))
+
+
 # ---------------------------------------------------------------------------
 # _detect_test_framework
 # ---------------------------------------------------------------------------
@@ -372,6 +390,23 @@ def test_resolve_root_valid(tmp_path):
     assert resolved == tmp_path.resolve()
 
 
-def test_resolve_root_invalid():
+def test_resolve_root_invalid(tmp_path):
+    """A non-directory root is rejected -- asked from INSIDE the authorized set.
+
+    This used to pass ``/nonexistent/path/abc123xyz``: unauthorized *and*
+    missing. That pinned "not a directory" as the answer for a path the caller
+    was never allowed to ask about -- the existence oracle written down as the
+    requirement. ``_resolve_root`` stat-ed before it authorized, so an
+    unauthorized-missing path and an unauthorized-existing one gave different
+    refusals, and every server wrapper hands those straight back to a confined
+    agent.
+
+    The intent -- a root that is not a directory is refused, and says so -- is
+    real, so it is kept and asked the way a legitimate caller asks it: about a
+    missing path inside the tree this file's fixture authorizes. The
+    unauthorized half is asserted in ``test_harness_root_confinement.py``,
+    where it belongs.
+    """
+    missing = tmp_path / "not_created"
     with pytest.raises(ValueError, match="not a directory"):
-        harness_tools._resolve_root("/nonexistent/path/abc123xyz")
+        harness_tools._resolve_root(str(missing))

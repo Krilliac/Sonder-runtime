@@ -53,6 +53,7 @@ def _select_examples(conn):
     the strongest-proven response, then the newest positive evidence.
     """
     rejected = collections.Counter()
+    accepted_populations = collections.Counter()
     winners = {}
     ranked = []
     retained_chars = 0
@@ -95,13 +96,27 @@ def _select_examples(conn):
             "task": task,
             "response": response,
             "prompt_key": _canonical_prompt(task),
-            "best_reward": reward.score(best.get("signal")),
+            "population": (
+                "caller" if best.get("outcome_source") == reward.SOURCE_CALLER
+                else reward.signal_population(best.get("signal"))
+            ),
             "evidence_rowid": int(best.get("outcome_rowid") or 0),
             "interaction_rowid": int(first.get("interaction_rowid") or 0),
             "chars": len(task) + len(response),
         }
+        # Population first, price only inside it. Ordering by reward alone put
+        # self-graded "tests_passed" (1.0) above every caller-judged signal, so
+        # duplicate-prompt resolution and capacity eviction both preferred the
+        # runtime's own marking to a human's -- in a corpus already ~98%
+        # self-graded, that is the wrong row surviving every squeeze.
+        evidence_rank = reward.evidence_rank(best.get("signal"))
+        # Provenance is the actual answer to who judged this row.  A caller
+        # recording a passing test has still reviewed the delegated work; do
+        # not demote that row merely because its signal name is execution-like.
+        if best.get("outcome_source") == reward.SOURCE_CALLER:
+            evidence_rank = (evidence_rank[0], 2, reward.score(best.get("signal")))
         candidate["rank"] = (
-            candidate["best_reward"],
+            evidence_rank,
             candidate["evidence_rowid"],
             candidate["interaction_rowid"],
             candidate["id"],
@@ -135,6 +150,14 @@ def _select_examples(conn):
             rejected["selection_capacity"] += 1
 
     current = None
+
+    def row_evidence_rank(row):
+        signal = row.get("signal")
+        rank = reward.evidence_rank(signal)
+        if row.get("outcome_source") == reward.SOURCE_CALLER:
+            rank = (rank[0], 2, reward.score(signal))
+        return rank, int(row.get("outcome_rowid") or 0)
+
     for row in memory_store.interaction_outcome_evidence(
         conn,
         limit=MAX_EXPORT_EVIDENCE_ROWS + 1,
@@ -168,11 +191,11 @@ def _select_examples(conn):
             # A corrupt reward row is untrustworthy evidence.
             current["contradictory"] = True
         elif reward.is_good(signal):
+            # is_good is eligibility; evidence_rank is the ordering. Comparing
+            # rows by score() alone lets a self-graded pass displace the
+            # caller's judgement of the same interaction.
             if current["best"] is None or (
-                reward.score(signal), int(row.get("outcome_rowid") or 0)
-            ) > (
-                reward.score(current["best"].get("signal")),
-                int(current["best"].get("outcome_rowid") or 0),
+                row_evidence_rank(row) > row_evidence_rank(current["best"])
             ):
                 current["best"] = row
         elif reward.score(signal) < 0:
@@ -223,6 +246,7 @@ def _select_examples(conn):
             rejected["content_size_limit"] += 1
             continue
         accepted.append((candidate["prompt_key"], candidate["id"], example))
+        accepted_populations[candidate["population"] or "unknown"] += 1
         payload_bytes += len(encoded)
         payload_chars += record_chars
     examples = [
@@ -233,6 +257,10 @@ def _select_examples(conn):
         "outcome_evidence_rows": evidence_count,
         "eligible_before_deduplication": eligible_count,
         "accepted": len(examples),
+        # Reported apart, never combined. A single "accepted" total hides that
+        # the corpus is overwhelmingly the runtime's own marking; a blended
+        # quality figure over both would read like accuracy and is not one.
+        "accepted_by_population": dict(sorted(accepted_populations.items())),
         "rejected": interaction_count - len(examples),
         "rejected_by_reason": dict(sorted(rejected.items())),
     }

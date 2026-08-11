@@ -343,7 +343,11 @@ if __name__ == "__main__":
         raw = _last_raw["text"]
         iid = server.parse_interaction_id(raw) if raw else None
         if iid:
-            server.record_outcome(iid, "tests_passed" if passed else "failed")
+            # The ladder sets the level and grades it; that is the runtime
+            # marking its own exam, not a caller judging delegated work (#62).
+            server.record_self_graded_outcome(
+                iid, "tests_passed" if passed else "failed",
+            )
 
     start = int(sys.argv[1]) if len(sys.argv) > 1 else 1
     max_levels = int(sys.argv[2]) if len(sys.argv) > 2 else 99

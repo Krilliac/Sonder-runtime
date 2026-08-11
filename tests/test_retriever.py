@@ -6,7 +6,7 @@ import retriever as r
 def _lesson_outcome(conn, lesson_id, index, signal, value, task="threading lock release"):
     interaction_id = "%s-use-%s" % (lesson_id, index)
     ms.log_lesson_usage(conn, [lesson_id], interaction_id, task)
-    ms.record_lesson_usage_outcome(conn, interaction_id, signal, value)
+    ms.record_lesson_usage_outcome(conn, interaction_id, signal, value, source="caller")
 
 
 def test_rrf_rewards_agreement():
@@ -399,7 +399,7 @@ def test_delayed_failures_start_cooldown_when_feedback_arrives():
     conn.commit()
 
     for interaction_id in interaction_ids:
-        ms.record_lesson_usage_outcome(conn, interaction_id, "failed", -1.0)
+        ms.record_lesson_usage_outcome(conn, interaction_id, "failed", -1.0, source="caller")
 
     decision = r.lesson_quarantine(ms.lesson_usage_stats(conn)["lesson"])
     assert decision["active"] is True
@@ -485,7 +485,7 @@ def test_retrieve_mmr_diversifies_near_duplicates(monkeypatch):
 def _graded(conn, interaction_id, lesson_ids, task, reward):
     ms.log_lesson_usage(conn, lesson_ids, interaction_id, task)
     ms.record_lesson_usage_outcome(
-        conn, interaction_id, "tests_passed" if reward > 0 else "failed", reward,
+        conn, interaction_id, "tests_passed" if reward > 0 else "failed", reward, source="caller",
     )
 
 
@@ -687,12 +687,22 @@ def test_usage_boost_confidence_comes_from_scored_outcomes_not_retrievals():
     weight inflated by ungraded retrievals -- one lesson with a single win and
     100 retrievals drew the same full confidence as a lesson with 100 graded
     wins. Weight now shrinks toward the neutral prior on SCORED evidence, so an
-    asserted-but-never-validated lesson sits at 0.0, below any earned record."""
-    earned = r._usage_boost({"uses": 50, "wins": 50, "losses": 0, "avg_reward": 1.0})
-    thin = r._usage_boost({"uses": 100, "wins": 1, "losses": 0, "avg_reward": 1.0})
+    asserted-but-never-validated lesson sits at 0.0, below any earned record.
+
+    The counts are per-population (#25): the boost reads the deciding
+    population's own mean and its own scored count, so the fixtures name that
+    population rather than the blended `avg_reward`/`wins`/`losses` triple.
+    The weighting under test is unchanged -- 50 scored rows still shrink to
+    50/60, one still shrinks to 1/11."""
+    earned = r._usage_boost({"uses": 50, "avg_reward_caller": 1.0,
+                             "scored_caller": 50})
+    thin = r._usage_boost({"uses": 100, "avg_reward_caller": 1.0,
+                           "scored_caller": 1})
     synthetic = r._usage_boost(None)
-    never_scored = r._usage_boost({"uses": 100, "wins": 0, "losses": 0,
-                                   "avg_reward": None})
+    never_scored = r._usage_boost({"uses": 100, "avg_reward_caller": None,
+                                   "scored_caller": 0,
+                                   "avg_reward_execution": None,
+                                   "scored_execution": 0})
 
     assert synthetic == 0.0
     assert never_scored == 0.0
@@ -705,7 +715,7 @@ def test_usage_boost_confidence_comes_from_scored_outcomes_not_retrievals():
     # An earned positive record outranks an unvalidated lesson; an earned
     # negative one ranks below it.
     assert earned > synthetic > r._usage_boost(
-        {"uses": 50, "wins": 0, "losses": 50, "avg_reward": -1.0}
+        {"uses": 50, "avg_reward_caller": -1.0, "scored_caller": 50}
     )
 
 
@@ -735,3 +745,113 @@ def test_attribution_scans_the_usage_history_once_per_call():
     assert len(grouped) == 1, grouped
     assert stats["co0"]["attributable_losses_since_win"] == 1.5
     assert stats["solo"]["attributable_losses_since_win"] == 6.0
+
+
+def _judged(conn, lesson_id, index, signal, reward, task="threading lock release"):
+    """One graded retrieval of one lesson, carrying its outcome POPULATION."""
+    interaction_id = "%s-j%s" % (lesson_id, index)
+    ms.log_lesson_usage(conn, [lesson_id], interaction_id, task)
+    ms.record_lesson_usage_outcome(conn, interaction_id, signal, reward)
+
+
+def test_the_usage_boost_orders_rows_so_it_may_not_read_the_blended_mean():
+    """#25: `_usage_boost` is added into the retrieval sort key, which makes it
+    a BETWEEN-ROW ordering, not a per-lesson boost -- and it read `avg_reward`,
+    the mean over both outcome populations that `lesson_usage_stats` documents
+    as one that "must never ORDER two lessons against each other".
+
+    Probe-measured on this branch: a lesson a caller REJECTED (-0.5) whose
+    runtime then passed its own tests eight times blends to +0.833 and takes a
+    +0.0039 boost, beating a lesson a caller reviewed and ACCEPTED (+0.8) at
+    +0.0007. The self-graded rows launder the caller's judgement. The cap is
+    0.01 against an adjacent-rank RRF gap of 0.000264, so this moves a row up
+    to 37 ranks -- it is not a tiebreaker in any bounded sense.
+    """
+    conn = ms.connect(":memory:")
+    ms.add_lesson(conn, "reviewed", "threading lock release advice reviewed",
+                  None, "seed")
+    ms.add_lesson(conn, "laundered", "threading lock release advice laundered",
+                  None, "seed")
+
+    _judged(conn, "reviewed", 0, "accepted", 0.8)
+    _judged(conn, "laundered", 0, "rejected", -0.5)
+    for index in range(1, 9):
+        _judged(conn, "laundered", index, "tests_passed", 1.0)
+
+    stats = ms.lesson_usage_stats(conn)
+    assert stats["laundered"]["avg_reward"] > stats["reviewed"]["avg_reward"], (
+        "precondition: the blend really does favour the rejected lesson"
+    )
+
+    assert r._usage_boost(stats["reviewed"]) > r._usage_boost(stats["laundered"])
+    rows = r.retrieve_with_ids(conn, "threading lock release advice", k=2,
+                               embed_fn=lambda _text: None)
+    assert [row["id"] for row in rows] == ["reviewed", "laundered"]
+
+
+def test_the_usage_boost_confidence_comes_from_the_deciding_population():
+    """The magnitude and the certainty must come from the SAME population.
+
+    Reading the caller mean while weighting it by every scored row lets one
+    caller judgement borrow the confidence of a hundred self-graded ones --
+    the same blend, moved into the second factor. One caller rejection is
+    thin evidence and must be weighted as thin evidence.
+    """
+    one_caller_row_among_many = {
+        "uses": 101, "wins": 100, "losses": 1,
+        "avg_reward_caller": -0.5, "scored_caller": 1,
+        "avg_reward_execution": 1.0, "scored_execution": 100,
+    }
+    one_caller_row_alone = {
+        "uses": 1, "wins": 0, "losses": 1,
+        "avg_reward_caller": -0.5, "scored_caller": 1,
+        "avg_reward_execution": None, "scored_execution": 0,
+    }
+
+    assert (
+        r._usage_boost(one_caller_row_among_many)
+        == r._usage_boost(one_caller_row_alone)
+    ), "self-graded volume must not lend certainty to a caller's judgement"
+    assert round(r._usage_boost(one_caller_row_alone), 6) == round(
+        -0.5 * (1 / 11.0) * 0.01, 6
+    )
+
+
+def test_the_execution_mean_decides_only_when_no_caller_has_judged():
+    """A lesson no caller has looked at still has evidence; it is just weaker
+    evidence, and it decides nothing once a caller has spoken."""
+    self_graded_only = {
+        "uses": 10, "wins": 10, "losses": 0,
+        "avg_reward_caller": None, "scored_caller": 0,
+        "avg_reward_execution": 1.0, "scored_execution": 10,
+    }
+    unjudged = {
+        "uses": 10, "wins": 0, "losses": 0,
+        "avg_reward_caller": None, "scored_caller": 0,
+        "avg_reward_execution": None, "scored_execution": 0,
+    }
+
+    assert r._usage_boost(self_graded_only) > 0.0
+    assert r._usage_boost(unjudged) == 0.0
+    # An unattributable outcome (a signal in neither population) buys nothing:
+    # unknown provenance ranks below both, as it does in the rules.
+    assert r._usage_boost({"uses": 5, "wins": 5, "losses": 0,
+                           "avg_reward": 1.0}) == 0.0
+
+
+def test_lesson_usage_stats_counts_each_population_separately():
+    """The split counts have to come from the store beside the split means --
+    a ranking that reads one population's mean needs that population's own
+    count, and guessing it downstream is how the blend comes back."""
+    conn = ms.connect(":memory:")
+    ms.add_lesson(conn, "lesson", "advice", None, "seed")
+    _judged(conn, "lesson", 0, "rejected", -0.5)
+    for index in range(1, 4):
+        _judged(conn, "lesson", index, "tests_passed", 1.0)
+
+    row = ms.lesson_usage_stats(conn)["lesson"]
+
+    assert row["scored_caller"] == 1
+    assert row["scored_execution"] == 3
+    assert row["avg_reward_caller"] == -0.5
+    assert row["avg_reward_execution"] == 1.0

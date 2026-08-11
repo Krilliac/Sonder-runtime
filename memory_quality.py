@@ -4,6 +4,7 @@ import re
 
 import contribute
 import sonder_runtime.adapters.memory_store as memory_store
+from sonder_runtime.domain.memory import rules as memory_rules
 
 LONG_LESSON_CHARS = 220
 
@@ -16,13 +17,6 @@ _CONCRETE_ANCHOR = re.compile(
     r"`[^`]+`|\b\w+\.\w+|\b\w+_\w+|[A-Za-z]+[A-Z][a-z]|O\([^)]*\)"
 )
 INTERACTION_ID_RE = re.compile(r"^[0-9a-f]{16}$", re.I)
-# Sorts below every real reward (the worst signal prices at -1.0). Exact
-# duplicates share their text, so the copy carrying outcome history is the one
-# worth keeping even when that history is bad: deleting it would launder a
-# lesson the store has already measured as harmful. This constant exists so
-# that "never evaluated" is expressed explicitly rather than through a falsy
-# default, which silently swallowed a measured average of exactly 0.0.
-_NO_EVIDENCE_RANK = -2.0
 
 
 def normalize_lesson_text(text):
@@ -71,21 +65,33 @@ def choose_exact_duplicate_keeper(group, stats=None):
     text, then the oldest row. Exact duplicates have the same text, but this
     keeps the rule robust if whitespace/case differ.
 
-    ``avg_reward`` is read through an explicit ``None`` check. Reading it as
-    ``avg_reward or _NO_EVIDENCE_RANK`` collapsed a measured average of exactly
-    0.0 onto the never-evaluated rank, so a lesson the store had graded neutral
-    sorted below one it had graded -1.0.
+    The question this asks is RETENTION -- whose judgement would be lost if
+    this row were deleted -- and the rule for it is written down once, in
+    ``memory_rules.retention_rank``. It is deliberately NOT the credit rule
+    (``memory_rules.evidence_rank``), which conditions population on
+    eligibility; see the "two questions" note beside them. This module used to
+    hold a private closure named ``evidence_rank`` that meant the opposite of
+    the domain function of the same name, which is precisely how two sites come
+    to teach contradictory rules for one concept without anyone noticing.
+
+    Evidence is read as TWO ranks, never one average. ``avg_reward`` is a mean
+    over both outcome populations, so ranking on it kept the lesson the runtime
+    graded 1.0 by running its own tests over one a caller reviewed and accepted
+    at 0.8 -- and the reviewed copy was the row deleted.
     """
     stats = stats or {}
 
-    def evidence_rank(row):
-        average = stats.get(row["id"], {}).get("avg_reward")
-        return _NO_EVIDENCE_RANK if average is None else float(average)
+    def retention(row):
+        row_stats = stats.get(row["id"], {})
+        return memory_rules.retention_rank(
+            row_stats.get("avg_reward_caller"),
+            row_stats.get("avg_reward_execution"),
+        )
 
     return sorted(
         group,
         key=lambda row: (
-            -evidence_rank(row),
+            *retention(row),
             -int(stats.get(row["id"], {}).get("wins") or 0),
             -int(stats.get(row["id"], {}).get("uses") or 0),
             -len(row.get("text") or ""),

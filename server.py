@@ -18,6 +18,7 @@ Tiers (escalation ladder, cheapest first):
     cloud-code/cloud-general -> configured hosted defaults (no local memory cost)
 """
 
+import collections
 import contextlib
 import hmac
 import importlib
@@ -71,6 +72,7 @@ import codegen_loop
 import file_ops
 import data_query as data_query_module
 import json_patch_tool
+import json_schema_verifier
 import text_patch as text_patch_ops
 import workspace_compare as workspace_compare_module
 import log_inspect as log_inspect_module
@@ -99,7 +101,11 @@ import intents
 import runtime_policy
 import npu_contract
 import npu_service
+import calibration
 import command_catalog
+import grounded_extraction
+import grounded_outcomes
+import permission_modes
 import reloadable_mcp
 import autopilot_store
 import autopilot_controller
@@ -118,6 +124,7 @@ import tool_capabilities
 import git_tools
 import sonder_runtime.adapters.evaluation_history_store as eval_history
 import artifact_risk as artifact_risk_module
+import artifact_fetch as artifact_fetch_module
 import process_risk as process_risk_module
 import unsafe_lab
 
@@ -289,15 +296,61 @@ def reasoning_exposure_enabled() -> bool:
     ``message.thinking``, separate from the answer, but only when the request
     asks for it -- so leaving this off means we never even request it.
 
-    This does not weaken ``admin_private_chain_of_thought``: that refuses
-    arbitrary inspection of hidden reasoning, which stays refused. This exposes
-    only the reasoning a model emitted for the turn the caller just asked for,
-    through a channel the model emits deliberately and separately from its
-    answer, and only where the operator has turned it on.
+    This is not the switch that opens ``admin_private_chain_of_thought``. That
+    surface has its own flag (SONDER_ALLOW_PRIVATE_COT) and additionally needs
+    an explicit operator permission rule; it refuses until both are set. What
+    this flag decides is narrower and upstream of both: whether Sonder asks the
+    model for its thinking at all. With it off nothing is captured, so there is
+    nothing for either surface to show.
     """
     return os.environ.get("SONDER_EXPOSE_REASONING", "").strip().lower() in (
         "1", "true", "yes", "on"
     )
+
+
+def private_cot_opt_in_enabled() -> bool:
+    """Whether the operator has flagged this deployment to serve /cot at all.
+
+    Off by default, and deliberately a *different* variable from
+    SONDER_EXPOSE_REASONING. That one decides whether the model is asked to
+    think; this one decides whether the surface that has refused since the
+    beginning may reveal what it thought. Overloading one flag onto both would
+    mean enabling reasoning capture silently opened a tool documented as
+    refusing -- which is exactly the surprise this split exists to prevent.
+
+    The flag alone is not sufficient: see ``_private_cot_rule_allows``.
+    """
+    return os.environ.get("SONDER_ALLOW_PRIVATE_COT", "").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+
+
+def _private_cot_rule_allows() -> bool:
+    """Whether the operator's permission policy names this tool as allowed.
+
+    The second required act, and the one that cannot be set by an environment
+    variable inherited from a parent process. ``policy.DEFAULT_RULES`` denies
+    ``admin_private_chain_of_thought``, so this is False on any deployment that
+    has not written an explicit allow rule into ``permissions.json``.
+
+    What the act requires is that *state on disk*, not one particular route to
+    it: ``permission_rule_set`` is the developer-gated tool for writing it, but
+    editing ``permissions.json`` by hand does it just as well, and that needs
+    filesystem access to the Sonder home rather than a developer token. Stating
+    the tool as the only way would overstate the gate.
+
+    First-match evaluation means the operator rule (inserted at the front) wins
+    over the built-in deny without the deny ever being removed.
+
+    Fails closed: an unreadable or malformed policy is not an opt-in.
+    """
+    try:
+        rule = permission_rules.check(
+            sonder_paths.default_home(), "admin_private_chain_of_thought"
+        )
+    except Exception:
+        return False
+    return str(rule.get("action", "")).strip().lower() == "allow"
 
 
 # Which local models are known to reason. Learned from responses that carry
@@ -747,6 +800,55 @@ def _open_db():
     return memory_store.connect(_DB_PATH, check_same_thread=True)
 
 
+# A status surface may wait a moment for a busy store; it may not wait the
+# write path's thirty seconds. WAL readers do not queue behind a writer at all,
+# so this is a backstop rather than an expected cost -- but SQLite's default of
+# zero fails instantly on the one case where a short wait would have succeeded.
+_READ_ONLY_BUSY_TIMEOUT_MS = 2000
+
+
+def _open_db_readonly():
+    """Open the store read-only: no creation, no migration, no long wait.
+
+    ``_open_db`` is the *write* path. ``memory_store.connect`` sets
+    ``busy_timeout=30000``, runs ``PRAGMA journal_mode=WAL`` (which takes a
+    brief exclusive lock) and then ``init_db`` under ``BEGIN IMMEDIATE``. For a
+    caller that is about to write, all three are correct. For one that only
+    wants a count they are not: on a machine with no store yet it CREATES a
+    ~200KB database and migrates the schema, and with a second Sonder process
+    live it can block for up to thirty seconds on that process's write lock.
+
+    A block is not an exception. No ``try`` around the call can shorten it, so
+    a read-only caller cannot make the write path safe by catching things --
+    it has to not take the write path. Hence this one: ``mode=ro`` raises on a
+    missing database instead of conjuring one, runs no migration, and cannot
+    write even if a later edit asks it to.
+
+    Raises on a missing or unreadable store, which callers must treat as
+    ignorance rather than as a pass.
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(
+        # .resolve() before .as_uri(): sqlite3 resolves a relative path against
+        # the process cwd, but as_uri() refuses one outright. Without this a
+        # relative SONDER_DB made this opener report "could not be read" while
+        # _open_db on the same page read the store fine -- one page, two
+        # contradicting verdicts. Failing closed is a property of the verdict,
+        # not of a report that argues with itself.
+        "%s?mode=ro" % Path(_DB_PATH).resolve().as_uri(),
+        uri=True,
+        check_same_thread=True,
+    )
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=%d" % _READ_ONLY_BUSY_TIMEOUT_MS)
+    except Exception:
+        conn.close()
+        raise
+    return conn
+
+
 def with_footer(text, interaction_id):
     current = activity_tracker.current()
     activity = activity_tracker.format_response(current) if current else ""
@@ -801,6 +903,80 @@ TRACE_SYSTEM = (
 )
 
 
+def _deployment_authenticates_callers() -> bool:
+    """True when this runtime can serve more than one identity.
+
+    Mirrors sonder_serve's auth-mode resolution without importing it (that
+    would be circular). Any of these means callers are distinguishable, so a
+    tool returning one caller's data to another is a real disclosure:
+    SONDER_AUTH_MODE set at all, an API key configured, or accounts required.
+    Absent all three the deployment is `local-open` -- a single operator on
+    loopback, where there is no second party to protect.
+    """
+    if os.environ.get("SONDER_AUTH_MODE", "").strip():
+        return True
+    if os.environ.get("SONDER_API_KEY", "").strip():
+        return True
+    return str(os.environ.get("SONDER_REQUIRE_ACCOUNT", "")).strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _developer_gate(tool_name: str, token: str, started):
+    """Refusal text when the caller may not read another caller's data, else None.
+
+    Deliberately NOT `if token:` -- that shape checks the token only when one
+    happens to be supplied, so omitting it skips the check entirely. It reads
+    like a gate and fails open. On any deployment that authenticates callers a
+    developer token is required; unauthenticated ones are refused rather than
+    waved through.
+    """
+    if not _deployment_authenticates_callers():
+        return None
+    account = _admin_account_from_token(token) if token else None
+    ok, msg = admin_auth.require(account, "developer")
+    if ok:
+        return None
+    _record_direct_tool(tool_name, {}, ok=False, started=started)
+    return "refused: %s." % msg
+
+
+_TURN_TRACES = collections.deque(maxlen=8)
+
+
+def _capture_turn(model, tier, trace_ctx, prompt, response, iid=None):
+    """Keep the last few turns' pipeline state so a turn can be debugged after it.
+
+    ``/trace on`` already prints all of this -- the assembled prompt, the
+    lessons retrieved, the tier -- but only for turns run *after* you thought
+    to enable it. That is the wrong way round for debugging: you want the
+    trace for the turn that already surprised you, and reproducing it is
+    exactly what is hard when the behaviour is intermittent.
+
+    ``_answer`` returns ``trace_ctx`` on every turn regardless of the flag, so
+    this state is built and then thrown away. Keeping a bounded ring of it in
+    memory costs nothing and makes ``turn_inspect`` retrospective. Nothing is
+    written to disk; the buffer dies with the process.
+    """
+    if not isinstance(trace_ctx, dict):
+        return
+    try:
+        _TURN_TRACES.append({
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "model": str(model or ""),
+            "tier": str(tier or ""),
+            "interaction_id": str(iid or ""),
+            "prompt": str(prompt or "")[:4000],
+            "augmented_prompt": str(trace_ctx.get("augmented_prompt") or "")[:16000],
+            "lessons": [str(x)[:400] for x in (trace_ctx.get("lessons") or [])][:20],
+            "facts_omitted": int(trace_ctx.get("facts_omitted") or 0),
+            "response_head": str(response or "")[:2000],
+        })
+    except Exception:
+        # Debug bookkeeping must never break the answer path it observes.
+        pass
+
+
 def _format_trace(model, tier, params, trace):
     lessons = trace.get("lessons", [])
     lines = [
@@ -812,6 +988,11 @@ def _format_trace(model, tier, params, trace):
     ]
     for lesson_text in lessons:
         lines.append("   - %s" % lesson_text)
+    # A bounded facts block that drops entries must say so on the surface an
+    # operator actually reads, not only inside the prompt text.
+    facts_omitted = int(trace.get("facts_omitted") or 0)
+    if facts_omitted:
+        lines.append("stored facts omitted by the block bound: %d" % facts_omitted)
     lines.append("--- exact prompt sent to the model ---")
     lines.append(trace.get("augmented_prompt", ""))
     lines.append("=== END TRACE ===")
@@ -844,7 +1025,7 @@ def resolve_sonder_model(strict=False):
 def _make_generate(
     model, system, temperature, num_predict, num_ctx, cloud=False, timeout=None,
     cancel_check=None, accept_native_tool_calls=False,
-    compact_cloud_reasoning=False,
+    compact_cloud_reasoning=False, schema=None,
 ):
     """Build a generate(prompt, history) closure for `model`.
 
@@ -852,6 +1033,12 @@ def _make_generate(
     (they're VRAM/local-context knobs the remote tier doesn't take), matching how the
     non-learning cloud path posts.  The opt-in agent flags accept one canonical
     native tool call and keep hosted reasoning compact for a small JSON contract.
+
+    `schema` is a JSON Schema object handed to Ollama as the decoder-side
+    ``format`` constraint. It is omitted from the payload entirely when None, so
+    an unconstrained call posts exactly the bytes it always did. Constraining
+    the decoder is not the same as verifying the result -- see
+    `_require_schema_match`, which callers apply to the returned text.
     """
     cloud = bool(cloud or _is_cloud_model_name(model))
 
@@ -876,6 +1063,8 @@ def _make_generate(
             options = _local_model_options(temperature, prediction_limit, num_ctx)
         payload = {"model": model, "messages": messages, "stream": False,
                    "options": options}
+        if schema is not None:
+            payload["format"] = schema
         if cloud:
             _apply_cloud_thinking_policy(
                 payload, model, compact=compact_cloud_reasoning,
@@ -1258,6 +1447,64 @@ def _runtime_identity_block() -> str:
     )
 
 
+# The mutable, disk-backed parts of the system prompt, pinned for one turn.
+#
+# One turn can build the system prompt more than once, and each build re-read
+# system_profile.md, the emotion vectors and the goal store from disk.
+# Measured: a workbench-agent turn builds it twice (the agent loop, then the
+# negative-claim reviewer at finalization) and a routed work request builds it
+# three times (execution-mode router, then the agent, then that reviewer).
+# Every one of those prompts is sent to a model -- none is discarded -- so this
+# cannot be fixed by dropping a build. With an edit landing between two reads,
+# one turn told the router "never use the network" and, in the same turn, told
+# the agent "always use the network".
+#
+# Per-REQUEST freshness is deliberate: system_profile.py exists so an operator
+# can edit standing instructions while the server runs. Per-TURN consistency is
+# what was missing, so the parts are read once per turn and reused, not cached
+# for the life of the process.
+#
+# _runtime_identity_block() is deliberately NOT pinned. It names the model
+# answering THIS call, and the two consumers in a routed turn can run on
+# different tiers; pinning it would make the second prompt state the first
+# one's model, which is the exact failure that block exists to prevent.
+_SYSTEM_CONTEXT = threading.local()
+
+
+def _read_system_context():
+    """Read the disk-backed system-prompt parts: (profile, emotions, goal)."""
+    profile = system_profile.system_prompt()
+    emotions = emotion_vectors.system_prompt()
+    # An active goal is re-stated every turn so a long objective cannot erode
+    # into whatever fits the current turn. Fail-soft: goal bookkeeping must
+    # never be able to break a conversation.
+    try:
+        import goal_store
+        goal_block = goal_store.context_block()
+    except Exception:
+        goal_block = ""
+    return profile, emotions, goal_block
+
+
+@contextlib.contextmanager
+def _stable_system_context():
+    """Pin the disk-backed system-prompt parts for the duration of one turn.
+
+    Thread-local, so concurrent turns never share a pin, and re-entrant: a lane
+    nested inside an already-pinned turn (the workbench agent under the
+    execution router) keeps the outer turn's reading instead of taking a fresh
+    one. Always released, so the next turn reads from disk again.
+    """
+    if getattr(_SYSTEM_CONTEXT, "parts", None) is not None:
+        yield
+        return
+    _SYSTEM_CONTEXT.parts = _read_system_context()
+    try:
+        yield
+    finally:
+        _SYSTEM_CONTEXT.parts = None
+
+
 def _build_system(system, trace, persona):
     """Compose the effective system prompt from a base `system`, optional trace
     instruction, optional persona, editable profile, and emotion vectors."""
@@ -1269,16 +1516,10 @@ def _build_system(system, trace, persona):
         effective_system = (
             "%s\n\n%s" % (persona_prompt, effective_system) if effective_system else persona_prompt
         )
-    profile = system_profile.system_prompt()
-    emotions = emotion_vectors.system_prompt()
-    # An active goal is re-stated every turn so a long objective cannot erode
-    # into whatever fits the current turn. Fail-soft: goal bookkeeping must
-    # never be able to break a conversation.
-    try:
-        import goal_store
-        goal_block = goal_store.context_block()
-    except Exception:
-        goal_block = ""
+    # Outside a pinned turn this is an ordinary fresh read, so a single-build
+    # caller behaves exactly as before.
+    parts = getattr(_SYSTEM_CONTEXT, "parts", None)
+    profile, emotions, goal_block = parts or _read_system_context()
     return _join_system_parts(
         _runtime_identity_block(), profile, emotions, goal_block, effective_system
     )
@@ -1632,12 +1873,42 @@ def _training_command(arg: str) -> str:
 def _selfmod_test_commands(run, explicit_tests):
     import shlex
     workspace = Path(run["workspace_path"])
-    python_files = [path for path in run["files"] if path.endswith(".py") and (workspace / path).is_file()]
-    syntax = [sys.executable, "-m", "py_compile", *python_files] if python_files else [sys.executable, "-c", "print('no Python syntax targets')"]
+    declared_python = sorted(path for path in run["files"] if path.lower().endswith(".py"))
+    present_python = [path for path in declared_python if (workspace / path).is_file()]
+    absent_python = [path for path in declared_python if not (workspace / path).is_file()]
+    if present_python:
+        syntax = [sys.executable, "-m", "py_compile", *present_python]
+    elif declared_python:
+        # `.is_file()` used to empty this list silently and the required syntax
+        # check degraded to `print('no Python syntax targets')` -- exit 0,
+        # recorded as passing. The list empties exactly when the candidate
+        # DELETED its declared modules, and deletion is the shape an automated
+        # repair loop is most likely to produce, so the one change that most
+        # needed a syntax gate was the one that skipped it.
+        syntax = [sys.executable, "-c", "raise SystemExit(%r)" % (
+            "selfmod syntax gate: every declared Python target is absent from the "
+            "candidate workspace (%s). A deletion-only change has nothing to compile "
+            "in place, and an empty target set is a refusal, not a pass. Re-scope the "
+            "run so a surviving module carries the change, or take the deletion "
+            "through an explicit maintenance review."
+            % ", ".join(absent_python)
+        )]
+    else:
+        syntax = [sys.executable, "-c", "raise SystemExit(%r)" % (
+            "selfmod syntax gate: this run declares no Python file (%s), so the "
+            "required syntax check has nothing to compile. An empty target set is a "
+            "refusal, not a pass." % (", ".join(run["files"]) or "no files")
+        )]
     targeted = shlex.split(explicit_tests[0], posix=os.name != "nt") if explicit_tests else [sys.executable, "-c", "raise SystemExit('explicit reproducing/targeted test required')"]
     regression = [sys.executable, "-m", "pytest", "-q"]
-    smoke = [sys.executable, "-c", "import pathlib; assert pathlib.Path('.').is_dir(); print('selfmod smoke ok')"]
-    commands = [("syntax", syntax), ("targeted", targeted), ("regression", regression), ("smoke", smoke)]
+    # `smoke` is deliberately NOT built here. It used to be
+    #     python -c "import pathlib; assert pathlib.Path('.').is_dir(); ..."
+    # run with the candidate workspace as cwd -- a required gate that could not
+    # fail. It is now selfmod.record_smoke(), which imports the candidate in a
+    # child process and must return a SHA-256 receipt over the bytes it loaded.
+    # It lives in selfmod.py because the receipt has to be computed by the
+    # recording process from the workspace, and never handed to the probe.
+    commands = [("syntax", syntax), ("targeted", targeted), ("regression", regression)]
     if run["maintenance_authorized"]:
         security = shlex.split(explicit_tests[1], posix=os.name != "nt") if len(explicit_tests) > 1 else [sys.executable, "-c", "raise SystemExit('explicit protected security test required')"]
         commands.append(("security", security))
@@ -1752,6 +2023,10 @@ def _execute_selfmod_run(run_id, explicit_tests=None):
         selfmod.begin_testing(run_id)
         for kind, command in test_commands:
             selfmod.record_test(run_id, kind, command)
+        # review() requires a passing `smoke`; this is what supplies it. It runs
+        # the candidate rather than describing it, so it is recorded here rather
+        # than being one more argv in the list above.
+        selfmod.record_smoke(run_id)
         selfmod.review(run_id)
         return selfmod.format_run(run_id) + "\n\nAgent evidence:\n" + output
     except Exception as exc:
@@ -1898,12 +2173,39 @@ def _goal_command(arg: str) -> str:
         return "ERROR: %s" % exc
 
 
-def _selfmod_command(arg: str, *, repository_root="") -> str:
+# The ``/selfmod`` actions that write the *live* source tree, as opposed to the
+# isolated candidate workspace. ``plan``/``run``/``approve`` stay out: they edit
+# and grade a copy, and nothing they do survives without a ``deploy``.
+#
+# The chain gate above already grades ``/selfmod`` ``dangerous``, which is what
+# makes ``plan`` refuse it at every surface. This second gate adds the one thing
+# that grade alone could not say: that for *these two* actions, "nobody was
+# available to ask" must resolve to no. Keyed on the action rather than the
+# command because ``/selfmod status`` arrives at the same entry point, and
+# refusing a status read unattended would be the over-refusal this gate exists
+# to avoid.
+_SELFMOD_SOURCE_WRITING_ACTIONS = frozenset({"deploy", "rollback"})
+
+
+def _selfmod_command(arg: str, *, repository_root="", operator_approved=False) -> str:
     text = str(arg or "status").strip() or "status"
     action, _, rest = text.partition(" ")
     action = action.lower()
     rest = rest.strip()
     root = Path(repository_root or Path(__file__).resolve().parent).resolve()
+    if action in _SELFMOD_SOURCE_WRITING_ACTIONS and not operator_approved:
+        # Source replacement is the one dangerous operation that must never
+        # inherit an unattended mode's normal ask-to-allow degradation.  The
+        # only unattended escape hatch is a written per-tool allow rule; the
+        # other is an actual console approval passed by the REPL.
+        rule_action, _ = permission_modes._rule_action_for("selfmod", None)
+        if rule_action != permission_modes.ALLOW:
+            mode = permission_modes.current_mode()
+            return (
+                "refused /selfmod %s: this writes Sonder's own source and "
+                "requires a console operator approval, or an explicit allow "
+                "rule via /permissions (mode: %s)"
+            ) % (action, permission_modes.MODE_LABELS.get(mode, mode))
     try:
         if action in {"status", "show", "list"}:
             return selfmod.format_status()
@@ -1966,6 +2268,18 @@ def _selfmod_command(arg: str, *, repository_root="") -> str:
             run_id, _, reason = rest.partition(" ")
             return selfmod.format_run(selfmod.reject(run_id, reason or "explicit user rejection")["id"])
         if action == "deploy":
+            # This command proves the new bytes import and that `status()` does
+            # not raise. It does NOT prove the server answers: `status()` catches
+            # `ModelCallError`/`URLError` and *returns* the error as a string, so
+            # this exits 0 with "ERROR contacting Ollama..." in its output, which
+            # nothing reads. Do not grow claims for it.
+            #
+            # It is also deliberately NOT the check that the deployment can be
+            # undone: a `--maintenance` run can rewrite `selfmod.py` and
+            # `selfmod_recover.py` in one deploy, and this command passed on a
+            # tree whose rollback was broken. `selfmod.deploy` now dry-runs both
+            # rollback routes itself, unconditionally, so that property cannot be
+            # lost by editing the argv here or by a caller that passes none.
             run = selfmod.deploy(rest, health_command=[sys.executable, "-c", "import server; print(server.status())"])
             module_names = {
                 Path(path).stem for path in run["files"]
@@ -1996,13 +2310,60 @@ def _selfmod_command(arg: str, *, repository_root="") -> str:
         return "ERROR: %s" % exc
 
 
-def control_command(prompt: str, history=None, session="", project=""):
+def _control_tool_refusal(tools, label):
+    """The permission gate for ``control_command``: "" to proceed, else a refusal.
+
+    ``interactive=False``: nothing that reaches this function has a console
+    attached. The console prompts at ``sonder_repl._named_command_gate``
+    *before* forwarding here, and the other two callers -- the app's slash
+    chain and ``answer_with_history`` -- have nobody to ask. So ``ask``
+    degrades to allow and only a ``deny`` rule and ``plan`` refuse, which is
+    what "preserve current behaviour" requires of a path this widely reached.
+
+    The exemption comes from ``decide_for_caller`` rather than being repeated
+    here. This surface is one a person drives, so it carries it.
+    """
+    for tool in tools:
+        decision = permission_modes.decide_for_caller(
+            tool, interactive=False, gate_control_exempt=True,
+        )
+        if decision is None:
+            continue
+        if decision.action == permission_modes.DENY:
+            return "refused %s: %s (mode: %s)" % (
+                label, decision.reason,
+                permission_modes.MODE_LABELS.get(decision.mode, decision.mode),
+            )
+    return ""
+
+
+def control_command(prompt: str, history=None, session="", project="",
+                    operator_approved=False):
     """Handle safe slash commands before a prompt reaches the model.
 
     Client layers have richer commands like /run that depend on their local last
     response. This guard catches read-only/status commands for direct MCP/API
     calls too, so `/quality` and `/context` never get treated as ordinary model
     prompts.
+
+    Gated at the top, because this chain has three callers and only two of them
+    gate before forwarding. ``sonder_repl`` and ``sonder_serve`` both consult
+    their map first; ``answer_with_history`` -- the ordinary chat path, and the
+    one an MCP client reaches through the ``sonder`` tool -- passes the user's
+    raw prompt straight in, so all 97 branches here were reachable ungated from
+    it. Re-deciding on the two paths that already gated is free and cannot
+    double-prompt: nothing here prompts, and a caller with nobody to ask gets
+    ``allow`` for anything the mode merely asks about.
+
+    ``operator_approved`` is the one place that last sentence stops being
+    harmless. ``/selfmod deploy`` refuses to take "nobody to ask" for yes (see
+    ``_SELFMOD_SOURCE_WRITING_ACTIONS``), so the console -- which really did ask,
+    at ``sonder_repl._named_command_gate``, and got an answer -- has to be able
+    to say so, or re-deciding here would silently overrule the person who
+    approved. It defaults to False and is passed only by ``sonder_repl``, and
+    only when a real operator is attached; ``control_command`` is not a
+    registered tool and is not in the catalog, so no model can reach this
+    argument and grant itself the approval.
     """
     text = (prompt or "").strip()
     if not text.startswith("/"):
@@ -2010,6 +2371,14 @@ def control_command(prompt: str, history=None, session="", project=""):
     parts = text.split(None, 1)
     cmd = parts[0].lower()
     arg = parts[1] if len(parts) > 1 else ""
+
+    try:
+        chain_tools = command_catalog.console_tools().get(cmd, ())
+    except command_catalog.CatalogUnavailable as exc:
+        return "refused %s: %s" % (cmd, exc)
+    refusal = _control_tool_refusal(chain_tools, cmd)
+    if refusal:
+        return refusal
     if cmd == "/":
         # A bare slash is the "what can I type" gesture.
         return command_catalog.format_matches("")
@@ -2036,7 +2405,7 @@ def control_command(prompt: str, history=None, session="", project=""):
     if cmd in ("/training", "/weighttraining"):
         return _training_command(arg)
     if cmd in ("/selfmod", "/selfmodify"):
-        return _selfmod_command(arg)
+        return _selfmod_command(arg, operator_approved=operator_approved)
     if cmd in ("/goal", "/goals"):
         return _goal_command(arg)
     if cmd in ("/ensemble",):
@@ -2056,7 +2425,9 @@ def control_command(prompt: str, history=None, session="", project=""):
     if cmd in ("/report", "/endreport"):
         latest = activity_tracker.latest()
         return "%s\n\n%s" % (
-            activity_tracker.format_end_report(latest),
+            activity_tracker.format_end_report(
+                latest, calibration_line=_agent_end_report_standing_line(),
+            ),
             activity_tracker.format_transcript(latest),
         )
     if cmd in ("/inventory", "/workspace"):
@@ -2208,14 +2579,38 @@ def control_command(prompt: str, history=None, session="", project=""):
     # just the hand-written slice, in reach of the console, app, and API. A
     # slash line that names no known tool still returns None and reaches the
     # model unchanged, so ordinary prose beginning with "/" is unaffected.
+    #
+    # Gated, like the console's fall-through and the app's, and for the same
+    # reason all three need their own: the branch chain above is covered by
+    # the console map, keyed on the *named command*, while this path is
+    # reached by the *tool's own name*, which no named command covers. This
+    # copy is reached from ``answer_with_history`` with the user's raw prompt,
+    # so a chat line reading ``/file_delete path=x dry_run=false`` ran the
+    # tool with nothing in front of it -- under ``plan``, and through a
+    # ``deny`` rule.
+    #
+    # ``interactive=False``: nothing here has a console attached. The
+    # console's own prompt already happened at
+    # ``sonder_repl._named_command_gate`` before it forwarded, and the chat
+    # path has nobody to ask -- so ``ask`` degrades to allow and only a
+    # ``deny`` rule and ``plan`` refuse, which is what "preserve current
+    # behaviour" requires of a path this widely reached.
     try:
         parsed = command_catalog.parse_invocation(text)
     except ValueError as exc:
         return str(exc)
+    except command_catalog.CatalogUnavailable as exc:
+        # This is a RuntimeError, so the ``except ValueError`` above let it
+        # out -- onto the ordinary chat path, which reaches this function
+        # unguarded and has no handler for it. Refuse in-band instead.
+        return "refused %s: %s" % (cmd, exc)
     if parsed:
         tool, kwargs = parsed
         handler = globals().get(tool)
         if callable(handler):
+            refusal = _control_tool_refusal((tool,), "/" + tool)
+            if refusal:
+                return refusal
             try:
                 return str(handler(**kwargs))
             except TypeError as exc:
@@ -2409,17 +2804,33 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
             if project is not None else []
         )
         facts = _preference_facts(conn, prompt, project=project)
-        if project:
-            facts.extend(f["text"] for f in memory_store.facts_for_project(conn, project))
+        # Kept SEPARATE from the preferences rather than appended to them. The
+        # facts block is bounded, and a single list spent in order let twelve
+        # preferences evict every operator-authored project fact -- including
+        # the recall canaries -- because _preference_facts' cap is exactly the
+        # block's cap. orchestrator.select_facts draws the two round-robin so
+        # neither source can starve the other by call order.
+        # Newest first. facts_for_project is ORDER BY ts ASC (and other callers
+        # want that chronological order, so it stays as it is), but the block
+        # is bounded: fed oldest-first, a project holding more facts than the
+        # round-robin floor fills the block with its oldest rows and drops the
+        # newest. A fact someone just stored is the newest row in the project
+        # by definition, so oldest-first makes recency the thing that loses.
+        project_facts = (
+            [f["text"] for f in reversed(memory_store.facts_for_project(conn, project))]
+            if project else []
+        )
         retrieve_fn = retriever.retrieve
     else:
         recalls = None
         facts = None
+        project_facts = None
         retrieve_fn = _no_retrieve
     if trace:
         resp, iid, tctx = orchestrator.run_with_learning_traced(
             conn, prompt, tier, gen, retrieve_fn=retrieve_fn, history=history,
-            recalls=recalls, facts=facts, session_id=session_id, task_embedding=blob,
+            recalls=recalls, facts=facts, project_facts=project_facts,
+            session_id=session_id, task_embedding=blob,
             project=project,
             project_explicit=True,
             task_embedding_model=embedding_provenance.get("model"),
@@ -2433,7 +2844,8 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
         return resp, iid, tctx
     resp, iid = orchestrator.run_with_learning(
         conn, prompt, tier, gen, retrieve_fn=retrieve_fn, history=history,
-        recalls=recalls, facts=facts, session_id=session_id, task_embedding=blob,
+        recalls=recalls, facts=facts, project_facts=project_facts,
+        session_id=session_id, task_embedding=blob,
         project=project,
         project_explicit=True,
         task_embedding_model=embedding_provenance.get("model"),
@@ -2577,8 +2989,15 @@ def _prepare_lesson_candidate_bounded(interaction, signal):
     )
 
 
-def _record_outcome_and_maybe_distill(interaction_id, signal):
-    """Atomically record an outcome and run at most one claimed distillation."""
+def _record_outcome_and_maybe_distill(interaction_id, signal, *, source):
+    """Atomically record an outcome and run at most one claimed distillation.
+
+    ``source`` is required and keyword-only (#62): every caller must name the
+    writing path that produced the verdict, so that a machine-graded result and
+    a caller's judgement stop being the same row. It is deliberately NOT a
+    parameter of the ``record_outcome`` MCP tool -- provenance a caller can
+    choose is provenance a caller can misstate.
+    """
     claim_token = memory_store.new_id()
     owner_pid = os.getpid()
     owner_state, owner_identity = process_liveness.probe_process(owner_pid)
@@ -2603,6 +3022,7 @@ def _record_outcome_and_maybe_distill(interaction_id, signal):
                 interaction_id,
                 signal,
                 score,
+                source=source,
                 claim_token=claim_token,
                 owner_pid=owner_pid,
                 owner_identity=owner_identity,
@@ -2701,6 +3121,25 @@ def _record_outcome_and_maybe_distill(interaction_id, signal):
         return result
 
 
+def _stored_outcome_source(interaction_id, signal):
+    """Provenance already on record for this (interaction, signal), or unknown.
+
+    Used by retry paths, which re-assert an outcome somebody else judged. The
+    stored row is immutable under INSERT OR IGNORE, so this only decides what a
+    retry would claim if the row had vanished -- and the honest answer there is
+    that we no longer know who judged it.
+    """
+    try:
+        conn = _open_db()
+        try:
+            stored = memory_store.outcome_row_source(conn, interaction_id, signal)
+        finally:
+            conn.close()
+    except Exception:
+        stored = None
+    return stored or reward.SOURCE_UNKNOWN
+
+
 def _drain_deferred_distillations(limit=16):
     """Retry deferred lesson distillations once the fleet is quiet.
 
@@ -2711,7 +3150,7 @@ def _drain_deferred_distillations(limit=16):
     no-ops, so re-recording the original signal is safe.
     """
     if master_orchestrator.active_model_call_count():
-        return {"drained": 0, "stored": 0, "deferred": 0}
+        return _EMPTY_DRAIN.copy()
     try:
         conn = _open_db()
         try:
@@ -2719,19 +3158,43 @@ def _drain_deferred_distillations(limit=16):
         finally:
             conn.close()
     except Exception:
-        return {"drained": 0, "stored": 0, "deferred": 0}
-    stored = deferred = 0
+        return _EMPTY_DRAIN.copy()
+    stored = deferred = failed = skipped = 0
     for interaction_id, signal in pending:
         if signal not in reward.VALID_SIGNALS:
+            skipped += 1
             continue
         try:
-            result = _record_outcome_and_maybe_distill(interaction_id, signal)
+            # Re-asserting an outcome that already exists. The stored row wins
+            # (INSERT OR IGNORE under the unique index), so carry its recorded
+            # provenance forward rather than restamping the retry's own; if the
+            # row is somehow gone, `unknown` is the honest answer, not a guess
+            # that this drain was the original judge.
+            result = _record_outcome_and_maybe_distill(
+                interaction_id, signal,
+                source=_stored_outcome_source(interaction_id, signal),
+            )
         except Exception:
+            # Counted, never merely skipped. Swallowing this made `stored` a
+            # floor reported as a total: a batch whose every item raised
+            # returned `stored: 0, deferred: 0`, which is byte for byte what a
+            # batch that legitimately stored nothing looks like. Measured, that
+            # is exactly how an over-narrow test double hid its own TypeError
+            # as `stored == 0` -- inside the test written to catch the
+            # floor-as-total shape. The drain still must not break the run it
+            # is servicing, so the exception is still absorbed; what changes is
+            # that it can no longer be absorbed *silently*.
+            failed += 1
             continue
         if result.get("lesson_id"):
             stored += 1
         elif result.get("distillation_deferred"):
             deferred += 1
+        else:
+            # Returned, but claimed neither a lesson nor a deferral. Without
+            # this the buckets would not sum to the batch and the difference
+            # would be invisible again, one bucket further along.
+            skipped += 1
     # `deferred` counts only what stayed deferred inside this LIMIT-bounded
     # batch, which answers "how much of this batch failed" -- not "how big is
     # the backlog". Draining 16 of 500 successfully reported "still deferred 0"
@@ -2754,14 +3217,48 @@ def _drain_deferred_distillations(limit=16):
         "drained": len(pending),
         "stored": stored,
         "deferred": deferred,
+        "failed": failed,
+        "skipped": skipped,
         "backlog": backlog,
     }
+
+
+# Every bucket a drain can report, so an early return has the same shape as a
+# real one and a caller can never read a missing key as a zero.
+_EMPTY_DRAIN = {
+    "drained": 0, "stored": 0, "deferred": 0, "failed": 0, "skipped": 0,
+    "backlog": None,
+}
 
 
 def _drain_backlog_text(drain):
     """Render the drain's remaining backlog, or say it could not be read."""
     backlog = drain.get("backlog")
     return "unknown (count query failed)" if backlog is None else str(backlog)
+
+
+def _drain_summary_text(drain):
+    """The campaign's one line about the drain.
+
+    Rendered here rather than at the two call sites that used to format it
+    identically, so a bucket added to the drain cannot reach one report and
+    miss the other. The healthy line is byte-identical to what it has always
+    been; the failure clause is appended only when non-zero, because an
+    unattended nightly run keeps these lines and a drain whose items raised
+    must not read as a quiet success.
+    """
+    text = (
+        "deferred distillations drained: %d (lessons stored %d, still "
+        "deferred in batch %d, backlog remaining %s)"
+        % (
+            drain.get("drained", 0), drain.get("stored", 0),
+            drain.get("deferred", 0), _drain_backlog_text(drain),
+        )
+    )
+    if drain.get("failed"):
+        text += " -- failed %d (recorder raised; these are NOT deferred and " \
+                "will be retried)" % drain["failed"]
+    return text
 
 
 def _campaign_headline(
@@ -2855,7 +3352,12 @@ def _record_code_gate_failure(interaction_id):
     if not interaction_id:
         return
     try:
-        _record_outcome_and_maybe_distill(interaction_id, "failed")
+        # `machine`: the runtime ran the reply's own code and it did not work.
+        # Nobody reviewed anything, so this must not count toward the reviewed
+        # rate -- which, before provenance existed, it silently did.
+        _record_outcome_and_maybe_distill(
+            interaction_id, "failed", source=reward.SOURCE_MACHINE,
+        )
     except Exception as exc:
         with contextlib.suppress(Exception):
             activity_tracker.record_event(
@@ -3627,6 +4129,226 @@ def _get(path: str) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _parse_schema_arg(schema):
+    """Normalize an offload `schema` argument to a schema object, or None.
+
+    Accepts an already-parsed object (internal callers) or the JSON text the
+    tool surface passes (matching how every other structured argument crosses
+    that boundary). A blank string means "no schema", so the unconstrained path
+    stays the default. Anything else that is not a JSON object is a caller
+    error and is raised as a typed configuration failure -- never quietly
+    dropped, because dropping it would run the call unconstrained while the
+    caller believed it was constrained.
+    """
+    if schema is None:
+        return None
+    if isinstance(schema, dict):
+        return schema
+    if isinstance(schema, str):
+        text = schema.strip()
+        if not text:
+            return None
+        try:
+            parsed = json.loads(text)
+        except ValueError as exc:
+            raise ModelCallError(
+                "configuration",
+                "schema is not valid JSON: %s" % exc,
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise ModelCallError(
+                "configuration",
+                "schema must be a JSON object, got %s" % type(parsed).__name__,
+            )
+        return parsed
+    raise ModelCallError(
+        "configuration",
+        "schema must be a JSON object or JSON text, got %s" % type(schema).__name__,
+    )
+
+
+# The complete set of keywords `json_schema_verifier` enforces. Coverage below
+# is the *complement* of this set rather than a list of unsupported keywords
+# somebody remembered to enumerate: a keyword nobody anticipated is reported as
+# unchecked by default instead of being assumed harmless. `tests/
+# test_offload_schema.py` pins both halves against the verifier's real
+# behaviour, so this cannot quietly drift out of step with it.
+_VERIFIED_SCHEMA_KEYWORDS = frozenset({
+    "type", "required", "properties", "items", "enum", "minimum",
+    "minLength", "additionalProperties", "uniqueItems", "pattern",
+})
+
+# How many gaps a disclosure names before it summarizes the rest.
+_MAX_REPORTED_SCHEMA_GAPS = 8
+
+
+def _schema_coverage(value, schema, path, gaps):
+    """Mirror `json_schema_verifier._validate`'s descent, recording what it skips.
+
+    Deliberately walks the *data* as well as the schema, because the verifier's
+    descent is data-dependent: it only enters `properties[key]` when the key is
+    actually present and only applies `items` to elements that exist. A report
+    derived from the schema alone would claim coverage of branches nothing ever
+    walked.
+
+    The two cases that matter most are absences rather than keywords, and a
+    static list of unsupported keywords would score both as fully covered:
+
+    * a node with no ``type`` -- which includes every ``$ref`` node -- defaults
+      to ``"any"`` in the verifier, accepts literally any value, and never
+      applies its own ``required``/``properties`` either, so the whole subtree
+      goes unchecked;
+    * ``properties``/``required`` written without an explicit ``"type":
+      "object"`` are skipped for the same reason.
+    """
+    if not isinstance(schema, dict):
+        gaps.append((path, "schema node is not an object; nothing was checked"))
+        return gaps
+
+    declared = schema.get("type")
+    if declared is None:
+        reason = (
+            '"$ref" is not followed, so nothing at this node was checked'
+            if "$ref" in schema
+            else 'no "type", so any value is accepted and nothing was checked'
+        )
+        gaps.append((path, reason))
+        return gaps
+    if not isinstance(declared, str) or declared not in json_schema_verifier._TYPE_CHECKS:
+        # A type union -- legal JSON Schema, and honoured by Ollama's decoder --
+        # is not something this verifier can evaluate.
+        gaps.append((path, "type %r is not one this check understands" % (declared,)))
+        return gaps
+
+    unenforced = sorted(set(schema) - _VERIFIED_SCHEMA_KEYWORDS)
+    if unenforced:
+        gaps.append((path, "%s not checked" % ", ".join(unenforced)))
+
+    if declared == "object" and isinstance(value, dict):
+        for key, subschema in (schema.get("properties") or {}).items():
+            if key in value:
+                _schema_coverage(value[key], subschema, "%s.%s" % (path, key), gaps)
+    elif declared == "array" and isinstance(value, list):
+        items_schema = schema.get("items")
+        if items_schema is not None:
+            for index, item in enumerate(value):
+                _schema_coverage(item, items_schema, "%s[%d]" % (path, index), gaps)
+    return gaps
+
+
+def _schema_coverage_gaps(value, schema):
+    """Every part of `schema` the post-hoc check did not actually enforce.
+
+    Total by construction: a walker that raised would leave the caller with no
+    coverage information at all, which is the failure mode this exists to
+    prevent, so an unexpected error is itself reported as total non-coverage.
+    """
+    try:
+        return _schema_coverage(value, schema, "$", [])
+    except Exception as exc:
+        return [("$", "coverage could not be determined: %s" % exc)]
+
+
+def _format_schema_gaps(gaps):
+    shown = ["%s (%s)" % (path, reason) for path, reason in gaps[:_MAX_REPORTED_SCHEMA_GAPS]]
+    remaining = len(gaps) - len(shown)
+    if remaining > 0:
+        shown.append("and %d more" % remaining)
+    return "; ".join(shown)
+
+
+def _with_schema_coverage(text, gaps):
+    """Append what the check could not verify, or return `text` untouched.
+
+    A fully-checkable schema -- the common `type`/`required`/`properties`/
+    `items` case -- returns byte-for-byte clean JSON. Anything less carries the
+    shortfall with it, because a caller who cannot see that the check was
+    partial will read its silence as a pass.
+    """
+    if not gaps:
+        return text
+    return "%s\n[schema_unverified: %s]" % (text, _format_schema_gaps(gaps))
+
+
+def _require_schema_match(text, schema):
+    """Re-check a schema-constrained generation, and report what that covered.
+
+    Ollama's ``format`` is applied by the backend we asked, which makes it a
+    claim rather than evidence: a stale server, a model that ignores the
+    grammar, or a truncated decode all produce text that never went through the
+    constraint we think we imposed. Re-checking it here is cheap and catches
+    that.
+
+    It does **not** make the whole schema ours to guarantee.
+    ``json_schema_verifier`` implements a strict subset -- ``type``,
+    ``required``, ``properties``, ``items`` -- while Ollama's decoder honours
+    full JSON Schema. So `enum`, `minimum`, `additionalProperties`, `$ref` and
+    roughly twenty more are constrained during decoding and *not* re-checked
+    here. Returning silence for those would be the more dangerous failure: it
+    reads as a clean bill of health. This returns ``(data, gaps)`` and the
+    caller discloses the gaps.
+
+    A violation still raises, and is deliberately not repaired, coerced,
+    defaulted or silently re-asked -- rejecting non-conforming output is the
+    entire point of requesting a schema. The failure names every path that did
+    not validate, and the coverage shortfall alongside it, because "at least
+    this was wrong" is not the same claim as "this is all that was wrong".
+
+    Raises only ModelCallError. A schema this check cannot traverse at all is a
+    coverage gap, not a rejection: the decoder still applied it, so refusing the
+    response would remove capability the caller legitimately has.
+    """
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError) as exc:
+        raise ModelCallError(
+            "protocol",
+            "response is not valid JSON despite a schema constraint: %s" % exc,
+        ) from exc
+    gaps = _schema_coverage_gaps(data, schema)
+    try:
+        errors = json_schema_verifier.validate(data, schema)
+    except Exception as exc:
+        return data, gaps + [("$", "the check aborted on this schema: %s" % exc)]
+    if errors:
+        detail = "schema violation: %s" % "; ".join(errors)
+        if gaps:
+            # Keep the machine-readable disclosure even on a rejected reply;
+            # otherwise a partial verifier failure looks like a complete one.
+            detail += " [schema_unverified: %s]" % _format_schema_gaps(gaps)
+        raise ModelCallError("protocol", detail)
+    return data, gaps
+
+
+def _file_schema_rejection(interaction_id):
+    """File a schema violation as a caller-judged `rejected` outcome.
+
+    A schema failure is the rare thing the outcome store is starved of: a
+    negative verdict on delegated work, produced without anyone having to
+    remember to file it. `grounded_outcomes` exists for exactly this -- taking
+    the verdict from the tool that knows the truth instead of asking a human --
+    and this writes through its own `record_fn` seam, `_record_outcome_signal`.
+    It does not go through `grounded_outcomes.attribute`, because that resolves
+    a *plausible* generation from a time-bounded ledger; here the failing
+    interaction id is known exactly, and guessing would be strictly worse.
+
+    `rejected` and not `failed`: `failed` is the machine-graded bucket that the
+    self-generated curriculum floods by more than an order of magnitude, where
+    a real caller-facing rejection is invisible to the only quality figure
+    worth trusting. A conforming response deliberately files nothing -- matching
+    a shape is not evidence that the answer was good, and recording `accepted`
+    for it would raise the reviewed rate on something that never measured
+    quality.
+    """
+    if not interaction_id:
+        return
+    try:
+        _record_outcome_signal(interaction_id, "rejected")
+    except Exception:
+        # Bookkeeping must never mask the schema failure it is describing.
+        pass
+
+
 def _offload_impl(
     prompt: str,
     tier: str = "fast",
@@ -3637,8 +4359,10 @@ def _offload_impl(
     learn: bool = True,
     timeout: int = TIMEOUT,
     cancel_check=None,
+    schema=None,
 ) -> str:
     """Internal offload path; model failures stay typed for orchestrators."""
+    schema = _parse_schema_arg(schema)
     # 0 means "ask the context policy", which the session path already does.
     # This path hardcoded 4096 and so ignored the policy and its env knobs,
     # which cost real capability: an autopilot run inspecting a 524 KB source
@@ -3677,6 +4401,8 @@ def _offload_impl(
             "stream": False,
             "options": options,
         }
+        if schema is not None:
+            payload["format"] = schema
         if cloud:
             _apply_cloud_thinking_policy(payload, model)
         else:
@@ -3722,7 +4448,20 @@ def _offload_impl(
                 "tokens_out": int(tokens_out or 0),
                 "token_source": source,
             }
+            # `ok` describes the model call, which succeeded: the request was
+            # answered and tokens came back. A schema violation is a verdict on
+            # the content, and it is carried by the `rejected` outcome rather
+            # than by recording the transport as failed. The learning path
+            # cannot report otherwise anyway -- `gen` has already recorded
+            # ok=True by the time the check runs -- and an activity feed that
+            # says a schema violation failed on one path and succeeded on the
+            # other measures nothing. Keeping ok=True here also preserves
+            # `response_preview`, which is the offending text a schema failure
+            # most needs.
             ok = True
+            if schema is not None:
+                _, gaps = _require_schema_match(msg, schema)
+                return _with_schema_coverage(msg, gaps)
             return msg
         finally:
             activity_tracker.record_model_call(
@@ -3749,6 +4488,7 @@ def _offload_impl(
             cloud=True,
             timeout=request_timeout,
             cancel_check=cancel_check,
+            schema=schema,
         )
         retrieve_kwargs["retrieve_fn"] = _no_retrieve
     else:
@@ -3767,6 +4507,7 @@ def _offload_impl(
             num_ctx,
             timeout=request_timeout,
             cancel_check=cancel_check,
+            schema=schema,
         )
     conn = _open_db()
     try:
@@ -3775,6 +4516,17 @@ def _offload_impl(
         )
     finally:
         conn.close()
+    if schema is not None:
+        try:
+            _, gaps = _require_schema_match(response, schema)
+        except Exception:
+            # Any failure here means the generation did not deliver what was
+            # asked for, so it must reach the outcome store. Catching only
+            # ModelCallError let anything unforeseen skip the `rejected` write
+            # and go invisible to the exact population this feature feeds.
+            _file_schema_rejection(iid)
+            raise
+        response = _with_schema_coverage(response, gaps)
     return with_footer(response, iid)
 
 
@@ -3788,6 +4540,7 @@ def offload(
     num_ctx: int = 0,
     learn: bool = True,
     timeout: int = TIMEOUT,
+    schema: str = "",
 ) -> str:
     """Offload a self-contained subtask to a local or Ollama-cloud model.
 
@@ -3807,6 +4560,32 @@ def offload(
     Tiers: fast=3B (default), code=7B coder, general=7B instruct,
     cloud-code / cloud-general (METERED, prompt leaves this machine).
     Give a FULLY self-contained prompt (the model can't see this chat or your files).
+
+    schema: optional JSON Schema *as JSON text*, e.g.
+    '{"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}}'.
+    Full JSON Schema is accepted and is applied in full by the model's decoder.
+
+    It is then re-checked here, but only PARTIALLY: the in-process check covers
+    "type", "required", "properties" and "items". Everything else -- "enum",
+    "minimum", "additionalProperties", "$ref", "oneOf", and so on -- is
+    constrained during decoding and NOT re-checked. So is any node without an
+    explicit "type" (every "$ref" node, and "properties" written without
+    "type": "object"), which the check accepts unconditionally.
+
+    What that means for you:
+      - A response failing the re-checked part is REJECTED, with the failing
+        path named. It is never repaired into a passing one and never silently
+        retried.
+      - A response that passes gets back exactly the JSON text, and nothing
+        else, ONLY when the whole schema was re-checkable. Otherwise a
+        '[schema_unverified: <path> (<what went unchecked>)]' line follows the
+        JSON, so partial verification is never handed to you as complete.
+      - Stick to type/required/properties/items if you want the strongest
+        guarantee and clean parseable output.
+
+    Omit schema (the default) and this call behaves exactly as it always has:
+    no format constraint, no checking, raw text back.
+    Small object shapes work far better than deep ones on a 3B/7B local tier.
     """
     _maybe_live_reload()
     try:
@@ -3814,6 +4593,189 @@ def offload(
             prompt=prompt,
             tier=tier,
             system=system,
+            temperature=temperature,
+            num_predict=num_predict,
+            num_ctx=num_ctx,
+            learn=learn,
+            timeout=timeout,
+            schema=schema,
+        )
+    except ModelCallError as error:
+        return _format_model_call_error(error)
+
+
+def _trailing_interaction_id(text):
+    """Read back the id `with_footer` appended, using the footer's own delimiters.
+
+    `parse_interaction_id` only matches the lowercase-hex ids the store happens
+    to mint today. Using it here would mean that the day an id gains a hyphen, a
+    rejection stops being filed -- silently, and in the direction that flatters
+    the numbers, since only negative outcomes are filed from this path.
+    """
+    body = (text or "").rstrip()
+    start = body.rfind(FOOTER_PREFIX)
+    if start < 0 or not body.endswith("]"):
+        return None
+    return body[start + len(FOOTER_PREFIX):-1].strip() or None
+
+
+def _leading_json_object(text):
+    """The JSON object a schema-constrained reply starts with.
+
+    A constrained response is JSON first and footers after -- the interaction-id
+    line, an activity block, a `[schema_unverified: ...]` disclosure. Decoding
+    the leading value instead of matching those trailers means this does not
+    have to know their formats, and cannot be broken by a new one.
+    """
+    body = (text or "").lstrip()
+    try:
+        data, _end = json.JSONDecoder().raw_decode(body)
+    except ValueError as exc:
+        raise ModelCallError(
+            "protocol",
+            "response did not begin with the JSON object the schema required: %s" % exc,
+        ) from exc
+    if not isinstance(data, dict):
+        raise ModelCallError(
+            "protocol",
+            "response was a JSON %s, not the object the schema required"
+            % type(data).__name__,
+        )
+    return data
+
+
+def _extract_grounded_impl(
+    source: str,
+    schema,
+    task: str = "",
+    tier: str = "fast",
+    temperature: float = 0.0,
+    num_predict: int = 1024,
+    num_ctx: int = 0,
+    learn: bool = True,
+    timeout: int = TIMEOUT,
+) -> str:
+    """Internal grounded-extraction path; model failures stay typed."""
+    if not isinstance(source, str) or not source.strip():
+        raise ModelCallError(
+            "configuration",
+            "source text is required: with nothing to ground against, every "
+            "field would be rejected and the call could only waste a generation.",
+        )
+    parsed = _parse_schema_arg(schema)
+    if parsed is None:
+        raise ModelCallError(
+            "configuration",
+            "a schema naming the fields to extract is required; without one there "
+            "is nothing to ground.",
+        )
+    if _is_cloud_tier(tier):
+        # This tool is handed whole source documents, so it stays on tiers that
+        # never leave the machine. `offload` still takes a cloud tier for work
+        # the caller has decided to send there -- nothing that would not already
+        # have gone to the cloud goes there because of this helper.
+        raise ModelCallError(
+            "configuration",
+            "extract_grounded runs on local tiers only (%s), because it sends the "
+            "whole source document to the model. Tier '%s' is a hosted tier."
+            % (", ".join(LOCAL_TIERS), tier),
+        )
+    try:
+        wrapped = grounded_extraction.grounded_schema(parsed)
+    except grounded_extraction.GroundingError as exc:
+        raise ModelCallError("configuration", str(exc)) from exc
+
+    text = _offload_impl(
+        prompt=grounded_extraction.extraction_prompt(source, task),
+        tier=tier,
+        system=grounded_extraction.EXTRACTION_SYSTEM,
+        temperature=temperature,
+        num_predict=num_predict,
+        num_ctx=num_ctx,
+        learn=learn,
+        timeout=timeout,
+        schema=wrapped,
+    )
+    interaction_id = _trailing_interaction_id(text)
+    try:
+        data = _leading_json_object(text)
+        fields = grounded_extraction.verify_grounding(data, source)
+    except grounded_extraction.GroundingError as exc:
+        _file_schema_rejection(interaction_id)
+        raise ModelCallError("protocol", str(exc)) from exc
+    except Exception:
+        _file_schema_rejection(interaction_id)
+        raise
+
+    result = {"fields": fields}
+    # The re-check that ran inside `_offload_impl` covers a subset of JSON
+    # Schema, and Task 1's rule is that a partial check never gets to look like
+    # a complete one. Recomputing the shortfall here -- with the same function
+    # the offload path uses -- keeps the disclosure inside the result object
+    # rather than trailing after it as prose.
+    gaps = _schema_coverage_gaps(data, wrapped)
+    if gaps:
+        result["schema_unverified"] = _format_schema_gaps(gaps)
+    body = json.dumps(result, indent=2, ensure_ascii=False)
+    return with_footer(body, interaction_id) if interaction_id else body
+
+
+@mcp.tool()
+def extract_grounded(
+    source: str,
+    schema: str,
+    task: str = "",
+    tier: str = "fast",
+    temperature: float = 0.0,
+    num_predict: int = 1024,
+    num_ctx: int = 0,
+    learn: bool = True,
+    timeout: int = TIMEOUT,
+) -> str:
+    """Extract fields from text you supply, with each one citing its source span.
+
+    Use this instead of `offload` whenever the answer is supposed to come out of
+    a document you already have. The local models are good at transforming facts
+    you give them and bad at supplying facts you did not: asked to recall, they
+    invent confidently and the output looks exactly like a correct one. A JSON
+    schema alone cannot see that -- an invented value is perfectly schema-valid.
+
+    So every field must come back with the span of `source` that states it, and
+    every span is checked here by literal substring against `source`. A field
+    citing text that is not in your document is REJECTED, by name. Nothing is
+    repaired, defaulted or silently re-asked.
+
+    source: the text to extract from, passed verbatim to a LOCAL tier only.
+      Hosted/cloud tiers are refused: this sends whole documents.
+    schema: JSON Schema text for the FIELDS you want, e.g.
+      '{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}'.
+      Only top-level "properties" are grounded, one citation per field. A field
+      you leave out of "required" may be omitted -- which is the right answer
+      when the source does not state it, and better than forcing an invention.
+
+    On success you get JSON: {"fields": {"<name>": {"value": ..., "quote": ...,
+    "quote_offset": N, "quote_occurrences": N}}}. The offset and the count are
+    computed here from your source, never taken from the model;
+    "quote_occurrences" above 1 means that span appears more than once and does
+    not pin down a single place.
+
+    WHAT THIS DOES NOT PROVE: that the quote supports the value. A model can cite
+    a genuine sentence and attach a wrong value to it, and that passes. This
+    guarantees the field points at text that really is in your source -- read the
+    quote before relying on the value. Comparison is exact, with no whitespace,
+    case or unicode folding, so an honest quote that was reflowed while copying
+    is also rejected; that error is the cheap direction.
+
+    A "schema_unverified" key appears when part of your schema was applied by the
+    decoder but not re-checked in process (see `offload` for which keywords).
+    """
+    _maybe_live_reload()
+    try:
+        return _extract_grounded_impl(
+            source=source,
+            schema=schema,
+            task=task,
+            tier=tier,
             temperature=temperature,
             num_predict=num_predict,
             num_ctx=num_ctx,
@@ -4017,6 +4979,7 @@ def _sonder_impl_serialized(
             num_ctx_eff, session_id, project_id, history, trace=trace,
             tier=tier_label, cloud=cloud, augment=augment,
         )
+        _capture_turn(tgt_model, tier_label, trace_ctx, prompt, response, iid)
         if iid is not None:
             interaction_snapshot = memory_store.get_interaction(conn, iid)
         if session_id and is_first:
@@ -4246,6 +5209,7 @@ def _answer_with_history_impl(
                 session_id, capture_project, history or None, trace=trace,
                 tier=tier_label, cloud=cloud, augment=augment,
             )
+            _capture_turn(model, tier_label, trace_ctx, prompt, response, iid)
             if iid is not None:
                 interaction_snapshot = memory_store.get_interaction(conn, iid)
         else:
@@ -4372,17 +5336,24 @@ def record_outcome(interaction_id: str, signal: str) -> str:
         recorded here is effectively invisible in the reviewed rate.
 
     So if YOU ran the tests and are reporting your own verdict, prefer
-    `accepted` or `rejected` over `tests_passed`/`failed` -- otherwise a real
-    caller judgement lands in the self-marked bucket and stops counting toward
-    the only quality figure anyone should trust. The split is inferred from the
-    signal name; there is no recorded source, so this is a convention the caller
-    has to honour rather than something the runtime can enforce.
+    `accepted` or `rejected` over `tests_passed`/`failed`, because the signal
+    still records WHAT the evidence was.
+
+    WHO judged is no longer a convention you have to honour: every row this
+    tool writes is stamped `source='caller'`, and the runtime's own attribution
+    path stamps `source='machine'`. The reviewed rate now selects on that
+    recorded provenance rather than guessing from the signal name, so a caller
+    judgement can no longer be lost into the self-marked bucket by choosing the
+    wrong signal. There is deliberately no `source` argument here: provenance a
+    caller can choose is provenance a caller can misstate.
     """
     _maybe_live_reload()
     if signal not in reward.VALID_SIGNALS:
         return "ERROR: unknown signal '%s'. Valid: %s." % (
             signal, ", ".join(sorted(reward.VALID_SIGNALS)))
-    result = _record_outcome_and_maybe_distill(interaction_id, signal)
+    result = _record_outcome_and_maybe_distill(
+        interaction_id, signal, source=reward.SOURCE_CALLER,
+    )
     if not result["found"]:
         return "ERROR: no interaction '%s' (already expired or wrong id)." % interaction_id
     verb = "Recorded" if result["outcome_inserted"] else "Already recorded"
@@ -4393,6 +5364,47 @@ def record_outcome(interaction_id: str, signal: str) -> str:
         msg += " Distilled lesson %s." % result["lesson_id"]
     elif result["distillation_deferred"]:
         msg += " Lesson distillation was deferred for retry."
+    return msg
+
+
+def record_self_graded_outcome(interaction_id: str, signal: str) -> str:
+    """Record an outcome the runtime both SET and MARKED (#62).
+
+    ``curriculum_run`` and ``game_ladder`` invent the task, ask the model, run
+    the check, and file the verdict. Every step is the runtime's. They used to
+    call ``record_outcome`` -- the caller-facing tool -- so their rows were
+    indistinguishable from a human judging delegated work, and they are the
+    bulk of the store: measured read-only on the live database, 9,049 of 9,450
+    rows are ``tests_passed``. Left on the caller path they would now be
+    stamped `caller` and would dominate the one figure that is supposed to mean
+    "how good is delegated work", which is the original defect wearing a new
+    column.
+
+    Not an MCP tool on purpose: it is an in-process entry point for the
+    runtime's own drivers, not something a caller can reach to relabel its own
+    verdicts. Being in-process is also why bad input RAISES here instead of
+    returning a stringly ``ERROR:`` signal: there is no protocol boundary to
+    serialize one across, and this repo is actively shrinking that universe
+    (``scripts/check_error_signals.py`` is a shrink-only ratchet).
+    """
+    if signal not in reward.VALID_SIGNALS:
+        raise ValueError(
+            "unknown signal %r; valid: %s"
+            % (signal, ", ".join(sorted(reward.VALID_SIGNALS)))
+        )
+    result = _record_outcome_and_maybe_distill(
+        interaction_id, signal, source=reward.SOURCE_SELF_CURRICULUM,
+    )
+    if not result["found"]:
+        return "no interaction %r (already expired or wrong id)." % (
+            interaction_id,
+        )
+    verb = "Recorded" if result["outcome_inserted"] else "Already recorded"
+    msg = "%s '%s' (reward %+.2f) for %s." % (
+        verb, signal, result["reward"], interaction_id,
+    )
+    if result["lesson_id"]:
+        msg += " Distilled lesson %s." % result["lesson_id"]
     return msg
 
 
@@ -4966,14 +5978,7 @@ def campaign_generate_compile_execute_record(
         )
     drain = _drain_deferred_distillations(limit=max(16, len(results)))
     if drain["drained"]:
-        lines.append(
-            "deferred distillations drained: %d (lessons stored %d, "
-            "still deferred in batch %d, backlog remaining %s)"
-            % (
-                drain["drained"], drain["stored"], drain["deferred"],
-                _drain_backlog_text(drain),
-            ),
-        )
+        lines.append(_drain_summary_text(drain))
     for r in results:
         status = "PASS" if r["ok"] else "FAIL"
         lines.append("[%s] %s attempts=%d iid=%s" % (
@@ -5312,14 +6317,7 @@ def campaign_repo_repair(
         )
     drain = _drain_deferred_distillations(limit=max(16, len(results)))
     if drain["drained"]:
-        lines.append(
-            "deferred distillations drained: %d (lessons stored %d, "
-            "still deferred in batch %d, backlog remaining %s)"
-            % (
-                drain["drained"], drain["stored"], drain["deferred"],
-                _drain_backlog_text(drain),
-            ),
-        )
+        lines.append(_drain_summary_text(drain))
     for r in results:
         status = "PASS" if r["ok"] else "FAIL"
         lines.append("[%s] %s-%d attempts=%d iid=%s%s" % (
@@ -5968,11 +6966,62 @@ def context_compaction_plan(session: str = "", project: str = "") -> str:
     return format_context_compaction_plan(context_compaction_plan_data(session, project))
 
 
+def _permission_mode_context(mode: str) -> str:
+    """The state a rule table cannot show: which mode is in force, and privilege."""
+    return "\n".join([
+        "permission mode: %s -- %s" % (
+            permission_modes.MODE_LABELS.get(mode, mode),
+            permission_modes.MODE_BLURBS.get(mode, ""),
+        ),
+        # Load-bearing, and printed unconditionally on every render: it is
+        # what makes an `ask` row incomplete rather than false for a caller
+        # this surface does not speak for. Defined in permission_modes so the
+        # same sentence reaches /mode and /help too, rather than being a
+        # second copy free to drift.
+        "  %s" % permission_modes.ASK_CAVEAT,
+        _elevation_status_text(),
+    ])
+
+
+def _permission_policy_text(tool_name: str = "") -> str:
+    """The effective policy: the rule, the mode, and which one governs.
+
+    Printing the rule alone was honest only while nothing enforced it. Now that
+    ``permission_modes.decide()`` combines rules with a mode, the rule column
+    can disagree with what happens -- ``status`` shows ``allow`` while ``plan``
+    is in force, and a ``deny`` rule beats ``auto``. So the mode is pinned and
+    the rules loaded exactly once here, and both are pushed into the renderer:
+
+    * once, so the whole table describes one consistent policy rather than
+      re-reading a file that can change between rows, and
+    * injected, so the render honours *this* home instead of the one
+      ``decide()``'s default lookup would resolve for itself.
+
+    ``interactive=True`` is the operator's view: ``ask`` means "you will be
+    asked". The line under the mode says what a caller with nobody to ask gets
+    instead, rather than silently rendering that caller's answer here.
+    """
+    home = sonder_paths.default_home()
+    rules, report = permission_rules.load_report(home)
+    mode = permission_modes.current_mode()
+    lookup = permission_rules.rule_lookup(rules)
+
+    def decide(name: str):
+        return permission_modes.decide(
+            name, interactive=True, mode=mode, rule_lookup=lookup,
+        )
+
+    table = permission_rules.format_policy(
+        home, tool_name, decide=decide, snapshot=(rules, report),
+    )
+    return "%s\n\n%s" % (table, _permission_mode_context(mode))
+
+
 @mcp.tool()
 def permission_policy(tool_name: str = "") -> str:
-    """Show local permission rules, or the matching rule for one tool."""
+    """Show the effective permission decision: the rule, the mode, and which wins."""
     _maybe_live_reload()
-    return permission_rules.format_policy(sonder_paths.default_home(), tool_name)
+    return _permission_policy_text(tool_name)
 
 
 @mcp.tool()
@@ -5998,7 +7047,9 @@ def permission_rule_set(
         permission_rules.add_rule(sonder_paths.default_home(), pattern, action, note)
     except Exception as e:
         return "ERROR: %s" % e
-    return permission_rules.format_policy(sonder_paths.default_home())
+    # Show the same effective view /permissions gives: a rule that was just
+    # written is exactly when someone needs to see whether it actually governs.
+    return _permission_policy_text()
 
 
 @mcp.tool()
@@ -6447,7 +7498,12 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
     outcomes = learning_state["outcomes"]
     lesson_count = learning_state["lessons"]
     fact_count = learning_state["facts"]
-    acceptance = learning_state["positive_percent"] / 100.0
+    # The blended rate largely measures the runtime grading its own work.
+    # Publish an acceptance rate only when caller review is large enough to
+    # carry that claim, and keep the blended number explicitly labelled below.
+    reviewed = learning_state.get("reviewed_outcomes", 0)
+    reviewed_positive = learning_state.get("reviewed_positive_percent", 0.0)
+    acceptance = reviewed_positive / 100.0 if reviewed >= 30 else None
     issues = []
     try:
         autopilot = _application().automation.snapshot(include_finished=False, limit=100)
@@ -6609,8 +7665,6 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
     # good. learning_health_status separates these; this report used to blend
     # them, so it could show 96% positive and 100/100 readiness while
     # caller-judged work sat near 53% and the health view said "watch".
-    reviewed = learning_state.get("reviewed_outcomes", 0)
-    reviewed_positive = learning_state.get("reviewed_positive_percent", 0.0)
     if reviewed >= 30 and reviewed_positive < 60.0:
         add(
             "learning",
@@ -6623,11 +7677,25 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
             "what the store is starved of.",
         )
     elif reviewed < 30 and outcomes >= 200:
+        # #62: since provenance is recorded, "not judged" and "cannot tell who
+        # judged" are different states with different remedies, and reporting
+        # the second as the first would be the same substitution the reviewed
+        # rate itself used to make. Rows written before the column say nothing
+        # either way, so they are named rather than folded into the shortfall.
+        unclassifiable = learning_state.get("unknown_source_outcomes", 0)
+        detail = "Almost no outcomes have been judged by a caller (%d of %d)." % (
+            reviewed, outcomes,
+        )
+        if unclassifiable:
+            detail += (
+                " %d of those predate outcome provenance, so who judged them "
+                "is not recoverable -- they are not evidence either way."
+                % unclassifiable
+            )
         add(
             "learning",
             "low",
-            "Almost no outcomes have been judged by a caller (%d of %d)."
-            % (reviewed, outcomes),
+            detail,
             "Autograded outcomes cannot tell you whether delegated work is any "
             "good. Use record_outcome after real use so the reviewed rate means "
             "something.",
@@ -6652,10 +7720,18 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
         )))),
         "interactions": interactions,
         "outcomes": outcomes,
-        "acceptance_percent": round(acceptance * 100.0, 1),
+        "acceptance_percent": round(acceptance * 100.0, 1) if acceptance is not None else None,
+        "acceptance_basis": "reviewed" if acceptance is not None else "unmeasured",
         "reviewed_outcomes": learning_state.get("reviewed_outcomes", 0),
         "reviewed_positive_percent": learning_state.get("reviewed_positive_percent", 0.0),
         "autograded_outcomes": learning_state.get("autograded_outcomes", 0),
+        # Published beside the two it qualifies: reviewed + autograded no longer
+        # sum to `outcomes` on a store with pre-provenance rows, and a triple
+        # that silently does not add up is how a count starts reading as a
+        # measurement when it is a floor.
+        "unknown_source_outcomes": learning_state.get(
+            "unknown_source_outcomes", 0,
+        ),
         "lessons": lesson_count,
         "facts": fact_count,
         "cloud_allowed": cloud_allowed(),
@@ -6679,6 +7755,12 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
 
 
 def format_improvement_report(report: dict) -> str:
+    acceptance = report.get("acceptance_percent")
+    caller_judged = (
+        "unmeasured" if acceptance is None else "%s%% of %s reviewed" % (
+            acceptance, report.get("reviewed_outcomes", 0),
+        )
+    )
     lines = [
         "sonder improvement report",
         "  readiness score: %s/100" % report.get("score", 0),
@@ -6690,12 +7772,11 @@ def format_improvement_report(report: dict) -> str:
         # Never show the blended rate alone: it is dominated by the runtime
         # marking its own curriculum, and reads as a quality score when it
         # is not one.
-        "    caller-judged: %s%% of %s reviewed | autograded: %s%% of %s | blended: %s%%" % (
-            report.get("reviewed_positive_percent", 0),
-            report.get("reviewed_outcomes", 0),
+        "    caller-judged: %s | autograded: %s%% of %s | blended: %s%%" % (
+            caller_judged,
             report.get("learning_health", {}).get("autograded_positive_percent", 0),
             report.get("autograded_outcomes", 0),
-            report.get("acceptance_percent", 0),
+            report.get("learning_health", {}).get("positive_percent", 0),
         ),
         "  memory: %s lessons, %s facts, duplicate rows=%s, vague=%s, missing embeddings=%s" % (
             report.get("lessons", 0),
@@ -7380,18 +8461,28 @@ def admin_status(token: str = "") -> str:
     return "\n".join(lines)
 
 
+# Named so a test can pin it. It used to assert that hidden chain-of-thought
+# "is not exposed" -- an absolute across the whole runtime, which stopped being
+# true of anything but this bundle.
+_DEBUG_INSPECT_REASONING_NOTE = (
+    "  note: this bundle carries no model reasoning; use trace/tool/activity logs here,",
+    "        or reasoning_show / admin_private_chain_of_thought, both opt-in.",
+)
+
+
 @mcp.tool()
 def debug_inspect(token: str = "", include_status: bool = True) -> str:
     """Developer/admin inspection bundle without hidden chain-of-thought."""
     _maybe_live_reload()
-    account = _admin_account_from_token(token)
-    if token:
-        ok, msg = admin_auth.require(account, "developer")
-        if not ok:
-            return "ERROR: %s." % msg
+    # Was `if token:` -- which only checked a token that was volunteered, so
+    # omitting it skipped the gate entirely. Same fail-open shape as the one
+    # flagged in turn_inspect; this is where that pattern was copied from.
+    refusal = _developer_gate("debug_inspect", token, None)
+    if refusal:
+        return refusal
     sections = [
         "sonder debug inspect",
-        "  note: private hidden chain-of-thought is not exposed; use trace/tool/activity logs instead.",
+        *_DEBUG_INSPECT_REASONING_NOTE,
         "",
         admin_status(token),
         "",
@@ -7408,15 +8499,76 @@ def debug_inspect(token: str = "", include_status: bool = True) -> str:
     return "\n".join(sections)
 
 
+_PRIVATE_COT_REFUSAL = (
+    "DENIED: hidden private chain-of-thought cannot be exposed. "
+    "Use /trace, /debug, /agents, master_status, debug_inspect, "
+    "tool call logs, prompts, retrieved lessons, and final rationale summaries "
+    "instead.\n"
+    "  Refused here, and refused by default everywhere. Opting in takes two\n"
+    "  independent acts and either one alone leaves this refused: set\n"
+    "  SONDER_ALLOW_PRIVATE_COT=1, and add an explicit permission rule\n"
+    "  allowing admin_private_chain_of_thought (the built-in rule denies it).\n"
+    "  Opted in it serves the same record reasoning_show serves -- the model's\n"
+    "  own thinking channel for the current turn -- and no hidden state beyond\n"
+    "  it, because there is none."
+)
+
+
 @mcp.tool()
 def admin_private_chain_of_thought(token: str = "") -> str:
-    """Deny private chain-of-thought exposure and point to safe inspectable traces."""
+    """Refuse private chain-of-thought exposure unless the operator opted in twice.
+
+    Refused unconditionally for the whole life of this tool until now, with the
+    ``token`` argument accepted and ignored. That refusal predates
+    ``reasoning_show``, and had drifted into refusing precisely what a sibling
+    tool already serves under a gate. Opting in joins the two surfaces onto one
+    record; it does not open a new one. There is no hidden chain-of-thought
+    store behind this tool and there never was.
+
+    Three gates, all of which must pass, and the first two are the operator's:
+
+    * ``SONDER_ALLOW_PRIVATE_COT=1`` -- this deployment may serve this surface.
+    * an explicit permission rule allowing ``admin_private_chain_of_thought``
+      in ``permissions.json``. The built-in rule denies it, so this state has
+      to be written deliberately -- through the developer-gated
+      ``permission_rule_set``, or by editing the file by hand, which needs
+      filesystem access to the Sonder home. The property that matters is that
+      an environment variable inherited from a parent process cannot supply
+      it, not that any one tool is the sole route.
+    * a developer token, on any deployment that authenticates callers -- the
+      reasoning belongs to whoever's turn produced it, exactly as for
+      ``reasoning_show``. **On the default ``local-open`` deployment this third
+      gate is inert**: ``_deployment_authenticates_callers()`` is False when
+      none of SONDER_AUTH_MODE / SONDER_API_KEY / SONDER_REQUIRE_ACCOUNT is
+      set, so it passes for every caller. That is the documented meaning of
+      local-open, and a non-loopback bind is refused in that mode -- but count
+      two gates there, not three. The operator's two acts are the real ones.
+
+    What it then shows is the model's own thinking channel for the current or
+    last turn, which exists only where ``SONDER_EXPOSE_REASONING`` is also on.
+    Where it is off, this says nothing was captured rather than implying
+    something is being kept back.
+    """
     _maybe_live_reload()
-    return (
-        "DENIED: hidden private chain-of-thought cannot be exposed. "
-        "Use /trace, /debug, /agents, master_status, debug_inspect, "
-        "tool call logs, prompts, retrieved lessons, and final rationale summaries instead."
-    )
+    started = time.time()
+    # Flag and rule are checked before the caller gate so that a deployment
+    # which has not opted in returns the same refusal to everyone -- the
+    # refusal must not become an oracle for who holds a developer token.
+    if not (private_cot_opt_in_enabled() and _private_cot_rule_allows()):
+        # Recorded, and recorded as a failure. Returning here without an
+        # activity record made probing this gate invisible: an operator could
+        # not distinguish a deployment nobody had touched from one being tried
+        # repeatedly. ok=False so a blocked attempt never reads as a served one.
+        _record_direct_tool(
+            "admin_private_chain_of_thought", {}, ok=False, started=started,
+        )
+        return _PRIVATE_COT_REFUSAL
+    refusal = _developer_gate("admin_private_chain_of_thought", token, started)
+    if refusal:
+        return refusal
+    output = _reasoning_report()
+    _record_direct_tool("admin_private_chain_of_thought", {}, ok=True, started=started)
+    return output
 
 
 def _file_developer_allowed(token: str = "") -> bool:
@@ -7620,8 +8772,130 @@ def _record_file_activity(
     )
 
 
+_INTERACTION_ID_RE = re.compile(r"\[interaction_id:\s*([0-9A-Za-z_-]+)\]")
+
+
+def _record_outcome_signal(interaction_id: str, signal: str) -> None:
+    """Write one machine-attributed outcome, crediting the lesson that was used.
+
+    #62 unblocked this. It used to call ``record_outcome_row`` directly and so
+    skipped three things the model-facing wrapper does. Two are now safe to
+    take, and one is still deliberately refused:
+
+    * **Taken -- the interaction-existence precondition.** The wrapper refuses
+      to write a row for an interaction that is not there; the direct call
+      inserted regardless.
+    * **Taken -- the ``lesson_usage`` credit.** Refused before because
+      ``lesson_usage_stats`` aggregates reward with no provenance filter and
+      feeds ``retriever.lesson_quarantine``, so crediting here would have let
+      machine verdicts evict live lessons from retrieval. The credit now
+      carries ``outcome_source='machine'`` and the eviction gate excludes that
+      one source (``memory_rules.EVICTION_INELIGIBLE_OUTCOME_SOURCES``), so the
+      evidence is recorded and visible without reaching the gate. That
+      de-blends the metric instead of blending it, which is what the original
+      objection asked for.
+    * **Still refused -- the distillation claim/cancel.** Not a provenance
+      problem, a liveness one. This runs inside ``_feed_grounded_outcome`` on
+      the tool-observation path, which has no way to *finish* a distillation:
+      claiming here would park the interaction's single distillation slot on a
+      worker that never returns, and cancelling here would let an unreviewed
+      verdict destroy a caller's live job. Hence ``claim_distillation=False``.
+    """
+    conn = _open_db()
+    try:
+        memory_store.record_outcome_and_claim_lesson_distillation(
+            conn, interaction_id, signal, reward.score(signal),
+            source=reward.SOURCE_ATTRIBUTED,
+            claim_distillation=False,
+        )
+    finally:
+        conn.close()
+
+
+def _feed_grounded_outcome(name, ok, output, args=None, project=None, run_id="",
+                           evidence=None) -> None:
+    """Attribute execution evidence to the work it judges.
+
+    `evidence` is the verifier's own result dict, when the caller has one.
+    `ok` alone cannot tell "the tests failed" from "the tests never ran", and
+    that difference decides whether anything should be recorded at all -- a
+    tool that could not start used to score `failed` (-1.0) against work it
+    never examined, and burn the generation's one chance at a real verdict
+    doing it.
+
+    The agent path has no dict to pass: `_agent_dispatch` returns rendered
+    text and this function receives only that. So when no dict arrives, the
+    rendered observation is handed over instead and
+    `grounded_outcomes.rendered_infrastructure_error` reads it. Without that
+    fallback the fix would miss the agent and autopilot lanes entirely, which
+    are the lanes that run.
+
+    The outcome store holds ~9,000 rows and only ~190 of them measure delegated
+    work, because filing an outcome is a manual step and people file successes
+    far more readily than failures. The verification tools already know the
+    truth, so take it from them instead of asking anyone to remember.
+
+    `project` lets a caller that already knows the run's project (the agent
+    loop, which scopes every dispatched call to one explicit project root)
+    pass it straight through. Direct MCP calls have no such value, so they
+    leave it unset and it falls back to sniffing the tool's own arguments.
+
+    `run_id` is the caller's activity_tracker response id, when the caller is
+    running inside one (the agent loop always is). It is a stronger link than
+    project + time window: autopilot runs one thread per run, so two
+    concurrent runs -- especially two both scoped to the same project, or
+    both unscoped -- can otherwise have a verification from one run match the
+    newest pending generation from the OTHER run. Direct MCP calls pass
+    nothing here, which is unchanged from before this parameter existed.
+    """
+    if project is None:
+        project = ""
+        if isinstance(args, dict):
+            project = str(args.get("project") or args.get("root") or "")
+    else:
+        project = str(project or "")
+    try:
+        # Both roles are consulted, not the first membership test that happens
+        # to match. codegen_build_loop is in BOTH tables -- it writes the code
+        # and then runs the compiler over it -- so `elif` silently made its
+        # verifier role unreachable and discarded the most execution-grounded
+        # verdict the runtime produces. Running both is safe only because
+        # grounded_outcomes now refuses to let a tool judge its own generation;
+        # before, this ordering was the ONLY thing preventing that, which is a
+        # precondition none of that module's other callers could see.
+        if name in grounded_outcomes.GENERATORS:
+            match = _INTERACTION_ID_RE.search(str(output or ""))
+            if match:
+                grounded_outcomes.note_generation(match.group(1), name, project, run_id)
+        elif name in grounded_outcomes.VERIFIERS:
+            verdict = bool(ok)
+            if isinstance(evidence, dict):
+                if "ok" in evidence:
+                    verdict = bool(evidence["ok"])
+            else:
+                # The agent path computes `ok` as `not output.startswith(
+                # "ERROR:")`, which is a statement about the dispatcher, not
+                # about the work: measured, a pytest suite with a failing test
+                # renders "test run (pytest)\n  ok: False\n  returncode: 1"
+                # and so arrived here as ok=True, to be filed `tests_passed`
+                # at +1.0. Read the verifier's own rendered verdict instead,
+                # and keep the caller's answer when it rendered neither field.
+                rendered = grounded_outcomes.rendered_verdict(output)
+                if rendered is not None:
+                    verdict = rendered
+            grounded_outcomes.attribute(
+                name, verdict, project, record_fn=_record_outcome_signal,
+                run_id=run_id,
+                evidence=evidence if evidence is not None else output,
+            )
+    except Exception:
+        # Bookkeeping must never break the run it is observing.
+        pass
+
+
 def _record_direct_tool(
     name: str, args=None, ok=True, started=None, summary="", command="", output="",
+    evidence=None,
 ) -> None:
     if activity_tracker.inside_tool_call():
         return
@@ -7635,6 +8909,298 @@ def _record_direct_tool(
         command=command,
         output=output,
     )
+    _feed_grounded_outcome(name, ok, output, args, evidence=evidence)
+
+
+@mcp.tool()
+def turn_inspect(index: int = 0, full_prompt: bool = False, token: str = "") -> str:
+    """Show what actually went into a recent turn: prompt, lessons, tier, model.
+
+    index 0 is the most recent turn, 1 the one before it, and so on. This is
+    the retrospective half of /trace: the same pipeline state, for turns that
+    already ran, so an intermittent result can be debugged without first
+    reproducing it with tracing switched on.
+
+    Developer-gated like debug_inspect, because the captured prompts are the
+    caller's own text.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    refusal = _developer_gate("turn_inspect", token, started)
+    if refusal:
+        return refusal
+    turns = list(_TURN_TRACES)
+    if not turns:
+        _record_direct_tool("turn_inspect", {}, ok=True, started=started)
+        return (
+            "no turns captured yet.\n"
+            "  The buffer fills as answers are generated and holds the last %d.\n"
+            "  It lives in memory only and is empty after a restart."
+            % _TURN_TRACES.maxlen
+        )
+    try:
+        position = int(index)
+    except (TypeError, ValueError):
+        position = 0
+    if position < 0 or position >= len(turns):
+        _record_direct_tool("turn_inspect", {}, ok=False, started=started)
+        return "no turn at index %s; %d captured (0 is most recent)." % (
+            index, len(turns),
+        )
+    turn = turns[-1 - position]
+    prompt_text = turn["augmented_prompt"]
+    if not full_prompt and len(prompt_text) > 2000:
+        prompt_text = prompt_text[:2000] + (
+            "\n... (%d more chars; pass full_prompt=True)" % (
+                len(turn["augmented_prompt"]) - 2000)
+        )
+    lines = [
+        "turn -%d of %d captured   %s" % (position, len(turns), turn["ts"]),
+        "  model: %s   tier: %s%s" % (
+            turn["model"], turn["tier"],
+            "   interaction: %s" % turn["interaction_id"]
+            if turn["interaction_id"] else "",
+        ),
+        "",
+        "  asked:",
+    ]
+    lines += ["    " + line for line in (turn["prompt"] or "(none)").splitlines()[:20]]
+    lines += ["", "  lessons retrieved: %d" % len(turn["lessons"])]
+    lines += ["    - " + text for text in turn["lessons"]]
+    lines += ["", "  exact prompt sent to the model:"]
+    lines += ["    " + line for line in (prompt_text or "(none)").splitlines()]
+    lines += ["", "  response began:"]
+    lines += ["    " + line for line in
+              (turn["response_head"] or "(none)").splitlines()[:12]]
+    output = "\n".join(lines)
+    _record_direct_tool(
+        "turn_inspect", {"index": position}, ok=True, started=started,
+    )
+    return output
+
+
+def _reasoning_report() -> str:
+    """The model's reasoning for the current/last turn, or why there is none.
+
+    Shared verbatim by ``reasoning_show`` and ``admin_private_chain_of_thought``
+    so the two surfaces onto one record cannot drift into describing it
+    differently -- or into one of them implying it holds something the other
+    does not. Pure text: each caller keeps its own gate and its own telemetry.
+
+    The two empty cases are deliberately distinguished. "Nothing was captured"
+    and "something is being withheld" are different claims, and a reader who
+    cannot tell them apart will assume the second.
+    """
+    if not reasoning_exposure_enabled():
+        return (
+            "reasoning is not exposed.\n"
+            "  SONDER_EXPOSE_REASONING is off, so Sonder does not request the\n"
+            "  model's thinking at all -- there is nothing withheld, there is\n"
+            "  nothing captured.\n\n"
+            "  enable:   set SONDER_EXPOSE_REASONING=1  (then restart the runtime)\n"
+            "  audience: SONDER_REASONING_AUDIENCE=developer (default) | all\n\n"
+            "  /cot serves this same record and nothing besides it, and only\n"
+            "  where that surface is separately opted in."
+        )
+    record = activity_tracker.current_reasoning() or activity_tracker.latest_reasoning()
+    if not record:
+        return (
+            "reasoning is enabled, but nothing is recorded for this turn.\n"
+            "  Either the last answer came from a model that emits no separate\n"
+            "  thinking channel, or no turn has run since the runtime started.\n"
+            "  Nothing is being withheld."
+        )
+    text = str(record.get("text") or "").strip()
+    model = str(record.get("model") or "")
+    lines = ["model reasoning%s" % (" (%s)" % model if model else ""), ""]
+    lines += ["  " + line for line in (text or "(empty)").splitlines()]
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def reasoning_show(token: str = "") -> str:
+    """Show the reasoning the model emitted for the current/last turn, if enabled.
+
+    Two gates, both of which must pass. The operator gate
+    (SONDER_EXPOSE_REASONING) decides whether reasoning is captured at all --
+    with it off Sonder never asks the model for its thinking. The caller gate
+    decides who may read it: on a deployment that authenticates callers this
+    needs a developer token, because the reasoning belongs to whoever's turn
+    produced it. The HTTP path gates the same way via SONDER_REASONING_AUDIENCE.
+
+    admin_private_chain_of_thought serves this same record, and only where the
+    operator has separately opted that surface in. It is a second door onto
+    this data, not a door onto more of it -- there is no hidden store beyond
+    what this shows.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    refusal = _developer_gate("reasoning_show", token, started)
+    if refusal:
+        return refusal
+    output = _reasoning_report()
+    _record_direct_tool("reasoning_show", {}, ok=True, started=started)
+    return output
+
+
+@mcp.tool()
+def calibration_status() -> str:
+    """Measured reliability, split by population and never averaged.
+
+    Reports how often delegated work was judged good by a caller, separately
+    from how often generated code built or passed tests. A single figure over
+    both reads like accuracy and is not one: the self-graded population is
+    ~50x larger and ~45 points higher, so combining them hides exactly the
+    number worth knowing.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    conn = _open_db()
+    try:
+        output = calibration.report(conn)
+    finally:
+        conn.close()
+    _record_direct_tool("calibration_status", {}, ok=True, started=started)
+    return output
+
+
+@mcp.tool()
+def permission_mode(mode: str = "", explain: bool = False) -> str:
+    """Show or set how much Sonder does without asking.
+
+    Modes, least to most autonomous: plan (reads only), manual (ask before
+    anything that is not a read), acceptEdits (file changes proceed, running
+    programs still asks), auto (programs proceed too). Destructive tools ask in
+    every mode, including auto.
+
+    Elevation is a separate axis no mode grants; see permission_policy.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    wanted = str(mode or "").strip()
+    try:
+        if not wanted:
+            output = permission_modes.overview()
+        elif explain:
+            output = permission_modes.describe(wanted)
+        else:
+            permission_modes.set_mode(wanted)
+            output = permission_modes.describe()
+    except ValueError as exc:
+        _record_direct_tool(
+            "permission_mode", {"mode": wanted}, ok=False, started=started,
+            summary=str(exc),
+        )
+        return str(exc)
+    _record_direct_tool("permission_mode", {"mode": wanted}, ok=True, started=started)
+    return output
+
+
+def permission_mode_data() -> dict:
+    """Mode state as structured data, for the HTTP API and the app."""
+    active = permission_modes.current_mode()
+    return {
+        "mode": active,
+        "label": permission_modes.MODE_LABELS.get(active, active),
+        "blurb": permission_modes.MODE_BLURBS.get(active, ""),
+        "elevated": permission_modes.elevated(),
+        "elevationReason": permission_modes.elevation_reason(),
+        "modes": [
+            {
+                "name": name,
+                "label": permission_modes.MODE_LABELS.get(name, name),
+                "blurb": permission_modes.MODE_BLURBS.get(name, ""),
+            }
+            for name in permission_modes.MODES
+        ],
+        "matrix": dict(permission_modes._MATRIX[active]),
+    }
+
+
+_ELEVATE_ON_WORDS = frozenset({"on", "true", "yes", "1"})
+_ELEVATE_OFF_WORDS = frozenset({"off", "false", "no", "0"})
+
+
+def _elevation_status_text() -> str:
+    if permission_modes.elevated():
+        reason = permission_modes.elevation_reason()
+        lines = ["elevation: on%s" % (" -- %s" % reason if reason else "")]
+    else:
+        lines = ["elevation: off"]
+    lines.append(
+        "  host process: %s administrator rights"
+        % ("holds" if permission_modes.host_is_elevated() else "does not hold")
+    )
+    lines.append(
+        "  no /mode ever grants or revokes this; it is session-only and is "
+        "dropped, never restored, at the start of the next session."
+    )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def elevate(on: str = "", reason: str = "", token: str = "") -> str:
+    """Turn Sonder's privilege axis on or off for this session, or show it.
+
+    Elevation is a separate axis from the autonomy mode set by /mode: no mode
+    grants it, switching modes never touches it, and -- unlike mode -- it is
+    never restored from a previous session, so a fresh session always starts
+    unelevated. This is the only way to change it.
+
+    Sonder's own tool catalog does not currently mark anything as
+    unconditionally requiring administrator rights (see PRIVILEGED_TOOLS in
+    permission_modes.py for the reasoning); this flag is the session-scoped
+    switch for the day something does, and for decide()'s per-call
+    requires_elevation path in the meantime.
+
+    on: "on"/"true"/"yes"/"1" to elevate (a reason is required), "off"/
+        "false"/"no"/"0" to de-elevate. Omitted, or "status", just reports
+        the current state; neither requires a reason or a token.
+    reason: why elevation is being turned on. Shown by /mode --explain and
+        /permissions for as long as elevation stays on; dropped the moment
+        it is turned off.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    wanted = str(on or "").strip().lower()
+    if wanted in ("", "status", "show"):
+        output = _elevation_status_text()
+        _record_direct_tool("elevate", {"on": wanted}, ok=True, started=started)
+        return output
+    if wanted in _ELEVATE_ON_WORDS:
+        refusal = _developer_gate("elevate", token, started)
+        if refusal:
+            return refusal
+        reason_text = str(reason or "").strip()
+        if not reason_text:
+            _record_direct_tool(
+                "elevate", {"on": wanted}, ok=False, started=started,
+                summary="reason required",
+            )
+            return (
+                'elevate on requires a reason, e.g. '
+                '/elevate on "installing a signed driver".'
+            )
+        permission_modes.set_elevated(True, reason_text)
+        output = _elevation_status_text()
+        if not permission_modes.host_is_elevated():
+            output += (
+                "\n  note: this process does not actually hold administrator "
+                "rights, so anything genuinely needing them (e.g. dism) will "
+                "still fail at the OS -- this only lifted Sonder's own "
+                "privilege gate, not Windows'."
+            )
+    elif wanted in _ELEVATE_OFF_WORDS:
+        permission_modes.set_elevated(False)
+        output = _elevation_status_text()
+    else:
+        _record_direct_tool(
+            "elevate", {"on": wanted}, ok=False, started=started,
+            summary="unrecognised argument",
+        )
+        return "unrecognised /elevate argument %r. use on, off, or status." % on
+    _record_direct_tool("elevate", {"on": wanted}, ok=True, started=started)
+    return output
 
 
 @mcp.tool()
@@ -8744,6 +10310,16 @@ def _format_run_result(title: str, data: dict) -> str:
         "  timed_out: %s" % data.get("timed_out", False),
         "  elapsed_ms: %s" % data.get("elapsed_ms", 0),
     ]
+    # Why nothing ran, when nothing ran. `harness_tools` returns `{"ok": False,
+    # "error": ...}` without spawning anything for an unknown framework, an
+    # unknown linter, or a root with no build system, and this dropped the
+    # field: a model was told `ok: False` with no reason at all, and the
+    # rendered text -- the only evidence the agent path ever has -- could not
+    # be told apart from a real failing build. Header block, before the
+    # child's own output, because `grounded_outcomes.rendered_infrastructure_
+    # error` reads exactly this much and stops at `stdout:`.
+    if data.get("error"):
+        lines.append("  error: %s" % data["error"])
     if data.get("stdout"):
         lines.extend(["stdout:", data["stdout"].rstrip()])
     if data.get("stderr"):
@@ -9329,13 +10905,14 @@ def test_run(
             extra_args_json=extra_args_json,
         )
     except Exception as exc:
-        _record_direct_tool("test_run", args, ok=False, started=started, summary=str(exc))
+        _record_direct_tool("test_run", args, ok=False, started=started, summary=str(exc),
+                            evidence={"error": str(exc)})
         return "ERROR: %s" % exc
     output = _format_run_result("test run (%s)" % data.get("framework", "?"), data)
     _record_direct_tool(
         "test_run", args, ok=data.get("ok", False), started=started,
         summary="exit %s" % data.get("returncode"),
-        output=output,
+        output=output, evidence=data,
     )
     return output
 
@@ -9355,13 +10932,14 @@ def lint_run(
     try:
         data = harness_tools.lint_run(root=root, tool=tool, path=path, fix=fix, timeout=timeout)
     except Exception as exc:
-        _record_direct_tool("lint_run", args, ok=False, started=started, summary=str(exc))
+        _record_direct_tool("lint_run", args, ok=False, started=started, summary=str(exc),
+                            evidence={"error": str(exc)})
         return "ERROR: %s" % exc
     output = _format_run_result("lint (%s, %s)" % (data.get("tool", "?"), data.get("mode", "check")), data)
     _record_direct_tool(
         "lint_run", args, ok=data.get("ok", False), started=started,
         summary="exit %s" % data.get("returncode"),
-        output=output,
+        output=output, evidence=data,
     )
     return output
 
@@ -9406,13 +10984,14 @@ def typecheck_run(
     try:
         data = harness_tools.typecheck_run(root=root, tool=tool, path=path, timeout=timeout)
     except Exception as exc:
-        _record_direct_tool("typecheck_run", args, ok=False, started=started, summary=str(exc))
+        _record_direct_tool("typecheck_run", args, ok=False, started=started, summary=str(exc),
+                            evidence={"error": str(exc)})
         return "ERROR: %s" % exc
     output = _format_run_result("typecheck (%s)" % data.get("tool", "?"), data)
     _record_direct_tool(
         "typecheck_run", args, ok=data.get("ok", False), started=started,
         summary="exit %s" % data.get("returncode"),
-        output=output,
+        output=output, evidence=data,
     )
     return output
 
@@ -9683,10 +11262,11 @@ def build_run(
     try:
         data = harness_tools.build_run(root=root, command=command, timeout=timeout)
     except Exception as exc:
-        _record_direct_tool("build_run", args, ok=False, started=started, summary=str(exc))
+        _record_direct_tool("build_run", args, ok=False, started=started, summary=str(exc),
+                            evidence={"error": str(exc)})
         return "ERROR: %s" % exc
     output = _format_run_result("build", data)
-    _record_direct_tool("build_run", args, ok=data.get("ok", False), started=started, summary="exit %s" % data.get("returncode"), output=output)
+    _record_direct_tool("build_run", args, ok=data.get("ok", False), started=started, summary="exit %s" % data.get("returncode"), output=output, evidence=data)
     return output
 
 
@@ -9946,6 +11526,131 @@ def artifact_risk_inspect(
 
 
 @mcp.tool()
+def fetch_artifact(
+    url: str,
+    dest: str,
+    expect_type: str = "",
+    expect_publisher: str = "",
+    sha256: str = "",
+    max_mb: float = artifact_fetch_module.DEFAULT_MAX_MB,
+    timeout: float = artifact_fetch_module.DEFAULT_TIMEOUT,
+    resume: bool = True,
+    overwrite: bool = False,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Download a binary artifact to a guarded path and verify it atomically.
+
+    Unlike web_fetch this writes bytes, not text, so it is the only supported
+    way to acquire an installer, driver, ISO, or archive. Nothing lands at
+    *dest* unless the payload passes every check: HTTP status, block/denial
+    page detection, magic bytes against expect_type or the extension, a size
+    floor, an optional sha256, and -- on Windows for PE payloads -- the
+    Authenticode signer subject against expect_publisher. Success also writes
+    <dest>.provenance.json recording the URL, redirect chain, digest,
+    signature, and every verdict.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "url": url, "dest": dest, "expect_type": expect_type,
+        "expect_publisher": expect_publisher, "sha256": sha256,
+        "max_mb": max_mb, "timeout": timeout,
+    }
+    try:
+        data = artifact_fetch_module.fetch_artifact(
+            url,
+            dest,
+            expect_type=expect_type,
+            expect_publisher=expect_publisher,
+            sha256=sha256,
+            max_mb=max_mb,
+            timeout=timeout,
+            resume=resume,
+            overwrite=overwrite,
+            extra_roots=extra_roots if _file_bypass_allowed(token, approval) else "",
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "fetch_artifact", args, ok=False, started=started, summary=str(exc),
+        )
+        return "artifact fetch REFUSED: %s" % exc
+    output = artifact_fetch_module.format_fetch_result(data)
+    summary = "%s; %d bytes; %s" % (
+        data.get("verdict", "rejected"), data.get("bytes", 0),
+        data.get("detected_type", "") or "unknown",
+    )
+    _record_direct_tool(
+        "fetch_artifact", args, ok=bool(data.get("ok")), started=started,
+        summary=summary, output=output,
+    )
+    if data.get("ok"):
+        _record_file_activity("write", {
+            "action": "fetch_artifact",
+            "path": data.get("path", ""),
+            "bytes": data.get("bytes", 0),
+        })
+    activity_tracker.record_event(
+        "fetch_artifact", summary=summary, path=data.get("path", ""),
+    )
+    return output
+
+
+@mcp.tool()
+def verify_artifact(
+    path: str,
+    expect_type: str = "",
+    expect_publisher: str = "",
+    sha256: str = "",
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Run fetch_artifact's verification battery against a file already on disk.
+
+    Same code path as a fresh download: magic bytes vs expect_type or the
+    extension, block/denial-page markers, a per-type size floor, an optional
+    sha256, and the Authenticode signer subject against expect_publisher. Use
+    it on anything staged earlier or acquired outside Sonder.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    args = {
+        "path": path, "expect_type": expect_type,
+        "expect_publisher": expect_publisher, "sha256": sha256,
+    }
+    try:
+        data = artifact_fetch_module.verify_artifact(
+            path,
+            expect_type=expect_type,
+            expect_publisher=expect_publisher,
+            sha256=sha256,
+            extra_roots=extra_roots if _file_bypass_allowed(token, approval) else "",
+            bypass=_file_bypass_allowed(token, approval),
+        )
+    except Exception as exc:
+        _record_direct_tool(
+            "verify_artifact", args, ok=False, started=started, summary=str(exc),
+        )
+        return "artifact verify REFUSED: %s" % exc
+    output = artifact_fetch_module.format_verify_result(data)
+    summary = "%s; %d bytes; %s" % (
+        data.get("verdict", "rejected"), data.get("bytes", 0),
+        data.get("detected_type", "") or "unknown",
+    )
+    _record_direct_tool(
+        "verify_artifact", args, ok=bool(data.get("ok")), started=started,
+        summary=summary, output=output,
+    )
+    activity_tracker.record_event(
+        "verify_artifact", summary=summary, path=data.get("path", ""),
+    )
+    return output
+
+
+@mcp.tool()
 def script_run(
     path: str,
     args_json: str = "[]",
@@ -10137,11 +11842,14 @@ def run_code(
         )
         ok = bool(result.get("ok")) if isinstance(result, dict) else True
     except ValueError as e:
+        # Empty code, an unsupported language, a cwd outside the workspace: all
+        # raised before anything is spawned, so there is no verdict to file.
         _record_direct_tool(
             "run_code",
             {"language": language, "timeout": timeout},
             ok=False, started=started,
             summary=str(e),
+            evidence={"error": str(e)},
         )
         return "ERROR: %s" % e
     output = code_runner.format_result(result)
@@ -10151,6 +11859,9 @@ def run_code(
         ok=ok, started=started,
         summary=("ok" if ok else "failed"),
         output=output,
+        # `ok` cannot tell "the code is wrong" from "there is no interpreter on
+        # this machine"; the grounded-outcome ledger may only record the first.
+        evidence=result,
     )
     return output
 
@@ -10183,11 +11894,14 @@ def run_project(
         )
         ok = bool(result.get("ok")) if isinstance(result, dict) else True
     except ValueError as e:
+        # Malformed files_json, an unsafe path, or no detectable way to run the
+        # project: raised before any step is spawned, so nothing was measured.
         _record_direct_tool(
             "run_project",
             {"timeout": timeout},
             ok=False, started=started,
             summary=str(e),
+            evidence={"error": str(e)},
         )
         return "ERROR: %s" % e
     output = code_runner.format_project_result(result)
@@ -10197,6 +11911,9 @@ def run_project(
         ok=ok, started=started,
         summary=("ok" if ok else "failed"),
         output=output,
+        # The composite carries no top-level verdict at all; the step that
+        # stopped the run holds it, and the ledger reads it from there.
+        evidence=result,
     )
     return output
 
@@ -10242,6 +11959,8 @@ def isolated_run(
             "isolated_run",
             {"denial": code, "writable_workspace": writable_workspace is True},
             ok=False, started=started, summary=code, output=message,
+            # A denial spawns no container, so it judges nobody's code.
+            evidence={"error": code},
         )
         return message
 
@@ -10287,11 +12006,15 @@ def isolated_run(
         )
         ok = bool(result.get("ok"))
     except (OSError, ValueError) as exc:
+        # A rejected image, an unauthorized project root, a resource limit that
+        # would not validate: every one of these is raised before the container
+        # is launched, so nothing about the code was observed.
         _record_direct_tool(
             "isolated_run",
             {"failure": "policy-or-runtime-error",
              "writable_workspace": writable_workspace is True},
             ok=False, started=started, summary="isolated runner rejected request",
+            evidence={"error": str(exc)},
         )
         return "ERROR: %s" % exc
     output = isolated_runner.format_result(result)
@@ -10301,6 +12024,10 @@ def isolated_run(
          "writable_workspace": writable_workspace is True},
         ok=ok, started=started, summary=("ok" if ok else "failed"),
         output=output,
+        # No engine installed, or a run the caps killed, is not a verdict on
+        # the code; `isolated_runner` keeps that in `error` and the container's
+        # own exit status in `returncode`.
+        evidence=result,
     )
     return output
 
@@ -10765,6 +12492,74 @@ def _loop_verdict_result(action_type, text, success_prefix):
     return result
 
 
+# `_loop_dispatch` action types are mostly tool names already; these are the
+# ones that are not, so the gate below decides on the tool that actually runs
+# rather than on a name `risk_of` has never heard of.
+_LOOP_ACTION_TOOLS = {
+    "code": "run_code",
+    "project": "run_project",
+    "artifact": "artifact_generate",
+    "artifact_check": "artifact_ground",
+    "game_reference": "game_reference_suite",
+    "game": "game_generate_and_test",
+    "work": "workbench_agent",
+    "agent": "workbench_agent",
+    "improvement_report": "system_improvement_report",
+    "profile_status": "system_profile_text",
+    "emotion_status": "emotion_vector_status",
+    "emotion_update": "update_emotion_vectors",
+    "emotion_tune": "tune_emotion_vectors",
+    "learning_health": "learning_health_status",
+}
+
+# Single source for the public loop vocabulary.  It deliberately includes
+# aliases implemented by `_loop_dispatch`; hiding aliases makes clients think
+# valid actions are invalid, while advertising a non-branch makes the inverse
+# promise.  Keep the `loop` docstring in lockstep (covered by drift tests).
+_LOOP_ACTION_TYPES = (
+    "code", "run_code", "project", "run_project", "artifact", "artifact_generate", "assetgen", "artifact_ground", "artifact_check", "game_reference", "game_reference_suite", "game", "game_generate", "game_generate_and_test", "game_campaign", "game_generation_campaign", "offload", "sonder", "status", "diagnostics", "context_health", "learning_health", "memory_quality_report", "memory_quality_repair", "memory_privacy_review", "memory_privacy_repair", "memory_embedding_backfill", "memory_interaction_embedding_backfill", "improvement_report", "system_improvement_report", "master_status", "agent_status", "master_capacity", "agent_capacity", "master_cancel", "agent_cancel", "master_retry", "agent_retry", "master", "master_orchestrate", "work", "agent", "workbench_agent", "workspace_inventory", "directory_tree", "directory_create", "file_read_range", "text_search", "script_search", "program_search", "workspace_run", "script_run", "artifact_risk_inspect", "process_list", "process_memory_risk_inspect", "image_inspect", "data_inspect", "checklist_create", "checklist_update", "checklist_show", "file_policy", "file_find", "file_read", "file_write", "file_copy", "file_move", "file_edit", "file_delete", "self_heal_check", "self_heal_repair", "profile_status", "emotion_status", "emotion_update", "emotion_tune", "learn_preference", "preferences_status", "memory_search", "ground_artifact", "apply_learned", "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup", "unload", "sleep",
+)
+
+
+def _loop_action_tool(action_type):
+    """The tool a loop action really runs, for the permission gate."""
+    name = str(action_type or "").strip().lower()
+    return _canonical_agent_tool_name(_LOOP_ACTION_TOOLS.get(name, name))
+
+
+def _loop_permission_refusal(action_type):
+    """Gate a model-authored `loop`/`workflow_run` action, or None to proceed.
+
+    `_loop_dispatch` is the third place a *model* chooses what runs -- the
+    `loop` and `workflow_run` tools execute actions the model authored,
+    including `file_delete`, `workspace_run` and `self_heal_repair`. That is
+    the same threat model as `_agent_dispatch`, not "a client calling a tool
+    directly", so it takes the same `interactive=False` gate: `manual` refuses
+    nothing it refused yesterday, while `plan` and an explicit per-tool `deny`
+    rule stop the action before it runs.
+    """
+    # Unknown action types are rejected by `_loop_dispatch` with the canonical
+    # vocabulary below.  Do not turn that helpful contract error into a policy
+    # denial for a fictitious tool name.
+    if str(action_type or "").strip().lower() not in _LOOP_ACTION_TYPES:
+        return None
+    tool = _loop_action_tool(action_type)
+    decision = permission_modes.decide(tool, interactive=False)
+    if decision.allowed:
+        return None
+    return {
+        "ok": False,
+        "type": str(action_type or ""),
+        "summary": "refused by the permission gate (mode=%s)" % decision.mode,
+        "output": (
+            "HOST POLICY: '%s' is refused by the active permission gate: %s "
+            "(tool=%s, mode=%s, risk=%s). This is standing policy, not a "
+            "transient failure -- choose a different action."
+            % (action_type, decision.reason, tool, decision.mode, decision.risk)
+        ),
+    }
+
+
 def _loop_dispatch(action):
     action_type = (action.get("type") or action.get("action") or "code").strip().lower()
     activity_tracker.record_tool_call(
@@ -10772,6 +12567,9 @@ def _loop_dispatch(action):
         {k: v for k, v in (action or {}).items() if k not in {"code", "content", "files"}},
         summary="loop action queued",
     )
+    refusal = _loop_permission_refusal(action_type)
+    if refusal is not None:
+        return refusal
     if action_type in ("code", "run_code"):
         result = code_runner.run_code(
             code=action.get("code", ""),
@@ -11277,7 +13075,7 @@ def _loop_dispatch(action):
         "ok": False,
         "type": action_type or "(unknown)",
         "summary": "unknown action type",
-        "output": "Valid action types: code, project, artifact_generate, artifact_ground, game_reference_suite, game_generate_and_test, game_generation_campaign, offload, sonder, master_orchestrate, master_status, master_capacity, master_cancel, master_retry, file_policy, workspace_inventory, directory_tree, text_search, script_search, program_search, workspace_run, script_run, image_inspect, file_find, file_read, file_write, file_edit, file_copy, file_move, file_delete, status, diagnostics, context_health, learning_health, memory_quality_report, memory_quality_repair, memory_privacy_review, memory_privacy_repair, memory_embedding_backfill, memory_interaction_embedding_backfill, improvement_report, self_heal_check, self_heal_repair, profile_status, emotion_status, emotion_update, emotion_tune, learn_preference, preferences_status, memory_search, ground_artifact, apply_learned, web_search, web_fetch, weather_lookup, approximate_location_lookup, unload, sleep.",
+        "output": "Valid action types: %s." % ", ".join(_LOOP_ACTION_TYPES),
     }
 
 
@@ -11292,7 +13090,28 @@ def loop(
     """Run a bounded loop of code/model/system actions.
 
     `actions_json` is a JSON list of action objects, or {"actions": [...]}.
-    Supported action types:
+
+    All valid `type` values: code, project, artifact_generate, artifact_ground,
+    game_reference_suite, game_generate_and_test, game_generation_campaign,
+    offload, sonder, workbench_agent, master_orchestrate, master_status,
+    master_capacity, master_cancel, master_retry, file_policy,
+    workspace_inventory, directory_tree, directory_create, text_search,
+    script_search, program_search, workspace_run, script_run, image_inspect,
+    data_inspect, artifact_risk_inspect, process_list,
+    process_memory_risk_inspect, file_find, file_read, file_read_range,
+    file_write, file_edit, file_copy, file_move, file_delete,
+    checklist_create, checklist_update, checklist_show, status, diagnostics,
+    context_health, learning_health, memory_quality_report,
+    memory_quality_repair, memory_privacy_review, memory_privacy_repair,
+    memory_embedding_backfill, memory_interaction_embedding_backfill,
+    improvement_report, self_heal_check, self_heal_repair, profile_status,
+    emotion_status, emotion_update, emotion_tune, learn_preference,
+    preferences_status, memory_search, ground_artifact, apply_learned,
+    web_search, web_fetch, weather_lookup, approximate_location_lookup,
+    unload, sleep.
+
+    Argument shapes, by example (each action takes the same arguments as the
+    MCP tool of the same name):
       - {"type":"code","language":"python|js|powershell|cpp|csharp","code":"..."}
       - {"type":"project","files":[{"path":"src/main.cpp","content":"..."}],"commands":[{"cmd":["g++","src/main.cpp","-o","app"]}]}
       - {"type":"artifact_generate","name":"brand-kit","brief":"fiery logo, music, and 3D mascot","kinds":"auto"}
@@ -11352,6 +13171,18 @@ def loop(
     except ValueError as e:
         return "ERROR: %s" % e
     return code_runner.format_loop_result(result)
+
+
+# Render the documented vocabulary from the same tuple used by the unknown
+# action reply.  The examples below remain hand-written because they document
+# argument shapes, but the list itself cannot drift from dispatch aliases.
+_loop_doc = loop.__doc__ or ""
+_loop_marker = "All valid `type` values:"
+_loop_tail = _loop_doc.find("\n\n    Argument shapes", _loop_doc.find(_loop_marker))
+if _loop_marker in _loop_doc and _loop_tail >= 0:
+    _loop_head = _loop_doc[:_loop_doc.find(_loop_marker) + len(_loop_marker)]
+    _loop_doc = _loop_head + " " + ", ".join(_LOOP_ACTION_TYPES) + "." + _loop_doc[_loop_tail:]
+    loop.__doc__ = _loop_doc
 
 
 @mcp.tool()
@@ -11458,6 +13289,23 @@ def web_fetch(url: str, max_chars: int = 8000) -> str:
             summary=str(e),
         )
         return "ERROR: %s" % e
+    # A bot-block, captcha interstitial, or Access Denied page arrives with a
+    # 200 and reads like a document, so without this the caller consumes a
+    # refusal as if it were the requested content -- worse than a 404 because
+    # it looks like success. Name the denial instead of relaying it.
+    blocked = artifact_fetch_module.detect_block_page(
+        out, content_type="text/html", url=url,
+    )
+    if blocked is not None:
+        notice = artifact_fetch_module.format_block_notice(url, blocked)
+        _record_direct_tool(
+            "web_fetch",
+            {"url": url, "max_chars": max_chars},
+            ok=False, started=started,
+            summary="blocked: %s" % blocked.get("reason", "denial page"),
+            output=notice,
+        )
+        return notice
     _record_direct_tool(
         "web_fetch",
         {"url": url, "max_chars": max_chars},
@@ -12245,7 +14093,12 @@ def learn_from_example(task: str, solution: str, signal: str = "accepted") -> st
             task_embedding_revision=provenance.get("revision"),
             task_embedding_dim=provenance.get("dimension"),
         )
-    result = _record_outcome_and_maybe_distill(interaction_id, signal)
+    # `caller`: learn_from_example is a caller asserting "this task and this
+    # solution worked". Nothing ran here, so it belongs with judgement, not
+    # with execution evidence.
+    result = _record_outcome_and_maybe_distill(
+        interaction_id, signal, source=reward.SOURCE_CALLER,
+    )
     if result["lesson_id"]:
         return "Learned lesson %s from example interaction %s." % (
             result["lesson_id"], interaction_id,
@@ -12533,7 +14386,7 @@ def tool_manifest() -> str:
         "mcp_runtime_status/live_reload_status": "Audit atomic MCP source/tool convergence, refresh history, list-change signaling, and fail-closed reload errors.",
         "master_orchestrate/master_status/master_capacity/master_cancel/master_retry": "Run restart-safe hardware-scheduled orchestration, inspect capacity/activity, cancel fleets, and explicitly retry interrupted work.",
         "admin_register/admin_login/admin_accounts/admin_set_account": "Manage hosted accounts, roles, bans, tiers, and developer flags.",
-        "admin_status/debug_inspect/admin_private_chain_of_thought": "Inspect admin/debug state and safely deny private chain-of-thought exposure.",
+        "admin_status/debug_inspect/admin_private_chain_of_thought": "Inspect admin/debug state; private chain-of-thought is refused unless the operator opted in twice (SONDER_ALLOW_PRIVATE_COT plus an explicit allow rule), and then serves only the reasoning record reasoning_show serves.",
         "sonder": "Ask through Sonder Runtime's local learning loop.",
         "offload": "Route a self-contained task to a configured local/cloud tier.",
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
@@ -12560,7 +14413,7 @@ def tool_manifest() -> str:
         "workbench_agent": "Run an autonomous local tool loop with a guaranteed checklist, exact action transcript, validation gate, and end report.",
         "command_registry_list": "Inspect available slash commands by category, name, or risk.",
         "activity_status": "Inspect active/latest response activity, tool calls, and file changes.",
-        "permission_policy/permission_rule_set": "Inspect or guarded-edit local permission rules for tool actions.",
+        "permission_policy/permission_rule_set": "Inspect the effective permission decision -- the rule, the active mode, and which one governs -- or guarded-edit a rule.",
         "context_compaction_plan": "Preview when to summarize, split sessions, or reduce live context.",
         "run_code": "Run a bounded snippet: Python, JS/TypeScript, Bash, Ruby, Perl, PHP, Lua, R, Go, Java, Rust, PowerShell, C++, C#.",
         "isolated_run": "Direct MCP-only, explicitly enabled and developer-authorized Docker/Podman execution with approved roots, separate writable approval, and a fixed resource-capped isolation policy.",
@@ -12570,7 +14423,11 @@ def tool_manifest() -> str:
         "artifact_generate/artifact_verify": "Create and verify stdlib-only images, animated GIF/AVI video, SVGs, Office files, MIDI/WAV audio, captions, EDL timelines, data, web mockups, OBJ and textured humanoid GLBs with full morph frames and clip sequences, scenes, and themed packs from a free-form brief.",
         "game_reference_suite/game_generate_and_test/game_generation_campaign": "Build, execute, repair, and ground persistent in-house 2D/2.5D/3D game projects and fleets.",
         "loop": "Repeat bounded code/model/system actions.",
-        "workflow_list/save/run/delete": "Manage reusable loop workflows.",
+        # Spell every tool out.  The old "workflow_list/save/run/delete"
+        # shorthand read as four tool names, three of which ("save", "run",
+        # "delete") are not registered tools at all -- the only names on any
+        # advertising surface that no @mcp.tool() backs.
+        "workflow_list/workflow_save/workflow_run/workflow_delete": "Manage reusable loop workflows.",
         "system_profile_text/update_system_profile": "Read or edit standing instructions.",
         "emotion_vector_status/update_emotion_vectors/tune_emotion_vectors": "Read, edit, or live-tune tone vectors.",
         "learn_preference/preferences_status": "Read or teach durable user behavior/workflow preferences.",
@@ -12739,6 +14596,7 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "repo_status", "repo_diff",
     "repo_log", "repo_show", "repo_blame",
     "project_detect", "data_inspect", "data_query", "archive_list", "artifact_risk_inspect",
+    "verify_artifact",
     "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
     "diagnostics", "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
@@ -12747,7 +14605,18 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "self_heal_check", "status", "system_profile_text", "environment_status", "hardware_profile",
     "emotion_vector_status", "preferences_status", "tool_manifest",
     "memory_search", "web_search", "web_fetch", "weather_lookup",
-    "test_discover", "find_references", "diff_files", "secret_scan",
+    "test_discover",
+    # test_discover / find_references / diff_files / secret_scan are
+    # deliberately absent.  They are read-only, but they are direct-MCP tools
+    # only: harness_tools._resolve_root resolves any absolute path with no
+    # allowed-roots check, and their signatures expose no token/approval/
+    # extra_roots, so they cannot take part in the guarded-read contract this
+    # allow-list grants.  _repository_read_only_error has no resolve branch for
+    # them and _project_scoped_path_key maps them to "path" while they actually
+    # take "root", so both the scope check and the project rebase would inspect
+    # a key they never use and pass while the real root went unchecked.
+    # Re-add them here, to REPOSITORY_AGENT_TOOL_HELP and to _agent_dispatch
+    # together, and only once they are root-confined.
 })
 REPOSITORY_READ_ONLY_FORBIDDEN_ARGS = frozenset({
     "token", "approval", "extra_roots",
@@ -12777,6 +14646,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - repo_blame: {"path": ".", "file_path": "<required contained relative file>", "revision": "HEAD", "start_line": 1, "end_line": 100, "timeout": 5, "max_bytes": 256000}
 - archive_list: {"path": "<task-relevant ZIP or TAR>", "max_entries": 2000, "max_total_bytes": 256000000, "max_ratio": 100, "max_results": 2500}
 - artifact_risk_inspect: {"path": "<task-relevant document, executable, script, or binary>", "max_scan_bytes": 16777216, "max_seconds": 5}
+- verify_artifact: {"path": "<task-relevant downloaded installer, archive, or image>", "expect_type": "pe|msi|zip|iso|elf", "expect_publisher": "<required signer substring>", "sha256": "<64-hex digest>"}
 - log_inspect: {"path": "<task-relevant log file>", "tail_lines": 0, "context_lines": 2, "max_file_bytes": 64000000, "max_scan_bytes": 4000000, "max_lines": 10000, "max_line_bytes": 4096, "max_results": 100, "max_output_bytes": 256000, "timeout": 5}
 - text_search: {"query": "<exact task symbol or anchor>", "root": ".", "glob": "<task-relevant glob>", "max_results": 100}
 - script_search: {"query": "<task-relevant script name>", "root": ".", "max_results": 100}
@@ -12790,6 +14660,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - web_search: {"query": "...", "limit": 5}
 - web_fetch: {"url": "https://...", "max_chars": 8000}
 - weather_lookup: {"location": "Chicago, IL|60601", "forecast_days": 3, "units": "auto|metric|imperial"}
+- test_discover: {"root": ".", "framework": "auto"}
 - command_registry_list: {"filter_text": "filesystem|context|status"}
 - activity_status: {}
 - permission_policy: {"tool_name": "file_read"}
@@ -12811,10 +14682,6 @@ an exact symbol named by the task; do not default to Python or server.py.
 - emotion_vector_status: {}
 - preferences_status: {"include_disabled": false, "limit": 20}
 - tool_manifest: {}
-- test_discover: {"root": ".", "framework": "auto"} -- discover tests; auto-detects pytest/jest/vitest/cargo/go/dotnet
-- find_references: {"root": ".", "symbol": "MyClass", "glob": "**/*.py"} -- find all occurrences of a symbol
-- diff_files: {"root": ".", "left": "a.py", "right": "b.py", "context": 3} -- unified diff between two files
-- secret_scan: {"root": ".", "timeout": 30} -- scan for leaked API keys, passwords, tokens, private keys
 
 Reply with exactly one JSON object and no markdown:
 {"tool": "tool_name", "args": {...}, "reason": "short reason"}
@@ -12823,15 +14690,60 @@ or
 """
 
 
-def _agent_tool_help(read_only=False, cloud=False):
+def _agent_help_advertised_tools(help_text):
+    """Tool names an agent help block advertises, one per '- name: {...}' line."""
+    names = []
+    for line in help_text.splitlines():
+        stripped = line.lstrip()
+        if not stripped.startswith("- "):
+            continue
+        name, separator, _ = stripped[2:].partition(":")
+        name = name.strip()
+        if separator and name.isidentifier():
+            names.append(name)
+    return tuple(names)
+
+
+def _agent_tool_help(
+    read_only=False,
+    cloud=False,
+    unsafe=False,
+    project_bound=False,
+    allow_web=True,
+    allow_location=False,
+):
+    """Advertise exactly what THIS run's gates will admit.
+
+    Deriving the filter from ``_agent_run_tool_refusal`` instead of
+    restating one of its tool sets is what stops the two from drifting: the
+    local-only set was stripped here while the nested-model set never was, so a
+    hosted agent read in its own tool help that it could nest a model call that
+    dispatch hard-denies.  The same failure was live on three more gates --
+    ``project_bound`` left 21 names dead in ``AGENT_TOOL_HELP`` for every
+    project-bound run, and ``allow_web`` left the three web tools dead on every
+    ``master_orchestrate`` worker -- because those gates were never modelled
+    here at all.
+    """
     help_text = REPOSITORY_AGENT_TOOL_HELP if read_only else AGENT_TOOL_HELP
-    if not cloud:
+    denied = frozenset(
+        name for name in _agent_help_advertised_tools(help_text)
+        if _agent_run_tool_refusal(
+            name,
+            read_only=read_only,
+            cloud=cloud,
+            unsafe=unsafe,
+            project_bound=project_bound,
+            allow_web=allow_web,
+            allow_location=allow_location,
+        )
+    )
+    if not denied:
         return help_text
     return "\n".join(
         line for line in help_text.splitlines()
         if not any(
             line.lstrip().startswith("- %s:" % name)
-            for name in _CLOUD_AGENT_LOCAL_ONLY_TOOLS
+            for name in denied
         )
     )
 
@@ -12859,12 +14771,19 @@ def _tool_capability_shadow_surfaces():
         full_agent_help=AGENT_TOOL_HELP,
         repository_agent_help=REPOSITORY_AGENT_TOOL_HELP,
         hosted_agent_help=_agent_tool_help(cloud=True),
+        autopilot_observe_tools=_AUTOPILOT_OBSERVE_TOOLS,
+        autopilot_workspace_tools=_AUTOPILOT_WORKSPACE_TOOLS,
     )
 
 
 def tool_capability_shadow_report():
     """Validate descriptor drift without making descriptors authoritative."""
     return tool_capabilities.format_shadow_report(_tool_capability_shadow_surfaces())
+
+
+def tool_capability_coverage_report():
+    """Measured descriptor coverage for every advertised tool surface."""
+    return tool_capabilities.format_coverage_report(_tool_capability_shadow_surfaces())
 
 
 def _repository_scope_path_error(tool_name, args, project_root):
@@ -12897,6 +14816,33 @@ def _repository_scope_path_error(tool_name, args, project_root):
             targets = [("repository root", args.get("root") or ".")]
             if str(args.get("path") or "").strip():
                 targets.append(("diff path", args.get("path")))
+        elif tool_name == "diff_files":
+            targets = [
+                ("repository root", args.get("root") or "."),
+                ("left path", args.get("left") or ""),
+                ("right path", args.get("right") or ""),
+            ]
+        elif tool_name in _PROJECT_SCOPED_ROOT_AND_PATH_TOOLS:
+            # `path` is optional here, but when present harness_tools appends
+            # it to the child argv, so an unchecked value is a read or write
+            # outside the project even when `root` is contained.  Resolve it
+            # against the tool's OWN root -- that is what the child process
+            # does (cwd=root), and resolving against the project root instead
+            # would falsely reject a legitimate sibling reference from a
+            # subdirectory root.  It is checked, not rebased: for the cargo
+            # and go frameworks `path` names a test target or package pattern
+            # rather than a filesystem path, and rebasing would corrupt it.
+            tool_root = Path(str(args.get("root") or ".")).expanduser()
+            if not tool_root.is_absolute():
+                tool_root = root / tool_root
+            targets = [("repository root", tool_root)]
+            raw_path = str(args.get("path") or "").strip()
+            if raw_path:
+                candidate = Path(raw_path).expanduser()
+                targets.append((
+                    "path",
+                    candidate if candidate.is_absolute() else tool_root / candidate,
+                ))
         elif tool_name == "file_batch_write":
             operations = _batch_agent_operations(args)
             if operations is None or not operations:
@@ -12999,17 +14945,31 @@ def _agent_project_execution_argument_error(tool_name, args, project_root):
     program can still access resources available to the user account.  Keep
     that limitation explicit while blocking the direct escape forms a model
     can otherwise express in workspace/script argv.
+
+    build_run is covered too.  It forwards a caller-supplied `command` verbatim
+    to a child process (harness_tools.py:657-663), so leaving it outside this
+    guard would make it the one reachable execution route that accepts exactly
+    the inline-interpreter forms workspace_run refuses.
     """
     if (
         not project_root
-        or tool_name not in _PROJECT_SCOPED_EXECUTION_TOOLS
+        or tool_name not in (
+            _PROJECT_SCOPED_EXECUTION_TOOLS | _PROJECT_SCOPED_COMMAND_TOOLS
+        )
         or not isinstance(args, dict)
     ):
         return ""
     root = Path(str(project_root)).expanduser().resolve(strict=True)
-    argv = _agent_argv(args)
+    if tool_name in _PROJECT_SCOPED_COMMAND_TOOLS:
+        # harness_tools splits the command on whitespace and execs the result,
+        # so read the program and its argv exactly the way the child will.
+        command_argv = str(args.get("command") or "").split()
+        program = Path(command_argv[0]).name.casefold() if command_argv else ""
+        argv = command_argv[1:]
+    else:
+        argv = _agent_argv(args)
+        program = Path(str(args.get("program") or "")).name.casefold()
     lowered = [item.casefold() for item in argv]
-    program = Path(str(args.get("program") or "")).name.casefold()
     inline_flags = {
         "python": {"-c"}, "python.exe": {"-c"},
         "py": {"-c"}, "py.exe": {"-c"},
@@ -13072,9 +15032,14 @@ def _agent_project_execution_argument_error(tool_name, args, project_root):
                 "stdin is outside the project path guard"
             )
 
-    base_value = args.get("cwd") or (
-        os.path.dirname(str(args.get("path") or "")) if tool_name == "script_run" else "."
-    )
+    if tool_name in _PROJECT_SCOPED_COMMAND_TOOLS:
+        # build_run runs the child with cwd=root, so relative argv entries
+        # resolve against root -- not against Sonder's own working directory.
+        base_value = args.get("root") or "."
+    else:
+        base_value = args.get("cwd") or (
+            os.path.dirname(str(args.get("path") or "")) if tool_name == "script_run" else "."
+        )
     base = Path(str(base_value)).expanduser().resolve(strict=False)
     for raw_item in argv:
         raw = str(raw_item or "").strip().strip('"\'')
@@ -13492,8 +15457,44 @@ def _agent_task_exact_anchors(task: str) -> list[str]:
     return deduped[:6]
 
 
-def _agent_exact_negative_action(task: str, observations) -> dict | None:
+def _agent_claim_review_tools(cloud: bool = False) -> frozenset:
+    """Claim-review tools this run can actually reach, derived from the gate.
+
+    ``_AGENT_CLAIM_REVIEW_TOOLS`` is only the first of two gates a claim-review
+    action passes.  On a hosted run ``_cloud_agent_tool_policy_error`` refuses
+    every local-only tool one step later, and three of the five claim-review
+    tools are local-only -- so a reviewer told to use ``text_search`` /
+    ``file_read_range`` / ``file_find`` has, hosted, no working vocabulary at
+    all, while ``repository_symbol_index`` and ``project_detect`` sit unnamed.
+
+    Deriving the advertised vocabulary from the denial function rather than
+    restating one of its tool sets is what stops the two from drifting again;
+    this mirrors ``_agent_tool_help``, which was fixed the same way.
+    """
+    if not cloud:
+        return frozenset(_AGENT_CLAIM_REVIEW_TOOLS)
+    return frozenset(
+        name for name in _AGENT_CLAIM_REVIEW_TOOLS
+        if not _cloud_agent_tool_policy_error(name)
+    )
+
+
+def _agent_claim_review_vocabulary(cloud: bool = False) -> tuple:
+    """Deterministic ordering for the tool names shown to the reviewer."""
+    return tuple(sorted(_agent_claim_review_tools(cloud)))
+
+
+def _agent_exact_negative_action(
+    task: str, observations, cloud: bool = False,
+) -> dict | None:
     """Require exact anchor queries before accepting a negative existence claim."""
+    # This deterministic action runs before the reviewer model is consulted, so
+    # a hardcoded tool name here makes the *host itself* propose a tool the
+    # host will then refuse.  ``text_search`` is local-only, so it is dead on
+    # every hosted run; fall through to the model reviewer instead of emitting
+    # an action that can only produce a policy refusal.
+    if "text_search" not in _agent_claim_review_tools(cloud):
+        return None
     anchors = _agent_task_exact_anchors(task)
     if not anchors:
         return None
@@ -13542,9 +15543,12 @@ def _agent_negative_claim_review(
     """Audit negative existence claims without letting the reviewer invent facts."""
     if not _AGENT_NEGATIVE_CLAIM_RE.search(str(final or "")):
         return {"decision": "accept", "reason": "no negative existence claim"}
-    exact_action = _agent_exact_negative_action(task, observations)
+    exact_action = _agent_exact_negative_action(task, observations, cloud=cloud)
     if exact_action:
         return exact_action
+    # Name only what this run's policy will actually admit.  Restating a fixed
+    # trio here is what made 100% of the hosted reviewer's vocabulary dead.
+    vocabulary = _agent_claim_review_vocabulary(cloud)
     system = _build_system(
         "You are a local evidence reviewer. Return exactly one JSON object and no "
         "prose or chain-of-thought. Decide only accept or continue. Accept a negative "
@@ -13552,20 +15556,24 @@ def _agent_negative_claim_review(
         "anchor across the relevant scope. Reject a paraphrased/descriptive search "
         "query, a clipped read that did not reach the target, or a scope mismatch. "
         "Never rewrite the answer or invent evidence; continue must return exactly "
-        "one structured read-only evidence action using text_search, file_read_range, "
-        "or file_find.",
+        "one structured read-only evidence action using %s. No other tool is "
+        "available on this run: if none of them can settle the claim, return "
+        "continue with an empty tool and say so in the reason -- never accept a "
+        "claim you could not check."
+        % ", ".join(vocabulary),
         False,
         "",
     )
     review_prompt = (
         "Task:\n%s\n\nProposed final:\n%s\n\n%s\n\n"
         "JSON schema: {\"decision\":\"accept|continue\",\"reason\":\"brief\","
-        "\"tool\":\"text_search|file_read_range|file_find or empty\","
+        "\"tool\":\"%s or empty\","
         "\"args\":{}}"
         % (
             str(task or "")[:8000],
             str(final or "")[:4000],
             _agent_observation_prompt(observations, max_chars=7000),
+            "|".join(vocabulary),
         )
     )
     if cloud and cloud_budget_state is None:
@@ -13614,9 +15622,21 @@ def _agent_negative_claim_review(
                 raise ValueError("claim review needs a reason")
             if not isinstance(args, dict):
                 raise ValueError("claim review args must be a JSON object")
-            if decision == "continue" and tool not in _AGENT_CLAIM_REVIEW_TOOLS:
+            # Validate against what this run admits, not the superset.  A
+            # hosted reviewer naming ``text_search`` used to pass here and be
+            # refused a step later, spending the whole claim-review budget on
+            # a tool that could never run.
+            #
+            # An empty tool on ``continue`` is accepted: it is the reviewer
+            # saying "I cannot settle this with the tools I have", which the
+            # caller already handles by withholding evidence and ultimately
+            # returning EVIDENCE_REQUIRED.  That is strictly safer than an
+            # ``accept`` it cannot support, and it is the same shape this
+            # function's own parse-failure fallback returns.
+            if decision == "continue" and tool and tool not in vocabulary:
                 raise ValueError(
-                    "continued claim review needs an approved read-only tool"
+                    "continued claim review needs one of these approved "
+                    "read-only tools: %s" % ", ".join(vocabulary)
                 )
             if decision == "accept":
                 tool, args = "", {}
@@ -13640,6 +15660,96 @@ def _agent_negative_claim_review(
     }
 
 
+def _agent_permission_gate_error(tool_name):
+    """Refusal text when the operator's permission gate forbids this dispatch.
+
+    ``permission_modes.decide()`` was written as a pure function that call
+    sites opt into, and until now nothing did: the mode matrix and the
+    per-tool ``permission_rules`` policy both decided nothing. This is the
+    opt-in for the agent/workbench/autopilot path.
+
+    ``interactive=False`` is the whole reason this does not break flows that
+    have always worked. Nobody is at a keyboard behind an autonomous run, so
+    ``decide()`` degrades ``ask`` to ``allow`` here -- which means the default
+    ``manual`` mode refuses nothing it did not refuse yesterday. Only two
+    things can actually stop a dispatch: ``plan`` mode (whose entire purpose
+    is to hold still) and an explicit per-tool ``deny`` rule. Both are a
+    deliberate, written-down operator decision.
+
+    Because ``decide()`` never returns ``ask`` when ``interactive=False``,
+    the "what should ``ask`` mean with no human attached?" question does not
+    arise on this path. Were it ever to, the answer would have to be refusal,
+    not silent self-approval by the loop.
+
+    This gate is additional to -- never a replacement for -- the read-only
+    filter, the project-bound tool set and the cloud/host policies below it.
+    The refusal is shaped like the loop's other ``HOST POLICY`` observations
+    so ``_agent_observation_ok`` counts it as a failed step and the model is
+    told to change course rather than retry.
+    """
+    name = _canonical_agent_tool_name(str(tool_name or "").strip())
+    decision = permission_modes.decide(name, interactive=False)
+    if decision.allowed:
+        return ""
+    # Assigned rather than returned as a literal: scripts/check_error_signals.py
+    # ratchets new literal-prefixed ``ERROR:`` *returns*, and the agent loop's
+    # own policy chain builds its HOST POLICY strings the same way.
+    refusal = (
+        "ERROR: HOST POLICY: tool '%s' is refused by the active permission "
+        "gate (%s, mode=%s, risk=%s). This is the host's standing policy, not "
+        "a transient failure: retrying it unchanged will be refused again. "
+        "Choose a different tool or finalize with what you have."
+        % (name, decision.reason, decision.mode, decision.risk)
+    )
+    return refusal
+
+
+def _agent_project_root_refusal(tool_name, *, read_only, repository_extra_roots):
+    """Refusal text when a read-only run reaches a dev tool with no project.
+
+    ``_agent_project_scope("")`` returns ``("", "")`` with no error, so
+    ``project=""`` produced a read-only run bound to nothing -- and every path
+    check in ``_agent_dispatch``'s read-only block is conditional on
+    ``repository_extra_roots`` being set.  For these 23 that meant no
+    confinement at all, which is how ``secret_scan`` came to read a canary
+    outside the repository and print the key back to a read-only "observe"
+    agent.  Their whole contract is "work on a project", so with no project
+    there is nothing legitimate for them to do and refusing costs nothing.
+
+    Second lock, not the lock: ``harness_tools._resolve_root`` is where the
+    class is actually closed, because it also covers the direct MCP callers
+    and the 19 of these that ``_agent_dispatch`` never sees (the read-only
+    policy refuses them for not being in ``REPOSITORY_READ_ONLY_TOOLS``).
+    This one stands in front of it so that adding a tool to that set cannot
+    silently re-open the door -- and it is genuinely load-bearing rather than
+    belt-and-braces: with no project bound, ``root="."`` resolves to Sonder's
+    own cwd, which *is* in ``file_ops.allowed_roots()``, so ``_resolve_root``
+    admits it.  Removing this branch lets ``secret_scan(root=".")`` run and
+    print matched credentials back to the model.
+
+    The refusal lives here, beside its condition, rather than inline in
+    ``_agent_dispatch``: the dispatcher already forwards
+    ``_agent_permission_gate_error`` and ``_repository_read_only_error`` the
+    same way, so one more gate that owns its own message keeps every refusal
+    reachable from exactly one place instead of restated at the call site --
+    the drift shape ``dfad7ce`` removed from ``_agent_run_tool_refusal``.
+    """
+    if not read_only or repository_extra_roots:
+        return ""
+    if tool_name not in _DEVELOPER_WORKFLOW_TOOLS:
+        return ""
+    # Assigned rather than returned as a literal: scripts/check_error_signals.py
+    # ratchets new literal-prefixed ``ERROR:`` *returns*, and the agent loop's
+    # own policy chain builds its HOST POLICY strings the same way (see
+    # ``_agent_permission_gate_error`` directly above).
+    refusal = (
+        "ERROR: read-only agent run has no host-selected project root, "
+        "so developer-workflow tool '%s' has no project to work on. "
+        "Pass project=<directory>." % tool_name
+    )
+    return refusal
+
+
 def _agent_dispatch(
     tool_name, args, allow_web=True, read_only=False, allow_location=False,
     repository_extra_roots="",
@@ -13656,6 +15766,16 @@ def _agent_dispatch(
     args = args or {}
     if not isinstance(args, dict):
         return "ERROR: tool args must be a JSON object"
+    gate_error = _agent_permission_gate_error(tool_name)
+    if gate_error:
+        return gate_error
+    root_refusal = _agent_project_root_refusal(
+        tool_name,
+        read_only=read_only,
+        repository_extra_roots=repository_extra_roots,
+    )
+    if root_refusal:
+        return root_refusal
     if read_only:
         if repository_extra_roots:
             # Defense in depth for direct/internal dispatch callers.  The
@@ -13670,7 +15790,12 @@ def _agent_dispatch(
         if policy_error:
             return policy_error
         if tool_name in {"command_registry_list", "tool_manifest"}:
-            return _agent_tool_help(read_only=True)
+            return _agent_tool_help(
+                read_only=True,
+                project_bound=bool(repository_extra_roots),
+                allow_web=allow_web,
+                allow_location=allow_location,
+            )
         if repository_extra_roots:
             # The model cannot grant itself filesystem authority.  Replace any
             # scoped value with the exact host-selected project root, then use
@@ -14257,6 +16382,16 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "verify_artifact":
+        return verify_artifact(
+            path=args.get("path", ""),
+            expect_type=args.get("expect_type", ""),
+            expect_publisher=args.get("expect_publisher", ""),
+            sha256=args.get("sha256", ""),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "process_list":
         return process_list(
             max_processes=args.get("max_processes", 128),
@@ -14491,6 +16626,174 @@ def _agent_dispatch(
             num_ctx=args.get("num_ctx", 4096),
             learn=args.get("learn", False),
         )
+    # ── Developer-workflow tools (harness_tools.py) ──────────────────────
+    # Every tool below hands `root` to a child process as its working
+    # directory, and secret_scan prints what it finds there.  Confinement
+    # lives in harness_tools._resolve_root; this scope is the only channel
+    # that adds the HOST-selected project root to the authorized set, and
+    # it is an in-process scope rather than a tool argument precisely so a
+    # model cannot grant itself one.  Outside it these tools are confined
+    # to file_roots.local / SONDER_FILE_ROOTS, so a missed call site fails
+    # closed.
+    with harness_tools.authorized_root_scope(repository_extra_roots):
+        if tool_name == "test_discover":
+            return test_discover(
+                root=args.get("root", "."),
+                framework=args.get("framework", "auto"),
+            )
+        if tool_name == "test_run":
+            return test_run(
+                root=args.get("root", "."),
+                framework=args.get("framework", "auto"),
+                path=args.get("path", ""),
+                pattern=args.get("pattern", ""),
+                verbose=args.get("verbose", False),
+                coverage=args.get("coverage", False),
+                timeout=args.get("timeout", 120),
+                extra_args_json=args.get("extra_args_json", "[]"),
+            )
+        if tool_name == "lint_run":
+            return lint_run(
+                root=args.get("root", "."),
+                tool=args.get("tool", "auto"),
+                path=args.get("path", ""),
+                fix=args.get("fix", False),
+                timeout=args.get("timeout", 60),
+            )
+        if tool_name == "format_code":
+            return format_code(
+                root=args.get("root", "."),
+                tool=args.get("tool", "auto"),
+                path=args.get("path", ""),
+                check_only=args.get("check_only", False),
+                timeout=args.get("timeout", 60),
+            )
+        if tool_name == "typecheck_run":
+            return typecheck_run(
+                root=args.get("root", "."),
+                tool=args.get("tool", "auto"),
+                path=args.get("path", ""),
+                timeout=args.get("timeout", 120),
+            )
+        if tool_name == "dependency_add":
+            return dependency_add(
+                root=args.get("root", "."),
+                packages_json=args.get("packages_json", "[]"),
+                dev=args.get("dev", False),
+                timeout=args.get("timeout", 60),
+            )
+        if tool_name == "dependency_remove":
+            return dependency_remove(
+                root=args.get("root", "."),
+                packages_json=args.get("packages_json", "[]"),
+                timeout=args.get("timeout", 60),
+            )
+        if tool_name == "dependency_update":
+            return dependency_update(
+                root=args.get("root", "."),
+                packages_json=args.get("packages_json", "[]"),
+                timeout=args.get("timeout", 120),
+            )
+        if tool_name == "dependency_audit":
+            return dependency_audit(
+                root=args.get("root", "."),
+                timeout=args.get("timeout", 60),
+            )
+        if tool_name == "git_commit":
+            return git_commit(
+                root=args.get("root", "."),
+                message=args.get("message", ""),
+                paths_json=args.get("paths_json", "[]"),
+                all_tracked=args.get("all_tracked", False),
+                timeout=args.get("timeout", 30),
+            )
+        if tool_name == "git_branch":
+            return git_branch(
+                root=args.get("root", "."),
+                name=args.get("name", ""),
+                checkout=args.get("checkout", True),
+                base=args.get("base", ""),
+                timeout=args.get("timeout", 10),
+            )
+        if tool_name == "git_checkout":
+            return git_checkout(
+                root=args.get("root", "."),
+                ref=args.get("ref", ""),
+                timeout=args.get("timeout", 10),
+            )
+        if tool_name == "git_stash":
+            return git_stash(
+                root=args.get("root", "."),
+                action=args.get("action", "push"),
+                message=args.get("message", ""),
+                include_untracked=args.get("include_untracked", True),
+                timeout=args.get("timeout", 10),
+            )
+        if tool_name == "git_tag":
+            return git_tag(
+                root=args.get("root", "."),
+                name=args.get("name", ""),
+                message=args.get("message", ""),
+                delete=args.get("delete", False),
+                timeout=args.get("timeout", 10),
+            )
+        if tool_name == "git_merge":
+            return git_merge(
+                root=args.get("root", "."),
+                branch=args.get("branch", ""),
+                no_ff=args.get("no_ff", True),
+                message=args.get("message", ""),
+                timeout=args.get("timeout", 30),
+            )
+        if tool_name == "git_cherry_pick":
+            return git_cherry_pick(
+                root=args.get("root", "."),
+                commits_json=args.get("commits_json", "[]"),
+                timeout=args.get("timeout", 30),
+            )
+        if tool_name == "build_run":
+            return build_run(
+                root=args.get("root", "."),
+                command=args.get("command", ""),
+                timeout=args.get("timeout", 120),
+            )
+        if tool_name == "build_clean":
+            return build_clean(
+                root=args.get("root", "."),
+                timeout=args.get("timeout", 30),
+            )
+        if tool_name == "rename_symbol":
+            return rename_symbol(
+                root=args.get("root", "."),
+                old_name=args.get("old_name", ""),
+                new_name=args.get("new_name", ""),
+                glob=args.get("glob", "**/*.py"),
+                dry_run=args.get("dry_run", True),
+            )
+        if tool_name == "find_references":
+            return find_references(
+                root=args.get("root", "."),
+                symbol=args.get("symbol", ""),
+                glob=args.get("glob", "**/*.py"),
+            )
+        if tool_name == "diff_files":
+            return diff_files(
+                root=args.get("root", "."),
+                left=args.get("left", ""),
+                right=args.get("right", ""),
+                context=args.get("context", 3),
+            )
+        if tool_name == "apply_patch":
+            return apply_patch(
+                root=args.get("root", "."),
+                patch_text=args.get("patch_text", ""),
+                check_only=args.get("check_only", False),
+            )
+        if tool_name == "secret_scan":
+            return secret_scan(
+                root=args.get("root", "."),
+                timeout=args.get("timeout", 30),
+            )
     return "ERROR: unknown tool '%s'." % tool_name
 
 
@@ -14545,6 +16848,7 @@ _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "archive_list", "archive_extract",
     "file_delete", "directory_create", "workspace_inventory", "dependency_inventory", "directory_tree",
     "file_find", "repository_symbol_index", "text_search", "script_search", "artifact_verify",
+    "fetch_artifact", "verify_artifact",
     "artifact_ground", "artifact_risk_inspect", "scaffold_project", "archive_create", "repo_status", "repo_diff", "project_detect", "file_copy", "file_move",
     "test_discover", "test_run", "lint_run", "format_code", "typecheck_run",
     "dependency_add", "dependency_remove", "dependency_update", "dependency_audit",
@@ -14553,6 +16857,36 @@ _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "rename_symbol", "find_references", "diff_files", "apply_patch", "secret_scan",
 })
 _PROJECT_SCOPED_EXECUTION_TOOLS = frozenset({"workspace_run", "script_run"})
+# The developer-workflow tools (harness_tools.py).  Every OTHER project-scoped
+# tool resolves its path through file_ops -- `_repository_read_only_error`'s
+# resolver chain calls `resolve_repository_read_path(..., extra_roots=trusted)`
+# for each of them -- so with no project bound they are still confined to
+# `allowed_roots("")`.  These 23 have no such branch: they hand `root` to a
+# child process.  Confinement for them now lives in `harness_tools._resolve_root`;
+# this set is the second lock on the same door, and it is a set rather than a
+# check against `_PROJECT_SCOPED_PATH_TOOLS` because refusing that whole set on
+# a rootless read-only run also refuses tools that were never unconfined
+# (`artifact_ground` on a workspace-relative path, measured).
+_DEVELOPER_WORKFLOW_TOOLS = frozenset({
+    "test_discover", "test_run", "lint_run", "format_code", "typecheck_run",
+    "dependency_add", "dependency_remove", "dependency_update", "dependency_audit",
+    "git_commit", "git_branch", "git_checkout", "git_stash", "git_tag",
+    "git_merge", "git_cherry_pick",
+    "build_run", "build_clean",
+    "rename_symbol", "find_references", "diff_files", "apply_patch", "secret_scan",
+})
+# Developer-workflow tools that take BOTH `root` and a second `path` argument
+# which harness_tools appends straight to the child argv (harness_tools.py:233,
+# 353, 366, 394).  Containing `root` alone leaves `path` checked by nothing, so
+# lint_run(path="../../x", fix=True) would write outside the project.
+_PROJECT_SCOPED_ROOT_AND_PATH_TOOLS = frozenset({
+    "test_run", "lint_run", "format_code", "typecheck_run",
+})
+# Tools that forward a caller-supplied command string to a child process.  They
+# need the same inline-interpreter argv guard as the execution tools, but they
+# are not execution tools for scoping purposes -- their working directory is
+# `root`, not `cwd`.
+_PROJECT_SCOPED_COMMAND_TOOLS = frozenset({"build_run"})
 _AGENT_TOOL_ALIASES = {
     "assetgen": "artifact_generate",
     "game_generate": "game_generate_and_test",
@@ -14596,6 +16930,64 @@ _CLOUD_AGENT_LOCAL_ONLY_TOOLS = frozenset({
     "repo_diff", "artifact_risk_inspect", "process_list",
     "process_memory_risk_inspect",
 })
+# ``_agent_dispatch`` checks these two flags *inside* the matched tool branch,
+# so every name here is dispatchable and a dispatch-only drift check reports it
+# as fine.  The refusal is name-unconditional all the same: on a run with the
+# flag off the tool can never do anything.  Kept as declared sets so the help
+# filter is cheap; tests/test_advertised_surface_drift.py AST-extracts the real
+# branch guards and asserts these two constants match them exactly.
+_AGENT_WEB_GATED_TOOLS = frozenset({
+    "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",
+})
+_AGENT_LOCATION_GATED_TOOLS = frozenset({"approximate_location_lookup"})
+
+
+def _agent_run_tool_refusal(
+    tool_name,
+    *,
+    read_only=False,
+    cloud=False,
+    unsafe=False,
+    project_bound=False,
+    allow_web=True,
+    allow_location=False,
+):
+    """Name the gate that will refuse this tool on this run, or ``""``.
+
+    Advertising a tool a later gate always refuses is the "admit-then-deny"
+    defect: the model is told it may call the tool, spends a step calling it,
+    and is refused.  ``_agent_tool_help`` used to model only ``read_only`` /
+    ``cloud`` / ``unsafe``, while ``_agent_impl`` gates three more times --
+    ``project_scope`` against ``_PROJECT_BOUND_AGENT_TOOLS``, and ``allow_web``
+    / ``allow_location`` inside the dispatcher.  Both the help filter and the
+    drift guard read this one predicate, so neither can drift from the other.
+
+    This deliberately returns a short GATE NAME, never a user-facing
+    ``ERROR:`` message.  The refusal messages themselves belong to the gates
+    that actually enforce them (``_repository_read_only_error``, the
+    project-bound branch of ``_agent_impl``, and ``_agent_dispatch``'s own
+    web/location guards); restating them here would put a fifth copy of each
+    string one edit away from drifting out of sync with the real one -- the
+    exact defect shape this function exists to prevent.  No caller reads the
+    text: both use it as a predicate.
+    """
+    if unsafe:
+        # unsafe_lab resets read_only/allow_web/allow_location/project in
+        # _agent_impl, so only hosted policy still applies.
+        return "hosted agent policy" if _cloud_agent_tool_policy_error(
+            tool_name, unsafe=True,
+        ) else ""
+    if cloud and _cloud_agent_tool_policy_error(tool_name, unsafe=unsafe):
+        return "hosted agent policy"
+    if read_only and tool_name not in REPOSITORY_READ_ONLY_TOOLS:
+        return "repository read-only policy"
+    if project_bound and tool_name not in _PROJECT_BOUND_AGENT_TOOLS:
+        return "project-bound execution contract"
+    if not allow_web and tool_name in _AGENT_WEB_GATED_TOOLS:
+        return "allow_web=False"
+    if not allow_location and tool_name in _AGENT_LOCATION_GATED_TOOLS:
+        return "allow_location=False"
+    return ""
 
 
 def _cloud_agent_tool_policy_error(tool_name, *, unsafe=False):
@@ -14625,9 +17017,27 @@ def _canonical_agent_tool_name(tool_name):
 def _project_scoped_path_key(tool_name):
     if tool_name == "archive_extract":
         return "destination"
+    if tool_name == "fetch_artifact":
+        # Its download target is `dest`; there is no `path` parameter, so the
+        # generic branch was reading a missing key, falling back to ".", and
+        # passing unconditionally. Latent rather than live today (this tool is
+        # neither advertised nor dispatchable), but it arms the moment anyone
+        # gives it a dispatch branch -- which is exactly what this task just
+        # did for twenty-three of its neighbours.
+        return "dest"
     if tool_name in {
         "file_find", "text_search", "script_search", "scaffold_project",
         "repo_status", "repo_diff", "text_patch", "archive_create",
+        # Developer-workflow tools (harness_tools.py) all take "root", not
+        # "path" -- without this, a project-bound run would silently
+        # rebase a nonexistent "path" key while the real "root" argument
+        # (and its escape-check) went untouched.
+        "test_discover", "test_run", "lint_run", "format_code", "typecheck_run",
+        "dependency_add", "dependency_remove", "dependency_update", "dependency_audit",
+        "git_commit", "git_branch", "git_checkout", "git_stash", "git_tag",
+        "git_merge", "git_cherry_pick",
+        "build_run", "build_clean",
+        "rename_symbol", "find_references", "diff_files", "apply_patch", "secret_scan",
     }:
         return "root"
     return "path"
@@ -14777,6 +17187,40 @@ def _project_scope_args(tool_name, args, project):
     return scoped
 
 
+# Dispatchable tools whose observation text THIS server rendered, in one of the
+# shapes `grounded_outcomes.rendered_verdict` reads. Membership is what makes it
+# safe to believe a verdict line: the text is ours, not the tool's subject.
+#
+# Scoped rather than applied to every observation, because measured, that
+# over-reaches -- `file_read` of a 23-byte YAML whose first line is `ok: false`
+# makes `rendered_verdict` return False, and filing a successful read as a
+# failure is the same defect pointing the other way, driven by file content the
+# caller supplies. `test_tool_content_cannot_flip_the_verdict` pins that case.
+#
+# Derived from the renderer call sites, intersected with
+# `tool_capabilities.dispatch_names(_agent_dispatch)`:
+#   _format_run_result                -> the 20 run-and-report tools below
+#   code_runner.format_result         -> run_code (script_run uses both)
+#   code_runner.format_project_result -> run_project
+#   artifact_grounding.format_result  -> ground_artifact, artifact_ground
+#   artifact_verify                   -> renders its verdict line inline
+# `archive_create`, `archive_extract` and `artifact_risk_inspect` also call a
+# `format_result`, but theirs is a `json.dumps`, whose `"ok": false` key keeps
+# its quotes and so is not a verdict line. They are deliberately absent.
+#
+# `test_every_format_run_result_tool_is_covered` re-derives the first group by
+# AST, so a new tool using the main renderer cannot quietly miss this.
+_RENDERED_VERDICT_TOOLS = frozenset({
+    "apply_patch", "build_clean", "build_run", "dependency_add",
+    "dependency_audit", "dependency_remove", "dependency_update", "format_code",
+    "git_branch", "git_checkout", "git_cherry_pick", "git_commit", "git_merge",
+    "git_stash", "git_tag", "lint_run", "script_run", "test_run",
+    "typecheck_run", "workspace_run",
+    "run_code", "run_project",
+    "ground_artifact", "artifact_ground", "artifact_verify",
+})
+
+
 def _agent_dispatch_observed(
     tool_name, args, allow_web=True, read_only=False, allow_location=False,
     project="",
@@ -14784,6 +17228,14 @@ def _agent_dispatch_observed(
     started = time.time()
     ok = False
     observation = ""
+    # True only once _agent_dispatch has actually returned a verdict. A
+    # dispatcher crash (bad arg handling, an internal KeyError, an IO fault
+    # before the tool's own try/except engages) is evidence the plumbing
+    # broke, not that the generated work failed -- grounded_outcomes must not
+    # see it, or a plumbing bug poisons the very population it exists to
+    # clean up. record_tool_result still logs it below either way; only the
+    # outcome feed is gated on this.
+    dispatched = False
     args = _project_scope_args(tool_name, args, project)
     dispatch_args = args
     if project and tool_name in {"archive_create", "sqlite_mutate"}:
@@ -14797,14 +17249,41 @@ def _agent_dispatch_observed(
             dispatch_options = {"allow_web": allow_web}
             if allow_location:
                 dispatch_options["allow_location"] = True
-            if read_only:
-                observation = _agent_dispatch(
-                    tool_name, dispatch_args, read_only=True,
-                    repository_extra_roots=project, **dispatch_options,
-                )
-            else:
-                observation = _agent_dispatch(tool_name, dispatch_args, **dispatch_options)
+            # `repository_extra_roots` is the ONLY channel that adds the
+            # host-selected project root to the authorized set -- it opens
+            # `harness_tools.authorized_root_scope` inside `_agent_dispatch` --
+            # and it belongs on BOTH arms. It used to be passed on the
+            # `read_only` arm alone, so a write-enabled project-bound run
+            # dispatched under `authorized_root_scope("")` and all 23
+            # developer-workflow tools raised `PermissionError: root is outside
+            # every authorized root` on the very project the host bound. The
+            # commit that made these tools dispatchable broke them for exactly
+            # the run type that changes anything.
+            #
+            # This grants no authority the read-only arm did not already have:
+            # the value is the host-selected `project`, never a model-supplied
+            # argument, and `_resolve_root` still refuses everything outside it.
+            observation = _agent_dispatch(
+                tool_name, dispatch_args, read_only=read_only,
+                repository_extra_roots=project, **dispatch_options,
+            )
+        dispatched = True
         ok = not str(observation).startswith("ERROR:")
+        if ok and tool_name in _RENDERED_VERDICT_TOOLS:
+            # `ok` above is a statement about the DISPATCHER, not the work:
+            # these tools emit `ERROR:` only when they never ran, so a genuinely
+            # failing run arrives here as True. Measured on a project holding
+            # one failing pytest -- harness ok=False, returncode=1, rendered
+            # "test run (pytest)\n  ok: False" -- the activity record said
+            # ok=True and the public snapshot said phase "completed".
+            #
+            # The outcome feed learned to read the verifier's own rendered
+            # verdict; this is the same read for the OTHER consumer of the same
+            # flag. It can only ever turn a claimed success into a failure --
+            # never the reverse -- so a dispatcher fault stays a failure.
+            rendered = grounded_outcomes.rendered_verdict(observation)
+            if rendered is not None:
+                ok = rendered
         return observation
     finally:
         activity_tracker.record_tool_result(
@@ -14816,11 +17295,39 @@ def _agent_dispatch_observed(
             command=_agent_activity_command(tool_name, args),
             output=observation,
         )
+        # This is the agent-loop counterpart of _record_direct_tool's own feed.
+        # A tool dispatched from here runs inside tool_dispatch_context(), so
+        # any _record_direct_tool call the tool body makes on its own (e.g.
+        # file_write, file_edit, text_patch, which are both GENERATORS and
+        # direct MCP tools) sees inside_tool_call() = True and skips its feed
+        # -- this call is the only one that fires for it. That guard is why
+        # this call is unconditional (on dispatched) rather than itself
+        # checking inside_tool_call(): a nested dispatch (a sub-agent tool
+        # call running its own tool loop) still has its own genuinely
+        # distinct tool calls to feed, one call site per
+        # tool_name/ok/observation, and grounded_outcomes.attribute()
+        # additionally refuses to judge the same pending generation twice
+        # with the same verification kind.
+        if dispatched:
+            # activity_tracker.current_response_id() is this thread's active
+            # response span -- agent(), workbench_agent() and each autopilot
+            # run (one threading.Thread per run, each wrapped in its own
+            # response_span) all set one for the life of the run, so every
+            # call this function makes on that thread shares it. Passing it
+            # through lets grounded_outcomes refuse to let one run's
+            # verification claim another concurrent run's generation, which
+            # project + time window alone cannot distinguish when both runs
+            # share a project (or both leave it blank).
+            _feed_grounded_outcome(
+                tool_name, ok, observation, args, project=project,
+                run_id=activity_tracker.current_response_id() or "",
+            )
 
 
 _WORK_MUTATION_TOOLS = frozenset({
     "directory_create", "file_write", "file_batch_write", "json_patch", "file_edit", "file_copy", "file_move", "file_delete", "text_patch", "data_convert",
     "sqlite_mutate", "scaffold_project", "archive_extract", "archive_create",
+    "fetch_artifact",
     "artifact_generate", "game_generate_and_test", "game_generation_campaign",
     "memory_quality_repair", "memory_privacy_repair", "memory_embedding_backfill",
     "memory_interaction_embedding_backfill",
@@ -14828,6 +17335,10 @@ _WORK_MUTATION_TOOLS = frozenset({
     "git_merge", "git_cherry_pick",
     "dependency_add", "dependency_remove", "dependency_update",
     "build_clean", "rename_symbol", "apply_patch",
+    # lint_run(fix=True) runs the linter's fix command and format_code writes
+    # in place unless check_only -- both rewrite source files, so both must be
+    # able to count as mutations. _agent_tool_mutates decides per invocation.
+    "lint_run", "format_code",
     "task_delete",
 })
 
@@ -14845,6 +17356,22 @@ def _agent_tool_mutates(tool_name, args):
         return args.get("apply") is True
     if tool_name == "rename_symbol":
         return args.get("dry_run") is False
+    if tool_name == "apply_patch":
+        # Unlike rename_symbol's dry_run (default True, opt-in to mutate),
+        # apply_patch's check_only defaults False -- it applies by default,
+        # so only an explicit check_only=True is a non-mutating dry run.
+        return args.get("check_only") is not True
+    if tool_name == "lint_run":
+        # `ruff check --fix`, `npx eslint --fix` and `cargo clippy --fix`
+        # rewrite source files. Linters with no fix command (flake8, pylint)
+        # fall back to checking, but which linter runs is auto-detected inside
+        # the tool -- long after this gate has to answer -- so fix=True is
+        # treated as a mutation rather than guessing that it is harmless.
+        return args.get("fix") is True
+    if tool_name == "format_code":
+        # Every formatter in the table writes in place by default, so like
+        # apply_patch this applies unless explicitly told only to check.
+        return args.get("check_only") is not True
     if tool_name == "data_convert":
         return args.get("apply") is True
     if tool_name == "sqlite_mutate":
@@ -14870,6 +17397,364 @@ _WORK_VALIDATION_TOOLS = frozenset({
     "repository_symbol_index", "file_read", "file_read_range", "archive_extract", "archive_create", "text_search", "image_inspect",
     "memory_quality_report", "memory_privacy_review", "learning_health_status",
 })
+
+# Verifiers whose passing result is a citation a completion claim can rest on.
+#
+# Deliberately NOT members of _WORK_VALIDATION_TOOLS: _agent_validation_covers
+# has no branch for these names and falls through to False, so adding them
+# there would set validation_ok=False and stamp the run VALIDATION_FAILED --
+# running the tests would be the thing that failed the run.
+_AGENT_VERIFICATION_TOOLS = frozenset({
+    "test_run", "build_run", "lint_run", "typecheck_run",
+})
+
+# Leads an end report that claims completion the record says must be earned.
+# A statement of standing, not a failure: deliberately absent from
+# autopilot_controller.FAILURE_PREFIXES.
+#
+# It leads only when nothing stronger already does. A prefix is a position, not
+# a decoration: _task_passed matches FAILURE_PREFIXES at position 0 and
+# _agent_observation_ok reads line one, so stacking this in front of
+# VALIDATION_FAILED would displace that marker and make both consumers blind to
+# a failed validation. When both apply the two are composed into one block led
+# by the failure marker -- see finish_final.
+_AGENT_UNVERIFIED_PREFIX = "UNVERIFIED:"
+
+_AGENT_VALIDATION_FAILED_LINE = (
+    "VALIDATION_FAILED: workspace changes were not successfully validated."
+)
+
+# One noun phrase, shared by the standalone standing and the composed clause,
+# so the two can never drift into describing different things.
+_AGENT_VERIFIERS_PHRASE = (
+    "a passing verification (test_run, build_run, lint_run or typecheck_run) "
+    "covering the work"
+)
+
+
+def _agent_verifier_reachable(read_only, allowed_tools):
+    """Whether any verifier could have been called in this lane at all.
+
+    Read from the two gates the dispatcher actually enforces -- the read-only
+    policy, which admits only ``REPOSITORY_READ_ONLY_TOOLS``, and the lane's
+    own ``tool_allowlist`` -- rather than from a list of lane names, so a lane
+    added later is classified by what it can do instead of by whether someone
+    remembered to add it here.
+
+    This exists because a demand nothing in the lane can satisfy is not a gate.
+    Four allowlists in this file admit no member of
+    ``_AGENT_VERIFICATION_TOOLS``: ``REPOSITORY_READ_ONLY_TOOLS`` (repository
+    workers), ``_AUTOPILOT_OBSERVE_TOOLS``, the chat/web research allowlist,
+    and the selfmod editor's. Leading their answers -- every weather question
+    among them -- with "claimed completion without a passing verification
+    (test_run, build_run, lint_run or typecheck_run)" names tools the lane is
+    forbidden from calling, and no run in it could ever clear the line. A
+    standing with no OFF state is a banner, and a banner teaches a reader to
+    skip exactly where a real warning would appear.
+
+    The measurement is unchanged either way, and still reaches the caller
+    through the end-report standing line, which ships on every run.
+    """
+    reachable = set(_AGENT_VERIFICATION_TOOLS)
+    if read_only:
+        reachable &= REPOSITORY_READ_ONLY_TOOLS
+    if allowed_tools is not None:
+        reachable &= set(allowed_tools)
+    return bool(reachable)
+
+
+# Flags that make a program report on itself instead of on the project. Taken
+# from the set ``_agent_validation_covers`` already applies to ``workspace_run``
+# -- the sibling free-form-argv tool -- so the two routes refuse the same
+# no-ops rather than each keeping a private list.
+_AGENT_NO_OP_COMMAND_FLAGS = frozenset({
+    "--help", "-h", "--version", "-version", "--collect-only", "--co",
+    "--list-tests", "--dry-run", "--fixtures", "--fixtures-per-test",
+    "--show-only", "-n",
+})
+
+# Programs that build or test a project, and the action words that mean they
+# did. Derived, not recalled: the first rows are exactly the argv
+# ``harness_tools.build_run`` auto-detects from a root's own marker files
+# (Makefile, Cargo.toml, CMakeLists.txt, go.mod, package.json, build.gradle,
+# pom.xml), and the rest are the drivers ``_agent_validation_covers`` already
+# treats as broad for ``workspace_run``. An empty tuple means any non-no-op
+# invocation of that program builds something.
+_AGENT_BUILD_DRIVERS = {
+    "make": (), "gmake": (), "nmake": (), "mingw32-make": (),
+    "cargo": ("build", "check", "test"),
+    "cmake": ("--build",),
+    "go": ("build", "test", "vet", "install"),
+    "npm": ("build", "test", "check", "lint"),
+    "pnpm": ("build", "test", "check", "lint"),
+    "yarn": ("build", "test", "check", "lint"),
+    "gradle": ("build", "test", "check", "assemble", "verify"),
+    "gradlew": ("build", "test", "check", "assemble", "verify"),
+    "mvn": ("package", "install", "verify", "test", "compile"),
+    "msbuild": (), "ninja": (), "ctest": (), "pytest": (),
+    "dotnet": ("build", "test"),
+}
+
+
+def _agent_build_command_examines(command, root, scope, changed):
+    """Whether a ``build_run`` command could have looked at the work at all.
+
+    ``build_run`` is the one verifier with neither a ``path`` nor a fixed
+    program: ``harness_tools.build_run`` takes ``root``/``command``/``timeout``
+    and appends nothing, so the S2 narrowing that made this gate read ``path``
+    cannot reach it and ``root`` alone decided coverage. Measured on a project
+    with no build system, ``build_run(root=proj, command="git --version")``
+    returns ``ok=True, returncode=0``, so ``verification_ok`` was granted --
+    and through ``_work_validated`` that satisfied a whole ``validate`` task --
+    for a command that examined nothing. "Exit 0" is not a verdict about the
+    work when the caller chose the whole argv.
+
+    The control is not new doctrine: ``_agent_validation_covers`` already
+    applies it to ``workspace_run``, the sibling tool whose argv the caller
+    also chooses, on the *validation* route. ``build_run`` reached the
+    *verification* route, where the same shape had no check. The command is
+    tokenized with ``str.split()`` because that is exactly what the child does
+    (``harness_tools.build_run``'s ``parts = command.split()``); analysing it
+    any other way would judge an argv the child never runs.
+
+    An empty ``command`` stays covered. The argv is then derived from the
+    root's own build files, which the caller cannot forge, and a root with no
+    build system comes back ``{"ok": False, ...}`` so ``tool_ok`` already
+    refuses it one level up. That is the non-fabricable binding this check
+    exists to demand, and it is already present on that path.
+    """
+    text = str(command or "").strip()
+    if not text:
+        return True
+    parts = text.split()
+    if not parts:
+        return True
+    program = os.path.basename(parts[0]).casefold()
+    for suffix in (".exe", ".cmd", ".bat"):
+        if program.endswith(suffix):
+            program = program[: -len(suffix)]
+            break
+    argv = parts[1:]
+    lowered = [item.casefold() for item in argv]
+
+    # Self-reporting flags first, and before the driver table: ``make
+    # --version`` is the project's real build program and still builds nothing.
+    if any(item.split("=", 1)[0] in _AGENT_NO_OP_COMMAND_FLAGS for item in lowered):
+        return False
+    if any(
+        item == "clean" or item.endswith(":clean") or item in {"/t:clean", "-t:clean"}
+        for item in lowered
+    ):
+        return False
+    # Inline source runs the caller's own text, never the project's.
+    if program in {"python", "py", "python3", "node"} and any(
+        flag in lowered for flag in ("-c", "-e", "--eval", "-p", "--print")
+    ):
+        return False
+
+    if program in _AGENT_BUILD_DRIVERS:
+        required = _AGENT_BUILD_DRIVERS[program]
+        if not required or any(action in lowered for action in required):
+            return True
+
+    # Otherwise it has to say what it looked at, and that has to be the work.
+    targets = _agent_explicit_command_paths(argv, root)
+    targets = [target for target in targets if _agent_path_within(target, scope)]
+    if not targets:
+        return False
+    if not changed:
+        return True
+    return _agent_paths_covered_by_targets(changed, targets)
+
+
+def _agent_verification_covers(tool_name, args, mutations, project_scope=""):
+    """Whether this verifier ran over the work this run is answerable for.
+
+    Keyed on ``root`` NARROWED BY ``path``. This used to key on ``root`` alone,
+    justified here as: *"their `path` argument narrows which checks run inside
+    it, not what those checks exercise."* That was refuted by code in the same
+    lane. ``harness_tools`` appends ``path`` straight to the child argv
+    (``cmd.append(path)`` in test_run/lint_run/format_code/typecheck_run), so
+    ``path`` decides what the child actually looks at -- it *is* what those
+    checks exercise. ``server.py:15659`` says so in the other direction, and
+    until the confinement added beside this fix, ``path`` could even point
+    outside ``root`` altogether (measured: ``test_run`` executed a file outside
+    the authorized root through it).
+
+    The half the old comment had right is kept, and is why the narrowing is
+    conditional: ``path`` is empty on a default invocation, and reading it
+    unconditionally -- as the file-oriented ``_agent_validation_covers`` does --
+    would answer "" for nearly every real call and refuse verifications that
+    genuinely covered the change. So an empty ``path`` means "the whole root",
+    exactly as before; a non-empty one means the verifier looked at that
+    subtree and must be judged on it.
+
+    Without this, the model changes ``payments.py`` and runs the verifier
+    narrowed to ``tests/`` -- a real, passing, in-scope check of a different
+    part of the tree -- and it counted as covering the change.
+
+    The no-mutation case is decided explicitly, never left to fall through an
+    empty ``all()``: ``all([])`` is True, so a run that changed nothing
+    previously reported *any* root as covering -- a check answering yes because
+    it had nothing to check. That is load-bearing now that a passing verifier
+    also sets validation_attempted/validation_passed, which is what
+    _task_passed and _completion_gate accept for a whole ``validate`` task.
+    With nothing changed on disk, the work the run is answerable for is the
+    scope it was confined to, so the verifier has to cover that scope.
+
+    An unscoped run has no declared boundary to violate -- ``root`` defaults to
+    the server CWD, which is that run's implicit scope -- so it is covered.
+    That default is a separately-tracked item, not something decided here.
+    """
+    args = args if isinstance(args, dict) else {}
+    root = str(args.get("root") or ".")
+    scope = _agent_normalized_path(root)
+    if not scope:
+        return False
+    # A non-empty `path` narrows the scope to what the child was actually
+    # pointed at. Resolved against `root`, matching how the child resolves it
+    # (harness_tools runs it with cwd=root).
+    narrowing = str(args.get("path") or "").strip()
+    if narrowing:
+        narrowed = _agent_normalized_path(
+            narrowing if os.path.isabs(narrowing)
+            else os.path.join(root, narrowing)
+        )
+        # Only ever narrows. A `path` that resolves outside `root` is refused
+        # by harness_tools now; if one still arrives, the scope it covers is
+        # not the root it claimed, so fall closed rather than widen.
+        if not narrowed or not _agent_path_within(narrowed, scope):
+            return False
+        scope = narrowed
+    changed = [
+        str(record.get("path") or "") for record in mutations
+        if record.get("path")
+    ]
+    # ``build_run`` has no ``path`` to narrow with, so the narrowing above can
+    # never reach it and ``root`` alone said yes to any command that exited 0.
+    # See ``_agent_build_command_examines``: the caller chooses this whole argv,
+    # so the argv has to name something in scope before its exit status counts.
+    if tool_name == "build_run" and not _agent_build_command_examines(
+        args.get("command"), root, scope, changed,
+    ):
+        return False
+    if not changed:
+        declared = _agent_normalized_path(project_scope)
+        return _agent_path_within(declared, scope) if declared else True
+    return all(_agent_path_within(path, scope) for path in changed)
+
+
+def _agent_verification_standing():
+    """Whether the measured record demands a citation, and the measured why.
+
+    Returns ``(bool, reason)`` where ``reason`` is ``should_verify``'s own
+    projection of the counts -- never generated prose. Ignorance fails closed
+    in both directions: too thin a sample demands verification, and so does a
+    record that cannot be read at all.
+    """
+    unreadable = (
+        "the measured record could not be read - reliability is unknown, "
+        "so verify rather than assume"
+    )
+    try:
+        # Read-only, like the end-report standing: this is the last completion
+        # path that could take the write path's thirty-second busy_timeout and
+        # a BEGIN IMMEDIATE just to count rows. Reading a count is not a reason
+        # to queue behind another process's write lock, and using the same
+        # opener as the other standing keeps the two from disagreeing.
+        conn = _open_db_readonly()
+    except Exception:
+        return True, unreadable
+    try:
+        return calibration.should_verify(conn, "caller")
+    except Exception:
+        return True, unreadable
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _agent_verification_standing_notice():
+    """The three-state calibration block shown to the agent itself."""
+    try:
+        conn = _open_db()
+    except Exception:
+        return (
+            "VERIFICATION STANDING: unverifiable\n"
+            "  caller population could not be read; verify before claiming done"
+        )
+    try:
+        return calibration.agent_notice(conn, "caller")
+    except Exception:
+        return (
+            "VERIFICATION STANDING: unverifiable\n"
+            "  caller population could not be read; verify before claiming done"
+        )
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _agent_end_report_standing_line():
+    """The measured standing the claim in an end report was made under.
+
+    Deliberately *not* ``should_verify``'s reason sentence. ``finish_final``
+    already prints that verbatim when a run claims completion without citing a
+    verification, and the same sentence twice on one report reads as two
+    findings where there is one. That prefix is a fact about *this run*
+    ("claimed completion without verifiers"); this line is the other half --
+    the verdict and the counts behind it -- and it ships on every run, cited or
+    not, so a reader can see the standing even when nothing was flagged.
+
+    Only the caller-judged population appears, because that is the one a
+    completion claim is gated on. No figure here crosses the two populations.
+
+    Ignorance fails closed in both directions: too thin a sample and a record
+    that cannot be read both demand verification, and a sample too thin to
+    measure is reported as exactly that rather than as ``0.0%``.
+
+    Read through ``_open_db_readonly`` on purpose. ``/report`` is one of the
+    two surfaces this composes for, and it did no I/O whatsoever before this
+    line existed; putting the write path behind a status command would let it
+    create a database, migrate a schema, and stall for thirty seconds on
+    another process's lock. A store that does not exist yet raises here and
+    lands on ``unreadable`` below -- which demands verification, the same
+    answer an empty store gets.
+    """
+    unreadable = (
+        "standing: verify before claiming done: yes | caller-judged: the "
+        "measured record could not be read"
+    )
+    try:
+        conn = _open_db_readonly()
+    except Exception:
+        return unreadable
+    try:
+        demanded, _reason = calibration.should_verify(conn, "caller")
+        measurement = calibration.measure(conn, "caller")
+    except Exception:
+        return unreadable
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    if measurement.rate is None:
+        measured = "%d observation(s) - too few to measure (need %d)" % (
+            measurement.total, calibration.MIN_SAMPLE,
+        )
+    else:
+        measured = "%d good / %d bad (%.1f%%, n=%d) - %s" % (
+            measurement.good, measurement.bad, measurement.rate * 100,
+            measurement.total, measurement.verdict,
+        )
+    return "standing: verify before claiming done: %s | caller-judged: %s" % (
+        "yes" if demanded else "no", measured,
+    )
 
 
 def _agent_observation_ok(observation):
@@ -15326,6 +18211,7 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "text_search", "script_search", "program_search", "image_inspect", "repo_status", "repo_diff",
     "repo_log", "repo_show", "repo_blame",
     "data_inspect", "data_query", "project_detect", "archive_list", "artifact_risk_inspect",
+    "verify_artifact",
     "memory_search", "learning_health_status", "evaluation_history_status",
     "memory_quality_report", "memory_privacy_review", "artifact_ground",
     "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",
@@ -15335,6 +18221,50 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "build_run",
     "task_progress",
 })
+
+# Tools that only observe the running runtime: no filesystem root, no host
+# process, no outbound socket, no row written. They are in neither
+# REPOSITORY_READ_ONLY_TOOLS nor _WORK_INSPECTION_TOOLS, because both of those
+# sets are about *repository* work -- so command_catalog._risk_for fell through
+# to "ask" for all sixteen, and `plan`, a mode whose entire promise is reads,
+# refused every one of them.
+#
+# Membership was established by running each tool in a cold interpreter against
+# traps on file writes, process spawns, outbound sockets and non-DDL SQL, on its
+# SUCCESS path. Candidates that look read-only and failed that check are
+# deliberately absent: debug_inspect and npu_status spawn PowerShell,
+# apply_learned writes the embedding cache and calls the model endpoint, and
+# runtime_policy_status calls the model endpoint. admin_accounts is absent
+# because it answers "login required" and its success path could not be
+# exercised -- unverified is not the same as verified-safe. permission_mode is
+# absent because with a mode argument it rewrites the saved mode, which would
+# let a plan-mode run leave plan mode.
+#
+# Do not add a name here from its docstring. Run it.
+_RUNTIME_OBSERVATION_TOOLS = frozenset({
+    "task_list", "task_show", "checklist_show",
+    "admin_status", "admin_whoami",
+    "autopilot_status", "calibration_status",
+    "learn_tiers", "live_reload_status", "mcp_runtime_status",
+    "reasoning_show", "sonder_sessions", "sonder_stats",
+    "turn_inspect", "workflow_list", "memory_export",
+})
+
+# Tools that resolve a caller-supplied root through harness_tools._resolve_root,
+# which does `Path(root).resolve()` and no allowed-roots check at all.
+#
+# All four are in _WORK_INSPECTION_TOOLS, so _risk_for called them "safe" and
+# `plan` allowed them. Verified by execution: under that classification
+# `secret_scan(root=...)` reads a directory on another drive entirely and prints
+# the credential material it finds there. `b8a15ef` removed exactly these four
+# from REPOSITORY_READ_ONLY_TOOLS for this reason; the removal never reached the
+# risk classification, so the hole stayed open on the one mode that promises
+# reads only. They stay refused until _resolve_root confines -- adding that
+# confinement is what lets them back, not deleting this set.
+_UNCONFINED_ROOT_TOOLS = frozenset({
+    "diff_files", "find_references", "secret_scan",
+})
+
 _AGENT_FILE_EVIDENCE_TOOLS = frozenset({
     "workspace_inventory", "workspace_compare", "directory_tree", "file_read", "file_read_range",
     "file_digest", "directory_digest", "file_find", "text_search",
@@ -15513,7 +18443,21 @@ def _agent_checklist_fail(checklist_id, states, reason, item=1):
     _agent_checklist_mark(checklist_id, states, 4, "done", "failure included in end report")
 
 
-def _agent_impl(
+def _agent_impl(*args, **kwargs) -> str:
+    """One agent turn, with the disk-backed system-prompt parts pinned.
+
+    The agent builds its system prompt at the top of the turn and the
+    negative-claim reviewer builds another at finalization (measured: two
+    builds, two reads of system_profile.md, in one turn). Both are sent to a
+    model, so they must not disagree about the operator's standing
+    instructions. See _stable_system_context; a nested call under an already
+    pinned turn reuses the outer reading.
+    """
+    with _stable_system_context():
+        return _agent_turn(*args, **kwargs)
+
+
+def _agent_turn(
     prompt: str,
     tier: str = "code",
     max_steps: int = 6,
@@ -15558,9 +18502,9 @@ def _agent_impl(
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()
     if tier_label is None:
-        return "ERROR: unknown tier '%s'. Valid: sonder, %s." % (tier, _valid_tier_names())
+        return "unknown tier '%s'. Valid: sonder, %s." % (tier, _valid_tier_names())
     if model is None:
-        return "ERROR: `sonder:latest` Ollama alias not found."
+        return "`sonder:latest` Ollama alias not found."
     project_scope, project_error = _agent_project_scope(project)
     if project_error:
         if return_host_receipt:
@@ -15630,6 +18574,11 @@ def _agent_impl(
     mutated = False
     validation_attempted = False
     validation_ok = False
+    # A currently-valid citation for the completion claim. Same discipline as
+    # validation_ok -- latest verifier wins, any mutation or execution clears
+    # it -- because a monotonic "a verifier ran at some point" signal can never
+    # un-verify and would report the majority of real runs as verified.
+    verification_ok = False
     mutations = []
     required_tools = frozenset(
         _canonical_agent_tool_name(name) for name in required_tool_names if name
@@ -15652,6 +18601,13 @@ def _agent_impl(
     # lost to that loop). Pre-existing files are never auto-overwritten.
     run_created_paths = set()
     claim_review_requests = 0
+    # A claim-review action that host policy refused proves nothing.  Track it
+    # separately from a tool that simply found no match, so an ``accept`` that
+    # follows only refusals cannot pass an unchecked negative claim off as
+    # verified.  ``claim_review_verified`` is the release valve: once any
+    # claim-review tool has actually produced evidence, a later accept is real.
+    claim_review_policy_refused = False
+    claim_review_verified = False
     # Branch prediction + speculative execution (advisory; a mispredict costs
     # at most one wasted read-only call and never touches durable state).
     _predictor = sonder_speculation.default_predictor()
@@ -15683,7 +18639,19 @@ def _agent_impl(
     # path-like typos were rejected above rather than failing open to Sonder's
     # own workspace.
     transcript = "Task:\n%s\n\n%s" % (
-        prompt, _agent_tool_help(read_only=read_only, cloud=cloud)
+        prompt,
+        # Every gate this run will actually apply, not just the three that
+        # used to be modelled here.  project_scope/allow_web/allow_location
+        # refuse name-unconditionally further down; advertising through them
+        # spent steps on calls that could never run.
+        _agent_tool_help(
+            read_only=read_only,
+            cloud=cloud,
+            unsafe=unsafe,
+            project_bound=bool(project_scope),
+            allow_web=allow_web,
+            allow_location=allow_location,
+        ),
     )
     if unsafe:
         transcript = "%s\n\n%s" % (unsafe_lab.WARNING, transcript)
@@ -15698,6 +18666,7 @@ def _agent_impl(
             "\n\nHOST TOOL ALLOWLIST (cannot be expanded by the model):\n- %s"
             % "\n- ".join(sorted(allowed_tools))
         )
+    transcript += "\n\n" + _agent_verification_standing_notice()
 
     def ensure_not_cancelled():
         if cancel_check is not None and _cancel_requested(cancel_check):
@@ -15732,9 +18701,28 @@ def _agent_impl(
             text += "\n\n%s\n%s" % (marker, "\n\n".join(observations))
         return text
 
+    def _work_validated():
+        """Was the change actually checked, by either grounded route?
+
+        ``validation_ok`` and ``verification_ok`` answer the same question over
+        disjoint tool sets. Until the developer-workflow tools became
+        dispatchable, the only way to validate a mutation was to shell out
+        through ``workspace_run``; counting a passing, root-covering
+        test_run/build_run/lint_run/typecheck_run as anything less than a
+        validation would fail a run precisely *for reaching for the
+        purpose-built tool*, while the same run's end report called the
+        verification satisfied. This is the one place that contradiction is
+        resolved, so the report, the checklist and the receipt cannot disagree.
+
+        Not a relaxation: the added satisfying condition is a host-observed
+        passing verifier whose root covers every mutated path.
+        """
+        return validation_ok or verification_ok
+
     def finish_final(final):
         _teardown_speculation()
         final = str(final or "")
+        validated = _work_validated()
         if auto_checklist:
             _agent_checklist_mark(
                 checklist_id, checklist_states, 1, "done", "workspace evidence inspected",
@@ -15743,24 +18731,54 @@ def _agent_impl(
                 checklist_id, checklist_states, 2, "done",
                 "requested work completed" if mutated else "analysis completed without file mutation",
             )
-            validation_status = "done" if (validation_ok or not mutated) else "blocked"
+            validation_status = "done" if (validated or not mutated) else "blocked"
             _agent_checklist_mark(
                 checklist_id, checklist_states, 3, validation_status,
-                "grounded validation passed" if validation_ok else (
+                "grounded validation passed" if validated else (
                     "no mutation required" if not mutated else "validation did not pass"
                 ),
             )
             _agent_checklist_mark(
                 checklist_id, checklist_states, 4, "done", "end report prepared",
             )
-        if auto_checklist and mutated and not validation_ok:
-            final = (
-                "VALIDATION_FAILED: workspace changes were not successfully validated.\n\n"
-                + final
-            )
         final = _attach_tool_evidence(final)
+        # The model's own first line, captured before anything leads the report,
+        # so the activity feed keeps naming the work rather than the standing.
+        model_summary = final.splitlines()[0] if final else "agent completed"
+
+        validation_failed = bool(auto_checklist and mutated and not validated)
+        standing = ""
+        # Only where a verifier was actually callable. Elsewhere the sentence
+        # names tools the lane is forbidden from using and has no OFF state --
+        # see _agent_verifier_reachable.
+        if not verification_ok and _agent_verifier_reachable(
+            read_only, allowed_tools,
+        ):
+            demanded, reason = _agent_verification_standing()
+            if demanded:
+                # Every word here is either a fixed host sentence or
+                # should_verify's own projection of the counts. Nothing is
+                # generated by the model or about how it feels.
+                standing = reason
+        if validation_failed:
+            # Compose, never stack. Prefixing the standing in front of
+            # VALIDATION_FAILED would push that marker off position 0, and
+            # _task_passed / _agent_observation_ok would stop seeing a failed
+            # validation -- a mechanism for honesty blinding a failure gate.
+            # The failure keeps line one, byte for byte; the standing becomes
+            # the second line of the same block.
+            block = _AGENT_VALIDATION_FAILED_LINE
+            if standing:
+                block += "\nThis run also claimed completion without %s - %s" % (
+                    _AGENT_VERIFIERS_PHRASE, standing,
+                )
+            final = block + "\n\n" + final
+        elif standing:
+            final = "%s this run claimed completion without %s - %s\n\n%s" % (
+                _AGENT_UNVERIFIED_PREFIX, _AGENT_VERIFIERS_PHRASE, standing, final,
+            )
         activity_tracker.set_result_summary(
-            final.splitlines()[0] if final else "agent completed"
+            _AGENT_VALIDATION_FAILED_LINE if validation_failed else model_summary
         )
         if return_host_receipt:
             return autopilot_controller.HostTaskResult(
@@ -15768,7 +18786,7 @@ def _agent_impl(
                 tools=tuple(sorted(used_tool_names)),
                 mutation_observed=mutated,
                 validation_attempted=validation_attempted,
-                validation_passed=validation_ok,
+                validation_passed=validated,
                 project_scope=project_scope,
             )
         return final
@@ -15797,13 +18815,14 @@ def _agent_impl(
                 tools=tuple(sorted(used_tool_names)),
                 mutation_observed=mutated,
                 validation_attempted=validation_attempted,
-                validation_passed=validation_ok,
+                validation_passed=_work_validated(),
                 project_scope=project_scope,
             )
         return text
 
     def run_claim_review_action(review, review_number):
         nonlocal file_evidence, inspected, used_tool
+        nonlocal claim_review_policy_refused, claim_review_verified
         tool_name = str(review.get("tool") or "")
         tool_args = review.get("args") or {}
         # Validate the same host-scoped arguments that dispatch will use.  A
@@ -15833,6 +18852,9 @@ def _agent_impl(
                 trusted_extra_roots=project_scope,
             )
         if policy_error:
+            # The verification mechanism was refused, not answered.  Record it
+            # so no later ``accept`` can be mistaken for a checked claim.
+            claim_review_policy_refused = True
             observation_text = policy_error
         else:
             ensure_not_cancelled()
@@ -15845,6 +18867,7 @@ def _agent_impl(
             ))
         tool_ok = _agent_tool_observation_ok(tool_name, observation_text)
         if tool_ok:
+            claim_review_verified = True
             used_tool = True
             used_tool_names.add(tool_name)
             file_evidence = True
@@ -15866,6 +18889,33 @@ def _agent_impl(
                 observation_text[:6000],
             )
         )
+
+    def unverifiable_claim_review_exit():
+        """Refuse a confident verdict the claim reviewer could not support.
+
+        If every claim-review action this run attempted was refused by host
+        policy and none ever returned evidence, the negative existence claim
+        was never checked.  Accepting it here would let the mechanism whose
+        job is catching silent failures fail silently itself, which is exactly
+        what a hosted run did while its entire named vocabulary was denied.
+        """
+        if not claim_review_policy_refused or claim_review_verified:
+            return None
+        if auto_checklist:
+            _agent_checklist_fail(
+                checklist_id,
+                checklist_states,
+                "negative-claim review could not run: host policy refused "
+                "every evidence tool it was given",
+                1,
+            )
+        return _early_exit("%s: %s\n\n%s" % (
+            master_orchestrator.EVIDENCE_REQUIRED,
+            "the negative existence claim was never verified -- host policy "
+            "refused every claim-review evidence tool this run offered, so "
+            "the reviewer's acceptance carries no evidence",
+            "\n\n".join(observations),
+        ))
 
     for step in range(1, max_steps + 1):
         # Squash any speculation left unretired by the previous step (the
@@ -16007,6 +19057,9 @@ def _agent_impl(
                         claim_review["reason"],
                         "\n\n".join(observations),
                     ))
+                unverifiable = unverifiable_claim_review_exit()
+                if unverifiable is not None:
+                    return unverifiable
             if require_file_evidence and not file_evidence:
                 if auto_checklist:
                     _agent_checklist_fail(
@@ -16175,9 +19228,17 @@ def _agent_impl(
         elif cloud and tool_name == "tool_manifest":
             # The direct/local manifest remains authoritative and complete,
             # while a hosted model sees only the capabilities it may request.
-            observation = _agent_tool_help(read_only=read_only, cloud=True)
+            observation = _agent_tool_help(
+                read_only=read_only, cloud=True, unsafe=unsafe,
+                project_bound=bool(project_scope),
+                allow_web=allow_web, allow_location=allow_location,
+            )
         elif read_only and tool_name in {"command_registry_list", "tool_manifest"}:
-            observation = _agent_tool_help(read_only=True)
+            observation = _agent_tool_help(
+                read_only=True, cloud=cloud, unsafe=unsafe,
+                project_bound=bool(project_scope),
+                allow_web=allow_web, allow_location=allow_location,
+            )
         else:
             ensure_not_cancelled()
             # Retire a matching speculation: if the model committed to the
@@ -16308,6 +19369,9 @@ def _agent_impl(
             repeated_inspection_counts.clear()
             validation_attempted = False
             validation_ok = False
+            # Tests that passed before this change no longer say anything about
+            # the tree that exists after it.
+            verification_ok = False
             if mutation_happened or tool_ok:
                 failed_call_counts.clear()
             else:
@@ -16328,6 +19392,19 @@ def _agent_impl(
                 _agent_checklist_mark(
                     checklist_id, checklist_states, 2, "in_progress", "%s changed workspace state" % tool_name,
                 )
+        if tool_name in _AGENT_VERIFICATION_TOOLS:
+            # A verifier is a validator by another route (see _work_validated),
+            # so a run that reached for one has attempted validation -- without
+            # this a "validate" task satisfied by test_run is rejected with
+            # "ran no host-observed validator", which would be false.
+            validation_attempted = True
+            # The latest host-observed verifier decides current standing: a
+            # later failing or out-of-scope check must invalidate an earlier
+            # pass, exactly as it does for validation_ok below.
+            verification_ok = tool_ok and _agent_verification_covers(
+                tool_name, policy_tool_args, mutations,
+                project_scope=project_scope,
+            )
         if tool_name in _WORK_VALIDATION_TOOLS:
             validation_attempted = True
             validation_covered = tool_ok and _agent_validation_covers(
@@ -16415,6 +19492,9 @@ def _agent_impl(
                 )
             return _early_exit(claim_review["reason"])
         if claim_review["decision"] == "accept":
+            unverifiable = unverifiable_claim_review_exit()
+            if unverifiable is not None:
+                return unverifiable
             break
         claim_review_requests += 1
         if claim_review_requests <= 2:
@@ -16496,7 +19576,9 @@ def agent(
         response["elapsed_ms"] = int((time.time() - response["started_at"]) * 1000)
     return "%s\n\n%s\n\n%s" % (
         result.rstrip(),
-        activity_tracker.format_end_report(response),
+        activity_tracker.format_end_report(
+            response, calibration_line=_agent_end_report_standing_line(),
+        ),
         activity_tracker.format_response(response),
     )
 
@@ -16524,29 +19606,58 @@ def workbench_agent(
     )
 
 
+# These two sets are not policy alone.  _agent_impl renders the selected one
+# into the model transcript verbatim under "HOST TOOL ALLOWLIST (cannot be
+# expanded by the model)", and _autopilot_plan_model renders it again as
+# "Allowed tools: ...", so every name here is a promise the model plans
+# against.  A name _agent_dispatch has no branch for -- or one the read-only
+# gate an observe run executes under would refuse -- spends autonomous steps
+# on a call that cannot run.  Keep both sets a subset of _agent_dispatch's
+# branches and the observe set a subset of REPOSITORY_READ_ONLY_TOOLS;
+# tests/test_advertised_surface_drift.py asserts both.
+#
+# There is a THIRD gate these sets must clear, and it was missing from this
+# comment when the first two were added: a project-bound run refuses every
+# tool outside _PROJECT_BOUND_AGENT_TOOLS, which left 5 workspace names dead
+# in the rendered allowlist.  _autopilot_allowed_tools now intersects with it
+# rather than requiring these literals to be maintained against it, because
+# these sets are also used for unbound runs where all 5 are legitimate.  Do
+# not "fix" a future gap by editing the literals -- narrow at the point of use,
+# where the run's flags are known.
 _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "directory_digest", "file_find",
     "dependency_inventory",
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "data_inspect", "data_query", "text_search", "script_search",
     "project_detect",
     "repo_status", "repo_diff", "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
-    "program_search", "image_inspect", "memory_search", "process_list", "process_memory_risk_inspect", "web_search",
+    "program_search", "image_inspect", "memory_search", "web_search",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
-    "test_discover", "find_references", "diff_files", "secret_scan",
-    "dependency_audit",
-    "task_progress",
+    # test_discover / find_references / diff_files / secret_scan /
+    # dependency_audit are deliberately absent: _agent_dispatch has no branch
+    # for any of them, exactly as for REPOSITORY_READ_ONLY_TOOLS, so a run
+    # that believed this list burned steps on "ERROR: unknown tool".  Re-add
+    # them here only together with a root-confined dispatch branch.
+    # process_list / process_memory_risk_inspect / task_progress moved to the
+    # workspace-only block below: _autopilot_work_model runs observe tasks
+    # with read_only=True, and _repository_read_only_error refuses every tool
+    # outside REPOSITORY_READ_ONLY_TOOLS -- which those three are deliberately
+    # outside of.  Advertising them to an observe run promised a call the very
+    # next gate rejected.  They remain fully available to workspace runs.
 })
 _AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
     "directory_create", "file_write", "file_batch_write", "json_patch", "file_edit", "file_copy", "file_move", "archive_extract", "archive_create", "text_patch", "data_convert", "workspace_run",
     "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_generate", "artifact_verify", "game_reference_suite",
     "game_generate_and_test",
-    "test_run", "lint_run", "format_code", "typecheck_run",
-    "dependency_add", "dependency_remove", "dependency_update",
-    "git_commit", "git_branch", "git_checkout", "git_stash", "git_tag", "git_merge", "git_cherry_pick",
-    "build_run", "build_clean", "rename_symbol", "apply_patch",
+    # These purpose-built verifier tools now have matching _agent_dispatch
+    # branches.  Keeping them in the workspace lane gives a completion claim
+    # a reachable, host-observed way to satisfy its verification standing.
+    "test_run", "build_run", "lint_run", "typecheck_run",
+    "process_list", "process_memory_risk_inspect", "task_progress",
     "task_delete", "task_plan", "task_depend",
+    # Other developer-workflow tools remain absent until their agent dispatch
+    # and project-root guards are admitted to this autonomous lane.
 })
 _AUTOPILOT_RUNNERS = frozenset({
     "python", "python.exe", "py", "py.exe", "pytest", "pytest.exe",
@@ -16565,11 +19676,20 @@ _AUTOPILOT_MUTATION_EVIDENCE = frozenset({
 def _autopilot_allowed_tools(run: dict) -> frozenset | None:
     if unsafe_lab.active():
         return None
-    return (
+    allowed = (
         _AUTOPILOT_OBSERVE_TOOLS
         if run.get("policy") == "observe"
         else _AUTOPILOT_WORKSPACE_TOOLS
     )
+    # A project-bound run renders this set into the transcript as "HOST TOOL
+    # ALLOWLIST (cannot be expanded by the model)" and then refuses every name
+    # outside _PROJECT_BOUND_AGENT_TOOLS at the project-bound gate.  Narrowing
+    # here keeps the promise and the gate identical: the literal sibling of the
+    # advertise-vs-dispatch bug 277fd27 fixed, one gate further down.
+    project_scope, _project_error = _agent_project_scope(run.get("project", ""))
+    if project_scope:
+        allowed = allowed & _PROJECT_BOUND_AGENT_TOOLS
+    return allowed
 
 
 def _autopilot_command_programs(value) -> list[str]:
@@ -17265,7 +20385,17 @@ def _capability_refined_tier(
 
 
 def route_work_request(prompt: str, project: str = "") -> str | None:
-    """Transparently route eligible natural work to a bounded execution lane."""
+    """Transparently route eligible natural work to a bounded execution lane.
+
+    The disk-backed system-prompt parts are pinned across the whole routed
+    turn: the execution-mode router and the lane it chooses each build their
+    own system prompt, and both go to a model. See _stable_system_context.
+    """
+    with _stable_system_context():
+        return _route_work_request(prompt, project=project)
+
+
+def _route_work_request(prompt: str, project: str = "") -> str | None:
     _maybe_live_reload()
     explicit_worker_cap = master_orchestrator.requested_worker_cap(prompt)
     decision = (
@@ -17673,6 +20803,7 @@ def diagnostics() -> str:
         lines.append("  mcp refresh ERROR: %s" % mcp_state["last_error"])
     try:
         lines.append("  tool capability shadow: %s" % tool_capability_shadow_report())
+        lines.append("  tool capability coverage: %s" % tool_capability_coverage_report())
     except Exception as e:
         lines.append("  tool capability shadow: ERROR validator failed: %s" % e)
     lines.append(
@@ -18484,6 +21615,12 @@ def codegen_build_loop(
         build_state["ran"] = codegen_loop.build_ran(out)
         build_state["exit_ok"] = exit_ok
         errors = codegen_loop.count_errors(out, error_regex)
+        if codegen_loop.output_truncated(out):
+            # This marker must reach `format_report` independently of the
+            # caller's diagnostic regex (for example a C#-only regex).  A
+            # partial compiler transcript is neither a clean build nor a
+            # measured failure.
+            errors.append("error: build output was truncated; measurement incomplete")
         if not exit_ok and not errors:
             # The compiler said no and the regex heard nothing -- a restore
             # failure under a CS-only regex, a non-English toolchain, a Gradle

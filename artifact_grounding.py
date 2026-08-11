@@ -3584,9 +3584,6 @@ def _validate_directory(path: Path, recipe: str, requirements: dict) -> dict:
             ("%d undeclared: %s" % (len(undeclared), ", ".join(undeclared[:5])))
             if undeclared else "none",
         )
-        kinds = set(str(item) for item in manifest.get("kinds", []) if item)
-        for kind in _string_list(requirements, "required_kinds"):
-            _check(checks, "bundle-required-kind", kind in kinds, "kind %r" % kind)
     else:
         generic = []
         for item in path.rglob("*"):
@@ -3602,6 +3599,38 @@ def _validate_directory(path: Path, recipe: str, requirements: dict) -> dict:
     declared_names = {name for name, _candidate in declared}
     for filename in required_files:
         _check(checks, "bundle-required-file", filename in declared_names, "file %r" % filename)
+
+    # required_kinds, checked against files on disk rather than against itself.
+    #
+    # This loop used to read `kinds = set(manifest["kinds"])` and test
+    # `kind in kinds`, with the caller passing `manifest["kinds"]` as
+    # `required_kinds` -- the same list on both sides, so it could not fail.
+    # It also sat inside the `if isinstance(manifest, dict)` branch, so a
+    # bundle with no manifest had the requirement silently dropped and still
+    # reported ok. `declared_names` is populated in both branches and holds
+    # only files that were found on disk, so it is real evidence.
+    kind_files = requirements.get("kind_files")
+    if kind_files is not None and not isinstance(kind_files, dict):
+        raise ValueError("kind_files must be a JSON object of kind -> filenames")
+    for kind in _string_list(requirements, "required_kinds"):
+        expected = (kind_files or {}).get(kind)
+        if isinstance(expected, str):
+            expected = [expected]
+        if not expected:
+            # Nothing describes what this kind should have produced, so nothing
+            # can be verified. A check that cannot look must not report success.
+            _check(
+                checks, "bundle-required-kind", False,
+                "kind %r: no kind_files evidence supplied, so the requirement "
+                "cannot be verified" % kind,
+            )
+            continue
+        missing = [str(name) for name in expected if str(name) not in declared_names]
+        _check(
+            checks, "bundle-required-kind", not missing,
+            ("kind %r missing %s" % (kind, ", ".join(missing))) if missing
+            else "kind %r: %s" % (kind, ", ".join(str(name) for name in expected)),
+        )
     minimum_files = _bounded_int(requirements, "min_files", 1, 0, MAX_BUNDLE_FILES)
     _check(checks, "bundle-minimum-files", len(declared) >= minimum_files, "%d files (minimum %d)" % (len(declared), minimum_files))
     total_bytes = sum(candidate.stat().st_size for _name, candidate in declared)

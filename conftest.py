@@ -36,6 +36,30 @@ os.environ.update(
 sys.path.insert(0, str(_REPO_ROOT))
 
 
+# Whether callers are authenticated is read from the environment at call time,
+# because that is genuinely where deployment posture lives. Production
+# entrypoints -- `serve`, and sonder_launcher -- export resolved config into
+# os.environ as a deliberate side effect, and that behaviour is itself under
+# test. The export outlives the test that triggered it, so every later test in
+# the session inherited SONDER_AUTH_MODE=api-key and any code consulting it
+# concluded the deployment authenticates callers. Invisible while nothing read
+# those variables per call; a session-wide false posture the moment something
+# did. Restore them around every test rather than per leaking test, because the
+# leak is a property of the code under test, not of any one caller.
+_POSTURE_VARS = ("SONDER_AUTH_MODE", "SONDER_API_KEY", "SONDER_REQUIRE_ACCOUNT")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_deployment_posture():
+    before = {name: os.environ.get(name) for name in _POSTURE_VARS}
+    yield
+    for name, value in before.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+
 def _cleanup_test_state() -> None:
     global _cleanup_complete
     if _cleanup_complete:
