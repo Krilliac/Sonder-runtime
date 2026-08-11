@@ -558,6 +558,20 @@ def aggregate(arm, rows):
 # ---------------------------------------------------------------------------
 # Comparing the arms
 # ---------------------------------------------------------------------------
+def _digest_for(names):
+    """The digest of the cases a run actually covered, or empty if unknowable.
+
+    Stamping the module's current case set onto a comparison would be a label
+    that does not describe what was measured -- the same family of defect as a
+    rate that does not describe what completed. If a run covered cases this
+    module does not define, the honest answer is no digest at all.
+    """
+    covered = set(names)
+    if not covered <= {case.name for case in CASES}:
+        return ""
+    return case_set_digest(tuple(c for c in CASES if c.name in covered))
+
+
 def compare_arms(baseline, treatment):
     """Compare, or refuse to.
 
@@ -567,8 +581,18 @@ def compare_arms(baseline, treatment):
     beside each other. When the completion counts differ the deltas are ``None``
     -- not merely flagged -- so there is no number for anyone to quote.
     """
+    baseline_cases = [row["case"] for row in baseline["rows"]]
+    treatment_cases = [row["case"] for row in treatment["rows"]]
+    if sorted(baseline_cases) != sorted(treatment_cases):
+        # Same failure as a truncated arm, wearing different clothes: two rates
+        # over different work. This one is a setup error rather than a result,
+        # so it raises instead of returning a verdict nobody should read.
+        raise SchemaBenchmarkError(
+            "the arms did not run the same cases: %s vs %s"
+            % (sorted(baseline_cases), sorted(treatment_cases))
+        )
     result = {
-        "case_set_digest": case_set_digest(),
+        "case_set_digest": _digest_for(baseline_cases),
         "arms": {baseline["arm"]: baseline, treatment["arm"]: treatment},
         "baseline_arm": baseline["arm"],
         "treatment_arm": treatment["arm"],
@@ -776,13 +800,20 @@ def render_case_set(cases=CASES):
 # The live path
 # ---------------------------------------------------------------------------
 def build_live_call(tier="fast", *, temperature=0.0, num_predict=768,
-                    timeout=180, learn=True):
+                    timeout=180):
     """A ``call_fn`` bound to the real local model.
 
     Refuses a hosted tier outright: the cases carry whole source documents, and
     the same rule ``extract_grounded`` enforces applies to anything that sends
-    them. ``learn`` stays True because the interaction id it mints is what a
-    caller verdict attaches to -- without it there is nothing to file against.
+    them.
+
+    Learning is not a parameter, deliberately. It is what mints the interaction
+    id a caller verdict attaches to, and it is also what makes the runtime file
+    its own rejection -- which is why :func:`run_case` skips re-filing one on the
+    schema arm. Turning it off would silently break both halves of that at once:
+    every row would become unrecordable, and a rejection the runtime never filed
+    would be skipped as though it had been. The second of those errs in the
+    flattering direction, so the option is not offered.
     """
     import server
 
@@ -796,7 +827,7 @@ def build_live_call(tier="fast", *, temperature=0.0, num_predict=768,
     def call_fn(prompt, system, schema):
         return server._offload_impl(
             prompt=prompt, tier=tier, system=system, temperature=temperature,
-            num_predict=num_predict, learn=learn, timeout=timeout, schema=schema,
+            num_predict=num_predict, learn=True, timeout=timeout, schema=schema,
         )
 
     return call_fn

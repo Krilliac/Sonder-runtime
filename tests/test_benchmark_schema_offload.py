@@ -436,6 +436,43 @@ def test_an_unknown_outcome_fails_closed_rather_than_being_ignored():
         bench.aggregate("schema", rows)
 
 
+def test_arms_that_ran_different_cases_cannot_be_compared_at_all():
+    # A truncated arm in different clothes: two rates over different work. The
+    # completion counts can match exactly and the comparison still means nothing.
+    baseline = bench.aggregate(bench.ARM_NO_SCHEMA, _rows(bench.VALID, bench.WRONG))
+    other = _rows(bench.VALID, bench.VALID)
+    other[1]["case"] = "a-case-the-other-arm-never-saw"
+    treatment = bench.aggregate(bench.ARM_SCHEMA, other)
+    assert baseline["completed"] == treatment["completed"]
+    with pytest.raises(bench.SchemaBenchmarkError):
+        bench.compare_arms(baseline, treatment)
+
+
+def test_the_digest_describes_the_cases_that_actually_ran():
+    def arm(name, cases):
+        return bench.aggregate(name, [
+            {"case": case.name, "outcome": bench.VALID, "interaction_id": "i",
+             "already_filed": False, "span_mix": {}, "not_run_kind": "",
+             "detail": "", "parse_mode": "leading"}
+            for case in cases
+        ])
+
+    subset = bench.CASES[:3]
+    partial = bench.compare_arms(
+        arm(bench.ARM_NO_SCHEMA, subset), arm(bench.ARM_SCHEMA, subset),
+    )
+    full = bench.compare_arms(
+        arm(bench.ARM_NO_SCHEMA, bench.CASES), arm(bench.ARM_SCHEMA, bench.CASES),
+    )
+    assert partial["case_set_digest"] == bench.case_set_digest(subset)
+    assert full["case_set_digest"] == bench.case_set_digest(bench.CASES)
+    assert partial["case_set_digest"] != full["case_set_digest"]
+    # Cases this module does not define cannot be honestly labelled at all.
+    synthetic = bench.compare_arms(_arm(bench.ARM_NO_SCHEMA, bench.VALID),
+                                   _arm(bench.ARM_SCHEMA, bench.VALID))
+    assert synthetic["case_set_digest"] == ""
+
+
 def test_the_footer_prefix_matches_the_one_the_server_appends():
     # The judging path reads interaction ids without importing server; this is
     # the pin that keeps the copy honest.
