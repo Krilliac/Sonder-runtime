@@ -76,6 +76,22 @@ def test_catalogued_dispatch_checks_role_before_invoking_system_tool(monkeypatch
     assert "administrator authorization" in result
 
 
+def test_runtime_slash_checks_admin_role_before_control_dispatch(monkeypatch):
+    monkeypatch.setattr(serve, "_http_slash_refusal", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(
+        serve.server, "control_command",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("runtime control must not run for an ordinary account")
+        ),
+    )
+    result = serve._handle_slash(
+        "/runtime set code=qwen2.5-coder:14b",
+        state=serve.ConversationState(), context=_context("developer"),
+    )
+    assert result.startswith("refused /runtime:")
+    assert "administrator authorization" in result
+
+
 def test_catalogued_system_tool_remains_available_to_local_open_operator():
     local_operator = {
         "mode": "local-open", "authorized": True, "api_key": False,
@@ -94,6 +110,12 @@ def test_agent_cannot_turn_injected_system_tool_names_into_authority():
     for tool in server._AGENT_SYSTEM_OPERATOR_TOOLS:
         result = server._agent_dispatch(tool, {}, allow_web=False)
         assert "system operation" in result.lower(), tool
+
+
+def test_agent_help_does_not_advertise_system_operations():
+    help_text = server._agent_tool_help()
+    for tool in server._AGENT_SYSTEM_OPERATOR_TOOLS:
+        assert "- %s:" % tool not in help_text, tool
 
 
 def test_restricted_agent_policy_classifies_every_registered_tool():

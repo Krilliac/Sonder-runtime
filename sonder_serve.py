@@ -1027,6 +1027,22 @@ def _http_tool_refusal(tools, label, context=None):
     return ""
 
 
+def _slash_system_operation(command, argument):
+    """Classify named slash controls that bypass catalogued tool dispatch.
+
+    ``/runtime set`` is parsed by ``server.control_command`` rather than the
+    dynamic ``/<tool>`` catalog.  Keeping this tiny parser next to the HTTP
+    choke point prevents a role declaration from becoming decorative merely
+    because a command has two spellings.
+    """
+    command = str(command or "").strip().lower()
+    parts = str(argument or "").strip().split(None, 1)
+    action = parts[0].lower() if parts else ""
+    if command in ("/runtime", "/models") and action in ("set", "reset"):
+        return "runtime_policy_change"
+    return ""
+
+
 def _handle_slash(content, messages=None, state=None, project="", context=None):
     """Return response text if `content` is a recognized slash command, else None."""
     state = _state_or_legacy(state)
@@ -1045,6 +1061,11 @@ def _handle_slash(content, messages=None, state=None, project="", context=None):
     refusal = _http_slash_refusal(cmd, context=context)
     if refusal:
         return refusal
+    operation = _slash_system_operation(cmd, arg)
+    if operation and context is not None:
+        authority_error = _system_operation_authority_error(operation, context)
+        if authority_error:
+            return "refused %s: %s" % (cmd, authority_error)
 
     if cmd == "/help":
         # The catalog derives every command from the dispatch chains and the

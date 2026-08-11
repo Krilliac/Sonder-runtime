@@ -15756,7 +15756,7 @@ _AGENT_SYSTEM_OPERATOR_TOOLS = frozenset({
     "runtime_policy_update", "update_system_profile",
     "autopilot_start", "autopilot_resume", "autopilot_pause", "autopilot_cancel",
     "self_heal_repair", "memory_export", "memory_privacy_repair",
-    "memory_quality_repair", "workflow_save", "workflow_delete",
+    "memory_quality_repair", "workflow_save", "workflow_delete", "workflow_run",
 })
 
 
@@ -16992,6 +16992,8 @@ def _agent_run_tool_refusal(
     exact defect shape this function exists to prevent.  No caller reads the
     text: both use it as a predicate.
     """
+    if _canonical_agent_tool_name(tool_name) in _AGENT_SYSTEM_OPERATOR_TOOLS:
+        return "system operation"
     if unsafe:
         # unsafe_lab resets read_only/allow_web/allow_location/project in
         # _agent_impl, so only hosted policy still applies.
