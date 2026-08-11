@@ -10,6 +10,24 @@ import pytest
 import harness_tools
 
 
+@pytest.fixture(autouse=True)
+def _authorize_pytest_tmp_roots(tmp_path_factory, monkeypatch):
+    """Authorize pytest's tmp tree for ``harness_tools._resolve_root``.
+
+    ``_resolve_root`` now confines every caller-supplied ``root`` to
+    ``file_ops.allowed_roots()`` -- see its docstring for why. These tests
+    legitimately do their work in ``tmp_path``, so they authorize exactly that
+    tree, the same way an operator authorizes a repository in
+    ``file_roots.local``.
+
+    This AUTHORIZES a root; it does not disable the check. A root outside the
+    tmp tree is still refused, which is what
+    ``tests/test_harness_root_confinement.py`` asserts -- without that file
+    this fixture would be indistinguishable from deleting the guard.
+    """
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path_factory.getbasetemp()))
+
+
 # ---------------------------------------------------------------------------
 # _detect_test_framework
 # ---------------------------------------------------------------------------

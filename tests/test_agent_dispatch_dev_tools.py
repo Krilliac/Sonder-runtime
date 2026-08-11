@@ -150,13 +150,37 @@ def test_dev_workflow_tool_dispatch_reaches_the_real_function(monkeypatch, tool_
     assert len(calls) == 1
 
 
-def test_read_only_dispatch_reaches_test_discover(monkeypatch):
+def test_read_only_dispatch_reaches_test_discover(monkeypatch, tmp_path):
+    """A read-only dispatch reaches the tool THROUGH a host-selected project.
+
+    This test used to assert that ``_agent_dispatch("test_discover",
+    {"root": "."}, read_only=True)`` reached the tool with no project bound at
+    all -- the vulnerability written down as a requirement.
+    ``_agent_project_scope("")`` returns ``("", "")`` with no error, and every
+    path check in the read-only block is conditional on a project root being
+    present, so the rootless run was the one shape with no confinement:
+    ``secret_scan`` on that path read a canary file outside the repository and
+    printed the key back.
+
+    The intent is still worth keeping -- read-only dispatch must actually reach
+    the read-only tools -- so it is asserted the way the tool is genuinely used,
+    with a root bound, plus the negative half that pins the fix.
+    """
     monkeypatch.setattr(
         server, "test_discover",
         lambda **kwargs: "discovered:" + kwargs.get("root", ""),
     )
-    out = server._agent_dispatch("test_discover", {"root": "."}, read_only=True)
-    assert out == "discovered:."
+    out = server._agent_dispatch(
+        "test_discover", {"root": "."}, read_only=True,
+        repository_extra_roots=str(tmp_path),
+    )
+    assert out == "discovered:%s" % tmp_path
+
+    refused = server._agent_dispatch(
+        "test_discover", {"root": "."}, read_only=True,
+    )
+    assert refused.startswith("ERROR:")
+    assert "no host-selected project root" in refused
 
 
 def test_git_commit_dispatch_reaches_the_real_function(monkeypatch):
@@ -203,7 +227,7 @@ def test_apply_patch_mutation_gate_keys_on_check_only():
 
 @pytest.mark.parametrize("tool_name", sorted(DEV_WORKFLOW_MUTATING_TOOLS))
 def test_mutating_dev_workflow_tools_are_refused_by_read_only_dispatch(
-    monkeypatch, tool_name,
+    monkeypatch, tool_name, tmp_path,
 ):
     """Assert the gate at the enforcement layer, not the classification layer.
 
@@ -216,15 +240,31 @@ def test_mutating_dev_workflow_tools_are_refused_by_read_only_dispatch(
     reach it when the gate is off. The second half is what stops this test
     passing vacuously (e.g. on a misspelled tool name, where "ERROR:" would be
     returned for the wrong reason).
+
+    A project root is bound here on purpose. Without one, ``_agent_dispatch``
+    now refuses every project-scoped tool outright -- the second layer added
+    for the rootless-read-only hole -- and this test would have gone on passing
+    while proving only that, never reaching the read-only policy it exists to
+    check. Same refusal, different reason, and the difference is the whole
+    test. ``tmp_path`` is the host-selected root, so the refusal below comes
+    from ``_repository_read_only_error``: these tools are not in
+    ``REPOSITORY_READ_ONLY_TOOLS``.
     """
     calls = []
     monkeypatch.setattr(
         server, tool_name, lambda *a, **k: calls.append((a, k)) or "ran",
     )
 
-    refused = server._agent_dispatch(tool_name, {"root": "."}, read_only=True)
+    refused = server._agent_dispatch(
+        tool_name, {"root": "."}, read_only=True,
+        repository_extra_roots=str(tmp_path),
+    )
 
     assert refused.startswith("ERROR:")
+    assert "no host-selected project root" not in refused, (
+        "%s was refused for want of a project root, not by the read-only "
+        "policy -- this test is no longer checking what it says" % tool_name
+    )
     assert calls == [], "%s executed despite read_only=True" % tool_name
 
     assert server._agent_dispatch(tool_name, {"root": "."}) == "ran"
