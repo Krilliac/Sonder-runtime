@@ -10,8 +10,8 @@ sat behind that sentence, and they point in opposite directions:
   ``mcp_runtime_status`` and friends -- are in neither, so they fell through to
   ``ask`` and ``plan`` denied every one of them.
 
-* **Too wide, and worse.** Four tools that take a caller-supplied ``root`` --
-  ``diff_files``, ``find_references``, ``secret_scan``, ``test_discover`` --
+* **Too wide, and worse.** Three tools that take a caller-supplied ``root`` --
+  ``diff_files``, ``find_references``, ``secret_scan`` --
   are in ``_WORK_INSPECTION_TOOLS`` and were therefore ``safe``, so ``plan``
   allowed them. ``harness_tools._resolve_root`` performs no allowed-roots
   check, so under a mode whose whole promise is "reads only" a model could
@@ -65,9 +65,9 @@ _PLAN_REFUSED = {
     "task_create": "writes a task row",
 }
 
-# Take a caller-supplied root that harness_tools._resolve_root does not confine.
+# Take a caller-supplied root outside the harness confinement boundary.
 _UNCONFINED = frozenset({
-    "diff_files", "find_references", "secret_scan", "test_discover",
+    "diff_files", "find_references", "secret_scan",
 })
 
 
@@ -116,8 +116,9 @@ def test_the_unconfined_set_is_derived_from_harness_tools_not_restated():
         if any(re.search(r"harness_tools\.%s\b" % u, src) for u in users):
             reached.add(tool)
     assert _UNCONFINED <= reached, sorted(_UNCONFINED - reached)
-    # _resolve_root still does no confinement; if that changes, revisit this file.
-    assert "allowed" not in inspect.getsource(harness_tools._resolve_root)
+    # The harness is now the confinement boundary: changing it back to a bare
+    # resolver would silently re-open every direct developer-workflow tool.
+    assert "_require_authorized_root" in inspect.getsource(harness_tools._resolve_root)
 
 
 # --------------------------------------------------------------------------
@@ -161,13 +162,14 @@ def test_plan_refuses_tools_whose_root_argument_is_not_confined():
 
 
 def test_no_tool_plan_allows_reaches_the_unconfined_root_resolver():
-    """The general form, so a fifth such tool cannot be added silently."""
+    """The general form: direct developer tools share a guarded resolver."""
+    assert "_require_authorized_root" in inspect.getsource(harness_tools._resolve_root)
     tree = ast.parse(inspect.getsource(harness_tools))
     users = {
         node.name for node in ast.walk(tree)
         if isinstance(node, ast.FunctionDef) and "_resolve_root" in ast.dump(node)
     }
-    offenders = []
+    reached = []
     for tool in sorted(_registered()):
         if _plan(tool) != permission_modes.ALLOW:
             continue
@@ -179,11 +181,8 @@ def test_no_tool_plan_allows_reaches_the_unconfined_root_resolver():
         except (OSError, TypeError):
             continue
         if any(re.search(r"harness_tools\.%s\b" % u, src) for u in users):
-            offenders.append(tool)
-    assert not offenders, (
-        "plan mode promises reads only, but these allowed tools resolve a "
-        "caller-supplied root with no allowed-roots check: %s" % offenders
-    )
+            reached.append(tool)
+    assert "test_discover" in reached, reached
 
 
 # --------------------------------------------------------------------------

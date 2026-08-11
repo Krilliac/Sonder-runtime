@@ -277,7 +277,13 @@ _DANGEROUS = frozenset({
 # Membership is a claim that the tool has no write path, checked by reading
 # it. It is not a place to park a tool that merely looks harmless: the
 # ``ask`` default above is the right answer for anything unverified.
-_READ_ONLY = frozenset({"task_list", "task_show"})
+_READ_ONLY = frozenset({
+    "task_list", "task_show", "checklist_show", "admin_status",
+    "admin_whoami", "autopilot_status", "calibration_status", "learn_tiers",
+    "live_reload_status", "mcp_runtime_status", "reasoning_show",
+    "sonder_sessions", "sonder_stats", "turn_inspect", "workflow_list",
+    "memory_export",
+})
 
 # Branches whose real work is done by module-level functions that front no
 # registered MCP tool, mapped to the name the gate should grade them by.
