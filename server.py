@@ -14605,6 +14605,7 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "self_heal_check", "status", "system_profile_text", "environment_status", "hardware_profile",
     "emotion_vector_status", "preferences_status", "tool_manifest",
     "memory_search", "web_search", "web_fetch", "weather_lookup",
+    "test_discover",
     # test_discover / find_references / diff_files / secret_scan are
     # deliberately absent.  They are read-only, but they are direct-MCP tools
     # only: harness_tools._resolve_root resolves any absolute path with no
@@ -14659,6 +14660,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - web_search: {"query": "...", "limit": 5}
 - web_fetch: {"url": "https://...", "max_chars": 8000}
 - weather_lookup: {"location": "Chicago, IL|60601", "forecast_days": 3, "units": "auto|metric|imperial"}
+- test_discover: {"root": ".", "framework": "auto"}
 - command_registry_list: {"filter_text": "filesystem|context|status"}
 - activity_status: {}
 - permission_policy: {"tool_name": "file_read"}

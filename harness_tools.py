@@ -69,8 +69,8 @@ def _resolve_root(root, extra_roots=""):
     refusal names no path. The other order answered "does this exist?" before
     "are you allowed to ask?", and the two refusals were distinguishable::
 
-        unauthorized MISSING  -> ValueError: not a directory: C:\\Users\\natew\\__definitely_not_here__
-        unauthorized EXISTING -> PermissionError: root is outside every authorized root: C:\\Windows\\System32\\drivers
+        unauthorized MISSING  -> ValueError: not a directory: <unapproved-root>
+        unauthorized EXISTING -> PermissionError: root is outside every authorized root: <unapproved-root>
 
     Every server wrapper does ``return "ERROR: %s" % exc``, so a confined agent
     could probe the existence of any path on the host and read the resolved
