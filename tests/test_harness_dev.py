@@ -390,6 +390,23 @@ def test_resolve_root_valid(tmp_path):
     assert resolved == tmp_path.resolve()
 
 
-def test_resolve_root_invalid():
+def test_resolve_root_invalid(tmp_path):
+    """A non-directory root is rejected -- asked from INSIDE the authorized set.
+
+    This used to pass ``/nonexistent/path/abc123xyz``: unauthorized *and*
+    missing. That pinned "not a directory" as the answer for a path the caller
+    was never allowed to ask about -- the existence oracle written down as the
+    requirement. ``_resolve_root`` stat-ed before it authorized, so an
+    unauthorized-missing path and an unauthorized-existing one gave different
+    refusals, and every server wrapper hands those straight back to a confined
+    agent.
+
+    The intent -- a root that is not a directory is refused, and says so -- is
+    real, so it is kept and asked the way a legitimate caller asks it: about a
+    missing path inside the tree this file's fixture authorizes. The
+    unauthorized half is asserted in ``test_harness_root_confinement.py``,
+    where it belongs.
+    """
+    missing = tmp_path / "not_created"
     with pytest.raises(ValueError, match="not a directory"):
-        harness_tools._resolve_root("/nonexistent/path/abc123xyz")
+        harness_tools._resolve_root(str(missing))
