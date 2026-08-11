@@ -35,9 +35,12 @@ class ModelCallError(urllib.error.URLError):
         self.status = int(status) if status is not None else None
         self.attempts = max(0, int(attempts if attempts is not None else 1))
         self.cloud = bool(cloud)
+        try:
+            retry_after = float(retry_after_seconds)
+        except (TypeError, ValueError):
+            retry_after = None
         self.retry_after_seconds = (
-            max(0.0, float(retry_after_seconds))
-            if retry_after_seconds is not None else None
+            max(0.0, retry_after) if retry_after is not None else None
         )
         super().__init__(self.detail)
 
