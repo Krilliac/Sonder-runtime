@@ -91,6 +91,45 @@ def test_building_is_not_passing():
     assert go.VERIFIERS["test_run"][0] == "tests_passed"
 
 
+def test_no_verifier_may_write_into_the_caller_judged_population():
+    """A machine verdict is not a caller's judgement.
+
+    Everything in VERIFIERS is a program deciding whether something ran or
+    validated. `calibration.CALLER_JUDGED` answers a different question -- did a
+    human accept the delegated work -- and it is the population `should_verify`
+    and the `_status` thresholds gate on. One machine signal leaking into it
+    moves that gate, optimistically, with no human having judged anything.
+    """
+    import calibration
+
+    for tool, (good, bad) in go.VERIFIERS.items():
+        assert good not in calibration.CALLER_JUDGED, tool
+        assert bad not in calibration.CALLER_JUDGED, tool
+        assert good in calibration.EXECUTION_GROUNDED, tool
+        assert bad in calibration.EXECUTION_GROUNDED, tool
+
+
+def test_an_artifact_validator_files_its_verdict_as_execution_evidence():
+    """`artifact_verify` runs a file-format checker: it proves the artifact is
+    well formed, which is exactly what `compiled` means and is not what
+    `accepted` means."""
+    written, record = _sink()
+    go.note_generation("i1", "artifact_generate")
+
+    go.attribute("artifact_verify", ok=True, record_fn=record)
+
+    assert written == [("i1", "compiled")]
+
+
+def test_a_failing_artifact_validator_is_execution_evidence_too():
+    written, record = _sink()
+    go.note_generation("i1", "artifact_generate")
+
+    go.attribute("artifact_ground", ok=False, record_fn=record)
+
+    assert written == [("i1", "failed")]
+
+
 def test_a_tool_that_is_not_evidence_never_attributes():
     written, record = _sink()
     go.note_generation("i1", "sonder")
@@ -211,6 +250,142 @@ def test_the_newest_generation_is_judged_first():
     go.attribute("test_run", ok=True, record_fn=record)
 
     assert written == [("new", "tests_passed")]
+
+
+# --- verifications that never measured anything ---------------------------
+
+# `harness_tools._run` returns returncode -1 for both a timeout and a missing
+# binary, and the detect-a-build-system helpers return an `error` dict without
+# ever spawning anything. All three used to arrive here as ok=False.
+
+_TIMED_OUT = {"ok": False, "returncode": -1, "timed_out": True, "stderr": ""}
+_NO_TOOLCHAIN = {"ok": False, "returncode": -1, "timed_out": False,
+                 "stderr": "command not found: mypy"}
+_NO_BUILD_SYSTEM = {"ok": False, "error": "no recognized build system found at /x"}
+_REAL_FAILURE = {"ok": False, "returncode": 1, "timed_out": False,
+                 "stderr": "2 tests failed"}
+
+
+def test_a_timed_out_verification_records_nothing():
+    """MAX_TIMEOUT is a hard 120s clamp, so a suite slower than two minutes
+    always times out. Filing `failed` (-1.0) for that measures the clock."""
+    written, record = _sink()
+    go.note_generation("i1", "sonder")
+
+    report = go.attribute("test_run", ok=False, record_fn=record, evidence=_TIMED_OUT)
+
+    assert report["attributed"] is False
+    assert written == []
+    assert "timed out" in report["evaluation_infrastructure_error"]
+
+
+def test_a_missing_toolchain_records_nothing():
+    """No mypy on PATH says nothing whatever about the generated code."""
+    written, record = _sink()
+    go.note_generation("i1", "sonder")
+
+    go.attribute("typecheck_run", ok=False, record_fn=record, evidence=_NO_TOOLCHAIN)
+
+    assert written == []
+
+
+def test_an_unrecognised_build_system_records_nothing():
+    written, record = _sink()
+    go.note_generation("i1", "sonder")
+
+    go.attribute("build_run", ok=False, record_fn=record, evidence=_NO_BUILD_SYSTEM)
+
+    assert written == []
+
+
+def test_unmeasured_is_not_recorded_as_success_either():
+    """The third state is unmeasured. Not bad, and equally not good --
+    'the tests never ran' must not become `tests_passed`."""
+    written, record = _sink()
+    go.note_generation("i1", "sonder")
+
+    report = go.attribute("test_run", ok=False, record_fn=record, evidence=_TIMED_OUT)
+
+    assert written == []
+    assert "signal" not in report
+
+
+def test_an_unmeasured_verification_leaves_the_generation_judgeable():
+    """It consumed no verdict, so it must not consume the one chance this
+    generation had to get a real one."""
+    go.note_generation("i1", "sonder")
+    go.attribute("test_run", ok=False, evidence=_TIMED_OUT)
+
+    written, record = _sink()
+    go.attribute("test_run", ok=False, record_fn=record, evidence=_REAL_FAILURE)
+
+    assert written == [("i1", "failed")]
+
+
+def test_an_error_with_no_message_is_still_an_error():
+    """``{"error": ""}`` is what a message-less exception forwards.
+
+    The wrappers pass ``evidence={"error": str(exc)}``, and ``str()`` on an
+    exception raised with no argument is "". Reading the VALUE's truthiness
+    made that indistinguishable from "no error was reported", so the whole
+    unmeasured state hinged on whether the exception happened to carry a
+    message. The KEY is the assertion; the message is only the detail.
+    """
+    written, record = _sink()
+    go.note_generation("i1", "sonder")
+
+    report = go.attribute("test_run", ok=False, record_fn=record,
+                          evidence={"ok": False, "error": ""})
+
+    assert written == []
+    assert report["attributed"] is False
+    assert report["evaluation_infrastructure_error"], (
+        "an unmeasured run must still say why it measured nothing"
+    )
+
+
+def test_an_absent_error_key_is_not_an_error():
+    """The counterpart: a verifier that ran and reported no error at all must
+    keep attributing. Only a PRESENT, non-None error key claims the run never
+    produced a verdict."""
+    written, record = _sink()
+    go.note_generation("i1", "sonder")
+
+    go.attribute("test_run", ok=False, record_fn=record,
+                 evidence={"ok": False, "returncode": 1, "error": None})
+
+    assert written == [("i1", "failed")]
+
+
+def test_a_genuine_failure_is_still_recorded():
+    """Failing tests are the whole point of the module; only the runs that
+    never produced a verdict are dropped."""
+    written, record = _sink()
+    go.note_generation("i1", "sonder")
+
+    go.attribute("test_run", ok=False, record_fn=record, evidence=_REAL_FAILURE)
+
+    assert written == [("i1", "failed")]
+
+
+def test_evidence_is_optional_for_verifiers_that_do_not_run_a_process():
+    written, record = _sink()
+    go.note_generation("i1", "artifact_generate")
+
+    go.attribute("artifact_verify", ok=True, record_fn=record, evidence=None)
+
+    assert written == [("i1", "compiled")]
+
+
+def test_unmeasured_runs_are_counted_separately_from_failures():
+    _written, record = _sink()
+    go.note_generation("i1", "sonder")
+    go.attribute("test_run", ok=False, record_fn=record, evidence=_TIMED_OUT)
+
+    stats = go.stats()
+    assert stats["unmeasured"] == 1
+    assert stats["attributed"] == 0
+    assert stats["unlinked"] == 0, "there was a generation; the verifier is what failed"
 
 
 # --- robustness -----------------------------------------------------------

@@ -32,4 +32,20 @@ def score(signal):
 
 
 def is_good(signal):
+    """Eligibility only. To ORDER rows, use evidence_rank -- see the rules."""
     return _rules.reward_is_good(signal)
+
+
+def signal_population(signal):
+    """"caller", "execution", or "" -- which kind of evidence this signal is."""
+    return _rules.signal_population(signal)
+
+
+def evidence_rank(signal):
+    """Population first, frozen price only as a tie-break inside it.
+
+    Ordering by score() alone ranks the runtime's self-graded ``tests_passed``
+    (1.0) above every caller-judged signal, which is how the fine-tuning corpus
+    came to put self-marked rows ahead of human-validated ones.
+    """
+    return _rules.evidence_rank(signal)
