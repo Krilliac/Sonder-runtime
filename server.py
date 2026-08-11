@@ -752,6 +752,55 @@ def _open_db():
     return memory_store.connect(_DB_PATH, check_same_thread=True)
 
 
+# A status surface may wait a moment for a busy store; it may not wait the
+# write path's thirty seconds. WAL readers do not queue behind a writer at all,
+# so this is a backstop rather than an expected cost -- but SQLite's default of
+# zero fails instantly on the one case where a short wait would have succeeded.
+_READ_ONLY_BUSY_TIMEOUT_MS = 2000
+
+
+def _open_db_readonly():
+    """Open the store read-only: no creation, no migration, no long wait.
+
+    ``_open_db`` is the *write* path. ``memory_store.connect`` sets
+    ``busy_timeout=30000``, runs ``PRAGMA journal_mode=WAL`` (which takes a
+    brief exclusive lock) and then ``init_db`` under ``BEGIN IMMEDIATE``. For a
+    caller that is about to write, all three are correct. For one that only
+    wants a count they are not: on a machine with no store yet it CREATES a
+    ~200KB database and migrates the schema, and with a second Sonder process
+    live it can block for up to thirty seconds on that process's write lock.
+
+    A block is not an exception. No ``try`` around the call can shorten it, so
+    a read-only caller cannot make the write path safe by catching things --
+    it has to not take the write path. Hence this one: ``mode=ro`` raises on a
+    missing database instead of conjuring one, runs no migration, and cannot
+    write even if a later edit asks it to.
+
+    Raises on a missing or unreadable store, which callers must treat as
+    ignorance rather than as a pass.
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(
+        # .resolve() before .as_uri(): sqlite3 resolves a relative path against
+        # the process cwd, but as_uri() refuses one outright. Without this a
+        # relative SONDER_DB made this opener report "could not be read" while
+        # _open_db on the same page read the store fine -- one page, two
+        # contradicting verdicts. Failing closed is a property of the verdict,
+        # not of a report that argues with itself.
+        "%s?mode=ro" % Path(_DB_PATH).resolve().as_uri(),
+        uri=True,
+        check_same_thread=True,
+    )
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=%d" % _READ_ONLY_BUSY_TIMEOUT_MS)
+    except Exception:
+        conn.close()
+        raise
+    return conn
+
+
 def with_footer(text, interaction_id):
     current = activity_tracker.current()
     activity = activity_tracker.format_response(current) if current else ""
@@ -2178,7 +2227,9 @@ def control_command(prompt: str, history=None, session="", project=""):
     if cmd in ("/report", "/endreport"):
         latest = activity_tracker.latest()
         return "%s\n\n%s" % (
-            activity_tracker.format_end_report(latest),
+            activity_tracker.format_end_report(
+                latest, calibration_line=_agent_end_report_standing_line(),
+            ),
             activity_tracker.format_transcript(latest),
         )
     if cmd in ("/inventory", "/workspace"):
@@ -7836,25 +7887,41 @@ def _record_outcome_signal(interaction_id: str, signal: str) -> None:
         conn.close()
 
 
-def _feed_grounded_outcome(name, ok, output, args=None) -> None:
+def _feed_grounded_outcome(name, ok, output, args=None, project=None, run_id="") -> None:
     """Attribute execution evidence to the work it judges.
 
     The outcome store holds ~9,000 rows and only ~190 of them measure delegated
     work, because filing an outcome is a manual step and people file successes
     far more readily than failures. The verification tools already know the
     truth, so take it from them instead of asking anyone to remember.
+
+    `project` lets a caller that already knows the run's project (the agent
+    loop, which scopes every dispatched call to one explicit project root)
+    pass it straight through. Direct MCP calls have no such value, so they
+    leave it unset and it falls back to sniffing the tool's own arguments.
+
+    `run_id` is the caller's activity_tracker response id, when the caller is
+    running inside one (the agent loop always is). It is a stronger link than
+    project + time window: autopilot runs one thread per run, so two
+    concurrent runs -- especially two both scoped to the same project, or
+    both unscoped -- can otherwise have a verification from one run match the
+    newest pending generation from the OTHER run. Direct MCP calls pass
+    nothing here, which is unchanged from before this parameter existed.
     """
-    project = ""
-    if isinstance(args, dict):
-        project = str(args.get("project") or args.get("root") or "")
+    if project is None:
+        project = ""
+        if isinstance(args, dict):
+            project = str(args.get("project") or args.get("root") or "")
+    else:
+        project = str(project or "")
     try:
         if name in grounded_outcomes.GENERATORS:
             match = _INTERACTION_ID_RE.search(str(output or ""))
             if match:
-                grounded_outcomes.note_generation(match.group(1), name, project)
+                grounded_outcomes.note_generation(match.group(1), name, project, run_id)
         elif name in grounded_outcomes.VERIFIERS:
             grounded_outcomes.attribute(
-                name, bool(ok), project, record_fn=_record_outcome_signal,
+                name, bool(ok), project, record_fn=_record_outcome_signal, run_id=run_id,
             )
     except Exception:
         # Bookkeeping must never break the run it is observing.
@@ -13618,6 +13685,33 @@ def _repository_scope_path_error(tool_name, args, project_root):
             targets = [("repository root", args.get("root") or ".")]
             if str(args.get("path") or "").strip():
                 targets.append(("diff path", args.get("path")))
+        elif tool_name == "diff_files":
+            targets = [
+                ("repository root", args.get("root") or "."),
+                ("left path", args.get("left") or ""),
+                ("right path", args.get("right") or ""),
+            ]
+        elif tool_name in _PROJECT_SCOPED_ROOT_AND_PATH_TOOLS:
+            # `path` is optional here, but when present harness_tools appends
+            # it to the child argv, so an unchecked value is a read or write
+            # outside the project even when `root` is contained.  Resolve it
+            # against the tool's OWN root -- that is what the child process
+            # does (cwd=root), and resolving against the project root instead
+            # would falsely reject a legitimate sibling reference from a
+            # subdirectory root.  It is checked, not rebased: for the cargo
+            # and go frameworks `path` names a test target or package pattern
+            # rather than a filesystem path, and rebasing would corrupt it.
+            tool_root = Path(str(args.get("root") or ".")).expanduser()
+            if not tool_root.is_absolute():
+                tool_root = root / tool_root
+            targets = [("repository root", tool_root)]
+            raw_path = str(args.get("path") or "").strip()
+            if raw_path:
+                candidate = Path(raw_path).expanduser()
+                targets.append((
+                    "path",
+                    candidate if candidate.is_absolute() else tool_root / candidate,
+                ))
         elif tool_name == "file_batch_write":
             operations = _batch_agent_operations(args)
             if operations is None or not operations:
@@ -13720,17 +13814,31 @@ def _agent_project_execution_argument_error(tool_name, args, project_root):
     program can still access resources available to the user account.  Keep
     that limitation explicit while blocking the direct escape forms a model
     can otherwise express in workspace/script argv.
+
+    build_run is covered too.  It forwards a caller-supplied `command` verbatim
+    to a child process (harness_tools.py:657-663), so leaving it outside this
+    guard would make it the one reachable execution route that accepts exactly
+    the inline-interpreter forms workspace_run refuses.
     """
     if (
         not project_root
-        or tool_name not in _PROJECT_SCOPED_EXECUTION_TOOLS
+        or tool_name not in (
+            _PROJECT_SCOPED_EXECUTION_TOOLS | _PROJECT_SCOPED_COMMAND_TOOLS
+        )
         or not isinstance(args, dict)
     ):
         return ""
     root = Path(str(project_root)).expanduser().resolve(strict=True)
-    argv = _agent_argv(args)
+    if tool_name in _PROJECT_SCOPED_COMMAND_TOOLS:
+        # harness_tools splits the command on whitespace and execs the result,
+        # so read the program and its argv exactly the way the child will.
+        command_argv = str(args.get("command") or "").split()
+        program = Path(command_argv[0]).name.casefold() if command_argv else ""
+        argv = command_argv[1:]
+    else:
+        argv = _agent_argv(args)
+        program = Path(str(args.get("program") or "")).name.casefold()
     lowered = [item.casefold() for item in argv]
-    program = Path(str(args.get("program") or "")).name.casefold()
     inline_flags = {
         "python": {"-c"}, "python.exe": {"-c"},
         "py": {"-c"}, "py.exe": {"-c"},
@@ -13793,9 +13901,14 @@ def _agent_project_execution_argument_error(tool_name, args, project_root):
                 "stdin is outside the project path guard"
             )
 
-    base_value = args.get("cwd") or (
-        os.path.dirname(str(args.get("path") or "")) if tool_name == "script_run" else "."
-    )
+    if tool_name in _PROJECT_SCOPED_COMMAND_TOOLS:
+        # build_run runs the child with cwd=root, so relative argv entries
+        # resolve against root -- not against Sonder's own working directory.
+        base_value = args.get("root") or "."
+    else:
+        base_value = args.get("cwd") or (
+            os.path.dirname(str(args.get("path") or "")) if tool_name == "script_run" else "."
+        )
     base = Path(str(base_value)).expanduser().resolve(strict=False)
     for raw_item in argv:
         raw = str(raw_item or "").strip().strip('"\'')
@@ -15269,6 +15382,165 @@ def _agent_dispatch(
             num_ctx=args.get("num_ctx", 4096),
             learn=args.get("learn", False),
         )
+    # ── Developer-workflow tools (harness_tools.py) ──────────────────────
+    if tool_name == "test_discover":
+        return test_discover(
+            root=args.get("root", "."),
+            framework=args.get("framework", "auto"),
+        )
+    if tool_name == "test_run":
+        return test_run(
+            root=args.get("root", "."),
+            framework=args.get("framework", "auto"),
+            path=args.get("path", ""),
+            pattern=args.get("pattern", ""),
+            verbose=args.get("verbose", False),
+            coverage=args.get("coverage", False),
+            timeout=args.get("timeout", 120),
+            extra_args_json=args.get("extra_args_json", "[]"),
+        )
+    if tool_name == "lint_run":
+        return lint_run(
+            root=args.get("root", "."),
+            tool=args.get("tool", "auto"),
+            path=args.get("path", ""),
+            fix=args.get("fix", False),
+            timeout=args.get("timeout", 60),
+        )
+    if tool_name == "format_code":
+        return format_code(
+            root=args.get("root", "."),
+            tool=args.get("tool", "auto"),
+            path=args.get("path", ""),
+            check_only=args.get("check_only", False),
+            timeout=args.get("timeout", 60),
+        )
+    if tool_name == "typecheck_run":
+        return typecheck_run(
+            root=args.get("root", "."),
+            tool=args.get("tool", "auto"),
+            path=args.get("path", ""),
+            timeout=args.get("timeout", 120),
+        )
+    if tool_name == "dependency_add":
+        return dependency_add(
+            root=args.get("root", "."),
+            packages_json=args.get("packages_json", "[]"),
+            dev=args.get("dev", False),
+            timeout=args.get("timeout", 60),
+        )
+    if tool_name == "dependency_remove":
+        return dependency_remove(
+            root=args.get("root", "."),
+            packages_json=args.get("packages_json", "[]"),
+            timeout=args.get("timeout", 60),
+        )
+    if tool_name == "dependency_update":
+        return dependency_update(
+            root=args.get("root", "."),
+            packages_json=args.get("packages_json", "[]"),
+            timeout=args.get("timeout", 120),
+        )
+    if tool_name == "dependency_audit":
+        return dependency_audit(
+            root=args.get("root", "."),
+            timeout=args.get("timeout", 60),
+        )
+    if tool_name == "git_commit":
+        return git_commit(
+            root=args.get("root", "."),
+            message=args.get("message", ""),
+            paths_json=args.get("paths_json", "[]"),
+            all_tracked=args.get("all_tracked", False),
+            timeout=args.get("timeout", 30),
+        )
+    if tool_name == "git_branch":
+        return git_branch(
+            root=args.get("root", "."),
+            name=args.get("name", ""),
+            checkout=args.get("checkout", True),
+            base=args.get("base", ""),
+            timeout=args.get("timeout", 10),
+        )
+    if tool_name == "git_checkout":
+        return git_checkout(
+            root=args.get("root", "."),
+            ref=args.get("ref", ""),
+            timeout=args.get("timeout", 10),
+        )
+    if tool_name == "git_stash":
+        return git_stash(
+            root=args.get("root", "."),
+            action=args.get("action", "push"),
+            message=args.get("message", ""),
+            include_untracked=args.get("include_untracked", True),
+            timeout=args.get("timeout", 10),
+        )
+    if tool_name == "git_tag":
+        return git_tag(
+            root=args.get("root", "."),
+            name=args.get("name", ""),
+            message=args.get("message", ""),
+            delete=args.get("delete", False),
+            timeout=args.get("timeout", 10),
+        )
+    if tool_name == "git_merge":
+        return git_merge(
+            root=args.get("root", "."),
+            branch=args.get("branch", ""),
+            no_ff=args.get("no_ff", True),
+            message=args.get("message", ""),
+            timeout=args.get("timeout", 30),
+        )
+    if tool_name == "git_cherry_pick":
+        return git_cherry_pick(
+            root=args.get("root", "."),
+            commits_json=args.get("commits_json", "[]"),
+            timeout=args.get("timeout", 30),
+        )
+    if tool_name == "build_run":
+        return build_run(
+            root=args.get("root", "."),
+            command=args.get("command", ""),
+            timeout=args.get("timeout", 120),
+        )
+    if tool_name == "build_clean":
+        return build_clean(
+            root=args.get("root", "."),
+            timeout=args.get("timeout", 30),
+        )
+    if tool_name == "rename_symbol":
+        return rename_symbol(
+            root=args.get("root", "."),
+            old_name=args.get("old_name", ""),
+            new_name=args.get("new_name", ""),
+            glob=args.get("glob", "**/*.py"),
+            dry_run=args.get("dry_run", True),
+        )
+    if tool_name == "find_references":
+        return find_references(
+            root=args.get("root", "."),
+            symbol=args.get("symbol", ""),
+            glob=args.get("glob", "**/*.py"),
+        )
+    if tool_name == "diff_files":
+        return diff_files(
+            root=args.get("root", "."),
+            left=args.get("left", ""),
+            right=args.get("right", ""),
+            context=args.get("context", 3),
+        )
+    if tool_name == "apply_patch":
+        return apply_patch(
+            root=args.get("root", "."),
+            patch_text=args.get("patch_text", ""),
+            check_only=args.get("check_only", False),
+        )
+    if tool_name == "secret_scan":
+        return secret_scan(
+            root=args.get("root", "."),
+            timeout=args.get("timeout", 30),
+        )
     return "ERROR: unknown tool '%s'." % tool_name
 
 
@@ -15332,6 +15604,18 @@ _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "rename_symbol", "find_references", "diff_files", "apply_patch", "secret_scan",
 })
 _PROJECT_SCOPED_EXECUTION_TOOLS = frozenset({"workspace_run", "script_run"})
+# Developer-workflow tools that take BOTH `root` and a second `path` argument
+# which harness_tools appends straight to the child argv (harness_tools.py:233,
+# 353, 366, 394).  Containing `root` alone leaves `path` checked by nothing, so
+# lint_run(path="../../x", fix=True) would write outside the project.
+_PROJECT_SCOPED_ROOT_AND_PATH_TOOLS = frozenset({
+    "test_run", "lint_run", "format_code", "typecheck_run",
+})
+# Tools that forward a caller-supplied command string to a child process.  They
+# need the same inline-interpreter argv guard as the execution tools, but they
+# are not execution tools for scoping purposes -- their working directory is
+# `root`, not `cwd`.
+_PROJECT_SCOPED_COMMAND_TOOLS = frozenset({"build_run"})
 _AGENT_TOOL_ALIASES = {
     "assetgen": "artifact_generate",
     "game_generate": "game_generate_and_test",
@@ -15404,9 +15688,27 @@ def _canonical_agent_tool_name(tool_name):
 def _project_scoped_path_key(tool_name):
     if tool_name == "archive_extract":
         return "destination"
+    if tool_name == "fetch_artifact":
+        # Its download target is `dest`; there is no `path` parameter, so the
+        # generic branch was reading a missing key, falling back to ".", and
+        # passing unconditionally. Latent rather than live today (this tool is
+        # neither advertised nor dispatchable), but it arms the moment anyone
+        # gives it a dispatch branch -- which is exactly what this task just
+        # did for twenty-three of its neighbours.
+        return "dest"
     if tool_name in {
         "file_find", "text_search", "script_search", "scaffold_project",
         "repo_status", "repo_diff", "text_patch", "archive_create",
+        # Developer-workflow tools (harness_tools.py) all take "root", not
+        # "path" -- without this, a project-bound run would silently
+        # rebase a nonexistent "path" key while the real "root" argument
+        # (and its escape-check) went untouched.
+        "test_discover", "test_run", "lint_run", "format_code", "typecheck_run",
+        "dependency_add", "dependency_remove", "dependency_update", "dependency_audit",
+        "git_commit", "git_branch", "git_checkout", "git_stash", "git_tag",
+        "git_merge", "git_cherry_pick",
+        "build_run", "build_clean",
+        "rename_symbol", "find_references", "diff_files", "apply_patch", "secret_scan",
     }:
         return "root"
     return "path"
@@ -15563,6 +15865,14 @@ def _agent_dispatch_observed(
     started = time.time()
     ok = False
     observation = ""
+    # True only once _agent_dispatch has actually returned a verdict. A
+    # dispatcher crash (bad arg handling, an internal KeyError, an IO fault
+    # before the tool's own try/except engages) is evidence the plumbing
+    # broke, not that the generated work failed -- grounded_outcomes must not
+    # see it, or a plumbing bug poisons the very population it exists to
+    # clean up. record_tool_result still logs it below either way; only the
+    # outcome feed is gated on this.
+    dispatched = False
     args = _project_scope_args(tool_name, args, project)
     dispatch_args = args
     if project and tool_name in {"archive_create", "sqlite_mutate"}:
@@ -15583,6 +15893,7 @@ def _agent_dispatch_observed(
                 )
             else:
                 observation = _agent_dispatch(tool_name, dispatch_args, **dispatch_options)
+        dispatched = True
         ok = not str(observation).startswith("ERROR:")
         return observation
     finally:
@@ -15595,6 +15906,33 @@ def _agent_dispatch_observed(
             command=_agent_activity_command(tool_name, args),
             output=observation,
         )
+        # This is the agent-loop counterpart of _record_direct_tool's own feed.
+        # A tool dispatched from here runs inside tool_dispatch_context(), so
+        # any _record_direct_tool call the tool body makes on its own (e.g.
+        # file_write, file_edit, text_patch, which are both GENERATORS and
+        # direct MCP tools) sees inside_tool_call() = True and skips its feed
+        # -- this call is the only one that fires for it. That guard is why
+        # this call is unconditional (on dispatched) rather than itself
+        # checking inside_tool_call(): a nested dispatch (a sub-agent tool
+        # call running its own tool loop) still has its own genuinely
+        # distinct tool calls to feed, one call site per
+        # tool_name/ok/observation, and grounded_outcomes.attribute()
+        # additionally refuses to judge the same pending generation twice
+        # with the same verification kind.
+        if dispatched:
+            # activity_tracker.current_response_id() is this thread's active
+            # response span -- agent(), workbench_agent() and each autopilot
+            # run (one threading.Thread per run, each wrapped in its own
+            # response_span) all set one for the life of the run, so every
+            # call this function makes on that thread shares it. Passing it
+            # through lets grounded_outcomes refuse to let one run's
+            # verification claim another concurrent run's generation, which
+            # project + time window alone cannot distinguish when both runs
+            # share a project (or both leave it blank).
+            _feed_grounded_outcome(
+                tool_name, ok, observation, args, project=project,
+                run_id=activity_tracker.current_response_id() or "",
+            )
 
 
 _WORK_MUTATION_TOOLS = frozenset({
@@ -15608,6 +15946,10 @@ _WORK_MUTATION_TOOLS = frozenset({
     "git_merge", "git_cherry_pick",
     "dependency_add", "dependency_remove", "dependency_update",
     "build_clean", "rename_symbol", "apply_patch",
+    # lint_run(fix=True) runs the linter's fix command and format_code writes
+    # in place unless check_only -- both rewrite source files, so both must be
+    # able to count as mutations. _agent_tool_mutates decides per invocation.
+    "lint_run", "format_code",
     "task_delete",
 })
 
@@ -15625,6 +15967,22 @@ def _agent_tool_mutates(tool_name, args):
         return args.get("apply") is True
     if tool_name == "rename_symbol":
         return args.get("dry_run") is False
+    if tool_name == "apply_patch":
+        # Unlike rename_symbol's dry_run (default True, opt-in to mutate),
+        # apply_patch's check_only defaults False -- it applies by default,
+        # so only an explicit check_only=True is a non-mutating dry run.
+        return args.get("check_only") is not True
+    if tool_name == "lint_run":
+        # `ruff check --fix`, `npx eslint --fix` and `cargo clippy --fix`
+        # rewrite source files. Linters with no fix command (flake8, pylint)
+        # fall back to checking, but which linter runs is auto-detected inside
+        # the tool -- long after this gate has to answer -- so fix=True is
+        # treated as a mutation rather than guessing that it is harmless.
+        return args.get("fix") is True
+    if tool_name == "format_code":
+        # Every formatter in the table writes in place by default, so like
+        # apply_patch this applies unless explicitly told only to check.
+        return args.get("check_only") is not True
     if tool_name == "data_convert":
         return args.get("apply") is True
     if tool_name == "sqlite_mutate":
@@ -15650,6 +16008,197 @@ _WORK_VALIDATION_TOOLS = frozenset({
     "repository_symbol_index", "file_read", "file_read_range", "archive_extract", "archive_create", "text_search", "image_inspect",
     "memory_quality_report", "memory_privacy_review", "learning_health_status",
 })
+
+# Verifiers whose passing result is a citation a completion claim can rest on.
+#
+# Deliberately NOT members of _WORK_VALIDATION_TOOLS: _agent_validation_covers
+# has no branch for these names and falls through to False, so adding them
+# there would set validation_ok=False and stamp the run VALIDATION_FAILED --
+# running the tests would be the thing that failed the run.
+_AGENT_VERIFICATION_TOOLS = frozenset({
+    "test_run", "build_run", "lint_run", "typecheck_run",
+})
+
+# Leads an end report that claims completion the record says must be earned.
+# A statement of standing, not a failure: deliberately absent from
+# autopilot_controller.FAILURE_PREFIXES.
+#
+# It leads only when nothing stronger already does. A prefix is a position, not
+# a decoration: _task_passed matches FAILURE_PREFIXES at position 0 and
+# _agent_observation_ok reads line one, so stacking this in front of
+# VALIDATION_FAILED would displace that marker and make both consumers blind to
+# a failed validation. When both apply the two are composed into one block led
+# by the failure marker -- see finish_final.
+_AGENT_UNVERIFIED_PREFIX = "UNVERIFIED:"
+
+_AGENT_VALIDATION_FAILED_LINE = (
+    "VALIDATION_FAILED: workspace changes were not successfully validated."
+)
+
+# One noun phrase, shared by the standalone standing and the composed clause,
+# so the two can never drift into describing different things.
+_AGENT_VERIFIERS_PHRASE = (
+    "a passing verification (test_run, build_run, lint_run or typecheck_run) "
+    "covering the work"
+)
+
+
+def _agent_verifier_reachable(read_only, allowed_tools):
+    """Whether any verifier could have been called in this lane at all.
+
+    Read from the two gates the dispatcher actually enforces -- the read-only
+    policy, which admits only ``REPOSITORY_READ_ONLY_TOOLS``, and the lane's
+    own ``tool_allowlist`` -- rather than from a list of lane names, so a lane
+    added later is classified by what it can do instead of by whether someone
+    remembered to add it here.
+
+    This exists because a demand nothing in the lane can satisfy is not a gate.
+    Four allowlists in this file admit no member of
+    ``_AGENT_VERIFICATION_TOOLS``: ``REPOSITORY_READ_ONLY_TOOLS`` (repository
+    workers), ``_AUTOPILOT_OBSERVE_TOOLS``, the chat/web research allowlist,
+    and the selfmod editor's. Leading their answers -- every weather question
+    among them -- with "claimed completion without a passing verification
+    (test_run, build_run, lint_run or typecheck_run)" names tools the lane is
+    forbidden from calling, and no run in it could ever clear the line. A
+    standing with no OFF state is a banner, and a banner teaches a reader to
+    skip exactly where a real warning would appear.
+
+    The measurement is unchanged either way, and still reaches the caller
+    through the end-report standing line, which ships on every run.
+    """
+    reachable = set(_AGENT_VERIFICATION_TOOLS)
+    if read_only:
+        reachable &= REPOSITORY_READ_ONLY_TOOLS
+    if allowed_tools is not None:
+        reachable &= set(allowed_tools)
+    return bool(reachable)
+
+
+def _agent_verification_covers(tool_name, args, mutations, project_scope=""):
+    """Whether this verifier ran over the work this run is answerable for.
+
+    Keyed on ``root``. These four tools scope their run with ``root``; their
+    ``path`` argument narrows *which* checks run inside it, not what those
+    checks exercise, and it is empty on a default invocation. Reading ``path``
+    here -- the argument the file-oriented _agent_validation_covers reads --
+    would answer "" for nearly every real call and quietly refuse to count a
+    verification that genuinely covered the change.
+
+    The no-mutation case is decided explicitly, never left to fall through an
+    empty ``all()``: ``all([])`` is True, so a run that changed nothing
+    previously reported *any* root as covering -- a check answering yes because
+    it had nothing to check. That is load-bearing now that a passing verifier
+    also sets validation_attempted/validation_passed, which is what
+    _task_passed and _completion_gate accept for a whole ``validate`` task.
+    With nothing changed on disk, the work the run is answerable for is the
+    scope it was confined to, so the verifier has to cover that scope.
+
+    An unscoped run has no declared boundary to violate -- ``root`` defaults to
+    the server CWD, which is that run's implicit scope -- so it is covered.
+    That default is a separately-tracked item, not something decided here.
+    """
+    args = args if isinstance(args, dict) else {}
+    scope = _agent_normalized_path(str(args.get("root") or "."))
+    if not scope:
+        return False
+    changed = [
+        str(record.get("path") or "") for record in mutations
+        if record.get("path")
+    ]
+    if not changed:
+        declared = _agent_normalized_path(project_scope)
+        return _agent_path_within(declared, scope) if declared else True
+    return all(_agent_path_within(path, scope) for path in changed)
+
+
+def _agent_verification_standing():
+    """Whether the measured record demands a citation, and the measured why.
+
+    Returns ``(bool, reason)`` where ``reason`` is ``should_verify``'s own
+    projection of the counts -- never generated prose. Ignorance fails closed
+    in both directions: too thin a sample demands verification, and so does a
+    record that cannot be read at all.
+    """
+    unreadable = (
+        "the measured record could not be read - reliability is unknown, "
+        "so verify rather than assume"
+    )
+    try:
+        # Read-only, like the end-report standing: this is the last completion
+        # path that could take the write path's thirty-second busy_timeout and
+        # a BEGIN IMMEDIATE just to count rows. Reading a count is not a reason
+        # to queue behind another process's write lock, and using the same
+        # opener as the other standing keeps the two from disagreeing.
+        conn = _open_db_readonly()
+    except Exception:
+        return True, unreadable
+    try:
+        return calibration.should_verify(conn, "caller")
+    except Exception:
+        return True, unreadable
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _agent_end_report_standing_line():
+    """The measured standing the claim in an end report was made under.
+
+    Deliberately *not* ``should_verify``'s reason sentence. ``finish_final``
+    already prints that verbatim when a run claims completion without citing a
+    verification, and the same sentence twice on one report reads as two
+    findings where there is one. That prefix is a fact about *this run*
+    ("claimed completion without verifiers"); this line is the other half --
+    the verdict and the counts behind it -- and it ships on every run, cited or
+    not, so a reader can see the standing even when nothing was flagged.
+
+    Only the caller-judged population appears, because that is the one a
+    completion claim is gated on. No figure here crosses the two populations.
+
+    Ignorance fails closed in both directions: too thin a sample and a record
+    that cannot be read both demand verification, and a sample too thin to
+    measure is reported as exactly that rather than as ``0.0%``.
+
+    Read through ``_open_db_readonly`` on purpose. ``/report`` is one of the
+    two surfaces this composes for, and it did no I/O whatsoever before this
+    line existed; putting the write path behind a status command would let it
+    create a database, migrate a schema, and stall for thirty seconds on
+    another process's lock. A store that does not exist yet raises here and
+    lands on ``unreadable`` below -- which demands verification, the same
+    answer an empty store gets.
+    """
+    unreadable = (
+        "standing: verify before claiming done: yes | caller-judged: the "
+        "measured record could not be read"
+    )
+    try:
+        conn = _open_db_readonly()
+    except Exception:
+        return unreadable
+    try:
+        demanded, _reason = calibration.should_verify(conn, "caller")
+        measurement = calibration.measure(conn, "caller")
+    except Exception:
+        return unreadable
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    if measurement.rate is None:
+        measured = "%d observation(s) - too few to measure (need %d)" % (
+            measurement.total, calibration.MIN_SAMPLE,
+        )
+    else:
+        measured = "%d good / %d bad (%.1f%%, n=%d) - %s" % (
+            measurement.good, measurement.bad, measurement.rate * 100,
+            measurement.total, measurement.verdict,
+        )
+    return "standing: verify before claiming done: %s | caller-judged: %s" % (
+        "yes" if demanded else "no", measured,
+    )
 
 
 def _agent_observation_ok(observation):
@@ -16411,6 +16960,11 @@ def _agent_impl(
     mutated = False
     validation_attempted = False
     validation_ok = False
+    # A currently-valid citation for the completion claim. Same discipline as
+    # validation_ok -- latest verifier wins, any mutation or execution clears
+    # it -- because a monotonic "a verifier ran at some point" signal can never
+    # un-verify and would report the majority of real runs as verified.
+    verification_ok = False
     mutations = []
     required_tools = frozenset(
         _canonical_agent_tool_name(name) for name in required_tool_names if name
@@ -16513,9 +17067,28 @@ def _agent_impl(
             text += "\n\n%s\n%s" % (marker, "\n\n".join(observations))
         return text
 
+    def _work_validated():
+        """Was the change actually checked, by either grounded route?
+
+        ``validation_ok`` and ``verification_ok`` answer the same question over
+        disjoint tool sets. Until the developer-workflow tools became
+        dispatchable, the only way to validate a mutation was to shell out
+        through ``workspace_run``; counting a passing, root-covering
+        test_run/build_run/lint_run/typecheck_run as anything less than a
+        validation would fail a run precisely *for reaching for the
+        purpose-built tool*, while the same run's end report called the
+        verification satisfied. This is the one place that contradiction is
+        resolved, so the report, the checklist and the receipt cannot disagree.
+
+        Not a relaxation: the added satisfying condition is a host-observed
+        passing verifier whose root covers every mutated path.
+        """
+        return validation_ok or verification_ok
+
     def finish_final(final):
         _teardown_speculation()
         final = str(final or "")
+        validated = _work_validated()
         if auto_checklist:
             _agent_checklist_mark(
                 checklist_id, checklist_states, 1, "done", "workspace evidence inspected",
@@ -16524,24 +17097,54 @@ def _agent_impl(
                 checklist_id, checklist_states, 2, "done",
                 "requested work completed" if mutated else "analysis completed without file mutation",
             )
-            validation_status = "done" if (validation_ok or not mutated) else "blocked"
+            validation_status = "done" if (validated or not mutated) else "blocked"
             _agent_checklist_mark(
                 checklist_id, checklist_states, 3, validation_status,
-                "grounded validation passed" if validation_ok else (
+                "grounded validation passed" if validated else (
                     "no mutation required" if not mutated else "validation did not pass"
                 ),
             )
             _agent_checklist_mark(
                 checklist_id, checklist_states, 4, "done", "end report prepared",
             )
-        if auto_checklist and mutated and not validation_ok:
-            final = (
-                "VALIDATION_FAILED: workspace changes were not successfully validated.\n\n"
-                + final
-            )
         final = _attach_tool_evidence(final)
+        # The model's own first line, captured before anything leads the report,
+        # so the activity feed keeps naming the work rather than the standing.
+        model_summary = final.splitlines()[0] if final else "agent completed"
+
+        validation_failed = bool(auto_checklist and mutated and not validated)
+        standing = ""
+        # Only where a verifier was actually callable. Elsewhere the sentence
+        # names tools the lane is forbidden from using and has no OFF state --
+        # see _agent_verifier_reachable.
+        if not verification_ok and _agent_verifier_reachable(
+            read_only, allowed_tools,
+        ):
+            demanded, reason = _agent_verification_standing()
+            if demanded:
+                # Every word here is either a fixed host sentence or
+                # should_verify's own projection of the counts. Nothing is
+                # generated by the model or about how it feels.
+                standing = reason
+        if validation_failed:
+            # Compose, never stack. Prefixing the standing in front of
+            # VALIDATION_FAILED would push that marker off position 0, and
+            # _task_passed / _agent_observation_ok would stop seeing a failed
+            # validation -- a mechanism for honesty blinding a failure gate.
+            # The failure keeps line one, byte for byte; the standing becomes
+            # the second line of the same block.
+            block = _AGENT_VALIDATION_FAILED_LINE
+            if standing:
+                block += "\nThis run also claimed completion without %s - %s" % (
+                    _AGENT_VERIFIERS_PHRASE, standing,
+                )
+            final = block + "\n\n" + final
+        elif standing:
+            final = "%s this run claimed completion without %s - %s\n\n%s" % (
+                _AGENT_UNVERIFIED_PREFIX, _AGENT_VERIFIERS_PHRASE, standing, final,
+            )
         activity_tracker.set_result_summary(
-            final.splitlines()[0] if final else "agent completed"
+            _AGENT_VALIDATION_FAILED_LINE if validation_failed else model_summary
         )
         if return_host_receipt:
             return autopilot_controller.HostTaskResult(
@@ -16549,7 +17152,7 @@ def _agent_impl(
                 tools=tuple(sorted(used_tool_names)),
                 mutation_observed=mutated,
                 validation_attempted=validation_attempted,
-                validation_passed=validation_ok,
+                validation_passed=validated,
                 project_scope=project_scope,
             )
         return final
@@ -16578,7 +17181,7 @@ def _agent_impl(
                 tools=tuple(sorted(used_tool_names)),
                 mutation_observed=mutated,
                 validation_attempted=validation_attempted,
-                validation_passed=validation_ok,
+                validation_passed=_work_validated(),
                 project_scope=project_scope,
             )
         return text
@@ -17089,6 +17692,9 @@ def _agent_impl(
             repeated_inspection_counts.clear()
             validation_attempted = False
             validation_ok = False
+            # Tests that passed before this change no longer say anything about
+            # the tree that exists after it.
+            verification_ok = False
             if mutation_happened or tool_ok:
                 failed_call_counts.clear()
             else:
@@ -17109,6 +17715,19 @@ def _agent_impl(
                 _agent_checklist_mark(
                     checklist_id, checklist_states, 2, "in_progress", "%s changed workspace state" % tool_name,
                 )
+        if tool_name in _AGENT_VERIFICATION_TOOLS:
+            # A verifier is a validator by another route (see _work_validated),
+            # so a run that reached for one has attempted validation -- without
+            # this a "validate" task satisfied by test_run is rejected with
+            # "ran no host-observed validator", which would be false.
+            validation_attempted = True
+            # The latest host-observed verifier decides current standing: a
+            # later failing or out-of-scope check must invalidate an earlier
+            # pass, exactly as it does for validation_ok below.
+            verification_ok = tool_ok and _agent_verification_covers(
+                tool_name, policy_tool_args, mutations,
+                project_scope=project_scope,
+            )
         if tool_name in _WORK_VALIDATION_TOOLS:
             validation_attempted = True
             validation_covered = tool_ok and _agent_validation_covers(
@@ -17277,7 +17896,9 @@ def agent(
         response["elapsed_ms"] = int((time.time() - response["started_at"]) * 1000)
     return "%s\n\n%s\n\n%s" % (
         result.rstrip(),
-        activity_tracker.format_end_report(response),
+        activity_tracker.format_end_report(
+            response, calibration_line=_agent_end_report_standing_line(),
+        ),
         activity_tracker.format_response(response),
     )
 

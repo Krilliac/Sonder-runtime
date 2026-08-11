@@ -52,3 +52,29 @@ def _isolate_fleet_ledger():
     except Exception:
         pass
     yield
+
+
+@pytest.fixture
+def without_standing():
+    """Drop the calibration standing an agent end report may now carry.
+
+    ``_agent_impl`` prefixes a measured standing when the caller-judged record
+    demands verification and the run cited none. The hermetic test store is
+    empty, so under pytest the record is always ``unmeasured`` -- which fails
+    closed by design, and would otherwise rewrite the expected output of every
+    unrelated agent-loop test.
+
+    Use this only in tests that are about something else (tool dispatch,
+    caching, evidence attachment). It deliberately does not assert the standing
+    is present -- ``tests/test_agent_verification_gate.py`` owns that -- so a
+    test using it keeps checking exactly the text it checked before.
+    """
+    def _strip(text):
+        import server
+
+        text = str(text or "")
+        if text.startswith(server._AGENT_UNVERIFIED_PREFIX):
+            return text.split("\n\n", 1)[1]
+        return text
+
+    return _strip

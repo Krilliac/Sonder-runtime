@@ -135,6 +135,41 @@ def test_an_unscoped_side_still_matches():
                         record_fn=record)["attributed"] is True
 
 
+def test_a_different_run_id_does_not_match_even_in_the_same_project():
+    """Two concurrent runs (e.g. two autopilot threads) can share a project.
+    Project + time window alone cannot tell them apart; run identity must."""
+    written, record = _sink()
+    go.note_generation("i1", "sonder", project="p", run_id="run-a")
+
+    report = go.attribute("test_run", ok=False, project="p", record_fn=record, run_id="run-b")
+
+    assert report["attributed"] is False
+    assert written == []
+
+
+def test_an_unscoped_run_id_still_matches():
+    """Only two *different named* run ids are a mismatch (mirrors project)."""
+    written, record = _sink()
+    go.note_generation("i1", "sonder", run_id="")
+
+    assert go.attribute("test_run", ok=True, record_fn=record,
+                        run_id="run-a")["attributed"] is True
+
+
+def test_run_id_picks_the_matching_generation_over_a_newer_unrelated_one():
+    """Without run scoping, _candidate always returns the newest pending
+    generation -- which is exactly the cross-run contamination the run_id
+    parameter exists to prevent when two runs interleave."""
+    written, record = _sink()
+    go.note_generation("older-own", "sonder", run_id="run-a")
+    go.note_generation("newer-other-run", "sonder", run_id="run-b")
+
+    report = go.attribute("test_run", ok=True, record_fn=record, run_id="run-a")
+
+    assert report["attributed"] is True
+    assert written == [("older-own", "tests_passed")]
+
+
 def test_one_verification_kind_judges_a_generation_only_once():
     written, record = _sink()
     go.note_generation("i1", "sonder")
