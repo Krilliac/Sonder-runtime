@@ -276,11 +276,18 @@ def test_agent_runs_tool_then_final(monkeypatch, without_standing):
         return gen
 
     monkeypatch.setattr(server, "_make_generate", fake_make_generate)
-    monkeypatch.setattr(
-        server,
-        "_agent_dispatch",
-        lambda tool, args, allow_web=True, read_only=False, project="", allow_location=False: "OBSERVATION",
-    )
+    # Signature-agnostic on purpose. This test asserts nothing about the
+    # dispatcher's parameters -- its subject is the loop's tool-then-final
+    # sequencing -- and the explicit list it used to carry was a copy of the
+    # WRONG function's: it declared `project=""`, which `_agent_dispatch` has
+    # never had, and omitted `repository_extra_roots`, which it has had since
+    # 7a4d0e9. So it pinned no real API; it just went RED when the caller
+    # started passing the host-selected project root on the write arm too.
+    # That argument is a genuine requirement, and it is pinned deliberately and
+    # end-to-end (with the real `_resolve_root`, not a double) by
+    # tests/test_harness_root_confinement.py::
+    # test_a_write_enabled_run_reaches_the_tool_on_its_bound_project.
+    monkeypatch.setattr(server, "_agent_dispatch", lambda *a, **k: "OBSERVATION")
     out = server.agent("answer with tools", tier="code", max_steps=2, checklist=False)
     assert without_standing(out).startswith("done after observation")
     assert "=== ACTIVITY (observable work) ===" in out
