@@ -1195,12 +1195,17 @@ def _rollback_probe_detail(code, output, expected_receipt):
 def _verify_deployed_rollback(run_id, root, timeout):
     """Adjudicated here, performed there. Returns (ok, detail, probe, ...)."""
     probe = rollback_probe_command(run_id)
+    # Anything that stops this from producing a verdict is itself a failure to
+    # verify, and must reach the rollback path rather than escape as an
+    # exception the caller's generic handler will decline to restore from --
+    # the run is already `deployed` by this point, so an unhandled error here
+    # would leave exactly the unverified deployment this check exists to stop.
     try:
         digest, count = expected_rollback_receipt(run_id)
+        expected = "%s intree=%s recover=%s files=%d" % (ROLLBACK_RECEIPT_PREFIX, digest, digest, count)
+        code, output, duration = _run(probe, root, timeout)
     except Exception as exc:
-        return False, "rollback verification could not be prepared: %s" % exc, probe, 1, str(exc), 0
-    expected = "%s intree=%s recover=%s files=%d" % (ROLLBACK_RECEIPT_PREFIX, digest, digest, count)
-    code, output, duration = _run(probe, root, timeout)
+        return False, "rollback verification could not run: %s: %s" % (type(exc).__name__, exc), probe, 1, str(exc), 0
     ok = code == 0 and expected in (output or "")
     detail = "" if ok else _rollback_probe_detail(code, output, expected)
     return ok, detail, probe, code, output, duration
