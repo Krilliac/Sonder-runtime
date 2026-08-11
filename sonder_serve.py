@@ -475,6 +475,11 @@ DANGEROUS_HTTP_SLASH_COMMANDS = frozenset({
     "/todo", "/task", "/tasks", "/qualityfix", "/emotion", "/emotions",
     "/vectors", "/mood", "/prefer", "/preference", "/preferences",
     "/register", "/admin", "/accounts", "/setaccount", "/debug", "/inspect",
+    # Belongs beside /debug rather than apart from it. It was omitted while it
+    # could only ever refuse; an opted-in deployment now returns a turn's
+    # reasoning through it, and an omission justified by a refusal must not
+    # outlive the refusal.
+    "/cot", "/chainofthought", "/thoughts",
     "/filepolicy", "/files", "/find", "/read", "/write", "/append", "/edit",
     "/delete", "/master", "/pass", "/good", "/accept", "/accepted", "/used",
     "/copied", "/edited", "/fail", "/bad", "/trace", "/strict", "/run",
