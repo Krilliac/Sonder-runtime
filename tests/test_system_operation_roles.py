@@ -64,6 +64,18 @@ def test_catalogued_system_tool_cannot_bypass_http_role_boundary():
         ), tool
 
 
+def test_catalogued_dispatch_checks_role_before_invoking_system_tool(monkeypatch):
+    def invoked(**_kwargs):
+        raise AssertionError("system handler must not run for an ordinary account")
+
+    monkeypatch.setattr(serve.server, "permission_mode", invoked)
+    result = serve._dispatch_catalogued_tool(
+        "/permission_mode auto", serve.ConversationState(), context=_context("user"),
+    )
+    assert result.startswith("refused /permission_mode:")
+    assert "administrator authorization" in result
+
+
 def test_catalogued_system_tool_remains_available_to_local_open_operator():
     local_operator = {
         "mode": "local-open", "authorized": True, "api_key": False,
