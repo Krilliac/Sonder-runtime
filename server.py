@@ -2025,12 +2025,41 @@ def _goal_command(arg: str) -> str:
         return "ERROR: %s" % exc
 
 
-def _selfmod_command(arg: str, *, repository_root="") -> str:
+# The ``/selfmod`` actions that write the *live* source tree, as opposed to the
+# isolated candidate workspace. ``plan``/``run``/``approve`` stay out: they edit
+# and grade a copy, and nothing they do survives without a ``deploy``.
+#
+# The chain gate above already grades ``/selfmod`` ``dangerous``, which is what
+# makes ``plan`` refuse it at every surface. This second gate adds the one thing
+# that grade alone could not say: that for *these two* actions, "nobody was
+# available to ask" must resolve to no. Keyed on the action rather than the
+# command because ``/selfmod status`` arrives at the same entry point, and
+# refusing a status read unattended would be the over-refusal this gate exists
+# to avoid.
+_SELFMOD_SOURCE_WRITING_ACTIONS = frozenset({"deploy", "rollback"})
+
+
+def _selfmod_command(arg: str, *, repository_root="", operator_approved=False) -> str:
     text = str(arg or "status").strip() or "status"
     action, _, rest = text.partition(" ")
     action = action.lower()
     rest = rest.strip()
     root = Path(repository_root or Path(__file__).resolve().parent).resolve()
+    if action in _SELFMOD_SOURCE_WRITING_ACTIONS and not operator_approved:
+        # ``interactive=False`` is the honest value at every caller that gets
+        # here without ``operator_approved``: the app's HTTP chain and
+        # ``answer_with_history`` (ordinary chat, and the MCP ``sonder`` tool)
+        # have nobody to prompt. ``non_degrading`` is what stops that from
+        # meaning yes. The console sets ``operator_approved`` only after a
+        # person has actually answered ``_named_command_gate``'s prompt.
+        decision = permission_modes.decide(
+            "selfmod", interactive=False, non_degrading=True,
+        )
+        if decision.action == permission_modes.DENY:
+            return "refused /selfmod %s: %s (mode: %s)" % (
+                action, decision.reason,
+                permission_modes.MODE_LABELS.get(decision.mode, decision.mode),
+            )
     try:
         if action in {"status", "show", "list"}:
             return selfmod.format_status()
@@ -2150,7 +2179,8 @@ def _control_tool_refusal(tools, label):
     return ""
 
 
-def control_command(prompt: str, history=None, session="", project=""):
+def control_command(prompt: str, history=None, session="", project="",
+                    operator_approved=False):
     """Handle safe slash commands before a prompt reaches the model.
 
     Client layers have richer commands like /run that depend on their local last
@@ -2166,6 +2196,16 @@ def control_command(prompt: str, history=None, session="", project=""):
     it. Re-deciding on the two paths that already gated is free and cannot
     double-prompt: nothing here prompts, and a caller with nobody to ask gets
     ``allow`` for anything the mode merely asks about.
+
+    ``operator_approved`` is the one place that last sentence stops being
+    harmless. ``/selfmod deploy`` refuses to take "nobody to ask" for yes (see
+    ``_SELFMOD_SOURCE_WRITING_ACTIONS``), so the console -- which really did ask,
+    at ``sonder_repl._named_command_gate``, and got an answer -- has to be able
+    to say so, or re-deciding here would silently overrule the person who
+    approved. It defaults to False and is passed only by ``sonder_repl``, and
+    only when a real operator is attached; ``control_command`` is not a
+    registered tool and is not in the catalog, so no model can reach this
+    argument and grant itself the approval.
     """
     text = (prompt or "").strip()
     if not text.startswith("/"):
@@ -2207,7 +2247,7 @@ def control_command(prompt: str, history=None, session="", project=""):
     if cmd in ("/training", "/weighttraining"):
         return _training_command(arg)
     if cmd in ("/selfmod", "/selfmodify"):
-        return _selfmod_command(arg)
+        return _selfmod_command(arg, operator_approved=operator_approved)
     if cmd in ("/goal", "/goals"):
         return _goal_command(arg)
     if cmd in ("/ensemble",):
