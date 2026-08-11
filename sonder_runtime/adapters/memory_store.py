@@ -2064,6 +2064,13 @@ def lesson_usage_stats(conn, history=None):
     its own homework are different kinds of evidence, and one mean over both
     ranks a self-graded lesson above a reviewed one. The per-population means
     beside it are what a ranking reads.
+
+    ``scored_caller``/``scored_execution`` count the graded rows behind each of
+    those means. ``wins``/``losses`` span both populations, so a ranking that
+    reads one population's mean has to weight it by that population's own
+    count -- otherwise a single caller judgement borrows the certainty of a
+    hundred self-graded ones and the blend comes back through the weighting.
+    Same query, same GROUP BY: no extra scan.
     """
     caller = tuple(sorted(memory_rules.CALLER_JUDGED))
     execution = tuple(sorted(memory_rules.EXECUTION_GROUNDED))
@@ -2075,13 +2082,19 @@ def lesson_usage_stats(conn, history=None):
         "AVG(CASE WHEN outcome_signal IN (%s) AND reward IS NOT NULL "
         "THEN reward END) AS avg_reward_caller, "
         "AVG(CASE WHEN outcome_signal IN (%s) AND reward IS NOT NULL "
-        "THEN reward END) AS avg_reward_execution "
+        "THEN reward END) AS avg_reward_execution, "
+        "SUM(CASE WHEN outcome_signal IN (%s) AND reward IS NOT NULL "
+        "THEN 1 ELSE 0 END) AS scored_caller, "
+        "SUM(CASE WHEN outcome_signal IN (%s) AND reward IS NOT NULL "
+        "THEN 1 ELSE 0 END) AS scored_execution "
         "FROM lesson_usage GROUP BY lesson_id"
         % (
             ",".join("?" for _ in caller),
             ",".join("?" for _ in execution),
+            ",".join("?" for _ in caller),
+            ",".join("?" for _ in execution),
         ),
-        caller + execution,
+        caller + execution + caller + execution,
     ).fetchall()
     stats = {r["lesson_id"]: dict(r) for r in rows}
 

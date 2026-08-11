@@ -505,22 +505,44 @@ def quarantined_lessons(usage_stats, task, now=None):
 
 
 def _usage_boost(stats):
+    """This lesson's outcome history, as a bounded addend to its fused score.
+
+    It is added into the retrieval sort key, so it ORDERS ROWS AGAINST EACH
+    OTHER -- which is why it may not read ``avg_reward``. That mean spans both
+    outcome populations, and ``lesson_usage_stats`` says in as many words that
+    it must never order two lessons. Measured on this branch: a lesson a caller
+    REJECTED (-0.5) whose runtime then passed its own tests eight times blends
+    to +0.833 and outranked a lesson a caller reviewed and ACCEPTED (+0.8). The
+    self-graded rows laundered the caller's judgement, and the ±0.01 cap is 37
+    adjacent RRF ranks wide, so this is no bounded tiebreak.
+
+    The deciding population is the caller's wherever a caller has judged the
+    lesson; the runtime's own grade only speaks when nobody reviewed it. Both
+    the magnitude and the certainty come from that one population -- weighting
+    a caller mean by every scored row would let one judgement borrow the
+    confidence of a hundred self-graded ones, which is the same blend moved
+    into the second factor. An outcome in neither population attributes
+    nothing: unknown provenance ranks below both, as it does in the rules.
+    """
     if not stats:
         return 0.0
-    avg = stats.get("avg_reward")
-    if avg is None:
+    average = stats.get("avg_reward_caller")
+    scored = int(stats.get("scored_caller") or 0)
+    if average is None:
+        average = stats.get("avg_reward_execution")
+        scored = int(stats.get("scored_execution") or 0)
+    if average is None:
         return 0.0
     # Confidence is earned by graded outcomes, not by being retrieved: `uses`
     # counts unscored retrievals too, which handed 63 lessons more tiebreak
     # weight than their evidence supports. Shrink toward the neutral prior so a
     # synthetic lesson with no scored history stays at 0.0, and an earned one
     # approaches the cap only as its graded evidence accumulates.
-    scored = int(stats.get("wins") or 0) + int(stats.get("losses") or 0)
     if scored <= 0:
         return 0.0
     confidence = scored / float(scored + USAGE_BOOST_PRIOR_SCORED_USES)
     # Keep historical outcome as a gentle tiebreaker, not a relevance override.
-    return max(-0.01, min(0.01, float(avg) * confidence * 0.01))
+    return max(-0.01, min(0.01, float(average) * confidence * 0.01))
 
 
 def _mmr_lambda():
