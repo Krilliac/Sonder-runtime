@@ -26,11 +26,19 @@ def _clean():
 
 
 def _sink(monkeypatch):
-    """Capture what would have been written to the outcome store."""
+    """Capture what would have been written to the outcome store.
+
+    Signature-agnostic, because `server._feed_grounded_outcome` wraps the whole
+    attribution in `except Exception: pass`. A double whose parameter list had
+    drifted from `_record_outcome_signal` would raise into that handler and be
+    read as "nothing was written" -- which is precisely what several of the
+    assertions below *expect*. Those negative guards would then have passed
+    while testing nothing at all.
+    """
     written = []
     monkeypatch.setattr(
         server, "_record_outcome_signal",
-        lambda ident, signal: written.append((ident, signal)),
+        lambda *a, **k: written.append(tuple(a[:2])),
     )
     return written
 
