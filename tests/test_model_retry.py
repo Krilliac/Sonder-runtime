@@ -20,12 +20,12 @@ def test_model_error_identity_survives_server_reload():
     assert isinstance(old_error, server.ModelCallError)
 
 
-def _http_error(code, body=b'{"error":"request rejected"}'):
+def _http_error(code, body=b'{"error":"request rejected"}', headers=None):
     return urllib.error.HTTPError(
         server.BASE + "/api/chat",
         code,
         "failure",
-        {},
+        headers or {},
         io.BytesIO(body),
     )
 
@@ -110,6 +110,44 @@ def test_transient_cloud_failure_is_never_retried(monkeypatch):
     assert caught.value.cloud is True
     assert caught.value.status == 503
     assert len(calls) == 1
+
+
+def test_cloud_throttle_reports_retry_after_without_retrying(monkeypatch):
+    calls = []
+
+    def fake_post(*args, **kwargs):
+        calls.append(1)
+        raise _http_error(429, headers={"Retry-After": "17"})
+
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    monkeypatch.setattr(server, "_post", fake_post)
+
+    with pytest.raises(server.ModelCallError) as caught:
+        server._chat_request({}, model="hosted", cloud=True, timeout=20)
+
+    assert caught.value.cloud is True
+    assert caught.value.status == 429
+    assert caught.value.retry_after_seconds == 17
+    assert len(calls) == 1
+    text = server._format_model_call_error(caught.value)
+    assert "not retried automatically" in text
+    assert "after about 17s" in text
+
+
+def test_retry_after_parser_supports_http_dates_and_rejects_garbage():
+    now = server.datetime.datetime(2026, 8, 11, 21, 0, tzinfo=server.datetime.timezone.utc)
+    assert server._retry_after_seconds({"Retry-After": "Tue, 11 Aug 2026 21:00:12 GMT"}, now=now) == 12
+    assert server._retry_after_seconds({"Retry-After": "not-a-date"}) is None
+    assert server._retry_after_seconds({"Retry-After": "NaN"}) is None
+    assert server._retry_after_seconds({"Retry-After": "inf"}) is None
+
+
+def test_model_error_ignores_malformed_retry_after_metadata():
+    error = server.ModelCallError("http", "throttled", retry_after_seconds="bad")
+    assert error.retry_after_seconds is None
+    assert server.ModelCallError(
+        "http", "throttled", retry_after_seconds=float("nan"),
+    ).retry_after_seconds is None
 
 
 def test_cloud_model_name_is_fail_safe_single_attempt(monkeypatch):

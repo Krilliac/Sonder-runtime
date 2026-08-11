@@ -20,10 +20,13 @@ Tiers (escalation ladder, cheapest first):
 
 import collections
 import contextlib
+import datetime
+import email.utils
 import hmac
 import importlib
 import http.client
 import json
+import math
 import os
 import re
 import sys
@@ -3639,6 +3642,40 @@ def _http_error_detail(error: urllib.error.HTTPError) -> str:
     return _safe_model_error_detail(detail)
 
 
+def _retry_after_seconds(headers, *, now=None):
+    """Return a bounded upstream Retry-After hint without ever sleeping on it.
+
+    Hosted calls are deliberately single-attempt because a retry can duplicate
+    metered work.  The header is therefore observability for the caller, not an
+    instruction to make the runtime wait or retry.  Both RFC delta-seconds and
+    HTTP-date forms are accepted; malformed or excessive values are ignored or
+    capped so an upstream cannot make status output misleading.
+    """
+    try:
+        value = headers.get("Retry-After", "") if headers else ""
+    except (AttributeError, TypeError):
+        value = ""
+    value = str(value or "").strip()
+    if not value:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            when = email.utils.parsedate_to_datetime(value)
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=datetime.timezone.utc)
+            current = now if now is not None else datetime.datetime.now(datetime.timezone.utc)
+            seconds = (when - current).total_seconds()
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return None
+    if not math.isfinite(seconds):
+        return None
+    if seconds < 0:
+        return 0.0
+    return min(float(seconds), 86400.0)
+
+
 def _transport_error_detail(error) -> str:
     reason = getattr(error, "reason", error)
     return _safe_model_error_detail(reason)
@@ -3753,6 +3790,7 @@ def _post_model(
                 status=error.status,
                 attempts=attempt,
                 cloud=cloud,
+                retry_after_seconds=error.retry_after_seconds,
             ) from error
         except urllib.error.HTTPError as error:
             status = int(getattr(error, "code", 0) or 0)
@@ -3764,7 +3802,15 @@ def _post_model(
                 status=status,
                 attempts=attempt,
                 cloud=cloud,
+                retry_after_seconds=_retry_after_seconds(error.headers),
             )
+            if cloud and status == 429:
+                activity_tracker.record_event(
+                    "model_cloud_throttled",
+                    model=str(model or "")[:80],
+                    status=status,
+                    retry_after_seconds=failure.retry_after_seconds,
+                )
         except (
             urllib.error.URLError,
             TimeoutError,
@@ -4037,9 +4083,21 @@ def _format_model_call_error(error: ModelCallError) -> str:
     if error.kind == "budget":
         return "ERROR: hosted agent output budget exhausted: %s" % error.detail
     if error.kind == "http":
-        return "ERROR: %s rejected the model request (HTTP %s)%s: %s" % (
+        retry_hint = ""
+        if error.cloud and error.status in _TRANSIENT_MODEL_HTTP_CODES:
+            retry_hint = (
+                " Cloud calls are not retried automatically to avoid duplicate "
+                "metered work."
+            )
+            if error.retry_after_seconds is not None:
+                retry_hint += " Provider suggests retrying after about %ss." % (
+                    int(round(error.retry_after_seconds)),
+                )
+        rendered = "ERROR: %s rejected the model request (HTTP %s)%s: %s%s" % (
             target, error.status or "unknown", suffix, error.detail,
+            retry_hint,
         )
+        return rendered
     if error.kind == "configuration":
         return "ERROR: %s" % error.detail
     if error.kind in ("protocol", "empty_response", "request"):
