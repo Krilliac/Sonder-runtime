@@ -15750,6 +15750,16 @@ def _agent_project_root_refusal(tool_name, *, read_only, repository_extra_roots)
     return refusal
 
 
+_AGENT_SYSTEM_OPERATOR_TOOLS = frozenset({
+    "admin_login", "admin_register", "admin_set_account", "admin_accounts",
+    "elevate", "permission_mode", "permission_rule_set",
+    "runtime_policy_update", "update_system_profile",
+    "autopilot_start", "autopilot_resume", "autopilot_pause", "autopilot_cancel",
+    "self_heal_repair", "memory_export", "memory_privacy_repair",
+    "memory_quality_repair", "workflow_save", "workflow_delete", "workflow_run",
+})
+
+
 def _agent_dispatch(
     tool_name, args, allow_web=True, read_only=False, allow_location=False,
     repository_extra_roots="",
@@ -15762,10 +15772,21 @@ def _agent_dispatch(
         read_only = False
         allow_location = True
         repository_extra_roots = ""
-    tool_name = (tool_name or "").strip()
+    tool_name = _canonical_agent_tool_name((tool_name or "").strip())
     args = args or {}
     if not isinstance(args, dict):
         return "ERROR: tool args must be a JSON object"
+    # A model can propose these calls after reading hostile page text, but it
+    # is never an operator.  Unsafe-lab relaxes experimentation policy for
+    # ordinary host tools; it does not turn prompt text into account, runtime
+    # or authorization authority.
+    if tool_name in _AGENT_SYSTEM_OPERATOR_TOOLS:
+        refusal = (
+            "ERROR: HOST POLICY: tool '%s' is a system operation and cannot "
+            "be called by an agent. Use an authenticated developer/admin "
+            "surface with explicit operator intent." % tool_name
+        )
+        return refusal
     gate_error = _agent_permission_gate_error(tool_name)
     if gate_error:
         return gate_error
@@ -16971,6 +16992,8 @@ def _agent_run_tool_refusal(
     exact defect shape this function exists to prevent.  No caller reads the
     text: both use it as a predicate.
     """
+    if _canonical_agent_tool_name(tool_name) in _AGENT_SYSTEM_OPERATOR_TOOLS:
+        return "system operation"
     if unsafe:
         # unsafe_lab resets read_only/allow_web/allow_location/project in
         # _agent_impl, so only hosted policy still applies.
