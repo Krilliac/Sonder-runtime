@@ -12,6 +12,7 @@ import threading
 from contextlib import contextmanager
 
 import command_catalog
+import permission_modes
 import sonder_serve as ts
 
 
@@ -50,7 +51,13 @@ def _assert_command_shape(entry):
     assert entry["name"].startswith("/")
     assert isinstance(entry["aliases"], list)
     assert isinstance(entry["native"], bool)
-    assert entry["risk"] in ("safe", "ask", "mutation", "dangerous")
+    # Derived from the enforcing module rather than typed out. The literal
+    # ("safe", "ask", "mutation", "dangerous") stood here, and it pinned the
+    # wire to the one vocabulary the gate does NOT decide on -- it has no
+    # ``execution`` -- so it passed happily while 27 commands reached the app
+    # under a class ``_MATRIX`` has no row for, and it would have rejected the
+    # fix. Every mode's row has the same key set; MANUAL is just a witness.
+    assert entry["risk"] in permission_modes._MATRIX[permission_modes.MANUAL]
     for param in entry["params"]:
         assert set(param) == {"name", "type", "required", "default"}
 

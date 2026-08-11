@@ -232,7 +232,11 @@ _CATEGORY_BY_SLASH = {
     "/run": "execution", "/runwindow": "execution",
 }
 
-_RISK_ORDER = ("safe", "ask", "mutation", "dangerous")
+# A four-class ``_RISK_ORDER`` used to sit here -- no ``execution``, and, when
+# it was removed, no readers anywhere in the tree. The live ranking is
+# ``sonder_repl._RISK_ORDER``, which carries all five classes. A dead second
+# copy of a policy vocabulary is worth less than nothing, because the next
+# reader takes it for the vocabulary, so it is deleted rather than corrected.
 
 # Names whose blast radius the policy sets alone understate.
 _DANGEROUS = frozenset({
@@ -788,9 +792,57 @@ def _category_for(name: str) -> str:
     return "system"
 
 
+def _is_execution(name: str) -> bool:
+    """Whether the gate classes ``name`` as starting a host process.
+
+    Reads ``permission_modes``' two frozensets directly rather than calling
+    ``permission_modes.risk_of``. ``risk_of`` resolves the catalogued risk via
+    ``by_name``, which builds this very catalog -- calling it from inside
+    ``catalog()`` would recurse through a half-populated ``lru_cache``. The
+    sets carry no catalog dependency, and the precedence that matters
+    (``dangerous`` before ``execution``, so ``self_heal_repair`` cannot report
+    as merely executable) is preserved by the caller's ordering below, exactly
+    as ``risk_of`` orders it.
+    """
+    import permission_modes  # lazy: permission_modes imports this module
+
+    stem = str(name or "").strip().lstrip("/")
+    if not stem:
+        return False
+    return (
+        stem in permission_modes.EXECUTION_TOOLS
+        or stem in permission_modes.EXECUTION_COMMANDS
+    )
+
+
+def _native_risk(stem: str, hit) -> str:
+    """Risk for a native command that fronts no registered tool.
+
+    ``EXECUTION_COMMANDS`` exists precisely for this shape -- branch work no
+    tool name stands for -- so it is consulted before the legacy registry's
+    curated value, which predates the class and cannot name it.
+    """
+    if _is_execution(stem):
+        return "execution"
+    return hit.get("risk", "safe") if hit else "safe"
+
+
 def _risk_for(name: str, server) -> str:
+    """The risk class published for a tool -- the one the gate decides on.
+
+    ``execution`` sits here rather than only in ``permission_modes.risk_of``
+    because this value is what ``GET /v1/commands`` ships to the Flutter app,
+    and the app pairs it with the ``matrix`` from ``GET /v1/permission-mode``,
+    whose rows are keyed by the gate's five classes. While this function
+    emitted only four, 27 of 273 commands reached the app under a class the
+    gate does not decide on -- ``/build_run``, ``/test_run``, ``/typecheck_run``
+    and ``/dependency_audit`` among them as ``safe``, drawn with the green dot
+    and the words "Safe - read only", for tools ``plan`` refuses outright.
+    """
     if name in _DANGEROUS:
         return "dangerous"
+    if _is_execution(name):
+        return "execution"
     if name in getattr(server, "_WORK_MUTATION_TOOLS", frozenset()):
         return "mutation"
     # A tool that resolves a caller-supplied root with no allowed-roots check is
@@ -889,10 +941,14 @@ def catalog() -> tuple:
             aliases=aliases,
             tool=tool,
             category=category,
-            # A console command that drives no tool cannot mutate on its own.
-            risk=_risk_for(tool, server) if tool else (
-                hit.get("risk", "safe") if hit else "safe"
-            ),
+            # A console command that drives no tool cannot mutate on its own --
+            # but it can still start a host process. ``/runwindow`` is the live
+            # case: it fronts no registered tool, so it took the legacy
+            # registry's ``ask`` and shipped that to the app, while
+            # ``permission_modes.EXECUTION_COMMANDS`` classes it ``execution``
+            # and ``plan`` denies it. The stem carries that, so grade by it
+            # before falling back to the registry.
+            risk=_risk_for(tool, server) if tool else _native_risk(stem, hit),
             summary=_summarize(getattr(row, "description", "")) if row else "",
             params=_params_from_schema(getattr(row, "parameters", {})) if row else (),
             native=True,
@@ -1023,7 +1079,15 @@ def complete(prefix: str = "", limit: int = 12) -> list:
 
 # --- rendering ------------------------------------------------------------
 
-_RISK_MARK = {"safe": " ", "ask": "?", "mutation": "*", "dangerous": "!"}
+# One mark per class the gate decides on. ``safe`` is deliberately blank --
+# it is the unremarkable case -- which is also why a missing entry here is
+# dangerous: ``.get(risk, " ")`` renders an unknown class exactly like a safe
+# read. ``execution`` had no entry and no way to get one until ``_risk_for``
+# started emitting it, so ``/build_run`` printed with the same blank mark as
+# ``/status``. A drift test pins this table to ``permission_modes._MATRIX``.
+_RISK_MARK = {
+    "safe": " ", "ask": "?", "mutation": "*", "execution": ">", "dangerous": "!",
+}
 
 
 def _line(command: Command, width: int) -> str:
@@ -1053,7 +1117,8 @@ def help_overview() -> str:
         lines += ["", "most used"]
         pwidth = max(len(c.name) for c in popular)
         lines += [_line(c, pwidth) for c in popular]
-    lines += ["", "  legend: ? asks first   * changes files   ! destructive"]
+    lines += ["", "  legend: ? asks first   * changes files   "
+                  "> runs a program   ! destructive"]
     return "\n".join(lines)
 
 
