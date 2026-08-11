@@ -87,6 +87,33 @@ def test_a_failing_exit_status_is_not_reported_as_a_green_build(
     assert "failure status" in out
 
 
+def test_a_truncated_build_is_not_a_green_build_under_a_stricter_error_regex(
+    monkeypatch, tmp_path,
+):
+    """The whole loop, driven through the documented `error_regex` knob.
+
+    workbench dropped the tail of the build output, which is where the errors
+    are. Under `CS\\d{4}` the harness's truncation notice does not match, so the
+    parsed error list is EMPTY -- and an empty list from a build nobody
+    finished reading is indistinguishable from a clean compile. The loop then
+    skipped the file as "already clean" and reported BUILD SUCCEEDED.
+    """
+    (tmp_path / "main.cs").write_text("class C { }\n", encoding="utf-8")
+    truncated = _build(ok=True, stdout="Build started 12:00:01")
+    truncated["stdout_truncated"] = True
+    _prepare(monkeypatch, tmp_path, lambda *a, **k: truncated)
+    monkeypatch.setattr(server, "ensemble_answer", lambda prompt, **kw: "class C { }")
+
+    out = server.codegen_build_loop(
+        str(tmp_path), '{"main.cs": "a class"}', "dotnet",
+        build_args_json='["build"]', attempts=1, error_regex=r"CS\d{4}",
+    )
+
+    assert "BUILD SUCCEEDED" not in out
+    assert "MEASUREMENT INCOMPLETE" in out
+    assert "already clean" not in out
+
+
 def test_program_search_says_when_the_list_was_cut(monkeypatch):
     """The handler dropped workbench's truncated flag, so a PATH-order slice
     read as the machine's whole program list -- "absent" meant "not installed"."""

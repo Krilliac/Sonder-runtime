@@ -1,5 +1,6 @@
 import memory_quality
 import memory_store
+from sonder_runtime.domain.memory import rules as memory_rules
 
 
 def test_exact_duplicate_plan_keeps_best_scored_lesson():
@@ -79,8 +80,8 @@ def test_measured_zero_reward_outranks_a_measured_negative_reward():
     memory_store.add_lesson(conn, "neutral", "Prefer explicit imports.", None, "a1")
     memory_store.add_lesson(conn, "harmful", "Prefer explicit imports.", None, "a2")
     stats = {
-        "neutral": {"avg_reward": 0.0, "wins": 0, "uses": 1},
-        "harmful": {"avg_reward": -1.0, "wins": 0, "uses": 1},
+        "neutral": {"avg_reward_caller": 0.0, "wins": 0, "uses": 1},
+        "harmful": {"avg_reward_caller": -1.0, "wins": 0, "uses": 1},
     }
     group = [
         {"id": "neutral", "text": "Prefer explicit imports.", "ts": "2026-01-01"},
@@ -99,13 +100,65 @@ def test_unevaluated_duplicate_never_launders_away_measured_harm():
     delete the evidence (and any quarantine built on it) and leave a clean-
     looking row behind. "No evidence" must therefore stay ranked below every
     real reward, unlike the neutral 0.0 case above."""
-    stats = {"harmful": {"avg_reward": -1.0, "wins": 0, "uses": 5}}
+    stats = {"harmful": {"avg_reward_caller": -1.0, "wins": 0, "uses": 5}}
     group = [
         {"id": "unused", "text": "Retry on any exception.", "ts": "2026-01-01"},
         {"id": "harmful", "text": "Retry on any exception.", "ts": "2026-01-02"},
     ]
 
     assert memory_quality.choose_exact_duplicate_keeper(group, stats)["id"] == "harmful"
+
+
+def test_a_self_graded_duplicate_never_outranks_a_caller_reviewed_one():
+    """The surviving sibling of the fine-tuning corpus inversion.
+
+    ``avg_reward`` is a mean over BOTH outcome populations, and the keeper was
+    ranked on it -- so a lesson the runtime graded 1.0 by running its own tests
+    beat one a caller reviewed and accepted at 0.8, and the reviewed copy was
+    the row deleted. This is a real ordering, unlike the boolean EXISTS filters
+    elsewhere in the store, so the same rule applies: never one mean over both.
+    """
+    stats = {
+        "self": {
+            "avg_reward": 1.0, "avg_reward_caller": None,
+            "avg_reward_execution": 1.0, "wins": 1, "uses": 1,
+        },
+        "human": {
+            "avg_reward": 0.8, "avg_reward_caller": 0.8,
+            "avg_reward_execution": None, "wins": 1, "uses": 1,
+        },
+    }
+    group = [
+        {"id": "self", "text": "Prefer explicit imports.", "ts": "2026-01-01"},
+        {"id": "human", "text": "Prefer explicit imports.", "ts": "2026-01-02"},
+    ]
+
+    assert memory_quality.choose_exact_duplicate_keeper(group, stats)["id"] == "human"
+
+
+def test_lesson_usage_stats_reports_the_two_populations_apart():
+    """The split has to come from the store, not be guessed downstream."""
+    conn = memory_store.connect(":memory:")
+    memory_store.add_lesson(conn, "lesson", "Prefer explicit imports.", None, "a1")
+    memory_store.log_interaction(conn, "i1", "t1", "", "r1", "code")
+    memory_store.log_interaction(conn, "i2", "t2", "", "r2", "code")
+    conn.execute(
+        "INSERT INTO lesson_usage(lesson_id,interaction_id,task,outcome_signal,reward)"
+        " VALUES(?,?,?,?,?)", ("lesson", "i1", "t1", "tests_passed", 1.0),
+    )
+    conn.execute(
+        "INSERT INTO lesson_usage(lesson_id,interaction_id,task,outcome_signal,reward)"
+        " VALUES(?,?,?,?,?)", ("lesson", "i2", "t2", "rejected", -0.5),
+    )
+    conn.commit()
+
+    row = memory_store.lesson_usage_stats(conn)["lesson"]
+
+    assert row["avg_reward_execution"] == 1.0
+    assert row["avg_reward_caller"] == -0.5
+    # The blended mean is still reported, but it is nobody's ranking key.
+    assert row["avg_reward"] == 0.25
+    conn.close()
 
 
 def test_audit_separates_ungrounded_and_never_validated_lessons():
@@ -215,3 +268,46 @@ def test_retryable_backlog_is_zero_on_a_clean_store():
         assert ms.count_retryable_distillations(conn) == 0
     finally:
         conn.close()
+
+
+def test_the_keeper_rule_is_the_written_domain_rule_not_a_local_copy():
+    """#27: this module and ``rules.evidence_rank`` taught contradictory rules
+    for the same concept, under the same NAME.
+
+    ``choose_exact_duplicate_keeper`` held a closure literally called
+    ``evidence_rank`` that made the caller mean key 1 unconditionally, while
+    ``rules.evidence_rank`` deliberately conditions population on eligibility.
+    Both are right -- for DIFFERENT questions -- but nothing said so and
+    nothing tested it, which is the B2 shape. The keeper now reads the domain
+    rule for its question rather than keeping a second, silent copy.
+    """
+    stats = {
+        "rejected": {"avg_reward_caller": -0.5, "avg_reward_execution": None,
+                     "wins": 0, "uses": 1},
+        "self_graded": {"avg_reward_caller": None, "avg_reward_execution": 1.0,
+                        "wins": 1, "uses": 1},
+    }
+    group = [
+        {"id": "rejected", "text": "Retry on any exception.", "ts": "2026-01-01"},
+        {"id": "self_graded", "text": "Retry on any exception.", "ts": "2026-01-02"},
+    ]
+
+    keeper = memory_quality.choose_exact_duplicate_keeper(group, stats)
+
+    # The row a caller judged is the one whose history would be lost.
+    assert keeper["id"] == "rejected"
+    # ... and the ordering is the one written down in the rules, not a local
+    # restatement of it that can drift.
+    assert memory_rules.retention_rank(-0.5, None) < memory_rules.retention_rank(None, 1.0)
+    assert not hasattr(memory_quality, "_NO_EVIDENCE_RANK"), (
+        "the never-measured rank belongs to the rules, in one place"
+    )
+
+
+def test_the_keeper_rule_is_not_the_credit_rule():
+    """The same pair, ranked for credit, comes out the other way -- and must.
+    A `rejected` row is the WORST evidence of good work and the BEST reason to
+    keep a duplicate's history. Naming the two questions apart is the fix; a
+    single rule for both would be wrong at one site or the other."""
+    assert memory_rules.evidence_rank("tests_passed") > memory_rules.evidence_rank("rejected")
+    assert memory_rules.retention_rank(-0.5, None) < memory_rules.retention_rank(None, 1.0)
