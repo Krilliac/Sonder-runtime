@@ -80,10 +80,13 @@ def changed_diff(repo: Path, since: str | None) -> str:
         return run_git(repo, "diff", "-U0", "%s...HEAD" % since) + run_git(
             repo, "diff", "-U0", "HEAD",
         )
-    # Committed-but-unpushed work plus anything still in the working tree.
-    upstream = run_git(repo, "rev-parse", "--verify", "--quiet", "HEAD").strip()
-    diff = run_git(repo, "diff", "-U0", "HEAD") if upstream else ""
-    return diff
+    # Include commits not yet pushed, not merely a dirty working tree.  HEAD
+    # always exists in a normal repository, so using it as the probe made this
+    # branch silently vacuous after a commit.
+    upstream = run_git(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}").strip()
+    return run_git(repo, "diff", "-U0", "%s...HEAD" % upstream) + run_git(
+        repo, "diff", "-U0", "HEAD",
+    )
 
 
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")

@@ -862,6 +862,7 @@ def fetch_artifact(
     part = _part_path(resolved)
 
     if resolved.exists() and not overwrite:
+        prior = read_provenance(resolved)
         existing = verify_artifact(
             resolved,
             expect_type=expect_type,
@@ -871,16 +872,22 @@ def fetch_artifact(
             bypass=bypass,
         )
         existing["action"] = "reused"
-        existing["url"] = url
+        # Never attach a newly requested origin to old bytes.  Reuse is only
+        # sound when the sidecar binds these exact bytes to this URL.
+        prior_url = str((prior or {}).get("final_url") or (prior or {}).get("url") or "")
+        prior_digest = str((prior or {}).get("sha256") or "")
+        if prior_url != url or prior_digest.lower() != str(existing.get("sha256", "")).lower():
+            existing["ok"] = False
+            existing["verdict"] = "rejected"
+            existing["checks"].append(_check("provenance", False, "existing artifact is not proven to originate from requested URL"))
+            existing["failures"] = [row for row in existing["checks"] if not row["ok"]]
+            return existing
+        existing["url"] = prior_url
         existing["reused"] = True
         existing["redirect_chain"] = []
         existing["final_url"] = url
         existing["status"] = 0
         existing["content_type"] = ""
-        if existing["ok"]:
-            existing["provenance_path"] = str(
-                _write_provenance(resolved, existing, reused=True)
-            )
         return existing
 
     try:
@@ -1041,6 +1048,12 @@ def _download(url, part, *, max_bytes, timeout, resume, expect_type, dest_name):
     with response:
         content_type = response.headers.get("Content-Type", "") or ""
         if status == 206 and offset:
+            content_range = response.headers.get("Content-Range", "") or ""
+            if not content_range.startswith("bytes %d-" % offset):
+                checks.append(_check("content_range", False, "206 response does not begin at requested offset"))
+                return {"ok": False, "checks": checks, "redirect_chain": chain,
+                        "final_url": current, "status": status, "content_type": content_type,
+                        "bytes": 0, "sha256": "", "resumed_from": 0, "block": None}
             append = True
         else:
             append = False
