@@ -2134,7 +2134,9 @@ def control_command(prompt: str, history=None, session="", project=""):
     if cmd in ("/report", "/endreport"):
         latest = activity_tracker.latest()
         return "%s\n\n%s" % (
-            activity_tracker.format_end_report(latest),
+            activity_tracker.format_end_report(
+                latest, calibration_line=_agent_end_report_standing_line(),
+            ),
             activity_tracker.format_transcript(latest),
         )
     if cmd in ("/inventory", "/workspace"):
@@ -15751,6 +15753,56 @@ def _agent_verification_standing():
             pass
 
 
+def _agent_end_report_standing_line():
+    """The measured standing the claim in an end report was made under.
+
+    Deliberately *not* ``should_verify``'s reason sentence. ``finish_final``
+    already prints that verbatim when a run claims completion without citing a
+    verification, and the same sentence twice on one report reads as two
+    findings where there is one. That prefix is a fact about *this run*
+    ("claimed completion without verifiers"); this line is the other half --
+    the verdict and the counts behind it -- and it ships on every run, cited or
+    not, so a reader can see the standing even when nothing was flagged.
+
+    Only the caller-judged population appears, because that is the one a
+    completion claim is gated on. No figure here crosses the two populations.
+
+    Ignorance fails closed in both directions: too thin a sample and a record
+    that cannot be read both demand verification, and a sample too thin to
+    measure is reported as exactly that rather than as ``0.0%``.
+    """
+    unreadable = (
+        "standing: verify before claiming done: yes | caller-judged: the "
+        "measured record could not be read"
+    )
+    try:
+        conn = _open_db()
+    except Exception:
+        return unreadable
+    try:
+        demanded, _reason = calibration.should_verify(conn, "caller")
+        measurement = calibration.measure(conn, "caller")
+    except Exception:
+        return unreadable
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    if measurement.rate is None:
+        measured = "%d observation(s) - too few to measure (need %d)" % (
+            measurement.total, calibration.MIN_SAMPLE,
+        )
+    else:
+        measured = "%d good / %d bad (%.1f%%, n=%d) - %s" % (
+            measurement.good, measurement.bad, measurement.rate * 100,
+            measurement.total, measurement.verdict,
+        )
+    return "standing: verify before claiming done: %s | caller-judged: %s" % (
+        "yes" if demanded else "no", measured,
+    )
+
+
 def _agent_observation_ok(observation):
     text = str(observation or "")
     lowered = text.lower()
@@ -17441,7 +17493,9 @@ def agent(
         response["elapsed_ms"] = int((time.time() - response["started_at"]) * 1000)
     return "%s\n\n%s\n\n%s" % (
         result.rstrip(),
-        activity_tracker.format_end_report(response),
+        activity_tracker.format_end_report(
+            response, calibration_line=_agent_end_report_standing_line(),
+        ),
         activity_tracker.format_response(response),
     )
 

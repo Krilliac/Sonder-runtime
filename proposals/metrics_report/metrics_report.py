@@ -20,6 +20,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import calibration  # noqa: E402  (repo root module, read-only import)
 import reward  # noqa: E402  (repo root module, read-only import)
 
 
@@ -78,7 +79,16 @@ def outcome_signal_distribution(conn):
         "by_signal": by_signal,
         "total": total,
         "good_total": good_total,
-        "good_fraction": (good_total / total) if total else 0.0,
+        # Named for what it is. As `good_fraction` this read as "how often
+        # this thing is good" while being a sum over two populations that
+        # answer different questions: the runtime marking its own curriculum
+        # (tests_passed/compiled/failed), which dominates the row count, and a
+        # caller judging delegated work. The combined figure may ship -- it is
+        # the only total-outcome number here -- but it may not ship alone or
+        # under a name that hides what went into it.
+        "blended_good_fraction": (good_total / total) if total else 0.0,
+        "caller_judged": calibration.measure(conn, "caller").to_dict(),
+        "execution_grounded": calibration.measure(conn, "execution").to_dict(),
     }
 
 
@@ -129,6 +139,28 @@ def build_report(conn):
     }
 
 
+def _population_line(label, measurement):
+    """One population's own figure, or an admission that it has none yet.
+
+    Below calibration.MIN_SAMPLE there is no rate. Printing 0.0 there would
+    say "nothing here has ever been good", which is a different claim from
+    "too little has been recorded to say".
+    """
+    if not measurement:
+        return "    - %-20s (not measured)" % label
+    if measurement.get("rate") is None:
+        return "    - %-20s %d observation(s) -- too few to measure (need %d)" % (
+            label, measurement.get("total", 0), calibration.MIN_SAMPLE,
+        )
+    return "    - %-20s n=%-5d good=%-5d %.1f%% -- %s" % (
+        label,
+        measurement.get("total", 0),
+        measurement.get("good", 0),
+        float(measurement["rate"]) * 100,
+        measurement.get("verdict", "unknown"),
+    )
+
+
 def format_report(report):
     """Render build_report()'s dict as the multi-line text sonder_stats uses."""
     lines = ["sonder metrics report"]
@@ -157,8 +189,15 @@ def format_report(report):
         lines.append("    (none yet)")
     sig = report["outcome_signals"]
     lines.append(
-        "  outcome signals (total=%d, good=%d, good_fraction=%.2f):"
-        % (sig["total"], sig["good_total"], sig["good_fraction"])
+        "  outcome signals (total=%d, good=%d, blended good fraction=%.2f "
+        "-- blended across both populations, not an accuracy figure):"
+        % (sig["total"], sig["good_total"], sig["blended_good_fraction"])
+    )
+    lines.append(
+        _population_line("caller-judged", sig.get("caller_judged"))
+    )
+    lines.append(
+        _population_line("execution-grounded", sig.get("execution_grounded"))
     )
     if sig["by_signal"]:
         for name in sorted(sig["by_signal"]):
