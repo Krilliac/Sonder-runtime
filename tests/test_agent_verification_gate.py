@@ -61,7 +61,10 @@ def _record(monkeypatch, counts):
         conns.append(conn)
         return conn
 
+    # Both openers: the standing reads through the read-only path, and this
+    # helper must not be the thing that decides which one the loop uses.
     monkeypatch.setattr(server, "_open_db", _open)
+    monkeypatch.setattr(server, "_open_db_readonly", _open)
     monkeypatch.setattr(calibration, "_counts", lambda _conn: dict(counts))
     return conns
 
@@ -655,21 +658,123 @@ def test_the_activity_summary_still_names_the_work_not_the_standing(monkeypatch)
 # --- ignorance fails closed, everywhere ----------------------------------
 
 
-@pytest.mark.parametrize(
-    "lane", [
-        {},                                    # workspace agent
-        {"auto_checklist": True},              # workbench / autopilot
-        {"read_only": True},                   # repository worker
-        {"allow_web": True, "read_only": True},  # chat / web research
-    ],
-)
-def test_the_gate_covers_every_lane_not_just_the_mutating_one(monkeypatch, lane):
-    """Gating on ``mutated``/``auto_checklist`` would exempt 4 of the 5 lanes."""
+# Lanes, expressed as the two gates that actually decide whether a verifier is
+# callable: the read-only policy (which admits only REPOSITORY_READ_ONLY_TOOLS)
+# and the lane's own tool_allowlist. The previous version of this table listed
+# lane *flags* -- {"read_only": True} with no allowlist -- which is not what any
+# real caller passes, so it exercised none of the restrictions it named.
+LANES_THAT_CAN_VERIFY = {
+    "workspace agent (no allowlist)": {},
+    "workbench / autopilot workspace": {"auto_checklist": True},
+    "autopilot workspace allowlist": {
+        "tool_allowlist": tuple(sorted(server._AUTOPILOT_WORKSPACE_TOOLS)),
+    },
+}
+
+# Lanes where no member of _AGENT_VERIFICATION_TOOLS is reachable at all.
+LANES_THAT_CANNOT_VERIFY = {
+    "repository worker": {
+        "read_only": True,
+        "tool_allowlist": tuple(sorted(server.REPOSITORY_READ_ONLY_TOOLS)),
+    },
+    "autopilot observe": {
+        "read_only": True,
+        "tool_allowlist": tuple(sorted(server._AUTOPILOT_OBSERVE_TOOLS)),
+    },
+    "chat / web research": {
+        "allow_web": True,
+        "tool_allowlist": (
+            "web_search", "web_fetch", "weather_lookup",
+            "approximate_location_lookup",
+        ),
+    },
+    "selfmod editor": {
+        "tool_allowlist": (
+            "workspace_inventory", "directory_tree", "text_search", "file_read",
+            "file_read_range", "file_write", "file_edit", "file_delete",
+        ),
+    },
+}
+
+
+def test_the_lane_tables_match_what_the_gates_actually_admit():
+    """Derived, not asserted: the tables above are checked against the sets."""
+    verifiers = server._AGENT_VERIFICATION_TOOLS
+    assert verifiers, "the verifier set must not be empty"
+    for name, lane in LANES_THAT_CANNOT_VERIFY.items():
+        allowed = set(lane.get("tool_allowlist") or ())
+        assert not (verifiers & allowed), "%s can reach %s" % (
+            name, sorted(verifiers & allowed),
+        )
+    # read_only admits only REPOSITORY_READ_ONLY_TOOLS, which holds no verifier.
+    assert not (verifiers & server.REPOSITORY_READ_ONLY_TOOLS)
+    assert verifiers & server._AUTOPILOT_WORKSPACE_TOOLS
+
+
+@pytest.mark.parametrize("lane", sorted(LANES_THAT_CAN_VERIFY))
+def test_every_lane_that_can_verify_is_gated(monkeypatch, lane):
+    """Gating on ``mutated``/``auto_checklist`` would exempt most of these."""
     _record(monkeypatch, UNMEASURED_RECORD)
 
-    out = _run(monkeypatch, [FINAL], **lane)
+    out = _run(monkeypatch, [FINAL], **LANES_THAT_CAN_VERIFY[lane])
 
     assert out.startswith(server._AGENT_UNVERIFIED_PREFIX)
+
+
+@pytest.mark.parametrize("lane", sorted(LANES_THAT_CAN_VERIFY))
+def test_every_lane_that_can_verify_can_also_clear_it(monkeypatch, lane):
+    """The assertion the old table never made.
+
+    Pinning only that the standing FIRES documents a banner just as happily as
+    it documents a gate. A gate is a thing with an OFF state, so each lane that
+    is told to cite a verifier must be able to cite one and come out clean.
+    """
+    _record(monkeypatch, POOR_RECORD)
+
+    out = _run(
+        monkeypatch,
+        ['{"tool":"test_run","args":{"root":"."}}', FINAL],
+        [PASSING_RUN],
+        **LANES_THAT_CAN_VERIFY[lane],
+    )
+
+    assert server._AGENT_UNVERIFIED_PREFIX not in out
+
+
+@pytest.mark.parametrize("lane", sorted(LANES_THAT_CANNOT_VERIFY))
+def test_a_lane_with_no_reachable_verifier_is_not_told_to_run_one(
+    monkeypatch, lane,
+):
+    """A demand nothing in the lane can satisfy is a banner, not a gate.
+
+    These lanes cannot call test_run/build_run/lint_run/typecheck_run at all,
+    so leading every answer -- including every weather question -- with
+    "claimed completion without a passing verification (test_run, build_run,
+    lint_run or typecheck_run)" names tools the lane is forbidden from using
+    and can never be acted on. The measured record is unchanged and still
+    reaches the caller through the end-report standing line; what goes away is
+    an instruction that has no OFF state.
+    """
+    _record(monkeypatch, UNMEASURED_RECORD)
+
+    out = _run(monkeypatch, [FINAL], **LANES_THAT_CANNOT_VERIFY[lane])
+
+    assert out == "the work is complete"
+    assert server._AGENT_UNVERIFIED_PREFIX not in out
+
+
+def test_scoping_is_read_from_the_gates_not_from_a_list_of_lane_names():
+    """A lane added later is classified by what it can do, not by memory."""
+    assert server._agent_verifier_reachable(read_only=False, allowed_tools=None)
+    assert not server._agent_verifier_reachable(
+        read_only=True, allowed_tools=None,
+    )
+    assert not server._agent_verifier_reachable(
+        read_only=False, allowed_tools=frozenset({"web_search"}),
+    )
+    assert server._agent_verifier_reachable(
+        read_only=False, allowed_tools=frozenset({"web_search", "test_run"}),
+    )
 
 
 def test_an_unreadable_record_demands_verification_rather_than_assuming(
@@ -680,10 +785,33 @@ def test_an_unreadable_record_demands_verification_rather_than_assuming(
         raise RuntimeError("store unavailable")
 
     monkeypatch.setattr(server, "_open_db", _boom)
+    monkeypatch.setattr(server, "_open_db_readonly", _boom)
 
     out = _run(monkeypatch, [FINAL])
 
     assert out.startswith(server._AGENT_UNVERIFIED_PREFIX)
+
+
+def test_reading_the_standing_never_creates_or_migrates_the_store(
+    monkeypatch, tmp_path,
+):
+    """The last completion path that could block on another process's lock.
+
+    ``finish_final`` is a write lane, so ``/report``'s argument does not carry
+    over on its own -- but ``_open_db`` still sets ``busy_timeout=30000`` and
+    opens ``init_db`` with ``BEGIN IMMEDIATE``, so asking "what is my standing"
+    could wait thirty seconds behind a second Sonder process. Reading a count
+    is not a reason to take a write lock.
+    """
+    missing = tmp_path / "memory.db"
+    monkeypatch.setattr(server, "_DB_PATH", str(missing))
+    monkeypatch.setattr(calibration, "_counts", lambda _conn: dict(POOR_RECORD))
+
+    demanded, reason = server._agent_verification_standing()
+
+    assert not missing.exists(), "a standing question must not create a store"
+    assert demanded is True
+    assert "could not be read" in reason
 
 
 def test_the_connection_is_closed_even_though_the_loop_continues(monkeypatch):
