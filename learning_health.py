@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import calibration
 import embeddings
 import memory_quality
 import sonder_runtime.adapters.memory_store as memory_store
@@ -509,6 +510,50 @@ def _reviewed_by_tier_lines(report: dict) -> list[str]:
     return lines
 
 
+def _calibration_lines(report: dict) -> list[str]:
+    """The named caller-judged population, rendered without inventing a rate.
+
+    ``reviewed_positive_percent`` two lines up is a *complement* bucket
+    (everything that is not autograded) rendered through ``_percent``, which
+    answers ``0.0`` on an empty denominator. On a thin sample it therefore
+    prints something shaped like a rate: two acceptances and one rejection
+    read as ``66.7%``, and no judgements at all read as ``0.0%`` -- "nothing
+    delegated has ever been good", which is a different and false statement.
+
+    ``calibration`` names the population by signal instead of by exclusion and
+    returns no rate at all below ``MIN_SAMPLE``. This line is where the report
+    admits it does not know yet.
+
+    Returns ``[]`` for a report built before this key existed, so an older
+    snapshot renders as it always did rather than as a zero.
+    """
+    measurement = report.get("calibration")
+    if not measurement:
+        return []
+    label = (
+        "    calibration (caller-judged: the named population a completion "
+        "claim is gated on): "
+    )
+    if measurement.get("rate") is None:
+        return [
+            label
+            + "%s observation(s) - too few to measure (need %s), so the "
+            "reviewed rate above is not yet one"
+            % (measurement.get("total", 0), calibration.MIN_SAMPLE)
+        ]
+    return [
+        label
+        + "%s good / %s bad (%.1f%%, n=%s) - %s"
+        % (
+            measurement.get("good", 0),
+            measurement.get("bad", 0),
+            float(measurement["rate"]) * 100,
+            measurement.get("total", 0),
+            measurement.get("verdict", "unknown"),
+        )
+    ]
+
+
 def _distillation_reason_lines(report: dict) -> list[str]:
     """Render the breakdown with recorded and unrecorded rows kept apart.
 
@@ -711,6 +756,11 @@ def build_report(conn) -> dict:
         "interaction_task_embeddings": interaction_embedding_state,
         "ambiguous_legacy_project_turns": ambiguous_legacy_project_turns,
         "unscoped_session_turns": unscoped_session_turns,
+        # The same caller-judged population the agent loop gates completion
+        # claims on, measured by the module that owns that decision rather
+        # than re-derived here. Carrying it means the health report and the
+        # gate cannot drift into disagreeing about the same store.
+        "calibration": calibration.measure(conn, "caller").to_dict(),
     }
     report["status"] = _status(report)
     return report
@@ -757,6 +807,7 @@ def format_report(report: dict) -> str:
         "    (split inferred from signal name, not a recorded source: "
         "record_outcome callers who use tests_passed/failed/compiled land in "
         "the autograded bucket)",
+        *_calibration_lines(report),
         "  lessons: %s | interaction-grounded: %s | synthetic: %s | orphaned: %s"
         % (
             report.get("lessons", 0),
