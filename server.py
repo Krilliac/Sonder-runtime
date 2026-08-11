@@ -13202,7 +13202,17 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "self_heal_check", "status", "system_profile_text", "environment_status", "hardware_profile",
     "emotion_vector_status", "preferences_status", "tool_manifest",
     "memory_search", "web_search", "web_fetch", "weather_lookup",
-    "test_discover", "find_references", "diff_files", "secret_scan",
+    # test_discover / find_references / diff_files / secret_scan are
+    # deliberately absent.  They are read-only, but they are direct-MCP tools
+    # only: harness_tools._resolve_root resolves any absolute path with no
+    # allowed-roots check, and their signatures expose no token/approval/
+    # extra_roots, so they cannot take part in the guarded-read contract this
+    # allow-list grants.  _repository_read_only_error has no resolve branch for
+    # them and _project_scoped_path_key maps them to "path" while they actually
+    # take "root", so both the scope check and the project rebase would inspect
+    # a key they never use and pass while the real root went unchecked.
+    # Re-add them here, to REPOSITORY_AGENT_TOOL_HELP and to _agent_dispatch
+    # together, and only once they are root-confined.
 })
 REPOSITORY_READ_ONLY_FORBIDDEN_ARGS = frozenset({
     "token", "approval", "extra_roots",
@@ -13267,10 +13277,6 @@ an exact symbol named by the task; do not default to Python or server.py.
 - emotion_vector_status: {}
 - preferences_status: {"include_disabled": false, "limit": 20}
 - tool_manifest: {}
-- test_discover: {"root": ".", "framework": "auto"} -- discover tests; auto-detects pytest/jest/vitest/cargo/go/dotnet
-- find_references: {"root": ".", "symbol": "MyClass", "glob": "**/*.py"} -- find all occurrences of a symbol
-- diff_files: {"root": ".", "left": "a.py", "right": "b.py", "context": 3} -- unified diff between two files
-- secret_scan: {"root": ".", "timeout": 30} -- scan for leaked API keys, passwords, tokens, private keys
 
 Reply with exactly one JSON object and no markdown:
 {"tool": "tool_name", "args": {...}, "reason": "short reason"}
@@ -13279,15 +13285,38 @@ or
 """
 
 
-def _agent_tool_help(read_only=False, cloud=False):
+def _agent_help_advertised_tools(help_text):
+    """Tool names an agent help block advertises, one per '- name: {...}' line."""
+    names = []
+    for line in help_text.splitlines():
+        stripped = line.lstrip()
+        if not stripped.startswith("- "):
+            continue
+        name, separator, _ = stripped[2:].partition(":")
+        name = name.strip()
+        if separator and name.isidentifier():
+            names.append(name)
+    return tuple(names)
+
+
+def _agent_tool_help(read_only=False, cloud=False, unsafe=False):
     help_text = REPOSITORY_AGENT_TOOL_HELP if read_only else AGENT_TOOL_HELP
     if not cloud:
         return help_text
+    # Advertise exactly what hosted policy will admit.  Deriving the filter
+    # from _cloud_agent_tool_policy_error instead of restating one of its tool
+    # sets is what stops the two from drifting: the local-only set was stripped
+    # here while the nested-model set never was, so a hosted agent read in its
+    # own tool help that it could nest a model call that dispatch hard-denies.
+    denied = frozenset(
+        name for name in _agent_help_advertised_tools(help_text)
+        if _cloud_agent_tool_policy_error(name, unsafe=unsafe)
+    )
     return "\n".join(
         line for line in help_text.splitlines()
         if not any(
             line.lstrip().startswith("- %s:" % name)
-            for name in _CLOUD_AGENT_LOCAL_ONLY_TOOLS
+            for name in denied
         )
     )
 
@@ -16152,7 +16181,8 @@ def _agent_impl(
     # path-like typos were rejected above rather than failing open to Sonder's
     # own workspace.
     transcript = "Task:\n%s\n\n%s" % (
-        prompt, _agent_tool_help(read_only=read_only, cloud=cloud)
+        prompt,
+        _agent_tool_help(read_only=read_only, cloud=cloud, unsafe=unsafe),
     )
     if unsafe:
         transcript = "%s\n\n%s" % (unsafe_lab.WARNING, transcript)
@@ -16644,7 +16674,9 @@ def _agent_impl(
         elif cloud and tool_name == "tool_manifest":
             # The direct/local manifest remains authoritative and complete,
             # while a hosted model sees only the capabilities it may request.
-            observation = _agent_tool_help(read_only=read_only, cloud=True)
+            observation = _agent_tool_help(
+                read_only=read_only, cloud=True, unsafe=unsafe,
+            )
         elif read_only and tool_name in {"command_registry_list", "tool_manifest"}:
             observation = _agent_tool_help(read_only=True)
         else:
