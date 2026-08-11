@@ -189,6 +189,44 @@ def changed_diff(repo: Path, base: str) -> str:
 
 
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+_QUOTED_RE = re.compile(r"['\"]([A-Za-z_][A-Za-z0-9_]{3,})['\"]")
+
+
+def module_collection_strings(path: Path) -> set[str]:
+    """Identifier-shaped strings held in a module-level collection literal.
+
+    Policy in this repo is written as sets of *tool names*
+    (``REPOSITORY_READ_ONLY_TOOLS``, ``_DEVELOPER_WORKFLOW_TOOLS``), and the
+    tests that catch a tool moving across such a gate drive the tool by its
+    name as data -- ``tools=("file_read",)``, ``prefetcher.observe("file_read",
+    ...)``, ``'{"tool":"text_search","args":{...}}'``.  None of those is a
+    ``Name`` or an ``Attribute``, so a pure symbol walk cannot see them: the
+    known-answer mutation below missed ``tests/test_file_prefetcher.py`` and
+    ``tests/test_master_orchestrator.py`` for exactly this reason (recall 4/6).
+
+    Restricting the term source to *module-level collection members* is what
+    keeps this from degenerating into the raw word scan the AST matching
+    replaced -- an arbitrary changed string literal contributes nothing.
+    """
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, SyntaxError):
+        return set()
+    strings: set[str] = set()
+    for node in tree.body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        for inner in ast.walk(node):
+            if isinstance(inner, (ast.Set, ast.List, ast.Tuple)):
+                for element in inner.elts:
+                    if (
+                        isinstance(element, ast.Constant)
+                        and isinstance(element.value, str)
+                        and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{3,}", element.value)
+                        and element.value.lower() not in STOPWORDS
+                    ):
+                        strings.add(element.value)
+    return strings
 
 
 def module_api_symbols(path: Path) -> tuple[set[str], list[tuple[int, int, str]]]:
@@ -223,7 +261,7 @@ def module_api_symbols(path: Path) -> tuple[set[str], list[tuple[int, int, str]]
     return symbols, spans
 
 
-def parse_diff(repo: Path, diff: str) -> tuple[set[str], set[str], set[Path]]:
+def parse_diff(repo: Path, diff: str) -> tuple[set[str], set[str], set[Path], set[str]]:
     """Return (changed modules, changed API identifiers, changed paths).
 
     An identifier is kept only when it is a module-level name of a changed
@@ -233,8 +271,10 @@ def parse_diff(repo: Path, diff: str) -> tuple[set[str], set[str], set[Path]]:
     modules: set[str] = set()
     identifiers: set[str] = set()
     paths: set[Path] = set()
+    gate_strings: set[str] = set()
     current_path: Path | None = None
     api: set[str] = set()
+    members: set[str] = set()
     spans: list[tuple[int, int, str]] = []
     new_line_number = 0
 
@@ -254,8 +294,9 @@ def parse_diff(repo: Path, diff: str) -> tuple[set[str], set[str], set[Path]]:
                 modules.add(Path(normalized).stem)
                 paths.add(current_path)
                 api, spans = module_api_symbols(current_path)
+                members = module_collection_strings(current_path)
             else:
-                current_path, api, spans = None, set(), []
+                current_path, api, spans, members = None, set(), [], set()
             continue
         if current_path is None:
             continue
@@ -271,6 +312,7 @@ def parse_diff(repo: Path, diff: str) -> tuple[set[str], set[str], set[Path]]:
             for start, end, name in spans:
                 if start <= new_line_number <= end:
                     identifiers.add(name)
+            gate_strings |= members.intersection(_QUOTED_RE.findall(line))
             new_line_number += 1
         elif line.startswith("-") and not line.startswith("---"):
             # A deleted line's own numbering does not advance the new file, but
@@ -279,9 +321,10 @@ def parse_diff(repo: Path, diff: str) -> tuple[set[str], set[str], set[Path]]:
             for match in IDENTIFIER_RE.findall(code):
                 if match in api and match.lower() not in STOPWORDS:
                     identifiers.add(match)
+            gate_strings |= members.intersection(_QUOTED_RE.findall(line))
         elif line.startswith(" "):
             new_line_number += 1
-    return modules, identifiers, paths
+    return modules, identifiers, paths, gate_strings
 
 
 def consumer_symbols(paths: set[Path], identifiers: set[str]) -> set[str]:
@@ -381,8 +424,36 @@ def test_file_references(path: Path) -> set[str]:
     return references
 
 
-def scan_tests(repo: Path, terms: set[str]) -> tuple[dict[str, set[str]], list[str]]:
+def test_file_string_tokens(path: Path) -> set[str]:
+    """Identifier-shaped tokens appearing inside a test's STRING literals.
+
+    Policy in this repo is a set of tool *names*, and the tests that catch a
+    tool moving across a gate name it as data, not as a symbol:
+    ``tools=("file_read",)`` and ``'{"tool":"text_search","args":{...}}'``.
+    Tokenising string constants (rather than comparing them whole) is what
+    reaches the tool name buried inside that JSON blob.
+
+    Matched only against ``gate_strings`` -- members of a module-level
+    collection the diff actually touched -- so this cannot become the raw word
+    scan it sits next to: an ordinary changed string literal contributes no
+    term for it to match.
+    """
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, SyntaxError):
+        return set()
+    tokens: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            tokens.update(IDENTIFIER_RE.findall(node.value))
+    return tokens
+
+
+def scan_tests(
+    repo: Path, terms: set[str], gate_strings: set[str] | None = None,
+) -> tuple[dict[str, set[str]], list[str]]:
     """Map test path -> changed terms it references, parsing each file once."""
+    gate_strings = gate_strings or set()
     selected: dict[str, set[str]] = {}
     all_tests: list[str] = []
     for directory in TEST_DIRS:
@@ -392,9 +463,11 @@ def scan_tests(repo: Path, terms: set[str]) -> tuple[dict[str, set[str]], list[s
         for path in sorted(root.rglob("test_*.py")):
             relative = path.relative_to(repo).as_posix()
             all_tests.append(relative)
-            if not terms:
+            if not terms and not gate_strings:
                 continue
             hits = test_file_references(path) & terms
+            if gate_strings:
+                hits = hits | (test_file_string_tokens(path) & gate_strings)
             if hits:
                 selected[relative] = hits
     return selected, all_tests
@@ -416,14 +489,14 @@ def main() -> int:
     repo = Path(arguments.repo).resolve()
     base, how = resolve_base(repo, arguments.since)
     diff = changed_diff(repo, base)
-    modules, identifiers, paths = parse_diff(repo, diff)
+    modules, identifiers, paths, gate_strings = parse_diff(repo, diff)
     consumers = consumer_symbols(paths, identifiers) if identifiers else set()
 
     # The changed API names plus their one-hop consumers are the selection.  A
     # bare module name is only a fallback: for a package like this one nearly
     # every test imports ``server``, so keying on it stops being a selection.
     terms = (identifiers | consumers) or modules
-    fallback = not identifiers
+    fallback = not identifiers and not gate_strings
 
     print(
         "# base %s (%s), %s commit(s) in range"
@@ -432,7 +505,7 @@ def main() -> int:
         file=sys.stderr,
     )
 
-    if not terms:
+    if not terms and not gate_strings:
         print(
             "SELECTION VACUOUS: the diff yielded no identifiers. This is an "
             "infrastructure failure (empty range? wrong --since?), not a clean "
@@ -441,7 +514,7 @@ def main() -> int:
         )
         return 2
 
-    selected, all_tests = scan_tests(repo, terms)
+    selected, all_tests = scan_tests(repo, terms, gate_strings)
 
     if not selected:
         print(
@@ -464,9 +537,9 @@ def main() -> int:
 
     print(
         "\n# selected %d of %d test files from %d changed identifier(s) "
-        "+ %d consumer(s) across %d module(s): %s%s"
+        "+ %d consumer(s) + %d gate string(s) across %d module(s): %s%s"
         % (len(selected), len(all_tests), len(identifiers), len(consumers),
-           len(modules), ", ".join(sorted(modules)),
+           len(gate_strings), len(modules), ", ".join(sorted(modules)),
            "  [FALLBACK: no API identifier changed, keyed on module name]"
            if fallback else ""),
         file=sys.stderr,
