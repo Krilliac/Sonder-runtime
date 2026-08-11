@@ -16133,6 +16133,110 @@ def _agent_verifier_reachable(read_only, allowed_tools):
     return bool(reachable)
 
 
+# Flags that make a program report on itself instead of on the project. Taken
+# from the set ``_agent_validation_covers`` already applies to ``workspace_run``
+# -- the sibling free-form-argv tool -- so the two routes refuse the same
+# no-ops rather than each keeping a private list.
+_AGENT_NO_OP_COMMAND_FLAGS = frozenset({
+    "--help", "-h", "--version", "-version", "--collect-only", "--co",
+    "--list-tests", "--dry-run", "--fixtures", "--fixtures-per-test",
+    "--show-only", "-n",
+})
+
+# Programs that build or test a project, and the action words that mean they
+# did. Derived, not recalled: the first rows are exactly the argv
+# ``harness_tools.build_run`` auto-detects from a root's own marker files
+# (Makefile, Cargo.toml, CMakeLists.txt, go.mod, package.json, build.gradle,
+# pom.xml), and the rest are the drivers ``_agent_validation_covers`` already
+# treats as broad for ``workspace_run``. An empty tuple means any non-no-op
+# invocation of that program builds something.
+_AGENT_BUILD_DRIVERS = {
+    "make": (), "gmake": (), "nmake": (), "mingw32-make": (),
+    "cargo": ("build", "check", "test"),
+    "cmake": ("--build",),
+    "go": ("build", "test", "vet", "install"),
+    "npm": ("build", "test", "check", "lint"),
+    "pnpm": ("build", "test", "check", "lint"),
+    "yarn": ("build", "test", "check", "lint"),
+    "gradle": ("build", "test", "check", "assemble", "verify"),
+    "gradlew": ("build", "test", "check", "assemble", "verify"),
+    "mvn": ("package", "install", "verify", "test", "compile"),
+    "msbuild": (), "ninja": (), "ctest": (), "pytest": (),
+    "dotnet": ("build", "test"),
+}
+
+
+def _agent_build_command_examines(command, root, scope, changed):
+    """Whether a ``build_run`` command could have looked at the work at all.
+
+    ``build_run`` is the one verifier with neither a ``path`` nor a fixed
+    program: ``harness_tools.build_run`` takes ``root``/``command``/``timeout``
+    and appends nothing, so the S2 narrowing that made this gate read ``path``
+    cannot reach it and ``root`` alone decided coverage. Measured on a project
+    with no build system, ``build_run(root=proj, command="git --version")``
+    returns ``ok=True, returncode=0``, so ``verification_ok`` was granted --
+    and through ``_work_validated`` that satisfied a whole ``validate`` task --
+    for a command that examined nothing. "Exit 0" is not a verdict about the
+    work when the caller chose the whole argv.
+
+    The control is not new doctrine: ``_agent_validation_covers`` already
+    applies it to ``workspace_run``, the sibling tool whose argv the caller
+    also chooses, on the *validation* route. ``build_run`` reached the
+    *verification* route, where the same shape had no check. The command is
+    tokenized with ``str.split()`` because that is exactly what the child does
+    (``harness_tools.build_run``'s ``parts = command.split()``); analysing it
+    any other way would judge an argv the child never runs.
+
+    An empty ``command`` stays covered. The argv is then derived from the
+    root's own build files, which the caller cannot forge, and a root with no
+    build system comes back ``{"ok": False, ...}`` so ``tool_ok`` already
+    refuses it one level up. That is the non-fabricable binding this check
+    exists to demand, and it is already present on that path.
+    """
+    text = str(command or "").strip()
+    if not text:
+        return True
+    parts = text.split()
+    if not parts:
+        return True
+    program = os.path.basename(parts[0]).casefold()
+    for suffix in (".exe", ".cmd", ".bat"):
+        if program.endswith(suffix):
+            program = program[: -len(suffix)]
+            break
+    argv = parts[1:]
+    lowered = [item.casefold() for item in argv]
+
+    # Self-reporting flags first, and before the driver table: ``make
+    # --version`` is the project's real build program and still builds nothing.
+    if any(item.split("=", 1)[0] in _AGENT_NO_OP_COMMAND_FLAGS for item in lowered):
+        return False
+    if any(
+        item == "clean" or item.endswith(":clean") or item in {"/t:clean", "-t:clean"}
+        for item in lowered
+    ):
+        return False
+    # Inline source runs the caller's own text, never the project's.
+    if program in {"python", "py", "python3", "node"} and any(
+        flag in lowered for flag in ("-c", "-e", "--eval", "-p", "--print")
+    ):
+        return False
+
+    if program in _AGENT_BUILD_DRIVERS:
+        required = _AGENT_BUILD_DRIVERS[program]
+        if not required or any(action in lowered for action in required):
+            return True
+
+    # Otherwise it has to say what it looked at, and that has to be the work.
+    targets = _agent_explicit_command_paths(argv, root)
+    targets = [target for target in targets if _agent_path_within(target, scope)]
+    if not targets:
+        return False
+    if not changed:
+        return True
+    return _agent_paths_covered_by_targets(changed, targets)
+
+
 def _agent_verification_covers(tool_name, args, mutations, project_scope=""):
     """Whether this verifier ran over the work this run is answerable for.
 
@@ -16196,6 +16300,14 @@ def _agent_verification_covers(tool_name, args, mutations, project_scope=""):
         str(record.get("path") or "") for record in mutations
         if record.get("path")
     ]
+    # ``build_run`` has no ``path`` to narrow with, so the narrowing above can
+    # never reach it and ``root`` alone said yes to any command that exited 0.
+    # See ``_agent_build_command_examines``: the caller chooses this whole argv,
+    # so the argv has to name something in scope before its exit status counts.
+    if tool_name == "build_run" and not _agent_build_command_examines(
+        args.get("command"), root, scope, changed,
+    ):
+        return False
     if not changed:
         declared = _agent_normalized_path(project_scope)
         return _agent_path_within(declared, scope) if declared else True
