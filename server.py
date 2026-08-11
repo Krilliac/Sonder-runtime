@@ -13372,12 +13372,19 @@ def _tool_capability_shadow_surfaces():
         full_agent_help=AGENT_TOOL_HELP,
         repository_agent_help=REPOSITORY_AGENT_TOOL_HELP,
         hosted_agent_help=_agent_tool_help(cloud=True),
+        autopilot_observe_tools=_AUTOPILOT_OBSERVE_TOOLS,
+        autopilot_workspace_tools=_AUTOPILOT_WORKSPACE_TOOLS,
     )
 
 
 def tool_capability_shadow_report():
     """Validate descriptor drift without making descriptors authoritative."""
     return tool_capabilities.format_shadow_report(_tool_capability_shadow_surfaces())
+
+
+def tool_capability_coverage_report():
+    """How much of each advertised surface the shadow validator inspected."""
+    return tool_capabilities.format_coverage_report(_tool_capability_shadow_surfaces())
 
 
 def _repository_scope_path_error(tool_name, args, project_root):
@@ -18199,6 +18206,7 @@ def diagnostics() -> str:
         lines.append("  mcp refresh ERROR: %s" % mcp_state["last_error"])
     try:
         lines.append("  tool capability shadow: %s" % tool_capability_shadow_report())
+        lines.append("  tool capability coverage: %s" % tool_capability_coverage_report())
     except Exception as e:
         lines.append("  tool capability shadow: ERROR validator failed: %s" % e)
     lines.append(
@@ -18929,7 +18937,7 @@ def _codegen_build(program, args_json, cwd, timeout, token, approval, extra_root
     if data.get("stdout_truncated") or data.get("stderr_truncated"):
         # The captured window keeps the head, and MSBuild prints its error
         # summary at the tail, so the errors are exactly what gets dropped.
-        parts.append("error: build output was truncated; the error summary may be missing")
+        parts.append(codegen_loop.TRUNCATED_MEASUREMENT_NOTICE)
     parts.append(stdout)
     parts.append(stderr)
     return "\n".join(p for p in parts if p), bool(data.get("ok"))
@@ -19019,6 +19027,19 @@ def codegen_build_loop(
                 "error: the build exited with a failure status but no output "
                 "line matched error_regex"
             ]
+        if (
+            codegen_loop.output_truncated(out)
+            and not codegen_loop.partial_output_blocked(errors)
+        ):
+            # Same failure one step further out: error_regex is a documented
+            # parameter, and a stricter one (CS\d{4}) does not match the
+            # truncation notice, so the parsed list loses the only trace that
+            # this build was never fully read. count_unreliable then returns 0
+            # and score() hands a truncated build a trustworthy (0, 0, 0),
+            # which beats an honest (0, 0, 30) -- the original defect, through
+            # a knob the docstring advertises. build_ran() consults the RAW
+            # output for exactly this reason; so does this.
+            errors = [codegen_loop.TRUNCATED_MEASUREMENT_NOTICE] + errors
         return errors
 
     def read(name):

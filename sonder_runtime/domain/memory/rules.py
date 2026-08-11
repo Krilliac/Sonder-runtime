@@ -31,13 +31,98 @@ VALID_SIGNALS = frozenset(SIGNAL_REWARDS)
 # fine-tuning row.
 GOOD_THRESHOLD = 0.71
 
+# --- the two populations ----------------------------------------------------
+#
+# A caller who reviewed the work and the runtime marking its own homework are
+# different KINDS of evidence, and this codebase refuses to blend them (see
+# calibration.py, which imports these and reports both populations side by side
+# without ever producing one figure over both).
+#
+# The pricing table above cannot express that difference and must not try: it
+# is frozen, because export_training_data compares a stored reward against
+# reward_score() to detect corruption, so moving a price rewrites history. What
+# it does say, read as a ranking, is exactly backwards -- self-graded
+# "tests_passed" is priced 1.0, above EVERY caller-judged signal -- and the
+# fine-tuning corpus was ordered by it. evidence_rank() below fixes the order
+# without touching a price, by ranking the population FIRST and using the
+# frozen price only as a tie-break inside it.
+
+# Judged by a caller who reviewed the work.
+CALLER_JUDGED = frozenset({"used", "copied", "edited", "accepted", "rejected"})
+
+# Produced by running something. The runtime grading itself.
+EXECUTION_GROUNDED = frozenset({"tests_passed", "compiled", "failed"})
+
+POPULATIONS = {
+    "caller": CALLER_JUDGED,
+    "execution": EXECUTION_GROUNDED,
+}
+
+# Lexicographic tiers, never summed with a reward. Deliberately no entry for an
+# unrecognised signal beyond the 0 default: unknown provenance ranks below both.
+_POPULATION_TIER = {"caller": 2, "execution": 1}
+
 
 def reward_score(signal: str) -> float:
     return SIGNAL_REWARDS.get(signal, 0.0)
 
 
 def reward_is_good(signal: str) -> bool:
+    """Whether a signal is evidence of good work AT ALL -- an eligibility gate.
+
+    This is a yes/no per row and is population-blind on purpose: a passing test
+    and a caller keeping the output are both evidence. It is NOT an ordering.
+    Never sort or compare rows by this or by reward_score() across populations
+    -- use evidence_rank(), or the strongest self-graded row displaces a
+    human-validated one.
+    """
     return reward_score(signal) >= GOOD_THRESHOLD
+
+
+def signal_population(signal: str) -> str:
+    """Which population a signal belongs to: "caller", "execution", or "" ."""
+    for name, signals in POPULATIONS.items():
+        if signal in signals:
+            return name
+    return ""
+
+
+def evidence_rank(signal: str) -> tuple[int, int, float]:
+    """Order two outcome signals without blending their populations.
+
+    Three lexicographic keys, never summed:
+
+      1. is this evidence of good work at all -- the eligibility gate;
+      2. for GOOD signals only, which population produced it -- a caller who
+         reviewed the work outranks the runtime grading itself;
+      3. the frozen price, as a tie-break INSIDE one population.
+
+    Key 2 is conditioned on key 1 because the population distinction is a
+    statement about positive evidence: it answers "whose judgement says this
+    was good". Below the eligibility bar there is no credit to attribute, and
+    ranking by population there would put `rejected` (a caller's negative)
+    above `compiled` (a weak positive) -- so those are ordered by price alone.
+
+    So `edited` (0.75, a caller kept the output after changing it) outranks
+    `tests_passed` (1.0, the runtime ran its own tests), while `used` still
+    outranks `edited` and `tests_passed` still outranks `compiled`.
+
+    Key 1 is what makes the ordering TOTAL, so this carries no precondition for
+    its callers. Without it, `rejected` (caller, -0.5) would outrank
+    `tests_passed` (execution, 1.0) -- harmless only for as long as every call
+    site happens to be reward_is_good-gated, which is an unwritten contract the
+    next caller cannot see. A guard that depends on being called correctly is
+    not a guard.
+
+    There is deliberately no function here that reduces the two populations to
+    one number; that figure reads like quality and is not one.
+    """
+    good = reward_is_good(signal)
+    return (
+        1 if good else 0,
+        _POPULATION_TIER.get(signal_population(signal), 0) if good else 0,
+        reward_score(signal),
+    )
 
 
 # --- recall thresholding ----------------------------------------------------

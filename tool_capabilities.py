@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import ast
 import inspect
-from dataclasses import dataclass
+from dataclasses import dataclass, fields as dataclass_fields
 from enum import Enum
 from types import MappingProxyType
 from typing import Callable, Iterable, Mapping
@@ -104,6 +104,38 @@ class ShadowSurfaces:
     full_agent_help: str
     repository_agent_help: str
     hosted_agent_help: str
+    # Injected verbatim into the autopilot model transcript, so they advertise
+    # tools exactly as the help texts do and are measured the same way.
+    #
+    # Deliberately NOT defaulted, like every field above: a default lets a
+    # construction site omit a surface, and an omitted surface is indistinguishable
+    # from one that genuinely advertises nothing. That is the same silence this
+    # module was fixed for, moved from the descriptor slice to the snapshot.
+    autopilot_observe_tools: frozenset[str]
+    autopilot_workspace_tools: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class SurfaceCoverage:
+    """How much of one advertised surface the descriptor slice can validate."""
+
+    surface: str
+    advertised: int
+    described: int
+
+    @property
+    def unvalidated(self) -> int:
+        return self.advertised - self.described
+
+    @property
+    def described_fraction(self) -> float | None:
+        """None when the surface advertises nothing -- 0 of 0 is not 100%.
+
+        Returning 1.0 there says "fully validated" about a surface nothing was
+        ever measured on, which is the exact shape of the defect this coverage
+        report exists to expose.
+        """
+        return (self.described / self.advertised) if self.advertised else None
 
 
 _ALL_VISIBILITY = frozenset(Visibility)
@@ -223,11 +255,98 @@ def _help_has(help_text: str, name: str) -> bool:
 
 
 def _manifest_has(manifest_text: str, name: str) -> bool:
-    for line in manifest_text.splitlines():
+    return name in _manifest_names(manifest_text)
+
+
+def _help_names(help_text: str) -> frozenset[str]:
+    """Every tool name a help text advertises, by the shape ``_help_has`` reads."""
+    names: set[str] = set()
+    for line in (help_text or "").splitlines():
+        stripped = line.lstrip()
+        if not stripped.startswith("- "):
+            continue
+        name, separator, _ = stripped[2:].partition(":")
+        if separator and name.isidentifier():
+            names.add(name)
+    return frozenset(names)
+
+
+def _manifest_names(manifest_text: str) -> frozenset[str]:
+    """Every tool name the manifest advertises, by ``_manifest_has``'s shape."""
+    names: set[str] = set()
+    for line in (manifest_text or "").splitlines():
         key, separator, _ = line.strip().partition(":")
-        if separator and name in key.split("/"):
-            return True
-    return False
+        if not separator:
+            continue
+        names.update(part for part in key.split("/") if part.isidentifier())
+    return frozenset(names)
+
+
+# The only surfaces that are not already a set of names.  A field listed here
+# is parsed into one; a text field missing from here raises rather than being
+# skipped, because silently skipping what it lacks a handler for is exactly the
+# defect this coverage report exists to expose.
+_TEXT_SURFACE_PARSERS = {
+    "tool_manifest": _manifest_names,
+    "full_agent_help": _help_names,
+    "repository_agent_help": _help_names,
+    "hosted_agent_help": _help_names,
+}
+
+
+def surface_label(field_name: str) -> str:
+    """The report label for a ShadowSurfaces field -- derived, not hand-written."""
+    base = field_name[:-len("_tools")] if field_name.endswith("_tools") else field_name
+    return base.replace("_", "-")
+
+
+def advertised_surfaces(
+    surfaces: ShadowSurfaces,
+    text_parsers: Mapping[str, Callable[[str], frozenset[str]]] | None = None,
+) -> tuple[tuple[str, frozenset[str]], ...]:
+    """Every surface on the snapshot, enumerated FROM ``ShadowSurfaces`` itself.
+
+    Hand-listing them reproduced this module's own defect one level up: the
+    list covered every field that existed when it was written, and a fifteenth
+    would have been silently unmeasured -- precisely as a tool without a
+    descriptor is silently unchecked. Deriving the list means a new surface is
+    measured the moment it is snapshotted, and the one hand-maintained part
+    (which text fields need a name parser) fails loudly when it goes stale.
+    """
+    parsers = _TEXT_SURFACE_PARSERS if text_parsers is None else text_parsers
+    rows = []
+    for field in dataclass_fields(ShadowSurfaces):
+        value = getattr(surfaces, field.name)
+        if isinstance(value, str):
+            parser = parsers.get(field.name)
+            if parser is None:
+                raise ValueError(
+                    "no tool-name parser for text surface %r: coverage must not "
+                    "silently skip a surface it cannot read" % field.name
+                )
+            names = parser(value)
+        else:
+            names = frozenset(value)
+        rows.append((surface_label(field.name), names))
+    return tuple(rows)
+
+
+def shadow_coverage(
+    surfaces: ShadowSurfaces,
+    descriptors: Iterable[ToolCapability] | None = None,
+) -> tuple[SurfaceCoverage, ...]:
+    """Per-surface count of advertised tools this validator can actually check.
+
+    ``validate_shadow`` is per-descriptor, so a tool with no descriptor is not
+    checked -- it is *exempt*, silently.  These numbers are the difference
+    between "no drift" and "no drift in the part I looked at".
+    """
+    rows = tuple(descriptors) if descriptors is not None else _DESCRIPTORS
+    described = frozenset(row.name for row in rows)
+    return tuple(
+        SurfaceCoverage(label, len(names), len(names & described))
+        for label, names in advertised_surfaces(surfaces)
+    )
 
 
 def validate_shadow(
@@ -297,7 +416,48 @@ def assert_shadow_valid(surfaces: ShadowSurfaces) -> None:
 
 
 def format_shadow_report(surfaces: ShadowSurfaces) -> str:
+    """The drift verdict, which may never be stated without its coverage.
+
+    This validator was built to catch an advertised-but-uncallable tool and
+    could not see a real 23-tool instance of exactly that, because every tool
+    without a descriptor is skipped rather than reported.  Reporting "ok" over
+    15 of ~184 advertised tools is how that stayed invisible, so the verdict
+    now leads with the fraction it actually inspected.
+    """
     issues = validate_shadow(surfaces)
-    if not issues:
-        return "ok (%d descriptors; shadow-only)" % len(_DESCRIPTORS)
-    return "ERROR %d drift issue(s): %s" % (len(issues), "; ".join(issues))
+    coverage = shadow_coverage(surfaces)
+    advertised = frozenset().union(*(names for _label, names in advertised_surfaces(surfaces)))
+    described = advertised & frozenset(CAPABILITIES)
+    unvalidated = len(advertised) - len(described)
+    if not advertised:
+        # "complete: 0 of 0 (100.0%)" is this module's own defect one level up:
+        # the absence of evidence reported as evidence of absence. A snapshot
+        # that advertises nothing measured nothing.
+        return (
+            "unmeasured: this snapshot advertises no tool on any of its %d "
+            "surface(s), so nothing was validated -- 0 of 0 is not coverage"
+            % len(coverage)
+        )
+    verdict = "complete" if not unvalidated else "partial"
+    scope = (
+        "%s: %d descriptor(s) validate %d of %d advertised tool(s) (%.1f%%); "
+        "%d unvalidated across %d surface(s)"
+        % (
+            verdict, len(_DESCRIPTORS), len(described), len(advertised),
+            100.0 * len(described) / len(advertised) if advertised else 100.0,
+            unvalidated, sum(1 for row in coverage if row.unvalidated),
+        )
+    )
+    if issues:
+        return "%s; ERROR %d drift issue(s) among the described: %s" % (
+            scope, len(issues), "; ".join(issues),
+        )
+    return "%s; no drift among the described (shadow-only)" % scope
+
+
+def format_coverage_report(surfaces: ShadowSurfaces) -> str:
+    """Coverage for every advertised surface, so none can hide behind a total."""
+    return "; ".join(
+        "%s %d/%d" % (row.surface, row.described, row.advertised)
+        for row in shadow_coverage(surfaces)
+    )

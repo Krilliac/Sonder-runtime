@@ -2057,13 +2057,31 @@ def lesson_usage_stats(conn, history=None):
     ``history`` accepts a pre-fetched lesson_usage_history() result so a caller
     that also needs the raw evidence (retriever.usage_stats_with_attribution)
     scans lesson_usage once rather than once per consumer.
+
+    ``avg_reward`` is a mean over BOTH outcome populations and is kept for
+    callers that only want "how has this lesson fared". It must never ORDER two
+    lessons against each other: a caller's judgement and the runtime marking
+    its own homework are different kinds of evidence, and one mean over both
+    ranks a self-graded lesson above a reviewed one. The per-population means
+    beside it are what a ranking reads.
     """
+    caller = tuple(sorted(memory_rules.CALLER_JUDGED))
+    execution = tuple(sorted(memory_rules.EXECUTION_GROUNDED))
     rows = conn.execute(
         "SELECT lesson_id, COUNT(*) AS uses, "
         "SUM(CASE WHEN reward > 0 THEN 1 ELSE 0 END) AS wins, "
         "SUM(CASE WHEN reward < 0 THEN 1 ELSE 0 END) AS losses, "
-        "AVG(CASE WHEN reward IS NOT NULL THEN reward END) AS avg_reward "
+        "AVG(CASE WHEN reward IS NOT NULL THEN reward END) AS avg_reward, "
+        "AVG(CASE WHEN outcome_signal IN (%s) AND reward IS NOT NULL "
+        "THEN reward END) AS avg_reward_caller, "
+        "AVG(CASE WHEN outcome_signal IN (%s) AND reward IS NOT NULL "
+        "THEN reward END) AS avg_reward_execution "
         "FROM lesson_usage GROUP BY lesson_id"
+        % (
+            ",".join("?" for _ in caller),
+            ",".join("?" for _ in execution),
+        ),
+        caller + execution,
     ).fetchall()
     stats = {r["lesson_id"]: dict(r) for r in rows}
 
