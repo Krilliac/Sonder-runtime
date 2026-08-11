@@ -17308,6 +17308,15 @@ def workbench_agent(
 # on a call that cannot run.  Keep both sets a subset of _agent_dispatch's
 # branches and the observe set a subset of REPOSITORY_READ_ONLY_TOOLS;
 # tests/test_advertised_surface_drift.py asserts both.
+#
+# There is a THIRD gate these sets must clear, and it was missing from this
+# comment when the first two were added: a project-bound run refuses every
+# tool outside _PROJECT_BOUND_AGENT_TOOLS, which left 5 workspace names dead
+# in the rendered allowlist.  _autopilot_allowed_tools now intersects with it
+# rather than requiring these literals to be maintained against it, because
+# these sets are also used for unbound runs where all 5 are legitimate.  Do
+# not "fix" a future gap by editing the literals -- narrow at the point of use,
+# where the run's flags are known.
 _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "directory_digest", "file_find",
     "dependency_inventory",
