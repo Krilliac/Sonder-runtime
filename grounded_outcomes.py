@@ -37,6 +37,12 @@ Deliberate limits
   -- the third state is *unmeasured*. ``promotion_eval`` already refuses a
   promotion decision on the same grounds and calls it
   ``evaluation_infrastructure_error``; this is that idea, one layer down.
+  Reading that state off a result dict is per-runner work, not one shared rule:
+  ``code_runner`` says ``error`` for a compiler it could not find *and* for a
+  compilation that genuinely failed, so a predicate tuned to ``harness_tools``
+  would drop the second as unmeasured. Dropping a real failure is the more
+  expensive mistake -- failures are the scarce half of the honest population --
+  so each runner gets a predicate that reads its own shape.
 
 Stdlib only.
 """
@@ -77,6 +83,21 @@ VERIFIERS = {
     "ground_artifact": ("compiled", "failed"),
     "artifact_ground": ("compiled", "failed"),
 }
+
+# Verifiers backed by ``code_runner``, whose result dict overloads ``error``.
+# ``_run_rust`` stamps "rust compilation failed" onto a result whose process
+# really did run and really did reject the code (code_runner.py:460), so the
+# ``error``-first reading that is correct for ``harness_tools`` would file a
+# genuine compile failure as unmeasured -- discarding the negative evidence
+# this store is measurably short of. These use their own predicate.
+#
+# ``isolated_run`` is deliberately NOT here: ``isolated_runner._run_bounded``
+# puts the container's own exit status in ``returncode`` and reserves ``error``
+# for the reasons the runner itself stopped the run (no engine, output cap,
+# time cap, unverified cleanup), so the ``error``-first predicate is right for
+# it -- and is the only correct one, because a container killed by the time cap
+# still carries the killed process's integer returncode.
+CODE_RUNNER_VERIFIERS = frozenset({"run_code", "run_project"})
 
 # Tools that produce work worth judging later.
 GENERATORS = frozenset({
@@ -129,6 +150,67 @@ def evaluation_infrastructure_error(evidence) -> str:
         detail = stderr[0] if stderr else "the verifier could not be run"
         return detail
     return ""
+
+
+def code_runner_infrastructure_error(evidence) -> str:
+    """Why ``run_code``/``run_project`` measured nothing, or "" when code ran.
+
+    ``code_runner`` uses ``error`` for two opposite things, which is the whole
+    difficulty here. It is the runner reporting that it could not start -- no
+    interpreter, no compiler, no time left -- and it is also, once,
+    ``_run_rust`` labelling a compilation that genuinely failed. Reading
+    ``error`` first would turn that real verdict into "nothing was measured",
+    and a lost failure is worse than a lost success: the caller-judged
+    population is 101 good to 91 rejected only because failures are already the
+    hard half to collect.
+
+    ``returncode`` separates them honestly, because ``code_runner`` only ever
+    reports one when a process exited. ``_error_result`` and ``_timeout_result`` --
+    every missing-toolchain path, every timeout, ``/runwindow`` off Windows --
+    carry ``returncode: None``, because no process ever produced one.
+    ``_completed_result`` carries the integer a process exited with, and the
+    rust overload is written onto one of those. So an ``error`` beside an
+    integer returncode is the code's verdict; an ``error`` without one is the
+    runner's.
+
+    Known limit: a toolchain that starts and then fails for its own reasons --
+    a broken vcvars where ``cl`` is missing inside the batch file, a dotnet SDK
+    that cannot restore -- exits nonzero like a rejected program and is
+    recorded as ``failed``. That is the direction to be wrong in; the opposite
+    mistake would silently drop real negative evidence.
+    """
+    if not isinstance(evidence, dict):
+        return ""
+    steps = evidence.get("steps")
+    if isinstance(steps, list):
+        return _project_infrastructure_error(evidence, steps)
+    if evidence.get("timed_out"):
+        return "the run timed out before producing a verdict"
+    error = str(evidence.get("error") or "").strip()
+    if not error:
+        return ""
+    returncode = evidence.get("returncode")
+    if isinstance(returncode, int) and not isinstance(returncode, bool):
+        # A process ran and exited. Whatever `error` says, this is a verdict.
+        return ""
+    return error
+
+
+def _project_infrastructure_error(evidence, steps) -> str:
+    """``run_project``'s composite result hides its evidence one level down.
+
+    The top level is ``{ok, files, steps, timeout}`` -- no ``error``, no
+    ``returncode`` -- so a predicate reading only the top level sees a clean
+    result no matter what happened. ``run_project`` stops at the first step
+    that fails, so the step that stopped it is the one holding the evidence.
+    """
+    if evidence.get("ok"):
+        return ""
+    for step in reversed(steps):
+        result = step.get("result") if isinstance(step, dict) else None
+        if isinstance(result, dict) and not result.get("ok"):
+            return code_runner_infrastructure_error(result)
+    return "the project run produced no step result to judge"
 
 
 def _now() -> float:
@@ -200,7 +282,11 @@ def attribute(tool: str, ok: bool, project: str = "", record_fn=None,
         return {"attributed": False, "reason": "%s is not execution-grounded evidence" % name}
     # Checked before a pending generation is claimed: an unmeasured run must not
     # consume the one chance that generation had to be judged for real.
-    infrastructure_error = evaluation_infrastructure_error(evidence)
+    infrastructure_error = (
+        code_runner_infrastructure_error(evidence)
+        if name in CODE_RUNNER_VERIFIERS
+        else evaluation_infrastructure_error(evidence)
+    )
     if infrastructure_error:
         with _LOCK:
             _STATS["unmeasured"] += 1
