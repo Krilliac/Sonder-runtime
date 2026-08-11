@@ -74,7 +74,39 @@ through to mode behaviour unchanged; unknown tool still fails closed.
 Tests: a privileged tool is denied when elevation is off and permitted when on;
 no mode change alters elevation (already covered — extend if the set changes).
 
-## Task 3 — Make `/permissions` tell the truth
+## Task 3 — Wire the gate into the dispatch path
+
+**Added mid-plan.** Task 1's implementer found that `permission_modes.decide()`
+has *zero production callers*: only `/mode` and `/elevate` plumbing touches the
+module. So the mode system is currently in exactly the state that motivated this
+plan — a well-tested decision function that decides nothing — and finishing
+Tasks 1-2 without this would ship a second dead gate beside the first.
+
+The controller (me) caused this: `permission_modes` was written with
+"enforcement scope: `decide()` is a pure function; call sites opt in", and the
+only lane that was going to opt in was a REPL lane that got stuck and was
+stopped. The omission is mine, not the implementer's.
+
+Wire `decide()` at the dispatch sites:
+
+- `server._agent_dispatch` — the agent/workbench/autopilot tool path.
+- `sonder_repl._run_catalogued` — the console path for `/<tool_name>`.
+  `ask` here means genuinely prompting the operator (`y/N`, default no), since
+  a person is present. `deny` prints the reason and does not run.
+- Direct MCP calls keep `interactive=False` semantics, where `ask` degrades to
+  `allow` — that is deliberate and documented in `permission_modes`. Do not
+  change it here.
+
+**Highest-risk task in the plan.** This is the first time these rules actually
+stop anything, so a mistake surfaces as "Sonder refuses to work". Verify the
+default mode (`manual`) leaves existing flows behaving as they did.
+
+Tests: an agent-loop dispatch of a mutating tool under `plan` is refused and the
+underlying function is never called (prove it — monkeypatch something that
+raises if invoked); the same under `auto` runs; `manual` on a direct MCP call
+still allows; the console path prompts and honours a refusal.
+
+## Task 4 — Make `/permissions` tell the truth
 
 `permission_policy` currently prints rules that were not enforced. Now that they
 are, its output must reflect the *effective* decision: the rule, the active
