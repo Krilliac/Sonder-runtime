@@ -577,7 +577,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /accounts          list accounts (admin)
   /setaccount ...    admin account edits: user role= tier= dev_flags= banned=
   /debug             inspect safe debug state
-  /cot               denied: hidden private chain-of-thought is not exposed
+  /cot               model reasoning; refused without opt-in (flag + allow rule)
   /permissions [tool] show local permission rules or one matched rule
   /mode [name]       show or set how much runs without asking (plan/manual/acceptEdits/auto)
   /filepolicy        show file access roots and bypass controls

@@ -115,7 +115,19 @@ ceiling and are visible in `master_capacity`. Without a per-run `worker_cap`,
 the conservative hardware-derived worker width is unchanged.
 
 Consent gates: `SONDER_ALLOW_CLOUD`, `SONDER_WEB_TOOLS`,
-`SONDER_ALLOW_REMOTE_OLLAMA`, `SONDER_FILE_ROOTS`, `SONDER_LOCATION_CONSENT`.
+`SONDER_ALLOW_REMOTE_OLLAMA`, `SONDER_FILE_ROOTS`, `SONDER_LOCATION_CONSENT`,
+`SONDER_EXPOSE_REASONING`, `SONDER_ALLOW_PRIVATE_COT`.
+
+`SONDER_EXPOSE_REASONING` decides whether Sonder asks a reasoning model for its
+thinking at all; with it off nothing is captured, so nothing can be shown. It
+also means the model is asked to think, which costs latency and tokens.
+`SONDER_ALLOW_PRIVATE_COT` is separate and narrower: it decides whether
+`admin_private_chain_of_thought` (`/cot`) may reveal that record, and it is
+**not sufficient on its own** — the tool also requires an explicit `allow` rule
+for its own name in `permissions.json`, since the built-in rule denies it.
+Write that rule with `permission_rule_set` or by hand; what the gate requires
+is the state on disk, not any one route to it. Both acts are required; either
+alone still refuses.
 
 Models/tiers: `SONDER_FAST`, `SONDER_CODE`, `SONDER_GENERAL`,
 `SONDER_REASONING`, `SONDER_VISION`, `SONDER_BASE_MODEL`,

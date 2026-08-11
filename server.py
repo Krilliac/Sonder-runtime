@@ -294,15 +294,61 @@ def reasoning_exposure_enabled() -> bool:
     ``message.thinking``, separate from the answer, but only when the request
     asks for it -- so leaving this off means we never even request it.
 
-    This does not weaken ``admin_private_chain_of_thought``: that refuses
-    arbitrary inspection of hidden reasoning, which stays refused. This exposes
-    only the reasoning a model emitted for the turn the caller just asked for,
-    through a channel the model emits deliberately and separately from its
-    answer, and only where the operator has turned it on.
+    This is not the switch that opens ``admin_private_chain_of_thought``. That
+    surface has its own flag (SONDER_ALLOW_PRIVATE_COT) and additionally needs
+    an explicit operator permission rule; it refuses until both are set. What
+    this flag decides is narrower and upstream of both: whether Sonder asks the
+    model for its thinking at all. With it off nothing is captured, so there is
+    nothing for either surface to show.
     """
     return os.environ.get("SONDER_EXPOSE_REASONING", "").strip().lower() in (
         "1", "true", "yes", "on"
     )
+
+
+def private_cot_opt_in_enabled() -> bool:
+    """Whether the operator has flagged this deployment to serve /cot at all.
+
+    Off by default, and deliberately a *different* variable from
+    SONDER_EXPOSE_REASONING. That one decides whether the model is asked to
+    think; this one decides whether the surface that has refused since the
+    beginning may reveal what it thought. Overloading one flag onto both would
+    mean enabling reasoning capture silently opened a tool documented as
+    refusing -- which is exactly the surprise this split exists to prevent.
+
+    The flag alone is not sufficient: see ``_private_cot_rule_allows``.
+    """
+    return os.environ.get("SONDER_ALLOW_PRIVATE_COT", "").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+
+
+def _private_cot_rule_allows() -> bool:
+    """Whether the operator's permission policy names this tool as allowed.
+
+    The second required act, and the one that cannot be set by an environment
+    variable inherited from a parent process. ``policy.DEFAULT_RULES`` denies
+    ``admin_private_chain_of_thought``, so this is False on any deployment that
+    has not written an explicit allow rule into ``permissions.json``.
+
+    What the act requires is that *state on disk*, not one particular route to
+    it: ``permission_rule_set`` is the developer-gated tool for writing it, but
+    editing ``permissions.json`` by hand does it just as well, and that needs
+    filesystem access to the Sonder home rather than a developer token. Stating
+    the tool as the only way would overstate the gate.
+
+    First-match evaluation means the operator rule (inserted at the front) wins
+    over the built-in deny without the deny ever being removed.
+
+    Fails closed: an unreadable or malformed policy is not an opt-in.
+    """
+    try:
+        rule = permission_rules.check(
+            sonder_paths.default_home(), "admin_private_chain_of_thought"
+        )
+    except Exception:
+        return False
+    return str(rule.get("action", "")).strip().lower() == "allow"
 
 
 # Which local models are known to reason. Learned from responses that carry
@@ -7777,6 +7823,15 @@ def admin_status(token: str = "") -> str:
     return "\n".join(lines)
 
 
+# Named so a test can pin it. It used to assert that hidden chain-of-thought
+# "is not exposed" -- an absolute across the whole runtime, which stopped being
+# true of anything but this bundle.
+_DEBUG_INSPECT_REASONING_NOTE = (
+    "  note: this bundle carries no model reasoning; use trace/tool/activity logs here,",
+    "        or reasoning_show / admin_private_chain_of_thought, both opt-in.",
+)
+
+
 @mcp.tool()
 def debug_inspect(token: str = "", include_status: bool = True) -> str:
     """Developer/admin inspection bundle without hidden chain-of-thought."""
@@ -7789,7 +7844,7 @@ def debug_inspect(token: str = "", include_status: bool = True) -> str:
         return refusal
     sections = [
         "sonder debug inspect",
-        "  note: private hidden chain-of-thought is not exposed; use trace/tool/activity logs instead.",
+        *_DEBUG_INSPECT_REASONING_NOTE,
         "",
         admin_status(token),
         "",
@@ -7806,15 +7861,76 @@ def debug_inspect(token: str = "", include_status: bool = True) -> str:
     return "\n".join(sections)
 
 
+_PRIVATE_COT_REFUSAL = (
+    "DENIED: hidden private chain-of-thought cannot be exposed. "
+    "Use /trace, /debug, /agents, master_status, debug_inspect, "
+    "tool call logs, prompts, retrieved lessons, and final rationale summaries "
+    "instead.\n"
+    "  Refused here, and refused by default everywhere. Opting in takes two\n"
+    "  independent acts and either one alone leaves this refused: set\n"
+    "  SONDER_ALLOW_PRIVATE_COT=1, and add an explicit permission rule\n"
+    "  allowing admin_private_chain_of_thought (the built-in rule denies it).\n"
+    "  Opted in it serves the same record reasoning_show serves -- the model's\n"
+    "  own thinking channel for the current turn -- and no hidden state beyond\n"
+    "  it, because there is none."
+)
+
+
 @mcp.tool()
 def admin_private_chain_of_thought(token: str = "") -> str:
-    """Deny private chain-of-thought exposure and point to safe inspectable traces."""
+    """Refuse private chain-of-thought exposure unless the operator opted in twice.
+
+    Refused unconditionally for the whole life of this tool until now, with the
+    ``token`` argument accepted and ignored. That refusal predates
+    ``reasoning_show``, and had drifted into refusing precisely what a sibling
+    tool already serves under a gate. Opting in joins the two surfaces onto one
+    record; it does not open a new one. There is no hidden chain-of-thought
+    store behind this tool and there never was.
+
+    Three gates, all of which must pass, and the first two are the operator's:
+
+    * ``SONDER_ALLOW_PRIVATE_COT=1`` -- this deployment may serve this surface.
+    * an explicit permission rule allowing ``admin_private_chain_of_thought``
+      in ``permissions.json``. The built-in rule denies it, so this state has
+      to be written deliberately -- through the developer-gated
+      ``permission_rule_set``, or by editing the file by hand, which needs
+      filesystem access to the Sonder home. The property that matters is that
+      an environment variable inherited from a parent process cannot supply
+      it, not that any one tool is the sole route.
+    * a developer token, on any deployment that authenticates callers -- the
+      reasoning belongs to whoever's turn produced it, exactly as for
+      ``reasoning_show``. **On the default ``local-open`` deployment this third
+      gate is inert**: ``_deployment_authenticates_callers()`` is False when
+      none of SONDER_AUTH_MODE / SONDER_API_KEY / SONDER_REQUIRE_ACCOUNT is
+      set, so it passes for every caller. That is the documented meaning of
+      local-open, and a non-loopback bind is refused in that mode -- but count
+      two gates there, not three. The operator's two acts are the real ones.
+
+    What it then shows is the model's own thinking channel for the current or
+    last turn, which exists only where ``SONDER_EXPOSE_REASONING`` is also on.
+    Where it is off, this says nothing was captured rather than implying
+    something is being kept back.
+    """
     _maybe_live_reload()
-    return (
-        "DENIED: hidden private chain-of-thought cannot be exposed. "
-        "Use /trace, /debug, /agents, master_status, debug_inspect, "
-        "tool call logs, prompts, retrieved lessons, and final rationale summaries instead."
-    )
+    started = time.time()
+    # Flag and rule are checked before the caller gate so that a deployment
+    # which has not opted in returns the same refusal to everyone -- the
+    # refusal must not become an oracle for who holds a developer token.
+    if not (private_cot_opt_in_enabled() and _private_cot_rule_allows()):
+        # Recorded, and recorded as a failure. Returning here without an
+        # activity record made probing this gate invisible: an operator could
+        # not distinguish a deployment nobody had touched from one being tried
+        # repeatedly. ok=False so a blocked attempt never reads as a served one.
+        _record_direct_tool(
+            "admin_private_chain_of_thought", {}, ok=False, started=started,
+        )
+        return _PRIVATE_COT_REFUSAL
+    refusal = _developer_gate("admin_private_chain_of_thought", token, started)
+    if refusal:
+        return refusal
+    output = _reasoning_report()
+    _record_direct_tool("admin_private_chain_of_thought", {}, ok=True, started=started)
+    return output
 
 
 def _file_developer_allowed(token: str = "") -> bool:
@@ -8217,6 +8333,44 @@ def turn_inspect(index: int = 0, full_prompt: bool = False, token: str = "") -> 
     return output
 
 
+def _reasoning_report() -> str:
+    """The model's reasoning for the current/last turn, or why there is none.
+
+    Shared verbatim by ``reasoning_show`` and ``admin_private_chain_of_thought``
+    so the two surfaces onto one record cannot drift into describing it
+    differently -- or into one of them implying it holds something the other
+    does not. Pure text: each caller keeps its own gate and its own telemetry.
+
+    The two empty cases are deliberately distinguished. "Nothing was captured"
+    and "something is being withheld" are different claims, and a reader who
+    cannot tell them apart will assume the second.
+    """
+    if not reasoning_exposure_enabled():
+        return (
+            "reasoning is not exposed.\n"
+            "  SONDER_EXPOSE_REASONING is off, so Sonder does not request the\n"
+            "  model's thinking at all -- there is nothing withheld, there is\n"
+            "  nothing captured.\n\n"
+            "  enable:   set SONDER_EXPOSE_REASONING=1  (then restart the runtime)\n"
+            "  audience: SONDER_REASONING_AUDIENCE=developer (default) | all\n\n"
+            "  /cot serves this same record and nothing besides it, and only\n"
+            "  where that surface is separately opted in."
+        )
+    record = activity_tracker.current_reasoning() or activity_tracker.latest_reasoning()
+    if not record:
+        return (
+            "reasoning is enabled, but nothing is recorded for this turn.\n"
+            "  Either the last answer came from a model that emits no separate\n"
+            "  thinking channel, or no turn has run since the runtime started.\n"
+            "  Nothing is being withheld."
+        )
+    text = str(record.get("text") or "").strip()
+    model = str(record.get("model") or "")
+    lines = ["model reasoning%s" % (" (%s)" % model if model else ""), ""]
+    lines += ["  " + line for line in (text or "(empty)").splitlines()]
+    return "\n".join(lines)
+
+
 @mcp.tool()
 def reasoning_show(token: str = "") -> str:
     """Show the reasoning the model emitted for the current/last turn, if enabled.
@@ -8228,41 +8382,17 @@ def reasoning_show(token: str = "") -> str:
     needs a developer token, because the reasoning belongs to whoever's turn
     produced it. The HTTP path gates the same way via SONDER_REASONING_AUDIENCE.
 
-    This is NOT admin_private_chain_of_thought. That refuses arbitrary
-    inspection of hidden reasoning and still does. This shows only what a
-    reasoning model deliberately emitted, for the turn you just ran, on the
-    channel it emits separately from its answer.
+    admin_private_chain_of_thought serves this same record, and only where the
+    operator has separately opted that surface in. It is a second door onto
+    this data, not a door onto more of it -- there is no hidden store beyond
+    what this shows.
     """
     _maybe_live_reload()
     started = time.time()
     refusal = _developer_gate("reasoning_show", token, started)
     if refusal:
         return refusal
-    if not reasoning_exposure_enabled():
-        _record_direct_tool("reasoning_show", {}, ok=True, started=started)
-        return (
-            "reasoning is not exposed.\n"
-            "  SONDER_EXPOSE_REASONING is off, so Sonder does not request the\n"
-            "  model's thinking at all -- there is nothing withheld, there is\n"
-            "  nothing captured.\n\n"
-            "  enable:   set SONDER_EXPOSE_REASONING=1  (then restart the runtime)\n"
-            "  audience: SONDER_REASONING_AUDIENCE=developer (default) | all\n\n"
-            "  Unrelated to /cot, which refuses arbitrary hidden-state\n"
-            "  inspection and stays refused either way."
-        )
-    record = activity_tracker.current_reasoning() or activity_tracker.latest_reasoning()
-    if not record:
-        _record_direct_tool("reasoning_show", {}, ok=True, started=started)
-        return (
-            "reasoning is enabled, but nothing is recorded for this turn.\n"
-            "  Either the last answer came from a model that emits no separate\n"
-            "  thinking channel, or no turn has run since the runtime started."
-        )
-    text = str(record.get("text") or "").strip()
-    model = str(record.get("model") or "")
-    lines = ["model reasoning%s" % (" (%s)" % model if model else ""), ""]
-    lines += ["  " + line for line in (text or "(empty)").splitlines()]
-    output = "\n".join(lines)
+    output = _reasoning_report()
     _record_direct_tool("reasoning_show", {}, ok=True, started=started)
     return output
 
@@ -13564,7 +13694,7 @@ def tool_manifest() -> str:
         "mcp_runtime_status/live_reload_status": "Audit atomic MCP source/tool convergence, refresh history, list-change signaling, and fail-closed reload errors.",
         "master_orchestrate/master_status/master_capacity/master_cancel/master_retry": "Run restart-safe hardware-scheduled orchestration, inspect capacity/activity, cancel fleets, and explicitly retry interrupted work.",
         "admin_register/admin_login/admin_accounts/admin_set_account": "Manage hosted accounts, roles, bans, tiers, and developer flags.",
-        "admin_status/debug_inspect/admin_private_chain_of_thought": "Inspect admin/debug state and safely deny private chain-of-thought exposure.",
+        "admin_status/debug_inspect/admin_private_chain_of_thought": "Inspect admin/debug state; private chain-of-thought is refused unless the operator opted in twice (SONDER_ALLOW_PRIVATE_COT plus an explicit allow rule), and then serves only the reasoning record reasoning_show serves.",
         "sonder": "Ask through Sonder Runtime's local learning loop.",
         "offload": "Route a self-contained task to a configured local/cloud tier.",
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
