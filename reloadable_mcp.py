@@ -55,10 +55,10 @@ def _refuse_if_gated(name: str) -> None:
     import permission_modes
 
     tool = str(name or "")
-    if tool in permission_modes.GATE_CONTROL_TOOLS:
-        return
-    decision = permission_modes.decide(tool, interactive=False)
-    if decision.allowed:
+    decision = permission_modes.decide_for_caller(
+        tool, interactive=False, gate_control_exempt=True,
+    )
+    if decision is None or decision.allowed:
         return
     raise ToolError(
         "%s is refused by the active permission gate: %s (mode=%s, risk=%s). "

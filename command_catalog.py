@@ -309,6 +309,25 @@ _READ_ONLY = frozenset({"task_list", "task_show"})
 # ``/report`` was read the same way and deliberately left out: it only formats
 # ``activity_tracker.latest()``, so there is nothing there to gate and adding
 # it would be over-refusal dressed as caution.
+# ``/runwindow`` and its aliases launch a code block in a detached console via
+# ``code_runner.run_code_window``, which fronts no tool -- so ``/run`` was
+# refused under ``plan`` while ``/runwindow`` ran the same block. Graded
+# ``execution`` through ``permission_modes.EXECUTION_COMMANDS``.
+#
+# ``/training`` passes its argument to ``adaptive_training.command_text``,
+# which runs that CLI's own ``main()``: ``start``, ``deploy``, ``rollback``,
+# ``adopt-legacy``, ``release-alias``. Deploying an adapter changes which
+# weights every later call uses, so it is graded ``dangerous`` for the reason
+# ``runtime_policy_update`` is.
+#
+# ``/hardware`` reaches the same CLI but only ever with a *literal* argument,
+# so it cannot reach those subcommands. It is recorded here as the read it is
+# rather than put on the coverage floor's display-only allow-list: a recorded
+# ``safe`` verdict and an exemption behave identically today and differ
+# entirely tomorrow -- the verdict is visible to ``/permissions``, can be
+# overridden by a rule, and stays inside the map this repo now has a floor
+# for. The literal is asserted by a test, because it is the only thing that
+# makes ``safe`` true.
 _UNREGISTERED_BRANCH_WORK = {
     "/selfmod": "selfmod",
     "/selfmodify": "selfmod",
@@ -316,6 +335,12 @@ _UNREGISTERED_BRANCH_WORK = {
     "/convergence": "mcp",
     "/goal": "goal",
     "/goals": "goal",
+    "/runwindow": "runwindow",
+    "/runnew": "runwindow",
+    "/runconsole": "runwindow",
+    "/training": "training",
+    "/weighttraining": "training",
+    "/hardware": "hardware",
 }
 
 
@@ -439,6 +464,61 @@ def _native_groups() -> list[tuple[str, ...]]:
     return groups
 
 
+# ``control_command`` is a dispatch chain, not a worker. It is resolved by
+# name (see ``http_slash_tools``), and following it as a function would grade
+# every branch that forwards to it by everything the whole chain can do.
+_NEVER_FOLLOW = frozenset({"control_command"})
+
+
+@functools.lru_cache(maxsize=None)
+def _module_level_functions(module: str) -> dict:
+    """Top-level ``def``s of a sibling module in this repo, or ``{}``.
+
+    Module level only: a nested helper is not reachable as
+    ``<module>.<name>``, so admitting one would attribute a call that cannot
+    happen.
+    """
+    path = os.path.join(_HERE, module + ".py")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read())
+    except (OSError, SyntaxError):
+        return {}
+    return {
+        node.name: node for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
+def _wrapper_tools(module: str, name: str, tool_names: frozenset, seen: set) -> set:
+    """Registered tools called directly inside ``<module>.<name>``.
+
+    Deliberately shallow -- the tools that one function calls itself, and no
+    further. Depth is where this turns into over-attribution: two levels out
+    of a general-purpose helper starts crediting a branch with work it cannot
+    reach, and over-refusal trains operators to route around the gate.
+    """
+    key = "%s.%s" % (module, name)
+    if key in seen:
+        return set()
+    seen.add(key)
+    target = _module_level_functions(module).get(name)
+    if target is None:
+        return set()
+    found = set()
+    for child in ast.walk(target):
+        if not isinstance(child, ast.Call):
+            continue
+        inner = child.func
+        if isinstance(inner, ast.Attribute) and inner.attr in tool_names:
+            found.add(inner.attr)
+        elif isinstance(inner, ast.Name) and inner.id in tool_names:
+            found.add(inner.id)
+    return found
+
+
 def _branch_tool_calls(path: str, function: str, tool_names: frozenset) -> dict:
     """``{"/write": ("file_write",)}`` for one hand-written dispatch chain.
 
@@ -483,6 +563,25 @@ def _branch_tool_calls(path: str, function: str, tool_names: frozenset) -> dict:
                 # command outside a gate whose whole job is running programs.
                 # The name is filtered against the real registry below.
                 found.add(target.attr)
+                # ...and when the name is NOT a tool, it may be a wrapper in
+                # another module of this repo that calls the tools for it.
+                # ``sonder_serve``'s ``/emotion`` branch calls
+                # ``server.emotion_command``, so it resolved to nothing while
+                # the console's own branch -- which calls the tools directly --
+                # resolved to three: the same command, the same write, refused
+                # for the operator and allowed for the app. One level only, and
+                # never into ``control_command``, which is a 97-branch dispatch
+                # chain: following that grades every delegating branch by the
+                # union of all of them (measured: 49 branches jump to
+                # ``dangerous``). It is resolved by name instead.
+                if (
+                    target.attr not in tool_names
+                    and target.attr not in _NEVER_FOLLOW
+                    and depth < 1
+                ):
+                    found |= _wrapper_tools(
+                        target.value.id, target.attr, tool_names, seen,
+                    )
             elif isinstance(target, ast.Name):
                 if target.id in tool_names:
                     found.add(target.id)
@@ -826,6 +925,7 @@ def reset_cache() -> None:
     catalog.cache_clear()
     console_tools.cache_clear()
     http_slash_tools.cache_clear()
+    _module_level_functions.cache_clear()
 
 
 # --- lookup / search ------------------------------------------------------

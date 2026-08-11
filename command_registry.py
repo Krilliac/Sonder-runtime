@@ -81,8 +81,13 @@ COMMANDS = [
     },
     {
         "name": "/training",
+        # The argument goes to adaptive_training.command_text, which runs
+        # that CLI main(): start, deploy, rollback, adopt-legacy,
+        # release-alias. Deploying an adapter changes which weights every
+        # later call uses. No registered tool fronts it, so this entry is
+        # what the permission gate grades the command by.
         "category": "learning",
-        "risk": "ask",
+        "risk": "dangerous",
         "summary": "Plan, explicitly start, inspect, deploy, or roll back adaptive weight training.",
     },
     {

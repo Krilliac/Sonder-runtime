@@ -31,6 +31,8 @@ import permission_modes as pm
 import permission_rules
 import server
 import sonder_repl
+import reloadable_mcp
+import sonder_serve
 from sonder_runtime.domain.execution import policy as execution_policy
 
 pytestmark = pytest.mark.unit
@@ -1377,3 +1379,188 @@ def test_acceptedits_lets_a_goal_write_through_but_still_stops_a_registry_refres
     may_run, _refusal = sonder_repl._named_command_gate("/mcp")
     assert not may_run
     assert len(asked) == 1
+
+
+
+# --- the whole control_command chain, from the path that does not gate ----
+
+
+def test_the_control_command_chain_is_gated_from_the_chat_path(monkeypatch):
+    """Three callers, and only two of them gated before forwarding.
+
+    `sonder_repl` and `sonder_serve` consult their map and refuse first.
+    `answer_with_history` -- the ordinary chat path, and what an MCP client
+    reaches through the `sonder` tool -- passes the user's raw prompt straight
+    in, so all 97 branches of this chain were reachable ungated from it. The
+    fall-through at the end was gated last round; the chain above it was not.
+    """
+    monkeypatch.setattr(server, "directory_create", _never_runs)
+    pm.set_mode(pm.PLAN)
+
+    out = server.control_command("/mkdir newdir")
+
+    assert out is not None
+    assert out.startswith("refused /mkdir:")
+
+
+def test_a_deny_rule_binds_on_the_control_command_chain(monkeypatch):
+    monkeypatch.setattr(server, "file_delete", _never_runs)
+    monkeypatch.setattr(pm, "_rule_lookup", _rules("deny"))
+    pm.set_mode(pm.AUTO)
+
+    out = server.control_command("/delete notes.txt")
+
+    assert out.startswith("refused /delete:")
+    assert "rule denies this tool" in out
+
+
+def test_the_control_command_chain_still_answers_a_read(monkeypatch):
+    """The over-correction guard: reads must keep working in every mode."""
+    monkeypatch.setattr(server, "context_health", lambda **_k: "CONTEXT OK")
+
+    for mode in pm.MODES:
+        pm.set_mode(mode)
+        assert server.control_command("/context") == "CONTEXT OK", mode
+
+
+def test_gating_the_chain_cannot_double_prompt(monkeypatch):
+    """The console gates, then forwards here. Nothing here may ask again.
+
+    `interactive=False` is what makes re-deciding free: an `ask` the console
+    already resolved degrades to allow on arrival rather than being put to the
+    operator a second time.
+    """
+    import builtins
+
+    monkeypatch.setattr(
+        builtins, "input",
+        lambda *_a, **_k: pytest.fail("control_command prompted"),
+    )
+    monkeypatch.setattr(server, "directory_create", lambda **_k: "made it")
+    pm.set_mode(pm.MANUAL)
+
+    assert server.control_command("/mkdir newdir") == "made it"
+
+
+# --- the exemption has one owner, and it drifted the moment it had five ---
+
+
+def test_the_gate_control_exemption_holds_at_every_person_facing_surface():
+    """`permission_mode` must stay reachable wherever a person selects a mode.
+
+    It is risk `ask`, which `plan` denies, and the mode persists to disk -- so
+    a surface that gates it leaves whoever chose `plan` unable to choose
+    anything else, across restarts. Four surfaces each kept their own copy of
+    the check; the fifth, added one round ago, was written without it, and
+    `decide("permission_mode", interactive=False, mode="plan")` came back
+    `deny` on that path.
+    """
+    pm.set_mode(pm.PLAN)
+
+    assert sonder_repl._named_command_gate("/mode") == (True, "")
+    assert sonder_serve._http_tool_refusal(("permission_mode",), "/x") == ""
+    assert server._control_tool_refusal(("permission_mode",), "/x") == ""
+    assert reloadable_mcp._refuse_if_gated("permission_mode") is None
+
+
+def test_the_agent_path_still_gets_no_exemption():
+    """The distinction the exemption exists to draw, asserted in both halves.
+
+    A person driving Sonder keeps a way out of `plan`. Sonder driving itself
+    does not get to lift its own restraint.
+    """
+    pm.set_mode(pm.PLAN)
+
+    assert pm.decide_for_caller(
+        "permission_mode", interactive=False, gate_control_exempt=True,
+    ) is None
+    modelled = pm.decide_for_caller(
+        "permission_mode", interactive=False, gate_control_exempt=False,
+    )
+    assert modelled is not None
+    assert modelled.action == pm.DENY
+
+
+def test_the_exemption_set_is_consulted_in_exactly_one_place():
+    """What stops a sixth surface from being written without it.
+
+    A set that has to be remembered at every call site is a set that will be
+    missed at the next one -- which is exactly what happened when a fifth
+    surface was added. Membership is now tested inside `decide_for_caller` and
+    nowhere else, and this is the check that keeps it that way.
+
+    Read as *code* rather than as text: an earlier version of this test
+    grepped the source and flagged a docstring that merely mentions the set by
+    name. Prose about a security-relevant set is not a use of it, and a test
+    that cannot tell the difference trains people to reword comments.
+    """
+    import pathlib
+
+    root = pathlib.Path(server.__file__).parent
+    uses = {}
+    for name in ("server.py", "sonder_repl.py", "sonder_serve.py",
+                 "reloadable_mcp.py", "permission_modes.py"):
+        tree = ast.parse((root / name).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            loaded = (
+                isinstance(node, ast.Name)
+                and node.id in ("GATE_CONTROL_TOOLS", "GATE_EXEMPT_TOOLS")
+            ) or (
+                isinstance(node, ast.Attribute)
+                and node.attr in ("GATE_CONTROL_TOOLS", "GATE_EXEMPT_TOOLS")
+            )
+            if loaded and isinstance(getattr(node, "ctx", None), ast.Load):
+                uses.setdefault(name, []).append(node.lineno)
+
+    assert uses == {
+        # The one membership test, inside decide_for_caller.
+        "permission_modes.py": [permission_modes_check_line(root)],
+        # The console's public alias, which exists only so a test can pin the
+        # set to one name; it is not consulted at the gate any more.
+        "sonder_repl.py": [alias_line(root)],
+    }, "the exemption is consulted outside decide_for_caller: %r" % uses
+
+
+def permission_modes_check_line(root):
+    """The single line inside `decide_for_caller` that tests membership."""
+    import pathlib
+
+    source = (root / "permission_modes.py").read_text(encoding="utf-8").splitlines()
+    hits = [
+        number for number, line in enumerate(source, 1)
+        if "in GATE_CONTROL_TOOLS" in line and not line.strip().startswith("#")
+    ]
+    assert len(hits) == 1, "expected exactly one membership test, found %r" % hits
+    return hits[0]
+
+
+def alias_line(root):
+    source = (root / "sonder_repl.py").read_text(encoding="utf-8").splitlines()
+    hits = [
+        number for number, line in enumerate(source, 1)
+        if line.startswith("GATE_EXEMPT_TOOLS = ")
+    ]
+    assert len(hits) == 1
+    return hits[0]
+
+
+# --- EXECUTION_COMMANDS cannot drift away from the map --------------------
+
+
+def test_execution_commands_and_the_map_stay_in_step():
+    """A stand-in graded `execution` must be a stand-in the map actually uses.
+
+    Both directions: a name here that no branch maps to would be dead weight
+    someone would later delete as unused, and a `run_code_window`-shaped
+    branch added to the map without a grade here would silently be `ask`.
+    """
+    stand_ins = set(command_catalog._UNREGISTERED_BRANCH_WORK.values())
+
+    assert pm.EXECUTION_COMMANDS <= stand_ins, (
+        "EXECUTION_COMMANDS names something the map never produces"
+    )
+    for name in pm.EXECUTION_COMMANDS:
+        assert pm.risk_of(name) == "execution", name
+    assert not (pm.EXECUTION_COMMANDS & set(
+        tool.name for tool in server.mcp._tool_manager.list_tools()
+    )), "a registered tool belongs in EXECUTION_TOOLS, not here"

@@ -2074,6 +2074,33 @@ def _selfmod_command(arg: str, *, repository_root="") -> str:
         return "ERROR: %s" % exc
 
 
+def _control_tool_refusal(tools, label):
+    """The permission gate for ``control_command``: "" to proceed, else a refusal.
+
+    ``interactive=False``: nothing that reaches this function has a console
+    attached. The console prompts at ``sonder_repl._named_command_gate``
+    *before* forwarding here, and the other two callers -- the app's slash
+    chain and ``answer_with_history`` -- have nobody to ask. So ``ask``
+    degrades to allow and only a ``deny`` rule and ``plan`` refuse, which is
+    what "preserve current behaviour" requires of a path this widely reached.
+
+    The exemption comes from ``decide_for_caller`` rather than being repeated
+    here. This surface is one a person drives, so it carries it.
+    """
+    for tool in tools:
+        decision = permission_modes.decide_for_caller(
+            tool, interactive=False, gate_control_exempt=True,
+        )
+        if decision is None:
+            continue
+        if decision.action == permission_modes.DENY:
+            return "refused %s: %s (mode: %s)" % (
+                label, decision.reason,
+                permission_modes.MODE_LABELS.get(decision.mode, decision.mode),
+            )
+    return ""
+
+
 def control_command(prompt: str, history=None, session="", project=""):
     """Handle safe slash commands before a prompt reaches the model.
 
@@ -2081,6 +2108,15 @@ def control_command(prompt: str, history=None, session="", project=""):
     response. This guard catches read-only/status commands for direct MCP/API
     calls too, so `/quality` and `/context` never get treated as ordinary model
     prompts.
+
+    Gated at the top, because this chain has three callers and only two of them
+    gate before forwarding. ``sonder_repl`` and ``sonder_serve`` both consult
+    their map first; ``answer_with_history`` -- the ordinary chat path, and the
+    one an MCP client reaches through the ``sonder`` tool -- passes the user's
+    raw prompt straight in, so all 97 branches here were reachable ungated from
+    it. Re-deciding on the two paths that already gated is free and cannot
+    double-prompt: nothing here prompts, and a caller with nobody to ask gets
+    ``allow`` for anything the mode merely asks about.
     """
     text = (prompt or "").strip()
     if not text.startswith("/"):
@@ -2088,6 +2124,14 @@ def control_command(prompt: str, history=None, session="", project=""):
     parts = text.split(None, 1)
     cmd = parts[0].lower()
     arg = parts[1] if len(parts) > 1 else ""
+
+    try:
+        chain_tools = command_catalog.console_tools().get(cmd, ())
+    except command_catalog.CatalogUnavailable as exc:
+        return "refused %s: %s" % (cmd, exc)
+    refusal = _control_tool_refusal(chain_tools, cmd)
+    if refusal:
+        return refusal
     if cmd == "/":
         # A bare slash is the "what can I type" gesture.
         return command_catalog.format_matches("")
@@ -2315,12 +2359,9 @@ def control_command(prompt: str, history=None, session="", project=""):
         tool, kwargs = parsed
         handler = globals().get(tool)
         if callable(handler):
-            decision = permission_modes.decide(tool, interactive=False)
-            if decision.action == permission_modes.DENY:
-                return "refused /%s: %s (mode: %s)" % (
-                    tool, decision.reason,
-                    permission_modes.MODE_LABELS.get(decision.mode, decision.mode),
-                )
+            refusal = _control_tool_refusal((tool,), "/" + tool)
+            if refusal:
+                return refusal
             try:
                 return str(handler(**kwargs))
             except TypeError as exc:

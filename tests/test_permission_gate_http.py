@@ -432,3 +432,31 @@ def test_the_fall_through_refuses_when_the_catalog_is_blind(monkeypatch):
     finally:
         monkeypatch.undo()
         command_catalog.reset_cache()
+
+
+
+def test_the_window_runner_is_refused_at_the_app_surface_too(monkeypatch):
+    """`/run` was refused under `plan` here while `/runwindow` launched a console."""
+    pm.set_mode(pm.PLAN)
+
+    for name in ("/runwindow", "/runnew", "/runconsole"):
+        reply = ts._handle_slash("%s 30" % name)
+        assert reply is not None, name
+        assert reply.startswith("refused %s:" % name), (name, reply)
+
+
+def test_the_wrapper_backed_writes_are_refused_here_as_at_the_console(monkeypatch):
+    """`/emotion` and `/prefer` write, and this surface resolved them to nothing.
+
+    Their branches here call `server.emotion_command` / `preference_command`
+    -- wrappers -- while the console branches call the tools directly. Same
+    command, same write, refused for the operator and allowed for the app.
+    """
+    monkeypatch.setattr(server, "emotion_command", _never_runs)
+    monkeypatch.setattr(server, "preference_command", _never_runs)
+    pm.set_mode(pm.PLAN)
+
+    for name in ("/emotion", "/emotions", "/mood", "/vectors"):
+        assert ts._handle_slash("%s joy=0.8" % name).startswith("refused %s:" % name), name
+    for name in ("/prefer", "/preference", "/preferences"):
+        assert ts._handle_slash("%s terse" % name).startswith("refused %s:" % name), name
