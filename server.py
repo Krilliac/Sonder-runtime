@@ -2122,6 +2122,13 @@ def _selfmod_command(arg: str, *, repository_root="", operator_approved=False) -
             run_id, _, reason = rest.partition(" ")
             return selfmod.format_run(selfmod.reject(run_id, reason or "explicit user rejection")["id"])
         if action == "deploy":
+            # This command proves the new bytes import and that the server still
+            # answers. It is deliberately NOT the check that the deployment can
+            # be undone: a `--maintenance` run can rewrite `selfmod.py` and
+            # `selfmod_recover.py` in one deploy, and this command passed on a
+            # tree whose rollback was broken. `selfmod.deploy` now dry-runs both
+            # rollback routes itself, unconditionally, so that property cannot be
+            # lost by editing the argv here or by a caller that passes none.
             run = selfmod.deploy(rest, health_command=[sys.executable, "-c", "import server; print(server.status())"])
             module_names = {
                 Path(path).stem for path in run["files"]
