@@ -49,7 +49,45 @@ Tests: an agent run that generates then fails a build files exactly one
 `failed`; the same run does not file twice; a run with no verification files
 nothing.
 
-## Task 2 — Gate completion claims on measured reliability
+## Task 2 — Close the advertised-but-not-callable gap
+
+**Added mid-plan, and it blocks the task after it.** Task 1's implementer
+noticed that `_agent_dispatch` has no branch for the verification tools. That
+turned out to understate it. Measured on this branch:
+
+- `AGENT_TOOL_HELP` advertises **130** tools to the agent.
+- `_agent_dispatch` can actually call **117**.
+- **23 are advertised and not callable**: `test_run`, `test_discover`,
+  `build_run`, `build_clean`, `lint_run`, `format_code`, `typecheck_run`,
+  `secret_scan`, `diff_files`, `find_references`, `rename_symbol`,
+  `apply_patch`, the whole `dependency_*` family, and every `git_*` tool.
+
+These are the 25 developer-workflow tools added in an earlier session. They were
+put into `_WORK_INSPECTION_TOOLS`, `_AUTOPILOT_WORKSPACE_TOOLS` and the help
+text, but never given dispatch branches. So the agent is told in its own tool
+help that it can run the tests, and cannot. This is a shipped defect on `main`,
+introduced by the controller, not by any implementer here.
+
+It blocks Task 3: gating a completion claim on verification is meaningless when
+the agent cannot invoke a verifier.
+
+Add the missing `_agent_dispatch` branches so every advertised tool is callable.
+
+- Follow the shape of the existing branches exactly, including how they read
+  arguments and pass `token`/`approval`/`extra_roots` where the tool takes them.
+- Mutating tools among these (`git_commit`, `apply_patch`, `rename_symbol`,
+  `dependency_*`, `build_clean`) must keep whatever gating already applies to
+  them via `_agent_tool_mutates` and the policy sets — making a tool *reachable*
+  must not make it *ungated*. Check `_agent_tool_mutates` handles each one.
+- **Add a drift test** asserting that every name advertised in
+  `AGENT_TOOL_HELP` is dispatchable, so this cannot silently recur. That test is
+  the real deliverable — the branches are mechanical, the invariant is not.
+
+Tests: the drift test above (it must fail before your fix — verify that); a
+representative dispatch for a read-only tool and for a mutating one; the
+mutating one still respects its existing approval/dry-run gate.
+
+## Task 3 — Gate completion claims on measured reliability
 
 Wire `should_verify()` into the place where work is declared done.
 
@@ -66,7 +104,7 @@ Tests: with a poor/unmeasured record, an agent run that produced no verification
 is reported unverified; with a good record it is not; the reason text contains
 the measured counts.
 
-## Task 3 — Expose calibration where decisions are made
+## Task 4 — Expose calibration where decisions are made
 
 `calibration_status` exists as an MCP tool. Add the two surfaces that make it
 actionable:

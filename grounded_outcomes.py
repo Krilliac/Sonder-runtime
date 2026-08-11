@@ -82,6 +82,7 @@ class _Pending:
     tool: str
     project: str
     created: float
+    run_id: str = ""
     judged: set = field(default_factory=set)   # verification kinds already applied
 
 
@@ -108,11 +109,18 @@ def _prune(now: float | None = None) -> None:
             _STATS["expired"] += dropped
 
 
-def note_generation(interaction_id: str, tool: str, project: str = "") -> bool:
+def note_generation(interaction_id: str, tool: str, project: str = "", run_id: str = "") -> bool:
     """Record that `tool` produced work that a later verification can judge.
 
     Returns False when there is nothing judgeable -- no interaction id means no
     row to attach an outcome to.
+
+    `run_id` is the caller's run/span identity (e.g. an agent loop's
+    activity_tracker response id) when one is available. It is a stronger
+    link than project + time window alone: two concurrent runs (autopilot
+    spawns one thread per run) can share a project -- or both leave it blank
+    -- and without a run identity the newest pending generation from either
+    run looks like a valid candidate for the other's verification.
     """
     ident = str(interaction_id or "").strip()
     name = str(tool or "").strip().lstrip("/")
@@ -123,27 +131,35 @@ def note_generation(interaction_id: str, tool: str, project: str = "") -> bool:
         # A repeat generation for the same interaction replaces the old entry
         # rather than stacking, so one id cannot collect several verdicts.
         _PENDING[:] = [p for p in _PENDING if p.interaction_id != ident]
-        _PENDING.append(_Pending(ident, name, str(project or ""), _now()))
+        _PENDING.append(
+            _Pending(ident, name, str(project or ""), _now(), str(run_id or ""))
+        )
         _STATS["noted"] += 1
     return True
 
 
-def _candidate(project: str, kind: str):
+def _candidate(project: str, kind: str, run_id: str = ""):
     """Newest pending generation eligible for this verification, or None."""
     wanted = str(project or "")
+    wanted_run = str(run_id or "")
     with _LOCK:
         for pending in reversed(_PENDING):
             if kind in pending.judged:
                 continue
             # An empty project on either side means "unscoped" and is allowed
-            # to match; two *different* named projects never match.
+            # to match; two *different* named projects never match. Run
+            # identity follows the same rule: it only ever narrows a match,
+            # never widens one, so a caller with no run identity available
+            # (the direct-call path) behaves exactly as before.
             if wanted and pending.project and wanted != pending.project:
+                continue
+            if wanted_run and pending.run_id and wanted_run != pending.run_id:
                 continue
             return pending
     return None
 
 
-def attribute(tool: str, ok: bool, project: str = "", record_fn=None) -> dict:
+def attribute(tool: str, ok: bool, project: str = "", record_fn=None, run_id: str = "") -> dict:
     """Attribute a verification result to the generation it most likely judges.
 
     `record_fn(interaction_id, signal)` performs the write; injected so this
@@ -154,7 +170,7 @@ def attribute(tool: str, ok: bool, project: str = "", record_fn=None) -> dict:
     if name not in VERIFIERS:
         return {"attributed": False, "reason": "%s is not execution-grounded evidence" % name}
     _prune()
-    pending = _candidate(project, name)
+    pending = _candidate(project, name, run_id)
     if pending is None:
         with _LOCK:
             _STATS["unlinked"] += 1

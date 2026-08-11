@@ -1,3 +1,4 @@
+import calibration
 import learning_health
 import memory_store
 
@@ -754,3 +755,97 @@ def test_failed_blame_attribution_is_reported_not_swallowed(monkeypatch):
     # The caveat rides on the line carrying the numbers it invalidates, not in
     # a footnote a reader quoting the quarantine count would skip.
     assert "UPPER BOUND" in feedback[0]
+
+
+# --- the measured caller-judged figure ------------------------------------
+#
+# ``learning_health`` already splits reviewed from autograded, but its
+# ``reviewed`` bucket is a *complement* set (everything that is not
+# tests_passed/failed/compiled) and it renders through ``_percent``, which
+# returns 0.0 on an empty denominator. So a store with three judgements shows a
+# reviewed percent that reads like a rate and is not one. ``calibration``
+# names the population explicitly and refuses to produce a rate below
+# ``MIN_SAMPLE``; carrying its measurement here is what makes the report say
+# "too few to measure" where it used to say a number.
+
+
+def _calibration_line(rendered):
+    lines = [ln for ln in rendered.splitlines() if "calibration" in ln]
+    assert lines, "the report should carry a calibration line"
+    assert len(lines) == 1, "one calibration line, not several: %r" % (lines,)
+    return lines[0]
+
+
+def test_the_measured_caller_judged_figure_is_reported_beside_the_curriculum():
+    """The named population, kept apart from the runtime's own exams."""
+    conn = _conn()
+    try:
+        for n in range(500):
+            memory_store.record_outcome_row(conn, "auto%d" % n, "tests_passed", 1.0)
+        for n in range(30):
+            memory_store.record_outcome_row(conn, "ok%d" % n, "accepted", 0.8)
+        for n in range(30):
+            memory_store.record_outcome_row(conn, "no%d" % n, "rejected", -0.5)
+        report = learning_health.build_report(conn)
+    finally:
+        conn.close()
+
+    assert report["calibration"]["population"] == "caller"
+    assert report["calibration"]["total"] == 60
+    assert report["calibration"]["rate"] == 0.5
+    assert report["calibration"]["verdict"] == calibration.POOR
+
+    line = _calibration_line(learning_health.format_report(report))
+    assert "caller-judged" in line
+    assert "50.0%" in line and "n=60" in line
+    # It must not carry the curriculum population, in any form.
+    assert "500" not in line and "autograded" not in line
+
+
+def test_a_caller_judged_sample_too_small_to_measure_does_not_read_as_a_rate():
+    """"Too few to measure" is not "0% good", and is not "100% good" either."""
+    conn = _conn()
+    try:
+        for n in range(3):
+            memory_store.record_outcome_row(conn, "ok%d" % n, "accepted", 0.8)
+        report = learning_health.build_report(conn)
+    finally:
+        conn.close()
+
+    assert report["calibration"]["rate"] is None
+    assert report["calibration"]["verdict"] == calibration.UNMEASURED
+
+    line = _calibration_line(learning_health.format_report(report))
+    assert "too few to measure" in line
+    assert str(calibration.MIN_SAMPLE) in line
+    assert "%" not in line, "a thin sample must not render as any percentage"
+
+
+def test_no_percentage_in_the_report_blends_the_populations_unlabelled():
+    """A combined figure may ship, but never without saying it is combined.
+
+    The blended ``positive_percent`` is allowed here -- it is labelled, and the
+    split rides directly under it. What is forbidden is an *unqualified* blend:
+    a line carrying the combined number with nothing on it to stop a reader
+    quoting it as an accuracy figure.
+    """
+    conn = _conn()
+    try:
+        for n in range(500):
+            memory_store.record_outcome_row(conn, "auto%d" % n, "tests_passed", 1.0)
+        for n in range(30):
+            memory_store.record_outcome_row(conn, "ok%d" % n, "accepted", 0.8)
+        for n in range(30):
+            memory_store.record_outcome_row(conn, "no%d" % n, "rejected", -0.5)
+        report = learning_health.build_report(conn)
+    finally:
+        conn.close()
+
+    blended = "%s%%" % report["positive_percent"]
+    assert blended == "94.6%"                      # distinct from every split rate
+    rendered = learning_health.format_report(report)
+
+    carrying = [ln for ln in rendered.splitlines() if blended in ln]
+    assert carrying, "the blended figure should still be reported"
+    for line in carrying:
+        assert "blended" in line, "unlabelled blend: %r" % (line,)

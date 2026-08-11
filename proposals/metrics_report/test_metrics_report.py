@@ -64,12 +64,60 @@ def test_outcome_signal_distribution_counts_and_rewards():
     assert dist["by_signal"]["failed"]["count"] == 1
     assert dist["total"] == 3
     assert dist["good_total"] == 2  # tests_passed is good, failed is not
-    assert abs(dist["good_fraction"] - (2 / 3)) < 1e-9
+    # Named for what it is. The old key was `good_fraction`, which reads as
+    # "how often this thing is good" while being a sum over two populations
+    # that answer different questions.
+    assert abs(dist["blended_good_fraction"] - (2 / 3)) < 1e-9
 
 
 def test_outcome_signal_distribution_empty_store():
     dist = mr.outcome_signal_distribution(_conn())
-    assert dist == {"by_signal": {}, "total": 0, "good_total": 0, "good_fraction": 0.0}
+    assert dist["by_signal"] == {}
+    assert dist["total"] == 0
+    assert dist["good_total"] == 0
+    assert dist["blended_good_fraction"] == 0.0
+    assert dist["caller_judged"]["total"] == 0
+    assert dist["execution_grounded"]["total"] == 0
+
+
+# --- the blend must never travel unlabelled ---------------------------------
+
+def test_the_distribution_splits_the_populations_it_blends():
+    """Three tests_passed and one rejection are not "75% good at anything".
+
+    They are a self-graded curriculum run and a caller's judgement, added
+    together. The blend may ship; it may not ship alone.
+    """
+    c = _conn()
+    for n in range(3):
+        ms.record_outcome_row(c, "auto%d" % n, "tests_passed", 1.0)
+    ms.record_outcome_row(c, "judged", "rejected", -0.5)
+
+    dist = mr.outcome_signal_distribution(c)
+
+    assert dist["caller_judged"]["total"] == 1
+    assert dist["execution_grounded"]["total"] == 3
+    # Neither is a rate yet: one observation and three are both below the bar.
+    assert dist["caller_judged"]["rate"] is None
+    assert dist["execution_grounded"]["rate"] is None
+    assert dist["blended_good_fraction"] == 0.75
+
+
+def test_format_report_never_prints_the_blend_unlabelled():
+    c = _conn()
+    for n in range(3):
+        ms.record_outcome_row(c, "auto%d" % n, "tests_passed", 1.0)
+    ms.record_outcome_row(c, "judged", "rejected", -0.5)
+
+    text = mr.format_report(mr.build_report(c))
+
+    carrying = [ln for ln in text.splitlines() if "0.75" in ln]
+    assert carrying, "the blended figure should still be reported"
+    for line in carrying:
+        assert "blended" in line, "unlabelled blend: %r" % (line,)
+    # And the split rides with it, saying neither half is measurable yet.
+    assert "caller-judged" in text
+    assert "too few to measure" in text
 
 
 # --- lessons_per_interaction / distillation_yield ---------------------------
