@@ -1163,7 +1163,12 @@ def test_agent_attaches_successful_file_evidence(monkeypatch, without_standing):
     monkeypatch.setattr(
         server,
         "_agent_dispatch_observed",
-        lambda tool, args, allow_web=True, read_only=False, project="", allow_location=False: "file read: README.md\nhello",
+        # Signature-agnostic: this test asserts the final text and the evidence
+        # block, and makes no claim about the dispatcher's parameters. The
+        # explicit list it used to carry was the same trap `9836d8a` removed
+        # one file over -- it omits `repository_extra_roots`, so it would have
+        # raised TypeError the moment this call site forwarded one.
+        lambda *a, **k: "file read: README.md\nhello",
     )
 
     out = server._agent_impl(
@@ -1193,7 +1198,9 @@ def test_agent_counts_project_detection_as_file_evidence(monkeypatch, without_st
     monkeypatch.setattr(
         server,
         "_agent_dispatch_observed",
-        lambda tool, args, allow_web=True, read_only=False, project="", allow_location=False: (
+        # Signature-agnostic, for the same reason as above: the assertions are
+        # about the final text, not about how the dispatcher is called.
+        lambda *a, **k: (
             '{"root":".","manifests":[{"path":"pyproject.toml"}],"errors":[]}'
         ),
     )
@@ -1420,9 +1427,15 @@ def test_project_mutation_and_validation_share_canonical_scope(
         dispatches.append((tool, args, kwargs))
         return "workspace run\n  ok: true\n  exit: 0" if tool == "workspace_run" else "wrote target.py"
 
-    def covers(tool, args, mutations, observation=""):
-        captured.append((tool, args, mutations))
-        return original_covers(tool, args, mutations, observation)
+    def covers(*args, **kwargs):
+        # A forwarding spy, not a stub: it must pass through whatever it was
+        # handed, so it takes and forwards *args/**kwargs rather than restating
+        # `_agent_validation_covers`'s parameter list. The assertions below read
+        # the captured positional arguments; none of them is about the
+        # signature, so pinning one here would only break on a legitimate
+        # change to it.
+        captured.append(args[:3])
+        return original_covers(*args, **kwargs)
 
     monkeypatch.setattr(server, "_agent_dispatch_observed", dispatch)
     monkeypatch.setattr(server, "_agent_validation_covers", covers)

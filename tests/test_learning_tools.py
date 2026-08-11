@@ -403,9 +403,15 @@ def test_drain_deferred_distillations_retries_fleet_deferred_jobs(
     assert "deferred for retry" in server.record_outcome("I1", "tests_passed")
     assert "deferred for retry" in server.record_outcome("I2", "tests_passed")
 
-    # A busy fleet also blocks the drain itself.
+    # A busy fleet also blocks the drain itself. Pinned as an exact dict on
+    # purpose -- that is what stops a bucket being dropped silently -- but the
+    # shape is now the FULL one: a blocked drain reports every bucket a real
+    # drain does. It used to return a short dict, so a caller reading
+    # `drain["failed"]` or `drain["backlog"]` off the blocked path would have
+    # raised, or worse, read a `.get` default as a measured zero.
     assert server._drain_deferred_distillations() == {
         "drained": 0, "stored": 0, "deferred": 0,
+        "failed": 0, "skipped": 0, "backlog": None,
     }
 
     # Once quiet, the drain stores the deferred lessons without new outcomes.
@@ -416,6 +422,10 @@ def test_drain_deferred_distillations_retries_fleet_deferred_jobs(
     assert drain["drained"] == 2
     assert drain["stored"] == 2
     assert drain["deferred"] == 0
+    # Nothing raised and nothing fell between the buckets, so the counts are
+    # totals rather than floors.
+    assert drain["failed"] == 0
+    assert drain["skipped"] == 0
 
     conn = server._open_db()
     try:
