@@ -13,8 +13,18 @@ of the model — an uncensored or "abliterated" model changes what it will
   proxy regardless ([secure-remote-access](../runbooks/secure-remote-access.md)).
 - **Consent gates**, each independent and default-off: cloud/hosted models
   (`SONDER_ALLOW_CLOUD`), web tools (`SONDER_WEB_TOOLS`), remote Ollama
-  (`SONDER_ALLOW_REMOTE_OLLAMA`), approximate location. Runtime policy can
-  never turn any of these on.
+  (`SONDER_ALLOW_REMOTE_OLLAMA`), approximate location, model reasoning
+  (`SONDER_EXPOSE_REASONING`), and private chain-of-thought
+  (`SONDER_ALLOW_PRIVATE_COT`). Runtime policy can never turn any of these on.
+- **`SONDER_ALLOW_PRIVATE_COT` takes a second, separate act.** It is the one
+  consent gate an environment variable cannot open by itself:
+  `admin_private_chain_of_thought` also requires an explicit `allow` rule for
+  its own name in `permissions.json`, written through the developer-gated
+  `permission_rule_set`. The built-in rule denies it, and the tool reads that
+  rule itself, so a variable inherited from a parent process is not enough.
+  Opted in it serves the same record as `reasoning_show` — the model's own
+  thinking channel for the current turn — and nothing besides it. That channel
+  can hold what the final answer deliberately left out.
 
 ## Authentication
 

@@ -7,6 +7,8 @@ create a new one. There is no hidden chain-of-thought store behind this tool,
 and these tests exist partly to keep that true: opted in, it must serve the
 same reasoning record ``reasoning_show`` serves, and nothing else.
 """
+import pathlib
+
 import activity_tracker as at
 import permission_rules
 import server
@@ -203,6 +205,9 @@ def test_no_surface_still_calls_the_refusal_unconditional():
             policy.default_rules(), "admin_private_chain_of_thought"
         )["note"],
         "command registry": str(command_registry.COMMANDS),
+        # The note this change actually rewrote. Pinning the surfaces I left
+        # alone while omitting one I edited is the wrong way round.
+        "debug_inspect note": "\n".join(server._DEBUG_INSPECT_REASONING_NOTE),
     }
     for name, text in surfaces.items():
         assert "never exposed" not in (text or ""), name
@@ -222,6 +227,56 @@ def test_cot_is_developer_gated_on_the_http_surface():
 
     for name in ("/cot", "/chainofthought", "/thoughts"):
         assert ts._dangerous_http_slash(name), name
+
+
+def test_the_flag_is_listed_in_every_consent_gate_inventory():
+    """A new consent gate must appear wherever consent gates are enumerated.
+
+    Searching the docs for this feature's own name could only ever return zero
+    -- nothing containing it existed yet, so the search was guaranteed to
+    reassure. The searchable thing is the *category*: these three files are
+    where this runtime lists its default-off consent gates, and a gate missing
+    from them is a gate an operator auditing the runtime will never learn about.
+    """
+    root = pathlib.Path(__file__).resolve().parent.parent
+    inventories = (
+        "docs/wiki/09-security-model.md",
+        "docs/wiki/03-configuration.md",
+        "docs/security/REVIEW.md",
+    )
+    for rel in inventories:
+        text = (root / rel).read_text(encoding="utf-8")
+        assert "SONDER_ALLOW_PRIVATE_COT" in text, rel
+
+
+def test_the_opt_in_refusal_is_recorded(monkeypatch):
+    """A gate nobody can see being probed is a gate with no alarm on it.
+
+    The refusal returned before any activity record, so an operator could not
+    tell a deployment nobody had touched from one being probed repeatedly --
+    on the one tool where that difference is most worth knowing.
+    """
+    seen = []
+    monkeypatch.setattr(
+        server,
+        "_record_direct_tool",
+        lambda name, args=None, ok=True, started=None, **kw: seen.append((name, ok)),
+    )
+    server.admin_private_chain_of_thought()
+    # ok=False, not ok=True: a blocked attempt that logs as a success is
+    # indistinguishable from a served one, which defeats recording it.
+    assert seen == [("admin_private_chain_of_thought", False)]
+
+
+def test_docstring_admits_the_token_gate_is_inert_on_local_open():
+    """Naming three gates without saying one is off by default overstates them.
+
+    On the default deployment _deployment_authenticates_callers() is False, so
+    the developer-token gate passes for everybody. An operator counting gates
+    from this docstring must not be given three when they have two.
+    """
+    doc = server.admin_private_chain_of_thought.__doc__ or ""
+    assert "local-open" in doc
 
 
 def test_opt_in_flag_is_named_on_every_surface_that_refuses():

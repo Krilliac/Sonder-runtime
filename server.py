@@ -7500,6 +7500,15 @@ def admin_status(token: str = "") -> str:
     return "\n".join(lines)
 
 
+# Named so a test can pin it. It used to assert that hidden chain-of-thought
+# "is not exposed" -- an absolute across the whole runtime, which stopped being
+# true of anything but this bundle.
+_DEBUG_INSPECT_REASONING_NOTE = (
+    "  note: this bundle carries no model reasoning; use trace/tool/activity logs here,",
+    "        or reasoning_show / admin_private_chain_of_thought, both opt-in.",
+)
+
+
 @mcp.tool()
 def debug_inspect(token: str = "", include_status: bool = True) -> str:
     """Developer/admin inspection bundle without hidden chain-of-thought."""
@@ -7512,8 +7521,7 @@ def debug_inspect(token: str = "", include_status: bool = True) -> str:
         return refusal
     sections = [
         "sonder debug inspect",
-        "  note: this bundle carries no model reasoning; use trace/tool/activity logs here,",
-        "        or reasoning_show / admin_private_chain_of_thought, both opt-in.",
+        *_DEBUG_INSPECT_REASONING_NOTE,
         "",
         admin_status(token),
         "",
@@ -7565,7 +7573,12 @@ def admin_private_chain_of_thought(token: str = "") -> str:
       inherited from a parent process cannot supply it.
     * a developer token, on any deployment that authenticates callers -- the
       reasoning belongs to whoever's turn produced it, exactly as for
-      ``reasoning_show``.
+      ``reasoning_show``. **On the default ``local-open`` deployment this third
+      gate is inert**: ``_deployment_authenticates_callers()`` is False when
+      none of SONDER_AUTH_MODE / SONDER_API_KEY / SONDER_REQUIRE_ACCOUNT is
+      set, so it passes for every caller. That is the documented meaning of
+      local-open, and a non-loopback bind is refused in that mode -- but count
+      two gates there, not three. The operator's two acts are the real ones.
 
     What it then shows is the model's own thinking channel for the current or
     last turn, which exists only where ``SONDER_EXPOSE_REASONING`` is also on.
@@ -7573,12 +7586,19 @@ def admin_private_chain_of_thought(token: str = "") -> str:
     something is being kept back.
     """
     _maybe_live_reload()
+    started = time.time()
     # Flag and rule are checked before the caller gate so that a deployment
     # which has not opted in returns the same refusal to everyone -- the
     # refusal must not become an oracle for who holds a developer token.
     if not (private_cot_opt_in_enabled() and _private_cot_rule_allows()):
+        # Recorded, and recorded as a failure. Returning here without an
+        # activity record made probing this gate invisible: an operator could
+        # not distinguish a deployment nobody had touched from one being tried
+        # repeatedly. ok=False so a blocked attempt never reads as a served one.
+        _record_direct_tool(
+            "admin_private_chain_of_thought", {}, ok=False, started=started,
+        )
         return _PRIVATE_COT_REFUSAL
-    started = time.time()
     refusal = _developer_gate("admin_private_chain_of_thought", token, started)
     if refusal:
         return refusal
