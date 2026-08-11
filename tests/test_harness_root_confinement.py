@@ -327,6 +327,43 @@ def test_a_path_inside_the_root_still_works(tmp_path, monkeypatch, tool_name):
     assert "outside" not in str(result.get("error", "")).lower(), result
 
 
+def test_an_unauthorized_root_is_not_an_existence_oracle(tmp_path, monkeypatch):
+    """"Are you allowed?" must be answered before "does it exist?".
+
+    ``_resolve_root`` stat-ed first::
+
+        unauthorized MISSING  -> ValueError: not a directory: <resolved path>
+        unauthorized EXISTING -> PermissionError: root is outside every
+                                 authorized root: <resolved path>
+
+    Two distinguishable answers, both echoing the resolved host path -- and
+    every server wrapper does ``return "ERROR: %s" % exc``, so a confined agent
+    got a directory-existence oracle over the whole filesystem plus the real
+    location, account name included. Same class as the ``diff_files``
+    absolute-path leak this module already fixed.
+
+    Both refusals must now be the same exception with the same text.
+    """
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path))
+    existing = tmp_path.parent / "oracle_exists"
+    existing.mkdir(exist_ok=True)
+    missing = tmp_path.parent / "oracle_missing_abc123xyz"
+
+    errors = []
+    for target in (existing, missing):
+        with pytest.raises(PermissionError) as excinfo:
+            harness_tools._resolve_root(str(target))
+        errors.append(str(excinfo.value))
+
+    assert errors[0] == errors[1], (
+        "an unauthorized existing root and an unauthorized missing one gave "
+        "different refusals: %r vs %r" % (errors[0], errors[1])
+    )
+    for blob, target in zip(errors, (existing, missing)):
+        assert str(target) not in blob, "unauthorized path echoed back: %s" % blob
+        assert target.name not in blob, "unauthorized path echoed back: %s" % blob
+
+
 def test_diff_files_does_not_leak_the_absolute_host_path(tmp_path, monkeypatch):
     """``git diff --no-index`` echoes its arguments into the ``diff --git`` header.
 

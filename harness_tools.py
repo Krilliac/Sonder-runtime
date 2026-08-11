@@ -64,11 +64,24 @@ def _resolve_root(root, extra_roots=""):
     the operator has not already granted them. ``extra_roots`` carries the
     host-selected project root and reaches here only through a host-controlled
     parameter, never from model-supplied arguments.
+
+    Authorization is checked BEFORE the directory stat, and the unauthorized
+    refusal names no path. The other order answered "does this exist?" before
+    "are you allowed to ask?", and the two refusals were distinguishable::
+
+        unauthorized MISSING  -> ValueError: not a directory: C:\\Users\\natew\\__definitely_not_here__
+        unauthorized EXISTING -> PermissionError: root is outside every authorized root: C:\\Windows\\System32\\drivers
+
+    Every server wrapper does ``return "ERROR: %s" % exc``, so a confined agent
+    could probe the existence of any path on the host and read the resolved
+    location back -- the same class of leak the ``diff_files`` absolute-path
+    fix closed in this module. An authorized root may still report "not a
+    directory" with its path: the caller is entitled to that one.
     """
     p = Path(root or ".").resolve()
+    _require_authorized_root(p, extra_roots)
     if not p.is_dir():
         raise ValueError("not a directory: %s" % p)
-    _require_authorized_root(p, extra_roots)
     return p
 
 
@@ -152,10 +165,14 @@ def _require_authorized_root(resolved, extra_roots=""):
             candidate = root
         if resolved == candidate or file_ops._is_inside(resolved, candidate):
             return
+    # Deliberately names NO path. The resolved path is the host's real
+    # location -- account name included -- and every server wrapper returns
+    # `"ERROR: %s" % exc` straight to a confined agent, so echoing it here
+    # disclosed both that the path exists and where it actually lives.
+    # `_resolve_root` explains the ordering half of the same leak.
     raise PermissionError(
-        "root is outside every authorized root: %s. Add it to file_roots.local "
+        "root is outside every authorized root. Add it to file_roots.local "
         "or SONDER_FILE_ROOTS, or pass a project the host has selected."
-        % resolved
     )
 
 
