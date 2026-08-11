@@ -400,7 +400,7 @@ def test_properties_without_an_explicit_object_type_are_unverified(monkeypatch):
     assert "schema_unverified" in out
 
 
-def test_unsupported_keywords_are_named_at_the_node_that_carries_them(monkeypatch):
+def test_extended_keyword_violation_is_named_at_the_node_that_carries_it(monkeypatch):
     schema = {
         "type": "object",
         "required": ["color"],
@@ -410,7 +410,7 @@ def test_unsupported_keywords_are_named_at_the_node_that_carries_them(monkeypatc
     out = server.offload(
         "pick one", tier="fast", learn=False, schema=json.dumps(schema),
     )
-    assert "schema_unverified" in out
+    assert out.startswith("ERROR:")
     assert "$.color" in out
     assert "enum" in out
 
@@ -456,8 +456,9 @@ def test_a_fully_supported_schema_is_returned_byte_for_byte(monkeypatch):
     assert json.loads(out) == GOOD
 
 
-def test_a_violation_message_also_discloses_partial_coverage(monkeypatch):
-    # "At least this was wrong" is not the same as "this is all that was wrong".
+def test_a_violation_message_is_complete_when_all_keywords_are_verified(monkeypatch):
+    # With both constraints implemented, the error is a complete local check
+    # rather than a partial-coverage disclosure.
     schema = {
         "type": "object",
         "required": ["name"],
@@ -469,15 +470,15 @@ def test_a_violation_message_also_discloses_partial_coverage(monkeypatch):
     )
     assert out.startswith("ERROR:")
     assert "$.name: expected type string" in out
-    assert "unverified" in out.casefold()
-    assert "minLength not checked" in out
+    assert "unverified" not in out.casefold()
 
 
 def test_the_verifier_really_enforces_every_keyword_coverage_claims():
     # Guards the mirror: if json_schema_verifier ever stops enforcing one of
     # these, coverage would keep claiming it and this fails.
     assert server._VERIFIED_SCHEMA_KEYWORDS == frozenset(
-        {"type", "required", "properties", "items"}
+        {"type", "required", "properties", "items", "enum", "minimum",
+         "minLength", "additionalProperties", "uniqueItems", "pattern"}
     )
     assert json_schema_verifier.validate(1, {"type": "string"})
     assert json_schema_verifier.validate({}, {"type": "object", "required": ["a"]})
@@ -500,15 +501,12 @@ def test_the_verifier_really_enforces_every_keyword_coverage_claims():
         ({"type": "string", "pattern": "^a$"}, "zzz"),
     ],
 )
-def test_the_verifier_really_ignores_the_keywords_coverage_flags(schema, datum):
-    # The other half of the mirror: each of these passes the verifier despite
-    # violating the schema, which is exactly why coverage must disclose them.
-    assert json_schema_verifier.validate(datum, schema) == []
+def test_the_verifier_really_enforces_extended_schema_keywords(schema, datum):
+    # The verifier now implements these constraints, so a violating datum must
+    # be rejected rather than merely carrying an "unverified" disclosure.
+    assert json_schema_verifier.validate(datum, schema)
     gaps = server._schema_coverage_gaps(datum, schema)
-    assert gaps, schema
-    unsupported = set(schema) - server._VERIFIED_SCHEMA_KEYWORDS
-    reported = " ".join(reason for _, reason in gaps)
-    assert all(keyword in reported for keyword in unsupported)
+    assert not gaps, schema
 
 
 def test_coverage_reports_rather_than_raises_on_a_malformed_schema_node():

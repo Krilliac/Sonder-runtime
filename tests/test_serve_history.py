@@ -431,7 +431,7 @@ def test_cot_slash_is_denied(monkeypatch):
     assert ts._handle_slash("/cot") == "DENIED: no"
 
 
-def test_login_slash_stores_token(monkeypatch):
+def test_login_slash_requires_an_operator_approval(monkeypatch):
     monkeypatch.setattr(
         ts.server,
         "admin_login",
@@ -442,8 +442,8 @@ def test_login_slash_stores_token(monkeypatch):
 
     out = ts._handle_slash("/login user password123")
 
-    assert "login ok" in out
-    assert ts.CURRENT_TOKEN == "abc123"
+    assert out.startswith("refused /login:"), out
+    assert ts.CURRENT_TOKEN == ""
 
 
 def test_file_slash_commands_route_to_server(monkeypatch):

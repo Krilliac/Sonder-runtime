@@ -202,8 +202,8 @@ def test_no_native_command_is_graded_below_the_tools_its_branch_calls():
     assert not under, "under-graded native commands: %r" % (under,)
 
 
-def test_execution_class_is_absent_from_the_catalog():
-    """Known, pre-existing vocabulary gap -- pinned so it cannot widen silently.
+def test_execution_class_is_published_when_a_native_command_reaches_it():
+    """Execution-backed native commands publish the gate's actual class.
 
     `/run`, `/runscript`, `/forge` and `/train` reach tools that
     `permission_modes.risk_of` grades `execution`; the catalog stores `ask` for
@@ -223,7 +223,8 @@ def test_execution_class_is_absent_from_the_catalog():
                for t in _branch_tools(c) - _disarmed(c))
     }
     assert execution_backed, "no command reaches an execution tool -- did the derivation break?"
-    assert not any(c.risk == "execution" for c in command_catalog.catalog())
+    published = {c.name for c in command_catalog.catalog() if c.risk == "execution"}
+    assert execution_backed <= published
     del server
 
 

@@ -799,6 +799,11 @@ def build_run(root=".", command="", timeout=120, extra_roots=""):
     timeout = _bounded_int(timeout, 120, 5, MAX_TIMEOUT)
 
     if command:
+        # `echo` and many build wrappers are shell builtins on Windows.  This
+        # tool intentionally accepts a command string, so dispatch it through
+        # cmd there rather than trying to exec a nonexistent echo.exe.
+        if os.name == "nt":
+            return _run(["cmd", "/d", "/s", "/c", command], cwd=root, timeout=timeout)
         parts = command.split()
         return _run(parts, cwd=root, timeout=timeout)
 

@@ -937,7 +937,7 @@ def _is_execution(name: str) -> bool:
     )
 
 
-def _native_risk(stem: str, hit) -> str:
+def _declared_native_risk(stem: str, hit) -> str:
     """Risk for a native command that fronts no registered tool.
 
     ``EXECUTION_COMMANDS`` exists precisely for this shape -- branch work no
@@ -1026,8 +1026,11 @@ def _native_risk(group, tool, hit, server, tools_by_name) -> str:
     table, and a table nobody updates is exactly how ``/setaccount`` came to be
     graded ``safe``.
     """
-    declared = _risk_for(tool, server) if tool else (
-        hit.get("risk", "safe") if hit else "safe"
+    # Native commands with no registered tool may still be execution commands
+    # (notably /runwindow).  The app must publish the very class the gate will
+    # decide on, rather than the stale registry's older four-class label.
+    declared = _risk_for(tool, server) if tool else _declared_native_risk(
+        str(group[0] if group else "").lstrip("/"), hit
     )
 
     mapped = console_tools()
@@ -1200,6 +1203,7 @@ def reset_cache() -> None:
     """Drop the memoised catalog (used after a live reload adds tools)."""
     catalog.cache_clear()
     console_tools.cache_clear()
+    console_disarmed_tools.cache_clear()
     http_slash_tools.cache_clear()
     _module_level_functions.cache_clear()
     # Was cleared by nothing anywhere. `_help_summaries` parses the HELP block

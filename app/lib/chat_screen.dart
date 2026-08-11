@@ -1604,6 +1604,8 @@ Color _riskColor(ColorScheme cs, String risk) {
       return const Color(0xFF8D6E63); // brown — distinct from mutation orange
     case 'dangerous':
       return const Color(0xFFE53935);
+    case 'unclassified':
+      return const Color(0xFF757575); // explicit neutral: policy has no class
     default:
       return cs.outline;
   }
@@ -1629,6 +1631,8 @@ String _riskLabel(String risk) {
       return 'Runs a program on the host';
     case 'dangerous':
       return 'Dangerous — destructive';
+    case 'unclassified':
+      return 'Unclassified - refused until policy is defined';
     default:
       return 'Risk not published';
   }
