@@ -170,7 +170,7 @@ def test_checklist_late_write_failure_preserves_legacy_partial_rows(
         conn.close()
 
 
-def test_workbench_agent_forces_validation_after_mutation(monkeypatch, tmp_path):
+def test_workbench_agent_forces_validation_after_mutation(monkeypatch, tmp_path, without_standing):
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "agent.db"))
     decisions = [
         '{"tool":"directory_tree","args":{"path":"."}}',
@@ -205,7 +205,7 @@ def test_workbench_agent_forces_validation_after_mutation(monkeypatch, tmp_path)
         project="sonder",
     )
 
-    assert result == "created and validated demo.py"
+    assert without_standing(result) == "created and validated demo.py"
     assert "HOST REQUIREMENT" in prompts[3]
     conn = memory_store.connect(server._DB_PATH)
     try:
@@ -353,7 +353,7 @@ def test_agent_observation_records_nested_run_code_once():
     assert actions[0]["tool"] == "run_code"
 
 
-def test_recreating_a_run_created_file_is_promoted_to_overwrite(monkeypatch, tmp_path):
+def test_recreating_a_run_created_file_is_promoted_to_overwrite(monkeypatch, tmp_path, without_standing):
     """A mode=create write to a path this run already created is promoted to
     mode=overwrite by the host, instead of failing with "file exists" until the
     no-progress guard kills the run (measured: 5 of 12 steps lost that way)."""
@@ -390,14 +390,14 @@ def test_recreating_a_run_created_file_is_promoted_to_overwrite(monkeypatch, tmp
         project="sonder",
     )
 
-    assert result == "rewrote demo.py and validated it"
+    assert without_standing(result) == "rewrote demo.py and validated it"
     assert len(writes) == 2
     # First write is an ordinary create; the retry is host-promoted.
     assert str(writes[0].get("mode") or "create") == "create"
     assert writes[1]["mode"] == "overwrite"
 
 
-def test_file_exists_failure_hint_names_overwrite(monkeypatch, tmp_path):
+def test_file_exists_failure_hint_names_overwrite(monkeypatch, tmp_path, without_standing):
     """When a create hits a PRE-EXISTING file (not created by this run), the
     host does not auto-overwrite -- but the recovery hint tells the model the
     exact retry, so it does not have to guess."""
@@ -436,6 +436,6 @@ def test_file_exists_failure_hint_names_overwrite(monkeypatch, tmp_path):
         project="sonder",
     )
 
-    assert result == "replaced existing.py"
+    assert without_standing(result) == "replaced existing.py"
     joined = "\n".join(prompts)
     assert "repeat the call with mode=overwrite" in joined

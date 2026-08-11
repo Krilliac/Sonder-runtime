@@ -20,7 +20,7 @@ def _store_good(
                        project=project, task_embedding_model=embedding_model,
                        task_embedding_revision=embedding_revision,
                        task_embedding_dim=len(vec))
-    ms.record_outcome_row(c, iid, "tests_passed", 1.0)
+    ms.record_outcome_row(c, iid, "tests_passed", 1.0, source="caller")
 
 
 def _bulk_good(c, rows):
@@ -39,7 +39,8 @@ def _bulk_good(c, rows):
         ],
     )
     c.executemany(
-        "INSERT INTO outcomes(interaction_id,signal,reward) VALUES(?,?,?)",
+        "INSERT INTO outcomes(interaction_id,signal,reward,source) "
+        "VALUES(?,?,?,'caller')",
         [(row[0], "tests_passed", 1.0) for row in rows],
     )
     c.execute("UPDATE interactions SET ts=printf('%020d',rowid)")
@@ -95,7 +96,7 @@ def test_recall_ignores_bad_outcomes():
     c = _conn()
     ms.log_interaction(c, "i1", "task", "", "resp", "sonder",
                        task_embedding=embeddings.to_blob([1.0, 0.0]))
-    ms.record_outcome_row(c, "i1", "failed", -1.0)
+    ms.record_outcome_row(c, "i1", "failed", -1.0, source="caller")
     assert recall.recall(c, "q", embed_fn=lambda t: [1.0, 0.0], min_sim=0.5) == []
 
 
@@ -164,7 +165,7 @@ def test_recall_quarantines_ambiguous_migrated_session_project():
 def test_recall_vetoes_interaction_with_contradictory_outcome():
     c = _conn()
     _store_good(c, "conflict", "task", "response", [1.0, 0.0])
-    ms.record_outcome_row(c, "conflict", "failed", -1.0)
+    ms.record_outcome_row(c, "conflict", "failed", -1.0, source="caller")
 
     assert recall.recall(
         c, "task", qv=[1.0, 0.0], min_sim=0.5,
@@ -172,7 +173,8 @@ def test_recall_vetoes_interaction_with_contradictory_outcome():
 
     _store_good(c, "unknown", "other task", "response", [1.0, 0.0])
     c.execute(
-        "INSERT INTO outcomes(interaction_id,signal,reward) VALUES(?,?,?)",
+        "INSERT INTO outcomes(interaction_id,signal,reward,source) "
+        "VALUES(?,?,?,'caller')",
         ("unknown", "future_signal", 99.0),
     )
     c.commit()
@@ -206,7 +208,7 @@ def test_recall_fails_closed_for_legacy_vector_without_provenance():
         c, "legacy", "task", "", "legacy response", "sonder",
         task_embedding=embeddings.to_blob([1.0, 0.0]),
     )
-    ms.record_outcome_row(c, "legacy", "tests_passed", 1.0)
+    ms.record_outcome_row(c, "legacy", "tests_passed", 1.0, source="caller")
 
     assert recall.recall(
         c, "task", qv=[1.0, 0.0], min_sim=0.5,
@@ -384,7 +386,8 @@ def test_corrupt_rows_do_not_starve_valid_bounded_candidates():
         ),
     )
     c.execute(
-        "INSERT INTO outcomes(interaction_id,signal,reward) VALUES(?,?,?)",
+        "INSERT INTO outcomes(interaction_id,signal,reward,source) "
+        "VALUES(?,?,?,'caller')",
         ("corrupt", "tests_passed", 1.0),
     )
     c.execute(
@@ -397,7 +400,8 @@ def test_corrupt_rows_do_not_starve_valid_bounded_candidates():
         ),
     )
     c.execute(
-        "INSERT INTO outcomes(interaction_id,signal,reward) VALUES(?,?,?)",
+        "INSERT INTO outcomes(interaction_id,signal,reward,source) "
+        "VALUES(?,?,?,'caller')",
         ("invalid-utf8", "tests_passed", 1.0),
     )
     c.commit()
@@ -601,7 +605,8 @@ def test_timestamp_id_cursor_is_safe_when_sqlite_reuses_rowids():
         ),
     )
     c.execute(
-        "INSERT INTO outcomes(interaction_id,signal,reward) VALUES(?,?,?)",
+        "INSERT INTO outcomes(interaction_id,signal,reward,source) "
+        "VALUES(?,?,?,'caller')",
         ("new-rowid-one", "tests_passed", 1.0),
     )
     c.commit()

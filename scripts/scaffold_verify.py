@@ -19,6 +19,20 @@ import project_scaffold  # noqa: E402
 PROJECT_NAME = "ScaffoldVerify"
 BUILD_TIMEOUT_SECONDS = 120
 
+# `compileall -q src` over the Python scaffold only proves that an empty
+# __init__.py and a print() parse. pyproject.toml -- the file most likely to be
+# malformed, and the only one a packaging tool actually reads -- was never
+# opened before this script printed VERIFIED. Parsing it is the cheapest way to
+# make the Python verdict mean something.
+_PYPROJECT_CHECK = (
+    "import pathlib,sys,tomllib;"
+    "p=pathlib.Path('pyproject.toml');"
+    "sys.exit('pyproject.toml is missing') if not p.is_file() else None;"
+    "d=tomllib.loads(p.read_text('utf-8'));"
+    "sys.exit('pyproject.toml declares no [project] name') "
+    "if not d.get('project',{}).get('name') else None"
+)
+
 
 def _commands(kind: str, tool: str) -> list[list[str]]:
     commands = {
@@ -26,7 +40,10 @@ def _commands(kind: str, tool: str) -> list[list[str]]:
         "csharp": [[tool, "build"]],
         "go": [[tool, "build", "./..."]],
         "node": [[tool, "--check", "index.js"]],
-        "python": [[tool, "-m", "compileall", "-q", "src"]],
+        "python": [
+            [tool, "-c", _PYPROJECT_CHECK],
+            [tool, "-m", "compileall", "-q", "src"],
+        ],
         "cpp-cmake": [
             [tool, "-S", ".", "-B", "build"],
             [tool, "--build", "build", "--config", "Debug"],

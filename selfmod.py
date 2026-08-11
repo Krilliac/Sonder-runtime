@@ -11,16 +11,18 @@ import contextlib
 import difflib
 import hashlib
 import json
+import keyword
 import os
 import shutil
 import socket
 import sqlite3
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import sonder_paths
 import sonder_logging
@@ -732,10 +734,22 @@ def begin_testing(run_id):
     return _phase(run_id, {"editing", "interrupted"}, "testing", "testing", "host-controlled validation started")
 
 
-def _record_command(run, kind, command, cwd_path, seconds, expect_failure=False):
+def _record_command(run, kind, command, cwd_path, seconds, expect_failure=False, receipt=None):
     run_id = run["id"]
     code, output, duration = _run(command, cwd_path, seconds)
     passed = code != 0 if expect_failure else code == 0
+    if receipt is not None and passed and receipt not in output:
+        # "It exited 0" is not "it did the thing". The receipt is computed by
+        # this process from the candidate on disk and is deliberately never
+        # handed to the child, so a probe that returns success without doing
+        # the work -- or that prints a fabricated line -- is refused here.
+        passed = False
+        output = (
+            "%s\nSELFMOD %s GATE REFUSED: the probe exited %s but did not report the "
+            "receipt it could only produce by examining the candidate.\n"
+            "  expected: %s"
+            % (output, str(kind).upper(), code, receipt)
+        )[:100_000]
     with _tx() as conn:
         conn.execute(
             "INSERT INTO selfmod_tests(run_id,kind,command_json,exit_code,duration_ms,output,passed,created_ts) VALUES(?,?,?,?,?,?,?,?)",
@@ -762,6 +776,174 @@ def record_test(run_id, kind, command, *, cwd=None, timeout=None):
     cwd_path = workspace if cwd is None else (workspace / _rel(workspace, cwd)).parent
     seconds = min(int(timeout or run["budgets"]["max_test_seconds"]), run["budgets"]["max_test_seconds"])
     return _record_command(run, kind, command, cwd_path, seconds)
+
+
+SMOKE_RECEIPT_PREFIX = "SELFMOD-SMOKE-RECEIPT"
+
+# Executed by a child process rooted at the candidate workspace, so the bytes
+# that answer are the candidate's own. It imports every declared module that
+# still exists, confirms every declared module that was deleted is genuinely
+# unreachable, and reports a SHA-256 over what it actually loaded.
+#
+# The expected digest is computed by the parent and is never passed in here.
+# That is deliberate: the check this replaced -- `assert Path('.').is_dir()` --
+# was a required gate that could not fail, and replacing it with anything whose
+# only evidence is an exit code would rebuild the same defect one layer up.
+_SMOKE_PROBE = r"""
+import hashlib
+import importlib
+import importlib.util
+import json
+import os
+import pathlib
+import sys
+
+sys.path.insert(0, os.getcwd())
+plan = json.loads(sys.argv[1])
+root = pathlib.Path(os.getcwd()).resolve()
+digest = hashlib.sha256()
+failures = []
+
+for index, rel in enumerate(plan["present"]):
+    name = plan["names"].get(rel)
+    try:
+        if name:
+            module = importlib.import_module(name)
+        else:
+            loader = importlib.util.spec_from_file_location(
+                "_selfmod_smoke_%d" % index, root / rel
+            )
+            module = importlib.util.module_from_spec(loader)
+            loader.loader.exec_module(module)
+    except BaseException as exc:
+        failures.append("%s: %s: %s" % (rel, type(exc).__name__, exc))
+        continue
+    source = getattr(module, "__file__", None)
+    if not source:
+        failures.append("%s: imported but reports no __file__" % rel)
+        continue
+    source = pathlib.Path(source).resolve()
+    if not source.is_relative_to(root):
+        failures.append(
+            "%s: import resolved outside the candidate workspace: %s" % (rel, source)
+        )
+        continue
+    digest.update(b"import\0" + rel.encode("utf-8") + b"\0")
+    digest.update(hashlib.sha256(source.read_bytes()).hexdigest().encode("ascii") + b"\n")
+
+for rel in plan["absent"]:
+    name = plan["names"].get(rel)
+    if (root / rel).exists():
+        failures.append("%s: declared deleted but still present" % rel)
+        continue
+    try:
+        resolved = importlib.util.find_spec(name) if name else None
+    except BaseException:
+        resolved = None
+    if resolved is not None:
+        failures.append("%s: deleted module still resolves as %r" % (rel, name))
+        continue
+    digest.update(b"gone\0" + rel.encode("utf-8") + b"\n")
+
+if failures:
+    sys.stdout.write("SELFMOD SMOKE FAILED -- the candidate does not run:\n")
+    for line in failures:
+        sys.stdout.write("  %s\n" % line)
+    raise SystemExit(1)
+
+sys.stdout.write(
+    "SELFMOD-SMOKE-RECEIPT %s modules=%d gone=%d\n"
+    % (digest.hexdigest(), len(plan["present"]), len(plan["absent"]))
+)
+"""
+
+
+def _module_name(rel: str):
+    """Dotted import name for a repo-relative .py path, or None if it has none."""
+    parts = tuple(PurePosixPath(rel).parts)
+    if not parts or not parts[-1].endswith(".py"):
+        return None
+    parts = parts[:-1] if parts[-1] == "__init__.py" else parts[:-1] + (parts[-1][:-3],)
+    if not parts:
+        return None
+    if not all(part.isidentifier() and not keyword.iskeyword(part) for part in parts):
+        return None
+    return ".".join(parts)
+
+
+def smoke_plan(run_id):
+    """Split the run's declared Python surface into must-import and must-be-gone."""
+    run = get_run(run_id)
+    workspace = candidate_path(run_id)
+    declared = sorted(path for path in run["files"] if path.lower().endswith(".py"))
+    present = [path for path in declared if (workspace / path).is_file()]
+    absent = [path for path in declared if not (workspace / path).is_file()]
+    names = {path: _module_name(path) for path in declared}
+    return {
+        "workspace": workspace,
+        "declared": declared,
+        "present": present,
+        "absent": absent,
+        "names": {key: value for key, value in names.items() if value},
+    }
+
+
+def _smoke_receipt(workspace: Path, present, absent) -> str:
+    digest = hashlib.sha256()
+    for rel in present:
+        digest.update(b"import\0" + rel.encode("utf-8") + b"\0")
+        digest.update(_sha(workspace / rel).encode("ascii") + b"\n")
+    for rel in absent:
+        digest.update(b"gone\0" + rel.encode("utf-8") + b"\n")
+    return "%s %s modules=%d gone=%d" % (
+        SMOKE_RECEIPT_PREFIX, digest.hexdigest(), len(present), len(absent),
+    )
+
+
+def record_smoke(run_id, *, timeout=None):
+    """Run the candidate, and require proof that it was the candidate that ran.
+
+    `review()` will not approve a self-modification without a passing check of
+    kind `smoke`. That check used to be
+
+        python -c "import pathlib; assert pathlib.Path('.').is_dir(); ..."
+
+    executed with the candidate workspace as its working directory -- so the
+    assertion was a constant and the required gate could not fail. It never
+    imported, ran or read one byte of what it was gating. A required gate that
+    cannot fail is worse than no gate: it manufactures the appearance of review.
+
+    What runs instead is bounded and offline -- a stdlib child process, no
+    network, no model, no operator -- and it writes nothing, so a failure cannot
+    leave state behind. It fails by naming the module and the exception.
+    """
+    run = get_run(run_id)
+    if run["phase"] != "testing":
+        raise RuntimeError("tests may run only in testing phase")
+    plan = smoke_plan(run_id)
+    seconds = min(int(timeout or run["budgets"]["max_test_seconds"]), run["budgets"]["max_test_seconds"])
+    workspace = plan["workspace"]
+
+    if not plan["declared"]:
+        # An empty target set is the same defect wearing a different hat: a
+        # check with nothing to examine that reports success anyway.
+        message = (
+            "selfmod smoke gate: this run declares no Python file (%s), so there is "
+            "nothing for a smoke check to execute. An empty target set is a refusal, "
+            "not a pass -- declare the module the change actually affects."
+            % (", ".join(run["files"]) or "no files")
+        )
+        return _record_command(
+            run, "smoke", [sys.executable, "-c", "raise SystemExit(%r)" % message],
+            workspace, seconds,
+        )
+
+    payload = _json({
+        "present": plan["present"], "absent": plan["absent"], "names": plan["names"],
+    })
+    command = [sys.executable, "-c", _SMOKE_PROBE, payload]
+    receipt = _smoke_receipt(workspace, plan["present"], plan["absent"])
+    return _record_command(run, "smoke", command, workspace, seconds, receipt=receipt)
 
 
 def test_results(run_id):
@@ -1039,6 +1221,177 @@ def _remove_bytecode_cache(target: Path):
             path.unlink()
 
 
+ROLLBACK_RECEIPT_PREFIX = "SELFMOD-ROLLBACK-RECEIPT"
+
+
+def _receipt_digest(pairs):
+    digest = hashlib.sha256()
+    for path, content_sha in sorted(pairs):
+        digest.update(path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update((content_sha or "-").encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def expected_rollback_receipt(run_id):
+    """The receipt a working rollback must reproduce, derived here, not there.
+
+    Computed by the process that is *doing* the deployment, from the backup
+    manifest, and deliberately never passed to the probe. A deployed
+    ``verify_rollback_ready`` that has been reduced to a no-op cannot print a
+    value it was never told.
+    """
+    manifest = _load_manifest(run_id)
+    records = manifest.get("files") or []
+    if not records:
+        raise RuntimeError("backup manifest records no files; a rollback would restore nothing")
+    pairs = [
+        (record["path"], record["sha256_before"] if record["existed_before"] else "")
+        for record in records
+    ]
+    return _receipt_digest(pairs), len(records)
+
+
+def _probe_digest(root, records):
+    """Digest the bytes a dry-run rollback actually put on disk.
+
+    Re-derived from the restored files rather than from the manifest, so a
+    restore that silently skipped a path cannot match.
+    """
+    pairs = []
+    for record in records:
+        target = Path(root) / record["path"]
+        if record["existed_before"]:
+            if not target.is_file():
+                raise RuntimeError("rollback did not restore %s" % record["path"])
+            pairs.append((record["path"], _sha(target)))
+        else:
+            if target.exists():
+                raise RuntimeError("rollback did not remove %s" % record["path"])
+            pairs.append((record["path"], ""))
+    return _receipt_digest(pairs)
+
+
+def verify_rollback_ready(run_id):
+    """Dry-run both rollback routes against a throwaway tree; print a receipt.
+
+    Run by the *deployed* code, in a child process, after the new bytes are in
+    place -- which is the only position from which "can this installation still
+    undo itself?" is a real question. It exercises the machinery a rollback
+    actually uses:
+
+    * the in-tree route, ``rollback()`` -> ``restore()`` -> the manifest walk in
+      ``_restore_manifest_files``, redirected at a temporary directory; and
+    * the out-of-tree route, ``selfmod_recover.restore``, driven through its own
+      manifest bundle so its checksum gate, backup verification and path
+      confinement all execute.
+
+    Both must return the exact pre-deploy bytes, and both must agree.
+
+    It writes only inside that temporary directory, so it may fail without
+    changing anything: the caller then rolls back using the code it already has
+    loaded, which is by construction the code from before the deployment.
+
+    Scope, stated plainly: this catches a rollback that is *broken*. It is not a
+    defence against a deployed tree that deliberately forges its own receipt.
+    Nothing that runs inside the tree can settle that.
+    """
+    import selfmod_recover
+
+    manifest = verify_backup(run_id)
+    records = manifest.get("files") or []
+    if not records:
+        raise RuntimeError("backup manifest records no files; a rollback would restore nothing")
+    stale = _deployed_file_mismatches(run_id)
+    if stale:
+        raise RuntimeError(
+            "rollback would refuse before it started; deployed bytes already diverge: %s"
+            % ", ".join(stale)
+        )
+    with tempfile.TemporaryDirectory(prefix="sonder-selfmod-rollback-probe-") as temp:
+        scratch = Path(temp)
+        intree = scratch / "intree"
+        intree.mkdir()
+        _restore_manifest_files(dict(manifest, repository_root=str(intree)))
+        intree_digest = _probe_digest(intree, records)
+
+        emergency_root = scratch / "emergency"
+        emergency_root.mkdir()
+        bundle = scratch / "bundle"
+        bundle.mkdir()
+        manifest_path = bundle / "manifest.json"
+        manifest_path.write_text(
+            json.dumps(dict(manifest, repository_root=str(emergency_root)), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        (bundle / "manifest.sha256").write_text(_sha(manifest_path) + "\n", encoding="ascii")
+        restored_root = selfmod_recover.restore(manifest_path)
+        if Path(restored_root).resolve() != emergency_root.resolve():
+            raise RuntimeError(
+                "emergency recovery restored into %s, not the probe's scratch tree" % restored_root
+            )
+        emergency_digest = _probe_digest(emergency_root, records)
+
+    if intree_digest != emergency_digest:
+        raise RuntimeError(
+            "the two rollback routes disagree: in-tree %s vs emergency %s"
+            % (intree_digest, emergency_digest)
+        )
+    receipt = "%s intree=%s recover=%s files=%d" % (
+        ROLLBACK_RECEIPT_PREFIX, intree_digest, emergency_digest, len(records),
+    )
+    print(receipt)
+    return receipt
+
+
+def rollback_probe_command(run_id):
+    """Argv for the probe, with the deployed tree first on ``sys.path``.
+
+    ``.`` is the repository being deployed to, so when that tree carries its own
+    ``selfmod``/``selfmod_recover`` -- which is the case this check exists for --
+    the probe runs the *just-written* bytes. The deploying process's own
+    ``sys.path`` follows as a fallback, so a repository that is not itself a
+    Sonder installation still gets a real dry-run rollback from the running
+    module rather than a `ModuleNotFoundError` dressed up as a broken rollback.
+    """
+    fallback = [entry for entry in sys.path if entry]
+    return [
+        sys.executable, "-c",
+        "import sys; sys.path[:0] = ['.']; sys.path.extend(%r); import selfmod; "
+        "selfmod.verify_rollback_ready(%r)" % (fallback, str(run_id)),
+    ]
+
+
+def _rollback_probe_detail(code, output, expected_receipt):
+    tail = [line.strip() for line in (output or "").splitlines() if line.strip()]
+    if code:
+        return tail[-1] if tail else "the probe exited %s with no output" % code
+    return (
+        "the probe exited 0 but did not report a matching rollback receipt; "
+        "expected %r" % expected_receipt
+    )
+
+
+def _verify_deployed_rollback(run_id, root, timeout):
+    """Adjudicated here, performed there. Returns (ok, detail, probe, ...)."""
+    probe = rollback_probe_command(run_id)
+    # Anything that stops this from producing a verdict is itself a failure to
+    # verify, and must reach the rollback path rather than escape as an
+    # exception the caller's generic handler will decline to restore from --
+    # the run is already `deployed` by this point, so an unhandled error here
+    # would leave exactly the unverified deployment this check exists to stop.
+    try:
+        digest, count = expected_rollback_receipt(run_id)
+        expected = "%s intree=%s recover=%s files=%d" % (ROLLBACK_RECEIPT_PREFIX, digest, digest, count)
+        code, output, duration = _run(probe, root, timeout)
+    except Exception as exc:
+        return False, "rollback verification could not run: %s: %s" % (type(exc).__name__, exc), probe, 1, str(exc), 0
+    ok = code == 0 and expected in (output or "")
+    detail = "" if ok else _rollback_probe_detail(code, output, expected)
+    return ok, detail, probe, code, output, duration
+
+
 def deploy(run_id, *, health_command=None, commit=True):
     run = get_run(run_id)
     if run["phase"] != "approved":
@@ -1090,6 +1443,36 @@ def deploy(run_id, *, health_command=None, commit=True):
             # A later user edit must be treated as a conflict, not discarded.
             _record_deployed_files(run_id, root, diff["changed_files"])
             _phase(run_id, {"approved"}, "deployed", "deploy", "candidate deployed atomically", deployed_commit=deployed_commit, deployed_ts=time.time())
+            # Rollback readiness is checked first, and unconditionally.
+            #
+            # The health command a caller supplies proves the new bytes import.
+            # That is not the property auto-restore depends on: `selfmod.py` and
+            # `selfmod_recover.py` are `_protected()`, but an operator-typed
+            # `--maintenance` run can rewrite both inside one eight-file deploy,
+            # and a `selfmod.py` that imports cleanly while its restore path
+            # raises passed every check this function used to make. It is also
+            # not conditional on a caller remembering to ask: the unattended lane
+            # (`scripts/nightly_selfmod.py`) calls `deploy(run_id)` bare.
+            #
+            # Failing here is safe by construction. The probe writes only inside
+            # its own temporary directory, and the restore that follows is
+            # performed by the already-loaded module -- which is, necessarily,
+            # the code from before this deployment.
+            _renew_deployment_lock(deployment_owner)
+            budget = min(120, run["budgets"]["max_test_seconds"])
+            ok, detail, probe, code, output, duration = _verify_deployed_rollback(run_id, root, budget)
+            with _tx() as conn:
+                conn.execute(
+                    "INSERT INTO selfmod_tests(run_id,kind,command_json,exit_code,duration_ms,output,passed,created_ts) VALUES(?,?,?,?,?,?,?,?)",
+                    (run_id, "post_deploy_rollback", _json(list(probe)), code, duration, output, int(ok), time.time()),
+                )
+                _event(conn, run_id, "rollback_check", "post-deploy rollback verification exit=%s passed=%s" % (code, ok))
+            if not ok:
+                _phase(run_id, {"deployed"}, "rollback_requested", "rollback", "deployed code cannot perform a rollback")
+                restore(run_id)
+                raise RuntimeError(
+                    "deployed code cannot perform a rollback; automatic rollback completed: %s" % detail
+                )
             if health_command:
                 _renew_deployment_lock(deployment_owner)
                 code, output, duration = _run(health_command, root, min(120, run["budgets"]["max_test_seconds"]))

@@ -49,7 +49,7 @@ def test_apply_learned_returns_usage_stats(monkeypatch, tmp_path):
     try:
         memory_store.add_lesson(conn, "L1", "use deque for queue operations", None, "seed")
         memory_store.log_lesson_usage(conn, ["L1"], "I1", "queue task")
-        memory_store.record_lesson_usage_outcome(conn, "I1", "tests_passed", 1.0)
+        memory_store.record_lesson_usage_outcome(conn, "I1", "tests_passed", 1.0, source="caller")
     finally:
         conn.close()
     monkeypatch.setattr(
@@ -403,9 +403,15 @@ def test_drain_deferred_distillations_retries_fleet_deferred_jobs(
     assert "deferred for retry" in server.record_outcome("I1", "tests_passed")
     assert "deferred for retry" in server.record_outcome("I2", "tests_passed")
 
-    # A busy fleet also blocks the drain itself.
+    # A busy fleet also blocks the drain itself. Pinned as an exact dict on
+    # purpose -- that is what stops a bucket being dropped silently -- but the
+    # shape is now the FULL one: a blocked drain reports every bucket a real
+    # drain does. It used to return a short dict, so a caller reading
+    # `drain["failed"]` or `drain["backlog"]` off the blocked path would have
+    # raised, or worse, read a `.get` default as a measured zero.
     assert server._drain_deferred_distillations() == {
         "drained": 0, "stored": 0, "deferred": 0,
+        "failed": 0, "skipped": 0, "backlog": None,
     }
 
     # Once quiet, the drain stores the deferred lessons without new outcomes.
@@ -416,6 +422,10 @@ def test_drain_deferred_distillations_retries_fleet_deferred_jobs(
     assert drain["drained"] == 2
     assert drain["stored"] == 2
     assert drain["deferred"] == 0
+    # Nothing raised and nothing fell between the buckets, so the counts are
+    # totals rather than floors.
+    assert drain["failed"] == 0
+    assert drain["skipped"] == 0
 
     conn = server._open_db()
     try:
@@ -631,7 +641,9 @@ def test_record_outcome_persists_the_refusal_reason_reflection_computed(
         lambda *args, **kwargs: {"status": "no_lesson", "reason": "not_concrete"},
     )
 
-    result = server._record_outcome_and_maybe_distill("I1", "tests_passed")
+    result = server._record_outcome_and_maybe_distill(
+        "I1", "tests_passed", source="caller",
+    )
 
     assert result["distillation_state"] == memory_store.DISTILLATION_NO_LESSON
     assert result["distillation_reason"] == "not_concrete"
@@ -669,7 +681,9 @@ def test_record_outcome_persists_a_real_dedupe_refusal_reason(monkeypatch, tmp_p
         lambda *args, **kwargs: _prepared_candidate(text=text),
     )
 
-    result = server._record_outcome_and_maybe_distill("I1", "tests_passed")
+    result = server._record_outcome_and_maybe_distill(
+        "I1", "tests_passed", source="caller",
+    )
 
     assert result["distillation_state"] == memory_store.DISTILLATION_NO_LESSON
     assert result["distillation_reason"] == "exact_duplicate"

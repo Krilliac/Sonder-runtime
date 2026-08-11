@@ -209,9 +209,9 @@ def test_good_interactions_with_embeddings_filters_and_excludes():
     ms.log_interaction(c, "bad", "task bad", "", "resp", "sonder",
                        task_embedding=vector)
     ms.log_interaction(c, "noemb", "task noemb", "", "resp", "sonder")
-    ms.record_outcome_row(c, "g", "tests_passed", 1.0)
-    ms.record_outcome_row(c, "bad", "failed", -1.0)
-    ms.record_outcome_row(c, "noemb", "tests_passed", 1.0)
+    ms.record_outcome_row(c, "g", "tests_passed", 1.0, source="caller")
+    ms.record_outcome_row(c, "bad", "failed", -1.0, source="caller")
+    ms.record_outcome_row(c, "noemb", "tests_passed", 1.0, source="caller")
     rows = ms.good_interactions_with_embeddings(c)
     assert {r["id"] for r in rows} == {"g"}  # only good + has embedding
     # excluding session A removes it

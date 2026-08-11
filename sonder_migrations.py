@@ -330,7 +330,24 @@ def migrate_store(
     path = db_path or store_db_paths()[store]
     migrations = discover_migrations(store)
     if not migrations:
-        return status(store, path)
+        # Returning `status(...)` unconditionally here skipped the two gates
+        # below. A build whose `migrations/` directory was omitted from the
+        # release bundle discovers nothing, so it compared a database full of
+        # applied history against an empty set of known migrations and reported
+        # a clean, empty result -- the caller saw exit 0 with no pending work
+        # and activated. The evidence that the build had LOST its schema
+        # definitions is exactly the signal `status()` already computes: every
+        # recorded row is now unknown. Do not discard it.
+        current = status(store, path)
+        if current.unknown:
+            raise FutureSchemaError(
+                f"store {store!r} at {path} records {len(current.unknown)} applied "
+                f"migration(s) this build does not define and found no migrations of "
+                f"its own: {', '.join(current.unknown)}. Either this database is "
+                f"newer than the code, or this build shipped without its "
+                f"migrations/ directory; refusing to run"
+            )
+        return current
 
     with migration_lock():
         current = status(store, path)

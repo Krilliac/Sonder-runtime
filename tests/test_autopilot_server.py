@@ -381,7 +381,7 @@ def test_autopilot_policy_blocks_control_plane_shell_and_bypass():
     )
 
 
-def test_agent_host_allowlist_rejects_model_tool_expansion(monkeypatch):
+def test_agent_host_allowlist_rejects_model_tool_expansion(monkeypatch, without_standing):
     responses = [
         '{"tool":"file_delete","args":{"path":"x"}}',
         '{"final":"stopped after host denial"}',
@@ -399,7 +399,7 @@ def test_agent_host_allowlist_rejects_model_tool_expansion(monkeypatch):
         "inspect only", max_steps=2, include_evidence=True,
         tool_allowlist={"file_read"},
     )
-    assert output.startswith("stopped after host denial")
+    assert without_standing(output).startswith("stopped after host denial")
     assert dispatched == []
     assert "outside this autonomous run's allowlist" in output
 

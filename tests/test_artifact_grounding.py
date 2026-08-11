@@ -167,6 +167,11 @@ def test_generated_all_format_pack_passes_manifest_and_format_recipes(
         {
             "require_manifest": True,
             "required_kinds": pack["kinds"],
+            # `required_kinds` on its own was read back out of the same
+            # manifest and compared with itself, so this held no matter what
+            # the pack contained. `kind_files` supplies the evidence side:
+            # what each requested kind had to leave on disk.
+            "kind_files": {k: list(v) for k, v in assetgen.KIND_ARTIFACTS.items()},
             "required_files": [
                 "brief.md",
                 "animation.gif",

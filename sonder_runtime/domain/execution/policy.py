@@ -31,8 +31,12 @@ DEFAULT_RULES = [
      "note": "executes an image through an external container runtime"},
     {"pattern": "web_*", "action": "ask", "note": "uses network access"},
     {"pattern": "local_service_probe", "action": "ask", "note": "reads one loopback HTTP endpoint"},
+    # The tool reads this rule itself, so this deny is load-bearing rather than
+    # advisory: it is one of the two acts an operator must reverse deliberately.
+    # Replacing it with an allow rule is half of opting in; the other half is
+    # SONDER_ALLOW_PRIVATE_COT.
     {"pattern": "admin_private_chain_of_thought", "action": "deny",
-     "note": "private chain-of-thought is never exposed"},
+     "note": "refused unless allowed here AND SONDER_ALLOW_PRIVATE_COT is set"},
 ]
 
 NO_MATCH_RULE = {"pattern": "*", "action": "ask", "note": "no matching rule"}

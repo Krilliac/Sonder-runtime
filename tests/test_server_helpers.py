@@ -1097,7 +1097,7 @@ def test_learning_health_is_structured_and_routed(monkeypatch, tmp_path):
             revision=server.embeddings.EMBED_REVISION,
             dimension=1,
         )
-        memory_store.record_outcome_row(conn, "i1", "tests_passed", 1.0)
+        memory_store.record_outcome_row(conn, "i1", "tests_passed", 1.0, source="machine")
         memory_store.add_lesson(
             conn,
             "lesson-one",
@@ -1114,7 +1114,11 @@ def test_learning_health_is_structured_and_routed(monkeypatch, tmp_path):
     data = server.learning_health_data()
     text = server.learning_health_status()
 
-    assert data["status"] == "healthy"
+    # The only outcome here is `tests_passed` -- the runtime grading its own
+    # work. No caller has judged anything, so the status fails closed at
+    # "watch": clean is not the same as measured good.
+    assert data["status"] == "watch"
+    assert data["reviewed_outcomes"] == 0
     assert data["outcome_coverage_percent"] == 100.0
     assert data["grounded_lessons"] == 1
     assert "sonder learning health" in text
@@ -1199,7 +1203,7 @@ def test_context_health_reports_session_and_memory(monkeypatch, tmp_path):
             conn, "lesson-one", "Prefer runnable snippets.", None, "i1"
         )
         memory_store.add_fact(conn, "fact-one", "proj", "Use the local app bundle.")
-        memory_store.record_outcome_row(conn, "i1", "tests_passed", 1.0)
+        memory_store.record_outcome_row(conn, "i1", "tests_passed", 1.0, source="caller")
     finally:
         conn.close()
 
@@ -2269,9 +2273,13 @@ def test_admin_register_login_and_cot_denial(monkeypatch, tmp_path):
     assert "token:" in login
     token = login.split("token: ", 1)[1].strip()
     assert "owner role=admin" in server.admin_whoami(token)
-    assert "hidden private chain-of-thought cannot be exposed" in (
-        server.admin_private_chain_of_thought(token)
-    )
+    # An admin token is not an opt-in. Exposure needs SONDER_ALLOW_PRIVATE_COT
+    # plus an explicit allow rule; with neither set this refuses regardless of
+    # who is asking. See tests/test_private_cot_opt_in.py for the opted-in side.
+    monkeypatch.delenv("SONDER_ALLOW_PRIVATE_COT", raising=False)
+    denial = server.admin_private_chain_of_thought(token)
+    assert "hidden private chain-of-thought cannot be exposed" in denial
+    assert "SONDER_ALLOW_PRIVATE_COT" in denial
 
 
 def test_admin_accounts_requires_admin_token(monkeypatch, tmp_path):
@@ -2777,10 +2785,14 @@ def _improvement_report_text(**overrides):
     base = {
         "score": 100, "interactions": 7865, "outcomes": 6831,
         "reviewed_positive_percent": 52.7, "reviewed_outcomes": 186,
-        "autograded_outcomes": 6645, "acceptance_percent": 96.1,
+        "autograded_outcomes": 6645,
+        # acceptance_percent is the caller-judged rate now; the blend is read
+        # from learning_health, which is where it is actually computed.
+        "acceptance_percent": 52.7, "acceptance_basis": "reviewed",
         "learning_health": {
             "outcome_coverage_percent": 86.8,
             "autograded_positive_percent": 97.3,
+            "positive_percent": 96.1,
         },
         "memory_quality": {}, "autopilot": {}, "mcp_runtime": {}, "issues": [],
     }
@@ -2837,6 +2849,66 @@ def test_improvement_report_flags_when_nothing_has_been_judged(monkeypatch, tmp_
     report = server.improvement_report_data()
     titles = " ".join(i["title"] for i in report["issues"])
     assert "judged by a caller" in titles
+
+
+def _improvement_report_with(monkeypatch, tmp_path, **learning):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
+    state = {
+        "quality": {}, "interactions": 500, "outcomes": 400,
+        "lessons": 50, "facts": 5, "outcome_coverage_percent": 80.0,
+    }
+    state.update(learning)
+    monkeypatch.setattr(
+        server.learning_health, "build_report", lambda conn: state,
+    )
+    return server.improvement_report_data()
+
+
+def test_improvement_report_has_no_acceptance_rate_until_work_is_judged(
+    monkeypatch, tmp_path,
+):
+    """`acceptance_percent` was the blended rate wearing a caller-judgement
+    name. 398 rows of the runtime grading itself and 2 real judgements
+    published "acceptance: 99.0%". learning_health's gate stopped believing the
+    blend; this surface was still republishing it, which is exactly how a fix
+    to one reader leaves the shape alive on a sibling."""
+    report = _improvement_report_with(
+        monkeypatch, tmp_path,
+        positive_percent=99.0, reviewed_outcomes=2,
+        reviewed_positive_percent=100.0, autograded_outcomes=398,
+        autograded_positive_percent=99.0,
+    )
+
+    assert report["acceptance_percent"] is None, "an unjudged store has no acceptance rate"
+    assert report["acceptance_basis"] == "unmeasured"
+
+
+def test_improvement_report_acceptance_is_the_caller_judged_rate_once_measurable(
+    monkeypatch, tmp_path,
+):
+    """Fail-closed, not permanently silent: with a sample that can carry it,
+    the number published is the honest one -- 88, never the 92 blend."""
+    report = _improvement_report_with(
+        monkeypatch, tmp_path,
+        positive_percent=92.0, reviewed_outcomes=200,
+        reviewed_positive_percent=88.0, autograded_outcomes=200,
+        autograded_positive_percent=96.0,
+    )
+
+    assert report["acceptance_percent"] == 88.0
+    assert report["acceptance_basis"] == "reviewed"
+
+
+def test_improvement_report_does_not_render_an_unjudged_store_as_zero_percent():
+    """"0.0% of 0 reviewed" reads as total failure when it means nobody looked.
+    Unmeasured has to say so in words."""
+    text = _improvement_report_text(
+        acceptance_percent=None, acceptance_basis="unmeasured",
+        reviewed_outcomes=0, reviewed_positive_percent=0.0,
+    )
+
+    assert "caller-judged: unmeasured" in text
+    assert "caller-judged: 0.0%" not in text
 
 
 def test_improvement_report_stays_quiet_when_review_is_healthy(monkeypatch, tmp_path):

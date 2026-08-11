@@ -97,6 +97,32 @@ DEFAULT_TRUNCATED_ERROR_RE = (
     r"build did not run)"
 )
 
+# Phase -1: the build ran and reported honestly, and the HARNESS lost the
+# report. workbench captures a bounded window and keeps the HEAD, while every
+# build prints its error summary at the TAIL, so an overflowing build is
+# truncated at exactly the errors. The notice _codegen_build emits for that
+# matched DEFAULT_ERROR_RE and none of the shapes above, so it counted as ONE
+# ordinary error in the TRUSTWORTHY tier: a build nobody finished reading
+# outscored an honest one, and codegen_build_loop's keep-best-version decision
+# wrote the WORSE file back to disk. Same 1-vs-109 failure as the phases above,
+# one notch earlier, and missed when they were added.
+#
+# Kept separate from DEFAULT_TRUNCATED_ERROR_RE on purpose: that regex also
+# decides build_ran(), and this build DID run. "Did not fully measure" is a
+# third state -- neither a pass nor a measured failure nor an unrun build -- and
+# collapsing it into any of the other three is how it hid in the first place.
+DEFAULT_PARTIAL_OUTPUT_ERROR_RE = (
+    r"(?i)(?:output (?:was |is )?truncated|truncated (?:build |captured )?output|"
+    r"output (?:was |is )?(?:cut off|clipped)|error summary may be missing)"
+)
+
+# The harness's own words for it. Owned here rather than at the emitting site so
+# the notice and the regex that has to recognise it cannot drift apart, and so a
+# caller whose error_regex drops the notice can have it restored verbatim.
+TRUNCATED_MEASUREMENT_NOTICE = (
+    "error: build output was truncated; the error summary may be missing"
+)
+
 # Phase 2, DECLARE. A type that parses but cannot be *defined* -- a duplicate
 # member, a redefinition, a conflicting declaration -- leaves the compiler with
 # no usable symbol for it, so it stops before binding method bodies and every
@@ -255,13 +281,19 @@ def count_unreliable(
     parse_regex: str = DEFAULT_PARSE_ERROR_RE,
     definition_regex: str = DEFAULT_DEFINITION_ERROR_RE,
     truncated_regex: str = DEFAULT_TRUNCATED_ERROR_RE,
+    partial_regex: str = DEFAULT_PARTIAL_OUTPUT_ERROR_RE,
 ) -> int:
-    """How many errors stop the compiler before it reports the rest.
+    """How many errors mean the count itself cannot be read as a total.
 
-    While any of these stand, len(errors) is a floor, not a total: it says how
-    far the compiler got, not how broken the project is.
+    Either the compiler stopped before reporting the rest, or the harness
+    stopped capturing before the compiler finished. While any of these stand,
+    len(errors) is a floor: it says how far the measurement got, not how broken
+    the project is.
     """
-    patterns = [re.compile(r) for r in (parse_regex, definition_regex, truncated_regex)]
+    patterns = [
+        re.compile(r)
+        for r in (parse_regex, definition_regex, truncated_regex, partial_regex)
+    ]
     return sum(1 for e in errors if any(p.search(e) for p in patterns))
 
 
@@ -274,6 +306,20 @@ def build_ran(output: str, truncated_regex: str = DEFAULT_TRUNCATED_ERROR_RE) ->
     build that never ran renders as BUILD SUCCEEDED.
     """
     return not re.search(truncated_regex, output or "")
+
+
+def output_truncated(
+    output: str, partial_regex: str = DEFAULT_PARTIAL_OUTPUT_ERROR_RE
+) -> bool:
+    """Whether the harness lost part of the build's report.
+
+    Read from the RAW output, never from a parsed error list, for the same
+    reason build_ran() is: `error_regex` is caller-supplied, and a stricter one
+    drops the truncation notice from that list entirely. The partial state
+    would then vanish and score() would hand a build nobody finished reading a
+    trustworthy (0, 0, 0) -- which beats every honest candidate.
+    """
+    return bool(re.search(partial_regex, output or ""))
 
 
 def score(
@@ -308,11 +354,20 @@ def truncated_blocked(errors: list, truncated_regex: str = DEFAULT_TRUNCATED_ERR
     return sum(1 for e in errors if pattern.search(e))
 
 
+def partial_output_blocked(
+    errors: list, partial_regex: str = DEFAULT_PARTIAL_OUTPUT_ERROR_RE
+) -> int:
+    """How many errors say the harness stopped capturing before the build ended."""
+    pattern = re.compile(partial_regex)
+    return sum(1 for e in errors if pattern.search(e))
+
+
 def describe_total(
     errors: list,
     parse_regex: str = DEFAULT_PARSE_ERROR_RE,
     definition_regex: str = DEFAULT_DEFINITION_ERROR_RE,
     truncated_regex: str = DEFAULT_TRUNCATED_ERROR_RE,
+    partial_regex: str = DEFAULT_PARTIAL_OUTPUT_ERROR_RE,
 ) -> str:
     """Report a total, flagging when it cannot be trusted, and why."""
     reasons = []
@@ -325,6 +380,9 @@ def describe_total(
     capped = truncated_blocked(errors, truncated_regex)
     if capped:
         reasons.append("%d capped-or-unrun build(s)" % capped)
+    unread = partial_output_blocked(errors, partial_regex)
+    if unread:
+        reasons.append("%d truncated build output(s)" % unread)
     if not reasons:
         return "%d total" % len(errors)
     return ("%d total (UNRELIABLE: %s are masking the semantic count)"
@@ -408,6 +466,28 @@ def format_report(rows: list, final_errors: list, ok: bool, ran: bool = True) ->
         )
         for e in final_errors[:5]:
             lines.append("  " + e[:200])
+        return "\n".join(lines)
+    unread = partial_output_blocked(final_errors)
+    if unread:
+        # The build ran and reported; the harness lost the tail of the report,
+        # which is where builds print their errors. That is neither a pass nor
+        # a measured failure, and it must outrank `ok` -- a caller deriving ok
+        # from "no error line matched" is reading the part that survived.
+        lines.append(
+            "BUILD MEASUREMENT INCOMPLETE: %d distinct error line(s) captured"
+            % len(final_errors)
+        )
+        lines.append(
+            "The build ran, but its output was truncated before the end and a "
+            "build prints its error summary last -- so the count above is a "
+            "FLOOR, not a total, and this run did not measure the project. It "
+            "is NOT a pass and NOT a measured failure. Re-run with a larger "
+            "output budget, or a quieter build, before reading any number here."
+        )
+        for e in final_errors[:15]:
+            lines.append("  " + e[:200])
+        if len(final_errors) > 15:
+            lines.append("  ... and %d more" % (len(final_errors) - 15))
         return "\n".join(lines)
     if ok:
         lines.append("BUILD SUCCEEDED")

@@ -80,27 +80,67 @@ COMMANDS = [
         "summary": "Detect live system RAM, GPU runtime, VRAM, and offload support.",
     },
     {
-        "name": "/training",
-        "category": "learning",
+        "name": "/location",
+        # `/location on` assigns the REPL's `location_consent`
+        # (sonder_repl.py:1083), which `main()` then passes to `server.sonder`
+        # on every later turn (sonder_repl.py:1510) -- so it grants approximate
+        # IP-geolocation consent that is OFF by default and stays granted for
+        # the rest of the session. That is "changes what a later call may do",
+        # the same reasoning `/mcp` and `/goal` carry, not the read its old
+        # display-only entry claimed ("reads the location-consent env flag" --
+        # true only of the bare `/location` form).
+        #
+        # Without this entry the command inherits `catalog()`'s default for a
+        # console command fronting no tool, `safe`, which `plan` allows -- so a
+        # mode advertising "reads only" would let a session acquire a new
+        # capability. Graded by the worst it can do, like every other command
+        # the gate reads a risk for. `ask` rather than `mutation` because it
+        # writes no file; the two are the same row of the mode matrix.
+        "category": "system",
         "risk": "ask",
+        "summary": "Show, grant, or revoke approximate IP-location consent for this session.",
+    },
+    {
+        "name": "/training",
+        # The argument goes to adaptive_training.command_text, which runs
+        # that CLI main(): start, deploy, rollback, adopt-legacy,
+        # release-alias. Deploying an adapter changes which weights every
+        # later call uses. No registered tool fronts it, so this entry is
+        # what the permission gate grades the command by.
+        "category": "learning",
+        "risk": "dangerous",
         "summary": "Plan, explicitly start, inspect, deploy, or roll back adaptive weight training.",
     },
     {
         "name": "/goal",
+        # adopt/complete/abandon/note write to goal_store; only the default
+        # "show" reads. Graded by the worst it can do, like every other
+        # command the gate reads a risk for.
         "category": "system",
-        "risk": "safe",
+        "risk": "mutation",
         "summary": "Set, inspect, note, or close the persistent goal; review and adopt self-proposed goals.",
     },
     {
         "name": "/selfmod",
+        # `deploy` and `rollback` os.replace() files in Sonder's own source
+        # tree, so this command's blast radius is the interpreter running it.
+        # It is also the risk the permission gate grades the command by
+        # (command_catalog._UNREGISTERED_BRANCH_WORK): the work is done by
+        # module functions that front no registered tool, so nothing else in
+        # the derivation can see it.
         "category": "system",
-        "risk": "ask",
+        "risk": "dangerous",
         "summary": "Inspect, isolate, test, approve, deploy, or roll back auditable self-improvements.",
     },
     {
         "name": "/mcp",
+        # `refresh` republishes the live MCP source and tool registry, so it
+        # alters what every later call is allowed to do -- the reasoning
+        # command_catalog._DANGEROUS applies to runtime_policy_update and
+        # permission_rule_set. No registered tool fronts it, so this entry is
+        # what the permission gate grades the command by.
         "category": "system",
-        "risk": "safe",
+        "risk": "dangerous",
         "summary": "Audit or refresh the atomic live MCP source and tool registry.",
     },
     {
@@ -347,7 +387,7 @@ COMMANDS = [
         "name": "/permissions",
         "category": "security",
         "risk": "safe",
-        "summary": "Inspect local permission rules and matching behavior.",
+        "summary": "Show the effective permission decision: rule, active mode, and which governs.",
     },
     {
         "name": "/debug",

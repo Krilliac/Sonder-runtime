@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import sonder_migrations
 import unsafe_lab
 
 from sonder_runtime.__main__ import main
@@ -293,6 +294,16 @@ def test_doctor_schema_check_uses_exact_cli_home(
 
     assert main(args) == 1
     payload = json.loads(capsys.readouterr().out)
+    # The pending count is scenery here -- this test's subject is WHICH home
+    # the doctor reads -- so it is derived rather than pinned. Hard-coded, it
+    # failed on every added migration, in a test that measures no migration.
+    # One known migration is the deliberately-modified one, counted as
+    # unhealthy rather than pending.
+    known = sum(
+        len(sonder_migrations.discover_migrations(store))
+        for store in ("memory", "autopilot", "fleet", "operations",
+                      "queued_actions", "updates")
+    )
     assert payload == {
         "overall": "fail",
         "checks": [{
@@ -300,7 +311,7 @@ def test_doctor_schema_check_uses_exact_cli_home(
             "status": "fail",
             "detail": (
                 "6 store(s); unhealthy history: modified=1 future=0; "
-                "pending=5"
+                "pending=%d" % (known - 1)
             ),
         }],
     }

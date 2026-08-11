@@ -19,11 +19,54 @@ import time
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp.resources import FunctionResource, ResourceManager
 from mcp.server.fastmcp.prompts import PromptManager
 from mcp.server.fastmcp.tools import ToolManager
 from mcp.server.fastmcp.utilities.context_injection import find_context_parameter
 from mcp.server.lowlevel.server import NotificationOptions
+
+
+def _refuse_if_gated(name: str) -> None:
+    """Apply the operator's permission gate to a direct MCP tool call.
+
+    This is the only place an MCP *client* enters; every internal Python call
+    to the same function bypasses it, which is exactly the split we want --
+    ``_agent_dispatch`` and the REPL each gate with their own ``interactive``
+    value, and gating the function bodies instead would double-prompt them.
+
+    ``interactive=False``: nobody is at a keyboard behind a protocol call, so
+    ``ask`` degrades to ``allow`` and the default ``manual`` mode refuses
+    nothing a client could do yesterday. What this does add is the mode that
+    exists to hold still: ``plan`` denies here too. Without this, ``plan``
+    advertised "reads only - no writes, no commands" while a client could call
+    ``file_write`` straight through -- an operator who selects that mode and
+    then watches their workspace change has been lied to by the indicator.
+    An explicit per-tool ``deny`` rule refuses here as well.
+
+    ``GATE_CONTROL_TOOLS`` is exempt, because the refusal below names
+    ``permission_mode`` as the remedy and ``plan`` would otherwise refuse that
+    tool too -- leaving a client that selected ``plan`` no way to select
+    anything else, across restarts, since the mode persists to disk.
+
+    Imported lazily: ``permission_modes`` resolves the command catalog, which
+    imports ``server``, which imports this module.
+    """
+    import permission_modes
+
+    tool = str(name or "")
+    decision = permission_modes.decide_for_caller(
+        tool, interactive=False, gate_control_exempt=True,
+    )
+    if decision is None or decision.allowed:
+        return
+    raise ToolError(
+        "%s is refused by the active permission gate: %s (mode=%s, risk=%s). "
+        "Change the mode with the permission_mode tool, or write a rule with "
+        "permission_rule_set." % (
+            name, decision.reason, decision.mode, decision.risk,
+        )
+    )
 
 
 def _recovery_action(configured_ready: bool) -> str:
@@ -216,6 +259,25 @@ class ReloadableFastMCP(FastMCP):
                 # validation. Clear it so changed/removed tools cannot retain a
                 # stale schema after the atomic manager swap.
                 self._mcp_server._tool_cache.clear()
+                # So does the command catalog, and it is the permission gate's
+                # only source of truth for a tool's risk class. It is an
+                # ``lru_cache`` over this very registry, and nothing ever
+                # called ``reset_cache()`` -- its docstring said "used after a
+                # live reload adds tools" and it had no callers at all. The
+                # consequence outlives the reload: a tool this swap
+                # RECLASSIFIED (say ``safe`` -> ``dangerous``) kept its stale
+                # grade for the life of the process, and a newly added tool
+                # was unknown to the catalog entirely. Imported lazily for the
+                # import-cycle reason ``_refuse_if_gated`` documents.
+                try:
+                    import command_catalog
+
+                    command_catalog.reset_cache()
+                except Exception:
+                    # A catalog that cannot be reset must not abort a swap that
+                    # has already happened. The gate fails closed on a catalog
+                    # it cannot read, which is the safe direction to leave this.
+                    pass
                 self._refresh_count += 1
                 self._last_refresh_ts = int(time.time())
             self._staging_source_state = None
@@ -449,6 +511,7 @@ class ReloadableFastMCP(FastMCP):
     async def call_tool(self, name: str, arguments: dict):
         refreshed = self.refresh_if_changed()
         await self._notify_surface_changes(refreshed)
+        _refuse_if_gated(name)
         return await super().call_tool(name, arguments)
 
     async def _notify_surface_changes(self, refreshed: dict) -> None:

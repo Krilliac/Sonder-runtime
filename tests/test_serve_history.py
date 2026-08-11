@@ -1,3 +1,4 @@
+import permission_modes
 import sonder_serve as ts
 from concurrent.futures import ThreadPoolExecutor
 import threading
@@ -407,16 +408,30 @@ def test_run_prompt_passes_session_and_project(monkeypatch):
 
 
 def test_cot_slash_is_denied(monkeypatch):
+    """Two refusals now, and the outer one is the point.
+
+    `admin_private_chain_of_thought` carries a shipped `deny` rule, and the
+    app's slash chain is gated, so the refusal that reaches the caller is the
+    permission gate's -- the tool is never entered. The tool's own denial is
+    still what answers when no rule is in the way, which is the second half
+    below; without it this test would stop covering the routing it was
+    written for.
+    """
     monkeypatch.setattr(
         ts.server,
         "admin_private_chain_of_thought",
         lambda token="": "DENIED: no",
     )
 
+    refused = ts._handle_slash("/cot")
+    assert refused.startswith("refused /cot:")
+    assert "rule denies this tool" in refused
+
+    monkeypatch.setattr(permission_modes, "_rule_lookup", lambda _tool: None)
     assert ts._handle_slash("/cot") == "DENIED: no"
 
 
-def test_login_slash_stores_token(monkeypatch):
+def test_login_slash_requires_an_operator_approval(monkeypatch):
     monkeypatch.setattr(
         ts.server,
         "admin_login",
@@ -427,11 +442,18 @@ def test_login_slash_stores_token(monkeypatch):
 
     out = ts._handle_slash("/login user password123")
 
-    assert "login ok" in out
-    assert ts.CURRENT_TOKEN == "abc123"
+    assert out.startswith("refused /login:"), out
+    assert ts.CURRENT_TOKEN == ""
 
 
 def test_file_slash_commands_route_to_server(monkeypatch):
+    """The routing, with the shipped `file_delete: deny` rule out of the way.
+
+    `/delete` reaches `file_delete`, which ships a default `deny` rule, and the
+    app's slash chain now enforces it -- see the next test. Neutralising the
+    lookup here keeps this test about routing, which is what it is named for.
+    """
+    monkeypatch.setattr(permission_modes, "_rule_lookup", lambda _tool: None)
     monkeypatch.setattr(ts.server, "file_find", lambda **kwargs: "found")
     monkeypatch.setattr(ts.server, "file_read", lambda **kwargs: "read")
     monkeypatch.setattr(ts.server, "file_delete", lambda **kwargs: "dry delete")
@@ -439,6 +461,24 @@ def test_file_slash_commands_route_to_server(monkeypatch):
     assert ts._handle_slash("/files *.py") == "found"
     assert ts._handle_slash("/read README.md") == "read"
     assert ts._handle_slash("/delete README.md") == "dry delete"
+
+
+def test_the_shipped_delete_rule_binds_on_this_surface(monkeypatch):
+    """And with the real lookup, the rule wins and the tool is never entered.
+
+    This is the sentence the permission-gate plan opened with, at the last
+    surface it was still true of: before the chain was gated, the only thing
+    stopping this call was `file_delete`'s own `dry_run` default.
+    """
+    def _never_runs(**_kwargs):
+        raise AssertionError("a refused tool was dispatched anyway")
+
+    monkeypatch.setattr(ts.server, "file_delete", _never_runs)
+
+    reply = ts._handle_slash("/delete README.md")
+
+    assert reply.startswith("refused /delete:")
+    assert "rule denies this tool" in reply
 
 
 def test_artifact_and_game_slash_commands_route_to_server(monkeypatch):

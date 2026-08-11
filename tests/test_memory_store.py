@@ -67,6 +67,8 @@ def test_outcome_and_distillation_migration_is_deterministic_and_one_time(tmp_pa
         ),
     )
     legacy.executemany(
+        # Deliberately the pre-#62 shape: this fixture IS a legacy database,
+        # so it must not name the column the migration is supposed to add.
         "INSERT INTO outcomes(interaction_id, signal, reward, ts) "
         "VALUES(?, ?, ?, ?)",
         (
@@ -118,14 +120,21 @@ def test_outcome_and_distillation_migration_is_deterministic_and_one_time(tmp_pa
         "AND name='uq_outcomes_interaction_signal_nonnull'"
     ).fetchone()[0]
     assert "WHERE interaction_id IS NOT NULL AND signal IS NOT NULL" in unique_sql
+    # #62: the rebuild that adds `source` must survive the same migration pass
+    # as the dedupe, keep every surviving row, and label none of them.
+    assert [
+        row[0] for row in conn.execute(
+            "SELECT source FROM outcomes ORDER BY rowid"
+        )
+    ] == ["unknown"] * 5
 
     conn.execute(
         "INSERT INTO interactions(id, task, response, tier) "
         "VALUES('post-migration', 'task', 'response', 'code')"
     )
     conn.execute(
-        "INSERT INTO outcomes(interaction_id, signal, reward) "
-        "VALUES('post-migration', 'tests_passed', 1.0)"
+        "INSERT INTO outcomes(interaction_id, signal, reward, source) "
+        "VALUES('post-migration', 'tests_passed', 1.0, 'caller')"
     )
     conn.commit()
     conn.close()
@@ -426,14 +435,14 @@ def test_replace_interaction_response_cas_rejects_learning_state(blocker):
     conn = _conn()
     expected = _log_repairable_interaction(conn)
     if blocker == "outcome":
-        ms.record_outcome_row(conn, "repairable", "tests_passed", 1.0)
+        ms.record_outcome_row(conn, "repairable", "tests_passed", 1.0, source="caller")
     elif blocker == "lesson":
         ms.add_lesson(conn, "derived", "derived lesson", None, "repairable")
     else:
         ms.add_lesson(conn, "retrieved", "retrieved lesson", None, "seed")
         ms.log_lesson_usage(conn, ["retrieved"], "repairable", "original task")
         ms.record_lesson_usage_outcome(
-            conn, "repairable", "tests_passed", 1.0,
+            conn, "repairable", "tests_passed", 1.0, source="caller",
         )
 
     assert not ms.replace_interaction_response_cas(
@@ -568,15 +577,15 @@ def test_delete_interaction_removes_lessons_distilled_from_it():
 def test_record_outcome_row():
     c = _conn()
     ms.log_interaction(c, "abc", "t", "", "r", "code")
-    assert ms.record_outcome_row(c, "abc", "tests_passed", 1.0) is True
-    assert ms.record_outcome_row(c, "abc", "tests_passed", 1.0) is False
+    assert ms.record_outcome_row(c, "abc", "tests_passed", 1.0, source="caller") is True
+    assert ms.record_outcome_row(c, "abc", "tests_passed", 1.0, source="caller") is False
     with pytest.raises(ValueError, match="canonical signal reward"):
-        ms.record_outcome_row(c, "abc", "tests_passed", 0.9)
+        ms.record_outcome_row(c, "abc", "tests_passed", 0.9, source="caller")
     with pytest.raises(ValueError, match="supported grounded outcome"):
-        ms.record_outcome_row(c, "abc", "future_signal", 99.0)
+        ms.record_outcome_row(c, "abc", "future_signal", 99.0, source="caller")
     with pytest.raises(ValueError, match="canonical signal reward"):
-        ms.record_outcome_row(c, "abc", "compiled", float("nan"))
-    assert ms.record_outcome_row(c, "abc", "compiled", 0.7) is True
+        ms.record_outcome_row(c, "abc", "compiled", float("nan"), source="caller")
+    assert ms.record_outcome_row(c, "abc", "compiled", 0.7, source="caller") is True
     row = c.execute(
         "SELECT signal, reward FROM outcomes WHERE interaction_id='abc' "
         "AND signal='tests_passed'"
@@ -591,7 +600,7 @@ def test_atomic_outcome_rejects_noncanonical_signal_reward_pair():
 
     with pytest.raises(ValueError, match="canonical signal reward"):
         ms.record_outcome_and_claim_lesson_distillation(
-            c, "job", "tests_passed", -1.0,
+            c, "job", "tests_passed", -1.0, source="caller",
         )
 
     assert c.execute("SELECT COUNT(*) FROM outcomes").fetchone()[0] == 0
@@ -608,7 +617,7 @@ def _claim_good_outcome(
     return ms.record_outcome_and_claim_lesson_distillation(
         conn, interaction_id, "tests_passed", 1.0,
         claim_token=token, owner_pid=owner_pid,
-        owner_identity=owner_identity, owner_probe=probe, now=100,
+        owner_identity=owner_identity, owner_probe=probe, now=100, source="caller",
     )
 
 
@@ -649,7 +658,7 @@ def test_atomic_outcome_duplicate_preserves_usage_time_but_reclaims_retryable():
     different = ms.record_outcome_and_claim_lesson_distillation(
         conn, "job", "accepted", 0.8, claim_token="claim-2",
         owner_pid=101, owner_identity="owner-101", owner_probe=_owner_probe,
-        now=101,
+        now=101, source="caller",
     )
     assert different["outcome_inserted"] is True
     assert different["usage_rows_updated"] == 1
@@ -759,7 +768,7 @@ def test_concurrent_same_outcome_has_one_row_and_one_claim_owner(tmp_path):
                 owner_pid=1000 + index,
                 owner_identity="owner-%d" % index,
                 owner_probe=_owner_probe,
-                now=100 + index,
+                now=100 + index, source="caller",
             )
             with result_lock:
                 results.append(result)
@@ -802,7 +811,7 @@ def test_non_good_evidence_cancels_live_claim_and_blocks_finalization():
 
     failed = ms.record_outcome_and_claim_lesson_distillation(
         conn, "job", "failed", -1.0, claim_token="unused",
-        owner_pid=101, owner_identity="owner-101", owner_probe=_owner_probe,
+        owner_pid=101, owner_identity="owner-101", owner_probe=_owner_probe, source="caller",
     )
     assert failed["outcome_inserted"] is True
     assert failed["claimed"] is False
@@ -830,7 +839,7 @@ def test_finalization_rechecks_legacy_contradiction_before_callback():
     ms.log_interaction(conn, "job", "task", "", "response", "code")
     assert _claim_good_outcome(conn)["claimed"] is True
     # Simulate an older writer that records evidence without touching the ledger.
-    assert ms.record_outcome_row(conn, "job", "rejected", -0.5)
+    assert ms.record_outcome_row(conn, "job", "rejected", -0.5, source="caller")
 
     called = []
     result = ms.finalize_lesson_distillation(
@@ -1332,9 +1341,9 @@ def test_outcome_signal_counts_empty():
 def test_outcome_signal_counts_groups_by_signal():
     c = _conn()
     ms.log_interaction(c, "a", "t", "", "r", "code")
-    ms.record_outcome_row(c, "a", "tests_passed", 1.0)
-    ms.record_outcome_row(c, "a", "tests_passed", 1.0)
-    ms.record_outcome_row(c, "a", "failed", -1.0)
+    ms.record_outcome_row(c, "a", "tests_passed", 1.0, source="caller")
+    ms.record_outcome_row(c, "a", "tests_passed", 1.0, source="caller")
+    ms.record_outcome_row(c, "a", "failed", -1.0, source="caller")
     assert ms.outcome_signal_counts(c) == {"tests_passed": 1, "failed": 1}
 
 
@@ -1359,9 +1368,9 @@ def test_interactions_with_good_outcome_filters_by_signal():
     ms.log_interaction(c, "a", "task A", "", "resp A", "code")
     ms.log_interaction(c, "b", "task B", "", "resp B", "code")
     ms.log_interaction(c, "c", "task C", "", "resp C", "code")
-    ms.record_outcome_row(c, "a", "tests_passed", 1.0)
-    ms.record_outcome_row(c, "b", "failed", -1.0)
-    ms.record_outcome_row(c, "c", "compiled", 0.7)
+    ms.record_outcome_row(c, "a", "tests_passed", 1.0, source="caller")
+    ms.record_outcome_row(c, "b", "failed", -1.0, source="caller")
+    ms.record_outcome_row(c, "c", "compiled", 0.7, source="caller")
     good = ms.interactions_with_good_outcome(c, {"tests_passed", "compiled"})
     ids = {g["id"] for g in good}
     assert ids == {"a", "c"}
@@ -1373,7 +1382,7 @@ def test_interactions_with_good_outcome_filters_by_signal():
 def test_interactions_with_good_outcome_empty_signals_returns_empty():
     c = _conn()
     ms.log_interaction(c, "a", "task A", "", "resp A", "code")
-    ms.record_outcome_row(c, "a", "tests_passed", 1.0)
+    ms.record_outcome_row(c, "a", "tests_passed", 1.0, source="caller")
     assert ms.interactions_with_good_outcome(c, set()) == []
 
 
@@ -1381,8 +1390,8 @@ def test_outcome_evidence_query_is_indexed_bounded_and_truncates_text():
     c = _conn()
     ms.log_interaction(c, "a", "x" * 20, "", "y" * 20, "code")
     ms.log_interaction(c, "b", "second", "", "response", "code")
-    ms.record_outcome_row(c, "a", "tests_passed", 1.0)
-    ms.record_outcome_row(c, "b", "compiled", 0.7)
+    ms.record_outcome_row(c, "a", "tests_passed", 1.0, source="caller")
+    ms.record_outcome_row(c, "b", "compiled", 0.7, source="caller")
 
     rows = list(ms.interaction_outcome_evidence(c, limit=1, field_limit=5))
     plan = c.execute(
@@ -1405,7 +1414,7 @@ def test_lesson_usage_stats_records_outcomes():
     stats = ms.lesson_usage_stats(c)["L1"]
     assert stats["uses"] == 1
     assert stats["wins"] == 0
-    ms.record_lesson_usage_outcome(c, "i1", "tests_passed", 1.0)
+    ms.record_lesson_usage_outcome(c, "i1", "tests_passed", 1.0, source="caller")
     stats = ms.lesson_usage_stats(c)["L1"]
     assert stats["wins"] == 1
     assert stats["avg_reward"] == 1.0
@@ -1433,14 +1442,14 @@ def test_distillation_contradiction_is_negative_evidence_not_weak_positive():
     lesson nor evidence against one."""
     conn = ms.connect(":memory:")
     ms.log_interaction(conn, "weakpos", "t", "", "r", "code")
-    ms.record_outcome_row(conn, "weakpos", "compiled", 0.7)
-    ms.record_outcome_row(conn, "weakpos", "edited", 0.75)
+    ms.record_outcome_row(conn, "weakpos", "compiled", 0.7, source="caller")
+    ms.record_outcome_row(conn, "weakpos", "edited", 0.75, source="caller")
     good, contradiction = ms._distillation_evidence(conn, "weakpos")
     assert good is True and contradiction is False
 
     ms.log_interaction(conn, "disputed", "t", "", "r", "code")
-    ms.record_outcome_row(conn, "disputed", "tests_passed", 1.0)
-    ms.record_outcome_row(conn, "disputed", "failed", -1.0)
+    ms.record_outcome_row(conn, "disputed", "tests_passed", 1.0, source="caller")
+    ms.record_outcome_row(conn, "disputed", "failed", -1.0, source="caller")
     good, contradiction = ms._distillation_evidence(conn, "disputed")
     assert good is True and contradiction is True
 

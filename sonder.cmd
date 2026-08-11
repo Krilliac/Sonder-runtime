@@ -9,6 +9,12 @@ if not defined SONDER_NUM_THREAD set "SONDER_NUM_THREAD=%NUMBER_OF_PROCESSORS%"
 if not defined SONDER_NUM_GPU set "SONDER_NUM_GPU=999"
 if not defined SONDER_NUM_BATCH set "SONDER_NUM_BATCH=512"
 if not defined OLLAMA_FLASH_ATTENTION set "OLLAMA_FLASH_ATTENTION=1"
+
+rem Surface the reasoning a model emits on its own thinking channel. Off by
+rem default upstream, and off means Sonder never even asks Ollama for it, so
+rem turning this on changes what is requested. Audience is deliberately left
+rem at its default (developer) rather than 'all'. Unset it to go back.
+if not defined SONDER_EXPOSE_REASONING set "SONDER_EXPOSE_REASONING=1"
 if not defined SONDER_PYTHON (
   echo [sonder] ERROR: no bundled or system Python runtime was found.
   endlocal & exit /b 3
