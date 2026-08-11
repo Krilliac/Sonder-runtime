@@ -2373,11 +2373,20 @@ class Handler(BaseHTTPRequestHandler):
                 "invalid_request_error" if 400 <= status < 500 else
                 "server_error"
             )
-            headers = {"Retry-After": "1"} if status in (429, 503, 504) else None
+            retry_after = "1"
+            if error.retry_after_seconds is not None:
+                retry_after = str(max(0, int(round(error.retry_after_seconds))))
+            headers = (
+                {"Retry-After": retry_after}
+                if status in (429, 503, 504) else None
+            )
+            message = error.detail
+            if error.cloud and error.status == 429:
+                message = server._format_model_call_error(error)
             self._send_json_payload(
                 {
                     "error": {
-                        "message": error.detail,
+                        "message": message,
                         "type": error_type,
                     }
                 },

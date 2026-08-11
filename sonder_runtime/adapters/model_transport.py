@@ -8,6 +8,7 @@ typed ``ModelGateway`` port and domain error taxonomy; the root
 from __future__ import annotations
 
 import urllib.error
+import math
 
 
 class ModelCallError(urllib.error.URLError):
@@ -27,6 +28,7 @@ class ModelCallError(urllib.error.URLError):
         status: int | None = None,
         attempts: int = 1,
         cloud: bool = False,
+        retry_after_seconds: float | None = None,
     ):
         self.kind = str(kind or "unknown")
         self.detail = str(detail or self.kind)[:800]
@@ -34,6 +36,14 @@ class ModelCallError(urllib.error.URLError):
         self.status = int(status) if status is not None else None
         self.attempts = max(0, int(attempts if attempts is not None else 1))
         self.cloud = bool(cloud)
+        try:
+            retry_after = float(retry_after_seconds)
+        except (TypeError, ValueError):
+            retry_after = None
+        self.retry_after_seconds = (
+            max(0.0, retry_after)
+            if retry_after is not None and math.isfinite(retry_after) else None
+        )
         super().__init__(self.detail)
 
 
