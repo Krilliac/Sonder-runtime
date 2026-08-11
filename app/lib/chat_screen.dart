@@ -1581,8 +1581,17 @@ class _TypingDotsState extends State<_TypingDots>
 
 /// Colour for a command's risk band.
 ///
-/// An unrecognised or missing band deliberately gets the neutral outline
-/// colour: an unlabelled row is honest, a wrongly-green one is not.
+/// The bands are the ones `permission_modes._MATRIX` has rows for, because the
+/// server publishes each command under the class its gate decides on. There is
+/// no second table here to keep in step — a band this switch does not know is a
+/// band the app must not colour, so it takes the neutral outline: an unlabelled
+/// row is honest, a wrongly-green one is not.
+///
+/// `execution` earns its own band rather than borrowing `mutation`'s. It was
+/// missing while the server still published a four-class vocabulary, and the
+/// four tools it should have covered — `/build_run`, `/test_run`,
+/// `/typecheck_run`, `/dependency_audit` — arrived as `safe` and were drawn
+/// green with "read only" under their name, for work `plan` mode refuses.
 Color _riskColor(ColorScheme cs, String risk) {
   switch (risk) {
     case 'safe':
@@ -1591,6 +1600,8 @@ Color _riskColor(ColorScheme cs, String risk) {
       return const Color(0xFFFFC107);
     case 'mutation':
       return const Color(0xFFFF7043);
+    case 'execution':
+      return const Color(0xFF8D6E63); // brown — distinct from mutation orange
     case 'dangerous':
       return const Color(0xFFE53935);
     default:
@@ -1599,14 +1610,23 @@ Color _riskColor(ColorScheme cs, String risk) {
 }
 
 /// Human wording for a risk band, used as the dot's tooltip.
+///
+/// These name the *class*, not the outcome. What actually happens is
+/// `PermissionMode.matrix[risk]` for the mode on the chip above the composer,
+/// and it differs by mode: `ask`-class work runs unprompted under acceptEdits
+/// and auto, and every class but `safe` is refused outright under plan. So the
+/// `ask` band no longer reads "Asks before acting" — that was a promise this
+/// row is in no position to make, and it was false in two of the four modes.
 String _riskLabel(String risk) {
   switch (risk) {
     case 'safe':
       return 'Safe — read only';
     case 'ask':
-      return 'Asks before acting';
+      return 'Acts beyond a read — prompts depend on the mode';
     case 'mutation':
       return 'Changes files or state';
+    case 'execution':
+      return 'Runs a program on the host';
     case 'dangerous':
       return 'Dangerous — destructive';
     default:
