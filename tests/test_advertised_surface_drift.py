@@ -21,6 +21,24 @@ separately proved non-vacuous, because a parser that silently stopped matching
 would turn every subset assertion below into a tautology over the empty set --
 which is exactly how a validator here once reported ``ok`` while covering 15
 of 184 tools.
+
+Advertised-vs-dispatchable is not sufficient on its own.  A tool can be
+advertised on a surface, admitted by that surface's policy, genuinely
+dispatchable -- and still refused a step later by a *second* gate, so the model
+is told it may call the tool, calls it, and is refused.  A dispatch-only check
+cannot see that shape, because the tool does dispatch.
+
+``_agent_impl`` has three such gates that no surface and no guard measured:
+
+* ``project_scope`` + ``_PROJECT_BOUND_AGENT_TOOLS`` (server.py, "has no
+  project-bound execution contract");
+* ``allow_web``, checked *inside* ``_agent_dispatch``'s own branch bodies;
+* ``allow_location``, likewise.
+
+``_agent_tool_help`` filtered on ``read_only``/``cloud``/``unsafe`` only, so
+each of these produced dead vocabulary.  The section at the bottom of this file
+asserts that no advertising surface names a tool a run gate will
+unconditionally refuse, for every combination of the run flags.
 """
 from __future__ import annotations
 
@@ -306,3 +324,192 @@ def test_loop_docstring_examples_are_all_real_action_types():
     ))
     assert len(examples) >= 20
     assert sorted(examples - implemented) == []
+
+
+# --------------------------------------------------------------------------
+# admit-then-deny: a surface advertises it, a policy admits it, a SECOND gate
+# refuses it one step later.  Invisible to every check above, because the tool
+# genuinely dispatches.
+# --------------------------------------------------------------------------
+
+def _flag_gated_tools(flag):
+    """Tools whose ``_agent_dispatch`` branch returns early on ``not <flag>``.
+
+    These are name-unconditional refusals living *inside* the dispatcher, so
+    ``dispatch_names`` counts them as dispatchable and no advertised-vs-
+    dispatchable check can see them.
+    """
+    tree = ast.parse(inspect.getsource(server._agent_dispatch))
+    gated = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        test = node.test
+        if not (
+            isinstance(test, ast.Compare)
+            and isinstance(test.left, ast.Name)
+            and test.left.id == "tool_name"
+            and len(test.ops) == 1
+        ):
+            continue
+        comparator = test.comparators[0]
+        if isinstance(test.ops[0], ast.Eq) and isinstance(comparator, ast.Constant):
+            names = (comparator.value,)
+        elif isinstance(test.ops[0], ast.In) and isinstance(
+            comparator, (ast.Set, ast.Tuple, ast.List)
+        ):
+            names = tuple(
+                item.value for item in comparator.elts
+                if isinstance(item, ast.Constant) and isinstance(item.value, str)
+            )
+        else:
+            continue
+        for inner in ast.walk(ast.Module(body=node.body, type_ignores=[])):
+            if (
+                isinstance(inner, ast.If)
+                and isinstance(inner.test, ast.UnaryOp)
+                and isinstance(inner.test.op, ast.Not)
+                and isinstance(inner.test.operand, ast.Name)
+                and inner.test.operand.id == flag
+                and any(isinstance(stmt, ast.Return) for stmt in inner.body)
+            ):
+                gated.update(name for name in names if isinstance(name, str))
+    return frozenset(gated)
+
+
+def _agent_impl_call_keywords(function):
+    """Constant keyword arguments a caller pins on its ``_agent_impl`` call."""
+    tree = ast.parse(inspect.getsource(function))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        target = node.func
+        name = target.attr if isinstance(target, ast.Attribute) else getattr(
+            target, "id", "",
+        )
+        if name != "_agent_impl":
+            continue
+        return {
+            keyword.arg: keyword.value.value
+            for keyword in node.keywords
+            if keyword.arg and isinstance(keyword.value, ast.Constant)
+        }
+    return {}
+
+
+def test_flag_gate_extractors_cannot_go_vacuous():
+    web = _flag_gated_tools("allow_web")
+    location = _flag_gated_tools("allow_location")
+    assert "web_search" in web and "web_fetch" in web
+    assert location, "allow_location gate extractor sees nothing"
+    assert location <= web
+    # The declared constants must match what the dispatcher actually does, or
+    # the filter below is protecting against the wrong set.
+    assert web == frozenset(server._AGENT_WEB_GATED_TOOLS)
+    assert location == frozenset(server._AGENT_LOCATION_GATED_TOOLS)
+    # And the project-bound gate must still be a real, narrowing gate: it has
+    # to refuse dispatchable tools, or every assertion below is a tautology.
+    # (Note it is deliberately NOT asserted to be a subset of the dispatch
+    # branches -- 24 of its names have no branch at all.  That is inert rather
+    # than harmful, because it is a permit set, not an advertising surface.)
+    assert len(server._PROJECT_BOUND_AGENT_TOOLS) >= 30
+    dispatch = capabilities.dispatch_names(server._agent_dispatch)
+    refused = dispatch - frozenset(server._PROJECT_BOUND_AGENT_TOOLS)
+    assert len(refused) >= 10, refused
+
+
+def _run_flag_combinations():
+    """Every run-flag combination ``_agent_tool_help`` accepts."""
+    flags = tuple(
+        name
+        for name, parameter in inspect.signature(
+            server._agent_tool_help
+        ).parameters.items()
+        if isinstance(parameter.default, bool)
+    )
+    for combination in itertools.product((False, True), repeat=len(flags)):
+        yield dict(zip(flags, combination))
+
+
+def test_agent_help_advertises_nothing_a_run_gate_will_refuse():
+    """The admit-then-deny guard.
+
+    For every combination of run flags, no name the help text advertises may
+    be one that ``_agent_run_tool_policy_error`` refuses for that same
+    combination.  Advertising it means the model is told it can call the tool
+    and is refused one step later -- and the run pays a step for it.
+    """
+    for keywords in _run_flag_combinations():
+        help_text = server._agent_tool_help(**keywords)
+        advertised = _help_advertised(help_text)
+        assert advertised, "help went empty for %s" % keywords
+        refused = sorted(
+            name for name in advertised
+            if server._agent_run_tool_policy_error(name, **keywords)
+        )
+        assert refused == [], (
+            "_agent_tool_help(%s) advertises %d tool(s) that a later gate "
+            "unconditionally refuses on exactly that run: %s"
+            % (
+                ", ".join("%s=%s" % item for item in sorted(keywords.items())),
+                len(refused),
+                refused,
+            )
+        )
+
+
+def test_project_bound_help_still_advertises_a_usable_surface():
+    """The filter must narrow the surface, not empty it."""
+    unbound = _help_advertised(server._agent_tool_help())
+    bound = _help_advertised(server._agent_tool_help(project_bound=True))
+    assert bound < unbound, "project-bound filter removed nothing"
+    assert len(bound) >= 30, bound
+    assert "file_read" in bound
+
+
+def test_autopilot_workspace_allowlist_survives_the_project_bound_gate(tmp_path):
+    """F1: the literal sibling of the dispatch bug this file already guards.
+
+    ``_AUTOPILOT_WORKSPACE_TOOLS`` is rendered verbatim into the transcript as
+    "HOST TOOL ALLOWLIST (cannot be expanded by the model)".  On a project-
+    bound run every name outside ``_PROJECT_BOUND_AGENT_TOOLS`` is refused.
+    """
+    project = str(tmp_path)
+    # The scope must actually resolve, or this test binds nothing.
+    assert server._agent_project_scope(project)[0], project
+    for policy in ("workspace", "observe"):
+        run = {"policy": policy, "project": project}
+        allowed = server._autopilot_allowed_tools(run)
+        assert allowed, run
+        gap = sorted(frozenset(allowed) - frozenset(server._PROJECT_BOUND_AGENT_TOOLS))
+        assert gap == [], (
+            "the %s allowlist a project-bound autopilot run renders into its "
+            "transcript names %d tool(s) with no project-bound execution "
+            "contract: %s" % (policy, len(gap), gap)
+        )
+    # An unbound run must keep its full allowlist -- the narrowing is scoped.
+    unbound = server._autopilot_allowed_tools({"policy": "workspace"})
+    assert frozenset(unbound) == frozenset(server._AUTOPILOT_WORKSPACE_TOOLS)
+
+
+def test_orchestrator_worker_help_names_no_tool_its_own_flags_refuse():
+    """F4: ``_orchestrator_agent_worker`` pins ``allow_web=False``.
+
+    The flags are read out of the call itself rather than restated here, so
+    changing the call changes what this test checks.
+    """
+    keywords = _agent_impl_call_keywords(server._orchestrator_agent_worker)
+    assert keywords, "no _agent_impl call found in _orchestrator_agent_worker"
+    assert keywords.get("allow_web") is False, keywords
+    help_text = server._agent_tool_help(
+        read_only=bool(keywords.get("read_only")),
+        project_bound=True,
+        allow_web=bool(keywords.get("allow_web")),
+        allow_location=bool(keywords.get("allow_location")),
+    )
+    advertised = _help_advertised(help_text)
+    dead = sorted(advertised & _flag_gated_tools("allow_web"))
+    assert dead == [], (
+        "every master_orchestrate worker run advertises %d web tool(s) that "
+        "its own allow_web=False refuses: %s" % (len(dead), dead)
+    )

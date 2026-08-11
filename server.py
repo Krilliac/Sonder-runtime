@@ -13368,19 +13368,41 @@ def _agent_help_advertised_tools(help_text):
     return tuple(names)
 
 
-def _agent_tool_help(read_only=False, cloud=False, unsafe=False):
+def _agent_tool_help(
+    read_only=False,
+    cloud=False,
+    unsafe=False,
+    project_bound=False,
+    allow_web=True,
+    allow_location=False,
+):
+    """Advertise exactly what THIS run's gates will admit.
+
+    Deriving the filter from ``_agent_run_tool_policy_error`` instead of
+    restating one of its tool sets is what stops the two from drifting: the
+    local-only set was stripped here while the nested-model set never was, so a
+    hosted agent read in its own tool help that it could nest a model call that
+    dispatch hard-denies.  The same failure was live on three more gates --
+    ``project_bound`` left 21 names dead in ``AGENT_TOOL_HELP`` for every
+    project-bound run, and ``allow_web`` left the three web tools dead on every
+    ``master_orchestrate`` worker -- because those gates were never modelled
+    here at all.
+    """
     help_text = REPOSITORY_AGENT_TOOL_HELP if read_only else AGENT_TOOL_HELP
-    if not cloud:
-        return help_text
-    # Advertise exactly what hosted policy will admit.  Deriving the filter
-    # from _cloud_agent_tool_policy_error instead of restating one of its tool
-    # sets is what stops the two from drifting: the local-only set was stripped
-    # here while the nested-model set never was, so a hosted agent read in its
-    # own tool help that it could nest a model call that dispatch hard-denies.
     denied = frozenset(
         name for name in _agent_help_advertised_tools(help_text)
-        if _cloud_agent_tool_policy_error(name, unsafe=unsafe)
+        if _agent_run_tool_policy_error(
+            name,
+            read_only=read_only,
+            cloud=cloud,
+            unsafe=unsafe,
+            project_bound=project_bound,
+            allow_web=allow_web,
+            allow_location=allow_location,
+        )
     )
+    if not denied:
+        return help_text
     return "\n".join(
         line for line in help_text.splitlines()
         if not any(
@@ -14279,7 +14301,12 @@ def _agent_dispatch(
         if policy_error:
             return policy_error
         if tool_name in {"command_registry_list", "tool_manifest"}:
-            return _agent_tool_help(read_only=True)
+            return _agent_tool_help(
+                read_only=True,
+                project_bound=bool(repository_extra_roots),
+                allow_web=allow_web,
+                allow_location=allow_location,
+            )
         if repository_extra_roots:
             # The model cannot grant itself filesystem authority.  Replace any
             # scoped value with the exact host-selected project root, then use
@@ -15216,6 +15243,67 @@ _CLOUD_AGENT_LOCAL_ONLY_TOOLS = frozenset({
     "repo_diff", "artifact_risk_inspect", "process_list",
     "process_memory_risk_inspect",
 })
+# ``_agent_dispatch`` checks these two flags *inside* the matched tool branch,
+# so every name here is dispatchable and a dispatch-only drift check reports it
+# as fine.  The refusal is name-unconditional all the same: on a run with the
+# flag off the tool can never do anything.  Kept as declared sets so the help
+# filter is cheap; tests/test_advertised_surface_drift.py AST-extracts the real
+# branch guards and asserts these two constants match them exactly.
+_AGENT_WEB_GATED_TOOLS = frozenset({
+    "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",
+})
+_AGENT_LOCATION_GATED_TOOLS = frozenset({"approximate_location_lookup"})
+
+
+def _agent_run_tool_policy_error(
+    tool_name,
+    *,
+    read_only=False,
+    cloud=False,
+    unsafe=False,
+    project_bound=False,
+    allow_web=True,
+    allow_location=False,
+):
+    """Name-unconditional refusals a run's own flags guarantee, in one place.
+
+    Advertising a tool a later gate always refuses is the "admit-then-deny"
+    defect: the model is told it may call the tool, spends a step calling it,
+    and is refused.  ``_agent_tool_help`` used to model only ``read_only`` /
+    ``cloud`` / ``unsafe``, while ``_agent_impl`` gates three more times --
+    ``project_scope`` against ``_PROJECT_BOUND_AGENT_TOOLS``, and ``allow_web``
+    / ``allow_location`` inside the dispatcher.  Both the help filter and the
+    drift guard now read this one predicate, so neither can drift from the
+    other.
+
+    Returns the refusal message, or ``""`` when the run admits the tool.
+    """
+    if unsafe:
+        # unsafe_lab resets read_only/allow_web/allow_location/project in
+        # _agent_impl, so only hosted policy still applies.
+        return _cloud_agent_tool_policy_error(tool_name, unsafe=True)
+    if cloud:
+        error = _cloud_agent_tool_policy_error(tool_name, unsafe=unsafe)
+        if error:
+            return error
+    if read_only and tool_name not in REPOSITORY_READ_ONLY_TOOLS:
+        return (
+            "ERROR: tool '%s' is not allowed by the repository read-only policy."
+            % tool_name
+        )
+    if project_bound and tool_name not in _PROJECT_BOUND_AGENT_TOOLS:
+        return (
+            "ERROR: HOST POLICY: tool '%s' has no project-bound execution "
+            "contract and is disabled for a project-bound agent." % tool_name
+        )
+    if not allow_web and tool_name in _AGENT_WEB_GATED_TOOLS:
+        return "ERROR: web access disabled for this agent run"
+    if not allow_location and tool_name in _AGENT_LOCATION_GATED_TOOLS:
+        return (
+            "ERROR: approximate location requires host-verified user consent "
+            "for this agent run"
+        )
+    return ""
 
 
 def _cloud_agent_tool_policy_error(tool_name, *, unsafe=False):
@@ -16313,7 +16401,18 @@ def _agent_impl(
     # own workspace.
     transcript = "Task:\n%s\n\n%s" % (
         prompt,
-        _agent_tool_help(read_only=read_only, cloud=cloud, unsafe=unsafe),
+        # Every gate this run will actually apply, not just the three that
+        # used to be modelled here.  project_scope/allow_web/allow_location
+        # refuse name-unconditionally further down; advertising through them
+        # spent steps on calls that could never run.
+        _agent_tool_help(
+            read_only=read_only,
+            cloud=cloud,
+            unsafe=unsafe,
+            project_bound=bool(project_scope),
+            allow_web=allow_web,
+            allow_location=allow_location,
+        ),
     )
     if unsafe:
         transcript = "%s\n\n%s" % (unsafe_lab.WARNING, transcript)
@@ -16842,9 +16941,15 @@ def _agent_impl(
             # while a hosted model sees only the capabilities it may request.
             observation = _agent_tool_help(
                 read_only=read_only, cloud=True, unsafe=unsafe,
+                project_bound=bool(project_scope),
+                allow_web=allow_web, allow_location=allow_location,
             )
         elif read_only and tool_name in {"command_registry_list", "tool_manifest"}:
-            observation = _agent_tool_help(read_only=True)
+            observation = _agent_tool_help(
+                read_only=True, cloud=cloud, unsafe=unsafe,
+                project_bound=bool(project_scope),
+                allow_web=allow_web, allow_location=allow_location,
+            )
         else:
             ensure_not_cancelled()
             # Retire a matching speculation: if the model committed to the
@@ -17257,11 +17362,20 @@ _AUTOPILOT_MUTATION_EVIDENCE = frozenset({
 def _autopilot_allowed_tools(run: dict) -> frozenset | None:
     if unsafe_lab.active():
         return None
-    return (
+    allowed = (
         _AUTOPILOT_OBSERVE_TOOLS
         if run.get("policy") == "observe"
         else _AUTOPILOT_WORKSPACE_TOOLS
     )
+    # A project-bound run renders this set into the transcript as "HOST TOOL
+    # ALLOWLIST (cannot be expanded by the model)" and then refuses every name
+    # outside _PROJECT_BOUND_AGENT_TOOLS at the project-bound gate.  Narrowing
+    # here keeps the promise and the gate identical: the literal sibling of the
+    # advertise-vs-dispatch bug 277fd27 fixed, one gate further down.
+    project_scope, _project_error = _agent_project_scope(run.get("project", ""))
+    if project_scope:
+        allowed = allowed & _PROJECT_BOUND_AGENT_TOOLS
+    return allowed
 
 
 def _autopilot_command_programs(value) -> list[str]:
