@@ -78,6 +78,14 @@ Acceptance also rejects:
 - any candidate file outside the pre-backed-up scope;
 - removed/renamed tests from the pre-change inventory;
 - missing or failed syntax, targeted, regression, or smoke checks;
+  - `syntax` compiles the declared Python modules that survive in the candidate.
+    If every declared module was deleted, or the run declares no Python at all,
+    that is a refusal: an empty target set is not a pass.
+  - `smoke` imports the candidate's own modules in a child process rooted at the
+    workspace, confirms any declared deletion is genuinely unreachable, and must
+    return a SHA-256 receipt over the bytes it loaded. The receipt is computed by
+    the recording process and never handed to the probe, so exit 0 on its own
+    cannot satisfy the gate.
 - oversized diffs or file counts;
 - source conflicts after planning;
 - corrupted backups or failed rollback rehearsal.
