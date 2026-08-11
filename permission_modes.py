@@ -349,6 +349,60 @@ PRIVILEGED_TOOLS = frozenset()
 # itself -- not how hard the tool is to reach.
 GATE_CONTROL_TOOLS = frozenset({"permission_mode"})
 
+# Tools that hand out authority which outlives the call. The non-interactive
+# degrade does not apply to these -- see ``decide()`` step 5b.
+#
+# Task #18 made ``UNCLASSIFIED`` non-degradable and left ``dangerous``
+# degradable, and for an elevation primitive that ordering is inverted: the
+# grade for "we do not know what this is" refuses to relax while the grade for
+# "this is the most dangerous thing we have" still does. Measured with no
+# operator rules, every one of these came back ALLOW in manual, acceptEdits and
+# auto with ``interactive=False``, which is the only path the five production
+# gates use.
+#
+# Why this class and not the whole ``dangerous`` grade. The catalog grades 19
+# commands ``dangerous``; 8 of them are reachable from
+# ``server._agent_dispatch`` (``file_delete``, ``git_cherry_pick``,
+# ``git_merge``, ``memory_privacy_repair``, ``memory_quality_repair``,
+# ``self_heal_repair``, ``sqlite_mutate``, ``task_delete``). A class-wide
+# non-degrade would refuse all eight in every non-interactive lane -- the agent
+# and autopilot lanes entirely -- which is a shutdown, not a gate. So the line
+# is drawn where the degrade's own justification stops holding rather than at
+# the severity label.
+#
+# That justification is a trade: accept an unanswerable prompt resolving to
+# yes, because the result can be undone afterwards. For privilege the "undo" is
+# "the operator can revoke it later", which assumes the operator KNOWS IT
+# HAPPENED -- and a degraded prompt is precisely the notification that did not
+# occur. Granting an account, assuming one, logging in, switching elevation on,
+# or writing a standing permission rule all leave state behind and no prompt
+# behind. None of the five is dispatchable by the agent or loop paths
+# (measured against ``tool_capabilities.dispatch_names``), so this costs those
+# lanes nothing; the surfaces it binds are the MCP protocol entry point and the
+# HTTP one, where "nobody is present" is literally true.
+#
+# ``permission_rule_set`` is a member because without it the class does not
+# bind. ``decide()`` resolves an explicit ALLOW rule at step 3, BEFORE the
+# degrade, so a caller who can write rules unattended writes one for
+# ``admin_register`` and walks through. Bootstrapping authority has to cost a
+# person's attention or it is not a boundary.
+#
+# Both routes out survive and are deliberate: a console operator arrives with
+# ``interactive=True`` and is asked, and an explicit ``allow`` rule -- narrow,
+# persistent, auditable -- still satisfies the ask at step 3. A refusal with no
+# route out is one operators learn to route around.
+#
+# Not extended to ``/selfmod``: ``work/17-selfmod-gate`` gates that with a
+# per-invocation ``non_degrading=`` flag keyed on the ACTION, because
+# ``/selfmod status`` and ``/selfmod deploy`` arrive at the same command and
+# refusing a status read unattended is the over-refusal these gates exist to
+# avoid. That is the right shape there and the wrong shape here; the two
+# mechanisms compose, and this list must not grow to swallow that one.
+DURABLE_AUTHORITY_TOOLS = frozenset({
+    "admin_login", "admin_register", "admin_set_account",
+    "elevate", "permission_rule_set",
+})
+
 _LOCK = threading.RLock()
 _STATE = {"mode": DEFAULT_MODE, "elevated": False, "elevation_reason": ""}
 _LOADED = False
@@ -761,6 +815,25 @@ def decide(tool_name: str, *, interactive: bool = True,
                 % (name or "(empty name)"),
                 name,
                 source="unclassified",
+            )
+        # 5b. The other grade the degrade must not touch, and it is a class
+        #     rather than a severity -- see DURABLE_AUTHORITY_TOOLS. The
+        #     degrade trades an unanswerable prompt for the chance to undo the
+        #     result; for a tool that grants authority the undo is "the
+        #     operator revokes it later", which assumes the operator learned it
+        #     happened, and the degraded prompt is exactly the notice that did
+        #     not reach them. Resolved after the explicit-allow branch at (3),
+        #     so an operator who wants this unattended still has a written way
+        #     to say so.
+        if name in DURABLE_AUTHORITY_TOOLS:
+            return Decision(
+                DENY, active, risk,
+                "%s grants authority that outlives this call, and there is no "
+                "one here to be told it happened; run it from the console and "
+                "answer the prompt, or write an explicit allow rule with "
+                "/permissions" % (name or "(empty name)"),
+                name,
+                source="durable-authority",
             )
         return Decision(
             ALLOW, active, risk,

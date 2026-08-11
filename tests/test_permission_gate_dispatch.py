@@ -431,13 +431,29 @@ def _selfmod_agent_allowlist():
 def test_manual_refuses_nothing_the_mode_did_not_refuse_before():
     """Default mode must not start denying tools that worked yesterday.
 
-    Wiring the gate in flips two dormant layers on at once. The mode layer is
+    Wiring the gate in flips two dormant layers on at once. The mode layer was
     a no-op on this path by construction (``interactive=False`` degrades
-    ``ask`` to ``allow``), so the ONLY refusals mode ``manual`` may produce
-    are the per-tool ``deny`` rules that ``/permissions`` has always printed
-    and never enforced. Anything else refused here is a regression that would
-    surface to a user as "Sonder stopped working".
+    ``ask`` to ``allow``), so the refusals mode ``manual`` may produce are the
+    per-tool ``deny`` rules that ``/permissions`` has always printed and never
+    enforced. Anything else refused here is a regression that would surface to
+    a user as "Sonder stopped working".
+
+    Task #57 adds the second, declared exception:
+    ``permission_modes.DURABLE_AUTHORITY_TOOLS``, the class the non-interactive
+    degrade deliberately does not apply to. It is admitted here as an
+    enumerated set rather than by loosening the comparison, so the floor still
+    binds for every other name -- a change that starts denying anything else
+    still fails this test.
+
+    The cost this test exists to catch is measured, not assumed: none of those
+    names is reachable from ``_agent_dispatch`` at all (asserted below), so no
+    agent run that worked yesterday stops working. The gate refuses them on
+    this path anyway, and deliberately -- a model must not be able to grant
+    itself authority, and "there is no dispatch branch today" is not a
+    guarantee about tomorrow.
     """
+    import tool_capabilities
+
     pm.set_mode(pm.MANUAL)
     # The hermetic test home has no permissions.json, so the gate's real rule
     # lookup resolves against exactly these built-in defaults.
@@ -454,10 +470,14 @@ def test_manual_refuses_nothing_the_mode_did_not_refuse_before():
         if execution_policy.evaluate(defaults, tool)["action"] == pm.DENY:
             denied_by_rule.add(tool)
 
-    assert refused == denied_by_rule
+    assert refused == denied_by_rule | pm.DURABLE_AUTHORITY_TOOLS
     # And the default policy really does deny something, so an empty set on
     # both sides can never pass this vacuously.
     assert "file_delete" in denied_by_rule
+    # The whole justification for admitting the class above: it costs the agent
+    # lane nothing, because the agent lane cannot call any of it.
+    dispatchable = set(tool_capabilities.dispatch_names(server._agent_dispatch))
+    assert pm.DURABLE_AUTHORITY_TOOLS & dispatchable == set()
 
 
 def test_manual_allows_every_risk_class_on_the_agent_path():
