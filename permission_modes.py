@@ -610,13 +610,33 @@ def decide_for_caller(tool_name: str, *, interactive: bool,
 
 def decide(tool_name: str, *, interactive: bool = True,
            mode: str | None = None, rule_lookup=None,
-           requires_elevation: bool = False) -> Decision:
+           requires_elevation: bool = False,
+           non_degrading: bool = False) -> Decision:
     """Whether ``tool_name`` may run right now.
 
     ``interactive=False`` means nobody is present to answer a prompt (a direct
     MCP call). ``ask`` then degrades to ``allow`` -- preserving how Sonder has
     always behaved -- except under ``plan``, which denies regardless because
     holding still is the entire point of that mode.
+
+    ``non_degrading``, if given, turns off exactly that degrade for THIS
+    invocation: ``ask`` with nobody to ask becomes ``deny`` instead of
+    ``allow``. It is per-invocation for the same reason ``requires_elevation``
+    is -- what makes an operation unrecoverable is usually what the caller is
+    asking a general entry point to do, not the entry point itself.
+    ``/selfmod`` is the live case and currently the only caller: ``status``
+    and ``deploy`` arrive at the same command, and only one of them
+    ``os.replace``s the interpreter that is running.
+
+    The degrade is right for ordinary tools and is deliberately left alone for
+    them. It trades a refusal nobody could answer for the chance to undo the
+    result afterwards -- a bargain that assumes the thing that would undo it
+    still works. ``selfmod.deploy`` can overwrite ``selfmod.py``, so for self
+    modification that assumption is exactly what is at stake, and the trade
+    stops paying. Both routes out survive, because a refusal with no route out
+    is one operators learn to route around: an explicit ``allow`` rule is
+    resolved at (3) below, before this ever runs, and a console operator who
+    answers the prompt reaches here with ``interactive`` already true.
 
     ``rule_lookup``, if given, overrides the module-level ``_rule_lookup``
     hook for this call only. See the module docstring for the precedence
@@ -680,6 +700,16 @@ def decide(tool_name: str, *, interactive: bool = True,
     #    it did before rules were wired in.
     action = mode_action
     if action == ASK and not interactive:
+        if non_degrading:
+            # The one case where "nobody to ask" must mean no, not yes.
+            return Decision(
+                DENY, active, risk,
+                "this rewrites Sonder's own source, so it will not run with "
+                "nobody to approve it; run it from the console and answer the "
+                "prompt, or write an explicit allow rule with /permissions",
+                name,
+                source="non-degrading",
+            )
         return Decision(
             ALLOW, active, risk,
             "no interactive prompt available; %s tools are not blocked outside "
