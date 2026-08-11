@@ -96,7 +96,10 @@ def _select_examples(conn):
             "task": task,
             "response": response,
             "prompt_key": _canonical_prompt(task),
-            "population": reward.signal_population(best.get("signal")),
+            "population": (
+                "caller" if best.get("outcome_source") == reward.SOURCE_CALLER
+                else reward.signal_population(best.get("signal"))
+            ),
             "evidence_rowid": int(best.get("outcome_rowid") or 0),
             "interaction_rowid": int(first.get("interaction_rowid") or 0),
             "chars": len(task) + len(response),
@@ -106,8 +109,14 @@ def _select_examples(conn):
         # duplicate-prompt resolution and capacity eviction both preferred the
         # runtime's own marking to a human's -- in a corpus already ~98%
         # self-graded, that is the wrong row surviving every squeeze.
+        evidence_rank = reward.evidence_rank(best.get("signal"))
+        # Provenance is the actual answer to who judged this row.  A caller
+        # recording a passing test has still reviewed the delegated work; do
+        # not demote that row merely because its signal name is execution-like.
+        if best.get("outcome_source") == reward.SOURCE_CALLER:
+            evidence_rank = (evidence_rank[0], 2, reward.score(best.get("signal")))
         candidate["rank"] = (
-            reward.evidence_rank(best.get("signal")),
+            evidence_rank,
             candidate["evidence_rowid"],
             candidate["interaction_rowid"],
             candidate["id"],
@@ -141,6 +150,14 @@ def _select_examples(conn):
             rejected["selection_capacity"] += 1
 
     current = None
+
+    def row_evidence_rank(row):
+        signal = row.get("signal")
+        rank = reward.evidence_rank(signal)
+        if row.get("outcome_source") == reward.SOURCE_CALLER:
+            rank = (rank[0], 2, reward.score(signal))
+        return rank, int(row.get("outcome_rowid") or 0)
+
     for row in memory_store.interaction_outcome_evidence(
         conn,
         limit=MAX_EXPORT_EVIDENCE_ROWS + 1,
@@ -178,10 +195,7 @@ def _select_examples(conn):
             # rows by score() alone lets a self-graded pass displace the
             # caller's judgement of the same interaction.
             if current["best"] is None or (
-                reward.evidence_rank(signal), int(row.get("outcome_rowid") or 0)
-            ) > (
-                reward.evidence_rank(current["best"].get("signal")),
-                int(current["best"].get("outcome_rowid") or 0),
+                row_evidence_rank(row) > row_evidence_rank(current["best"])
             ):
                 current["best"] = row
         elif reward.score(signal) < 0:

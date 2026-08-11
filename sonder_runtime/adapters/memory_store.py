@@ -2157,15 +2157,19 @@ def log_lesson_usage(conn, lesson_ids, interaction_id, task):
     conn.commit()
 
 
-def record_lesson_usage_outcome(conn, interaction_id, signal, reward, *, source):
+def record_lesson_usage_outcome(conn, interaction_id, signal, reward, *, source=None):
     """Credit a retrieval with the outcome it earned, stamped with provenance.
 
-    ``source`` is required for the same reason it is on ``record_outcome_row``:
+    New callers supply ``source`` for the same reason it is on ``record_outcome_row``:
     this row feeds ``lesson_usage_stats`` -> ``retriever.lesson_quarantine``,
     which removes lessons from retrieval. Evidence with no provenance cannot be
     excluded from that gate later.
     """
-    _checked_outcome_source(source)
+    # Keep the legacy four-argument call usable for rows that predate source
+    # provenance.  NULL is intentionally preserved as legacy/unknown rather
+    # than invented as caller or machine evidence.
+    if source is not None:
+        _checked_outcome_source(source)
     conn.execute(
         "UPDATE lesson_usage SET outcome_signal=?, reward=?, "
         "outcome_ts=CURRENT_TIMESTAMP, outcome_source=? WHERE interaction_id=?",
@@ -2219,12 +2223,29 @@ def lesson_usage_stats(conn, history=None):
         "SUM(CASE WHEN %(elig)s AND reward > 0 THEN 1 ELSE 0 END) AS wins, "
         "SUM(CASE WHEN %(elig)s AND reward < 0 THEN 1 ELSE 0 END) AS losses, "
         "AVG(CASE WHEN %(elig)s AND reward IS NOT NULL THEN reward END) "
-        "AS avg_reward "
+        "AS avg_reward, "
+        "AVG(CASE WHEN %(elig)s AND (outcome_source = 'caller' OR "
+        "(outcome_source IS NULL AND outcome_signal IN "
+        "('used','copied','edited','accepted','rejected'))) "
+        "AND reward IS NOT NULL THEN reward END) AS avg_reward_caller, "
+        "SUM(CASE WHEN %(elig)s AND (outcome_source = 'caller' OR "
+        "(outcome_source IS NULL AND outcome_signal IN "
+        "('used','copied','edited','accepted','rejected'))) "
+        "AND reward IS NOT NULL THEN 1 ELSE 0 END) AS scored_caller, "
+        "AVG(CASE WHEN %(elig)s AND (outcome_source != 'caller' OR "
+        "(outcome_source IS NULL AND outcome_signal NOT IN "
+        "('used','copied','edited','accepted','rejected'))) "
+        "AND reward IS NOT NULL THEN reward END) "
+        "AS avg_reward_execution, "
+        "SUM(CASE WHEN %(elig)s AND (outcome_source != 'caller' OR "
+        "(outcome_source IS NULL AND outcome_signal NOT IN "
+        "('used','copied','edited','accepted','rejected'))) "
+        "AND reward IS NOT NULL THEN 1 ELSE 0 END) AS scored_execution "
         "FROM lesson_usage GROUP BY lesson_id" % {
             "elig": "(outcome_source IS NULL OR outcome_source NOT IN (%s))"
                     % placeholders,
         },
-        tuple(excluded) * 3,
+        tuple(excluded) * 7,
     ).fetchall()
     stats = {r["lesson_id"]: dict(r) for r in rows}
 

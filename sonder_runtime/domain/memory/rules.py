@@ -31,6 +31,15 @@ VALID_SIGNALS = frozenset(SIGNAL_REWARDS)
 # fine-tuning row.
 GOOD_THRESHOLD = 0.71
 
+# Signal populations answer distinct questions and are never averaged.
+CALLER_JUDGED = frozenset({"used", "copied", "edited", "accepted", "rejected"})
+EXECUTION_GROUNDED = frozenset({"tests_passed", "compiled", "failed"})
+POPULATIONS = {"caller": CALLER_JUDGED, "execution": EXECUTION_GROUNDED}
+_POPULATION_TIER = {"caller": 2, "execution": 1}
+
+# Below every stored reward: absence of evidence cannot outrank measurement.
+NO_MEASUREMENT_RANK = -2.0
+
 
 def reward_score(signal: str) -> float:
     return SIGNAL_REWARDS.get(signal, 0.0)
@@ -38,6 +47,31 @@ def reward_score(signal: str) -> float:
 
 def reward_is_good(signal: str) -> bool:
     return reward_score(signal) >= GOOD_THRESHOLD
+
+
+def signal_population(signal: str) -> str:
+    """Return ``caller`` or ``execution`` for a known outcome signal."""
+    for name, signals in POPULATIONS.items():
+        if signal in signals:
+            return name
+    return ""
+
+
+def evidence_rank(signal: str) -> tuple[int, int, float]:
+    """Credit order: eligibility, then positive evidence population, then price."""
+    good = reward_is_good(signal)
+    return (
+        1 if good else 0,
+        _POPULATION_TIER.get(signal_population(signal), 0) if good else 0,
+        reward_score(signal),
+    )
+
+
+def retention_rank(caller_mean, execution_mean) -> tuple[float, float]:
+    """Ascending duplicate-retention order, preserving caller evidence first."""
+    def rank(mean):
+        return NO_MEASUREMENT_RANK if mean is None else float(mean)
+    return (-rank(caller_mean), -rank(execution_mean))
 
 
 # --- outcome provenance -----------------------------------------------------
