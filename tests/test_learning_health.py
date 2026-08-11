@@ -127,7 +127,9 @@ def test_clean_grounded_learning_store_is_healthy_and_formats(monkeypatch):
         conn.close()
 
     text = learning_health.format_report(report)
-    assert report["status"] == "healthy"
+    # A single caller judgement is useful evidence but not a statistically
+    # meaningful health gate; the report must not call it healthy yet.
+    assert report["status"] == "watch"
     assert report["distillation_yield"] == 1.0
     assert "sonder learning health" in text
     assert "outcome coverage: 100.0%" in text
@@ -367,11 +369,11 @@ def test_status_gates_on_the_caller_judged_rate_not_the_blend():
     assert "blended, not an accuracy figure" in learning_health.format_report(report)
 
 
-def test_a_reviewed_sample_too_small_to_gate_on_falls_back_to_the_blend():
+def test_a_reviewed_sample_too_small_to_gate_on_is_unmeasured():
     """Four judgements cannot carry a 60%/80% threshold; flipping to
     "attention" on a single rejection would make the status meaningless. Below
-    _MIN_REVIEWED_SAMPLE the gate stays on the blend and the split stays
-    visible in the text, which is where the honest number lives."""
+    _MIN_REVIEWED_SAMPLE the gate is explicitly unmeasured; self-generated
+    curriculum outcomes are a different population and cannot stand in."""
     conn = _conn()
     try:
         for n in range(9):
@@ -389,7 +391,7 @@ def test_a_reviewed_sample_too_small_to_gate_on_falls_back_to_the_blend():
     assert report["reviewed_outcomes"] == 4
     assert report["reviewed_positive_percent"] == 25.0
     assert report["status"] != "attention"
-    assert learning_health._gating_positive_percent(report)[1] == "blended"
+    assert learning_health.gating_positive_percent(report)[1] == "unmeasured"
 
 
 def test_loss_only_is_measured_against_its_own_reference_class():

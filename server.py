@@ -2194,20 +2194,18 @@ def _selfmod_command(arg: str, *, repository_root="", operator_approved=False) -
     rest = rest.strip()
     root = Path(repository_root or Path(__file__).resolve().parent).resolve()
     if action in _SELFMOD_SOURCE_WRITING_ACTIONS and not operator_approved:
-        # ``interactive=False`` is the honest value at every caller that gets
-        # here without ``operator_approved``: the app's HTTP chain and
-        # ``answer_with_history`` (ordinary chat, and the MCP ``sonder`` tool)
-        # have nobody to prompt. ``non_degrading`` is what stops that from
-        # meaning yes. The console sets ``operator_approved`` only after a
-        # person has actually answered ``_named_command_gate``'s prompt.
-        decision = permission_modes.decide(
-            "selfmod", interactive=False, non_degrading=True,
-        )
-        if decision.action == permission_modes.DENY:
-            return "refused /selfmod %s: %s (mode: %s)" % (
-                action, decision.reason,
-                permission_modes.MODE_LABELS.get(decision.mode, decision.mode),
-            )
+        # Source replacement is the one dangerous operation that must never
+        # inherit an unattended mode's normal ask-to-allow degradation.  The
+        # only unattended escape hatch is a written per-tool allow rule; the
+        # other is an actual console approval passed by the REPL.
+        rule_action, _ = permission_modes._rule_action_for("selfmod", None)
+        if rule_action != permission_modes.ALLOW:
+            mode = permission_modes.current_mode()
+            return (
+                "refused /selfmod %s: this writes Sonder's own source and "
+                "requires a console operator approval, or an explicit allow "
+                "rule via /permissions (mode: %s)"
+            ) % (action, permission_modes.MODE_LABELS.get(mode, mode))
     try:
         if action in {"status", "show", "list"}:
             return selfmod.format_status()
@@ -4175,7 +4173,10 @@ def _parse_schema_arg(schema):
 # unchecked by default instead of being assumed harmless. `tests/
 # test_offload_schema.py` pins both halves against the verifier's real
 # behaviour, so this cannot quietly drift out of step with it.
-_VERIFIED_SCHEMA_KEYWORDS = frozenset({"type", "required", "properties", "items"})
+_VERIFIED_SCHEMA_KEYWORDS = frozenset({
+    "type", "required", "properties", "items", "enum", "minimum",
+    "minLength", "additionalProperties", "uniqueItems", "pattern",
+})
 
 # How many gaps a disclosure names before it summarizes the rest.
 _MAX_REPORTED_SCHEMA_GAPS = 8
@@ -4312,7 +4313,9 @@ def _require_schema_match(text, schema):
     if errors:
         detail = "schema violation: %s" % "; ".join(errors)
         if gaps:
-            detail += ". Unverified: %s" % _format_schema_gaps(gaps)
+            # Keep the machine-readable disclosure even on a rejected reply;
+            # otherwise a partial verifier failure looks like a complete one.
+            detail += " [schema_unverified: %s]" % _format_schema_gaps(gaps)
         raise ModelCallError("protocol", detail)
     return data, gaps
 
@@ -12509,6 +12512,14 @@ _LOOP_ACTION_TOOLS = {
     "learning_health": "learning_health_status",
 }
 
+# Single source for the public loop vocabulary.  It deliberately includes
+# aliases implemented by `_loop_dispatch`; hiding aliases makes clients think
+# valid actions are invalid, while advertising a non-branch makes the inverse
+# promise.  Keep the `loop` docstring in lockstep (covered by drift tests).
+_LOOP_ACTION_TYPES = (
+    "code", "run_code", "project", "run_project", "artifact", "artifact_generate", "assetgen", "artifact_ground", "artifact_check", "game_reference", "game_reference_suite", "game", "game_generate", "game_generate_and_test", "game_campaign", "game_generation_campaign", "offload", "sonder", "status", "diagnostics", "context_health", "learning_health", "memory_quality_report", "memory_quality_repair", "memory_privacy_review", "memory_privacy_repair", "memory_embedding_backfill", "memory_interaction_embedding_backfill", "improvement_report", "system_improvement_report", "master_status", "agent_status", "master_capacity", "agent_capacity", "master_cancel", "agent_cancel", "master_retry", "agent_retry", "master", "master_orchestrate", "work", "agent", "workbench_agent", "workspace_inventory", "directory_tree", "directory_create", "file_read_range", "text_search", "script_search", "program_search", "workspace_run", "script_run", "artifact_risk_inspect", "process_list", "process_memory_risk_inspect", "image_inspect", "data_inspect", "checklist_create", "checklist_update", "checklist_show", "file_policy", "file_find", "file_read", "file_write", "file_copy", "file_move", "file_edit", "file_delete", "self_heal_check", "self_heal_repair", "profile_status", "emotion_status", "emotion_update", "emotion_tune", "learn_preference", "preferences_status", "memory_search", "ground_artifact", "apply_learned", "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup", "unload", "sleep",
+)
+
 
 def _loop_action_tool(action_type):
     """The tool a loop action really runs, for the permission gate."""
@@ -12527,6 +12538,11 @@ def _loop_permission_refusal(action_type):
     nothing it refused yesterday, while `plan` and an explicit per-tool `deny`
     rule stop the action before it runs.
     """
+    # Unknown action types are rejected by `_loop_dispatch` with the canonical
+    # vocabulary below.  Do not turn that helpful contract error into a policy
+    # denial for a fictitious tool name.
+    if str(action_type or "").strip().lower() not in _LOOP_ACTION_TYPES:
+        return None
     tool = _loop_action_tool(action_type)
     decision = permission_modes.decide(tool, interactive=False)
     if decision.allowed:
@@ -13155,6 +13171,18 @@ def loop(
     except ValueError as e:
         return "ERROR: %s" % e
     return code_runner.format_loop_result(result)
+
+
+# Render the documented vocabulary from the same tuple used by the unknown
+# action reply.  The examples below remain hand-written because they document
+# argument shapes, but the list itself cannot drift from dispatch aliases.
+_loop_doc = loop.__doc__ or ""
+_loop_marker = "All valid `type` values:"
+_loop_tail = _loop_doc.find("\n\n    Argument shapes", _loop_doc.find(_loop_marker))
+if _loop_marker in _loop_doc and _loop_tail >= 0:
+    _loop_head = _loop_doc[:_loop_doc.find(_loop_marker) + len(_loop_marker)]
+    _loop_doc = _loop_head + " " + ", ".join(_LOOP_ACTION_TYPES) + "." + _loop_doc[_loop_tail:]
+    loop.__doc__ = _loop_doc
 
 
 @mcp.tool()
@@ -21586,6 +21614,12 @@ def codegen_build_loop(
         build_state["ran"] = codegen_loop.build_ran(out)
         build_state["exit_ok"] = exit_ok
         errors = codegen_loop.count_errors(out, error_regex)
+        if codegen_loop.output_truncated(out):
+            # This marker must reach `format_report` independently of the
+            # caller's diagnostic regex (for example a C#-only regex).  A
+            # partial compiler transcript is neither a clean build nor a
+            # measured failure.
+            errors.append("error: build output was truncated; measurement incomplete")
         if not exit_ok and not errors:
             # The compiler said no and the regex heard nothing -- a restore
             # failure under a CS-only regex, a non-English toolchain, a Gradle
