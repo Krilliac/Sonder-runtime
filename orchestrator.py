@@ -48,6 +48,57 @@ MAX_FACTS_CHARS = 4000
 
 APPLICATION_HEADER = "# How to apply the lessons:"
 
+# A code fence an injected item opens and never closes swallows everything
+# after it -- measured on the real server._answer path, a stored fact whose
+# body opened a ```python block put the TASK_DIRECTIVE, the "# Task:" marker
+# and the task itself inside that fact's code block, so the question reads as
+# the fact's sample code. `recall._format` already guards the version of this
+# it creates ITSELF (its 400-char cut can land mid-block, so it appends a
+# closer); this is the same defect arriving from a different source, so it
+# takes the same shape rather than a second unrelated mechanism.
+#
+# It has to be closed at the ASSEMBLY boundary, not in the stored text: whole
+# facts only, never a shortened or rewritten one -- a fact cut in half is a
+# fact that lies. Appending a terminator after the whole item is the only
+# repair that adds nothing to and removes nothing from what the operator
+# stored. Relabelling the task marker would not help: any plain-text marker
+# inside an open fence is inert, so the fence must be closed either way.
+_FENCE_CHARS = ("`", "~")
+
+
+def _unclosed_fence(text):
+    """The closing fence an item still owes, or "" when it is balanced.
+
+    Scans like a Markdown reader rather than counting: a bare run of >= 3 ` or
+    ~ opens a block, and only a bare run of at least that length of the SAME
+    character closes it. Parity-counting ``` alone would miss a ~~~ block and
+    would miscount a ``` line that is content inside a ~~~ block.
+    """
+    char = None
+    length = 0
+    for line in str(text or "").splitlines():
+        stripped = line.lstrip()
+        if char is None:
+            for candidate in _FENCE_CHARS:
+                run = len(stripped) - len(stripped.lstrip(candidate))
+                if run >= 3:
+                    char, length = candidate, run
+                    break
+            continue
+        run = len(stripped) - len(stripped.lstrip(char))
+        # An info string ("```python") opens but never closes, so a closer must
+        # be the bare run and nothing else.
+        if run >= length and not stripped[run:].strip():
+            char, length = None, 0
+    return "" if char is None else char * length
+
+
+def _fence_balanced(text):
+    """The item as stored, plus the closing fence it left open (if any)."""
+    text = str(text)
+    closer = _unclosed_fence(text)
+    return "%s\n%s" % (text, closer) if closer else text
+
 
 def _rough_token_count(text):
     if not text:
@@ -284,7 +335,8 @@ def _facts_block(facts, project_facts=None):
     total = sum(count for _label, _kept, count in per_source)
     omitted = total - len(kept)
     items = "\n\n".join(
-        "%s %d of %d\n%s" % (FACT_ITEM_HEADER, index, len(kept), text)
+        "%s %d of %d\n%s"
+        % (FACT_ITEM_HEADER, index, len(kept), _fence_balanced(text))
         for index, text in enumerate(kept, 1)
     )
     block = "%s\n%s\n\n%s" % (FACTS_HEADER, FACTS_PREAMBLE, items)
@@ -335,7 +387,10 @@ def build_prompt_reporting_omissions(task, lessons, recalls=None, facts=None,
         blocks.append(
             "%s\n%s" % (
                 MEMORY_HEADER,
-                "\n".join("- %s" % lesson for lesson in lessons),
+                # A lesson is normally a one-liner, but nothing enforces that
+                # and a distilled lesson can carry a snippet, so it gets the
+                # same fence balancing as a fact or a recall.
+                "\n".join("- %s" % _fence_balanced(lesson) for lesson in lessons),
             )
         )
         blocks.append(
@@ -358,7 +413,9 @@ def build_prompt_reporting_omissions(task, lessons, recalls=None, facts=None,
             "%s\n%s" % (
                 RECALL_HEADER,
                 "\n\n".join(
-                    "%s %d of %d\n%s" % (RECALL_ITEM_HEADER, index, len(recalls), text)
+                    "%s %d of %d\n%s"
+                    % (RECALL_ITEM_HEADER, index, len(recalls),
+                       _fence_balanced(text))
                     for index, text in enumerate(recalls, 1)
                 ),
             )
