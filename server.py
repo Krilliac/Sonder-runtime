@@ -13378,7 +13378,7 @@ def _agent_tool_help(
 ):
     """Advertise exactly what THIS run's gates will admit.
 
-    Deriving the filter from ``_agent_run_tool_policy_error`` instead of
+    Deriving the filter from ``_agent_run_tool_refusal`` instead of
     restating one of its tool sets is what stops the two from drifting: the
     local-only set was stripped here while the nested-model set never was, so a
     hosted agent read in its own tool help that it could nest a model call that
@@ -13391,7 +13391,7 @@ def _agent_tool_help(
     help_text = REPOSITORY_AGENT_TOOL_HELP if read_only else AGENT_TOOL_HELP
     denied = frozenset(
         name for name in _agent_help_advertised_tools(help_text)
-        if _agent_run_tool_policy_error(
+        if _agent_run_tool_refusal(
             name,
             read_only=read_only,
             cloud=cloud,
@@ -15255,7 +15255,7 @@ _AGENT_WEB_GATED_TOOLS = frozenset({
 _AGENT_LOCATION_GATED_TOOLS = frozenset({"approximate_location_lookup"})
 
 
-def _agent_run_tool_policy_error(
+def _agent_run_tool_refusal(
     tool_name,
     *,
     read_only=False,
@@ -15265,7 +15265,7 @@ def _agent_run_tool_policy_error(
     allow_web=True,
     allow_location=False,
 ):
-    """Name-unconditional refusals a run's own flags guarantee, in one place.
+    """Name the gate that will refuse this tool on this run, or ``""``.
 
     Advertising a tool a later gate always refuses is the "admit-then-deny"
     defect: the model is told it may call the tool, spends a step calling it,
@@ -15273,36 +15273,33 @@ def _agent_run_tool_policy_error(
     ``cloud`` / ``unsafe``, while ``_agent_impl`` gates three more times --
     ``project_scope`` against ``_PROJECT_BOUND_AGENT_TOOLS``, and ``allow_web``
     / ``allow_location`` inside the dispatcher.  Both the help filter and the
-    drift guard now read this one predicate, so neither can drift from the
-    other.
+    drift guard read this one predicate, so neither can drift from the other.
 
-    Returns the refusal message, or ``""`` when the run admits the tool.
+    This deliberately returns a short GATE NAME, never a user-facing
+    ``ERROR:`` message.  The refusal messages themselves belong to the gates
+    that actually enforce them (``_repository_read_only_error``, the
+    project-bound branch of ``_agent_impl``, and ``_agent_dispatch``'s own
+    web/location guards); restating them here would put a fifth copy of each
+    string one edit away from drifting out of sync with the real one -- the
+    exact defect shape this function exists to prevent.  No caller reads the
+    text: both use it as a predicate.
     """
     if unsafe:
         # unsafe_lab resets read_only/allow_web/allow_location/project in
         # _agent_impl, so only hosted policy still applies.
-        return _cloud_agent_tool_policy_error(tool_name, unsafe=True)
-    if cloud:
-        error = _cloud_agent_tool_policy_error(tool_name, unsafe=unsafe)
-        if error:
-            return error
+        return "hosted agent policy" if _cloud_agent_tool_policy_error(
+            tool_name, unsafe=True,
+        ) else ""
+    if cloud and _cloud_agent_tool_policy_error(tool_name, unsafe=unsafe):
+        return "hosted agent policy"
     if read_only and tool_name not in REPOSITORY_READ_ONLY_TOOLS:
-        return (
-            "ERROR: tool '%s' is not allowed by the repository read-only policy."
-            % tool_name
-        )
+        return "repository read-only policy"
     if project_bound and tool_name not in _PROJECT_BOUND_AGENT_TOOLS:
-        return (
-            "ERROR: HOST POLICY: tool '%s' has no project-bound execution "
-            "contract and is disabled for a project-bound agent." % tool_name
-        )
+        return "project-bound execution contract"
     if not allow_web and tool_name in _AGENT_WEB_GATED_TOOLS:
-        return "ERROR: web access disabled for this agent run"
+        return "allow_web=False"
     if not allow_location and tool_name in _AGENT_LOCATION_GATED_TOOLS:
-        return (
-            "ERROR: approximate location requires host-verified user consent "
-            "for this agent run"
-        )
+        return "allow_location=False"
     return ""
 
 
