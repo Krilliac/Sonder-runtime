@@ -360,6 +360,12 @@ def _candidate(project: str, kind: str, run_id: str = ""):
         for pending in reversed(_PENDING):
             if kind in pending.judged:
                 continue
+            # A tool may not judge what it generated itself. `continue` rather
+            # than bail out: its own row must not shadow an older one that a
+            # different generator produced and that this verifier CAN judge.
+            if pending.tool == kind:
+                self_skipped += 1
+                continue
             # An empty project on either side means "unscoped" and is allowed
             # to match; two *different* named projects never match. Run
             # identity follows the same rule: it only ever narrows a match,
@@ -411,7 +417,21 @@ def attribute(tool: str, ok: bool, project: str = "", record_fn=None,
     pending = _candidate(project, name, run_id)
     if pending is None:
         with _LOCK:
-            _STATS["unlinked"] += 1
+            # `unlinked` means "nothing was waiting to be judged". A refusal to
+            # self-grade is the opposite -- work WAS waiting and the guard
+            # declined it -- so counting both here would blend a working guard
+            # with an idle module in the one number a consumer is most likely
+            # to read alone. They are counted apart, not summed and split later.
+            if self_skipped:
+                _STATS["self_blocked"] += self_skipped
+            else:
+                _STATS["unlinked"] += 1
+        if self_skipped:
+            return {
+                "attributed": False,
+                "self_blocked": self_skipped,
+                "reason": "%s may not grade the work it generated itself" % name,
+            }
         return {"attributed": False, "reason": "no recent generation to judge"}
 
     good_signal, bad_signal = VERIFIERS[name]
@@ -419,6 +439,7 @@ def attribute(tool: str, ok: bool, project: str = "", record_fn=None,
     with _LOCK:
         pending.judged.add(name)
         _STATS["attributed"] += 1
+        _STATS["self_blocked"] += self_skipped
     report = {
         "attributed": True,
         "interaction_id": pending.interaction_id,
@@ -431,7 +452,16 @@ def attribute(tool: str, ok: bool, project: str = "", record_fn=None,
         try:
             record_fn(pending.interaction_id, signal)
             report["recorded"] = True
+            with _LOCK:
+                _STATS["recorded"] += 1
         except Exception as exc:            # a failed write must not break the run
+            # The pending was consumed BEFORE the write, so a locked database
+            # burned the generation: this verifier could never claim it again,
+            # and every caller of this function discards the report that says
+            # so. A write that did not happen must not spend the evidence.
+            with _LOCK:
+                pending.judged.discard(name)
+                _STATS["write_failed"] += 1
             report["recorded"] = False
             report["error"] = str(exc)
     return report
