@@ -68,7 +68,10 @@ def _record(monkeypatch, counts):
     # helper must not be the thing that decides which one the loop uses.
     monkeypatch.setattr(server, "_open_db", _open)
     monkeypatch.setattr(server, "_open_db_readonly", _open)
-    monkeypatch.setattr(calibration, "_counts", lambda _conn: dict(counts))
+    # Signature-agnostic: `_counts` gained a provenance filter with #62 and
+    # no assertion here concerns its parameters. A double that pins an
+    # argument list it never checks fails on changes it does not test.
+    monkeypatch.setattr(calibration, "_counts", lambda *a, **k: dict(counts))
     return conns
 
 
@@ -808,7 +811,9 @@ def test_reading_the_standing_never_creates_or_migrates_the_store(
     """
     missing = tmp_path / "memory.db"
     monkeypatch.setattr(server, "_DB_PATH", str(missing))
-    monkeypatch.setattr(calibration, "_counts", lambda _conn: dict(POOR_RECORD))
+    monkeypatch.setattr(
+        calibration, "_counts", lambda *a, **k: dict(POOR_RECORD),
+    )
 
     demanded, reason = server._agent_verification_standing()
 

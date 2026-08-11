@@ -17,9 +17,9 @@ def test_build_examples_returns_good_pairs_in_chat_shape():
     ms.log_interaction(c, "a", "task A", "", "resp A", "code")
     ms.log_interaction(c, "b", "task B", "", "resp B", "code")
     ms.log_interaction(c, "bad", "task bad", "", "resp bad", "code")
-    ms.record_outcome_row(c, "a", "tests_passed", 1.0)
-    ms.record_outcome_row(c, "b", "accepted", 0.8)
-    ms.record_outcome_row(c, "bad", "failed", -1.0)
+    ms.record_outcome_row(c, "a", "tests_passed", 1.0, source="caller")
+    ms.record_outcome_row(c, "b", "accepted", 0.8, source="caller")
+    ms.record_outcome_row(c, "bad", "failed", -1.0, source="caller")
 
     examples = etd.build_examples(c)
 
@@ -40,8 +40,8 @@ def test_build_examples_dedups_repeated_task():
     c = _conn()
     ms.log_interaction(c, "a", "same task", "", "resp 1", "code")
     ms.log_interaction(c, "b", "same task", "", "resp 2", "code")
-    ms.record_outcome_row(c, "a", "tests_passed", 1.0)
-    ms.record_outcome_row(c, "b", "tests_passed", 1.0)
+    ms.record_outcome_row(c, "a", "tests_passed", 1.0, source="caller")
+    ms.record_outcome_row(c, "b", "tests_passed", 1.0, source="caller")
 
     examples = etd.build_examples(c)
 
@@ -54,15 +54,16 @@ def test_build_examples_vetoes_interaction_with_any_bad_or_unknown_outcome():
     ms.log_interaction(c, "unknown", "task B", "", "unsafe B", "code")
     ms.log_interaction(c, "recovered", "task C", "", "still conflicted", "code")
     for interaction_id in ("failed-later", "unknown", "recovered"):
-        ms.record_outcome_row(c, interaction_id, "tests_passed", 1.0)
-    ms.record_outcome_row(c, "failed-later", "failed", -1.0)
+        ms.record_outcome_row(c, interaction_id, "tests_passed", 1.0, source="caller")
+    ms.record_outcome_row(c, "failed-later", "failed", -1.0, source="caller")
     c.execute(
-        "INSERT INTO outcomes(interaction_id,signal,reward) VALUES(?,?,?)",
+        "INSERT INTO outcomes(interaction_id,signal,reward,source) "
+        "VALUES(?,?,?,'caller')",
         ("unknown", "future_signal", 99.0),
     )
     c.commit()
-    ms.record_outcome_row(c, "recovered", "failed", -1.0)
-    ms.record_outcome_row(c, "recovered", "tests_passed", 1.0)
+    ms.record_outcome_row(c, "recovered", "failed", -1.0, source="caller")
+    ms.record_outcome_row(c, "recovered", "tests_passed", 1.0, source="caller")
 
     assert etd.build_examples(c) == []
 
@@ -73,10 +74,10 @@ def test_build_examples_normalizes_prompts_and_selects_strongest_then_newest():
     ms.log_interaction(c, "newer-weak", "same task", "", "newer weak response", "code")
     ms.log_interaction(c, "old-tie", "other task", "", "old tie", "code")
     ms.log_interaction(c, "new-tie", "OTHER   TASK", "", "new tie", "code")
-    ms.record_outcome_row(c, "strong", "tests_passed", 1.0)
-    ms.record_outcome_row(c, "newer-weak", "edited", 0.75)
-    ms.record_outcome_row(c, "old-tie", "tests_passed", 1.0)
-    ms.record_outcome_row(c, "new-tie", "tests_passed", 1.0)
+    ms.record_outcome_row(c, "strong", "tests_passed", 1.0, source="caller")
+    ms.record_outcome_row(c, "newer-weak", "edited", 0.75, source="caller")
+    ms.record_outcome_row(c, "old-tie", "tests_passed", 1.0, source="caller")
+    ms.record_outcome_row(c, "new-tie", "tests_passed", 1.0, source="caller")
 
     examples = etd.build_examples(c)
     responses = [row["messages"][1]["content"] for row in examples]
@@ -100,7 +101,8 @@ def test_export_vetoes_noncanonical_persisted_outcome_evidence(
     conn = _conn()
     ms.log_interaction(conn, "poison", "task", "", "response", "code")
     conn.execute(
-        "INSERT INTO outcomes(interaction_id,signal,reward) VALUES(?,?,?)",
+        "INSERT INTO outcomes(interaction_id,signal,reward,source) "
+        "VALUES(?,?,?,'caller')",
         ("poison", signal, stored_reward),
     )
     conn.commit()
@@ -119,8 +121,8 @@ def test_export_excludes_private_content_and_writes_non_sensitive_manifest(tmp_p
         conn, "private", "read C:\\Users\\alice\\private.txt", "",
         "token=do-not-export", "code",
     )
-    ms.record_outcome_row(conn, "safe", "tests_passed", 1.0)
-    ms.record_outcome_row(conn, "private", "tests_passed", 1.0)
+    ms.record_outcome_row(conn, "safe", "tests_passed", 1.0, source="caller")
+    ms.record_outcome_row(conn, "private", "tests_passed", 1.0, source="caller")
     conn.close()
     out = tmp_path / "training.jsonl"
 
@@ -144,7 +146,7 @@ def test_export_rejects_bearer_tokens_that_are_not_assignments():
         conn, "bearer", "call endpoint", "",
         "Use Authorization: Bearer %s" % secret, "code",
     )
-    ms.record_outcome_row(conn, "bearer", "tests_passed", 1.0)
+    ms.record_outcome_row(conn, "bearer", "tests_passed", 1.0, source="caller")
 
     examples, stats = etd._select_examples(conn)
 
@@ -162,7 +164,7 @@ def test_export_rejects_records_outside_shared_training_bounds(monkeypatch):
     ms.log_interaction(conn, "first", "first task", "", "12345", "code")
     ms.log_interaction(conn, "second", "second task", "", "67890", "code")
     for interaction_id in ("large-field", "first", "second"):
-        ms.record_outcome_row(conn, interaction_id, "tests_passed", 1.0)
+        ms.record_outcome_row(conn, interaction_id, "tests_passed", 1.0, source="caller")
     monkeypatch.setattr(etd, "MAX_TRAINING_TOTAL_CHARS", 16)
 
     examples, stats = etd._select_examples(conn)
@@ -175,8 +177,8 @@ def test_export_rejects_records_outside_shared_training_bounds(monkeypatch):
 def test_export_stream_fails_closed_at_outcome_evidence_limit(monkeypatch):
     conn = _conn()
     ms.log_interaction(conn, "one", "task", "", "response", "code")
-    ms.record_outcome_row(conn, "one", "accepted", 0.8)
-    ms.record_outcome_row(conn, "one", "tests_passed", 1.0)
+    ms.record_outcome_row(conn, "one", "accepted", 0.8, source="caller")
+    ms.record_outcome_row(conn, "one", "tests_passed", 1.0, source="caller")
     monkeypatch.setattr(etd, "MAX_EXPORT_EVIDENCE_ROWS", 1)
 
     with pytest.raises(etd.training_data.TrainingDataError, match="evidence limit"):
@@ -187,8 +189,8 @@ def test_export_capacity_keeps_highest_quality_candidate(monkeypatch):
     conn = _conn()
     ms.log_interaction(conn, "weak", "weak task", "", "weak response", "code")
     ms.log_interaction(conn, "strong", "strong task", "", "strong response", "code")
-    ms.record_outcome_row(conn, "weak", "edited", 0.75)
-    ms.record_outcome_row(conn, "strong", "tests_passed", 1.0)
+    ms.record_outcome_row(conn, "weak", "edited", 0.75, source="caller")
+    ms.record_outcome_row(conn, "strong", "tests_passed", 1.0, source="caller")
     monkeypatch.setattr(etd, "MAX_TRAINING_EXAMPLES", 1)
 
     examples, stats = etd._select_examples(conn)
@@ -205,7 +207,7 @@ def test_manifest_failure_never_leaves_a_stale_manifest_for_new_data(
     db_path = tmp_path / "memory.db"
     conn = ms.connect(db_path)
     ms.log_interaction(conn, "safe", "safe task", "", "safe response", "code")
-    ms.record_outcome_row(conn, "safe", "tests_passed", 1.0)
+    ms.record_outcome_row(conn, "safe", "tests_passed", 1.0, source="caller")
     conn.close()
     out = tmp_path / "training.jsonl"
     manifest = tmp_path / "selection.json"
@@ -231,7 +233,7 @@ def test_export_outputs_cannot_replace_memory_database(tmp_path, collision):
     db_path = tmp_path / "memory.db"
     conn = ms.connect(db_path)
     ms.log_interaction(conn, "safe", "safe task", "", "safe response", "code")
-    ms.record_outcome_row(conn, "safe", "tests_passed", 1.0)
+    ms.record_outcome_row(conn, "safe", "tests_passed", 1.0, source="caller")
     conn.close()
     out = db_path if collision == "data" else tmp_path / "training.jsonl"
     manifest = db_path if collision == "manifest" else tmp_path / "selection.json"
@@ -268,8 +270,8 @@ def test_weak_positive_does_not_poison_an_otherwise_good_interaction():
     ignored rather than treated as a contradiction."""
     c = _conn()
     ms.log_interaction(c, "weakpos", "task", "", "response", "code")
-    ms.record_outcome_row(c, "weakpos", "compiled", 0.7)
-    ms.record_outcome_row(c, "weakpos", "edited", 0.75)
+    ms.record_outcome_row(c, "weakpos", "compiled", 0.7, source="caller")
+    ms.record_outcome_row(c, "weakpos", "edited", 0.75, source="caller")
     examples, stats = etd._select_examples(c)
     assert stats["accepted"] == 1
     assert stats["rejected_by_reason"].get("contradictory_outcome", 0) == 0
@@ -281,8 +283,8 @@ def test_genuine_negative_still_excludes_a_contradicted_interaction():
     balanced-false-pass retro-corrections rely on."""
     c = _conn()
     ms.log_interaction(c, "disputed", "task", "", "response", "code")
-    ms.record_outcome_row(c, "disputed", "tests_passed", 1.0)
-    ms.record_outcome_row(c, "disputed", "failed", -1.0)
+    ms.record_outcome_row(c, "disputed", "tests_passed", 1.0, source="caller")
+    ms.record_outcome_row(c, "disputed", "failed", -1.0, source="caller")
     examples, stats = etd._select_examples(c)
     assert stats["accepted"] == 0
     assert stats["rejected_by_reason"].get("contradictory_outcome", 0) == 1

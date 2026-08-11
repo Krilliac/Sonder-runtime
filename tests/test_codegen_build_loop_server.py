@@ -135,9 +135,15 @@ def test_an_unreadable_backlog_is_reported_as_unknown_not_as_the_batch(
         server.memory_store, "list_retryable_distillations",
         lambda conn, limit: [("iid-1", "compiled")],
     )
+    # Signature-agnostic: this test asserts how the BACKLOG is reported and
+    # makes no claim about the recorder's parameters. Pinned to `(iid, signal)`
+    # it broke when #62 added required provenance -- and broke invisibly: the
+    # drain swallows per-item exceptions, so the TypeError surfaced only as
+    # `stored == 0`, which is the floor-reported-as-total shape this very test
+    # exists to catch, arriving from the test's own double.
     monkeypatch.setattr(
         server, "_record_outcome_and_maybe_distill",
-        lambda iid, signal: {"lesson_id": "lesson-1"},
+        lambda *a, **k: {"lesson_id": "lesson-1"},
     )
 
     def locked(conn):

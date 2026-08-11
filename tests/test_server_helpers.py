@@ -1097,7 +1097,7 @@ def test_learning_health_is_structured_and_routed(monkeypatch, tmp_path):
             revision=server.embeddings.EMBED_REVISION,
             dimension=1,
         )
-        memory_store.record_outcome_row(conn, "i1", "tests_passed", 1.0)
+        memory_store.record_outcome_row(conn, "i1", "tests_passed", 1.0, source="caller")
         memory_store.add_lesson(
             conn,
             "lesson-one",
@@ -1199,7 +1199,7 @@ def test_context_health_reports_session_and_memory(monkeypatch, tmp_path):
             conn, "lesson-one", "Prefer runnable snippets.", None, "i1"
         )
         memory_store.add_fact(conn, "fact-one", "proj", "Use the local app bundle.")
-        memory_store.record_outcome_row(conn, "i1", "tests_passed", 1.0)
+        memory_store.record_outcome_row(conn, "i1", "tests_passed", 1.0, source="caller")
     finally:
         conn.close()
 
