@@ -938,6 +938,11 @@ def reset_cache() -> None:
     console_tools.cache_clear()
     http_slash_tools.cache_clear()
     _module_level_functions.cache_clear()
+    # Was cleared by nothing anywhere. `_help_summaries` parses the HELP block
+    # out of `sonder_repl.py`, so a live reload that edited a one-liner kept
+    # serving the pre-reload text for the life of the process -- the same
+    # stale-cache defect as the other four, one field over.
+    _help_summaries.cache_clear()
 
 
 # --- lookup / search ------------------------------------------------------

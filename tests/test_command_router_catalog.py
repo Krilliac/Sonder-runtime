@@ -284,6 +284,50 @@ def test_the_index_follows_the_catalog_across_a_reset():
     assert cr._index()
 
 
+def test_reset_cache_clears_every_memoised_reader():
+    """``reset_cache`` must clear ALL of this module's caches, not most.
+
+    Four of the five ``lru_cache`` readers were cleared and ``_help_summaries``
+    was cleared by nothing anywhere, so a live reload that edited a
+    ``sonder_repl.py`` HELP line kept serving the pre-reload summary for the
+    life of the process. Bounded to summary text rather than to policy, so it
+    is not a security hole -- it is the same defect one field over.
+
+    Written against the decorator rather than a hand-kept list, so a sixth
+    cache cannot be added and silently missed the same way.
+    """
+    import inspect
+
+    cached = {
+        name for name, value in vars(command_catalog).items()
+        if callable(value) and hasattr(value, "cache_clear")
+    }
+    assert "_help_summaries" in cached, "test is not looking at the right module"
+
+    # Populate every cache. The one reader that takes an argument
+    # (``_module_level_functions``) is fed a real module name so this asserts
+    # on a genuinely warm cache rather than on an empty one.
+    for name in sorted(cached):
+        reader = getattr(command_catalog, name)
+        required = [
+            parameter for parameter in inspect.signature(reader).parameters.values()
+            if parameter.default is inspect.Parameter.empty
+            and parameter.kind in (
+                parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD,
+            )
+        ]
+        reader(*(["server"] * len(required)))
+        assert reader.cache_info().currsize, "%s did not cache" % name
+
+    command_catalog.reset_cache()
+
+    stale = sorted(
+        name for name in cached
+        if getattr(command_catalog, name).cache_info().currsize
+    )
+    assert stale == [], "reset_cache left these caches populated: %s" % stale
+
+
 # --- 7. a read verb never reaches a mutating command ----------------------
 
 
