@@ -46,10 +46,21 @@ pytestmark = pytest.mark.unit
 # the `control_command` chain it forwards to, `http_slash_tools()` covers the
 # app's. They are kept apart because the same slash name can mean different
 # work on different surfaces -- see `http_slash_tools`' docstring.
+#
+# The fourth chain is the agent tool surface, and it was missing. The floor
+# passed both before and after `sdd/02-calibration` added 23 dispatch branches
+# to `_agent_dispatch`, because the three chains above are *slash-command*
+# chains and the two maps are keyed `/name`. Proven by mutation rather than
+# inferred: an unmapped branch added to `control_command` fails this file
+# (`1 failed, 7 passed`), and the identical mutation added to `_agent_dispatch`
+# did not (`8 passed`) -- an ungated door open with the floor green. That is
+# exactly the "the floor stopped looking at the right set" shape this file
+# exists to prevent, one surface over.
 _CHAINS = (
     ("server.py", "control_command", "console"),
     ("sonder_repl.py", "main", "console"),
     ("sonder_serve.py", "_handle_slash", "http"),
+    ("server.py", "_agent_dispatch", "agent"),
 )
 
 
@@ -74,10 +85,51 @@ def _guard_process_state():
     assert pm._rule_lookup is before_rule_lookup, "_rule_lookup monkeypatch leaked"
 
 
+def _agent_tools():
+    """Every agent tool name ``_agent_permission_gate_error`` can actually grade.
+
+    The agent path's gate is ``_canonical_agent_tool_name`` ->
+    ``permission_modes.decide`` -> ``risk_of``, and ``risk_of`` resolves a name
+    through ``command_catalog.by_name``. A dispatch branch whose name the
+    catalog cannot find therefore lands on ``risk_of``'s unknown-tool fallback
+    of ``"ask"``, which ``decide(interactive=False)`` degrades to *allow* --
+    the same "absent is indistinguishable from allowed" this file was written
+    about, reached by a different road.
+
+    Two things this deliberately does NOT do:
+
+    * It does not treat a *catalogued* ``ask`` as a hole. Twenty-eight
+      dispatchable tools are graded ``ask`` by the catalog and are allowed on
+      this path because nobody is at a keyboard -- that is Lane 1's written
+      design decision (see ``_agent_permission_gate_error``'s docstring), not
+      an oversight, and flagging it here would be this file re-litigating a
+      policy instead of checking a map.
+    * It does not build itself from the dispatch list it is used to check --
+      that would be a map that agrees with the branches by construction and
+      could never report a hole. It is derived from the catalog and the alias
+      table, which is where the gate's own answer comes from.
+
+    The alias arm is load-bearing: nine branches (``assetgen``, ``master``,
+    ``game_generate``, ``agent_status`` ...) are alias names the catalog has
+    never heard of, and the gate canonicalizes before grading. Reading the raw
+    names would report all nine as holes the gate in fact handles correctly.
+    """
+    import server as _server
+
+    graded = {}
+    for command in command_catalog.catalog():
+        graded[command.name.lstrip("/")] = (command.name.lstrip("/"),)
+    for alias, target in _server._AGENT_TOOL_ALIASES.items():
+        if target in graded:
+            graded[alias] = graded[target]
+    return graded
+
+
 def _maps():
     return {
         "console": command_catalog.console_tools(),
         "http": command_catalog.http_slash_tools(),
+        "agent": _agent_tools(),
     }
 
 
@@ -112,15 +164,51 @@ _DISPLAY_ONLY_BRANCHES = {
 }
 
 
+def _tool_branch_names(test):
+    """Tool names one ``tool_name == "x"`` / ``tool_name in (...)`` test compares.
+
+    The agent chain's counterpart to ``command_catalog._branch_names``. It is
+    written out here rather than imported from
+    ``tool_capabilities.dispatch_names`` for the same reason the slash walk is:
+    this file is the check ON those derivations, and sharing one would let a
+    single bug hide itself on both sides.
+    """
+    if not isinstance(test, ast.Compare) or len(test.ops) != 1:
+        return []
+    if not isinstance(test.left, ast.Name) or test.left.id != "tool_name":
+        return []
+    comparator = test.comparators[0]
+    if isinstance(test.ops[0], ast.Eq) and isinstance(comparator, ast.Constant):
+        values = [comparator.value]
+    elif isinstance(test.ops[0], ast.In) and isinstance(
+        comparator, (ast.Tuple, ast.List, ast.Set)
+    ):
+        values = [item.value for item in comparator.elts
+                  if isinstance(item, ast.Constant)]
+    else:
+        return []
+    return [value for value in values if isinstance(value, str) and value]
+
+
 def _branch_names_in(path, function):
-    """Every slash name one dispatch chain compares ``cmd`` against.
+    """Every name one dispatch chain compares its command/tool variable against.
 
     Deliberately re-derived here rather than imported from
     ``command_catalog``: this is the check on that module's derivation, so
     sharing its walk would let one bug hide the other. It uses only
     ``_branch_names``, which reads a single ``if`` test and cannot be the
     source of a missing branch.
+
+    The agent chain compares ``tool_name`` against bare tool names rather than
+    ``cmd`` against ``/slash`` names, so it gets ``_tool_branch_names``. The
+    walk is over ``ast.If`` tests either way, which is what makes a branch
+    nested inside a ``with`` (as the developer-workflow block now is) still
+    visible.
     """
+    reader = (
+        _tool_branch_names if function == "_agent_dispatch"
+        else command_catalog._branch_names
+    )
     with open(os.path.join(os.path.dirname(server.__file__), path),
               encoding="utf-8") as handle:
         tree = ast.parse(handle.read())
@@ -134,7 +222,7 @@ def _branch_names_in(path, function):
     names = []
     for node in ast.walk(scope):
         if isinstance(node, ast.If):
-            names.extend(command_catalog._branch_names(node.test))
+            names.extend(reader(node.test))
     return sorted(set(names))
 
 
@@ -234,6 +322,7 @@ def test_the_floor_is_not_vacuous():
     maps = _maps()
     assert len(maps["console"]) > 100
     assert len(maps["http"]) > 100
+    assert len(maps["agent"]) > 100
 
 
 # --- the three graded branches this floor forced into the map -------------
