@@ -2774,8 +2774,15 @@ def _prepare_lesson_candidate_bounded(interaction, signal):
     )
 
 
-def _record_outcome_and_maybe_distill(interaction_id, signal):
-    """Atomically record an outcome and run at most one claimed distillation."""
+def _record_outcome_and_maybe_distill(interaction_id, signal, *, source):
+    """Atomically record an outcome and run at most one claimed distillation.
+
+    ``source`` is required and keyword-only (#62): every caller must name the
+    writing path that produced the verdict, so that a machine-graded result and
+    a caller's judgement stop being the same row. It is deliberately NOT a
+    parameter of the ``record_outcome`` MCP tool -- provenance a caller can
+    choose is provenance a caller can misstate.
+    """
     claim_token = memory_store.new_id()
     owner_pid = os.getpid()
     owner_state, owner_identity = process_liveness.probe_process(owner_pid)
@@ -2800,6 +2807,7 @@ def _record_outcome_and_maybe_distill(interaction_id, signal):
                 interaction_id,
                 signal,
                 score,
+                source=source,
                 claim_token=claim_token,
                 owner_pid=owner_pid,
                 owner_identity=owner_identity,
@@ -2898,6 +2906,25 @@ def _record_outcome_and_maybe_distill(interaction_id, signal):
         return result
 
 
+def _stored_outcome_source(interaction_id, signal):
+    """Provenance already on record for this (interaction, signal), or unknown.
+
+    Used by retry paths, which re-assert an outcome somebody else judged. The
+    stored row is immutable under INSERT OR IGNORE, so this only decides what a
+    retry would claim if the row had vanished -- and the honest answer there is
+    that we no longer know who judged it.
+    """
+    try:
+        conn = _open_db()
+        try:
+            stored = memory_store.outcome_row_source(conn, interaction_id, signal)
+        finally:
+            conn.close()
+    except Exception:
+        stored = None
+    return stored or reward.SOURCE_UNKNOWN
+
+
 def _drain_deferred_distillations(limit=16):
     """Retry deferred lesson distillations once the fleet is quiet.
 
@@ -2922,7 +2949,15 @@ def _drain_deferred_distillations(limit=16):
         if signal not in reward.VALID_SIGNALS:
             continue
         try:
-            result = _record_outcome_and_maybe_distill(interaction_id, signal)
+            # Re-asserting an outcome that already exists. The stored row wins
+            # (INSERT OR IGNORE under the unique index), so carry its recorded
+            # provenance forward rather than restamping the retry's own; if the
+            # row is somehow gone, `unknown` is the honest answer, not a guess
+            # that this drain was the original judge.
+            result = _record_outcome_and_maybe_distill(
+                interaction_id, signal,
+                source=_stored_outcome_source(interaction_id, signal),
+            )
         except Exception:
             continue
         if result.get("lesson_id"):
@@ -3052,7 +3087,12 @@ def _record_code_gate_failure(interaction_id):
     if not interaction_id:
         return
     try:
-        _record_outcome_and_maybe_distill(interaction_id, "failed")
+        # `machine`: the runtime ran the reply's own code and it did not work.
+        # Nobody reviewed anything, so this must not count toward the reviewed
+        # rate -- which, before provenance existed, it silently did.
+        _record_outcome_and_maybe_distill(
+            interaction_id, "failed", source=reward.SOURCE_MACHINE,
+        )
     except Exception as exc:
         with contextlib.suppress(Exception):
             activity_tracker.record_event(
@@ -4571,17 +4611,24 @@ def record_outcome(interaction_id: str, signal: str) -> str:
         recorded here is effectively invisible in the reviewed rate.
 
     So if YOU ran the tests and are reporting your own verdict, prefer
-    `accepted` or `rejected` over `tests_passed`/`failed` -- otherwise a real
-    caller judgement lands in the self-marked bucket and stops counting toward
-    the only quality figure anyone should trust. The split is inferred from the
-    signal name; there is no recorded source, so this is a convention the caller
-    has to honour rather than something the runtime can enforce.
+    `accepted` or `rejected` over `tests_passed`/`failed`, because the signal
+    still records WHAT the evidence was.
+
+    WHO judged is no longer a convention you have to honour: every row this
+    tool writes is stamped `source='caller'`, and the runtime's own attribution
+    path stamps `source='machine'`. The reviewed rate now selects on that
+    recorded provenance rather than guessing from the signal name, so a caller
+    judgement can no longer be lost into the self-marked bucket by choosing the
+    wrong signal. There is deliberately no `source` argument here: provenance a
+    caller can choose is provenance a caller can misstate.
     """
     _maybe_live_reload()
     if signal not in reward.VALID_SIGNALS:
         return "ERROR: unknown signal '%s'. Valid: %s." % (
             signal, ", ".join(sorted(reward.VALID_SIGNALS)))
-    result = _record_outcome_and_maybe_distill(interaction_id, signal)
+    result = _record_outcome_and_maybe_distill(
+        interaction_id, signal, source=reward.SOURCE_CALLER,
+    )
     if not result["found"]:
         return "ERROR: no interaction '%s' (already expired or wrong id)." % interaction_id
     verb = "Recorded" if result["outcome_inserted"] else "Already recorded"
@@ -4592,6 +4639,47 @@ def record_outcome(interaction_id: str, signal: str) -> str:
         msg += " Distilled lesson %s." % result["lesson_id"]
     elif result["distillation_deferred"]:
         msg += " Lesson distillation was deferred for retry."
+    return msg
+
+
+def record_self_graded_outcome(interaction_id: str, signal: str) -> str:
+    """Record an outcome the runtime both SET and MARKED (#62).
+
+    ``curriculum_run`` and ``game_ladder`` invent the task, ask the model, run
+    the check, and file the verdict. Every step is the runtime's. They used to
+    call ``record_outcome`` -- the caller-facing tool -- so their rows were
+    indistinguishable from a human judging delegated work, and they are the
+    bulk of the store: measured read-only on the live database, 9,049 of 9,450
+    rows are ``tests_passed``. Left on the caller path they would now be
+    stamped `caller` and would dominate the one figure that is supposed to mean
+    "how good is delegated work", which is the original defect wearing a new
+    column.
+
+    Not an MCP tool on purpose: it is an in-process entry point for the
+    runtime's own drivers, not something a caller can reach to relabel its own
+    verdicts. Being in-process is also why bad input RAISES here instead of
+    returning a stringly ``ERROR:`` signal: there is no protocol boundary to
+    serialize one across, and this repo is actively shrinking that universe
+    (``scripts/check_error_signals.py`` is a shrink-only ratchet).
+    """
+    if signal not in reward.VALID_SIGNALS:
+        raise ValueError(
+            "unknown signal %r; valid: %s"
+            % (signal, ", ".join(sorted(reward.VALID_SIGNALS)))
+        )
+    result = _record_outcome_and_maybe_distill(
+        interaction_id, signal, source=reward.SOURCE_SELF_CURRICULUM,
+    )
+    if not result["found"]:
+        return "no interaction %r (already expired or wrong id)." % (
+            interaction_id,
+        )
+    verb = "Recorded" if result["outcome_inserted"] else "Already recorded"
+    msg = "%s '%s' (reward %+.2f) for %s." % (
+        verb, signal, result["reward"], interaction_id,
+    )
+    if result["lesson_id"]:
+        msg += " Distilled lesson %s." % result["lesson_id"]
     return msg
 
 
@@ -6875,11 +6963,25 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
             "what the store is starved of.",
         )
     elif reviewed < 30 and outcomes >= 200:
+        # #62: since provenance is recorded, "not judged" and "cannot tell who
+        # judged" are different states with different remedies, and reporting
+        # the second as the first would be the same substitution the reviewed
+        # rate itself used to make. Rows written before the column say nothing
+        # either way, so they are named rather than folded into the shortfall.
+        unclassifiable = learning_state.get("unknown_source_outcomes", 0)
+        detail = "Almost no outcomes have been judged by a caller (%d of %d)." % (
+            reviewed, outcomes,
+        )
+        if unclassifiable:
+            detail += (
+                " %d of those predate outcome provenance, so who judged them "
+                "is not recoverable -- they are not evidence either way."
+                % unclassifiable
+            )
         add(
             "learning",
             "low",
-            "Almost no outcomes have been judged by a caller (%d of %d)."
-            % (reviewed, outcomes),
+            detail,
             "Autograded outcomes cannot tell you whether delegated work is any "
             "good. Use record_outcome after real use so the reviewed rate means "
             "something.",
@@ -6908,6 +7010,13 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
         "reviewed_outcomes": learning_state.get("reviewed_outcomes", 0),
         "reviewed_positive_percent": learning_state.get("reviewed_positive_percent", 0.0),
         "autograded_outcomes": learning_state.get("autograded_outcomes", 0),
+        # Published beside the two it qualifies: reviewed + autograded no longer
+        # sum to `outcomes` on a store with pre-provenance rows, and a triple
+        # that silently does not add up is how a count starts reading as a
+        # measurement when it is a floor.
+        "unknown_source_outcomes": learning_state.get(
+            "unknown_source_outcomes", 0,
+        ),
         "lessons": lesson_count,
         "facts": fact_count,
         "cloud_allowed": cloud_allowed(),
@@ -7877,11 +7986,37 @@ _INTERACTION_ID_RE = re.compile(r"\[interaction_id:\s*([0-9A-Za-z_-]+)\]")
 
 
 def _record_outcome_signal(interaction_id: str, signal: str) -> None:
-    """Write one grounded outcome row, bypassing the model-facing wrapper."""
+    """Write one machine-attributed outcome, crediting the lesson that was used.
+
+    #62 unblocked this. It used to call ``record_outcome_row`` directly and so
+    skipped three things the model-facing wrapper does. Two are now safe to
+    take, and one is still deliberately refused:
+
+    * **Taken -- the interaction-existence precondition.** The wrapper refuses
+      to write a row for an interaction that is not there; the direct call
+      inserted regardless.
+    * **Taken -- the ``lesson_usage`` credit.** Refused before because
+      ``lesson_usage_stats`` aggregates reward with no provenance filter and
+      feeds ``retriever.lesson_quarantine``, so crediting here would have let
+      machine verdicts evict live lessons from retrieval. The credit now
+      carries ``outcome_source='machine'`` and the eviction gate excludes that
+      one source (``memory_rules.EVICTION_INELIGIBLE_OUTCOME_SOURCES``), so the
+      evidence is recorded and visible without reaching the gate. That
+      de-blends the metric instead of blending it, which is what the original
+      objection asked for.
+    * **Still refused -- the distillation claim/cancel.** Not a provenance
+      problem, a liveness one. This runs inside ``_feed_grounded_outcome`` on
+      the tool-observation path, which has no way to *finish* a distillation:
+      claiming here would park the interaction's single distillation slot on a
+      worker that never returns, and cancelling here would let an unreviewed
+      verdict destroy a caller's live job. Hence ``claim_distillation=False``.
+    """
     conn = _open_db()
     try:
-        memory_store.record_outcome_row(
+        memory_store.record_outcome_and_claim_lesson_distillation(
             conn, interaction_id, signal, reward.score(signal),
+            source=reward.SOURCE_ATTRIBUTED,
+            claim_distillation=False,
         )
     finally:
         conn.close()
@@ -13078,7 +13213,12 @@ def learn_from_example(task: str, solution: str, signal: str = "accepted") -> st
             task_embedding_revision=provenance.get("revision"),
             task_embedding_dim=provenance.get("dimension"),
         )
-    result = _record_outcome_and_maybe_distill(interaction_id, signal)
+    # `caller`: learn_from_example is a caller asserting "this task and this
+    # solution worked". Nothing ran here, so it belongs with judgement, not
+    # with execution evidence.
+    result = _record_outcome_and_maybe_distill(
+        interaction_id, signal, source=reward.SOURCE_CALLER,
+    )
     if result["lesson_id"]:
         return "Learned lesson %s from example interaction %s." % (
             result["lesson_id"], interaction_id,
