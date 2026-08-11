@@ -184,8 +184,15 @@ def attribute(tool: str, ok: bool, project: str = "", record_fn=None) -> dict:
     pending, self_skipped = _candidate(project, name)
     if pending is None:
         with _LOCK:
-            _STATS["unlinked"] += 1
-            _STATS["self_blocked"] += self_skipped
+            # `unlinked` means "nothing was waiting to be judged". A refusal to
+            # self-grade is the opposite -- work WAS waiting and the guard
+            # declined it -- so counting both here would blend a working guard
+            # with an idle module in the one number a consumer is most likely
+            # to read alone. They are counted apart, not summed and split later.
+            if self_skipped:
+                _STATS["self_blocked"] += self_skipped
+            else:
+                _STATS["unlinked"] += 1
         if self_skipped:
             return {
                 "attributed": False,

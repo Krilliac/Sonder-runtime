@@ -197,7 +197,16 @@ def test_a_dual_role_tool_is_routed_by_role_not_by_branch_order(monkeypatch):
     branch was unreachable. Whether a tool's compiler verdict counts as
     evidence must not depend on which membership test happens to be written
     first, and the loop's own build is the most execution-grounded evidence the
-    runtime produces."""
+    runtime produces.
+
+    The output carries an `[interaction_id: ...]` tag on purpose: without one
+    the GENERATORS branch is a silent no-op and this test proves only that the
+    verifier branch runs, never that it runs SAFELY alongside the generator
+    branch it now shares a call with. That narrower version survived M1 (the
+    self-guard removed) untouched -- the same "the test exercises a
+    neighbouring, safer path than the one the change made reachable" error as
+    the first draft of the shrink-floor test.
+    """
     go = _grounded()
     written = []
     monkeypatch.setattr(
@@ -206,10 +215,19 @@ def test_a_dual_role_tool_is_routed_by_role_not_by_branch_order(monkeypatch):
     go.note_generation("gen-1", "offload", project="p")
 
     server._feed_grounded_outcome(
-        "codegen_build_loop", True, "=== codegen build loop ===\nBUILD SUCCEEDED",
+        "codegen_build_loop", True,
+        "=== codegen build loop ===\nBUILD SUCCEEDED\n[interaction_id: gen-self]",
         {"project": "p"},
     )
 
+    # Both branches really ran: the generator branch noted the loop's own work
+    # (2 pending, not 1), and the verifier branch then had to choose between
+    # that row and the older one. Asserted rather than assumed -- if the tag
+    # ever stops matching _INTERACTION_ID_RE this test must fail loudly rather
+    # than quietly go back to testing only half the call site.
+    assert go.pending_count() == 2
+    # The newest pending is the loop's OWN generation. It must lose to the
+    # older offload row: a tool may not hand itself a `compiled` (+0.70).
     assert written == [("gen-1", "compiled")]
 
 

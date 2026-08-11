@@ -236,6 +236,13 @@ def test_a_tool_never_grades_the_work_it_generated_itself():
 
     assert report["attributed"] is False
     assert written == [], "self-graded evidence is the population this module exists to dilute"
+    # "I refused to grade my own work" and "there was nothing waiting to be
+    # graded" are different facts about a run. Folding the first into
+    # `unlinked` is the metric-blending shape at small scale: a consumer
+    # reading `unlinked` alone cannot tell a working guard from an idle module.
+    stats = go.stats()
+    assert stats["self_blocked"] == 1
+    assert stats["unlinked"] == 0
 
 
 def test_a_self_generated_row_does_not_hide_an_eligible_older_one():
@@ -291,5 +298,9 @@ def test_stats_count_rows_written_apart_from_attribution_decisions():
     go.attribute("test_run", ok=True, project="p", record_fn=record)
 
     stats = go.stats()
+    # The split this test is named for: two calls each reached the write, so
+    # two DECISIONS were made, and exactly one ROW landed. Asserting only the
+    # new counters left the old one -- the one that used to mean both -- unpinned.
+    assert stats.get("attributed") == 2
     assert stats.get("write_failed") == 1
     assert stats.get("recorded") == 1
