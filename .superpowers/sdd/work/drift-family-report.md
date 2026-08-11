@@ -79,16 +79,47 @@ that way), so that key reads as four tool names, three of which no `@mcp.tool()`
 agent help surface.**
 
 A count of 0 on five surfaces is the classic early-abort tell, so it was checked before
-being believed: the registration extractor agrees exactly with the live MCP tool
-manager (184 = 184), and the *same* extractor did surface the 3 real hits on
-`tool_manifest()` — so it is not blind. Other candidate surfaces were swept and cleared:
+being believed.
+
+> **Corrected 2026-08-11 after re-review.** The defence originally given here —
+> "*the same extractor did surface the 3 real hits on `tool_manifest()`, so it is not
+> blind*" — was **circular and is withdrawn**. There is no single extractor.
+> `_help_advertised` (bullet parser) and `_manifest_advertised` (slash-separated key
+> splitter) are different functions; measured cross-application,
+> `_help_advertised(tool_manifest())` yields 0 and `_manifest_advertised(AGENT_TOOL_HELP)`
+> yields 0. Finding 3 with one says nothing about blindness in the other.
+
+The argument that actually holds, in two parts:
+
+* **Three of the five surfaces have no parser to go blind.**
+  `REPOSITORY_READ_ONLY_TOOLS`, `_AUTOPILOT_OBSERVE_TOOLS` and
+  `_AUTOPILOT_WORKSPACE_TOOLS` are Python `frozenset` literals read directly via
+  `frozenset(getattr(server, label))`. Their 0 is a set difference over n = 55, 45, 86,
+  not an extraction, so vacuity is not a failure mode there.
+* **The two parsed surfaces were confirmed by an independent, deliberately over-broad
+  method.** A greedy regex sweep for *every* `snake_case` token anywhere in the help text
+  — which cannot go vacuous by failing to match a bullet shape — found 239 tokens in
+  `AGENT_TOOL_HELP` and 98 in `REPOSITORY_AGENT_TOOL_HELP`, and **zero registered tool
+  names that the bullet parser missed** on either. The bullet parser is not
+  under-matching. (Independently reproduced in the re-review, §2.2.)
+
+The registration side is separately triangulated: the live MCP tool manager, an AST sweep
+for module-level `@mcp.tool()`, and a pure text scan of every repo-root `*.py` at any
+nesting depth all give **184**, with empty symmetric differences (third method added by
+the re-review, §1.1).
+
+Other candidate surfaces were swept and cleared:
 `workflows.json` (6 action types, all implemented), the 271-entry slash-command registry
 (carries no tool names), `command_catalog`, `slash_menu`, `intents`, `command_router`,
 and the nine `_AGENT_TOOL_ALIASES` (all resolve to registered tools). No surface anywhere
 produces 12.
 
-Also recorded, not fixed: 46 registered tools are absent from `tool_manifest()` — the
-reverse (hidden-capability) direction. Out of scope for this lane.
+Also recorded, not fixed: **43** registered tools are absent from `tool_manifest()` at
+HEAD — the reverse (hidden-capability) direction. Out of scope for this lane.  (It was
+**46** at `b8a15ef`; the manifest-key fix in §2 added `workflow_save`/`workflow_run`/
+`workflow_delete` and closed three. An earlier draft of this report quoted the pre-fix 46
+in the present tense — exactly this project's recurring failure mode, a figure measured
+at one revision reported as a fact about another. Corrected 2026-08-11.)
 
 ### #32 — loop actions
 
@@ -173,11 +204,17 @@ it was removed from the advertisement rather than given a dispatch branch.
 source on every run — registration from the live tool manager, dispatchability from
 `_agent_dispatch`, loop vocabulary from `_loop_dispatch`'s branch table — and asserts:
 
-- no advertising surface (both help constants, all four `_agent_tool_help` flag
-  combinations, `REPOSITORY_READ_ONLY_TOOLS`, both autopilot allowlists,
+- no advertising surface (both help constants, all **eight** `_agent_tool_help` flag
+  combinations — it takes three booleans, `read_only`/`cloud`/`unsafe`, not two; an
+  earlier draft said four — `REPOSITORY_READ_ONLY_TOOLS`, both autopilot allowlists,
   `tool_manifest()`) names anything that is not a registered MCP tool;
-- the alias allowance in that test cannot launder a fake name — every
-  `_AGENT_TOOL_ALIASES` target must itself be registered;
+- the alias exemption in the check above cannot launder a fake name — every
+  `_AGENT_TOOL_ALIASES` **key** must have its own `_agent_dispatch` branch, and every
+  **target** must be a registered tool.  The key half was added 2026-08-11: the
+  exemption subtracts keys, the old test only checked targets, so
+  `_AGENT_TOOL_ALIASES["__ghost__"] = "memory_search"` plus advertising `__ghost__` on
+  `tool_manifest()` passed every guard in the repository (45 passed across four files).
+  See the mutation table below;
 - both autopilot allowlists are subsets of `_agent_dispatch`'s branches;
 - the observe allowlist is a subset of `REPOSITORY_READ_ONLY_TOOLS`;
 - the loop reply is rendered from `_LOOP_ACTION_TYPES`, every branch has an advertised
@@ -201,6 +238,20 @@ now checks the workspace set for those two.
 | add `"__ghost_tool__"` to `_AUTOPILOT_OBSERVE_TOOLS` (advertised, never registered) | **3 failed** — `test_no_surface_advertises_an_unregistered_tool`, `test_autopilot_allowlists_only_name_dispatchable_tools`, `test_autopilot_observe_allowlist_survives_repository_read_only_policy` |
 | re-add `"test_run"` to `_AUTOPILOT_WORKSPACE_TOOLS` (registered, undispatchable) | **1 failed** — `test_autopilot_allowlists_only_name_dispatchable_tools` |
 | drop `"checklist_show"` from `_LOOP_ACTION_TYPES` | **2 failed** — `test_loop_advertises_every_action_type_it_implements`, `test_loop_docstring_and_error_reply_advertise_the_same_vocabulary` |
+| **(2026-08-11)** `_AGENT_TOOL_ALIASES["__ghost_manifest__"] = "memory_search"` + advertise `__ghost_manifest__` on `tool_manifest()` | **1 failed** — `test_agent_tool_alias_keys_and_targets_are_both_real`. Before the key assertion was added this same mutation gave **45 passed** across `test_advertised_surface_drift`, `test_agent_help_dispatch_drift`, `test_tool_capabilities`, `test_mcp_primitives` — uncaught anywhere in the repository. |
+
+The alias-key assertion is green on arrival (all nine current keys already have their own
+`_agent_dispatch` branch), which is exactly why it was mutation-proven before being
+committed: an assertion that is green on arrival and never mutated is the failure mode
+this lane exists to catch.
+
+One gap left open deliberately, per the re-review's own ruling of **Minor**: adding
+`"test_run"` to `REPOSITORY_READ_ONLY_TOOLS` passes this file 10/10, because the
+dispatchability loop iterates the two autopilot labels only. It is already caught by four
+pre-existing tests, including `b8a15ef`'s own
+`test_agent_help_dispatch_drift.py::test_repository_help_allowlist_and_dispatch_all_agree`
+(which asserts `REPOSITORY_READ_ONLY_TOOLS - dispatch == []` directly), so adding it here
+would duplicate rather than close coverage. Not in the coordinator's close-list.
 
 All three reverted; suite back to green. The guard binds in both directions.
 
@@ -251,6 +302,30 @@ test_sqlite_mutate_server, test_symbol_index, test_task_state, test_text_patch,
 test_tool_capabilities, test_unsafe_lab, test_workbench_server,
 test_workflow_usecases, test_workflows, test_workspace_compare`.
 
+### 2026-08-11 follow-up (alias-key assertion)
+
+The laundering mutation, with the new assertion in place — the row above, verbatim:
+
+```
+FAILED tests/test_advertised_surface_drift.py::test_agent_tool_alias_keys_and_targets_are_both_real
+1 failed, 44 passed in 1.97s
+```
+
+(44 + 1 = the 45 the re-review measured passing before the fix, on the same four files.)
+Mutation reverted; `git diff` on `server.py` is empty. GREEN after revert:
+
+```
+10 passed in 1.40s
+```
+
+```
+147 passed in 4.38s
+```
+
+Files in that second run: `test_advertised_surface_drift, test_agent_help_dispatch_drift,
+test_tool_capabilities, test_mcp_primitives, test_process_risk_server, test_agent_tools,
+test_autopilot_server`. The full suite was again **not** run.
+
 ## 5. New findings
 
 **IMPORTANT (new, fixed here).** Observe-policy autopilot advertised three tools that a
@@ -277,14 +352,23 @@ use.
 
 **MINOR (new, fixed).** `tool_manifest()` was the only surface in the codebase naming
 tools that no `@mcp.tool()` backs (`save`, `run`, `delete`). It is also the least
-covered: 46 registered tools appear nowhere in it.
+covered: **43** registered tools appear nowhere in it at HEAD (46 pre-fix), and it was
+the surface the alias-laundering route below reached.
 
 ## 6. Commits
 
 - `277fd27` — Stop advertising tools and loop actions that cannot run, and guard both
   (autopilot allowlists, `tool_manifest` key, `_LOOP_ACTION_TYPES`, new guard file,
   two updated existing tests)
-- this report committed separately
+- `dad98ac` — this report
+- `<follow-up>` — close the alias-key laundering route in the guard, plus the three
+  report corrections above (2026-08-11, after re-review `MERGE` on `277fd27`)
+
+Out of scope by instruction and untouched here: findings F1, F2, F4 and the test-selection
+rule, filed as **#45** for a later lane; `AGENT_TOOL_HELP` /
+`_KNOWN_UNDISPATCHABLE_HELP_ENTRIES`, whose deferral the re-review confirmed
+(the sibling worktree `12-merge-dispatch` has 340 uncommitted lines rewriting the body of
+`_agent_dispatch` right now).
 
 Checkout left clean on `work/13-drift-family`. Nothing pushed. `git stash` was never
 run; `refs/stash` untouched. Staging was always by explicit path.

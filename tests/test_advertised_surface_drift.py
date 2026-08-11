@@ -226,9 +226,28 @@ def test_no_surface_advertises_an_unregistered_tool():
         )
 
 
-def test_agent_tool_aliases_all_resolve_to_registered_tools():
-    """The alias allowance above must not be able to launder a fake name."""
+def test_agent_tool_alias_keys_and_targets_are_both_real():
+    """Close the laundering route the allowance above opens.
+
+    The allowance subtracts alias **keys**, so until this asserted anything
+    about keys, writing ``_AGENT_TOOL_ALIASES["__ghost__"] = "memory_search"``
+    and advertising ``__ghost__`` on ``tool_manifest()`` was invisible to
+    every guard in the repository -- the exact #22 defect, on the same
+    surface, reached through the guard's own exemption.  ``_agent_dispatch``
+    does not resolve aliases (``_AGENT_TOOL_ALIASES`` appears nowhere in its
+    source; resolution happens separately in ``_canonical_agent_tool_name``),
+    so requiring each key to have its own dispatch branch is what makes the
+    exemption safe.  Targets are checked too, for the other direction.
+    """
     registered = _registered_tools()
+    dispatch = capabilities.dispatch_names(server._agent_dispatch)
+    assert len(server._AGENT_TOOL_ALIASES) >= 5
+    undispatchable_keys = sorted(set(server._AGENT_TOOL_ALIASES) - dispatch)
+    assert undispatchable_keys == [], (
+        "alias keys with no _agent_dispatch branch are exempted from the "
+        "registration check above while being unreachable: %s"
+        % undispatchable_keys
+    )
     unresolved = sorted(
         "%s -> %s" % item
         for item in server._AGENT_TOOL_ALIASES.items()
