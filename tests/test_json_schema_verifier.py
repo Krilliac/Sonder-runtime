@@ -626,6 +626,33 @@ def test_a_legitimately_empty_keyword_is_not_an_error(keyword):
     assert J.check({"a": 1}, {"type": "object", keyword: {}}) == ([], [])
 
 
+# --- the same defect, spelled `is not None` instead of `or {}` ---------------
+
+@pytest.mark.parametrize("schema, datum", [
+    ({"type": "object", "propertyNames": None}, {"a": 1}),
+    ({"type": "array", "items": None}, ["a"]),
+    ({"type": None}, 1),
+])
+def test_an_explicit_null_keyword_value_is_reported_like_any_other_malformed_value(schema, datum):
+    # `schema.get(kw) is not None` has the same blind spot as `schema.get(kw)
+    # or default`: it cannot tell "absent" from "present and explicitly null",
+    # so {"propertyNames": null} / {"items": null} / {"type": null} came back
+    # errors=[] unchecked=[] -- a clean pass on an illegal schema.
+    result = J.check(datum, schema)
+    assert result.errors, "%r passed silently" % (schema,)
+    assert result.unchecked, "%r claimed coverage it did not have" % (schema,)
+
+
+@pytest.mark.parametrize("schema, datum", [
+    ({"type": "object", "propertyNames": {"pattern": "^a$"}}, {"a": 1}),
+    ({"type": "array", "items": {"type": "integer"}}, [1, 2]),
+    ({"type": "integer"}, 1),
+])
+def test_a_legal_value_for_the_same_keywords_is_unaffected(schema, datum):
+    # The fix for the null case above must not touch the legal-value path.
+    assert J.check(datum, schema) == ([], [])
+
+
 # --- deep nesting: "Never raises" has to stay true ----------------------------
 
 def _nested(depth):

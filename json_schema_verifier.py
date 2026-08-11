@@ -422,10 +422,17 @@ def _validate_object(value, schema, path, ctx):
                        "must be a schema or a boolean, got %s" % _show(extra))
             break
 
-    names_schema = schema.get("propertyNames")
-    if names_schema is not None:
-        for key in value:
-            _validate(key, names_schema, "%s.%s (property name)" % (path, key), ctx)
+    if "propertyNames" in schema:
+        names_schema = schema["propertyNames"]
+        if isinstance(names_schema, (dict, bool)):
+            for key in value:
+                _validate(key, names_schema, "%s.%s (property name)" % (path, key), ctx)
+        else:
+            # Same guard as `properties`/`patternProperties` above: `.get(kw) is
+            # not None` cannot tell "absent" from "explicitly null", so
+            # {"propertyNames": null} used to check nothing and say nothing.
+            _malformed(ctx, path, "propertyNames",
+                       "must be a schema, got %s" % _show(names_schema))
 
     minimum = _count_bound(ctx, path, schema, "minProperties")
     if minimum is not None and len(value) < minimum:
@@ -438,16 +445,23 @@ def _validate_object(value, schema, path, ctx):
 
 
 def _validate_array(value, schema, path, ctx):
-    items_schema = schema.get("items")
-    if isinstance(items_schema, list):
-        # Draft-07 tuple form (one schema per position). Legal, and something a
-        # decoder will honour -- this module just cannot apply it, so it is a
-        # gap rather than a reason to reject the data.
-        _uncheckable(ctx, path, "items",
-                     "is a per-position tuple, which this verifier does not apply")
-    elif items_schema is not None:
-        for i, item in enumerate(value):
-            _validate(item, items_schema, "%s[%d]" % (path, i), ctx)
+    if "items" in schema:
+        items_schema = schema["items"]
+        if isinstance(items_schema, list):
+            # Draft-07 tuple form (one schema per position). Legal, and something a
+            # decoder will honour -- this module just cannot apply it, so it is a
+            # gap rather than a reason to reject the data.
+            _uncheckable(ctx, path, "items",
+                         "is a per-position tuple, which this verifier does not apply")
+        elif isinstance(items_schema, (dict, bool)):
+            for i, item in enumerate(value):
+                _validate(item, items_schema, "%s[%d]" % (path, i), ctx)
+        else:
+            # Same guard as `properties`/`patternProperties`: `.get(kw) is not
+            # None` cannot tell "absent" from "explicitly null", so
+            # {"items": null} used to check nothing and say nothing.
+            _malformed(ctx, path, "items",
+                       "must be a schema or an array of schemas, got %s" % _show(items_schema))
 
     minimum = _count_bound(ctx, path, schema, "minItems")
     if minimum is not None and len(value) < minimum:
@@ -568,8 +582,12 @@ def _validate_node(value, schema, path, ctx):
     if unenforced:
         ctx.unchecked.append((path, "%s not checked" % ", ".join(unenforced)))
 
-    declared = schema.get("type")
-    if declared is not None:
+    if "type" in schema:
+        # `.get("type") is not None` cannot tell "absent" from "explicitly
+        # null", so {"type": null} used to check nothing and say nothing; the
+        # membership test below routes it into the "unknown schema type" path,
+        # which already fills both channels.
+        declared = schema["type"]
         names = declared if isinstance(declared, list) else [declared]
         unknown = [n for n in names
                    if not isinstance(n, str) or n not in _TYPE_CHECKS]
