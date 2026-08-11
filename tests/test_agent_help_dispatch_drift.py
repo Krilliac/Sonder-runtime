@@ -48,7 +48,7 @@ _KNOWN_UNDISPATCHABLE_HELP_ENTRIES = frozenset({
     "dependency_update", "diff_files", "find_references", "format_code",
     "git_branch", "git_checkout", "git_cherry_pick", "git_commit",
     "git_merge", "git_stash", "git_tag", "lint_run", "rename_symbol",
-    "secret_scan", "test_discover", "test_run", "typecheck_run",
+    "secret_scan", "test_run", "typecheck_run",
 })
 
 
