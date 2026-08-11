@@ -208,3 +208,43 @@ def test_schema_and_ledger_insert_are_one_transaction(tmp_path):
     finally:
         conn.close()
     assert "installed_release" not in tables
+
+
+def test_lost_migrations_directory_is_refused_not_reported_healthy(
+    tmp_path, monkeypatch
+):
+    """A release shipped without its `migrations/` tree must not journal `ok`.
+
+    `migrate_store` returned `status(...)` the moment `discover_migrations`
+    found nothing -- *before* the unknown/checksum gates. So a build whose
+    `migrations/` directory was omitted from the bundle ran against a database
+    full of applied history, discovered nothing to compare it against, and
+    reported a clean status with empty `applied` and empty `pending`. The one
+    signal that the build had lost its schema definitions -- every ledger row
+    now being `unknown` -- was computed by `status()` and then discarded.
+    """
+    db = str(tmp_path / "operations.db")
+    migrate_store("operations", db)  # a real ledger with real history
+
+    empty = tmp_path / "no-migrations"
+    empty.mkdir()
+    monkeypatch.setattr(sonder_migrations, "MIGRATIONS_ROOT", empty)
+
+    assert sonder_migrations.discover_migrations("operations") == ()
+    st = status("operations", db)
+    assert st.unknown == ("0001_baseline",), "precondition: the ledger is now unknown"
+
+    with pytest.raises(FutureSchemaError):
+        migrate_store("operations", db)
+
+
+def test_empty_store_with_no_migrations_and_no_ledger_is_still_fine(
+    tmp_path, monkeypatch
+):
+    """The refusal must key on lost history, not merely on an empty build."""
+    empty = tmp_path / "no-migrations"
+    empty.mkdir()
+    monkeypatch.setattr(sonder_migrations, "MIGRATIONS_ROOT", empty)
+    result = migrate_store("operations", str(tmp_path / "fresh.db"))
+    assert result.applied == ()
+    assert result.unknown == ()

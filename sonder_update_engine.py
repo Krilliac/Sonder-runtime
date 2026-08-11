@@ -8,6 +8,7 @@ failure.  Every step lands in the durable update journal.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -356,6 +357,22 @@ class UpdateManager:
                     plan, final_dir, step,
                     error_code="MIGRATION_FAILED",
                 )
+            # This step asked for `--json` and then threw the answer away,
+            # accepting exit 0 as proof that the schema was migrated. It is not.
+            # A release whose `migrations/` directory was missing from the
+            # bundle exits 0 with nothing discovered and nothing applied, and
+            # used to journal "ok" and activate.
+            migrate_problems = self._migration_problems(migrate_result.stdout)
+            if migrate_problems:
+                self.repository.record_step(
+                    update_id, step, "migrate", "failed",
+                    error_code="MIGRATION_FAILED",
+                    evidence={"rc": 0, "problems": migrate_problems[:5]},
+                )
+                return self._roll_back_activation(
+                    plan, final_dir, step,
+                    error_code="MIGRATION_FAILED",
+                )
             self.repository.record_step(update_id, step, "migrate", "ok")
             plan = self.repository.advance(plan, "health_check")
 
@@ -490,6 +507,62 @@ class UpdateManager:
             text=True,
             timeout=timeout,
         )
+
+    @staticmethod
+    def _migration_problems(stdout: str) -> list[str]:
+        """Read the `migrate --json` payload the step already pays for.
+
+        Returns the reasons this migration cannot be called done. An empty list
+        means every store reported a healthy ledger, no pending work, and -- the
+        part exit code 0 can never show -- that this build actually had
+        migrations to discover.
+        """
+        text = (stdout or "").strip()
+        if not text:
+            return ["migrate produced no output to verify"]
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError):
+            return ["migrate output was not readable JSON: %r" % text[:200]]
+        if not isinstance(payload, dict) or not payload:
+            return ["migrate reported no stores; nothing was verified"]
+
+        problems: list[str] = []
+        discovered_total = 0
+        for store, row in payload.items():
+            if not isinstance(row, dict):
+                problems.append(f"{store}: malformed migration report")
+                continue
+            for field in ("applied", "pending", "unknown", "checksum_mismatches"):
+                if not isinstance(row.get(field), list):
+                    problems.append(f"{store}: migration report omits {field!r}")
+            if "discovered" not in row:
+                problems.append(f"{store}: migration report omits 'discovered'")
+                continue
+            try:
+                discovered_total += int(row["discovered"])
+            except (TypeError, ValueError):
+                problems.append(f"{store}: 'discovered' is not a count")
+            for field, label in (
+                ("pending", "still pending after migrate"),
+                ("unknown", "recorded but unknown to this build"),
+                ("checksum_mismatches", "checksum mismatch"),
+            ):
+                values = row.get(field)
+                if isinstance(values, list) and values:
+                    problems.append(
+                        "%s: %s: %s" % (store, label, ", ".join(str(v) for v in values[:5]))
+                    )
+        if not problems and discovered_total == 0:
+            # Every store found zero migrations. `migrations/` is packaged
+            # beside sonder_migrations.py, so this means the release shipped
+            # without it and the migrate step was a no-op that exited 0.
+            problems.append(
+                "no store discovered any migration; this release appears to have "
+                "shipped without its migrations/ directory, so the migrate step "
+                "verified nothing"
+            )
+        return problems
 
     def _run_health_checks(
         self,
