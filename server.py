@@ -329,10 +329,16 @@ def _private_cot_rule_allows() -> bool:
     The second required act, and the one that cannot be set by an environment
     variable inherited from a parent process. ``policy.DEFAULT_RULES`` denies
     ``admin_private_chain_of_thought``, so this is False on any deployment that
-    has not written an explicit allow rule -- through ``permission_rule_set``,
-    which is itself developer-gated. First-match evaluation means the operator
-    rule (inserted at the front) wins over the built-in deny without the deny
-    ever being removed.
+    has not written an explicit allow rule into ``permissions.json``.
+
+    What the act requires is that *state on disk*, not one particular route to
+    it: ``permission_rule_set`` is the developer-gated tool for writing it, but
+    editing ``permissions.json`` by hand does it just as well, and that needs
+    filesystem access to the Sonder home rather than a developer token. Stating
+    the tool as the only way would overstate the gate.
+
+    First-match evaluation means the operator rule (inserted at the front) wins
+    over the built-in deny without the deny ever being removed.
 
     Fails closed: an unreadable or malformed policy is not an opt-in.
     """
@@ -7567,10 +7573,13 @@ def admin_private_chain_of_thought(token: str = "") -> str:
     Three gates, all of which must pass, and the first two are the operator's:
 
     * ``SONDER_ALLOW_PRIVATE_COT=1`` -- this deployment may serve this surface.
-    * an explicit permission rule allowing ``admin_private_chain_of_thought``.
-      The built-in rule denies it, so this must be written deliberately through
-      the developer-gated ``permission_rule_set``. An environment variable
-      inherited from a parent process cannot supply it.
+    * an explicit permission rule allowing ``admin_private_chain_of_thought``
+      in ``permissions.json``. The built-in rule denies it, so this state has
+      to be written deliberately -- through the developer-gated
+      ``permission_rule_set``, or by editing the file by hand, which needs
+      filesystem access to the Sonder home. The property that matters is that
+      an environment variable inherited from a parent process cannot supply
+      it, not that any one tool is the sole route.
     * a developer token, on any deployment that authenticates callers -- the
       reasoning belongs to whoever's turn produced it, exactly as for
       ``reasoning_show``. **On the default ``local-open`` deployment this third

@@ -8,6 +8,7 @@ and these tests exist partly to keep that true: opted in, it must serve the
 same reasoning record ``reasoning_show`` serves, and nothing else.
 """
 import pathlib
+import re
 
 import activity_tracker as at
 import permission_rules
@@ -15,6 +16,68 @@ import server
 from sonder_runtime.domain.execution import policy
 
 import pytest
+
+# --- consent-gate documentation coverage ----------------------------------
+
+_CONSENT_GATE_RE = re.compile(r"SONDER_ALLOW_[A-Z0-9_]+")
+
+# Where this runtime enumerates its default-off consent gates.
+_CONSENT_GATE_INVENTORIES = (
+    "docs/wiki/09-security-model.md",
+    "docs/wiki/03-configuration.md",
+    "docs/security/REVIEW.md",
+)
+
+# (gate, inventory) pairs already undocumented at this branch's base commit
+# 9f377f1. This branch does not fix them -- they are other people's gates and
+# other people's docs. Registering them keeps the check's teeth for anything
+# NEW while leaving the pre-existing debt visible instead of invisible, which
+# is the whole difference between a silenced check and an honest one.
+_UNDOCUMENTED_AT_BRANCH_POINT = frozenset(
+    (gate, inventory)
+    for gate in ("SONDER_ALLOW_CPU_OFFLOAD", "SONDER_ALLOW_PERMISSION_EDITS",
+                 "SONDER_ALLOW_REGISTRATION")
+    for inventory in _CONSENT_GATE_INVENTORIES
+) | frozenset({
+    # REVIEW.md's D2 entry describes this gate in prose and by its config key
+    # `allow_remote` rather than by env-var name. Pre-existing; not mine.
+    ("SONDER_ALLOW_REMOTE_OLLAMA", "docs/security/REVIEW.md"),
+})
+
+
+def _repo_root():
+    return pathlib.Path(__file__).resolve().parent.parent
+
+
+def _declared_consent_gates():
+    """Every SONDER_ALLOW_* gate name the runtime source actually reads."""
+    root = _repo_root()
+    sources = list(root.glob("*.py")) + list((root / "sonder_runtime").rglob("*.py"))
+    found = set()
+    for path in sources:
+        found.update(
+            _CONSENT_GATE_RE.findall(path.read_text(encoding="utf-8", errors="replace"))
+        )
+    return found
+
+
+def _undocumented_gates(gate_names, root=None):
+    """{inventory: [gate, ...]} for gates absent from it, minus known debt.
+
+    Pure and separately callable so the check can be shown to have teeth
+    rather than merely claimed to.
+    """
+    root = root or _repo_root()
+    missing = {}
+    for rel in _CONSENT_GATE_INVENTORIES:
+        text = (root / rel).read_text(encoding="utf-8")
+        absent = sorted(
+            gate for gate in gate_names
+            if gate not in text and (gate, rel) not in _UNDOCUMENTED_AT_BRANCH_POINT
+        )
+        if absent:
+            missing[rel] = absent
+    return missing
 
 
 @pytest.fixture(autouse=True)
@@ -229,24 +292,84 @@ def test_cot_is_developer_gated_on_the_http_surface():
         assert ts._dangerous_http_slash(name), name
 
 
-def test_the_flag_is_listed_in_every_consent_gate_inventory():
-    """A new consent gate must appear wherever consent gates are enumerated.
+def test_every_consent_gate_in_the_source_is_documented():
+    """Every SONDER_ALLOW_* gate the source reads must appear in all three
+    inventories -- derived from the code, not from a name typed here.
 
-    Searching the docs for this feature's own name could only ever return zero
-    -- nothing containing it existed yet, so the search was guaranteed to
-    reassure. The searchable thing is the *category*: these three files are
-    where this runtime lists its default-off consent gates, and a gate missing
-    from them is a gate an operator auditing the runtime will never learn about.
+    The first version of this test hardcoded one flag, so a *fourth* gate added
+    with no documentation would have passed green. That repeats the very shape
+    this change exists to remove: you cannot search for a name that does not
+    exist yet, and you equally cannot assert on one. The gate list is now read
+    out of the source, so a new SONDER_ALLOW_* gate fails here by default and
+    its author has to either document it or add it to the debt register below
+    on purpose.
+
+    Honest limit: this catches the SONDER_ALLOW_* naming family. A consent gate
+    named outside that convention -- SONDER_EXPOSE_REASONING, SONDER_WEB_TOOLS,
+    SONDER_LOCATION_CONSENT -- is not derivable this way and still escapes.
     """
-    root = pathlib.Path(__file__).resolve().parent.parent
-    inventories = (
-        "docs/wiki/09-security-model.md",
-        "docs/wiki/03-configuration.md",
-        "docs/security/REVIEW.md",
-    )
-    for rel in inventories:
-        text = (root / rel).read_text(encoding="utf-8")
-        assert "SONDER_ALLOW_PRIVATE_COT" in text, rel
+    gates = _declared_consent_gates()
+    # The derivation must actually be finding things, or an empty set would
+    # make every assertion below vacuously true.
+    assert "SONDER_ALLOW_PRIVATE_COT" in gates
+    assert len(gates) >= 5
+    assert _undocumented_gates(gates) == {}
+
+
+def test_the_inventory_check_has_teeth():
+    """Prove it fails on an undocumented gate instead of quietly passing.
+
+    The claim "a new gate now fails loudly" is worth exactly as much as the
+    demonstration that it does. This is that demonstration.
+    """
+    bogus = "SONDER_ALLOW_NOT_A_REAL_GATE"
+    missing = _undocumented_gates({bogus})
+    assert set(missing) == set(_CONSENT_GATE_INVENTORIES)
+    assert all(names == [bogus] for names in missing.values())
+
+
+def test_the_documentation_debt_register_cannot_rot():
+    """A silenced name that no longer exists silences nothing and hides that.
+
+    Every entry must still name a gate the source really reads, so the register
+    shrinks when the debt is paid instead of quietly outliving it.
+    """
+    gates = _declared_consent_gates()
+    for gate, inventory in _UNDOCUMENTED_AT_BRANCH_POINT:
+        assert gate in gates, gate
+        assert inventory in _CONSENT_GATE_INVENTORIES, inventory
+
+
+def test_no_surface_calls_permission_rule_set_the_only_way_in():
+    """Act 2 is a state on disk, not one tool. Saying otherwise overstates it.
+
+    `permissions.json` can be edited by hand -- this file's own `_allow_rule`
+    helper goes through `permission_rules.add_rule`, not the MCP tool. The
+    security property is that an *environment variable* cannot supply act 2,
+    not that one developer-gated tool is the sole route. That distinction was
+    already flagged as deferred in one docstring and I carried it into three
+    operator-facing documents before catching it.
+    """
+    surfaces = {
+        "_private_cot_rule_allows docstring": server._private_cot_rule_allows.__doc__,
+        "tool docstring": server.admin_private_chain_of_thought.__doc__,
+    }
+    root = _repo_root()
+    for rel in _CONSENT_GATE_INVENTORIES:
+        surfaces[rel] = (root / rel).read_text(encoding="utf-8")
+    for name, text in surfaces.items():
+        if "permission_rule_set" in (text or ""):
+            assert "by hand" in text, name
+
+
+def test_review_does_not_claim_the_refusal_is_recorded_unconditionally():
+    """activity_tracker.record_tool_result no-ops without a bound response span.
+
+    Pre-existing and uniform across every tool -- but my sentence in REVIEW.md
+    asserted the recording flatly, which is a new absolute that is not absolute.
+    """
+    text = (_repo_root() / "docs/security/REVIEW.md").read_text(encoding="utf-8")
+    assert "response span" in text
 
 
 def test_the_opt_in_refusal_is_recorded(monkeypatch):
