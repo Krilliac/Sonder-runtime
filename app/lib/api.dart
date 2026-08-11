@@ -384,7 +384,11 @@ class SonderCommand {
   final String tool;
   final String category;
 
-  /// safe | ask | mutation | dangerous. Free-form on the wire; the UI treats
+  /// safe | ask | mutation | execution | dangerous — the class the server's
+  /// gate decides on, so it is a key of [PermissionMode.matrix] and the two
+  /// can be read together. This list has been wrong before: `execution` was
+  /// missing here and from the server's published vocabulary, so process
+  /// launchers shipped as `safe`. Free-form on the wire; the UI treats
   /// anything it does not recognise as unlabelled rather than guessing.
   final String risk;
   final String summary;
