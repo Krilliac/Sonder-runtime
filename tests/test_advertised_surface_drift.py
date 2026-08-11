@@ -435,7 +435,7 @@ def test_agent_help_advertises_nothing_a_run_gate_will_refuse():
     """The admit-then-deny guard.
 
     For every combination of run flags, no name the help text advertises may
-    be one that ``_agent_run_tool_policy_error`` refuses for that same
+    be one that ``_agent_run_tool_refusal`` refuses for that same
     combination.  Advertising it means the model is told it can call the tool
     and is refused one step later -- and the run pays a step for it.
     """
@@ -444,8 +444,12 @@ def test_agent_help_advertises_nothing_a_run_gate_will_refuse():
         advertised = _help_advertised(help_text)
         assert advertised, "help went empty for %s" % keywords
         refused = sorted(
-            name for name in advertised
-            if server._agent_run_tool_policy_error(name, **keywords)
+            "%s (%s)" % (name, gate)
+            for name, gate in (
+                (name, server._agent_run_tool_refusal(name, **keywords))
+                for name in advertised
+            )
+            if gate
         )
         assert refused == [], (
             "_agent_tool_help(%s) advertises %d tool(s) that a later gate "
