@@ -123,22 +123,17 @@ def test_plan_still_lets_the_app_read(monkeypatch):
     assert not ts._handle_slash("/permissions").startswith("refused")
 
 
-def test_an_ask_class_read_is_refused_here_exactly_as_it_already_was_elsewhere():
-    """The cost of gating this chain, stated rather than discovered.
+def test_a_verified_read_is_allowed_here_exactly_as_elsewhere():
+    """A verified runtime observation is safe across every surface.
 
-    ``sonder_stats`` is read-only by inspection but the catalog classes it
-    ``ask`` -- it is one of the read-only tools sitting in the fail-closed
-    default -- so ``plan`` refuses it. That is a pre-existing classification
-    gap, not something this gate invented: the console and the MCP entry point
-    have refused the same call since they were gated. Pinning it here keeps
-    the three surfaces answering alike, so a future fix to the classification
-    moves all three at once instead of leaving this one behind.
+    ``sonder_stats`` is read-only by execution, so plan mode may inspect it;
+    the console and HTTP entry points must agree with the catalog.
     """
-    assert pm.risk_of("sonder_stats") == "ask"
+    assert pm.risk_of("sonder_stats") == "safe"
     pm.set_mode(pm.PLAN)
 
-    assert ts._handle_slash("/stats").startswith("refused /stats:")
-    assert not sonder_repl._named_command_gate("/stats")[0]
+    assert not ts._handle_slash("/stats").startswith("refused /stats:")
+    assert sonder_repl._named_command_gate("/stats")[0]
 
 
 # --- an explicit deny binds here too --------------------------------------

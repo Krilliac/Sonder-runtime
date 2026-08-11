@@ -803,7 +803,9 @@ def build_run(root=".", command="", timeout=120, extra_roots=""):
         # tool intentionally accepts a command string, so dispatch it through
         # cmd there rather than trying to exec a nonexistent echo.exe.
         if os.name == "nt":
-            return _run(["cmd", "/d", "/s", "/c", command], cwd=root, timeout=timeout)
+            result = _run(["cmd", "/d", "/s", "/c", command], cwd=root, timeout=timeout)
+            result["command"] = command.split()
+            return result
         parts = command.split()
         return _run(parts, cwd=root, timeout=timeout)
 

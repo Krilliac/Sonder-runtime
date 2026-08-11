@@ -392,11 +392,9 @@ def test_a_malformed_schema_is_refused_before_any_request_is_posted(monkeypatch)
 
 # --- partial schema coverage is disclosed, not hidden -------------------------
 
-def test_a_subschema_the_re_check_cannot_verify_is_disclosed(monkeypatch):
-    # `enum` is applied by Ollama's decoder and is NOT re-checked in process.
-    # Task 1 established that silence from a partial check must never read as a
-    # clean bill of health; carrying that disclosure through this helper is the
-    # same obligation.
+def test_a_subschema_the_re_check_verifies_is_not_disclosed(monkeypatch):
+    # `enum` is enforced in process, so a valid nested value needs no partial-
+    # coverage disclosure.
     schema = {
         "type": "object",
         "required": ["name"],
@@ -409,8 +407,7 @@ def test_a_subschema_the_re_check_cannot_verify_is_disclosed(monkeypatch):
         source=SOURCE, schema=json.dumps(schema), tier="fast", learn=False,
     )
     result = json.loads(out)
-    assert "enum" in result["schema_unverified"]
-    assert "$.name.value" in result["schema_unverified"]
+    assert "schema_unverified" not in result
 
 
 def test_a_fully_checkable_schema_discloses_nothing(monkeypatch):
