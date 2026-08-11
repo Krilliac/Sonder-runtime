@@ -413,6 +413,102 @@ def test_fewer_real_errors_still_wins_when_nothing_is_masked():
     )
 
 
+# --- a truncated capture is a partial measurement, not a good score ---------
+
+# The exact notice _codegen_build emits when workbench drops build output.
+_TRUNCATED_NOTICE = (
+    "error: build output was truncated; the error summary may be missing"
+)
+
+
+def test_a_truncated_capture_cannot_occupy_the_trustworthy_tier():
+    """workbench keeps the HEAD of overflowing output and a build prints its
+    error summary at the TAIL, so truncation drops exactly the errors. The
+    notice matched the error regex but none of the unreliable shapes, so it
+    counted as one ordinary error in the TRUSTWORTHY tier -- and the truncated
+    build outscored an honest one, whose file the loop then threw away."""
+    truncated = cg.count_errors(_TRUNCATED_NOTICE)
+    honest = cg.count_errors(
+        "\n".join("a.cs(%d,1): error CS0246: missing type" % i for i in range(30))
+    )
+    assert len(truncated) == 1 and len(honest) == 30
+
+    assert cg.count_unreliable(truncated) == 1
+    assert cg.score(truncated)[0] == 1, "a floor is not a trustworthy total"
+    assert cg.score(honest) < cg.score(truncated), (
+        "30 measured errors must beat 1 from a build nobody finished reading"
+    )
+
+
+def test_describe_total_names_a_truncated_capture_as_the_reason():
+    described = cg.describe_total(cg.count_errors(_TRUNCATED_NOTICE))
+    assert "UNRELIABLE" in described
+    assert "truncated" in described
+
+
+def test_a_truncated_capture_is_a_third_state_not_a_pass_and_not_a_failure():
+    """"Did not fully measure" is distinct from "measured and found few errors"
+    -- and equally distinct from "measured and found the build broken"."""
+    report = cg.format_report([], cg.count_errors(_TRUNCATED_NOTICE), ok=False)
+    assert "BUILD SUCCEEDED" not in report
+    assert "BUILD FAILED" not in report
+    assert "MEASUREMENT INCOMPLETE" in report
+    assert "FLOOR" in report
+
+    # Even asked to call it a pass, a partial measurement is not one.
+    assert "BUILD SUCCEEDED" not in cg.format_report(
+        [], cg.count_errors(_TRUNCATED_NOTICE), ok=True,
+    )
+
+
+def test_a_truncated_capture_still_counts_as_a_build_that_ran():
+    """The opposite over-correction: the build DID run and DID report on the
+    code, so calling it unrun would be a second false state."""
+    assert cg.build_ran(_TRUNCATED_NOTICE) is True
+    assert "BUILD DID NOT RUN" not in cg.format_report(
+        [], cg.count_errors(_TRUNCATED_NOTICE), ok=False,
+    )
+
+
+def test_ordinary_truncation_words_do_not_mask_an_honest_build():
+    """The over-correction guard. Every line below carries "truncat*" in an
+    HONEST compiler message, three of them the exact word "truncated" -- so a
+    lazy `(?i)truncat(ed|ion)` would flatten the tier the loop converges on,
+    and this test would catch it. The single-C4305 fixture did not: "truncation"
+    alone still passes a bare `(?i)truncated`."""
+    honest = cg.count_errors("\n".join((
+        "a.cpp(1,1): error C4305: 'initializing': truncation from 'double' to 'float'",
+        "b.c(9,3): error: string literal was truncated to fit the array",
+        "c.sql(2,1): error: value would be truncated when stored in column 'name'",
+        "d.java(4,4): error: input file was truncated by the preprocessor",
+    )))
+    assert len(honest) == 4
+    assert cg.count_unreliable(honest) == 0
+    assert cg.score(honest)[0] == 0
+    assert "UNRELIABLE" not in cg.describe_total(honest)
+
+
+def test_a_stricter_error_regex_cannot_hide_a_truncated_capture():
+    """The partial state must be read from RAW output, exactly as build_ran is.
+
+    `error_regex` is a documented codegen_build_loop parameter. Deriving the
+    partial-measurement state from the PARSED error list means a caller passing
+    a strict regex drops the truncation notice entirely -- and then
+    count_unreliable([]) == 0 and score([]) == (0, 0, 0), which beats an honest
+    (0, 0, 30). That is the original defect, reachable through a documented
+    knob.
+    """
+    raw = cg.TRUNCATED_MEASUREMENT_NOTICE + "\nBuild started 12:00:01\n"
+    strict = r"CS\d{4}"
+
+    assert cg.count_errors(raw, strict) == [], "the notice is invisible to it"
+    # The raw output still says the capture was cut -- and still says it ran.
+    assert cg.output_truncated(raw) is True
+    assert cg.build_ran(raw) is True
+    # ...and an honest build is not falsely accused.
+    assert cg.output_truncated("a.cs(1,1): error CS0246: missing type") is False
+
+
 CS_SKELETON = """\
 public sealed class GameMap
 {
