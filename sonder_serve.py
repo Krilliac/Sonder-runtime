@@ -441,6 +441,27 @@ SYSTEM_OPERATION_ROLES = {
     "workspace_execution": "developer",
 }
 
+# The catalogued ``/<tool>`` surface resolves tool names dynamically, so it
+# cannot safely rely on a hand-maintained branch list.  Bind the small set of
+# shared-authority tools to the operation they perform at that one choke point.
+# Direct local MCP/console use remains a trusted operator surface; this map is
+# deliberately enforced only when an HTTP request supplies an auth context.
+SYSTEM_OPERATION_TOOLS = {
+    "permission_mode": "permission_mode_change",
+    "permission_rule_set": "permission_rule_change",
+    "runtime_policy_update": "runtime_policy_change",
+    "update_system_profile": "selfmod_deploy",
+    "admin_set_account": "account_management",
+    "autopilot_start": "automation_lifecycle",
+    "autopilot_resume": "automation_lifecycle",
+    "autopilot_pause": "automation_lifecycle",
+    "autopilot_cancel": "automation_lifecycle",
+    "workflow_save": "automation_lifecycle",
+    "workflow_delete": "automation_lifecycle",
+    "workflow_run": "automation_lifecycle",
+    "memory_export": "workspace_execution",
+}
+
 
 def _system_operation_authority_error(operation, context):
     """Return a role-boundary refusal, or "" when this caller may proceed."""
@@ -937,7 +958,7 @@ def _dump_chat(messages=None, label="chat", state=None):
     return "dumped chat/debug log to %s" % path
 
 
-def _http_slash_refusal(cmd):
+def _http_slash_refusal(cmd, context=None):
     """The permission gate for this chain: "" to proceed, else the refusal text.
 
     This chain calls `server.file_write` / `file_edit` / `file_delete`
@@ -974,16 +995,21 @@ def _http_slash_refusal(cmd):
         # Fail closed on ignorance: an empty map would answer "allowed" for
         # every command in this chain.
         return "refused %s: %s" % (cmd, exc)
-    return _http_tool_refusal(tools, cmd)
+    return _http_tool_refusal(tools, cmd, context=context)
 
 
-def _http_tool_refusal(tools, label):
+def _http_tool_refusal(tools, label, context=None):
     """The decision itself, shared by this surface's two entry points.
 
     Only a `deny` can come back under `interactive=False`, so this is a flat
     loop rather than a copy of the console's ask-and-rank gate.
     """
     for tool in tools:
+        operation = SYSTEM_OPERATION_TOOLS.get(tool)
+        if operation and context is not None:
+            authority_error = _system_operation_authority_error(operation, context)
+            if authority_error:
+                return "refused %s: %s" % (label, authority_error)
         decision = permission_modes.decide_for_caller(
             tool, interactive=False, gate_control_exempt=True,
         )
@@ -997,7 +1023,7 @@ def _http_tool_refusal(tools, label):
     return ""
 
 
-def _handle_slash(content, messages=None, state=None, project=""):
+def _handle_slash(content, messages=None, state=None, project="", context=None):
     """Return response text if `content` is a recognized slash command, else None."""
     state = _state_or_legacy(state)
 
@@ -1012,7 +1038,7 @@ def _handle_slash(content, messages=None, state=None, project=""):
     # One choke point in front of every branch below, for the same reason the
     # REPL has one: this is a flat chain of ~130 `if cmd == ...` returns, and a
     # check placed after even one of them leaves that one ungated.
-    refusal = _http_slash_refusal(cmd)
+    refusal = _http_slash_refusal(cmd, context=context)
     if refusal:
         return refusal
 
@@ -1306,14 +1332,14 @@ def _handle_slash(content, messages=None, state=None, project=""):
             return err
         return _do_train(n)
 
-    dispatched = _dispatch_catalogued_tool(stripped, state)
+    dispatched = _dispatch_catalogued_tool(stripped, state, context=context)
     if dispatched is not None:
         return dispatched
 
     return None  # not a recognized slash command — fall through to the model
 
 
-def _dispatch_catalogued_tool(line, state):
+def _dispatch_catalogued_tool(line, state, context=None):
     """Run ``/<tool> ...`` for any registered tool without a branch of its own.
 
     The explicit branches above cover the curated console commands; everything
@@ -1347,7 +1373,7 @@ def _dispatch_catalogued_tool(line, state):
     handler = getattr(server, tool_name, None)
     if not callable(handler):
         return "%s is catalogued but not callable here." % tool_name
-    refusal = _http_tool_refusal((tool_name,), "/" + tool_name)
+    refusal = _http_tool_refusal((tool_name,), "/" + tool_name, context=context)
     if refusal:
         return refusal
     # Guarded tools take the caller's own token exactly as the explicit
@@ -2231,7 +2257,7 @@ class Handler(BaseHTTPRequestHandler):
                 ) as activity_response:
                     reply = _handle_slash(
                         prompt, messages=messages, state=state,
-                        project=storage_project,
+                        project=storage_project, context=context,
                     )
                     if reply is None:
                         reply = _handle_feedback(prompt, state=state)

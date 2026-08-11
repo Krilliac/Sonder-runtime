@@ -25,6 +25,9 @@ def test_every_declared_system_operation_has_an_explicit_role():
         "automation_lifecycle", "workspace_execution",
     }
     assert set(serve.SYSTEM_OPERATION_ROLES.values()) <= {"developer", "admin"}
+    assert set(serve.SYSTEM_OPERATION_TOOLS.values()) <= set(
+        serve.SYSTEM_OPERATION_ROLES
+    )
 
 
 def test_ordinary_user_is_refused_from_every_system_operation():
@@ -50,6 +53,29 @@ def test_local_open_trusted_operator_retains_extended_system_toolset():
     }
     for operation in serve.SYSTEM_OPERATION_ROLES:
         assert serve._system_operation_authority_error(operation, local_operator) == ""
+
+
+def test_catalogued_system_tool_cannot_bypass_http_role_boundary():
+    ordinary = _context("user")
+    for tool, operation in serve.SYSTEM_OPERATION_TOOLS.items():
+        refusal = serve._http_tool_refusal((tool,), "/" + tool, ordinary)
+        assert "refused" in refusal and serve.SYSTEM_OPERATION_ROLES[operation] in (
+            "developer", "admin",
+        ), tool
+
+
+def test_catalogued_system_tool_remains_available_to_local_open_operator():
+    local_operator = {
+        "mode": "local-open", "authorized": True, "api_key": False,
+        "account": None,
+    }
+    for tool in serve.SYSTEM_OPERATION_TOOLS:
+        refusal = serve._http_tool_refusal((tool,), "/" + tool, local_operator)
+        # Permission modes may independently ask/deny a state-changing tool,
+        # but the remote account-role boundary must not take authority away
+        # from the trusted local operator surface.
+        assert "administrator authorization" not in refusal, tool
+        assert "developer or administrator authorization" not in refusal, tool
 
 
 def test_agent_cannot_turn_injected_system_tool_names_into_authority():
