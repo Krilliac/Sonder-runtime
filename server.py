@@ -26,6 +26,7 @@ import hmac
 import importlib
 import http.client
 import json
+import math
 import os
 import re
 import sys
@@ -3668,6 +3669,8 @@ def _retry_after_seconds(headers, *, now=None):
             seconds = (when - current).total_seconds()
         except (TypeError, ValueError, IndexError, OverflowError):
             return None
+    if not math.isfinite(seconds):
+        return None
     if seconds < 0:
         return 0.0
     return min(float(seconds), 86400.0)

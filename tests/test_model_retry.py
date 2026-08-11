@@ -138,11 +138,16 @@ def test_retry_after_parser_supports_http_dates_and_rejects_garbage():
     now = server.datetime.datetime(2026, 8, 11, 21, 0, tzinfo=server.datetime.timezone.utc)
     assert server._retry_after_seconds({"Retry-After": "Tue, 11 Aug 2026 21:00:12 GMT"}, now=now) == 12
     assert server._retry_after_seconds({"Retry-After": "not-a-date"}) is None
+    assert server._retry_after_seconds({"Retry-After": "NaN"}) is None
+    assert server._retry_after_seconds({"Retry-After": "inf"}) is None
 
 
 def test_model_error_ignores_malformed_retry_after_metadata():
     error = server.ModelCallError("http", "throttled", retry_after_seconds="bad")
     assert error.retry_after_seconds is None
+    assert server.ModelCallError(
+        "http", "throttled", retry_after_seconds=float("nan"),
+    ).retry_after_seconds is None
 
 
 def test_cloud_model_name_is_fail_safe_single_attempt(monkeypatch):
