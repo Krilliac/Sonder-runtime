@@ -137,6 +137,74 @@ def test_a_blind_catalog_stops_a_non_interactive_caller_in_every_mode(monkeypatc
         )
 
 
+def test_a_blind_catalog_is_blind_however_it_went_blind(monkeypatch):
+    """The ``CatalogUnavailable`` branch is not the only way to blind it.
+
+    ``catalog()`` converts only the registry read into ``CatalogUnavailable``.
+    The remaining ~100 lines -- ``import command_registry``, ``_native_groups()``,
+    ``Command`` construction, ``_category_for`` -- are unwrapped, so an
+    ``ImportError``/``AttributeError`` during the partially-initialised server
+    that ``CatalogUnavailable``'s own docstring cites arrives as some *other*
+    exception. That lands on the broad ``except Exception: command = None``
+    two lines below the fail-closed branch, which does NOT return
+    ``UNCLASSIFIED`` -- it falls through to the static tables below.
+
+    Those tables then answer confidently while the authority is blind, and the
+    answer can be *softer* than the catalog's. ``self_heal_repair`` is the
+    proof: it is catalog-``dangerous`` AND a member of ``EXECUTION_TOOLS``,
+    and ``dangerous`` outranks ``execution`` only when the catalog can be read.
+    Blind, the ``catalogued == "dangerous"`` test cannot fire, ``EXECUTION_TOOLS``
+    does, and ``execution`` is ALLOW in ``auto`` outright.
+
+    This is the same defect ``risk_of``'s own docstring says the precedence
+    order was rewritten to fix, re-entered through the exception path.
+    """
+    def blind(_name):
+        raise AttributeError("module 'command_registry' has no attribute 'COMMANDS'")
+
+    monkeypatch.setattr(command_catalog, "by_name", blind)
+    # Grading must be identical to the CatalogUnavailable branch: the gate
+    # cannot know WHY it went blind, only that it did.
+    for name in ("git_merge", "self_heal_repair", "run_code", "sqlite_mutate"):
+        assert pm.risk_of(name) == UNCLASSIFIED, (
+            "the classifier is blind but still graded %s as %r from a static "
+            "table -- a confident answer from an authority that cannot see"
+            % (name, pm.risk_of(name))
+        )
+        for mode in ALL_MODES:
+            decision = pm.decide(name, mode=mode, **NON_INTERACTIVE)
+            assert decision.action == pm.DENY, (
+                "mode %s: the classifier was blind via a non-CatalogUnavailable "
+                "exception and the gate still resolved %s to %r"
+                % (mode, name, decision.action)
+            )
+
+
+def test_a_catalog_that_will_not_even_import_is_also_blind(monkeypatch):
+    """The third way in: ``import command_catalog`` itself raising.
+
+    ``except Exception: command_catalog = None`` skips the whole lookup block,
+    leaving ``catalogued`` empty and falling into the very same static tables.
+    A partially-initialised server is exactly when an import fails, so this is
+    not a hypothetical.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_catalog(name, *a, **k):
+        if name == "command_catalog":
+            raise ImportError("partially-initialised server")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", no_catalog)
+    for name in ("self_heal_repair", "run_code", "git_merge"):
+        assert pm.risk_of(name) == UNCLASSIFIED, (
+            "command_catalog would not import, so nothing graded %s -- but "
+            "risk_of answered %r anyway" % (name, pm.risk_of(name))
+        )
+
+
 def test_the_refusal_is_visible_and_says_why():
     """"Never silently downgraded" means the outcome has to be legible."""
     decision = pm.decide("not_a_real_tool", mode=pm.AUTO, **NON_INTERACTIVE)
