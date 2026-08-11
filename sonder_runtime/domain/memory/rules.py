@@ -62,6 +62,41 @@ POPULATIONS = {
 # unrecognised signal beyond the 0 default: unknown provenance ranks below both.
 _POPULATION_TIER = {"caller": 2, "execution": 1}
 
+# --- TWO QUESTIONS, deliberately different rules -----------------------------
+#
+# There are two orderings here and they disagree, on purpose, about the same
+# pair of rows. Written down once, in one place, because they were previously
+# implicit -- one lived here and the other in a closure inside memory_quality
+# that happened to share the NAME `evidence_rank` while meaning the opposite.
+# Two sites teaching contradictory rules for one concept, unstated and
+# untested, is the shape that produced the calibration/learning_health defect.
+#
+#   CREDIT -- evidence_rank(signal)
+#     "Whose judgement says this work was GOOD?"
+#     Population is conditioned on eligibility, because population attributes
+#     CREDIT and there is none below the bar. Used to order outcome signals for
+#     distillation and the fine-tuning export.
+#
+#   RETENTION -- retention_rank(caller_mean, execution_mean)
+#     "Whose judgement would be LOST if this row were deleted?"
+#     Population decides unconditionally, because a caller's negative is the
+#     most valuable history to keep, not the least: deleting it leaves a
+#     clean-looking duplicate behind and launders a lesson the store has
+#     already measured as harmful. Used to pick the survivor of an
+#     exact-duplicate group.
+#
+# They are not opposites. Above the eligibility bar they agree -- a caller who
+# reviewed the work outranks the runtime grading itself in both. They part
+# company only below it, where credit runs out and retention value peaks.
+# Neither may be substituted for the other, and neither reduces the two
+# populations to one number.
+
+# Sorts below every real reward (the worst signal prices at -1.0), so an
+# unmeasured row can never displace a measured one. It exists so that "never
+# measured" is expressed explicitly rather than through a falsy default, which
+# silently swallowed a measured average of exactly 0.0.
+NO_MEASUREMENT_RANK = -2.0
+
 
 def reward_score(signal: str) -> float:
     return SIGNAL_REWARDS.get(signal, 0.0)
@@ -88,7 +123,12 @@ def signal_population(signal: str) -> str:
 
 
 def evidence_rank(signal: str) -> tuple[int, int, float]:
-    """Order two outcome signals without blending their populations.
+    """CREDIT: whose judgement says this work was GOOD.
+
+    Order two outcome signals without blending their populations. The sibling
+    question -- whose judgement would be LOST if a row were deleted -- is
+    ``retention_rank``, and it deliberately answers differently; see the "two
+    questions" note above before making one of them match the other.
 
     Three lexicographic keys, never summed:
 
@@ -123,6 +163,35 @@ def evidence_rank(signal: str) -> tuple[int, int, float]:
         _POPULATION_TIER.get(signal_population(signal), 0) if good else 0,
         reward_score(signal),
     )
+
+
+def retention_rank(caller_mean, execution_mean) -> tuple[float, float]:
+    """RETENTION: whose judgement would be LOST if this row were deleted.
+
+    For choosing which of several rows carrying the SAME content to keep. The
+    two per-population means come from ``lesson_usage_stats``; ``None`` means
+    that population never judged this row.
+
+    Two keys, never one number, and the caller key decides first
+    UNCONDITIONALLY -- the deliberate difference from ``evidence_rank``, which
+    conditions population on eligibility because it is attributing credit.
+    Here a caller's ``rejected`` is not weak evidence, it is the strongest
+    reason to keep the row: it is a measured harm, the self-graded copy cannot
+    stand in for it, and deleting it launders the lesson. A blended mean is
+    what made a row a caller rejected at -0.5 and the runtime then passed eight
+    times read as +0.83 and win.
+
+    Within a population the ordering is the mean itself, so a measured neutral
+    0.0 stays above a measured -1.0 -- neutral evidence is not absent evidence.
+    ``None`` maps to ``NO_MEASUREMENT_RANK``, below every real reward, so an
+    unevaluated duplicate can never displace a measured one.
+
+    Returns keys for an ASCENDING sort: the smallest tuple is the keeper.
+    """
+    def rank(mean):
+        return NO_MEASUREMENT_RANK if mean is None else float(mean)
+
+    return (-rank(caller_mean), -rank(execution_mean))
 
 
 # --- recall thresholding ----------------------------------------------------
