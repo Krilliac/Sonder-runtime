@@ -22,6 +22,7 @@ import collections
 import contextlib
 import datetime
 import email.utils
+import hashlib
 import hmac
 import importlib
 import http.client
@@ -14505,6 +14506,65 @@ def tool_manifest() -> str:
         "sonder_stats/sonder_sessions/sonder_remember_fact": "Memory observability and durable facts.",
     }
     return "\n".join("  %s: %s" % item for item in sorted(tools.items()))
+
+
+@mcp.tool()
+def tool_capability_manifest() -> str:
+    """Return a deterministic fingerprint of the currently advertised tool surface.
+
+    This is visibility only: it cannot add, remove, approve, or invoke tools.
+    Clients can retain the SHA-256 value with a run receipt and notice when a
+    live-reloaded runtime presents a different capability surface.
+    """
+    _maybe_live_reload()
+    manifest = tool_manifest()
+    digest = hashlib.sha256(manifest.encode("utf-8")).hexdigest()
+    return json.dumps({
+        "sha256": digest,
+        "tool_count": len(getattr(mcp._tool_manager, "_tools", {})),
+        "manifest": manifest,
+        "authority": "informational only; host policy remains authoritative",
+    }, indent=2, sort_keys=True)
+
+
+@mcp.tool()
+def access_request_preview(path: str, mode: str = "read") -> str:
+    """Preview a scoped filesystem access request without changing any authority.
+
+    The result is deliberately non-authorizing.  Only an operator can add a
+    root through the existing guarded configuration and, for mutations, the
+    existing developer/approval path remains required.
+    """
+    _maybe_live_reload()
+    wanted = str(mode or "read").strip().lower()
+    if wanted not in ("read", "write"):
+        error = "ERROR: mode must be read or write."
+        return error
+    requested = str(path or "").strip()
+    if not requested:
+        error = "ERROR: path is required."
+        return error
+    try:
+        resolved = file_ops.resolve_path(requested)
+        state = "already_authorized"
+        detail = "The guarded root policy already admits this path."
+    except (OSError, ValueError, PermissionError) as exc:
+        resolved = str(Path(requested).expanduser())
+        state = "operator_action_required"
+        detail = str(exc)
+    return json.dumps({
+        "path": resolved,
+        "mode": wanted,
+        "state": state,
+        "detail": detail,
+        "grant": False,
+        "operator_action": (
+            "Review and explicitly add a trusted root through file_roots.local "
+            "or SONDER_FILE_ROOTS; write access also remains subject to the "
+            "existing developer/approval gate."
+        ),
+        "model_authority": "A model or prompt cannot approve this request.",
+    }, indent=2, sort_keys=True)
 
 
 AGENT_TOOL_HELP = """Available tools:
