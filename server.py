@@ -16267,6 +16267,38 @@ def _agent_checklist_fail(checklist_id, states, reason, item=1):
     _agent_checklist_mark(checklist_id, states, 4, "done", "failure included in end report")
 
 
+def _agent_verification_standing() -> str:
+    """The measured standing the agent's own claims are about to be made under.
+
+    The runtime has always computed this and shown it to the *caller* through
+    `calibration_status`. The agent -- the thing actually making the claims --
+    was told nothing, so it proceeded as though unverified work were verified.
+
+    What crosses the boundary is the three-way state, not a bare percentage and
+    not `should_verify`'s bare boolean: that boolean is True both for a record
+    measured below the bar and for one too thin to measure, and an agent given
+    only the boolean cannot tell "measured and unreliable" from "never
+    measured". Rendering is `calibration`'s, so the wording stays a projection
+    of counts rather than something a model produced about itself.
+
+    The caller-judged population is the one named, deliberately. The execution
+    population is self-graded, roughly fifty times larger, and around forty
+    points higher; it answers "did something build", not "was the delegated work
+    any good", and showing it here would be the reassuring number.
+
+    Bookkeeping must never break the run it is describing, so a failure to read
+    the store yields no block rather than an error.
+    """
+    try:
+        conn = _open_db()
+        try:
+            return calibration.agent_notice(conn, "caller")
+        finally:
+            conn.close()
+    except Exception:
+        return ""
+
+
 def _agent_impl(
     prompt: str,
     tier: str = "code",
@@ -16471,6 +16503,9 @@ def _agent_impl(
             "\n\nHOST TOOL ALLOWLIST (cannot be expanded by the model):\n- %s"
             % "\n- ".join(sorted(allowed_tools))
         )
+    standing_notice = _agent_verification_standing()
+    if standing_notice:
+        transcript += "\n\n" + standing_notice
 
     def ensure_not_cancelled():
         if cancel_check is not None and _cancel_requested(cancel_check):
