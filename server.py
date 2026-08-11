@@ -14538,6 +14538,27 @@ def _agent_dispatch(
     if gate_error:
         return gate_error
     if read_only:
+        if not repository_extra_roots and tool_name in _DEVELOPER_WORKFLOW_TOOLS:
+            # `_agent_project_scope("")` returns ("", "") with no error, so
+            # `project=""` produced a read-only run bound to nothing -- and
+            # every path check below is conditional on `repository_extra_roots`
+            # being set.  For these 23 that meant no confinement at all, which
+            # is how `secret_scan` came to read a canary outside the repository
+            # and print the key back to a read-only "observe" agent.  Their
+            # whole contract is "work on a project", so with no project there
+            # is nothing legitimate for them to do and refusing costs nothing.
+            #
+            # Second lock, not the lock: `harness_tools._resolve_root` is where
+            # the class is actually closed, because it also covers the direct
+            # MCP callers and the 19 of these that this branch never sees (the
+            # read-only policy refuses them for not being in
+            # REPOSITORY_READ_ONLY_TOOLS).  This one stands in front of it so
+            # that adding a tool to that set cannot silently re-open the door.
+            return (
+                "ERROR: read-only agent run has no host-selected project root, "
+                "so developer-workflow tool '%s' has no project to work on. "
+                "Pass project=<directory>." % tool_name
+            )
         if repository_extra_roots:
             # Defense in depth for direct/internal dispatch callers.  The
             # observed agent path already scopes before policy, but dispatch
@@ -15383,164 +15404,173 @@ def _agent_dispatch(
             learn=args.get("learn", False),
         )
     # ── Developer-workflow tools (harness_tools.py) ──────────────────────
-    if tool_name == "test_discover":
-        return test_discover(
-            root=args.get("root", "."),
-            framework=args.get("framework", "auto"),
-        )
-    if tool_name == "test_run":
-        return test_run(
-            root=args.get("root", "."),
-            framework=args.get("framework", "auto"),
-            path=args.get("path", ""),
-            pattern=args.get("pattern", ""),
-            verbose=args.get("verbose", False),
-            coverage=args.get("coverage", False),
-            timeout=args.get("timeout", 120),
-            extra_args_json=args.get("extra_args_json", "[]"),
-        )
-    if tool_name == "lint_run":
-        return lint_run(
-            root=args.get("root", "."),
-            tool=args.get("tool", "auto"),
-            path=args.get("path", ""),
-            fix=args.get("fix", False),
-            timeout=args.get("timeout", 60),
-        )
-    if tool_name == "format_code":
-        return format_code(
-            root=args.get("root", "."),
-            tool=args.get("tool", "auto"),
-            path=args.get("path", ""),
-            check_only=args.get("check_only", False),
-            timeout=args.get("timeout", 60),
-        )
-    if tool_name == "typecheck_run":
-        return typecheck_run(
-            root=args.get("root", "."),
-            tool=args.get("tool", "auto"),
-            path=args.get("path", ""),
-            timeout=args.get("timeout", 120),
-        )
-    if tool_name == "dependency_add":
-        return dependency_add(
-            root=args.get("root", "."),
-            packages_json=args.get("packages_json", "[]"),
-            dev=args.get("dev", False),
-            timeout=args.get("timeout", 60),
-        )
-    if tool_name == "dependency_remove":
-        return dependency_remove(
-            root=args.get("root", "."),
-            packages_json=args.get("packages_json", "[]"),
-            timeout=args.get("timeout", 60),
-        )
-    if tool_name == "dependency_update":
-        return dependency_update(
-            root=args.get("root", "."),
-            packages_json=args.get("packages_json", "[]"),
-            timeout=args.get("timeout", 120),
-        )
-    if tool_name == "dependency_audit":
-        return dependency_audit(
-            root=args.get("root", "."),
-            timeout=args.get("timeout", 60),
-        )
-    if tool_name == "git_commit":
-        return git_commit(
-            root=args.get("root", "."),
-            message=args.get("message", ""),
-            paths_json=args.get("paths_json", "[]"),
-            all_tracked=args.get("all_tracked", False),
-            timeout=args.get("timeout", 30),
-        )
-    if tool_name == "git_branch":
-        return git_branch(
-            root=args.get("root", "."),
-            name=args.get("name", ""),
-            checkout=args.get("checkout", True),
-            base=args.get("base", ""),
-            timeout=args.get("timeout", 10),
-        )
-    if tool_name == "git_checkout":
-        return git_checkout(
-            root=args.get("root", "."),
-            ref=args.get("ref", ""),
-            timeout=args.get("timeout", 10),
-        )
-    if tool_name == "git_stash":
-        return git_stash(
-            root=args.get("root", "."),
-            action=args.get("action", "push"),
-            message=args.get("message", ""),
-            include_untracked=args.get("include_untracked", True),
-            timeout=args.get("timeout", 10),
-        )
-    if tool_name == "git_tag":
-        return git_tag(
-            root=args.get("root", "."),
-            name=args.get("name", ""),
-            message=args.get("message", ""),
-            delete=args.get("delete", False),
-            timeout=args.get("timeout", 10),
-        )
-    if tool_name == "git_merge":
-        return git_merge(
-            root=args.get("root", "."),
-            branch=args.get("branch", ""),
-            no_ff=args.get("no_ff", True),
-            message=args.get("message", ""),
-            timeout=args.get("timeout", 30),
-        )
-    if tool_name == "git_cherry_pick":
-        return git_cherry_pick(
-            root=args.get("root", "."),
-            commits_json=args.get("commits_json", "[]"),
-            timeout=args.get("timeout", 30),
-        )
-    if tool_name == "build_run":
-        return build_run(
-            root=args.get("root", "."),
-            command=args.get("command", ""),
-            timeout=args.get("timeout", 120),
-        )
-    if tool_name == "build_clean":
-        return build_clean(
-            root=args.get("root", "."),
-            timeout=args.get("timeout", 30),
-        )
-    if tool_name == "rename_symbol":
-        return rename_symbol(
-            root=args.get("root", "."),
-            old_name=args.get("old_name", ""),
-            new_name=args.get("new_name", ""),
-            glob=args.get("glob", "**/*.py"),
-            dry_run=args.get("dry_run", True),
-        )
-    if tool_name == "find_references":
-        return find_references(
-            root=args.get("root", "."),
-            symbol=args.get("symbol", ""),
-            glob=args.get("glob", "**/*.py"),
-        )
-    if tool_name == "diff_files":
-        return diff_files(
-            root=args.get("root", "."),
-            left=args.get("left", ""),
-            right=args.get("right", ""),
-            context=args.get("context", 3),
-        )
-    if tool_name == "apply_patch":
-        return apply_patch(
-            root=args.get("root", "."),
-            patch_text=args.get("patch_text", ""),
-            check_only=args.get("check_only", False),
-        )
-    if tool_name == "secret_scan":
-        return secret_scan(
-            root=args.get("root", "."),
-            timeout=args.get("timeout", 30),
-        )
+    # Every tool below hands `root` to a child process as its working
+    # directory, and secret_scan prints what it finds there.  Confinement
+    # lives in harness_tools._resolve_root; this scope is the only channel
+    # that adds the HOST-selected project root to the authorized set, and
+    # it is an in-process scope rather than a tool argument precisely so a
+    # model cannot grant itself one.  Outside it these tools are confined
+    # to file_roots.local / SONDER_FILE_ROOTS, so a missed call site fails
+    # closed.
+    with harness_tools.authorized_root_scope(repository_extra_roots):
+        if tool_name == "test_discover":
+            return test_discover(
+                root=args.get("root", "."),
+                framework=args.get("framework", "auto"),
+            )
+        if tool_name == "test_run":
+            return test_run(
+                root=args.get("root", "."),
+                framework=args.get("framework", "auto"),
+                path=args.get("path", ""),
+                pattern=args.get("pattern", ""),
+                verbose=args.get("verbose", False),
+                coverage=args.get("coverage", False),
+                timeout=args.get("timeout", 120),
+                extra_args_json=args.get("extra_args_json", "[]"),
+            )
+        if tool_name == "lint_run":
+            return lint_run(
+                root=args.get("root", "."),
+                tool=args.get("tool", "auto"),
+                path=args.get("path", ""),
+                fix=args.get("fix", False),
+                timeout=args.get("timeout", 60),
+            )
+        if tool_name == "format_code":
+            return format_code(
+                root=args.get("root", "."),
+                tool=args.get("tool", "auto"),
+                path=args.get("path", ""),
+                check_only=args.get("check_only", False),
+                timeout=args.get("timeout", 60),
+            )
+        if tool_name == "typecheck_run":
+            return typecheck_run(
+                root=args.get("root", "."),
+                tool=args.get("tool", "auto"),
+                path=args.get("path", ""),
+                timeout=args.get("timeout", 120),
+            )
+        if tool_name == "dependency_add":
+            return dependency_add(
+                root=args.get("root", "."),
+                packages_json=args.get("packages_json", "[]"),
+                dev=args.get("dev", False),
+                timeout=args.get("timeout", 60),
+            )
+        if tool_name == "dependency_remove":
+            return dependency_remove(
+                root=args.get("root", "."),
+                packages_json=args.get("packages_json", "[]"),
+                timeout=args.get("timeout", 60),
+            )
+        if tool_name == "dependency_update":
+            return dependency_update(
+                root=args.get("root", "."),
+                packages_json=args.get("packages_json", "[]"),
+                timeout=args.get("timeout", 120),
+            )
+        if tool_name == "dependency_audit":
+            return dependency_audit(
+                root=args.get("root", "."),
+                timeout=args.get("timeout", 60),
+            )
+        if tool_name == "git_commit":
+            return git_commit(
+                root=args.get("root", "."),
+                message=args.get("message", ""),
+                paths_json=args.get("paths_json", "[]"),
+                all_tracked=args.get("all_tracked", False),
+                timeout=args.get("timeout", 30),
+            )
+        if tool_name == "git_branch":
+            return git_branch(
+                root=args.get("root", "."),
+                name=args.get("name", ""),
+                checkout=args.get("checkout", True),
+                base=args.get("base", ""),
+                timeout=args.get("timeout", 10),
+            )
+        if tool_name == "git_checkout":
+            return git_checkout(
+                root=args.get("root", "."),
+                ref=args.get("ref", ""),
+                timeout=args.get("timeout", 10),
+            )
+        if tool_name == "git_stash":
+            return git_stash(
+                root=args.get("root", "."),
+                action=args.get("action", "push"),
+                message=args.get("message", ""),
+                include_untracked=args.get("include_untracked", True),
+                timeout=args.get("timeout", 10),
+            )
+        if tool_name == "git_tag":
+            return git_tag(
+                root=args.get("root", "."),
+                name=args.get("name", ""),
+                message=args.get("message", ""),
+                delete=args.get("delete", False),
+                timeout=args.get("timeout", 10),
+            )
+        if tool_name == "git_merge":
+            return git_merge(
+                root=args.get("root", "."),
+                branch=args.get("branch", ""),
+                no_ff=args.get("no_ff", True),
+                message=args.get("message", ""),
+                timeout=args.get("timeout", 30),
+            )
+        if tool_name == "git_cherry_pick":
+            return git_cherry_pick(
+                root=args.get("root", "."),
+                commits_json=args.get("commits_json", "[]"),
+                timeout=args.get("timeout", 30),
+            )
+        if tool_name == "build_run":
+            return build_run(
+                root=args.get("root", "."),
+                command=args.get("command", ""),
+                timeout=args.get("timeout", 120),
+            )
+        if tool_name == "build_clean":
+            return build_clean(
+                root=args.get("root", "."),
+                timeout=args.get("timeout", 30),
+            )
+        if tool_name == "rename_symbol":
+            return rename_symbol(
+                root=args.get("root", "."),
+                old_name=args.get("old_name", ""),
+                new_name=args.get("new_name", ""),
+                glob=args.get("glob", "**/*.py"),
+                dry_run=args.get("dry_run", True),
+            )
+        if tool_name == "find_references":
+            return find_references(
+                root=args.get("root", "."),
+                symbol=args.get("symbol", ""),
+                glob=args.get("glob", "**/*.py"),
+            )
+        if tool_name == "diff_files":
+            return diff_files(
+                root=args.get("root", "."),
+                left=args.get("left", ""),
+                right=args.get("right", ""),
+                context=args.get("context", 3),
+            )
+        if tool_name == "apply_patch":
+            return apply_patch(
+                root=args.get("root", "."),
+                patch_text=args.get("patch_text", ""),
+                check_only=args.get("check_only", False),
+            )
+        if tool_name == "secret_scan":
+            return secret_scan(
+                root=args.get("root", "."),
+                timeout=args.get("timeout", 30),
+            )
     return "ERROR: unknown tool '%s'." % tool_name
 
 
@@ -15604,6 +15634,24 @@ _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "rename_symbol", "find_references", "diff_files", "apply_patch", "secret_scan",
 })
 _PROJECT_SCOPED_EXECUTION_TOOLS = frozenset({"workspace_run", "script_run"})
+# The developer-workflow tools (harness_tools.py).  Every OTHER project-scoped
+# tool resolves its path through file_ops -- `_repository_read_only_error`'s
+# resolver chain calls `resolve_repository_read_path(..., extra_roots=trusted)`
+# for each of them -- so with no project bound they are still confined to
+# `allowed_roots("")`.  These 23 have no such branch: they hand `root` to a
+# child process.  Confinement for them now lives in `harness_tools._resolve_root`;
+# this set is the second lock on the same door, and it is a set rather than a
+# check against `_PROJECT_SCOPED_PATH_TOOLS` because refusing that whole set on
+# a rootless read-only run also refuses tools that were never unconfined
+# (`artifact_ground` on a workspace-relative path, measured).
+_DEVELOPER_WORKFLOW_TOOLS = frozenset({
+    "test_discover", "test_run", "lint_run", "format_code", "typecheck_run",
+    "dependency_add", "dependency_remove", "dependency_update", "dependency_audit",
+    "git_commit", "git_branch", "git_checkout", "git_stash", "git_tag",
+    "git_merge", "git_cherry_pick",
+    "build_run", "build_clean",
+    "rename_symbol", "find_references", "diff_files", "apply_patch", "secret_scan",
+})
 # Developer-workflow tools that take BOTH `root` and a second `path` argument
 # which harness_tools appends straight to the child argv (harness_tools.py:233,
 # 353, 366, 394).  Containing `root` alone leaves `path` checked by nothing, so
