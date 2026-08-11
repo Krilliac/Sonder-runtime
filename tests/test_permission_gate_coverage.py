@@ -91,19 +91,31 @@ def _agent_tools():
     The agent path's gate is ``_canonical_agent_tool_name`` ->
     ``permission_modes.decide`` -> ``risk_of``, and ``risk_of`` resolves a name
     through ``command_catalog.by_name``. A dispatch branch whose name the
-    catalog cannot find therefore lands on ``risk_of``'s unknown-tool fallback
-    of ``"ask"``, which ``decide(interactive=False)`` degrades to *allow* --
-    the same "absent is indistinguishable from allowed" this file was written
-    about, reached by a different road.
+    catalog cannot find therefore lands on ``risk_of``'s unknown-name fallback
+    -- the same "absent is indistinguishable from allowed" this file was
+    written about, reached by a different road. That fallback used to return
+    ``"ask"``, which ``decide(interactive=False)`` degraded to *allow*; it now
+    returns ``permission_modes.UNCLASSIFIED``, which is refused instead. This
+    map is still the check that keeps a real tool off that path.
 
     Two things this deliberately does NOT do:
 
-    * It does not treat a *catalogued* ``ask`` as a hole. Twenty-eight
-      dispatchable tools are graded ``ask`` by the catalog and are allowed on
-      this path because nobody is at a keyboard -- that is Lane 1's written
+    * It does not treat a *catalogued* ``ask`` as a hole. Those tools are
+      allowed on this path because nobody is at a keyboard -- Lane 1's written
       design decision (see ``_agent_permission_gate_error``'s docstring), not
       an oversight, and flagging it here would be this file re-litigating a
       policy instead of checking a map.
+
+      The figure once recorded here, "twenty-eight dispatchable tools are
+      graded ``ask`` by the catalog", conflated two different things and is
+      corrected rather than carried: 28 is the count over the *raw* branch
+      names, and only 21 of those are catalogued ``ask``. The other 7
+      (``agent_status``, ``game_generate``, ``improvement_report`` ...) are
+      alias names the catalog has never heard of, so they were the *fallback*,
+      not the deliberate grade -- the very thing being contrasted. They are
+      harmless only because the gate canonicalizes first, which is what the
+      alias arm below reproduces. Over the canonicalized set the gate actually
+      grades: 19 catalogued ``ask``, 0 on the fallback.
     * It does not build itself from the dispatch list it is used to check --
       that would be a map that agrees with the branches by construction and
       could never report a hole. It is derived from the catalog and the alias
@@ -158,10 +170,19 @@ _DISPLAY_ONLY_BRANCHES = {
     "/resume": "looks a session up (memory_store.find_session)",
     "/facts": "prints stored facts",
     "/lessons": "prints stored lessons",
-    "/location": "reads the location-consent env flag",
     "/report": "formats activity_tracker.latest(); no writer beneath it",
     "/endreport": "alias of /report",
 }
+
+# NOT here, deliberately: `/location`. It carried
+# "reads the location-consent env flag", which is true only of the bare form.
+# `/location on` ASSIGNS the REPL's `location_consent` (sonder_repl.py:1083),
+# handed to `server.sonder` on every later turn (sonder_repl.py:1510) -- so it
+# grants approximate IP-geolocation consent that is off by default, which is
+# "changes what a later call may do" and fails the bar above. It is graded in
+# `command_registry` and mapped in `command_catalog._UNREGISTERED_BRANCH_WORK`
+# instead, for the reason `/hardware` is. See
+# `test_location_is_gated_rather_than_excused` below before re-adding it.
 
 
 def _tool_branch_names(test):
@@ -400,3 +421,70 @@ def test_the_hardware_report_is_graded_safe_rather_than_exempted():
             "/hardware now passes a variable to the training CLI; it can reach "
             "deploy/rollback and is no longer safe"
         )
+
+
+def test_location_is_gated_rather_than_excused():
+    """`/location` grants IP-geolocation consent, so it is not display only.
+
+    Its allow-list reason said "reads the location-consent env flag". The bare
+    `/location` does read it (sonder_repl.py:1087), but `/location on|off`
+    ASSIGNS `location_consent` (sonder_repl.py:1083), and `main()` hands that
+    value to `server.sonder` on every later turn (sonder_repl.py:1510). Consent
+    is off by default, so the branch grants a capability for the rest of the
+    session -- "changes what a later call may do", which the allow-list's own
+    bar excludes.
+
+    Excusing it was not merely a wrong label. With no entry in the console map
+    the gate resolved `/location` to an empty tool set and allowed it in every
+    mode: measured before this change, `plan` -- which advertises "reads only"
+    -- still let `/location on` through and later turns received consent.
+
+    Anchors are re-resolved here rather than trusted, because the line numbers
+    in this project have drifted before.
+    """
+    assert "/location" not in _DISPLAY_ONLY_BRANCHES, (
+        "/location writes session consent; it cannot be excused as display only"
+    )
+    assert _maps()["console"].get("/location") == ("location",), (
+        "/location must resolve to a graded name or the gate receives an "
+        "empty set and allows it"
+    )
+    # `safe` is what `catalog()` defaults a tool-less console command to, and
+    # `plan` allows `safe` -- so the grade is the whole fix.
+    assert pm.risk_of("location") == "ask"
+    assert pm.decide("location", mode=pm.PLAN, interactive=True).action == pm.DENY
+
+    # The write really is in the branch, and really is not just a read.
+    source = open(
+        os.path.join(os.path.dirname(server.__file__), "sonder_repl.py"),
+        encoding="utf-8",
+    ).read()
+    tree = ast.parse(source)
+    main = next(n for n in ast.walk(tree)
+                if isinstance(n, ast.FunctionDef) and n.name == "main")
+    branch = next(
+        n for n in ast.walk(main)
+        if isinstance(n, ast.If) and "/location" in command_catalog._branch_names(n.test)
+    )
+    writes = [
+        t.id
+        for node in ast.walk(branch) if isinstance(node, ast.Assign)
+        for t in node.targets if isinstance(t, ast.Name)
+    ]
+    assert "location_consent" in writes, (
+        "/location no longer assigns location_consent -- recheck the grade, it "
+        "may genuinely be a read again"
+    )
+
+    # And the value really does reach later turns.
+    forwards = [
+        node for node in ast.walk(main)
+        if isinstance(node, ast.Call)
+        for kw in node.keywords
+        if kw.arg == "location_consent" and isinstance(kw.value, ast.Name)
+        and kw.value.id == "location_consent"
+    ]
+    assert forwards, (
+        "nothing in main() forwards location_consent, so the write would not "
+        "reach a later turn"
+    )
