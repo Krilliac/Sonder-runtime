@@ -33,10 +33,10 @@ from sonder_runtime.domain.memory import rules as _rules
 
 # Judged by a caller who reviewed the work. The population that answers "was
 # the delegated work any good".
-CALLER_JUDGED = frozenset({"used", "copied", "edited", "accepted", "rejected"})
+CALLER_JUDGED = _rules.CALLER_JUDGED
 
 # Produced by running something. Answers "did it build / did tests pass".
-EXECUTION_GROUNDED = frozenset({"tests_passed", "compiled", "failed"})
+EXECUTION_GROUNDED = _rules.EXECUTION_GROUNDED
 
 # A population is a signal set AND a provenance set (#62). The signal name
 # alone was never enough: `accepted` is written by a caller reviewing delegated
