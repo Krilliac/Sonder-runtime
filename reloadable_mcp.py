@@ -259,6 +259,25 @@ class ReloadableFastMCP(FastMCP):
                 # validation. Clear it so changed/removed tools cannot retain a
                 # stale schema after the atomic manager swap.
                 self._mcp_server._tool_cache.clear()
+                # So does the command catalog, and it is the permission gate's
+                # only source of truth for a tool's risk class. It is an
+                # ``lru_cache`` over this very registry, and nothing ever
+                # called ``reset_cache()`` -- its docstring said "used after a
+                # live reload adds tools" and it had no callers at all. The
+                # consequence outlives the reload: a tool this swap
+                # RECLASSIFIED (say ``safe`` -> ``dangerous``) kept its stale
+                # grade for the life of the process, and a newly added tool
+                # was unknown to the catalog entirely. Imported lazily for the
+                # import-cycle reason ``_refuse_if_gated`` documents.
+                try:
+                    import command_catalog
+
+                    command_catalog.reset_cache()
+                except Exception:
+                    # A catalog that cannot be reset must not abort a swap that
+                    # has already happened. The gate fails closed on a catalog
+                    # it cannot read, which is the safe direction to leave this.
+                    pass
                 self._refresh_count += 1
                 self._last_refresh_ts = int(time.time())
             self._staging_source_state = None

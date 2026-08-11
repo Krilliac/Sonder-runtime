@@ -237,7 +237,8 @@ MODE_LABELS = {
 # reader of any of them can get from a row to their own answer.
 ASK_CAVEAT = (
     "'ask' means a prompt at the console; a caller with nobody to ask "
-    "proceeds instead, except under plan."
+    "proceeds instead, except under plan and except for tools nothing can "
+    "classify, which are refused."
 )
 
 MODE_BLURBS = {
@@ -255,18 +256,48 @@ MODE_BLURBS = {
 # Colour hints for whatever renders the indicator (ANSI 256 palette).
 MODE_COLOURS = {PLAN: 117, MANUAL: 250, ACCEPT_EDITS: 114, AUTO: 221}
 
+# The grade ``risk_of`` returns when it CANNOT grade: an empty name, a blind
+# catalog, or a name nothing has ever heard of. Deliberately not one of the
+# severity classes, because severity cannot express this.
+#
+# Every production gate calls ``decide(interactive=False)`` --
+# ``reloadable_mcp._refuse_if_gated``, ``server._agent_permission_gate_error``,
+# ``server._loop_permission_refusal``, ``server._control_tool_refusal``,
+# ``sonder_serve._http_tool_refusal`` -- and that path degrades ASK to ALLOW.
+# So on the path that actually runs, *no* severity of grade fails closed:
+# ``dangerous`` is ``ask`` in manual/acceptEdits/auto and is allowed there too.
+# Returning a scarier class was the previous attempt at failing closed and it
+# achieved nothing; what is needed is a class the degrade does not apply to.
+UNCLASSIFIED = "unclassified"
+
+# Work reachable through a gate that legitimately fronts no registered tool,
+# with the grade it would carry if it did. Without this, ``sleep`` -- a clamped
+# ``time.sleep`` in ``server._loop_dispatch`` -- lands on the unknown-name path
+# and the change above would refuse it: the classifier denying service to the
+# runtime, which is the failure a fail-closed change has to avoid. Declaring it
+# makes the exception visible and reviewable instead of silent, exactly as
+# ``EXECUTION_COMMANDS`` declares ``/runwindow``. A drift test pins this to the
+# loop actions that really run no tool, so it cannot become a list of strings.
+NON_TOOL_WORK = {"sleep": "safe"}
+
 # risk class -> action, per mode. "execution" is a synthetic class: tools that
 # start a host process, split out of `ask`/`mutation` so acceptEdits and auto
 # differ by something real.
+#
+# ``unclassified`` reads as ASK outside ``plan`` so a person at a console is
+# *asked* rather than refused, but ``decide()`` refuses to degrade it for a
+# caller with nobody to ask. An operator who wants such a name to run says so
+# with an explicit ``allow`` rule, which still satisfies the ASK below; that is
+# the escape hatch that keeps failing closed from becoming a denial of service.
 _MATRIX = {
     PLAN: {"safe": ALLOW, "ask": DENY, "mutation": DENY,
-           "execution": DENY, "dangerous": DENY},
+           "execution": DENY, "dangerous": DENY, UNCLASSIFIED: DENY},
     MANUAL: {"safe": ALLOW, "ask": ASK, "mutation": ASK,
-             "execution": ASK, "dangerous": ASK},
+             "execution": ASK, "dangerous": ASK, UNCLASSIFIED: ASK},
     ACCEPT_EDITS: {"safe": ALLOW, "ask": ALLOW, "mutation": ALLOW,
-                   "execution": ASK, "dangerous": ASK},
+                   "execution": ASK, "dangerous": ASK, UNCLASSIFIED: ASK},
     AUTO: {"safe": ALLOW, "ask": ALLOW, "mutation": ALLOW,
-           "execution": ALLOW, "dangerous": ASK},
+           "execution": ALLOW, "dangerous": ASK, UNCLASSIFIED: ASK},
 }
 
 # Tools that start a host process. Kept here rather than imported from server
@@ -490,8 +521,11 @@ def risk_of(tool_name: str) -> str:
     if not name:
         # Fail closed. An empty name dispatches nothing today, but returning
         # "safe" here put a fail-OPEN default directly above a comment
-        # promising the opposite.
-        return "ask"
+        # promising the opposite -- and so, it turned out, did returning
+        # "ask": ``decide(interactive=False)`` allows that, so the comment
+        # stayed false for a second reason. UNCLASSIFIED is the grade that
+        # actually keeps the promise.
+        return UNCLASSIFIED
     catalogued = ""
     try:
         import command_catalog
@@ -504,9 +538,15 @@ def risk_of(tool_name: str) -> str:
             # The classifier itself is blind. Continuing would report every
             # ``dangerous`` tool as ``ask``, which a caller with nobody to ask
             # resolves to ``allow`` -- a gate that cannot see refusing nothing.
-            # Fail closed on ignorance instead; ``dangerous`` is the one class
-            # that stops in every mode.
-            return "dangerous"
+            #
+            # This used to return "dangerous", on the stated grounds that it
+            # "is the one class that stops in every mode". Measured, that is
+            # false on the only path this matters: ``dangerous`` is ASK in
+            # manual, acceptEdits and auto, and ``interactive=False`` degrades
+            # ASK to ALLOW. The blind-catalog branch therefore allowed
+            # git_merge in three of four modes. UNCLASSIFIED is not degraded,
+            # so the branch now does what it always said it did.
+            return UNCLASSIFIED
         except Exception:
             command = None
         if command is not None:
@@ -515,8 +555,16 @@ def risk_of(tool_name: str) -> str:
         return "dangerous"
     if name in EXECUTION_TOOLS or name in EXECUTION_COMMANDS:
         return "execution"
-    # Unknown tool: treat as needing a prompt, never as safe.
-    return catalogued or "ask"
+    if catalogued:
+        return catalogued
+    # Work that fronts no registered tool, graded because it was declared.
+    # Checked after the catalog so a real tool of the same name always wins.
+    if name in NON_TOOL_WORK:
+        return NON_TOOL_WORK[name]
+    # Nothing knows this name. Not "probably fine, ask someone" -- that
+    # answer was indistinguishable from a catalogued ``ask`` and, with nobody
+    # to ask, indistinguishable from ``allow``. Say the classifier failed.
+    return UNCLASSIFIED
 
 
 def _default_rule_lookup(tool_name: str) -> dict | None:
@@ -680,6 +728,22 @@ def decide(tool_name: str, *, interactive: bool = True,
     #    it did before rules were wired in.
     action = mode_action
     if action == ASK and not interactive:
+        # 5a. The one grade the degrade must not touch. "Nobody is here to
+        #     answer" is a reason to proceed when the answer would merely have
+        #     been a confirmation of something known; it is not a reason to
+        #     proceed when the gate does not know what it is confirming. An
+        #     explicit ``allow`` rule already resolved above (3), so an
+        #     operator who wants this name to run has a written way to say so.
+        if risk == UNCLASSIFIED:
+            return Decision(
+                DENY, active, risk,
+                "nothing could classify %r, and there is no one to ask; "
+                "refusing rather than downgrading an unclassified tool. Add a "
+                "permission rule for it, or register it in the command catalog"
+                % (name or "(empty name)"),
+                name,
+                source="unclassified",
+            )
         return Decision(
             ALLOW, active, risk,
             "no interactive prompt available; %s tools are not blocked outside "
@@ -718,13 +782,17 @@ def describe(mode: str | None = None) -> str:
         "%s -- %s" % (MODE_LABELS.get(active, active), MODE_BLURBS.get(active, "")),
         "",
     ]
-    order = ("safe", "ask", "mutation", "execution", "dangerous")
+    order = ("safe", "ask", "mutation", "execution", "dangerous", UNCLASSIFIED)
     labels = {
         "safe": "read-only tools",
         "ask": "tools that touch the workspace",
         "mutation": "tools that change files",
         "execution": "tools that run host programs",
         "dangerous": "destructive/administrative tools",
+        # Shown rather than hidden: the row reads "ask", but it is the one
+        # row a non-interactive caller is refused on instead of allowed, and
+        # ASK_CAVEAT below would otherwise state the opposite for it.
+        UNCLASSIFIED: "tools nothing can classify",
     }
     width = max(len(labels[k]) for k in order)
     for key in order:
