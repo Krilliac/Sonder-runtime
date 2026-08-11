@@ -150,7 +150,9 @@ def test_hosted_help_tracks_policy_in_both_directions():
     assert local_only.isdisjoint(hosted)
     # Unsafe lab mode re-allows nested model calls, so it re-advertises exactly
     # those -- and still never re-advertises host-data tools.
-    assert nested & full <= hosted_unsafe
+    nestable = nested - server._AGENT_SYSTEM_OPERATOR_TOOLS
+    assert nestable & full <= hosted_unsafe
+    assert server._AGENT_SYSTEM_OPERATOR_TOOLS.isdisjoint(hosted_unsafe)
     assert local_only.isdisjoint(hosted_unsafe)
 
 
