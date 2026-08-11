@@ -35,6 +35,27 @@ def _sink(monkeypatch):
     return written
 
 
+# What a verifier that RAN and rejected the work actually renders. Measured
+# from code_runner.format_result() on `raise SystemExit(3)`. The previous
+# fixture used "ERROR: ..." for this, and no verifier in VERIFIERS ever
+# produces that for a failing run: server.run_code returns "ERROR: %s" only
+# for a ValueError out of code_runner (unsupported language, bad args), i.e.
+# for a tool that never ran the code at all, and the four harness verifiers
+# return it only from their `except` branch. So the old fixture pinned "a
+# verification that could not run files failed" while calling it a normal
+# failure -- the conflation task #56 removes. Every assertion below is kept;
+# only the stand-in changed, to one a real verifier can actually emit.
+REJECTED = "\n".join([
+    "status: failed",
+    "language: python",
+    "cwd: /tmp/x",
+    "timeout: 10s",
+    "returncode: 3",
+    "",
+    "(no output)",
+])
+
+
 def _stub_dispatch(monkeypatch, responses):
     """Replace _agent_dispatch with a canned tool_name -> observation map."""
     def fake(tool_name, args, **kwargs):
@@ -49,7 +70,7 @@ def test_agent_loop_generation_then_failed_verification_files_exactly_one_failed
     written = _sink(monkeypatch)
     _stub_dispatch(monkeypatch, {
         "offload": "here is the code\n\n[interaction_id: run-1]",
-        "run_code": "ERROR: build failed",
+        "run_code": REJECTED,
     })
 
     server._agent_dispatch_observed("offload", {"prompt": "write a function"})
@@ -80,7 +101,7 @@ def test_a_rerun_of_the_same_verifier_does_not_file_twice(monkeypatch):
     written = _sink(monkeypatch)
     _stub_dispatch(monkeypatch, {
         "offload": "code\n\n[interaction_id: run-3]",
-        "run_code": "ERROR: still failing",
+        "run_code": REJECTED,
     })
 
     server._agent_dispatch_observed("offload", {"prompt": "x"})
@@ -157,7 +178,7 @@ def test_the_dispatch_projects_scope_is_used_for_attribution_not_the_raw_args(mo
     written = _sink(monkeypatch)
     _stub_dispatch(monkeypatch, {
         "offload": "code\n\n[interaction_id: run-6]",
-        "run_code": "ERROR: nope",
+        "run_code": REJECTED,
     })
 
     server._agent_dispatch_observed(
@@ -216,11 +237,17 @@ def test_a_dispatcher_crash_on_a_generator_notes_nothing(monkeypatch):
 
 def test_a_normal_tool_failure_still_files_as_before(monkeypatch):
     """The crash guard must not swallow the ordinary case: a tool that
-    dispatches cleanly and returns its own "ERROR: ..." string is still a
-    real verdict and must still be filed."""
+    dispatches cleanly and rejects the work is a real verdict and must
+    still be filed.
+
+    The stand-in used to be an "ERROR: ..." string. Measured, that is not
+    what a rejecting verifier renders -- it is what a verifier that never
+    ran renders -- so the old form pinned the misattribution instead of the
+    intent. See ``test_an_error_observation_files_nothing``.
+    """
     written = _sink(monkeypatch)
     go.note_generation("run-y", "sonder")
-    _stub_dispatch(monkeypatch, {"run_code": "ERROR: it does not compile"})
+    _stub_dispatch(monkeypatch, {"run_code": REJECTED})
 
     server._agent_dispatch_observed("run_code", {"code": "bad"})
 
@@ -249,7 +276,7 @@ def test_two_concurrent_runs_do_not_cross_attribute(monkeypatch):
         if tool_name == "offload":
             return "code\n\n[interaction_id: %s]" % args["tag"]
         if tool_name == "run_code":
-            return "ERROR: broke"
+            return REJECTED
         raise AssertionError("unexpected tool %r" % tool_name)
 
     monkeypatch.setattr(server, "_agent_dispatch", fake_dispatch)
@@ -279,3 +306,55 @@ def test_two_concurrent_runs_do_not_cross_attribute(monkeypatch):
         "run A's own verification must judge run A's own generation, "
         "not run B's newer, unrelated one"
     )
+
+
+def test_an_error_observation_files_nothing(monkeypatch):
+    """The other half of the same distinction, and the task #56 fix.
+
+    ``server.run_code`` returns ``"ERROR: %s" % e`` only when ``code_runner``
+    raised ``ValueError`` -- an unsupported language, a bad argument -- so the
+    snippet was never executed and nothing was measured. The four harness
+    verifiers return it only from their ``except`` branch, for the same reason.
+    Filing ``failed`` (-1.0) from that scores work nothing examined, and worse,
+    consumes the generation's one chance at a real verdict for that kind.
+    """
+    written = _sink(monkeypatch)
+    go.note_generation("run-z", "sonder")
+    _stub_dispatch(monkeypatch, {"run_code": "ERROR: unsupported language 'q'"})
+
+    server._agent_dispatch_observed("run_code", {"code": "bad"})
+
+    assert written == []
+    assert go.pending_count() == 1, "the generation still awaits real evidence"
+
+
+def test_a_failing_suite_is_not_filed_as_a_pass(monkeypatch):
+    """The inverted half, found while fixing #56 and strictly worse than it.
+
+    ``_agent_dispatch_observed`` computes ``ok = not observation.startswith(
+    "ERROR:")``, which is a statement about the dispatcher. Measured, a pytest
+    suite with a failing test renders ``"test run (pytest)\n  ok: False\n
+    returncode: 1"`` -- no ``ERROR:`` prefix -- so it arrived as ``ok=True``
+    and was filed ``tests_passed`` at +1.0. A manufactured success in a store
+    whose caller-judged population sits near 52% is indistinguishable from
+    real progress.
+    """
+    written = _sink(monkeypatch)
+    go.note_generation("run-w", "sonder")
+    _stub_dispatch(monkeypatch, {
+        "test_run": "\n".join([
+            "test run (pytest)",
+            "  command: []",
+            "  cwd: /tmp/x",
+            "  ok: False",
+            "  returncode: 1",
+            "  timed_out: False",
+            "  elapsed_ms: 12",
+            "stdout:",
+            "1 failed, 2 passed",
+        ]),
+    })
+
+    server._agent_dispatch_observed("test_run", {"root": "/tmp/x"})
+
+    assert written == [("run-w", "failed")]

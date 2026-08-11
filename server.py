@@ -7887,8 +7887,23 @@ def _record_outcome_signal(interaction_id: str, signal: str) -> None:
         conn.close()
 
 
-def _feed_grounded_outcome(name, ok, output, args=None, project=None, run_id="") -> None:
+def _feed_grounded_outcome(name, ok, output, args=None, project=None, run_id="",
+                           evidence=None) -> None:
     """Attribute execution evidence to the work it judges.
+
+    `evidence` is the verifier's own result dict, when the caller has one.
+    `ok` alone cannot tell "the tests failed" from "the tests never ran", and
+    that difference decides whether anything should be recorded at all -- a
+    tool that could not start used to score `failed` (-1.0) against work it
+    never examined, and burn the generation's one chance at a real verdict
+    doing it.
+
+    The agent path has no dict to pass: `_agent_dispatch` returns rendered
+    text and this function receives only that. So when no dict arrives, the
+    rendered observation is handed over instead and
+    `grounded_outcomes.rendered_infrastructure_error` reads it. Without that
+    fallback the fix would miss the agent and autopilot lanes entirely, which
+    are the lanes that run.
 
     The outcome store holds ~9,000 rows and only ~190 of them measure delegated
     work, because filing an outcome is a manual step and people file successes
@@ -7920,8 +7935,25 @@ def _feed_grounded_outcome(name, ok, output, args=None, project=None, run_id="")
             if match:
                 grounded_outcomes.note_generation(match.group(1), name, project, run_id)
         elif name in grounded_outcomes.VERIFIERS:
+            verdict = bool(ok)
+            if isinstance(evidence, dict):
+                if "ok" in evidence:
+                    verdict = bool(evidence["ok"])
+            else:
+                # The agent path computes `ok` as `not output.startswith(
+                # "ERROR:")`, which is a statement about the dispatcher, not
+                # about the work: measured, a pytest suite with a failing test
+                # renders "test run (pytest)\n  ok: False\n  returncode: 1"
+                # and so arrived here as ok=True, to be filed `tests_passed`
+                # at +1.0. Read the verifier's own rendered verdict instead,
+                # and keep the caller's answer when it rendered neither field.
+                rendered = grounded_outcomes.rendered_verdict(output)
+                if rendered is not None:
+                    verdict = rendered
             grounded_outcomes.attribute(
-                name, bool(ok), project, record_fn=_record_outcome_signal, run_id=run_id,
+                name, verdict, project, record_fn=_record_outcome_signal,
+                run_id=run_id,
+                evidence=evidence if evidence is not None else output,
             )
     except Exception:
         # Bookkeeping must never break the run it is observing.
@@ -7930,6 +7962,7 @@ def _feed_grounded_outcome(name, ok, output, args=None, project=None, run_id="")
 
 def _record_direct_tool(
     name: str, args=None, ok=True, started=None, summary="", command="", output="",
+    evidence=None,
 ) -> None:
     if activity_tracker.inside_tool_call():
         return
@@ -7943,7 +7976,7 @@ def _record_direct_tool(
         command=command,
         output=output,
     )
-    _feed_grounded_outcome(name, ok, output, args)
+    _feed_grounded_outcome(name, ok, output, args, evidence=evidence)
 
 
 @mcp.tool()
@@ -9330,6 +9363,16 @@ def _format_run_result(title: str, data: dict) -> str:
         "  timed_out: %s" % data.get("timed_out", False),
         "  elapsed_ms: %s" % data.get("elapsed_ms", 0),
     ]
+    # Why nothing ran, when nothing ran. `harness_tools` returns `{"ok": False,
+    # "error": ...}` without spawning anything for an unknown framework, an
+    # unknown linter, or a root with no build system, and this dropped the
+    # field: a model was told `ok: False` with no reason at all, and the
+    # rendered text -- the only evidence the agent path ever has -- could not
+    # be told apart from a real failing build. Header block, before the
+    # child's own output, because `grounded_outcomes.rendered_infrastructure_
+    # error` reads exactly this much and stops at `stdout:`.
+    if data.get("error"):
+        lines.append("  error: %s" % data["error"])
     if data.get("stdout"):
         lines.extend(["stdout:", data["stdout"].rstrip()])
     if data.get("stderr"):
@@ -9915,13 +9958,14 @@ def test_run(
             extra_args_json=extra_args_json,
         )
     except Exception as exc:
-        _record_direct_tool("test_run", args, ok=False, started=started, summary=str(exc))
+        _record_direct_tool("test_run", args, ok=False, started=started, summary=str(exc),
+                            evidence={"error": str(exc)})
         return "ERROR: %s" % exc
     output = _format_run_result("test run (%s)" % data.get("framework", "?"), data)
     _record_direct_tool(
         "test_run", args, ok=data.get("ok", False), started=started,
         summary="exit %s" % data.get("returncode"),
-        output=output,
+        output=output, evidence=data,
     )
     return output
 
@@ -9941,13 +9985,14 @@ def lint_run(
     try:
         data = harness_tools.lint_run(root=root, tool=tool, path=path, fix=fix, timeout=timeout)
     except Exception as exc:
-        _record_direct_tool("lint_run", args, ok=False, started=started, summary=str(exc))
+        _record_direct_tool("lint_run", args, ok=False, started=started, summary=str(exc),
+                            evidence={"error": str(exc)})
         return "ERROR: %s" % exc
     output = _format_run_result("lint (%s, %s)" % (data.get("tool", "?"), data.get("mode", "check")), data)
     _record_direct_tool(
         "lint_run", args, ok=data.get("ok", False), started=started,
         summary="exit %s" % data.get("returncode"),
-        output=output,
+        output=output, evidence=data,
     )
     return output
 
@@ -9992,13 +10037,14 @@ def typecheck_run(
     try:
         data = harness_tools.typecheck_run(root=root, tool=tool, path=path, timeout=timeout)
     except Exception as exc:
-        _record_direct_tool("typecheck_run", args, ok=False, started=started, summary=str(exc))
+        _record_direct_tool("typecheck_run", args, ok=False, started=started, summary=str(exc),
+                            evidence={"error": str(exc)})
         return "ERROR: %s" % exc
     output = _format_run_result("typecheck (%s)" % data.get("tool", "?"), data)
     _record_direct_tool(
         "typecheck_run", args, ok=data.get("ok", False), started=started,
         summary="exit %s" % data.get("returncode"),
-        output=output,
+        output=output, evidence=data,
     )
     return output
 
@@ -10269,10 +10315,11 @@ def build_run(
     try:
         data = harness_tools.build_run(root=root, command=command, timeout=timeout)
     except Exception as exc:
-        _record_direct_tool("build_run", args, ok=False, started=started, summary=str(exc))
+        _record_direct_tool("build_run", args, ok=False, started=started, summary=str(exc),
+                            evidence={"error": str(exc)})
         return "ERROR: %s" % exc
     output = _format_run_result("build", data)
-    _record_direct_tool("build_run", args, ok=data.get("ok", False), started=started, summary="exit %s" % data.get("returncode"), output=output)
+    _record_direct_tool("build_run", args, ok=data.get("ok", False), started=started, summary="exit %s" % data.get("returncode"), output=output, evidence=data)
     return output
 
 
