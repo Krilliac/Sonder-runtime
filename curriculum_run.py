@@ -48,7 +48,9 @@ def practice_on(tasks):
             if ok:
                 passed += 1
             if iid:
-                msg = server.record_outcome(iid, signal)
+                # The runtime invented this task and has just marked its own
+                # answer, so the row is `self_curriculum`, not `caller` (#62).
+                msg = server.record_self_graded_outcome(iid, signal)
                 if "Distilled lesson" in msg:
                     new_lessons += 1
                 print("    -> %s  %s" % ("PASS" if ok else "FAIL", msg))
