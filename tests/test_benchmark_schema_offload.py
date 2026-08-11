@@ -436,6 +436,39 @@ def test_an_unknown_outcome_fails_closed_rather_than_being_ignored():
         bench.aggregate("schema", rows)
 
 
+def test_a_key_outside_the_schema_is_ignored_rather_than_penalised():
+    # The leniency that matters most, because it is the only one that could run
+    # the wrong way. Only the unconstrained arm can emit an extra key -- the
+    # decoder forbids it on the other -- and verify_grounding rejects any
+    # top-level key that is not a {value, quote} pair. Left unhandled, a chatty
+    # model loses the no-schema arm a case it actually got right and the schema
+    # arm wins on nothing. That is improvement-manufacturing, the one direction
+    # this design exists to exclude.
+    chatty = json.loads(_reply())
+    chatty["explanation"] = "I found both fields in the first sentence."
+    row = bench.run_case(
+        _case(), with_schema=False, call_fn=_call(text=json.dumps(chatty)),
+    )
+    assert row["outcome"] == bench.VALID
+    assert row["ignored_keys"] == ["explanation"]
+    # And the drop is real rather than cosmetic: unfiltered, the same reply is
+    # rejected by the production check.
+    with pytest.raises(grounded_extraction.GroundingError):
+        grounded_extraction.verify_grounding(chatty, SOURCE)
+
+
+def test_recording_refuses_until_an_outcome_row_can_carry_its_provenance():
+    # calibration.measure aggregates by signal name alone, and
+    # calibration.should_verify gates runtime behaviour off the result -- so an
+    # unmarked benchmark row moves the control loop this harness measures. A
+    # disclosure in the writer's output never reaches the reader who quotes the
+    # number, so the refusal is the mechanism and the prose is not.
+    assert bench.PROVENANCE_AVAILABLE is False
+    with pytest.raises(bench.SchemaBenchmarkError) as excinfo:
+        bench.run_live(record=True)
+    assert "provenance" in str(excinfo.value).lower()
+
+
 def test_arms_that_ran_different_cases_cannot_be_compared_at_all():
     # A truncated arm in different clothes: two rates over different work. The
     # completion counts can match exactly and the comparison still means nothing.

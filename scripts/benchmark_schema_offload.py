@@ -74,13 +74,23 @@ The hazard in reporting through the population you write to
 the report then quotes. That is what the population is for -- a caller reviewed
 delegated work -- but it means **running this benchmark moves the number it
 reports**, and a benchmark with easy fixtures run repeatedly would raise the
-caller-judged rate without any work getting better. Three things hold the line:
-recording is opt-in and never happens by default; the report prints the
-population before and after so this run's contribution is always visible as a
-delta rather than absorbed into a headline; and ``accepted`` is filed only for
+caller-judged rate without any work getting better.
+
+The disclosure that used to sit here was not a mitigation. It lived in the
+writer's own output, while the damage lands on a *reader* who never sees it:
+``calibration.measure`` aggregates by signal name and there is no provenance
+column, so ``calibration_status`` reports one unmarked number, and
+``calibration.should_verify`` gates runtime behaviour off that same population
+-- meaning the instrument moves the control loop it is measuring. A convention
+imposed on a stranger is not a control.
+
+So ``--record`` now **refuses** while ``PROVENANCE_AVAILABLE`` is False. What
+remains true and load-bearing: ``--live`` without ``--record`` is unaffected and
+measures everything this task set out to measure; ``accepted`` is filed only for
 agreement with a fixture fixed before the model ran, never for a reply that
-merely matched a shape. Anyone quoting the caller-judged rate after a recorded
-run should subtract this run's rows or say that it includes them.
+merely matched a shape; and the report still prints the population before and
+after, so a recorded run's contribution is visible as a delta rather than
+absorbed into a headline.
 
 Stdlib plus this repository's own modules; ``server`` is imported only on the
 live path.
@@ -138,6 +148,26 @@ RAN_ERROR_KINDS = frozenset({"protocol"})
 FOOTER_PREFIX = "\n\n[interaction_id: "
 
 _ACCEPTED, _REJECTED_SIGNAL = "accepted", "rejected"
+
+#: Whether an outcome row can carry where it came from. It cannot: the store
+#: has no provenance column and ``calibration.measure`` aggregates by signal
+#: name alone, so a benchmark-authored row is indistinguishable from a row a
+#: human filed after reviewing real delegated work. Until that changes,
+#: ``--record`` refuses.
+PROVENANCE_AVAILABLE = False
+
+_PROVENANCE_REFUSAL = (
+    "recording is disabled: an outcome row cannot yet carry its provenance. "
+    "calibration.measure aggregates by signal name alone, so rows this "
+    "benchmark writes are indistinguishable from a caller's verdict on real "
+    "delegated work -- and calibration.should_verify gates runtime behaviour "
+    "off that same population, so recording here moves the control loop this "
+    "harness is supposed to be measuring. A disclosure in the writer's own "
+    "output does not reach the stranger who later quotes the number. Run "
+    "--live without --record, or add a provenance column and set "
+    "PROVENANCE_AVAILABLE once a benchmark-authored row can be excluded on "
+    "request."
+)
 
 # Curly quotes, dashes and non-breaking spaces: the characters a model
 # "tidies" while copying. Folding them is how a cosmetic difference is told
@@ -427,6 +457,7 @@ def judge_text(case, text):
         "detail": "",
         "parse_mode": "",
         "already_filed": False,
+        "ignored_keys": [],
     }
     data, parse_mode = extract_json_object(text)
     row["parse_mode"] = parse_mode
@@ -434,14 +465,25 @@ def judge_text(case, text):
         row["outcome"] = UNUSABLE
         row["detail"] = "no JSON object anywhere in the reply"
         return row
-    row["span_mix"] = _span_mix(data, case.source)
-    errors = json_schema_verifier.validate(data, schema)
+    # Keys outside the schema are dropped BEFORE anything judges them. Only the
+    # unconstrained arm can emit one -- the decoder forbids it on the other --
+    # so penalising it would be a penalty applied to one arm alone, and it would
+    # run in the one direction this whole design exists to exclude: making the
+    # schema arm look better than it is. `verify_grounding` rejects any
+    # top-level key that is not a {value, quote} pair (grounded_extraction.py
+    # :171-177), so an "explanation" field alongside the real ones would sink an
+    # otherwise valid reply. Stating the leniency in a comment was not enough;
+    # it has to be executed, which is what this line does.
+    declared = {name: value for name, value in data.items() if name in case.fields}
+    row["ignored_keys"] = sorted(set(data) - set(declared))
+    row["span_mix"] = _span_mix(declared, case.source)
+    errors = json_schema_verifier.validate(declared, schema)
     if errors:
         row["outcome"] = REJECTED
         row["detail"] = "schema violation: %s" % "; ".join(str(e) for e in errors[:3])
         return row
     try:
-        fields = grounded_extraction.verify_grounding(data, case.source)
+        fields = grounded_extraction.verify_grounding(declared, case.source)
     except grounded_extraction.GroundingError as exc:
         row["outcome"] = REJECTED
         row["detail"] = str(exc)
@@ -451,9 +493,6 @@ def judge_text(case, text):
         actual = fields.get(name, {}).get(grounded_extraction.VALUE_KEY)
         if actual != expected:
             disagreements.append("%s=%r (expected %r)" % (name, actual, expected))
-    # Keys outside the schema are ignored rather than penalised: only the
-    # unconstrained arm can produce them, so counting them would be a penalty
-    # applied to one arm alone.
     if disagreements:
         row["outcome"] = WRONG
         row["detail"] = "; ".join(disagreements)
@@ -854,7 +893,20 @@ def _live_recorder():
 
 
 def run_live(tier="fast", cases=CASES, *, record=False, timeout=180):
-    """Both arms against the real model, in a fixed order, once each."""
+    """Both arms against the real model, in a fixed order, once each.
+
+    The arms run as two consecutive blocks, and that is a known confound rather
+    than an oversight. ``orchestrator._run`` prepends retrieved lessons to the
+    prompt *below* the layer this module controls, so the parity test at the
+    ``call_fn`` boundary cannot see them: if the lesson store changed mid-run,
+    the change would be perfectly correlated with the arm. Nothing on this path
+    writes a lesson row, so retrieval is static within a run and the confound is
+    currently inert -- but it is inert by circumstance, not by construction.
+    Interleaving the arms case by case would remove it, at the cost of making
+    every past run incomparable to every future one.
+    """
+    if record and not PROVENANCE_AVAILABLE:
+        raise SchemaBenchmarkError(_PROVENANCE_REFUSAL)
     call_fn = build_live_call(tier, timeout=timeout)
     baseline = run_arm(cases, ARM_NO_SCHEMA, call_fn)
     treatment = run_arm(cases, ARM_SCHEMA, call_fn)
