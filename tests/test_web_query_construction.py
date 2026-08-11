@@ -131,8 +131,9 @@ def test_agent_impl_accepts_research_system_override(monkeypatch):
     agent prompt that invites text_search on pure web questions."""
     captured = {}
 
-    def fake_build_system(text, trace, persona):
+    def fake_build_system(text, trace, persona, model="", cloud=False):
         captured["system"] = text
+        captured["model"] = model
         return text
 
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
