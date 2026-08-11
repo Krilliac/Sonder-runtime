@@ -64,9 +64,9 @@ VERIFIERS = {
     "run_project": ("compiled", "failed"),
     "isolated_run": ("compiled", "failed"),
     "codegen_build_loop": ("compiled", "failed"),
-    "artifact_verify": ("accepted", "rejected"),
-    "ground_artifact": ("accepted", "rejected"),
-    "artifact_ground": ("accepted", "rejected"),
+    "artifact_verify": ("compiled", "failed"),
+    "ground_artifact": ("compiled", "failed"),
+    "artifact_ground": ("compiled", "failed"),
 }
 
 # code_runner uses an ``error`` field both for infrastructure failures and for
@@ -97,7 +97,11 @@ class _Pending:
 
 
 _PENDING: list[_Pending] = []
-_STATS = {"noted": 0, "attributed": 0, "expired": 0, "unlinked": 0, "unmeasured": 0}
+_STATS = {
+    "noted": 0, "attributed": 0, "expired": 0, "unlinked": 0,
+    "unmeasured": 0, "self_blocked": 0, "recorded": 0,
+    "write_failed": 0,
+}
 
 # Where ``_format_run_result``'s header block ends and the child's own output
 # begins. Everything after one of these lines is text the verified program
@@ -164,10 +168,15 @@ def evaluation_infrastructure_error(evidence) -> str:
         return ""
     if evidence.get("timed_out"):
         return "the verification timed out before producing a verdict"
-    error = evidence.get("error")
-    if error:
-        return str(error)
-    if evidence.get("returncode") == -1:
+    returncode = evidence.get("returncode")
+    # A real process exit is a verdict even if a wrapper also populated an
+    # empty ``error`` field.  Isolated/container runners use that shape for a
+    # program which ran and rejected the generated work.
+    if isinstance(returncode, int) and not isinstance(returncode, bool) and returncode >= 0:
+        return ""
+    if "error" in evidence and evidence.get("error") is not None:
+        return str(evidence.get("error")) or "the verifier raised before producing a verdict"
+    if returncode == -1:
         stderr = str(evidence.get("stderr") or "").strip().splitlines()
         return stderr[0] if stderr else "the verifier could not be run"
     return ""
@@ -256,8 +265,8 @@ def rendered_infrastructure_error(observation) -> str:
             fields.setdefault(key.strip().casefold(), value.strip())
     if fields.get("timed_out", "").casefold() == "true":
         return "the verification timed out before producing a verdict"
-    if fields.get("error"):
-        return fields["error"]
+    if "error" in fields:
+        return fields["error"] or "the verifier raised before producing a verdict"
     if fields.get("returncode") in ("-1", "None"):
         return "the verifier could not be run"
     return ""
@@ -353,9 +362,10 @@ def note_generation(interaction_id: str, tool: str, project: str = "", run_id: s
 
 
 def _candidate(project: str, kind: str, run_id: str = ""):
-    """Newest pending generation eligible for this verification, or None."""
+    """Newest eligible pending generation and skipped self-generated rows."""
     wanted = str(project or "")
     wanted_run = str(run_id or "")
+    self_skipped = 0
     with _LOCK:
         for pending in reversed(_PENDING):
             if kind in pending.judged:
@@ -375,8 +385,8 @@ def _candidate(project: str, kind: str, run_id: str = ""):
                 continue
             if wanted_run and pending.run_id and wanted_run != pending.run_id:
                 continue
-            return pending
-    return None
+            return pending, self_skipped
+    return None, self_skipped
 
 
 def attribute(tool: str, ok: bool, project: str = "", record_fn=None,
@@ -414,7 +424,7 @@ def attribute(tool: str, ok: bool, project: str = "", record_fn=None,
             "evaluation_infrastructure_error": infrastructure_error,
         }
     _prune()
-    pending = _candidate(project, name, run_id)
+    pending, self_skipped = _candidate(project, name, run_id)
     if pending is None:
         with _LOCK:
             # `unlinked` means "nothing was waiting to be judged". A refusal to

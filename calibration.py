@@ -115,6 +115,12 @@ def _counts(conn, sources=None) -> dict:
     import sonder_runtime.adapters.memory_store as memory_store
     try:
         return dict(memory_store.outcome_signal_counts(conn, sources) or {})
+    except TypeError:
+        # Test and third-party store adapters from before provenance filtering
+        # accepted only ``conn``.  They still provide an authoritative count;
+        # retain that compatibility rather than turn every such read into an
+        # empty, fail-closed population.
+        return dict(memory_store.outcome_signal_counts(conn) or {})
     except Exception:
         return {}
 

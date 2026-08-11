@@ -17639,6 +17639,29 @@ def _agent_verification_standing():
             pass
 
 
+def _agent_verification_standing_notice():
+    """The three-state calibration block shown to the agent itself."""
+    try:
+        conn = _open_db()
+    except Exception:
+        return (
+            "VERIFICATION STANDING: unverifiable\n"
+            "  caller population could not be read; verify before claiming done"
+        )
+    try:
+        return calibration.agent_notice(conn, "caller")
+    except Exception:
+        return (
+            "VERIFICATION STANDING: unverifiable\n"
+            "  caller population could not be read; verify before claiming done"
+        )
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def _agent_end_report_standing_line():
     """The measured standing the claim in an end report was made under.
 
@@ -18606,9 +18629,7 @@ def _agent_turn(
             "\n\nHOST TOOL ALLOWLIST (cannot be expanded by the model):\n- %s"
             % "\n- ".join(sorted(allowed_tools))
         )
-    standing_notice = _agent_verification_standing()
-    if standing_notice:
-        transcript += "\n\n" + standing_notice
+    transcript += "\n\n" + _agent_verification_standing_notice()
 
     def ensure_not_cancelled():
         if cancel_check is not None and _cancel_requested(cancel_check):
@@ -19592,16 +19613,14 @@ _AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
     "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_generate", "artifact_verify", "game_reference_suite",
     "game_generate_and_test",
+    # These purpose-built verifier tools now have matching _agent_dispatch
+    # branches.  Keeping them in the workspace lane gives a completion claim
+    # a reachable, host-observed way to satisfy its verification standing.
+    "test_run", "build_run", "lint_run", "typecheck_run",
     "process_list", "process_memory_risk_inspect", "task_progress",
     "task_delete", "task_plan", "task_depend",
-    # test_run / lint_run / format_code / typecheck_run / dependency_add /
-    # dependency_remove / dependency_update / the seven git_* tools /
-    # build_run / build_clean / rename_symbol / apply_patch are deliberately
-    # absent for the same reason as the observe block: they are direct MCP
-    # tools with no _agent_dispatch branch, so advertising them to an
-    # autonomous run cost steps and bought no capability.  workspace_run and
-    # script_run stay, and reach the same build/test binaries through the
-    # argv-checked execution path.
+    # Other developer-workflow tools remain absent until their agent dispatch
+    # and project-root guards are admitted to this autonomous lane.
 })
 _AUTOPILOT_RUNNERS = frozenset({
     "python", "python.exe", "py", "py.exe", "pytest", "pytest.exe",

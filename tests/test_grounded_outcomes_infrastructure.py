@@ -164,7 +164,7 @@ def test_evidence_is_optional_and_the_old_behaviour_survives():
         record_fn=lambda i, s: written.append((i, s)),
     )
     assert report["attributed"] is True
-    assert written == [("gen-1", "rejected")]
+    assert written == [("gen-1", "failed")]
 
 
 # --- the text predicate, for the agent path --------------------------------
