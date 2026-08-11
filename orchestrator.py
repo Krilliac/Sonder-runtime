@@ -132,6 +132,110 @@ def _run_compat_block(task):
     )
 
 
+# Draw order, and the label each source is reported under when the size bound
+# cuts one of them harder than the other. Project facts draw first, so an odd
+# slot falls the operator's way.
+FACT_SOURCE_LABELS = ("project facts", "preferences")
+
+
+def _draw_facts(facts=None, project_facts=None):
+    """The draw behind select_facts. Returns (kept, per_source).
+
+    ``kept`` is the list of kept texts in render order. ``per_source`` is one
+    ``(label, kept_count, candidate_count)`` per source, in draw order -- what
+    the block needs to say WHICH source the bound cut, rather than reporting a
+    flat total that reads as an even trim.
+    """
+    queues = [
+        [str(f) for f in project_facts or []],
+        [str(f) for f in facts or []],
+    ]
+    candidates = [len(queue) for queue in queues]
+    per_source_floor = MAX_INJECTED_FACTS // len(queues)
+    kept = []  # (source_index, text), in draw order
+    used = 0
+    turn = 0
+    first_drawn = None
+    # The first candidate of each source that could fit the budget ALONE. Not
+    # "the first that fits what is left" -- a starved source is starved
+    # precisely because nothing of its fits what is left.
+    first_fitting = [None] * len(queues)
+    while any(queues):
+        # Skip an exhausted source rather than ending the draw: a source with
+        # nothing left must not cost the other its remaining turns.
+        while not queues[turn]:
+            turn = (turn + 1) % len(queues)
+        source = turn
+        text = queues[turn].pop(0)
+        turn = (turn + 1) % len(queues)
+        if first_drawn is None:
+            first_drawn = text
+        if first_fitting[source] is None and len(text) <= MAX_FACTS_CHARS:
+            first_fitting[source] = text
+        if kept and len(kept) >= MAX_INJECTED_FACTS:
+            break  # no slots left for anyone; drawing more cannot help
+        if used + len(text) > MAX_FACTS_CHARS:
+            # Skip this one and keep drawing rather than ending the draw. One
+            # oversized entry used to cost BOTH queues every remaining slot
+            # (measured: kept=1 of 24 for a single 4200-char preference), so
+            # the round-robin floor held only while nothing was oversized.
+            # Skipping is still deterministic and still never shortens a fact.
+            # This check used to be gated on `kept` being non-empty, which
+            # exempted the first entry drawn from ever being skipped -- so an
+            # oversized first entry alone (project facts draw first, and are
+            # now newest-first) still collapsed the whole block to kept=1.
+            continue
+        kept.append((source, text))
+        used += len(text)
+    for source in range(len(queues)):
+        # The per-source floor, now enforced against the CHAR bound too. The
+        # round-robin gave each source its turn, but both turns are spent from
+        # ONE shared budget in draw order, so a source could take its turn and
+        # still keep nothing: measured, twelve 3990-char project facts (all
+        # UNDER the 4000-char budget -- no oversized entry, no fallback) left
+        # under ten chars behind them and skipped every preference, and two
+        # sources of half-budget facts rendered ONE fact out of twenty-four.
+        # A source silently reduced to zero is the defect; the floor below
+        # guarantees any source with a usable candidate is represented.
+        if not candidates[source] or first_fitting[source] is None:
+            # No candidates, or none that fit the budget alone. An oversized
+            # entry is not a floor -- re-admitting one here would reopen
+            # exactly what the char-budget skip above closed. The source stays
+            # absent and _facts_block says so, by source, in the block.
+            continue
+        if any(index == source for index, _text in kept):
+            continue
+        if len(kept) >= MAX_INJECTED_FACTS:
+            # Take the slot from a source that is above its OWN floor, lowest
+            # priority (last drawn) first, so honouring the floor cannot push
+            # the block past the count bound.
+            victim = None
+            for index in range(len(kept) - 1, -1, -1):
+                holder = kept[index][0]
+                if len([1 for other, _t in kept if other == holder]) > per_source_floor:
+                    victim = index
+                    break
+            if victim is None:
+                continue
+            kept.pop(victim)
+        kept.insert(0 if source == 0 else len(kept), (source, first_fitting[source]))
+    if not kept and first_drawn is not None:
+        # Every candidate was over budget, so the loop above skipped all of
+        # them and left the block empty. An empty block is strictly worse
+        # than showing one oversized fact, so fall back to the first entry
+        # drawn -- the same choice the old unconditional-first-entry rule
+        # made, now reached only when nothing smaller was available to fill
+        # the slot instead.
+        kept = [(0 if project_facts else 1, first_drawn)]
+    per_source = [
+        (FACT_SOURCE_LABELS[source],
+         len([1 for index, _t in kept if index == source]),
+         candidates[source])
+        for source in range(len(queues))
+    ]
+    return [text for _source, text in kept], per_source
+
+
 def select_facts(facts=None, project_facts=None):
     """Return (kept, omitted_count) for the facts block.
 
@@ -161,54 +265,24 @@ def select_facts(facts=None, project_facts=None):
     that slot is precisely a fact someone just stored -- the common case, not
     an edge case. The char-budget check now applies to every entry, first
     included; only the fallback below still special-cases position zero.
+
+    The per-source floor is enforced against the CHAR bound as well as the
+    count bound -- see _draw_facts. Where the budget cannot seat a source's
+    floor at all (twelve 3000-char facts cannot fit a 4000-char budget however
+    the draw is ordered -- measured at 1 kept even with ZERO competing
+    preferences), the shortfall is reported per source by _facts_block rather
+    than left to read as an even trim.
     """
-    queues = [
-        [str(f) for f in project_facts or []],
-        [str(f) for f in facts or []],
-    ]
-    total = sum(len(queue) for queue in queues)
-    kept = []
-    used = 0
-    turn = 0
-    first_drawn = None
-    while any(queues):
-        # Skip an exhausted source rather than ending the draw: a source with
-        # nothing left must not cost the other its remaining turns.
-        while not queues[turn]:
-            turn = (turn + 1) % len(queues)
-        text = queues[turn].pop(0)
-        turn = (turn + 1) % len(queues)
-        if first_drawn is None:
-            first_drawn = text
-        if kept and len(kept) >= MAX_INJECTED_FACTS:
-            break  # no slots left for anyone; drawing more cannot help
-        if used + len(text) > MAX_FACTS_CHARS:
-            # Skip this one and keep drawing rather than ending the draw. One
-            # oversized entry used to cost BOTH queues every remaining slot
-            # (measured: kept=1 of 24 for a single 4200-char preference), so
-            # the round-robin floor held only while nothing was oversized.
-            # Skipping is still deterministic and still never shortens a fact.
-            # This check used to be gated on `kept` being non-empty, which
-            # exempted the first entry drawn from ever being skipped -- so an
-            # oversized first entry alone (project facts draw first, and are
-            # now newest-first) still collapsed the whole block to kept=1.
-            continue
-        kept.append(text)
-        used += len(text)
-    if not kept and first_drawn is not None:
-        # Every candidate was over budget, so the loop above skipped all of
-        # them and left the block empty. An empty block is strictly worse
-        # than showing one oversized fact, so fall back to the first entry
-        # drawn -- the same choice the old unconditional-first-entry rule
-        # made, now reached only when nothing smaller was available to fill
-        # the slot instead.
-        kept = [first_drawn]
+    kept, per_source = _draw_facts(facts, project_facts)
+    total = sum(count for _label, _kept, count in per_source)
     return kept, total - len(kept)
 
 
 def _facts_block(facts, project_facts=None):
     """Render the facts block. Returns (text, omitted_count)."""
-    kept, omitted = select_facts(facts, project_facts)
+    kept, per_source = _draw_facts(facts, project_facts)
+    total = sum(count for _label, _kept, count in per_source)
+    omitted = total - len(kept)
     items = "\n\n".join(
         "%s %d of %d\n%s" % (FACT_ITEM_HEADER, index, len(kept), text)
         for index, text in enumerate(kept, 1)
@@ -221,6 +295,22 @@ def _facts_block(facts, project_facts=None):
             "rest explicitly if you need them."
             % (FACTS_OMITTED_PREFIX, omitted, omitted + len(kept))
         )
+        live = [entry for entry in per_source if entry[2]]
+        if len(live) > 1:
+            # A flat total reads as an even trim. It is not: the size bound is
+            # spent in draw order, so it routinely cuts one source far harder
+            # than the other (measured: 11 of 12 project facts left out against
+            # 1 of 12 preferences, with nothing over budget). Say which source
+            # lost what, on the same line, so a per-source cut cannot be
+            # silent -- the block cannot always seat both floors, but it can
+            # always be honest about which one it could not.
+            block += (
+                " The size bound did not fall evenly: %s."
+                % ", ".join(
+                    "%s %d of %d left out" % (label, count - kept_count, count)
+                    for label, kept_count, count in live
+                )
+            )
     return block, omitted
 
 
