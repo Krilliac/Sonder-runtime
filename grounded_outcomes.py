@@ -31,6 +31,11 @@ Deliberate limits
   recording nothing.
 * Only genuinely execution-grounded tools may attribute. A tool whose "success"
   means "it ran", not "the work was good", is not evidence.
+* A verification that never produced a verdict is not evidence either. ``ok``
+  alone cannot tell "the build failed" from "there was no build system", and
+  both used to arrive as signal ``failed`` -- reward -1.0, the harshest in the
+  table -- against work nothing ever examined. See
+  ``evaluation_infrastructure_error``.
 
 Stdlib only.
 """
@@ -87,7 +92,135 @@ class _Pending:
 
 
 _PENDING: list[_Pending] = []
-_STATS = {"noted": 0, "attributed": 0, "expired": 0, "unlinked": 0}
+_STATS = {"noted": 0, "attributed": 0, "expired": 0, "unlinked": 0, "unmeasured": 0}
+
+# Where ``_format_run_result``'s header block ends and the child's own output
+# begins. Everything after one of these lines is text the verified program
+# chose, so nothing after them may be read as a report about the verifier.
+_RENDERED_OUTPUT_HEADERS = ("stdout:", "stderr:")
+
+
+def evaluation_infrastructure_error(evidence) -> str:
+    """Why this verification measured nothing, or "" when it really ran.
+
+    ``harness_tools`` already knows the difference and the call site threw it
+    away. Measured returns from a project with no build system::
+
+        no build system    {"ok": False, "error": "no recognized build system..."}
+        unknown framework  {"ok": False, "error": "unknown framework: nosuchfw"}
+        command not found  {"ok": False, "returncode": -1, "stderr": "command not found: ..."}
+        timeout            {"ok": False, "returncode": -1, "timed_out": True}
+        real build failure {"ok": False, "returncode": 1, ...}
+
+    Only the last is a statement about the work. The first four reached the
+    store as ``failed`` at reward -1.0, and -- worse -- consumed the pending
+    entry, so the later genuine verdict for that generation had nothing left to
+    attach to.
+
+    ``returncode: -1`` is the harness's own marker for "no process exited":
+    ``_run`` uses it for both ``TimeoutExpired`` and ``FileNotFoundError`` and
+    nowhere else, because a real child's status is whatever it exited with.
+
+    Silence when there is nothing to read. A verifier that runs no process (an
+    artifact validator) passes no dict, and must keep attributing exactly as
+    before; reading absence as breakage would silently switch off every
+    verifier this lane did not wire.
+    """
+    if not isinstance(evidence, dict):
+        return ""
+    if evidence.get("timed_out"):
+        return "the verification timed out before producing a verdict"
+    error = evidence.get("error")
+    if error:
+        return str(error)
+    if evidence.get("returncode") == -1:
+        stderr = str(evidence.get("stderr") or "").strip().splitlines()
+        return stderr[0] if stderr else "the verifier could not be run"
+    return ""
+
+
+def rendered_infrastructure_error(observation) -> str:
+    """The same question, asked of ``_format_run_result``'s rendered text.
+
+    The agent and autopilot lanes are the paths that actually run, and they
+    never see the result dict: ``server._agent_dispatch`` returns a formatted
+    string and the outcome feed receives only that. So the fix has to be
+    answerable from text, or it does not reach production at all.
+
+    Read strictly, and only from the header block. ``_format_run_result``
+    emits its ``ok:``/``returncode:``/``timed_out:``/``error:`` lines first and
+    then the child's own ``stdout:``/``stderr:`` blocks, and a failing test
+    suite prints whatever it likes -- including lines that look exactly like an
+    infrastructure report. Reading past the first header would let a genuine
+    failure disguise itself as "nothing was measured", and a lost negative is
+    the worse mistake here: the caller-judged population is short of failures
+    already. So parsing stops at the first output header.
+
+    ``test_the_two_predicates_agree`` pins this against
+    ``evaluation_infrastructure_error`` over the same measured result dicts, so
+    the two cannot drift.
+    """
+    text = str(observation or "")
+    if not text.strip():
+        return ""
+    # A tool that raised never produced a verdict about anything. This is how
+    # `_agent_dispatch` renders one, and how `ok` becomes False for it.
+    if text.lstrip().startswith("ERROR:"):
+        return text.strip().splitlines()[0]
+    fields = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.casefold() in _RENDERED_OUTPUT_HEADERS:
+            break
+        key, sep, value = stripped.partition(":")
+        if sep and key:
+            fields.setdefault(key.strip().casefold(), value.strip())
+    if fields.get("timed_out", "").casefold() == "true":
+        return "the verification timed out before producing a verdict"
+    if fields.get("error"):
+        return fields["error"]
+    if fields.get("returncode") in ("-1", "None"):
+        return "the verifier could not be run"
+    return ""
+
+
+def rendered_verdict(observation):
+    """The verifier's own pass/fail from its rendered text, or None.
+
+    The agent path derives ``ok`` as ``not observation.startswith("ERROR:")``
+    (``server._agent_dispatch_observed``), and that is not a verdict about the
+    work -- measured, a pytest suite with a failing test renders
+    ``"test run (pytest)\\n  ok: False\\n  returncode: 1"``, which does not
+    start with ``ERROR:``, so a FAILING suite arrived here as ``ok=True`` and
+    would have been filed ``tests_passed`` at +1.0. A false pass is worse than
+    the false failure this lane was opened for: the whole point of this store
+    is a number that can be trusted, and the caller-judged population sits near
+    52%, so a manufactured success is indistinguishable from real progress.
+
+    The two renderers, both measured:
+      ``server._format_run_result``   -> ``  ok: True`` / ``  ok: False``
+      ``code_runner.format_result``   -> ``status: ok`` / ``status: failed``
+
+    Returns None when neither field is present, so a verifier rendered some
+    other way keeps whatever the caller decided and nothing changes for it.
+    """
+    text = str(observation or "")
+    if not text.strip():
+        return None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.casefold() in _RENDERED_OUTPUT_HEADERS:
+            break
+        key, sep, value = stripped.partition(":")
+        if not sep:
+            continue
+        key = key.strip().casefold()
+        value = value.strip().casefold()
+        if key == "ok" and value in ("true", "false"):
+            return value == "true"
+        if key == "status" and value in ("ok", "failed"):
+            return value == "ok"
+    return None
 
 
 def _now() -> float:
@@ -159,16 +292,37 @@ def _candidate(project: str, kind: str, run_id: str = ""):
     return None
 
 
-def attribute(tool: str, ok: bool, project: str = "", record_fn=None, run_id: str = "") -> dict:
+def attribute(tool: str, ok: bool, project: str = "", record_fn=None,
+              run_id: str = "", evidence=None) -> dict:
     """Attribute a verification result to the generation it most likely judges.
 
     `record_fn(interaction_id, signal)` performs the write; injected so this
     module has no import cycle with the server and is trivially testable.
-    Returns a report describing what happened, including when nothing did.
+    `evidence` is the verifier's own result dict, or the rendered observation
+    the agent path has instead of one, read only to tell a verdict from the
+    absence of one. Returns a report describing what happened, including when
+    nothing did.
     """
     name = str(tool or "").strip().lstrip("/")
     if name not in VERIFIERS:
         return {"attributed": False, "reason": "%s is not execution-grounded evidence" % name}
+    # Asked BEFORE a pending generation is claimed. One verifier kind judges a
+    # generation once, so a run that measured nothing must not consume the one
+    # chance that generation had to be judged for real -- measured, an
+    # infrastructure blip permanently displaced the later genuine verdict.
+    infrastructure_error = (
+        evaluation_infrastructure_error(evidence)
+        if isinstance(evidence, dict)
+        else rendered_infrastructure_error(evidence)
+    )
+    if infrastructure_error:
+        with _LOCK:
+            _STATS["unmeasured"] += 1
+        return {
+            "attributed": False,
+            "reason": "%s produced no verdict, so there is nothing to attribute" % name,
+            "evaluation_infrastructure_error": infrastructure_error,
+        }
     _prune()
     pending = _candidate(project, name, run_id)
     if pending is None:
