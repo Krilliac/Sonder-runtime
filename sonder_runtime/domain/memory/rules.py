@@ -79,11 +79,14 @@ _POPULATION_TIER = {"caller": 2, "execution": 1}
 #
 #   RETENTION -- retention_rank(caller_mean, execution_mean)
 #     "Whose judgement would be LOST if this row were deleted?"
-#     Population decides unconditionally, because a caller's negative is the
-#     most valuable history to keep, not the least: deleting it leaves a
-#     clean-looking duplicate behind and launders a lesson the store has
-#     already measured as harmful. Used to pick the survivor of an
-#     exact-duplicate group.
+#     Population decides unconditionally, because ACROSS populations a caller's
+#     negative is the most valuable history to keep, not the least: deleting it
+#     leaves a clean-looking duplicate behind and launders a lesson the store
+#     has already measured as harmful. Used to pick the survivor of an
+#     exact-duplicate group. That claim stops at the population boundary --
+#     WITHIN the caller population the better mean still wins, so a
+#     caller-judged +0.8 does delete a caller-judged -1.0. See the caveat on
+#     retention_rank before quoting this paragraph on its own.
 #
 # They are not opposites. Above the eligibility bar they agree -- a caller who
 # reviewed the work outranks the runtime grading itself in both. They part
