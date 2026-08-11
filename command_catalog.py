@@ -341,6 +341,18 @@ _UNREGISTERED_BRANCH_WORK = {
     "/training": "training",
     "/weighttraining": "training",
     "/hardware": "hardware",
+    # `/location on` grants session-wide approximate IP-geolocation consent by
+    # assigning the REPL's `location_consent`, which every later turn is then
+    # handed. No registered tool fronts that assignment -- `/location` never
+    # calls `approximate_location_lookup`, it authorizes it -- so without an
+    # entry here the console gate resolves the command to an empty tool set
+    # and allows it unconditionally. It sat on the coverage floor's
+    # display-only allow-list instead, under a reason ("reads the
+    # location-consent env flag") that described only the bare form. Recorded
+    # as the grant it is, for the reason `/hardware` is recorded as the read
+    # it is: a verdict is visible to `/permissions`, can be overridden by a
+    # rule, and stays inside the map the floor checks.
+    "/location": "location",
 }
 
 

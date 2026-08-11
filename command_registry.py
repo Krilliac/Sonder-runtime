@@ -80,6 +80,27 @@ COMMANDS = [
         "summary": "Detect live system RAM, GPU runtime, VRAM, and offload support.",
     },
     {
+        "name": "/location",
+        # `/location on` assigns the REPL's `location_consent`
+        # (sonder_repl.py:1083), which `main()` then passes to `server.sonder`
+        # on every later turn (sonder_repl.py:1510) -- so it grants approximate
+        # IP-geolocation consent that is OFF by default and stays granted for
+        # the rest of the session. That is "changes what a later call may do",
+        # the same reasoning `/mcp` and `/goal` carry, not the read its old
+        # display-only entry claimed ("reads the location-consent env flag" --
+        # true only of the bare `/location` form).
+        #
+        # Without this entry the command inherits `catalog()`'s default for a
+        # console command fronting no tool, `safe`, which `plan` allows -- so a
+        # mode advertising "reads only" would let a session acquire a new
+        # capability. Graded by the worst it can do, like every other command
+        # the gate reads a risk for. `ask` rather than `mutation` because it
+        # writes no file; the two are the same row of the mode matrix.
+        "category": "system",
+        "risk": "ask",
+        "summary": "Show, grant, or revoke approximate IP-location consent for this session.",
+    },
+    {
         "name": "/training",
         # The argument goes to adaptive_training.command_text, which runs
         # that CLI main(): start, deploy, rollback, adopt-legacy,
