@@ -299,3 +299,13 @@ def test_path_escape_sensitive_and_symlink_are_rejected(tmp_path, monkeypatch):
         pytest.skip("symlink unavailable: %s" % exc)
     with pytest.raises(mutate.SqliteMutateError, match="symlink|junction"):
         mutate.mutate_sqlite("link.db", "DELETE FROM x WHERE id = ?", [1])
+
+
+def test_custom_named_fanout_receipt_store_is_not_a_mutation_target(tmp_path, monkeypatch):
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path))
+    receipt = tmp_path / "runtime-receipts.sqlite"
+    sqlite3.connect(receipt).close()
+    monkeypatch.setenv("SONDER_FANOUT_DB", str(receipt))
+
+    with pytest.raises(mutate.SqliteMutateError, match="protected Sonder secret/control-plane"):
+        mutate.mutate_sqlite(receipt, "DELETE FROM fanout_results WHERE 1 = ?", [1])
