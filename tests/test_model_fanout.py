@@ -59,6 +59,7 @@ def test_tool_manifest_documents_guarded_model_routes():
     assert "model_fanout/model_fanout_status/model_fanout_cancel/model_fanout_resume" in manifest
     assert "ask all available local models: ..." in manifest
     assert "ask all local and cloud models: ..." in manifest
+    assert "ask all local models and cloud models: ..." in manifest
     assert "ask the phi4:latest model to ..." in manifest
     assert "run using model phi4:latest: ..." in manifest
     assert "explicit operator opt-in" in manifest
@@ -72,6 +73,8 @@ def test_tool_manifest_documents_guarded_model_routes():
         ("run every available cloud models to answer: summarize this", {"kind": "fanout", "scope": "cloud", "prompt": "summarize this"}),
         ("run all models available to answer: summarize this", {"kind": "fanout", "scope": "all", "prompt": "summarize this"}),
         ("ask all local and cloud models: summarize this", {"kind": "fanout", "scope": "all", "prompt": "summarize this"}),
+        ("ask all local models and cloud models: summarize this", {"kind": "fanout", "scope": "all", "prompt": "summarize this"}),
+        ("run every cloud model + local model to summarize this", {"kind": "fanout", "scope": "all", "prompt": "summarize this"}),
         ("run every cloud + local model to summarize this", {"kind": "fanout", "scope": "all", "prompt": "summarize this"}),
         ("ask all the local models: summarize this", {"kind": "fanout", "scope": "local", "prompt": "summarize this"}),
         ("ask all of the models to summarize this", {"kind": "fanout", "scope": "all", "prompt": "summarize this"}),
