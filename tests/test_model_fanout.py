@@ -439,7 +439,7 @@ def test_repeated_local_availability_failures_back_off(monkeypatch):
     recorded = []
     monkeypatch.setattr(
         server.fanout_store, "get_model_health",
-        lambda _model: {"failure_count": 2},
+        lambda _model: {"availability_failure_count": 2},
     )
     monkeypatch.setattr(
         server.fanout_store, "record_model_health",
@@ -477,7 +477,7 @@ def test_local_backoff_reaches_one_hour_cap(monkeypatch):
     recorded = []
     monkeypatch.setattr(
         server.fanout_store, "get_model_health",
-        lambda _model: {"failure_count": 5},
+        lambda _model: {"availability_failure_count": 5},
     )
     monkeypatch.setattr(
         server.fanout_store, "record_model_health",
