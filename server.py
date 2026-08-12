@@ -22,6 +22,7 @@ import collections
 import contextlib
 import datetime
 import email.utils
+import hashlib
 import hmac
 import importlib
 import http.client
@@ -14470,6 +14471,7 @@ def tool_manifest() -> str:
         "task_create/task_list/task_update/task_show/task_delete/task_plan/task_progress/task_depend/checklist_create/checklist_update/checklist_show": "Visible todo and ordered checklist state shared by console, app, agents, and MCP. task_plan batch-creates a work plan with ordered steps and auto-dependencies. task_progress shows a compact summary. task_depend manages blocking relationships.",
         "workbench_agent": "Run an autonomous local tool loop with a guaranteed checklist, exact action transcript, validation gate, and end report.",
         "command_registry_list": "Inspect available slash commands by category, name, or risk.",
+        "tool_manifest/tool_capability_manifest/access_request_preview": "Inspect the human-readable MCP tool catalog, fingerprint the live registered capability schemas, or preview a non-authorizing scoped filesystem access request.",
         "activity_status": "Inspect active/latest response activity, tool calls, and file changes.",
         "permission_policy/permission_rule_set": "Inspect the effective permission decision -- the rule, the active mode, and which one governs -- or guarded-edit a rule.",
         "context_compaction_plan": "Preview when to summarize, split sessions, or reduce live context.",
@@ -14505,6 +14507,78 @@ def tool_manifest() -> str:
         "sonder_stats/sonder_sessions/sonder_remember_fact": "Memory observability and durable facts.",
     }
     return "\n".join("  %s: %s" % item for item in sorted(tools.items()))
+
+
+@mcp.tool()
+def tool_capability_manifest() -> str:
+    """Return a deterministic fingerprint of the currently advertised tool surface.
+
+    This is visibility only: it cannot add, remove, approve, or invoke tools.
+    Clients can retain the SHA-256 value with a run receipt and notice when a
+    live-reloaded runtime presents a different capability surface.
+    """
+    _maybe_live_reload()
+    manifest = tool_manifest()
+    registered = getattr(mcp._tool_manager, "_tools", {})
+    capabilities = [
+        {
+            "name": str(name),
+            "description": str(getattr(tool, "description", "")),
+            "parameters": getattr(tool, "parameters", {}),
+        }
+        for name, tool in sorted(registered.items())
+    ]
+    canonical = json.dumps(
+        capabilities, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        default=str,
+    )
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return json.dumps({
+        "sha256": digest,
+        "tool_count": len(capabilities),
+        "manifest": manifest,
+        "authority": "informational only; host policy remains authoritative",
+    }, indent=2, sort_keys=True)
+
+
+@mcp.tool()
+def access_request_preview(path: str, mode: str = "read") -> str:
+    """Preview a scoped filesystem access request without changing any authority.
+
+    The result is deliberately non-authorizing.  Only an operator can add a
+    root through the existing guarded configuration and, for mutations, the
+    existing developer/approval path remains required.
+    """
+    _maybe_live_reload()
+    wanted = str(mode or "read").strip().lower()
+    if wanted not in ("read", "write"):
+        error = "ERROR: mode must be read or write."
+        return error
+    requested = str(path or "").strip()
+    if not requested:
+        error = "ERROR: path is required."
+        return error
+    try:
+        resolved = str(file_ops.resolve_path(requested))
+        state = "already_authorized"
+        detail = "The guarded root policy already admits this path."
+    except (OSError, ValueError, PermissionError) as exc:
+        resolved = str(Path(requested).expanduser())
+        state = "operator_action_required"
+        detail = str(exc)
+    return json.dumps({
+        "path": resolved,
+        "mode": wanted,
+        "state": state,
+        "detail": detail,
+        "grant": False,
+        "operator_action": (
+            "Review and explicitly add a trusted root through file_roots.local "
+            "or SONDER_FILE_ROOTS; write access also remains subject to the "
+            "existing developer/approval gate."
+        ),
+        "model_authority": "A model or prompt cannot approve this request.",
+    }, indent=2, sort_keys=True)
 
 
 AGENT_TOOL_HELP = """Available tools:
