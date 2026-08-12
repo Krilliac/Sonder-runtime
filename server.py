@@ -21329,7 +21329,10 @@ def natural_model_request(text):
     """
     value = str(text or "").strip()
     fanout = re.match(
-        r"^(?:ask|run)\s+(?:all|every)\s+(?:(local|cloud|available)\s+)?models\s*(?::|to answer:?|answer:?)\s*(.+)$",
+        # Keep this an imperative whole-turn grammar: it is deliberately not
+        # a classifier over retrieved prose.  ``available`` describes the
+        # catalog while local/cloud selects its bounded scope.
+        r"^(?:ask|run|try|query)\s+(?:all|every)\s+(?:available\s+)?(?:(local|cloud)\s+)?models\s*(?::|to answer:?|answer:?|to)\s*(.+)$",
         value, re.IGNORECASE | re.DOTALL,
     )
     if fanout:
@@ -21344,6 +21347,16 @@ def natural_model_request(text):
     )
     if single:
         return {"kind": "model", "model": single.group(1).strip(), "prompt": single.group(2).strip()}
+    # A colon in a model tag is common, which is why the legacy form above
+    # requires ``: ``.  This alternate has a constrained selector and an
+    # explicit ``to`` delimiter, so it remains unambiguous and cannot make
+    # arbitrary prose a routing request.
+    single_to = re.match(
+        r"^(?:use|run|ask|try|query)\s+model\s+([A-Za-z0-9][A-Za-z0-9._:/-]*)\s+to\s+(.+)$",
+        value, re.IGNORECASE | re.DOTALL,
+    )
+    if single_to:
+        return {"kind": "model", "model": single_to.group(1).strip(), "prompt": single_to.group(2).strip()}
     return None
 
 
