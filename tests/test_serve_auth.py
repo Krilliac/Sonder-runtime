@@ -776,6 +776,33 @@ def test_dangerous_slash_denied_before_handler(monkeypatch):
     assert called == []
 
 
+def test_wrapped_dangerous_slash_is_denied_before_handler(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "account")
+    monkeypatch.setattr(
+        ts, "_auth_account", lambda header: {"username": "u", "role": "user"}
+    )
+    called = []
+    monkeypatch.setattr(ts, "_handle_slash", lambda *args, **kwargs: called.append(True))
+    request = json.dumps({
+        "model": "sonder",
+        "messages": [{"role": "user", "content": "use model phi4: /run"}],
+    }).encode("utf-8")
+    with _http_server(monkeypatch) as port:
+        status, _, _ = _request(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            body=request,
+            headers={
+                "Authorization": "Bearer account-token",
+                "Content-Type": "application/json",
+            },
+        )
+    assert status == 403
+    assert called == []
+
+
 @pytest.mark.parametrize(
     "prompt",
     [
