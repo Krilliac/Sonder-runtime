@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import asyncio
 
 import pytest
 
@@ -193,6 +194,38 @@ def test_model_fanout_lifecycle_tools_work_in_local_open_mode(monkeypatch, tmp_p
 
     assert status["run_id"] == receipt["run_id"]
     assert cancelled["status"] == "completed"
+
+
+@pytest.mark.parametrize(("name", "value"), [
+    ("include_failed", "false"),
+    ("retry_unknown", 1),
+])
+def test_model_fanout_resume_requires_literal_boolean_flags(
+    monkeypatch, name, value,
+):
+    """A truthy JSON-ish value must not replay metered model calls."""
+    calls = []
+    monkeypatch.setattr(
+        server.fanout_store, "resume_run",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    kwargs = {name: value}
+    reply = server.model_fanout_resume("fan-test", **kwargs)
+
+    assert "%s must be a boolean" % name in reply
+    assert calls == []
+
+
+@pytest.mark.parametrize("value", [1, "false"])
+def test_mcp_fanout_resume_rejects_coercible_nonboolean_flags(value):
+    """FastMCP must reject before Pydantic can coerce a replay request."""
+    with pytest.raises(Exception) as raised:
+        asyncio.run(server.mcp.call_tool(
+            "model_fanout_resume", {"run_id": "fan-test", "retry_unknown": value},
+        ))
+
+    assert "boolean" in str(raised.value).lower()
 
 
 def test_model_fanout_lifecycle_is_gated_for_shared_deployments(monkeypatch):
