@@ -486,6 +486,23 @@ def test_fanout_receipt_derives_remaining_cooldown_at_read_time(monkeypatch):
     assert "retry_after_ts" not in receipt["skipped"][0]
 
 
+def test_interrupted_fanout_receipt_duration_is_terminal(monkeypatch, tmp_path):
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    monkeypatch.setattr(server.time, "time", lambda: 1_000.0)
+    run = server.fanout_store.create_run("sealed-fanout-prompt:marker", ["local-a"])
+    assert server.fanout_store.claim_run(run["id"], "dead-worker", owner_pid=2_147_483_647)
+    assert server.fanout_store.claim_next_result(run["id"], "dead-worker", owner_pid=2_147_483_647)
+    assert server.fanout_store.reconcile_stale_runs(now=2_000.0) == 1
+
+    monkeypatch.setattr(server.time, "time", lambda: 3_000.0)
+    first = server._fanout_receipt(run["id"])
+    monkeypatch.setattr(server.time, "time", lambda: 4_000.0)
+    second = server._fanout_receipt(run["id"])
+
+    assert first["status"] == second["status"] == "interrupted"
+    assert first["total_elapsed_ms"] == second["total_elapsed_ms"] == 1_000_000
+
+
 def test_retired_cloud_model_gets_a_health_cooldown(monkeypatch):
     recorded = []
     monkeypatch.setattr(server.fanout_store, "record_model_health", lambda *args, **kwargs: recorded.append((args, kwargs)))
