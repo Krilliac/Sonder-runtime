@@ -266,7 +266,12 @@ def _is_sensitive_control_path(path: Path) -> bool:
     return (
         path in _control_plane_paths()
         or name in CONTROL_CONFIG_FILES
-        or name in {"memory.db", "memory.db-wal", "memory.db-shm"}
+        or name in {
+            "memory.db", "memory.db-wal", "memory.db-shm",
+            # Durable fanout receipts contain sealed execution state.  They
+            # are runtime control state, never user data for sqlite_mutate.
+            "fanout.db", "fanout.db-wal", "fanout.db-shm",
+        }
         or _is_secret_path(path)
     )
 

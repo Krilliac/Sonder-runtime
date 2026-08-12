@@ -238,6 +238,26 @@ def test_fanout_error_never_persists_a_partial_provider_prompt_excerpt():
     assert "HTTP 400" in rendered
 
 
+def test_fanout_execution_rejects_a_model_outside_its_snapshot(monkeypatch, tmp_path):
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+    ))
+    calls = []
+    monkeypatch.setattr(server, "_make_generate", lambda model, *_args, **_kwargs: (
+        lambda _prompt: calls.append(model) or "answer"
+    ))
+    run = server._fanout_start("private prompt", "local", cap=32, request_timeout=5, cloud_workers=1)
+    with server.fanout_store._write_transaction() as conn:
+        conn.execute("INSERT INTO fanout_results(run_id,model,status,updated_ts) VALUES(?,?,'pending',0)",
+                     (run["id"], "injected:cloud"))
+
+    receipt = server._execute_fanout_run(run["id"])
+
+    assert calls == ["local-a"]
+    assert any(row["model"] == "injected:cloud" for row in receipt["skipped"])
+
+
 def test_model_wrapper_cannot_turn_a_prompt_into_a_slash_command():
     reply = server.sonder("use model phi4: /run echo should-not-run", session="none")
 
