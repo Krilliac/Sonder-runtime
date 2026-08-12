@@ -1710,15 +1710,18 @@ class Handler(BaseHTTPRequestHandler):
                 "Content-Type, Authorization, X-Sonder-Account-Token, "
                 "X-Sonder-Bootstrap-Secret",
             )
+            self.send_header("Access-Control-Expose-Headers", "X-Sonder-Elapsed-Ms")
 
     def log_message(self, fmt, *args):
         sys.stderr.write("[sonder_serve] %s\n" % (fmt % args))
 
     def do_OPTIONS(self):
+        self._request_started = time.monotonic()
         if self._reject_disallowed_origin():
             return
         self.send_response(204)
         self._cors()
+        self.send_header("X-Sonder-Elapsed-Ms", "0")
         self.end_headers()
 
     def _reject_disallowed_origin(self):
@@ -1875,6 +1878,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         if getattr(self, "_correlation_id", ""):
             self.send_header("X-Sonder-Correlation-Id", self._correlation_id)
+        started = getattr(self, "_request_started", None)
+        if started is not None:
+            self.send_header(
+                "X-Sonder-Elapsed-Ms",
+                str(max(0, int((time.monotonic() - started) * 1000))),
+            )
         for name, value in (headers or {}).items():
             self.send_header(str(name), str(value))
         self.end_headers()
@@ -1906,6 +1915,7 @@ class Handler(BaseHTTPRequestHandler):
         return payload
 
     def do_GET(self):
+        self._request_started = time.monotonic()
         if self._reject_disallowed_origin():
             return
         path = self.path.rstrip("/")
@@ -1947,13 +1957,7 @@ class Handler(BaseHTTPRequestHandler):
                     if server._is_cloud_tier(tier_name, model)
                     else "local",
                 })
-            body = json.dumps({"object": "list", "data": data}).encode("utf-8")
-            self.send_response(200)
-            self._cors()
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_json_payload({"object": "list", "data": data})
             return
         if path == "/v1/admin/updates/status":
             # Durable update state for the System page (SPEC-4 R-M19).
@@ -2037,13 +2041,7 @@ class Handler(BaseHTTPRequestHandler):
                     ],
                 ],
             }
-            body = json.dumps(payload).encode("utf-8")
-            self.send_response(200)
-            self._cors()
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_json_payload(payload)
             return
         if self._handle_commands_get():
             return
@@ -2201,6 +2199,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json_payload(server.permission_mode_data())
 
     def do_POST(self):
+        self._request_started = time.monotonic()
         if self._reject_disallowed_origin():
             return
         _maybe_live_reload()
@@ -2608,13 +2607,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(_chat_completion_object(text, "sonder"))
 
     def _send_json(self, obj):
-        body = json.dumps(obj).encode("utf-8")
-        self.send_response(200)
-        self._cors()
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        self._send_json_payload(obj)
 
     def _send_stream(self, content, model, iid=None, elapsed_ms=None):
         iid = iid or uuid.uuid4().hex[:12]
