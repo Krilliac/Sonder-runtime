@@ -21424,7 +21424,7 @@ def natural_model_request(text):
         # Keep this an imperative whole-turn grammar: it is deliberately not
         # a classifier over retrieved prose.  ``available`` describes the
         # catalog while local/cloud selects its bounded scope.
-        r"^(?:ask|run|try|query)\s+(?:all|every)\s+(?:of\s+)?(?:the\s+|my\s+)?(?:(?:currently\s+)?available\s+)?(?:(?:(local|cloud|local\s+(?:and|\+)\s+cloud|cloud\s+(?:and|\+)\s+local)\s+)?models?|local\s+models?\s+(?:and|\+)\s+cloud\s+models?|cloud\s+models?\s+(?:and|\+)\s+local\s+models?)(?:\s+(?:currently\s+)?available)?\b\s*(?::|to\s+answer\b:?|answer\b:?|to\b)\s*(.+)$",
+        r"^(?:ask|run|try|query)\s+(?:all|every)\s+(?:of\s+)?(?:the\s+|my\s+)?(?:(?:currently\s+)?available\s+)?(?:(?:(local|cloud|local\s+(?:and|\+)\s+cloud|cloud\s+(?:and|\+)\s+local)\s+)?models?|local\s+models?\s+(?:and|\+)\s+cloud\s+models?|cloud\s+models?\s+(?:and|\+)\s+local\s+models?)(?:\s+(?:currently\s+)?available)?\b\s*(?::|to\s+answer\b:?|answer\b:?|to\b|for\s+)\s*(.+)$",
         value, re.IGNORECASE | re.DOTALL,
     )
     if fanout:
@@ -21441,6 +21441,14 @@ def natural_model_request(text):
     )
     if single:
         return {"kind": "model", "model": single.group(1).strip(), "prompt": single.group(2).strip()}
+    named_tag = re.match(
+        # A bare tag is accepted only when it contains an internal tag colon;
+        # arbitrary "run word: ..." prose must not become a model request.
+        r"^(?:use|run|ask|try|query)\s+(?:the\s+)?([A-Za-z0-9][A-Za-z0-9._/-]*:[A-Za-z0-9][A-Za-z0-9._/-]*)\s*:\s+(.+)$",
+        value, re.IGNORECASE | re.DOTALL,
+    )
+    if named_tag:
+        return {"kind": "model", "model": named_tag.group(1).strip(), "prompt": named_tag.group(2).strip()}
     using_model = re.match(
         # This provides an explicit natural-language counterpart to the
         # established ``use model X: prompt`` form without attempting to
