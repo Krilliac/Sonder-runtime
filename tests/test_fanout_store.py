@@ -146,6 +146,36 @@ def test_schema_migration_is_safe_across_two_processes(tmp_path):
     assert second.wait(timeout=15) == 0
 
 
+def test_schema_migration_retries_transient_wal_lock(tmp_path, monkeypatch):
+    database = tmp_path / "fanout.db"
+    real_connect = sqlite3.connect
+    attempts = []
+
+    class LockedJournalConnection:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def execute(self, sql, *args, **kwargs):
+            if str(sql).strip().upper() == "PRAGMA JOURNAL_MODE=WAL":
+                raise sqlite3.OperationalError("database is locked")
+            return self._connection.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+    def flaky_connect(*args, **kwargs):
+        attempts.append(1)
+        connection = real_connect(*args, **kwargs)
+        return LockedJournalConnection(connection) if len(attempts) == 1 else connection
+
+    monkeypatch.setattr(store.sqlite3, "connect", flaky_connect)
+    monkeypatch.setattr(store, "database_path", lambda: str(database))
+    store.reset_schema_cache_for_tests()
+
+    assert store.get_model_health("m") is None
+    assert len(attempts) >= 2
+
+
 def test_resume_requires_explicit_unknown_retry():
     run = store.create_run("question", ["a"])
     store.claim_run(run["id"], "dead", owner_pid=2_147_483_647)
