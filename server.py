@@ -21446,7 +21446,7 @@ def natural_model_request(text):
         # infer a model from arbitrary prose.  Both the ``using model`` cue
         # and a prompt delimiter are required; the selector is still checked
         # against the live catalog downstream.
-        r"^(?:use|run|ask|try|query)\s+(?:with|using)\s+model\s+([A-Za-z0-9][A-Za-z0-9._:/-]*)\s*(?::\s*|to\s+)(.+)$",
+        r"^(?:use|run|ask|try|query)\s+(?:with|using)\s+model\s+([A-Za-z0-9][A-Za-z0-9._:/-]*)\s*(?::\s+|to\s+)(.+)$",
         value, re.IGNORECASE | re.DOTALL,
     )
     if using_model:
