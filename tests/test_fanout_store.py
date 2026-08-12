@@ -94,6 +94,15 @@ def test_health_success_resets_failure_and_prune_removes_terminal_receipts():
     assert result["runs"] == 1 and store.get_run(run["id"]) is None
 
 
+def test_nonavailability_health_error_does_not_increase_backoff_counter():
+    first = store.record_model_health("m", error="timeout", disabled_until=time.time() + 1)
+    assert first["failure_count"] == 1
+    prompt_error = store.record_model_health(
+        "m", error="request rejected", counts_toward_backoff=False,
+    )
+    assert prompt_error["failure_count"] == 1
+
+
 def test_resume_requires_explicit_unknown_retry():
     run = store.create_run("question", ["a"])
     store.claim_run(run["id"], "dead", owner_pid=2_147_483_647)
