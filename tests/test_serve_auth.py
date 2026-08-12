@@ -350,7 +350,8 @@ def test_http_fanout_lifecycle_is_owner_scoped(monkeypatch):
         ts, "_auth_account",
         lambda header: {"username": "dev-a" if "a-token" in header else "dev-b", "role": "developer"},
     )
-    run = {"id": "fan-owned", "request_owner": "account:dev-a"}
+    owner_a = ts._fanout_request_owner({"account": {"username": "dev-a"}, "api_key": False})
+    run = {"id": "fan-owned", "request_owner": owner_a}
     monkeypatch.setattr(ts.server.fanout_store, "get_run", lambda _run_id: run)
     monkeypatch.setattr(ts.server, "_fanout_receipt", lambda run_id: {"run_id": run_id, "status": "completed"})
 
@@ -375,7 +376,8 @@ def test_http_fanout_cancel_requires_developer_and_uses_owned_run(monkeypatch):
     monkeypatch.setattr(ts, "AUTH_MODE", "account")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", True)
     monkeypatch.setattr(ts, "_auth_account", lambda _header: {"username": "dev", "role": "developer"})
-    monkeypatch.setattr(ts.server.fanout_store, "get_run", lambda _run_id: {"id": "fan-owned", "request_owner": "account:dev"})
+    owner = ts._fanout_request_owner({"account": {"username": "dev"}, "api_key": False})
+    monkeypatch.setattr(ts.server.fanout_store, "get_run", lambda _run_id: {"id": "fan-owned", "request_owner": owner})
     cancelled = []
     monkeypatch.setattr(ts.server.fanout_store, "request_cancel", lambda run_id: cancelled.append(run_id) or {})
     monkeypatch.setattr(ts.server, "_fanout_receipt", lambda run_id: {"run_id": run_id, "status": "cancelled"})
@@ -390,6 +392,39 @@ def test_http_fanout_cancel_requires_developer_and_uses_owned_run(monkeypatch):
     assert status == 200
     assert cancelled == ["fan-owned"]
     assert json.loads(body)["status"] == "cancelled"
+
+
+def test_fanout_owner_key_is_stable_without_raw_or_redactable_principal():
+    context = {"account": {"username": "api_key=alice-secret", "role": "developer"}, "api_key": False}
+    owner = ts._fanout_request_owner(context)
+
+    assert owner.startswith("fo-")
+    assert "alice" not in owner and "api_key" not in owner
+    assert owner == ts._fanout_request_owner(context)
+    assert ts._fanout_request_role(context) == "developer"
+
+
+def test_http_fanout_resume_requires_literal_boolean(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "account")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", True)
+    monkeypatch.setattr(ts, "_auth_account", lambda _header: {"username": "dev", "role": "developer"})
+    owner = ts._fanout_request_owner({"account": {"username": "dev"}, "api_key": False})
+    monkeypatch.setattr(ts.server.fanout_store, "get_run", lambda _run_id: {"id": "fan-owned", "request_owner": owner})
+    monkeypatch.setattr(
+        ts.server.fanout_store, "resume_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("resume must not run")),
+    )
+    request = json.dumps({"retry_unknown": "false"}).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "POST", "/v1/fanout/fan-owned/resume", body=request,
+            headers={"Content-Type": "application/json", "Authorization": "Bearer dev-token"},
+        )
+
+    assert status == 400
+    assert "retry_unknown must be a boolean" in json.loads(body)["error"]["message"]
 
 
 def test_http_todo_command_preserves_task_text_contract(monkeypatch, tmp_path):

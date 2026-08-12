@@ -240,6 +240,27 @@ def _state_principal(context):
     return "local-open"
 
 
+def _fanout_request_owner(context):
+    """Stable, non-secret receipt owner key for durable fanout state.
+
+    Usernames are client-controlled account data and may look like a secret
+    assignment (for example ``api_key=...``).  Receipt storage redacts text by
+    design, so never use that raw principal as an authorization key.  A domain
+    separated digest remains stable for owner comparison without persisting an
+    identifier that the generic secret redactor can transform or collide.
+    """
+    material = "fanout-owner\0" + _state_principal(context)
+    return "fo-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _fanout_request_role(context):
+    account = context.get("account") or {}
+    role = str(account.get("role") or "").strip()
+    if role:
+        return role
+    return "api-key" if context.get("api_key") else "local-open"
+
+
 def _prune_http_session_states(max_size=HTTP_SESSION_STATE_LIMIT):
     for key, candidate in list(_HTTP_SESSION_STATES.items()):
         if len(_HTTP_SESSION_STATES) <= max_size:
@@ -2092,7 +2113,7 @@ class Handler(BaseHTTPRequestHandler):
         account = context.get("account") or {}
         is_admin = account.get("role") == "admin"
         if context.get("mode") != "local-open" and not is_admin:
-            if run.get("request_owner") != _state_principal(context):
+            if run.get("request_owner") != _fanout_request_owner(context):
                 # Do not disclose another developer's run identifier.
                 return None, (404, "fanout run was not found")
         return run, None
@@ -2139,9 +2160,13 @@ class Handler(BaseHTTPRequestHandler):
         if action == "cancel":
             server.fanout_store.request_cancel(run_id)
         else:
+            for name in ("include_failed", "retry_unknown"):
+                if name in req and not isinstance(req[name], bool):
+                    self._send_json_payload({"error": {"message": "%s must be a boolean" % name, "type": "invalid_request"}}, status=400)
+                    return True
             resumed = server.fanout_store.resume_run(
-                run_id, include_failed=bool(req.get("include_failed", False)),
-                retry_unknown=bool(req.get("retry_unknown", False)),
+                run_id, include_failed=req.get("include_failed") is True,
+                retry_unknown=req.get("retry_unknown") is True,
             )
             if resumed is None:
                 self._send_json_payload({"error": {"message": "fanout run is not resumable with the selected retry options", "type": "invalid_request"}}, status=400)
@@ -2437,8 +2462,8 @@ class Handler(BaseHTTPRequestHandler):
                         # developer account a second time.
                         reply = server._model_fanout_authorized(
                             natural_model["prompt"], scope=natural_model["scope"],
-                            request_owner=_state_principal(context),
-                            request_role=str((context.get("account") or {}).get("role") or "api-key" if context.get("api_key") else "local-open"),
+                            request_owner=_fanout_request_owner(context),
+                            request_role=_fanout_request_role(context),
                         )
                     if reply is None:
                         reply = server.chat_web_response(
