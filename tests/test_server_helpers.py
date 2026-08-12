@@ -2929,6 +2929,19 @@ def test_improvement_report_has_no_acceptance_rate_until_work_is_judged(
     assert report["acceptance_basis"] == "unmeasured"
 
 
+def test_improvement_report_uses_the_canonical_twenty_review_sample(monkeypatch, tmp_path):
+    report = _improvement_report_with(
+        monkeypatch, tmp_path,
+        positive_percent=99.0, reviewed_outcomes=25,
+        reviewed_positive_percent=88.0, autograded_outcomes=375,
+        autograded_positive_percent=99.0,
+    )
+
+    assert report["acceptance_percent"] == 88.0
+    assert report["acceptance_basis"] == "reviewed"
+    assert report["score"] > 75
+
+
 def test_improvement_report_acceptance_is_the_caller_judged_rate_once_measurable(
     monkeypatch, tmp_path,
 ):
