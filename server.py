@@ -21479,8 +21479,10 @@ def natural_model_request(text):
         # the wrapper and producing an unknown-tier error.  Exact model names
         # remain validated downstream against the live catalog.
         if selector.casefold() in {
-            "best", "fastest", "cheapest", "strongest", "smartest",
-            "appropriate", "available", "local", "cloud",
+            "best", "better", "fastest", "quickest", "cheapest",
+            "strongest", "smartest", "largest", "smallest", "biggest",
+            "appropriate", "available", "default", "preferred",
+            "recommended", "right", "local", "cloud",
         }:
             return None
         return {
