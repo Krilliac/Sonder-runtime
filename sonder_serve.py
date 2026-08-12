@@ -1870,7 +1870,7 @@ class Handler(BaseHTTPRequestHandler):
             return ""
         return nonce
 
-    def _send_json_payload(self, payload, status=200, headers=None):
+    def _send_json_payload(self, payload, status=200, headers=None, elapsed_ms=None):
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self._cors()
@@ -1879,7 +1879,9 @@ class Handler(BaseHTTPRequestHandler):
         if getattr(self, "_correlation_id", ""):
             self.send_header("X-Sonder-Correlation-Id", self._correlation_id)
         started = getattr(self, "_request_started", None)
-        if started is not None:
+        if elapsed_ms is not None:
+            self.send_header("X-Sonder-Elapsed-Ms", str(max(0, int(elapsed_ms))))
+        elif started is not None:
             self.send_header(
                 "X-Sonder-Elapsed-Ms",
                 str(max(0, int((time.monotonic() - started) * 1000))),
@@ -2584,12 +2586,16 @@ class Handler(BaseHTTPRequestHandler):
         _lifecycle.metrics.requests_total.labels(
             route="/v1/chat/completions", result="ok"
         ).inc()
+        # The handler timer starts before body parsing, authentication, and
+        # routing.  It is the public HTTP contract, unlike the inner request
+        # timer which exists only for the lifecycle histogram.
+        request_started = getattr(self, "_request_started", _request_started)
         _lifecycle.metrics.request_duration_seconds.labels(
             route="/v1/chat/completions"
-        ).observe(time.monotonic() - _request_started)
+        ).observe(time.monotonic() - request_started)
         if not _reasoning_visible_to(context):
             response_reasoning = ""
-        elapsed_ms = int((time.monotonic() - _request_started) * 1000)
+        elapsed_ms = int((time.monotonic() - request_started) * 1000)
         if stream:
             self._send_stream(content, model, iid=response_iid, elapsed_ms=elapsed_ms)
         else:
@@ -2597,7 +2603,7 @@ class Handler(BaseHTTPRequestHandler):
                 _chat_completion_object(
                     content, model, iid=response_iid,
                     reasoning=response_reasoning, elapsed_ms=elapsed_ms,
-                )
+                ), elapsed_ms=elapsed_ms,
             )
 
     def _send_error_completion(self, text, stream):
@@ -2606,8 +2612,8 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send_json(_chat_completion_object(text, "sonder"))
 
-    def _send_json(self, obj):
-        self._send_json_payload(obj)
+    def _send_json(self, obj, elapsed_ms=None):
+        self._send_json_payload(obj, elapsed_ms=elapsed_ms)
 
     def _send_stream(self, content, model, iid=None, elapsed_ms=None):
         iid = iid or uuid.uuid4().hex[:12]
