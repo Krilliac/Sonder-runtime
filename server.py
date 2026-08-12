@@ -21433,11 +21433,26 @@ def natural_model_request(text):
         # A model tag commonly contains a colon (for example ``phi4:latest``).
         # Requiring whitespace after the prompt separator makes the final
         # ``: `` unambiguous without turning ordinary prose into a request.
-        r"^(?:use|run|ask)\s+model\s+(.+?)\s*:\s+(.+)$",
+        r"^(?:use|run|ask|try|query)\s+model\s+(.+?)\s*:\s+(.+)$",
         value, re.IGNORECASE | re.DOTALL,
     )
     if single:
         return {"kind": "model", "model": single.group(1).strip(), "prompt": single.group(2).strip()}
+    using_model = re.match(
+        # This provides an explicit natural-language counterpart to the
+        # established ``use model X: prompt`` form without attempting to
+        # infer a model from arbitrary prose.  Both the ``using model`` cue
+        # and a prompt delimiter are required; the selector is still checked
+        # against the live catalog downstream.
+        r"^(?:use|run|ask|try|query)\s+(?:with|using)\s+model\s+([A-Za-z0-9][A-Za-z0-9._:/-]*)\s*(?::\s*|to\s+)(.+)$",
+        value, re.IGNORECASE | re.DOTALL,
+    )
+    if using_model:
+        return {
+            "kind": "model",
+            "model": using_model.group(1).strip(),
+            "prompt": using_model.group(2).strip(),
+        }
     # A colon in a model tag is common, which is why the legacy form above
     # requires ``: ``.  This alternate has a constrained selector and an
     # explicit ``to`` delimiter, so it remains unambiguous and cannot make
