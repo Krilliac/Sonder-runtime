@@ -233,7 +233,7 @@ class SonderLauncherApi {
         );
       }
       onProgress?.call(accepted);
-      return waitForOperation(
+      return await waitForOperation(
         operation.id,
         maxWait: maxWait,
         pollInterval: pollInterval,
