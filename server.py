@@ -21839,11 +21839,19 @@ def _fanout_health(model, exc, prompt):
     disabled_until = None
     availability_failure = False
     if isinstance(exc, ModelCallError):
-        if _is_cloud_model_name(model):
-            if exc.status in (402, 404, 410):
-                disabled_until = time.time() + 3600
-            elif exc.status == 429:
-                disabled_until = time.time() + (exc.retry_after_seconds or 60)
+        if _is_cloud_model_name(model) and exc.status in (402, 404, 410):
+            disabled_until = time.time() + 3600
+        elif _is_cloud_model_name(model) and exc.status == 429:
+            disabled_until = time.time() + (exc.retry_after_seconds or 60)
+        elif (
+            _is_cloud_model_name(model)
+            and exc.retry_after_seconds is not None
+            and (exc.transient or exc.kind in {"timeout", "transport", "protocol", "empty_response"})
+        ):
+            # Providers can throttle or shed load with transient statuses other
+            # than 429 (for example 503).  An explicit Retry-After remains
+            # authoritative for every transient cloud failure, not just 429.
+            disabled_until = time.time() + exc.retry_after_seconds
         elif exc.status in (404, 410):
             # The tag disappeared from Ollama after the immutable run snapshot
             # was created. Avoid rediscovering and failing it on every fanout.
@@ -21852,7 +21860,10 @@ def _fanout_health(model, exc, prompt):
         elif exc.transient or exc.kind in {"timeout", "transport", "protocol", "empty_response"}:
             # These identify the model/daemon response path, not the prompt.
             # Back off repeated availability failures instead of making every
-            # frequent all-model request re-probe the same unhealthy daemon.
+            # frequent all-model request re-probe the same unhealthy local or
+            # cloud target.  A cloud provider's explicit 429 Retry-After above
+            # remains authoritative; this covers unavailable providers that
+            # offer no retry contract.
             # Cap at an hour so recovery remains automatic without operator
             # intervention. A successful model call resets the stored count.
             previous = fanout_store.get_model_health(model)
