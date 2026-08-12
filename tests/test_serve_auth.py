@@ -308,6 +308,40 @@ def test_chat_accepts_valid_text_messages_and_forwards_history(monkeypatch):
     )]
 
 
+def test_http_developer_fanout_uses_authorized_internal_path(monkeypatch):
+    """An API-key owner must not be rejected by MCP's token-only gate."""
+    api_key = "k" * 32
+    monkeypatch.setattr(ts, "API_KEY", api_key)
+    monkeypatch.setattr(ts, "AUTH_MODE", "api-key")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+
+    class FakeConnection:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ts.server, "_open_db", lambda: FakeConnection())
+    monkeypatch.setattr(ts.admin_auth, "rate_limit", lambda conn, account: (True, ""))
+    calls = []
+    monkeypatch.setattr(
+        ts.server, "_model_fanout_authorized",
+        lambda prompt, scope: calls.append((prompt, scope)) or '{"models_answered": 1}',
+    )
+    request = json.dumps({
+        "model": "sonder",
+        "messages": [{"role": "user", "content": "ask all local models: summarize this"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json", "Authorization": "Bearer " + api_key},
+        )
+
+    assert status == 200
+    assert calls == [("summarize this", "local")]
+    assert json.loads(body)["choices"][0]["message"]["content"].startswith('{"models_answered": 1}')
+
+
 def test_http_todo_command_preserves_task_text_contract(monkeypatch, tmp_path):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
