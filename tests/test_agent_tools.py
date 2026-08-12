@@ -1117,7 +1117,7 @@ def test_agent_required_web_fetch_rejects_empty_page_before_memory_final(
         required_tool_names=("web_fetch",),
     )
 
-    assert output.startswith("ERROR: agent reached max_steps=2")
+    assert output.startswith("ERROR: required host evidence did not recover")
     assert "web_fetch" in output
     assert "Python 3.10.6" not in output
     assert "HOST RECOVERY" in prompts[1]
@@ -1148,6 +1148,57 @@ def test_agent_requires_successful_file_evidence(monkeypatch):
 
     assert out.startswith("EVIDENCE_REQUIRED:")
     assert "I inspected it" not in out
+
+
+def test_agent_failed_file_evidence_is_not_recovered_by_unrelated_success(monkeypatch):
+    responses = [
+        '{"tool":"file_read","args":{"path":"missing.md"}}',
+        '{"tool":"text_search","args":{"query":"hello","root":"."}}',
+        '{"final":"completed"}',
+    ]
+    monkeypatch.setattr(
+        server, "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: responses.pop(0),
+    )
+    monkeypatch.setattr(
+        server, "_agent_dispatch_observed",
+        lambda tool, *_args, **_kwargs: (
+            "ERROR: file not found" if tool == "file_read" else "README.md: hello"
+        ),
+    )
+
+    out = server._agent_impl(
+        "Review Repository", tier="code", max_steps=3,
+        require_file_evidence=True, read_only=True, include_evidence=True,
+    )
+
+    assert out.startswith("EVIDENCE_REQUIRED:")
+    assert "completed" not in out
+
+
+def test_agent_failed_singleton_required_tool_is_not_recovered_by_alternative(monkeypatch):
+    responses = [
+        '{"tool":"web_fetch","args":{"url":"https://example.com"}}',
+        '{"tool":"web_search","args":{"query":"example"}}',
+        '{"final":"completed"}',
+    ]
+    monkeypatch.setattr(
+        server, "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: responses.pop(0),
+    )
+    monkeypatch.setattr(
+        server, "_agent_dispatch_observed",
+        lambda tool, *_args, **_kwargs: (
+            "ERROR: fetch failed" if tool == "web_fetch" else "search result"
+        ),
+    )
+
+    out = server._agent_impl(
+        "Fetch the page", max_steps=3, required_tool_names=("web_fetch",),
+    )
+
+    assert out.startswith("ERROR:")
+    assert "completed" not in out
 
 
 def test_agent_attaches_successful_file_evidence(monkeypatch, without_standing):
