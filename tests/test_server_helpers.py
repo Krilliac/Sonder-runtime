@@ -1126,6 +1126,51 @@ def test_learning_health_is_structured_and_routed(monkeypatch, tmp_path):
     assert server.control_command("/metrics") == text
 
 
+def test_learning_health_refreshes_only_loopback_embedding_provenance(monkeypatch):
+    refreshed = []
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server.learning_health, "build_report", lambda _conn: {"ok": True})
+
+    class _Connection:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(server, "_open_db", _Connection)
+    monkeypatch.setattr(server.embeddings, "endpoint_is_loopback", lambda _base: True)
+    monkeypatch.setattr(
+        server.embeddings, "refresh_runtime_revision", lambda: refreshed.append(True)
+    )
+
+    assert server.learning_health_data() == {"ok": True}
+    assert refreshed == [True]
+
+    monkeypatch.setattr(server.embeddings, "endpoint_is_loopback", lambda _base: False)
+    assert server.learning_health_data() == {"ok": True}
+    assert refreshed == [True]
+
+
+def test_improvement_report_uses_refreshed_learning_health(monkeypatch):
+    state = {
+        "quality": {}, "interactions": 0, "outcomes": 0, "lessons": 10,
+        "facts": 0, "outcome_coverage_percent": 0.0,
+        "reviewed_outcomes": 0, "reviewed_positive_percent": 0.0,
+    }
+    calls = []
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server, "context_health_data", lambda **_kwargs: {"status": "healthy"})
+    monkeypatch.setattr(
+        server, "learning_health_data", lambda: calls.append(True) or state,
+    )
+    monkeypatch.setattr(server, "mcp_runtime_data", lambda: {})
+    monkeypatch.setattr(server, "tool_manifest", lambda: "ground_artifact artifact_ground")
+    monkeypatch.setattr(server, "cloud_allowed", lambda: True)
+
+    report = server.improvement_report_data()
+
+    assert report["interactions"] == 0
+    assert calls == [True]
+
+
 def test_session_history_never_crosses_project_or_uses_shared_summary():
     conn = memory_store.connect(":memory:")
     memory_store.touch_session(conn, "default", project="project-a")
