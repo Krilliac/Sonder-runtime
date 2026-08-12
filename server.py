@@ -342,10 +342,21 @@ def discovered_model_records():
 def _fanout_nonchat_reason(record):
     """Return a skip reason only for explicit non-chat catalog capability."""
     details = record.get("details") if isinstance(record.get("details"), dict) else {}
-    raw = record.get("capabilities", details.get("capabilities", ()))
-    if not isinstance(raw, (list, tuple, set)):
-        return ""
-    capabilities = {str(value).strip().lower() for value in raw if str(value).strip()}
+    def normalized(raw):
+        if isinstance(raw, str):
+            values = (raw,)
+        elif isinstance(raw, (list, tuple, set)):
+            values = raw
+        else:
+            return set()
+        return {str(value).strip().lower() for value in values if str(value).strip()}
+
+    # Some Ollama-compatible catalogs expose a scalar capability, while others
+    # nest it under details.  Prefer a meaningful top-level declaration, but
+    # do not mistake null/empty metadata for an authoritative "unknown".
+    capabilities = normalized(record.get("capabilities"))
+    if not capabilities:
+        capabilities = normalized(details.get("capabilities"))
     generative = {"completion", "chat", "generate", "text-generation"}
     if capabilities & generative:
         return ""
@@ -356,15 +367,21 @@ def _fanout_nonchat_reason(record):
     return ""
 
 
-def resolve_discovered_model(selector):
-    """Resolve an exact live catalog name case-insensitively, or return None."""
+def resolve_discovered_model_record(selector):
+    """Resolve an exact live catalog record case-insensitively, or return None."""
     wanted = str(selector or "").strip().casefold()
     if not wanted:
         return None
-    for name in discovered_models():
+    for name, record in discovered_model_records():
         if name.casefold() == wanted:
-            return name
+            return name, record
     return None
+
+
+def resolve_discovered_model(selector):
+    """Resolve an exact live catalog name case-insensitively, or return None."""
+    found = resolve_discovered_model_record(selector)
+    return found[0] if found else None
 
 
 def reasoning_exposure_enabled() -> bool:
@@ -1699,10 +1716,16 @@ def _serve_target(tier, strict):
     # membership is required, so this is not an arbitrary backend URL/model
     # injection surface and it automatically tracks models being added/removed.
     try:
-        model = resolve_discovered_model(tier)
+        found = resolve_discovered_model_record(tier)
     except Exception:
-        model = None
-    if model:
+        found = None
+    if found:
+        model, record = found
+        # A catalog can legitimately include embedding or vision-only models.
+        # They are not executable chat targets, just as they are not fanout
+        # candidates; reject before a doomed backend request.
+        if _fanout_nonchat_reason(record):
+            return None, False, False, None
         cloud = _is_cloud_model_name(model)
         if cloud and not cloud_allowed():
             return None, True, False, "cloud-disabled"
