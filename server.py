@@ -21475,6 +21475,20 @@ def _fanout_limits(run):
     }
 
 
+def _fanout_snapshot_allows(run, model):
+    """Check a claimed receipt against the run's immutable target contract."""
+    try:
+        snapshot = json.loads(run.get("models_json") or "[]")
+    except (TypeError, ValueError):
+        snapshot = []
+    selected = {str(name).casefold() for name in snapshot if str(name).strip()}
+    if str(model).casefold() not in selected:
+        return False
+    scope = str(run.get("scope") or "local").casefold()
+    cloud = _is_cloud_model_name(model)
+    return scope in ("all", "available") or (scope == "cloud" and cloud) or (scope == "local" and not cloud)
+
+
 def _fanout_receipt(run_id):
     """Build a serializable receipt without exposing the sealed prompt."""
     run = fanout_store.get_run(run_id)
@@ -21561,6 +21575,8 @@ def _execute_fanout_run(run_id):
     def invoke(row):
         model = row["model"]
         started = time.monotonic()
+        if not _fanout_snapshot_allows(run, model):
+            return row, "skipped", "", "model is outside immutable fanout target snapshot", 0, None
         if _is_cloud_model_name(model) and (not run.get("cloud_opt_in") or not cloud_allowed()):
             return row, "skipped", "", "cloud access disabled before execution", 0, None
         exc = None
