@@ -359,6 +359,26 @@ def test_fanout_plan_skips_only_explicit_nonchat_or_cooldown_models(monkeypatch)
     assert "cooled" in override["selected"]
 
 
+def test_fanout_reports_why_no_eligible_models_can_start(monkeypatch):
+    monkeypatch.setattr(server, "_get", lambda _path: {"models": [
+        {"name": "cooled", "capabilities": ["completion"]},
+        {"name": "embed", "capabilities": ["embedding"]},
+    ]})
+    monkeypatch.setattr(
+        server.fanout_store, "get_model_health",
+        lambda name: {"disabled_until": 9_999_999_999} if name == "cooled" else None,
+    )
+
+    with pytest.raises(server.ModelCallError) as error:
+        server._fanout_start("private prompt", "local", cap=32, request_timeout=5, cloud_workers=1)
+
+    assert "no eligible local models" in error.value.detail
+    assert "health cooldown active (1)" in error.value.detail
+    assert "embedding-only capability (1)" in error.value.detail
+    assert "cooled" not in error.value.detail
+    assert "private prompt" not in error.value.detail
+
+
 def test_retired_cloud_model_gets_a_health_cooldown(monkeypatch):
     recorded = []
     monkeypatch.setattr(server.fanout_store, "record_model_health", lambda *args, **kwargs: recorded.append((args, kwargs)))
