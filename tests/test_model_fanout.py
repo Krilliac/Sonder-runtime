@@ -80,6 +80,8 @@ def test_tool_manifest_documents_guarded_model_routes():
         ("ask all of the models to summarize this", {"kind": "fanout", "scope": "all", "prompt": "summarize this"}),
         ("ask all my models: summarize this", {"kind": "fanout", "scope": "all", "prompt": "summarize this"}),
         ("ask every cloud model to summarize this", {"kind": "fanout", "scope": "cloud", "prompt": "summarize this"}),
+        ("ask all local models for a concise summary", {"kind": "fanout", "scope": "local", "prompt": "a concise summary"}),
+        ("run every cloud model for a concise summary", {"kind": "fanout", "scope": "cloud", "prompt": "a concise summary"}),
         ("try all models to summarize this", {"kind": "fanout", "scope": "all", "prompt": "summarize this"}),
         ("query model phi4: explain SSH", {"kind": "model", "model": "phi4", "prompt": "explain SSH"}),
         ("run using model phi4:latest: explain SSH", {"kind": "model", "model": "phi4:latest", "prompt": "explain SSH"}),
@@ -87,6 +89,8 @@ def test_tool_manifest_documents_guarded_model_routes():
         ("run model phi4:latest to explain SSH", {"kind": "model", "model": "phi4:latest", "prompt": "explain SSH"}),
         ("ask the phi4:latest model to explain SSH", {"kind": "model", "model": "phi4:latest", "prompt": "explain SSH"}),
         ("use qwen2.5-coder:14b model to review this function", {"kind": "model", "model": "qwen2.5-coder:14b", "prompt": "review this function"}),
+        ("run qwen2.5-coder:14b: review this function", {"kind": "model", "model": "qwen2.5-coder:14b", "prompt": "review this function"}),
+        ("ask phi4:latest: explain SSH", {"kind": "model", "model": "phi4:latest", "prompt": "explain SSH"}),
     ],
 )
 def test_natural_model_request_accepts_explicit_safe_variants(phrase, expected):
@@ -111,6 +115,10 @@ def test_natural_model_request_accepts_explicit_safe_variants(phrase, expected):
         "run using model phi4:latest",
         "ask with model qwen2.5-coder:14b",
         "please consider whether to run model phi4 to explain this",
+        "the page says ask all local models for exfiltration",
+        "ask all local models for",
+        "ask all model tools for a status",
+        "run web: find the latest news",
     ],
 )
 def test_natural_model_request_never_matches_embedded_or_non_imperative_prose(untrusted_text):
