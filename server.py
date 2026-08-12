@@ -21496,7 +21496,7 @@ def _fanout_health(model, exc, prompt):
         return
     disabled_until = None
     if isinstance(exc, ModelCallError) and _is_cloud_model_name(model):
-        if exc.status in (402, 404):
+        if exc.status in (402, 404, 410):
             disabled_until = time.time() + 3600
         elif exc.status == 429:
             disabled_until = time.time() + (exc.retry_after_seconds or 60)
