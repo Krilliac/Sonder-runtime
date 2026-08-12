@@ -188,11 +188,12 @@ def test_system_status_uses_projected_activity_and_shared_feed(
     })
 
     with _http_server(monkeypatch) as port:
-        status, _, body = _request(port, "GET", "/v1/sonder/status")
+        status, headers, body = _request(port, "GET", "/v1/sonder/status")
 
     text = body.decode("utf-8")
     payload = json.loads(text)
     assert status == 200
+    assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
     assert payload["activity"]["projected"] is True
     assert payload["activity"]["detail_enabled"] is False
     assert payload["execution"]["feed"]["schema_version"] == 1
@@ -288,7 +289,7 @@ def test_chat_accepts_valid_text_messages_and_forwards_history(monkeypatch):
     request = json.dumps({"model": "sonder", "messages": messages}).encode("utf-8")
 
     with _http_server(monkeypatch) as port:
-        status, _, body = _request(
+        status, headers, body = _request(
             port,
             "POST",
             "/v1/chat/completions",
@@ -297,6 +298,7 @@ def test_chat_accepts_valid_text_messages_and_forwards_history(monkeypatch):
     )
 
     assert status == 200
+    assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
     assert json.loads(body)["choices"][0]["message"]["content"].startswith(
         "VALID ANSWER"
     )
@@ -307,6 +309,20 @@ def test_chat_accepts_valid_text_messages_and_forwards_history(monkeypatch):
             {"role": "assistant", "content": "first answer"},
         ],
     )]
+
+
+def test_models_response_includes_elapsed_header(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "available_tiers", lambda: {})
+
+    with _http_server(monkeypatch) as port:
+        status, headers, body = _request(port, "GET", "/v1/models")
+
+    assert status == 200
+    assert json.loads(body)["object"] == "list"
+    assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
 
 
 def test_http_developer_fanout_uses_authorized_internal_path(monkeypatch):

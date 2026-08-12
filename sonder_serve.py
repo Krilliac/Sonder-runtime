@@ -1957,13 +1957,7 @@ class Handler(BaseHTTPRequestHandler):
                     if server._is_cloud_tier(tier_name, model)
                     else "local",
                 })
-            body = json.dumps({"object": "list", "data": data}).encode("utf-8")
-            self.send_response(200)
-            self._cors()
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_json_payload({"object": "list", "data": data})
             return
         if path == "/v1/admin/updates/status":
             # Durable update state for the System page (SPEC-4 R-M19).
@@ -2047,13 +2041,7 @@ class Handler(BaseHTTPRequestHandler):
                     ],
                 ],
             }
-            body = json.dumps(payload).encode("utf-8")
-            self.send_response(200)
-            self._cors()
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_json_payload(payload)
             return
         if self._handle_commands_get():
             return
@@ -2619,13 +2607,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(_chat_completion_object(text, "sonder"))
 
     def _send_json(self, obj):
-        body = json.dumps(obj).encode("utf-8")
-        self.send_response(200)
-        self._cors()
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        self._send_json_payload(obj)
 
     def _send_stream(self, content, model, iid=None, elapsed_ms=None):
         iid = iid or uuid.uuid4().hex[:12]
