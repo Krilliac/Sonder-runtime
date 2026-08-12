@@ -2230,6 +2230,12 @@ class Handler(BaseHTTPRequestHandler):
         natural_model = server.natural_model_request(prompt)
         if natural_model and natural_model["kind"] == "model":
             prompt = natural_model["prompt"]
+            if prompt.lstrip().startswith("/"):
+                self._send_json_payload(
+                    {"error": {"message": "model selection cannot wrap a slash command; issue the command directly.", "type": "invalid_request"}},
+                    status=400,
+                )
+                return
         if _dangerous_http_slash(prompt) and not _developer_authorized(context):
             self._send_json_payload(
                 {

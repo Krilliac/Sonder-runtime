@@ -799,7 +799,7 @@ def test_wrapped_dangerous_slash_is_denied_before_handler(monkeypatch):
                 "Content-Type": "application/json",
             },
         )
-    assert status == 403
+    assert status == 400
     assert called == []
 
 
