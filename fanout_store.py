@@ -48,6 +48,7 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS fanout_runs (
  id TEXT PRIMARY KEY, request_owner TEXT NOT NULL DEFAULT '', request_role TEXT NOT NULL DEFAULT '',
  prompt TEXT NOT NULL, prompt_sha256 TEXT NOT NULL, models_json TEXT NOT NULL,
+ execution_prompt_ciphertext TEXT NOT NULL DEFAULT '',
  scope TEXT NOT NULL DEFAULT 'local', cloud_opt_in INTEGER NOT NULL DEFAULT 0,
  limits_json TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL, cancel_requested INTEGER NOT NULL DEFAULT 0,
  owner_id TEXT NOT NULL DEFAULT '', owner_pid INTEGER NOT NULL DEFAULT 0, owner_host TEXT NOT NULL DEFAULT '',
@@ -114,6 +115,14 @@ def _ensure_schema(path: str) -> None:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA foreign_keys=ON")
             conn.executescript(_SCHEMA)
+            # Existing receipt databases predate the sealed execution payload.
+            # Migration is additive and the ciphertext is never exposed by the
+            # public receipt readers below.
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(fanout_runs)")}
+            if "execution_prompt_ciphertext" not in columns:
+                conn.execute(
+                    "ALTER TABLE fanout_runs ADD COLUMN execution_prompt_ciphertext TEXT NOT NULL DEFAULT ''"
+                )
             conn.commit()
         finally:
             conn.close()
@@ -147,6 +156,7 @@ def _write_transaction():
 def _row(row) -> dict | None:
     if row is None: return None
     result = dict(row)
+    result.pop("execution_prompt_ciphertext", None)
     for key in ("cloud_opt_in", "cancel_requested"):
         if key in result: result[key] = bool(result[key])
     return result
@@ -162,7 +172,8 @@ def _lease(seconds: int, max_seconds: int = 3600) -> float:
 
 
 def create_run(prompt: str, models, *, request_owner: str = "", request_role: str = "",
-               scope: str = "local", cloud_opt_in: bool = False, limits=None) -> dict:
+               scope: str = "local", cloud_opt_in: bool = False, limits=None,
+               execution_prompt_ciphertext: str = "") -> dict:
     clean_models = []
     for value in models or ():
         name = _safe_text(value, 200).strip()
@@ -175,10 +186,11 @@ def create_run(prompt: str, models, *, request_owner: str = "", request_role: st
     now = time.time(); run_id = "fan-%s" % uuid.uuid4().hex[:16]
     stored_prompt = _safe_text(raw_prompt, MAX_PROMPT_CHARS)
     with _write_transaction() as conn:
-        conn.execute("""INSERT INTO fanout_runs(id,request_owner,request_role,prompt,prompt_sha256,models_json,scope,cloud_opt_in,limits_json,status,created_ts,updated_ts)
-                        VALUES(?,?,?,?,?,?,?,?,?,'queued',?,?)""",
+        conn.execute("""INSERT INTO fanout_runs(id,request_owner,request_role,prompt,prompt_sha256,models_json,execution_prompt_ciphertext,scope,cloud_opt_in,limits_json,status,created_ts,updated_ts)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?)""",
                      (run_id, _safe_text(request_owner, 200), _safe_text(request_role, 80), stored_prompt,
-                      hashlib.sha256(raw_prompt.encode("utf-8")).hexdigest(), _json(clean_models), _safe_text(scope, 40),
+                      hashlib.sha256(raw_prompt.encode("utf-8")).hexdigest(), _json(clean_models),
+                      _safe_text(execution_prompt_ciphertext, 64_000), _safe_text(scope, 40),
                       int(bool(cloud_opt_in)), _json(limits or {}), now, now))
         conn.executemany("INSERT INTO fanout_results(run_id,model,status,updated_ts) VALUES(?,?,'pending',?)",
                          [(run_id, model, now) for model in clean_models])
@@ -192,6 +204,19 @@ def get_run(run_id: str) -> dict | None:
     conn = _connect()
     try: return _row(conn.execute("SELECT * FROM fanout_runs WHERE id=?", (str(run_id),)).fetchone())
     finally: conn.close()
+
+
+def execution_prompt_ciphertext(run_id: str) -> str | None:
+    """Return the sealed prompt only to the server-side execution worker."""
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT execution_prompt_ciphertext FROM fanout_runs WHERE id=?",
+            (str(run_id),),
+        ).fetchone()
+        return str(row["execution_prompt_ciphertext"] or "") if row else None
+    finally:
+        conn.close()
 
 
 def list_runs(*, include_finished: bool = True, limit: int = 20) -> list[dict]:
