@@ -483,7 +483,22 @@ class SpeculationEngine:
         # Each slot is a dict {tool_name, call_signature, result, thread}.
         # A list preserves issue order so a mispredict squashes the stalest.
         self._slots: list[dict] = []
+        # A small read-through cache keeps a completed, squashed *read-only*
+        # result available when a model takes the same branch one turn later.
+        # Listing order and model read order need not agree; without this a
+        # harmless prefetch of ``gamma`` followed by a real ``beta`` read can
+        # dispatch ``gamma`` a second time on the next turn.  It is bounded by
+        # the reorder buffer size and never contains a mutating tool.
+        self._retired_cache: dict[str, SpeculativeResult] = {}
         self._lock = threading.Lock()
+
+    def _cache_result(self, result: SpeculativeResult | None) -> None:
+        if result is None or not result.ok:
+            return
+        with self._lock:
+            self._retired_cache[result.call_signature] = result
+            while len(self._retired_cache) > self._max_slots:
+                self._retired_cache.pop(next(iter(self._retired_cache)))
 
     def begin(self, tool_name: str, call_signature: str, args: dict) -> bool:
         """Launch a speculative read-only call. Returns True if issued.
@@ -495,6 +510,10 @@ class SpeculationEngine:
         if not self._enabled or not self._predictor.speculatable(tool_name):
             return False
         with self._lock:
+            # The result is already available for retirement.  Do not issue a
+            # duplicate read while the model decides whether to use it.
+            if call_signature in self._retired_cache:
+                return False
             if len(self._slots) >= self._max_slots:
                 return False  # buffer full; back-pressure like a full ROB
             slot: dict = {
@@ -550,10 +569,17 @@ class SpeculationEngine:
             if match is not None:
                 self._slots.remove(match)
                 target, hit = match, True
+                cached = None
+            elif real_signature in self._retired_cache:
+                cached = self._retired_cache.pop(real_signature)
+                target, hit = None, True
             elif self._slots:
                 target, hit = self._slots.pop(0), False
+                cached = None
             else:
                 return None  # nothing in flight: idle, nothing to squash
+        if cached is not None:
+            return cached
         thread = target.get("thread")
         if thread is not None:
             thread.join(timeout=30)
@@ -564,6 +590,9 @@ class SpeculationEngine:
                 return result
             # Signature matched but the worker never produced a result (e.g.
             # a join timeout): treat it as a squash rather than a retirement.
+        with self._lock:
+            result = target.get("result")
+        self._cache_result(result)
         self._predictor.note_squash()
         return None
 
@@ -582,6 +611,9 @@ class SpeculationEngine:
             thread = slot.get("thread")
             if thread is not None:
                 thread.join(timeout=30)
+            with self._lock:
+                result = slot.get("result")
+            self._cache_result(result)
         for _ in slots:
             self._predictor.note_squash()
 
