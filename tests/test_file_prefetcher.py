@@ -140,7 +140,11 @@ def test_prefetched_file_read_is_retired_in_the_loop(
     for path in ("alpha.md", "beta.md", "gamma.md"):
         assert basenames.count(path) == 1, dispatch_paths
     stats = sonder_speculation.default_predictor().stats()
-    assert stats["speculations"] >= 2
+    # At least one argful prefetch occurred. A cached squashed prefetch can
+    # retire on a later matching model decision, so the repaired engine may
+    # need only one speculation where the older duplicate-dispatch behavior
+    # issued two.
+    assert stats["speculations"] >= 1
     # At least one argful prefetch retired (beta or gamma, depending on
     # listing order in the observation).
     assert stats["speculations"] - stats["squashes"] >= 1
