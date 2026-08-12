@@ -21805,9 +21805,6 @@ def model_fanout_status(run_id: str, token: str = "") -> str:
     the full local toolset.
     """
     started = time.time()
-    refusal = _developer_gate("model_fanout_status", token, started)
-    if refusal:
-        return refusal
     _run, refusal = _direct_fanout_access(
         run_id, token, started, "model_fanout_status",
     )
@@ -21823,9 +21820,6 @@ def model_fanout_status(run_id: str, token: str = "") -> str:
 def model_fanout_cancel(run_id: str, token: str = "") -> str:
     """Cancel a durable model fanout; late provider results are discarded."""
     started = time.time()
-    refusal = _developer_gate("model_fanout_cancel", token, started)
-    if refusal:
-        return refusal
     _run, refusal = _direct_fanout_access(
         run_id, token, started, "model_fanout_cancel",
     )
