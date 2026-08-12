@@ -107,6 +107,11 @@ def test_read_file_refuses_custom_named_fanout_receipt_store(workspace, monkeypa
     with pytest.raises(PermissionError, match="protected Sonder secret/control-plane"):
         file_ops.read_file(str(receipt))
 
+    journal = type(receipt)(str(receipt) + "-journal")
+    journal.write_bytes(b"active rollback journal")
+    with pytest.raises(PermissionError, match="protected Sonder secret/control-plane"):
+        file_ops.read_file(str(journal))
+
 
 def test_inspect_data_developer_can_read_secret(workspace):
     (workspace / "credentials.json").write_text('{"token": "s"}', encoding="utf-8")

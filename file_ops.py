@@ -241,8 +241,8 @@ def _control_plane_paths() -> set[Path]:
     else:
         db = home / "memory.db"
     paths.update({
-        db, Path(str(db) + "-wal"), Path(str(db) + "-shm"),
-        root / "memory.db", root / "memory.db-wal", root / "memory.db-shm",
+        db, Path(str(db) + "-wal"), Path(str(db) + "-shm"), Path(str(db) + "-journal"),
+        root / "memory.db", root / "memory.db-wal", root / "memory.db-shm", root / "memory.db-journal",
     })
     # Fanout receipts are executable runtime state: even a custom file name
     # must not turn them into an ordinary SQLite target.  Keep the override
@@ -257,8 +257,8 @@ def _control_plane_paths() -> set[Path]:
     else:
         fanout_db = home / "fanout.db"
     paths.update({
-        fanout_db, Path(str(fanout_db) + "-wal"), Path(str(fanout_db) + "-shm"),
-        root / "fanout.db", root / "fanout.db-wal", root / "fanout.db-shm",
+        fanout_db, Path(str(fanout_db) + "-wal"), Path(str(fanout_db) + "-shm"), Path(str(fanout_db) + "-journal"),
+        root / "fanout.db", root / "fanout.db-wal", root / "fanout.db-shm", root / "fanout.db-journal",
     })
     return {_resolve_best_effort(path) for path in paths}
 
