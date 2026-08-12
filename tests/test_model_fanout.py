@@ -357,6 +357,9 @@ def test_fanout_plan_skips_only_explicit_nonchat_or_cooldown_models(monkeypatch)
     assert error is None
     assert plan["selected"] == ["chat", "chat-unknown"]
     assert {row["model"] for row in plan["skipped"]} == {"embed", "vision", "cooled"}
+    cooled = next(row for row in plan["skipped"] if row["model"] == "cooled")
+    assert cooled["reason"] == "health cooldown active"
+    assert cooled["retry_after_ts"] > time.time()
     override, _ = server._fanout_plan("local", include_unhealthy=True)
     assert "cooled" in override["selected"]
 
@@ -379,6 +382,25 @@ def test_fanout_reports_why_no_eligible_models_can_start(monkeypatch):
     assert "embedding-only capability (1)" in error.value.detail
     assert "cooled" not in error.value.detail
     assert "private prompt" not in error.value.detail
+
+
+def test_fanout_receipt_derives_remaining_cooldown_at_read_time(monkeypatch):
+    monkeypatch.setattr(server.fanout_store, "get_run", lambda _run_id: {
+        "id": "fan-test", "status": "completed", "scope": "local",
+        "created_ts": 100.0, "finished_ts": 110.0,
+        "limits_json": json.dumps({"plan_skipped": [{
+            "model": "local-a", "reason": "health cooldown active", "retry_after_ts": 220.0,
+        }]}),
+    })
+    monkeypatch.setattr(server.fanout_store, "list_results", lambda _run_id: [])
+    monkeypatch.setattr(server.time, "time", lambda: 200.0)
+
+    receipt = server._fanout_receipt("fan-test")
+
+    assert receipt["skipped"] == [{
+        "model": "local-a", "reason": "health cooldown active", "retry_after_ms": 20_000,
+    }]
+    assert "retry_after_ts" not in receipt["skipped"][0]
 
 
 def test_retired_cloud_model_gets_a_health_cooldown(monkeypatch):
