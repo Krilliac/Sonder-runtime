@@ -21731,9 +21731,17 @@ def _fanout_health(model, exc, prompt):
             disabled_until = time.time() + 3600
         elif exc.transient or exc.kind in {"timeout", "transport", "protocol", "empty_response"}:
             # These identify the model/daemon response path, not the prompt.
-            # A brief cooldown excludes failed local models from a subsequent
-            # mass request while still allowing recovery without intervention.
-            disabled_until = time.time() + 300
+            # Back off repeated availability failures instead of making every
+            # frequent all-model request re-probe the same unhealthy daemon.
+            # Cap at an hour so recovery remains automatic without operator
+            # intervention. A successful model call resets the stored count.
+            previous = fanout_store.get_model_health(model)
+            try:
+                failure_count = max(0, int((previous or {}).get("failure_count", 0))) + 1
+            except (TypeError, ValueError):
+                failure_count = 1
+            delay_seconds = min(3600, 300 * (2 ** min(3, failure_count - 1)))
+            disabled_until = time.time() + delay_seconds
     fanout_store.record_model_health(
         model, model_class="cloud" if _is_cloud_model_name(model) else "local",
         error=_fanout_safe_error(exc, prompt), disabled_until=disabled_until,
