@@ -21651,16 +21651,34 @@ def _fanout_receipt(run_id):
 
 
 def _fanout_health(model, exc, prompt):
-    """Keep health advisory-only, with cooldowns only for known cloud rejects."""
+    """Record advisory model health and cool down repeatable model failures.
+
+    A fanout is explicitly opt-in, but repeating a target that just timed out,
+    vanished, or returned malformed output makes the next "all models" request
+    slower without adding an answer.  Keep caller/prompt failures eligible: a
+    bad request is not evidence that the local model is unhealthy.  Cloud
+    cooldowns preserve provider retry hints; local failures use a short fixed
+    cooldown because there is no upstream throttle contract to honor.
+    """
     if exc is None:
         fanout_store.record_model_health(model, model_class="cloud" if _is_cloud_model_name(model) else "local", success=True)
         return
     disabled_until = None
-    if isinstance(exc, ModelCallError) and _is_cloud_model_name(model):
-        if exc.status in (402, 404, 410):
+    if isinstance(exc, ModelCallError):
+        if _is_cloud_model_name(model):
+            if exc.status in (402, 404, 410):
+                disabled_until = time.time() + 3600
+            elif exc.status == 429:
+                disabled_until = time.time() + (exc.retry_after_seconds or 60)
+        elif exc.status in (404, 410):
+            # The tag disappeared from Ollama after the immutable run snapshot
+            # was created. Avoid rediscovering and failing it on every fanout.
             disabled_until = time.time() + 3600
-        elif exc.status == 429:
-            disabled_until = time.time() + (exc.retry_after_seconds or 60)
+        elif exc.transient or exc.kind in {"timeout", "transport", "protocol", "empty_response"}:
+            # These identify the model/daemon response path, not the prompt.
+            # A brief cooldown excludes failed local models from a subsequent
+            # mass request while still allowing recovery without intervention.
+            disabled_until = time.time() + 300
     fanout_store.record_model_health(
         model, model_class="cloud" if _is_cloud_model_name(model) else "local",
         error=_fanout_safe_error(exc, prompt), disabled_until=disabled_until,
