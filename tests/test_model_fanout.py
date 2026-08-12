@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import asyncio
+import time
 
 import pytest
 
@@ -370,6 +371,35 @@ def test_retired_cloud_model_gets_a_health_cooldown(monkeypatch):
 
     assert recorded[0][1]["disabled_until"] is not None
     assert "private prompt" not in recorded[0][1]["error"]
+
+
+def test_failed_local_model_gets_a_bounded_health_cooldown(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(server.fanout_store, "record_model_health", lambda *args, **kwargs: recorded.append((args, kwargs)))
+
+    server._fanout_health(
+        "local-a",
+        server.ModelCallError("timeout", "model timed out", transient=True),
+        "private prompt",
+    )
+
+    assert recorded[0][1]["disabled_until"] is not None
+    assert recorded[0][1]["disabled_until"] - time.time() <= 301
+    assert recorded[0][1]["disabled_until"] - time.time() >= 298
+    assert "private prompt" not in recorded[0][1]["error"]
+
+
+def test_local_request_error_does_not_disable_a_model(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(server.fanout_store, "record_model_health", lambda *args, **kwargs: recorded.append((args, kwargs)))
+
+    server._fanout_health(
+        "local-a",
+        server.ModelCallError("request", "prompt was rejected", status=400),
+        "private prompt",
+    )
+
+    assert recorded[0][1]["disabled_until"] is None
 
 
 def test_fanout_error_never_persists_a_partial_provider_prompt_excerpt():
