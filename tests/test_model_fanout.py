@@ -27,6 +27,22 @@ def test_direct_discovered_model_is_a_safe_serve_target(monkeypatch):
     )
 
 
+@pytest.mark.parametrize("record", [
+    {"name": "embed-scalar", "capabilities": "embedding"},
+    {"name": "vision-nested", "details": {"capabilities": "vision"}},
+    {"name": "embed-nested", "capabilities": None, "details": {"capabilities": ["embedding"]}},
+])
+def test_explicit_nonchat_catalog_records_are_rejected_everywhere(monkeypatch, record):
+    monkeypatch.setattr(server, "_get", lambda _path: {"models": [record]})
+
+    plan, error = server._fanout_plan("local")
+
+    assert error is None
+    assert plan["selected"] == []
+    assert plan["skipped"][0]["model"] == record["name"]
+    assert server._serve_target(record["name"], False) == (None, False, False, None)
+
+
 def test_direct_cloud_model_still_requires_opt_in(monkeypatch):
     monkeypatch.delenv("SONDER_ALLOW_CLOUD", raising=False)
     monkeypatch.setattr(server, "_get", lambda _path: {"models": [{"name": "kimi:cloud"}]})
