@@ -21430,9 +21430,19 @@ def natural_model_request(text):
         value, re.IGNORECASE | re.DOTALL,
     )
     if named_model_to:
+        selector = named_model_to.group(1).strip()
+        # "the best model" and similar preference language is not a concrete
+        # selector.  Preserve it as an ordinary request rather than consuming
+        # the wrapper and producing an unknown-tier error.  Exact model names
+        # remain validated downstream against the live catalog.
+        if selector.casefold() in {
+            "best", "fastest", "cheapest", "strongest", "smartest",
+            "appropriate", "available", "local", "cloud",
+        }:
+            return None
         return {
             "kind": "model",
-            "model": named_model_to.group(1).strip(),
+            "model": selector,
             "prompt": named_model_to.group(2).strip(),
         }
     return None
