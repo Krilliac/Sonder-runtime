@@ -1494,6 +1494,32 @@ def _model_to_tier(model):
     return None
 
 
+def _request_model_selector(model):
+    """Keep OpenAI defaults, but pass explicit non-default selectors to server.
+
+    ``server._serve_target`` performs the live-catalog allowlist check.  Keeping
+    it there means MCP, desktop, and HTTP cannot disagree about which concrete
+    model names are safe to request.
+    """
+    selected = _model_to_tier(model)
+    if selected is not None:
+        return selected
+    raw = str(model or "").strip()
+    # OpenAI-compatible clients often use gpt-* model identifiers.  Preserve
+    # their default fallback *unless* that exact identifier is actually in the
+    # live Ollama catalog (for example gpt-oss:20b).
+    if raw:
+        try:
+            discovered = server.resolve_discovered_model(raw)
+        except Exception:
+            discovered = None
+        if discovered:
+            return discovered
+    if not raw or raw in ("sonder", "local") or raw.startswith("gpt-"):
+        return None
+    return raw
+
+
 def _reasoning_audience():
     """Who may receive model reasoning over HTTP: 'developer' or 'all'.
 
@@ -1547,7 +1573,7 @@ def _run_prompt(
     return result if return_result else result.content
 
 
-def _chat_completion_object(content, model="sonder", iid=None, reasoning=""):
+def _chat_completion_object(content, model="sonder", iid=None, reasoning="", elapsed_ms=None):
     iid = iid or uuid.uuid4().hex[:12]
     obj = {
         "id": "chatcmpl-%s" % iid,
@@ -1568,10 +1594,14 @@ def _chat_completion_object(content, model="sonder", iid=None, reasoning=""):
     # clients can treat absence as "this deployment does not expose reasoning".
     if reasoning:
         obj["sonder_reasoning"] = reasoning
+    if elapsed_ms is not None:
+        # Vendor extension: monotonic wall duration for the complete HTTP
+        # request, including routing/tool work, not just model generation.
+        obj["sonder_elapsed_ms"] = max(0, int(elapsed_ms))
     return obj
 
 
-def _chunk(iid, model, delta, finish_reason=None):
+def _chunk(iid, model, delta, finish_reason=None, elapsed_ms=None):
     obj = {
         "id": "chatcmpl-%s" % iid,
         "object": "chat.completion.chunk",
@@ -1579,6 +1609,8 @@ def _chunk(iid, model, delta, finish_reason=None):
         "model": model,
         "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
     }
+    if elapsed_ms is not None:
+        obj["sonder_elapsed_ms"] = max(0, int(elapsed_ms))
     return "data: %s\n\n" % json.dumps(obj)
 
 
@@ -2192,6 +2224,18 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         prompt = _last_user_message(messages)
+        # Normalize an explicitly recognized whole-turn model request before
+        # policy checks.  Otherwise ``use model x: /run ...`` could evade the
+        # initial slash-command gate and execute after the rewrite below.
+        natural_model = server.natural_model_request(prompt)
+        if natural_model and natural_model["kind"] == "model":
+            prompt = natural_model["prompt"]
+            if prompt.lstrip().startswith("/"):
+                self._send_json_payload(
+                    {"error": {"message": "model selection cannot wrap a slash command; issue the command directly.", "type": "invalid_request"}},
+                    status=400,
+                )
+                return
         if _dangerous_http_slash(prompt) and not _developer_authorized(context):
             self._send_json_payload(
                 {
@@ -2214,11 +2258,24 @@ class Handler(BaseHTTPRequestHandler):
 
         stream = bool(req.get("stream", False))
         model = req.get("model", "sonder")
+        if natural_model and natural_model["kind"] == "fanout":
+            # A whole-catalog request spends several model calls.  Local-open
+            # keeps its single-user/full-tool behavior; shared deployments
+            # require the same developer authority as /ensemble.
+            if not _developer_authorized(context):
+                self._send_json_payload(
+                    {"error": {"message": "developer or admin authentication is required for model fanout", "type": "forbidden_command"}},
+                    status=403,
+                )
+                return
+        if natural_model and natural_model["kind"] == "model":
+            model = natural_model["model"]
+        model_selector = _request_model_selector(model)
         # Speculatively load the target model now, overlapping its cold-load
         # cost with the history assembly, scope resolution, and memory work
         # below. Best-effort and local-only (see server.prewarm_model).
         try:
-            server.prewarm_model(_model_to_tier(model) or "")
+            server.prewarm_model(model_selector or "")
         except Exception:
             pass
         context_size = req.get("context_size", "")
@@ -2290,11 +2347,15 @@ class Handler(BaseHTTPRequestHandler):
                         reply = _handle_intent(
                             prompt, messages=messages, state=state
                         )
+                    if reply is None and natural_model and natural_model["kind"] == "fanout":
+                        reply = server.model_fanout(
+                            natural_model["prompt"], scope=natural_model["scope"],
+                        )
                     if reply is None:
                         reply = server.chat_web_response(
                             prompt,
                             history=history,
-                            tier=_model_to_tier(model) or "code",
+                            tier=model_selector or "code",
                             location_consent=location_consent,
                             location_hint=location_hint,
                             allow_server_location_lookup=(
@@ -2317,7 +2378,7 @@ class Handler(BaseHTTPRequestHandler):
                         turn = _run_prompt(
                             prompt,
                             history,
-                            _model_to_tier(model),
+                            model_selector,
                             context_size=context_size,
                             session=storage_session,
                             project=storage_project,
@@ -2415,13 +2476,14 @@ class Handler(BaseHTTPRequestHandler):
         ).observe(time.monotonic() - _request_started)
         if not _reasoning_visible_to(context):
             response_reasoning = ""
+        elapsed_ms = int((time.monotonic() - _request_started) * 1000)
         if stream:
-            self._send_stream(content, model, iid=response_iid)
+            self._send_stream(content, model, iid=response_iid, elapsed_ms=elapsed_ms)
         else:
             self._send_json(
                 _chat_completion_object(
                     content, model, iid=response_iid,
-                    reasoning=response_reasoning,
+                    reasoning=response_reasoning, elapsed_ms=elapsed_ms,
                 )
             )
 
@@ -2440,7 +2502,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_stream(self, content, model, iid=None):
+    def _send_stream(self, content, model, iid=None, elapsed_ms=None):
         iid = iid or uuid.uuid4().hex[:12]
         self.send_response(200)
         self._cors()
@@ -2453,7 +2515,9 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             self.wfile.write(_chunk(iid, model, {"role": "assistant", "content": content}).encode("utf-8"))
-            self.wfile.write(_chunk(iid, model, {}, finish_reason="stop").encode("utf-8"))
+            self.wfile.write(_chunk(
+                iid, model, {}, finish_reason="stop", elapsed_ms=elapsed_ms,
+            ).encode("utf-8"))
             self.wfile.write(b"data: [DONE]\n\n")
         except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
             pass
