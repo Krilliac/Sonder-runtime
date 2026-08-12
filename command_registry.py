@@ -483,12 +483,10 @@ def list_commands(filter_text=""):
     except Exception:
         source = [dict(command) for command in COMMANDS]
     f = (filter_text or "").strip().lower()
-    intent_words = frozenset(re.findall(r"[a-z0-9_]+", f))
-    planning_intent = bool(intent_words & {"task", "checklist"})
     scored_rows = []
     for command in source:
         score = _discovery_match_score(command, f)
-        if score and (not planning_intent or command.get("category") == "planning"):
+        if score:
             scored_rows.append((score, dict(command)))
     return [row for _score, row in sorted(
         scored_rows, key=lambda item: (-item[0], item[1]["name"]),
