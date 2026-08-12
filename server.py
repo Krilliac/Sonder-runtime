@@ -7936,13 +7936,20 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
 
     severity_rank = {"high": 0, "medium": 1, "low": 2, "info": 3}
     issues.sort(key=lambda item: (severity_rank.get(item["severity"], 9), item["area"], item["title"]))
+    score = max(0, min(100, int(round(
+        100
+        - 18 * sum(1 for i in issues if i["severity"] == "high")
+        - 9 * sum(1 for i in issues if i["severity"] == "medium")
+        - 4 * sum(1 for i in issues if i["severity"] == "low")
+    ))))
+    # A clean runtime and many self-recorded outcomes are useful operational
+    # signals, but they do not establish that delegated work is reliable.  Do
+    # not let the aggregate score read like validated quality when a populated
+    # outcome history has no caller-measured sample at all.
+    if outcomes >= 200 and reviewed < 30:
+        score = min(score, 75)
     return {
-        "score": max(0, min(100, int(round(
-            100
-            - 18 * sum(1 for i in issues if i["severity"] == "high")
-            - 9 * sum(1 for i in issues if i["severity"] == "medium")
-            - 4 * sum(1 for i in issues if i["severity"] == "low")
-        )))),
+        "score": score,
         "interactions": interactions,
         "outcomes": outcomes,
         "acceptance_percent": round(acceptance * 100.0, 1) if acceptance is not None else None,

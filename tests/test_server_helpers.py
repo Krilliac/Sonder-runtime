@@ -2894,6 +2894,7 @@ def test_improvement_report_flags_when_nothing_has_been_judged(monkeypatch, tmp_
     report = server.improvement_report_data()
     titles = " ".join(i["title"] for i in report["issues"])
     assert "judged by a caller" in titles
+    assert report["score"] <= 75
 
 
 def _improvement_report_with(monkeypatch, tmp_path, **learning):
