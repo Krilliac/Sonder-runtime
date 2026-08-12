@@ -118,6 +118,65 @@ def test_model_fanout_persists_a_sealed_prompt_and_durable_receipt(monkeypatch, 
     assert "sealed-fanout-prompt:" in stored
 
 
+def test_model_fanout_never_persists_a_model_echo_of_the_prompt(monkeypatch, tmp_path):
+    database = _isolated_durable_fanout(monkeypatch, tmp_path)
+    secret_prompt = "private fanout prompt: echo-must-not-persist"
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+    ))
+    monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: lambda prompt: "echo: " + prompt)
+    monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})
+
+    receipt = json.loads(server.model_fanout(secret_prompt, scope="local"))
+
+    assert secret_prompt not in json.dumps(receipt)
+    assert "<redacted prompt>" in receipt["answers"][0]["answer"]
+    with sqlite3.connect(database) as conn:
+        stored = "\n".join(str(value) for row in conn.execute(
+            "SELECT prompt, execution_prompt_ciphertext FROM fanout_runs"
+        ) for value in row)
+        stored += "\n".join(str(value) for row in conn.execute(
+            "SELECT answer, error FROM fanout_results"
+        ) for value in row)
+    assert secret_prompt not in stored
+
+
+def test_model_fanout_rejects_oversized_prompt_before_vault(monkeypatch):
+    monkeypatch.setattr(
+        server.fanout_prompt_vault, "encrypt_prompt",
+        lambda _prompt: (_ for _ in ()).throw(AssertionError("vault should not run")),
+    )
+
+    reply = server.model_fanout("x" * (server.fanout_store.MAX_PROMPT_CHARS + 1))
+
+    assert "prompt exceeds" in reply
+
+
+def test_model_fanout_lifecycle_tools_work_in_local_open_mode(monkeypatch, tmp_path):
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+    ))
+    monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: lambda _prompt: "answer")
+    monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})
+
+    receipt = json.loads(server.model_fanout("hello", scope="local"))
+    status = json.loads(server.model_fanout_status(receipt["run_id"]))
+    cancelled = json.loads(server.model_fanout_cancel(receipt["run_id"]))
+
+    assert status["run_id"] == receipt["run_id"]
+    assert cancelled["status"] == "completed"
+
+
+def test_model_fanout_lifecycle_is_gated_for_shared_deployments(monkeypatch):
+    monkeypatch.setenv("SONDER_AUTH_MODE", "accounts")
+    monkeypatch.setattr(server, "_admin_account_from_token", lambda _token: None)
+
+    reply = server.model_fanout_status("fan-not-owned")
+
+    assert reply.startswith("refused:")
+
+
 def test_fanout_plan_skips_only_explicit_nonchat_or_cooldown_models(monkeypatch):
     monkeypatch.setattr(server, "_get", lambda _path: {"models": [
         {"name": "chat-unknown"},

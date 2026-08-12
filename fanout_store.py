@@ -123,6 +123,17 @@ def _ensure_schema(path: str) -> None:
                 conn.execute(
                     "ALTER TABLE fanout_runs ADD COLUMN execution_prompt_ciphertext TEXT NOT NULL DEFAULT ''"
                 )
+            # Before sealed prompts existed this database retained a best-effort
+            # redacted copy plus a stable digest.  That is not an acceptable
+            # durable prompt store: a redactor cannot safely classify arbitrary
+            # private prose, and a digest enables offline guessing.  Old runs
+            # cannot be resumed without their sealed payload, so scrub them in
+            # the same migration that introduces the vault column.
+            conn.execute(
+                "UPDATE fanout_runs SET prompt='legacy-fanout-prompt:redacted', "
+                "prompt_sha256='' WHERE COALESCE(execution_prompt_ciphertext, '')='' "
+                "AND prompt NOT LIKE 'legacy-fanout-prompt:%'"
+            )
             conn.commit()
         finally:
             conn.close()
@@ -183,6 +194,9 @@ def create_run(prompt: str, models, *, request_owner: str = "", request_role: st
     raw_prompt = str(prompt or "")
     if not raw_prompt.strip(): raise ValueError("fanout prompt is required")
     if len(raw_prompt) > MAX_PROMPT_CHARS: raise ValueError("fanout prompt exceeds %d characters" % MAX_PROMPT_CHARS)
+    ciphertext = str(execution_prompt_ciphertext or "")
+    if len(ciphertext) > 64_000:
+        raise ValueError("fanout sealed prompt exceeds 64000 characters")
     now = time.time(); run_id = "fan-%s" % uuid.uuid4().hex[:16]
     stored_prompt = _safe_text(raw_prompt, MAX_PROMPT_CHARS)
     with _write_transaction() as conn:
@@ -190,7 +204,7 @@ def create_run(prompt: str, models, *, request_owner: str = "", request_role: st
                         VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?)""",
                      (run_id, _safe_text(request_owner, 200), _safe_text(request_role, 80), stored_prompt,
                       hashlib.sha256(raw_prompt.encode("utf-8")).hexdigest(), _json(clean_models),
-                      _safe_text(execution_prompt_ciphertext, 64_000), _safe_text(scope, 40),
+                      ciphertext, _safe_text(scope, 40),
                       int(bool(cloud_opt_in)), _json(limits or {}), now, now))
         conn.executemany("INSERT INTO fanout_results(run_id,model,status,updated_ts) VALUES(?,?,'pending',?)",
                          [(run_id, model, now) for model in clean_models])
