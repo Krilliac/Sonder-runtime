@@ -1018,6 +1018,41 @@ def _developer_gate(tool_name: str, token: str, started):
     return "refused: %s." % msg
 
 
+def _direct_fanout_identity(token: str):
+    """Return the direct-MCP receipt owner and authenticated account.
+
+    Durable fanout results contain model answers, so developer authority alone
+    is insufficient in a shared deployment: one developer must not read or
+    cancel another developer's run.  Keep the owner opaque because generic
+    receipt redaction is allowed to transform username-shaped text.
+    """
+    if not _deployment_authenticates_callers():
+        return "", None
+    account = _admin_account_from_token(token) if token else None
+    username = str((account or {}).get("username") or "").strip()
+    if not username:
+        return "", account
+    material = "fanout-direct-owner\0" + username
+    return "fo-" + hashlib.sha256(material.encode("utf-8")).hexdigest(), account
+
+
+def _direct_fanout_access(run_id: str, token: str, started, tool_name: str):
+    """Authorize a direct-MCP fanout lifecycle operation without cross-user reads."""
+    refusal = _developer_gate(tool_name, token, started)
+    if refusal:
+        return None, refusal
+    run = fanout_store.get_run(run_id)
+    if run is None:
+        return None, _format_model_call_error(ModelCallError("configuration", "fanout run was not found"))
+    if not _deployment_authenticates_callers():
+        return run, None
+    owner, account = _direct_fanout_identity(token)
+    if str((account or {}).get("role") or "") == "admin" or run.get("request_owner") == owner:
+        return run, None
+    # Do not disclose whether another developer's opaque receipt exists.
+    return None, _format_model_call_error(ModelCallError("configuration", "fanout run was not found"))
+
+
 _TURN_TRACES = collections.deque(maxlen=8)
 
 
@@ -21750,9 +21785,12 @@ def model_fanout(prompt: str, scope: str = "local", num_predict: int = 512,
     refusal = _developer_gate("model_fanout", token, started)
     if refusal:
         return refusal
+    request_owner, account = _direct_fanout_identity(token)
     return _model_fanout_authorized(
         prompt, scope=scope, num_predict=num_predict, timeout=timeout,
         max_cloud_workers=max_cloud_workers,
+        request_owner=request_owner,
+        request_role=str((account or {}).get("role") or "local-open"),
     )
 
 
@@ -21768,6 +21806,11 @@ def model_fanout_status(run_id: str, token: str = "") -> str:
     refusal = _developer_gate("model_fanout_status", token, started)
     if refusal:
         return refusal
+    _run, refusal = _direct_fanout_access(
+        run_id, token, started, "model_fanout_status",
+    )
+    if refusal:
+        return refusal
     receipt = _fanout_receipt(run_id)
     if receipt is None:
         return _format_model_call_error(ModelCallError("configuration", "fanout run was not found"))
@@ -21781,8 +21824,12 @@ def model_fanout_cancel(run_id: str, token: str = "") -> str:
     refusal = _developer_gate("model_fanout_cancel", token, started)
     if refusal:
         return refusal
-    if fanout_store.request_cancel(run_id) is None:
-        return _format_model_call_error(ModelCallError("configuration", "fanout run was not found"))
+    _run, refusal = _direct_fanout_access(
+        run_id, token, started, "model_fanout_cancel",
+    )
+    if refusal:
+        return refusal
+    fanout_store.request_cancel(run_id)
     receipt = _fanout_receipt(run_id)
     if receipt is None:
         return _format_model_call_error(ModelCallError("configuration", "fanout receipt was unavailable"))
@@ -21798,9 +21845,6 @@ def model_fanout_resume(run_id: str, include_failed: StrictBool = False,
     prevents accidental replays of metered cloud calls after an interruption.
     """
     started = time.time()
-    refusal = _developer_gate("model_fanout_resume", token, started)
-    if refusal:
-        return refusal
     # Keep direct Python calls strict too.  MCP transport enforces this at the
     # schema boundary through StrictBool, before Pydantic can coerce 1 or
     # "false" into True; this check protects in-process callers as well.
@@ -21812,6 +21856,11 @@ def model_fanout_resume(run_id: str, include_failed: StrictBool = False,
             return _format_model_call_error(ModelCallError(
                 "configuration", "%s must be a boolean" % name,
             ))
+    _run, refusal = _direct_fanout_access(
+        run_id, token, started, "model_fanout_resume",
+    )
+    if refusal:
+        return refusal
     run = fanout_store.resume_run(
         run_id, include_failed=include_failed, retry_unknown=retry_unknown,
     )
